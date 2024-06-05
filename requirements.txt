@@ -1,0 +1,11 @@
+sanic  # pip install -U sanic
+numpy  # conda install numpy
+redis[hiredis]  # pip install -U redis[hiredis]
+pyzmq  # pip3 install -U pyzmq
+# pip install sanic-testing
+
+
+# 开发环境用：
+trustme  # pip install -U trustme
+ipykernel
+ipywidgets  # conda install ipykernel ipywidgets
