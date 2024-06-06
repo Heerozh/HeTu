@@ -6,7 +6,7 @@
 """
 import argparse
 import sys
-from hetu.server import start_webserver
+from .server import start_webserver
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  

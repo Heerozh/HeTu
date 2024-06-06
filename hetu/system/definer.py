@@ -163,10 +163,9 @@ def define_system(components: tuple[Type[BaseComponent], ...],
                              permission, inherits)
 
         # 返回假的func，因为不允许直接调用。
-        def warp_system_call(*args, **kwargs):
+        def warp_system_call():  # (*args, **kwargs)
             raise RuntimeError("系统函数不允许直接调用")
             # return call_system(namespace, func.__name__, *args, **kwargs)
         return warp_system_call
 
     return warp
-
