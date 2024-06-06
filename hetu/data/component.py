@@ -167,7 +167,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                     prop.index = True
                 assert prop.default is not None, \
                     (f"{cls.__name__}.{name}默认值不能为None。所有属性都要有默认值，"
-                     f"因为数据接口统一用c like struct实现，强类型struct通常不接受NULL/None值。")
+                     f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
                 if type(prop.default) is str:
                     can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
                 else:
