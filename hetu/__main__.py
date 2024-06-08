@@ -39,6 +39,7 @@ def start(start_args):
             'APP_FILE': start_args.app_file,
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
+            'HEAD_NODE': start_args.head,
             'LISTEN': f"0.0.0.0:{start_args.port}",
             'BACKENDS': {
                 'Redis': {
@@ -81,28 +82,30 @@ def start(start_args):
 
 
 def main():
-    parser = argparse.ArgumentParser(prog='HeTu', description='Hetu Data Server')
+    parser = argparse.ArgumentParser(prog='hetu', description='Hetu Data Server')
     command_parsers = parser.add_subparsers(dest='command', help='commands', required=True)
 
     # ============================================
     parser_start = command_parsers.add_parser(
         'start', help='启动河图服务')
-    cli_group = parser_start.add_argument_group("命令行配置参数")
+    cli_group = parser_start.add_argument_group("通过命令行启动参数")
     cli_group.add_argument(
         "--app-file", help="河图app的py文件", metavar="app.py")
     cli_group.add_argument(
-        "--namespace", help="加载app中哪个命名空间")
+        "--namespace", metavar="game1", help="加载app中哪个命名空间")
     cli_group.add_argument(
         "--instance", help="河图实例名称，每个实例是一个副本",
-        metavar="db_name")
+        metavar="server1")
     cli_group.add_argument(
-        "--port", help="监听的Websocket端口", default='2466')
+        "--port", metavar="2446", help="监听的Websocket端口", default='2466')
     cli_group.add_argument(
-        "--db", help="后端数据库地址", default='localhost:6379')
+        "--db", metavar="127.0.0.1:6379", help="后端数据库地址", default='127.0.0.1:6379')
+    cli_group.add_argument(
+        "--head", help="是否为主节点，默认为True", default=True, metavar="True", type=bool)
 
-    cfg_group = parser_start.add_argument_group("配置文件参数")
+    cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
-        "--config", help="通过配置文件加载服务", metavar="config.py")
+        "--config", help="配置文件模板见CONFIG_TEMPLATE.py", metavar="config.py")
 
     # 开始执行
     args = parser.parse_args()
