@@ -7,6 +7,9 @@
 from inspect import signature
 from typing import Type
 from dataclasses import dataclass
+import asyncio
+import warnings
+import traceback
 from ..common import Singleton
 from ..data import BaseComponent, Permission
 
@@ -161,11 +164,17 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
 
         assert permission != permission.OWNER, "System的权限不支持OWNER"
 
+        if components is not None and len(components) > 0:
+            if not asyncio.iscoroutinefunction(func):
+                formatted_lines = traceback.format_stack()
+                warnings.warn(f"System {func.__name__} 不是异步函数，数据库请求可能会阻塞整个Worker: \n" +
+                              formatted_lines[-2])
+
         SystemClusters().add(namespace, func, components, force,
                              permission, inherits)
 
         # 返回假的func，因为不允许直接调用。
-        def warp_system_call():  # (*args, **kwargs)
+        def warp_system_call(*_, **__):
             raise RuntimeError("系统函数不允许直接调用")
             # return call_system(namespace, func.__name__, *args, **kwargs)
         return warp_system_call
