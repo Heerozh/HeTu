@@ -55,8 +55,9 @@ class ComponentTable:
     Component的数据表操作接口，和后端通讯并处理事务。
     """
 
-    def __init__(self, component_cls: type[BaseComponent]):
+    def __init__(self, component_cls: type[BaseComponent], config: dict):
         self.component_cls = component_cls
+        self.config = config
 
     def select(self, value, where: str = None):
         raise NotImplementedError
@@ -95,7 +96,6 @@ class ComponentDefines(metaclass=Singleton):
 
     def __init__(self):
         self._components = {}
-        self._remote_actors = {}
 
     def clear_(self):
         self._components.clear()
@@ -139,6 +139,8 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         `index`表示此属性开启索引；
         `unique`表示属性值必须唯一，索引性能更高，启动此项默认会同时打开index。
 
+    * ⚠️ 警告：索引会降低全表性能，请控制数量。
+
     属性值的类型由type hint决定（如`: np.float32`），请使用长度明确的np类型。
     字符串类型格式为"<U8"，U是Unicode，8表示长度。
     不想看到"<U8"在IDE里标红语法错误的话，可用`name = Property(dtype='<U8')`方式。
@@ -160,9 +162,9 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                 if np.dtype(prop.dtype).itemsize == 0:
                     raise AssertionError(f"{cls.__name__}.{name}属性的dtype不能为0长度。"
                                          f"str类型请用'<U8'方式定义")
-                # # bool只有2个值可能不够用，以防万一至少3个值，True, False, Masked(nan like)
-                # if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
-                #     prop.dtype = np.int8
+                # bool类型在一些后端数据库中不支持，强制转换为int8
+                if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
+                    prop.dtype = np.int8
                 if prop.unique:
                     prop.index = True
                 assert prop.default is not None, \

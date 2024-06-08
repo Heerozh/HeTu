@@ -112,6 +112,8 @@ class SystemClusters(metaclass=Singleton):
 
         if not force:
             assert func.__name__ not in sub_map, "System重复定义"
+        if components is None:
+            components = tuple()
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         arg_count = func.__code__.co_argcount
@@ -123,7 +125,7 @@ class SystemClusters(metaclass=Singleton):
             permission=permission, full_components=None, full_inherits=None)
 
 
-def define_system(components: tuple[Type[BaseComponent], ...],
+def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
                   inherits: tuple[str] = tuple()):
     """

@@ -90,6 +90,17 @@ class TestComponentDefine(unittest.TestCase):
         row = GalaxyPosition.new_row(2)
         self.assertEqual(row.x[1], 88)
 
+        # 测试布尔值强制更换
+        @define_component(namespace="ssw", force=True)
+        class TestBool(BaseComponent):
+            a: bool = Property(True, True)
+            b: '?' = Property(True, False)
+            c: np.bool_ = Property(True, False)
+
+        np.testing.assert_array_equal(
+            np.array(list(TestBool.dtypes.fields.values()))[:, 0],
+            [np.int8, np.int8, np.int8, np.int64])
+
 
 if __name__ == '__main__':
     unittest.main()
