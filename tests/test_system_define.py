@@ -45,7 +45,7 @@ class TestSystemDefine(unittest.TestCase):
             namespace="ssw",
             components=(GalaxyPosition, Hp, Inventory),
         )
-        def system1(ctx, vec, hit=1):
+        async def system1(ctx, vec, hit=1):
             pass
 
         # 要能取到定义
@@ -57,7 +57,7 @@ class TestSystemDefine(unittest.TestCase):
 
         # 直接调用要禁止
         with self.assertRaisesRegex(RuntimeError, "调用"):
-            system1(1, 2, 3, 4, 5)
+            system1(1, 2, 3)
 
         # 重复定义
         with self.assertRaisesRegex(AssertionError, "System重复定义"):
@@ -65,7 +65,7 @@ class TestSystemDefine(unittest.TestCase):
                 namespace="ssw",
                 components=(GalaxyPosition, Hp, Inventory),
             )
-            def system1(ctx, vec, hit):
+            async def system1(ctx, vec, hit):
                 pass
 
         @define_system(
@@ -73,7 +73,7 @@ class TestSystemDefine(unittest.TestCase):
             components=(GalaxyPosition, Hp, Inventory),
             force=True
         )
-        def system1(ctx, vec, hit):
+        async def system1(ctx, vec, hit):
             pass
 
         # 测试参数不对
@@ -101,7 +101,7 @@ class TestSystemDefine(unittest.TestCase):
             namespace="ssw",
             components=(GalaxyPosition, ),
         )
-        def system_base(ctx, vec, hit):
+        async def system_base(ctx, vec, hit):
             pass
 
         @define_system(
@@ -109,7 +109,7 @@ class TestSystemDefine(unittest.TestCase):
             components=(Hp, Inventory),
             inherits=('system_base',)
         )
-        def system_inherit1(ctx, vec, hit):
+        async def system_inherit1(ctx, vec, hit):
             pass
 
         @define_system(
@@ -117,7 +117,7 @@ class TestSystemDefine(unittest.TestCase):
             components=(World, ),
             inherits=('system_inherit1',)
         )
-        def system_inherit2(ctx, vec, hit):
+        async def system_inherit2(ctx, vec, hit):
             pass
 
         SystemClusters().build_clusters()
@@ -127,6 +127,16 @@ class TestSystemDefine(unittest.TestCase):
         clu = SystemClusters().get_cluster('ssw', 0)
         self.assertEqual(sys_def.full_components, {GalaxyPosition, Hp, Inventory, World})
         self.assertEqual(clu.components, {GalaxyPosition, Hp, Inventory, World})
+
+        # 检测sync是否有警告
+        with self.assertWarns(UserWarning):
+            @define_system(
+                namespace="ssw",
+                components=(GalaxyPosition, Hp, Inventory),
+            )
+            def system_sync(ctx, vec, hit):
+                pass
+
 
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
@@ -138,42 +148,42 @@ class TestSystemDefine(unittest.TestCase):
             namespace="ssw",
             components=(Map, Hp,),
         )
-        def system1(ctx, ):
+        async def system1(ctx, ):
             pass
 
         @define_system(
             namespace="ssw",
             components=(Hp, ),
         )
-        def system2(ctx, ):
+        async def system2(ctx, ):
             pass
 
         @define_system(
             namespace="ssw",
             components=(Map, ),
         )
-        def system3(ctx, ):
+        async def system3(ctx, ):
             pass
 
         @define_system(
             namespace="ssw",
             components=(GalaxyPosition,),
         )
-        def system4(ctx, ):
+        async def system4(ctx, ):
             pass
 
         @define_system(
             namespace="ssw2",
             components=(GalaxyPosition,),
         )
-        def system4(ctx, ):
+        async def system4(ctx, ):
             pass
 
         @define_system(
             namespace="ssw",
             components=(GalaxyPosition, Inventory),
         )
-        def system5(ctx, ):
+        async def system5(ctx, ):
             pass
 
         # 测试cluster
