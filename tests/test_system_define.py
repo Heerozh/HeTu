@@ -137,7 +137,6 @@ class TestSystemDefine(unittest.TestCase):
             def system_sync(ctx, vec, hit):
                 pass
 
-
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
         SystemClusters._instances.pop(SystemClusters, None)

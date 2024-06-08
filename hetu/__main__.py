@@ -6,7 +6,7 @@
 """
 import argparse
 import sys
-from .server import start_webserver
+from hetu.server import start_webserver
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -64,9 +64,9 @@ def start(start_args):
     app = loader.load()
     # 显示服务器信息
     logger.info(FULL_COLOR_LOGO)
-    logger.info(f"{app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
-    logger.info(f"Python {sys.version} on {sys.platform}")
-    logger.info(f"Listening on https://{config.LISTEN}")
+    logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
+    logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
+    logger.info(f"📡 Listening on https://{config.LISTEN}")
     # 准备启动服务器
 
     app.prepare(debug=config.DEBUG,
