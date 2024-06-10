@@ -7,6 +7,10 @@
 from ..common import Singleton
 from dataclasses import dataclass
 from enum import Enum
+import warnings
+import inspect
+import git
+import os
 import numpy as np
 import logging
 logger = logging.getLogger('HeTu')
@@ -34,14 +38,15 @@ class BaseComponent:
     components_name_ = None
     namespace_ = None
     permission_ = Permission.USER
-    persist_ = True
-    default_row = None      # type: np.ndarray
-    readonly_ = False
-    backend_ = None         # type: str
-    hosted_ = None          # type: ComponentTable
-    prop_idx_map_ = None    # type: dict[str, int]
-    dtype_map_ = None       # type: dict[str, np.dtype]
-    uniques_ = None         # type: set[str]
+    persist_ = True                                     # 只是标记，每次启动Head时会清空此标记的数据
+    default_row = None      # type: np.ndarray          # 默认空数据行
+    readonly_ = False                                   # 只是标记，调用写入会警告
+    backend_ = None         # type: str                 # 该表的后端类型
+    hosted_ = None          # type: ComponentTable      # 该Component运行时托管的ComponentTable
+    prop_idx_map_ = None    # type: dict[str, int]      # 获取key代表第几个属性
+    dtype_map_ = None       # type: dict[str, np.dtype] # key到dtype的映射
+    uniques_ = None         # type: set[str]            # 唯一索引的set(keys)
+    version_ = None         # type: str                 # Component定义的版本，发生变化时要先执行迁移
 
     @classmethod
     def new_row(cls, size=1):
@@ -54,12 +59,20 @@ class ComponentTable:
     """
     Component的数据表操作接口，和后端通讯并处理事务。
     """
-
-    def __init__(self, component_cls: type[BaseComponent], config: dict):
+    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id, backend):
         self.component_cls = component_cls
-        self.config = config
+        self.instance_name = instance_name
+        self.backend = backend
+        self.cluster_id = cluster_id
+
+    def build(self):
+        """只有HeadNode的主进程在启动时会调用一次"""
+        raise NotImplementedError
 
     def select(self, value, where: str = None):
+        raise NotImplementedError
+
+    async def select_async(self, value, where: str = None):
         raise NotImplementedError
 
     def select_or_create(self, value, where: str = None):
@@ -202,6 +215,20 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             [tuple([prop.default for name, prop in cls.properties_])],
             dtype=cls.dtypes)  # or np.object_
         cls.uniques_ = {name for name, prop in cls.properties_ if prop.unique}
+
+        # 保存app文件的版本信息
+        caller = inspect.stack()[1]
+        repo = git.Repo(caller.filename, search_parent_directories=True)
+        tree = repo.head.commit.tree
+        relpath = os.path.relpath(caller.filename, repo.working_dir).replace(os.sep, '/')
+        try:
+            blob = tree[relpath]
+            sha = blob.hexsha
+            cls.version_ = sha
+        except KeyError:
+            warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
+                          f"将无法检测表{cls.__name__}的版本，未来的修改可能会导致数据丢失。")
+            cls.version_ = 'untracked'
 
         cls.prop_idx_map_ = {}
         cls.dtype_map_ = {}

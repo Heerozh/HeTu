@@ -101,6 +101,9 @@ class TestComponentDefine(unittest.TestCase):
             np.array(list(TestBool.dtypes.fields.values()))[:, 0],
             [np.int8, np.int8, np.int8, np.int64])
 
+        # 测试版本信息, git hash 长度40
+        self.assertEqual(len(TestBool.version_), 40)
+
 
 if __name__ == '__main__':
     unittest.main()
