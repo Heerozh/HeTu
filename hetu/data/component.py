@@ -7,6 +7,7 @@
 from ..common import Singleton
 from dataclasses import dataclass
 from enum import Enum
+import json
 import warnings
 import inspect
 import git
@@ -28,25 +29,79 @@ class Property:
     default: any                # 属性的默认值
     unique: bool = False        # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool = False         # 是否是排序索引
-    dtype: type = None          # 数据类型，最好用np的明确定义
+    dtype: str | type = None          # 数据类型，最好用np的明确定义
 
 
 class BaseComponent:
-    # 表的属性值
-    properties_ = []
-    dtypes = None
+    # -------------------------------定义部分-------------------------------
+    properties_ = []                                    # 表的属性们
     components_name_ = None
     namespace_ = None
     permission_ = Permission.USER
     persist_ = True                                     # 只是标记，每次启动Head时会清空此标记的数据
-    default_row = None      # type: np.ndarray          # 默认空数据行
     readonly_ = False                                   # 只是标记，调用写入会警告
     backend_ = None         # type: str                 # 该表的后端类型
-    hosted_ = None          # type: ComponentTable      # 该Component运行时托管的ComponentTable
-    prop_idx_map_ = None    # type: dict[str, int]      # 获取key代表第几个属性
-    dtype_map_ = None       # type: dict[str, np.dtype] # key到dtype的映射
-    uniques_ = None         # type: set[str]            # 唯一索引的set(keys)
-    version_ = None         # type: str                 # Component定义的版本，发生变化时要先执行迁移
+    # ------------------------------内部变量-------------------------------
+    dtypes = None
+    default_row = None      # type: np.ndarray          # 默认空数据行
+    hosted_ = None          # type: ComponentTable      # 该Component运行时被托管的后端实例
+    prop_idx_map_ = None    # type: dict[str, int]      # 属性名->第几个属性 的映射
+    dtype_map_ = None       # type: dict[str, np.dtype] # 属性名->dtype的映射
+    uniques_ = None         # type: set[str]            # 唯一索引的属性名集合
+    json_ = None            # type: str                 # Component定义的json字符串
+    git_hash_ = None        # type: str                 # Component定义的app文件版本
+
+    @staticmethod
+    def make_json(properties, namespace, components_name, permission, persist, readonly,
+                  backend):
+        return json.dumps({
+            'namespace': str(namespace),
+            'component_name': str(components_name),
+            'permission': permission.name,
+            'persist': bool(persist),
+            'readonly': bool(readonly),
+            'backend': str(backend),
+            'properties': {name: {
+                'default': prop.default,
+                'unique': bool(prop.unique),
+                'index': bool(prop.index),
+                'dtype': np.dtype(prop.dtype).str,
+            } for name, prop in properties.items()},
+        })
+
+    @classmethod
+    def load_json(cls, json_str: str):
+        data = json.loads(json_str)
+        # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
+        if cls is BaseComponent:
+            comp = type(data.component_name, (BaseComponent, ))
+        else:
+            comp = cls
+        comp.namespace_ = data['namespace']
+        comp.components_name_ = data['component_name']
+        comp.permission_ = Permission[data['permission']]
+        comp.persist_ = data['persist']
+        comp.readonly_ = data['readonly']
+        comp.backend_ = data['backend']
+        comp.properties_ = [(name, Property(**prop)) for name, prop in data['properties'].items()]
+        comp.properties_ = sorted(comp.properties_, key=lambda x: x[0])
+        comp.json_ = json.dumps(data)  # 重新序列化，保持一致
+        # 成员变量初始化
+        # 从properties生成np structured dtype，align为True更慢，arm服务器会好些
+        comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in cls.properties_], align=False)
+        comp.default_row = np.rec.array(
+            [tuple([prop.default for name, prop in comp.properties_])],
+            dtype=comp.dtypes)  # or np.object_
+        comp.uniques_ = {name for name, prop in comp.properties_ if prop.unique}
+
+        comp.prop_idx_map_ = {}
+        comp.dtype_map_ = {}
+        for name, prop in comp.properties_:
+            comp.prop_idx_map_[name] = len(comp.prop_idx_map_)
+            comp.dtype_map_[name] = prop.dtype
+
+        # 从json生成的Component没有git版本信息
+        comp.git_hash_ = ""
 
     @classmethod
     def new_row(cls, size=1):
@@ -201,20 +256,10 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
 
-        # 成员变量初始化
-        cls.properties_ = sorted(list(properties.items()), key=lambda x: x[0])
-        cls.components_name_ = cls.__name__
-        cls.permission_ = permission
-        cls.namespace_ = namespace
-        cls.persist_ = persist
-        cls.readonly_ = readonly
-        cls.backend_ = backend
-        # 从properties生成np structured dtype，align为True更慢，arm服务器会好些
-        cls.dtypes = np.dtype([(name, prop.dtype) for name, prop in cls.properties_], align=False)
-        cls.default_row = np.rec.array(
-            [tuple([prop.default for name, prop in cls.properties_])],
-            dtype=cls.dtypes)  # or np.object_
-        cls.uniques_ = {name for name, prop in cls.properties_ if prop.unique}
+        # 生成json格式，并通过json加载到class中
+        json_str = BaseComponent.make_json(properties, namespace, cls.__name__, permission,
+                                           persist, readonly, backend)
+        cls.load_json(json_str)
 
         # 保存app文件的版本信息
         caller = inspect.stack()[1]
@@ -224,17 +269,11 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         try:
             blob = tree[relpath]
             sha = blob.hexsha
-            cls.version_ = sha
+            cls.git_hash_ = sha
         except KeyError:
             warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
                           f"将无法检测表{cls.__name__}的版本，未来的修改可能会导致数据丢失。")
-            cls.version_ = 'untracked'
-
-        cls.prop_idx_map_ = {}
-        cls.dtype_map_ = {}
-        for name, prop in cls.properties_:
-            cls.prop_idx_map_[name] = len(cls.prop_idx_map_)
-            cls.dtype_map_[name] = prop.dtype
+            cls.git_hash_ = 'untracked'
 
         # 把class加入到总集中
         ComponentDefines().add_component(namespace, cls, force)

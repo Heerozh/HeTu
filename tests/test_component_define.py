@@ -23,10 +23,10 @@ class TestComponentDefine(unittest.TestCase):
         self.assertEqual(
             GalaxyPosition.properties_,
             [
-                ('aaa', Property(0, False, False, np.int8)),
-                ('id', Property(0, True, True, np.int64)),
-                ('x', Property(0, True, True, int)),
-                ('y', Property(0, False, False, float))
+                ('aaa', Property(0, False, False, np.dtype(np.int8).str)),
+                ('id', Property(0, True, True, np.dtype(np.int64).str)),
+                ('x', Property(0, True, True, np.dtype(int).str)),
+                ('y', Property(0, False, False, np.dtype(float).str))
             ])
 
         # 测试是否会提示无Property错误
@@ -102,7 +102,7 @@ class TestComponentDefine(unittest.TestCase):
             [np.int8, np.int8, np.int8, np.int64])
 
         # 测试版本信息, git hash 长度40
-        self.assertEqual(len(TestBool.version_), 40)
+        self.assertEqual(len(TestBool.git_hash_), 40)
 
 
 if __name__ == '__main__':
