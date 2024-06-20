@@ -5,15 +5,5 @@
 @email: heeroz@gmail.com
 """
 
-from .component import (
-    define_component,
-    Property,
-    BaseComponent,
-    Permission,
-    ComponentDefines,
-)
-
-from .backend import (
-    RedisComponentTable,
-    ComponentTable,
-)
+from .base import ComponentTable
+from .redis import RedisComponentTable, RedisBackend
