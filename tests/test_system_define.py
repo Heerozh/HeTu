@@ -129,7 +129,7 @@ class TestSystemDefine(unittest.TestCase):
         self.assertEqual(clu.components, {GalaxyPosition, Hp, Inventory, World})
 
         # 检测sync是否有警告
-        with self.assertWarns(UserWarning):
+        with self.assertRaisesRegex(AssertionError, "async"):
             @define_system(
                 namespace="ssw",
                 components=(GalaxyPosition, Hp, Inventory),
