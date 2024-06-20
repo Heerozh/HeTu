@@ -8,8 +8,6 @@ from inspect import signature
 from typing import Type
 from dataclasses import dataclass
 import asyncio
-import warnings
-import traceback
 from ..common import Singleton
 from ..data import BaseComponent, Permission
 
@@ -130,26 +128,44 @@ class SystemClusters(metaclass=Singleton):
 
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
-                  inherits: tuple[str] = tuple()):
+                  retry: int = 9999, inherits: tuple[str] = tuple()):
     """
     定义系统
-    :param namespace: 系统命名空间
-    :param components: 引用读/写的表
+    :param namespace: System命名空间
+    :param components: 引用Component，只有引用的Component可以在`ctx`中获得
     :param force: 遇到重复定义是否强制覆盖前一个, 单元测试用
-    :param permission: 系统权限
-    :param inherits: 继承其他系统, 让系统可以在内部调用它，并不破坏事务一致性。但是簇会和其他系统绑定。
+    :param permission: System权限，OWNER权限这里不可使用，其他同Component权限。
+    :param retry: 如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
+    :param inherits: 继承其他System, 让System中可以调用其他System，并不破坏事务一致性。但是簇会和其他系统绑定。
 
-    格式：
+    示例：
     @define_system(
         namespace="ssw",
         components=(Position, Hp),
     )
-    def system_dash(ctx, entity_self, entity_target, vec):
+    async def system_dash(ctx, entity_self, entity_target, vec):
         pos_self = ctx[Position].select(entity_self)
         pos_self.x += vec.x
         ctx[Position].update(entity_self, pos_self)
         items = ctx[Inventory].query("owner", entity_self)
         ...
+        return True
+
+    函数部分：
+    `async`: 函数如果有异步操作，必须是异步函数。比如数据库操作(components)。
+    `ctx`: 上下文，内容有：
+        `ctx.caller`: 调用者id，由你在登录System中调用`elevate`函数赋值，None表示未登录用户
+        `ctx.retry_count`: 当前已重试次数，0表示首次调用。
+        `ctx[Component Class]`: 获取引用的Component实例，如`ctx[Position]`。
+        `ctx.inherited['SystemName']`: 获取继承的System函数，如`ctx.inherited['move']`。
+
+    其他参数为客户端调用时传入的参数。
+
+    返回值为 bool, message：bool表示是否执行事务，False表示放弃事务。message为返回给客户端的消息，可以省略。
+
+    Component实列：
+    由`ctx[Component Class]`返回的实例，类型为ComponentTable，可以进行数据库操作，并自动包装为事务，
+    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentTable的文档。
 
     """
     def warp(func):
@@ -165,10 +181,9 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         assert permission != permission.OWNER, "System的权限不支持OWNER"
 
         if components is not None and len(components) > 0:
-            if not asyncio.iscoroutinefunction(func):
-                formatted_lines = traceback.format_stack()
-                warnings.warn(f"System {func.__name__} 不是异步函数，数据库请求可能会阻塞整个Worker: \n" +
-                              formatted_lines[-2])
+            assert asyncio.iscoroutinefunction(func), \
+                (f"System {func.__name__} 必须是异步函数(`async def ...`)，"
+                 f"不然数据库请求会堵塞整个Worker。")
 
         SystemClusters().add(namespace, func, components, force,
                              permission, inherits)
