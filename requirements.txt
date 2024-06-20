@@ -1,7 +1,7 @@
 sanic  # pip install -U sanic
 numpy  # conda install numpy
 redis[hiredis]  # pip install -U redis[hiredis]
-pyzmq  # pip3 install -U pyzmq
+GitPython  # pip install -U GitPython
 # pip install sanic-testing
 
 

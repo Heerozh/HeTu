@@ -34,20 +34,21 @@ class Property:
 
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
-    properties_ = []                                    # 表的属性们
+    properties_ = []                                    # Component的属性们
     components_name_ = None
     namespace_ = None
     permission_ = Permission.USER
-    persist_ = True                                     # 只是标记，每次启动Head时会清空此标记的数据
+    persist_ = True                                     # 只是标记，每次启动时会清空此标记的数据
     readonly_ = False                                   # 只是标记，调用写入会警告
-    backend_ = None         # type: str                 # 该表的后端类型
+    backend_ = None         # type: str                 # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes = None
     default_row = None      # type: np.ndarray          # 默认空数据行
-    hosted_ = None          # type: ComponentTable      # 该Component运行时被托管的后端实例
+    hosted_ = None          # type: "ComponentTable"    # 该Component运行时被托管的后端实例
     prop_idx_map_ = None    # type: dict[str, int]      # 属性名->第几个属性 的映射
     dtype_map_ = None       # type: dict[str, np.dtype] # 属性名->dtype的映射
     uniques_ = None         # type: set[str]            # 唯一索引的属性名集合
+    indexes_ = None         # type: set[str]            # 所有索引的属性名集合
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
 
@@ -91,8 +92,9 @@ class BaseComponent:
         comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in cls.properties_], align=False)
         comp.default_row = np.rec.array(
             [tuple([prop.default for name, prop in comp.properties_])],
-            dtype=comp.dtypes)  # or np.object_
+            dtype=comp.dtypes)
         comp.uniques_ = {name for name, prop in comp.properties_ if prop.unique}
+        comp.indexes_ = {name for name, prop in comp.properties_ if prop.unique or prop.index}
 
         comp.prop_idx_map_ = {}
         comp.dtype_map_ = {}
@@ -104,57 +106,18 @@ class BaseComponent:
         comp.git_hash_ = ""
 
     @classmethod
-    def new_row(cls, size=1):
+    def new_row(cls, size=1) -> np.void | np.ndarray | np.recarray:
         """返回空数据行， id为0时，insert会自动赋予id"""
-        row = cls.default_row[0].copy() if size == 1 else np.repeat(cls.default_row, size, 0)
+        row = cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
         return row
 
-
-class ComponentTable:
-    """
-    Component的数据表操作接口，和后端通讯并处理事务。
-    """
-    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id, backend):
-        self.component_cls = component_cls
-        self.instance_name = instance_name
-        self.backend = backend
-        self.cluster_id = cluster_id
-
-    def build(self):
-        """只有HeadNode的主进程在启动时会调用一次"""
-        raise NotImplementedError
-
-    def select(self, value, where: str = None):
-        raise NotImplementedError
-
-    async def select_async(self, value, where: str = None):
-        raise NotImplementedError
-
-    def select_or_create(self, value, where: str = None):
-        uniques = self.component_cls.uniques_ - {'id', where}
-        assert len(uniques) == 0, "有多个Unique属性的Component不能使用select_or_create"
-
-        rtn = self.select(value, where)
-        if rtn is None:
-            rtn = self.component_cls.new_row()
-            rtn[where] = value
-            self.insert(rtn)
-        return rtn
-
-    def query(self, index_name: str, left, right=None, limit=10, desc=False):
-        raise NotImplementedError
-
-    def update(self, row_id: int, row):
-        raise NotImplementedError
-
-    def insert(self, row):
-        raise NotImplementedError
-
-    def delete(self, row_id: int):
-        raise NotImplementedError
-
-    def is_exist(self, value, where: str = None):
-        raise NotImplementedError
+    @classmethod
+    def dict_to_row(cls, data: dict):
+        """从dict生成一个数据行"""
+        row = cls.new_row()
+        for name, value in data.items():
+            row[name] = value
+        return row
 
 
 class ComponentDefines(metaclass=Singleton):
@@ -193,13 +156,13 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
 
     :param namespace: 是你的项目名，一个网络地址只能启动一个namespace。
     :param persist: 表示是否持久化。
-    :param readonly: 只读表，只读表不会被加事务保护，增加并行性。
+    :param readonly: 是否只读Component，只读Component不会被加事务保护，增加并行性。
     :param backend: 指定Component后端，对应配置文件中的db_name。默认为Redis
     :param permission: 设置读取权限，只对游戏客户端的读取查询调用起作用。
-        - everybody: 任何人都可以读，适合读一些服务器状态类的数据，如在线人数
-        - user: 登录用户都可以读
+        - everybody: 任何客户端都可以读，适合读一些服务器状态类的数据，如在线人数
+        - user: 已登录客户端都可以读
         - admin: 只有管理员可以读
-        - owner: 只有表的owner属性值==登录的用户id（`ctx.caller`）可以读，如果无owner值则认为不可读
+        - owner: 只有owner属性值==登录的用户id（`ctx.caller`）时可以读，如果无owner值则认为该行不可读
     :param force: 强制覆盖同名Component，否则会报错。
     :param _cls: 按@define_component()方式调用时，不需要传入_cls参数。
 
@@ -272,7 +235,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             cls.git_hash_ = sha
         except KeyError:
             warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
-                          f"将无法检测表{cls.__name__}的版本，未来的修改可能会导致数据丢失。")
+                          f"将无法检测组件{cls.__name__}的版本，未来的修改可能会导致数据丢失。")
             cls.git_hash_ = 'untracked'
 
         # 把class加入到总集中
