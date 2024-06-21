@@ -1,4 +1,5 @@
 import numpy as np
+import asyncio
 from ..component import BaseComponent
 
 
@@ -24,7 +25,7 @@ class ComponentTable:
         self._cache = {}
         self._updates = []
 
-    async def end_transaction(self):
+    async def end_transaction(self, discard: bool):
         # 继承，并实现事务提交的操作，将_updates中的命令写入事务
         # updates是一个List[(row_id, row)]，row_id为None表示插入，否则为更新，row为None表示删除
         # 如果index是独立分离的，写入时要同时更新index
@@ -60,10 +61,10 @@ class ComponentTable:
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
 
         # 查询并lock index
-        if len(slicer := await self._backend_query(where, value, limit=1)) == 0:
+        if len(row_ids := await self._backend_query(where, value, limit=1)) == 0:
             return None
 
-        row_id = slicer[0]
+        row_id = row_ids[0]
 
         if (row := self._cache.get(row_id)) is not None:
             return row
@@ -89,11 +90,11 @@ class ComponentTable:
             f"{self._component_cls.components_name_} 组件没有叫 {index_name} 的索引"
 
         # 查询并lock index
-        slicer = await self._backend_query(index_name, left, right, limit, desc)
+        row_ids = await self._backend_query(index_name, left, right, limit, desc)
 
         # 获得所有行数据并lock row
-        rtn = [] # todo 这里要改成返回numpy array
-        for row_id in slicer:
+        rtn = []
+        for row_id in row_ids:
             if (row := self._cache.get(row_id)) is not None:
                 rtn.append(row)
             elif (row := await self._backend_get(row_id)) is not None:
@@ -101,17 +102,20 @@ class ComponentTable:
                 rtn.append(row)
             else:
                 raise TransactionConflict()
-        return rtn
+
+        # 返回numpy array
+        return np.rec.array(rtn, dtype=self._component_cls.dtypes)
 
     async def is_exist(self, value, where: str = 'id'):
-        """查询索引是否存在该键值，并返回索引位置，返回值：(bool, i)"""
+        """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
         assert np.issctype(type(value)), \
             f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
 
-        slicer = await self._backend_query(where, value, limit=1)
-        return len(slicer) > 0, slicer[0]
+        row_ids = await self._backend_query(where, value, limit=1)
+        found = len(row_ids) > 0
+        return found, found and row_ids[0] or None
 
     async def select_or_create(self, value, where: str = None):
         uniques = self._component_cls.uniques_ - {'id', where}
@@ -173,15 +177,17 @@ class ComponentTable:
             raise TransactionConflict()
 
         # 加入到更新队列
+        self._cache[row.id] = row
         self._updates.append((None, row))
 
     async def delete(self, row_id: int):
         # 先查询旧数据是否存在，顺便lock row
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
-        if old_row is None:
+        if old_row is None or old_row == 'deleted':
             raise KeyError(f"{self._component_cls.components_name_} 组件没有id为 {row_id} 的行")
 
         # 标记删除
+        self._cache[row_id] = 'deleted'
         self._updates.append((row_id, None))
 
 
