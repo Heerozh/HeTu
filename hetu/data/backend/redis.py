@@ -8,6 +8,7 @@ import numpy as np
 import random
 import hashlib
 import redis
+import asyncio
 from datetime import datetime, timedelta
 from sanic.log import logger
 from ...common import Singleton
@@ -15,15 +16,35 @@ from ..component import BaseComponent, Property
 from .base import ComponentTable
 
 
+def get_coroutine_executor():
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run
+    else:
+        return loop.run_until_complete
+
+
 class RedisBackend:
     def __init__(self, config: dict):
         # 同步io连接, 异步io连接, 只读io连接
         self.io = redis.from_url(config['master'])
         self.aio = redis.asyncio.from_url(config['master'])
-        self.replicas = [redis.asyncio.from_url(url) for url in config['servants']]
+        servants = config.get('servants', [])
+        if servants:
+            self.replicas = [redis.asyncio.from_url(url) for url in config['servants']]
+        else:
+            self.replicas = [self.aio]
+
+        # 配置keyspace通知
+        run = get_coroutine_executor()
+        for replica in self.replicas:
+            run(replica.config_set('notify-keyspace-events', 'Kghz'))
 
     def rnd_replica(self):
-        return self.replicas[random.randint(0, len(self.replicas))]
+        """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
+        i = random.randint(0, len(self.replicas))
+        return i, self.replicas[i]
 
 
 class RedisComponentTable(ComponentTable):
@@ -41,13 +62,8 @@ class RedisComponentTable(ComponentTable):
     instance_name:component_name:meta
     """
 
-    @classmethod
-    def create_schema(cls):
-        raise NotImplementedError
-
     def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
                  backend: RedisBackend):
-        """backend: 要传"""
         super().__init__(component_cls, instance_name, cluster_id, backend)
         component_cls.hosted_ = self
         # redis key名
@@ -59,10 +75,7 @@ class RedisComponentTable(ComponentTable):
         self._idx_prefix = f'{self._root_prefix}.{hash_tag}:index:'
         self._lock_key = f'{self._root_prefix}:init_lock'
         self._meta_key = f'{self._root_prefix}:meta'
-
-        # 需要事务结束时，一起执行的写入操作
-        self.updates = []
-
+        self._trans_pipe = None
         # 检测meta信息，然后做对应处理
         self.check_meta()
 
@@ -71,7 +84,6 @@ class RedisComponentTable(ComponentTable):
         检查meta信息，然后做对应处理
         meta格式:
         json: 表的结构信息
-        increment: 自增id
         version: json的hash
         cluster_id: 所属簇id
         last_index_rebuild: 上次重建索引时间
@@ -117,7 +129,6 @@ class RedisComponentTable(ComponentTable):
         # 只需要写入meta，其他的_rebuild_index会创建
         meta = {
             'json': self._component_cls.json_,
-            'increment': 0,
             'version': hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest(),
             'cluster_id': self._cluster_id,
             'last_index_rebuild': '2024-06-19T03:41:18.682529+08:00'
@@ -129,24 +140,23 @@ class RedisComponentTable(ComponentTable):
         logger.info(f"⌚ [💾Redis] {self._name}表 正在重建索引...")
         io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
-        for key, prop in self._component_cls.properties_:
-            if prop.unique or prop.index:
-                db_key = self._idx_prefix + key
-                # 先删除所有_idx_key开头的索引
-                io.delete(db_key)
-                # 重建所有索引，不管unique还是index都是sset
-                pipe = io.pipeline()
-                row_ids = []
-                for row in rows:
-                    row_id = row.split(':')[-1]
-                    row_ids.append(row_id)
-                    io.hget(row, key)
-                values = pipe.execute()
-                # zadd({member:score})其实是set的意思
-                io.zadd(db_key, dict(zip(row_ids, values)))
+        for idx_name in self._component_cls.indexes_:
+            idx_key = self._idx_prefix + idx_name
+            # 先删除所有_idx_key开头的索引
+            io.delete(idx_key)
+            # 重建所有索引，不管unique还是index都是sset
+            pipe = io.pipeline()
+            row_ids = []
+            for row in rows:
+                row_id = row.split(':')[-1]
+                row_ids.append(row_id)
+                io.hget(row, idx_name)
+            values = pipe.execute()
+            # zadd({member:score})其实是set的意思
+            io.zadd(idx_key, dict(zip(row_ids, values)))
 
     def _migration_cluster_id(self, old):
-        logger.warning(f"⚠️ [💾Redis] {self._name}表 cluster_id 由 {old} 变更为 {self.cluster_id}，"
+        logger.warning(f"⚠️ [💾Redis] {self._name}表 cluster_id 由 {old} 变更为 {self._cluster_id}，"
                        f"将尝试迁移cluster数据...")
         # 重命名key
         old_hash_tag = f'{{CLU{old}}}'
@@ -208,26 +218,89 @@ class RedisComponentTable(ComponentTable):
                     pipe.hset(row, prop_name, default)
                 pipe.execute()
 
-    async def end_transaction(self):
-        # 继承，并实现事务提交的操作，将_updates中的命令写入事务
+    def begin_transaction(self):
+        super().begin_transaction()
+        self._trans_pipe = self._backend.aio.pipeline(transaction=True)
+
+    async def end_transaction(self, discard):
+        # 并实现事务提交的操作，将_updates中的命令写入事务
+        if discard:
+            self._trans_pipe.discard()
+            return True
+
+        pipe = self._trans_pipe
+        pipe.multi()
+
         # updates是一个List[(row_id, row)]，row_id为None表示插入，否则为更新，row为None表示删除
-        # 如果index是独立分离的，写入时要同时更新index
-        raise NotImplementedError
+        for row_id, row in self._updates:
+            if row is None:
+                # 删除
+                row_key = self._key_prefix + str(row_id)
+                pipe.delete(row_key)
+                for index in self._component_cls.indexes_:
+                    idx_key = self._idx_prefix + index
+                    pipe.zrem(idx_key, row_id)
+            else:
+                # 插入/更新
+                row_key = self._key_prefix + str(row.id)
+                dict_row = dict(zip(row.dtype.names, row))
+                pipe.hset(row_key, mapping=dict_row)
+                for index in self._component_cls.indexes_:
+                    idx_key = self._idx_prefix + index
+                    pipe.zadd(idx_key, {row.id: dict_row[index]})
+
+        try:
+            await pipe.execute()
+        except redis.WatchError:
+            return False
+        raise True
 
     async def _backend_get(self, row_id: int):
-        # 继承，并实现获取行数据的操作，返回值要通过dict_to_row包裹下
-        # 如果不存在该行数据，返回None
-        # 同时要让乐观锁锁定该行。sql是记录该行的version，用于后续的update条件
-        raise NotImplementedError
+        # 获取行数据的操作
+        key = self._key_prefix + str(row_id)
+        pipe = self._trans_pipe
+
+        # 同时要让乐观锁锁定该行
+        await pipe.watch(key)
+        # 返回值要通过dict_to_row包裹下
+        row = await pipe.hgetall(key)
+        if row:
+            return self._component_cls.dict_to_row(row)
+        else:
+            return None
 
     async def _backend_get_max_id(self):
-        # 继承，并实现获取最大id的操作
-        # 如果自增id是数据库负责的，这个可以返回-1，只要你end_transaction时处理即可
-        # 如果最大id是单独储存的，要用乐观锁锁定该行数据，或者锁定id的索引也可以
-        raise NotImplementedError
+        # 获取最大id的操作
+        idx_key = self._idx_prefix + 'id'
+        pipe = self._trans_pipe
+
+        # 同时要让乐观锁锁定Index
+        await pipe.watch(idx_key)
+        max_score = await pipe.zrange(idx_key, 0, 0, desc=True, withscores=True)
+        max_score = max_score[0][1] if max_score else 0
+
+        raise max_score
 
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
-        # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
+        # 范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
+        idx_key = self._idx_prefix + index_name
+        pipe = self._trans_pipe
+
+        # 要让乐观锁锁定Index
+        await pipe.watch(idx_key)
+        if desc:
+            left, right = min(left, right), max(left, right)
+        row_ids = await pipe.zrange(idx_key, left, right, byscore=True, desc=desc,
+                                    offset=0, num=limit)
+
+        # 同时锁定所有读取的行
+        # row_keys = [self._key_prefix + row_id for row_id in row_ids]
+        # await asyncio.gather(*[pipe.watch(row_key) for row_key in row_keys])
+        # rtn = await asyncio.gather(*[pipe.hgetall(row_key) for row_key in row_keys])
+
         # 未查询到数据时返回[]
-        # 如果index数据是独立分离的，要用乐观锁锁定该index
-        raise NotImplementedError
+        return row_ids
+
+
+
+
