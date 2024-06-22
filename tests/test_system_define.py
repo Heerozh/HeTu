@@ -35,10 +35,14 @@ class TestSystemDefine(unittest.TestCase):
         class World(BaseComponent):
             some: int = Property(0, False)
 
+    def __init__(self, method_name='runTest'):
+        super().__init__(method_name)
+        ComponentDefines().clear_()
+        self.build_test_component()
+
     def test_normal_define(self):
         # 先卸载SystemClusters单件防止重定义
         SystemClusters._instances.pop(SystemClusters, None)
-        self.build_test_component()
 
         # 定义测试系统
         @define_system(
@@ -140,7 +144,6 @@ class TestSystemDefine(unittest.TestCase):
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
         SystemClusters._instances.pop(SystemClusters, None)
-        self.build_test_component()
 
         # 定义测试系统
         @define_system(
