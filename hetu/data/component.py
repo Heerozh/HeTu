@@ -48,7 +48,7 @@ class BaseComponent:
     prop_idx_map_ = None    # type: dict[str, int]      # 属性名->第几个属性 的映射
     dtype_map_ = None       # type: dict[str, np.dtype] # 属性名->dtype的映射
     uniques_ = None         # type: set[str]            # 唯一索引的属性名集合
-    indexes_ = None         # type: set[str]            # 所有索引的属性名集合
+    indexes_ = None         # type: dict[str, bool]     # 索引名->是否是字符串类型 的映射
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
 
@@ -63,7 +63,8 @@ class BaseComponent:
             'readonly': bool(readonly),
             'backend': str(backend),
             'properties': {name: {
-                'default': prop.default,
+                'default': prop.default.decode('utf8')
+                if type(prop.default) is bytes else prop.default,
                 'unique': bool(prop.unique),
                 'index': bool(prop.index),
                 'dtype': np.dtype(prop.dtype).str,
@@ -94,7 +95,8 @@ class BaseComponent:
             [tuple([prop.default for name, prop in comp.properties_])],
             dtype=comp.dtypes)
         comp.uniques_ = {name for name, prop in comp.properties_ if prop.unique}
-        comp.indexes_ = {name for name, prop in comp.properties_ if prop.unique or prop.index}
+        comp.indexes_ = {name: np.dtype(prop.dtype).type in (np.str_, np.bytes_)
+                         for name, prop in comp.properties_ if prop.unique or prop.index}
 
         comp.prop_idx_map_ = {}
         comp.dtype_map_ = {}
@@ -106,7 +108,7 @@ class BaseComponent:
         comp.git_hash_ = ""
 
     @classmethod
-    def new_row(cls, size=1) -> np.void | np.ndarray | np.recarray:
+    def new_row(cls, size=1) -> np.record | np.ndarray | np.recarray:
         """返回空数据行， id为0时，insert会自动赋予id"""
         row = cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
         return row
@@ -168,7 +170,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
 
     `Property(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
         `index`表示此属性开启索引；
-        `unique`表示属性值必须唯一，索引性能更高，启动此项默认会同时打开index。
+        `unique`表示属性值必须唯一，启动此项默认会同时打开index。
 
     * ⚠️ 警告：索引会降低全表性能，请控制数量。
 
@@ -183,16 +185,16 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         # 获取class的property成员列表
         cls_annotations = cls.__dict__.get('__annotations__', {})
         properties = {}
-
         # 从class读取并删除该成员
         for name, dtype in cls_annotations.items():
             prop = getattr(cls, name, None)
             if isinstance(prop, Property):
                 if prop.dtype is None:
                     prop.dtype = dtype
-                if np.dtype(prop.dtype).itemsize == 0:
-                    raise AssertionError(f"{cls.__name__}.{name}属性的dtype不能为0长度。"
-                                         f"str类型请用'<U8'方式定义")
+                assert np.dtype(prop.dtype).itemsize > 0, \
+                    f"{cls.__name__}.{name}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+                assert np.dtype(prop.dtype).type is not np.void, \
+                    f"{cls.__name__}.{name}属性的dtype不支持void类型"
                 # bool类型在一些后端数据库中不支持，强制转换为int8
                 if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
                     prop.dtype = np.int8
@@ -201,7 +203,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                 assert prop.default is not None, \
                     (f"{cls.__name__}.{name}默认值不能为None。所有属性都要有默认值，"
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
-                if type(prop.default) is str:
+                if type(prop.default) is str or type(prop.default) is bytes:
                     can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
                 else:
                     can_cast = np.can_cast(prop.default, prop.dtype)
@@ -235,7 +237,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             cls.git_hash_ = sha
         except KeyError:
             warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
-                          f"将无法检测组件{cls.__name__}的版本，未来的修改可能会导致数据丢失。")
+                          f"将无法检测组件{cls.__name__}的版本。")
             cls.git_hash_ = 'untracked'
 
         # 把class加入到总集中
