@@ -104,6 +104,17 @@ class TestComponentDefine(unittest.TestCase):
         # 测试版本信息, git hash 长度40
         self.assertEqual(len(TestBool.git_hash_), 40)
 
+        # 测试字符串byte类型
+        @define_component(namespace="ssw", force=True)
+        class TestString(BaseComponent):
+            a: 'U8' = Property(b'123', True, True)
+            b: 'S8' = Property(b'123', True, False)
+            c: 'b'  = Property(1, True, False)
+
+        self.assertEqual(TestString.indexes_['a'], True)
+        self.assertEqual(TestString.indexes_['b'], True)
+        self.assertEqual(TestString.indexes_['c'], False)
+
 
 if __name__ == '__main__':
     unittest.main()
