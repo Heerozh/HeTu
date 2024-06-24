@@ -203,12 +203,13 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                 assert prop.default is not None, \
                     (f"{cls.__name__}.{name}默认值不能为None。所有属性都要有默认值，"
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
-                if type(prop.default) is str or type(prop.default) is bytes:
-                    can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
-                else:
-                    can_cast = np.can_cast(prop.default, prop.dtype)
-                assert can_cast, (f"{cls.__name__}.{name}属性的默认值({prop.default})"
-                                  f"类型和dtype({prop.dtype})不匹配")
+                can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
+                if not can_cast and not (type(prop.default) is str or type(prop.default) is bytes):
+                    # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败, 所以要再负数判断一次
+                    can_cast = np.can_cast(np.min_scalar_type(-prop.default), prop.dtype)
+                assert can_cast, (f"{cls.__name__}.{name}的default值："
+                                  f"{type(prop.default).__name__}({prop.default})"
+                                  f"和属性dtype({prop.dtype})不匹配")
                 properties[name] = prop
             delattr(cls, name)
 

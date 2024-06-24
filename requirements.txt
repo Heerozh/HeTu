@@ -1,5 +1,5 @@
 sanic  # pip install -U sanic
-numpy  # conda install numpy
+numpy >= 2.0 # conda install numpy
 redis[hiredis]  # pip install -U redis[hiredis]
 GitPython  # pip install -U GitPython
 # pip install sanic-testing
@@ -9,3 +9,4 @@ GitPython  # pip install -U GitPython
 trustme  # pip install -U trustme
 ipykernel
 ipywidgets  # conda install ipykernel ipywidgets
+docker  # pip install -U docker

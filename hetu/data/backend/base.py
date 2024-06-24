@@ -1,5 +1,4 @@
 import numpy as np
-import asyncio
 from ..component import BaseComponent
 
 
@@ -66,10 +65,12 @@ class ComponentTable:
         `where`不是unique索引时，返回升序排序的第一条数据。
         如果没有查询到数据，返回None。
         """
-        assert np.issctype(type(value)), \
-            f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
+
+        if issubclass(type(value), np.generic):
+            value = value.item()
 
         # 查询
         if where == 'id':
@@ -99,12 +100,13 @@ class ComponentTable:
         如果right为None，则查询等于left的数据。
         返回Numpy.Array[row]，如果没有查询到数据，返回空Numpy.Array。
         """
-        assert np.issctype(type(left)), \
-            f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
+        assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
         assert index_name in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {index_name} 的索引"
 
-        left = type(left) is bool and int(left) or left
+        left = np.issubdtype(type(left), np.bool_) and int(left) or left
+        left = issubclass(type(left), np.generic) and left.item() or left
+        right = issubclass(type(right), np.generic) and right.item() or right
 
         if right is None:
             right = left
@@ -136,14 +138,16 @@ class ComponentTable:
 
     async def is_exist(self, value, where: str = 'id'):
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
-        assert np.issctype(type(value)), \
-            f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
 
+        if issubclass(type(value), np.generic):
+            value = value.item()
+
         row_ids = await self._backend_query(where, value, limit=1)
         found = len(row_ids) > 0
-        return found, found and row_ids[0] or None
+        return found, found and int(row_ids[0]) or None
 
     async def select_or_create(self, value, where: str = None):
         uniques = self._component_cls.uniques_ - {'id', where}
@@ -173,6 +177,8 @@ class ComponentTable:
     async def update(self, row_id: int, row):
         """修改row_id行的数据"""
         assert type(row) is np.record, "update数据必须是单行数据"
+        row_id = int(row_id)
+
         if row.id != row_id:
             raise ValueError(f"更新的row.id {row.id} 与传入的row_id {row_id} 不一致")
 
@@ -213,8 +219,9 @@ class ComponentTable:
         self._cache[row.id.item()] = row
         self._updates.append(('insert', row.id, None, row))
 
-    async def delete(self, row_id: int):
+    async def delete(self, row_id: int | np.integer):
         """删除row_id行"""
+        row_id = int(row_id)
         # 先查询旧数据是否存在，顺便lock row
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
         if old_row is None or (type(old_row) is str and old_row == 'deleted'):
@@ -269,5 +276,3 @@ class ComponentPublisher:
             msg.append({'cmd': 'update', 'row': dict_row})
         # 返回消息
         raise msg
-
-
