@@ -11,18 +11,8 @@ import redis
 import asyncio
 from datetime import datetime, timedelta
 from sanic.log import logger
-from ...common import Singleton
 from ..component import BaseComponent, Property
-from .base import ComponentTable
-
-
-def get_coroutine_executor():
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run
-    else:
-        return loop.run_until_complete
+from .base import ComponentTable, RaceCondition
 
 
 class RedisBackend:
@@ -37,9 +27,8 @@ class RedisBackend:
             self.replicas = [self.aio]
 
         # 配置keyspace通知
-        run = get_coroutine_executor()
         for replica in self.replicas:
-            run(replica.config_set('notify-keyspace-events', 'Kghz'))
+            asyncio.create_task(replica.config_set('notify-keyspace-events', 'Kghz'))
 
     def rnd_replica(self):
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
@@ -71,8 +60,8 @@ class RedisComponentTable(ComponentTable):
         # 不能用component_cls.__name__ 可能是json加载的名字不对
         self._name = component_cls.components_name_
         self._root_prefix = f'{instance_name}:{self._name}:'
-        self._key_prefix = f'{self._root_prefix}.{hash_tag}:id:'
-        self._idx_prefix = f'{self._root_prefix}.{hash_tag}:index:'
+        self._key_prefix = f'{self._root_prefix}{hash_tag}:id:'
+        self._idx_prefix = f'{self._root_prefix}{hash_tag}:index:'
         self._lock_key = f'{self._root_prefix}:init_lock'
         self._meta_key = f'{self._root_prefix}:meta'
         self._trans_pipe = None
@@ -133,14 +122,18 @@ class RedisComponentTable(ComponentTable):
             'cluster_id': self._cluster_id,
             'last_index_rebuild': '2024-06-19T03:41:18.682529+08:00'
         }
-        self._backend.io.hmset(self._meta_key, meta)
+        self._backend.io.hset(self._meta_key, mapping=meta)
         return meta
 
     def _rebuild_index(self):
         logger.info(f"⌚ [💾Redis] {self._name}表 正在重建索引...")
         io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
-        for idx_name in self._component_cls.indexes_:
+        if len(rows) == 0:
+            logger.info(f"✅ [💾Redis] {self._name}表 无数据，无需重建索引。")
+            return
+
+        for idx_name, str_type in self._component_cls.indexes_.items():
             idx_key = self._idx_prefix + idx_name
             # 先删除所有_idx_key开头的索引
             io.delete(idx_key)
@@ -152,8 +145,12 @@ class RedisComponentTable(ComponentTable):
                 row_ids.append(row_id)
                 io.hget(row, idx_name)
             values = pipe.execute()
-            # zadd({member:score})其实是set的意思
-            io.zadd(idx_key, dict(zip(row_ids, values)))
+            if str_type:
+                # 字符串类型要特殊处理，score=0, member='name:1'形式
+                io.zadd(idx_key, {f'{value}:{rid}': 0 for rid, value in zip(row_ids, values)})
+            else:
+                # zadd 会替换掉member相同的值，等于是set
+                io.zadd(idx_key, dict(zip(row_ids, values)))
 
     def _migration_cluster_id(self, old):
         logger.warning(f"⚠️ [💾Redis] {self._name}表 cluster_id 由 {old} 变更为 {self._cluster_id}，"
@@ -161,9 +158,9 @@ class RedisComponentTable(ComponentTable):
         # 重命名key
         old_hash_tag = f'{{CLU{old}}}'
         new_hash_tag = f'{{CLU{self._cluster_id}}}'
-        old_prefix = f'{self._root_prefix}.{old_hash_tag}:'
+        old_prefix = f'{self._root_prefix}{old_hash_tag}:'
         old_prefix_len = len(old_prefix)
-        new_prefix = f'{self._root_prefix}.{new_hash_tag}:'
+        new_prefix = f'{self._root_prefix}{new_hash_tag}:'
 
         io = self._backend.io
         old_keys = io.keys(old_prefix + '*')
@@ -229,25 +226,44 @@ class RedisComponentTable(ComponentTable):
             return True
 
         pipe = self._trans_pipe
-        pipe.multi()
 
-        # updates是一个List[(row_id, row)]，row_id为None表示插入，否则为更新，row为None表示删除
-        for row_id, row in self._updates:
-            if row is None:
-                # 删除
+        # 对unique index进行最终检查，之前虽然检查过，但没有lock index，
+        # 此次检查会锁定index，在最后才锁定index可以降低事务冲突概率
+        locked_indexes = set()
+        for idx in self._component_cls.uniques_:
+            for cmd, _, old_row, new_row in self._updates:
+                if (cmd == 'update' and old_row[idx] != new_row[idx]) or cmd == 'insert':
+                    if idx not in locked_indexes:
+                        await pipe.watch(self._idx_prefix + idx)
+                        locked_indexes.add(idx)
+                    if len(await self._backend_query(idx, new_row[idx].item(), limit=1)) > 0:
+                        raise RaceCondition()
+
+        # 执行事务
+        pipe.multi()
+        for cmd, row_id, old_row, new_row in self._updates:
+            if cmd == 'delete':
                 row_key = self._key_prefix + str(row_id)
                 pipe.delete(row_key)
-                for index in self._component_cls.indexes_:
-                    idx_key = self._idx_prefix + index
-                    pipe.zrem(idx_key, row_id)
+                for idx_name, str_type in self._component_cls.indexes_.items():
+                    idx_key = self._idx_prefix + idx_name
+                    if str_type:
+                        pipe.zrem(idx_key, f'{old_row[idx_name]}:{row_id}')
+                    else:
+                        pipe.zrem(idx_key, row_id)
             else:
                 # 插入/更新
-                row_key = self._key_prefix + str(row.id)
-                dict_row = dict(zip(row.dtype.names, row))
+                row_key = self._key_prefix + str(row_id)
+                dict_row = dict(zip(new_row.dtype.names, new_row.tolist()))
                 pipe.hset(row_key, mapping=dict_row)
-                for index in self._component_cls.indexes_:
-                    idx_key = self._idx_prefix + index
-                    pipe.zadd(idx_key, {row.id: dict_row[index]})
+                for idx_name, str_type in self._component_cls.indexes_.items():
+                    idx_key = self._idx_prefix + idx_name
+                    if str_type:
+                        # 先删除老数据
+                        pipe.zrem(idx_key, f'{old_row[idx_name]}:{row_id}')
+                        pipe.zadd(idx_key, {f'{dict_row[idx_name]}:{row_id}': 0})
+                    else:
+                        pipe.zadd(idx_key, {str(row_id): dict_row[idx_name]})
 
         try:
             await pipe.execute()
@@ -274,24 +290,33 @@ class RedisComponentTable(ComponentTable):
         idx_key = self._idx_prefix + 'id'
         pipe = self._trans_pipe
 
-        # 同时要让乐观锁锁定Index
-        await pipe.watch(idx_key)
         max_score = await pipe.zrange(idx_key, 0, 0, desc=True, withscores=True)
         max_score = max_score[0][1] if max_score else 0
 
-        raise max_score
+        return max_score
 
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
         # 范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         idx_key = self._idx_prefix + index_name
         pipe = self._trans_pipe
 
-        # 要让乐观锁锁定Index
-        await pipe.watch(idx_key)
         if desc:
-            left, right = min(left, right), max(left, right)
+            left, right = right, left
+
+        # 对于str类型查询，要用[开始
+        str_type = self._component_cls.indexes_[index_name]
+        if str_type:
+            assert type(left) is str and type(right) is str, "字符串类型索引查询必须是str"
+            if not left.startswith(('(', '[')):
+                left = f'[{left}'
+            if not right.startswith(('(', '[')):
+                right = f'[{right}'
+
         row_ids = await pipe.zrange(idx_key, left, right, byscore=True, desc=desc,
                                     offset=0, num=limit)
+
+        if str_type:
+            row_ids = [int(vk.split(':')[-1]) for vk in row_ids]
 
         # 同时锁定所有读取的行
         # row_keys = [self._key_prefix + row_id for row_id in row_ids]

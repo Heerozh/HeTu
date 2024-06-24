@@ -5,5 +5,5 @@
 @email: heeroz@gmail.com
 """
 
-from .base import ComponentTable
+from .base import ComponentTable, RaceCondition
 from .redis import RedisComponentTable, RedisBackend
