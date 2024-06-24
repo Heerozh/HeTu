@@ -104,6 +104,8 @@ class ComponentTable:
         assert index_name in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {index_name} 的索引"
 
+        left = type(left) is bool and int(left) or left
+
         if right is None:
             right = left
         assert right >= left, f"right必须大于等于left，你的:{right}, {left}"
@@ -169,6 +171,7 @@ class ComponentTable:
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
 
     async def update(self, row_id: int, row):
+        """修改row_id行的数据"""
         assert type(row) is np.record, "update数据必须是单行数据"
         if row.id != row_id:
             raise ValueError(f"更新的row.id {row.id} 与传入的row_id {row_id} 不一致")
@@ -181,6 +184,7 @@ class ComponentTable:
         # 检查先决条件
         await self._check_uniques(old_row, row)
         # 更新cache数据
+        row = row.copy()
         self._cache[row_id] = row
         # 加入到更新队列
         self._updates.append(('update', row_id, old_row, row))
@@ -191,6 +195,7 @@ class ComponentTable:
             await self.update(id_, rows[i])
 
     async def insert(self, row):
+        """插入单行数据"""
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
 
@@ -204,13 +209,15 @@ class ComponentTable:
             raise RaceCondition()
 
         # 加入到更新队列
+        row = row.copy()
         self._cache[row.id.item()] = row
         self._updates.append(('insert', row.id, None, row))
 
     async def delete(self, row_id: int):
+        """删除row_id行"""
         # 先查询旧数据是否存在，顺便lock row
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
-        if old_row is None or old_row == 'deleted':
+        if old_row is None or (type(old_row) is str and old_row == 'deleted'):
             raise KeyError(f"{self._component_cls.components_name_} 组件没有id为 {row_id} 的行")
 
         # 标记删除

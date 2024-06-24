@@ -17,4 +17,6 @@ from .backend import (
     ComponentTable,
     RedisBackend,
     RedisComponentTable,
+    RaceCondition,
+    UniqueViolation,
 )
