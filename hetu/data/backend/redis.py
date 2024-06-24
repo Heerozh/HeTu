@@ -331,8 +331,10 @@ class RedisComponentTable(ComponentTable):
         str_type = self._component_cls.indexes_[index_name]
         by_lex = False
         if str_type:
+            left = type(left) is np.str_ and left.item() or left
+            right = type(right) is np.str_ and right.item() or right
             assert type(left) is str and type(right) is str, \
-                f"字符串类型索引`{index_name}`的查询(left={left}, right={right})变量类型必须是str"
+                f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
             if not left.startswith(('(', '[')):
                 left = f'[{left}'
             if not right.startswith(('(', '[')):
@@ -340,7 +342,7 @@ class RedisComponentTable(ComponentTable):
 
             if left == right:  # 如果是精确查询
                 left = f'{left}:'  # name:id 形式，所以:作为结尾标识符
-                right = '+'
+                right = f'{right};'  # ';' = 3B, ':' = 3A
 
             by_lex = True
 
