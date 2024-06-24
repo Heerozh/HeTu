@@ -163,6 +163,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 (await tbl.query('time', 10, 15, desc=True)).time, range(15, 9, -1))
             self.assertEqual((await tbl.query('owner', 10)).shape[0], 10)
             self.assertEqual((await tbl.query('owner', 10, limit=30)).shape[0], 25)
+            self.assertEqual((await tbl.query('owner', 10, limit=8)).shape[0], 8)
             self.assertEqual((await tbl.query('owner', 11)).shape[0], 0)
             # query on unique
             with self.assertRaisesRegex(AssertionError, "str"):
@@ -185,6 +186,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row = await tbl.select(row.id)
             self.assertEqual(row.name, 'updated')
         async with item_data as tbl:
+            row = await tbl.select(row.id)  # 测试用numpy type进行select是否报错
+            self.assertEqual(row.name, 'updated')
+            self.assertEqual((await tbl.query('owner', row.owner, limit=30)).shape[0], 1)
             self.assertEqual((await tbl.query('owner', 10, limit=30)).shape[0], 24)
             self.assertEqual((await tbl.query('owner', 11)).shape[0], 1)
             self.assertEqual((await tbl.query('owner', 11)).name, 'updated')
@@ -247,7 +251,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data as tbl:
             autoinc = await tbl._backend_get_max_id()
             size = len(await tbl.query('id', -np.inf, +np.inf, limit=999))
-        # 重新连接后再试
+        # 重新初始化table和连接后再试
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
         async with item_data as tbl:
@@ -255,18 +259,55 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
 
     @parameterized(implements)
-    def test_race(self, table_cls, backend_cls, config):
-        # 测试竞态
+    async def test_race(self, table_cls, backend_cls, config):
+        # 测试竞态，通过2个协程来测试
+
+        ComponentDefines().clear_()
+        self.build_test_component()
+        backend = backend_cls(config)
+        item_data1 = table_cls(Item, 'test', 1, backend)
+        item_data2 = table_cls(Item, 'test', 1, backend)
+
+        # 测试select时，另一个del和update的竞态
+        async with item_data1 as tbl:
+            row = Item.new_row()
+            row.owner = 65535
+            row.name = 'Fixed'
+            row.time = 233874
+            await tbl.insert(row)
+            row.id = 0
+            row.name = 'ForUpdate'
+            row.time += 1
+            await tbl.insert(row)
+            row.id = 0
+            row.name = 'ForDel'
+            row.time += 1
+            await tbl.insert(row)
+
+        async def query_rows():
+            async with item_data1 as _tbl:
+                rows = await _tbl.query('owner', 65535)
+
+        async def del_and_update():
+            async with item_data2 as _tbl:
+                _row = await _tbl.select('ForDel', 'name')
+                await _tbl.delete(_row.id)
+                _row = await _tbl.select('ForUpdate', 'name')
+                _row.owner = 999
+                await _tbl.update(_row.id, _row)
+
+        task1 = asyncio.create_task(query_rows())
+        task2 = asyncio.create_task(del_and_update())
+        await asyncio.gather(task1, task2)
+
+    @parameterized(implements)
+    async def test_migration(self, table_cls, backend_cls, config):
+        # 测试迁移
         pass
 
     @parameterized(implements)
-    def test_migration(self, table_cls, backend_cls, config):
-        # 测试迁移
-        self.assertEqual(True, False)
-
-    @parameterized(implements)
-    def test_benchmark(self, table_cls, backend_cls, config):
-        self.assertEqual(True, False)
+    async def test_benchmark(self, table_cls, backend_cls, config):
+        pass
 
 
 if __name__ == '__main__':

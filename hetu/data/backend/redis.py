@@ -331,8 +331,8 @@ class RedisComponentTable(ComponentTable):
         str_type = self._component_cls.indexes_[index_name]
         by_lex = False
         if str_type:
-            left = type(left) is np.str_ and left.item() or left
-            right = type(right) is np.str_ and right.item() or right
+            # left = issubclass(type(left), np.flexible) and left.item() or left  # 判断是否str
+            # right = issubclass(type(right), np.flexible) and right.item() or right
             assert type(left) is str and type(right) is str, \
                 f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
             if not left.startswith(('(', '[')):
