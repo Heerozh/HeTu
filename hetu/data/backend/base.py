@@ -3,7 +3,11 @@ import asyncio
 from ..component import BaseComponent
 
 
-class TransactionConflict(Exception):
+class RaceCondition(Exception):
+    pass
+
+
+class UniqueViolation(IndexError):
     pass
 
 
@@ -25,10 +29,16 @@ class ComponentTable:
         self._cache = {}
         self._updates = []
 
+    async def __aenter__(self):
+        self.begin_transaction()
+
+    async def __aexit__(self, exc_type, exc, tb):
+        await self.end_transaction(discard=False)
+
     async def end_transaction(self, discard: bool):
         # 继承，并实现事务提交的操作，将_updates中的命令写入事务
-        # updates是一个List[(row_id, row)]，row_id为None表示插入，否则为更新，row为None表示删除
-        # 如果index是独立分离的，写入时要同时更新index
+        # updates是一个List[(cmd, row_id, row)]
+        # 如果index是独立分离的，写入前要锁定index，写入时要同时更新index
         raise NotImplementedError
 
     async def _backend_get(self, row_id: int):
@@ -46,7 +56,7 @@ class ComponentTable:
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         # 未查询到数据时返回[]
-        # 如果index数据是独立分离的，要用乐观锁锁定该index
+        # 如果index数据是独立分离的，不要锁index，太容易事务冲突，只在end_transaction里锁定
         raise NotImplementedError
 
     async def select(self, value, where: str = 'id'):
@@ -60,7 +70,7 @@ class ComponentTable:
         assert where in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
 
-        # 查询并lock index
+        # 查询
         if len(row_ids := await self._backend_query(where, value, limit=1)) == 0:
             return None
 
@@ -69,11 +79,13 @@ class ComponentTable:
         if (row := self._cache.get(row_id)) is not None:
             return row
 
-        # 获得行数据并lock row
+        # 获得行数据并lock row，我们不锁index, 所以index的查询结果和get到的可能不一样（就算锁了也要写入时才知道）
+        # 所以我们这里判断下如果值不同就抛出冲突异常
         if (row := await self._backend_get(row_id)) is None:
-            # 如果index是独立的，且乐观锁锁定，由于乐观锁只有最后写入时才会冲突，这里get依然有可能获得空值（被删除了）
-            # 如果不写这句，最后写入时也会提示事务冲突，但间隔太远，而且可能导致用户代码因为返回值是None出错
-            raise TransactionConflict()
+            raise RaceCondition()
+        if row[where] != value:
+            raise RaceCondition()
+
         self._cache[row_id] = row
 
         return row
@@ -89,7 +101,11 @@ class ComponentTable:
         assert index_name in self._component_cls.indexes_, \
             f"{self._component_cls.components_name_} 组件没有叫 {index_name} 的索引"
 
-        # 查询并lock index
+        if right is None:
+            right = left
+        assert right >= left, f"right必须大于等于left，你的:{right}, {left}"
+
+        # 查询
         row_ids = await self._backend_query(index_name, left, right, limit, desc)
 
         # 获得所有行数据并lock row
@@ -98,10 +114,13 @@ class ComponentTable:
             if (row := self._cache.get(row_id)) is not None:
                 rtn.append(row)
             elif (row := await self._backend_get(row_id)) is not None:
+                # 由于没lock index，如果发现get结果不在query范围内，就抛出冲突
+                if not (left <= row[index_name] <= right):
+                    raise RaceCondition()
                 self._cache[row_id] = row
                 rtn.append(row)
             else:
-                raise TransactionConflict()
+                raise RaceCondition()
 
         # 返回numpy array
         return np.rec.array(rtn, dtype=self._component_cls.dtypes)
@@ -128,21 +147,22 @@ class ComponentTable:
             await self.insert(rtn)
         return rtn
 
-    async def _check_uniques(self, old_row: [np.void, None], new_row: np.void):
+    async def _check_uniques(self, old_row: [np.record, None], new_row: np.record):
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
         is_insert = old_row is None
 
         # 先检查是否可以添加，循环所有unique index
-        for prop in self._component_cls.uniques_:
+        for idx_name in self._component_cls.uniques_:
             # 如果值变动了/或是插入，先检查目标值是否已存在
-            if (is_update and old_row[prop] != new_row[prop]) or is_insert:
-                if len(await self._backend_query(prop, new_row[prop], limit=1)) > 0:
-                    raise ValueError(f"Unique索引{self._component_cls.components_name_}.{prop}，"
-                                     f"已经存在值为({new_row[prop]})的行，无法Update/Insert")
+            if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
+                if len(await self._backend_query(idx_name, new_row[idx_name].item(), limit=1)) > 0:
+                    raise UniqueViolation(
+                        f"Unique索引{self._component_cls.components_name_}.{idx_name}，"
+                        f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
 
     async def update(self, row_id: int, row):
-        assert type(row) is np.void, "update数据必须是单行数据"
+        assert type(row) is np.record, "update数据必须是单行数据"
         if row.id != row_id:
             raise ValueError(f"更新的row.id {row.id} 与传入的row_id {row_id} 不一致")
 
@@ -156,7 +176,7 @@ class ComponentTable:
         # 更新cache数据
         self._cache[row_id] = row
         # 加入到更新队列
-        self._updates.append((row_id, row))
+        self._updates.append(('update', row_id, old_row, row))
 
     async def update_rows(self, rows: np.rec.array):
         assert type(rows) is np.recarray and rows.shape[0] > 1, "update_rows数据必须是多行数据"
@@ -164,7 +184,7 @@ class ComponentTable:
             await self.update(id_, rows[i])
 
     async def insert(self, row):
-        assert type(row) is np.void, "插入数据必须是单行数据"
+        assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
 
         # 检查先决条件
@@ -174,11 +194,11 @@ class ComponentTable:
         # 尝试获取数据，由于上面先决条件检查了，肯定获取不到，主要目的是lock row
         old_row = await self._backend_get(row.id)
         if old_row is not None:
-            raise TransactionConflict()
+            raise RaceCondition()
 
         # 加入到更新队列
         self._cache[row.id] = row
-        self._updates.append((None, row))
+        self._updates.append(('insert', row.id, None, row))
 
     async def delete(self, row_id: int):
         # 先查询旧数据是否存在，顺便lock row
@@ -188,6 +208,52 @@ class ComponentTable:
 
         # 标记删除
         self._cache[row_id] = 'deleted'
-        self._updates.append((row_id, None))
+        self._updates.append(('delete', row_id, old_row, None))
+
+
+class ComponentPublisher:
+    """
+    Component的数据订阅和查询接口
+    """
+    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id, backend):
+        self._component_cls = component_cls
+        self._instance_name = instance_name
+        self._backend = backend
+        self._cluster_id = cluster_id
+
+    async def subscribe_select(self, value, where: str = 'id'):
+        """订阅单行数据"""
+        # 需要获取backend db数字
+        # 频道： '__keyspace@0__:keyname' 事件：hset, del
+        raise NotImplementedError
+
+    async def subscribe_query(self, index_name: str, left, right=None, limit=10, desc=False):
+        """订阅多行数据"""
+        # 频道： '__keyspace@0__:indexname' 事件：zadd，zrem
+        # 然后再对所有查询的结果分别订阅select
+        raise NotImplementedError
+
+    async def unsubscribe(self, sub_id):
+        """取消订阅数据"""
+        raise NotImplementedError
+
+    async def _backend_get_changes(self):
+        # 继承，并获取数据row和index发生变动的通知
+        # 根据通知，组合成row数据，返回List，
+        # 返回示例：[('update', row), ('insert', row), ('delete', row_id)]
+        raise NotImplementedError
+
+    async def get_message(self):
+        """处理一次订阅事件"""
+        # 调用get_message()，没值返回None
+        rows = await self._backend_get_changes()
+        # 组合成消息
+        msg = []
+        row_names = rows.dtype.names
+        for row in rows:
+            dict_row = dict(zip(row_names, row))
+            msg.append({'cmd': 'update', 'row': dict_row})
+        # 返回消息
+        raise msg
 
 

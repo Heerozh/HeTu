@@ -14,6 +14,7 @@ from .component import (
 )
 
 from .backend import (
-    RedisComponentTable,
     ComponentTable,
+    RedisBackend,
+    RedisComponentTable,
 )
