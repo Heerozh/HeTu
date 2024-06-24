@@ -15,20 +15,31 @@ from ..component import BaseComponent, Property
 from .base import ComponentTable, RaceCondition
 
 
+def get_coroutine_executor():
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run
+    else:
+        return asyncio.create_task
+
+
 class RedisBackend:
     def __init__(self, config: dict):
         # 同步io连接, 异步io连接, 只读io连接
-        self.io = redis.from_url(config['master'])
-        self.aio = redis.asyncio.from_url(config['master'])
+        self.io = redis.from_url(config['master'], decode_responses=True)
+        self.aio = redis.asyncio.from_url(config['master'], decode_responses=True)
         servants = config.get('servants', [])
         if servants:
-            self.replicas = [redis.asyncio.from_url(url) for url in config['servants']]
+            self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
+                             for url in config['servants']]
         else:
             self.replicas = [self.aio]
 
         # 配置keyspace通知
+        run_async = get_coroutine_executor()
         for replica in self.replicas:
-            asyncio.create_task(replica.config_set('notify-keyspace-events', 'Kghz'))
+            run_async(replica.config_set('notify-keyspace-events', 'Kghz'))
 
     def rnd_replica(self):
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
@@ -65,6 +76,7 @@ class RedisComponentTable(ComponentTable):
         self._lock_key = f'{self._root_prefix}:init_lock'
         self._meta_key = f'{self._root_prefix}:meta'
         self._trans_pipe = None
+        self._autoinc = None
         # 检测meta信息，然后做对应处理
         self.check_meta()
 
@@ -217,12 +229,16 @@ class RedisComponentTable(ComponentTable):
 
     def begin_transaction(self):
         super().begin_transaction()
+        self._autoinc = -1
         self._trans_pipe = self._backend.aio.pipeline(transaction=True)
+        # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
+        self._trans_pipe.watching = True
 
     async def end_transaction(self, discard):
         # 并实现事务提交的操作，将_updates中的命令写入事务
         if discard:
             self._trans_pipe.discard()
+            self._trans_pipe = None
             return True
 
         pipe = self._trans_pipe
@@ -260,7 +276,8 @@ class RedisComponentTable(ComponentTable):
                     idx_key = self._idx_prefix + idx_name
                     if str_type:
                         # 先删除老数据
-                        pipe.zrem(idx_key, f'{old_row[idx_name]}:{row_id}')
+                        if cmd == 'update':
+                            pipe.zrem(idx_key, f'{old_row[idx_name]}:{row_id}')
                         pipe.zadd(idx_key, {f'{dict_row[idx_name]}:{row_id}': 0})
                     else:
                         pipe.zadd(idx_key, {str(row_id): dict_row[idx_name]})
@@ -268,8 +285,10 @@ class RedisComponentTable(ComponentTable):
         try:
             await pipe.execute()
         except redis.WatchError:
+            self._trans_pipe = None
             return False
-        raise True
+        self._trans_pipe = None
+        return True
 
     async def _backend_get(self, row_id: int):
         # 获取行数据的操作
@@ -286,13 +305,16 @@ class RedisComponentTable(ComponentTable):
             return None
 
     async def _backend_get_max_id(self):
+        if self._autoinc >= 0:
+            return self._autoinc + sum([1 for cmd, _, _, _ in self._updates if cmd == 'insert'])
+
         # 获取最大id的操作
         idx_key = self._idx_prefix + 'id'
         pipe = self._trans_pipe
 
         max_score = await pipe.zrange(idx_key, 0, 0, desc=True, withscores=True)
         max_score = max_score[0][1] if max_score else 0
-
+        self._autoinc = max_score
         return max_score
 
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
@@ -300,23 +322,33 @@ class RedisComponentTable(ComponentTable):
         idx_key = self._idx_prefix + index_name
         pipe = self._trans_pipe
 
+        if right is None:
+            right = left
         if desc:
             left, right = right, left
 
         # 对于str类型查询，要用[开始
         str_type = self._component_cls.indexes_[index_name]
+        by_lex = False
         if str_type:
-            assert type(left) is str and type(right) is str, "字符串类型索引查询必须是str"
+            assert type(left) is str and type(right) is str, \
+                f"字符串类型索引`{index_name}`的查询(left={left}, right={right})变量类型必须是str"
             if not left.startswith(('(', '[')):
                 left = f'[{left}'
             if not right.startswith(('(', '[')):
                 right = f'[{right}'
 
-        row_ids = await pipe.zrange(idx_key, left, right, byscore=True, desc=desc,
-                                    offset=0, num=limit)
+            if left == right:  # 如果是精确查询
+                left = f'{left}:'  # name:id 形式，所以:作为结尾标识符
+                right = '+'
+
+            by_lex = True
+
+        row_ids = await pipe.zrange(idx_key, left, right, desc=desc, offset=0, num=limit,
+                                    byscore=not by_lex, bylex=by_lex)
 
         if str_type:
-            row_ids = [int(vk.split(':')[-1]) for vk in row_ids]
+            row_ids = [vk.split(':')[-1] for vk in row_ids]
 
         # 同时锁定所有读取的行
         # row_keys = [self._key_prefix + row_id for row_id in row_ids]
@@ -324,7 +356,7 @@ class RedisComponentTable(ComponentTable):
         # rtn = await asyncio.gather(*[pipe.hgetall(row_key) for row_key in row_keys])
 
         # 未查询到数据时返回[]
-        return row_ids
+        return list(map(int, row_ids))
 
 
 

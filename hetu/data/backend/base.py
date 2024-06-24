@@ -31,6 +31,7 @@ class ComponentTable:
 
     async def __aenter__(self):
         self.begin_transaction()
+        return self
 
     async def __aexit__(self, exc_type, exc, tb):
         await self.end_transaction(discard=False)
@@ -50,7 +51,7 @@ class ComponentTable:
     async def _backend_get_max_id(self):
         # 继承，并实现获取最大id的操作
         # 如果自增id是数据库负责的，这个可以返回-1，只要你end_transaction时处理即可
-        # 如果最大id是单独储存的，要用乐观锁锁定该行数据，或者锁定id的索引也可以
+        # 如果是自己负责，则注意返回值应该是max_id + 当前事务pending的insert数
         raise NotImplementedError
 
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
@@ -71,10 +72,12 @@ class ComponentTable:
             f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
 
         # 查询
-        if len(row_ids := await self._backend_query(where, value, limit=1)) == 0:
-            return None
-
-        row_id = row_ids[0]
+        if where == 'id':
+            row_id = value
+        else:
+            if len(row_ids := await self._backend_query(where, value, limit=1)) == 0:
+                return None
+            row_id = int(row_ids[0])
 
         if (row := self._cache.get(row_id)) is not None:
             return row
@@ -94,7 +97,7 @@ class ComponentTable:
         """
         查询`index_name`在`left`和`right`之间的数据，限制`limit`条，是否降序`desc`。
         如果right为None，则查询等于left的数据。
-        返回Numpy.Array[row]，如果没有查询到数据，返回空列表[]。
+        返回Numpy.Array[row]，如果没有查询到数据，返回空Numpy.Array。
         """
         assert np.issctype(type(left)), \
             f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
@@ -111,6 +114,7 @@ class ComponentTable:
         # 获得所有行数据并lock row
         rtn = []
         for row_id in row_ids:
+            row_id = int(row_id)
             if (row := self._cache.get(row_id)) is not None:
                 rtn.append(row)
             elif (row := await self._backend_get(row_id)) is not None:
@@ -123,7 +127,10 @@ class ComponentTable:
                 raise RaceCondition()
 
         # 返回numpy array
-        return np.rec.array(rtn, dtype=self._component_cls.dtypes)
+        if len(rtn) == 0:
+            return np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))
+        else:
+            return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
     async def is_exist(self, value, where: str = 'id'):
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
@@ -197,7 +204,7 @@ class ComponentTable:
             raise RaceCondition()
 
         # 加入到更新队列
-        self._cache[row.id] = row
+        self._cache[row.id.item()] = row
         self._updates.append(('insert', row.id, None, row))
 
     async def delete(self, row_id: int):
