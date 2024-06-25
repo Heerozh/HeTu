@@ -9,9 +9,6 @@ NAMESPACE = "game_short_name"
 # 服务器实例名称，每个实例是一个副本
 INSTANCE_NAME = "game_name_region1234"
 
-# 是否为主节点，主节点负责分发跨节点数据
-HEAD_NODE = True
-
 # 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
 DEBUG = False
 
@@ -29,13 +26,12 @@ ACCESS_LOG = False
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
-# 后端数据库地址，component中的implement可以指定用这里的哪个后端
+# 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS = {
-    'db_name': {
-        "type": "Redis",
-        "addr": "127.0.0.1:6379",
-        "user": "root",
-        "pass": "",
-        "db": 0,
+    'backend_name': {
+        "type": "Redis",                        # 指定backend的类型，目前只支持Redis
+        "master": "redis://127.0.0.1:6379/0",   # 指定master服务器，只能一个地址
+        "servants": [],                         # 只读副本服务器，如果设置了，所有客户端查询随机在只读副本上进行
+        # url格式：redis://[[username]:[password]]@localhost:6379/0
     },
 }
