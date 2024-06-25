@@ -35,7 +35,7 @@ class Property:
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
     properties_ = []                                    # Component的属性们
-    components_name_ = None
+    component_name_ = None
     namespace_ = None
     permission_ = Permission.USER
     persist_ = True                                     # 只是标记，每次启动时会清空此标记的数据
@@ -53,11 +53,11 @@ class BaseComponent:
     git_hash_ = None        # type: str                 # Component定义的app文件版本
 
     @staticmethod
-    def make_json(properties, namespace, components_name, permission, persist, readonly,
+    def make_json(properties, namespace, component_name, permission, persist, readonly,
                   backend):
         return json.dumps({
             'namespace': str(namespace),
-            'component_name': str(components_name),
+            'component_name': str(component_name),
             'permission': permission.name,
             'persist': bool(persist),
             'readonly': bool(readonly),
@@ -76,11 +76,11 @@ class BaseComponent:
         data = json.loads(json_str)
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
-            comp = type(data.component_name, (BaseComponent, ))
+            comp = type(data['component_name'], (BaseComponent, ), {})
         else:
             comp = cls
         comp.namespace_ = data['namespace']
-        comp.components_name_ = data['component_name']
+        comp.component_name_ = data['component_name']
         comp.permission_ = Permission[data['permission']]
         comp.persist_ = data['persist']
         comp.readonly_ = data['readonly']
@@ -90,7 +90,7 @@ class BaseComponent:
         comp.json_ = json.dumps(data)  # 重新序列化，保持一致
         # 成员变量初始化
         # 从properties生成np structured dtype，align为True更慢，arm服务器会好些
-        comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in cls.properties_], align=False)
+        comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in comp.properties_], align=False)
         comp.default_row = np.rec.array(
             [tuple([prop.default for name, prop in comp.properties_])],
             dtype=comp.dtypes)
@@ -106,6 +106,7 @@ class BaseComponent:
 
         # 从json生成的Component没有git版本信息
         comp.git_hash_ = ""
+        return comp
 
     @classmethod
     def new_row(cls, size=1) -> np.record | np.ndarray | np.recarray:
@@ -140,8 +141,8 @@ class ComponentDefines(metaclass=Singleton):
                       force: bool = False):
         comp_map = self._components.setdefault(namespace, dict())
         if not force:
-            assert component_cls.components_name_ not in comp_map, "Component重复定义"
-        comp_map[component_cls.components_name_] = component_cls
+            assert component_cls.component_name_ not in comp_map, "Component重复定义"
+        comp_map[component_cls.component_name_] = component_cls
 
 
 def define_component(_cls=None,  /, *, namespace: str = "default", force: bool = False,
