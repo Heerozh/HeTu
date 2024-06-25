@@ -4,7 +4,6 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
-import numpy as np
 import random
 import hashlib
 import redis
@@ -25,6 +24,7 @@ def get_coroutine_executor():
 
 
 class RedisBackend:
+    """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentTable"""
     def __init__(self, config: dict):
         # 同步io连接, 异步io连接, 只读io连接
         self.io = redis.from_url(config['master'], decode_responses=True)
@@ -41,6 +41,12 @@ class RedisBackend:
         for replica in self.replicas:
             run_async(replica.config_set('notify-keyspace-events', 'Kghz'))
 
+    async def close(self):
+        self.io.close()
+        await self.aio.aclose()
+        for replica in self.replicas:
+            await replica.aclose()
+
     def rnd_replica(self):
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
         i = random.randint(0, len(self.replicas))
@@ -49,7 +55,7 @@ class RedisBackend:
 
 class RedisComponentTable(ComponentTable):
     """
-    使用redis实现的Component后端。
+    使用redis实现的Component数据表，提供查询和修改功能。
 
     参考：
     redis-py吞吐量基准：
@@ -253,6 +259,8 @@ class RedisComponentTable(ComponentTable):
                         await pipe.watch(self._idx_prefix + idx)
                         locked_indexes.add(idx)
                     if len(await self._backend_query(idx, new_row[idx].item(), limit=1)) > 0:
+                        self._trans_pipe = None
+                        await pipe.aclose()
                         raise RaceCondition()
 
         # 执行事务
@@ -286,7 +294,7 @@ class RedisComponentTable(ComponentTable):
             await pipe.execute()
         except redis.WatchError:
             self._trans_pipe = None
-            return False
+            raise RaceCondition()
         self._trans_pipe = None
         return True
 
@@ -331,8 +339,6 @@ class RedisComponentTable(ComponentTable):
         str_type = self._component_cls.indexes_[index_name]
         by_lex = False
         if str_type:
-            # left = issubclass(type(left), np.flexible) and left.item() or left  # 判断是否str
-            # right = issubclass(type(right), np.flexible) and right.item() or right
             assert type(left) is str and type(right) is str, \
                 f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
             if not left.startswith(('(', '[')):
@@ -352,14 +358,5 @@ class RedisComponentTable(ComponentTable):
         if str_type:
             row_ids = [vk.split(':')[-1] for vk in row_ids]
 
-        # 同时锁定所有读取的行
-        # row_keys = [self._key_prefix + row_id for row_id in row_ids]
-        # await asyncio.gather(*[pipe.watch(row_key) for row_key in row_keys])
-        # rtn = await asyncio.gather(*[pipe.hgetall(row_key) for row_key in row_keys])
-
         # 未查询到数据时返回[]
         return list(map(int, row_ids))
-
-
-
-

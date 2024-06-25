@@ -1,9 +1,12 @@
 import unittest
 import numpy as np
 import asyncio
+
+import redis.asyncio
+
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines, RedisComponentTable, RedisBackend,
-    UniqueViolation,
+    UniqueViolation, RaceCondition
     )
 
 
@@ -19,6 +22,7 @@ def parameterized(test_items):
 
 implements = (
     (RedisComponentTable, RedisBackend, {"master": "redis://127.0.0.1:23318/0"}),
+    # 所有其他类型table和后端在此添加并通过测试
 )
 
 
@@ -257,26 +261,26 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data as tbl:
             self.assertEqual(await tbl._backend_get_max_id(), autoinc)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
+        await backend.close()
 
     @parameterized(implements)
     async def test_race(self, table_cls, backend_cls, config):
         # 测试竞态，通过2个协程来测试
-
         ComponentDefines().clear_()
         self.build_test_component()
         backend = backend_cls(config)
         item_data1 = table_cls(Item, 'test', 1, backend)
         item_data2 = table_cls(Item, 'test', 1, backend)
 
-        # 测试select时，另一个del和update的竞态
+        # 测试query时，另一个del和update的竞态
         async with item_data1 as tbl:
             row = Item.new_row()
             row.owner = 65535
-            row.name = 'Fixed'
+            row.name = 'Self'
             row.time = 233874
             await tbl.insert(row)
             row.id = 0
-            row.name = 'ForUpdate'
+            row.name = 'ForUpdt'
             row.time += 1
             await tbl.insert(row)
             row.id = 0
@@ -284,21 +288,96 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row.time += 1
             await tbl.insert(row)
 
-        async def query_rows():
-            async with item_data1 as _tbl:
-                rows = await _tbl.query('owner', 65535)
+        # 重写item_data1的query，延迟2秒
+        org_query = item_data1._backend_query
 
-        async def del_and_update():
+        async def mock_query(*args, **kwargs):
+            rtn = await org_query(*args, **kwargs)
+            await asyncio.sleep(1)
+            return rtn
+
+        item_data1._backend_query = mock_query
+
+        async def query_owner(value):
+            async with item_data1 as _tbl:
+                rows = await _tbl.query('owner', value)
+                print(rows)
+
+        async def select_owner(value):
+            async with item_data1 as _tbl:
+                rows = await _tbl.select(value, 'owner')
+                print(rows)
+
+        async def del_row(name):
             async with item_data2 as _tbl:
-                _row = await _tbl.select('ForDel', 'name')
+                _row = await _tbl.select(name, 'name')
                 await _tbl.delete(_row.id)
-                _row = await _tbl.select('ForUpdate', 'name')
+
+        async def update_owner(name):
+            async with item_data2 as _tbl:
+                _row = await _tbl.select(name, 'name')
                 _row.owner = 999
                 await _tbl.update(_row.id, _row)
 
-        task1 = asyncio.create_task(query_rows())
-        task2 = asyncio.create_task(del_and_update())
-        await asyncio.gather(task1, task2)
+        # 测试del和query竞态是否激发race condition
+        task1 = asyncio.create_task(query_owner(65535))
+        task2 = asyncio.create_task(del_row('ForDel'))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # 测试update和query竞态是否激发race condition
+        task1 = asyncio.create_task(query_owner(65535))
+        task2 = asyncio.create_task(update_owner('ForUpdt'))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # 测试update和select竞态是否激发race condition
+        task1 = asyncio.create_task(select_owner(65535))
+        task2 = asyncio.create_task(update_owner('Self'))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # 测试del和select竞态是否激发race condition
+        task1 = asyncio.create_task(select_owner(999))
+        task2 = asyncio.create_task(del_row('Self'))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # 测试事务提交时unique的RaceCondition, 在end前sleep即可测试
+        item_data1._backend_query = org_query
+
+        async def insert_and_sleep(table, sleep):
+            async with table as _tbl:
+                _row = Item.new_row()
+                _row.owner = 874233
+                _row.name = 'TstRace'
+                _row.time = 874233
+                await _tbl.insert(_row)
+                await asyncio.sleep(sleep)
+        task1 = asyncio.create_task(insert_and_sleep(item_data1, 1))
+        task2 = asyncio.create_task(insert_and_sleep(item_data2, 0.2))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # 测试事务提交时的watch的RaceCondition
+        async def update_and_sleep(table, sleep):
+            async with table as _tbl:
+                _row = await _tbl.select('TstRace', 'name')
+                _row.time = 8742333
+                await _tbl.update(_row.id, _row)
+                await asyncio.sleep(sleep)
+        task1 = asyncio.create_task(update_and_sleep(item_data1, 1))
+        task2 = asyncio.create_task(update_and_sleep(item_data2, 0.2))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        await backend.close()
 
     @parameterized(implements)
     async def test_migration(self, table_cls, backend_cls, config):
