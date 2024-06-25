@@ -67,7 +67,7 @@ class ComponentTable:
         """
         assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
+            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -102,7 +102,7 @@ class ComponentTable:
         """
         assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
         assert index_name in self._component_cls.indexes_, \
-            f"{self._component_cls.components_name_} 组件没有叫 {index_name} 的索引"
+            f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
 
         left = np.issubdtype(type(left), np.bool_) and int(left) or left
         left = issubclass(type(left), np.generic) and left.item() or left
@@ -140,7 +140,7 @@ class ComponentTable:
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
         assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.components_name_} 组件没有叫 {where} 的索引"
+            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -171,7 +171,7 @@ class ComponentTable:
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
                 if len(await self._backend_query(idx_name, new_row[idx_name].item(), limit=1)) > 0:
                     raise UniqueViolation(
-                        f"Unique索引{self._component_cls.components_name_}.{idx_name}，"
+                        f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
 
     async def update(self, row_id: int, row):
@@ -185,7 +185,7 @@ class ComponentTable:
         # 先查询旧数据是否存在，一般update调用时，旧数据都在_cache里，不然你哪里获得的row数据
         old_row = self._cache.get(row_id)  # or await self._backend_get(row_id)
         if old_row is None:
-            raise KeyError(f"{self._component_cls.components_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
 
         # 检查先决条件
         await self._check_uniques(old_row, row)
@@ -225,7 +225,7 @@ class ComponentTable:
         # 先查询旧数据是否存在，顺便lock row
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
         if old_row is None or (type(old_row) is str and old_row == 'deleted'):
-            raise KeyError(f"{self._component_cls.components_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
 
         # 标记删除
         self._cache[row_id] = 'deleted'
