@@ -164,8 +164,8 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     返回值为 bool, message：bool表示是否执行事务，False表示放弃事务。message为返回给客户端的消息，可以省略。
 
     Component实列：
-    由`ctx[Component Class]`返回的实例，类型为ComponentTable，可以进行数据库操作，并自动包装为事务，
-    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentTable的文档。
+    由`ctx[Component Class]`返回的实例，类型为ComponentBackend，可以进行数据库操作，并自动包装为事务，
+    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentBackend的文档。
 
     """
     def warp(func):

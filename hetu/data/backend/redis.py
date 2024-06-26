@@ -10,14 +10,15 @@ import redis
 import asyncio
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
-from .base import ComponentTable, RaceCondition
+from .base import ComponentTransaction, ComponentBackend, BackendClientPool, RaceCondition
 import logging
 logger = logging.getLogger('HeTu')
 
 
-class RedisBackend:
-    """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentTable"""
+class RedisBackendClientPool(BackendClientPool):
+    """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
     def __init__(self, config: dict):
+        super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
         self.io = redis.from_url(config['master'], decode_responses=True)
         self.aio = redis.asyncio.from_url(config['master'], decode_responses=True)
@@ -44,9 +45,9 @@ class RedisBackend:
         return i, self.replicas[i]
 
 
-class RedisComponentTable(ComponentTable):
+class RedisComponentBackend(ComponentBackend):
     """
-    使用redis实现的Component数据表，提供查询和修改功能。
+    在redis种初始化/管理Component数据表，提供事务指令。
 
     参考：
     redis-py吞吐量基准：
@@ -60,12 +61,12 @@ class RedisComponentTable(ComponentTable):
     """
 
     def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
-                 backend: RedisBackend):
-        super().__init__(component_cls, instance_name, cluster_id, backend)
+                 conn_pool: RedisBackendClientPool):
+        super().__init__(component_cls, instance_name, cluster_id, conn_pool)
+        self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
         component_cls.hosted_ = self
         # redis key名
         hash_tag = f'{{CLU{cluster_id}}}'
-        # 不能用component_cls.__name__ 可能是json加载的名字不对
         self._name = component_cls.component_name_
         self._root_prefix = f'{instance_name}:{self._name}:'
         self._key_prefix = f'{self._root_prefix}{hash_tag}:id:'
@@ -86,7 +87,7 @@ class RedisComponentTable(ComponentTable):
         cluster_id: 所属簇id
         last_index_rebuild: 上次重建索引时间
         """
-        io = self._backend.io
+        io = self._conn_pool.io
         lock = io.lock(self._lock_key)
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         lock.acquire(blocking=True)
@@ -136,13 +137,13 @@ class RedisComponentTable(ComponentTable):
             'cluster_id': self._cluster_id,
             'last_index_rebuild': '2024-06-19T03:41:18.682529+08:00'
         }
-        self._backend.io.hset(self._meta_key, mapping=meta)
+        self._conn_pool.io.hset(self._meta_key, mapping=meta)
         logger.info(f"✅ [💾Redis][{self._name}组件] 空表创建完成")
         return meta
 
     def _rebuild_index(self):
         logger.info(f"⌚ [💾Redis][{self._name}组件] 正在重建索引...")
-        io = self._backend.io
+        io = self._conn_pool.io
         rows = io.keys(self._key_prefix + '*')
         if len(rows) == 0:
             logger.info(f"✅ [💾Redis][{self._name}组件] 无数据，无需重建索引。")
@@ -186,7 +187,7 @@ class RedisComponentTable(ComponentTable):
         old_prefix_len = len(old_prefix)
         new_prefix = f'{self._root_prefix}{new_hash_tag}:'
 
-        io = self._backend.io
+        io = self._conn_pool.io
         old_keys = io.keys(old_prefix + '*')
         for old_key in old_keys:
             new_key = new_prefix + old_key[old_prefix_len:]
@@ -223,7 +224,7 @@ class RedisComponentTable(ComponentTable):
                                f"默认丢弃该属性数据。")
 
         # 多出来的列再次报警告，然后忽略
-        io = self._backend.io
+        io = self._conn_pool.io
         rows = io.keys(self._key_prefix + '*')
         props = dict(self._component_cls.properties_)  # type: dict[str, Property]
         added = 0
@@ -244,10 +245,21 @@ class RedisComponentTable(ComponentTable):
         logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
-    def begin_transaction(self):
-        super().begin_transaction()
+    def transaction(self):
+        return RedisComponentTransaction(self._component_cls, self._conn_pool,
+                                         self._key_prefix, self._idx_prefix)
+
+
+class RedisComponentTransaction(ComponentTransaction):
+    def __init__(self, component_cls: type[BaseComponent], conn_pool: RedisBackendClientPool,
+                 key_prefix: str, index_prefix: str):
+        super().__init__(component_cls, conn_pool)
+        self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
+
+        self._key_prefix = key_prefix
+        self._idx_prefix = index_prefix
         self._autoinc = -1
-        self._trans_pipe = self._backend.aio.pipeline(transaction=True)
+        self._trans_pipe = self._conn_pool.aio.pipeline(transaction=True)
         # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
         self._trans_pipe.watching = True
 
