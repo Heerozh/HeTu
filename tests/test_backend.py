@@ -1,6 +1,7 @@
 import unittest
 import numpy as np
 import asyncio
+import docker
 from unittest import mock
 from datetime import datetime, timedelta
 import logging
@@ -8,7 +9,6 @@ logger = logging.getLogger('HeTu')
 logger.setLevel(logging.DEBUG)
 logging.lastResort.setLevel(logging.DEBUG)
 mock_time = mock.Mock()
-
 
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines, RedisComponentTable, RedisBackend,
@@ -28,7 +28,7 @@ def parameterized(test_items):
 
 implements = (
     (RedisComponentTable, RedisBackend, {"master": "redis://127.0.0.1:23318/0"}),
-    # 所有其他类型table和后端在此添加并通过测试
+    # 所有其他类型table和后端在此添加并通过测试，并在下方"# 启动服务器"处启动对应的docker
 )
 
 
@@ -59,7 +59,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # docker启动对应的backend
         self.containers = []
-        import docker
         client = docker.from_env()
         # 先删除已启动的
         try:
@@ -75,7 +74,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     def __del__(self):
         for container in self.containers:
-            container.kill()
+            try:
+                container.kill()
+            except (docker.errors.NotFound, ImportError):
+                pass
 
     @parameterized(implements)
     async def test_basic(self, table_cls, backend_cls, config):
@@ -262,6 +264,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             autoinc = await tbl._backend_get_max_id()
             size = len(await tbl.query('id', -np.inf, +np.inf, limit=999))
         # 重新初始化table和连接后再试
+        await backend.close()
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
         async with item_data as tbl:
@@ -385,11 +388,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         await backend.close()
 
-    @mock.patch('hetu.data.backend.redis.datetime', mock_time)
+    # @mock.patch('hetu.data.backend.redis.datetime', mock_time)
     @parameterized(implements)
     async def test_migration(self, table_cls, backend_cls, config):
-        mock_time.now.return_value = datetime.now()
-        mock_time.fromisoformat = datetime.fromisoformat
+        # mock_time.now.return_value = datetime.now()
+        # # mock_time.now.return_value = datetime.now() + timedelta(days=10)
+        # mock_time.fromisoformat = datetime.fromisoformat
         # 测试迁移，先用原定义写入数据
         ComponentDefines().clear_()
         self.build_test_component()
@@ -403,7 +407,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 row.id = 0
                 row.name = f'Itm{i+10}aaaaaaaaaa'
                 row.owner = 10
-                row.time = i+10
+                row.time = i+110
                 row.qty = 999
                 await item_data.insert(row)
 
@@ -414,7 +418,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         class ItemNew(BaseComponent):
             owner: np.int64 = Property(0, unique=False, index=True)
             model: np.int32 = Property(0, unique=False, index=True)
-            qty_new: np.int16 = Property(1, unique=False, index=False)
+            qty_new: np.int16 = Property(111, unique=False, index=False)
             level: np.int8 = Property(1, unique=False, index=False)
             time: np.int64 = Property(0, unique=True, index=True)
             name: 'U6' = Property("", unique=True, index=False)
@@ -425,15 +429,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         define['component_name'] = 'Item'
         renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
 
-        # 测试迁移，先修改now时间激活rebuild index
-        mock_time.now.return_value = datetime.now() + timedelta(days=10)
+        # 测试迁移
         item_data = table_cls(renamed_new_item_cls, 'test', 2, backend)
         async with item_data as tbl:
-            self.assertEqual((await tbl.select(11, where='time')).name, 'Itm11a')
-            self.assertEqual((await tbl.select(11, where='time')).qty_new, 1)
+            self.assertEqual((await tbl.select(111, where='time')).name, 'Itm11a')
+            self.assertEqual((await tbl.select(111, where='time')).qty_new, 111)
 
-            self.assertEqual((await tbl.select(30, where='time')).name, 'Itm30a')
-            self.assertEqual((await tbl.select(30, where='time')).qty_new, 1)
+            self.assertEqual((await tbl.select('Itm30a', where='name')).name, 'Itm30a')
+            self.assertEqual((await tbl.select(130, where='time')).qty_new, 111)
         await backend.close()
 
     @parameterized(implements)

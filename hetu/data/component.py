@@ -42,7 +42,7 @@ class BaseComponent:
     readonly_ = False                                   # 只是标记，调用写入会警告
     backend_ = None         # type: str                 # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
-    dtypes = None
+    dtypes = None           # type: np.dtype            # np structured dtype
     default_row = None      # type: np.ndarray          # 默认空数据行
     hosted_ = None          # type: "ComponentTable"    # 该Component运行时被托管的后端实例
     prop_idx_map_ = None    # type: dict[str, int]      # 属性名->第几个属性 的映射
@@ -206,8 +206,9 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
                 can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
                 if not can_cast and not (type(prop.default) is str or type(prop.default) is bytes):
-                    # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败, 所以要再负数判断一次
-                    can_cast = np.can_cast(np.min_scalar_type(-prop.default), prop.dtype)
+                    # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败,所以要转为负数再判断一次
+                    default_value = -prop.default if prop.default != 0 else -1
+                    can_cast = np.can_cast(np.min_scalar_type(default_value), prop.dtype)
                 assert can_cast, (f"{cls.__name__}.{name}的default值："
                                   f"{type(prop.default).__name__}({prop.default})"
                                   f"和属性dtype({prop.dtype})不匹配")

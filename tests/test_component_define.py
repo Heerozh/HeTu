@@ -63,12 +63,12 @@ class TestComponentDefine(unittest.TestCase):
                 id: int = Property(0, True)
 
         # 测试默认值和dtype冲突
-        with self.assertRaisesRegex(AssertionError, "默认值"):
+        with self.assertRaisesRegex(AssertionError, "default值"):
             @define_component(namespace="ssw", force=True)
             class GalaxyPosition(BaseComponent):
                 name: np.int8 = Property('0')
 
-        with self.assertRaisesRegex(AssertionError, "默认值"):
+        with self.assertRaisesRegex(AssertionError, "default值"):
             @define_component(namespace="ssw", force=True)
             class GalaxyPosition(BaseComponent):
                 name: 'U8' = Property(99999999999)
