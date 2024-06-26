@@ -1,8 +1,14 @@
 import unittest
 import numpy as np
 import asyncio
+from unittest import mock
+from datetime import datetime, timedelta
+import logging
+logger = logging.getLogger('HeTu')
+logger.setLevel(logging.DEBUG)
+logging.lastResort.setLevel(logging.DEBUG)
+mock_time = mock.Mock()
 
-import redis.asyncio
 
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines, RedisComponentTable, RedisBackend,
@@ -379,10 +385,56 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         await backend.close()
 
+    @mock.patch('hetu.data.backend.redis.datetime', mock_time)
     @parameterized(implements)
     async def test_migration(self, table_cls, backend_cls, config):
-        # 测试迁移
-        pass
+        mock_time.now.return_value = datetime.now()
+        mock_time.fromisoformat = datetime.fromisoformat
+        # 测试迁移，先用原定义写入数据
+        ComponentDefines().clear_()
+        self.build_test_component()
+
+        backend = backend_cls(config)
+        item_data = table_cls(Item, 'test', 1, backend)
+
+        async with item_data as tbl:
+            for i in range(25):
+                row = Item.new_row()
+                row.id = 0
+                row.name = f'Itm{i+10}aaaaaaaaaa'
+                row.owner = 10
+                row.time = i+10
+                row.qty = 999
+                await item_data.insert(row)
+
+        # 重新定义新的属性
+        ComponentDefines().clear_()
+
+        @define_component(namespace="ssw")
+        class ItemNew(BaseComponent):
+            owner: np.int64 = Property(0, unique=False, index=True)
+            model: np.int32 = Property(0, unique=False, index=True)
+            qty_new: np.int16 = Property(1, unique=False, index=False)
+            level: np.int8 = Property(1, unique=False, index=False)
+            time: np.int64 = Property(0, unique=True, index=True)
+            name: 'U6' = Property("", unique=True, index=False)
+            used: bool = Property(False, unique=False, index=True)
+        # 从ItemNew改名回Item
+        import json
+        define = json.loads(ItemNew.json_)
+        define['component_name'] = 'Item'
+        renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+
+        # 测试迁移，先修改now时间激活rebuild index
+        mock_time.now.return_value = datetime.now() + timedelta(days=10)
+        item_data = table_cls(renamed_new_item_cls, 'test', 2, backend)
+        async with item_data as tbl:
+            self.assertEqual((await tbl.select(11, where='time')).name, 'Itm11a')
+            self.assertEqual((await tbl.select(11, where='time')).qty_new, 1)
+
+            self.assertEqual((await tbl.select(30, where='time')).name, 'Itm30a')
+            self.assertEqual((await tbl.select(30, where='time')).qty_new, 1)
+        await backend.close()
 
     @parameterized(implements)
     async def test_benchmark(self, table_cls, backend_cls, config):

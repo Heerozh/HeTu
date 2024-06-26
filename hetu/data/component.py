@@ -118,8 +118,8 @@ class BaseComponent:
     def dict_to_row(cls, data: dict):
         """从dict生成一个数据行"""
         row = cls.new_row()
-        for name, value in data.items():
-            row[name] = value
+        for name, _ in cls.dtype_map_.items():
+            row[name] = data[name]
         return row
 
 
