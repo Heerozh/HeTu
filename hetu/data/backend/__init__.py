@@ -5,5 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-from .base import ComponentTable, RaceCondition, UniqueViolation
-from .redis import RedisComponentTable, RedisBackend
+from .base import (ComponentBackend, BackendClientPool, ComponentTransaction,
+                   RaceCondition, UniqueViolation)
+from .redis import RedisBackendClientPool, RedisComponentBackend, RedisComponentTransaction

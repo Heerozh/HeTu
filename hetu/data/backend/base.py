@@ -10,26 +10,52 @@ class UniqueViolation(IndexError):
     pass
 
 
-class ComponentTable:
+class BackendClientPool:
     """
-    Component的数据表操作接口，和数据库通讯并处理事务的抽象接口。
-    继承此类，完善所有NotImplementedError的方法。有些数据库可能要重写更多方法。
+    后端客户端连接池类。
+    继承此类，完善所有NotImplementedError的方法。
+    此类由你自己的ComponentBackend和ComponentTransaction调用，因此接口随意。
     """
-    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id, backend):
+
+    def __init__(self, config: dict):
+        pass
+
+    async def close(self):
+        raise NotImplementedError
+
+
+class ComponentBackend:
+    """
+    Component的事务管理类，主要负责对每个Component数据的初始化操作，并开始事务。
+    继承此类，完善所有NotImplementedError的方法。
+    """
+    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
+                 conn_pool: BackendClientPool):
         self._component_cls = component_cls
         self._instance_name = instance_name
-        self._backend = backend
+        self._conn_pool = conn_pool
         self._cluster_id = cluster_id
+
+    def transaction(self):
+        # 继承，并执行：
+        # return YourComponentTransaction(self._component_cls, self._conn_pool)
+        raise NotImplementedError
+
+
+class ComponentTransaction:
+    """
+    Component的数据表操作接口，和数据库通讯并处理事务的抽象接口。
+    继承此类，完善所有NotImplementedError的方法。
+    已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
+    """
+    def __init__(self, component_cls: type[BaseComponent], conn_pool: BackendClientPool):
+        self._component_cls = component_cls
+        self._conn_pool = conn_pool
 
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
         self._updates = []  # 事务中写入队列，在end_transaction时作为事务一起写入
 
-    def begin_transaction(self):
-        self._cache = {}
-        self._updates = []
-
     async def __aenter__(self):
-        self.begin_transaction()
         return self
 
     async def __aexit__(self, exc_type, exc, tb):

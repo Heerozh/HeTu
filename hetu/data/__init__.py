@@ -14,9 +14,7 @@ from .component import (
 )
 
 from .backend import (
-    ComponentTable,
-    RedisBackend,
-    RedisComponentTable,
-    RaceCondition,
-    UniqueViolation,
+    ComponentBackend, ComponentTransaction, BackendClientPool,
+    RaceCondition, UniqueViolation,
+    RedisBackendClientPool, RedisComponentBackend, RedisComponentTransaction,
 )
