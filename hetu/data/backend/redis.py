@@ -15,32 +15,22 @@ import logging
 logger = logging.getLogger('HeTu')
 
 
-def get_coroutine_executor():
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run
-    else:
-        return asyncio.create_task
-
-
 class RedisBackend:
     """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentTable"""
     def __init__(self, config: dict):
         # 同步io连接, 异步io连接, 只读io连接
         self.io = redis.from_url(config['master'], decode_responses=True)
         self.aio = redis.asyncio.from_url(config['master'], decode_responses=True)
+        # 连接只读数据库
         servants = config.get('servants', [])
-        if servants:
-            self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
-                             for url in config['servants']]
-        else:
-            self.replicas = [self.aio]
+        self.replicas = [redis.asyncio.from_url(url, decode_responses=True) for url in servants]
+        if not servants:
+            servants.append(config['master'])
+            self.replicas.append(self.aio)
 
         # 配置keyspace通知
-        run_async = get_coroutine_executor()
-        for replica in self.replicas:
-            run_async(replica.config_set('notify-keyspace-events', 'Kghz'))
+        for url in servants:
+            redis.from_url(url).config_set('notify-keyspace-events', 'Kghz')
 
     async def close(self):
         self.io.close()
@@ -114,6 +104,8 @@ class RedisComponentTable(ComponentTable):
             # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
             if meta['version'] != version:
                 self._migration_schema(old=meta['json'])
+                # 因为迁移了，强制rebuild_index
+                meta['last_index_rebuild'] = '2024-06-19T03:41:18.682529+08:00'
 
         # 重建数据，每次启动间隔超过1小时就重建，主要是为了防止多个node同时启动执行了多次
         last_index_rebuild = datetime.fromisoformat(meta.get('last_index_rebuild'))
@@ -168,6 +160,12 @@ class RedisComponentTable(ComponentTable):
                 row_ids.append(row_id)
                 pipe.hget(row, idx_name)
             values = pipe.execute()
+            # 把values按dtype转换下
+            struct = self._component_cls.new_row()
+            for i, v in enumerate(values):
+                struct[idx_name] = v
+                values[i] = struct[idx_name].item()
+            # 建立redis索引
             if str_type:
                 # 字符串类型要特殊处理，score=0, member='name:1'形式
                 io.zadd(idx_key, {f'{value}:{rid}': 0 for rid, value in zip(row_ids, values)})
@@ -213,7 +211,7 @@ class RedisComponentTable(ComponentTable):
                        f"{dtypes_in_db}\n"
                        f"代码定义的：\n"
                        f"{new_dtypes}\n "
-                       f"将尝试迁移数据：")
+                       f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）：")
 
         # todo 调用自定义版本迁移代码（define_migration）
 
@@ -228,6 +226,7 @@ class RedisComponentTable(ComponentTable):
         io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
         props = dict(self._component_cls.properties_)  # type: dict[str, Property]
+        added = 0
         for prop_name in new_dtypes.fields:
             if prop_name not in dtypes_in_db.fields:
                 logger.warning(f"⚠️ [💾Redis][{self._name}组件] "
@@ -241,8 +240,9 @@ class RedisComponentTable(ComponentTable):
                 for row in rows:
                     pipe.hset(row, prop_name, default)
                 pipe.execute()
-        logger.warning(f"✅ [💾Redis][{self._name}组件] schema 迁移完成，供迁移{len(rows)}行 * "
-                       f"{len(new_dtypes.fields)}个属性。")
+                added += 1
+        logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
+                       f"{added}个属性。")
 
     def begin_transaction(self):
         super().begin_transaction()
