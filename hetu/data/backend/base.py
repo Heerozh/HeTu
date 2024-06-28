@@ -64,25 +64,19 @@ class ComponentTransaction:
     async def end_transaction(self, discard: bool):
         # 继承，并实现事务提交的操作，将_updates中的命令写入事务
         # updates是一个List[(cmd, row_id, row)]
-        # 如果index是独立分离的，写入前要锁定index，写入时要同时更新index
+        # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
     async def _backend_get(self, row_id: int):
         # 继承，并实现获取行数据的操作，返回值要通过dict_to_row包裹下
         # 如果不存在该行数据，返回None
-        # 同时要让乐观锁锁定该行。sql是记录该行的version，用于后续的update条件
-        raise NotImplementedError
-
-    async def _backend_get_max_id(self):
-        # 继承，并实现获取最大id的操作
-        # 如果自增id是数据库负责的，这个可以返回-1，只要你end_transaction时处理即可
-        # 如果是自己负责，则注意返回值应该是max_id + 当前事务pending的insert数
+        # 如果用乐观锁，这里同时要让乐观锁锁定该行。sql是记录该行的version，事务提交时判断
         raise NotImplementedError
 
     async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         # 未查询到数据时返回[]
-        # 如果index数据是独立分离的，不要锁index，太容易事务冲突，只在end_transaction里锁定
+        # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
     async def select(self, value, where: str = 'id'):
@@ -109,12 +103,16 @@ class ComponentTransaction:
         if (row := self._cache.get(row_id)) is not None:
             return row
 
-        # 获得行数据并lock row，我们不锁index, 所以index的查询结果和get到的可能不一样（就算锁了也要写入时才知道）
-        # 所以我们这里判断下如果值不同就抛出冲突异常
+        # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
+        # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
+        # 所以检测get结果是否在查询范围内，不在就抛出冲突
         if (row := await self._backend_get(row_id)) is None:
-            raise RaceCondition()
+            if where == 'id':
+                return None  # 如果不是从index查询到的id，而是直接传入，那就不需要判断race了
+            else:
+                raise RaceCondition('select: row中途被删除了')
         if row[where] != value:
-            raise RaceCondition()
+            raise RaceCondition('select: row值变动了')
 
         self._cache[row_id] = row
 
@@ -148,13 +146,15 @@ class ComponentTransaction:
             if (row := self._cache.get(row_id)) is not None:
                 rtn.append(row)
             elif (row := await self._backend_get(row_id)) is not None:
-                # 由于没lock index，如果发现get结果不在query范围内，就抛出冲突
+                # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
+                # 由于index是分离的，且不能锁定index(不然事务冲突率很高），所以检测get结果是否在查询范围内，
+                # 不在就抛出冲突
                 if not (left <= row[index_name] <= right):
-                    raise RaceCondition()
+                    raise RaceCondition('select: row值变动了')
                 self._cache[row_id] = row
                 rtn.append(row)
             else:
-                raise RaceCondition()
+                raise RaceCondition('select: row中途被删除了')
 
         # 返回numpy array
         if len(rtn) == 0:
@@ -186,14 +186,16 @@ class ComponentTransaction:
             await self.insert(rtn)
         return rtn
 
-    async def _check_uniques(self, old_row: [np.record, None], new_row: np.record):
+    async def _check_uniques(self, old_row: [np.record, None], new_row: np.record, ignores=None):
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
         is_insert = old_row is None
 
-        # 先检查是否可以添加，循环所有unique index
+        # 循环所有unique index, 检查是否可以添加/更新行
         for idx_name in self._component_cls.uniques_:
-            # 如果值变动了/或是插入，先检查目标值是否已存在
+            if ignores and idx_name in ignores:
+                continue
+            # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
                 if len(await self._backend_query(idx_name, new_row[idx_name].item(), limit=1)) > 0:
                     raise UniqueViolation(
@@ -231,24 +233,17 @@ class ComponentTransaction:
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
 
-        # 检查先决条件
-        row.id = await self._backend_get_max_id() + 1
-        await self._check_uniques(None, row)
-
-        # 尝试获取数据，由于上面先决条件检查了，肯定获取不到，主要目的是lock row
-        old_row = await self._backend_get(row.id)
-        if old_row is not None:
-            raise RaceCondition()
+        # 提交到事务前先检查无unique冲突
+        await self._check_uniques(None, row, ignores={'id'})
 
         # 加入到更新队列
         row = row.copy()
-        self._cache[row.id.item()] = row
-        self._updates.append(('insert', row.id, None, row))
+        self._updates.append(('insert', None, None, row))
 
     async def delete(self, row_id: int | np.integer):
         """删除row_id行"""
         row_id = int(row_id)
-        # 先查询旧数据是否存在，顺便lock row
+        # 先查询旧数据是否存在
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
         if old_row is None or (type(old_row) is str and old_row == 'deleted'):
             raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
