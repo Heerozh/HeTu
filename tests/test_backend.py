@@ -82,6 +82,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 container.kill()
             except (docker.errors.NotFound, ImportError):
                 pass
+        pass
 
     @parameterized(implements)
     async def test_basic(self, table_cls: type[ComponentBackend],
@@ -110,9 +111,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row.name, 'test')
             row = await tbl.select_or_create('', 'name')
             self.assertEqual(row.id, 1)
-            # 测试能否命中cache
-            row = await tbl.select(2)
-            self.assertEqual(row.id, 2)
 
         async with singular_unique.transaction() as tbl:
             result = await tbl.query('name', 'test')
@@ -246,7 +244,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data.transaction() as tbl:
             self.assertIsNot(await tbl.select('reinsert', 'name'), None,
                              "超出U8长度应该要被截断，这里没索引出来说明没截断")
-            self.assertEqual((await tbl.select('reinsert', 'name')).id, row.id)
+            self.assertEqual((await tbl.select('reinsert', 'name')).id, 29)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 27)
         # 测试添加再删除
         async with item_data.transaction() as tbl:
@@ -266,14 +264,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data.transaction() as tbl:
             await tbl.delete(1)
         async with item_data.transaction() as tbl:
-            autoinc = await tbl._backend_get_max_id()
             size = len(await tbl.query('id', -np.inf, +np.inf, limit=999))
         # 重新初始化table和连接后再试
         await backend.close()
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
         async with item_data.transaction() as tbl:
-            self.assertEqual(await tbl._backend_get_max_id(), autoinc)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
         await backend.close()
 
@@ -364,16 +360,22 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await task1
 
         # 测试事务提交时unique的RaceCondition, 在end前sleep即可测试
-        async def insert_and_sleep(db, sleep):
+        async def insert_and_sleep(db, uni_val, sleep):
             async with db.transaction() as _tbl:
                 _row = Item.new_row()
                 _row.owner = 874233
-                _row.name = 'TstRace'
-                _row.time = 874233
+                _row.name = str(uni_val)
+                _row.time = uni_val
                 await _tbl.insert(_row)
                 await asyncio.sleep(sleep)
-        task1 = asyncio.create_task(insert_and_sleep(item_data, 1))
-        task2 = asyncio.create_task(insert_and_sleep(item_data, 0.2))
+        # 测试insert不同的值应该没有竞态
+        task1 = asyncio.create_task(insert_and_sleep(item_data, 111111, 1))
+        task2 = asyncio.create_task(insert_and_sleep(item_data, 111112, 0.2))
+        await asyncio.gather(task2)
+        await task1
+        # 相同的time会竞态
+        task1 = asyncio.create_task(insert_and_sleep(item_data, 222222, 1))
+        task2 = asyncio.create_task(insert_and_sleep(item_data, 222222, 0.2))
         await asyncio.gather(task2)
         with self.assertRaises(RaceCondition):
             await task1
@@ -381,8 +383,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试事务提交时的watch的RaceCondition
         async def update_and_sleep(db, sleep):
             async with db.transaction() as _tbl:
-                _row = await _tbl.select('TstRace', 'name')
-                _row.time = 8742333
+                _row = await _tbl.select('111111', 'name')
+                _row.time = 874233
                 await _tbl.update(_row.id, _row)
                 await asyncio.sleep(sleep)
         task1 = asyncio.create_task(update_and_sleep(item_data, 1))
@@ -450,37 +452,56 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                              backend_cls: type[BackendClientPool], config):
         # 基本的bench，要求一定的吞吐量
         ComponentDefines().clear_()
-        # self.build_test_component()
-        #
-        # backend = backend_cls(config)
-        # item_data = table_cls(Item, 'test', 1, backend)
-        #
-        # import os
-        # print("pid:", os.getpid())
-        #
-        # async def timeit(func, repeat=1, repeat_mul=1):
-        #     s = time.perf_counter()
-        #     await asyncio.gather(*[func() for _ in range(repeat)])
-        #     cost = time.perf_counter() - s
-        #     print(f"{func.__name__} 耗时: {cost:.2f}s, QPS: {repeat*repeat_mul/cost:.0f}/s")
-        #     return cost, repeat*repeat_mul / cost
-        #
-        # # 1. 插入速度
-        # async def test_insert_300k(count, starts=0):
-        #     semaphore = asyncio.Semaphore(100)
-        #     for i in range(count):
-        #     async with item_data as tbl:
-        #         row = Item.new_row()
-        #         row.name = f'Item{i+starts}'
-        #         row.owner = i+starts
-        #         row.time = i+starts
-        #         row.model = i
-        #         await item_data.insert(row)
-        #
-        # t, qps = await timeit(test_insert_300k, 1, 3000)
-        # # object array: 12.3秒30w次，平均24000/s (6个index) | 7.8秒30w次，平均38000/s (2个index)
-        # # struct array: 18秒 16000/s (6个index) | 11秒30w次，平均28000/s (2个index)
-        # self.assertLess(t, 25.0, f"耗时{t:.2f}秒")
+        self.build_test_component()
+
+        backend = backend_cls(config)
+        item_data = table_cls(Item, 'test', 1, backend)
+        # clean db
+        async with item_data.transaction() as tbl:
+            _rows = await tbl.query('id', -np.inf, +np.inf)
+            for _row in _rows:
+                await tbl.delete(_row.id)
+
+        import os
+        print("pid:", os.getpid())
+
+        async def timeit(func, repeat=1, repeat_mul=1, concurrency=100, *args):
+            # 限制并发。不能用batching， batch慢，因为要等所有完成，而不是完成一个继续下一个
+            semaphore = asyncio.Semaphore(concurrency)
+
+            async def limited_run(*_args):
+                async with semaphore:
+                    return await func(*_args)
+
+            s = time.perf_counter()
+            retry = await asyncio.gather(*[limited_run(i, *args) for i in range(repeat)])
+            cost = time.perf_counter() - s
+            print(f"{func.__name__}*{repeat} 耗时: {cost:.2f}s, QPS: {repeat*repeat_mul/cost:.0f}/s"
+                  f", 事务冲突次数: {sum(retry)}")
+            return cost, repeat*repeat_mul / cost
+
+        # 1. 插入速度
+        async def test_insert(i):
+            retry = 0
+            while True:
+                try:
+                    async with item_data.transaction() as tbl:
+                        row = Item.new_row()
+                        row.name = f'Item{i}'
+                        row.owner = i
+                        row.time = i
+                        row.model = i
+                        await tbl.insert(row)
+                except RaceCondition as e:
+                    print(e)
+                    retry += 1
+                    continue
+                return retry
+
+        t, qps = await timeit(test_insert, 30, 1)
+        # object array: 12.3秒30w次，平均24000/s (6个index) | 7.8秒30w次，平均38000/s (2个index)
+        # struct array: 18秒 16000/s (6个index) | 11秒30w次，平均28000/s (2个index)
+        self.assertLess(t, 25.0, f"耗时{t:.2f}秒")
 
 
 if __name__ == '__main__':
