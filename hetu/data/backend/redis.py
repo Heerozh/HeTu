@@ -31,8 +31,11 @@ class RedisBackendClientPool(BackendClientPool):
             self.replicas.append(self.aio)
 
         # 配置keyspace通知
-        for url in servants:
-            redis.from_url(url).config_set('notify-keyspace-events', 'Kghz')
+        try:
+            for url in servants:
+                redis.from_url(url).config_set('notify-keyspace-events', 'Kghz')
+        except redis.exceptions.NoPermissionError:
+            logger.warning("⚠️ [💾Redis] 此账号无权限设置keyspace通知，请手动设置notify-keyspace-events=Kghz")
 
     async def close(self):
         self.io.close()
@@ -256,12 +259,14 @@ class RedisComponentTransaction(ComponentTransaction):
     # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
     LUA_CHECK_UNIQUE_SCRIPT = """
     local result_key = KEYS[1]
+    local sub = string.sub
+    local redis = redis
 
     for i = 2, #KEYS, 1 do
         local start = ARGV[i-1]
         local stop = start
         local by = 'BYSCORE'
-        if start:sub(1, 1) == '[' then
+        if sub(start, 1, 1) == '[' then
             start = start .. ':'
             stop = start .. ';'
             by = 'BYLEX'
@@ -278,6 +283,11 @@ class RedisComponentTransaction(ComponentTransaction):
     # key: 1:是否执行的标记key, 2-n:不使用，仅供客户端判断hash slot用, args: stacked的命令
     LUA_IF_RUN_STACK_SCRIPT = """
     local result_key = KEYS[1]
+    local redis = redis
+    local tonumber = tonumber
+    local unpack = unpack
+    local gsub = string.gsub
+    
     local unique_check_ok = redis.call('get',  result_key)
     if tonumber(unique_check_ok) <= 0 then
         return 'FAIL'
@@ -303,7 +313,7 @@ class RedisComponentTransaction(ComponentTransaction):
             if last_row_id ~= nil then
                 local _
                 for i = 2, #cmds, 1 do
-                    cmds[i], _ = string.gsub(cmds[i], '{rowid}', last_row_id)
+                    cmds[i], _ = gsub(cmds[i], '{rowid}', last_row_id)
                 end
             end
             -- redis.log(2, table.concat(cmds, ','))
@@ -322,7 +332,7 @@ class RedisComponentTransaction(ComponentTransaction):
 
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
-        self._trans_pipe = self._conn_pool.aio.pipeline(transaction=True)
+        self._trans_pipe = self._conn_pool.aio.pipeline()
         # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
         self._trans_pipe.watching = True
 
@@ -334,8 +344,8 @@ class RedisComponentTransaction(ComponentTransaction):
 
     async def end_transaction(self, discard):
         # 并实现事务提交的操作，将_updates中的命令写入事务
-        if discard:
-            await self._trans_pipe.reset()
+        if discard or len(self._updates) == 0:
+            await self._trans_pipe.reset()  # todo 做成只有del才reset，平日就是discard
             self._trans_pipe = None
             return True
 
@@ -412,7 +422,7 @@ class RedisComponentTransaction(ComponentTransaction):
             return True
         finally:
             # 无论是else里的return还是except里的raise，finally都会在他们之前执行
-            await pipe.reset()
+            await pipe.reset()  # todo pipe要复用
             self._trans_pipe = None
 
     async def _backend_get(self, row_id: int):

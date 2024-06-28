@@ -112,7 +112,7 @@ class ComponentTransaction:
             else:
                 raise RaceCondition('select: row中途被删除了')
         if row[where] != value:
-            raise RaceCondition('select: row值变动了')
+            raise RaceCondition(f'select: row.{where}值变动了')
 
         self._cache[row_id] = row
 
@@ -150,7 +150,7 @@ class ComponentTransaction:
                 # 由于index是分离的，且不能锁定index(不然事务冲突率很高），所以检测get结果是否在查询范围内，
                 # 不在就抛出冲突
                 if not (left <= row[index_name] <= right):
-                    raise RaceCondition('select: row值变动了')
+                    raise RaceCondition(f'select: row.{index_name}值变动了')
                 self._cache[row_id] = row
                 rtn.append(row)
             else:
