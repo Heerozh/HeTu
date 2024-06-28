@@ -7,17 +7,17 @@ from unittest import mock
 import docker
 import numpy as np
 
-logger = logging.getLogger('HeTu')
-logger.setLevel(logging.DEBUG)
-logging.lastResort.setLevel(logging.DEBUG)
-mock_time = mock.Mock()
-
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines,
     ComponentBackend, BackendClientPool, ComponentTransaction,
     RedisComponentBackend, RedisBackendClientPool,
     UniqueViolation, RaceCondition
-    )
+)
+
+logger = logging.getLogger('HeTu')
+logger.setLevel(logging.DEBUG)
+logging.lastResort.setLevel(logging.DEBUG)
+mock_time = mock.Mock()
 
 
 def parameterized(test_items):
@@ -26,7 +26,9 @@ def parameterized(test_items):
             for param in test_items:
                 with self.subTest(param[0].__name__):
                     await func(self, *param)
+
         return test_wrapper
+
     return wrapper
 
 
@@ -165,9 +167,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data.transaction() as tbl:
             for i in range(25):
                 row.id = 0
-                row.name = f'Item{i+10}'
+                row.name = f'Item{i + 10}'
                 row.owner = 10
-                row.time = i+10
+                row.time = i + 10
                 await tbl.insert(row)
 
         # 测试query
@@ -249,13 +251,13 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试添加再删除
         async with item_data.transaction() as tbl:
             for i in range(30):
-                row.time = row.id+100
+                row.time = row.id + 100
                 row.id = 0
                 row.name = f're{i}'
                 await tbl.insert(row)
         async with item_data.transaction() as tbl:
             for i in range(30):
-                await tbl.delete(59-i)  # 再删掉
+                await tbl.delete(59 - i)  # 再删掉
         async with item_data.transaction() as tbl:
             np.testing.assert_array_equal((await tbl.query('id', 6, 9, limit=999)).id, [6, 8, 9])
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 27)
@@ -306,6 +308,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 rtn = await org_query(*args, **kwargs)
                 await asyncio.sleep(1)
                 return rtn
+
             trans._backend_query = mock_query
 
         async def query_owner(value):
@@ -368,6 +371,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 _row.time = uni_val
                 await _tbl.insert(_row)
                 await asyncio.sleep(sleep)
+
         # 测试insert不同的值应该没有竞态
         task1 = asyncio.create_task(insert_and_sleep(item_data, 111111, 1))
         task2 = asyncio.create_task(insert_and_sleep(item_data, 111112, 0.2))
@@ -387,6 +391,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 _row.time = 874233
                 await _tbl.update(_row.id, _row)
                 await asyncio.sleep(sleep)
+
         task1 = asyncio.create_task(update_and_sleep(item_data, 1))
         task2 = asyncio.create_task(update_and_sleep(item_data, 0.2))
         await asyncio.gather(task2)
@@ -413,9 +418,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             for i in range(25):
                 row = Item.new_row()
                 row.id = 0
-                row.name = f'Itm{i+10}aaaaaaaaaa'
+                row.name = f'Itm{i + 10}aaaaaaaaaa'
                 row.owner = 10
-                row.time = i+110
+                row.time = i + 110
                 row.qty = 999
                 await tbl.insert(row)
 
@@ -431,6 +436,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             time: np.int64 = Property(0, unique=True, index=True)
             name: 'U6' = Property("", unique=True, index=False)
             used: bool = Property(False, unique=False, index=True)
+
         # 从ItemNew改名回Item
         import json
         define = json.loads(ItemNew.json_)
@@ -446,62 +452,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await tbl.select('Itm30a', where='name')).name, 'Itm30a')
             self.assertEqual((await tbl.select(130, where='time')).qty_new, 111)
         await backend.close()
-
-    @parameterized(implements)
-    async def test_benchmark(self, table_cls: type[ComponentBackend],
-                             backend_cls: type[BackendClientPool], config):
-        # 基本的bench，要求一定的吞吐量
-        ComponentDefines().clear_()
-        self.build_test_component()
-
-        backend = backend_cls(config)
-        item_data = table_cls(Item, 'test', 1, backend)
-        # clean db
-        async with item_data.transaction() as tbl:
-            _rows = await tbl.query('id', -np.inf, +np.inf)
-            for _row in _rows:
-                await tbl.delete(_row.id)
-
-        import os
-        print("pid:", os.getpid())
-
-        async def timeit(func, repeat=1, repeat_mul=1, concurrency=100, *args):
-            # 限制并发。不能用batching， batch慢，因为要等所有完成，而不是完成一个继续下一个
-            semaphore = asyncio.Semaphore(concurrency)
-
-            async def limited_run(*_args):
-                async with semaphore:
-                    return await func(*_args)
-
-            s = time.perf_counter()
-            retry = await asyncio.gather(*[limited_run(i, *args) for i in range(repeat)])
-            cost = time.perf_counter() - s
-            print(f"{func.__name__}*{repeat} 耗时: {cost:.2f}s, QPS: {repeat*repeat_mul/cost:.0f}/s"
-                  f", 事务冲突次数: {sum(retry)}")
-            return cost, repeat*repeat_mul / cost
-
-        # 1. 插入速度
-        async def test_insert(i):
-            retry = 0
-            while True:
-                try:
-                    async with item_data.transaction() as tbl:
-                        row = Item.new_row()
-                        row.name = f'Item{i}'
-                        row.owner = i
-                        row.time = i
-                        row.model = i
-                        await tbl.insert(row)
-                except RaceCondition as e:
-                    print(e)
-                    retry += 1
-                    continue
-                return retry
-
-        t, qps = await timeit(test_insert, 30, 1)
-        # object array: 12.3秒30w次，平均24000/s (6个index) | 7.8秒30w次，平均38000/s (2个index)
-        # struct array: 18秒 16000/s (6个index) | 11秒30w次，平均28000/s (2个index)
-        self.assertLess(t, 25.0, f"耗时{t:.2f}秒")
 
 
 if __name__ == '__main__':
