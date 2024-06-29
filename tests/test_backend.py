@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import time
 import unittest
 from unittest import mock
 
