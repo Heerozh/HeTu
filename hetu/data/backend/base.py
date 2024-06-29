@@ -19,6 +19,7 @@ class DBClientPool:
     """
 
     def __init__(self, config: dict):
+        _ = config
         pass
 
     async def close(self):
@@ -113,7 +114,10 @@ class ComponentTransaction:
             row_id = int(row_ids[0])
 
         if (row := self._cache.get(row_id)) is not None:
-            return row
+            if type(row) is str and row == 'deleted':
+                return None
+            else:
+                return row.copy()
 
         # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
@@ -128,7 +132,7 @@ class ComponentTransaction:
 
         self._cache[row_id] = row
 
-        return row
+        return row.copy()
 
     async def query(self, index_name: str, left, right=None, limit=10, desc=False) -> np.recarray:
         """
@@ -236,6 +240,7 @@ class ComponentTransaction:
         await self._check_uniques(old_row, row)
         # 更新cache数据
         row = row.copy()
+        old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
         self._cache[row_id] = row
         # 加入到更新队列
         self._updates.append(('update', row_id, old_row, row))
@@ -264,6 +269,7 @@ class ComponentTransaction:
         old_row = self._cache.get(row_id) or await self._backend_get(row_id)
         if old_row is None or (type(old_row) is str and old_row == 'deleted'):
             raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+        old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
         self._cache[row_id] = 'deleted'

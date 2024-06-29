@@ -93,6 +93,19 @@ async def run_bench(inst, redis_address):
                 continue
             return retry
 
+    async def test_delete(i):
+        retry = 0
+        while True:
+            try:
+                async with item_data.transaction() as tbl:
+                    row = await tbl.select(i+1)
+                    await tbl.delete(row.id)
+            except RaceCondition as e:
+                print(e)
+                retry += 1
+                continue
+            return retry
+
     async def test_direct_update(i):
         name = await backend.aio.hget(f'{item_data._key_prefix}{i+1}', 'name')
         await backend.aio.hset(f'{item_data._key_prefix}{i+1}', 'name', f'It2{i}')
@@ -108,6 +121,30 @@ async def run_bench(inst, redis_address):
         await p.reset()
         return 0
 
+    async def test_query_1(i):
+        retry = 0
+        while True:
+            try:
+                async with item_data.transaction() as tbl:
+                    rows = await tbl.query("owner", i, i+10, limit=1)
+            except RaceCondition as e:
+                print(e)
+                retry += 1
+                continue
+            return retry
+
+    async def test_query_10(i):
+        retry = 0
+        while True:
+            try:
+                async with item_data.transaction() as tbl:
+                    rows = await tbl.query("owner", i, i+10, limit=10)
+            except RaceCondition as e:
+                print(e)
+                retry += 1
+                continue
+            return retry
+
     t, qps = await timeit(test_insert, 3000, 1)
     # 单worker 1000/s
     # assert qps >= 500, 'benchmark redis太慢，检查下'
@@ -117,6 +154,17 @@ async def run_bench(inst, redis_address):
 
     t, qps = await timeit(test_update, 3000, 1)
     # 单worker 1000/s
+
+    t, qps = await timeit(test_query_1, 3000, 1)
+    # 单worker 1500/s
+
+    t, qps = await timeit(test_query_10, 3000, 1)
+    # 单worker 300/s
+
+    t, qps = await timeit(test_delete, 3000, 1)
+    # 单worker 1000/s
+
+    breakpoint()
 
     t, qps = await timeit(test_direct_update, 6000, 1)
     # 单worker 3000/s，因为没有watch，所以较高

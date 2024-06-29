@@ -9,7 +9,6 @@ import hashlib
 import numpy as np
 import redis
 import itertools
-import asyncio
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
 from .base import ComponentTransaction, ComponentBackend, DBClientPool, RaceCondition
@@ -75,13 +74,13 @@ class RedisComponentBackend(ComponentBackend):
         self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
         component_cls.hosted_ = self
         # redis key名
-        hash_tag = f'{{CLU{cluster_id}}}'
+        hash_tag = f'{{CLU{cluster_id}}}:'
         self._name = component_cls.component_name_
         self._root_prefix = f'{instance_name}:{self._name}:'
-        self._key_prefix = f'{self._root_prefix}{hash_tag}:id:'
-        self._idx_prefix = f'{self._root_prefix}{hash_tag}:index:'
-        self._lock_key = f'{self._root_prefix}:init_lock'
-        self._meta_key = f'{self._root_prefix}:meta'
+        self._key_prefix = f'{self._root_prefix}{hash_tag}id:'
+        self._idx_prefix = f'{self._root_prefix}{hash_tag}index:'
+        self._lock_key = f'{self._root_prefix}init_lock'
+        self._meta_key = f'{self._root_prefix}meta'
         self._trans_pipe = None
         self._autoinc = None
         # 检测meta信息，然后做对应处理
@@ -190,11 +189,11 @@ class RedisComponentBackend(ComponentBackend):
                        f"cluster_id 由 {old} 变更为 {self._cluster_id}，"
                        f"将尝试迁移cluster数据...")
         # 重命名key
-        old_hash_tag = f'{{CLU{old}}}'
-        new_hash_tag = f'{{CLU{self._cluster_id}}}'
-        old_prefix = f'{self._root_prefix}{old_hash_tag}:'
+        old_hash_tag = f'{{CLU{old}}}:'
+        new_hash_tag = f'{{CLU{self._cluster_id}}}:'
+        old_prefix = f'{self._root_prefix}{old_hash_tag}'
         old_prefix_len = len(old_prefix)
-        new_prefix = f'{self._root_prefix}{new_hash_tag}:'
+        new_prefix = f'{self._root_prefix}{new_hash_tag}'
 
         io = self._conn_pool.io
         old_keys = io.keys(old_prefix + '*')
