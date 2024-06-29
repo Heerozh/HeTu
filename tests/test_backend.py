@@ -1,6 +1,8 @@
 import asyncio
 import logging
+import time
 import unittest
+from typing import Type
 from unittest import mock
 
 import docker
@@ -87,7 +89,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_basic(self, table_cls: type[ComponentBackend],
-                         backend_cls: type[DBClientPool], config):
+                         backend_cls: Type[type[DBClientPool]], config):
         ComponentDefines().clear_()
         self.build_test_component()
 
@@ -230,7 +232,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await tbl.delete(7)
             # 测试能否命中cache
             row = await tbl.select(5)
-            self.assertEqual(row, 'deleted')
+            self.assertIs(row, None)
         async with item_data.transaction() as tbl:
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 26)
             self.assertEqual(await tbl.select('Item11', where='name'), None)
@@ -273,6 +275,18 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with item_data.transaction() as tbl:
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
         await backend.close()
+
+        # 测试更新name后再把所有key删除后index是否正常为空
+        async with item_data.transaction() as tbl:
+            row = await tbl.select(2)
+            row.name = f'TST{row.id}'
+            await tbl.update(row.id, row)
+        async with item_data.transaction() as tbl:
+            rows = await tbl.query('id', -np.inf, +np.inf, limit=999)
+            for row in rows:
+                await tbl.delete(row.id)
+        time.sleep(1)  # 等待部分key过期
+        self.assertEqual(backend.io.keys('test:Item:{CLU*'), [])
 
     @parameterized(implements)
     async def test_race(self, table_cls: type[ComponentBackend],
