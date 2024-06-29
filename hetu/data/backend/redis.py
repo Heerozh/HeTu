@@ -11,12 +11,12 @@ import itertools
 import asyncio
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
-from .base import ComponentTransaction, ComponentBackend, BackendClientPool, RaceCondition
+from .base import ComponentTransaction, ComponentBackend, DBClientPool, RaceCondition
 import logging
 logger = logging.getLogger('HeTu')
 
 
-class RedisBackendClientPool(BackendClientPool):
+class RedisClientPool(DBClientPool):
     """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
     def __init__(self, config: dict):
         super().__init__(config)
@@ -65,7 +65,7 @@ class RedisComponentBackend(ComponentBackend):
     """
 
     def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
-                 conn_pool: RedisBackendClientPool):
+                 conn_pool: RedisClientPool):
         super().__init__(component_cls, instance_name, cluster_id, conn_pool)
         self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
         component_cls.hosted_ = self
@@ -325,7 +325,7 @@ class RedisComponentTransaction(ComponentTransaction):
     lua_check_unique = None
     lua_run_stack = None
 
-    def __init__(self, component_cls: type[BaseComponent], conn_pool: RedisBackendClientPool,
+    def __init__(self, component_cls: type[BaseComponent], conn_pool: RedisClientPool,
                  key_prefix: str, index_prefix: str):
         super().__init__(component_cls, conn_pool)
         self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool

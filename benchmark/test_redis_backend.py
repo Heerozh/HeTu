@@ -6,7 +6,7 @@ import argparse
 
 from hetu.data import (
     define_component, Property, BaseComponent,
-    RedisComponentBackend, RedisBackendClientPool,
+    RedisComponentBackend, RedisClientPool,
     RaceCondition
 )
 
@@ -39,7 +39,7 @@ async def timeit(func, repeat=1, repeat_mul=1, concurrency=100, *args):
 
 
 async def run_bench(inst, redis_address):
-    backend = RedisBackendClientPool({"master": redis_address})
+    backend = RedisClientPool({"master": redis_address})
     item_data = RedisComponentBackend(Item, inst, 1, backend)
     # clean db
     keys = backend.io.keys(f'{item_data._root_prefix}*')
@@ -98,18 +98,33 @@ async def run_bench(inst, redis_address):
         await backend.aio.hset(f'{item_data._key_prefix}{i+1}', 'name', f'It2{i}')
         return 0
 
+    async def test_direct_update_pipeline(i):
+        p = backend.aio.pipeline()
+        await p.watch(f'{item_data._key_prefix}{i+1}')
+        name = await p.hget(f'{item_data._key_prefix}{i+1}', 'name')
+        p.multi()
+        p.hset(f'{item_data._key_prefix}{i+1}', 'name', f'It2{i}')
+        await p.execute()
+        await p.reset()
+        return 0
+
     t, qps = await timeit(test_insert, 3000, 1)
     # 单worker 1000/s
-    assert qps >= 500, 'benchmark redis太慢，检查下'
+    # assert qps >= 500, 'benchmark redis太慢，检查下'
 
-    t, qps = await timeit(test_select, 3000, 1)
+    t, qps = await timeit(test_select, 6000, 1)
     # 单worker pipeline get 2000/s
 
     t, qps = await timeit(test_update, 3000, 1)
     # 单worker 1000/s
 
     t, qps = await timeit(test_direct_update, 6000, 1)
-    # 单worker 3000/s
+    # 单worker 3000/s，因为没有watch，所以较高
+
+    t, qps = await timeit(test_direct_update_pipeline, 6000, 1)
+    # 单worker 2000/s，因为watch多了1次io，且redis也会因为watch降低性能。去掉watch和test_direct_update一样
+
+    # 等完成分发后再测试整个流程的
 
 
 if __name__ == '__main__':

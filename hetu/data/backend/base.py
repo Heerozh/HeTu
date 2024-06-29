@@ -10,9 +10,9 @@ class UniqueViolation(IndexError):
     pass
 
 
-class BackendClientPool:
+class DBClientPool:
     """
-    后端客户端连接池类。
+    存放数据库连接的池。
     继承此类，完善所有NotImplementedError的方法。
     此类由你自己的ComponentBackend和ComponentTransaction调用，因此接口随意。
     """
@@ -26,11 +26,11 @@ class BackendClientPool:
 
 class ComponentBackend:
     """
-    Component的事务管理类，主要负责对每个Component数据的初始化操作，并开始事务。
+    Component数据的实现，负责对每个Component数据的初始化操作，并创建事务。
     继承此类，完善所有NotImplementedError的方法。
     """
     def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
-                 conn_pool: BackendClientPool):
+                 conn_pool: DBClientPool):
         self._component_cls = component_cls
         self._instance_name = instance_name
         self._conn_pool = conn_pool
@@ -48,7 +48,7 @@ class ComponentTransaction:
     继承此类，完善所有NotImplementedError的方法。
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
-    def __init__(self, component_cls: type[BaseComponent], conn_pool: BackendClientPool):
+    def __init__(self, component_cls: type[BaseComponent], conn_pool: DBClientPool):
         self._component_cls = component_cls
         self._conn_pool = conn_pool
 
@@ -297,3 +297,19 @@ class ComponentPublisher:
             msg.append({'cmd': 'update', 'row': dict_row})
         # 返回消息
         raise msg
+
+
+class ComponentBackendPool(metaclass=Singleton):
+    """
+    ComponentBackend连接池类。
+    继承此类，完善所有NotImplementedError的方法。
+    """
+    def __init__(self, config: dict):
+        pass
+
+    def get_backend(self, component_cls: type[BaseComponent], instance_name, cluster_id) -> ComponentBackend:
+        # 继承，并返回一个ComponentBackend实例
+        raise NotImplementedError
+
+    async def close(self):
+        raise NotImplementedError

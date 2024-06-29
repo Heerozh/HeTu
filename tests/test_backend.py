@@ -9,8 +9,8 @@ import numpy as np
 
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines,
-    ComponentBackend, BackendClientPool, ComponentTransaction,
-    RedisComponentBackend, RedisBackendClientPool,
+    ComponentBackend, DBClientPool, ComponentTransaction,
+    RedisComponentBackend, RedisClientPool,
     UniqueViolation, RaceCondition
 )
 
@@ -33,7 +33,7 @@ def parameterized(test_items):
 
 
 implements = (
-    (RedisComponentBackend, RedisBackendClientPool, {"master": "redis://127.0.0.1:23318/0"}),
+    (RedisComponentBackend, RedisClientPool, {"master": "redis://127.0.0.1:23318/0"}),
     # 所有其他类型table和后端在此添加并通过测试，并在下方"# 启动服务器"处启动对应的docker
 )
 
@@ -88,7 +88,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_basic(self, table_cls: type[ComponentBackend],
-                         backend_cls: type[BackendClientPool], config):
+                         backend_cls: type[DBClientPool], config):
         ComponentDefines().clear_()
         self.build_test_component()
 
@@ -277,7 +277,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_race(self, table_cls: type[ComponentBackend],
-                        backend_cls: type[BackendClientPool], config):
+                        backend_cls: type[DBClientPool], config):
         # 测试竞态，通过2个协程来测试
         ComponentDefines().clear_()
         self.build_test_component()
@@ -403,7 +403,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     # @mock.patch('hetu.data.backend.redis.datetime', mock_time)
     @parameterized(implements)
     async def test_migration(self, table_cls: type[ComponentBackend],
-                             backend_cls: type[BackendClientPool], config):
+                             backend_cls: type[DBClientPool], config):
         # mock_time.now.return_value = datetime.now()
         # # mock_time.now.return_value = datetime.now() + timedelta(days=10)
         # mock_time.fromisoformat = datetime.fromisoformat
