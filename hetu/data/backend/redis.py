@@ -6,6 +6,7 @@
 """
 import random
 import hashlib
+import numpy as np
 import redis
 import itertools
 import asyncio
@@ -64,8 +65,12 @@ class RedisComponentBackend(ComponentBackend):
     instance_name:component_name:meta
     """
 
-    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
-                 conn_pool: RedisClientPool):
+    def __init__(
+            self,
+            component_cls: type[BaseComponent],
+            instance_name, cluster_id,
+            conn_pool: RedisClientPool
+    ):
         super().__init__(component_cls, instance_name, cluster_id, conn_pool)
         self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
         component_cls.hosted_ = self
@@ -249,9 +254,9 @@ class RedisComponentBackend(ComponentBackend):
         logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
-    def transaction(self):
-        return RedisComponentTransaction(self._component_cls, self._conn_pool,
-                                         self._key_prefix, self._idx_prefix)
+    def transaction(self) -> 'RedisComponentTransaction':
+        return RedisComponentTransaction(
+            self._component_cls, self._conn_pool, self._key_prefix, self._idx_prefix)
 
 
 class RedisComponentTransaction(ComponentTransaction):
@@ -325,8 +330,13 @@ class RedisComponentTransaction(ComponentTransaction):
     lua_check_unique = None
     lua_run_stack = None
 
-    def __init__(self, component_cls: type[BaseComponent], conn_pool: RedisClientPool,
-                 key_prefix: str, index_prefix: str):
+    def __init__(
+            self,
+            component_cls: type[BaseComponent],
+            conn_pool: RedisClientPool,
+            key_prefix: str,
+            index_prefix: str
+    ):
         super().__init__(component_cls, conn_pool)
         self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
 
@@ -342,12 +352,12 @@ class RedisComponentTransaction(ComponentTransaction):
         if cls.lua_run_stack is None:
             cls.lua_run_stack = self._conn_pool.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
 
-    async def end_transaction(self, discard):
+    async def end_transaction(self, discard) -> None:
         # 并实现事务提交的操作，将_updates中的命令写入事务
         if discard or len(self._updates) == 0:
             await self._trans_pipe.reset()  # todo 做成只有del才reset，平日就是discard
             self._trans_pipe = None
-            return True
+            return
 
         pipe = self._trans_pipe
 
@@ -419,13 +429,13 @@ class RedisComponentTransaction(ComponentTransaction):
         except redis.WatchError:
             raise RaceCondition(f"watched key被其他事务修改")
         else:
-            return True
+            return
         finally:
             # 无论是else里的return还是except里的raise，finally都会在他们之前执行
             await pipe.reset()  # todo pipe要复用
             self._trans_pipe = None
 
-    async def _backend_get(self, row_id: int):
+    async def _backend_get(self, row_id: int) -> None | np.record:
         # 获取行数据的操作
         key = self._key_prefix + str(row_id)
         pipe = self._trans_pipe
@@ -439,7 +449,14 @@ class RedisComponentTransaction(ComponentTransaction):
         else:
             return None
 
-    async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
+    async def _backend_query(
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False
+    ) -> list[int]:
         # 范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         idx_key = self._idx_prefix + index_name
         pipe = self._trans_pipe

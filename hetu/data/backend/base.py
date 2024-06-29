@@ -1,4 +1,5 @@
 import numpy as np
+from ...common import Singleton
 from ..component import BaseComponent
 
 
@@ -29,8 +30,12 @@ class ComponentBackend:
     Component数据的实现，负责对每个Component数据的初始化操作，并创建事务。
     继承此类，完善所有NotImplementedError的方法。
     """
-    def __init__(self, component_cls: type[BaseComponent], instance_name, cluster_id,
-                 conn_pool: DBClientPool):
+    def __init__(
+            self, component_cls: type[BaseComponent],
+            instance_name: str,
+            cluster_id: int,
+            conn_pool: DBClientPool
+    ):
         self._component_cls = component_cls
         self._instance_name = instance_name
         self._conn_pool = conn_pool
@@ -61,25 +66,32 @@ class ComponentTransaction:
     async def __aexit__(self, exc_type, exc, tb):
         await self.end_transaction(discard=False)
 
-    async def end_transaction(self, discard: bool):
+    async def end_transaction(self, discard: bool) -> None:
         # 继承，并实现事务提交的操作，将_updates中的命令写入事务
         # updates是一个List[(cmd, row_id, row)]
         # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
-    async def _backend_get(self, row_id: int):
+    async def _backend_get(self, row_id: int) -> None | np.record:
         # 继承，并实现获取行数据的操作，返回值要通过dict_to_row包裹下
         # 如果不存在该行数据，返回None
         # 如果用乐观锁，这里同时要让乐观锁锁定该行。sql是记录该行的version，事务提交时判断
         raise NotImplementedError
 
-    async def _backend_query(self, index_name: str, left, right=None, limit=10, desc=False):
+    async def _backend_query(
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False
+    ) -> list[int]:
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         # 未查询到数据时返回[]
         # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
-    async def select(self, value, where: str = 'id'):
+    async def select(self, value, where: str = 'id') -> None | np.record:
         """
         获取`where`==`value`的单行数据，返回c-struct like。
         `where`不是unique索引时，返回升序排序的第一条数据。
@@ -118,7 +130,7 @@ class ComponentTransaction:
 
         return row
 
-    async def query(self, index_name: str, left, right=None, limit=10, desc=False):
+    async def query(self, index_name: str, left, right=None, limit=10, desc=False) -> np.recarray:
         """
         查询`index_name`在`left`和`right`之间的数据，限制`limit`条，是否降序`desc`。
         如果right为None，则查询等于left的数据。
@@ -162,7 +174,7 @@ class ComponentTransaction:
         else:
             return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def is_exist(self, value, where: str = 'id'):
+    async def is_exist(self, value, where: str = 'id') -> tuple[bool, int | None]:
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
         assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
@@ -175,7 +187,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    async def select_or_create(self, value, where: str = None):
+    async def select_or_create(self, value, where: str = None) -> np.record:
         uniques = self._component_cls.uniques_ - {'id', where}
         assert len(uniques) == 0, "有多个Unique属性的Component不能使用select_or_create"
 
@@ -186,7 +198,12 @@ class ComponentTransaction:
             await self.insert(rtn)
         return rtn
 
-    async def _check_uniques(self, old_row: [np.record, None], new_row: np.record, ignores=None):
+    async def _check_uniques(
+            self,
+            old_row: [np.record, None],
+            new_row: np.record,
+            ignores=None
+    ) -> None:
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
         is_insert = old_row is None
@@ -202,7 +219,7 @@ class ComponentTransaction:
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
 
-    async def update(self, row_id: int, row):
+    async def update(self, row_id: int, row) -> None:
         """修改row_id行的数据"""
         assert type(row) is np.record, "update数据必须是单行数据"
         row_id = int(row_id)
@@ -223,12 +240,12 @@ class ComponentTransaction:
         # 加入到更新队列
         self._updates.append(('update', row_id, old_row, row))
 
-    async def update_rows(self, rows: np.rec.array):
+    async def update_rows(self, rows: np.recarray) -> None:
         assert type(rows) is np.recarray and rows.shape[0] > 1, "update_rows数据必须是多行数据"
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
-    async def insert(self, row):
+    async def insert(self, row) -> None:
         """插入单行数据"""
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
@@ -240,7 +257,7 @@ class ComponentTransaction:
         row = row.copy()
         self._updates.append(('insert', None, None, row))
 
-    async def delete(self, row_id: int | np.integer):
+    async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
         row_id = int(row_id)
         # 先查询旧数据是否存在
@@ -301,15 +318,28 @@ class ComponentPublisher:
 
 class ComponentBackendPool(metaclass=Singleton):
     """
-    ComponentBackend连接池类。
-    继承此类，完善所有NotImplementedError的方法。
+    ComponentBackend的池，负责对每个ComponentBackend的初始化操作。
+    此类是单件，每个进程只有一个实例。
     """
-    def __init__(self, config: dict):
-        pass
+    def __init__(self):
+        self.backends = {}
+        self.publishers = {}
 
-    def get_backend(self, component_cls: type[BaseComponent], instance_name, cluster_id) -> ComponentBackend:
-        # 继承，并返回一个ComponentBackend实例
-        raise NotImplementedError
+    def create_backend(
+            self,
+            component_cls: type[BaseComponent],
+            instance_name: str,
+            cluster_id: int,
+            conn_pool: DBClientPool
+    ):
+        assert component_cls not in self.backends, f"{component_cls.component_name_} Backend已经存在"
+        self.backends[component_cls] = ComponentBackend(
+            component_cls, instance_name, cluster_id, conn_pool)
+        self.publishers[component_cls] = ComponentPublisher(
+            component_cls, instance_name, cluster_id, self.backends[component_cls])
 
-    async def close(self):
-        raise NotImplementedError
+    def backend(self, item: type[BaseComponent]) -> ComponentBackend:
+        return self.backends[item]
+
+    def publisher(self, item: type[BaseComponent]) -> ComponentPublisher:
+        return self.publishers[item]
