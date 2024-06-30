@@ -119,7 +119,7 @@ class ComponentTable:
         raise NotImplementedError
 
     def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':
-        """进入Component的事务模式，返回事务操作类"""
+        """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
         # return YourComponentTransaction(self, backend_trans)
         raise NotImplementedError
@@ -404,7 +404,3 @@ class ComponentSubscriber:
             msg.append({'cmd': 'update', 'row': dict_row})
         # 返回消息
         raise msg
-
-
-##################################################
-
