@@ -44,7 +44,7 @@ class BaseComponent:
     # ------------------------------内部变量-------------------------------
     dtypes = None           # type: np.dtype            # np structured dtype
     default_row = None      # type: np.ndarray          # 默认空数据行
-    hosted_ = None          # type: "ComponentBackend"  # 该Component运行时被托管的后端实例
+    hosted_ = None          # type: "ComponentTable"    # 该Component运行时被托管的实例
     prop_idx_map_ = None    # type: dict[str, int]      # 属性名->第几个属性 的映射
     dtype_map_ = None       # type: dict[str, np.dtype] # 属性名->dtype的映射
     uniques_ = None         # type: set[str]            # 唯一索引的属性名集合

@@ -12,12 +12,12 @@ import itertools
 import uuid
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
-from .base import ComponentTransaction, ComponentBackend, DBClientPool, RaceCondition, DBTransaction
+from .base import ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction
 import logging
 logger = logging.getLogger('HeTu')
 
 
-class RedisClientPool(DBClientPool):
+class RedisBackend(Backend):
     """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
     def __init__(self, config: dict):
         super().__init__(config)
@@ -54,7 +54,7 @@ class RedisClientPool(DBClientPool):
         return RedisTransaction(self, cluster_id)
 
 
-class RedisTransaction(DBTransaction):
+class RedisTransaction(BackendTransaction):
     """数据库事务类，负责开始事务，并提交事务"""
     # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
     LUA_CHECK_UNIQUE_SCRIPT = """
@@ -125,20 +125,20 @@ class RedisTransaction(DBTransaction):
     lua_check_unique = None
     lua_run_stack = None
 
-    def __init__(self, conn_pool: RedisClientPool, cluster_id: int):
-        super().__init__(conn_pool, cluster_id)
+    def __init__(self, backend: RedisBackend, cluster_id: int):
+        super().__init__(backend, cluster_id)
 
         cls = self.__class__
         if cls.lua_check_unique is None:
-            cls.lua_check_unique = conn_pool.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
+            cls.lua_check_unique = backend.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
         if cls.lua_run_stack is None:
-            cls.lua_run_stack = conn_pool.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
+            cls.lua_run_stack = backend.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
 
         self._uuid = uuid.uuid4().hex
         self._checks = {}  # 事务中的unique检查，key为unique索引名，value为值
         self._updates = []  # 事务中的更新操作
 
-        self._trans_pipe = conn_pool.aio.pipeline()
+        self._trans_pipe = backend.aio.pipeline()
         # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
         self._trans_pipe.watching = True
 
@@ -159,7 +159,7 @@ class RedisTransaction(DBTransaction):
     async def end_transaction(self, discard) -> None:
         # 并实现事务提交的操作，将_updates中的命令写入事务
         if discard or len(self._updates) == 0:
-            await self._trans_pipe.reset()  # todo 做成只有del才reset，平日就是discard
+            await self._trans_pipe.reset()
             self._trans_pipe = None
             return
 
@@ -196,7 +196,7 @@ class RedisTransaction(DBTransaction):
             self._trans_pipe = None
 
 
-class RedisComponentBackend(ComponentBackend):
+class RedisComponentTable(ComponentTable):
     """
     在redis种初始化/管理Component数据表，提供事务指令。
 
@@ -215,10 +215,10 @@ class RedisComponentBackend(ComponentBackend):
             self,
             component_cls: type[BaseComponent],
             instance_name, cluster_id,
-            conn_pool: RedisClientPool
+            backend: RedisBackend
     ):
-        super().__init__(component_cls, instance_name, cluster_id, conn_pool)
-        self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
+        super().__init__(component_cls, instance_name, cluster_id, backend)
+        self._backend = backend  # 为了让代码提示知道类型是RedisBackendClientPool
         component_cls.hosted_ = self
         # redis key名
         hash_tag = f'{{CLU{cluster_id}}}:'
@@ -242,7 +242,7 @@ class RedisComponentBackend(ComponentBackend):
         cluster_id: 所属簇id
         last_index_rebuild: 上次重建索引时间
         """
-        io = self._conn_pool.io
+        io = self._backend.io
         lock = io.lock(self._lock_key, timeout=60*5)
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         lock.acquire(blocking=True)
@@ -292,13 +292,13 @@ class RedisComponentBackend(ComponentBackend):
             'cluster_id': self._cluster_id,
             'last_index_rebuild': '2024-06-19T03:41:18.682529+08:00'
         }
-        self._conn_pool.io.hset(self._meta_key, mapping=meta)
+        self._backend.io.hset(self._meta_key, mapping=meta)
         logger.info(f"✅ [💾Redis][{self._name}组件] 空表创建完成")
         return meta
 
     def _rebuild_index(self):
         logger.info(f"⌚ [💾Redis][{self._name}组件] 正在重建索引...")
-        io = self._conn_pool.io
+        io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
         if len(rows) == 0:
             logger.info(f"✅ [💾Redis][{self._name}组件] 无数据，无需重建索引。")
@@ -342,7 +342,7 @@ class RedisComponentBackend(ComponentBackend):
         old_prefix_len = len(old_prefix)
         new_prefix = f'{self._root_prefix}{new_hash_tag}'
 
-        io = self._conn_pool.io
+        io = self._backend.io
         old_keys = io.keys(old_prefix + '*')
         for old_key in old_keys:
             new_key = new_prefix + old_key[old_prefix_len:]
@@ -379,7 +379,7 @@ class RedisComponentBackend(ComponentBackend):
                                f"默认丢弃该属性数据。")
 
         # 多出来的列再次报警告，然后忽略
-        io = self._conn_pool.io
+        io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
         props = dict(self._component_cls.properties_)  # type: dict[str, Property]
         added = 0
@@ -408,7 +408,7 @@ class RedisComponentBackend(ComponentBackend):
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
             self,
-            backend: RedisComponentBackend,
+            backend: RedisComponentTable,
             trans_conn: RedisTransaction,
             key_prefix: str,
             index_prefix: str
@@ -441,7 +441,6 @@ class RedisComponentTransaction(ComponentTransaction):
             limit=10,
             desc=False
     ) -> list[int]:
-        # 范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         idx_key = self._idx_prefix + index_name
         pipe = self._trans_conn.pipe
 
