@@ -32,6 +32,5 @@ class ComponentTableManager(metaclass=Singleton):
                 self.tables[comp] = table
                 # self.subscriptions[comp] = backend.subscribe(comp)
 
-    def get_table(self, component_cls: type[BaseComponent]):
+    def get_table(self, component_cls: type[BaseComponent]) -> ComponentTable | None:
         return self.tables.get(component_cls)
-

@@ -18,3 +18,5 @@ from .backend import (
     RaceCondition, UniqueViolation,
     RedisBackend, RedisComponentTable, RedisComponentTransaction,
 )
+
+from .manager import ComponentTableManager
