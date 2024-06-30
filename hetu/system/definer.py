@@ -20,6 +20,7 @@ class SystemDefine:
     inherits: tuple[str]
     full_inherits: tuple[str] | None
     permission: Permission
+    max_retry: int
     arg_count: int         # 全部参数个数（含默认参数）
     defaults_count: int    # 默认参数个数
     cluster_id: int
@@ -45,8 +46,8 @@ class SystemClusters(metaclass=Singleton):
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._clusters = {}    # type: dict[str, list[SystemClusters.Cluster]]
 
-    def get_system(self, namespace: str, system_name: str) -> SystemDefine:
-        return self._system_map[namespace][system_name]
+    def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
+        return self._system_map[namespace].get(system_name, None)
 
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
         return {name: self.get_system(cluster.namespace, name) for name in cluster.systems}
@@ -57,7 +58,7 @@ class SystemClusters(metaclass=Singleton):
     def get_cluster(self, namespace: str, cluster_id: int):
         return self._clusters[namespace][cluster_id]
 
-    def build_clusters(self):
+    def build_clusters(self, namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
 
@@ -79,6 +80,12 @@ class SystemClusters(metaclass=Singleton):
                 req.update(base_def.components)
                 inh.update(base_def.inherits)
                 inherit_components(namespace_, base_def.inherits, req, inh)
+
+        # 把__auto__的System迁移到默认namespace
+        auto_sys_map = self._system_map.pop('__auto__', {})
+        for sys_def in auto_sys_map.values():
+            sys_def.namespace = namespace
+        self._system_map[namespace].update(auto_sys_map)
 
         for namespace in self._system_map:
             clusters = []
@@ -108,7 +115,7 @@ class SystemClusters(metaclass=Singleton):
                 for sys_name in cluster.systems:
                     self._system_map[cluster.namespace][sys_name].cluster_id = cluster.id
 
-    def add(self, namespace, func, components, force, permission, inherits):
+    def add(self, namespace, func, components, force, permission, inherits, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -121,7 +128,7 @@ class SystemClusters(metaclass=Singleton):
         defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
         sub_map[func.__name__] = SystemDefine(
-            func=func, components=components, inherits=inherits,
+            func=func, components=components, inherits=inherits, max_retry=max_retry,
             arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
             permission=permission, full_components=None, full_inherits=None)
 
@@ -164,8 +171,8 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     返回值为 bool, message：bool表示是否执行事务，False表示放弃事务。message为返回给客户端的消息，可以省略。
 
     Component实列：
-    由`ctx[Component Class]`返回的实例，类型为ComponentBackend，可以进行数据库操作，并自动包装为事务，
-    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentBackend的文档。
+    由`ctx[Component Class]`返回的实例，类型为ComponentTransaction，可以进行数据库操作，并自动包装为事务，
+    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentTransaction的文档。
 
     """
     def warp(func):
@@ -186,7 +193,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
                  f"不然数据库请求会堵塞整个Worker。")
 
         SystemClusters().add(namespace, func, components, force,
-                             permission, inherits)
+                             permission, inherits, retry)
 
         # 返回假的func，因为不允许直接调用。
         def warp_system_call(*_, **__):

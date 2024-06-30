@@ -124,7 +124,7 @@ class TestSystemDefine(unittest.TestCase):
         async def system_inherit2(ctx, vec, hit):
             pass
 
-        SystemClusters().build_clusters()
+        SystemClusters().build_clusters('ssw')
 
         sys_def = SystemClusters().get_system(
             'ssw', 'system_inherit2')
@@ -182,7 +182,7 @@ class TestSystemDefine(unittest.TestCase):
             pass
 
         @define_system(
-            namespace="ssw",
+            namespace="__auto__",
             components=(GalaxyPosition, Inventory),
         )
         async def system5(ctx, ):
@@ -190,7 +190,7 @@ class TestSystemDefine(unittest.TestCase):
 
         # 测试cluster
         clusters = SystemClusters()
-        clusters.build_clusters()
+        clusters.build_clusters('ssw')
         self.assertEqual(len(clusters.get_clusters('ssw')), 2)
         self.assertEqual(len(clusters.get_clusters('ssw')[0].systems), 3)
         self.assertEqual(len(clusters.get_clusters('ssw')[1].systems), 2)
