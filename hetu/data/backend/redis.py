@@ -32,11 +32,21 @@ class RedisBackend(Backend):
             self.replicas.append(self.aio)
 
         # 配置keyspace通知
+        target_keyspace = 'Kghz'
         try:
             for url in servants:
-                redis.from_url(url).config_set('notify-keyspace-events', 'Kghz')
+                r = redis.from_url(url)
+                db_keyspace = r.config_get('notify-keyspace-events')['notify-keyspace-events']
+                db_keyspace = db_keyspace.replace('A', 'g$lshztxed')
+                db_keyspace_new = db_keyspace
+                for flag in list(target_keyspace):
+                    if flag not in db_keyspace:
+                        db_keyspace_new += flag
+                if db_keyspace_new != db_keyspace:
+                    r.config_set('notify-keyspace-events', db_keyspace_new)
         except redis.exceptions.NoPermissionError:
-            logger.warning("⚠️ [💾Redis] 此账号无权限设置keyspace通知，请手动设置notify-keyspace-events=Kghz")
+            logger.warning("⚠️ [💾Redis] 无权限调用数据库config_set命令，数据订阅将不起效。"
+                           f"可手动设置配置文件：notify-keyspace-events={target_keyspace}")
 
     async def close(self):
         self.io.close()
