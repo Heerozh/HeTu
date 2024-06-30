@@ -13,7 +13,7 @@
             │初始化数据                     │ 写入数据
   ┌─────────┴──────────┐      ┌───────────┴────────────┐
   │   ComponentTable   │      │  ComponentTransaction  │
-  │   件数据管理（单件)   │      │      组件相关事务操作     │
+  │  组件数据管理（单件)  │      │      组件相关事务操作     │
   └────────────────────┘      └────────────────────────┘
 
 
@@ -25,7 +25,7 @@
             ▲
             │
   ┌─────────┴──────────┐
-  │  BackendPublisher  │
+  │    Subscriptions   │
   │ 接受消息队列消息并分发 │
   └────────────────────┘
             ▲
@@ -92,7 +92,7 @@ class BackendTransaction:
 
 class ComponentTable:
     """
-    Component后端主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
+    Component数据主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
     继承此类，完善所有NotImplementedError的方法。
     """
     def __init__(
@@ -114,10 +114,10 @@ class ComponentTable:
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
-    def attach(self, db_trans: BackendTransaction) -> 'ComponentTransaction':
+    def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':
         """进入Component的事务模式，返回事务操作类"""
         # 继承，并执行：
-        # return YourComponentTransaction(self._component_cls, self.db_trans)
+        # return YourComponentTransaction(self, backend_trans)
         raise NotImplementedError
 
 
@@ -127,10 +127,10 @@ class ComponentTransaction:
     继承此类，完善所有NotImplementedError的方法。
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
-    def __init__(self, tbl: ComponentTable, trans_conn: BackendTransaction):
-        assert trans_conn.cluster_id == tbl.cluster_id, \
+    def __init__(self, comp_tbl: ComponentTable, trans_conn: BackendTransaction):
+        assert trans_conn.cluster_id == comp_tbl.cluster_id, \
             "事务只能在对应的cluster_id中执行，不能跨cluster"
-        self._component_cls = tbl.component_cls  # type: type[BaseComponent]
+        self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trans_conn = trans_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
 

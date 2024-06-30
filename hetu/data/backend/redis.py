@@ -400,20 +400,20 @@ class RedisComponentTable(ComponentTable):
         logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
-    def attach(self, db_trans: RedisTransaction) -> 'RedisComponentTransaction':
+    def attach(self, backend_trans: RedisTransaction) -> 'RedisComponentTransaction':
         return RedisComponentTransaction(
-            self, db_trans, self._key_prefix, self._idx_prefix)
+            self, backend_trans, self._key_prefix, self._idx_prefix)
 
 
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
             self,
-            backend: RedisComponentTable,
+            comp_tbl: RedisComponentTable,
             trans_conn: RedisTransaction,
             key_prefix: str,
             index_prefix: str
     ):
-        super().__init__(backend, trans_conn)
+        super().__init__(comp_tbl, trans_conn)
         self._trans_conn = trans_conn  # 为了让代码提示知道类型是RedisTransaction
 
         self._key_prefix = key_prefix
