@@ -134,6 +134,10 @@ class ComponentDefines(metaclass=Singleton):
     def clear_(self):
         self._components.clear()
 
+    def get_all(self) -> list[type[BaseComponent]]:
+        """返回所有Component类，但一般不使用此方法，而是用SystemClusters().get_clusters()获取用到的表"""
+        return [comp for comps in self._components.values() for comp in comps.values()]
+
     def get_component(self, namespace: str, component_name: str) -> type[BaseComponent]:
         return self._components[namespace][component_name]
 
