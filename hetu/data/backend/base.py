@@ -114,6 +114,10 @@ class ComponentTable:
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
+    def flush(self):
+        """如果非持久化组件，则允许调用flush主动清空数据"""
+        raise NotImplementedError
+
     def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':
         """进入Component的事务模式，返回事务操作类"""
         # 继承，并执行：
