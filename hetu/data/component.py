@@ -158,7 +158,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         owner: np.int64 = Property(default=0, unique=True)
 
     :param namespace: 是你的项目名，一个网络地址只能启动一个namespace。
-    :param persist: 表示是否持久化。
+    :param persist: 表示是否持久化，设为False时，允许主动调用flush()清空数据
     :param readonly: 是否只读Component，只读Component不会被加事务保护，增加并行性。
     :param backend: 指定Component后端，对应配置文件中的db_name。默认为Redis
     :param permission: 设置读取权限，只对游戏客户端的读取查询调用起作用。

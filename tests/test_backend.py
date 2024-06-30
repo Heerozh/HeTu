@@ -505,6 +505,34 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await tbl.select(130, where='time')).qty_new, 111)
         await backend.close()
 
+    @parameterized(implements)
+    async def test_flush(self, table_cls: type[ComponentTable],
+                         backend_cls: type[Backend], config):
+        backend = backend_cls(config)
+
+        @define_component(namespace="ssw", persist=False)
+        class TempData(BaseComponent):
+            data: np.int64 = Property(0, unique=True)
+        temp_data = table_cls(TempData, 'test', 1, backend)
+
+        async with backend.transaction(1) as trans:
+            tbl = temp_data.attach(trans)
+            for i in range(25):
+                row = TempData.new_row()
+                row.data = i
+                await tbl.insert(row)
+        async with backend.transaction(1) as trans:
+            tbl = temp_data.attach(trans)
+            self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
+                             25)
+
+        temp_data.flush()
+
+        async with backend.transaction(1) as trans:
+            tbl = temp_data.attach(trans)
+            self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
+                             0)
+
 
 if __name__ == '__main__':
     unittest.main()

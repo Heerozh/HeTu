@@ -277,13 +277,6 @@ class RedisComponentTable(ComponentTable):
         last_index_rebuild = datetime.fromisoformat(meta.get('last_index_rebuild'))
         now = datetime.now().astimezone()
         if last_index_rebuild <= now - timedelta(hours=1):
-            # 如果非持久化组件，则每次启动清空
-            if not self._component_cls.persist_:
-                logger.info(f"⌚ [💾Redis][{self._name}组件] 本组件无需持久化，清空已存数据中...")
-                del_keys = io.keys(self._root_prefix + '*')
-                map(io.delete, del_keys)
-                logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
-
             # 重建索引，如果已处理过了就不处理
             self._rebuild_index()
             # 写入meta信息
@@ -291,6 +284,22 @@ class RedisComponentTable(ComponentTable):
 
         lock.release()
         logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
+
+    def flush(self):
+        # 如果非持久化组件，则允许调用flush主动清空数据
+        if not self._component_cls.persist_:
+            io = self._backend.io
+            logger.info(f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中...")
+
+            with io.lock(self._lock_key, timeout=60 * 5):
+                del_keys = io.keys(self._root_prefix + '*')
+                del_keys.remove(self._lock_key)
+                list(map(io.delete, del_keys))
+
+            self.check_meta()
+            logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
+        else:
+            raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
 
     def _create_emtpy(self):
         logger.info(f"⌚ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
