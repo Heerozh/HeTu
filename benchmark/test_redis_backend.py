@@ -54,7 +54,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     row = Item.new_row()
                     row.name = f'Item{i}'
                     row.owner = i
@@ -71,7 +72,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     row = await tbl.select(i+1)
             except RaceCondition as e:
                 print(e)
@@ -83,7 +85,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     row = await tbl.select(i+1)
                     row.name = f'Itm{i}'
                     await tbl.update(row.id, row)
@@ -97,7 +100,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     row = await tbl.select(i+1)
                     await tbl.delete(row.id)
             except RaceCondition as e:
@@ -125,7 +129,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     rows = await tbl.query("owner", i, i+10, limit=1)
             except RaceCondition as e:
                 print(e)
@@ -137,7 +142,8 @@ async def run_bench(inst, redis_address):
         retry = 0
         while True:
             try:
-                async with item_data.transaction() as tbl:
+                async with backend.transaction(1) as trans:
+                    tbl = item_data.attach(trans)
                     rows = await tbl.query("owner", i, i+10, limit=10)
             except RaceCondition as e:
                 print(e)
@@ -163,8 +169,6 @@ async def run_bench(inst, redis_address):
 
     t, qps = await timeit(test_delete, 3000, 1)
     # 单worker 1000/s
-
-    breakpoint()
 
     t, qps = await timeit(test_direct_update, 6000, 1)
     # 单worker 3000/s，因为没有watch，所以较高
