@@ -359,7 +359,7 @@ class MQClientPool:
     pass
 
 
-class BackendPublisher:
+class Subscriptions:
     """
     Component的数据订阅和查询接口
     """
@@ -406,30 +406,5 @@ class ComponentSubscriber:
         raise msg
 
 
-class ComponentBackendPool(metaclass=Singleton):
-    """
-    ComponentBackend的池，负责对每个ComponentBackend的初始化操作。
-    此类是单件，每个进程只有一个实例。
-    """
-    def __init__(self):
-        self.backends = {}
-        self.publishers = {}
+##################################################
 
-    def create_backend(
-            self,
-            component_cls: type[BaseComponent],
-            instance_name: str,
-            cluster_id: int,
-            conn_pool: Backend
-    ):
-        assert component_cls not in self.backends, f"{component_cls.component_name_} Backend已经存在"
-        self.backends[component_cls] = ComponentTable(
-            component_cls, instance_name, cluster_id, conn_pool)
-        # self.publishers[component_cls] = ComponentPublisher(
-        #     component_cls, instance_name, cluster_id, self.backends[component_cls])
-
-    def backend(self, item: type[BaseComponent]) -> ComponentTable:
-        return self.backends[item]
-
-    # def publisher(self, item: type[BaseComponent]) -> ComponentPublisher:
-    #     return self.publishers[item]
