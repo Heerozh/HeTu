@@ -9,9 +9,10 @@ import hashlib
 import numpy as np
 import redis
 import itertools
+import uuid
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
-from .base import ComponentTransaction, ComponentBackend, DBClientPool, RaceCondition
+from .base import ComponentTransaction, ComponentBackend, DBClientPool, RaceCondition, DBTransaction
 import logging
 logger = logging.getLogger('HeTu')
 
@@ -47,6 +48,152 @@ class RedisClientPool(DBClientPool):
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
         i = random.randint(0, len(self.replicas))
         return i, self.replicas[i]
+
+    def transaction(self, cluster_id: int) -> 'RedisTransaction':
+        """进入db的事务模式，返回事务连接"""
+        return RedisTransaction(self, cluster_id)
+
+
+class RedisTransaction(DBTransaction):
+    """数据库事务类，负责开始事务，并提交事务"""
+    # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
+    LUA_CHECK_UNIQUE_SCRIPT = """
+    local result_key = KEYS[1]
+    local sub = string.sub
+    local redis = redis
+
+    for i = 2, #KEYS, 1 do
+        local start = ARGV[i-1]
+        local stop = start
+        local by = 'BYSCORE'
+        if sub(start, 1, 1) == '[' then
+            start = start .. ':'
+            stop = start .. ';'
+            by = 'BYLEX'
+        end
+        local rows = redis.call('zrange', KEYS[i], start, stop, by, 'LIMIT', 0, 1)
+        if #rows > 0 then
+            redis.call('set', result_key, 0, 'PX', 100)
+            return 'FAIL'
+        end
+    end
+    redis.call('set', result_key, 1, 'PX', 100)
+    return 'OK'
+    """
+    # key: 1:是否执行的标记key, 2-n:不使用，仅供客户端判断hash slot用, args: stacked的命令
+    LUA_IF_RUN_STACK_SCRIPT = """
+    local result_key = KEYS[1]
+    local redis = redis
+    local tonumber = tonumber
+    local unpack = unpack
+    local gsub = string.gsub
+
+    local unique_check_ok = redis.call('get',  result_key)
+    if tonumber(unique_check_ok) <= 0 then
+        return 'FAIL'
+    end
+
+    local cur = 1
+    local last_row_id = nil
+    while cur <= #ARGV do
+        local len = tonumber(ARGV[cur])
+        local cmds = {unpack(ARGV, cur+1, cur+len)}
+        cur = cur + len + 1
+        if cmds[1] == 'AUTO_INCR' then
+            local idx_key = cmds[2]
+            local ids = redis.call('zrange', idx_key, 0, 0, 'REV', 'WITHSCORES')
+            if #ids == 0 then 
+                last_row_id = 1
+            else
+                last_row_id = tonumber(ids[2]) + 1
+            end
+        elseif cmds[1] == 'END_INCR' then
+            last_row_id = nil
+        else
+            if last_row_id ~= nil then
+                local _
+                for i = 2, #cmds, 1 do
+                    cmds[i], _ = gsub(cmds[i], '{rowid}', last_row_id)
+                end
+            end
+            -- redis.log(2, table.concat(cmds, ','))
+            redis.call(unpack(cmds))
+        end
+    end
+    return 'OK'
+    """
+    lua_check_unique = None
+    lua_run_stack = None
+
+    def __init__(self, conn_pool: RedisClientPool, cluster_id: int):
+        super().__init__(conn_pool, cluster_id)
+
+        cls = self.__class__
+        if cls.lua_check_unique is None:
+            cls.lua_check_unique = conn_pool.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
+        if cls.lua_run_stack is None:
+            cls.lua_run_stack = conn_pool.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
+
+        self._uuid = uuid.uuid4().hex
+        self._checks = {}  # 事务中的unique检查，key为unique索引名，value为值
+        self._updates = []  # 事务中的更新操作
+
+        self._trans_pipe = conn_pool.aio.pipeline()
+        # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
+        self._trans_pipe.watching = True
+
+    @property
+    def pipe(self):
+        return self._trans_pipe
+
+    def stack_unique_check(self, index_key: str, value: int | float | str) -> None:
+        """加入需要在end_transaction时进行unique检查的index和value"""
+        if (values := self._checks.get(index_key)) is None:
+            values = set()
+            self._checks[index_key] = values
+        values.add(value)
+
+    def stack_cmd(self, *args):
+        self._updates.extend([len(args), ] + list(args))
+
+    async def end_transaction(self, discard) -> None:
+        # 并实现事务提交的操作，将_updates中的命令写入事务
+        if discard or len(self._updates) == 0:
+            await self._trans_pipe.reset()  # todo 做成只有del才reset，平日就是discard
+            self._trans_pipe = None
+            return
+
+        pipe = self._trans_pipe
+
+        # 准备对unique index进行最终检查，之前虽然检查过，但没有lock index，值可能变更
+        # 这里用lua在事务中检查，可以减少watch的key数量
+        unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + self._uuid
+        lua_unique_keys = [unique_check_key, ]
+        lua_unique_argv = []
+        for k, v in self._checks.items():
+            lua_unique_keys.extend([k] * len(v))
+            lua_unique_argv.extend(v)
+
+        # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
+        lua_run_keys = [unique_check_key, ]
+        lua_run_argv = self._updates
+
+        pipe.multi()
+        await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
+        await self.lua_run_stack(args=lua_run_argv, keys=lua_run_keys, client=pipe)
+
+        try:
+            result = await pipe.execute()
+            if result[-1] == 'FAIL':
+                raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
+        except redis.WatchError:
+            raise RaceCondition(f"watched key被其他事务修改")
+        else:
+            return
+        finally:
+            # 无论是else里的return还是except里的raise，finally都会在他们之前执行
+            await pipe.reset()
+            self._trans_pipe = None
 
 
 class RedisComponentBackend(ComponentBackend):
@@ -253,191 +400,29 @@ class RedisComponentBackend(ComponentBackend):
         logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
-    def transaction(self) -> 'RedisComponentTransaction':
+    def attach(self, db_trans: RedisTransaction) -> 'RedisComponentTransaction':
         return RedisComponentTransaction(
-            self._component_cls, self._conn_pool, self._key_prefix, self._idx_prefix)
+            self, db_trans, self._key_prefix, self._idx_prefix)
 
 
 class RedisComponentTransaction(ComponentTransaction):
-
-    # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
-    LUA_CHECK_UNIQUE_SCRIPT = """
-    local result_key = KEYS[1]
-    local sub = string.sub
-    local redis = redis
-
-    for i = 2, #KEYS, 1 do
-        local start = ARGV[i-1]
-        local stop = start
-        local by = 'BYSCORE'
-        if sub(start, 1, 1) == '[' then
-            start = start .. ':'
-            stop = start .. ';'
-            by = 'BYLEX'
-        end
-        local rows = redis.call('zrange', KEYS[i], start, stop, by, 'LIMIT', 0, 1)
-        if #rows > 0 then
-            redis.call('set', result_key, 0, 'PX', 100)
-            return 'FAIL'
-        end
-    end
-    redis.call('set', result_key, 1, 'PX', 100)
-    return 'OK'
-    """
-    # key: 1:是否执行的标记key, 2-n:不使用，仅供客户端判断hash slot用, args: stacked的命令
-    LUA_IF_RUN_STACK_SCRIPT = """
-    local result_key = KEYS[1]
-    local redis = redis
-    local tonumber = tonumber
-    local unpack = unpack
-    local gsub = string.gsub
-    
-    local unique_check_ok = redis.call('get',  result_key)
-    if tonumber(unique_check_ok) <= 0 then
-        return 'FAIL'
-    end
-
-    local cur = 1
-    local last_row_id = nil
-    while cur <= #ARGV do
-        local len = tonumber(ARGV[cur])
-        local cmds = {unpack(ARGV, cur+1, cur+len)}
-        cur = cur + len + 1
-        if cmds[1] == 'AUTO_INCR' then
-            local idx_key = cmds[2]
-            local ids = redis.call('zrange', idx_key, 0, 0, 'REV', 'WITHSCORES')
-            if #ids == 0 then 
-                last_row_id = 1
-            else
-                last_row_id = tonumber(ids[2]) + 1
-            end
-        elseif cmds[1] == 'END_INCR' then
-            last_row_id = nil
-        else
-            if last_row_id ~= nil then
-                local _
-                for i = 2, #cmds, 1 do
-                    cmds[i], _ = gsub(cmds[i], '{rowid}', last_row_id)
-                end
-            end
-            -- redis.log(2, table.concat(cmds, ','))
-            redis.call(unpack(cmds))
-        end
-    end
-    return 'OK'
-    """
-    lua_check_unique = None
-    lua_run_stack = None
-
     def __init__(
             self,
-            component_cls: type[BaseComponent],
-            conn_pool: RedisClientPool,
+            backend: RedisComponentBackend,
+            trans_conn: RedisTransaction,
             key_prefix: str,
             index_prefix: str
     ):
-        super().__init__(component_cls, conn_pool)
-        self._conn_pool = conn_pool  # 为了让代码提示知道类型是RedisBackendClientPool
+        super().__init__(backend, trans_conn)
+        self._trans_conn = trans_conn  # 为了让代码提示知道类型是RedisTransaction
 
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
-        self._trans_pipe = self._conn_pool.aio.pipeline()
-        # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
-        self._trans_pipe.watching = True
 
-        cls = self.__class__
-        if cls.lua_check_unique is None:
-            cls.lua_check_unique = self._conn_pool.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
-        if cls.lua_run_stack is None:
-            cls.lua_run_stack = self._conn_pool.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
-
-    async def end_transaction(self, discard) -> None:
-        # 并实现事务提交的操作，将_updates中的命令写入事务
-        if discard or len(self._updates) == 0:
-            await self._trans_pipe.reset()  # todo 做成只有del才reset，平日就是discard
-            self._trans_pipe = None
-            return
-
-        pipe = self._trans_pipe
-
-        # 准备对unique index进行最终检查，之前虽然检查过，但没有lock index，值可能变更
-        # 这里用lua在事务中检查，可以减少watch的key数量
-        lua_unique_keys = [self._key_prefix + 'unique_check_is_ok', ]
-        lua_unique_argv = []
-        for idx in self._component_cls.uniques_:
-            if idx == 'id':  # insert不需要检查id, update也不需要因为基类里会确认id一样
-                continue
-            for cmd, _, old_row, new_row in self._updates:
-                if (cmd == 'update' and old_row[idx] != new_row[idx]) or cmd == 'insert':
-                    lua_unique_keys.append(self._idx_prefix + idx)
-                    str_type = self._component_cls.indexes_[idx]
-                    if str_type:
-                        lua_unique_argv.append('[' + new_row[idx].item())
-                    else:
-                        lua_unique_argv.append(new_row[idx].item())
-
-        # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
-        lua_run_keys = [self._key_prefix + 'unique_check_is_ok', ]
-        lua_run_argv = []
-
-        def stack_cmd(*args):
-            if len(args) > 1:
-                lua_run_keys.append(args[1])
-            lua_run_argv.extend([len(args), ] + list(args))
-
-        for cmd, row_id, old_row, new_row in self._updates:
-            if cmd == 'delete':
-                row_key = self._key_prefix + str(row_id)
-                stack_cmd('del', row_key)
-                for idx_name, str_type in self._component_cls.indexes_.items():
-                    idx_key = self._idx_prefix + idx_name
-                    if str_type:
-                        stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
-                    else:
-                        stack_cmd('zrem', idx_key, row_id)
-            else:
-                # 插入/更新数据
-                if row_id is None:
-                    stack_cmd('AUTO_INCR', self._idx_prefix + 'id')
-                    row_id = '{rowid}'
-                row_key = self._key_prefix + str(row_id)
-                kvs = itertools.chain.from_iterable(zip(new_row.dtype.names, new_row.tolist()))
-                stack_cmd('hset', row_key, *kvs)
-                for idx_name, str_type in self._component_cls.indexes_.items():
-                    idx_key = self._idx_prefix + idx_name
-                    if str_type:
-                        if cmd == 'update':   # 删除老数据
-                            stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
-                        stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
-                    elif idx_name == 'id':
-                        stack_cmd('zadd', idx_key, row_id, row_id)
-                    else:
-                        stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
-                if row_id == '{rowid}':
-                    stack_cmd('hset', row_key, 'id', row_id)
-                    stack_cmd('END_INCR')
-
-        pipe.multi()
-        await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
-        await self.lua_run_stack(args=lua_run_argv, keys=lua_run_keys, client=pipe)
-
-        try:
-            result = await pipe.execute()
-            if result[-1] == 'FAIL':
-                raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
-        except redis.WatchError:
-            raise RaceCondition(f"watched key被其他事务修改")
-        else:
-            return
-        finally:
-            # 无论是else里的return还是except里的raise，finally都会在他们之前执行
-            await pipe.reset()  # todo pipe要复用
-            self._trans_pipe = None
-
-    async def _backend_get(self, row_id: int) -> None | np.record:
+    async def _db_get(self, row_id: int) -> None | np.record:
         # 获取行数据的操作
         key = self._key_prefix + str(row_id)
-        pipe = self._trans_pipe
+        pipe = self._trans_conn.pipe
 
         # 同时要让乐观锁锁定该行
         await pipe.watch(key)
@@ -448,7 +433,7 @@ class RedisComponentTransaction(ComponentTransaction):
         else:
             return None
 
-    async def _backend_query(
+    async def _db_query(
             self,
             index_name: str,
             left,
@@ -458,7 +443,7 @@ class RedisComponentTransaction(ComponentTransaction):
     ) -> list[int]:
         # 范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         idx_key = self._idx_prefix + index_name
-        pipe = self._trans_pipe
+        pipe = self._trans_conn.pipe
 
         if right is None:
             right = left
@@ -490,3 +475,81 @@ class RedisComponentTransaction(ComponentTransaction):
 
         # 未查询到数据时返回[]
         return list(map(int, row_ids))
+
+    def _trans_check_unique(self, old_row, new_row: np.record) -> None:
+        trans = self._trans_conn
+        component_cls = self._component_cls
+        idx_prefix = self._idx_prefix
+
+        for idx in component_cls.uniques_:
+            if idx == 'id':  # insert不需要检查id, update也不需要因为基类里会确认id一样
+                continue
+            if old_row is None or old_row[idx] != new_row[idx]:
+                key = idx_prefix + idx
+                str_type = component_cls.indexes_[idx]
+                if str_type:
+                    trans.stack_unique_check(key, '[' + new_row[idx].item())
+                else:
+                    trans.stack_unique_check(key, new_row[idx].item())
+
+    def _trans_insert(self, row: np.record) -> None:
+        trans = self._trans_conn
+        component_cls = self._component_cls
+        idx_prefix = self._idx_prefix
+
+        self._trans_check_unique(None, row)
+        # 开始自增id模式, 并用placeholder {rowid}替换id
+        trans.stack_cmd('AUTO_INCR', idx_prefix + 'id')
+        row_id = '{rowid}'
+        row_key = self._key_prefix + str(row_id)
+        # 设置row数据
+        kvs = itertools.chain.from_iterable(zip(row.dtype.names, row.tolist()))
+        trans.stack_cmd('hset', row_key, *kvs)
+        # 更新索引
+        for idx_name, str_type in component_cls.indexes_.items():
+            idx_key = idx_prefix + idx_name
+            if str_type:
+                trans.stack_cmd('zadd', idx_key, 0, f'{row[idx_name]}:{row_id}')
+            elif idx_name == 'id':
+                trans.stack_cmd('zadd', idx_key, row_id, row_id)
+            else:
+                trans.stack_cmd('zadd', idx_key, row[idx_name].item(), row_id)
+        # 结束自增id模式
+        trans.stack_cmd('hset', row_key, 'id', row_id)
+        trans.stack_cmd('END_INCR')
+
+    def _trans_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
+        trans = self._trans_conn
+        component_cls = self._component_cls
+        idx_prefix = self._idx_prefix
+
+        self._trans_check_unique(old_row, new_row)
+        # 更新row数据
+        row_key = self._key_prefix + str(row_id)
+        kvs = itertools.chain.from_iterable(zip(new_row.dtype.names, new_row.tolist()))
+        trans.stack_cmd('hset', row_key, *kvs)
+        # 更新索引
+        for idx_name, str_type in component_cls.indexes_.items():
+            idx_key = idx_prefix + idx_name
+            if str_type:
+                trans.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
+                trans.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
+            elif idx_name == 'id':
+                trans.stack_cmd('zadd', idx_key, row_id, row_id)
+            else:
+                trans.stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
+
+    def _trans_delete(self, row_id: int, old_row: np.record) -> None:
+        trans = self._trans_conn
+        component_cls = self._component_cls
+        idx_prefix = self._idx_prefix
+
+        row_key = self._key_prefix + str(row_id)
+        trans.stack_cmd('del', row_key)
+
+        for idx_name, str_type in component_cls.indexes_.items():
+            idx_key = idx_prefix + idx_name
+            if str_type:
+                trans.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
+            else:
+                trans.stack_cmd('zrem', idx_key, row_id)
