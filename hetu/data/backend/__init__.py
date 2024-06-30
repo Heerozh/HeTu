@@ -5,6 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-from .base import (ComponentBackend, DBClientPool, ComponentTransaction,
+from .base import (ComponentTable, Backend, ComponentTransaction,
                    RaceCondition, UniqueViolation)
-from .redis import RedisClientPool, RedisComponentBackend, RedisComponentTransaction
+from .redis import RedisBackend, RedisComponentTable, RedisComponentTransaction

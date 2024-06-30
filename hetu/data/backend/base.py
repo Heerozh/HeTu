@@ -5,14 +5,14 @@
 @email: heeroz@gmail.com
 
                       事务相关结构
-    ┌────────────────┐           ┌─────────────────┐
-    │  DBClientPool  ├──────────►│  DBTransaction  │
-    │数据库直连池（单件)│           │    事务模式连接    │
-    └────────────────┘           └─────────────────┘
+    ┌────────────────┐           ┌──────────────────┐
+    │    Backend     ├──────────►│BackendTransaction│
+    │数据库直连池（单件)│           │    事务模式连接     │
+    └────────────────┘           └──────────────────┘
             ▲                             ▲
             │初始化数据                     │ 写入数据
   ┌─────────┴──────────┐      ┌───────────┴────────────┐
-  │  ComponentBackend  │      │  ComponentTransaction  │
+  │   ComponentTable   │      │  ComponentTransaction  │
   │   件数据管理（单件)   │      │      组件相关事务操作     │
   └────────────────────┘      └────────────────────────┘
 
@@ -48,7 +48,7 @@ class UniqueViolation(IndexError):
     pass
 
 
-class DBClientPool:
+class Backend:
     """
     存放数据库连接的池，并负责开始事务。
     继承此类，完善所有NotImplementedError的方法。
@@ -61,15 +61,15 @@ class DBClientPool:
     async def close(self):
         raise NotImplementedError
 
-    def transaction(self, cluster_id: int) -> 'DBTransaction':
+    def transaction(self, cluster_id: int) -> 'BackendTransaction':
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
 
-class DBTransaction:
+class BackendTransaction:
     """数据库事务类，负责开始事务，并提交事务"""
-    def __init__(self, conn_pool: DBClientPool, cluster_id: int):
-        self._conn_pool = conn_pool
+    def __init__(self, backend: Backend, cluster_id: int):
+        self._backend = backend
         self._cluster_id = cluster_id
 
     @property
@@ -90,7 +90,7 @@ class DBTransaction:
         await self.end_transaction(discard=False)
 
 
-class ComponentBackend:
+class ComponentTable:
     """
     Component后端主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
     继承此类，完善所有NotImplementedError的方法。
@@ -99,11 +99,11 @@ class ComponentBackend:
             self, component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
-            conn_pool: DBClientPool
+            backend: Backend
     ):
         self._component_cls = component_cls
         self._instance_name = instance_name
-        self._conn_pool = conn_pool
+        self._backend = backend
         self._cluster_id = cluster_id
 
     @property
@@ -114,7 +114,7 @@ class ComponentBackend:
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
-    def attach(self, db_trans: DBTransaction) -> 'ComponentTransaction':
+    def attach(self, db_trans: BackendTransaction) -> 'ComponentTransaction':
         """进入Component的事务模式，返回事务操作类"""
         # 继承，并执行：
         # return YourComponentTransaction(self._component_cls, self.db_trans)
@@ -127,10 +127,10 @@ class ComponentTransaction:
     继承此类，完善所有NotImplementedError的方法。
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
-    def __init__(self, backend: ComponentBackend, trans_conn: DBTransaction):
-        assert trans_conn.cluster_id == backend.cluster_id, \
+    def __init__(self, tbl: ComponentTable, trans_conn: BackendTransaction):
+        assert trans_conn.cluster_id == tbl.cluster_id, \
             "事务只能在对应的cluster_id中执行，不能跨cluster"
-        self._component_cls = backend.component_cls  # type: type[BaseComponent]
+        self._component_cls = tbl.component_cls  # type: type[BaseComponent]
         self._trans_conn = trans_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
 
@@ -416,15 +416,15 @@ class ComponentBackendPool(metaclass=Singleton):
             component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
-            conn_pool: DBClientPool
+            conn_pool: Backend
     ):
         assert component_cls not in self.backends, f"{component_cls.component_name_} Backend已经存在"
-        self.backends[component_cls] = ComponentBackend(
+        self.backends[component_cls] = ComponentTable(
             component_cls, instance_name, cluster_id, conn_pool)
         # self.publishers[component_cls] = ComponentPublisher(
         #     component_cls, instance_name, cluster_id, self.backends[component_cls])
 
-    def backend(self, item: type[BaseComponent]) -> ComponentBackend:
+    def backend(self, item: type[BaseComponent]) -> ComponentTable:
         return self.backends[item]
 
     # def publisher(self, item: type[BaseComponent]) -> ComponentPublisher:
