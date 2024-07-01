@@ -425,6 +425,71 @@ class RedisComponentTable(ComponentTable):
         logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
+    @classmethod
+    def make_query_cmd(
+            cls, component_cls, index_name: str, left, right, limit, desc
+    ) -> dict[str, str] | list[int]:
+        """生成数据库查询命令，在direct_query和_db_query中复用此类。"""
+        if right is None:
+            right = left
+            if index_name == 'id':
+                return [int(left)]
+        if desc:
+            left, right = right, left
+
+        # 对于str类型查询，要用[开始
+        str_type = component_cls.indexes_[index_name]
+        by_lex = False
+        if str_type:
+            assert type(left) is str and type(right) is str, \
+                f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
+            if not left.startswith(('(', '[')):
+                left = f'[{left}'
+            if not right.startswith(('(', '[')):
+                right = f'[{right}'
+
+            if not left.endswith((':', ';')):
+                left = f'{left}:'  # name:id 形式，所以:作为结尾标识符
+            if not right.endswith((':', ';')):
+                right = f'{right};'  # ';' = 3B, ':' = 3A
+
+            by_lex = True
+
+        return {'start': left, 'end': right, 'desc': desc, 'offset': 0,
+                'num': limit, 'bylex': by_lex, 'byscore': not by_lex}
+
+    async def direct_query(
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False
+    ) -> np.recarray:
+        idx_key = self._idx_prefix + index_name
+
+        cmds = RedisComponentTable.make_query_cmd(
+            self._component_cls, index_name, left, right, limit, desc)
+
+        row_ids = []
+        if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
+            row_ids = cmds
+        else:
+            row_ids = await self._backend.aio.zrange(name=idx_key, **cmds)
+            str_type = self._component_cls.indexes_[index_name]
+            if str_type:
+                row_ids = [vk.split(':')[-1] for vk in row_ids]
+
+        rows = []
+        for _id in row_ids:
+            row = await self._backend.aio.hgetall(self._key_prefix + str(_id))
+            rows.append(self._component_cls.dict_to_row(row))
+
+        if len(rows) == 0:
+            return np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))
+        else:
+            return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
+
     def attach(self, backend_trans: RedisTransaction) -> 'RedisComponentTransaction':
         return RedisComponentTransaction(
             self, backend_trans, self._key_prefix, self._idx_prefix)
@@ -469,31 +534,15 @@ class RedisComponentTransaction(ComponentTransaction):
         idx_key = self._idx_prefix + index_name
         pipe = self._trans_conn.pipe
 
-        if right is None:
-            right = left
-        if desc:
-            left, right = right, left
+        cmds = RedisComponentTable.make_query_cmd(
+            self._component_cls, index_name, left, right, limit, desc)
 
-        # 对于str类型查询，要用[开始
+        if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
+            return cmds
+
+        row_ids = await pipe.zrange(name=idx_key, **cmds)
+
         str_type = self._component_cls.indexes_[index_name]
-        by_lex = False
-        if str_type:
-            assert type(left) is str and type(right) is str, \
-                f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
-            if not left.startswith(('(', '[')):
-                left = f'[{left}'
-            if not right.startswith(('(', '[')):
-                right = f'[{right}'
-
-            if left == right:  # 如果是精确查询
-                left = f'{left}:'  # name:id 形式，所以:作为结尾标识符
-                right = f'{right};'  # ';' = 3B, ':' = 3A
-
-            by_lex = True
-
-        row_ids = await pipe.zrange(idx_key, left, right, desc=desc, offset=0, num=limit,
-                                    byscore=not by_lex, bylex=by_lex)
-
         if str_type:
             row_ids = [vk.split(':')[-1] for vk in row_ids]
 

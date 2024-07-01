@@ -118,8 +118,14 @@ class ComponentTable:
         """如果非持久化组件，则允许调用flush主动清空数据"""
         raise NotImplementedError
 
-    async def direct_select(self, value, where: str = 'id') -> None | np.record:
-        """直接获取数据库的值，而不通过事务。注意，获取的值可能被其他进程变动。"""
+    async def direct_query(
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False) -> np.recarray:
+        """直接获取数据库的值，而不通过事务，一般用在维护时。注意，获取的值可能被其他进程变动，不可在System中使用。"""
         raise NotImplementedError
 
     def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':

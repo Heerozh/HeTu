@@ -159,6 +159,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await tbl.select('Item1', 'name')).name, 'Item1')
             self.assertIsNot(type(await tbl.select('Item1', 'name')), np.recarray)
 
+        np.testing.assert_array_equal(
+            (await item_data.direct_query('id', -np.inf, +np.inf)).id,
+            [1, 2, 3])
+
         # 测试插入Unique重复数据
         async with backend.transaction(1) as trans:
             tbl = item_data.attach(trans)
@@ -203,9 +207,16 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual((await tbl.query('name', 11)).shape[0], 0)
             self.assertEqual((await tbl.query('name', '11')).shape[0], 0)
             self.assertEqual((await tbl.query('name', "Item11")).time, 11)
+            np.testing.assert_array_equal(
+                (await tbl.query('name', 'Item11', 'Item12')).time,
+                [11, 12])
             # query one row
             self.assertEqual((await tbl.query('time', 11)).name, ['Item11'])
             self.assertEqual(len((await tbl.query('time', 11)).name), 1)
+
+        np.testing.assert_array_equal(
+            (await item_data.direct_query('name', 'Item11', 'Item12')).time,
+            [11, 12])
 
         # update
         async with backend.transaction(1) as trans:
