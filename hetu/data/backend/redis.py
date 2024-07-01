@@ -151,13 +151,13 @@ class RedisTransaction(BackendTransaction):
         self._checks = {}  # 事务中的unique检查，key为unique索引名，value为值
         self._updates = []  # 事务中的更新操作
 
-        self._trans_pipe = backend.aio.pipeline()
+        self._trx_pipe = backend.aio.pipeline()
         # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
-        self._trans_pipe.watching = True
+        self._trx_pipe.watching = True
 
     @property
     def pipe(self):
-        return self._trans_pipe
+        return self._trx_pipe
 
     def stack_unique_check(self, index_key: str, value: int | float | str) -> None:
         """加入需要在end_transaction时进行unique检查的index和value"""
@@ -170,15 +170,15 @@ class RedisTransaction(BackendTransaction):
         self._updates.extend([len(args), ] + list(args))
 
     async def end_transaction(self, discard) -> list[int] | None:
-        if self._trans_pipe is None:
+        if self._trx_pipe is None:
             return
         # 并实现事务提交的操作，将_updates中的命令写入事务
         if discard or len(self._updates) == 0:
-            await self._trans_pipe.reset()
-            self._trans_pipe = None
+            await self._trx_pipe.reset()
+            self._trx_pipe = None
             return
 
-        pipe = self._trans_pipe
+        pipe = self._trx_pipe
 
         # 准备对unique index进行最终检查，之前虽然检查过，但没有lock index，值可能变更
         # 这里用lua在事务中检查，可以减少watch的key数量
@@ -209,7 +209,7 @@ class RedisTransaction(BackendTransaction):
         finally:
             # 无论是else里的return还是except里的raise，finally都会在他们之前执行
             await pipe.reset()
-            self._trans_pipe = None
+            self._trx_pipe = None
 
 
 class RedisComponentTable(ComponentTable):
@@ -244,7 +244,7 @@ class RedisComponentTable(ComponentTable):
         self._idx_prefix = f'{self._root_prefix}{hash_tag}index:'
         self._lock_key = f'{self._root_prefix}init_lock'
         self._meta_key = f'{self._root_prefix}meta'
-        self._trans_pipe = None
+        self._trx_pipe = None
         self._autoinc = None
         # 检测meta信息，然后做对应处理
         self.check_meta()
@@ -490,21 +490,21 @@ class RedisComponentTable(ComponentTable):
         else:
             return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
-    def attach(self, backend_trans: RedisTransaction) -> 'RedisComponentTransaction':
+    def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         return RedisComponentTransaction(
-            self, backend_trans, self._key_prefix, self._idx_prefix)
+            self, backend_trx, self._key_prefix, self._idx_prefix)
 
 
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
             self,
             comp_tbl: RedisComponentTable,
-            trans_conn: RedisTransaction,
+            trx_conn: RedisTransaction,
             key_prefix: str,
             index_prefix: str
     ):
-        super().__init__(comp_tbl, trans_conn)
-        self._trans_conn = trans_conn  # 为了让代码提示知道类型是RedisTransaction
+        super().__init__(comp_tbl, trx_conn)
+        self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisTransaction
 
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
@@ -512,7 +512,7 @@ class RedisComponentTransaction(ComponentTransaction):
     async def _db_get(self, row_id: int) -> None | np.record:
         # 获取行数据的操作
         key = self._key_prefix + str(row_id)
-        pipe = self._trans_conn.pipe
+        pipe = self._trx_conn.pipe
 
         # 同时要让乐观锁锁定该行
         await pipe.watch(key)
@@ -532,7 +532,7 @@ class RedisComponentTransaction(ComponentTransaction):
             desc=False
     ) -> list[int]:
         idx_key = self._idx_prefix + index_name
-        pipe = self._trans_conn.pipe
+        pipe = self._trx_conn.pipe
 
         cmds = RedisComponentTable.make_query_cmd(
             self._component_cls, index_name, left, right, limit, desc)
@@ -549,8 +549,8 @@ class RedisComponentTransaction(ComponentTransaction):
         # 未查询到数据时返回[]
         return list(map(int, row_ids))
 
-    def _trans_check_unique(self, old_row, new_row: np.record) -> None:
-        trans = self._trans_conn
+    def _trx_check_unique(self, old_row, new_row: np.record) -> None:
+        trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix
 
@@ -561,68 +561,68 @@ class RedisComponentTransaction(ComponentTransaction):
                 key = idx_prefix + idx
                 str_type = component_cls.indexes_[idx]
                 if str_type:
-                    trans.stack_unique_check(key, '[' + new_row[idx].item())
+                    trx.stack_unique_check(key, '[' + new_row[idx].item())
                 else:
-                    trans.stack_unique_check(key, new_row[idx].item())
+                    trx.stack_unique_check(key, new_row[idx].item())
 
-    def _trans_insert(self, row: np.record) -> None:
-        trans = self._trans_conn
+    def _trx_insert(self, row: np.record) -> None:
+        trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix
 
-        self._trans_check_unique(None, row)
+        self._trx_check_unique(None, row)
         # 开始自增id模式, 并用placeholder {rowid}替换id
-        trans.stack_cmd('AUTO_INCR', idx_prefix + 'id')
+        trx.stack_cmd('AUTO_INCR', idx_prefix + 'id')
         row_id = '{rowid}'
         row_key = self._key_prefix + str(row_id)
         # 设置row数据
         kvs = itertools.chain.from_iterable(zip(row.dtype.names, row.tolist()))
-        trans.stack_cmd('hset', row_key, *kvs)
+        trx.stack_cmd('hset', row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
             idx_key = idx_prefix + idx_name
             if str_type:
-                trans.stack_cmd('zadd', idx_key, 0, f'{row[idx_name]}:{row_id}')
+                trx.stack_cmd('zadd', idx_key, 0, f'{row[idx_name]}:{row_id}')
             elif idx_name == 'id':
-                trans.stack_cmd('zadd', idx_key, row_id, row_id)
+                trx.stack_cmd('zadd', idx_key, row_id, row_id)
             else:
-                trans.stack_cmd('zadd', idx_key, row[idx_name].item(), row_id)
+                trx.stack_cmd('zadd', idx_key, row[idx_name].item(), row_id)
         # 结束自增id模式
-        trans.stack_cmd('hset', row_key, 'id', row_id)
-        trans.stack_cmd('END_INCR')
+        trx.stack_cmd('hset', row_key, 'id', row_id)
+        trx.stack_cmd('END_INCR')
 
-    def _trans_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
-        trans = self._trans_conn
+    def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
+        trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix
 
-        self._trans_check_unique(old_row, new_row)
+        self._trx_check_unique(old_row, new_row)
         # 更新row数据
         row_key = self._key_prefix + str(row_id)
         kvs = itertools.chain.from_iterable(zip(new_row.dtype.names, new_row.tolist()))
-        trans.stack_cmd('hset', row_key, *kvs)
+        trx.stack_cmd('hset', row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
             idx_key = idx_prefix + idx_name
             if str_type:
-                trans.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
-                trans.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
+                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
+                trx.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
             elif idx_name == 'id':
-                trans.stack_cmd('zadd', idx_key, row_id, row_id)
+                trx.stack_cmd('zadd', idx_key, row_id, row_id)
             else:
-                trans.stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
+                trx.stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
 
-    def _trans_delete(self, row_id: int, old_row: np.record) -> None:
-        trans = self._trans_conn
+    def _trx_delete(self, row_id: int, old_row: np.record) -> None:
+        trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix
 
         row_key = self._key_prefix + str(row_id)
-        trans.stack_cmd('del', row_key)
+        trx.stack_cmd('del', row_key)
 
         for idx_name, str_type in component_cls.indexes_.items():
             idx_key = idx_prefix + idx_name
             if str_type:
-                trans.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
+                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
             else:
-                trans.stack_cmd('zrem', idx_key, row_id)
+                trx.stack_cmd('zrem', idx_key, row_id)
