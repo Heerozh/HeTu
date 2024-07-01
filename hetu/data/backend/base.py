@@ -157,6 +157,10 @@ class ComponentTransaction:
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
 
+    @property
+    def attached(self) -> BackendTransaction:
+        return self._trx_conn
+
     async def _db_get(self, row_id: int) -> None | np.record:
         # 继承，并实现获取行数据的操作，返回值要通过dict_to_row包裹下
         # 如果不存在该行数据，返回None
@@ -235,6 +239,13 @@ class ComponentTransaction:
         查询`index_name`在`left`和`right`之间的数据，限制`limit`条，是否降序`desc`。
         如果right为None，则查询等于left的数据。
         返回Numpy.Array[row]，如果没有查询到数据，返回空Numpy.Array。
+
+        如何多条件查询？
+        请利用python的特性，举例：
+        items = ctx[Item].query('owner', ctx.caller, limit=100)  # 先在数据库上筛选出最少量的数据
+        swords = items[items.model == 'sword']                   # 然后本地二次筛选
+        或者:
+        few_items = items[items.amount < 10]
         """
         assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
         assert index_name in self._component_cls.indexes_, \
@@ -288,6 +299,11 @@ class ComponentTransaction:
         return found, found and int(row_ids[0]) or None
 
     async def select_or_create(self, value, where: str = None) -> np.record:
+        """
+        同:func:`~hetu.data.ComponentTransaction.select`，
+        只是如果没有查询到值时，会执行:func:`~hetu.data.ComponentTransaction.insert`。
+        注意，返回值的`id`可能为0，因为insert在事务执行前是无法获得row id的，具体参见`insert`。
+        """
         uniques = self._component_cls.uniques_ - {'id', where}
         assert len(uniques) == 0, "有多个Unique属性的Component不能使用select_or_create"
 
@@ -347,7 +363,17 @@ class ComponentTransaction:
             await self.update(id_, rows[i])
 
     async def insert(self, row) -> None:
-        """插入单行数据"""
+        """
+        插入单行数据。
+        如果想获得插入后的row id，只能在事务结束后获得。
+        可在System最后一行调用end_transaction获得，如下：
+        @define_system(...)
+        async some_system(ctx, ...):
+            ctx[Table].insert(...)
+            inserted_ids = await ctx.trx.end_transaction(discard=False)
+            return ...
+        注意：调用完end_transaction必须return结束System，否则操作未定义
+        """
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
 

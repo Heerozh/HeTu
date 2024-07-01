@@ -161,21 +161,23 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         ctx[Position].update(entity_self, pos_self)
         items = ctx[Inventory].query("owner", entity_self)
         ...
-        return True
+        return "return value"
 
     函数部分：
-    `async`: 函数如果有异步操作，必须是异步函数。比如数据库操作(components)。
-    `ctx`: 上下文，内容有：
-        `ctx.caller`: 调用者id，由你在登录System中调用`elevate`函数赋值，None表示未登录用户
-        `ctx.retry_count`: 当前已重试次数，0表示首次调用。
-        `ctx[Component Class]`: 获取引用的Component实例，如`ctx[Position]`。
-        `ctx.inherited['SystemName']`: 获取继承的System函数，如`ctx.inherited['move']`。
+        `async`: System如果引用了Components，则必须是异步函数。
+        参数:
+            `ctx`: 上下文，内容有：
+                `ctx.caller`: 调用者id，由你在登录System中调用`elevate`函数赋值，None表示未登录用户
+                `ctx.retry_count`: 当前已重试次数，0表示首次调用。
+                `ctx[Component Class]`: 获取引用的Component实例，如`ctx[Position]`。
+                `ctx.inherited['SystemName']`: 获取继承的System函数，如`ctx.inherited['move']`。
+                `await ctx.end_transaction(discard=False)`: 提前结束事务，调用完必须`return`结束System，
+                    否则结果未定义。
+            其他参数为客户端调用时传入的参数。
+        返回值:
+            返回值会传给客户端，或者传给其他调用方
 
-    其他参数为客户端调用时传入的参数。
-
-    返回值为 bool, message：bool表示是否执行事务，False表示放弃事务。message为返回给客户端的消息，可以省略。
-
-    Component实列：
+    Component事务实列：
     由`ctx[Component Class]`返回的实例，类型为ComponentTransaction，可以进行数据库操作，并自动包装为事务，
     在System结束后执行（如果返回值为True的话）。具体操作参考ComponentTransaction的文档。
 
