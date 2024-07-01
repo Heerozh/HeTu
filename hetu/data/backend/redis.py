@@ -471,7 +471,6 @@ class RedisComponentTable(ComponentTable):
         cmds = RedisComponentTable.make_query_cmd(
             self._component_cls, index_name, left, right, limit, desc)
 
-        row_ids = []
         if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
             row_ids = cmds
         else:
