@@ -1,7 +1,8 @@
-from component import BaseComponent
-from ..system import SystemClusters
-from backend.base import Backend, ComponentTable
-from ..common import Singleton
+from hetu.data.component import BaseComponent
+from hetu.data.backend.base import Backend, ComponentTable
+from hetu.common import Singleton
+from hetu.system import SystemClusters
+from typing import ItemsView
 
 
 class ComponentTableManager(metaclass=Singleton):
@@ -34,3 +35,6 @@ class ComponentTableManager(metaclass=Singleton):
 
     def get_table(self, component_cls: type[BaseComponent]) -> ComponentTable | None:
         return self.tables.get(component_cls)
+
+    def items(self) -> ItemsView[type[BaseComponent], ComponentTable]:
+        return self.tables.items()
