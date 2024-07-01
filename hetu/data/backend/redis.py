@@ -97,6 +97,7 @@ class RedisTransaction(BackendTransaction):
     local tonumber = tonumber
     local unpack = unpack
     local gsub = string.gsub
+    local insert = table.insert
 
     local unique_check_ok = redis.call('get',  result_key)
     if tonumber(unique_check_ok) <= 0 then
@@ -105,6 +106,7 @@ class RedisTransaction(BackendTransaction):
 
     local cur = 1
     local last_row_id = nil
+    local rtn = {}
     while cur <= #ARGV do
         local len = tonumber(ARGV[cur])
         local cmds = {unpack(ARGV, cur+1, cur+len)}
@@ -117,6 +119,7 @@ class RedisTransaction(BackendTransaction):
             else
                 last_row_id = tonumber(ids[2]) + 1
             end
+            insert(rtn, last_row_id)
         elseif cmds[1] == 'END_INCR' then
             last_row_id = nil
         else
@@ -130,7 +133,7 @@ class RedisTransaction(BackendTransaction):
             redis.call(unpack(cmds))
         end
     end
-    return 'OK'
+    return rtn
     """
     lua_check_unique = None
     lua_run_stack = None
@@ -166,7 +169,9 @@ class RedisTransaction(BackendTransaction):
     def stack_cmd(self, *args):
         self._updates.extend([len(args), ] + list(args))
 
-    async def end_transaction(self, discard) -> None:
+    async def end_transaction(self, discard) -> list[int] | None:
+        if self._trans_pipe is None:
+            return
         # 并实现事务提交的操作，将_updates中的命令写入事务
         if discard or len(self._updates) == 0:
             await self._trans_pipe.reset()
@@ -196,10 +201,11 @@ class RedisTransaction(BackendTransaction):
             result = await pipe.execute()
             if result[-1] == 'FAIL':
                 raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
+            result = result[-1]
         except redis.WatchError:
             raise RaceCondition(f"watched key被其他事务修改")
         else:
-            return
+            return result
         finally:
             # 无论是else里的return还是except里的raise，finally都会在他们之前执行
             await pipe.reset()
