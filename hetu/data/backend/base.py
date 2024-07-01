@@ -36,7 +36,6 @@
   └────────────────────┘
 """
 import numpy as np
-from ...common import Singleton
 from ..component import BaseComponent
 
 

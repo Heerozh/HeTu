@@ -12,10 +12,3 @@ from .component import (
     Permission,
     ComponentDefines,
 )
-
-from .backend import (
-    ComponentTable, ComponentTransaction, Backend,
-    RaceCondition, UniqueViolation,
-    RedisBackend, RedisComponentTable, RedisComponentTransaction,
-)
-
