@@ -104,6 +104,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row = SingleUnique.new_row()
             self.assertIsNot(type(row), np.ndarray)
             await tbl.insert(row)
+            row_ids = await trans.end_transaction(False)
+        self.assertEqual(row_ids, [1])
 
         async with backend.transaction(1) as trans:
             tbl = singular_unique.attach(trans)
@@ -117,6 +119,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(row.name, 'test')
             row = await tbl.select_or_create('', 'name')
             self.assertEqual(row.id, 1)
+            row_ids = await trans.end_transaction(False)
+        self.assertEqual(row_ids, [2])
 
         async with backend.transaction(1) as trans:
             tbl = singular_unique.attach(trans)
@@ -143,6 +147,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row.owner = 2
             row.time = 3
             await tbl.insert(row)
+            row_ids = await trans.end_transaction(False)
+        self.assertEqual(row_ids, [1,2,3])
 
         async with backend.transaction(1) as trans:
             tbl = item_data.attach(trans)

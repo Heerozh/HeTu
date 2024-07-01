@@ -76,8 +76,8 @@ class BackendTransaction:
     def cluster_id(self):
         return self._cluster_id
 
-    async def end_transaction(self, discard: bool) -> None:
-        """事务结束，提交或放弃事务"""
+    async def end_transaction(self, discard: bool) -> list[int] | None:
+        """事务结束，提交或放弃事务。返回insert的row.id列表，按调用顺序"""
         # 继承，并实现事务提交的操作，将stacked的命令写入事务
         # stacked的命令由你继承的_trans_insert等方法负责写入
         # 如果你用乐观锁，要考虑清楚何时检查
@@ -116,6 +116,10 @@ class ComponentTable:
 
     def flush(self):
         """如果非持久化组件，则允许调用flush主动清空数据"""
+        raise NotImplementedError
+
+    async def direct_select(self, value, where: str = 'id') -> None | np.record:
+        """直接获取数据库的值，而不通过事务。注意，获取的值可能被其他进程变动。"""
         raise NotImplementedError
 
     def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':
