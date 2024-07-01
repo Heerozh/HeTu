@@ -151,7 +151,7 @@ class ComponentDefines(metaclass=Singleton):
 
 def define_component(_cls=None,  /, *, namespace: str = "default", force: bool = False,
                      permission=Permission.USER, persist=True, readonly=False,
-                     backend: str = 'Redis'):
+                     backend: str = 'default'):
     """
     定义组件（表）的数据结构
     格式：
@@ -164,7 +164,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
     :param namespace: 是你的项目名，一个网络地址只能启动一个namespace。
     :param persist: 表示是否持久化，设为False时，允许主动调用flush()清空数据
     :param readonly: 是否只读Component，只读Component不会被加事务保护，增加并行性。
-    :param backend: 指定Component后端，对应配置文件中的db_name。默认为Redis
+    :param backend: 指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
     :param permission: 设置读取权限，只对游戏客户端的读取查询调用起作用。
         - everybody: 任何客户端都可以读，适合读一些服务器状态类的数据，如在线人数
         - user: 已登录客户端都可以读
@@ -217,6 +217,8 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                                   f"{type(prop.default).__name__}({prop.default})"
                                   f"和属性dtype({prop.dtype})不匹配")
                 properties[name] = prop
+            else:
+                raise AssertionError(f"{cls.__name__}.{name}不是Property类型")
             delattr(cls, name)
 
         assert properties, f"{cls.__name__}至少要有1个Property成员"
