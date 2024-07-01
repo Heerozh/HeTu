@@ -99,37 +99,37 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         singular_unique = table_cls(SingleUnique, 'test', 1, backend)
 
         # 测试insert是否正确
-        async with backend.transaction(1) as trans:
-            tbl = singular_unique.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = singular_unique.attach(trx)
             row = SingleUnique.new_row()
             self.assertIsNot(type(row), np.ndarray)
             await tbl.insert(row)
-            row_ids = await trans.end_transaction(False)
+            row_ids = await trx.end_transaction(False)
         self.assertEqual(row_ids, [1])
 
-        async with backend.transaction(1) as trans:
-            tbl = singular_unique.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = singular_unique.attach(trx)
             result = await tbl.query('id', 0, 2)
             self.assertIs(type(result), np.recarray)
 
         # 测试可用select_or_create
-        async with backend.transaction(1) as trans:
-            tbl = singular_unique.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = singular_unique.attach(trx)
             row = await tbl.select_or_create('test', 'name')
             self.assertEqual(row.name, 'test')
             row = await tbl.select_or_create('', 'name')
             self.assertEqual(row.id, 1)
-            row_ids = await trans.end_transaction(False)
+            row_ids = await trx.end_transaction(False)
         self.assertEqual(row_ids, [2])
 
-        async with backend.transaction(1) as trans:
-            tbl = singular_unique.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = singular_unique.attach(trx)
             result = await tbl.query('name', 'test')
             self.assertEqual(result.id[0], 2)
 
         # 测试插入数据
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = Item.new_row()
             row.name = 'Item1'
             row.owner = 1
@@ -147,11 +147,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row.owner = 2
             row.time = 3
             await tbl.insert(row)
-            row_ids = await trans.end_transaction(False)
+            row_ids = await trx.end_transaction(False)
         self.assertEqual(row_ids, [1,2,3])
 
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             result = await tbl.query('id', -np.inf, +np.inf)
             np.testing.assert_array_equal(result.id, [1, 2, 3])
             self.assertEqual((await tbl.select(1)).name, 'Item1')
@@ -164,8 +164,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             [1, 2, 3])
 
         # 测试插入Unique重复数据
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row.id = 0
             row.name = 'Item2'
             row.owner = 2
@@ -182,8 +182,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await tbl.select_or_create(1, 'owner')
 
         # 先插入25条数据
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             for i in range(25):
                 row.id = 0
                 row.name = f'Item{i + 10}'
@@ -192,8 +192,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await tbl.insert(row)
 
         # 测试query
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             np.testing.assert_array_equal(
                 (await tbl.query('time', 10, 15)).time, range(10, 16))
             np.testing.assert_array_equal(
@@ -219,8 +219,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             [11, 12])
 
         # update
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = (await tbl.query('owner', 10))[0]
             old_name = row.name
             self.assertEqual((await tbl.select(old_name, where='name')).name, old_name)
@@ -230,8 +230,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             # 测试能否命中cache
             row = await tbl.select(row.id)
             self.assertEqual(row.name, 'updated')
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = await tbl.select(row.id)  # 测试用numpy type进行select是否报错
             self.assertEqual(row.name, 'updated')
             self.assertEqual((await tbl.query('owner', row.owner, limit=30)).shape[0], 1)
@@ -241,89 +241,89 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await tbl.select('updated', where='name')).name, 'updated')
             self.assertEqual(await tbl.select(old_name, where='name'), None)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 28)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = await tbl.select(5)
             row.used = True
             await tbl.update(row.id, row)
             row = await tbl.select(7)
             row.used = True
             await tbl.update(row.id, row)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             self.assertEqual(set((await tbl.query('used', True)).id), {5, 7})
             self.assertEqual((await tbl.select('Item11', where='name')).id, 5)
             self.assertEqual((await tbl.select('Item13', where='name')).id, 7)
             np.testing.assert_array_equal((await tbl.query('id', 5, 7, limit=999)).id, [5, 6, 7])
 
         # delete
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             await tbl.delete(5)
             await tbl.delete(7)
             # 测试能否命中cache
             row = await tbl.select(5)
             self.assertIs(row, None)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 26)
             self.assertEqual(await tbl.select('Item11', where='name'), None)
             self.assertEqual(await tbl.select('Item13', where='name'), None)
             self.assertEqual((await tbl.query('used', True)).shape[0], 0)
 
         # 测试插入的字符串超出长度是否截断
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = Item.new_row()
             row.name = "reinsert2"  # 超出U8长度会被截断
             await tbl.insert(row)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             self.assertIsNot(await tbl.select('reinsert', 'name'), None,
                              "超出U8长度应该要被截断，这里没索引出来说明没截断")
             self.assertEqual((await tbl.select('reinsert', 'name')).id, 29)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 27)
         # 测试添加再删除
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             for i in range(30):
                 row.time = row.id + 100
                 row.id = 0
                 row.name = f're{i}'
                 await tbl.insert(row)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             for i in range(30):
                 await tbl.delete(59 - i)  # 再删掉
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             np.testing.assert_array_equal((await tbl.query('id', 6, 9, limit=999)).id, [6, 8, 9])
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 27)
 
         # 测试保存后再读回来
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             await tbl.delete(1)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             size = len(await tbl.query('id', -np.inf, +np.inf, limit=999))
         # 重新初始化table和连接后再试
         await backend.close()
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
         await backend.close()
 
         # 测试更新name后再把所有key删除后index是否正常为空
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = await tbl.select(2)
             row.name = f'TST{row.id}'
             await tbl.update(row.id, row)
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             rows = await tbl.query('id', -np.inf, +np.inf, limit=999)
             for row in rows:
                 await tbl.delete(row.id)
@@ -340,8 +340,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         item_data = table_cls(Item, 'test', 1, backend)
 
         # 测试query时，另一个del和update的竞态
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             row = Item.new_row()
             row.owner = 65535
             row.name = 'Self'
@@ -357,39 +357,39 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await tbl.insert(row)
 
         # 重写item_data1的query，延迟2秒
-        def mock_slow_query(_trans: ComponentTransaction):
-            org_query = _trans._db_query
+        def mock_slow_query(_trx: ComponentTransaction):
+            org_query = _trx._db_query
 
             async def mock_query(*args, **kwargs):
                 rtn = await org_query(*args, **kwargs)
                 await asyncio.sleep(1)
                 return rtn
 
-            _trans._db_query = mock_query
+            _trx._db_query = mock_query
 
         async def query_owner(value):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 mock_slow_query(_tbl)
                 rows = await _tbl.query('owner', value)
                 print(rows)
 
         async def select_owner(value):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 mock_slow_query(_tbl)
                 rows = await _tbl.select(value, 'owner')
                 print(rows)
 
         async def del_row(name):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 _row = await _tbl.select(name, 'name')
                 await _tbl.delete(_row.id)
 
         async def update_owner(name):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 _row = await _tbl.select(name, 'name')
                 _row.owner = 999
                 await _tbl.update(_row.id, _row)
@@ -424,8 +424,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 测试事务提交时unique的RaceCondition, 在end前sleep即可测试
         async def insert_and_sleep(db, uni_val, sleep):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 _row = Item.new_row()
                 _row.owner = 874233
                 _row.name = str(uni_val)
@@ -447,8 +447,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 测试事务提交时的watch的RaceCondition
         async def update_and_sleep(db, sleep):
-            async with backend.transaction(1) as _trans:
-                _tbl = item_data.attach(_trans)
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
                 _row = await _tbl.select('111111', 'name')
                 _row.time = 874233
                 await _tbl.update(_row.id, _row)
@@ -476,8 +476,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
 
-        async with backend.transaction(1) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
             for i in range(25):
                 row = Item.new_row()
                 row.id = 0
@@ -510,11 +510,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         item_data = table_cls(renamed_new_item_cls, 'test', 2, backend)
         # 检测跨cluster报错
         with self.assertRaisesRegex(AssertionError, "cluster"):
-            async with backend.transaction(1) as trans:
-                item_data.attach(trans)
+            async with backend.transaction(1) as trx:
+                item_data.attach(trx)
 
-        async with backend.transaction(2) as trans:
-            tbl = item_data.attach(trans)
+        async with backend.transaction(2) as trx:
+            tbl = item_data.attach(trx)
             self.assertEqual((await tbl.select(111, where='time')).name, 'Itm11a')
             self.assertEqual((await tbl.select(111, where='time')).qty_new, 111)
 
@@ -532,21 +532,21 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             data: np.int64 = Property(0, unique=True)
         temp_data = table_cls(TempData, 'test', 1, backend)
 
-        async with backend.transaction(1) as trans:
-            tbl = temp_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = temp_data.attach(trx)
             for i in range(25):
                 row = TempData.new_row()
                 row.data = i
                 await tbl.insert(row)
-        async with backend.transaction(1) as trans:
-            tbl = temp_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = temp_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
                              25)
 
         temp_data.flush()
 
-        async with backend.transaction(1) as trans:
-            tbl = temp_data.attach(trans)
+        async with backend.transaction(1) as trx:
+            tbl = temp_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
                              0)
 

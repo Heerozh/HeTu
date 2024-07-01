@@ -79,7 +79,7 @@ class BackendTransaction:
     async def end_transaction(self, discard: bool) -> list[int] | None:
         """事务结束，提交或放弃事务。返回insert的row.id列表，按调用顺序"""
         # 继承，并实现事务提交的操作，将stacked的命令写入事务
-        # stacked的命令由你继承的_trans_insert等方法负责写入
+        # stacked的命令由你继承的_trx_insert等方法负责写入
         # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
@@ -111,6 +111,10 @@ class ComponentTable:
         return self._cluster_id
 
     @property
+    def backend(self) -> Backend:
+        return self._backend
+
+    @property
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
@@ -128,10 +132,10 @@ class ComponentTable:
         """直接获取数据库的值，而不通过事务，一般用在维护时。注意，获取的值可能被其他进程变动，不可在System中使用。"""
         raise NotImplementedError
 
-    def attach(self, backend_trans: BackendTransaction) -> 'ComponentTransaction':
+    def attach(self, backend_trx: BackendTransaction) -> 'ComponentTransaction':
         """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
-        # return YourComponentTransaction(self, backend_trans)
+        # return YourComponentTransaction(self, backend_trx)
         raise NotImplementedError
 
     def new_transaction(self) -> tuple[BackendTransaction, 'ComponentTransaction']:
@@ -146,11 +150,11 @@ class ComponentTransaction:
     继承此类，完善所有NotImplementedError的方法。
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
-    def __init__(self, comp_tbl: ComponentTable, trans_conn: BackendTransaction):
-        assert trans_conn.cluster_id == comp_tbl.cluster_id, \
+    def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
+        assert trx_conn.cluster_id == comp_tbl.cluster_id, \
             "事务只能在对应的cluster_id中执行，不能跨cluster"
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
-        self._trans_conn = trans_conn
+        self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
 
     async def _db_get(self, row_id: int) -> None | np.record:
@@ -172,15 +176,15 @@ class ComponentTransaction:
         # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
-    def _trans_insert(self, row: np.record) -> None:
+    def _trx_insert(self, row: np.record) -> None:
         # 继承，并实现往transaction里stack插入数据的操作
         raise NotImplementedError
 
-    def _trans_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
+    def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
         # 继承，并实现往transaction里stack更新数据的操作
         raise NotImplementedError
 
-    def _trans_delete(self, row_id: int, old_row: np.record) -> None:
+    def _trx_delete(self, row_id: int, old_row: np.record) -> None:
         # 继承，并实现往transaction里stack删除数据的操作
         raise NotImplementedError
 
@@ -335,7 +339,7 @@ class ComponentTransaction:
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
         self._cache[row_id] = row
         # 加入到更新队列
-        self._trans_update(row_id, old_row, row)
+        self._trx_update(row_id, old_row, row)
 
     async def update_rows(self, rows: np.recarray) -> None:
         assert type(rows) is np.recarray and rows.shape[0] > 1, "update_rows数据必须是多行数据"
@@ -352,7 +356,7 @@ class ComponentTransaction:
 
         # 加入到更新队列
         row = row.copy()
-        self._trans_insert(row)
+        self._trx_insert(row)
 
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
@@ -365,7 +369,7 @@ class ComponentTransaction:
 
         # 标记删除
         self._cache[row_id] = 'deleted'
-        self._trans_delete(row_id, old_row)
+        self._trx_delete(row_id, old_row)
 
 
 ##################################################
