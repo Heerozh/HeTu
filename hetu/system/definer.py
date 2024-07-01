@@ -15,10 +15,10 @@ from ..data import BaseComponent, Permission
 @dataclass
 class SystemDefine:
     func: callable
-    components: tuple[Type[BaseComponent]]     # 引用的Components
-    full_components: tuple[Type[BaseComponent]] | None   # 完整的引用Components，包括继承自父System的
-    inherits: tuple[str]
-    full_inherits: tuple[str] | None
+    components: set[Type[BaseComponent]]     # 引用的Components
+    full_components: set[Type[BaseComponent]]   # 完整的引用Components，包括继承自父System的
+    inherits: set[str]
+    full_inherits: set[str]
     permission: Permission
     max_retry: int
     arg_count: int         # 全部参数个数（含默认参数）
@@ -135,7 +135,7 @@ class SystemClusters(metaclass=Singleton):
         sub_map[func.__name__] = SystemDefine(
             func=func, components=components, inherits=inherits, max_retry=max_retry,
             arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
-            permission=permission, full_components=None, full_inherits=None)
+            permission=permission, full_components=set(), full_inherits=set())
 
 
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
