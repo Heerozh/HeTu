@@ -95,6 +95,11 @@ class SystemClusters(metaclass=Singleton):
                 sys_def.full_inherits = set(sys_def.inherits)
                 inherit_components(namespace, sys_def.inherits, sys_def.full_components,
                                    sys_def.full_inherits)
+                # 检查所有System引用的Component和继承的也是同一个backend
+                backend_names = [comp.backend_ for comp in sys_def.full_components]
+                assert len(set(backend_names)) <= 1, \
+                    f"System {sys_name} 引用的Component必须都是同一种backend"
+                # 添加到clusters
                 clusters.append(SystemClusters.Cluster(
                     -1, sys_def.full_components.copy(),
                     namespace, {sys_name}))
@@ -191,6 +196,11 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
             assert asyncio.iscoroutinefunction(func), \
                 (f"System {func.__name__} 必须是异步函数(`async def ...`)，"
                  f"不然数据库请求会堵塞整个Worker。")
+
+        # 检查components是否都是同一个backend
+        backend_names = [comp.backend_ for comp in components]
+        assert len(set(backend_names)) <= 1, \
+            f"System {func.__name__} 引用的Component必须都是同一种backend"
 
         SystemClusters().add(namespace, func, components, force,
                              permission, inherits, retry)

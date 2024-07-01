@@ -141,6 +141,39 @@ class TestSystemDefine(unittest.TestCase):
             def system_sync(ctx, vec, hit):
                 pass
 
+        # 检测不同backend是否有警告
+        with self.assertRaisesRegex(AssertionError, "backend"):
+            @define_component(namespace="ssw", force=True, backend='Mysql')
+            class GalaxyPositionMysql(BaseComponent):
+                x: float = Property(0, True)
+                y: float = Property(0, True)
+            @define_system(
+                namespace="ssw",
+                components=(GalaxyPositionMysql, Hp, Inventory, Map),
+            )
+            async def system_diff_backend(ctx, vec, hit):
+                pass
+
+        # 检测继承的backend也要一致
+        SystemClusters._instances.pop(SystemClusters, None)
+        @define_system(
+            namespace="ssw",
+            components=(GalaxyPositionMysql, ),
+        )
+        async def system_mysql(ctx, vec, hit):
+            pass
+
+        @define_system(
+            namespace="ssw",
+            components=(Hp, Inventory, Map),
+            inherits=('system_mysql',)
+        )
+        async def system_diff_inh_backend(ctx, vec, hit):
+            pass
+
+        with self.assertRaisesRegex(AssertionError, "backend"):
+            SystemClusters().build_clusters('ssw')
+
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
         SystemClusters._instances.pop(SystemClusters, None)
