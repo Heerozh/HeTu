@@ -19,4 +19,3 @@ from .backend import (
     RedisBackend, RedisComponentTable, RedisComponentTransaction,
 )
 
-from .manager import ComponentTableManager
