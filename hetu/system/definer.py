@@ -138,7 +138,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   retry: int = 9999, inherits: tuple[str] = tuple()):
     """
     定义系统
-    :param namespace: System命名空间
+    :param namespace: 是你的项目名，一个网络地址只能启动一个namespace下的System们
     :param components: 引用Component，只有引用的Component可以在`ctx`中获得
     :param force: 遇到重复定义是否强制覆盖前一个, 单元测试用
     :param permission: System权限，OWNER权限这里不可使用，其他同Component权限。

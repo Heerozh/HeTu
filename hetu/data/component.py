@@ -161,7 +161,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         y: np.float32 = Property(default=0)
         owner: np.int64 = Property(default=0, unique=True)
 
-    :param namespace: 是你的项目名，一个网络地址只能启动一个namespace。
+    :param namespace: 你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
     :param persist: 表示是否持久化，设为False时，允许主动调用flush()清空数据
     :param readonly: 是否只读Component，只读Component不会被加事务保护，增加并行性。
     :param backend: 指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
