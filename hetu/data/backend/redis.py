@@ -296,8 +296,8 @@ class RedisComponentTable(ComponentTable):
                 del_keys.remove(self._lock_key)
                 list(map(io.delete, del_keys))
 
-            self.check_meta()
             logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
+            self.check_meta()
         else:
             raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
 

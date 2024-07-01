@@ -124,6 +124,11 @@ class ComponentTable:
         # return YourComponentTransaction(self, backend_trans)
         raise NotImplementedError
 
+    def new_transaction(self) -> tuple[BackendTransaction, 'ComponentTransaction']:
+        """返回当前组件的事务操作类，并新建一个后端事务连接"""
+        conn = self._backend.transaction(self._cluster_id)
+        return conn, self.attach(conn)
+
 
 class ComponentTransaction:
     """
