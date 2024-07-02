@@ -172,7 +172,8 @@ class ComponentTransaction:
             left,
             right=None,
             limit=10,
-            desc=False
+            desc=False,
+            lock_index=True
     ) -> list[int]:
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         # 未查询到数据时返回[]
@@ -208,7 +209,7 @@ class ComponentTransaction:
         if where == 'id':
             row_id = value
         else:
-            if len(row_ids := await self._db_query(where, value, limit=1)) == 0:
+            if len(row_ids := await self._db_query(where, value, limit=1, lock_index=False)) == 0:
                 return None
             row_id = int(row_ids[0])
 
@@ -233,7 +234,9 @@ class ComponentTransaction:
 
         return row.copy()
 
-    async def query(self, index_name: str, left, right=None, limit=10, desc=False) -> np.recarray:
+    async def query(
+            self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
+    ) -> np.recarray:
         """
         查询`index_name`在`left`和`right`之间的数据，限制`limit`条，是否降序`desc`。
         如果right为None，则查询等于left的数据。
@@ -245,6 +248,24 @@ class ComponentTransaction:
         swords = items[items.model == 'sword']                   # 然后本地二次筛选
         或者:
         few_items = items[items.amount < 10]
+
+        `lock_index`: 表示是否锁定`index_name`索引，安全起见默认锁定，但因为存在行锁定，
+        其实大部分情况锁定index是不必要的。
+
+        锁定分2种：
+        * 行锁定：任何其他协程/进程对查询结果所含行的修改会引发事务冲突，但无关行不会。此锁定是强制的，不可关闭。
+        * Index锁定：任何其他协程/进程修改了该index(插入新行/update本列/删除任意行)都会引起事务冲突。
+          如果慢日志回报了大量的事务冲突，再考虑设为False。
+
+        所以一般情况下：
+        * 如果你只对query返回的行操作，因为有行锁定，所以可以不锁index。
+        * 如果你对query结果本身有要求，比如需要判断结果数量/是否已存在，你需要保持锁定index。
+            - 建议使用`unique`索引在底层限制唯一性
+
+        举个删除背包所有道具的例子：1.查询背包，2.删除查询到的行。
+        此需求可以不锁定index，只是1和2之间可能有新的道具进入背包，删除可能不彻底。
+        由于存在行锁定，即使不锁定index，2也可以保证道具不会被其他进程删除。
+
         """
         assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
         assert index_name in self._component_cls.indexes_, \
@@ -259,7 +280,7 @@ class ComponentTransaction:
         assert right >= left, f"right必须大于等于left，你的:{right}, {left}"
 
         # 查询
-        row_ids = await self._db_query(index_name, left, right, limit, desc)
+        row_ids = await self._db_query(index_name, left, right, limit, desc, lock_index)
 
         # 获得所有行数据并lock row
         rtn = []
@@ -293,7 +314,7 @@ class ComponentTransaction:
         if issubclass(type(value), np.generic):
             value = value.item()
 
-        row_ids = await self._db_query(where, value, limit=1)
+        row_ids = await self._db_query(where, value, limit=1, lock_index=True)
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
@@ -329,7 +350,9 @@ class ComponentTransaction:
                 continue
             # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
-                if len(await self._db_query(idx_name, new_row[idx_name].item(), limit=1)) > 0:
+                row_ids = await self._db_query(
+                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False)
+                if len(row_ids) > 0:
                     raise UniqueViolation(
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")

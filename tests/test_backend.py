@@ -8,12 +8,9 @@ from unittest import mock
 import docker
 import numpy as np
 
-from hetu.data import (
-    define_component, Property, BaseComponent, ComponentDefines,
-    ComponentTable, Backend, ComponentTransaction,
-    RedisComponentTable, RedisBackend,
-    UniqueViolation, RaceCondition
-)
+from hetu.data import define_component, Property, BaseComponent, ComponentDefines
+from hetu.data.backend import (RaceCondition, UniqueViolation, ComponentTable, Backend,
+                               ComponentTransaction, RedisComponentTable, RedisBackend)
 
 logger = logging.getLogger('HeTu')
 logger.setLevel(logging.DEBUG)
@@ -66,7 +63,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # docker启动对应的backend
         self.containers = []
-        client = docker.from_env()
+        try:
+            client = docker.from_env()
+        except docker.errors.DockerException:
+            raise unittest.SkipTest("请启动DockerDesktop或者Docker服务后再运行测试")
         # 先删除已启动的
         try:
             client.containers.get('hetu_test_redis').kill()
@@ -314,7 +314,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
-        await backend.close()
 
         # 测试更新name后再把所有key删除后index是否正常为空
         async with backend.transaction(1) as trx:
@@ -329,6 +328,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await tbl.delete(row.id)
         time.sleep(1)  # 等待部分key过期
         self.assertEqual(backend.io.keys('test:Item:{CLU*'), [])
+
+        # close
+        await backend.close()
 
     @parameterized(implements)
     async def test_race(self, table_cls: type[ComponentTable],
@@ -371,7 +373,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             async with backend.transaction(1) as _trx:
                 _tbl = item_data.attach(_trx)
                 mock_slow_query(_tbl)
-                rows = await _tbl.query('owner', value)
+                rows = await _tbl.query('owner', value, lock_index=False)
                 print(rows)
 
         async def select_owner(value):
@@ -460,6 +462,24 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RaceCondition):
             await task1
 
+        # 测试query后该值是否激发竞态
+        async def query_then_update(sleep):
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
+                _rows = await _tbl.query('model', 2)
+                await asyncio.sleep(sleep)
+                if len(_rows) == 0:
+                    _row = await _tbl.select(0, 'model')
+                    _row.model = 2
+                    await _tbl.update(_row.id, _row)
+
+        task1 = asyncio.create_task(query_then_update(1))
+        task2 = asyncio.create_task(query_then_update(0.2))
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # close backend
         await backend.close()
 
     # @mock.patch('hetu.data.backend.redis.datetime', mock_time)
@@ -520,6 +540,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual((await tbl.select('Itm30a', where='name')).name, 'Itm30a')
             self.assertEqual((await tbl.select(130, where='time')).qty_new, 111)
+
         await backend.close()
 
     @parameterized(implements)
@@ -549,6 +570,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             tbl = temp_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
                              0)
+
+        await backend.close()
 
 
 if __name__ == '__main__':

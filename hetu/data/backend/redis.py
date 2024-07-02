@@ -528,7 +528,8 @@ class RedisComponentTransaction(ComponentTransaction):
             left,
             right=None,
             limit=10,
-            desc=False
+            desc=False,
+            lock_index=True
     ) -> list[int]:
         idx_key = self._idx_prefix + index_name
         pipe = self._trx_conn.pipe
@@ -539,6 +540,8 @@ class RedisComponentTransaction(ComponentTransaction):
         if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
             return cmds
 
+        if lock_index:
+            await pipe.watch(idx_key)
         row_ids = await pipe.zrange(name=idx_key, **cmds)
 
         str_type = self._component_cls.indexes_[index_name]

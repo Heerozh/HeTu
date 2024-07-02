@@ -189,7 +189,10 @@ if __name__ == '__main__':
     address = args.address
     if args.address is None:
         address = 'redis://127.0.0.1:23318/0'
-        client = docker.from_env()
+        try:
+            client = docker.from_env()
+        except docker.errors.DockerException:
+            raise EnvironmentError("请启动DockerDesktop或者Docker服务后再运行测试")
         try:
             client.containers.get('hetu_test_redis').kill()
             client.containers.get('hetu_test_redis').remove()
