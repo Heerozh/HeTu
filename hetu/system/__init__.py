@@ -11,8 +11,8 @@ from .definer import (
     SystemDefine
 )
 
-from .dispatcher import (
-    SystemDispatcher,
+from .executor import (
+    SystemExecutor,
     Context,
     SystemCall
 )

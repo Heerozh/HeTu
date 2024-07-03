@@ -271,9 +271,9 @@ class ComponentTransaction:
         assert index_name in self._component_cls.indexes_, \
             f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
 
-        left = np.issubdtype(type(left), np.bool_) and int(left) or left
-        left = issubclass(type(left), np.generic) and left.item() or left
-        right = issubclass(type(right), np.generic) and right.item() or right
+        left = int(left) if np.issubdtype(type(left), np.bool_) else left
+        left = left.item() if issubclass(type(left), np.generic) else left
+        right = right.item() if issubclass(type(right), np.generic) else right
 
         if right is None:
             right = left
