@@ -220,6 +220,11 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             else:
                 raise AssertionError(f"{cls.__name__}.{name}不是Property类型")
             delattr(cls, name)
+        # Property类型强制要求定义type hint
+        for name, value in cls.__dict__.items():
+            if isinstance(value, Property) and name not in properties:
+                raise ValueError(f"{cls.__name__}.{name}属性未定义type hint。请使用以下形式，"
+                                 f"{name}: type = Property(...)")
 
         assert properties, f"{cls.__name__}至少要有1个Property成员"
 
