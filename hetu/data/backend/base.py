@@ -318,21 +318,24 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    async def select_or_create(self, value, where: str = None) -> np.record:
+    async def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
         """
         同:func:`~hetu.data.ComponentTransaction.select`，
-        只是如果没有查询到值时，会执行:func:`~hetu.data.ComponentTransaction.insert`。
-        注意，返回值的`id`可能为0，因为insert在事务执行前是无法获得row id的，具体参见`insert`。
-        """
-        uniques = self._component_cls.uniques_ - {'id', where}
-        assert len(uniques) == 0, "有多个Unique属性的Component不能使用select_or_create"
+        如果没有查询到值时，会返回空数据（Component.new_row()）。
 
+        返回值是`UpdateOrInsert`类型，可通过`UpdateOrInsert.row`获取row数据，
+        `UpdateOrInsert.commit()`提交更新。
+        或者用With语句，可以自动提交，如下：
+        async with ctx[Component].select_or_create(...) as row:
+            row.value = 100
+        """
         rtn = await self.select(value, where)
         if rtn is None:
             rtn = self._component_cls.new_row()
             rtn[where] = value
-            await self.insert(rtn)
-        return rtn
+            return UpdateOrInsert(rtn, self, 0)
+        else:
+            return UpdateOrInsert(rtn, self, rtn.id)
 
     async def _check_uniques(
             self,
@@ -384,7 +387,7 @@ class ComponentTransaction:
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
-    async def insert(self, row) -> None:
+    async def insert(self, row: np.record) -> None:
         """
         插入单行数据。
         如果想获得插入后的row id，只能在事务结束后获得。
@@ -408,6 +411,16 @@ class ComponentTransaction:
         row = row.copy()
         self._trx_insert(row)
 
+    async def update_or_insert(self, row: np.record) -> None:
+        """
+        如果row.id == 0, 则插入该row，反之更新该id的row。
+        一般不要使用，请使用明确的update或insert语句。此方法仅在select_or_create后使用。
+        """
+        if row.id == 0:
+            await self.insert(row)
+        else:
+            await self.update(row.id, row)
+
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
         row_id = int(row_id)
@@ -422,7 +435,28 @@ class ComponentTransaction:
         self._trx_delete(row_id, old_row)
 
 
+class UpdateOrInsert:
+    def __init__(self, row: np.record, comp_trx: ComponentTransaction, row_id: int):
+        self.row = row
+        self.comp_trx = comp_trx
+        self.row_id = row_id
+
+    async def commit(self):
+        if self.row_id == 0:
+            await self.comp_trx.insert(self.row)
+        else:
+            await self.comp_trx.update(self.row_id, self.row)
+
+    async def __aenter__(self):
+        return self.row
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is None:
+            await self.commit()
+
+
 ##################################################
+
 
 class MQClientPool:
     pass
