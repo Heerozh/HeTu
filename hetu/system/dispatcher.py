@@ -6,94 +6,143 @@
 """
 import numpy as np
 from dataclasses import dataclass
-from ..data import (BaseComponent, define_component, Property, Permission,
-                    RaceCondition, ComponentTransaction)
+from ..data import BaseComponent, define_component, Property, Permission
+from ..data.backend import RaceCondition, ComponentTransaction
 from ..manager import ComponentTableManager
-from ..system import SystemClusters
+from ..system import SystemClusters, define_system
 import logging
 import traceback
 import asyncio
 import random
 from datetime import datetime
+
 logger = logging.getLogger('HeTu')
 
 
 @dataclass
 class Context:
-    caller: int | None  # 调用方的entity id
+    # 全局变量
+    caller: int | None  # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
     connection_id: int  # 调用方的connection id
-    timestamp: int      # 调用时间戳
-    group: str | None   # 所属组名，目前只用于判断是那组admin
-    retry_count: int    # 当前事务冲突重试次数
+    group: str | None  # 所属组名，目前只用于判断是否admin
+    user_data: dict  # 当前连接的用户数据，可自由设置，在所有System间共享
+    # 事务变量
+    timestamp: int  # 调用时间戳
+    retry_count: int  # 当前事务冲突重试次数
     transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
-    inherited: dict[str, callable]     # 继承的父事务函数
+    inherited: dict[str, callable]  # 继承的父事务函数
 
-    def __getattr__(self, item: type[BaseComponent]) -> ComponentTransaction:
-        return self.transactions[item]
+    def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | callable:
+        if type(item) is str:
+            return self.inherited[item]
+        else:
+            return self.transactions[item]
 
     async def end_transaction(self, discard: bool = False):
         comp_trx = next(iter(self.transactions.values()), None)
         if comp_trx is not None:
+            self.transactions = {}
             return await comp_trx.attached.end_transaction(discard)
 
 
 @dataclass
 class SystemCall:
-    system: str        # 目标system名
-    args: tuple        # 目标system参数
+    system: str  # 目标system名
+    args: tuple  # 目标system参数
 
 
 @define_component(namespace='HeTu', persist=False)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
-    address: 'U32' = Property('', index=True)  # 连接地址
-    device: 'U32' = Property('', index=True)  # 物理设备名
-    device_id: 'U128' = Property('', index=True)  # 设备id
-    admin: bool = Property(False, index=True)  # 是否是admin
-    created: np.int64 = Property(0, index=True)  # 连接创建时间
-    last_active: np.double = Property(0, index=True)  # 最后活跃时间
-    received_msgs: np.int32 = Property(0, index=True)  # 收到的消息数, 用来判断fooding攻击
-    invalid_msgs: np.int32 = Property(0, index=True)  # 无效消息数, 用来判断fooding攻击
+    address = Property('', dtype='<U32')  # 连接地址
+    device = Property('', dtype='<U32')  # 物理设备名
+    device_id = Property('', dtype='<U128')  # 设备id
+    admin = Property('', dtype='<U16')  # 是否是admin
+    created: np.double = Property(0)  # 连接创建时间
+    last_active: np.double = Property(0)  # 最后活跃时间
+    received_msgs: np.int32 = Property(0)  # 收到的消息数, 用来判断fooding攻击
+    invalid_msgs: np.int32 = Property(0)  # 无效消息数, 用来判断fooding攻击
+
+
+@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+async def new_connection(ctx: Context, address: str, device: str, device_id: str):
+    row = Connection.new_row()
+    row.owner = 0
+    row.created = datetime.now().timestamp()
+    row.last_active = row.created
+    row.address = address
+    row.device = device
+    row.device_id = device_id
+    await ctx[Connection].insert(row)
+    row_ids = await ctx.end_transaction()
+    ctx.connection_id = row_ids[0]
+
+
+@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+async def del_connection(ctx: Context):
+    await ctx[Connection].delete(ctx.connection_id)
+
+
+@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+async def elevate(ctx: Context, user_id: int):
+    """
+    提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
+    如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]
+    """
+    # 如果当前连接已提权
+    if ctx.caller is not None and ctx.caller > 0:
+        return False
+    # 如果此用户已经登录
+    exist, _ = await ctx[Connection].is_exist(user_id, 'owner')
+    if exist:
+        return False
+
+    # 在数据库中关联connection和user
+    conn = await ctx[Connection].select(ctx.connection_id)
+    conn.owner = user_id
+    await ctx[Connection].update(ctx.connection_id, conn)
+
+    # 如果事务成功，则设置ctx.caller (end_transaction事务冲突时会跳过后面代码)
+    await ctx.end_transaction()
+    ctx.caller = user_id
+    return True
 
 
 class SystemDispatcher:
     """
     每个连接一个SystemDispatcher实例。
     """
+
     def __init__(self, namespace: str):
         self.namespace = namespace
         self.context = Context(
             caller=None,
             connection_id=0,
-            timestamp=0,
             group=None,
+            user_data={},
+
+            timestamp=0,
             retry_count=0,
             transactions={},
             inherited={}
         )
 
-    async def initialization(self):
+    async def initialize(self, address: str, device: str, device_id: str):
+        if self.context.connection_id != 0:
+            return
         # 通过connection component分配自己一个连接id
-        # 这代码有点长，是不是可以包装下？
-        connection_table = ComponentTableManager().get_table(Connection)
-        while True:
-            trx, tbl = connection_table.new_transaction()
-            try:
-                async with trx:
-                    row = Connection.new_row()
-                    row.owner = 0
-                    row.created = datetime.now().timestamp()
-                    await tbl.insert(row)
-                    row_ids = await trx.end_transaction(False)
-                break
-            except RaceCondition:
-                continue
-        connection_id = row_ids[0]
+        ok, _ = await self.dispatch(SystemCall('new_connection', (address, device, device_id)))
+        if not ok:
+            raise Exception("连接初始化失败，new_connection调用失败")
 
-        # 好像component的namespace无所谓，只要系统namespace是auto就行？
-        self.context.connection_id = connection_id
+    async def terminate(self):
+        if self.context.connection_id == 0:
+            return
+        # 释放connection
+        await self.dispatch(SystemCall('del_connection', tuple()))
 
     async def dispatch(self, call: SystemCall) -> tuple[bool, dict | None]:
+        assert self.context.connection_id != 0, "请先初始化连接"
         # 读取保存的system define
         sys = SystemClusters().get_system(self.namespace, call.system)
         if not sys:
@@ -126,6 +175,7 @@ class SystemDispatcher:
         context.retry_count = 0
         context.timestamp = datetime.now()
         context.inherited = {}
+        context.transactions = {}
 
         first_comp = next(iter(sys.full_components), None)
         backend = first_comp and ComponentTableManager().get_table(first_comp).backend or None
@@ -138,7 +188,6 @@ class SystemDispatcher:
         # 调用系统
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
-            context.transactions = {}
             trx = None
             if len(sys.full_components) > 0:
                 trx = backend.transaction(sys.cluster_id)
@@ -154,7 +203,7 @@ class SystemDispatcher:
                 return True, rtn
             except RaceCondition:
                 context.retry_count += 1
-                delay = random.random() / 5   # 重试时为了防止和另一个再次冲突，用随机值0-0.2秒范围
+                delay = random.random() / 5  # 重试时为了防止和另一个再次冲突，用随机值0-0.2秒范围
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
@@ -165,5 +214,3 @@ class SystemDispatcher:
 
         logger.debug(f"✅ [📞Worker] 调用System失败, 超过{call.system}重试次数{sys.max_retry}")
         return False, None
-
-

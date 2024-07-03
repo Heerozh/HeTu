@@ -388,13 +388,15 @@ class ComponentTransaction:
         """
         插入单行数据。
         如果想获得插入后的row id，只能在事务结束后获得。
-        可在System最后一行调用end_transaction获得，如下：
+
+        或者可在System最后调用end_transaction获得，如下：
         @define_system(...)
         async some_system(ctx, ...):
             ctx[Table].insert(...)
             inserted_ids = await ctx.trx.end_transaction(discard=False)
+            ctx.user_data['my_id'] = inserted_ids[0]
             return ...
-        注意：调用完end_transaction必须return结束System，否则操作未定义
+        注意：调用完end_transaction，ctx将不再能够获取Components
         """
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"

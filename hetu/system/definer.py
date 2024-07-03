@@ -170,9 +170,9 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
                 `ctx.caller`: 调用者id，由你在登录System中调用`elevate`函数赋值，None表示未登录用户
                 `ctx.retry_count`: 当前已重试次数，0表示首次调用。
                 `ctx[Component Class]`: 获取引用的Component实例，如`ctx[Position]`。
-                `ctx.inherited['SystemName']`: 获取继承的System函数，如`ctx.inherited['move']`。
-                `await ctx.end_transaction(discard=False)`: 提前结束事务，调用完必须`return`结束System，
-                    否则结果未定义。
+                `ctx['SystemName']`: 获取继承的System函数。
+                `await ctx.end_transaction(discard=False)`: 提前结束事务，如果遇到事务冲突，
+                    则此行下面的代码不会执行。注意：调用完end_transaction，ctx将不再能够获取Components
             其他参数为客户端调用时传入的参数。
         返回值:
             返回值会传给客户端，或者传给其他调用方
