@@ -6,15 +6,16 @@
 """
 import numpy as np
 from dataclasses import dataclass
-from ..data import BaseComponent, define_component, Property, Permission
-from ..data.backend import RaceCondition, ComponentTransaction
-from ..manager import ComponentTableManager
-from ..system import SystemClusters, define_system
+from typing import Callable
 import logging
 import traceback
 import asyncio
 import random
 from datetime import datetime
+from ..data import BaseComponent, define_component, Property, Permission
+from ..data.backend import RaceCondition, ComponentTransaction
+from ..manager import ComponentTableManager
+from ..system import SystemClusters, define_system
 
 logger = logging.getLogger('HeTu')
 
@@ -32,7 +33,7 @@ class Context:
     transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
     inherited: dict[str, callable]  # 继承的父事务函数
 
-    def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | callable:
+    def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | Callable:
         if type(item) is str:
             return self.inherited[item]
         else:
@@ -54,10 +55,10 @@ class SystemCall:
 @define_component(namespace='HeTu', persist=False)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
-    address = Property('', dtype='<U32')  # 连接地址
-    device = Property('', dtype='<U32')  # 物理设备名
-    device_id = Property('', dtype='<U128')  # 设备id
-    admin = Property('', dtype='<U16')  # 是否是admin
+    address: str = Property('', dtype='<U32')  # 连接地址
+    device: str = Property('', dtype='<U32')  # 物理设备名
+    device_id: str = Property('', dtype='<U128')  # 设备id
+    admin: str = Property('', dtype='<U16')  # 是否是admin
     created: np.double = Property(0)  # 连接创建时间
     last_active: np.double = Property(0)  # 最后活跃时间
     received_msgs: np.int32 = Property(0)  # 收到的消息数, 用来判断fooding攻击
@@ -89,6 +90,8 @@ async def elevate(ctx: Context, user_id: int):
     提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
     如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]
     """
+    assert ctx.connection_id != 0, "请先初始化连接"
+
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
         return False
@@ -108,9 +111,9 @@ async def elevate(ctx: Context, user_id: int):
     return True
 
 
-class SystemDispatcher:
+class SystemExecutor:
     """
-    每个连接一个SystemDispatcher实例。
+    每个连接一个SystemExecutor实例。
     """
 
     def __init__(self, namespace: str):
@@ -131,7 +134,7 @@ class SystemDispatcher:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        ok, _ = await self.dispatch(SystemCall('new_connection', (address, device, device_id)))
+        ok, _ = await self.run_('new_connection', address, device, device_id)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
 
@@ -139,10 +142,9 @@ class SystemDispatcher:
         if self.context.connection_id == 0:
             return
         # 释放connection
-        await self.dispatch(SystemCall('del_connection', tuple()))
+        await self.run_('del_connection')
 
-    async def dispatch(self, call: SystemCall) -> tuple[bool, dict | None]:
-        assert self.context.connection_id != 0, "请先初始化连接"
+    async def run(self, call: SystemCall) -> tuple[bool, dict | None]:
         # 读取保存的system define
         sys = SystemClusters().get_system(self.namespace, call.system)
         if not sys:
@@ -204,6 +206,7 @@ class SystemDispatcher:
             except RaceCondition:
                 context.retry_count += 1
                 delay = random.random() / 5  # 重试时为了防止和另一个再次冲突，用随机值0-0.2秒范围
+                logger.debug(f"⌚ [📞Worker] 调用System遇到竞态: {call.system}，{delay}秒后重试")
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
@@ -214,3 +217,6 @@ class SystemDispatcher:
 
         logger.debug(f"✅ [📞Worker] 调用System失败, 超过{call.system}重试次数{sys.max_retry}")
         return False, None
+
+    async def run_(self, name: str, *args):
+        return await self.run(SystemCall(name, args))
