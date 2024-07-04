@@ -12,13 +12,14 @@ import itertools
 import uuid
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
-from .base import ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction
+from .base import (ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction,
+                   MQClient)
 import logging
 logger = logging.getLogger('HeTu')
 
 
 class RedisBackend(Backend):
-    """储存到Redis后端的客户端连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
+    """储存到Redis后端的连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
     def __init__(self, config: dict):
         super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
@@ -54,10 +55,10 @@ class RedisBackend(Backend):
         for replica in self.replicas:
             await replica.aclose()
 
-    def rnd_replica(self):
+    def get_mq_client(self) -> 'RedisMQClient':
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
         i = random.randint(0, len(self.replicas))
-        return i, self.replicas[i]
+        return RedisMQClient(self.replicas[i])
 
     def transaction(self, cluster_id: int) -> 'RedisTransaction':
         """进入db的事务模式，返回事务连接"""
@@ -605,10 +606,12 @@ class RedisComponentTransaction(ComponentTransaction):
         trx.stack_cmd('hset', row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
+            if old_row[idx_name] == new_row[idx_name]:
+                continue
             idx_key = idx_prefix + idx_name
             if str_type:
-                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
                 trx.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
+                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
             elif idx_name == 'id':
                 trx.stack_cmd('zadd', idx_key, row_id, row_id)
             else:
@@ -628,3 +631,13 @@ class RedisComponentTransaction(ComponentTransaction):
                 trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
             else:
                 trx.stack_cmd('zrem', idx_key, row_id)
+
+
+##############################
+
+
+class RedisMQClient(MQClient):
+    def __init__(self, redis_conn: redis.asyncio.Redis | redis.asyncio.RedisCluster):
+        # todo 要测试redis cluster是否能正常pub sub
+        self._mq = redis_conn.pubsub()
+

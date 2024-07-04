@@ -6,6 +6,8 @@ import argparse
 
 from hetu.data import (
     define_component, Property, BaseComponent,
+)
+from hetu.data.backend import (
     RedisComponentTable, RedisBackend,
     RaceCondition
 )
@@ -180,7 +182,7 @@ async def run_bench(inst, redis_address):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='hetu', description='Hetu Data Server')
+    parser = argparse.ArgumentParser(prog='hetu', description='Hetu bench redis backend')
     parser.add_argument("--instance_name", default="test")
     parser.add_argument("--address")
     args = parser.parse_args()
