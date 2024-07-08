@@ -28,6 +28,7 @@ ACCESS_LOG = False
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS = {
+    # 第一条是默认后端，@define_component不指定backend时会用这个
     'backend_name': {
         "type": "Redis",                        # 指定backend的类型，目前只支持Redis
         "master": "redis://127.0.0.1:6379/0",   # 指定master服务器，只能一个地址
