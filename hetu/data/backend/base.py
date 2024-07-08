@@ -19,8 +19,8 @@
 
         数据订阅结构
     ┌─────────────────┐
-    │   MQClientPool  │
-    │消息队列直连池（单件)│
+    │     MQClient    │
+    │消息队列连接(每用户）│
     └─────────────────┘
             ▲
             │
@@ -31,8 +31,8 @@
             ▲
             │
   ┌─────────┴──────────┐
-  │ComponentSubscriber │
-  │   组件相关订阅操作    │
+  │ 用户连接(Websocket) │
+  │   等待Subs返回消息   │
   └────────────────────┘
 """
 import numpy as np
@@ -64,6 +64,10 @@ class Backend:
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
+    def get_mq_client(self) -> 'MQClient':
+        """获取消息队列连接"""
+        raise NotImplementedError
+
 
 class BackendTransaction:
     """数据库事务类，负责开始事务，并提交事务"""
@@ -77,9 +81,9 @@ class BackendTransaction:
 
     async def end_transaction(self, discard: bool) -> list[int] | None:
         """事务结束，提交或放弃事务。返回insert的row.id列表，按调用顺序"""
-        # 继承，并实现事务提交的操作，将stacked的命令写入事务
-        # stacked的命令由你继承的_trx_insert等方法负责写入
+        # 继承，并实现事务提交的操作，将_trx_insert等方法堆叠的命令写入数据库
         # 如果你用乐观锁，要考虑清楚何时检查
+        # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
         raise NotImplementedError
 
     async def __aenter__(self):
@@ -127,8 +131,18 @@ class ComponentTable:
             left,
             right=None,
             limit=10,
-            desc=False) -> np.recarray:
-        """直接获取数据库的值，而不通过事务，一般用在维护时。注意，获取的值可能被其他进程变动，不可在System中使用。"""
+            desc=False,
+            row_format='struct',
+    ) -> np.recarray | list[dict | int]:
+        """
+        直接获取数据库的值，而不通过事务，只能用于只读逻辑。通过servant数据库进行查询，不影响Master性能。
+        注意，获取的值可能存在更新延迟，且脱离事务，不可在System中使用。
+        row_format:
+            'struct': 包装成component struct返回
+            'raw': 直接返回数据库中的值，由dict包装，可能包含多余数据，也不会进行类型转换。
+            'id': 只返回row_id列表
+        """
+        # 请使用servant数据库来操作
         raise NotImplementedError
 
     def attach(self, backend_trx: BackendTransaction) -> 'ComponentTransaction':
@@ -141,6 +155,10 @@ class ComponentTable:
         """返回当前组件的事务操作类，并新建一个后端事务连接"""
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
+
+    def channel_name(self, index_name: str = None, row_id: int = None):
+        """返回当前组件表，在消息队列中的频道名。表如果有数据变动，会发送到对应频道"""
+        raise NotImplementedError
 
 
 class ComponentTransaction:
@@ -181,15 +199,15 @@ class ComponentTransaction:
         raise NotImplementedError
 
     def _trx_insert(self, row: np.record) -> None:
-        # 继承，并实现往transaction里stack插入数据的操作
+        # 继承，并实现往BackendTransaction里stack插入数据的操作
         raise NotImplementedError
 
     def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
-        # 继承，并实现往transaction里stack更新数据的操作
+        # 继承，并实现往BackendTransaction里stack更新数据的操作
         raise NotImplementedError
 
     def _trx_delete(self, row_id: int, old_row: np.record) -> None:
-        # 继承，并实现往transaction里stack删除数据的操作
+        # 继承，并实现往BackendTransaction里stack删除数据的操作
         raise NotImplementedError
 
     async def select(self, value, where: str = 'id') -> None | np.record:
@@ -258,8 +276,8 @@ class ComponentTransaction:
           如果慢日志回报了大量的事务冲突，再考虑设为False。
 
         所以一般情况下：
-        * 如果你只对query返回的行操作，因为有行锁定，所以可以不锁index。
-        * 如果你对query结果本身有要求，比如需要判断结果数量/是否已存在，你需要保持锁定index。
+        * 如果你只对query返回的行操作(如`rows[0].value = 1`)，因为有行锁定，所以可以不锁index。
+        * 如果你对query结果本身有要求(如`if len(rows) == 0`)，你需要保持锁定index，不然提交事务时index可能已变。
             - 建议使用`unique`索引在底层限制唯一性
 
         举个删除背包所有道具的例子：1.查询背包，2.删除查询到的行。
@@ -321,13 +339,14 @@ class ComponentTransaction:
     async def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
         """
         同:func:`~hetu.data.ComponentTransaction.select`，
-        如果没有查询到值时，会返回空数据（Component.new_row()）。
+        返回的是一个UpdateOrInsert对象，可以在with语句中使用，离开with时自动update或insert。
+        如果没有查询到值时，会返回空数据（Component.new_row()），并在离开with时自动insert。
 
-        返回值是`UpdateOrInsert`类型，可通过`UpdateOrInsert.row`获取row数据，
-        `UpdateOrInsert.commit()`提交更新。
-        或者用With语句，可以自动提交，如下：
-        async with ctx[Component].select_or_create(...) as row:
-            row.value = 100
+        使用方法如下：
+        ```
+        async with ctx[Component].select_or_create(user_id, 'owner') as row:
+            row.money = 100
+        ```
         """
         rtn = await self.select(value, where)
         if rtn is None:
@@ -455,55 +474,195 @@ class UpdateOrInsert:
             await self.commit()
 
 
-##################################################
+# === === === === === === 数据订阅 === === === === === ===
 
 
-class MQClientPool:
-    pass
+class MQClient:
+    """连接到消息队列的客户端，每个用户连接一个实例"""
+    async def get_message(self) -> list[str]:
+        """
+        从消息队列获取一条消息。返回值为收到消息的channel_name列表。
+        每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
+        本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
+        """
+        # 必须合并消息，因为index更新时大都是2条一起的
+        raise NotImplementedError
+
+    async def subscribe(self, channel_name: str) -> None:
+        """订阅频道"""
+        raise NotImplementedError
+
+    async def unsubscribe(self, channel_name: str) -> None:
+        """取消订阅频道"""
+        raise NotImplementedError
+
+
+class BaseSubscription:
+    async def get_updated(self, channel) -> dict[int, dict | None]:
+        raise NotImplementedError
+
+    @property
+    def channels(self) -> set[str]:
+        raise NotImplementedError
+
+
+class RowSubscription(BaseSubscription):
+    def __init__(self, table: ComponentTable, channel: str, row_id: int):
+        self.table = table
+        self.channel = channel
+        self.row_id = row_id
+
+    async def get_update(self, channel) -> dict[int, dict | None]:
+        rtn = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
+        if len(rtn) == 0:
+            return {self.row_id: None}
+        return {self.row_id: rtn[0]}
+
+    @property
+    def channels(self) -> set[str]:
+        return {self.channel}
+
+
+class IndexSubscription(BaseSubscription):
+    def __init__(self, table: ComponentTable, index_channel: str, last_query, query_param: dict):
+        self.table = table
+        self.index_channel = index_channel
+        self.query_param = query_param
+        self.row_subs: dict[str, RowSubscription] = {}
+        self.last_query = last_query
+
+    def add_row_subscriber(self, channel, row_id):
+        self.row_subs[channel] = RowSubscription(self.table, channel, row_id)
+
+    async def get_update(self, channel) -> dict[int, dict | None]:
+        if channel == self.index_channel:
+            # 查询index更新，比较row_id是否有变化
+            row_ids = await self.table.direct_query(**self.query_param, row_format='id')
+            updated = set(row_ids) - self.last_query
+            rtn = {}
+            for row_id in updated:
+                row = await self.table.direct_query(
+                    'id', row_id, limit=1, row_format='raw')
+                if len(rtn) == 0:
+                    rtn[row_id] = None
+                else:
+                    rtn[row_id] = row[0]
+            return rtn
+        elif channel in self.row_subs:
+            return await self.row_subs[channel].get_update(channel)
+
+    @property
+    def channels(self) -> set[str]:
+        return {self.index_channel, *self.row_subs.keys()}
 
 
 class Subscriptions:
     """
     Component的数据订阅和查询接口
     """
-    def __init__(self, instance_name, mq: MQClientPool):
+    def __init__(self, instance_name, backend: Backend):
         self._instance_name = instance_name
-        self._mq = mq
+        self._backend = backend
+        self._mq = backend.get_mq_client()
 
+        self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
+        self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
 
-class ComponentSubscriber:
+    @classmethod
+    def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
+        return (f"{table.component_cls.component_name_}.{index_name}"
+                f"[{left}:{right}:{desc and -1 or 1}][:{limit}]")
 
-    async def subscribe_select(self, value, where: str = 'id'):
-        """订阅单行数据"""
-        # 需要获取backend db数字
-        # 频道： '__keyspace@0__:keyname' 事件：hset, del
-        raise NotImplementedError
+    async def subscribe_select(
+            self, table: ComponentTable, value, where: str = 'id'
+    ) -> tuple[str | None, np.record | None]:
+        """
+        获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
+        如果未查询到数据，返回None, None。
+        如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+        """
+        rows = await table.direct_query(where, value, limit=1, row_format='raw')
+        if len(rows) == 0:
+            return None, None
+        row = rows[0]
 
-    async def subscribe_query(self, index_name: str, left, right=None, limit=10, desc=False):
-        """订阅多行数据"""
-        # 频道： '__keyspace@0__:indexname' 事件：zadd，zrem
-        # 然后再对所有查询的结果分别订阅select
-        raise NotImplementedError
+        sub_id = self._make_query_str(
+            table, 'id', row['id'], None, 1, False)
+        if sub_id in self._subs:
+            return sub_id, row
+
+        channel_name = table.channel_name(row_id=row['id'])
+        await self._mq.subscribe(channel_name)
+
+        self._subs[sub_id] = RowSubscription(table, channel_name, row['id'])
+        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
+        return row
+
+    async def subscribe_query(
+            self,
+            table: ComponentTable,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False,
+            force=True
+    ) -> tuple[str | None, list[dict]]:
+        """
+        获取并订阅多行数据，返回订阅id(sub_id: str)，和多行数据(rows: list[dict])。
+        如果未查询到数据，返回None, []。
+        但force参数可以强制未查询到数据时也订阅，返回订阅id(sub_id: str)，和[]。
+        如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+        """
+        rows = await table.direct_query(
+            index_name, left, right, limit, desc, row_format='raw')
+        if not force and len(rows) == 0:
+            return None, rows
+
+        sub_id = self._make_query_str(table, index_name, left, right, limit, desc)
+        if sub_id in self._subs:
+            return sub_id, rows
+
+        index_channel = table.channel_name(index_name=index_name)
+        await self._mq.subscribe(index_channel)
+
+        idx_sub = IndexSubscription(
+            table, index_channel, {row['id'] for row in rows},
+            dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
+        self._subs[sub_id] = idx_sub
+        self._channel_subs.setdefault(index_channel, set()).add(sub_id)
+
+        # 还要订阅每行的信息，这样每行数据变更时才能收到消息
+        for row in rows:
+            row_channel = table.channel_name(row_id=row['id'])
+            await self._mq.subscribe(row_channel)
+            idx_sub.add_row_subscriber(row_channel, row['id'])
+            self._channel_subs.setdefault(row_channel, set()).add(sub_id)
+
+        return sub_id, rows
 
     async def unsubscribe(self, sub_id):
         """取消订阅数据"""
-        raise NotImplementedError
+        if sub_id not in self._subs:
+            return
 
-    async def _backend_get_changes(self):
-        # 继承，并获取数据row和index发生变动的通知
-        # 根据通知，组合成row数据，返回List，
-        # 返回示例：[('update', row), ('insert', row), ('delete', row_id)]
-        raise NotImplementedError
+        for channel in self._subs[sub_id].channels:
+            self._channel_subs[channel].remove(sub_id)
+            if len(self._channel_subs[channel]) == 0:
+                await self._mq.unsubscribe(channel)
+                del self._channel_subs[channel]
+        self._subs.pop(sub_id)
 
-    async def get_message(self):
-        """处理一次订阅事件"""
-        # 调用get_message()，没值返回None
-        rows = await self._backend_get_changes()
-        # 组合成消息
-        msg = []
-        row_names = rows.dtype.names
-        for row in rows:
-            dict_row = dict(zip(row_names, row))
-            msg.append({'cmd': 'update', 'row': dict_row})
-        # 返回消息
-        raise msg
+    async def get_updates(self):
+        """接受消息，并按消息类型分发到对应的ComponentSubscriber"""
+        rtn = []
+        updated_channels = await self._mq.get_message()
+        for channel in updated_channels:
+            sub_ids = self._channel_subs.get(channel, [])
+            for sub_id in sub_ids:
+                sub = self._subs[sub_id]
+                rtn.extend(await sub.get_updated(channel))
+        return rtn
+
+
+

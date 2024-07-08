@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
 from .base import (ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction,
-                   MQClient)
+                   MQClient, Subscriptions)
 import logging
 logger = logging.getLogger('HeTu')
 
@@ -25,6 +25,7 @@ class RedisBackend(Backend):
         # 同步io连接, 异步io连接, 只读io连接
         self.io = redis.from_url(config['master'], decode_responses=True)
         self.aio = redis.asyncio.from_url(config['master'], decode_responses=True)
+        self.dbi = self.io.connection_pool.connection_kwargs['db']
         # 连接只读数据库
         servants = config.get('servants', [])
         self.replicas = [redis.asyncio.from_url(url, decode_responses=True) for url in servants]
@@ -55,10 +56,14 @@ class RedisBackend(Backend):
         for replica in self.replicas:
             await replica.aclose()
 
+    def random_replica(self) -> redis.Redis:
+        """随机返回一个只读连接"""
+        i = random.randint(0, len(self.replicas) - 1)
+        return self.replicas[i]
+
     def get_mq_client(self) -> 'RedisMQClient':
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
-        i = random.randint(0, len(self.replicas))
-        return RedisMQClient(self.replicas[i])
+        return RedisMQClient(self.random_replica())
 
     def transaction(self, cluster_id: int) -> 'RedisTransaction':
         """进入db的事务模式，返回事务连接"""
@@ -235,7 +240,7 @@ class RedisComponentTable(ComponentTable):
             backend: RedisBackend
     ):
         super().__init__(component_cls, instance_name, cluster_id, backend)
-        self._backend = backend  # 为了让代码提示知道类型是RedisBackendClientPool
+        self._backend = backend  # 为了让代码提示知道类型是RedisBackend
         component_cls.hosted_ = self
         # redis key名
         hash_tag = f'{{CLU{cluster_id}}}:'
@@ -465,8 +470,10 @@ class RedisComponentTable(ComponentTable):
             left,
             right=None,
             limit=10,
-            desc=False
-    ) -> np.recarray:
+            desc=False,
+            row_format='struct',
+    ) -> np.recarray | list[dict | int]:
+        replica = self._backend.random_replica()
         idx_key = self._idx_prefix + index_name
 
         cmds = RedisComponentTable.make_query_cmd(
@@ -475,24 +482,43 @@ class RedisComponentTable(ComponentTable):
         if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
             row_ids = cmds
         else:
-            row_ids = await self._backend.aio.zrange(name=idx_key, **cmds)
+            row_ids = await replica.zrange(name=idx_key, **cmds)
             str_type = self._component_cls.indexes_[index_name]
             if str_type:
                 row_ids = [vk.split(':')[-1] for vk in row_ids]
 
+        if row_format == 'id':
+            return row_ids
+        raw = row_format == 'raw'
+
+        key_prefix = self._key_prefix
         rows = []
         for _id in row_ids:
-            row = await self._backend.aio.hgetall(self._key_prefix + str(_id))
-            rows.append(self._component_cls.dict_to_row(row))
+            row = await replica.hgetall(key_prefix + str(_id))
+            if raw:
+                rows.append(row)
+            else:
+                rows.append(self._component_cls.dict_to_row(row))
 
-        if len(rows) == 0:
-            return np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))
+        if raw:
+            return rows
         else:
-            return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
+            if len(rows) == 0:
+                return np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))
+            else:
+                return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         return RedisComponentTransaction(
             self, backend_trx, self._key_prefix, self._idx_prefix)
+
+    def channel_name(self, index_name: str = None, row_id: int = None):
+        dbi = self._backend.dbi
+        if index_name:
+            return f'__keyspace@{dbi}__:{self._idx_prefix + index_name}'
+        elif row_id is not None:
+            return f'__keyspace@{dbi}__:{self._key_prefix + str(row_id)}'
+        raise ValueError("index_name和row_id必须有一个")
 
 
 class RedisComponentTransaction(ComponentTransaction):
