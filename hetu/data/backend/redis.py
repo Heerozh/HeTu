@@ -6,6 +6,7 @@
 """
 import random
 import hashlib
+import time
 import numpy as np
 import redis
 import itertools
@@ -543,8 +544,7 @@ class RedisComponentTransaction(ComponentTransaction):
         # 同时要让乐观锁锁定该行
         await pipe.watch(key)
         # 返回值要通过dict_to_row包裹下
-        row = await pipe.hgetall(key)
-        if row:
+        if row := await pipe.hgetall(key):
             return self._component_cls.dict_to_row(row)
         else:
             return None
@@ -663,7 +663,31 @@ class RedisComponentTransaction(ComponentTransaction):
 
 
 class RedisMQClient(MQClient):
+    """连接到消息队列的客户端，每个用户连接一个实例。"""
     def __init__(self, redis_conn: redis.asyncio.Redis | redis.asyncio.RedisCluster):
         # todo 要测试redis cluster是否能正常pub sub
         self._mq = redis_conn.pubsub()
 
+    async def subscribe(self, channel_name) -> None:
+        await self._mq.subscribe(channel_name)
+
+    async def unsubscribe(self, channel_name) -> None:
+        await self._mq.unsubscribe(channel_name)
+
+    async def get_message(self) -> set[str]:
+        """
+        从消息队列获取一条消息。返回值为收到消息的channel_name列表。
+        每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
+        本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
+        """
+        rtn = set()
+        start_clock = time.monotonic()
+        while True:
+            msg = await self._mq.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            if msg is None:
+                # 等待至少0.5秒，来合并批量消息
+                if (time.monotonic() - start_clock) >= 0.5:
+                    break
+            else:
+                rtn.add(msg['channel'])
+        return rtn
