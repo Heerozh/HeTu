@@ -10,7 +10,8 @@ import numpy as np
 
 from hetu.data import define_component, Property, BaseComponent, ComponentDefines
 from hetu.data.backend import (RaceCondition, UniqueViolation, ComponentTable, Backend,
-                               ComponentTransaction, RedisComponentTable, RedisBackend)
+                               ComponentTransaction, RedisComponentTable, RedisBackend,
+                               Subscriptions)
 
 logger = logging.getLogger('HeTu')
 logger.setLevel(logging.DEBUG)
@@ -570,6 +571,80 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)),
                              0)
 
+        await backend.close()
+
+    @parameterized(implements)
+    async def test_message_queue(self, table_cls: type[ComponentTable],
+                                 backend_cls: type[Backend], config):
+        backend = backend_cls(config)
+        # 初始化测试数据
+        ComponentDefines().clear_()
+        self.build_test_component()
+
+        item_data = table_cls(Item, 'test', 1, backend)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            for i in range(25):
+                row = Item.new_row()
+                row.id = 0
+                row.name = f'Itm{i + 10}'
+                row.owner = 10
+                row.time = i + 110
+                row.qty = 999
+                await tbl.insert(row)
+
+        # 初始化订阅器
+        mq = backend.get_mq_client()
+        sub_mgr = Subscriptions(backend)
+
+        # 测试订阅的返回值，和订阅管理器的私有值
+        sub_id1, row = await sub_mgr.subscribe_select(item_data, 'Itm10', 'name')
+        self.assertEqual(row['time'], '110')
+        self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
+        self.assertEqual(sub_mgr._subs[sub_id1].row_id, '1')
+
+        sub_id2, rows = await sub_mgr.subscribe_query(
+            item_data, 'owner', 10, limit=33)
+        self.assertEqual(len(rows), 25)
+        self.assertEqual(sub_id2, 'Item.owner[10:None:1][:33]')
+        self.assertEqual(len(sub_mgr._subs[sub_id2].channels), 25 + 1)  # 加1 index channel
+        self.assertEqual(len(sub_mgr._subs[sub_id2].row_subs), 25)
+        self.assertEqual(sub_mgr._subs[sub_id2].last_query, {str(i) for i in range(1, 26)})
+        first_row_channel = next(iter(sorted(sub_mgr._subs[sub_id2].channels)))
+        self.assertEqual(sub_mgr._subs[sub_id2].row_subs[first_row_channel].row_id, '1')
+
+        sub_id2, rows = await sub_mgr.subscribe_query(
+            item_data, 'owner', 10, right=11, limit=44)
+        self.assertEqual(len(rows), 25)
+        self.assertEqual(sub_id2, 'Item.owner[10:11:1][:44]')
+
+        # 测试更新消息能否获得
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates), 0)
+
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.owner = 11
+            await tbl.update(1, row)
+
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates), 2)
+
+        # 测试第二次更新cache是否清空了
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(10)
+            row.owner = 11
+            await tbl.update(10, row)
+
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates), 2)
+
+        # 测试取消订阅
+
+
+        # 关闭连接
         await backend.close()
 
 

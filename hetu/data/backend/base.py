@@ -478,8 +478,8 @@ class UpdateOrInsert:
 
 
 class MQClient:
-    """连接到消息队列的客户端，每个用户连接一个实例"""
-    async def get_message(self) -> list[str]:
+    """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+    async def get_message(self) -> set[str]:
         """
         从消息队列获取一条消息。返回值为收到消息的channel_name列表。
         每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
@@ -498,7 +498,7 @@ class MQClient:
 
 
 class BaseSubscription:
-    async def get_updated(self, channel) -> dict[int, dict | None]:
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
         raise NotImplementedError
 
     @property
@@ -507,16 +507,29 @@ class BaseSubscription:
 
 
 class RowSubscription(BaseSubscription):
+    __cache = {}
+
     def __init__(self, table: ComponentTable, channel: str, row_id: int):
         self.table = table
         self.channel = channel
         self.row_id = row_id
 
-    async def get_update(self, channel) -> dict[int, dict | None]:
-        rtn = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
-        if len(rtn) == 0:
-            return {self.row_id: None}
-        return {self.row_id: rtn[0]}
+    @classmethod
+    def clear_cache(cls, channel):
+        cls.__cache.pop(channel, None)
+
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
+        # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
+        if (cache := RowSubscription.__cache.get(channel, None)) is not None:
+            return cache
+
+        rows = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
+        if len(rows) == 0:
+            rtn = {self.row_id: None}
+        else:
+            rtn = {self.row_id: rows[0]}
+        RowSubscription.__cache[channel] = rtn
+        return set(), set(), rtn
 
     @property
     def channels(self) -> set[str]:
@@ -534,22 +547,29 @@ class IndexSubscription(BaseSubscription):
     def add_row_subscriber(self, channel, row_id):
         self.row_subs[channel] = RowSubscription(self.table, channel, row_id)
 
-    async def get_update(self, channel) -> dict[int, dict | None]:
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
             row_ids = await self.table.direct_query(**self.query_param, row_format='id')
-            updated = set(row_ids) - self.last_query
+            inserts = set(row_ids) - self.last_query
+            deletes = self.last_query - set(row_ids)
+            new_chans = set()
+            rem_chans = set()
             rtn = {}
-            for row_id in updated:
-                row = await self.table.direct_query(
+            for row_id in inserts:
+                rows = await self.table.direct_query(
                     'id', row_id, limit=1, row_format='raw')
-                if len(rtn) == 0:
-                    rtn[row_id] = None
+                if len(rows) == 0:
+                    continue  # 可能是刚添加就删了
                 else:
-                    rtn[row_id] = row[0]
-            return rtn
+                    rtn[row_id] = rows[0]
+                    new_chans.add(self.table.channel_name(row_id=row_id))
+            for row_id in deletes:
+                rtn[row_id] = None
+                rem_chans.add(self.table.channel_name(row_id=row_id))
+            return new_chans, rem_chans, rtn
         elif channel in self.row_subs:
-            return await self.row_subs[channel].get_update(channel)
+            return await self.row_subs[channel].get_updated(channel)
 
     @property
     def channels(self) -> set[str]:
@@ -560,8 +580,7 @@ class Subscriptions:
     """
     Component的数据订阅和查询接口
     """
-    def __init__(self, instance_name, backend: Backend):
-        self._instance_name = instance_name
+    def __init__(self, backend: Backend):
         self._backend = backend
         self._mq = backend.get_mq_client()
 
@@ -581,8 +600,7 @@ class Subscriptions:
         如果未查询到数据，返回None, None。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
         """
-        rows = await table.direct_query(where, value, limit=1, row_format='raw')
-        if len(rows) == 0:
+        if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
             return None, None
         row = rows[0]
 
@@ -596,7 +614,7 @@ class Subscriptions:
 
         self._subs[sub_id] = RowSubscription(table, channel_name, row['id'])
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
-        return row
+        return sub_id, row
 
     async def subscribe_query(
             self,
@@ -641,7 +659,7 @@ class Subscriptions:
 
         return sub_id, rows
 
-    async def unsubscribe(self, sub_id):
+    async def unsubscribe(self, sub_id) -> None:
         """取消订阅数据"""
         if sub_id not in self._subs:
             return
@@ -653,15 +671,31 @@ class Subscriptions:
                 del self._channel_subs[channel]
         self._subs.pop(sub_id)
 
-    async def get_updates(self):
-        """接受消息，并按消息类型分发到对应的ComponentSubscriber"""
-        rtn = []
+    async def get_updates(self) -> dict[str, dict[int, dict]]:
+        """
+        pop mq的数据更新通知，然后通过查询数据库取出最新的值，并返回。
+        返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
+        """
+        rtn = {}
         updated_channels = await self._mq.get_message()
         for channel in updated_channels:
+            RowSubscription.clear_cache(channel)
             sub_ids = self._channel_subs.get(channel, [])
             for sub_id in sub_ids:
                 sub = self._subs[sub_id]
-                rtn.extend(await sub.get_updated(channel))
+                # 获取sub更新的行数据
+                new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
+                # 如果有行添加或删除，订阅或取消订阅
+                for new_chan in new_chans:
+                    await self._mq.subscribe(new_chan)
+                    self._channel_subs.setdefault(new_chan, set()).add(sub_id)
+                for rem_chan in rem_chans:
+                    self._channel_subs[rem_chan].remove(sub_id)
+                    if len(self._channel_subs[rem_chan]) == 0:
+                        await self._mq.unsubscribe(rem_chan)
+                        del self._channel_subs[rem_chan]
+                # 添加行数据到返回值
+                rtn.setdefault(sub_id, dict()).update(sub_updates)
         return rtn
 
 
