@@ -521,7 +521,7 @@ class RowSubscription(BaseSubscription):
     async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
-            return cache
+            return set(), set(), cache
 
         rows = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
         if len(rows) == 0:
@@ -551,8 +551,10 @@ class IndexSubscription(BaseSubscription):
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
             row_ids = await self.table.direct_query(**self.query_param, row_format='id')
-            inserts = set(row_ids) - self.last_query
-            deletes = self.last_query - set(row_ids)
+            row_ids = set(row_ids)
+            inserts = row_ids - self.last_query
+            deletes = self.last_query - row_ids
+            self.last_query = row_ids
             new_chans = set()
             rem_chans = set()
             rtn = {}
@@ -563,10 +565,16 @@ class IndexSubscription(BaseSubscription):
                     continue  # 可能是刚添加就删了
                 else:
                     rtn[row_id] = rows[0]
-                    new_chans.add(self.table.channel_name(row_id=row_id))
+                    new_chan_name = self.table.channel_name(row_id=row_id)
+                    new_chans.add(new_chan_name)
+                    self.row_subs[new_chan_name] = RowSubscription(
+                        self.table, new_chan_name, row_id)
             for row_id in deletes:
                 rtn[row_id] = None
-                rem_chans.add(self.table.channel_name(row_id=row_id))
+                rem_chan_name = self.table.channel_name(row_id=row_id)
+                rem_chans.add(rem_chan_name)
+                self.row_subs.pop(rem_chan_name)
+
             return new_chans, rem_chans, rtn
         elif channel in self.row_subs:
             return await self.row_subs[channel].get_updated(channel)
@@ -603,6 +611,7 @@ class Subscriptions:
         if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
             return None, None
         row = rows[0]
+        row['id'] = int(row['id'])
 
         sub_id = self._make_query_str(
             table, 'id', row['id'], None, 1, False)
@@ -644,17 +653,18 @@ class Subscriptions:
         index_channel = table.channel_name(index_name=index_name)
         await self._mq.subscribe(index_channel)
 
+        row_ids = {int(row['id']) for row in rows}
         idx_sub = IndexSubscription(
-            table, index_channel, {row['id'] for row in rows},
+            table, index_channel, row_ids,
             dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
         self._subs[sub_id] = idx_sub
         self._channel_subs.setdefault(index_channel, set()).add(sub_id)
 
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
-        for row in rows:
-            row_channel = table.channel_name(row_id=row['id'])
+        for row_id in row_ids:
+            row_channel = table.channel_name(row_id=row_id)
             await self._mq.subscribe(row_channel)
-            idx_sub.add_row_subscriber(row_channel, row['id'])
+            idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)
 
         return sub_id, rows
@@ -695,7 +705,8 @@ class Subscriptions:
                         await self._mq.unsubscribe(rem_chan)
                         del self._channel_subs[rem_chan]
                 # 添加行数据到返回值
-                rtn.setdefault(sub_id, dict()).update(sub_updates)
+                if len(sub_updates) > 0:
+                    rtn.setdefault(sub_id, dict()).update(sub_updates)
         return rtn
 
 

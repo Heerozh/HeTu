@@ -594,14 +594,13 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await tbl.insert(row)
 
         # 初始化订阅器
-        mq = backend.get_mq_client()
         sub_mgr = Subscriptions(backend)
 
         # 测试订阅的返回值，和订阅管理器的私有值
         sub_id1, row = await sub_mgr.subscribe_select(item_data, 'Itm10', 'name')
         self.assertEqual(row['time'], '110')
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
-        self.assertEqual(sub_mgr._subs[sub_id1].row_id, '1')
+        self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
 
         sub_id2, rows = await sub_mgr.subscribe_query(
             item_data, 'owner', 10, limit=33)
@@ -609,14 +608,40 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sub_id2, 'Item.owner[10:None:1][:33]')
         self.assertEqual(len(sub_mgr._subs[sub_id2].channels), 25 + 1)  # 加1 index channel
         self.assertEqual(len(sub_mgr._subs[sub_id2].row_subs), 25)
-        self.assertEqual(sub_mgr._subs[sub_id2].last_query, {str(i) for i in range(1, 26)})
+        self.assertEqual(sub_mgr._subs[sub_id2].last_query, {i for i in range(1, 26)})
         first_row_channel = next(iter(sorted(sub_mgr._subs[sub_id2].channels)))
-        self.assertEqual(sub_mgr._subs[sub_id2].row_subs[first_row_channel].row_id, '1')
+        self.assertEqual(sub_mgr._subs[sub_id2].row_subs[first_row_channel].row_id, 1)
 
-        sub_id2, rows = await sub_mgr.subscribe_query(
+        sub_id3, rows = await sub_mgr.subscribe_query(
             item_data, 'owner', 10, right=11, limit=44)
         self.assertEqual(len(rows), 25)
-        self.assertEqual(sub_id2, 'Item.owner[10:11:1][:44]')
+        self.assertEqual(sub_id3, 'Item.owner[10:11:1][:44]')
+
+        sub_id4, rows = await sub_mgr.subscribe_query(
+            item_data, 'owner', 11, right=12, limit=55)
+        self.assertEqual(len(rows), 0)
+        self.assertEqual(len(sub_mgr._subs[sub_id4].row_subs), 0)
+        self.assertEqual(sub_id4, 'Item.owner[11:12:1][:55]')
+
+        # 先把mq里的订阅消息都取出来清空
+        mq = sub_mgr._mq
+        await mq.get_message()
+        await mq.get_message()
+
+        # 测试mq，2次消息应该只能获得1次合并的
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.qty = 998
+            await tbl.update(1, row)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.qty = 997
+            await tbl.update(1, row)
+        mq = sub_mgr._mq
+        notified_channels = await mq.get_message()
+        self.assertEqual(len(notified_channels), 1)
 
         # 测试更新消息能否获得
         updates = await sub_mgr.get_updates()
@@ -629,20 +654,40 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await tbl.update(1, row)
 
         updates = await sub_mgr.get_updates()
-        self.assertEqual(len(updates), 2)
+        self.assertEqual(len(updates), 4)
+        self.assertEqual(updates[sub_id1][1]['owner'], '11')  # row订阅数据更新
+        self.assertEqual(updates[sub_id2][1], None)           # query 10删除了1
+        self.assertEqual(updates[sub_id3][1]['owner'], '11')  # query 10-11更新row数据
+        self.assertEqual(updates[sub_id4][1]['owner'], '11')  # query 11-12更新row数据
+
+        # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
+        self.assertEqual(len(sub_mgr._subs[sub_id2].row_subs), 24)
+        self.assertEqual(len(sub_mgr._subs[sub_id4].row_subs), 1)
 
         # 测试第二次更新cache是否清空了
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
-            row = await tbl.select(10)
-            row.owner = 11
-            await tbl.update(10, row)
+            row = await tbl.select(1)
+            row.owner = 12
+            await tbl.update(1, row)
 
         updates = await sub_mgr.get_updates()
-        self.assertEqual(len(updates), 2)
+        self.assertEqual(len(updates), 3)
+        self.assertEqual(updates[sub_id1][1]['owner'], '12')  # row订阅数据更新
+        self.assertEqual(updates[sub_id3][1], None)  # query 10-11删除了1
+        self.assertEqual(updates[sub_id4][1]['owner'], '12')  # query 11-12更新row数据
 
         # 测试取消订阅
-
+        await sub_mgr.unsubscribe(sub_id2)
+        self.assertEqual(len(sub_mgr._subs), 3)
+        await sub_mgr.unsubscribe(sub_id3)
+        self.assertEqual(len(sub_mgr._channel_subs), 2)
+        await sub_mgr.unsubscribe(sub_id1)
+        self.assertEqual(len(sub_mgr._channel_subs), 2)
+        await sub_mgr.unsubscribe(sub_id1)  # 测试重复取消订阅没变化
+        self.assertEqual(len(sub_mgr._channel_subs), 2)
+        await sub_mgr.unsubscribe(sub_id4)
+        self.assertEqual(len(sub_mgr._channel_subs), 0)
 
         # 关闭连接
         await backend.close()
