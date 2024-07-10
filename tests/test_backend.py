@@ -601,6 +601,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(row['time'], '110')
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
         self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 1)
 
         sub_id2, rows = await sub_mgr.subscribe_query(
             item_data, 'owner', 10, limit=33)
@@ -611,6 +612,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sub_mgr._subs[sub_id2].last_query, {i for i in range(1, 26)})
         first_row_channel = next(iter(sorted(sub_mgr._subs[sub_id2].channels)))
         self.assertEqual(sub_mgr._subs[sub_id2].row_subs[first_row_channel].row_id, 1)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
 
         sub_id3, rows = await sub_mgr.subscribe_query(
             item_data, 'owner', 10, right=11, limit=44)
@@ -622,9 +624,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(rows), 0)
         self.assertEqual(len(sub_mgr._subs[sub_id4].row_subs), 0)
         self.assertEqual(sub_id4, 'Item.owner[11:12:1][:55]')
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
 
         # 先把mq里的订阅消息都取出来清空
-        mq = sub_mgr._mq
+        mq = sub_mgr._mq_client
         await mq.get_message()
         await mq.get_message()
 
@@ -639,7 +642,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row = await tbl.select(1)
             row.qty = 997
             await tbl.update(1, row)
-        mq = sub_mgr._mq
+        mq = sub_mgr._mq_client
         notified_channels = await mq.get_message()
         self.assertEqual(len(notified_channels), 1)
 
@@ -678,16 +681,27 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updates[sub_id4][1]['owner'], '12')  # query 11-12更新row数据
 
         # 测试取消订阅
+        self.assertEqual(len(sub_mgr._subs), 4)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
+
         await sub_mgr.unsubscribe(sub_id2)
         self.assertEqual(len(sub_mgr._subs), 3)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
+
         await sub_mgr.unsubscribe(sub_id3)
         self.assertEqual(len(sub_mgr._channel_subs), 2)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 2)
+
         await sub_mgr.unsubscribe(sub_id1)
         self.assertEqual(len(sub_mgr._channel_subs), 2)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 2)
         await sub_mgr.unsubscribe(sub_id1)  # 测试重复取消订阅没变化
         self.assertEqual(len(sub_mgr._channel_subs), 2)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 2)
+
         await sub_mgr.unsubscribe(sub_id4)
         self.assertEqual(len(sub_mgr._channel_subs), 0)
+        self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 0)
 
         # 关闭连接
         await backend.close()
