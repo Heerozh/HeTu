@@ -496,6 +496,11 @@ class MQClient:
         """取消订阅频道"""
         raise NotImplementedError
 
+    @property
+    def subscribed_channels(self) -> set[str]:
+        """返回当前订阅的频道名"""
+        raise NotImplementedError
+
 
 class BaseSubscription:
     async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
@@ -590,7 +595,7 @@ class Subscriptions:
     """
     def __init__(self, backend: Backend):
         self._backend = backend
-        self._mq = backend.get_mq_client()
+        self._mq_client = backend.get_mq_client()
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
         self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
@@ -619,7 +624,7 @@ class Subscriptions:
             return sub_id, row
 
         channel_name = table.channel_name(row_id=row['id'])
-        await self._mq.subscribe(channel_name)
+        await self._mq_client.subscribe(channel_name)
 
         self._subs[sub_id] = RowSubscription(table, channel_name, row['id'])
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
@@ -651,7 +656,7 @@ class Subscriptions:
             return sub_id, rows
 
         index_channel = table.channel_name(index_name=index_name)
-        await self._mq.subscribe(index_channel)
+        await self._mq_client.subscribe(index_channel)
 
         row_ids = {int(row['id']) for row in rows}
         idx_sub = IndexSubscription(
@@ -663,7 +668,7 @@ class Subscriptions:
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
         for row_id in row_ids:
             row_channel = table.channel_name(row_id=row_id)
-            await self._mq.subscribe(row_channel)
+            await self._mq_client.subscribe(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)
 
@@ -677,7 +682,7 @@ class Subscriptions:
         for channel in self._subs[sub_id].channels:
             self._channel_subs[channel].remove(sub_id)
             if len(self._channel_subs[channel]) == 0:
-                await self._mq.unsubscribe(channel)
+                await self._mq_client.unsubscribe(channel)
                 del self._channel_subs[channel]
         self._subs.pop(sub_id)
 
@@ -687,7 +692,7 @@ class Subscriptions:
         返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
         """
         rtn = {}
-        updated_channels = await self._mq.get_message()
+        updated_channels = await self._mq_client.get_message()
         for channel in updated_channels:
             RowSubscription.clear_cache(channel)
             sub_ids = self._channel_subs.get(channel, [])
@@ -697,12 +702,12 @@ class Subscriptions:
                 new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
                 # 如果有行添加或删除，订阅或取消订阅
                 for new_chan in new_chans:
-                    await self._mq.subscribe(new_chan)
+                    await self._mq_client.subscribe(new_chan)
                     self._channel_subs.setdefault(new_chan, set()).add(sub_id)
                 for rem_chan in rem_chans:
                     self._channel_subs[rem_chan].remove(sub_id)
                     if len(self._channel_subs[rem_chan]) == 0:
-                        await self._mq.unsubscribe(rem_chan)
+                        await self._mq_client.unsubscribe(rem_chan)
                         del self._channel_subs[rem_chan]
                 # 添加行数据到返回值
                 if len(sub_updates) > 0:

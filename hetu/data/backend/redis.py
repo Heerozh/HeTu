@@ -691,3 +691,7 @@ class RedisMQClient(MQClient):
             else:
                 rtn.add(msg['channel'])
         return rtn
+
+    @property
+    def subscribed_channels(self) -> set[str]:
+        return set(self._mq.channels) - set(self._mq.pending_unsubscribe_channels)
