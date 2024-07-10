@@ -59,7 +59,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
     async def test_executor(self):
         executor = hetu.system.SystemExecutor('ssw')
-        await executor.initialize("", "", "")
+        await executor.initialize("")
 
         # 测试无权限call
         ok, _ = await executor.run_('use_hp', 9)
@@ -93,7 +93,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
         # 测试race
         executor2 = hetu.system.SystemExecutor('ssw')
-        await executor2.initialize("", "", "")
+        await executor2.initialize("")
 
         task1 = asyncio.create_task(executor.run_('race', 1))
         task2 = asyncio.create_task(executor2.run_('race', 0.2))

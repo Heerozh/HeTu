@@ -494,6 +494,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.build_test_component()
 
         backend = backend_cls(config)
+        backend.io.flushdb()
         item_data = table_cls(Item, 'test', 1, backend)
 
         async with backend.transaction(1) as trx:

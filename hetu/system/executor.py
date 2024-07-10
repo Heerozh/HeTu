@@ -66,14 +66,12 @@ class Connection(BaseComponent):
 
 
 @define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
-async def new_connection(ctx: Context, address: str, device: str, device_id: str):
+async def new_connection(ctx: Context, address: str):
     row = Connection.new_row()
     row.owner = 0
     row.created = datetime.now().timestamp()
     row.last_active = row.created
     row.address = address
-    row.device = device
-    row.device_id = device_id
     await ctx[Connection].insert(row)
     row_ids = await ctx.end_transaction()
     ctx.connection_id = row_ids[0]
@@ -130,11 +128,11 @@ class SystemExecutor:
             inherited={}
         )
 
-    async def initialize(self, address: str, device: str, device_id: str):
+    async def initialize(self, address: str):
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        ok, _ = await self.run_('new_connection', address, device, device_id)
+        ok, _ = await self.run_('new_connection', address)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
 
