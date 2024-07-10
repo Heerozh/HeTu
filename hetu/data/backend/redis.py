@@ -489,7 +489,7 @@ class RedisComponentTable(ComponentTable):
                 row_ids = [vk.split(':')[-1] for vk in row_ids]
 
         if row_format == 'id':
-            return row_ids
+            return list(map(int, row_ids))
         raw = row_format == 'raw'
 
         key_prefix = self._key_prefix
