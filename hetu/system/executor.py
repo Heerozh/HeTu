@@ -56,8 +56,9 @@ class SystemResult:
     pass
 
 
-class Response(SystemResult):
-    def __init__(self, message: any):
+class SystemResponse(SystemResult):
+    """回报message给客户端，注意必须是json可以序列化的数据"""
+    def __init__(self, message: list | dict):
         self.message = message
 
 

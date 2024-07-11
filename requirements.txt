@@ -1,8 +1,8 @@
+python >= 3.11
 sanic  # pip install -U sanic
 numpy >= 2.0 # conda install numpy
 redis[hiredis]  # pip install -U redis[hiredis]
 GitPython  # pip install -U GitPython
-# pip install sanic-testing
 
 
 # 开发环境用：
@@ -10,3 +10,5 @@ trustme  # pip install -U trustme
 ipykernel
 ipywidgets  # conda install ipykernel ipywidgets
 docker  # pip install -U docker
+websockets  # pip install -U websockets
+# pip install sanic-testing

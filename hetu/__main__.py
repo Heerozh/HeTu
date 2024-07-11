@@ -39,15 +39,12 @@ def start(start_args):
             'APP_FILE': start_args.app_file,
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
-            'HEAD_NODE': start_args.head,
             'LISTEN': f"0.0.0.0:{start_args.port}",
+            'WEBSOCKET_COMPRESSION_CLASS': 'zlib',
             'BACKENDS': {
                 'Redis': {
                     "type": "Redis",
-                    "addr": start_args.db,
-                    "user": "root",
-                    "pass": "",
-                    "db": 0,
+                    "master": start_args.db,
                 }
             },
             'DEBUG': True,
@@ -67,8 +64,10 @@ def start(start_args):
     logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
     logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
     logger.info(f"📡 Listening on https://{config.LISTEN}")
-    # 准备启动服务器
+    logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('WEBSOCKET_COMPRESSION_CLASS')}, "
+                f"加密模块：{config.get('WEBSOCKET_CRYPTOGRAPHY_CLASS')}")
 
+    # 准备启动服务器
     app.prepare(debug=config.DEBUG,
                 access_log=config.ACCESS_LOG,
                 motd=False,
@@ -85,7 +84,7 @@ def main():
     parser = argparse.ArgumentParser(prog='hetu', description='Hetu Data Server')
     command_parsers = parser.add_subparsers(dest='command', help='commands', required=True)
 
-    # ============================================
+    # ==================start==========================
     parser_start = command_parsers.add_parser(
         'start', help='启动河图服务')
     cli_group = parser_start.add_argument_group("通过命令行启动参数")
@@ -99,13 +98,15 @@ def main():
     cli_group.add_argument(
         "--port", metavar="2446", help="监听的Websocket端口", default='2466')
     cli_group.add_argument(
-        "--db", metavar="127.0.0.1:6379", help="后端数据库地址", default='127.0.0.1:6379')
-    cli_group.add_argument(
-        "--head", help="是否为主节点，默认为True", default=True, metavar="True", type=bool)
+        "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
+        default='redis://127.0.0.1:6379/0')
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
         "--config", help="配置文件模板见CONFIG_TEMPLATE.py", metavar="config.py")
+    # ==================migration==========================
+    # parser_start = command_parsers.add_parser(
+    #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
 
     # 开始执行
     args = parser.parse_args()

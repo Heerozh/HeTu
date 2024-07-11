@@ -18,13 +18,18 @@ LISTEN = "0.0.0.0:2466"
 # 工作进程数，-1 为自动按cpu核心数
 WORKER_NUM = 4
 
-# 反正是Websocket，可以关了加性能，要加也应该在反向代理里加
+# 反正是Websocket，可以关了加性能
 ACCESS_LOG = False
 
 # 传入消息的最大字节、ping间隔秒、ping无响应关闭连接秒
 # WEBSOCKET_MAX_SIZE = 2 ^ 20
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
+
+# 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
+WEBSOCKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩
+WEBSOCKET_CRYPTOGRAPHY_CLASS = None    # 通过该class的encrypt和decrypt方法进行加密和解密
+
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS = {

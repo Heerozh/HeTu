@@ -146,7 +146,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
 
     Examples
     --------
-    >>> from hetu.system import define_system, Context, Response
+    >>> from hetu.system import define_system, Context, SystemResponse
     >>> @define_system(
     ...     namespace="ssw",
     ...     components=(Position, Hp),
@@ -157,7 +157,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     ...     ctx[Position].update(entity_self, pos_self)
     ...     items = ctx[Inventory].query("owner", entity_self)
     ...     ...
-    ...     return Response('blah blah')
+    ...     return SystemResponse('blah blah')
 
     Parameters
     ----------
@@ -192,7 +192,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         如果调用方是其他System，通过`inherits`调用，则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
-            - 返回值是 hetu.system.Response(data)时，则把data发送给调用方sdk。
+            - 返回值是 hetu.system.SystemResponse(data)时，则把data发送给调用方sdk。
             - 其他返回值丢弃
 
     **Context部分：**

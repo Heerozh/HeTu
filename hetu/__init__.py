@@ -9,3 +9,4 @@ from . import system
 from . import common
 
 from .manager import ComponentTableManager
+from .__version__ import __version__
