@@ -18,6 +18,7 @@ class ComponentTableManager(metaclass=Singleton):
     """
     def __init__(self):
         self.tables = {}
+        self.tables_by_name = {}
         self.subscriptions = {}
 
     def build(
@@ -37,10 +38,13 @@ class ComponentTableManager(metaclass=Singleton):
                     raise ValueError(f"Backend {comp.backend_} not found")
                 table = table_cls(comp, instance_name, cluster.id, backend)
                 self.tables[comp] = table
-                # self.subscriptions[comp] = backend.subscribe(comp)
+                self.tables_by_name[comp.component_name_] = table
 
-    def get_table(self, component_cls: type[BaseComponent]) -> ComponentTable | None:
-        return self.tables.get(component_cls)
+    def get_table(self, component_cls: type[BaseComponent] | str) -> ComponentTable | None:
+        if type(component_cls) is str:
+            return self.tables_by_name.get(component_cls)
+        else:
+            return self.tables.get(component_cls)
 
     def items(self) -> ItemsView[type[BaseComponent], ComponentTable]:
         return self.tables.items()
