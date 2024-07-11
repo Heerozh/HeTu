@@ -212,9 +212,25 @@ class ComponentTransaction:
 
     async def select(self, value, where: str = 'id') -> None | np.record:
         """
-        获取`where`==`value`的单行数据，返回c-struct like。
-        `where`不是unique索引时，返回升序排序的第一条数据。
-        如果没有查询到数据，返回None。
+        获取 `where` == `value` 的单行数据，返回c-struct like。
+        `where` 不是unique索引时，返回升序排序的第一条数据。
+
+        Parameters
+        ----------
+        value: str or number
+            查询的值
+        where: str
+            查询的索引名，如 'id', 'owner', 'name' 等
+
+        Returns
+        -------
+        row: np.record or None
+            返回c-struct like的单行数据。如果没有查询到数据，返回None。
+
+        Examples
+        --------
+        >>> row = await ctx[Item].select(ctx.caller, 'owner')
+        >>> row.name
         """
         assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
@@ -256,33 +272,56 @@ class ComponentTransaction:
             self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
     ) -> np.recarray:
         """
-        查询`index_name`在`left`和`right`之间的数据，限制`limit`条，是否降序`desc`。
-        如果right为None，则查询等于left的数据。
-        返回Numpy.Array[row]，如果没有查询到数据，返回空Numpy.Array。
+        查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
+        如果 `right` 为 `None`，则查询等于 `left` 的数据。
 
+        Parameters
+        ----------
+        index_name: str
+            查询Component中的哪条索引
+        left, right: str or number
+            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间
+        limit: int
+            限制返回的行数，越低越快
+        desc: bool
+            是否降序排列
+        lock_index: bool
+            表示是否锁定 `index_name` 索引，安全起见默认锁定，但因为存在行锁定，
+            其实大部分情况锁定index是不必要的。
+
+            锁定分2种：
+
+            * 行锁定：任何其他协程/进程对查询结果所含行的修改会引发事务冲突，但无关行不会。此锁定是强制的，不可关闭。
+            * Index锁定：任何其他协程/进程修改了该index(插入新行/update本列/删除任意行)都会引起事务冲突。
+              如果慢日志回报了大量的事务冲突，再考虑设为 `False`。
+
+            所以一般情况下：
+
+            * 如果你只对 `query` 返回的行操作(如`rows[0].value = 1`)，因为有行锁定，所以可以不锁index。
+            * 如果你对 `query` 结果本身有要求(如要求`len(rows) == 0`)，你需要保持锁定index，
+              不然提交事务时index可能已变。
+                - 建议使用 `unique` 索引在底层限制唯一性，事务冲突率低
+
+            举个删除背包所有道具的例子：1.查询背包，2.删除查询到的行。
+
+            由于1在查询完后，已经对所有查询到的行进行了锁定，即使不锁定index，2也可以保证道具不会被其他进程修改。
+            所以如果不锁定index，只会导致1和2之间，有新道具进入背包，删除可能不彻底，没有其他害处。
+
+        Returns
+        -------
+        rows: np.recarray
+            返回 `numpy.array`，如果没有查询到数据，返回空 `numpy.array`。
+
+        Notes
+        -----
         如何多条件查询？
         请利用python的特性，举例：
-        items = ctx[Item].query('owner', ctx.caller, limit=100)  # 先在数据库上筛选出最少量的数据
-        swords = items[items.model == 'sword']                   # 然后本地二次筛选
-        或者:
-        few_items = items[items.amount < 10]
 
-        `lock_index`: 表示是否锁定`index_name`索引，安全起见默认锁定，但因为存在行锁定，
-        其实大部分情况锁定index是不必要的。
-
-        锁定分2种：
-        * 行锁定：任何其他协程/进程对查询结果所含行的修改会引发事务冲突，但无关行不会。此锁定是强制的，不可关闭。
-        * Index锁定：任何其他协程/进程修改了该index(插入新行/update本列/删除任意行)都会引起事务冲突。
-          如果慢日志回报了大量的事务冲突，再考虑设为False。
-
-        所以一般情况下：
-        * 如果你只对query返回的行操作(如`rows[0].value = 1`)，因为有行锁定，所以可以不锁index。
-        * 如果你对query结果本身有要求(如`if len(rows) == 0`)，你需要保持锁定index，不然提交事务时index可能已变。
-            - 建议使用`unique`索引在底层限制唯一性
-
-        举个删除背包所有道具的例子：1.查询背包，2.删除查询到的行。
-        此需求可以不锁定index，只是1和2之间可能有新的道具进入背包，删除可能不彻底。
-        由于存在行锁定，即使不锁定index，2也可以保证道具不会被其他进程删除。
+        >>> items = ctx[Item].query('owner', ctx.caller, limit=100)
+        先在数据库上筛选出最少量的数据
+        >>> swords = items[items.model == 'sword']
+        然后本地二次筛选，也可以用范围判断：
+        >>> few_items = items[items.amount < 10]
 
         """
         assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
@@ -338,15 +377,20 @@ class ComponentTransaction:
 
     async def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
         """
-        同:func:`~hetu.data.ComponentTransaction.select`，
-        返回的是一个UpdateOrInsert对象，可以在with语句中使用，离开with时自动update或insert。
-        如果没有查询到值时，会返回空数据（Component.new_row()），并在离开with时自动insert。
+        同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
+        Returns
+        -------
+        expression: UpdateOrInsert
+            返回的是一个UpdateOrInsert对象，可以在with语句中使用，离开with时自动update或insert。
+            如果没有查询到值时，上下文内是空数据（`Component.new_row()`），并在离开with时自动insert。
+
+        Examples
+        --------
         使用方法如下：
-        ```
-        async with ctx[Component].select_or_create(user_id, 'owner') as row:
-            row.money = 100
-        ```
+
+        >>> async with ctx[Component].select_or_create(user_id, 'owner') as row:
+        ...    row.money = 100
         """
         rtn = await self.select(value, where)
         if rtn is None:
@@ -409,16 +453,25 @@ class ComponentTransaction:
     async def insert(self, row: np.record) -> None:
         """
         插入单行数据。
-        如果想获得插入后的row id，只能在事务结束后获得。
 
-        或者可在System最后调用end_transaction获得，如下：
-        @define_system(...)
-        async some_system(ctx, ...):
-            ctx[Table].insert(...)
-            inserted_ids = await ctx.trx.end_transaction(discard=False)
-            ctx.user_data['my_id'] = inserted_ids[0]
-            return ...
-        注意：调用完end_transaction，ctx将不再能够获取Components
+        Examples
+        --------
+        >>> row = Item.new_row()
+        >>> ctx[Item].insert(row)
+
+        Notes
+        -----
+        如果想获得插入后的row id，或者想知道是否事务执行成功，可通过显式结束事务获得。
+
+        调用 `end_transaction` 方法，如果事务冲突，后面的代码不会执行，如下：
+
+        >>> @define_system(...)
+        ... async some_system(ctx, ...):
+        ...     ctx[Table].insert(...)
+        ...     inserted_ids = await ctx.trx.end_transaction(discard=False)
+        ...     ctx.user_data['my_id'] = inserted_ids[0]
+
+        ⚠️ 注意：调用完end_transaction，ctx将不再能够获取Components
         """
         assert type(row) is np.record, "插入数据必须是单行数据"
         assert row.id == 0, "插入数据要求 row.id == 0"
@@ -429,16 +482,6 @@ class ComponentTransaction:
         # 加入到更新队列
         row = row.copy()
         self._trx_insert(row)
-
-    async def update_or_insert(self, row: np.record) -> None:
-        """
-        如果row.id == 0, 则插入该row，反之更新该id的row。
-        一般不要使用，请使用明确的update或insert语句。此方法仅在select_or_create后使用。
-        """
-        if row.id == 0:
-            await self.insert(row)
-        else:
-            await self.update(row.id, row)
 
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
