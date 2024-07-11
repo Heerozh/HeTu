@@ -110,13 +110,13 @@ class BaseComponent:
 
     @classmethod
     def new_row(cls, size=1) -> np.record | np.ndarray | np.recarray:
-        """返回空数据行， id为0时，insert会自动赋予id"""
+        """返回空数据行，id为0，用于insert"""
         row = cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
         return row
 
     @classmethod
     def dict_to_row(cls, data: dict):
-        """从dict生成一个数据行"""
+        """从dict转换为c-struct like数据行"""
         row = cls.new_row()
         for name, _ in cls.dtype_map_.items():
             row[name] = data[name]
@@ -153,35 +153,54 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                      permission=Permission.USER, persist=True, readonly=False,
                      backend: str = 'default'):
     """
-    定义组件（表）的数据结构
-    格式：
-    @define_component(namespace="ssw")
-    class Position(BaseComponent):
-        x: np.float32 = Property(default=0)
-        y: np.float32 = Property(default=0)
-        owner: np.int64 = Property(default=0, unique=True)
+    定义Component组件（表）的数据结构
 
-    :param namespace: 你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
-    :param persist: 表示是否持久化，设为False时，每次启动你的数据会被清除，请小心。
-    :param readonly: 是否只读Component，只读Component不会被加事务保护，增加并行性。
-    :param backend: 指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
-    :param permission: 设置读取权限，只对游戏客户端的读取查询调用起作用。
+    Examples
+    --------
+    >>> from hetu.data import BaseComponent, Property, define_component, Permission
+    >>> @define_component(namespace="ssw")
+    ... class Position(BaseComponent):
+    ...     x: np.float32 = Property(default=0)
+    ...     y: np.float32 = Property(default=0)
+    ...     owner: np.int64 = Property(default=0, unique=True)
+
+    Parameters
+    ----------
+    namespace: str
+        你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
+    persist: bool
+        表示是否持久化，设为False时，每次启动你的数据会被清除，请小心。
+    readonly: bool
+        是否只读Component，只读Component不会被加事务保护，增加并行性。
+    backend: str
+        指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
+    permission: Permission
+        设置读取权限，只对hetu client sdk的读取查询调用起作用。
+
         - everybody: 任何客户端都可以读，适合读一些服务器状态类的数据，如在线人数
         - user: 已登录客户端都可以读
         - admin: 只有管理员可以读
         - owner: 只有owner属性值==登录的用户id（`ctx.caller`）时可以读，如果无owner值则认为该行不可读
-    :param force: 强制覆盖同名Component，否则会报错。
-    :param _cls: 按@define_component()方式调用时，不需要传入_cls参数。
+    force: bool
+        强制覆盖同名Component，单元测试用。
+    _cls: class
+        当所有参数使用默认值时，可以直接无参数使用，如：
 
+        >>> @define_component
+        ... class Position(BaseComponent):
+        ...    ...
+
+    Notes
+    -----
     `Property(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
-        `index`表示此属性开启索引；
-        `unique`表示属性值必须唯一，启动此项默认会同时打开index。
+        - `index` 表示此属性开启索引；
+        - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
 
-    * ⚠️ 警告：索引会降低全表性能，请控制数量。
+    .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。
 
-    属性值的类型由type hint决定（如`: np.float32`），请使用长度明确的np类型。
-    字符串类型格式为"<U8"，U是Unicode，8表示长度。
-    不想看到"<U8"在IDE里标红语法错误的话，可用`name = Property(dtype='<U8')`方式。
+    属性值的类型由type hint决定（如 `: np.float32`），请使用长度明确的np类型。
+    字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
+    不想看到"<U8"在IDE里标红语法错误的话，可用 `name = Property(dtype='<U8')` 方式。
 
     每个Component表都有个默认的主键`id: np.int64 = Property(default=0, unique=True)`，
     会自行自增无法修改。

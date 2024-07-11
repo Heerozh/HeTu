@@ -1,5 +1,5 @@
 from hetu.data import BaseComponent, Property, define_component, Permission
-from hetu.system import define_system
+from hetu.system import define_system, Context
 import numpy as np
 import asyncio
 import logging
@@ -40,15 +40,17 @@ class Users(BaseComponent):
     namespace="ssw",
     components=(MP,),
 )
-async def use_mp(ctx, value):
+async def use_mp(ctx: Context, value):
     async with await ctx[MP].select_or_create(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
 
 
 @define_system(namespace='ssw', permission=Permission.EVERYBODY, inherits=('elevate', ))
-async def login(ctx, user_id):
+async def login(ctx: Context, user_id):
     await ctx['elevate'](ctx, user_id)
+
+
 # -------------------------
 
 
@@ -57,7 +59,7 @@ async def login(ctx, user_id):
     components=(HP,),
     permission=Permission.USER
 )
-async def use_hp(ctx, value):
+async def use_hp(ctx: Context, value):
     async with await ctx[HP].select_or_create(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
@@ -68,7 +70,7 @@ async def use_hp(ctx, value):
     components=(HP, Users),
     permission=Permission.USER
 )
-async def test_hp(ctx, hp):
+async def test_hp(ctx: Context, hp):
     row = await ctx[HP].select(ctx.caller, 'owner')
     assert row.value == hp
 
@@ -79,7 +81,7 @@ async def test_hp(ctx, hp):
     namespace="ssw",
     components=(Position, Users),
 )
-async def create_user(ctx, user_id, x, y):
+async def create_user(ctx: Context, user_id, x, y):
     usr = Users.new_row()
     usr.name = f"User_{user_id}"
     usr.entity_id = user_id
@@ -95,7 +97,7 @@ async def create_user(ctx, user_id, x, y):
     components=(Position, Users),
     inherits=('use_mp', )
 )
-async def magic(ctx):
+async def magic(ctx: Context):
     mp = await ctx['use_mp'](ctx, 10)
     if mp < 0:
         return False
@@ -117,7 +119,7 @@ async def magic(ctx):
     permission=Permission.EVERYBODY,
     components=(Position, Users),
 )
-async def race(ctx, sleep):
+async def race(ctx: Context, sleep):
     _rows = await ctx[Position].query('owner', 3)
     await asyncio.sleep(sleep)
     _row = await ctx[Position].select(3, 'owner')

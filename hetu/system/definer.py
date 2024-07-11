@@ -142,45 +142,73 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
                   retry: int = 9999, inherits: tuple[str] = tuple()):
     """
-    定义系统
-    :param namespace: 是你的项目名，一个网络地址只能启动一个namespace下的System们
-    :param components: 引用Component，只有引用的Component可以在`ctx`中获得
-    :param force: 遇到重复定义是否强制覆盖前一个, 单元测试用
-    :param permission: System权限，OWNER权限这里不可使用，其他同Component权限。
-    :param retry: 如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
-    :param inherits: 继承其他System, 让System中可以调用其他System，并不破坏事务一致性。但是簇会和其他系统绑定。
+    定义System(函数)
 
-    示例：
-    @define_system(
-        namespace="ssw",
-        components=(Position, Hp),
-    )
-    async def system_dash(ctx, entity_self, entity_target, vec):
-        pos_self = ctx[Position].select(entity_self)
-        pos_self.x += vec.x
-        ctx[Position].update(entity_self, pos_self)
-        items = ctx[Inventory].query("owner", entity_self)
-        ...
-        return "return value"
+    Examples
+    --------
+    >>> from hetu.system import define_system, Context, Response
+    >>> @define_system(
+    ...     namespace="ssw",
+    ...     components=(Position, Hp),
+    ... )
+    ... async def system_dash(ctx: Context, entity_self, entity_target, vec):
+    ...     pos_self = ctx[Position].select(entity_self)
+    ...     pos_self.x += vec.x
+    ...     ctx[Position].update(entity_self, pos_self)
+    ...     items = ctx[Inventory].query("owner", entity_self)
+    ...     ...
+    ...     return Response('blah blah')
 
-    函数部分：
-        `async`: System如果引用了Components，则必须是异步函数。
-        参数:
-            `ctx`: 上下文，内容有：
-                `ctx.caller`: 调用者id，由你在登录System中调用`elevate`函数赋值，None表示未登录用户
-                `ctx.retry_count`: 当前已重试次数，0表示首次调用。
-                `ctx[Component Class]`: 获取引用的Component实例，如`ctx[Position]`。
-                `ctx['SystemName']`: 获取继承的System函数。
-                `await ctx.end_transaction(discard=False)`: 提前结束事务，如果遇到事务冲突，
-                    则此行下面的代码不会执行。注意：调用完end_transaction，ctx将不再能够获取Components
-            其他参数为客户端调用时传入的参数。
-        返回值:
-            返回值会传给客户端，或者传给其他调用方
+    Parameters
+    ----------
+    namespace: str
+        是你的项目名，一个网络地址只能启动一个namespace下的System们
+    components: list of BaseComponent class
+        引用Component，只有引用的Component可以在`ctx`中获得
+    force: bool
+        遇到重复定义是否强制覆盖前一个, 单元测试用
+    permission: Permission
+        System权限，OWNER权限这里不可使用，其他同Component权限。
+    retry: int
+        如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
+    inherits: tuple of str
+        继承其他System, 让System中可以调用其他System，并不破坏事务一致性。但是簇会和其他系统绑定。
 
-    Component事务实列：
-    由`ctx[Component Class]`返回的实例，类型为ComponentTransaction，可以进行数据库操作，并自动包装为事务，
-    在System结束后执行（如果返回值为True的话）。具体操作参考ComponentTransaction的文档。
+    Notes
+    -----
+    System分为3个主要内容，1.定义；2. System函数；3.ctx
 
+    **System函数部分：**
+
+    >>> async def system_dash(ctx: Context, entity_self, entity_target, vec)
+
+    async:
+        如果 `define_system` 中的 `components` 不为空，则System必须是异步函数。
+    ctx: Context
+        上下文，具体见Context部分
+    其他参数:
+        为hetu client SDK调用时传入的参数。
+    System返回值:
+        如果调用方是其他System，通过`inherits`调用，则返回值会原样传给调用方；
+
+        如果调用方是hetu client SDK：
+            - 返回值是 hetu.system.Response(data)时，则把data发送给调用方sdk。
+            - 其他返回值丢弃
+
+    **Context部分：**
+        ctx.caller: int
+            调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
+        ctx.retry_count: int
+            当前已重试次数，0表示首次调用。
+        ctx[Component Class]: ComponentTransaction
+            获取Component事务实例，如 `ctx[Position]`，只能获取 `components` 中引用的实例。
+            类型为 `ComponentTransaction`，可以进行数据库操作，并自动包装为事务在System结束后执行。
+            具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
+        ctx['SystemName']: func
+            获取继承的System函数。
+        await ctx.end_transaction(discard=False):
+            提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
+            注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
     """
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function

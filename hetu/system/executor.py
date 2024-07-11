@@ -52,6 +52,15 @@ class SystemCall:
     args: tuple  # 目标system参数
 
 
+class SystemResult:
+    pass
+
+
+class Response(SystemResult):
+    def __init__(self, message: any):
+        self.message = message
+
+
 @define_component(namespace='HeTu', persist=False)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
@@ -92,11 +101,11 @@ async def elevate(ctx: Context, user_id: int):
 
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
-        return False
+        return False, 'CURRENT_CONNECTION_ALREADY_ELEVATED'
     # 如果此用户已经登录
     exist, _ = await ctx[Connection].is_exist(user_id, 'owner')
     if exist:
-        return False
+        return False, 'USER_ALREADY_LOGGED_IN'
 
     # 在数据库中关联connection和user
     conn = await ctx[Connection].select(ctx.connection_id)
@@ -106,7 +115,7 @@ async def elevate(ctx: Context, user_id: int):
     # 如果事务成功，则设置ctx.caller (end_transaction事务冲突时会跳过后面代码)
     await ctx.end_transaction()
     ctx.caller = user_id
-    return True
+    return True, 'SUCCESS'
 
 
 class SystemExecutor:
