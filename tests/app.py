@@ -41,7 +41,7 @@ class Users(BaseComponent):
     components=(MP,),
 )
 async def use_mp(ctx: Context, value):
-    async with await ctx[MP].select_or_create(ctx.caller, 'owner') as row:
+    async with ctx[MP].select_or_create(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
 
@@ -60,7 +60,7 @@ async def login(ctx: Context, user_id):
     permission=Permission.USER
 )
 async def use_hp(ctx: Context, value):
-    async with await ctx[HP].select_or_create(ctx.caller, 'owner') as row:
+    async with ctx[HP].select_or_create(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
 
@@ -87,7 +87,7 @@ async def create_user(ctx: Context, user_id, x, y):
     usr.entity_id = user_id
     await ctx[Users].insert(usr)
 
-    async with await ctx[Position].select_or_create(user_id, 'owner') as pos:
+    async with ctx[Position].select_or_create(user_id, 'owner') as pos:
         pos.x = x
         pos.y = y
 

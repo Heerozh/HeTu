@@ -14,7 +14,7 @@ import uuid
 from datetime import datetime, timedelta
 from ..component import BaseComponent, Property
 from .base import (ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction,
-                   MQClient, Subscriptions)
+                   MQClient)
 import logging
 logger = logging.getLogger('HeTu')
 
@@ -510,8 +510,8 @@ class RedisComponentTable(ComponentTable):
                 return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
-        assert backend_trx.cluster_id == self._cluster_id, \
-            f"ComponentTable的Cluster id和当前事务的Cluster id不同，不能attach到非同簇的事务。"
+        # 这里不用检查cluster_id，因为ComponentTransaction会检查
+        # assert backend_trx.cluster_id == self._cluster_id
         return RedisComponentTransaction(
             self, backend_trx, self._key_prefix, self._idx_prefix)
 

@@ -175,6 +175,10 @@ class ComponentTransaction:
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
 
     @property
+    def component_cls(self) -> type[BaseComponent]:
+        return self._component_cls
+
+    @property
     def attached(self) -> BackendTransaction:
         return self._trx_conn
 
@@ -229,8 +233,15 @@ class ComponentTransaction:
 
         Examples
         --------
-        >>> row = await ctx[Item].select(ctx.caller, 'owner')
-        >>> row.name
+        >>> from hetu.system import define_system
+        >>> from hetu.data import define_component, Property
+        >>> @define_component
+        ... class Item(BaseComponent):
+        ...     owner: np.int64 = Property(0, index=True)
+        >>> @define_system(components=(Item, ))
+        ... async def some_system(ctx):
+        ...     item_row = await ctx[Item].select(ctx.caller, 'owner')
+        ...     print(item_row.name)
         """
         assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert where in self._component_cls.indexes_, \
@@ -317,7 +328,7 @@ class ComponentTransaction:
         如何多条件查询？
         请利用python的特性，举例：
 
-        >>> items = ctx[Item].query('owner', ctx.caller, limit=100)
+        >>> items = ctx[Item].query('owner', ctx.caller, limit=100)  # noqa
         先在数据库上筛选出最少量的数据
         >>> swords = items[items.model == 'sword']
         然后本地二次筛选，也可以用范围判断：
@@ -375,7 +386,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    async def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
+    def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
         """
         同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
@@ -388,17 +399,18 @@ class ComponentTransaction:
         Examples
         --------
         使用方法如下：
-
-        >>> async with ctx[Component].select_or_create(user_id, 'owner') as row:
-        ...    row.money = 100
+        >>> from hetu.system import define_system
+        >>> from hetu.data import define_component, Property
+        >>> @define_component
+        ... class Portfolio(BaseComponent):
+        ...     owner: np.int64 = Property(0, index=True)
+        ...     cash: np.int64 = Property(0)
+        >>> @define_system(components=(Portfolio, ))
+        ... async def deposit_franklin(ctx):
+        ...     async with ctx[].select_or_create(ctx.caller, 'owner') as row:
+        ...         row.cash += 100
         """
-        rtn = await self.select(value, where)
-        if rtn is None:
-            rtn = self._component_cls.new_row()
-            rtn[where] = value
-            return UpdateOrInsert(rtn, self, 0)
-        else:
-            return UpdateOrInsert(rtn, self, rtn.id)
+        return UpdateOrInsert(self, value, where)
 
     async def _check_uniques(
             self,
@@ -456,8 +468,17 @@ class ComponentTransaction:
 
         Examples
         --------
-        >>> row = Item.new_row()
-        >>> ctx[Item].insert(row)
+        >>> from hetu.system import define_system
+        >>> from hetu.data import define_component, Property
+        >>> @define_component
+        ... class Item(BaseComponent):
+        ...     owner: np.int64 = Property(0, index=True)
+        ...     model: str = Property("", dtype='<U8')
+        >>> @define_system(components=(Item, ))
+        ... async def create_item(ctx):
+        ...     new_item = Item.new_row()
+        ...     new_item.model = 'SWORD_1'
+        ...     ctx[Item].insert(new_item)
 
         Notes
         -----
@@ -465,11 +486,11 @@ class ComponentTransaction:
 
         调用 `end_transaction` 方法，如果事务冲突，后面的代码不会执行，如下：
 
-        >>> @define_system(...)
-        ... async some_system(ctx, ...):
-        ...     ctx[Table].insert(...)
+        >>> @define_system(components=(Item, ))
+        ... async def create_item(ctx):
+        ...     ctx[Item].insert(...)
         ...     inserted_ids = await ctx.trx.end_transaction(discard=False)
-        ...     ctx.user_data['my_id'] = inserted_ids[0]
+        ...     ctx.user_data['my_id'] = inserted_ids[0]  # 如果事务冲突，这句不会执行
 
         ⚠️ 注意：调用完end_transaction，ctx将不再能够获取Components
         """
@@ -498,10 +519,12 @@ class ComponentTransaction:
 
 
 class UpdateOrInsert:
-    def __init__(self, row: np.record, comp_trx: ComponentTransaction, row_id: int):
-        self.row = row
+    def __init__(self, comp_trx: ComponentTransaction, value, where):
         self.comp_trx = comp_trx
-        self.row_id = row_id
+        self.value = value
+        self.where = where
+        self.row = None
+        self.row_id = None
 
     async def commit(self):
         if self.row_id == 0:
@@ -510,6 +533,15 @@ class UpdateOrInsert:
             await self.comp_trx.update(self.row_id, self.row)
 
     async def __aenter__(self):
+        row = await self.comp_trx.select(self.value, self.where)
+        if row is None:
+            row = self.comp_trx.component_cls.new_row()
+            row[self.where] = self.value
+            self.row = row
+            self.row_id = 0
+        else:
+            self.row = row
+            self.row_id = row.id
         return self.row
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
@@ -756,6 +788,3 @@ class Subscriptions:
                 if len(sub_updates) > 0:
                     rtn.setdefault(sub_id, dict()).update(sub_updates)
         return rtn
-
-
-
