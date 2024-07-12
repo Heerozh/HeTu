@@ -44,6 +44,7 @@ class SystemClusters(metaclass=Singleton):
 
     def __init__(self):
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
+        self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}    # type: dict[str, list[SystemClusters.Cluster]]
 
     def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
@@ -51,6 +52,9 @@ class SystemClusters(metaclass=Singleton):
 
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
         return {name: self.get_system(cluster.namespace, name) for name in cluster.systems}
+
+    def get_component_cluster_id(self, comp: Type[BaseComponent]) -> int:
+        return self._component_map.get(comp, None)
 
     def get_clusters(self, namespace: str):
         return self._clusters[namespace]
@@ -111,6 +115,7 @@ class SystemClusters(metaclass=Singleton):
                 pass
 
             # 先按system数排序，然后按第一个system的alphabet排序，让簇id尽量不变
+            # todo 需要改成取这个组中最hub的Component作为名字来排序，在实际生产环境中测试下是不是比较稳定
             sorted(clusters, key=lambda x: f"{len(x.systems):02}_{next(iter(x.systems))}")
             for i in range(len(clusters)):
                 clusters[i].id = i
@@ -119,6 +124,8 @@ class SystemClusters(metaclass=Singleton):
             for cluster in clusters:
                 for sys_name in cluster.systems:
                     self._system_map[cluster.namespace][sys_name].cluster_id = cluster.id
+                for comp in cluster.components:
+                    self._component_map[comp] = cluster.id
 
     def add(self, namespace, func, components, force, permission, inherits, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
