@@ -153,18 +153,27 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
 
     Examples
     --------
+    >>> from hetu.data import BaseComponent, define_component, Property
+    >>> @define_component
+    ... class Position(BaseComponent):
+    ...     x: int = Property(0)
+    >>> @define_component
+    ... class HP(BaseComponent):
+    ...     hp: int = Property(0)
+    ...
     >>> from hetu.system import define_system, Context, SystemResponse
     >>> @define_system(
     ...     namespace="ssw",
-    ...     components=(Position, Hp),
+    ...     components=(Position, HP),
     ... )
     ... async def system_dash(ctx: Context, entity_self, entity_target, vec):
-    ...     pos_self = ctx[Position].select(entity_self)
+    ...     pos_self = await ctx[Position].select(entity_self)
     ...     pos_self.x += vec.x
-    ...     ctx[Position].update(entity_self, pos_self)
-    ...     items = ctx[Inventory].query("owner", entity_self)
-    ...     ...
-    ...     return SystemResponse('blah blah')
+    ...     await ctx[Position].update(entity_self, pos_self)
+    ...     enemy_hp = ctx[HP].query("owner", entity_target)
+    ...     enemy_hp -= 10
+    ...     await ctx[HP].update(entity_target, enemy_hp)
+    ...     return SystemResponse(['client cmd', 'blah blah'])
 
     Parameters
     ----------
