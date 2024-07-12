@@ -116,9 +116,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试可用select_or_create
         async with backend.transaction(1) as trx:
             tbl = singular_unique.attach(trx)
-            async with await tbl.select_or_create('test', 'name') as row:
+            async with tbl.select_or_create('test', 'name') as row:
                 self.assertEqual(row.name, 'test')
-            async with await tbl.select_or_create('', 'name') as row:
+            async with tbl.select_or_create('', 'name') as row:
                 self.assertEqual(row.id, 1)
             row_ids = await trx.end_transaction(False)
         self.assertEqual(row_ids, [2])
@@ -179,7 +179,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(UniqueViolation, "time"):
                 await tbl.insert(row)
             # 测试能用select_or_create
-            await tbl.select_or_create(1, 'owner')
+            async with tbl.select_or_create(1, 'owner') as row:
+                self.assertEqual(row.owner, 1)
 
         # 先插入25条数据
         async with backend.transaction(1) as trx:
