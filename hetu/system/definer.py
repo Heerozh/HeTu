@@ -17,6 +17,8 @@ class SystemDefine:
     func: callable
     components: set[Type[BaseComponent]]     # 引用的Components
     full_components: set[Type[BaseComponent]]   # 完整的引用Components，包括继承自父System的
+    non_transactions: set[Type[BaseComponent]]  # 直接获取的Components，不走事务
+    full_non_trx: set[Type[BaseComponent]]       # 完整的直接Components，包括继承自父System的
     inherits: set[str]
     full_inherits: set[str]
     permission: Permission
@@ -30,8 +32,7 @@ class SystemClusters(metaclass=Singleton):
     """
     储存所有System，并分类成簇。可以通过它查询System的定义信息，和所属簇id(每次服务器启动时按簇大小排序分配），
     每个namespace下的簇id从0重新分配。
-    簇是按照components的交集来划分的，表示这些System互相之间可能有事务冲突，簇和簇之间绝不会冲突。目前并无具体作用，
-    只用来观察ECS结构拆的是否足够细。
+    System之间components有交集的，表示这些System互相之间可能有事务冲突，形成一个簇，簇和簇之间绝不会冲突。
 
     此类只负责查询，调度器通过此类查询System信息。
     """
@@ -78,12 +79,13 @@ class SystemClusters(metaclass=Singleton):
                         return True
             return False
 
-        def inherit_components(namespace_, inherits, req: set, inh: set):
+        def inherit_components(namespace_, inherits, req: set, n_trx: set, inh: set):
             for base_system in inherits:
                 base_def = self._system_map[namespace_][base_system]
                 req.update(base_def.components)
+                n_trx.update(base_def.non_transactions)
                 inh.update(base_def.inherits)
-                inherit_components(namespace_, base_def.inherits, req, inh)
+                inherit_components(namespace_, base_def.inherits, req, n_trx, inh)
 
         # 把__auto__的System迁移到默认namespace
         auto_sys_map = self._system_map.pop('__auto__', {})
@@ -91,14 +93,18 @@ class SystemClusters(metaclass=Singleton):
             sys_def.namespace = namespace
         self._system_map[namespace].update(auto_sys_map)
 
+        non_trx = set()
+
         for namespace in self._system_map:
             clusters = []
             # 首先把所有系统变成独立的簇/并生成完整的请求表
             for sys_name, sys_def in self._system_map[namespace].items():
                 sys_def.full_components = set(sys_def.components)
                 sys_def.full_inherits = set(sys_def.inherits)
+                sys_def.full_non_trx = set(sys_def.non_transactions)
                 inherit_components(namespace, sys_def.inherits, sys_def.full_components,
-                                   sys_def.full_inherits)
+                                   sys_def.full_non_trx, sys_def.full_inherits)
+                non_trx.update(sys_def.full_non_trx)
                 # 检查所有System引用的Component和继承的也是同一个backend
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
                 assert len(set(backend_names)) <= 1, \
@@ -127,25 +133,34 @@ class SystemClusters(metaclass=Singleton):
                 for comp in cluster.components:
                     self._component_map[comp] = cluster.id
 
-    def add(self, namespace, func, components, force, permission, inherits, max_retry):
+        # 检查是否有component被non_transactions引用，但没有任何正常方式引用了它，必须至少有一个标准引用
+        for comp in non_trx:
+            if comp not in self._component_map:
+                raise RuntimeError(f"Component {comp.__name__} 被non_transactions方式引用过，"
+                                   f"但没有被任何System正常引用，必须至少有1个正常事务方式的引用。")
+
+    def add(self, namespace, func, components, non_trx, force, permission, inherits, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
             assert func.__name__ not in sub_map, "System重复定义"
         if components is None:
             components = tuple()
+        if non_trx is None:
+            non_trx = tuple()
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         arg_count = func.__code__.co_argcount
         defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
         sub_map[func.__name__] = SystemDefine(
-            func=func, components=components, inherits=inherits, max_retry=max_retry,
-            arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
-            permission=permission, full_components=set(), full_inherits=set())
+            func=func, components=components, non_transactions=non_trx, inherits=inherits,
+            max_retry=max_retry, arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
+            permission=permission, full_components=set(), full_non_trx=set(), full_inherits=set())
 
 
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
+                  non_transactions: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
                   retry: int = 9999, inherits: tuple[str] = tuple()):
     """
@@ -180,7 +195,16 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     namespace: str
         是你的项目名，一个网络地址只能启动一个namespace下的System们
     components: list of BaseComponent class
-        引用Component，只有引用的Component可以在`ctx`中获得
+        引用Component，引用的Component可以在`ctx`中进行相关的事务操作，保证数据一致性。
+    non_transactions: list of BaseComponent class
+        直接获得该Component底层类，因此可以绕过事务直接写入，注意不保证数据一致性，请只做原子操作。写入操作只支
+        持对无索引的属性写入，因为带索引的无法实现原子操作。
+
+        一般用在Hub Component上，System之间引用的components有交集的，形成一个簇，表示这些System互相之间可能
+        有事务冲突，大量System都引用的Component称为Hub，会导致簇过大，从而数据库无法通过Cluster模式提升性能，
+        影响未来的扩展性。正常建议通过拆分Component数据来降低簇集中聚集。
+
+        通过此方法相当于作弊，不引用Hub Component直接操作，让簇分布更平均，代价是没有数据一致性保证。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
@@ -215,13 +239,16 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         ctx.caller: int
             调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
         ctx.retry_count: int
-            当前已重试次数，0表示首次调用。
+            当前因为事务冲突的重试次数，0表示首次执行。
         ctx[Component Class]: ComponentTransaction
             获取Component事务实例，如 `ctx[Position]`，只能获取 `components` 中引用的实例。
             类型为 `ComponentTransaction`，可以进行数据库操作，并自动包装为事务在System结束后执行。
             具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
         ctx['SystemName']: func
             获取继承的System函数。
+        ctx.nontrxs[Component Class]: ComponentTable
+            获取non_transactions中引用的Component实例，类型为 `ComponentTable`，此方法危险，
+            且不保证数据一致性，请只做原子操作。写入操作只支持对无索引的属性写入，因为带索引的无法实现原子操作。
         await ctx.end_transaction(discard=False):
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
@@ -247,7 +274,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
             assert len(set(backend_names)) <= 1, \
                 f"System {func.__name__} 引用的Component必须都是同一种backend"
 
-        SystemClusters().add(namespace, func, components, force,
+        SystemClusters().add(namespace, func, components, non_transactions, force,
                              permission, inherits, retry)
 
         # 返回假的func，因为不允许直接调用。

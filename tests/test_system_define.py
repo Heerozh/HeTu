@@ -203,6 +203,7 @@ class TestSystemDefine(unittest.TestCase):
         @define_system(
             namespace="ssw",
             components=(GalaxyPosition,),
+            non_transactions=(Map,)
         )
         async def system4(ctx, ):
             pass
@@ -238,6 +239,8 @@ class TestSystemDefine(unittest.TestCase):
             clusters.get_system('ssw2', 'system4').cluster_id, 0)
         self.assertEqual(
             clusters.get_system('ssw', 'system5').cluster_id, 1)
+        self.assertEqual(
+            clusters.get_system('ssw', 'system4').full_non_trx, {Map, })
 
         # bug 测试clusters.append是忘记sys_def.full_components.copy()的bug
         self.assertEqual(
