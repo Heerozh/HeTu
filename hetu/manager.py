@@ -26,7 +26,8 @@ class ComponentTableManager(metaclass=Singleton):
             namespace: str,
             instance_name: str,
             backends: dict[str, Backend],
-            table_classes: dict[str, type[ComponentTable]]
+            table_classes: dict[str, type[ComponentTable]],
+            check_schema: bool = True
     ):
         """初始化所有ComponentTable的实例，此方法只能在SystemCluster.build_clusters()后调用。"""
         clusters = SystemClusters().get_clusters(namespace)
@@ -36,7 +37,7 @@ class ComponentTableManager(metaclass=Singleton):
                 table_cls = table_classes.get(comp.backend_)
                 if backend is None or table_cls is None:
                     raise ValueError(f"Backend {comp.backend_} not found")
-                table = table_cls(comp, instance_name, cluster.id, backend)
+                table = table_cls(comp, instance_name, cluster.id, backend, check_schema)
                 self.tables[comp] = table
                 self.tables_by_name[comp.component_name_] = table
 

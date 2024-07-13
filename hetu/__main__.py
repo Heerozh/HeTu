@@ -6,7 +6,9 @@
 """
 import argparse
 import sys
+import os
 from hetu.server import start_webserver
+
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -57,7 +59,7 @@ def start(start_args):
     workers = fast and 1 or config.WORKER_NUM
     # 加载app
     loader = AppLoader(factory=partial(start_webserver, f"Hetu-{config.NAMESPACE}",
-                                       config_for_factory))
+                                       config_for_factory, os.getpid()))
     app = loader.load()
     # 显示服务器信息
     logger.info(FULL_COLOR_LOGO)

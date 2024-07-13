@@ -237,10 +237,12 @@ class RedisComponentTable(ComponentTable):
     def __init__(
             self,
             component_cls: type[BaseComponent],
-            instance_name, cluster_id,
-            backend: RedisBackend
+            instance_name: str,
+            cluster_id: int,
+            backend: RedisBackend,
+            check_schema: bool = True
     ):
-        super().__init__(component_cls, instance_name, cluster_id, backend)
+        super().__init__(component_cls, instance_name, cluster_id, backend, check_schema)
         self._backend = backend  # 为了让代码提示知道类型是RedisBackend
         component_cls.hosted_ = self
         # redis key名
@@ -254,7 +256,8 @@ class RedisComponentTable(ComponentTable):
         self._trx_pipe = None
         self._autoinc = None
         # 检测meta信息，然后做对应处理
-        self.check_meta()
+        if self._check_schema:
+            self.check_meta()
 
     def check_meta(self):
         """
@@ -508,6 +511,15 @@ class RedisComponentTable(ComponentTable):
                 return np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))
             else:
                 return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
+
+    async def direct_set(self, row_id: int, mapped: dict[str, any]):
+        aio = self._backend.aio
+        key = self._key_prefix + str(row_id)
+
+        for key in mapped:
+            if key in self._component_cls.indexes_:
+                raise ValueError(f"索引字段`{key}`不允许直接修改")
+        await aio.hmset(key, mapped)
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
