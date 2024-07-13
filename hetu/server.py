@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 import json
+import os
 import zlib
 from sanic import Sanic
 from sanic import Request, Websocket, text
@@ -45,16 +46,17 @@ def check_length(name, data: list, left, right):
         raise ValueError(f"Invalid {name} message")
 
 
-async def sys_call(data: list, protocol: dict, executor: SystemExecutor, push_queue: asyncio.Queue):
+async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue):
     """处理Client SDK调用System的命令"""
+    print('sys', data)
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.run(call)  # 非ok就是无权限调用，参数不对，重试超出
     if ok and isinstance(res, SystemResponse):
-        await push_queue.put(encode_message(res.message, protocol))
+        await push_queue.put(res.message)
 
 
-async def sub_call(data: list, protocol: dict, subs: Subscriptions, push_queue: asyncio.Queue):
+async def sub_call(data: list, subs: Subscriptions, push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
     check_length('sub', data, 4, 100)
     table = ComponentTableManager().get_table(data[1])
@@ -69,7 +71,7 @@ async def sub_call(data: list, protocol: dict, subs: Subscriptions, push_queue: 
             raise ValueError(f"Invalid sub message")
     if sub_id is not None:
         reply = ['sub', sub_id, data]
-        await push_queue.put(encode_message(reply, protocol))
+        await push_queue.put(reply)
 
 
 @hetu_bp.route("/")
@@ -92,9 +94,9 @@ async def client_receiver(
             # 执行消息
             match data[0]:
                 case 'sys':  # sys system_name args ...
-                    await sys_call(data, protocol, executor, push_queue)
+                    await sys_call(data, executor, push_queue)
                 case 'sub':  # sub component_name select/query args ...
-                    await sub_call(data, protocol, subs, push_queue)
+                    await sub_call(data, subs, push_queue)
                 case 'unsub':  # unsub sub_id
                     check_length('unsub', data, 2, 2)
                     await subs.unsubscribe(data[1])
@@ -109,6 +111,9 @@ async def subscription_receiver(subscriptions: Subscriptions, push_queue: asynci
     try:
         while True:
             updates = await subscriptions.get_updates()
+            for sub_id, data in updates.items():
+                reply = ['updt', sub_id, data]
+                await push_queue.put(reply)
             # todo 备注，客户端要注意内部避免掉重复订阅
             # 客户端通过查询参数组合成查询字符串，来判断是否重复订阅，管理器注册对应的callback，重复注册只
             # 是callback增加并不会去服务器请求
@@ -130,31 +135,34 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 创建接受客户端消息的协程
     protocol = dict(compress=request.app.ctx.compress,
                     crypto=request.app.ctx.crypto)
-    task_name = f"client_receiver:{request.id}"
+    recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(ws, protocol, executor, subscriptions, push_queue)
-    _ = request.app.add_task(receiver_task, name=task_name)
+    _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
-    task_name = f"subs_receiver:{request.id}"
+    sub_task_id = f"subs_receiver:{request.id}"
     receiver_task = subscription_receiver(subscriptions, push_queue)
-    _ = request.app.add_task(receiver_task, name=task_name)
+    _ = request.app.add_task(receiver_task, name=sub_task_id)
     # todo 测试subscription_receiver报错退出了连接是否推出
 
     # 这里循环发送，保证总是第一时间Push
     try:
         while True:
             print('wait queue')
-            data = await push_queue.get()
-            print('getted')
-            await ws.send(data)
+            reply = await push_queue.get()
+            print('got', reply)
+            await ws.send(encode_message(reply, protocol))
     finally:
         # 连接断开，强制关闭此协程时也会调用
         print('closed')
-        await request.app.cancel_task(task_name)
+        await request.app.cancel_task(recv_task_id)
+        await request.app.cancel_task(sub_task_id)
+        await executor.terminate()
         request.app.purge_tasks()
+        # todo 要删除connection数据
 
 
-def start_webserver(app_name, config) -> Sanic:
+def start_webserver(app_name, config, main_pid) -> Sanic:
     """config： dict或者py目录"""
     # 加载玩家的app文件
     if (app_file := config.get('APP_FILE', None)) is not None:
@@ -162,6 +170,11 @@ def start_webserver(app_name, config) -> Sanic:
         module = importlib.util.module_from_spec(spec)
         sys.modules['HeTuApp'] = module
         spec.loader.exec_module(module)
+
+    # 重定向logger
+    import logging
+    hetu_logger = logging.getLogger('HeTu')
+    hetu_logger.parent = logger
 
     # 加载web服务器
     app = Sanic(app_name)
@@ -204,12 +217,15 @@ def start_webserver(app_name, config) -> Sanic:
     SystemClusters().build_clusters(config['NAMESPACE'])
     # 初始化所有ComponentTable
     ComponentTableManager().build(
-        config['NAMESPACE'], config['INSTANCE_NAME'], backends, table_classes)
+        config['NAMESPACE'], config['INSTANCE_NAME'], backends, table_classes,
+        os.getpid() == main_pid  # 子进程不检查schema
+    )
 
-    # 启动时清空所有非持久化表数据
-    for comp, tbl in ComponentTableManager().items():
-        if not comp.persist_:
-            tbl.flush()
+    # 启动时清空所有非持久化表数据，只在主进程启动时执行
+    if os.getpid() == main_pid:
+        for comp, tbl in ComponentTableManager().items():
+            if not comp.persist_:
+                tbl.flush()
 
     # 启动服务器监听
     app.blueprint(hetu_bp)

@@ -102,12 +102,14 @@ class ComponentTable:
             self, component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
-            backend: Backend
+            backend: Backend,
+            check_schema: bool = True
     ):
         self._component_cls = component_cls
         self._instance_name = instance_name
         self._backend = backend
         self._cluster_id = cluster_id
+        self._check_schema = check_schema
 
     @property
     def cluster_id(self) -> int:
@@ -135,14 +137,35 @@ class ComponentTable:
             row_format='struct',
     ) -> np.recarray | list[dict | int]:
         """
-        直接获取数据库的值，而不通过事务，只能用于只读逻辑。通过servant数据库进行查询，不影响Master性能。
-        注意，获取的值可能存在更新延迟，且脱离事务，不可在System中使用。
+        直接获取数据库的值，而不通过事务。此方法通过servant数据库进行查询，不影响Master性能，但没有数据一致性保证。
+
+        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，在System中使用要确保逻辑能接受数据不一致。
+
+        Parameters
+        ----------
+        index_name: str
+            查询Component中的哪条索引
+        left, right: str or number
+            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间
+        limit: int
+            限制返回的行数，越低越快
+        desc: bool
+            是否降序排列
         row_format:
             'struct': 包装成component struct返回
             'raw': 直接返回数据库中的值，由dict包装，可能包含多余数据，也不会进行类型转换。
             'id': 只返回row_id列表
         """
         # 请使用servant数据库来操作
+        raise NotImplementedError
+
+    async def direct_set(self, row_id: int, mapped: dict[str, any]):
+        """
+        不通过事务，直接设置数据库某行的值。此方法不检查任何正确性，比如row_id不存在也会设置。
+
+        .. warning:: ⚠️ 警告：由于不在事务中，值随时可能被其他进程修改/删除，不保证数据一致性。
+        请勿在System中使用，除非原子操作。
+        """
         raise NotImplementedError
 
     def attach(self, backend_trx: BackendTransaction) -> 'ComponentTransaction':
