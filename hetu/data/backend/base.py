@@ -137,7 +137,7 @@ class ComponentTable:
             row_format='struct',
     ) -> np.recarray | list[dict | int]:
         """
-        直接获取数据库的值，而不通过事务。此方法通过servant数据库进行查询，不影响Master性能，但没有数据一致性保证。
+        不通过事务直接从servant数据库查询值，不影响Master性能，但没有数据一致性保证。
 
         .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，在System中使用要确保逻辑能接受数据不一致。
 
@@ -159,7 +159,15 @@ class ComponentTable:
         # 请使用servant数据库来操作
         raise NotImplementedError
 
-    async def direct_set(self, row_id: int, mapped: dict[str, any]):
+    async def direct_get(self, row_id: int) -> None | np.record:
+        """
+        不通过事务，从servant数据库直接读取某行的值。
+
+        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，在System中使用要确保逻辑能接受数据不一致。
+        """
+        raise NotImplementedError
+
+    async def direct_set(self, row_id: int, **kwargs):
         """
         不通过事务，直接设置数据库某行的值。此方法不检查任何正确性，比如row_id不存在也会设置。
 
