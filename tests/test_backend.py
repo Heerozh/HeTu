@@ -219,6 +219,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             (await item_data.direct_query('name', 'Item11', 'Item12')).time,
             [11, 12])
 
+        # 测试direct get/set
+        np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 1)
+        await item_data.direct_set(1, qty=911)
+        np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 911)
+
         # update
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
