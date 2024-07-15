@@ -528,7 +528,7 @@ class RedisComponentTable(ComponentTable):
         for prop in kwargs:
             if prop in self._component_cls.indexes_:
                 raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
-        await aio.hmset(key, kwargs)
+        await aio.hset(key, mapping=kwargs)
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
