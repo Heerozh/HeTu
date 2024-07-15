@@ -47,8 +47,8 @@ async def use_mp(ctx: Context, value):
 
 
 @define_system(namespace='ssw', permission=Permission.EVERYBODY, inherits=('elevate', ))
-async def login(ctx: Context, user_id):
-    await ctx['elevate'](ctx, user_id)
+async def login(ctx: Context, user_id, kick_logged_in=True):
+    return await ctx['elevate'](ctx, user_id, kick_logged_in)
 
 
 # -------------------------
