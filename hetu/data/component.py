@@ -6,7 +6,7 @@
 """
 from ..common import Singleton
 from dataclasses import dataclass
-from enum import Enum
+from enum import IntEnum
 import json
 import warnings
 import inspect
@@ -17,7 +17,7 @@ import logging
 logger = logging.getLogger('HeTu')
 
 
-class Permission(Enum):
+class Permission(IntEnum):
     EVERYBODY = 1
     USER = 2
     OWNER = 3
@@ -253,6 +253,11 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
 
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
+
+        # 检查OWNER权限必须有owner属性
+        if permission == Permission.OWNER:
+            assert 'owner' in properties, \
+                f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
 
         # 生成json格式，并通过json加载到class中
         json_str = BaseComponent.make_json(properties, namespace, cls.__name__, permission,

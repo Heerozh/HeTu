@@ -8,7 +8,7 @@ from unittest import mock
 import docker
 import numpy as np
 
-from hetu.data import define_component, Property, BaseComponent, ComponentDefines
+from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
 from hetu.data.backend import (RaceCondition, UniqueViolation, ComponentTable, Backend,
                                ComponentTransaction, RedisComponentTable, RedisBackend,
                                Subscriptions)
@@ -42,7 +42,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     def build_test_component(cls):
         global Item, SingleUnique
 
-        @define_component(namespace="ssw")
+        @define_component(namespace="ssw", permission=Permission.OWNER)
         class Item(BaseComponent):
             owner: np.int64 = Property(0, unique=False, index=True)
             model: np.int32 = Property(0, unique=False, index=True)
@@ -604,14 +604,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         sub_mgr = Subscriptions(backend)
 
         # 测试订阅的返回值，和订阅管理器的私有值
-        sub_id1, row = await sub_mgr.subscribe_select(item_data, 'Itm10', 'name')
+        sub_id1, row = await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
         self.assertEqual(row['time'], '110')
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
         self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 1)
 
         sub_id2, rows = await sub_mgr.subscribe_query(
-            item_data, 'owner', 10, limit=33)
+            item_data, 'admin', 'owner', 10, limit=33)
         self.assertEqual(len(rows), 25)
         self.assertEqual(sub_id2, 'Item.owner[10:None:1][:33]')
         self.assertEqual(len(sub_mgr._subs[sub_id2].channels), 25 + 1)  # 加1 index channel
@@ -622,12 +622,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
 
         sub_id3, rows = await sub_mgr.subscribe_query(
-            item_data, 'owner', 10, right=11, limit=44)
+            item_data, 'admin', 'owner', 10, right=11, limit=44)
         self.assertEqual(len(rows), 25)
         self.assertEqual(sub_id3, 'Item.owner[10:11:1][:44]')
 
         sub_id4, rows = await sub_mgr.subscribe_query(
-            item_data, 'owner', 11, right=12, limit=55)
+            item_data, 'admin', 'owner', 11, right=12, limit=55)
         self.assertEqual(len(rows), 0)
         self.assertEqual(len(sub_mgr._subs[sub_id4].row_subs), 0)
         self.assertEqual(sub_id4, 'Item.owner[11:12:1][:55]')
@@ -709,6 +709,45 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         await sub_mgr.unsubscribe(sub_id4)
         self.assertEqual(len(sub_mgr._channel_subs), 0)
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 0)
+
+        # 测试owner不符不给订阅
+        sub_id5, row = await sub_mgr.subscribe_select(item_data, 10, 1)
+        self.assertEqual(sub_id5, None)
+        # 测试订阅单行，owner改变后要删除
+        sub_id5, row = await sub_mgr.subscribe_select(item_data, 10, 3)
+        self.assertEqual(row['owner'], '10')
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(3)
+            row.owner = 11
+            await tbl.update(3, row)
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(updates[sub_id5][3], None)
+
+        # 测试owner query只传输owner相等的数据
+        sub_id6, rows = await sub_mgr.subscribe_query(
+            item_data, 10, 'owner', 1, right=20, limit=55)
+        self.assertEqual([row['owner'] for row in rows], ['10'] * 23)
+        self.assertEqual(len(sub_mgr._subs[sub_id6].row_subs), 23)
+        # 测试更新数值，看query的update是否会删除/添加owner相符的
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(4)
+            row.owner = 11
+            await tbl.update(4, row)
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates[sub_id6]), 1)
+        self.assertEqual(updates[sub_id6][4], None)
+        # 因为会注册query的所有结果，不管是不是owner相符，所以注册数量又变成了25，这里就不测试了
+        # self.assertEqual(len(sub_mgr._subs[sub_id6].row_subs), 25)
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(4)
+            row.owner = 10
+            await tbl.update(4, row)
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates[sub_id6]), 1)
+        self.assertEqual(updates[sub_id6][4]['owner'], '10')
 
         # 关闭连接
         await backend.close()
