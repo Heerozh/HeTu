@@ -36,7 +36,7 @@
   └────────────────────┘
 """
 import numpy as np
-from ..component import BaseComponent
+from ..component import BaseComponent, Permission
 
 
 class RaceCondition(Exception):
@@ -620,8 +620,12 @@ class BaseSubscription:
 class RowSubscription(BaseSubscription):
     __cache = {}
 
-    def __init__(self, table: ComponentTable, channel: str, row_id: int):
+    def __init__(self, table: ComponentTable, caller: int | str, channel: str, row_id: int):
         self.table = table
+        if table.component_cls.permission_ == Permission.OWNER and caller != 'admin':
+            self.req_owner = caller
+        else:
+            self.req_owner = None
         self.channel = channel
         self.row_id = row_id
 
@@ -638,7 +642,10 @@ class RowSubscription(BaseSubscription):
         if len(rows) == 0:
             rtn = {self.row_id: None}
         else:
-            rtn = {self.row_id: rows[0]}
+            if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
+                rtn = {self.row_id: rows[0]}
+            else:
+                rtn = {self.row_id: None}
         RowSubscription.__cache[channel] = rtn
         return set(), set(), rtn
 
@@ -648,15 +655,22 @@ class RowSubscription(BaseSubscription):
 
 
 class IndexSubscription(BaseSubscription):
-    def __init__(self, table: ComponentTable, index_channel: str, last_query, query_param: dict):
+    def __init__(
+            self, table: ComponentTable, caller: int | str,
+            index_channel: str, last_query, query_param: dict
+    ):
         self.table = table
+        if table.component_cls.permission_ == Permission.OWNER and caller != 'admin':
+            self.req_owner = caller
+        else:
+            self.req_owner = None
         self.index_channel = index_channel
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
         self.last_query = last_query
 
     def add_row_subscriber(self, channel, row_id):
-        self.row_subs[channel] = RowSubscription(self.table, channel, row_id)
+        self.row_subs[channel] = RowSubscription(self.table, self.req_owner, channel, row_id)
 
     async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
         if channel == self.index_channel:
@@ -673,13 +687,15 @@ class IndexSubscription(BaseSubscription):
                 rows = await self.table.direct_query(
                     'id', row_id, limit=1, row_format='raw')
                 if len(rows) == 0:
+                    self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    rtn[row_id] = rows[0]
+                    if self.req_owner is None or rows[0].get('owner', 0) == self.req_owner:
+                        rtn[row_id] = rows[0]
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
-                        self.table, new_chan_name, row_id)
+                        self.table, self.req_owner, new_chan_name, row_id)
             for row_id in deletes:
                 rtn[row_id] = None
                 rem_chan_name = self.table.channel_name(row_id=row_id)
@@ -711,19 +727,59 @@ class Subscriptions:
         return (f"{table.component_cls.component_name_}.{index_name}"
                 f"[{left}:{right}:{desc and -1 or 1}][:{limit}]")
 
+    @classmethod
+    def _has_table_permission(cls, table: ComponentTable, caller: int | str) -> bool:
+        """判断caller是否对整个表有权限"""
+        comp_permission = table.component_cls.permission_
+        # admin和EVERYBODY权限永远返回True
+        if caller == 'admin' or comp_permission == Permission.EVERYBODY:
+            return True
+        else:
+            # 其他权限要求至少登陆过
+            if comp_permission == Permission.ADMIN:
+                return False
+            if caller and caller > 0:
+                return True
+            return False
+
+    @classmethod
+    def _has_row_permission(cls, table: ComponentTable, caller: int | str, row: dict) -> bool:
+        """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
+        comp_permission = table.component_cls.permission_
+        # 非owner权限在_has_table_permission里判断
+        if comp_permission != Permission.OWNER:
+            return True
+        # admin永远返回true
+        if caller == 'admin':
+            return True
+        else:
+            if int(row.get('owner', 0)) == caller:
+                return True
+            else:
+                return False
+
     async def subscribe_select(
-            self, table: ComponentTable, value, where: str = 'id'
+            self, table: ComponentTable, caller: int | str, value: any, where: str = 'id'
     ) -> tuple[str | None, np.record | None]:
         """
         获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
-        如果未查询到数据，返回None, None。
+        如果未查询到数据，或owner不符，返回None, None。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
         """
+        # 首先caller要对整个表有权限
+        if not self._has_table_permission(table, caller):
+            return None, None
+
         if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
             return None, None
         row = rows[0]
         row['id'] = int(row['id'])
 
+        # 再次caller要对该row有权限
+        if not self._has_row_permission(table, caller, row):
+            return None, None
+
+        # 开始订阅
         sub_id = self._make_query_str(
             table, 'id', row['id'], None, 1, False)
         if sub_id in self._subs:
@@ -732,28 +788,41 @@ class Subscriptions:
         channel_name = table.channel_name(row_id=row['id'])
         await self._mq_client.subscribe(channel_name)
 
-        self._subs[sub_id] = RowSubscription(table, channel_name, row['id'])
+        self._subs[sub_id] = RowSubscription(table, caller, channel_name, row['id'])
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         return sub_id, row
 
     async def subscribe_query(
             self,
             table: ComponentTable,
+            caller: int | str,
             index_name: str,
             left,
             right=None,
             limit=10,
             desc=False,
-            force=True
+            force=True,
     ) -> tuple[str | None, list[dict]]:
         """
         获取并订阅多行数据，返回订阅id(sub_id: str)，和多行数据(rows: list[dict])。
         如果未查询到数据，返回None, []。
         但force参数可以强制未查询到数据时也订阅，返回订阅id(sub_id: str)，和[]。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+
+        时间复杂度是O(log(N)+M)，N是index的条目数；M是查询到的行数。
+        Component权限是OWNER时，查询到的行在最后再根据owner值筛选，M为筛选前的行数。
         """
+        # 首先caller要对整个表有权限，不然就算force也不给订阅
+        if not self._has_table_permission(table, caller):
+            return None, []
+
         rows = await table.direct_query(
             index_name, left, right, limit, desc, row_format='raw')
+
+        # 如果是owner权限，只取owner相同的
+        if table.component_cls.permission_ == Permission.OWNER:
+            rows = [row for row in rows if self._has_row_permission(table, caller, row)]
+
         if not force and len(rows) == 0:
             return None, rows
 
@@ -766,7 +835,7 @@ class Subscriptions:
 
         row_ids = {int(row['id']) for row in rows}
         idx_sub = IndexSubscription(
-            table, index_channel, row_ids,
+            table, caller, index_channel, row_ids,
             dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
         self._subs[sub_id] = idx_sub
         self._channel_subs.setdefault(index_channel, set()).add(sub_id)
