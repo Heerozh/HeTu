@@ -251,6 +251,10 @@ class SystemExecutor:
                 logger.exception(traceback.format_exc())
                 logger.exception("------------------------")
                 return False, None
+            finally:
+                if trx is not None:
+                    # 上面如果执行过end_transaction了，那么这句不生效的，主要用于保证连接关闭
+                    await trx.end_transaction(discard=True)
 
         logger.debug(f"✅ [📞Worker] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
         return False, None

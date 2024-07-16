@@ -585,6 +585,9 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+    async def close(self):
+        raise NotImplementedError
+
     async def get_message(self) -> set[str]:
         """
         从消息队列获取一条消息。返回值为有数据变动的channel列表。
@@ -722,6 +725,9 @@ class Subscriptions:
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
         self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
+
+    async def close(self):
+        return await self._mq_client.close()
 
     @classmethod
     def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
