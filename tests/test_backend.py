@@ -9,9 +9,10 @@ import docker
 import numpy as np
 
 from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
-from hetu.data.backend import (RaceCondition, UniqueViolation, ComponentTable, Backend,
-                               ComponentTransaction, RedisComponentTable, RedisBackend,
-                               Subscriptions)
+from hetu.data.backend import (
+    RaceCondition, UniqueViolation, ComponentTable, Backend,
+    ComponentTransaction, RedisComponentTable, RedisBackend,
+    Subscriptions)
 
 logger = logging.getLogger('HeTu')
 logger.setLevel(logging.DEBUG)
@@ -149,7 +150,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row.time = 3
             await tbl.insert(row)
             row_ids = await trx.end_transaction(False)
-        self.assertEqual(row_ids, [1,2,3])
+        self.assertEqual(row_ids, [1, 2, 3])
 
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
@@ -748,6 +749,15 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates[sub_id6]), 1)
         self.assertEqual(updates[sub_id6][4]['owner'], '10')
+        # 测试insert新数据能否得到通知
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            new = Item.new_row()
+            new.owner = 10
+            await tbl.insert(new)
+        updates = await sub_mgr.get_updates()
+        self.assertEqual(len(updates[sub_id6]), 1)
+        self.assertEqual(updates[sub_id6][26]['owner'], '10')
 
         # 关闭连接
         await backend.close()
