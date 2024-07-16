@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import asyncio
 import random
 import hashlib
 import time
@@ -703,6 +704,11 @@ class RedisMQClient(MQClient):
         每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
         本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
         """
+        # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
+        if self._mq.connection is None:
+            await asyncio.sleep(0.5)  # 不写协程就死锁了
+            return set()
+
         rtn = set()
         start_clock = time.monotonic()
         while True:

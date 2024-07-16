@@ -258,6 +258,8 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         if permission == Permission.OWNER:
             assert 'owner' in properties, \
                 f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
+            assert np.issubdtype(properties['owner'].dtype, np.number), \
+                f"{cls.__name__}的owner属性必需是numeric数字(int, np.int64, ...)类型"
 
         # 生成json格式，并通过json加载到class中
         json_str = BaseComponent.make_json(properties, namespace, cls.__name__, permission,

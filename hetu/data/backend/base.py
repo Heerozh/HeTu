@@ -587,8 +587,9 @@ class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
     async def get_message(self) -> set[str]:
         """
-        从消息队列获取一条消息。返回值为收到消息的channel_name列表。
-        每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
+        从消息队列获取一条消息。返回值为有数据变动的channel列表。
+        每行数据，每个Index，都是一个channel。该channel收到了任何
+        消息都说明有数据更新，Subscriptions会对该数据进行重新读取比对。
         本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
         """
         # 必须合并消息，因为index更新时大都是2条一起的
@@ -690,7 +691,7 @@ class IndexSubscription(BaseSubscription):
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    if self.req_owner is None or rows[0].get('owner', 0) == self.req_owner:
+                    if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
                         rtn[row_id] = rows[0]
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
