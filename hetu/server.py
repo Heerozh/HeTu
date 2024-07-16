@@ -51,22 +51,29 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
     print('sys', data)
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
-    ok, res = await executor.run(call)  # 非ok就是无权限调用，参数不对，重试超出
+    ok, res = await executor.execute(call)
     if ok and isinstance(res, SystemResponse):
         await push_queue.put(res.message)
+    return ok
 
 
-async def sub_call(data: list, subs: Subscriptions, push_queue: asyncio.Queue):
+async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions, push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
     check_length('sub', data, 4, 100)
     table = ComponentTableManager().get_table(data[1])
+
+    if executor.context.group and executor.context.group.startswith("admin"):
+        caller = 'admin'
+    else:
+        caller = executor.context.caller
+
     match data[2]:
         case 'select':
             check_length('select', data, 5, 5)
-            sub_id, data = await subs.subscribe_select(table, *data[3:])
+            sub_id, data = await subs.subscribe_select(table, caller, *data[3:])
         case 'query':
             check_length('query', data, 5, 8)
-            sub_id, data = await subs.subscribe_query(table, *data[3:])
+            sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
         case _:
             raise ValueError(f"Invalid sub message")
     if sub_id is not None:
@@ -94,9 +101,11 @@ async def client_receiver(
             # 执行消息
             match data[0]:
                 case 'sys':  # sys system_name args ...
-                    await sys_call(data, executor, push_queue)
+                    sys_ok = await sys_call(data, executor, push_queue)
+                    if not sys_ok:
+                        return ws.fail_connection()
                 case 'sub':  # sub component_name select/query args ...
-                    await sub_call(data, subs, push_queue)
+                    await sub_call(data, executor, subs, push_queue)
                 case 'unsub':  # unsub sub_id
                     check_length('unsub', data, 2, 2)
                     await subs.unsubscribe(data[1])
@@ -162,7 +171,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         # todo 要删除connection数据
 
 
-def start_webserver(app_name, config, main_pid) -> Sanic:
+def start_webserver(app_name, config, main_pid, head) -> Sanic:
     """config： dict或者py目录"""
     # 加载玩家的app文件
     if (app_file := config.get('APP_FILE', None)) is not None:
@@ -182,8 +191,8 @@ def start_webserver(app_name, config, main_pid) -> Sanic:
 
     # 加载协议
     app.ctx.compress, app.ctx.crypto = None, None
-    compress = config.get('WEBSOCKET_COMPRESSION_CLASS')
-    crypto = config.get('WEBSOCKET_CRYPTOGRAPHY_CLASS')
+    compress = config.get('PACKET_COMPRESSION_CLASS')
+    crypto = config.get('PACKET_CRYPTOGRAPHY_CLASS')
     if compress is not None:
         if compress not in globals():
             raise ValueError(f"该压缩模块未在全局变量中找到：{compress}")
@@ -218,11 +227,11 @@ def start_webserver(app_name, config, main_pid) -> Sanic:
     # 初始化所有ComponentTable
     ComponentTableManager().build(
         config['NAMESPACE'], config['INSTANCE_NAME'], backends, table_classes,
-        os.getpid() == main_pid  # 子进程不检查schema
+        head and os.getpid() == main_pid  # 子进程不检查schema
     )
 
-    # 启动时清空所有非持久化表数据，只在主进程启动时执行
-    if os.getpid() == main_pid:
+    # 启动时清空所有非持久化表数据，只在主进程+Head启动时执行
+    if head and os.getpid() == main_pid:
         for comp, tbl in ComponentTableManager().items():
             if not comp.persist_:
                 tbl.flush()
