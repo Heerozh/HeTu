@@ -692,6 +692,9 @@ class RedisMQClient(MQClient):
         # todo 要测试redis cluster是否能正常pub sub
         self._mq = redis_conn.pubsub()
 
+    async def close(self):
+        return await self._mq.close()
+
     async def subscribe(self, channel_name) -> None:
         await self._mq.subscribe(channel_name)
 
