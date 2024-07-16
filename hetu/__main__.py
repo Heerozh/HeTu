@@ -42,7 +42,7 @@ def start(start_args):
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
             'LISTEN': f"0.0.0.0:{start_args.port}",
-            'WEBSOCKET_COMPRESSION_CLASS': 'zlib',
+            'PACKET_COMPRESSION_CLASS': 'zlib',
             'BACKENDS': {
                 'Redis': {
                     "type": "Redis",
@@ -59,15 +59,15 @@ def start(start_args):
     workers = fast and 1 or config.WORKER_NUM
     # 加载app
     loader = AppLoader(factory=partial(start_webserver, f"Hetu-{config.NAMESPACE}",
-                                       config_for_factory, os.getpid()))
+                                       config_for_factory, os.getpid(), start_args.head))
     app = loader.load()
     # 显示服务器信息
     logger.info(FULL_COLOR_LOGO)
     logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
     logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
     logger.info(f"📡 Listening on https://{config.LISTEN}")
-    logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('WEBSOCKET_COMPRESSION_CLASS')}, "
-                f"加密模块：{config.get('WEBSOCKET_CRYPTOGRAPHY_CLASS')}")
+    logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
+                f"加密模块：{config.get('PACKET_CRYPTOGRAPHY_CLASS')}")
 
     # 准备启动服务器
     app.prepare(debug=config.DEBUG,
@@ -102,10 +102,16 @@ def main():
     cli_group.add_argument(
         "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
         default='redis://127.0.0.1:6379/0')
+    cli_group.add_argument(
+        "--head", type=bool, default=True,
+        help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
         "--config", help="配置文件模板见CONFIG_TEMPLATE.py", metavar="config.py")
+    cli_group.add_argument(
+        "--head", type=bool, default=True,
+        help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
     # ==================migration==========================
     # parser_start = command_parsers.add_parser(
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')

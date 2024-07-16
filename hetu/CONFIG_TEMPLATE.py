@@ -27,8 +27,8 @@ ACCESS_LOG = False
 # WEBSOCKET_PING_TIMEOUT = 20
 
 # 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
-WEBSOCKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩
-WEBSOCKET_CRYPTOGRAPHY_CLASS = None    # 通过该class的encrypt和decrypt方法进行加密和解密
+PACKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩
+PACKET_CRYPTOGRAPHY_CLASS = None    # 通过该class的encrypt和decrypt方法进行加密和解密
 
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
