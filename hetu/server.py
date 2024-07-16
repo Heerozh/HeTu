@@ -7,19 +7,23 @@
 import json
 import os
 import zlib
+import traceback
+import asyncio
+import importlib.util
+import sys
+
 from sanic import Sanic
 from sanic import Request, Websocket, text
 from sanic import SanicException
 from sanic import Blueprint
 from sanic.log import logger
-import asyncio
-import importlib.util
-import sys
-from hetu.data.backend import Subscriptions
+
+from hetu.data.backend import Subscriptions, Backend
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, SystemResponse
 from hetu.manager import ComponentTableManager
 
 hetu_bp = Blueprint("my_blueprint")
+_ = zlib  # 标记使用，下方globals()['zlib']会使用
 
 
 def decode_message(message: bytes, protocol: dict):
@@ -59,8 +63,11 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions, push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
+    print('sub', data)
     check_length('sub', data, 4, 100)
     table = ComponentTableManager().get_table(data[1])
+    if table is None:
+        raise ValueError(f"subscribe了不存在的Component名，注意大小写：{data[1]}")
 
     if executor.context.group and executor.context.group.startswith("admin"):
         caller = 'admin'
@@ -84,7 +91,7 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions, pu
 @hetu_bp.route("/")
 async def web_root(request):
     import hetu
-    return text(f"Powered by HeTu(v{hetu.__version__}) Logic Database! ")
+    return text(f"Powered by HeTu(v{hetu.__version__}) Database! ")
 
 
 async def client_receiver(
@@ -92,40 +99,50 @@ async def client_receiver(
         executor: SystemExecutor, subs: Subscriptions,
         push_queue: asyncio.Queue
 ):
+    last_data = None
     try:
         async for message in ws:
             if not message:
                 break
             # 转换消息到array
-            data = decode_message(message, protocol)
+            last_data = decode_message(message, protocol)
+            # print('recv', last_data)
             # 执行消息
-            match data[0]:
+            match last_data[0]:
                 case 'sys':  # sys system_name args ...
-                    sys_ok = await sys_call(data, executor, push_queue)
+                    sys_ok = await sys_call(last_data, executor, push_queue)
                     if not sys_ok:
                         return ws.fail_connection()
                 case 'sub':  # sub component_name select/query args ...
-                    await sub_call(data, executor, subs, push_queue)
+                    await sub_call(last_data, executor, subs, push_queue)
                 case 'unsub':  # unsub sub_id
-                    check_length('unsub', data, 2, 2)
-                    await subs.unsubscribe(data[1])
+                    check_length('unsub', last_data, 2, 2)
+                    await subs.unsubscribe(last_data[1])
                 case _:
                     raise ValueError(f"Invalid message")
-    except SanicException:
+    except (SanicException, Exception) as e:
+        logger.exception(f"❌ [📡Websocket] 执行异常，封包：{last_data}，异常：{e}")
+        logger.exception(traceback.format_exc())
+        logger.exception("------------------------")
         # 不用断开连接，ws断了时主线程会自动结束
-        pass
+    print('receiver closed')
 
 
 async def subscription_receiver(subscriptions: Subscriptions, push_queue: asyncio.Queue):
+    last_updates = None
     try:
         while True:
-            updates = await subscriptions.get_updates()
-            for sub_id, data in updates.items():
+            last_updates = await subscriptions.get_updates()
+            for sub_id, data in last_updates.items():
                 reply = ['updt', sub_id, data]
                 await push_queue.put(reply)
             # todo 备注，客户端要注意内部避免掉重复订阅
             # 客户端通过查询参数组合成查询字符串，来判断是否重复订阅，管理器注册对应的callback，重复注册只
             # 是callback增加并不会去服务器请求
+    except Exception as e:
+        logger.exception(f"❌ [📡Websocket] 数据库Push时异常：{last_updates}，异常：{e}")
+        logger.exception(traceback.format_exc())
+        logger.exception("------------------------")
     finally:
         # 这里需要关闭ws连接，不然主线程会无障碍运行
         pass
@@ -149,9 +166,9 @@ async def websocket_connection(request: Request, ws: Websocket):
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
-    sub_task_id = f"subs_receiver:{request.id}"
-    receiver_task = subscription_receiver(subscriptions, push_queue)
-    _ = request.app.add_task(receiver_task, name=sub_task_id)
+    subs_task_id = f"subs_receiver:{request.id}"
+    subscript_task = subscription_receiver(subscriptions, push_queue)
+    _ = request.app.add_task(subscript_task, name=subs_task_id)
     # todo 测试subscription_receiver报错退出了连接是否推出
 
     # 这里循环发送，保证总是第一时间Push
@@ -161,14 +178,27 @@ async def websocket_connection(request: Request, ws: Websocket):
             reply = await push_queue.get()
             print('got', reply)
             await ws.send(encode_message(reply, protocol))
+    except Exception as e:
+        logger.exception(f"❌ [📡Websocket] 发送数据异常：{e}")
+        logger.exception(traceback.format_exc())
+        logger.exception("------------------------")
     finally:
         # 连接断开，强制关闭此协程时也会调用
         print('closed')
         await request.app.cancel_task(recv_task_id)
-        await request.app.cancel_task(sub_task_id)
+        await request.app.cancel_task(subs_task_id)
         await executor.terminate()
+        await subscriptions.close()
         request.app.purge_tasks()
         # todo 要删除connection数据
+
+
+async def server_close(app):
+    for attrib in dir(app.ctx):
+        backend = app.ctx.__getattribute__(attrib)
+        if isinstance(backend, Backend):
+            logger.info(f"⌚ [📡Server] Closing backend {attrib}...")
+            await backend.close()
 
 
 def start_webserver(app_name, config, main_pid, head) -> Sanic:
@@ -235,6 +265,10 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         for comp, tbl in ComponentTableManager().items():
             if not comp.persist_:
                 tbl.flush()
+
+    # 服务器work和main关闭回调
+    app.after_server_stop(server_close)
+    app.main_process_stop(server_close)
 
     # 启动服务器监听
     app.blueprint(hetu_bp)
