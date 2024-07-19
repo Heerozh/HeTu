@@ -1,5 +1,6 @@
 python >= 3.11
 sanic  # pip install -U sanic
+websockets  # sanic自带了，不用安装，只是为了抑制IDE警告列出
 numpy >= 2.0 # conda install numpy
 redis[hiredis]  # pip install -U redis[hiredis]
 GitPython  # pip install -U GitPython
@@ -10,5 +11,5 @@ trustme  # pip install -U trustme
 ipykernel
 ipywidgets  # conda install ipykernel ipywidgets
 docker  # pip install -U docker
-websockets  # pip install -U websockets
-# pip install sanic-testing
+aiohttp  # pip install -U aiohttp
+sanic-testing  # pip install -U sanic-testing

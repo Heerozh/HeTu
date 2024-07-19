@@ -693,7 +693,7 @@ class RedisMQClient(MQClient):
         self._mq = redis_conn.pubsub()
 
     async def close(self):
-        return await self._mq.close()
+        return await self._mq.aclose()
 
     async def subscribe(self, channel_name) -> None:
         await self._mq.subscribe(channel_name)
