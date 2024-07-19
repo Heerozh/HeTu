@@ -18,6 +18,7 @@ from sanic import SanicException
 from sanic import Blueprint
 from sanic.log import logger
 
+import hetu
 from hetu.data.backend import Subscriptions, Backend
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, SystemResponse
 from hetu.manager import ComponentTableManager
@@ -52,7 +53,7 @@ def check_length(name, data: list, left, right):
 
 async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue):
     """处理Client SDK调用System的命令"""
-    print('sys', data)
+    print(executor.context, 'sys', data)
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
@@ -63,7 +64,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions, push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
-    print('sub', data)
+    print(executor.context, 'sub', data)
     check_length('sub', data, 4, 100)
     table = ComponentTableManager().get_table(data[1])
     if table is None:
@@ -90,7 +91,6 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions, pu
 
 @hetu_bp.route("/")
 async def web_root(request):
-    import hetu
     return text(f"Powered by HeTu(v{hetu.__version__}) Database! ")
 
 
@@ -112,20 +112,28 @@ async def client_receiver(
                 case 'sys':  # sys system_name args ...
                     sys_ok = await sys_call(last_data, executor, push_queue)
                     if not sys_ok:
+                        print(executor.context, 'call failed, close connection...')
                         return ws.fail_connection()
                 case 'sub':  # sub component_name select/query args ...
                     await sub_call(last_data, executor, subs, push_queue)
                 case 'unsub':  # unsub sub_id
                     check_length('unsub', last_data, 2, 2)
                     await subs.unsubscribe(last_data[1])
+                case 'motd':
+                    print('motd')
+                    await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
                     raise ValueError(f"Invalid message")
-    except (SanicException, Exception) as e:
-        logger.exception(f"❌ [📡Websocket] 执行异常，封包：{last_data}，异常：{e}")
+    except asyncio.CancelledError:
+        print(executor.context, 'client_receiver normal canceled')
+    except (SanicException, BaseException) as e:
+        logger.exception(f"❌ [📡Websocket] 执行异常，连接{executor.context}，"
+                         f"封包：{last_data}，异常：{e}")
         logger.exception(traceback.format_exc())
         logger.exception("------------------------")
         # 不用断开连接，ws断了时主线程会自动结束
-    print('receiver closed')
+    finally:
+        print(executor.context, 'client_receiver closed')
 
 
 async def subscription_receiver(subscriptions: Subscriptions, push_queue: asyncio.Queue):
@@ -139,11 +147,14 @@ async def subscription_receiver(subscriptions: Subscriptions, push_queue: asynci
             # todo 备注，客户端要注意内部避免掉重复订阅
             # 客户端通过查询参数组合成查询字符串，来判断是否重复订阅，管理器注册对应的callback，重复注册只
             # 是callback增加并不会去服务器请求
-    except Exception as e:
+    except asyncio.CancelledError:
+        print('subscription_receiver normal canceled')
+    except BaseException as e:
         logger.exception(f"❌ [📡Websocket] 数据库Push时异常：{last_updates}，异常：{e}")
         logger.exception(traceback.format_exc())
         logger.exception("------------------------")
     finally:
+        print('subscription_receiver closed')
         # 这里需要关闭ws连接，不然主线程会无障碍运行
         pass
 
@@ -174,17 +185,18 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 这里循环发送，保证总是第一时间Push
     try:
         while True:
-            print('wait queue')
             reply = await push_queue.get()
-            print('got', reply)
+            print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
-    except Exception as e:
+    except asyncio.CancelledError:
+        print(executor.context, 'websocket_connection normal canceled')
+    except BaseException as e:
         logger.exception(f"❌ [📡Websocket] 发送数据异常：{e}")
         logger.exception(traceback.format_exc())
         logger.exception("------------------------")
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        print('closed')
+        print(executor.context, asyncio.current_task().get_name(), 'closed')
         await request.app.cancel_task(recv_task_id)
         await request.app.cancel_task(subs_task_id)
         await executor.terminate()

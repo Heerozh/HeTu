@@ -89,6 +89,10 @@ def main():
     # ==================start==========================
     parser_start = command_parsers.add_parser(
         'start', help='启动河图服务')
+    parser_start.add_argument(
+        "--head", type=bool, default=True,
+        help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
+
     cli_group = parser_start.add_argument_group("通过命令行启动参数")
     cli_group.add_argument(
         "--app-file", help="河图app的py文件", metavar="app.py")
@@ -102,16 +106,10 @@ def main():
     cli_group.add_argument(
         "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
         default='redis://127.0.0.1:6379/0')
-    cli_group.add_argument(
-        "--head", type=bool, default=True,
-        help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
         "--config", help="配置文件模板见CONFIG_TEMPLATE.py", metavar="config.py")
-    cli_group.add_argument(
-        "--head", type=bool, default=True,
-        help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
     # ==================migration==========================
     # parser_start = command_parsers.add_parser(
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
