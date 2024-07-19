@@ -35,6 +35,9 @@ class Context:
     transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
     inherited: dict[str, callable]  # 继承的父事务函数
 
+    def __str__(self):
+        return f"conn: {self.connection_id}, caller: {self.caller}"
+
     def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | Callable:
         if type(item) is str:
             return self.inherited[item]
@@ -73,8 +76,8 @@ class Connection(BaseComponent):
     admin: str = Property('', dtype='<U16')  # 是否是admin
     created: np.double = Property(0)  # 连接创建时间
     last_active: np.double = Property(0)  # 最后活跃时间
-    received_msgs: np.int32 = Property(0)  # 收到的消息数, 用来判断fooding攻击
-    invalid_msgs: np.int32 = Property(0)  # 无效消息数, 用来判断fooding攻击
+    received_msgs: np.int32 = Property(0)  # 收到的消息数, 用来判断flooding攻击
+    invalid_msgs: np.int32 = Property(0)  # 无效消息数, 用来判断flooding攻击
 
 
 @define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
@@ -157,6 +160,7 @@ class SystemExecutor:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
+        # todo 新建个connection的文件专门负责，附带kick，flood check等一系列方法
         sys = SystemClusters().get_system(self.namespace, 'new_connection')
         ok, _ = await self._execute(sys, address)
         if not ok:
