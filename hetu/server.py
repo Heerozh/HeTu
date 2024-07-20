@@ -186,6 +186,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     try:
         while True:
             reply = await push_queue.get()
+            # todo 增加replay log file，把recv和send的消息都记录，以及事务执行的结果等
             print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
     except asyncio.CancelledError:
@@ -267,6 +268,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     # 初始化SystemCluster
     SystemClusters().build_clusters(config['NAMESPACE'])
     # 初始化所有ComponentTable
+    # todo 要检查一下是否已有其他head启动。可用数据库维持一个过期key
     ComponentTableManager().build(
         config['NAMESPACE'], config['INSTANCE_NAME'], backends, table_classes,
         head and os.getpid() == main_pid  # 子进程不检查schema

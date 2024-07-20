@@ -12,6 +12,21 @@ INSTANCE_NAME = "game_name_region1234"
 # 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
 DEBUG = False
 
+# SSL配置
+# CERT_CHAIN = [
+#     None,  # 禁止通过IP查看证书
+#     {
+#         "cert": "/path/to/example.com/fullchain.pem",
+#         "key": "/path/to/example.com/privkey.pem",
+#         "password": "可选，如果密钥有密码的话",
+#     },
+#     {
+#         "cert": "/path/to/example2.cn/fullchain.pem",
+#         "key": "/path/to/example2.cn/privkey.pem",
+#         "password": "可选，如果密钥有密码的话",
+#     },
+# ]
+
 # 服务器Websocket监听地址
 LISTEN = "0.0.0.0:2466"
 
