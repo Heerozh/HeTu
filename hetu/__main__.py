@@ -42,6 +42,7 @@ def start(start_args):
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
             'LISTEN': f"0.0.0.0:{start_args.port}",
+            'CERT_CHAIN': start_args.cert,
             'PACKET_COMPRESSION_CLASS': 'zlib',
             'BACKENDS': {
                 'Redis': {
@@ -49,7 +50,7 @@ def start(start_args):
                     "master": start_args.db,
                 }
             },
-            'DEBUG': True,
+            'DEBUG': start_args.debug,
             'WORKER_NUM': 4,
             'ACCESS_LOG': False,
         }
@@ -62,20 +63,23 @@ def start(start_args):
                                        config_for_factory, os.getpid(), start_args.head))
     app = loader.load()
     # 显示服务器信息
+    host, port = config.LISTEN.rsplit(':', 1)
     logger.info(FULL_COLOR_LOGO)
     logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
     logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
-    logger.info(f"📡 Listening on https://{config.LISTEN}")
+    logger.info(f"📡 Listening on https://{host}:{port}")
     logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
                 f"加密模块：{config.get('PACKET_CRYPTOGRAPHY_CLASS')}")
 
     # 准备启动服务器
+    ssl = ('CERT_CHAIN' in config) and config.CERT_CHAIN or None
     app.prepare(debug=config.DEBUG,
                 access_log=config.ACCESS_LOG,
                 motd=False,
-                host=config.LISTEN.split(':')[0],
-                port=int(config.LISTEN.split(':')[1]),
-                auto_tls=config.DEBUG,
+                host=host,
+                port=int(port),
+                auto_tls=config.DEBUG or ssl,
+                ssl=ssl,
                 fast=fast,
                 workers=workers)
     # 启动并堵塞
@@ -97,15 +101,23 @@ def main():
     cli_group.add_argument(
         "--app-file", help="河图app的py文件", metavar="app.py")
     cli_group.add_argument(
-        "--namespace", metavar="game1", help="加载app中哪个命名空间")
+        "--namespace", metavar="game1", help="启动app.py中哪个namespace下的System")
     cli_group.add_argument(
-        "--instance", help="河图实例名称，每个实例是一个副本",
+        "--instance", help="实例名称，每个实例是一个副本",
         metavar="server1")
     cli_group.add_argument(
         "--port", metavar="2446", help="监听的Websocket端口", default='2466')
     cli_group.add_argument(
         "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
         default='redis://127.0.0.1:6379/0')
+    cli_group.add_argument(
+        "--debug", type=bool,
+        help="启用debug模式，会生成自签https证书传入cert参数，并显示更多的log信息",
+        default=False)
+    cli_group.add_argument(
+        "--cert", metavar="/etc/letsencrypt/live/example.com/",
+        help="证书目录，如果不设置则使用不安全的连接。由于客户端必须使用安全连接，需要另设反向https代理来转发消息。",
+        default='')
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
