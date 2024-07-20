@@ -65,6 +65,7 @@ class SystemClusters(metaclass=Singleton):
 
     def build_clusters(self, namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
+        assert namespace in self._system_map, f"没有找到namespace={namespace}的System定义"
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
 
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):
