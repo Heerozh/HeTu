@@ -268,16 +268,18 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
 
         # 保存app文件的版本信息
         caller = inspect.stack()[1]
-        repo = git.Repo(caller.filename, search_parent_directories=True)
-        tree = repo.head.commit.tree
-        relpath = os.path.relpath(caller.filename, repo.working_dir).replace(os.sep, '/')
         try:
+            repo = git.Repo(caller.filename, search_parent_directories=True)
+            tree = repo.head.commit.tree
+            relpath = os.path.relpath(caller.filename, repo.working_dir).replace(os.sep, '/')
             blob = tree[relpath]
             sha = blob.hexsha
             cls.git_hash_ = sha
-        except KeyError:
-            warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
-                          f"将无法检测组件{cls.__name__}的版本。")
+        except (KeyError, git.exc.InvalidGitRepositoryError):
+            lib_path = os.path.abspath(__file__ + '/../../')
+            if lib_path not in caller.filename:
+                warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
+                              f"将无法检测组件{cls.__name__}的版本。")
             cls.git_hash_ = 'untracked'
 
         # 把class加入到总集中
