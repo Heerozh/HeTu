@@ -8,29 +8,15 @@ import sanic_testing
 from hetu.server import start_webserver
 from hetu.server import encode_message, decode_message
 
+from backend_mgr import UnitTestBackends
+
 
 class TestWebsocket(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # docker启动对应的backend
-        self.containers = []
-        try:
-            client = docker.from_env()
-        except docker.errors.DockerException:
-            raise unittest.SkipTest("请启动DockerDesktop或者Docker服务后再运行测试")
-        # 先删除已启动的
-        try:
-            client.containers.get('hetu_test_redis').kill()
-            client.containers.get('hetu_test_redis').remove()
-        except (docker.errors.NotFound, docker.errors.APIError):
-            pass
-        # 启动redis服务器
-        self.containers.append(
-            client.containers.run("redis:latest", detach=True, ports={'6379/tcp': 23318},
-                                  name='hetu_test_redis', auto_remove=True)
-        )
-        # 启动hetu服务器
-        self.app = start_webserver("Hetu-test", {
+    @classmethod
+    def setUpClass(cls):
+        cls.backend_mgr = UnitTestBackends()
+        cls.backend_mgr.start_redis_server()
+        cls.app = start_webserver("Hetu-test", {
             'APP_FILE': 'app.py',
             'NAMESPACE': 'ssw',
             'INSTANCE_NAME': 'unittest1',
@@ -47,12 +33,9 @@ class TestWebsocket(unittest.TestCase):
             'ACCESS_LOG': False,
         }, os.getpid(), True)
 
-    def __del__(self):
-        for container in self.containers:
-            try:
-                container.kill()
-            except (docker.errors.NotFound, ImportError):
-                pass
+    @classmethod
+    def tearDownClass(cls):
+        cls.backend_mgr.teardown()
 
     def test_websocket(self):
         from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError

@@ -5,14 +5,13 @@ import unittest
 from typing import Type
 from unittest import mock
 
-import docker
 import numpy as np
 
 from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
 from hetu.data.backend import (
     RaceCondition, UniqueViolation, ComponentTable, Backend,
-    ComponentTransaction, RedisComponentTable, RedisBackend,
-    Subscriptions)
+    ComponentTransaction, Subscriptions)
+from backend_mgr import UnitTestBackends
 
 logger = logging.getLogger('HeTu')
 logger.setLevel(logging.DEBUG)
@@ -32,10 +31,9 @@ def parameterized(test_items):
     return wrapper
 
 
-implements = (
-    (RedisComponentTable, RedisBackend, {"master": "redis://127.0.0.1:23318/0"}),
-    # 所有其他类型table和后端在此添加并通过测试，并在下方"# 启动服务器"处启动对应的docker
-)
+# 要测试新的backend，请添加backend到UnitTestBackends类中
+test_backends = UnitTestBackends()
+implements = test_backends.get_all_backends()
 
 
 class TestBackend(unittest.IsolatedAsyncioTestCase):
@@ -58,43 +56,17 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             name: 'U8' = Property('', unique=True, index=True)
             timestamp: float = Property(0, unique=False, index=True)
 
-    def __init__(self, module_name='runTest'):
-        super().__init__(module_name)
-        ComponentDefines().clear_()
-        self.build_test_component()
+    @classmethod
+    def setUpClass(cls):
+        cls.build_test_component()
 
-        # docker启动对应的backend
-        self.containers = []
-        try:
-            client = docker.from_env()
-        except docker.errors.DockerException:
-            raise unittest.SkipTest("请启动DockerDesktop或者Docker服务后再运行测试")
-        # 先删除已启动的
-        try:
-            client.containers.get('hetu_test_redis').kill()
-            client.containers.get('hetu_test_redis').remove()
-        except (docker.errors.NotFound, docker.errors.APIError):
-            pass
-        # 启动服务器
-        self.containers.append(
-            client.containers.run("redis:latest", detach=True, ports={'6379/tcp': 23318},
-                                  name='hetu_test_redis', auto_remove=True)
-        )
-
-    def __del__(self):
-        for container in self.containers:
-            try:
-                container.kill()
-            except (docker.errors.NotFound, ImportError):
-                pass
-        pass
+    @classmethod
+    def tearDownClass(cls):
+        test_backends.teardown()
 
     @parameterized(implements)
     async def test_basic(self, table_cls: type[ComponentTable],
                          backend_cls: Type[type[Backend]], config):
-        ComponentDefines().clear_()
-        self.build_test_component()
-
         # 测试连接数据库并创建表
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
@@ -343,8 +315,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     async def test_race(self, table_cls: type[ComponentTable],
                         backend_cls: type[Backend], config):
         # 测试竞态，通过2个协程来测试
-        ComponentDefines().clear_()
-        self.build_test_component()
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
 
@@ -497,9 +467,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # # mock_time.now.return_value = datetime.now() + timedelta(days=10)
         # mock_time.fromisoformat = datetime.fromisoformat
         # 测试迁移，先用原定义写入数据
-        ComponentDefines().clear_()
-        self.build_test_component()
-
         backend = backend_cls(config)
         backend.io.flushdb()
         item_data = table_cls(Item, 'test', 1, backend)
@@ -586,9 +553,6 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                                  backend_cls: type[Backend], config):
         backend = backend_cls(config)
         # 初始化测试数据
-        ComponentDefines().clear_()
-        self.build_test_component()
-
         item_data = table_cls(Item, 'test', 1, backend)
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
