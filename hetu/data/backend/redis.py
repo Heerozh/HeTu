@@ -25,16 +25,21 @@ class RedisBackend(Backend):
     def __init__(self, config: dict):
         super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
-        self.io = redis.from_url(config['master'], decode_responses=True)
-        self.aio = redis.asyncio.from_url(config['master'], decode_responses=True)
+        self.master_url = config['master']
+        self.io = redis.from_url(self.master_url, decode_responses=True)
+        self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
         self.dbi = self.io.connection_pool.connection_kwargs['db']
         # 连接只读数据库
         servants = config.get('servants', [])
         self.replicas = [redis.asyncio.from_url(url, decode_responses=True) for url in servants]
         if not servants:
-            servants.append(config['master'])
-            self.replicas.append(self.aio)
-
+            servants.append(self.master_url)
+            self.replicas.append(self._aio)
+        # 限制aio运行的coroutine
+        try:
+            self.loop_id = hash(asyncio.get_running_loop())
+        except RuntimeError:
+            self.loop_id = None
         # 配置keyspace通知
         target_keyspace = 'Kghz'
         try:
@@ -52,14 +57,28 @@ class RedisBackend(Backend):
             logger.warning("⚠️ [💾Redis] 无权限调用数据库config_set命令，数据订阅将不起效。"
                            f"可手动设置配置文件：notify-keyspace-events={target_keyspace}")
 
+    @property
+    def aio(self):
+        if self.loop_id is None:
+            self.loop_id = hash(asyncio.get_running_loop())
+        assert hash(asyncio.get_running_loop()) == self.loop_id, \
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+
+        return self._aio
+
     async def close(self):
         self.io.close()
-        await self.aio.aclose()
+        await self._aio.aclose()
         for replica in self.replicas:
             await replica.aclose()
 
     def random_replica(self) -> redis.Redis:
         """随机返回一个只读连接"""
+        if self.loop_id is None:
+            self.loop_id = hash(asyncio.get_running_loop())
+        assert hash(asyncio.get_running_loop()) == self.loop_id, \
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+
         i = random.randint(0, len(self.replicas) - 1)
         return self.replicas[i]
 
@@ -690,6 +709,9 @@ class RedisMQClient(MQClient):
     """连接到消息队列的客户端，每个用户连接一个实例。"""
     def __init__(self, redis_conn: redis.asyncio.Redis | redis.asyncio.RedisCluster):
         # todo 要测试redis cluster是否能正常pub sub
+        # 2种模式：
+        # a. 每个ws连接一个pubsub连接，这样servants可以均匀的负载，也没有分发负担，目前的模式
+        # b. 每个worker一个pubsub连接，收到消息的分发交给worker来做，这样连接数较少，但servants数只能<=worker数
         self._mq = redis_conn.pubsub()
 
     async def close(self):
