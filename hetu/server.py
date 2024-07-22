@@ -131,14 +131,16 @@ async def client_receiver(
     except (SanicException, BaseException) as e:
         logger.exception(f"❌ [📡Websocket] 执行异常，连接{executor.context}，"
                          f"封包：{last_data}，异常：{e}")
-        logger.exception(traceback.format_exc())
-        logger.exception("------------------------")
-        # 不用断开连接，ws断了时主线程会自动结束
+        ws.fail_connection()
     finally:
         print(executor.context, 'client_receiver closed')
 
 
-async def subscription_receiver(subscriptions: Subscriptions, push_queue: asyncio.Queue):
+async def subscription_receiver(
+        ws: Websocket,
+        subscriptions: Subscriptions,
+        push_queue: asyncio.Queue
+):
     """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     last_updates = None
     try:
@@ -153,13 +155,10 @@ async def subscription_receiver(subscriptions: Subscriptions, push_queue: asynci
     except asyncio.CancelledError:
         print('subscription_receiver normal canceled')
     except BaseException as e:
-        logger.exception(f"❌ [📡Websocket] 数据库Push时异常：{last_updates}，异常：{e}")
-        logger.exception(traceback.format_exc())
-        logger.exception("------------------------")
+        logger.exception(f"❌ [📡Websocket] 数据库获取订阅消息时异常，上条消息：{last_updates}，异常：{e}")
+        return ws.fail_connection()
     finally:
         print('subscription_receiver closed')
-        # 这里需要关闭ws连接，不然主线程会无障碍运行
-        pass
 
 
 @hetu_bp.websocket("/hetu")
@@ -183,9 +182,8 @@ async def websocket_connection(request: Request, ws: Websocket):
 
     # 创建获得订阅推送通知的协程
     subs_task_id = f"subs_receiver:{request.id}"
-    subscript_task = subscription_receiver(subscriptions, push_queue)
+    subscript_task = subscription_receiver(ws, subscriptions, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
-    # todo 测试subscription_receiver报错退出了连接是否推出
 
     # 这里循环发送，保证总是第一时间Push
     try:
@@ -198,8 +196,6 @@ async def websocket_connection(request: Request, ws: Websocket):
         print(executor.context, 'websocket_connection normal canceled')
     except BaseException as e:
         logger.exception(f"❌ [📡Websocket] 发送数据异常：{e}")
-        logger.exception(traceback.format_exc())
-        logger.exception("------------------------")
     finally:
         # 连接断开，强制关闭此协程时也会调用
         print(executor.context, asyncio.current_task().get_name(), 'closed')
@@ -208,7 +204,6 @@ async def websocket_connection(request: Request, ws: Websocket):
         await executor.terminate()
         await subscriptions.close()
         request.app.purge_tasks()
-        # todo 要删除connection数据
 
 
 async def server_close(app):
@@ -250,7 +245,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             raise ValueError(f"该加密模块未在全局变量中找到：{crypto}")
         app.ctx.crypto = globals()[crypto]
 
-    # 创建数据库连接池
+    # 创建后端连接池
     backends = {}
     table_constructors = {}
     for name, db_cfg in app.config.BACKENDS.items():
@@ -264,8 +259,8 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             # import sqlalchemy
             # app.ctx.__setattr__(name, sqlalchemy.create_engine(db_cfg["addr"]))
             raise NotImplementedError(
-                "SQL后端未实现，SQL后端还是需要redis或zmq在前面一层负责推送，不一定必要")
-    # 把default后端设置为config第一个
+                "SQL后端未实现，实现SQL后端还需要redis或zmq在前面一层负责推送，较复杂")
+    # 把config第一个设置为default后端
     backends['default'] = backends[next(iter(app.config.BACKENDS.keys()))]
     table_constructors['default'] = table_constructors[next(iter(app.config.BACKENDS.keys()))]
     app.ctx.__setattr__('default_backend', backends['default'])
@@ -286,7 +281,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     except HeadLockFailed as e:
         message = (f"检测有其他head=True的node正在运行，只能启动一台head node。"
                    f"此标记位于{e}，如果之前服务器未正常关闭，请手动删除该键值")
-        logger.error("❌ [📡Server] " + message)
+        logger.exception("❌ [📡Server] " + message)
         raise HeadLockFailed(message)
 
     # 服务器work和main关闭回调
