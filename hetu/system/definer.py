@@ -4,10 +4,11 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import asyncio
+from dataclasses import dataclass
 from inspect import signature
 from typing import Type
-from dataclasses import dataclass
-import asyncio
+
 from ..common import Singleton
 from ..data import BaseComponent, Permission
 
@@ -15,10 +16,10 @@ from ..data import BaseComponent, Permission
 @dataclass
 class SystemDefine:
     func: callable
-    components: set[Type[BaseComponent]]     # 引用的Components
+    components: set[Type[BaseComponent]]        # 引用的Components
     full_components: set[Type[BaseComponent]]   # 完整的引用Components，包括继承自父System的
     non_transactions: set[Type[BaseComponent]]  # 直接获取的Components，不走事务
-    full_non_trx: set[Type[BaseComponent]]       # 完整的直接Components，包括继承自父System的
+    full_non_trx: set[Type[BaseComponent]]      # 完整的直接Components，包括继承自父System的
     inherits: set[str]
     full_inherits: set[str]
     permission: Permission
@@ -36,6 +37,7 @@ class SystemClusters(metaclass=Singleton):
 
     此类只负责查询，调度器通过此类查询System信息。
     """
+
     @dataclass
     class Cluster:
         id: int
@@ -44,9 +46,12 @@ class SystemClusters(metaclass=Singleton):
         systems: set[str]
 
     def __init__(self):
+        self._clear()
+
+    def _clear(self):
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
-        self._clusters = {}    # type: dict[str, list[SystemClusters.Cluster]]
+        self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
 
     def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
         return self._system_map[namespace].get(system_name, None)
@@ -66,8 +71,8 @@ class SystemClusters(metaclass=Singleton):
     def build_clusters(self, namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
         assert namespace in self._system_map, f"没有找到namespace={namespace}的System定义"
-        # 按Component交集生成簇，只有启动时运行，不用考虑性能
 
+        # 按Component交集生成簇，只有启动时运行，不用考虑性能
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):
             """合并2个冲突的簇"""
             for x in range(len(clusters_)):
@@ -82,6 +87,8 @@ class SystemClusters(metaclass=Singleton):
 
         def inherit_components(namespace_, inherits, req: set, n_trx: set, inh: set):
             for base_system in inherits:
+                if base_system not in self._system_map[namespace_]:
+                    raise RuntimeError(f"`inherits`引用的System `{base_system}` 不存在")
                 base_def = self._system_map[namespace_][base_system]
                 req.update(base_def.components)
                 n_trx.update(base_def.non_transactions)
@@ -108,8 +115,11 @@ class SystemClusters(metaclass=Singleton):
                 non_trx.update(sys_def.full_non_trx)
                 # 检查所有System引用的Component和继承的也是同一个backend
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
-                assert len(set(backend_names)) <= 1, \
-                    f"System {sys_name} 引用的Component必须都是同一种backend"
+                if len(set(backend_names)) > 1:
+                    refs = [f"{comp.component_name_}:{comp.backend_}"
+                            for comp in sys_def.full_components]
+                    raise AssertionError(f"System {sys_name} 引用的Component必须都是同一种backend，"
+                                         f"现在有：{refs}")
                 # 添加到clusters
                 clusters.append(SystemClusters.Cluster(
                     -1, sys_def.full_components.copy(),
@@ -254,6 +264,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
     """
+
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
 
@@ -282,6 +293,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         def warp_system_call(*_, **__):
             raise RuntimeError("系统函数不允许直接调用")
             # return call_system(namespace, func.__name__, *args, **kwargs)
+
         return warp_system_call
 
     return warp
