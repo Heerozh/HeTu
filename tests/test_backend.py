@@ -731,6 +731,38 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 关闭连接
         await backend.close()
 
+    @parameterized(implements)
+    async def test_update_or_insert_race_bug(
+            self, table_cls: type[ComponentTable],backend_cls: type[Backend], config
+    ):
+        # 测试select_or_create UniqueViolation是否转化为了RaceCondition
+        backend = backend_cls(config)
+        item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
+
+        async def main_task():
+            async with backend.transaction(1) as trx:
+                tbl = item_data.attach(trx)
+                async with tbl.select_or_create('uni_vio', 'name') as row:
+                    await asyncio.sleep(0.1)
+                    row.qty = 1
+
+        async def trouble_task():
+            async with backend.transaction(1) as _trx:
+                _tbl = item_data.attach(_trx)
+                row = Item.new_row()
+                row.name = 'uni_vio'
+                await _tbl.insert(row)
+
+        task1 = asyncio.create_task(main_task())
+        task2 = asyncio.create_task(trouble_task())
+        await asyncio.gather(task2)
+        with self.assertRaises(RaceCondition):
+            await task1
+
+        # close backend
+        await backend.close()
+
 
 if __name__ == '__main__':
     unittest.main()
