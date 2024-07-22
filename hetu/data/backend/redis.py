@@ -5,23 +5,27 @@
 @email: heeroz@gmail.com
 """
 import asyncio
-import random
 import hashlib
+import itertools
+import logging
+import random
 import time
+import uuid
+import warnings
+
 import numpy as np
 import redis
-import itertools
-import uuid
-from datetime import datetime, timedelta
-from ..component import BaseComponent, Property
+
 from .base import (ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction,
                    MQClient)
-import logging
+from ..component import BaseComponent, Property
+
 logger = logging.getLogger('HeTu')
 
 
 class RedisBackend(Backend):
     """储存到Redis后端的连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
+
     def __init__(self, config: dict):
         super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
@@ -61,6 +65,8 @@ class RedisBackend(Backend):
     def aio(self):
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())
+        # redis-py的async connection用的python的steam.connect，绑定到当前协程
+        # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
         assert hash(asyncio.get_running_loop()) == self.loop_id, \
             "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 
@@ -259,10 +265,9 @@ class RedisComponentTable(ComponentTable):
             component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
-            backend: RedisBackend,
-            check_schema: bool = True
+            backend: RedisBackend
     ):
-        super().__init__(component_cls, instance_name, cluster_id, backend, check_schema)
+        super().__init__(component_cls, instance_name, cluster_id, backend)
         self._backend = backend  # 为了让代码提示知道类型是RedisBackend
         component_cls.hosted_ = self
         # redis key名
@@ -271,69 +276,58 @@ class RedisComponentTable(ComponentTable):
         self._root_prefix = f'{instance_name}:{self._name}:'
         self._key_prefix = f'{self._root_prefix}{hash_tag}id:'
         self._idx_prefix = f'{self._root_prefix}{hash_tag}index:'
-        self._lock_key = f'{self._root_prefix}init_lock'
+        self._init_lock_key = f'{self._root_prefix}init_lock'
         self._meta_key = f'{self._root_prefix}meta'
         self._trx_pipe = None
         self._autoinc = None
-        # 检测meta信息，然后做对应处理
-        if self._check_schema:
-            self.check_meta()
 
-    def check_meta(self):
+    def create_or_migrate(self):
         """
-        检查meta信息，然后做对应处理
+        检查表结构是否正确，不正确则尝试进行迁移。此方法同时会强制重建表的索引。
         meta格式:
         json: 组件的结构信息
         version: json的hash
         cluster_id: 所属簇id
-        last_index_rebuild: 上次重建索引时间
         """
         io = self._backend.io
-        lock = io.lock(self._lock_key, timeout=60*5)
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
-        lock.acquire(blocking=True)
+        with io.lock(self._init_lock_key, timeout=60 * 5):
+            # 获取redis已存的组件信息
+            meta = io.hgetall(self._meta_key)
+            if not meta:
+                self._create_emtpy()
+            else:
+                version = hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest()
+                # 如果cluster_id改变，则迁移改key名
+                if int(meta['cluster_id']) != self._cluster_id:
+                    self._migration_cluster_id(old=int(meta['cluster_id']))
 
-        # 获取redis已存的组件信息
-        meta = io.hgetall(self._meta_key)
-        if not meta:
-            meta = self._create_emtpy()
-        else:
-            version = hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest()
-            # 如果cluster_id改变，则迁移改key名
-            if int(meta['cluster_id']) != self._cluster_id:
-                self._migration_cluster_id(old=int(meta['cluster_id']))
+                # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+                if meta['version'] != version:
+                    self._migration_schema(old=meta['json'])
 
-            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-            if meta['version'] != version:
-                self._migration_schema(old=meta['json'])
-                # 因为迁移了，强制rebuild_index
-                meta['last_index_rebuild'] = '2024-06-19T03:41:18.682529+08:00'
-
-        # 重建数据，每次启动间隔超过1小时就重建，主要是为了防止多个node同时启动执行了多次
-        last_index_rebuild = datetime.fromisoformat(meta.get('last_index_rebuild'))
-        now = datetime.now().astimezone()
-        if last_index_rebuild <= now - timedelta(hours=1):
-            # 重建索引，如果已处理过了就不处理
+            # 重建索引数据
             self._rebuild_index()
-            # 写入meta信息
-            io.hset(self._meta_key, 'last_index_rebuild', now.isoformat())
+            logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
-        lock.release()
-        logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
+    def flush(self, force=False):
+        if force:
+            warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
 
-    def flush(self):
         # 如果非持久化组件，则允许调用flush主动清空数据
-        if not self._component_cls.persist_:
+        if not self._component_cls.persist_ or force:
+
             io = self._backend.io
             logger.info(f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中...")
 
-            with io.lock(self._lock_key, timeout=60 * 5):
+            with io.lock(self._init_lock_key, timeout=60 * 5):
                 del_keys = io.keys(self._root_prefix + '*')
-                del_keys.remove(self._lock_key)
+                del_keys.remove(self._init_lock_key)
                 list(map(io.delete, del_keys))
 
+            self.create_or_migrate()
+
             logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
-            self.check_meta()
         else:
             raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
 
@@ -345,7 +339,6 @@ class RedisComponentTable(ComponentTable):
             'json': self._component_cls.json_,
             'version': hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest(),
             'cluster_id': self._cluster_id,
-            'last_index_rebuild': '2024-06-19T03:41:18.682529+08:00'
         }
         self._backend.io.hset(self._meta_key, mapping=meta)
         logger.info(f"✅ [💾Redis][{self._name}组件] 空表创建完成")
@@ -404,7 +397,8 @@ class RedisComponentTable(ComponentTable):
             io.rename(old_key, new_key)
         # 更新meta
         io.hset(self._meta_key, 'cluster_id', self._cluster_id)
-        logger.warning(f"✅ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。")
+        logger.warning(
+            f"✅ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。")
 
     def _migration_schema(self, old):
         """如果数据库中的属性和定义不一致，尝试进行简单迁移，可以处理属性更名以外的情况。"""
@@ -707,6 +701,7 @@ class RedisComponentTransaction(ComponentTransaction):
 
 class RedisMQClient(MQClient):
     """连接到消息队列的客户端，每个用户连接一个实例。"""
+
     def __init__(self, redis_conn: redis.asyncio.Redis | redis.asyncio.RedisCluster):
         # todo 要测试redis cluster是否能正常pub sub
         # 2种模式：
