@@ -16,8 +16,8 @@ import warnings
 import numpy as np
 import redis
 
-from .base import (ComponentTransaction, ComponentTable, Backend, RaceCondition, BackendTransaction,
-                   MQClient)
+from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, MQClient
+from .base import RaceCondition, HeadLockFailed
 from ..component import BaseComponent, Property
 
 logger = logging.getLogger('HeTu')
@@ -73,10 +73,19 @@ class RedisBackend(Backend):
         return self._aio
 
     async def close(self):
+        if self.io.get('head_lock') == str(id(self)):
+            self.io.delete('head_lock')
+
         self.io.close()
         await self._aio.aclose()
         for replica in self.replicas:
             await replica.aclose()
+
+    def requires_head_lock(self) -> bool:
+        locked = self.io.set('head_lock', id(self), nx=True, get=True)
+        if locked is None:
+            locked = str(id(self))
+        return locked == str(id(self))
 
     def random_replica(self) -> redis.Redis:
         """随机返回一个只读连接"""
@@ -289,6 +298,9 @@ class RedisComponentTable(ComponentTable):
         version: json的hash
         cluster_id: 所属簇id
         """
+        if not self._backend.requires_head_lock():
+            raise HeadLockFailed("redis中head_lock键")
+
         io = self._backend.io
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         with io.lock(self._init_lock_key, timeout=60 * 5):
@@ -311,6 +323,9 @@ class RedisComponentTable(ComponentTable):
             logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
     def flush(self, force=False):
+        if not self._backend.requires_head_lock():
+            raise HeadLockFailed("redis中head_lock键")
+
         if force:
             warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
 
