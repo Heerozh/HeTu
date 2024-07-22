@@ -745,18 +745,19 @@ class RedisMQClient(MQClient):
         每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
         本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
         """
+        updt_freq = self.UPDATE_FREQUENCY
         # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
         if self._mq.connection is None:
-            await asyncio.sleep(0.5)  # 不写协程就死锁了
+            await asyncio.sleep(updt_freq)  # 不写协程就死锁了
             return set()
 
         rtn = set()
         start_clock = time.monotonic()
         while True:
-            msg = await self._mq.get_message(ignore_subscribe_messages=True, timeout=0.5)
+            msg = await self._mq.get_message(ignore_subscribe_messages=True, timeout=updt_freq)
             if msg is None:
                 # 等待至少0.5秒，来合并批量消息
-                if (time.monotonic() - start_clock) >= 0.5:
+                if (time.monotonic() - start_clock) >= updt_freq:
                     break
             else:
                 rtn.add(msg['channel'])

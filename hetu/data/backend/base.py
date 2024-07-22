@@ -604,6 +604,7 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+    UPDATE_FREQUENCY = 0.5
 
     async def close(self):
         raise NotImplementedError

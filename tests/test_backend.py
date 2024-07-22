@@ -308,7 +308,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             rows = await tbl.query('id', -np.inf, +np.inf, limit=999)
             for row in rows:
                 await tbl.delete(row.id)
-        time.sleep(1)  # 等待部分key过期
+        # time.sleep(1)  # 等待部分key过期
         self.assertEqual(backend.io.keys('test:Item:{CLU*'), [])
 
         # close
@@ -345,7 +345,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
             async def mock_query(*args, **kwargs):
                 rtn = await org_query(*args, **kwargs)
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.1)
                 return rtn
 
             _trx._db_query = mock_query
@@ -417,13 +417,13 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(sleep)
 
         # 测试insert不同的值应该没有竞态
-        task1 = asyncio.create_task(insert_and_sleep(item_data, 111111, 1))
-        task2 = asyncio.create_task(insert_and_sleep(item_data, 111112, 0.2))
+        task1 = asyncio.create_task(insert_and_sleep(item_data, 111111, 0.1))
+        task2 = asyncio.create_task(insert_and_sleep(item_data, 111112, 0.01))
         await asyncio.gather(task2)
         await task1
         # 相同的time会竞态
-        task1 = asyncio.create_task(insert_and_sleep(item_data, 222222, 1))
-        task2 = asyncio.create_task(insert_and_sleep(item_data, 222222, 0.2))
+        task1 = asyncio.create_task(insert_and_sleep(item_data, 222222, 0.1))
+        task2 = asyncio.create_task(insert_and_sleep(item_data, 222222, 0.01))
         await asyncio.gather(task2)
         with self.assertRaises(RaceCondition):
             await task1
@@ -437,8 +437,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 await _tbl.update(_row.id, _row)
                 await asyncio.sleep(sleep)
 
-        task1 = asyncio.create_task(update_and_sleep(item_data, 1))
-        task2 = asyncio.create_task(update_and_sleep(item_data, 0.2))
+        task1 = asyncio.create_task(update_and_sleep(item_data, 0.1))
+        task2 = asyncio.create_task(update_and_sleep(item_data, 0.02))
         await asyncio.gather(task2)
         with self.assertRaises(RaceCondition):
             await task1
@@ -454,8 +454,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                     _row.model = 2
                     await _tbl.update(_row.id, _row)
 
-        task1 = asyncio.create_task(query_then_update(1))
-        task2 = asyncio.create_task(query_then_update(0.2))
+        task1 = asyncio.create_task(query_then_update(0.1))
+        task2 = asyncio.create_task(query_then_update(0.02))
         await asyncio.gather(task2)
         with self.assertRaises(RaceCondition):
             await task1
@@ -604,6 +604,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 先把mq里的订阅消息都取出来清空
         mq = sub_mgr._mq_client
+        mq.UPDATE_FREQUENCY = 0.1
         await mq.get_message()
         await mq.get_message()
 
