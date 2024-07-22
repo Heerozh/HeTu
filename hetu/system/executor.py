@@ -61,7 +61,7 @@ class SystemResult:
     pass
 
 
-class SystemResponse(SystemResult):
+class ResponseToClient(SystemResult):
     """回报message给客户端，注意必须是json可以序列化的数据"""
     def __init__(self, message: list | dict):
         self.message = message

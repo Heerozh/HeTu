@@ -193,7 +193,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     ... class HP(BaseComponent):
     ...     hp: int = Property(0)
     ...
-    >>> from hetu.system import define_system, Context, SystemResponse
+    >>> from hetu.system import define_system, Context, ResponseToClient
     >>> @define_system(
     ...     namespace="ssw",
     ...     components=(Position, HP),
@@ -205,7 +205,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     ...     enemy_hp = ctx[HP].query("owner", entity_target)
     ...     enemy_hp -= 10
     ...     await ctx[HP].update(entity_target, enemy_hp)
-    ...     return SystemResponse(['client cmd', 'blah blah'])
+    ...     return ResponseToClient(['client cmd', 'blah blah'])
 
     Parameters
     ----------
@@ -249,7 +249,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         如果调用方是其他System，通过`inherits`调用，则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
-            - 返回值是 hetu.system.SystemResponse(data)时，则把data发送给调用方sdk。
+            - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
             - 其他返回值丢弃
 
     **Context部分：**
