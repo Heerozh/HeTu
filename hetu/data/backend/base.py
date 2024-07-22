@@ -512,9 +512,10 @@ class ComponentTransaction:
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
-    async def insert(self, row: np.record) -> None:
+    async def insert(self, row: np.record, unique_violation_as_race=False) -> None:
         """
-        插入单行数据。
+        插入单行数据。unique_violation_as_race表示是否把
+        UniqueViolation(插入时遇到Unique值被占用)当作RaceCondition(事务冲突)抛出。
 
         Examples
         --------
@@ -548,7 +549,13 @@ class ComponentTransaction:
         assert row.id == 0, "插入数据要求 row.id == 0"
 
         # 提交到事务前先检查无unique冲突
-        await self._check_uniques(None, row, ignores={'id'})
+        try:
+            await self._check_uniques(None, row, ignores={'id'})
+        except UniqueViolation:
+            if unique_violation_as_race:
+                raise RaceCondition("插入数据时，unique冲突")
+            else:
+                raise
 
         # 加入到更新队列
         row = row.copy()
@@ -578,7 +585,7 @@ class UpdateOrInsert:
 
     async def commit(self):
         if self.row_id == 0:
-            await self.comp_trx.insert(self.row)
+            await self.comp_trx.insert(self.row, unique_violation_as_race=True)
         else:
             await self.comp_trx.update(self.row_id, self.row)
 
