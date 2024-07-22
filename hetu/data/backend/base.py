@@ -36,6 +36,7 @@
   └────────────────────┘
 """
 import numpy as np
+
 from ..component import BaseComponent, Permission
 
 
@@ -71,6 +72,7 @@ class Backend:
 
 class BackendTransaction:
     """数据库事务类，负责开始事务，并提交事务"""
+
     def __init__(self, backend: Backend, cluster_id: int):
         self._backend = backend
         self._cluster_id = cluster_id
@@ -98,18 +100,17 @@ class ComponentTable:
     Component数据主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
     继承此类，完善所有NotImplementedError的方法。
     """
+
     def __init__(
             self, component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
             backend: Backend,
-            check_schema: bool = True
     ):
         self._component_cls = component_cls
         self._instance_name = instance_name
         self._backend = backend
         self._cluster_id = cluster_id
-        self._check_schema = check_schema
 
     @property
     def cluster_id(self) -> int:
@@ -123,7 +124,11 @@ class ComponentTable:
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
-    def flush(self):
+    def create_or_migrate(self):
+        """进行表的初始化操作，每次服务器启动时都会进行。"""
+        raise NotImplementedError
+
+    def flush(self, force=False):
         """如果非持久化组件，则允许调用flush主动清空数据"""
         raise NotImplementedError
 
@@ -198,6 +203,7 @@ class ComponentTransaction:
     继承此类，完善所有NotImplementedError的方法。
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
+
     def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
         assert trx_conn.cluster_id == comp_tbl.cluster_id, \
             "事务只能在对应的cluster_id中执行，不能跨cluster"
@@ -585,6 +591,7 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+
     async def close(self):
         raise NotImplementedError
 
@@ -719,6 +726,7 @@ class Subscriptions:
     """
     Component的数据订阅和查询接口
     """
+
     def __init__(self, backend: Backend):
         self._backend = backend
         self._mq_client = backend.get_mq_client()
