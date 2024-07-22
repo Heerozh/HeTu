@@ -70,7 +70,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试连接数据库并创建表
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
         singular_unique = table_cls(SingleUnique, 'test', 1, backend)
+        singular_unique.create_or_migrate()
 
         # 测试insert是否正确
         async with backend.transaction(1) as trx:
@@ -290,6 +292,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         await backend.close()
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), size)
@@ -317,6 +320,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试竞态，通过2个协程来测试
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
 
         # 测试query时，另一个del和update的竞态
         async with backend.transaction(1) as trx:
@@ -459,17 +463,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # close backend
         await backend.close()
 
-    # @mock.patch('hetu.data.backend.redis.datetime', mock_time)
     @parameterized(implements)
     async def test_migration(self, table_cls: type[ComponentTable],
                              backend_cls: type[Backend], config):
-        # mock_time.now.return_value = datetime.now()
-        # # mock_time.now.return_value = datetime.now() + timedelta(days=10)
-        # mock_time.fromisoformat = datetime.fromisoformat
         # 测试迁移，先用原定义写入数据
         backend = backend_cls(config)
-        backend.io.flushdb()
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
+        item_data.flush(force=True)
 
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
@@ -495,7 +496,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             name: 'U6' = Property("", unique=True, index=False)
             used: bool = Property(False, unique=False, index=True)
 
-        # 从ItemNew改名回Item
+        # 从ItemNew改名回Item，以便迁移同名的
         import json
         define = json.loads(ItemNew.json_)
         define['component_name'] = 'Item'
@@ -503,6 +504,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 测试迁移
         item_data = table_cls(renamed_new_item_cls, 'test', 2, backend)
+        item_data.create_or_migrate()
         # 检测跨cluster报错
         with self.assertRaisesRegex(AssertionError, "cluster"):
             async with backend.transaction(1) as trx:
@@ -527,6 +529,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         class TempData(BaseComponent):
             data: np.int64 = Property(0, unique=True)
         temp_data = table_cls(TempData, 'test', 1, backend)
+        temp_data.create_or_migrate()
 
         async with backend.transaction(1) as trx:
             tbl = temp_data.attach(trx)
@@ -552,8 +555,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     async def test_message_queue(self, table_cls: type[ComponentTable],
                                  backend_cls: type[Backend], config):
         backend = backend_cls(config)
-        # 初始化测试数据
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
+        # 初始化测试数据
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             for i in range(25):
