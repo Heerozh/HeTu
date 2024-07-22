@@ -142,8 +142,9 @@ class SystemExecutor:
     每个连接一个SystemExecutor实例。
     """
 
-    def __init__(self, namespace: str):
+    def __init__(self, namespace: str, comp_mgr: ComponentTableManager):
         self.namespace = namespace
+        self.comp_mgr = comp_mgr
         self.context = Context(
             caller=None,
             connection_id=0,
@@ -220,15 +221,16 @@ class SystemExecutor:
         context.inherited = {}
         context.transactions = {}
 
+        # 获取system引用的第一个component的backend，system只能引用相同backend的组件，所以都一样
+        comp_mgr = self.comp_mgr
         first_comp = next(iter(sys.full_components), None)
-        backend = first_comp and ComponentTableManager().get_table(first_comp).backend or None
+        backend = first_comp and comp_mgr.get_table(first_comp).backend or None
 
         # 复制inherited函数
         for inh_name in sys.full_inherits:
             context.inherited[inh_name] = SystemClusters().get_system(self.namespace, inh_name).func
 
         # 调用系统
-        comp_mgr = ComponentTableManager()
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
             trx = None
@@ -275,7 +277,7 @@ class SystemExecutor:
 
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         # 此方法无法通过事务，判断后有其他进程修改了conn.owner问题也不大
-        conn_tbl = ComponentTableManager().get_table(Connection)
+        conn_tbl = self.comp_mgr.get_table(Connection)
         caller, conn_id = self.context.caller, self.context.connection_id
         if caller and caller > 0:
             conn = await conn_tbl.direct_get(conn_id)

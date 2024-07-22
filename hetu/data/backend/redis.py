@@ -72,6 +72,12 @@ class RedisBackend(Backend):
 
         return self._aio
 
+    def reset_connection_pool(self):
+        self.loop_id = None
+        self._aio.connection_pool.reset()
+        for replica in self.replicas:
+            replica.connection_pool.reset()
+
     async def close(self):
         if self.io.get('head_lock') == str(id(self)):
             self.io.delete('head_lock')
