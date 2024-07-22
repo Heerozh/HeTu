@@ -5,10 +5,10 @@
 @email: heeroz@gmail.com
 """
 import argparse
-import sys
 import os
-from hetu.server import start_webserver
+import sys
 
+from hetu.server import start_webserver
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -19,6 +19,17 @@ FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  █        █   \033[0m █ █▄▄▄▄▄█ █
 \033[38;2;25;170;255m  █     ▀▀▄█   \033[0m █▀▀▀▀▀▀▀▀▀█
 """
+
+
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
 def start(start_args):
@@ -51,7 +62,7 @@ def start(start_args):
                 }
             },
             'DEBUG': start_args.debug,
-            'WORKER_NUM': 4,
+            'WORKER_NUM': start_args.workers,
             'ACCESS_LOG': False,
         }
         config = Config(config_for_factory)
@@ -96,8 +107,8 @@ def main():
     # ==================start==========================
     parser_start = command_parsers.add_parser(
         'start', help='启动河图服务')
-    parser_start.add_argument(
-        "--head", type=bool, default=True,
+    parser_start.add_argument(  # const意思如果--ind后不带参数，则默认打开
+        "--head", type=str2bool, nargs='?', default=True, const=True,
         help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
 
     cli_group = parser_start.add_argument_group("通过命令行启动参数")
@@ -113,6 +124,8 @@ def main():
     cli_group.add_argument(
         "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
         default='redis://127.0.0.1:6379/0')
+    cli_group.add_argument(
+        "--workers", type=int, help="工作进程数，可设为 CPU * 1.2", default=4)
     cli_group.add_argument(
         "--debug", type=bool,
         help="启用debug模式，会生成自签https证书传入cert参数，并显示更多的log信息",
