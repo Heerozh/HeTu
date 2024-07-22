@@ -9,7 +9,6 @@ import importlib.util
 import json
 import os
 import sys
-import traceback
 import zlib
 
 from sanic import Blueprint
@@ -21,7 +20,7 @@ from sanic.log import logger
 import hetu
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
 from hetu.manager import ComponentTableManager
-from hetu.system import SystemClusters, SystemExecutor, SystemCall, SystemResponse
+from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
 
 hetu_bp = Blueprint("my_blueprint")
 _ = zlib  # 标记使用，下方globals()['zlib']会使用
@@ -57,7 +56,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
-    if ok and isinstance(res, SystemResponse):
+    if ok and isinstance(res, ResponseToClient):
         await push_queue.put(res.message)
     return ok
 
