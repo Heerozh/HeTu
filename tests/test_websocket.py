@@ -1,19 +1,20 @@
 import asyncio
-import unittest
-import docker
-import zlib
 import os
+import unittest
+import zlib
+
 import sanic_testing
 
-from hetu.server import start_webserver
-from hetu.server import encode_message, decode_message
-
 from backend_mgr import UnitTestBackends
+from hetu.server import encode_message, decode_message
+from hetu.server import start_webserver
+from hetu.system import SystemClusters
 
 
 class TestWebsocket(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        SystemClusters()._clear()
         cls.backend_mgr = UnitTestBackends()
         cls.backend_mgr.start_redis_server()
         cls.app = start_webserver("Hetu-test", {
@@ -91,6 +92,7 @@ class TestWebsocket(unittest.TestCase):
                     pass
 
             return ws_proxy
+
         sanic_testing.testing.websocket_proxy = websocket_proxy
 
         # 测试call和结果
@@ -122,6 +124,9 @@ class TestWebsocket(unittest.TestCase):
         self.assertEqual(response1.client_received[3][2]['1'],
                          {'id': '1', 'owner': '2', 'value': '99'})
 
+        # 准备下一轮测试，重置redis connection_pool，因为切换线程了
+        self.app.ctx.default_backend.reset_connection_pool()
+
         # 测试踢掉别人的连接
         async def kick_routine(connect):
             client1 = await connect()
@@ -140,6 +145,9 @@ class TestWebsocket(unittest.TestCase):
                 await client1.send(['sys', 'use_hp', 2])
 
         _, response1 = self.app.test_client.websocket("/hetu", mimic=kick_routine)
+        # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
+        self.assertEqual(response1.client_sent[-1], ['sys', 'use_hp', 2], "最后一行没执行到")
+        self.app.ctx.default_backend.reset_connection_pool()
 
 
 if __name__ == '__main__':

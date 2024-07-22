@@ -1,4 +1,5 @@
 import unittest
+
 from hetu.data import (define_component, Property, BaseComponent,
                        ComponentDefines, Permission)
 from hetu.system import (SystemClusters, define_system)
@@ -35,14 +36,14 @@ class TestSystemDefine(unittest.TestCase):
         class World(BaseComponent):
             some: int = Property(0, False)
 
-    def __init__(self, method_name='runTest'):
-        super().__init__(method_name)
+    @classmethod
+    def setUpClass(cls):
         ComponentDefines().clear_()
-        self.build_test_component()
+        cls.build_test_component()
 
     def test_normal_define(self):
         # 先卸载SystemClusters单件防止重定义
-        SystemClusters._instances.pop(SystemClusters, None)
+        SystemClusters()._clear()
 
         # 定义测试系统
         @define_system(
@@ -103,7 +104,7 @@ class TestSystemDefine(unittest.TestCase):
         # 测试继承的结果是否正确
         @define_system(
             namespace="ssw",
-            components=(GalaxyPosition, ),
+            components=(GalaxyPosition,),
         )
         async def system_base(ctx, vec, hit):
             pass
@@ -118,7 +119,7 @@ class TestSystemDefine(unittest.TestCase):
 
         @define_system(
             namespace="ssw",
-            components=(World, ),
+            components=(World,),
             inherits=('system_inherit1',)
         )
         async def system_inherit2(ctx, vec, hit):
@@ -147,6 +148,7 @@ class TestSystemDefine(unittest.TestCase):
             class GalaxyPositionMysql(BaseComponent):
                 x: float = Property(0, True)
                 y: float = Property(0, True)
+
             @define_system(
                 namespace="ssw",
                 components=(GalaxyPositionMysql, Hp, Inventory, Map),
@@ -155,10 +157,11 @@ class TestSystemDefine(unittest.TestCase):
                 pass
 
         # 检测继承的backend也要一致
-        SystemClusters._instances.pop(SystemClusters, None)
+        SystemClusters()._clear()
+
         @define_system(
             namespace="ssw",
-            components=(GalaxyPositionMysql, ),
+            components=(GalaxyPositionMysql,),
         )
         async def system_mysql(ctx, vec, hit):
             pass
@@ -176,7 +179,8 @@ class TestSystemDefine(unittest.TestCase):
 
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
-        SystemClusters._instances.pop(SystemClusters, None)
+        SystemClusters()._clear()
+        SystemClusters()._system_map = {}
 
         # 定义测试系统
         @define_system(
@@ -188,14 +192,14 @@ class TestSystemDefine(unittest.TestCase):
 
         @define_system(
             namespace="ssw",
-            components=(Hp, ),
+            components=(Hp,),
         )
         async def system2(ctx, ):
             pass
 
         @define_system(
             namespace="ssw",
-            components=(Map, ),
+            components=(Map,),
         )
         async def system3(ctx, ):
             pass

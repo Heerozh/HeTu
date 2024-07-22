@@ -46,12 +46,15 @@ class SystemClusters(metaclass=Singleton):
         systems: set[str]
 
     def __init__(self):
-        self._clear()
-
-    def _clear(self):
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
+        self._internal_system_map = {}
+
+    def _clear(self):
+        self._clusters = {}
+        self._component_map = {}
+        self._system_map = {"__auto__": self._internal_system_map}
 
     def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
         return self._system_map[namespace].get(system_name, None)
@@ -168,6 +171,9 @@ class SystemClusters(metaclass=Singleton):
             func=func, components=components, non_transactions=non_trx, inherits=inherits,
             max_retry=max_retry, arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
             permission=permission, full_components=set(), full_non_trx=set(), full_inherits=set())
+
+        if namespace == "__auto__":
+            self._internal_system_map[func.__name__] = sub_map[func.__name__]
 
 
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
