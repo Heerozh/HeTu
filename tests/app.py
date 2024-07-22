@@ -101,7 +101,7 @@ async def magic(ctx: Context):
     mp = await ctx['use_mp'](ctx, 10)
     if mp < 0:
         return False
-    await asyncio.sleep(3)
+    await asyncio.sleep(0.1)
     self_pos = await ctx[Position].select(ctx.caller, 'owner')
     targets_inx = await ctx[Position].query('x', self_pos.x-10, self_pos.x+10)
     targets_iny = await ctx[Position].query('y', self_pos.y-10, self_pos.y+10)

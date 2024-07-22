@@ -82,8 +82,8 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
         await executor2.initialize("")
 
-        task1 = asyncio.create_task(executor.exec('race', 1))
-        task2 = asyncio.create_task(executor2.exec('race', 0.2))
+        task1 = asyncio.create_task(executor.exec('race', 0.1))
+        task2 = asyncio.create_task(executor2.exec('race', 0.02))
         await asyncio.gather(task2)
         await task1
 

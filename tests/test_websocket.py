@@ -111,7 +111,7 @@ class TestWebsocket(unittest.TestCase):
             client2 = await connect()
             await client2.send(['sys', 'login', 2])
             await client2.send(['sys', 'use_mp', 1])
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
 
             await client1.recv()
 
@@ -132,15 +132,15 @@ class TestWebsocket(unittest.TestCase):
             client1 = await connect()
             await client1.send(['sys', 'login', 1])
             await client1.send(['sys', 'use_hp', 1])
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
 
             client2 = await connect()
             await client2.send(['sys', 'login', 1])
             await client2.send(['sys', 'use_hp', 1])
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
 
             await client1.send(['sys', 'use_hp', 1])
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
             with self.assertRaisesRegex(ConnectionClosedError, '.*'):
                 await client1.send(['sys', 'use_hp', 2])
 
