@@ -21,6 +21,7 @@ class NumberTable(hetu.data.BaseComponent):
 async def select_and_update(ctx: hetu.system.Context, number):
     async with ctx[NumberTable].select_or_create(number, 'number') as row:
         row.name = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+    return hetu.system.ResponseToClient([number])
 
 
 @hetu.system.define_system(namespace='bench', components=(NameTable, NumberTable),
@@ -31,3 +32,7 @@ async def exchange_data(ctx: hetu.system.Context, name, number):
             name_row.number, number_row.name = number, name
 
 
+@hetu.system.define_system(namespace="bench", permission=hetu.data.Permission.EVERYBODY,
+                           inherits=('elevate',))
+async def login_test(ctx: hetu.system.Context, user_id):
+    await ctx['elevate'](ctx, user_id, kick_logged_in=True)
