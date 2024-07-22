@@ -48,6 +48,10 @@ class UniqueViolation(IndexError):
     pass
 
 
+class HeadLockFailed(RuntimeError):
+    pass
+
+
 class Backend:
     """
     存放数据库连接的池，并负责开始事务。
@@ -59,6 +63,15 @@ class Backend:
         pass
 
     async def close(self):
+        raise NotImplementedError
+
+    def requires_head_lock(self) -> bool:
+        """
+        要求持有head锁，防止启动2台有head标记的服务器。
+        所有ComponentTable的create_or_migrate或flush调用时都会调用此方法。
+        返回True表示锁定成功，或已持有该锁。
+        返回False表示已有别人持有了锁，程序退出。
+        """
         raise NotImplementedError
 
     def transaction(self, cluster_id: int) -> 'BackendTransaction':

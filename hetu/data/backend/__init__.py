@@ -6,5 +6,6 @@
 """
 
 from .base import (ComponentTable, Backend, ComponentTransaction,
-                   RaceCondition, UniqueViolation, Subscriptions)
+                   RaceCondition, UniqueViolation, HeadLockFailed,
+                   Subscriptions)
 from .redis import RedisBackend, RedisComponentTable, RedisComponentTransaction
