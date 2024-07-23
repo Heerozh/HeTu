@@ -15,6 +15,7 @@ from sanic import Blueprint
 from sanic import Request, Websocket, text
 from sanic import Sanic
 from sanic import SanicException
+from sanic.exceptions import WebsocketClosed
 from sanic.log import logger
 
 import hetu
@@ -52,7 +53,7 @@ def check_length(name, data: list, left, right):
 
 async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue):
     """处理Client SDK调用System的命令"""
-    print(executor.context, 'sys', data)
+    # print(executor.context, 'sys', data)
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
@@ -64,7 +65,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
                    push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
-    print(executor.context, 'sub', data)
+    # print(executor.context, 'sub', data)
     check_length('sub', data, 4, 100)
     table = executor.comp_mgr.get_table(data[1])
     if table is None:
@@ -121,12 +122,13 @@ async def client_receiver(
                     check_length('unsub', last_data, 2, 2)
                     await subs.unsubscribe(last_data[1])
                 case 'motd':
-                    print('motd')
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
                     raise ValueError(f"Invalid message")
     except asyncio.CancelledError:
         print(executor.context, 'client_receiver normal canceled')
+    except WebsocketClosed:
+        pass
     except (SanicException, BaseException) as e:
         logger.exception(f"❌ [📡Websocket] 执行异常，连接{executor.context}，"
                          f"封包：{last_data}，异常：{e}")
@@ -189,7 +191,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         while True:
             reply = await push_queue.get()
             # todo 增加replay log file，把recv和send的消息都记录，以及事务执行的结果等
-            print(executor.context, 'got', reply)
+            # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
     except asyncio.CancelledError:
         print(executor.context, 'websocket_connection normal canceled')
@@ -198,8 +200,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     finally:
         # 连接断开，强制关闭此协程时也会调用
         print(executor.context, asyncio.current_task().get_name(), 'closed')
-        await request.app.cancel_task(recv_task_id)
-        await request.app.cancel_task(subs_task_id)
+        await request.app.cancel_task(recv_task_id, raise_exception=False)
+        await request.app.cancel_task(subs_task_id, raise_exception=False)
         await executor.terminate()
         await subscriptions.close()
         request.app.purge_tasks()
