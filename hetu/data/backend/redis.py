@@ -344,7 +344,9 @@ class RedisComponentTable(ComponentTable):
             with io.lock(self._init_lock_key, timeout=60 * 5):
                 del_keys = io.keys(self._root_prefix + '*')
                 del_keys.remove(self._init_lock_key)
-                list(map(io.delete, del_keys))
+                with io.pipeline() as pipe:
+                    list(map(pipe.delete, del_keys))
+                    pipe.execute()
 
             self.create_or_migrate()
 

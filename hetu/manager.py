@@ -39,8 +39,9 @@ class ComponentTableManager:
                 self.tables_by_name[comp.component_name_] = table
 
     def create_or_migrate_all(self):
-        for tbl in self.tables.values():
-            tbl.create_or_migrate()
+        for comp, tbl in self.tables.items():
+            if comp.persist_:
+                tbl.create_or_migrate()
 
     def flush_volatile(self):
         for comp, tbl in self.tables.items():
