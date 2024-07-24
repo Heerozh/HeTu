@@ -179,7 +179,7 @@ class SystemExecutor:
         # 读取保存的system define
         sys = SystemClusters().get_system(self.namespace, call.system)
         if not sys:
-            logger.warning(f"⚠️ [📞Worker] 不存在的System, 检查是否非法调用：{call}")
+            logger.warning(f"⚠️ [📞Executor] 不存在的System, 检查是否非法调用：{call}")
             return None
 
         context = self.context
@@ -187,16 +187,16 @@ class SystemExecutor:
         match sys.permission:
             case Permission.USER:
                 if context.caller is None or context.caller == 0:
-                    logger.warning(f"⚠️ [📞Worker] {call.system}无调用权限，检查是否非法调用：{call}")
+                    logger.warning(f"⚠️ [📞Executor] {call.system}无调用权限，检查是否非法调用：{call}")
                     return None
             case Permission.ADMIN:
                 if context.group is None or not context.group.startswith("admin"):
-                    logger.warning(f"⚠️ [📞Worker] {call.system}无调用权限，检查是否非法调用：{call}")
+                    logger.warning(f"⚠️ [📞Executor] {call.system}无调用权限，检查是否非法调用：{call}")
                     return None
 
         # 检测args数量是否对得上
         if len(call.args) < (sys.arg_count - sys.defaults_count - 3):
-            logger.warning(f"❌ [📞Worker] {call.system}参数数量不对，检查客户端代码。"
+            logger.warning(f"❌ [📞Executor] {call.system}参数数量不对，检查客户端代码。"
                            f"要求{sys.arg_count - sys.defaults_count}个参数, "
                            f"传入了{len(call.args)}个。"
                            f"调用内容：{call}")
@@ -212,7 +212,7 @@ class SystemExecutor:
         """
         # 开始调用
         sys_name = sys.func.__name__
-        logger.debug(f"⌚ [📞Worker] 调用System: {sys_name}")
+        logger.debug(f"⌚ [📞Executor] 调用System: {sys_name}")
 
         # 初始化context值
         context = self.context
@@ -244,25 +244,23 @@ class SystemExecutor:
                 rtn = await sys.func(context, *args)
                 if trx is not None:
                     await trx.end_transaction(discard=False)
-                logger.debug(f"✅ [📞Worker] 调用System成功: {sys_name}")
+                logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
                 context.retry_count += 1
                 delay = random.random() / 5  # 重试时为了防止和另一个再次冲突，用随机值0-0.2秒范围
-                logger.debug(f"⌚ [📞Worker] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
+                logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
-                logger.exception(f"❌ [📞Worker] 系统调用异常，调用：{sys_name}{{{args}}}，异常：{e}")
-                logger.exception(traceback.format_exc())
-                logger.exception("------------------------")
+                logger.exception(f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{{{args}}}，异常：{e}")
                 return False, None
             finally:
                 if trx is not None:
                     # 上面如果执行过end_transaction了，那么这句不生效的，主要用于保证连接关闭
                     await trx.end_transaction(discard=True)
 
-        logger.debug(f"✅ [📞Worker] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
+        logger.debug(f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
         return False, None
 
     async def execute(self, call: SystemCall) -> tuple[bool, dict | None]:
@@ -282,7 +280,7 @@ class SystemExecutor:
         if caller and caller > 0:
             conn = await conn_tbl.direct_get(conn_id)
             if conn is None or conn.owner != caller:
-                logger.warning(f"⚠️ [📞Worker] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{call}")
+                logger.warning(f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{call}")
                 return False, None
         await conn_tbl.direct_set(self.context.connection_id, last_active=time.time())
 
