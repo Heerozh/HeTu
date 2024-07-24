@@ -84,7 +84,7 @@ async def bench_pubsub_routine(address, duration, name: str, pid: str):
     except websockets.exceptions.ConnectionClosedError:
         print(pid, '号客户端连接断开，提前结束测试')
         pass
-    return recv_count
+    return recv_count, recv_count
 
 
 async def bench_pubsub_updater(redis_address, instance_name, pid):
@@ -92,7 +92,9 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
     idx = f"{instance_name}:IntTable:{{CLU0}}:index:number"
     keys = await aio.zrange(idx, start=0, end=100, byscore=True)
     keys = [f"{instance_name}:IntTable:{{CLU0}}:id:{key.decode()}" for key in keys]
-    print(keys)
+    if len(keys) == 0:
+        print('没有数据，请先运行call bench生成数据')
+        return
     while True:
         rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
         key = random.choice(keys)
@@ -195,8 +197,8 @@ if __name__ == '__main__':
             # 再开一个写入进程
             updater = partial(bench_pubsub_updater, args.redis, args.inst_name)
             async_updater = partial(run_client, updater, args.clients)
-            p = Process(target=async_updater, args=(1,))
-            p.start()
+            p_uper = Process(target=async_updater, args=(1,))
+            p_uper.start()
             # 开始等待消息
             all_results = [
                 run_bench(bench_pubsub_routine, args, 'pubsub')
@@ -219,3 +221,5 @@ if __name__ == '__main__':
     if args.item == 'call':
         print("各项目事务冲突率：")
         print(race_stat.to_markdown())
+    else:
+        p_uper.kill()
