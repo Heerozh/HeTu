@@ -141,7 +141,7 @@ class ComponentTable:
     def component_cls(self) -> type[BaseComponent]:
         return self._component_cls
 
-    def create_or_migrate(self):
+    def create_or_migrate(self, cluster_only=False):
         """进行表的初始化操作，每次服务器启动时都会进行。"""
         raise NotImplementedError
 
