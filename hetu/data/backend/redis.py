@@ -108,8 +108,7 @@ class RedisBackend(Backend):
         assert hash(asyncio.get_running_loop()) == self.loop_id, \
             "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 
-        i = random.randint(0, len(self.replicas) - 1)
-        return self.replicas[i]
+        return random.choice(self.replicas)
 
     def get_mq_client(self) -> 'RedisMQClient':
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
@@ -765,12 +764,11 @@ class RedisMQClient(MQClient):
         start_clock = time.monotonic()
         while True:
             msg = await self._mq.get_message(ignore_subscribe_messages=True, timeout=updt_freq)
-            if msg is None:
-                # 等待至少0.5秒，来合并批量消息
-                if (time.monotonic() - start_clock) >= updt_freq:
-                    break
-            else:
+            if msg is not None:
                 rtn.add(msg['channel'])
+            # 等待至少0.5秒，来合并批量消息
+            if (time.monotonic() - start_clock) >= updt_freq:
+                break
         return rtn
 
     @property
