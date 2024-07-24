@@ -19,6 +19,7 @@ import redis
 from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, MQClient
 from .base import RaceCondition, HeadLockFailed
 from ..component import BaseComponent, Property
+from ...common.helper import batched
 
 logger = logging.getLogger('HeTu')
 
@@ -303,7 +304,7 @@ class RedisComponentTable(ComponentTable):
         self._trx_pipe = None
         self._autoinc = None
 
-    def create_or_migrate(self):
+    def create_or_migrate(self, cluster_only=False):
         """
         检查表结构是否正确，不正确则尝试进行迁移。此方法同时会强制重建表的索引。
         meta格式:
@@ -316,6 +317,8 @@ class RedisComponentTable(ComponentTable):
 
         io = self._backend.io
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
+        if cluster_only:
+            logger.info(f"⌚ [💾Redis][{self._name}组件] 对该表只检查cluster id迁移信息...")
         with io.lock(self._init_lock_key, timeout=60 * 5):
             # 获取redis已存的组件信息
             meta = io.hgetall(self._meta_key)
@@ -328,11 +331,12 @@ class RedisComponentTable(ComponentTable):
                     self._migration_cluster_id(old=int(meta['cluster_id']))
 
                 # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-                if meta['version'] != version:
+                if meta['version'] != version and not cluster_only:
                     self._migration_schema(old=meta['json'])
 
             # 重建索引数据
-            self._rebuild_index()
+            if not cluster_only:
+                self._rebuild_index()
             logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
     def flush(self, force=False):
@@ -350,10 +354,12 @@ class RedisComponentTable(ComponentTable):
 
             with io.lock(self._init_lock_key, timeout=60 * 5):
                 del_keys = io.keys(self._root_prefix + '*')
+                print('准备删除', len(del_keys), '个键')
                 del_keys.remove(self._init_lock_key)
-                with io.pipeline() as pipe:
-                    list(map(pipe.delete, del_keys))
-                    pipe.execute()
+                for batch in batched(del_keys, 1000):
+                    with io.pipeline() as pipe:
+                        list(map(pipe.delete, batch))
+                        pipe.execute()
 
             self.create_or_migrate()
 

@@ -40,8 +40,8 @@ class ComponentTableManager:
 
     def create_or_migrate_all(self):
         for comp, tbl in self.tables.items():
-            if comp.persist_:
-                tbl.create_or_migrate()
+            # 非持久化的Component需要cluster迁移，不然数据就永远的留在了数据库中
+            tbl.create_or_migrate(cluster_only=not comp.persist_)
 
     def flush_volatile(self):
         for comp, tbl in self.tables.items():
