@@ -10,7 +10,7 @@ class StrTable(hetu.data.BaseComponent):
     number: np.int32 = hetu.data.Property(0)
 
 
-@hetu.data.define_component(namespace='bench', persist=False)
+@hetu.data.define_component(namespace='bench', persist=False, permission=hetu.data.Permission.EVERYBODY)
 class IntTable(hetu.data.BaseComponent):
     number: np.int32 = hetu.data.Property(0, unique=True)
     name: '<U16' = hetu.data.Property('Unnamed')
