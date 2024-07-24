@@ -7,9 +7,10 @@ import ssl
 import string
 import time
 import zlib
+import redis
 from collections import defaultdict
 from functools import partial
-from multiprocessing import Pool
+from multiprocessing import Pool, Process
 
 import pandas as pd
 import websockets
@@ -84,6 +85,18 @@ async def bench_pubsub_routine(address, duration, name: str, pid: str):
         print(pid, '号客户端连接断开，提前结束测试')
         pass
     return recv_count
+
+
+async def bench_pubsub_updater(redis_address, instance_name, pid):
+    aio = redis.asyncio.from_url(redis_address)
+    idx = f"{instance_name}:IntTable:{{CLU0}}:index:number"
+    keys = await aio.zrange(idx, start=0, end=100, byscore=True)
+    keys = [f"{instance_name}:IntTable:{{CLU0}}:id:{key.decode()}" for key in keys]
+    print(keys)
+    while True:
+        rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        key = random.choice(keys)
+        await aio.hset(key, key='name', value=rnd_str)
 
 
 async def bench_select_update(address, duration, name: str, pid: str):
@@ -164,6 +177,11 @@ if __name__ == '__main__':
     parser.add_argument("--clients", type=int, default=200, help="启动客户端数")
     parser.add_argument("--time", type=int, default=5,
                         help="每项目测试时间（分钟），测试结果去头尾各1分钟，所以要3分钟起")
+    parser.add_argument("--redis", default='redis://127.0.0.1:6379/0',
+                        help="pubsub bench用，服务器redis url")
+    parser.add_argument("--inst_name", default='bench1',
+                        help="pubsub bench用，hetu实例名称")
+
     args = parser.parse_args()
 
     # 分配clients个进程和连接进行测试
@@ -174,6 +192,12 @@ if __name__ == '__main__':
                 run_bench(bench_exchange_data, args, 'select*2 + update*2')
             ]
         case 'pubsub':
+            # 再开一个写入进程
+            updater = partial(bench_pubsub_updater, args.redis, args.inst_name)
+            async_updater = partial(run_client, updater, args.clients)
+            p = Process(target=async_updater, args=(1,))
+            p.start()
+            # 开始等待消息
             all_results = [
                 run_bench(bench_pubsub_routine, args, 'pubsub')
             ]
