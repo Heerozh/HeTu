@@ -35,9 +35,13 @@
   │   等待Subs返回消息   │
   └────────────────────┘
 """
+import logging
+
 import numpy as np
 
 from ..component import BaseComponent, Permission
+
+logger = logging.getLogger('HeTu')
 
 
 class RaceCondition(Exception):
@@ -850,6 +854,8 @@ class Subscriptions:
         """
         # 首先caller要对整个表有权限，不然就算force也不给订阅
         if not self._has_table_permission(table, caller):
+            logger.warning(f"⚠️ [💾Subscription] {table.component_cls.component_name_}无调用权限，"
+                           f"检查是否非法调用，caller：{caller}")
             return None, []
 
         rows = await table.direct_query(
