@@ -13,9 +13,12 @@ from multiprocessing import Pool
 import pandas as pd
 import websockets
 
+BENCH_ROW_COUNT = 30000
+
 
 async def bench_sys_call_routine(address, duration, pid, name, packet):
-    count = defaultdict(int)
+    call_count = defaultdict(int)
+    retry_count = defaultdict(int)
     if address.startswith('wss://'):
         ssl_context = ssl.create_default_context()
         ssl_context.check_hostname = False
@@ -23,29 +26,37 @@ async def bench_sys_call_routine(address, duration, pid, name, packet):
     else:
         ssl_context = None
     print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
-    async with websockets.connect(address, ssl=ssl_context) as ws:
-        while True:
-            # 随机读写30w数据中的一个
-            raw_call = packet()
-            # 组合封包
-            call = json.dumps(raw_call).encode()
-            call = zlib.compress(call)
-            # 为了测试准确的性能，采用call-response模式
-            await ws.send(call)
-            # todo 统计事务冲突率
-            _ = await ws.recv()
-            # 记录当前分钟的执行数
-            cur_min = int(time.time() // 60)
-            count[cur_min] += 1
-            if len(count) > duration:
-                del count[cur_min]
-                break
-    return count
+    try:
+        async with websockets.connect(address, ssl=ssl_context) as ws:
+            while True:
+                # 随机读写30w数据中的一个
+                raw_call = packet()
+                # 组合封包
+                call = json.dumps(raw_call).encode()
+                call = zlib.compress(call)
+                # 为了测试准确的性能，采用call-response模式
+                await ws.send(call)
+                # 统计事务冲突率
+                received = await ws.recv()
+                received = zlib.decompress(received)
+                received = json.loads(received)
+                # 记录当前分钟的执行数
+                cur_min = int(time.time() // 60)
+                call_count[cur_min] += 1
+                retry_count[cur_min] += received[0]
+                if len(call_count) > duration:
+                    del call_count[cur_min]
+                    del retry_count[cur_min]
+                    break
+    except websockets.exceptions.ConnectionClosedError:
+        print(pid, '号进程连接断开，提前结束测试')
+        pass
+    return call_count, retry_count
 
 
 async def bench_login(address, duration, name, pid):
     def packet():
-        user_id = random.randint(1, 300000)
+        user_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'login_test', user_id]
 
     return await bench_sys_call_routine(address, duration, pid, name, packet)
@@ -53,7 +64,7 @@ async def bench_login(address, duration, name, pid):
 
 async def bench_select_update(address, duration, name, pid):
     def packet():
-        row_id = random.randint(1, 300000)
+        row_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'select_and_update', row_id]
 
     return await bench_sys_call_routine(address, duration, pid, name, packet)
@@ -62,7 +73,7 @@ async def bench_select_update(address, duration, name, pid):
 async def bench_exchange_data(address, duration, name, pid):
     def packet():
         rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
-        row_id = random.randint(1, 300000)
+        row_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'exchange_data', rnd_str, row_id]
 
     return await bench_sys_call_routine(address, duration, pid, name, packet)
@@ -72,24 +83,28 @@ def run_client(func, pid):
     return asyncio.run(func(pid))
 
 
-def stat_count(list_of_dict, test_name):
-    df = pd.DataFrame(list_of_dict).T  # 行：分钟， 列: client id
-    df.columns = df.columns.map(lambda x: f"Client{x}")
-    # 分钟normalize
-    # df.index = pd.todd_datetime(df.index, unit='m', utc=True).tz_convert(-time.timezone)
-    df.sort_index(inplace=True)
-    # df.index = df.index.strftime("%H:%M")
-    df.index = df.index - df.index[0]
-    df.index = df.index.map(lambda x: f"00:{x:02}")
-    df.index.name = 'Time'
-    # 去头去尾，保留中间最准确的数据
-    if len(df) > 3:
-        df = df.iloc[1:-1]
-    else:
-        print('测试时间不够，数据不准确。')
-    series = df.sum(axis=1)
-    series.name = test_name
-    return series
+def stat_count(list3d, test_name):
+    def format_df(list_2d):
+        df = pd.DataFrame(list_2d).T  # 行：分钟， 列: client id
+        df.columns = df.columns.map(lambda x: f"Client{x}")
+        # 分钟normalize
+        df.sort_index(inplace=True)
+        df.index = df.index - df.index[0]
+        df.index = df.index.map(lambda x: f"00:{x:02}")
+        df.index.name = 'Time'
+        # 去头去尾，保留中间最准确的数据
+        if len(df) > 3:
+            df = df.iloc[1:-1]
+        else:
+            print('测试时间不够，数据不准确。')
+        return df.sum(axis=1)
+    call_count = [x[0] for x in list3d]
+    retry_count = [x[1] for x in list3d]
+    cpm = format_df(call_count)
+    cpm.name = test_name + '(CPM)'
+    race = round(format_df(retry_count) / cpm * 100, 3)
+    race.name = test_name + '(Race%)'
+    return pd.concat([cpm, race], axis=1)
 
 
 def run_bench(func, _args, name):
@@ -119,7 +134,13 @@ if __name__ == '__main__':
 
     # 汇总统计
     stat_df = pd.concat(all_results, axis=1)
-    stat_df.loc['Avg/minutes'] = stat_df.mean()
-    stat_df.loc['RTT(ms)'] = 60 / stat_df.loc['Avg/minutes'] * 1000 * args.clients
+    stat_df.loc['Avg'] = stat_df.mean()
+
+    cpm_stat = stat_df.loc[:, stat_df.columns.str.contains('CPM')].copy()
+    cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg'] * 1000 * args.clients
+
+    race_stat = stat_df.loc[:, stat_df.columns.str.contains('Race')]
     print("各项目每分钟执行次数：")
-    print(stat_df.to_markdown())
+    print(cpm_stat.to_markdown())
+    print("各项目事务冲突率：")
+    print(race_stat.to_markdown())
