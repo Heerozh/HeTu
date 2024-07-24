@@ -44,6 +44,12 @@ class RedisBackend(Backend):
             self.loop_id = hash(asyncio.get_running_loop())
         except RuntimeError:
             self.loop_id = None
+        # 检测redis版本
+        version = self.io.info('server')['redis_version']
+        assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
+        for url in servants:
+            version = redis.from_url(url).info('server')['redis_version']
+            assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         # 配置keyspace通知
         target_keyspace = 'Kghz'
         try:
@@ -57,7 +63,7 @@ class RedisBackend(Backend):
                         db_keyspace_new += flag
                 if db_keyspace_new != db_keyspace:
                     r.config_set('notify-keyspace-events', db_keyspace_new)
-        except redis.exceptions.NoPermissionError:
+        except (redis.exceptions.NoPermissionError, redis.exceptions.ResponseError):
             logger.warning("⚠️ [💾Redis] 无权限调用数据库config_set命令，数据订阅将不起效。"
                            f"可手动设置配置文件：notify-keyspace-events={target_keyspace}")
 
@@ -88,7 +94,9 @@ class RedisBackend(Backend):
             await replica.aclose()
 
     def requires_head_lock(self) -> bool:
-        locked = self.io.set('head_lock', id(self), nx=True, get=True)
+        self.io.set('head_lock', id(self), nx=True)
+        # 不在set中get，兼容一些redis变种
+        locked = self.io.get('head_lock')
         if locked is None:
             locked = str(id(self))
         return locked == str(id(self))
