@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import multiprocessing
 import random
 import ssl
 import string
@@ -49,7 +50,7 @@ async def bench_sys_call_routine(address, duration, pid, name, packet):
                     del retry_count[cur_min]
                     break
     except websockets.exceptions.ConnectionClosedError:
-        print(pid, '号进程连接断开，提前结束测试')
+        print(pid, '号客户端连接断开，提前结束测试')
         pass
     return call_count, retry_count
 
@@ -79,16 +80,24 @@ async def bench_exchange_data(address, duration, name, pid):
     return await bench_sys_call_routine(address, duration, pid, name, packet)
 
 
-def run_client(func, pid):
-    return asyncio.run(func(pid))
+async def gather_clients(func, client_num, pid):
+    clients = [func(pid) for i in range(client_num)]
+    return await asyncio.gather(*clients)
+
+
+def run_client(func, client_num, pid):
+    return asyncio.run(gather_clients(func, client_num, pid))
 
 
 def stat_count(list3d, test_name):
     def format_df(list_2d):
         df = pd.DataFrame(list_2d).T  # 行：分钟， 列: client id
         df.columns = df.columns.map(lambda x: f"Client{x}")
-        # 分钟normalize
         df.sort_index(inplace=True)
+        # 删除个别client特别慢导致多出来的行，然后再删除该client列
+        df.dropna(thresh=len(df.columns) // 2, inplace=True, axis=0)
+        df.dropna(thresh=len(df.index) // 2, inplace=True, axis=1)
+        # 分钟normalize
         df.index = df.index - df.index[0]
         df.index = df.index.map(lambda x: f"00:{x:02}")
         df.index.name = 'Time'
@@ -98,6 +107,7 @@ def stat_count(list3d, test_name):
         else:
             print('测试时间不够，数据不准确。')
         return df.sum(axis=1)
+
     call_count = [x[0] for x in list3d]
     retry_count = [x[1] for x in list3d]
     cpm = format_df(call_count)
@@ -108,10 +118,16 @@ def stat_count(list3d, test_name):
 
 
 def run_bench(func, _args, name):
+    cpu = multiprocessing.cpu_count()
+    process_num = cpu * 2
+    clients = int(_args.clients // cpu)
+
     atest = partial(func, _args.address, _args.time, name)
-    test = partial(run_client, atest)
-    with Pool(_args.clients) as p:
-        results = p.map(test, list(range(_args.clients)))
+    test = partial(run_client, atest, clients)
+
+    with Pool(process_num) as p:
+        results = p.map(test, list(range(process_num)))
+    results = [y for x in results for y in x]  # flatten clients
     return stat_count(results, name)
 
 
@@ -120,7 +136,7 @@ if __name__ == '__main__':
     # 此方法需要手动部署hetu服务器和backend，和测试机分开
     parser = argparse.ArgumentParser(prog='hetu', description='Hetu full bench')
     parser.add_argument("--address", type=str, default="ws://127.0.0.1:2466/hetu/")
-    parser.add_argument("--clients", type=int, default=20, help="启动进程数")
+    parser.add_argument("--clients", type=int, default=200, help="启动客户端数")
     parser.add_argument("--time", type=int, default=5,
                         help="每项目测试时间（分钟），测试结果去头尾各1分钟，所以要3分钟起")
     args = parser.parse_args()
