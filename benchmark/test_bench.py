@@ -8,12 +8,14 @@ import string
 import time
 import zlib
 import redis
+import tabulate
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process
 
 import pandas as pd
 import websockets
+_ = tabulate
 
 BENCH_ROW_COUNT = 30000
 
@@ -96,7 +98,7 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
         print('没有数据，请先运行call bench生成数据')
         return
     while True:
-        rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
         key = random.choice(keys)
         await aio.hset(key, key='name', value=rnd_str)
 
@@ -111,7 +113,7 @@ async def bench_select_update(address, duration, name: str, pid: str):
 
 async def bench_exchange_data(address, duration, name: str, pid: str):
     def packet():
-        rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
         row_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'exchange_data', rnd_str, row_id]
 
