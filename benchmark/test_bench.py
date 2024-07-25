@@ -52,7 +52,7 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
                     del call_count[cur_min]
                     del retry_count[cur_min]
                     break
-    except websockets.exceptions.ConnectionClosedError:
+    except (websockets.exceptions.ConnectionClosedError, TimeoutError):
         print(pid, '号客户端连接断开，提前结束测试')
         pass
     return call_count, retry_count

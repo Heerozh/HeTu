@@ -20,7 +20,7 @@ class IntTable(hetu.data.BaseComponent):
                            permission=hetu.data.Permission.EVERYBODY)
 async def select_and_update(ctx: hetu.system.Context, number):
     async with ctx[IntTable].select_or_create(number, 'number') as row:
-        row.name = ''.join(random.choices(string.ascii_uppercase + string.digits, k=16))
+        row.name = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
     return hetu.system.ResponseToClient([ctx.retry_count])
 
 
