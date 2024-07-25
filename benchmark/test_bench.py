@@ -159,7 +159,7 @@ def run_bench(func, _args, name):
     cpu = multiprocessing.cpu_count()
     process_num = cpu * 2
     process_num = _args.clients if process_num > _args.clients else process_num
-    clients = min(1, int(_args.clients // process_num))
+    clients = max(1, int(_args.clients // process_num))
 
     atest = partial(func, _args.address, _args.time, name)
     test = partial(run_client, atest, clients)
