@@ -14,7 +14,7 @@ try:
     import tabulate
     import pandas as pd
 except ImportError:
-    raise ImportError("请安装pandas+tabulate库：conda install pandas tabulate")
+    raise ImportError("请安装pandas + tabulate库：pip install pandas tabulate")
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process

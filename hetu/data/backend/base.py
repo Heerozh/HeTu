@@ -35,6 +35,7 @@
   │   等待Subs返回消息   │
   └────────────────────┘
 """
+import asyncio
 import logging
 
 import numpy as np
@@ -615,19 +616,27 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
-    UPDATE_FREQUENCY = 0.5
+    UPDATE_FREQUENCY = 10   # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
     async def close(self):
         raise NotImplementedError
 
-    async def get_message(self) -> set[str]:
+    async def pull(self) -> None:
         """
-        从消息队列获取一条消息。返回值为有数据变动的channel列表。
-        每行数据，每个Index，都是一个channel。该channel收到了任何
-        消息都说明有数据更新，Subscriptions会对该数据进行重新读取比对。
-        本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
+        从消息队列接收一条消息到本地队列，消息内容为channel名，每行数据，每个Index，都是一个channel。
+        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
+        每条消息带一个首次接受时间，重复的消息忽略。
+        此方法需要单独的协程反复调用，防止消息堆积。
         """
         # 必须合并消息，因为index更新时大都是2条一起的
+        raise NotImplementedError
+
+    async def get_message(self) -> set[str]:
+        """
+        pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
+        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        如果没有消息，则堵塞到永远。
+        """
         raise NotImplementedError
 
     async def subscribe(self, channel_name: str) -> None:
@@ -761,6 +770,10 @@ class Subscriptions:
 
     async def close(self):
         return await self._mq_client.close()
+
+    async def mq_pull(self):
+        """从MQ获得消息，并存放到本地内存。需要单独的协程反复调用，防止MQ消息堆积。"""
+        return await self._mq_client.pull()
 
     @classmethod
     def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
@@ -903,29 +916,40 @@ class Subscriptions:
                 del self._channel_subs[channel]
         self._subs.pop(sub_id)
 
-    async def get_updates(self) -> dict[str, dict[int, dict]]:
+    async def get_updates(self, timeout=None) -> dict[str, dict[int, dict]]:
         """
-        pop mq的数据更新通知，然后通过查询数据库取出最新的值，并返回。
+        pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
         返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
+        timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
         """
+        mq = self._mq_client
+        channel_subs = self._channel_subs
+
         rtn = {}
-        updated_channels = await self._mq_client.get_message()
+        if timeout is not None:
+            try:
+                async with asyncio.timeout(timeout):
+                    updated_channels = await mq.get_message()
+            except TimeoutError:
+                return rtn
+        else:
+            updated_channels = await mq.get_message()
         for channel in updated_channels:
             RowSubscription.clear_cache(channel)
-            sub_ids = self._channel_subs.get(channel, [])
+            sub_ids = channel_subs.get(channel, [])
             for sub_id in sub_ids:
                 sub = self._subs[sub_id]
                 # 获取sub更新的行数据
                 new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
                 # 如果有行添加或删除，订阅或取消订阅
                 for new_chan in new_chans:
-                    await self._mq_client.subscribe(new_chan)
-                    self._channel_subs.setdefault(new_chan, set()).add(sub_id)
+                    await mq.subscribe(new_chan)
+                    channel_subs.setdefault(new_chan, set()).add(sub_id)
                 for rem_chan in rem_chans:
-                    self._channel_subs[rem_chan].remove(sub_id)
-                    if len(self._channel_subs[rem_chan]) == 0:
-                        await self._mq_client.unsubscribe(rem_chan)
-                        del self._channel_subs[rem_chan]
+                    channel_subs[rem_chan].remove(sub_id)
+                    if len(channel_subs[rem_chan]) == 0:
+                        await mq.unsubscribe(rem_chan)
+                        del channel_subs[rem_chan]
                 # 添加行数据到返回值
                 if len(sub_updates) > 0:
                     rtn.setdefault(sub_id, dict()).update(sub_updates)

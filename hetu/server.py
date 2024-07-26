@@ -98,7 +98,8 @@ async def web_root(request):
 
 async def client_receiver(
         ws: Websocket, protocol: dict,
-        executor: SystemExecutor, subs: Subscriptions,
+        executor: SystemExecutor,
+        subs: Subscriptions,
         push_queue: asyncio.Queue
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
@@ -143,6 +144,23 @@ async def client_receiver(
         pass
 
 
+async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
+    try:
+        while True:
+            await subscriptions.mq_pull()
+    except asyncio.CancelledError:
+        pass
+    except RedisConnectionError as e:
+        logger.error(f"❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {e}"
+                     f"网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。")
+        return ws.fail_connection()
+    except BaseException as e:
+        logger.exception(f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{e}")
+        return ws.fail_connection()
+    finally:
+        pass
+
+
 async def subscription_receiver(
         ws: Websocket,
         subscriptions: Subscriptions,
@@ -163,7 +181,8 @@ async def subscription_receiver(
         # print('subscription_receiver normal canceled')
         pass
     except RedisConnectionError as e:
-        logger.error(f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {e}")
+        logger.error(f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {e}"
+                     f"上次接受了：{len(last_updates)}条消息。")
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，上条消息：{last_updates}，异常：{e}")
@@ -196,6 +215,9 @@ async def websocket_connection(request: Request, ws: Websocket):
     subs_task_id = f"subs_receiver:{request.id}"
     subscript_task = subscription_receiver(ws, subscriptions, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
+    puller_task_id = f"mq_puller:{request.id}"
+    puller_task = mq_puller(ws, subscriptions)
+    _ = request.app.add_task(puller_task, name=puller_task_id)
 
     # 这里循环发送，保证总是第一时间Push
     try:
@@ -216,6 +238,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         print(executor.context, asyncio.current_task().get_name(), 'closed')
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
+        await request.app.cancel_task(puller_task_id, raise_exception=False)
         await executor.terminate()
         await subscriptions.close()
         request.app.purge_tasks()

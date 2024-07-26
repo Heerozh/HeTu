@@ -20,6 +20,7 @@ from .base import ComponentTransaction, ComponentTable, Backend, BackendTransact
 from .base import RaceCondition, HeadLockFailed
 from ..component import BaseComponent, Property
 from ...common.helper import batched
+from ...common.multimap import MultiMap
 
 logger = logging.getLogger('HeTu')
 MAX_SUBSCRIBED = 1000
@@ -753,10 +754,12 @@ class RedisMQClient(MQClient):
     def __init__(self, redis_conn: redis.asyncio.Redis | redis.asyncio.RedisCluster):
         # todo 要测试redis cluster是否能正常pub sub
         # 2种模式：
-        # a. 每个ws连接一个pubsub连接，这样servants可以均匀的负载，也没有分发负担，目前的模式
-        # b. 每个worker一个pubsub连接，收到消息的分发交给worker来做，这样连接数较少，但servants数只能<=worker数
+        # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
+        # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
         self._mq = redis_conn.pubsub()
         self.subscribed = set()
+        self.pulled_deque = MultiMap()
+        self.pulled_set = set()
 
     async def close(self):
         return await self._mq.aclose()
@@ -773,28 +776,38 @@ class RedisMQClient(MQClient):
         await self._mq.unsubscribe(channel_name)
         self.subscribed.remove(channel_name)
 
-    async def get_message(self) -> set[str]:
-        """
-        从消息队列获取一条消息。返回值为收到消息的channel_name列表。
-        每个channel对应一条数据，channel收到了任何消息都说明有数据更新。
-        本方法并不实时返回，遇到消息会等待一会再合并，防止频繁变动的数据。
-        """
-        updt_freq = self.UPDATE_FREQUENCY
-        # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
-        if self._mq.connection is None:
-            await asyncio.sleep(updt_freq)  # 不写协程就死锁了
-            return set()
+    async def pull(self) -> None:
+        mq = self._mq
 
-        rtn = set()
-        start_clock = time.monotonic()
+        # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
+        if mq.connection is None:
+            await asyncio.sleep(0.5)  # 不写协程就死锁了
+            return
+
+        # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
+        msg = await mq.get_message(ignore_subscribe_messages=True, timeout=None)
+        if msg is not None:
+            channel_name = msg['channel']
+            # 判断是否已在deque中了，get_message会自动去重，这里判断是为了防止pop的时间正好夹断2条相同的消息
+            if channel_name not in self.pulled_set:
+                self.pulled_deque.add(time.time(), channel_name)
+                self.pulled_set.add(channel_name)
+
+    async def get_message(self) -> set[str]:
+        pulled_deque = self.pulled_deque
+
+        interval = 1 / self.UPDATE_FREQUENCY
+        # 如果没数据，等待直到有数据
+        while not pulled_deque:
+            await asyncio.sleep(interval)
+
         while True:
-            msg = await self._mq.get_message(ignore_subscribe_messages=True, timeout=updt_freq)
-            if msg is not None:
-                rtn.add(msg['channel'])
-            # 等待至少0.5秒，来合并批量消息
-            if (time.monotonic() - start_clock) >= updt_freq:
-                break
-        return rtn
+            # 只取超过interval的数据，这样可以减少频繁更新。set一下可以合并相同消息
+            rtn = set(pulled_deque.pop(0, time.time() - interval))
+            if rtn:
+                self.pulled_set -= rtn
+                return rtn
+            await asyncio.sleep(interval)
 
     @property
     def subscribed_channels(self) -> set[str]:
