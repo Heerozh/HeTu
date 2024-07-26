@@ -22,6 +22,7 @@ from ..component import BaseComponent, Property
 from ...common.helper import batched
 
 logger = logging.getLogger('HeTu')
+MAX_SUBSCRIBED = 1000
 
 
 class RedisBackend(Backend):
@@ -66,8 +67,9 @@ class RedisBackend(Backend):
                 if db_keyspace_new != db_keyspace:
                     r.config_set('notify-keyspace-events', db_keyspace_new)
             except (redis.exceptions.NoPermissionError, redis.exceptions.ResponseError):
-                logger.warning(f"⚠️ [💾Redis] 无权限调用数据库{servant_url}的config_set命令，数据订阅将"
-                               f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}")
+                logger.warning(
+                    f"⚠️ [💾Redis] 无权限调用数据库{servant_url}的config_set命令，数据订阅将"
+                    f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}")
             # 检查是否是replica模式
             if servant_url != self.master_url:
                 db_replica = r.config_get('replica-read-only')
@@ -754,15 +756,22 @@ class RedisMQClient(MQClient):
         # a. 每个ws连接一个pubsub连接，这样servants可以均匀的负载，也没有分发负担，目前的模式
         # b. 每个worker一个pubsub连接，收到消息的分发交给worker来做，这样连接数较少，但servants数只能<=worker数
         self._mq = redis_conn.pubsub()
+        self.subscribed = set()
 
     async def close(self):
         return await self._mq.aclose()
 
     async def subscribe(self, channel_name) -> None:
         await self._mq.subscribe(channel_name)
+        self.subscribed.add(channel_name)
+        if len(self.subscribed) > MAX_SUBSCRIBED:
+            # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
+            logger.warning(f"⚠️ [💾Redis] 订阅数据数超过1000行，可能导致网络和CPU消耗过大，"
+                           f"当前订阅数：{len(self.subscribed)}。")
 
     async def unsubscribe(self, channel_name) -> None:
         await self._mq.unsubscribe(channel_name)
+        self.subscribed.remove(channel_name)
 
     async def get_message(self) -> set[str]:
         """
