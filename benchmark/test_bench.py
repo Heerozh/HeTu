@@ -7,14 +7,20 @@ import ssl
 import string
 import time
 import zlib
+
 import redis
-import tabulate
+
+try:
+    import tabulate
+    import pandas as pd
+except ImportError:
+    raise ImportError("请安装pandas+tabulate库：conda install pandas tabulate")
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process
 
-import pandas as pd
 import websockets
+
 _ = tabulate
 
 BENCH_ROW_COUNT = 30000
