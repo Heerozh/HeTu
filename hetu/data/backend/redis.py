@@ -51,11 +51,12 @@ class RedisBackend(Backend):
         for url in servants:
             version = redis.from_url(url).info('server')['redis_version']
             assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
-        # 配置keyspace通知
+        # 检查servants设置
         target_keyspace = 'Kghz'
-        try:
-            for url in servants:
-                r = redis.from_url(url)
+        for servant_url in servants:
+            r = redis.from_url(servant_url)
+            try:
+                # 设置keyspace通知
                 db_keyspace = r.config_get('notify-keyspace-events')['notify-keyspace-events']
                 db_keyspace = db_keyspace.replace('A', 'g$lshztxed')
                 db_keyspace_new = db_keyspace
@@ -64,9 +65,18 @@ class RedisBackend(Backend):
                         db_keyspace_new += flag
                 if db_keyspace_new != db_keyspace:
                     r.config_set('notify-keyspace-events', db_keyspace_new)
-        except (redis.exceptions.NoPermissionError, redis.exceptions.ResponseError):
-            logger.warning("⚠️ [💾Redis] 无权限调用数据库config_set命令，数据订阅将不起效。"
-                           f"可手动设置配置文件：notify-keyspace-events={target_keyspace}")
+            except (redis.exceptions.NoPermissionError, redis.exceptions.ResponseError):
+                logger.warning(f"⚠️ [💾Redis] 无权限调用数据库{servant_url}的config_set命令，数据订阅将"
+                               f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}")
+            # 检查是否是replica模式
+            if servant_url != self.master_url:
+                db_replica = r.config_get('replica-read-only')
+                if db_replica.get('replica-read-only') != 'yes':
+                    logger.warning("⚠️ [💾Redis] servant必须是Read Only Replica模式。"
+                                   f"{servant_url} 未设置replica-read-only=yes")
+                # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
+            # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
+            # pubsub值建议为$剩余内存/预估在线数$
 
     @property
     def aio(self):
