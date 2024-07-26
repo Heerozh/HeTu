@@ -80,10 +80,12 @@ async def bench_pubsub_routine(address, duration, name: str, pid: str):
                 # 记录当前分钟的执行数
                 cur_min = int(time.time() // 60)
                 recv_count[cur_min] += 1
+                if random.randint(0, 100) == 0:
+                    print(f"{pid}号客户端收到数据", len(recv_count), recv_count[cur_min])
                 if len(recv_count) > duration:
                     del recv_count[cur_min]
                     break
-    except websockets.exceptions.ConnectionClosedError:
+    except (websockets.exceptions.ConnectionClosedError, TimeoutError):
         print(pid, '号客户端连接断开，提前结束测试')
         pass
     return recv_count, recv_count
@@ -100,6 +102,8 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
     while True:
         rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
         key = random.choice(keys)
+        if random.randint(0, 1000) == 0:
+            print(f"{pid}号客户端更新数据", key, rnd_str)
         await aio.hset(key, key='name', value=rnd_str)
 
 
@@ -168,6 +172,7 @@ def run_bench(func, _args, name):
 
     with Pool(process_num) as p:
         results = p.map(test, list(range(process_num)))
+    print("所有进程推出，执行完毕")
     results = [y for x in results for y in x]  # flatten clients
     return stat_count(results, name)
 
@@ -198,7 +203,7 @@ if __name__ == '__main__':
         case 'pubsub':
             # 再开一个写入进程
             updater = partial(bench_pubsub_updater, args.redis, args.inst_name)
-            async_updater = partial(run_client, updater, args.clients)
+            async_updater = partial(run_client, updater, args.clients // 10)
             p_uper = Process(target=async_updater, args=(1,))
             p_uper.start()
             # 开始等待消息
