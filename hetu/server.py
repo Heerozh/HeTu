@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import zlib
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from sanic import Blueprint
 from sanic import Request, Websocket, text
@@ -126,15 +127,20 @@ async def client_receiver(
                 case _:
                     raise ValueError(f"Invalid message")
     except asyncio.CancelledError:
-        print(executor.context, 'client_receiver normal canceled')
+        # print(executor.context, 'client_receiver normal canceled')
+        pass
     except WebsocketClosed:
         pass
+    except RedisConnectionError as e:
+        logger.error(f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {e}")
+        return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        logger.exception(f"❌ [📡Websocket] 执行异常，连接{executor.context}，"
+        logger.exception(f"❌ [📡WSReceiver] 执行异常，连接{executor.context}，"
                          f"封包：{last_data}，异常：{e}")
         ws.fail_connection()
     finally:
-        print(executor.context, 'client_receiver closed')
+        # print(executor.context, 'client_receiver closed')
+        pass
 
 
 async def subscription_receiver(
@@ -154,12 +160,17 @@ async def subscription_receiver(
             # 客户端通过查询参数组合成查询字符串，来判断是否重复订阅，管理器注册对应的callback，重复注册只
             # 是callback增加并不会去服务器请求
     except asyncio.CancelledError:
-        print('subscription_receiver normal canceled')
+        # print('subscription_receiver normal canceled')
+        pass
+    except RedisConnectionError as e:
+        logger.error(f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {e}")
+        return ws.fail_connection()
     except BaseException as e:
-        logger.exception(f"❌ [📡Websocket] 数据库获取订阅消息时异常，上条消息：{last_updates}，异常：{e}")
+        logger.exception(f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，上条消息：{last_updates}，异常：{e}")
         return ws.fail_connection()
     finally:
-        print('subscription_receiver closed')
+        # print('subscription_receiver closed')
+        pass
 
 
 @hetu_bp.websocket("/hetu")
@@ -194,9 +205,12 @@ async def websocket_connection(request: Request, ws: Websocket):
             # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
     except asyncio.CancelledError:
-        print(executor.context, 'websocket_connection normal canceled')
+        # print(executor.context, 'websocket_connection normal canceled')
+        pass
+    except WebsocketClosed:
+        pass
     except BaseException as e:
-        logger.exception(f"❌ [📡Websocket] 发送数据异常：{e}")
+        logger.exception(f"❌ [📡WSSender] 发送数据异常：{e}")
     finally:
         # 连接断开，强制关闭此协程时也会调用
         print(executor.context, asyncio.current_task().get_name(), 'closed')
