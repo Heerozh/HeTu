@@ -226,7 +226,7 @@ if __name__ == '__main__':
     stat_df.loc['Avg(CPM)'] = avg
     stat_df.loc['Avg(CPS)'] = avg / 60
 
-    cpm_stat = stat_df.loc[:, ~stat_df.columns.str.contains('CPM')].copy()
+    cpm_stat = stat_df.loc[:, ~stat_df.columns.str.contains('Race')].copy()
     if args.item == 'call':
         cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg(CPM)'] * 1000 * args.clients
 
