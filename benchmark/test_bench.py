@@ -228,7 +228,7 @@ if __name__ == '__main__':
 
     cpm_stat = stat_df.loc[:, ~stat_df.columns.str.contains('CPM')].copy()
     if args.item == 'call':
-        cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg'] * 1000 * args.clients
+        cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg(CPM)'] * 1000 * args.clients
 
     race_stat = stat_df.loc[:, stat_df.columns.str.contains('Race')]
     print("各项目每分钟执行次数：")
