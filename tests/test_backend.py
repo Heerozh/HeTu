@@ -572,6 +572,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 初始化订阅器
         sub_mgr = Subscriptions(backend)
 
+        async def puller():
+            while True:
+                await sub_mgr.mq_pull()
+        task = asyncio.create_task(puller())
+
         # 测试订阅的返回值，和订阅管理器的私有值
         sub_id1, row = await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
         self.assertEqual(row['time'], '110')
@@ -604,9 +609,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 先把mq里的订阅消息都取出来清空
         mq = sub_mgr._mq_client
-        mq.UPDATE_FREQUENCY = 0.1
-        await mq.get_message()
-        await mq.get_message()
+        try:
+            async with asyncio.timeout(0.1):
+                await mq.get_message()
+                await mq.get_message()
+        except TimeoutError:
+            pass
 
         # 测试mq，2次消息应该只能获得1次合并的
         async with backend.transaction(1) as trx:
@@ -614,17 +622,19 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row = await tbl.select(1)
             row.qty = 998
             await tbl.update(1, row)
+        await asyncio.sleep(0.01)
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             row = await tbl.select(1)
             row.qty = 997
             await tbl.update(1, row)
         mq = sub_mgr._mq_client
+        await asyncio.sleep(0.1)
         notified_channels = await mq.get_message()
         self.assertEqual(len(notified_channels), 1)
 
         # 测试更新消息能否获得
-        updates = await sub_mgr.get_updates()
+        updates = await sub_mgr.get_updates(timeout=0.1)
         self.assertEqual(len(updates), 0)
 
         async with backend.transaction(1) as trx:
@@ -729,6 +739,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updates[sub_id6][26]['owner'], '10')
 
         # 关闭连接
+        task.cancel()
         await backend.close()
 
     @parameterized(implements)
