@@ -108,7 +108,7 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
     while True:
         rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
         key = random.choice(keys)
-        if random.randint(0, 1000) == 0:
+        if random.randint(0, 10000) == 0:
             print(f"{pid}号客户端更新数据", key, rnd_str)
         await aio.hset(key, key='name', value=rnd_str)
 
@@ -131,6 +131,7 @@ async def bench_exchange_data(address, duration, name: str, pid: str):
 
 
 async def gather_clients(func, client_num, pid: int):
+    client_num = max(client_num, 1)
     clients = [func(f"{pid}.{i}") for i in range(client_num)]
     return await asyncio.gather(*clients)
 
@@ -161,7 +162,7 @@ def stat_count(list3d, test_name):
     call_count = [x[0] for x in list3d]
     retry_count = [x[1] for x in list3d]
     cpm = format_df(call_count)
-    cpm.name = test_name + '(CPM)'
+    cpm.name = test_name
     race = round(format_df(retry_count) / cpm * 100, 3)
     race.name = test_name + '(Race%)'
     return pd.concat([cpm, race], axis=1)
@@ -221,9 +222,11 @@ if __name__ == '__main__':
 
     # 汇总统计
     stat_df = pd.concat(all_results, axis=1)
-    stat_df.loc['Avg'] = stat_df.mean()
+    avg = stat_df.mean()
+    stat_df.loc['Avg(CPM)'] = avg
+    stat_df.loc['Avg(CPS)'] = avg / 60
 
-    cpm_stat = stat_df.loc[:, stat_df.columns.str.contains('CPM')].copy()
+    cpm_stat = stat_df.loc[:, ~stat_df.columns.str.contains('CPM')].copy()
     if args.item == 'call':
         cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg'] * 1000 * args.clients
 
