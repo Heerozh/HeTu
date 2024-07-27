@@ -202,7 +202,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
     # 初始化push消息队列
-    push_queue = asyncio.Queue(128)
+    push_queue = asyncio.Queue(1024)
 
     # 创建接受客户端消息的协程
     protocol = dict(compress=request.app.ctx.compress,

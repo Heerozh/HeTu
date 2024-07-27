@@ -792,6 +792,9 @@ class RedisMQClient(MQClient):
             if channel_name not in self.pulled_set:
                 self.pulled_deque.add(time.time(), channel_name)
                 self.pulled_set.add(channel_name)
+                # pop 2分钟前的消息，防止队列溢出
+                dropped = set(self.pulled_deque.pop(0, time.time() - 120))
+                self.pulled_set -= dropped
 
     async def get_message(self) -> set[str]:
         pulled_deque = self.pulled_deque
