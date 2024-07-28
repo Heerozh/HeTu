@@ -14,13 +14,16 @@ try:
     import tabulate
     import pandas as pd
 except ImportError:
-    raise ImportError("请安装pandas + tabulate库：pip install pandas tabulate")
+    raise ImportError("压测程序要安装pandas + tabulate库：pip install pandas tabulate")
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process
-
+from hetu.data.backend import (
+    RedisComponentTable, RedisBackend,
+    RaceCondition
+)
 import websockets
-
+import app
 _ = tabulate
 
 BENCH_ROW_COUNT = 30000
@@ -111,6 +114,41 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
         if random.randint(0, 10000) == 0:
             print(f"{pid}号客户端更新数据", key, rnd_str)
         await aio.hset(key, key='name', value=rnd_str)
+
+
+async def bench_direct_redis_routine(address, duration, name: str, pid: str):
+    call_count = defaultdict(int)
+    retry_count = defaultdict(int)
+
+    backend = RedisBackend({"master": address})
+    int_tbl = RedisComponentTable(app.IntTable, 'bench1', 1, backend)
+
+    print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
+    try:
+        while True:
+            cur_min = int(time.time() // 60)
+            try:
+                async with backend.transaction(1) as trx:
+                    tbl = int_tbl.attach(trx)
+                    row_id = random.randint(1, BENCH_ROW_COUNT)
+                    async with tbl.select_or_create(row_id, 'number') as row:
+                        row.name = ''.join(
+                            random.choices(string.ascii_uppercase + string.digits, k=3))
+                call_count[cur_min] += 1
+                retry_count[cur_min] += 0
+                if len(call_count) > duration:
+                    del call_count[cur_min]
+                    del retry_count[cur_min]
+                    break
+            except RaceCondition as e:
+                retry_count[cur_min] += 1
+                continue
+    except (TimeoutError):
+        print(pid, '号客户端连接断开，提前结束测试')
+        pass
+    finally:
+        await backend.close()
+    return call_count, retry_count
 
 
 async def bench_select_update(address, duration, name: str, pid: str):
@@ -217,6 +255,10 @@ if __name__ == '__main__':
             all_results = [
                 run_bench(bench_pubsub_routine, args, 'pubsub')
             ]
+        case 'direct':
+            all_results = [
+                run_bench(bench_direct_redis_routine, args, 'direct redis'),
+            ]
         case _:
             raise ValueError('--item未知测试项目')
 
@@ -234,8 +276,10 @@ if __name__ == '__main__':
     print("各项目每分钟执行次数：")
     print(cpm_stat.to_markdown())
 
-    if args.item == 'call':
-        print("各项目事务冲突率：")
-        print(race_stat.to_markdown())
-    else:
-        p_uper.kill()
+    match args.item:
+        case 'call':
+            print("各项目事务冲突率：")
+            print(race_stat.to_markdown())
+        case 'pubsub':
+            p_uper.kill()
+
