@@ -116,26 +116,28 @@ async def bench_pubsub_updater(redis_address, instance_name, pid):
         await aio.hset(key, key='name', value=rnd_str)
 
 
-async def bench_direct_redis_routine(address, duration, name: str, pid: str):
+async def bench_direct_backend_routine(address, duration, name: str, pid: str):
     call_count = defaultdict(int)
     retry_count = defaultdict(int)
 
     backend = RedisBackend({"master": address})
-    int_tbl = RedisComponentTable(app.IntTable, 'bench1', 1, backend)
+    int_tbl = RedisComponentTable(app.IntTable, 'bench1', 0, backend)
 
     print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
     try:
         while True:
             cur_min = int(time.time() // 60)
             try:
-                async with backend.transaction(1) as trx:
+                async with backend.transaction(0) as trx:
                     tbl = int_tbl.attach(trx)
-                    row_id = random.randint(1, BENCH_ROW_COUNT)
-                    async with tbl.select_or_create(row_id, 'number') as row:
+                    sel_num = random.randint(1, BENCH_ROW_COUNT)
+                    async with tbl.select_or_create(sel_num, 'number') as row:
                         row.name = ''.join(
                             random.choices(string.ascii_uppercase + string.digits, k=3))
                 call_count[cur_min] += 1
                 retry_count[cur_min] += 0
+                if random.randint(0, 10000) == 0:
+                    print(f"{pid}号客户端状态：", cur_min, call_count[cur_min], retry_count[cur_min])
                 if len(call_count) > duration:
                     del call_count[cur_min]
                     del retry_count[cur_min]
@@ -143,11 +145,86 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
             except RaceCondition as e:
                 retry_count[cur_min] += 1
                 continue
-    except (TimeoutError):
+    except redis.exceptions.ConnectionError:
         print(pid, '号客户端连接断开，提前结束测试')
         pass
     finally:
         await backend.close()
+    return call_count, retry_count
+
+
+async def bench_direct_redis_routine(address, duration, name: str, pid: str):
+    call_count = defaultdict(int)
+    retry_count = defaultdict(int)
+
+    aio = redis.asyncio.Redis.from_url(address, decode_responses=True)
+    idx_key = 'bench1:IntTable:{CLU0}:index:number'
+
+    print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
+    try:
+        while True:
+            cur_min = int(time.time() // 60)
+            # 直接ZRANGE, WATCH, HGETALL,  MULTI, HSET, ZADD, EXEC指令测试
+            sel_num = random.randint(1, BENCH_ROW_COUNT)
+
+            pipe = aio.pipeline()
+            pipe.watching = True
+            # 1.zrange->select row
+            row_ids = await pipe.zrange(
+                idx_key, sel_num, sel_num,
+                byscore=True, offset=0, num=1, withscores=True)
+
+            insert = False
+            if len(row_ids) == 0:
+                row_ids = await pipe.zrange(idx_key, 0, 0, desc=True, withscores=True)
+                if len(row_ids) == 0:
+                    row_id = 1
+                else:
+                    row_id = int(row_ids[0][1]) + 1
+                insert = True
+            else:
+                row_id = int(row_ids[0][1])
+                if row_id == 0:
+                    print(row_ids)
+
+            # 2.watch
+            row_key = f"bench1:IntTable:{{CLU0}}:id:{row_id}"
+            await pipe.watch(row_key)
+            # 3.hgetall
+            if insert:
+                row = {'number': sel_num, 'id': row_id}
+            else:
+                row = await pipe.hgetall(row_key)
+            row['name'] = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
+
+            # 4.multi
+            pipe.multi()
+            # 5.hset
+            pipe.hset(row_key, mapping=row)
+            if 'number' not in row:
+                print(row_key, row)
+            # 6.zadd
+            pipe.zadd(idx_key, {row['number']: row_id})
+            # 7.exec
+            try:
+                await pipe.execute()
+            except redis.exceptions.WatchError:
+                retry_count[cur_min] += 1
+                continue
+
+            call_count[cur_min] += 1
+            retry_count[cur_min] += 0
+            if random.randint(0, 10000) == 0:
+                print(f"{pid}号客户端状态：", cur_min, call_count[cur_min], retry_count[cur_min])
+            if len(call_count) > duration:
+                del call_count[cur_min]
+                del retry_count[cur_min]
+                break
+    except redis.exceptions.ConnectionError:
+        print(pid, '号客户端连接断开，提前结束测试')
+        pass
+    finally:
+        await aio.aclose()
     return call_count, retry_count
 
 
@@ -191,8 +268,10 @@ def stat_count(list3d, test_name):
         df.index = df.index.map(lambda x: f"00:{x:02}")
         df.index.name = 'Time'
         # 去头去尾，保留中间最准确的数据
+        if len(df) > 1:
+            df = df.iloc[1:]
         if len(df) > 3:
-            df = df.iloc[1:-1]
+            df = df.iloc[:-1]
         else:
             print('测试时间不够，数据不准确。')
         return df.sum(axis=1)
@@ -200,7 +279,7 @@ def stat_count(list3d, test_name):
     call_count = [x[0] for x in list3d]
     retry_count = [x[1] for x in list3d]
     cpm = format_df(call_count)
-    cpm.name = test_name
+    cpm.name = test_name + '(Calls)'
     race = round(format_df(retry_count) / cpm * 100, 3)
     race.name = test_name + '(Race%)'
     return pd.concat([cpm, race], axis=1)
@@ -258,6 +337,7 @@ if __name__ == '__main__':
         case 'direct':
             all_results = [
                 run_bench(bench_direct_redis_routine, args, 'direct redis'),
+                run_bench(bench_direct_backend_routine, args, 'direct backend'),
             ]
         case _:
             raise ValueError('--item未知测试项目')
@@ -265,20 +345,22 @@ if __name__ == '__main__':
     # 汇总统计
     stat_df = pd.concat(all_results, axis=1)
     avg = stat_df.mean()
-    stat_df.loc['Avg(CPM)'] = avg
-    stat_df.loc['Avg(CPS)'] = avg / 60
+    stat_df.loc['Avg'] = avg
+    stat_df.loc['Avg(秒)'] = avg / 60
 
-    cpm_stat = stat_df.loc[:, ~stat_df.columns.str.contains('Race')].copy()
-    if args.item == 'call':
+    cpm_stat = stat_df.loc[:, stat_df.columns.str.contains('Calls')].copy()
+    # 如果只启动1个客户端（服务器压力不大时），显示RTT数据
+    if args.item == 'call' and args.clients == 1:
         cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg(CPM)'] * 1000 * args.clients
 
-    race_stat = stat_df.loc[:, stat_df.columns.str.contains('Race')]
     print("各项目每分钟执行次数：")
     print(cpm_stat.to_markdown())
 
     match args.item:
-        case 'call':
+        case 'call' | 'direct':
             print("各项目事务冲突率：")
+            race_stat = stat_df.loc[:, stat_df.columns.str.contains('Race')]
+            race_stat = race_stat.loc[~race_stat.index.str.contains('秒')]
             print(race_stat.to_markdown())
         case 'pubsub':
             p_uper.kill()
