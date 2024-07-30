@@ -33,29 +33,32 @@ class RedisBackend(Backend):
         super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
         self.master_url = config['master']
+        self.servant_urls = config.get('servants', [])
         self.io = redis.from_url(self.master_url, decode_responses=True)
         self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
         self.dbi = self.io.connection_pool.connection_kwargs['db']
         # 连接只读数据库
-        servants = config.get('servants', [])
-        self.replicas = [redis.asyncio.from_url(url, decode_responses=True) for url in servants]
-        if not servants:
-            servants.append(self.master_url)
+        self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
+                         for url in self.servant_urls]
+        if not self.servant_urls:
+            self.servant_urls.append(self.master_url)
             self.replicas.append(self._aio)
         # 限制aio运行的coroutine
         try:
             self.loop_id = hash(asyncio.get_running_loop())
         except RuntimeError:
             self.loop_id = None
+
+    def configure(self):
         # 检测redis版本
         version = self.io.info('server')['redis_version']
         assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
-        for url in servants:
+        for url in self.servant_urls:
             version = redis.from_url(url).info('server')['redis_version']
             assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         # 检查servants设置
         target_keyspace = 'Kghz'
-        for servant_url in servants:
+        for servant_url in self.servant_urls:
             r = redis.from_url(servant_url)
             try:
                 # 设置keyspace通知

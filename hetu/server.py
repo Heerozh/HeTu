@@ -290,6 +290,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         if db_cfg["type"] == "Redis":
             from .data.backend import RedisBackend, RedisComponentTable
             backend = RedisBackend(db_cfg)
+            backend.configure()
             backends['Redis'] = backend
             table_constructors['Redis'] = RedisComponentTable
             app.ctx.__setattr__(name, backend)

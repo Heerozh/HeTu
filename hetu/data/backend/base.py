@@ -70,6 +70,12 @@ class Backend:
     async def close(self):
         raise NotImplementedError
 
+    def configure(self):
+        """
+        配置数据库，如果可能的话。
+        """
+        raise NotImplementedError
+
     def requires_head_lock(self) -> bool:
         """
         要求持有head锁，防止启动2台有head标记的服务器。
@@ -571,8 +577,12 @@ class ComponentTransaction:
         row_id = int(row_id)
         # 先查询旧数据是否存在
         old_row = self._cache.get(row_id) or await self._db_get(row_id)
-        if old_row is None or (type(old_row) is str and old_row == 'deleted'):
+        if old_row is None:
             raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+        if type(old_row) is str and old_row == 'deleted':
+            raise KeyError(f"{self._component_cls.component_name_} 组件id为 {row_id} "
+                           f"的行之前已经调用过delete了，不能重复调用")
+
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
