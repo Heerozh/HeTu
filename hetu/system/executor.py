@@ -145,6 +145,7 @@ class SystemExecutor:
     def __init__(self, namespace: str, comp_mgr: ComponentTableManager):
         self.namespace = namespace
         self.comp_mgr = comp_mgr
+        self.last_active = 0
         self.context = Context(
             caller=None,
             connection_id=0,
@@ -284,7 +285,11 @@ class SystemExecutor:
             if conn is None or conn.owner != caller:
                 logger.warning(f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{call}")
                 return False, None
-        await conn_tbl.direct_set(self.context.connection_id, last_active=time.time())
+        # 每2秒更新次last_active，防止批量操作时频繁更新
+        now = time.time()
+        if now - self.last_active > 2:
+            await conn_tbl.direct_set(self.context.connection_id, last_active=now)
+            self.last_active = now
 
         # 开始调用
         return await self._execute(sys, *call.args)
