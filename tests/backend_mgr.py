@@ -1,6 +1,7 @@
 import docker
 import unittest
 from docker.errors import NotFound
+from hetu.data.backend.redis import RedisTransaction
 
 
 class UnitTestBackends:
@@ -14,6 +15,9 @@ class UnitTestBackends:
                 container.kill()
             except (NotFound, ImportError):
                 pass
+        # 因为服务器销毁了，清理下python中的全局lua缓存
+        RedisTransaction.lua_check_unique = None
+        RedisTransaction.lua_run_stack = None
 
     def get_all_backends(self):
         # 启动所有start_*_server函数，并返回它们的连接配置
