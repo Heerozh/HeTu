@@ -248,7 +248,9 @@ class SystemExecutor:
                 return True, rtn
             except RaceCondition:
                 context.retry_count += 1
-                delay = random.random() / 5  # 重试时为了防止和另一个再次冲突，用随机值0-0.2秒范围
+                # 重试时sleep一段时间，可降低再次冲突率约90%。
+                # delay增加会降低冲突率，但也会增加rtt波动。除1:-94%, 2:-91%, 5: -87%, 10: -85%
+                delay = random.random() / 5
                 logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
                 await asyncio.sleep(delay)
                 continue
