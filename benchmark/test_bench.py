@@ -164,7 +164,7 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
     try:
         while True:
             cur_min = int(time.time() // 60)
-            # 直接ZRANGE, WATCH, HGETALL,  MULTI, HSET, ZADD, EXEC指令测试
+            # 直接 ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC 指令测试
             sel_num = random.randint(1, BENCH_ROW_COUNT)
 
             pipe = aio.pipeline()
@@ -203,13 +203,14 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
             pipe.hset(row_key, mapping=row)
             if 'number' not in row:
                 print(row_key, row)
-            # 6.zadd
-            pipe.zadd(idx_key, {row['number']: row_id})
-            # 7.exec
+
+            # 6.exec
             try:
                 await pipe.execute()
             except redis.exceptions.WatchError:
                 retry_count[cur_min] += 1
+                delay = random.random() / 5
+                await asyncio.sleep(delay)
                 continue
 
             call_count[cur_min] += 1
@@ -351,7 +352,7 @@ if __name__ == '__main__':
     cpm_stat = stat_df.loc[:, stat_df.columns.str.contains('Calls')].copy()
     # 如果只启动1个客户端（服务器压力不大时），显示RTT数据
     if args.item == 'call' and args.clients == 1:
-        cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg(CPM)'] * 1000 * args.clients
+        cpm_stat.loc['RTT(ms)'] = 60 / cpm_stat.loc['Avg'] * 1000 * args.clients
 
     print("各项目每分钟执行次数：")
     print(cpm_stat.to_markdown())
