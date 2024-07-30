@@ -139,6 +139,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             (await item_data.direct_query('id', -np.inf, +np.inf)).id,
             [1, 2, 3])
 
+        # 测试update是否正确
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.qty = 2
+            await tbl.update(1, row)
+        np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 2)
+
         # 测试插入Unique重复数据
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
@@ -195,7 +203,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             [11, 12])
 
         # 测试direct get/set
-        np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 1)
+        np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 2)
         await item_data.direct_set(1, qty=911)
         np.testing.assert_array_equal((await item_data.direct_get(1)).qty, 911)
 

@@ -141,19 +141,10 @@ class RedisTransaction(BackendTransaction):
     # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
     LUA_CHECK_UNIQUE_SCRIPT = """
     local result_key = KEYS[1]
-    local sub = string.sub
     local redis = redis
 
-    for i = 2, #KEYS, 1 do
-        local start = ARGV[i-1]
-        local stop = start
-        local by = 'BYSCORE'
-        if sub(start, 1, 1) == '[' then
-            start = start .. ':'
-            stop = start .. ';'
-            by = 'BYLEX'
-        end
-        local rows = redis.call('zrange', KEYS[i], start, stop, by, 'LIMIT', 0, 1)
+    for i = 1, #ARGV, 4 do
+        local rows = redis.call('zrange', ARGV[i], ARGV[i+1], ARGV[i+2], ARGV[i+3], 'LIMIT', 0, 1)
         if #rows > 0 then
             redis.call('set', result_key, 0, 'PX', 100)
             return 'FAIL'
@@ -216,12 +207,20 @@ class RedisTransaction(BackendTransaction):
         cls = self.__class__
         if cls.lua_check_unique is None:
             cls.lua_check_unique = backend.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
+            backend.io.script_load(cls.LUA_CHECK_UNIQUE_SCRIPT)
         if cls.lua_run_stack is None:
             cls.lua_run_stack = backend.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
+            backend.io.script_load(cls.LUA_IF_RUN_STACK_SCRIPT)
+            from redis.asyncio.client import Pipeline
+            # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
+            async def _pipeline_lua_speedup(_):
+                return
+            Pipeline.load_scripts = _pipeline_lua_speedup
 
         self._uuid = uuid.uuid4().hex
-        self._checks = {}  # 事务中的unique检查，key为unique索引名，value为值
+        self._checks = []  # 事务中的unique检查
         self._updates = []  # 事务中的更新操作
+        self._request_auto_incr = False
 
         self._trx_pipe = backend.aio.pipeline()
         # 强制pipeline进入立即模式，不然当我们需要读取未锁定的index时，会不返回结果
@@ -231,14 +230,13 @@ class RedisTransaction(BackendTransaction):
     def pipe(self):
         return self._trx_pipe
 
-    def stack_unique_check(self, index_key: str, value: int | float | str) -> None:
+    def stack_unique_check(self, index_key: str, start, stop, byscore) -> None:
         """加入需要在end_transaction时进行unique检查的index和value"""
-        if (values := self._checks.get(index_key)) is None:
-            values = set()
-            self._checks[index_key] = values
-        values.add(value)
+        self._checks.extend([index_key, start, stop, 'BYSCORE' if byscore else 'BYLEX'])
 
     def stack_cmd(self, *args):
+        if args[0] == 'AUTO_INCR':
+            self._request_auto_incr = True
         self._updates.extend([len(args), ] + list(args))
 
     async def end_transaction(self, discard) -> list[int] | None:
@@ -252,36 +250,57 @@ class RedisTransaction(BackendTransaction):
 
         pipe = self._trx_pipe
 
-        # 准备对unique index进行最终检查，之前虽然检查过，但没有lock index，值可能变更
-        # 这里用lua在事务中检查，可以减少watch的key数量
-        unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + self._uuid
-        lua_unique_keys = [unique_check_key, ]
-        lua_unique_argv = []
-        for k, v in self._checks.items():
-            lua_unique_keys.extend([k] * len(v))
-            lua_unique_argv.extend(v)
+        # 2种模式，如果有unique要检查，或者有auto incr要执行，就用lua脚本执行所有命令
+        if len(self._checks) > 0 or self._request_auto_incr:
+            # 在提交前最后检查一遍unique，并锁定index键
+            # 之前的insert和update时也有unique检查，但为了降低事务冲突并不锁定index，因此可能有变化
+            # 在lua中检查unique，不用锁定index
+            unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + self._uuid
+            lua_unique_keys = [unique_check_key, ]
+            lua_unique_argv = self._checks
 
-        # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
-        lua_run_keys = [unique_check_key, ]
-        lua_run_argv = self._updates
+            # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
+            lua_run_keys = [unique_check_key, ]
+            lua_run_argv = self._updates
 
-        pipe.multi()
-        await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
-        await self.lua_run_stack(args=lua_run_argv, keys=lua_run_keys, client=pipe)
+            pipe.multi()
+            await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
+            await self.lua_run_stack(args=lua_run_argv, keys=lua_run_keys, client=pipe)
 
-        try:
-            result = await pipe.execute()
-            if result[-1] == 'FAIL':
-                raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
-            result = result[-1]
-        except redis.WatchError:
-            raise RaceCondition(f"watched key被其他事务修改")
+            try:
+                result = await pipe.execute()
+                if result[-1] == 'FAIL':
+                    raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
+                result = result[-1]
+            except redis.WatchError:
+                raise RaceCondition(f"watched key被其他事务修改")
+            else:
+                return result
+            finally:
+                # 无论是else里的return还是except里的raise，finally都会在他们之前执行
+                await pipe.reset()
+                self._trx_pipe = None
+
         else:
-            return result
-        finally:
-            # 无论是else里的return还是except里的raise，finally都会在他们之前执行
-            await pipe.reset()
-            self._trx_pipe = None
+            # 执行事务
+            pipe.multi()
+
+            cur = 0
+            while cur < len(self._updates):
+                arg_len = int(self._updates[cur])
+                cmds = self._updates[cur + 1:cur + arg_len + 1]
+                cur = cur + arg_len + 1
+                await pipe.execute_command(*cmds)
+
+            try:
+                await pipe.execute()
+            except redis.WatchError:
+                raise RaceCondition(f"watched key被其他事务修改")
+            else:
+                return []
+            finally:
+                await pipe.reset()
+                self._trx_pipe = None
 
 
 class RedisComponentTable(ComponentTable):
@@ -678,10 +697,11 @@ class RedisComponentTransaction(ComponentTransaction):
             if old_row is None or old_row[idx] != new_row[idx]:
                 key = idx_prefix + idx
                 str_type = component_cls.indexes_[idx]
+                qv = new_row[idx].item()
                 if str_type:
-                    trx.stack_unique_check(key, '[' + new_row[idx].item())
+                    trx.stack_unique_check(key, f'[{qv}:', f'[{qv};', False)
                 else:
-                    trx.stack_unique_check(key, new_row[idx].item())
+                    trx.stack_unique_check(key, qv, qv, True)
 
     def _trx_insert(self, row: np.record) -> None:
         trx = self._trx_conn
@@ -717,7 +737,14 @@ class RedisComponentTransaction(ComponentTransaction):
         self._trx_check_unique(old_row, new_row)
         # 更新row数据
         row_key = self._key_prefix + str(row_id)
-        kvs = itertools.chain.from_iterable(zip(new_row.dtype.names, new_row.tolist()))
+        kvs = []
+        for key_name, new_value in zip(new_row.dtype.names, new_row.tolist()):
+            if old_row[key_name] != new_value:
+                kvs.extend([key_name, new_value])
+        # 如果没任何数据变动，跳出
+        if len(kvs) == 0:
+            return
+        # 更新数据
         trx.stack_cmd('hset', row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
