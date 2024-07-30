@@ -323,6 +323,79 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         await backend.close()
 
     @parameterized(implements)
+    async def test_duplicate_op(self, table_cls: type[ComponentTable],
+                                backend_cls: Type[type[Backend]], config):
+        # 测试重复update
+        backend = backend_cls(config)
+        item_data = table_cls(Item, 'test', 1, backend)
+        item_data.create_or_migrate()
+
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = Item.new_row()
+            row.time = 12345
+            await tbl.insert(row)
+            row = Item.new_row()
+            row.time = 22345
+            await tbl.insert(row)
+            self.assertTrue(len(trx._stack) > 0)
+
+        # 检测重复删除报错
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            await tbl.delete(1)
+            with self.assertRaisesRegex(KeyError, '重复'):
+                await tbl.delete(1)
+            await trx.end_transaction(discard=True)
+
+        # 检测update没有变化时没有stacked命令
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.time = 22345
+            await tbl.update(2, row)
+            self.assertTrue(len(trx._stack) == 0)
+
+        # 检测重复update/del报错
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.time = 32345
+            await tbl.update(2, row)
+            with self.assertRaisesRegex(KeyError, '重复'):
+                await tbl.update(2, row)
+            await trx.end_transaction(discard=True)
+
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.time = 32345
+            await tbl.delete(2)
+            with self.assertRaisesRegex(KeyError, '重复'):
+                await tbl.delete(2)
+            await trx.end_transaction(discard=True)
+
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.time = 32345
+            await tbl.delete(2)
+            with self.assertRaisesRegex(KeyError, '再次'):
+                await tbl.update(2, row)
+            await trx.end_transaction(discard=True)
+
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.time = 32345
+            await tbl.update(2, row)
+            with self.assertRaisesRegex(KeyError, '再次'):
+                await tbl.delete(2)
+            await trx.end_transaction(discard=True)
+
+        await backend.close()
+
+    @parameterized(implements)
     async def test_race(self, table_cls: type[ComponentTable],
                         backend_cls: type[Backend], config):
         # 测试竞态，通过2个协程来测试
@@ -563,7 +636,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     async def test_message_queue(self, table_cls: type[ComponentTable],
                                  backend_cls: type[Backend], config):
         backend = backend_cls(config)
+        backend.configure()
         item_data = table_cls(Item, 'test', 1, backend)
+        item_data.flush(force=True)
         item_data.create_or_migrate()
         # 初始化测试数据
         async with backend.transaction(1) as trx:

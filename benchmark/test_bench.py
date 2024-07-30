@@ -347,7 +347,7 @@ if __name__ == '__main__':
     stat_df = pd.concat(all_results, axis=1)
     avg = stat_df.mean()
     stat_df.loc['Avg'] = avg
-    stat_df.loc['Avg(秒)'] = avg / 60
+    stat_df.loc['Avg(每秒)'] = avg / 60
 
     cpm_stat = stat_df.loc[:, stat_df.columns.str.contains('Calls')].copy()
     # 如果只启动1个客户端（服务器压力不大时），显示RTT数据

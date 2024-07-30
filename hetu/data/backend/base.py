@@ -234,6 +234,8 @@ class ComponentTransaction:
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
+        self._del_flags = set()  # 事务中的删除操作标记
+        self._updt_flags = set()  # 事务中的更新操作标记
 
     @property
     def component_cls(self) -> type[BaseComponent]:
@@ -498,8 +500,16 @@ class ComponentTransaction:
 
     async def update(self, row_id: int, row) -> None:
         """修改row_id行的数据"""
-        assert type(row) is np.record, "update数据必须是单行数据"
         row_id = int(row_id)
+
+        if row_id in self._updt_flags:
+            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
+                           f"已经在事务中更新过了，不允许重复更新。")
+        if row_id in self._del_flags:
+            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
+                           f"已经在事务中删除了，不允许再次更新。")
+
+        assert type(row) is np.record, "update数据必须是单行数据"
 
         if row.id != row_id:
             raise ValueError(f"更新的row.id {row.id} 与传入的row_id {row_id} 不一致")
@@ -515,6 +525,7 @@ class ComponentTransaction:
         row = row.copy()
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
         self._cache[row_id] = row
+        self._updt_flags.add(row_id)
         # 加入到更新队列
         self._trx_update(row_id, old_row, row)
 
@@ -575,18 +586,24 @@ class ComponentTransaction:
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
         row_id = int(row_id)
+
+        if row_id in self._updt_flags:
+            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                           f"在事务中已有update命令，不允许再次删除。")
+        if row_id in self._del_flags:
+            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                           f"已经在事务中删除了，不允许重复删除。")
+
         # 先查询旧数据是否存在
         old_row = self._cache.get(row_id) or await self._db_get(row_id)
         if old_row is None:
             raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
-        if type(old_row) is str and old_row == 'deleted':
-            raise KeyError(f"{self._component_cls.component_name_} 组件id为 {row_id} "
-                           f"的行之前已经调用过delete了，不能重复调用")
 
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
         self._cache[row_id] = 'deleted'
+        self._del_flags.add(row_id)
         self._trx_delete(row_id, old_row)
 
 

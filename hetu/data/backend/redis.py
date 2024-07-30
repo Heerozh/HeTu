@@ -154,7 +154,7 @@ class RedisTransaction(BackendTransaction):
     return 'OK'
     """
     # key: 1:是否执行的标记key, 2-n:不使用，仅供客户端判断hash slot用, args: stacked的命令
-    LUA_IF_RUN_STACK_SCRIPT = """
+    LUA_IF_RUN_STACKED_SCRIPT = """
     local result_key = KEYS[1]
     local redis = redis
     local tonumber = tonumber
@@ -199,7 +199,7 @@ class RedisTransaction(BackendTransaction):
     return rtn
     """
     lua_check_unique = None
-    lua_run_stack = None
+    lua_run_stacked = None
 
     def __init__(self, backend: RedisBackend, cluster_id: int):
         super().__init__(backend, cluster_id)
@@ -208,9 +208,9 @@ class RedisTransaction(BackendTransaction):
         if cls.lua_check_unique is None:
             cls.lua_check_unique = backend.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
             backend.io.script_load(cls.LUA_CHECK_UNIQUE_SCRIPT)
-        if cls.lua_run_stack is None:
-            cls.lua_run_stack = backend.aio.register_script(cls.LUA_IF_RUN_STACK_SCRIPT)
-            backend.io.script_load(cls.LUA_IF_RUN_STACK_SCRIPT)
+        if cls.lua_run_stacked is None:
+            cls.lua_run_stacked = backend.aio.register_script(cls.LUA_IF_RUN_STACKED_SCRIPT)
+            backend.io.script_load(cls.LUA_IF_RUN_STACKED_SCRIPT)
             from redis.asyncio.client import Pipeline
             # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
             async def _pipeline_lua_speedup(_):
@@ -219,7 +219,7 @@ class RedisTransaction(BackendTransaction):
 
         self._uuid = uuid.uuid4().hex
         self._checks = []  # 事务中的unique检查
-        self._updates = []  # 事务中的更新操作
+        self._stack = []  # 事务中的更新操作
         self._request_auto_incr = False
 
         self._trx_pipe = backend.aio.pipeline()
@@ -237,13 +237,13 @@ class RedisTransaction(BackendTransaction):
     def stack_cmd(self, *args):
         if args[0] == 'AUTO_INCR':
             self._request_auto_incr = True
-        self._updates.extend([len(args), ] + list(args))
+        self._stack.extend([len(args), ] + list(args))
 
     async def end_transaction(self, discard) -> list[int] | None:
         if self._trx_pipe is None:
             return
-        # 并实现事务提交的操作，将_updates中的命令写入事务
-        if discard or len(self._updates) == 0:
+        # 并实现事务提交的操作，将_stack中的命令写入事务
+        if discard or len(self._stack) == 0:
             await self._trx_pipe.reset()
             self._trx_pipe = None
             return
@@ -252,20 +252,20 @@ class RedisTransaction(BackendTransaction):
 
         # 2种模式，如果有unique要检查，或者有auto incr要执行，就用lua脚本执行所有命令
         if len(self._checks) > 0 or self._request_auto_incr:
-            # 在提交前最后检查一遍unique，并锁定index键
+            # 在提交前最后检查一遍unique
             # 之前的insert和update时也有unique检查，但为了降低事务冲突并不锁定index，因此可能有变化
-            # 在lua中检查unique，不用锁定index
+            # 这里在lua中检查unique，不用锁定index
             unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + self._uuid
             lua_unique_keys = [unique_check_key, ]
             lua_unique_argv = self._checks
 
             # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
             lua_run_keys = [unique_check_key, ]
-            lua_run_argv = self._updates
+            lua_run_argv = self._stack
 
             pipe.multi()
             await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
-            await self.lua_run_stack(args=lua_run_argv, keys=lua_run_keys, client=pipe)
+            await self.lua_run_stacked(args=lua_run_argv, keys=lua_run_keys, client=pipe)
 
             try:
                 result = await pipe.execute()
@@ -286,9 +286,9 @@ class RedisTransaction(BackendTransaction):
             pipe.multi()
 
             cur = 0
-            while cur < len(self._updates):
-                arg_len = int(self._updates[cur])
-                cmds = self._updates[cur + 1:cur + arg_len + 1]
+            while cur < len(self._stack):
+                arg_len = int(self._stack[cur])
+                cmds = self._stack[cur + 1:cur + arg_len + 1]
                 cur = cur + arg_len + 1
                 await pipe.execute_command(*cmds)
 
@@ -337,7 +337,6 @@ class RedisComponentTable(ComponentTable):
         self._init_lock_key = f'{self._root_prefix}init_lock'
         self._meta_key = f'{self._root_prefix}meta'
         self._trx_pipe = None
-        self._autoinc = None
 
     def create_or_migrate(self, cluster_only=False):
         """
