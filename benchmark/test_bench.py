@@ -56,7 +56,10 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
                 # 记录当前分钟的执行数
                 cur_min = int(time.time() // 60)
                 call_count[cur_min] += 1
-                retry_count[cur_min] += received[0]
+                if received[0] is int:
+                    retry_count[cur_min] += received[0]
+                else:
+                    retry_count[cur_min] += 0
                 if len(call_count) > duration:
                     del call_count[cur_min]
                     del retry_count[cur_min]
@@ -174,6 +177,7 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
                 idx_key, sel_num, sel_num,
                 byscore=True, offset=0, num=1, withscores=True)
 
+            # 以下代码不正确，只是为了模拟插入
             insert = False
             if len(row_ids) == 0:
                 row_ids = await pipe.zrange(idx_key, 0, 0, desc=True, withscores=True)
@@ -201,8 +205,6 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
             pipe.multi()
             # 5.hset
             pipe.hset(row_key, mapping=row)
-            if 'number' not in row:
-                print(row_key, row)
 
             # 6.exec
             try:
@@ -242,6 +244,13 @@ async def bench_exchange_data(address, duration, name: str, pid: str):
         rnd_str = ''.join(random.choices(string.ascii_uppercase + string.digits, k=3))
         row_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'exchange_data', rnd_str, row_id]
+
+    return await bench_sys_call_routine(address, duration, name, pid, packet)
+
+
+async def bench_hello_world(address, duration, name: str, pid: str):
+    def packet():
+        return ['sys', 'hello_world']
 
     return await bench_sys_call_routine(address, duration, name, pid, packet)
 
@@ -323,7 +332,8 @@ if __name__ == '__main__':
         case 'call':
             all_results = [
                 run_bench(bench_select_update, args, 'select + update'),
-                run_bench(bench_exchange_data, args, 'select*2 + update*2')
+                run_bench(bench_exchange_data, args, 'select*2 + update*2'),
+                run_bench(bench_hello_world, args, 'hello world')
             ]
         case 'pubsub':
             # 再开一个写入进程

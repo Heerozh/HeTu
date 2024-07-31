@@ -33,6 +33,11 @@ async def exchange_data(ctx: hetu.system.Context, name, number):
     return hetu.system.ResponseToClient([ctx.retry_count])
 
 
+@hetu.system.define_system(namespace="bench", permission=hetu.data.Permission.EVERYBODY)
+async def hello_world(ctx: hetu.system.Context):
+    return hetu.system.ResponseToClient(['世界只有一个！但是河图可以模拟很多个！'])
+
+
 @hetu.system.define_system(namespace="bench", permission=hetu.data.Permission.EVERYBODY,
                            inherits=('elevate',))
 async def login_test(ctx: hetu.system.Context, user_id):
