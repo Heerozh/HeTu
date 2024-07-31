@@ -287,7 +287,7 @@ class SystemExecutor:
                 return False, None
         # 每2秒更新次last_active，防止批量操作时频繁更新
         now = time.time()
-        if now - self.last_active > 2:
+        if now - self.last_active > 30:
             await conn_tbl.direct_set(self.context.connection_id, last_active=now)
             self.last_active = now
 

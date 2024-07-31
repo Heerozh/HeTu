@@ -18,6 +18,7 @@ from sanic import Sanic
 from sanic import SanicException
 from sanic.exceptions import WebsocketClosed
 from sanic.log import logger
+from sanic.log import LOGGING_CONFIG_DEFAULTS
 
 import hetu
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
@@ -266,8 +267,32 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     hetu_logger = logging.getLogger('HeTu')
     hetu_logger.parent = logger
 
+    # 配置logger文件输出
+    LOGGING_CONFIG_DEFAULTS['handlers']['err_file'] = {
+        "class": "logging.handlers.TimedRotatingFileHandler",
+        "formatter": "generic",
+        "filename": "./logs/hetu_error.log",
+        "when": 'D',
+        "backupCount": 30,
+    }
+    LOGGING_CONFIG_DEFAULTS['handlers']['debug_file'] = {
+        "class": "logging.handlers.TimedRotatingFileHandler",
+        "formatter": "generic",
+        "filename": "./logs/hetu_debug.log",
+        "when": 'D',
+        "backupCount": 30,
+    }
+    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].append('err_file')
+    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].append('debug_file')
+    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].append('debug_file')
+    # 非debug关掉console输出
+    if not config.get('DEBUG', False):
+        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].remove('error_console')
+        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].remove('console')
+        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].remove('console')
+
     # 加载web服务器
-    app = Sanic(app_name)
+    app = Sanic(app_name, log_config=LOGGING_CONFIG_DEFAULTS)
     app.update_config(config)
 
     # 加载协议
