@@ -56,7 +56,7 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
                 # 记录当前分钟的执行数
                 cur_min = int(time.time() // 60)
                 call_count[cur_min] += 1
-                if received[0] is int:
+                if type(received[0]) is int:
                     retry_count[cur_min] += received[0]
                 else:
                     retry_count[cur_min] += 0
