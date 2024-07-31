@@ -42,7 +42,7 @@ ACCESS_LOG = False
 # WEBSOCKET_PING_TIMEOUT = 20
 
 # 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
-PACKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩
+PACKET_COMPRESSION_CLASS = 'zlibg'   # 通过该class的compress和decompress方法进行压缩和解压缩
 PACKET_CRYPTOGRAPHY_CLASS = None    # 通过该class的encrypt和decrypt方法进行加密和解密
 
 

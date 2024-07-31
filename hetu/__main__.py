@@ -26,7 +26,7 @@ def str2bool(v):
         return v
     if v.lower() in ('yes', 'true', 't', 'y', '1'):
         return True
-    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+    elif v.lower() in ('no', 'false', 'f', 'n', '0', 'None'):
         return False
     else:
         raise argparse.ArgumentTypeError('Boolean value expected.')
@@ -66,6 +66,8 @@ def start(start_args):
             'ACCESS_LOG': False,
         }
         config = Config(config_for_factory)
+    # 生成log目录
+    os.mkdir('logs') if not os.path.exists('logs') else None
     # prepare用的配置
     fast = config.WORKER_NUM < 0
     workers = fast and 1 or config.WORKER_NUM
@@ -80,7 +82,7 @@ def start(start_args):
     logger.info(FULL_COLOR_LOGO)
     logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
     logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
-    logger.info(f"📡 Listening on http{'s' if (config.DEBUG or ssl) else ''}://{host}:{port}")
+    logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
     logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
                 f"加密模块：{config.get('PACKET_CRYPTOGRAPHY_CLASS')}")
 
@@ -91,9 +93,9 @@ def start(start_args):
                 motd=False,
                 host=host,
                 port=int(port),
-                auto_tls=config.DEBUG or ssl,
+                auto_tls= ssl == 'auto',
                 auto_reload=config.DEBUG,
-                ssl=ssl,
+                ssl=ssl if ssl != 'auto' else None,
                 fast=fast,
                 workers=workers)
     # 启动并堵塞
@@ -127,12 +129,13 @@ def main():
     cli_group.add_argument(
         "--workers", type=int, help="工作进程数，可设为 CPU * 1.2", default=4)
     cli_group.add_argument(
-        "--debug", type=bool,
-        help="启用debug模式，会生成自签https证书传入cert参数，并显示更多的log信息",
+        "--debug", type=str2bool, nargs='?', const=True,
+        help="启用debug模式，主要显示更多的log信息",
         default=False)
     cli_group.add_argument(
         "--cert", metavar="/etc/letsencrypt/live/example.com/",
-        help="证书目录，如果不设置则使用不安全的连接。由于客户端必须使用安全连接，需要另设反向https代理来转发消息。",
+        help="证书目录，如果不设置则使用不安全的连接。也可以这里不设置，外加一层反向https代理。"
+             "填入auto会生成自签https证书。",
         default='')
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
