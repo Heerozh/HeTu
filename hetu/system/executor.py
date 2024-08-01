@@ -67,7 +67,7 @@ class ResponseToClient(SystemResult):
         self.message = message
 
 
-@define_component(namespace='HeTu', persist=False)
+@define_component(namespace='HeTu', persist=False, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
     address: str = Property('', dtype='<U32')  # 连接地址
@@ -80,7 +80,7 @@ class Connection(BaseComponent):
     invalid_msgs: np.int32 = Property(0)  # 无效消息数, 用来判断flooding攻击
 
 
-@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
 async def new_connection(ctx: Context, address: str):
     row = Connection.new_row()
     row.owner = 0
@@ -92,7 +92,7 @@ async def new_connection(ctx: Context, address: str):
     ctx.connection_id = row_ids[0]
 
 
-@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
 async def del_connection(ctx: Context):
     try:
         await ctx[Connection].delete(ctx.connection_id)
@@ -100,7 +100,7 @@ async def del_connection(ctx: Context):
         pass
 
 
-@define_system(namespace='__auto__', permission=Permission.EVERYBODY, components=(Connection,))
+@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
 async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     """
     提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
@@ -213,7 +213,7 @@ class SystemExecutor:
         """
         # 开始调用
         sys_name = sys.func.__name__
-        logger.debug(f"⌚ [📞Executor] 调用System: {sys_name}")
+        # logger.debug(f"⌚ [📞Executor] 调用System: {sys_name}")
 
         # 初始化context值
         context = self.context
@@ -245,7 +245,7 @@ class SystemExecutor:
                 rtn = await sys.func(context, *args)
                 if trx is not None:
                     await trx.end_transaction(discard=False)
-                logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
+                # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
                 context.retry_count += 1
