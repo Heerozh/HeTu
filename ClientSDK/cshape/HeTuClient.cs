@@ -1,0 +1,1 @@
+C:/xsoft/HeTu/ClientSDK/unity/cn.hetudb.clientsdk/Runtime/HeTuClient.cs
