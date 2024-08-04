@@ -12,52 +12,104 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 
 namespace HeTu
 {
-    public class BaseSubscription
+    public interface IBaseComponent
+    {
+        public long id
+        {
+            get;
+        }
+    }
+
+    public class DictComponent : Dictionary<string, string>, IBaseComponent
+    {
+        public long id => long.Parse(this["id"]);
+    }
+    
+    public abstract class BaseSubscription
     {
         public readonly string ComponentName;
-        public readonly int SubscriptID;
+        readonly string _subscriptID;
 
-        protected BaseSubscription(int subscriptID, string componentName)
+        protected BaseSubscription(string subscriptID, string componentName)
         {
-            SubscriptID = subscriptID;
+            _subscriptID = subscriptID;
             ComponentName = componentName;
         }
 
-        public event Action<int> OnUpdate;
-        public event Action<int> OnDelete;
+        public abstract void Update(long rowID, object data);
 
         ~BaseSubscription()
         {
-            // 取消订阅
+            HeTuClient.Instance._unsubscribe(_subscriptID);
         }
     }
 
-    public class RowSubscription : BaseSubscription
+    /// Select结果的订阅对象
+    public class RowSubscription<T> : BaseSubscription where T: IBaseComponent
     {
-        public readonly int RowID;
+        public T Data { get; private set; }
 
-        public RowSubscription(int subscriptID, string componentName, int rowID) : base(subscriptID,
-            componentName)
+        public RowSubscription(string subscriptID, string componentName, T row) : 
+            base(subscriptID, componentName)
         {
-            RowID = rowID;
+            Data = row;
         }
+
+        public event Action<RowSubscription<T>> OnUpdate;
+        public event Action<RowSubscription<T>> OnDelete;
+        
+        public override void Update(long rowID, object data)
+        {
+            Data = (T)data;
+            if (data is null)
+                OnDelete?.Invoke(this);
+            else
+                OnUpdate?.Invoke(this);
+        }
+        
     }
-
-    public class IndexSubscription : BaseSubscription
+    
+    /// Query结果的订阅对象
+    public class IndexSubscription<T> : BaseSubscription where T: IBaseComponent
     {
-        public readonly List<int> RowIDs;
+        public Dictionary<long, T> Rows { get; private set; }
 
-        public IndexSubscription(int subscriptID, string componentName, List<int> rowIDs) : base(
-            subscriptID,
-            componentName)
+        public IndexSubscription(string subscriptID, string componentName, List<T> rows) : 
+            base(subscriptID, componentName)
         {
-            RowIDs = rowIDs;
+            Rows = rows.ToDictionary(row => row.id);
         }
 
-        public event Action<int> OnInsert;
+        public event Action<long> OnUpdate;
+        public event Action<long> OnDelete;
+        public event Action<long> OnInsert;
+
+        public override void Update(long rowID, object data)
+        {
+            var tData = (T)data;
+
+            var exist = Rows.ContainsKey(rowID);
+            var delete = tData is null;
+
+            if (delete)
+            {
+                if (!exist) return;
+                Rows.Remove(rowID);
+                OnDelete?.Invoke(rowID);
+            }
+            else
+            {
+                Rows[rowID] = tData;
+                if (exist)
+                    OnUpdate?.Invoke(rowID);
+                else
+                    OnInsert?.Invoke(rowID);
+            }
+        }
     }
 
     /// <summary>
@@ -91,28 +143,34 @@ namespace HeTu
         // ------------Private定义------------
         static readonly Lazy<HeTuClient> Lazy = new(() => new HeTuClient());
         readonly ConcurrentQueue<byte[]> _sendingQueue = new();
-        readonly ClientWebSocket _socket;
+        readonly ConcurrentQueue<TaskCompletionSource<List<object>>> _waitingSubTasks = new();
+        Dictionary<string, BaseSubscription> _subscriptions = new();
+        ClientWebSocket _socket = new();
         int _buffSize = 0x200000;
         LogFunction _logError;
         LogFunction _logInfo;
-        IProtocol _protocol;
+        IProtocol _protocol = new ZlibProtocol();
         byte[] _rxBuff;
 
         Task _sendingTask;
-        // -----------------------------------
-
-        public HeTuClient()
+        
+        private void _StopAllTcs()
         {
-            _socket = new ClientWebSocket();
+            _logInfo?.Invoke("[HeTuClient] 停止所有等待任务...");
+            foreach (var tcs in _waitingSubTasks)
+                tcs.SetCanceled();
+            _waitingSubTasks.Clear();
         }
+        // -----------------------------------
 
         public static HeTuClient Instance => Lazy.Value;
 
         // 连接成功时的回调
         public event Action OnConnected;
 
-        // 收到System返回的`ResponseToClient`时的回调 todo 可能要返回json好的数据
-        public event Action<string> OnResponse;
+        // 收到System返回的`ResponseToClient`时的回调，根据你服务器发送的是什么数据类型来转换
+        // 比如服务器发送的是字典，可以用JObject.ToObject<Dictionary<string, object>>();
+        public event Action<JObject> OnResponse;
 
         // 设置日志函数，info为信息日志，err为错误日志。可以直接传入Unity的Debug.Log和Debug.LogError
         public void SetLogger(LogFunction info, LogFunction err)
@@ -141,12 +199,12 @@ namespace HeTu
         /// <returns>
         ///     返回连接断开的异常，如果正常断开则返回null，或者编辑器停止Play会抛出OperationCanceledException。
         /// </returns>
-        /// <remarks>
-        ///     UnityEngine使用示例：
+        /// <code>
+        ///     //UnityEngine使用示例：
         ///     public class YourNetworkManager : MonoBehaviour {
         ///         async void Start() {
         ///             HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError);
-        ///             // 服务器端默认是启动zlib的，但客户端不是，如何启用zlib请看ZlibProtocol.cs
+        ///             // 服务器端默认是使用zlib的压缩消息
         ///             HeTuClient.Instance.SetProtocol(new ZlibProtocol());
         ///             HeTuClient.Instance.OnConnected += () => {
         ///                 HeTuClient.Instance.CallSystem("login", "userToken");
@@ -162,7 +220,7 @@ namespace HeTu
         ///                 Debug.LogError("连接断开, 将继续重连：" + e.Message);
         ///             await Task.Delay(1000);
         ///     }}}}
-        /// </remarks>
+        /// </code>
         public async Task<Exception> Connect(string url, CancellationToken token)
         {
             // 连接websocket
@@ -170,6 +228,9 @@ namespace HeTu
             {
                 _logInfo?.Invoke($"[HeTuClient] 正在连接到：{url}...");
                 _rxBuff = new byte[_buffSize];
+                _subscriptions = new Dictionary<string, BaseSubscription>();
+                if (_socket.State is WebSocketState.Closed or WebSocketState.Aborted)
+                    _socket = new ClientWebSocket();
                 await _socket.ConnectAsync(new Uri(url), CancellationToken.None);
                 lock (_sendingQueue)
                 {
@@ -182,6 +243,7 @@ namespace HeTu
             catch (Exception e)
             {
                 _logError?.Invoke($"[HeTuClient] 连接失败: {e}");
+                _StopAllTcs();
                 return e;
             }
 
@@ -195,11 +257,11 @@ namespace HeTu
                     {
                         if (_socket.State != WebSocketState.Closed)
                             await _socket.CloseAsync(
-                                WebSocketCloseStatus.NormalClosure, 
+                                WebSocketCloseStatus.NormalClosure,
                                 "收到关闭消息",
                                 CancellationToken.None);
                         _logInfo?.Invoke("[HeTuClient] 连接断开，收到了服务器Close消息。");
-                        return null;
+                        break;
                     }
 
                     // 如果消息不完整，补全
@@ -209,13 +271,14 @@ namespace HeTu
                         if (cur >= _rxBuff.Length)
                         {
                             await _socket.CloseAsync(
-                                WebSocketCloseStatus.MessageTooBig, 
+                                WebSocketCloseStatus.MessageTooBig,
                                 "接收缓冲区溢出",
                                 CancellationToken.None);
                             var errMsg = "[HeTuClient] 接受数据超出缓冲区容量(" +
                                          _rxBuff.Length / 0x100000 +
                                          "MB)，可用SetReceiveBuffSize修改";
                             _logError?.Invoke(errMsg);
+                            _StopAllTcs();
                             return new WebSocketException(errMsg);
                         }
 
@@ -225,24 +288,32 @@ namespace HeTu
                         cur += received.Count;
                     }
 
-                    // todo 测试是否copy了消息
                     OnReceived(cur);
+                }
+                catch (OperationCanceledException e)
+                {
+                    _logInfo?.Invoke($"[HeTuClient] 连接断开，收到了Cancel请求: {e}");
+                    _StopAllTcs();
+                    return e;
                 }
                 catch (Exception e)
                 {
                     _logError?.Invoke($"[HeTuClient] 接受消息时发生异常: {e}");
+                    _StopAllTcs();
                     return e;
                 }
 
+            _StopAllTcs();
             return null;
         }
-
+    
         // 关闭河图连接
         public async Task Close()
         {
             _logInfo?.Invoke("[HeTuClient] 连接断开，因为主动调用了Close");
             await _socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "主动调用close",
                 CancellationToken.None);
+            _StopAllTcs();
         }
 
         // 发送System调用，立即返回，后台执行
@@ -252,35 +323,172 @@ namespace HeTu
             _Send(payload);
         }
 
-        // 订阅组件的一行数据，异步执行，返回订阅对象，可以对订阅对象注册事件
-        public async Task<RowSubscription> Select(string componentName, object value,
-            string where = "id")
+        static string _makeSubID(string table, string index, object left, object right,
+            int limit, bool desc)
         {
-            const string callType = "sub";
-            const string subType = "select";
-            var buffer = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(
-                new { callType, component_name = componentName, subType, value, where }));
-            Send(buffer);
-            //这里要想一下怎么弄，怎么wait
-            await Task.Delay(0);
-            return new RowSubscription(1, componentName, 1);
+            return $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
         }
 
-        // 订阅组件的索引数据，异步执行，返回订阅对象，可以对订阅对象注册事件
-        // left和right为索引范围，limit为返回数量，desc为是否降序，force为未查询到数据时是否也强制订阅
-        public async Task<IndexSubscription> Query(string componentName, string index,
-            object left, object right, int limit, bool desc, bool force)
+        
+        /// <summary>
+        /// 订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。
+        /// `Select`只对“单行”订阅，如果没有查询到行，会返回`null`。
+        /// 如果想要订阅不存在的行，请用`Query`订阅Index。
+        /// </summary>
+        /// <returns>
+        /// 返回`null`如果没查询到行，否则返回`RowSubscription`对象。
+        /// 可通过`RowSubscription.Data`获取数据。
+        /// 可以注册`RowSubscription.OnUpdate`和`OnDelete`事件处理数据更新。
+        /// </returns>
+        /// <remarks>
+        /// 可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, string}`类型。
+        /// 使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
+        /// 使用默认的Dictionary更自由灵活，但都是字符串类型需要自行转换。
+        /// </remarks>
+        /// <code>
+        /// // 使用示例
+        /// // 假设HP组件有owner属性，表示属于哪个玩家，value属性表示hp值。
+        /// var subscription = await HeTuClient.Instance.Select("HP", user_id, "owner");
+        /// Debug.log("My HP:" + int.Parse(subscription.Data["value"]));
+        /// subscription.OnUpdate += (sender) => {
+        ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
+        /// }
+        /// // --------或者--------
+        /// Class HP : IBaseComponent {  // Class名必须和服务器一致
+        ///     public long id {get; set;}  // 就id这一项必须特殊写
+        ///     public long owner;
+        ///     public int value;
+        /// }
+        /// var subscription = await HeTuClient.Instance.Select{HP}(user_id, "owner");
+        /// Debug.log("My HP:" + subscription.Data.value);
+        /// </code>
+        public async Task<RowSubscription<T>> Select<T>(
+            object value, string where = "id", string componentName = null) 
+            where T: IBaseComponent
         {
-            var callType = "sub";
-            var subType = "query";
-            var buffer = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(
-                new
-                {
-                    callType, component_name = componentName, subType, left, right, limit, desc,
-                    force
-                }));
-            Send(buffer);
-            return new IndexSubscription(1, componentName, new List<int> { 1, 2 });
+            componentName ??= typeof(T).Name;
+            // 如果where是id，我们可以事先判断是否已经订阅过
+            if (where == "id")
+            {
+                var predictID = _makeSubID(
+                    componentName, "id", value, null, 1, false);
+                if (_subscriptions.TryGetValue(predictID, out var subscribed))
+                    return (RowSubscription<T>)subscribed;
+            }
+            
+            // 向服务器订阅
+            var payload = new [] { "sub", componentName, "select", value, where };
+            // _logInfo($"[HeTuClient] payload sub {componentName} sending...");
+            _Send(payload);
+            
+            // 等待服务器结果
+            var tcs = new TaskCompletionSource<List<object>>();
+            _waitingSubTasks.Enqueue(tcs);
+            // _logInfo($"[HeTuClient] sub tcs waiting...");
+            List<object> subMsg;
+            try
+            {
+                subMsg = await tcs.Task;
+            }
+            catch (TaskCanceledException e)
+            {
+                // NUnit不把取消信号视为错误，所以这里要LogError一下让测试不通过
+                _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
+                throw;
+            }
+            // _logInfo($"[HeTuClient] sub tcs completed {subMsg}");
+            
+            var subID = (string)subMsg[1];
+            // 如果没有查询到值
+            if (subID is null) return null;
+            // 如果依然是重复订阅，直接返回副本
+            if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
+                return (RowSubscription<T>)stillSubscribed;
+            
+            var data = ((JObject)subMsg[2]).ToObject<T>();
+            var newSub = new RowSubscription<T>(subID, componentName, data);
+            _subscriptions[subID] = newSub;
+            return newSub;
+        }
+
+        public Task<RowSubscription<DictComponent>> Select(
+            string componentName, object value, string where = "id")
+        {
+            return Select<DictComponent>(value, where, componentName);
+        }
+        
+        /// <summary>
+        /// 订阅组件的索引数据。
+        /// `left`和`right`为索引范围，`limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
+        /// 具体示例同`Select`方法。
+        /// </summary>
+        /// <returns>
+        /// 返回`IndexSubscription`对象。
+        /// 可通过`IndexSubscription.Rows`获取数据。
+        /// 并可以注册`IndexSubscription.OnInsert`和`OnUpdate`，`OnDelete`数据事件。
+        /// </returns>
+        public async Task<IndexSubscription<T>> Query<T> (
+            string index, object left, object right, int limit, 
+            bool desc=false, bool force=true, string componentName = null) 
+            where T: IBaseComponent
+        {
+            componentName ??= typeof(T).Name;
+
+            // 先要组合sub_id看看是否已订阅过
+            var predictID = _makeSubID(
+                componentName, index, left, right, limit, desc);
+            if (_subscriptions.TryGetValue(predictID, out var subscribed))
+                return (IndexSubscription<T>)subscribed;
+            
+            // 发送订阅请求
+            var payload = new []
+            {
+                "sub", componentName, "query", index, left, right, limit, desc, force
+            };
+            _Send(payload);
+            
+            // 等待服务器结果
+            var tcs = new TaskCompletionSource<List<object>>();
+            _waitingSubTasks.Enqueue(tcs);
+            // _logInfo($"[HeTuClient] sub tcs waiting...");
+            List<object> subMsg;
+            try
+            {
+                subMsg = await tcs.Task;
+            }
+            catch (TaskCanceledException e)
+            {
+                // NUnit不把取消信号视为错误，所以这里要LogError一下让测试不通过
+                _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
+                throw;
+            }
+            // _logInfo($"[HeTuClient] sub tcs completed {subMsg}");
+            
+            var subID = (string)subMsg[1];
+            // 如果没有查询到值
+            if (subID is null) return null;
+            // 如果依然是重复订阅，直接返回副本
+            if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
+                return (IndexSubscription<T>)stillSubscribed;
+            
+            var rows = ((JObject)subMsg[2]).ToObject<List<T>>();
+            var newSub = new IndexSubscription<T>(subID, componentName, rows);
+            _subscriptions[subID] = newSub;
+            return newSub;
+        }
+
+        public Task<IndexSubscription<DictComponent>> Query(
+            string componentName, string index, object left, object right, int limit, 
+            bool desc = false, bool force = true)
+        {
+            return Query<DictComponent>(index, left, right, limit, desc, force, componentName);
+        }
+        
+        internal void _unsubscribe(string subID) 
+        {
+            _subscriptions.Remove(subID);
+            var payload = new object[] { "unsub", subID };
+            _Send(payload);
         }
 
         // --------------以下为内部方法----------------
@@ -300,12 +508,19 @@ namespace HeTu
                 _sendingQueue.Enqueue(buffer);
             }
 
-            if (_sendingTask == null || _sendingTask.IsCompleted)
-                _sendingTask = Task.Run(async () => { await _SendingThread(); });
+            if (_sendingTask is { IsCompleted: false }) return;
+            _logInfo("启动发送线程...");
+            _sendingTask = Task.Run(async () => { await _SendingThread(); });
         }
 
         async Task _SendingThread()
         {
+            while (_socket.State == WebSocketState.Connecting)
+            {
+                _logInfo("等待连接建立...");
+                await Task.Delay(10);
+            }
+
             while (true)
             {
                 byte[] data;
@@ -319,7 +534,7 @@ namespace HeTu
                 {
                     await _socket.SendAsync(
                         new ArraySegment<byte>(data),
-                        WebSocketMessageType.Text,
+                        WebSocketMessageType.Binary,
                         true,
                         CancellationToken.None);
                 }
@@ -338,9 +553,25 @@ namespace HeTu
             Array.Copy(_rxBuff, buffer, length);
             buffer = _protocol?.Decrypt(buffer) ?? buffer;
             buffer = _protocol?.Decompress(buffer) ?? buffer;
-            var msg = Encoding.UTF8.GetString(buffer);
-            // 处理消息
-            var obj = JsonConvert.DeserializeObject<object[]>(msg);
+            var decoded = Encoding.UTF8.GetString(buffer);
+            // 处理消息 
+            _logInfo?.Invoke($"[HeTuClient] 收到消息: {decoded}");
+            var structuredMsg = JsonConvert.DeserializeObject<List<object>>(decoded);
+            if (structuredMsg is null) return;
+            switch (structuredMsg[0])
+            {
+                case "rsp":
+                    OnResponse?.Invoke((JObject)structuredMsg[1]);
+                    break;
+                case "sub":
+                    if (!_waitingSubTasks.TryDequeue(out var tcs))
+                        break;
+                    tcs.SetResult(structuredMsg);
+                    break;
+                case "updt":
+                    // subid and data
+                    break;
+            }
         }
     }
 }

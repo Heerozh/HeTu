@@ -1,14 +1,10 @@
-﻿#if HETU_CLIENT_USING_ZLIB
-
-using Unity.SharpZipLib.Zip.Compression.Streams;
+﻿using Unity.SharpZipLib.Zip.Compression.Streams;
 using System.IO;
 
 namespace HeTu
 {
     /// <summary>
-    /// 启用zlib压缩需要在Project Settings->Player->Other Settings->
-    /// Scripting Define Symbols中添加 HETU_CLIENT_USING_ZLIB
-    /// 然后去Package Manager手动安装Unity.SharpZipLib包
+    /// 默认的消息压缩协议
     /// </summary>
     public class ZlibProtocol: IProtocol
     {
@@ -34,4 +30,3 @@ namespace HeTu
     }
 }
 
-#endif
