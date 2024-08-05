@@ -144,7 +144,7 @@ namespace HeTu
         static readonly Lazy<HeTuClient> Lazy = new(() => new HeTuClient());
         readonly ConcurrentQueue<byte[]> _sendingQueue = new();
         readonly ConcurrentQueue<TaskCompletionSource<List<object>>> _waitingSubTasks = new();
-        Dictionary<string, BaseSubscription> _subscriptions = new();
+        Dictionary<string, WeakReference> _subscriptions = new();
         ClientWebSocket _socket = new();
         int _buffSize = 0x200000;
         LogFunction _logError;
@@ -225,18 +225,19 @@ namespace HeTu
         {
             // 连接websocket
             try
-            {
+            {   
+                // 前置清理
                 _logInfo?.Invoke($"[HeTuClient] 正在连接到：{url}...");
                 _rxBuff = new byte[_buffSize];
-                _subscriptions = new Dictionary<string, BaseSubscription>();
-                if (_socket.State is WebSocketState.Closed or WebSocketState.Aborted)
-                    _socket = new ClientWebSocket();
-                await _socket.ConnectAsync(new Uri(url), CancellationToken.None);
+                _subscriptions = new Dictionary<string, WeakReference>();
                 lock (_sendingQueue)
                 {
                     _sendingQueue.Clear();
                 }
-
+                // 连接并等待
+                if (_socket.State is WebSocketState.Closed or WebSocketState.Aborted)
+                    _socket = new ClientWebSocket();
+                await _socket.ConnectAsync(new Uri(url), CancellationToken.None);
                 _logInfo?.Invoke("[HeTuClient] 连接成功。");
                 OnConnected?.Invoke();
             }
@@ -373,7 +374,11 @@ namespace HeTu
                 var predictID = _makeSubID(
                     componentName, "id", value, null, 1, false);
                 if (_subscriptions.TryGetValue(predictID, out var subscribed))
-                    return (RowSubscription<T>)subscribed;
+                    if (subscribed.Target is RowSubscription<T> casted)
+                        return casted;
+                    else
+                        throw new System.InvalidCastException(
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             }
             
             // 向服务器订阅
@@ -403,11 +408,16 @@ namespace HeTu
             if (subID is null) return null;
             // 如果依然是重复订阅，直接返回副本
             if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
-                return (RowSubscription<T>)stillSubscribed;
+                if (stillSubscribed.Target is RowSubscription<T> casted)
+                    return casted;
+                else
+                    throw new System.InvalidCastException(
+                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
+
             
             var data = ((JObject)subMsg[2]).ToObject<T>();
             var newSub = new RowSubscription<T>(subID, componentName, data);
-            _subscriptions[subID] = newSub;
+            _subscriptions[subID] = new WeakReference(newSub, false);
             return newSub;
         }
 
@@ -438,7 +448,11 @@ namespace HeTu
             var predictID = _makeSubID(
                 componentName, index, left, right, limit, desc);
             if (_subscriptions.TryGetValue(predictID, out var subscribed))
-                return (IndexSubscription<T>)subscribed;
+                if (subscribed.Target is IndexSubscription<T> casted)
+                    return casted;
+                else
+                    throw new System.InvalidCastException(
+                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             
             // 发送订阅请求
             var payload = new []
@@ -469,11 +483,15 @@ namespace HeTu
             if (subID is null) return null;
             // 如果依然是重复订阅，直接返回副本
             if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
-                return (IndexSubscription<T>)stillSubscribed;
+                if (stillSubscribed.Target is IndexSubscription<T> casted)
+                    return casted;
+                else
+                    throw new System.InvalidCastException(
+                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             
             var rows = ((JObject)subMsg[2]).ToObject<List<T>>();
             var newSub = new IndexSubscription<T>(subID, componentName, rows);
-            _subscriptions[subID] = newSub;
+            _subscriptions[subID] = new WeakReference(newSub, false);
             return newSub;
         }
 
@@ -509,7 +527,7 @@ namespace HeTu
             }
 
             if (_sendingTask is { IsCompleted: false }) return;
-            _logInfo("启动发送线程...");
+            _logInfo?.Invoke("启动发送线程...");
             _sendingTask = Task.Run(async () => { await _SendingThread(); });
         }
 
@@ -517,7 +535,7 @@ namespace HeTu
         {
             while (_socket.State == WebSocketState.Connecting)
             {
-                _logInfo("等待连接建立...");
+                _logInfo?.Invoke("等待连接建立...");
                 await Task.Delay(10);
             }
 
