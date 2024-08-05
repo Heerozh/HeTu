@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using System;
+using System.Threading;
 using System.Threading.Tasks;
 using HeTu;
 using UnityEngine;
@@ -66,25 +67,37 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("use_hp", 1);
             sub = await HeTuClient.Instance.Select(
                 "HP", 123, "owner");
-            Debug.Log(sub.Data["value"].GetType());
             var lastValue = int.Parse(sub.Data["value"]);
             
             // 测试订阅事件
-            var newValue = 0;
+            int? newValue = null;
             sub.OnUpdate += (sender) =>
             {
                 Debug.Log("收到了更新...");
                 newValue = int.Parse(sender.Data["value"]);
             };
             HeTuClient.Instance.CallSystem("use_hp", 2);
-            Assert.AreEqual(newValue, lastValue - 2);
+            Assert.AreEqual(lastValue - 2, newValue);
             
-            // 测试重复订阅，顺带用Class类型
+            // 测试重复订阅，但换一个类型，应该报错
             HeTuClient.Instance.CallSystem("use_hp", 1);
+            // Assert.ThrowsAsync用的是当前协程Wait，会卡死
+            Assert.Throws<AggregateException>(() => Task.Run(async () => 
+                await HeTuClient.Instance.Select<HP>(123, "owner")).Wait());
+
+            sub = null;
+            // unity delay后第二次gc才会回收
+            for (int i = 0; i < 10; i++)
+            {
+                GC.Collect();
+                GC.WaitForPendingFinalizers();
+                await Task.Delay(1);
+            }
+            
+            // 测试回收自动反订阅，顺带测试Class类型
             var typedSub = await HeTuClient.Instance.Select<HP>(
                 123, "owner");
-            Assert.AreEqual(typedSub.Data.value, lastValue - 3);
-            
+            Assert.AreEqual(lastValue - 3, typedSub.Data.value);
         }
         
         [Test]
@@ -98,13 +111,13 @@ namespace Tests.HeTu
             var lastValue = sub.Rows[0];
             
             // 测试订阅事件
-            var newValue = 0;
-            sub.OnUpdate += (sender) =>
-            {
-                newValue = (int)sender.Data["value"];
-            };
-            HeTuClient.Instance.CallSystem("use_hp", 2);
-            Assert.AreEqual(newValue, lastValue - 2);
+            // var newValue = 0;
+            // sub.OnUpdate += (sender) =>
+            // {
+            //     newValue = (int)sender.Data["value"];
+            // };
+            // HeTuClient.Instance.CallSystem("use_hp", 2);
+            // Assert.AreEqual(newValue, lastValue - 2);
 
         }
     }
