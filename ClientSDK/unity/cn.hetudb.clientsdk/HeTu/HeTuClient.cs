@@ -40,7 +40,7 @@ namespace HeTu
             ComponentName = componentName;
         }
 
-        public abstract void Update(long rowID, object data);
+        public abstract void Update(long rowID, JObject data);
 
         ~BaseSubscription()
         {
@@ -62,13 +62,18 @@ namespace HeTu
         public event Action<RowSubscription<T>> OnUpdate;
         public event Action<RowSubscription<T>> OnDelete;
         
-        public override void Update(long rowID, object data)
+        public override void Update(long rowID, JObject data)
         {
-            Data = (T)data;
             if (data is null)
+            {
                 OnDelete?.Invoke(this);
+                Data = default;
+            }
             else
+            {
+                Data = data.ToObject<T>();
                 OnUpdate?.Invoke(this);
+            }
         }
         
     }
@@ -84,30 +89,29 @@ namespace HeTu
             Rows = rows.ToDictionary(row => row.id);
         }
 
-        public event Action<long> OnUpdate;
-        public event Action<long> OnDelete;
-        public event Action<long> OnInsert;
+        public event Action<IndexSubscription<T>, long> OnUpdate;
+        public event Action<IndexSubscription<T>, long> OnDelete;
+        public event Action<IndexSubscription<T>, long> OnInsert;
 
-        public override void Update(long rowID, object data)
+        public override void Update(long rowID, JObject data)
         {
-            var tData = (T)data;
-
             var exist = Rows.ContainsKey(rowID);
-            var delete = tData is null;
+            var delete = data is null;
 
             if (delete)
             {
                 if (!exist) return;
+                OnDelete?.Invoke(this, rowID);
                 Rows.Remove(rowID);
-                OnDelete?.Invoke(rowID);
             }
             else
             {
+                var tData = data.ToObject<T>();
                 Rows[rowID] = tData;
                 if (exist)
-                    OnUpdate?.Invoke(rowID);
+                    OnUpdate?.Invoke(this, rowID);
                 else
-                    OnInsert?.Invoke(rowID);
+                    OnInsert?.Invoke(this, rowID);
             }
         }
     }
@@ -377,7 +381,7 @@ namespace HeTu
                     if (subscribed.Target is RowSubscription<T> casted)
                         return casted;
                     else
-                        throw new System.InvalidCastException(
+                        throw new InvalidCastException(
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             }
             
@@ -411,7 +415,7 @@ namespace HeTu
                 if (stillSubscribed.Target is RowSubscription<T> casted)
                     return casted;
                 else
-                    throw new System.InvalidCastException(
+                    throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
 
             
@@ -430,13 +434,24 @@ namespace HeTu
         /// <summary>
         /// 订阅组件的索引数据。
         /// `left`和`right`为索引范围，`limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
-        /// 具体示例同`Select`方法。
         /// </summary>
         /// <returns>
         /// 返回`IndexSubscription`对象。
         /// 可通过`IndexSubscription.Rows`获取数据。
         /// 并可以注册`IndexSubscription.OnInsert`和`OnUpdate`，`OnDelete`数据事件。
         /// </returns>
+        /// <code>
+        /// //使用示例
+        /// var subscription = await HeTuClient.Instance.Query("HP", "owner", 0, 9999, 10);
+        /// foreach (var row in subscription.Rows) 
+        ///     Debug.log($"HP: {row.Key}:{row.Value["value"]}");
+        /// subscription.OnUpdate += (sender, rowID) => {
+        ///     Debug.log($"New HP: {rowID}:{sender.Rows[rowID]["value"]}");
+        /// }
+        /// subscription.OnDelete += (sender, rowID) => {
+        ///     Debug.log($"Delete row: {rowID}，之前的数据：{sender.Rows[rowID]["value"]}");
+        /// }
+        /// </code>
         public async Task<IndexSubscription<T>> Query<T> (
             string index, object left, object right, int limit, 
             bool desc=false, bool force=true, string componentName = null) 
@@ -451,7 +466,7 @@ namespace HeTu
                 if (subscribed.Target is IndexSubscription<T> casted)
                     return casted;
                 else
-                    throw new System.InvalidCastException(
+                    throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             
             // 发送订阅请求
@@ -486,10 +501,10 @@ namespace HeTu
                 if (stillSubscribed.Target is IndexSubscription<T> casted)
                     return casted;
                 else
-                    throw new System.InvalidCastException(
+                    throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             
-            var rows = ((JObject)subMsg[2]).ToObject<List<T>>();
+            var rows = ((JArray)subMsg[2]).ToObject<List<T>>();
             var newSub = new IndexSubscription<T>(subID, componentName, rows);
             _subscriptions[subID] = new WeakReference(newSub, false);
             return newSub;
@@ -527,7 +542,7 @@ namespace HeTu
             }
 
             if (_sendingTask is { IsCompleted: false }) return;
-            _logInfo?.Invoke("启动发送线程...");
+            // _logInfo?.Invoke("启动发送线程...");
             _sendingTask = Task.Run(async () => { await _SendingThread(); });
         }
 
@@ -573,7 +588,7 @@ namespace HeTu
             buffer = _protocol?.Decompress(buffer) ?? buffer;
             var decoded = Encoding.UTF8.GetString(buffer);
             // 处理消息 
-            _logInfo?.Invoke($"[HeTuClient] 收到消息: {decoded}");
+            // _logInfo?.Invoke($"[HeTuClient] 收到消息: {decoded}");
             var structuredMsg = JsonConvert.DeserializeObject<List<object>>(decoded);
             if (structuredMsg is null) return;
             switch (structuredMsg[0])
@@ -587,7 +602,14 @@ namespace HeTu
                     tcs.SetResult(structuredMsg);
                     break;
                 case "updt":
-                    // subid and data
+                    var subID = (string)structuredMsg[1];
+                    if (!_subscriptions.TryGetValue(subID, out var pSubscribed))
+                        break;
+                    if (pSubscribed.Target is not BaseSubscription subscribed)
+                        break;
+                    var rows = ((JObject)structuredMsg[2]).ToObject<Dictionary<long, JObject>>();
+                    foreach (var (rowID, data) in rows)
+                        subscribed.Update(rowID, data);
                     break;
             }
         }
