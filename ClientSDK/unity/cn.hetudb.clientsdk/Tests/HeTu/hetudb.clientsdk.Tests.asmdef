@@ -2,8 +2,10 @@
     "name": "河图ClientSDK单元测试",
     "rootNamespace": "",
     "references": [
-        "GUID:e4aa3c779c5c37f45a22b7160eb9a992",
-        "GUID:701f601baaec7064c9dd5ec2de39b1f4"
+        "GUID:e4aa3c779c5c37f45a22b7160eb9a992"
+    ],
+    "optionalUnityReferences": [
+        "TestAssemblies"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],

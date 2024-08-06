@@ -107,9 +107,19 @@ namespace Tests.HeTu
                 var data = jsonData.ToObject<Dictionary<string, object>>();
                 responseID = (long)data["id"];
             };
+            
+            bool callbackCalled = false;
+            var a = HeTuClient.Instance.SystemCallbacks["login"] =
+            (args) =>
+            {
+                callbackCalled = true;
+            };
+            
             HeTuClient.Instance.CallSystem("login", 123, true);
             await Task.Delay(300);
             Assert.AreEqual(123, responseID);
+            
+            Assert.True(callbackCalled);
             
             Debug.Log("TestSystemCall结束");
         }
