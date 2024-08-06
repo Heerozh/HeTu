@@ -175,6 +175,9 @@ namespace HeTu
         // 收到System返回的`ResponseToClient`时的回调，根据你服务器发送的是什么数据类型来转换
         // 比如服务器发送的是字典，可以用JObject.ToObject<Dictionary<string, object>>();
         public event Action<JObject> OnResponse;
+        
+        // 本地调用System时的回调。调用时立即就会回调，是否成功调用未知。
+        public Dictionary<string, Action<object[]>> SystemCallbacks = new();
 
         // 设置日志函数，info为信息日志，err为错误日志。可以直接传入Unity的Debug.Log和Debug.LogError
         public void SetLogger(LogFunction info, LogFunction err)
@@ -239,9 +242,9 @@ namespace HeTu
                     _sendingQueue.Clear();
                 }
                 // 连接并等待
-                if (_socket.State is WebSocketState.Closed or WebSocketState.Aborted)
+                if (_socket.State is not WebSocketState.None)
                     _socket = new ClientWebSocket();
-                await _socket.ConnectAsync(new Uri(url), CancellationToken.None);
+                await _socket.ConnectAsync(new Uri(url), token);
                 _logInfo?.Invoke("[HeTuClient] 连接成功。");
                 OnConnected?.Invoke();
             }
@@ -326,6 +329,8 @@ namespace HeTu
         {
             var payload = new object[] { "sys", method }.Concat(args);
             _Send(payload);
+            SystemCallbacks.TryGetValue(method, out var callbacks);
+            callbacks?.Invoke(args);
         }
 
         /// <summary>
@@ -553,7 +558,7 @@ namespace HeTu
                 await Task.Delay(10);
             }
 
-            while (true)
+            while (_socket.State == WebSocketState.Open)
             {
                 byte[] data;
                 lock (_sendingQueue)
