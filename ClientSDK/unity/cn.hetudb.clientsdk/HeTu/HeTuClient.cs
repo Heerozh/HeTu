@@ -218,12 +218,12 @@ namespace HeTu
         ///                 var e = await HeTuClient.Instance.Connect("wss://host:port/hetu",
         ///                                 UnityEngine.Application.exitCancellationToken);
         ///                 // 断线处理...是否重连等等
-        ///                 if (e is null || e is OperationCanceledException) {
-        ///                 break;
-        ///             }else{
-        ///                 Debug.LogError("连接断开, 将继续重连：" + e.Message);
-        ///             await Task.Delay(1000);
-        ///     }}}}
+        ///                 if (e is null || e is OperationCanceledException)
+        ///                     break;
+        ///                 else
+        ///                     Debug.LogError("连接断开, 将继续重连：" + e.Message);
+        ///                 await Task.Delay(1000);
+        ///     }}}
         /// </code>
         public async Task<Exception> Connect(string url, CancellationToken token)
         {
@@ -293,7 +293,7 @@ namespace HeTu
                         cur += received.Count;
                     }
 
-                    OnReceived(cur);
+                    _OnReceived(cur);
                 }
                 catch (OperationCanceledException e)
                 {
@@ -328,17 +328,10 @@ namespace HeTu
             _Send(payload);
         }
 
-        static string _makeSubID(string table, string index, object left, object right,
-            int limit, bool desc)
-        {
-            return $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
-        }
-
-        
         /// <summary>
         /// 订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。
         /// `Select`只对“单行”订阅，如果没有查询到行，会返回`null`。
-        /// 如果想要订阅不存在的行，请用`Query`订阅Index。
+        /// 如果想要订阅不存在的行，请用`Query`订阅索引。
         /// </summary>
         /// <returns>
         /// 返回`null`如果没查询到行，否则返回`RowSubscription`对象。
@@ -355,12 +348,12 @@ namespace HeTu
         /// // 假设HP组件有owner属性，表示属于哪个玩家，value属性表示hp值。
         /// var subscription = await HeTuClient.Instance.Select("HP", user_id, "owner");
         /// Debug.log("My HP:" + int.Parse(subscription.Data["value"]));
-        /// subscription.OnUpdate += (sender) => {
+        /// subscription.OnUpdate += (sender, rowID) => {
         ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
         /// }
         /// // --------或者--------
         /// Class HP : IBaseComponent {  // Class名必须和服务器一致
-        ///     public long id {get; set;}  // 就id这一项必须特殊写
+        ///     public long id {get; set;}  // 就id这一项必须定义get set
         ///     public long owner;
         ///     public int value;
         /// }
@@ -432,8 +425,8 @@ namespace HeTu
         }
         
         /// <summary>
-        /// 订阅组件的索引数据。
-        /// `left`和`right`为索引范围，`limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
+        /// 订阅组件的索引数据。`index`是开启了索引的属性名，`left`和`right`为索引范围，
+        /// `limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
         /// </summary>
         /// <returns>
         /// 返回`IndexSubscription`对象。
@@ -517,24 +510,30 @@ namespace HeTu
             return Query<DictComponent>(index, left, right, limit, desc, force, componentName);
         }
         
+        // --------------以下为内部方法----------------
+        
         internal void _unsubscribe(string subID) 
         {
             _subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
             _Send(payload);
         }
-
-        // --------------以下为内部方法----------------
+        
+        static string _makeSubID(string table, string index, object left, object right,
+            int limit, bool desc)
+        {
+            return $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
+        }
 
         void _Send(object payload)
         {
             var buffer = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload));
             buffer = _protocol?.Compress(buffer) ?? buffer;
             buffer = _protocol?.Crypt(buffer) ?? buffer;
-            SendRaw(buffer);
+            _SendRaw(buffer);
         }
 
-        void SendRaw(byte[] buffer)
+        void _SendRaw(byte[] buffer)
         {
             lock (_sendingQueue)
             {
@@ -579,7 +578,7 @@ namespace HeTu
             }
         }
 
-        void OnReceived(int length)
+        void _OnReceived(int length)
         {
             // 解码消息
             var buffer = new byte[length];
