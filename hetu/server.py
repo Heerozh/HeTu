@@ -60,7 +60,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
     if ok and isinstance(res, ResponseToClient):
-        await push_queue.put(res.message)
+        await push_queue.put(['rsp', res.message])
     return ok
 
 
@@ -87,9 +87,9 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
             sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
         case _:
             raise ValueError(f"Invalid sub message")
-    if sub_id is not None:
-        reply = ['sub', sub_id, data]
-        await push_queue.put(reply)
+
+    reply = ['sub', sub_id, data]
+    await push_queue.put(reply)
 
 
 @hetu_bp.route("/")
@@ -111,7 +111,7 @@ async def client_receiver(
                 break
             # 转换消息到array
             last_data = decode_message(message, protocol)
-            # print('recv', last_data)
+            # print('recv',executor.context, last_data)
             # 执行消息
             match last_data[0]:
                 case 'sys':  # sys system_name args ...
@@ -175,9 +175,6 @@ async def subscription_receiver(
             for sub_id, data in last_updates.items():
                 reply = ['updt', sub_id, data]
                 await push_queue.put(reply)
-            # todo 备注，客户端要注意内部避免掉重复订阅
-            # 客户端通过查询参数组合成查询字符串，来判断是否重复订阅，管理器注册对应的callback，重复注册只
-            # 是callback增加并不会去服务器请求
     except asyncio.CancelledError:
         # print('subscription_receiver normal canceled')
         pass
