@@ -153,6 +153,7 @@ namespace HeTu
         int _buffSize = 0x200000;
         LogFunction _logError;
         LogFunction _logInfo;
+        LogFunction _logDebug;
         IProtocol _protocol = new ZlibProtocol();
         byte[] _rxBuff;
 
@@ -180,10 +181,11 @@ namespace HeTu
         public Dictionary<string, Action<object[]>> SystemCallbacks = new();
 
         // 设置日志函数，info为信息日志，err为错误日志。可以直接传入Unity的Debug.Log和Debug.LogError
-        public void SetLogger(LogFunction info, LogFunction err)
+        public void SetLogger(LogFunction info, LogFunction err, LogFunction dbg = null)
         {
             _logInfo = info;
             _logError = err;
+            _logDebug = dbg;
         }
 
         // 设置接收缓冲区大小，决定能接受的消息最大长度，单位字节，默认2MB。请在连接前调用，不然无效。
@@ -385,13 +387,12 @@ namespace HeTu
             
             // 向服务器订阅
             var payload = new [] { "sub", componentName, "select", value, where };
-            // _logInfo($"[HeTuClient] payload sub {componentName} sending...");
             _Send(payload);
+            _logDebug?.Invoke($"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
             
             // 等待服务器结果
             var tcs = new TaskCompletionSource<List<object>>();
             _waitingSubTasks.Enqueue(tcs);
-            // _logInfo($"[HeTuClient] sub tcs waiting...");
             List<object> subMsg;
             try
             {
@@ -403,8 +404,7 @@ namespace HeTu
                 _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
                 throw;
             }
-            // _logInfo($"[HeTuClient] sub tcs completed {subMsg}");
-            
+
             var subID = (string)subMsg[1];
             // 如果没有查询到值
             if (subID is null) return null;
@@ -420,6 +420,7 @@ namespace HeTu
             var data = ((JObject)subMsg[2]).ToObject<T>();
             var newSub = new RowSubscription<T>(subID, componentName, data);
             _subscriptions[subID] = new WeakReference(newSub, false);
+            _logInfo?.Invoke($"[HeTuClient] 成功订阅了 {subID}");
             return newSub;
         }
 
@@ -473,11 +474,11 @@ namespace HeTu
                 "sub", componentName, "query", index, left, right, limit, desc, force
             };
             _Send(payload);
+            _logDebug?.Invoke($"[HeTuClient] 发送Query订阅: {predictID}");
             
             // 等待服务器结果
             var tcs = new TaskCompletionSource<List<object>>();
             _waitingSubTasks.Enqueue(tcs);
-            // _logInfo($"[HeTuClient] sub tcs waiting...");
             List<object> subMsg;
             try
             {
@@ -489,7 +490,6 @@ namespace HeTu
                 _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
                 throw;
             }
-            // _logInfo($"[HeTuClient] sub tcs completed {subMsg}");
             
             var subID = (string)subMsg[1];
             // 如果没有查询到值
@@ -505,6 +505,7 @@ namespace HeTu
             var rows = ((JArray)subMsg[2]).ToObject<List<T>>();
             var newSub = new IndexSubscription<T>(subID, componentName, rows);
             _subscriptions[subID] = new WeakReference(newSub, false);
+            _logInfo?.Invoke($"[HeTuClient] 成功订阅了 {subID}");
             return newSub;
         }
 
@@ -522,6 +523,7 @@ namespace HeTu
             _subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
             _Send(payload);
+            _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription析构，已取消订阅 {subID}");
         }
         
         static string _makeSubID(string table, string index, object left, object right,
@@ -547,6 +549,7 @@ namespace HeTu
 
             if (_sendingTask is { IsCompleted: false }) return;
             // _logInfo?.Invoke("启动发送线程...");
+            // Task.Run会在这里创建新的Thread
             _sendingTask = Task.Run(async () => { await _SendingThread(); });
         }
 
