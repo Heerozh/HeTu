@@ -256,7 +256,7 @@ class SystemExecutor:
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
-                logger.exception(f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{{{args}}}，异常：{e}")
+                logger.exception(f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{e}")
                 return False, None
             finally:
                 if trx is not None:

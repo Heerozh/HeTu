@@ -352,7 +352,7 @@ class RedisComponentTable(ComponentTable):
         io = self._backend.io
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         if cluster_only:
-            logger.info(f"⌚ [💾Redis][{self._name}组件] 对该表只检查cluster id迁移信息...")
+            logger.info(f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。")
         with io.lock(self._init_lock_key, timeout=60 * 5):
             # 获取redis已存的组件信息
             meta = io.hgetall(self._meta_key)
@@ -388,21 +388,19 @@ class RedisComponentTable(ComponentTable):
 
             with io.lock(self._init_lock_key, timeout=60 * 5):
                 del_keys = io.keys(self._root_prefix + '*')
-                print('准备删除', len(del_keys), '个键')
                 del_keys.remove(self._init_lock_key)
                 for batch in batched(del_keys, 1000):
                     with io.pipeline() as pipe:
                         list(map(pipe.delete, batch))
                         pipe.execute()
+            logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
 
             self.create_or_migrate()
-
-            logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
         else:
             raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
 
     def _create_emtpy(self):
-        logger.info(f"⌚ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
+        logger.info(f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
 
         # 只需要写入meta，其他的_rebuild_index会创建
         meta = {
@@ -411,15 +409,15 @@ class RedisComponentTable(ComponentTable):
             'cluster_id': self._cluster_id,
         }
         self._backend.io.hset(self._meta_key, mapping=meta)
-        logger.info(f"✅ [💾Redis][{self._name}组件] 空表创建完成")
+        logger.info(f"  ✔️ [💾Redis][{self._name}组件] 空表创建完成")
         return meta
 
     def _rebuild_index(self):
-        logger.info(f"⌚ [💾Redis][{self._name}组件] 正在重建索引...")
+        logger.info(f"  ➖ [💾Redis][{self._name}组件] 正在重建索引...")
         io = self._backend.io
         rows = io.keys(self._key_prefix + '*')
         if len(rows) == 0:
-            logger.info(f"✅ [💾Redis][{self._name}组件] 无数据，无需重建索引。")
+            logger.info(f"  ✔️ [💾Redis][{self._name}组件] 无数据，无需重建索引。")
             return
 
         for idx_name, str_type in self._component_cls.indexes_.items():
@@ -446,11 +444,11 @@ class RedisComponentTable(ComponentTable):
             else:
                 # zadd 会替换掉member相同的值，等于是set
                 io.zadd(idx_key, dict(zip(row_ids, values)))
-        logger.info(f"✅ [💾Redis][{self._name}组件] 索引重建完成, "
+        logger.info(f"  ✔️ [💾Redis][{self._name}组件] 索引重建完成, "
                     f"{len(rows)}行 * {len(self._component_cls.indexes_)}个索引。")
 
     def _migration_cluster_id(self, old):
-        logger.warning(f"⚠️ [💾Redis][{self._name}组件] "
+        logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
                        f"cluster_id 由 {old} 变更为 {self._cluster_id}，"
                        f"将尝试迁移cluster数据...")
         # 重命名key
@@ -468,7 +466,7 @@ class RedisComponentTable(ComponentTable):
         # 更新meta
         io.hset(self._meta_key, 'cluster_id', self._cluster_id)
         logger.warning(
-            f"✅ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。")
+            f"  ✔️ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。")
 
     def _migration_schema(self, old):
         """如果数据库中的属性和定义不一致，尝试进行简单迁移，可以处理属性更名以外的情况。"""
@@ -481,7 +479,7 @@ class RedisComponentTable(ComponentTable):
         if dtypes_in_db == new_dtypes:
             return
 
-        logger.warning(f"⚠️ [💾Redis][{self._name}组件] 代码定义的Schema与已存的不一致，"
+        logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] 代码定义的Schema与已存的不一致，"
                        f"数据库中：\n"
                        f"{dtypes_in_db}\n"
                        f"代码定义的：\n"
@@ -493,7 +491,7 @@ class RedisComponentTable(ComponentTable):
         # 检查是否有属性被删除
         for prop_name in dtypes_in_db.fields:
             if prop_name not in new_dtypes.fields:
-                logger.warning(f"⚠️ [💾Redis][{self._name}组件] "
+                logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
                                f"数据库中的属性 {prop_name} 在新的组件定义中不存在，如果改名了需要手动迁移，"
                                f"默认丢弃该属性数据。")
 
@@ -504,11 +502,11 @@ class RedisComponentTable(ComponentTable):
         added = 0
         for prop_name in new_dtypes.fields:
             if prop_name not in dtypes_in_db.fields:
-                logger.warning(f"⚠️ [💾Redis][{self._name}组件] "
+                logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
                                f"新的代码定义中多出属性 {prop_name}，将使用默认值填充。")
                 default = props[prop_name].default
                 if default is None:
-                    logger.error(f"⚠️ [💾Redis][{self._name}组件] "
+                    logger.error(f"  ⚠️ [💾Redis][{self._name}组件] "
                                  f"迁移时尝试新增 {prop_name} 属性失败，该属性没有默认值，无法新增。")
                     raise ValueError("迁移失败")
                 pipe = io.pipeline()
@@ -516,7 +514,13 @@ class RedisComponentTable(ComponentTable):
                     pipe.hset(row, prop_name, default)
                 pipe.execute()
                 added += 1
-        logger.warning(f"✅ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
+
+        # 更新meta
+        version = hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest()
+        io.hset(self._meta_key, 'version', version)
+        io.hset(self._meta_key, 'json', self._component_cls.json_)
+
+        logger.warning(f"  ✔️ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
     @classmethod

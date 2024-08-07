@@ -86,6 +86,11 @@ def start(start_args):
     logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
                 f"加密模块：{config.get('PACKET_CRYPTOGRAPHY_CLASS')}")
 
+    if config.DEBUG:
+        logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
+        logger.warning("⚠️⚠️⚠️ Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%")
+        logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
+
     # 准备启动服务器
     os.environ['SANIC_IGNORE_PRODUCTION_WARNING'] = '1'
     app.prepare(debug=config.DEBUG,
@@ -130,7 +135,7 @@ def main():
         "--workers", type=int, help="工作进程数，可设为 CPU * 1.2", default=4)
     cli_group.add_argument(
         "--debug", type=str2bool, nargs='?', const=True,
-        help="启用debug模式，主要显示更多的log信息",
+        help="启用debug模式，显示更多的log信息。因为也会开启Python协程的Debug模式，速度慢90%。",
         default=False)
     cli_group.add_argument(
         "--cert", metavar="/etc/letsencrypt/live/example.com/",
@@ -144,6 +149,8 @@ def main():
     # ==================migration==========================
     # parser_start = command_parsers.add_parser(
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
+    # ==================build==========================
+    # todo 增加个build c# class文件
 
     # 开始执行
     args = parser.parse_args()
