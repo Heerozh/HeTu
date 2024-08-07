@@ -1,5 +1,5 @@
 from hetu.data import BaseComponent, Property, define_component, Permission
-from hetu.system import define_system, Context
+from hetu.system import define_system, Context, ResponseToClient
 import numpy as np
 import asyncio
 import logging
@@ -48,7 +48,8 @@ async def use_mp(ctx: Context, value):
 
 @define_system(namespace='ssw', permission=Permission.EVERYBODY, inherits=('elevate', ))
 async def login(ctx: Context, user_id, kick_logged_in=True):
-    return await ctx['elevate'](ctx, user_id, kick_logged_in)
+    await ctx['elevate'](ctx, user_id, kick_logged_in)
+    return ResponseToClient({'id': ctx.caller})
 
 
 # -------------------------
@@ -87,6 +88,16 @@ async def create_user(ctx: Context, user_id, x, y):
     usr.entity_id = user_id
     await ctx[Users].insert(usr)
 
+    async with ctx[Position].select_or_create(user_id, 'owner') as pos:
+        pos.x = x
+        pos.y = y
+
+
+@define_system(
+    namespace="ssw",
+    components=(Position, ),
+)
+async def move_user(ctx: Context, user_id, x, y):
     async with ctx[Position].select_or_create(user_id, 'owner') as pos:
         pos.x = x
         pos.y = y
