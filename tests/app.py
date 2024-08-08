@@ -46,7 +46,7 @@ async def use_mp(ctx: Context, value):
     return row.value
 
 
-@define_system(namespace='ssw', permission=Permission.EVERYBODY, inherits=('elevate', ))
+@define_system(namespace='ssw', permission=Permission.EVERYBODY, bases=('elevate', ))
 async def login(ctx: Context, user_id, kick_logged_in=True):
     await ctx['elevate'](ctx, user_id, kick_logged_in)
     return ResponseToClient({'id': ctx.caller})
@@ -106,7 +106,7 @@ async def move_user(ctx: Context, user_id, x, y):
 @define_system(
     namespace="ssw",
     components=(Position, Users),
-    inherits=('use_mp', )
+    bases=('use_mp', )
 )
 async def magic(ctx: Context):
     mp = await ctx['use_mp'](ctx, 10)

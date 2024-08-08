@@ -39,7 +39,7 @@ async def hello_world(ctx: hetu.system.Context):
 
 
 @hetu.system.define_system(namespace="bench", permission=hetu.data.Permission.EVERYBODY,
-                           inherits=('elevate',))
+                           bases=('elevate',))
 async def login_test(ctx: hetu.system.Context, user_id):
     await ctx['elevate'](ctx, user_id, kick_logged_in=True)
     return hetu.system.ResponseToClient([ctx.retry_count])

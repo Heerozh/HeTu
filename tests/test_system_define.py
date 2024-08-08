@@ -112,7 +112,7 @@ class TestSystemDefine(unittest.TestCase):
         @define_system(
             namespace="ssw",
             components=(Hp, Inventory),
-            inherits=('system_base',)
+            bases=('system_base',)
         )
         async def system_inherit1(ctx, vec, hit):
             pass
@@ -120,7 +120,7 @@ class TestSystemDefine(unittest.TestCase):
         @define_system(
             namespace="ssw",
             components=(World,),
-            inherits=('system_inherit1',)
+            bases=('system_inherit1',)
         )
         async def system_inherit2(ctx, vec, hit):
             pass
@@ -169,7 +169,7 @@ class TestSystemDefine(unittest.TestCase):
         @define_system(
             namespace="ssw",
             components=(Hp, Inventory, Map),
-            inherits=('system_mysql',)
+            bases=('system_mysql',)
         )
         async def system_diff_inh_backend(ctx, vec, hit):
             pass
