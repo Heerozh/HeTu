@@ -197,7 +197,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     comp_mgr = request.app.ctx.comp_mgr
     executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
     await executor.initialize(request.client_ip)
-    print(executor.context, request.client_ip, asyncio.current_task().get_name(), 'closed')
+    logger.info(f"🔗 [📡WSConnect] 新连接：{executor.context} | IP:{request.client_ip} "
+                f"| TASK:{asyncio.current_task().get_name()}")
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
     # 初始化push消息队列
@@ -234,7 +235,8 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.exception(f"❌ [📡WSSender] 发送数据异常：{e}")
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        print(executor.context, request.client_ip, asyncio.current_task().get_name(), 'closed')
+        logger.info(f"⛓️ [📡WSConnect] 连接断开：{executor.context} | IP:{request.client_ip} "
+                    f"| TASK:{asyncio.current_task().get_name()}")
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
@@ -314,7 +316,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             from .data.backend import RedisBackend, RedisComponentTable
             backend = RedisBackend(db_cfg)
             backend.configure()
-            backends['Redis'] = backend
+            backends[name] = backend
             table_constructors['Redis'] = RedisComponentTable
             app.ctx.__setattr__(name, backend)
         elif db_cfg["type"] == "SQL":
@@ -322,10 +324,11 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             # app.ctx.__setattr__(name, sqlalchemy.create_engine(db_cfg["addr"]))
             raise NotImplementedError(
                 "SQL后端未实现，实现SQL后端还需要redis或zmq在前面一层负责推送，较复杂")
-    # 把config第一个设置为default后端
-    backends['default'] = backends[next(iter(app.config.BACKENDS.keys()))]
-    table_constructors['default'] = table_constructors[next(iter(app.config.BACKENDS.keys()))]
-    app.ctx.__setattr__('default_backend', backends['default'])
+        # 把config第一个设置为default后端
+        if 'default' not in backends:
+            backends['default'] = backends[name]
+            table_constructors['default'] = table_constructors[db_cfg["type"]]
+            app.ctx.__setattr__('default_backend', backends['default'])
 
     # 初始化SystemCluster
     SystemClusters().build_clusters(config['NAMESPACE'])
