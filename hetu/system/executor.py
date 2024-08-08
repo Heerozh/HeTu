@@ -228,8 +228,8 @@ class SystemExecutor:
         backend = first_comp and comp_mgr.get_table(first_comp).backend or None
 
         # 复制inherited函数
-        for inh_name in sys.full_inherits:
-            context.inherited[inh_name] = SystemClusters().get_system(self.namespace, inh_name).func
+        for base_name in sys.full_bases:
+            context.inherited[base_name] = SystemClusters().get_system(self.namespace, base_name).func
 
         # 调用系统
         while context.retry_count < sys.max_retry:

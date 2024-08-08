@@ -197,6 +197,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     comp_mgr = request.app.ctx.comp_mgr
     executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
     await executor.initialize(request.client_ip)
+    print(executor.context, request.client_ip, asyncio.current_task().get_name(), 'closed')
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
     # 初始化push消息队列
@@ -233,7 +234,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.exception(f"❌ [📡WSSender] 发送数据异常：{e}")
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        print(executor.context, asyncio.current_task().get_name(), 'closed')
+        print(executor.context, request.client_ip, asyncio.current_task().get_name(), 'closed')
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)

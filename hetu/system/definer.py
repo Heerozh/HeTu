@@ -20,8 +20,8 @@ class SystemDefine:
     full_components: set[Type[BaseComponent]]   # 完整的引用Components，包括继承自父System的
     non_transactions: set[Type[BaseComponent]]  # 直接获取的Components，不走事务
     full_non_trx: set[Type[BaseComponent]]      # 完整的直接Components，包括继承自父System的
-    inherits: set[str]
-    full_inherits: set[str]
+    bases: set[str]
+    full_bases: set[str]
     permission: Permission
     max_retry: int
     arg_count: int         # 全部参数个数（含默认参数）
@@ -88,15 +88,15 @@ class SystemClusters(metaclass=Singleton):
                         return True
             return False
 
-        def inherit_components(namespace_, inherits, req: set, n_trx: set, inh: set):
-            for base_system in inherits:
+        def inherit_components(namespace_, bases, req: set, n_trx: set, inh: set):
+            for base_system in bases:
                 if base_system not in self._system_map[namespace_]:
-                    raise RuntimeError(f"`inherits`引用的System `{base_system}` 不存在")
+                    raise RuntimeError(f"`bases`引用的System `{base_system}` 不存在")
                 base_def = self._system_map[namespace_][base_system]
                 req.update(base_def.components)
                 n_trx.update(base_def.non_transactions)
-                inh.update(base_def.inherits)
-                inherit_components(namespace_, base_def.inherits, req, n_trx, inh)
+                inh.update(base_def.bases)
+                inherit_components(namespace_, base_def.bases, req, n_trx, inh)
 
         # 把__auto__的System迁移到默认namespace
         auto_sys_map = self._system_map.pop('__auto__', {})
@@ -111,10 +111,10 @@ class SystemClusters(metaclass=Singleton):
             # 首先把所有系统变成独立的簇/并生成完整的请求表
             for sys_name, sys_def in self._system_map[namespace].items():
                 sys_def.full_components = set(sys_def.components)
-                sys_def.full_inherits = set(sys_def.inherits)
+                sys_def.full_bases = set(sys_def.bases)
                 sys_def.full_non_trx = set(sys_def.non_transactions)
-                inherit_components(namespace, sys_def.inherits, sys_def.full_components,
-                                   sys_def.full_non_trx, sys_def.full_inherits)
+                inherit_components(namespace, sys_def.bases, sys_def.full_components,
+                                   sys_def.full_non_trx, sys_def.full_bases)
                 non_trx.update(sys_def.full_non_trx)
                 # 检查所有System引用的Component和继承的也是同一个backend
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
@@ -153,7 +153,7 @@ class SystemClusters(metaclass=Singleton):
                 raise RuntimeError(f"Component {comp.__name__} 被non_transactions方式引用过，"
                                    f"但没有被任何System正常引用，必须至少有1个正常事务方式的引用。")
 
-    def add(self, namespace, func, components, non_trx, force, permission, inherits, max_retry):
+    def add(self, namespace, func, components, non_trx, force, permission, bases, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -168,9 +168,9 @@ class SystemClusters(metaclass=Singleton):
         defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
         sub_map[func.__name__] = SystemDefine(
-            func=func, components=components, non_transactions=non_trx, inherits=inherits,
+            func=func, components=components, non_transactions=non_trx, bases=bases,
             max_retry=max_retry, arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
-            permission=permission, full_components=set(), full_non_trx=set(), full_inherits=set())
+            permission=permission, full_components=set(), full_non_trx=set(), full_bases=set())
 
         if namespace == "__auto__":
             self._internal_system_map[func.__name__] = sub_map[func.__name__]
@@ -179,7 +179,7 @@ class SystemClusters(metaclass=Singleton):
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   non_transactions: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
-                  retry: int = 9999, inherits: tuple[str] = tuple()):
+                  retry: int = 9999, bases: tuple[str] = tuple()):
     """
     定义System(函数)
 
@@ -228,7 +228,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         System权限，OWNER权限这里不可使用，其他同Component权限。
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
-    inherits: tuple of str
+    bases: tuple of str
         继承其他System, 让System中可以调用其他System，并不破坏事务一致性。但是簇会和其他系统绑定。
 
     Notes
@@ -246,7 +246,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     其他参数:
         为hetu client SDK调用时传入的参数。
     System返回值:
-        如果调用方是其他System，通过`inherits`调用，则返回值会原样传给调用方；
+        如果调用方是其他System，通过`bases`调用，则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
             - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
@@ -293,7 +293,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
                 f"System {func.__name__} 引用的Component必须都是同一种backend"
 
         SystemClusters().add(namespace, func, components, non_transactions, force,
-                             permission, inherits, retry)
+                             permission, bases, retry)
 
         # 返回假的func，因为不允许直接调用。
         def warp_system_call(*_, **__):

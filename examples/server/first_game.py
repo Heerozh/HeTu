@@ -12,8 +12,8 @@ class Position(BaseComponent):
     owner: np.int64 = Property(default=0, unique=True)  # 开启unique索引
 
 
-# permission定义为任何人可调用，inherits引用另一个hetu内置System：elevate
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, inherits=('elevate',))
+# permission定义为任何人可调用，bases引用另一个hetu内置System：elevate
+@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=('elevate',))
 async def login_test(ctx: Context, user_id):
     await ctx['elevate'](ctx, user_id, kick_logged_in=True)
 
