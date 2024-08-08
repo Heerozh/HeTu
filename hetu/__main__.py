@@ -4,11 +4,23 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
-import argparse
 import os
 import sys
+import subprocess
+
+import redis
 
 from hetu.server import start_webserver
+
+import gettext
+args_loc = {
+    "usage: ": "用法：",
+    "the following arguments are required: %s": "以下参数是必须的： %s",
+}
+gettext.gettext = lambda x: args_loc.get(x, x)
+
+import argparse
+
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -39,14 +51,28 @@ def start(start_args):
     from sanic.worker.loader import AppLoader
     from functools import partial
 
+    # 自动启动Redis部分
+    redis_proc = None
+    if os.environ.get('HETU_RUN_REDIS', None) and not start_args.standalone:
+        print(f"💾 正在自动启动Redis...")  #此时logger还未启动
+        os.mkdir('data') if not os.path.exists('data') else None
+        import shutil
+        if shutil.which("redis-server"):
+            redis_proc = subprocess.Popen(
+                ["redis-server", "--daemonize yes", "--save 60 1", "--dir /data/"])
+        else:
+            print("❌ 未找到redis-server，请手动启动")
+
+    # 命令行转配置文件
     if start_args.config:
         config = Config()
         config.update_config(start_args.config)
-        config_for_factory = start_args.config
+        config_for_factory = config
     else:
         if not start_args.app_file or not start_args.namespace or not start_args.instance:
-            print("使用--config指定配置文件启动，"
-                  "或用--app-file, --namespace, --instance参数快捷启动，请参照--help")
+            print("--app_file是必须参数，或者用--config") if not start_args.app_file else None
+            print("--namespace是必须参数，或者用--config") if not start_args.namespace else None
+            print("--instance是必须参数，或者用--config") if not start_args.instance else None
             sys.exit(2)
         config_for_factory = {
             'APP_FILE': start_args.app_file,
@@ -106,10 +132,18 @@ def start(start_args):
     # 启动并堵塞
     Sanic.serve(primary=app, app_loader=loader)
 
+    # 保存管理的redis
+    if redis_proc:
+        logger.info("💾 正在关闭Redis...")
+        r = redis.Redis(host='127.0.0.1', port=6379)
+        r.save()
+        r.close()
+        redis_proc.terminate()
+
 
 def main():
-    parser = argparse.ArgumentParser(prog='hetu', description='Hetu Data Server')
-    command_parsers = parser.add_subparsers(dest='command', help='commands', required=True)
+    parser = argparse.ArgumentParser(prog='hetu', description='河图数据库')
+    command_parsers = parser.add_subparsers(dest='command', help='执行操作', required=True)
 
     # ==================start==========================
     parser_start = command_parsers.add_parser(
@@ -117,29 +151,32 @@ def main():
     parser_start.add_argument(  # const意思如果--ind后不带参数，则默认打开
         "--head", type=str2bool, nargs='?', default=True, const=True,
         help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构")
+    parser_start.add_argument(
+        "--standalone", type=str2bool, nargs='?', const=True,
+        help="如果ENV设置了HETU_RUN_REDIS，河图启动时就会自动启动Redis。此项设为True可以关闭该行为",
+        default=False, metavar="False")
 
     cli_group = parser_start.add_argument_group("通过命令行启动参数")
     cli_group.add_argument(
-        "--app-file", help="河图app的py文件", metavar="app.py")
+        "--app-file", help="河图app的py文件", metavar=".app.py", default="/app/app.py")
     cli_group.add_argument(
         "--namespace", metavar="game1", help="启动app.py中哪个namespace下的System")
-    cli_group.add_argument(
-        "--instance", help="实例名称，每个实例是一个副本",
-        metavar="server1")
+    cli_group.add_argument(               # 不能require=True，因为有config参数
+        "--instance", help="实例名称，每个实例是一个副本", metavar="server1")
     cli_group.add_argument(
         "--port", metavar="2446", help="监听的Websocket端口", default='2466')
     cli_group.add_argument(
-        "--db", metavar="127.0.0.1:6379", help="后端数据库地址",
+        "--db", metavar="redis://127.0.0.1:6379/0", help="后端数据库地址",
         default='redis://127.0.0.1:6379/0')
     cli_group.add_argument(
         "--workers", type=int, help="工作进程数，可设为 CPU * 1.2", default=4)
     cli_group.add_argument(
         "--debug", type=str2bool, nargs='?', const=True,
-        help="启用debug模式，显示更多的log信息。因为也会开启Python协程的Debug模式，速度慢90%。",
-        default=False)
+        help="启用debug模式，显示更多的log信息。因为也会开启Python协程的Debug模式，速度慢90％。",
+        default=False, metavar="False")
     cli_group.add_argument(
         "--cert", metavar="/etc/letsencrypt/live/example.com/",
-        help="证书目录，如果不设置则使用不安全的连接。也可以这里不设置，外加一层反向https代理。"
+        help="证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。"
              "填入auto会生成自签https证书。",
         default='')
 
@@ -151,6 +188,7 @@ def main():
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
     # ==================build==========================
     # todo 增加个build c# class文件
+    parser_build = command_parsers.add_parser('build', help='生成客户端c#类型代码')
 
     # 开始执行
     args = parser.parse_args()
