@@ -44,46 +44,35 @@ class Position(BaseComponent):
     y: np.float32 = Property(default=0)  
     owner: np.int64 = Property(default=0, unique=True)  # 开启unique索引
 ```
-
-> ⚠️ 警告: 不要创建名叫Player的大表，而是把Player的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
+> [!WARNING]  
+> 不要创建名叫Player的大表，而是把Player的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
 然后通过`owner`属性关联到Player身上。大表会严重影响性能和扩展性。
 
 ### 然后写System
 
-定义`login`System（可理解为服务器逻辑），我们使用异步`aiohttp`验证`token`，这样等待网络IO的时候不堵塞Worker进程。
+#### login登录逻辑
 
-注意这里引入了System“继承”的概念，我们继承了内置System `elevate`提权。
-System函数是不可以直接调用的，想要调用其他System，必须通过参数`inherits`继承。
+Login逻辑可用内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
 
-`elevate`会把当前连接提权到USER组，并关联`user_id`，参数`kick_logged_in`为`Ture`表示如果该用户已登陆了，
-则断开他的另一个连接。
+System包含事务处理，不可直接函数调用，想要调用其他System，必须通过参数`bases`继承。
 
 ```Python
 from hetu.system import define_system, Context
-import aiohttp
 
-# permission定义为任何人可调用，inherits引用另一个hetu内置System：elevate
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, inherits=('elevate',))
-async def login(ctx: Context, token):  # 客户端传入参数为`token`
-    async with aiohttp.ClientSession() as session:
-        async with session.post('https://api.sso.yoursite.com', json={'token': token}) as response:
-            if response.status == 200:
-                user_id = int(response.json()['user_id'])
-                # 提权当前连接到User组，并关联user_id。以后ctx.caller就是user_id。
-                await ctx['elevate'](ctx, user_id, kick_logged_in=True)
-```
-
-上面只是演示，为了方便测试，这里我们让客户端直接传入user_id，省去验证过程。
-
-```Python
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, inherits=('elevate',))
+# permission定义为任何人可调用
+@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=('elevate',))
 async def login_test(ctx: Context, user_id): 
+    # 提权以后ctx.caller就是user_id。
     await ctx['elevate'](ctx, user_id, kick_logged_in=True)
 ```
+我们让客户端直接传入user_id，省去验证过程。实际应该传递token验证。
+
+#### move_to移动逻辑
 
 然后是玩家移动逻辑`move_to`，通过参数`components`引用要操作的表，这里我们操作玩家位置数据`Position`。
-`permission`设置为只有USER组的用户才能调用，也就是只有执行过`elevate`的用户才能调用，
-`ctx.caller`就是`elevate`传入的`user_id`。
+
+`permission`设置为只有USER组的用户才能调用，
+`ctx.caller`就是之前`elevate`传入的`user_id`。
 
 ```Python
 @define_system(
@@ -102,123 +91,243 @@ async def move_to(ctx: Context, x, y):
 
 服务器就完成了，我们不需要传输数据的代码，这由客户端来完成。
 
-把以上内容存到app.py文件（或分成多个文件，然后在入口app.py文件`import`他们）。
+把以上内容存到`.\app\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
 
-让我们用docker启动，安装Docker Desktop后，在任何系统下都只需下列命令即可：
-(注意，你可能需要外网访问能力)
+#### 启动服务器
 
-todo 搞一个集成的docker，包含数据库和服务器一起的, redis可以用-v <data-dir>:/data来保存到本地
-Run redis-server with persistent data directory. (creates dump.rdb)
-docker run -d -p 6379:6379 -v <data-dir>:/data --name redis dockerfile/redis
+安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要外网访问能力）：
 
-假设你的app.py文件放在./app/目录下
 ```bash
-docker run --name walk_game -p 2468:2468 -v ./app/:/app hetu:latest --debug=True --namespace=ssw --instance=inst_name
+docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest start --namespace=ssw --instance=walking
 ````
-* -p 是映射本地端口到hetu容器端口，本地端口可随意指定，比如要修改成443端口就使用-p 443:2468
-* -v 是映射本地目录到hetu容器目录(可映射/app和/data目录)，本地目录可以随意指定。
-* 如果映射了/data目录，那么数据库文件将存放到你的本地目录，而不是docker容器内部，方便你更换和升级容器
-* hetu:latest 是使用最新版hetu镜像
-* --debug=True 是开启调试模式，用于生成自签SSL证书
-* --namespace 是启动app.py中哪个namespace下的System
-* --instance 是实例名，数据都储存在该实例名下
+* `-p` 是映射本地端口到hetu容器端口，比如要修改成443端口就使用`-p 443:2466`
+* `-v` 是映射本地目录到hetu容器目录(`/app`和`/data`和`/logs`目录)
+* 其他参数见帮助`docker run --rm heerozh/hetu:latest start --help`
 
 ### 客户端代码部分
 
 首先在Unity中导入客户端SDK，点“Window”->“Package Manager”->“+加号”->“Add package from git URL”
-![菜单](https://github.com/Heerozh/HeTu/blob/media/sdk1.png)
-![第二步](https://github.com/Heerozh/HeTu/blob/media/sdk2.png)
+
+<img src="https://github.com/Heerozh/HeTu/blob/media/sdk1.png" width="306.5" height="156.5"/>
+<img src="https://github.com/Heerozh/HeTu/blob/media/sdk2.png" width="208.5" height="162.5"/>
 
 然后输入安装地址：`https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
 
 > 如果没外网可用国内镜像`https://gitee.com/heerozh/hetu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
 
-然后在场景中新建个空对象，添加如下脚本：
+然后在场景中新建个空对象，添加脚本，首先是连接服务器并登录：
 
 ```c#
-using System.Collections.Generic;
-using UnityEngine;
-using HeTu;
-using Random = UnityEngine.Random;
-
 public class FirstGame : MonoBehaviour
 {
-    public GameObject playerPrefab;
-    CharacterController _characterController;
-    readonly Dictionary<long, GameObject> _players = new ();
-    IndexSubscription<DictComponent> _allPlayerData;
-    long _selfID = 0;
-    
-    // 在场景中生成玩家代码
-    void AddPlayer(DictComponent row)
-    {
-        GameObject player = Instantiate(playerPrefab, 
-            new Vector3(float.Parse(row["x"]), 0.5f, float.Parse(row["y"])), 
-            Quaternion.identity);
-        _players[long.Parse(row["owner"])] = player;
-    }
-
+    public long SelfID = 1;  // 不同客户端要登录不同ID
     async void Start()
     {
-        _characterController = gameObject.GetComponent<CharacterController>();
-        _selfID = Random.Range(1, 20); // 随机登录1-20号玩家
-
         HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
-        // 连接河图，我们没有await该异步Task，暂时先射后不管
-        var task = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
+        // 连接河图，这是异步函数，不await就是射后不管
+        HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
             Application.exitCancellationToken);
+            
+        // 调用登录，会启动线程在后台发送
+        HeTuClient.Instance.CallSystem("login_test", SelfID);
         
-        // 调用登录，调用会在连接完成后执行
-        HeTuClient.Instance.CallSystem("login_test", _selfID);
-        
-        // 向数据库订阅owner=1-20的玩家数据。在河图里，查询就是订阅
-        _allPlayerData = await HeTuClient.Instance.Query(
-            "Position", "owner", 1, 20, 100);
-        // 把查询到的玩家加到场景中，这些是首次数据，后续的更新要靠OnUpdate回调
-        foreach(var data in _allPlayerData.Rows.Values)
-            if (long.Parse(data["owner"]) != _selfID) AddPlayer(data);
-        
-        // 当有新玩家Position数据创建时(新玩家创建)
-        _allPlayerData.OnInsert += (sender, rowID) => {
-            AddPlayer(sender.Rows[rowID]);
-        };
-        // 当有玩家删除时，我们没有删除玩家Position数据的代码，所以这里永远不会被调用
-        _allPlayerData.OnDelete += (sender, rowID) => {
-        };
-        // 当有玩家Position组件的任意属性变动时会被调用（这也是每个Component属性要少的原因）
-        _allPlayerData.OnUpdate += (sender, rowID) => {
-            var data = sender.Rows[rowID];
-            if (long.Parse(data["owner"]) == _selfID) return;
-            // 为了方便演示，前面Query时没有带类型，所以这里都要进行类型转换。生成客户端类型见build相关说明。
-            _players[long.Parse(data["owner"])].transform.position = new Vector3(
-                float.Parse(data["x"]), 0.5f, float.Parse(data["y"]));
-        };
-    
-        // 在最后await Connect的Task。该task会堵塞直到断线
-        await task;
-        Debug.Log("连接断开");
+        await SubscribeOthersPositions();
     }
+}
+```
+然后在玩家移动后往服务器发送新的坐标：
 
+```c#
     void Update()
     {
         // 获得输入变化
         var vec = new Vector3(Input.GetAxis("Horizontal"), 0, Input.GetAxis("Vertical"));
         vec *= (Time.deltaTime * 10.0f);
-        _characterController.Move(vec);
+        transform.position += vec;
         // 向服务器发送自己的新位置
         if (vec != Vector3.zero)
-        {
-            HeTuClient.Instance.CallSystem("move_to",
-                gameObject.transform.position.x, gameObject.transform.position.z);
-        }
+            HeTuClient.Instance.CallSystem("move_to", transform.position.x, transform.position.z);
     }
 }
+```
+
+最后就是显示其他玩家的实时位置，可以在任意`async`函数中进行。
+
+```c#
+    async void SubscribeOthersPositions()
+    {
+        // 向数据库订阅owner=1-999的玩家数据。在河图里，查询就是订阅
+        // 这里也可以用Query<Position>()强类型查询，类型可通过build生成
+        _allPlayerData = await HeTuClient.Instance.Query(
+            "Position", "owner", 1, 999, 100);
+        // 把查询到的玩家加到场景中
+        foreach(var data in _allPlayerData.Rows.Values)
+            AddPlayer(data);
+        
+        // 当有新Position行创建时(新玩家)
+        _allPlayerData.OnInsert += (sender, rowID) => {
+            AddPlayer(sender.Rows[rowID]);
+        };
+        // 当有玩家删除时
+        _allPlayerData.OnDelete += (sender, rowID) => {
+        };
+        // 当有玩家Position组件的任意属性变动时（这也是Component属性要少的原因）
+        _allPlayerData.OnUpdate += (sender, rowID) => {
+            var data = sender.Rows[rowID];
+            // 前面Query时没有带类型，所以数据都是字符串型
+            var playerID = long.Parse(data["owner"]);
+            var position = new Vector3(float.Parse(data["x"]), 0.5f, float.Parse(data["y"])
+            MovePlayer(playerID, position);
+        };
+    }
 ```
 
 以上，你的简单的地图移动小游戏就完成了。你可以启动多个客户端，每个客户端都会看到互相之间的移动。
 
 完整示例代码见examples目录的first_game。
 
+
+## 性能测试
+
+
+### 配置：
+
+|       |                     服务器 型号 |                                  设置 |   
+|:------|---------------------------:|------------------------------------:|
+| 河图    |           ecs.ic5.16xlarge |           64核，关SSL，参数: --workers=76 |
+| Redis |     redis.shard.small.2.ce |             单可用区，双机热备，非Cluster，内网直连 |   
+| 跑分程序  |                         本地 |         参数： --clients=1000 --time=5 |        
+
+### 基准：
+
+直接在Redis上压测以下最少事务指令作为基准，这指令序列等价于之后的select + update测试：
+
+```redis
+ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
+```
+
+Redis基准性能CPS(每秒调用次数)结果为：
+
+
+|         | direct redis(Calls) |
+|:--------|--------------------:|
+| Avg(每秒) |            30,345.2 |
+
+
+### 测试河图性能：
+
+- hello world测试: 序列化并返回hello world，主要消耗在json和zlib压缩
+- select + update：单Component获取行并写入行操作，表总数据量3W行。
+
+CPS(每秒调用次数)测试结果为：
+
+|         | hello world(Calls) | select + update(Calls) | select\*2 + update\*2(Calls) |
+|:--------|-------------------:|-----------------------:|-----------------------------:|
+| Avg(每秒) |            125,117 |               30,285.1 |                     16,112.7 |
+| CPU负载   |               100% |                    65% |                          45% |
+| Redis负载 |                 0% |                   100% |                         100% |
+
+以上测试为单Component，多个Component有机会（但不多）通过Redis Cluster扩展。
+
+### 单连接性能：
+
+测试程序使用`--clients=1`参数测试，未用满CPU，主要测试RTT：
+
+|         | hello world(Calls) | select + update(Calls) | select\*2 + update\*2(Calls) |
+|:--------|-------------------:|-----------------------:|-----------------------------:|
+| Avg(每秒) |               1823 |                231.217 |                      153.244 |
+| RTT(毫秒) |               0.54 |                   4.25 |                          6.7 |
+
+
+### 关于Python性能
+
+河图是分布式的，吞吐量上限不受制于逻辑代码，而受制于后端Redis，语言性能只影响RTT。作为参考，Python性能大概是PHP7水平。
+
+之前一直用LuaJIT，虽然速度很快，但代码实在是太繁重了。
+
+考虑到现在的CPU价格远低于开发人员成本，快速迭代，数据分析，无缝AI等特性具有优势。
+
+
+## 安装和启动
+
+### 整合版启动
+
+使用hetu的docker镜像，此镜像内部集成了Redis，部署方便，适合千人在线的网络游戏，或开发测试用。
+
+```bash
+docker run --rm -v .\本地app目录/app:/app -v .\本地数据目录:/data -p 2466:2466 heerozh/hetu:latest start --namespace=namespace --instance=server_name
+```
+其他参数可用`docker run --rm heerozh/hetu:latest --help`查看，
+
+### 分布式部署
+
+对于大型网络游戏，redis可以自己单独部署，以实现横向扩展。
+
+Redis部署，我们推荐用master+多机只读replica的分布式架构，这里我们只演示启动一个master：
+
+```bash
+docker run --name backend-redis -p 6379:6379 -v .\data/:/data redis:latest redis-server --save 60 1
+```
+
+然后再运行hetu镜像，开启standalone只启动河图，并使用config.py作为配置文件：
+
+```bash
+docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest start --config /app/config.py --standalone
+```
+配置方法具体见CONFIG_TEMPLATE.py文件。
+
+可以启动多台hetu standalone服务器，然后用反向代理对连接进行负载均衡。
+后续启动的服务器需要把`--head`参数设为`False`，以防止它们进行数据库初始化工作（主要是重建索引，删除临时数据等）。
+
+
+### 原生启动！
+
+如果是开发机，为了调试方便，可以用原生方式。
+
+先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)，
+Conda是软件堆栈管理器，含有编译好的Python任意版本，河图需要Python3.11.3以上版本。
+
+服务器部署可用安装脚本：
+```shell
+mkdir -p ~/miniconda3
+wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+rm -rf ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash
+exec bash
+```
+
+创建新的Python环境：
+
+```shell
+conda create -n hetu python=3.11
+```
+
+别忘了激活环境:
+```shell
+conda activate hetu
+````
+
+然后用传统pip方式安装河图到当前环境：
+
+```shell
+pip install git+https://github.com/Heerozh/HeTu.git
+````
+国内镜像地址：`pip install https://gitee.com/heerozh/hetu.git`
+
+然后：
+```bash
+hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
+```
+其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.py`方式启动，
+配置模板见CONFIG_TEMPLATE.py文件。
+
+另外别忘了还要自己安装和启动Redis。
+
+
+## 数据库文档：
+
+文档链接在这：建设中...
 
 ## 代码规范
 
