@@ -18,7 +18,7 @@ jobs:
         run: pip install pytest pytest-cov
       - name: Run tests and collect coverage
         working-directory: ./tests/
-        run: pytest --cov=hetu app ${{ env.CODECOV_ATS_TESTS }}
+        run: pytest --cov=hetu ${{ env.CODECOV_ATS_TESTS }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
         with:
