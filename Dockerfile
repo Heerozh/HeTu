@@ -18,4 +18,4 @@ WORKDIR /
 EXPOSE 2466/tcp
 
 ENTRYPOINT ["hetu"]
-CMD ["start"]
+CMD ["start", "--config /app/config.py"]
