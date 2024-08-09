@@ -1,5 +1,5 @@
 # 河图的image
-FROM sanicframework/sanic:latest-py3.11
+FROM python:3.11-alpine3.20
 
 RUN apk add git
 RUN apk add redis
