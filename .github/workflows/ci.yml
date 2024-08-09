@@ -14,7 +14,10 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Install pytest
+        run: pip install pytest
       - name: Run tests and collect coverage
+        working-directory: ./tests/
         run: pytest --cov app ${{ env.CODECOV_ATS_TESTS }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v4
