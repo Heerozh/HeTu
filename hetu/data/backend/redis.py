@@ -215,6 +215,8 @@ class RedisTransaction(BackendTransaction):
             # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
             async def _pipeline_lua_speedup(_):
                 return
+
+            Pipeline.load_scripts_org = Pipeline.load_scripts
             Pipeline.load_scripts = _pipeline_lua_speedup
 
         self._uuid = uuid.uuid4().hex
