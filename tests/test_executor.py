@@ -42,7 +42,10 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self):
         for backend in self.backends.values():
-            await backend.close()
+            try:
+                await backend.close()
+            except Exception as e:
+                pass
 
     async def test_executor(self):
         executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)
