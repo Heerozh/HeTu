@@ -98,6 +98,11 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
     @mock.patch('time.time', mock_time)
     async def test_connect(self):
+        # 把之前修改的代码改回来，不知道为啥github actions里会丢失lua脚本
+        from redis.asyncio.client import Pipeline
+        if 'load_scripts_org' in dir(Pipeline):
+            Pipeline.load_scripts = Pipeline.load_scripts_org
+
         # 先登录几个连接
         mock_time.return_value = time()
         executor1 = hetu.system.SystemExecutor('ssw', self.comp_mgr)

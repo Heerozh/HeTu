@@ -17,8 +17,9 @@ class TestWebsocket(unittest.TestCase):
         SystemClusters()._clear()
         cls.backend_mgr = UnitTestBackends()
         cls.backend_mgr.start_redis_server()
+        app_file = os.path.join(os.path.dirname(__file__), 'app.py')
         cls.app = start_webserver("Hetu-test", {
-            'APP_FILE': 'app.py',
+            'APP_FILE': app_file,
             'NAMESPACE': 'ssw',
             'INSTANCE_NAME': 'unittest1',
             'LISTEN': f"0.0.0.0:874",
