@@ -95,7 +95,7 @@ async def move_to(ctx: Context, x, y):
 
 #### 启动服务器
 
-安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要外网访问能力）：
+安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要外网）：
 
 ```bash
 docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest start --namespace=ssw --instance=walking
@@ -235,8 +235,10 @@ CPS(每秒调用次数)测试结果为：
 
 |         | hello world(Calls) | select + update(Calls) | select\*2 + update\*2(Calls) |
 |:--------|-------------------:|-----------------------:|-----------------------------:|
-| Avg(每秒) |               1823 |                231.217 |                      153.244 |
-| RTT(毫秒) |               0.54 |                   4.25 |                          6.7 |
+| Avg(每秒) |            3766.88 |                 659.95 |                       412.55 |     
+| RTT(ms) |           0.265471 |                1.51527 |                      2.42395 |           
+    
+
 
 
 ### 关于Python性能
@@ -250,44 +252,32 @@ CPS(每秒调用次数)测试结果为：
 
 ## 安装和启动
 
-### 整合版启动
+### 容器启动
 
-使用hetu的docker镜像，此镜像内部集成了Redis，部署方便，适合千人在线的网络游戏，或开发测试用。
+使用hetu的docker镜像，此镜像内部集成了Redis，部署方便。
 
 ```bash
 docker run --rm -v .\本地app目录/app:/app -v .\本地数据目录:/data -p 2466:2466 heerozh/hetu:latest start --namespace=namespace --instance=server_name
 ```
 其他参数可用`docker run --rm heerozh/hetu:latest --help`查看，
 
-### 分布式部署
-
-对于大型网络游戏，redis可以自己单独部署，以实现横向扩展。
-
-Redis部署，我们推荐用master+多机只读replica的分布式架构，这里我们只演示启动一个master：
-
-```bash
-docker run --name backend-redis -p 6379:6379 -v .\data/:/data redis:latest redis-server --save 60 1
-```
-
-然后再运行hetu镜像，开启standalone只启动河图，并使用config.py作为配置文件：
-
+也可以使用Standalone模式，只启动河图，不启动Redis。
 ```bash
 docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest start --config /app/config.py --standalone
 ```
-配置方法具体见CONFIG_TEMPLATE.py文件。
-
 可以启动多台hetu standalone服务器，然后用反向代理对连接进行负载均衡。
-后续启动的服务器需要把`--head`参数设为`False`，以防止它们进行数据库初始化工作（主要是重建索引，删除临时数据等）。
 
+后续启动的服务器需要把`--head`参数设为`False`，以防止它们进行数据库初始化工作（主要是重建索引，删除临时数据等）。
 
 ### 原生启动！
 
-如果是开发机，为了调试方便，可以用原生方式。
+容器一般有30%的性能损失，为了性能，也可以用原生方式。
 
-先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)，
-Conda是软件堆栈管理器，含有编译好的Python任意版本，河图需要Python3.11.3以上版本。
+Redis部署，我们推荐用master+多机只读replica的分布式架构，这里跳过。
 
-服务器部署可用安装脚本：
+先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)软件管理器，含有编译好的Python任意版本，河图需要Python3.11.3以上版本。
+
+服务器部署可用安装脚本（清华镜像）：
 ```shell
 mkdir -p ~/miniconda3
 wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
@@ -297,7 +287,7 @@ rm -rf ~/miniconda3/miniconda.sh
 exec bash
 ```
 
-创建新的Python环境：
+然后创建新的Python环境：
 
 ```shell
 conda create -n hetu python=3.11
@@ -313,7 +303,7 @@ conda activate hetu
 ```shell
 pip install git+https://github.com/Heerozh/HeTu.git
 ````
-国内镜像地址：`pip install https://gitee.com/heerozh/hetu.git`
+国内镜像地址：`pip install git+https://gitee.com/heerozh/hetu.git`
 
 然后：
 ```bash
@@ -322,10 +312,7 @@ hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=
 其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.py`方式启动，
 配置模板见CONFIG_TEMPLATE.py文件。
 
-另外别忘了还要自己安装和启动Redis。
-
-
-## 数据库文档：
+## 详细文档：
 
 文档链接在这：建设中...
 
