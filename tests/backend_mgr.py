@@ -1,3 +1,5 @@
+import time
+
 import docker
 import unittest
 from docker.errors import NotFound
@@ -13,7 +15,7 @@ class UnitTestBackends:
         for container in self.containers.values():
             try:
                 container.kill()
-            except (NotFound, ImportError):
+            except (NotFound, ImportError, docker.errors.APIError):
                 pass
         # 因为服务器销毁了，清理下python中的全局lua缓存
         RedisTransaction.lua_check_unique = None
@@ -29,6 +31,7 @@ class UnitTestBackends:
 
     def start_redis_server(self):
         from hetu.data.backend import RedisComponentTable, RedisBackend
+        import redis
         # 如果已启动则跳过
         if 'redis' not in self.containers:
             try:
@@ -45,5 +48,14 @@ class UnitTestBackends:
             self.containers['redis'] = client.containers.run(
                 "redis:latest", detach=True, ports={'6379/tcp': 23318}, name='hetu_test_redis',
                 auto_remove=True)
+            r = redis.Redis(host="127.0.0.1", port=23318)
+            # 等待docker启动完毕
+            while True:
+                try:
+                    time.sleep(1)
+                    print("version:", r.info()['redis_version'])
+                    break
+                except Exception:
+                    pass
             print('⚠️ 已启动redis docker.')
         return RedisComponentTable, RedisBackend, {"master": "redis://127.0.0.1:23318/0"}
