@@ -1,4 +1,4 @@
-[![Coverage Status](https://coveralls.io/repos/github/Heerozh/HeTu/badge.svg?branch=master)](https://coveralls.io/github/Heerozh/HeTu?branch=master)
+[![codecov](https://codecov.io/github/Heerozh/HeTu/graph/badge.svg?token=YFPF963NB0)](https://codecov.io/github/Heerozh/HeTu)
 
 > [!NOTE]  
 > 仍在开发中，80%...
@@ -10,15 +10,12 @@
 基于 ECS(Entity-Component-System) 结构，采用 Python 语言，支持各种数据科学库，拥抱未来。
 具体性能见下方[性能测试](#性能测试)。
 
-代码注释和文档都以中文为主，不鹊巢鸠占，方便中文用户开发。
+开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题，降低心智负担。
 
 ## 游戏服务器引擎，也可称为数据库
 
-河图把数据查询接口"暴露"给游戏客户端，客户端可以通过SDK直接向服务器 select，query 查询，并自动订阅同步，
-所以河图自称为数据库。
-写入操作通过调用 System，也就是游戏的逻辑代码，表现为数据库的一种数据功能。
-
-开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题，降低心智负担。
+河图把数据查询接口"暴露"给游戏客户端，客户端通过SDK直接进行 select，query 查询，并订阅同步，
+所以河图自称为数据库。写入操作通过 System，也就是游戏的逻辑代码。
 
 这种结构可以大幅减少游戏服务器和客户端的开发量。
 
@@ -50,9 +47,9 @@ class Position(BaseComponent):
 
 ### 然后写System
 
-#### login登录逻辑
+#### Login登录逻辑
 
-Login逻辑可用内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
+通过内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
 
 System包含事务处理，不可直接函数调用，想要调用其他System，必须通过参数`bases`继承。
 
@@ -89,7 +86,7 @@ async def move_to(ctx: Context, x, y):
         # with结束后会自动提交修改
 ```
 
-服务器就完成了，我们不需要传输数据的代码，这由客户端来完成。
+服务器就完成了，我们不需要传输数据的代码，因为河图是个“数据库”，客户端可直接查询。
 
 把以上内容存到`.\app\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
 
@@ -156,7 +153,7 @@ public class FirstGame : MonoBehaviour
 ```c#
     async void SubscribeOthersPositions()
     {
-        // 向数据库订阅owner=1-999的玩家数据。在河图里，查询就是订阅
+        // 向数据库订阅owner=1-999的玩家数据。
         // 这里也可以用Query<Position>()强类型查询，类型可通过build生成
         _allPlayerData = await HeTuClient.Instance.Query(
             "Position", "owner", 1, 999, 100);
@@ -171,11 +168,10 @@ public class FirstGame : MonoBehaviour
         // 当有玩家删除时
         _allPlayerData.OnDelete += (sender, rowID) => {
         };
-        // 当有玩家Position组件的任意属性变动时（这也是Component属性要少的原因）
+        // 当有Position行任意属性修改时（这也是Component属性要少的原因）
         _allPlayerData.OnUpdate += (sender, rowID) => {
             var data = sender.Rows[rowID];
-            // 前面Query时没有带类型，所以数据都是字符串型
-            var playerID = long.Parse(data["owner"]);
+            var playerID = long.Parse(data["owner"]);  // 前面Query时没有带类型，所以数据都是字符串型
             var position = new Vector3(float.Parse(data["x"]), 0.5f, float.Parse(data["y"])
             MovePlayer(playerID, position);
         };
