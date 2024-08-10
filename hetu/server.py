@@ -273,6 +273,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         "formatter": "generic",
         "filename": "./logs/hetu_error.log",
         "when": 'D',
+        "delay": True,  # 解决windows上PermissionError另一个程序正在使用此文件
         "backupCount": 30,
     }
     LOGGING_CONFIG_DEFAULTS['handlers']['debug_file'] = {
@@ -280,6 +281,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         "formatter": "generic",
         "filename": "./logs/hetu_debug.log",
         "when": 'D',
+        "delay": True,  # 解决windows上PermissionError另一个程序正在使用此文件
         "backupCount": 30,
     }
     LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].append('err_file')
@@ -339,6 +341,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     app.ctx.__setattr__('comp_mgr', comp_mgr)
     # 主进程+Head启动时执行检查schema, 清空所有非持久化表
     try:
+        # is_worker = os.environ.get('SANIC_WORKER_IDENTIFIER').startswith('Srv ')
         if head and os.getpid() == main_pid:
             logger.warning("⚠️ [📡Server] 启动为Head node，开始检查schema并清空非持久化表...")
             comp_mgr.create_or_migrate_all()
