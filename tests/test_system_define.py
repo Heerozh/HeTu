@@ -180,7 +180,6 @@ class TestSystemDefine(unittest.TestCase):
     def test_system_clusters(self):
         # 先卸载SystemClusters单件防止重定义
         SystemClusters()._clear()
-        SystemClusters()._system_map = {}
 
         # 定义测试系统
         @define_system(
@@ -220,7 +219,7 @@ class TestSystemDefine(unittest.TestCase):
             pass
 
         @define_system(
-            namespace="__auto__",
+            namespace="global",
             components=(GalaxyPosition, Inventory),
         )
         async def system5(ctx, ):
@@ -229,7 +228,8 @@ class TestSystemDefine(unittest.TestCase):
         # 测试cluster
         clusters = SystemClusters()
         clusters.build_clusters('ssw')
-        self.assertEqual(len(clusters.get_clusters('ssw')), 2)
+        global_clusters = len(clusters.get_clusters('global'))
+        self.assertEqual(len(clusters.get_clusters('ssw')), 2 + global_clusters)
         self.assertEqual(len(clusters.get_clusters('ssw')[0].systems), 3)
         self.assertEqual(len(clusters.get_clusters('ssw')[1].systems), 2)
         self.assertEqual(clusters.get_clusters('ssw')[0].id, 0)
