@@ -230,6 +230,12 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
         await aio.aclose()
     return call_count, retry_count
 
+async def bench_just_select(address, duration, name: str, pid: str):
+    def packet():
+        row_id = random.randint(1, BENCH_ROW_COUNT)
+        return ['sys', 'just_select', row_id]
+
+    return await bench_sys_call_routine(address, duration, name, pid, packet)
 
 async def bench_select_update(address, duration, name: str, pid: str):
     def packet():
@@ -332,6 +338,7 @@ if __name__ == '__main__':
         case 'call':
             all_results = [
                 run_bench(bench_hello_world, args, 'hello world'),
+                run_bench(bench_just_select, args, 'just select'),
                 run_bench(bench_select_update, args, 'select + update'),
                 run_bench(bench_exchange_data, args, 'select*2 + update*2'),
             ]
