@@ -9,7 +9,7 @@ import numpy as np
 
 from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
 from hetu.data.backend import (
-    RaceCondition, UniqueViolation, ComponentTable, Backend,
+    RaceCondition, UniqueViolation, ComponentTable, Backend, RedisBackend,
     ComponentTransaction, Subscriptions)
 from backend_mgr import UnitTestBackends
 
@@ -637,6 +637,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                                  backend_cls: type[Backend], config):
         backend = backend_cls(config)
         backend.configure()
+        if type(backend) is RedisBackend:
+            self.assertEqual(
+                backend.io.config_get('notify-keyspace-events')["notify-keyspace-events"],
+                "")
+
         item_data = table_cls(Item, 'test', 1, backend)
         item_data.flush(force=True)
         item_data.create_or_migrate()
@@ -651,6 +656,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 row.time = i + 110
                 row.qty = 999
                 await tbl.insert(row)
+
+        # 等待replica同步，因为不知道backend的类型，所以直接sleep
+        time.sleep(0.5)
 
         # 初始化订阅器
         sub_mgr = Subscriptions(backend)

@@ -1,5 +1,5 @@
 import time
-
+import socket
 import docker
 import unittest
 from docker.errors import NotFound
@@ -44,18 +44,37 @@ class UnitTestBackends:
                 client.containers.get('hetu_test_redis').remove()
             except (docker.errors.NotFound, docker.errors.APIError):
                 pass
+            try:
+                client.containers.get('hetu_test_redis_replica').kill()
+                client.containers.get('hetu_test_redis_replica').remove()
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass
             # 启动服务器
             self.containers['redis'] = client.containers.run(
                 "redis:latest", detach=True, ports={'6379/tcp': port}, name='hetu_test_redis',
                 auto_remove=True)
+            host_ip = socket.gethostbyname(socket.gethostname())
+            print("host_ip:", host_ip)
+            self.containers['redis_replica'] = client.containers.run(
+                "redis:latest", detach=True, ports={'6379/tcp': port+1},
+                name='hetu_test_redis_replica', auto_remove=True,
+                command=["redis-server", f"--replicaof {host_ip} {port}", "--replica-read-only yes"])
             r = redis.Redis(host="127.0.0.1", port=port)
+            r_slave = redis.Redis(host="127.0.0.1", port=port+1)
             # 等待docker启动完毕
             while True:
                 try:
                     time.sleep(1)
-                    print("version:", r.info()['redis_version'])
+                    print("version:", r.info()['redis_version'], r.role(),
+                          r.config_get('notify-keyspace-events'))
+                    r.wait(1, 10000)
+                    print("slave version:", r_slave.info()['redis_version'], r_slave.role(),
+                          r_slave.config_get('notify-keyspace-events'))
                     break
                 except Exception:
                     pass
             print('⚠️ 已启动redis docker.')
-        return RedisComponentTable, RedisBackend, {"master": "redis://127.0.0.1:23318/0"}
+        return RedisComponentTable, RedisBackend, {
+            "master": f"redis://127.0.0.1:{port}/0",
+            "servants": [f"redis://127.0.0.1:{port+1}/0", ]
+        }
