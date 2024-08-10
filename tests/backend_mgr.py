@@ -29,7 +29,7 @@ class UnitTestBackends:
                 rtn.append(getattr(self, func_name)())
         return rtn
 
-    def start_redis_server(self):
+    def start_redis_server(self, port=23318):
         from hetu.data.backend import RedisComponentTable, RedisBackend
         import redis
         # 如果已启动则跳过
@@ -46,9 +46,9 @@ class UnitTestBackends:
                 pass
             # 启动服务器
             self.containers['redis'] = client.containers.run(
-                "redis:latest", detach=True, ports={'6379/tcp': 23318}, name='hetu_test_redis',
+                "redis:latest", detach=True, ports={'6379/tcp': port}, name='hetu_test_redis',
                 auto_remove=True)
-            r = redis.Redis(host="127.0.0.1", port=23318)
+            r = redis.Redis(host="127.0.0.1", port=port)
             # 等待docker启动完毕
             while True:
                 try:

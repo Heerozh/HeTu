@@ -136,3 +136,10 @@ async def race(ctx: Context, sleep):
     _row = await ctx[Position].select(3, 'owner')
     _row.x = 2
     await ctx[Position].update(_row.id, _row)
+
+
+@define_system(
+    namespace="game_short_name",
+)
+def do_nothing(ctx: Context, sleep):
+    pass
