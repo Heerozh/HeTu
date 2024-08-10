@@ -228,7 +228,7 @@ class TestSystemDefine(unittest.TestCase):
         # 测试cluster
         clusters = SystemClusters()
         clusters.build_clusters('ssw')
-        global_clusters = len(clusters.get_clusters('global'))
+        global_clusters = len(clusters.get_clusters('global')) - 1
         self.assertEqual(len(clusters.get_clusters('ssw')), 2 + global_clusters)
         self.assertEqual(len(clusters.get_clusters('ssw')[0].systems), 3)
         self.assertEqual(len(clusters.get_clusters('ssw')[1].systems), 2)

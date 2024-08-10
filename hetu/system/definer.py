@@ -72,9 +72,9 @@ class SystemClusters(metaclass=Singleton):
     def get_cluster(self, namespace: str, cluster_id: int):
         return self._clusters[namespace][cluster_id]
 
-    def build_clusters(self, namespace: str):
+    def build_clusters(self, main_namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
-        assert namespace in self._system_map, f"没有找到namespace={namespace}的System定义"
+        assert main_namespace in self._system_map, f"没有找到namespace={main_namespace}的System定义"
 
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):
@@ -99,12 +99,12 @@ class SystemClusters(metaclass=Singleton):
                 inh.update(base_def.bases)
                 inherit_components(namespace_, base_def.bases, req, n_trx, inh)
 
-        # 把global的System迁移到当前namespace
-        self._system_map[namespace].update(copy.deepcopy(self._global_system_map))
-
         non_trx = set()
 
         for namespace in self._system_map:
+            # 把global的System迁移到当前namespace
+            self._system_map[namespace].update(copy.deepcopy(self._global_system_map))
+
             clusters = []
             # 首先把所有系统变成独立的簇/并生成完整的请求表
             for sys_name, sys_def in self._system_map[namespace].items():
