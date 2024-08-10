@@ -66,7 +66,9 @@ def start(start_args):
     # 命令行转配置文件
     if start_args.config:
         config = Config()
-        config.update_config(start_args.config)
+        # sanic不支持windows path
+        config_file = start_args.config.replace('\\', '/')
+        config.update_config(config_file)
         config_for_factory = config
     else:
         if not start_args.app_file or not start_args.namespace or not start_args.instance:

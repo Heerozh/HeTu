@@ -27,7 +27,7 @@ class MyTestCase(unittest.TestCase):
             main()
 
         # 正常启动
-        cfg_file = os.path.join(os.path.dirname(__file__), '../hetu', 'CONFIG_TEMPLATE.py')
+        cfg_file = os.path.join(os.path.dirname(__file__), 'config.py')
         sys.argv[1:] = ['start', '--config', cfg_file]
         SystemClusters()._clear()
         with self.assertRaises(redis.exceptions.ConnectionError):

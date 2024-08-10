@@ -2,6 +2,7 @@ name: Workflow for Codecov python
 on: [push, pull_request]
 jobs:
   run:
+    timeout-minutes: 3
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
