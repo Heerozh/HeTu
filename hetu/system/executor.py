@@ -80,7 +80,7 @@ class Connection(BaseComponent):
     invalid_msgs: np.int32 = Property(0)  # 无效消息数, 用来判断flooding攻击
 
 
-@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
+@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def new_connection(ctx: Context, address: str):
     row = Connection.new_row()
     row.owner = 0
@@ -92,7 +92,7 @@ async def new_connection(ctx: Context, address: str):
     ctx.connection_id = row_ids[0]
 
 
-@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
+@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def del_connection(ctx: Context):
     try:
         await ctx[Connection].delete(ctx.connection_id)
@@ -100,7 +100,7 @@ async def del_connection(ctx: Context):
         pass
 
 
-@define_system(namespace='__auto__', permission=Permission.ADMIN, components=(Connection,))
+@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     """
     提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。

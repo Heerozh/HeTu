@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import copy
 import asyncio
 from dataclasses import dataclass
 from inspect import signature
@@ -49,12 +50,12 @@ class SystemClusters(metaclass=Singleton):
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
-        self._internal_system_map = {}
+        self._global_system_map = {}  # type: dict[str, SystemDefine]
 
     def _clear(self):
         self._clusters = {}
         self._component_map = {}
-        self._system_map = {"__auto__": self._internal_system_map}
+        self._system_map = {}
 
     def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
         return self._system_map[namespace].get(system_name, None)
@@ -98,11 +99,8 @@ class SystemClusters(metaclass=Singleton):
                 inh.update(base_def.bases)
                 inherit_components(namespace_, base_def.bases, req, n_trx, inh)
 
-        # 把__auto__的System迁移到默认namespace
-        auto_sys_map = self._system_map.pop('__auto__', {})
-        for sys_def in auto_sys_map.values():
-            sys_def.namespace = namespace
-        self._system_map[namespace].update(auto_sys_map)
+        # 把global的System迁移到当前namespace
+        self._system_map[namespace].update(copy.deepcopy(self._global_system_map))
 
         non_trx = set()
 
@@ -172,8 +170,8 @@ class SystemClusters(metaclass=Singleton):
             max_retry=max_retry, arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
             permission=permission, full_components=set(), full_non_trx=set(), full_bases=set())
 
-        if namespace == "__auto__":
-            self._internal_system_map[func.__name__] = sub_map[func.__name__]
+        if namespace == "global":
+            self._global_system_map[func.__name__] = sub_map[func.__name__]
 
 
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
@@ -210,7 +208,8 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     Parameters
     ----------
     namespace: str
-        是你的项目名，一个网络地址只能启动一个namespace下的System们
+        是你的项目名，一个网络地址只能启动一个namespace下的System们。
+        定义为"global"的namespace可以在所有项目下通用。
     components: list of BaseComponent class
         引用Component，引用的Component可以在`ctx`中进行相关的事务操作，保证数据一致性。
     non_transactions: list of BaseComponent class
