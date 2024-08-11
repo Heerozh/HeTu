@@ -16,6 +16,7 @@ class Context:
     # 通用变量
     caller: int | None  # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
     connection_id: int  # 调用方的connection id
+    address: str | None # 调用方的ip
     group: str | None  # 所属组名，目前只用于判断是否admin
     user_data: dict  # 当前连接的用户数据，可自由设置，在所有System间共享
     # 事务变量
@@ -32,7 +33,7 @@ class Context:
 
 
     def __str__(self):
-        return f"conn: {self.connection_id}, caller: {self.caller}"
+        return f"conn: {self.connection_id}, address: {self.address}, caller: {self.caller}"
 
     def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | Callable:
         if type(item) is str:

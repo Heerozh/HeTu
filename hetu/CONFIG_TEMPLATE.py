@@ -37,12 +37,15 @@ WORKER_NUM = 4
 ACCESS_LOG = False
 
 # 传入消息的最大字节、ping间隔秒、ping无响应关闭连接秒
-# WEBSOCKET_MAX_SIZE = 2 ^ 20
+WEBSOCKET_MAX_SIZE = 2 ^ 19  # 0.5MB
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
 # 闲置多少秒未调用System则视为断线
 SYSTEM_CALL_IDLE_TIMEOUT = 60 * 2
+# 限制每个IP可以创建多少匿名连接（提权登陆后不受此限制）
+MAX_ANONYMOUS_CONNECTION_BY_IP = 10
+
 # 限制未登录客户端发送消息的频率，可以设置多个指标，格式为[[最大数量，统计时间（秒）], ...]，默认值目标是限制每秒3条消息
 # 登录提权后限制次数*10，或自己在login逻辑中修改ctx.client_send_limits值来实现
 CLIENT_SEND_LIMITS = [[10, 1], [27, 5], [100, 50], [300, 300]]
