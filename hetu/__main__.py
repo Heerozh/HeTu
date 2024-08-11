@@ -103,6 +103,7 @@ def start(start_args):
         config = Config(config_for_factory)
     # 生成log目录
     os.mkdir('logs') if not os.path.exists('logs') else None
+    os.mkdir('replays') if not os.path.exists('replays') else None
     # prepare用的配置
     fast = config.WORKER_NUM < 0
     workers = fast and 1 or config.WORKER_NUM
