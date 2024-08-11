@@ -76,27 +76,31 @@ class SystemExecutor:
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
         """检查调用是否合法"""
+        context = self.context
         # 读取保存的system define
         sys = SystemClusters().get_system(self.namespace, call.system)
         if not sys:
-            logger.warning(f"⚠️ [📞Executor] 不存在的System, 检查是否非法调用：{call}")
+            logger.warning(f"⚠️ [📞Executor] [非法操作] {context} | "
+                           f"不存在的System, 检查是否非法调用：{call}")
             return None
 
-        context = self.context
         # 检查权限是否符合
         match sys.permission:
             case Permission.USER:
                 if context.caller is None or context.caller == 0:
-                    logger.warning(f"⚠️ [📞Executor] {call.system}无调用权限，检查是否非法调用：{call}")
+                    logger.warning(f"⚠️ [📞Executor] [非法操作] {context} | "
+                                   f"{call.system}无调用权限，检查是否非法调用：{call}")
                     return None
             case Permission.ADMIN:
                 if context.group is None or not context.group.startswith("admin"):
-                    logger.warning(f"⚠️ [📞Executor] {call.system}无调用权限，检查是否非法调用：{call}")
+                    logger.warning(f"⚠️ [📞Executor] [非法操作] {context} | "
+                                   f"{call.system}无调用权限，检查是否非法调用：{call}")
                     return None
 
         # 检测args数量是否对得上
         if len(call.args) < (sys.arg_count - sys.defaults_count - 3):
-            logger.warning(f"❌ [📞Executor] {call.system}参数数量不对，检查客户端代码。"
+            logger.warning(f"❌ [📞Executor] [非法操作] {context} | "
+                           f"{call.system}参数数量不对，检查客户端代码。"
                            f"要求{sys.arg_count - sys.defaults_count}个参数, "
                            f"传入了{len(call.args)}个。"
                            f"调用内容：{call}")

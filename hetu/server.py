@@ -70,13 +70,13 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
                    push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
+    ctx = executor.context
     # print(executor.context, 'sub', data)
     check_length('sub', data, 4, 100)
     table = executor.comp_mgr.get_table(data[1])
     if table is None:
-        raise ValueError(f"subscribe了不存在的Component名，注意大小写：{data[1]}")
+        raise ValueError(f" [非法操作] {ctx} | subscribe了不存在的Component名，注意大小写：{data[1]}")
 
-    ctx = executor.context
     if ctx.group and ctx.group.startswith("admin"):
         caller = 'admin'
     else:
@@ -90,14 +90,15 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
             check_length('query', data, 5, 8)
             sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
         case _:
-            raise ValueError(f"Invalid sub message")
+            raise ValueError(f" [非法操作] {ctx} | 未知订阅操作：{data[2]}")
 
     reply = ['sub', sub_id, data]
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub = subs.count()
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
-        raise ValueError(f"订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
+        raise ValueError(f" [非法操作] {ctx} | 订阅数超过限制："
+                         f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
 
 
 @hetu_bp.route("/")
@@ -141,7 +142,7 @@ async def client_receiver(
                 case 'motd':
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
-                    raise ValueError(f"Invalid message")
+                    raise ValueError(f" [非法操作] {ctx} | 未知消息类型：{last_data[0]}")
     except asyncio.CancelledError:
         # print(ctx, 'client_receiver normal canceled')
         pass
