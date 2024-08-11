@@ -82,7 +82,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
         await executor2.initialize("")
 
-        task1 = asyncio.create_task(executor.exec('race', 0.1))
+        task1 = asyncio.create_task(executor.exec('race', 0.2))
         task2 = asyncio.create_task(executor2.exec('race', 0.02))
         await asyncio.gather(task2)
         await task1
@@ -129,9 +129,8 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         ok, _ = await executor3.exec('test_hp', 99)
         self.assertTrue(ok)
         # 然后是不强制踢出，但是timeout应该生效
-        from hetu.system.connection import SYSTEM_CALL_IDLE_TIMEOUT
-        mock_time.return_value = time() + SYSTEM_CALL_IDLE_TIMEOUT
         executor5 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
+        mock_time.return_value = time() + executor5.context.idle_timeout
         await executor5.initialize("")
         await executor5.exec('login', 1, False)
 

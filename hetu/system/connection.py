@@ -16,11 +16,6 @@ from ..system import define_system
 
 logger = logging.getLogger('HeTu')
 
-# 这里的值是占位符，实际是CONFIG中定义
-SYSTEM_CALL_IDLE_TIMEOUT = 0
-CLIENT_SEND_LIMITS = [[1, 1]]
-SERVER_SEND_LIMITS = [[1, 1]]
-
 
 @define_component(namespace='HeTu', persist=False, permission=Permission.ADMIN)
 class Connection(BaseComponent):
@@ -73,7 +68,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     if logged_conn is not None:
         now = time.time()
         # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
-        if kick_logged_in or now - logged_conn.last_active > SYSTEM_CALL_IDLE_TIMEOUT:
+        if kick_logged_in or now - logged_conn.last_active > ctx.idle_timeout:
             logged_conn.owner = 0  # 去掉该连接的owner，当该连接下次执行System时会被关闭
             await ctx[Connection].update(logged_conn.id, logged_conn)
         else:
@@ -87,6 +82,13 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     # 如果事务成功，则设置ctx.caller (end_transaction事务冲突时会跳过后面代码)
     await ctx.end_transaction()
     ctx.caller = user_id
+
+    # 已登录用户扩张限制
+    ctx.server_limits = [[limit[0] * 10, limit[1]] for limit in ctx.server_limits]
+    ctx.client_limits = [[limit[0] * 10, limit[1]] for limit in ctx.client_limits]
+    ctx.max_row_sub *= 100
+    ctx.max_index_sub *= 100
+
     return True, 'SUCCESS'
 
 
@@ -114,7 +116,7 @@ class ConnectionAliveChecker:
 
         # idle时间内只往数据库写入5次last_active，防止批量操作时频繁更新
         now = time.time()
-        if now - self.last_active_cache > (SYSTEM_CALL_IDLE_TIMEOUT / 5):
+        if now - self.last_active_cache > (ctx.idle_timeout / 5):
             await conn_tbl.direct_set(ctx.connection_id, last_active=now)
             self.last_active_cache = now
 
@@ -132,28 +134,28 @@ class ConnectionFloodChecker:
     def sent(self, count=1):
         self.sent_msgs += count
 
-    def send_limit_reached(self, info: str):
+    def send_limit_reached(self, ctx: Context, info: str):
         now = time.time()
         sent_elapsed = now - self.sent_start_time
-        for limit in SERVER_SEND_LIMITS:
+        for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
                 logger.warning(
                     f"⚠️ [📞Executor] 发送消息数过多，可能是订阅攻击，将断开连接。调用：{info}")
                 return True
-        if sent_elapsed > SERVER_SEND_LIMITS[-1][1]:
+        if sent_elapsed > ctx.server_limits[-1][1]:
             self.sent_msgs = 0
             self.sent_start_time = now
         return False
 
-    def recv_limit_reached(self, info: str):
+    def recv_limit_reached(self, ctx: Context, info: str):
         now = time.time()
         received_elapsed = now - self.received_start_time
-        for limit in CLIENT_SEND_LIMITS:
+        for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
                 logger.warning(
                     f"⚠️ [📞Executor] 收到消息数过多，可能是flood攻击，将断开连接。调用：{info}")
                 return True
-        if received_elapsed > CLIENT_SEND_LIMITS[-1][1]:
+        if received_elapsed > ctx.server_limits[-1][1]:
             self.received_msgs = 0
             self.received_start_time = now
         return False
