@@ -72,7 +72,7 @@ class Backend:
 
     def configure(self):
         """
-        配置数据库，如果可能的话。
+        启动时检查并配置数据库，减少运维压力的帮助方法，非必须。
         """
         raise NotImplementedError
 
@@ -281,6 +281,10 @@ class ComponentTransaction:
         """
         获取 `where` == `value` 的单行数据，返回c-struct like。
         `where` 不是unique索引时，返回升序排序的第一条数据。
+        就是query的语法糖，等同以下代码：
+        >>> async def some_system(ctx):
+        ...     rows = await ctx[Item].query(where, value, limit=1, lock_index=False)
+        ...     return rows[0] if rows else None
 
         Parameters
         ----------
@@ -343,8 +347,9 @@ class ComponentTransaction:
         return row.copy()
 
     async def query(
-            self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
-    ) -> np.recarray:
+            self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True,
+            index_only=False
+    ) -> np.recarray | list[int]:
         """
         查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
         如果 `right` 为 `None`，则查询等于 `left` 的数据。
@@ -380,11 +385,15 @@ class ComponentTransaction:
 
             由于1在查询完后，已经对所有查询到的行进行了锁定，即使不锁定index，2也可以保证道具不会被其他进程修改。
             所以如果不锁定index，只会导致1和2之间，有新道具进入背包，删除可能不彻底，没有其他害处。
+        index_only: bool
+            如果只需要获取Index的查询结果，不需要行数据，可以选择index_only=True。
+            返回的是List[int] of row_id。
 
         Returns
         -------
         rows: np.recarray
             返回 `numpy.array`，如果没有查询到数据，返回空 `numpy.array`。
+            如果 `index_only=True`，返回的是 `List[int]`。
 
         Notes
         -----
@@ -412,6 +421,9 @@ class ComponentTransaction:
 
         # 查询
         row_ids = await self._db_query(index_name, left, right, limit, desc, lock_index)
+
+        if index_only:
+            return row_ids
 
         # 获得所有行数据并lock row
         rtn = []
@@ -606,6 +618,11 @@ class ComponentTransaction:
         self._del_flags.add(row_id)
         self._trx_delete(row_id, old_row)
 
+    async def delete_rows(self, row_ids: list[int] | np.ndarray) -> None:
+        assert type(row_ids) is np.ndarray and row_ids.shape[0] > 1, "deletes数据必须是多行数据"
+        for row_id in row_ids:
+            await self.delete(row_id)
+
 
 class UpdateOrInsert:
     def __init__(self, comp_trx: ComponentTransaction, value, where):
@@ -794,6 +811,7 @@ class Subscriptions:
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
         self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
+        self._index_sub_count = 0
 
     async def close(self):
         return await self._mq_client.close()
@@ -801,6 +819,10 @@ class Subscriptions:
     async def mq_pull(self):
         """从MQ获得消息，并存放到本地内存。需要单独的协程反复调用，防止MQ消息堆积。"""
         return await self._mq_client.pull()
+
+    def count(self):
+        """获取订阅数，返回row订阅数，index订阅数"""
+        return len(self._subs) - self._index_sub_count, self._index_sub_count
 
     @classmethod
     def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
@@ -863,6 +885,7 @@ class Subscriptions:
         sub_id = self._make_query_str(
             table, 'id', row['id'], None, 1, False)
         if sub_id in self._subs:
+            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
 
         channel_name = table.channel_name(row_id=row['id'])
@@ -910,6 +933,7 @@ class Subscriptions:
 
         sub_id = self._make_query_str(table, index_name, left, right, limit, desc)
         if sub_id in self._subs:
+            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, rows
 
         index_channel = table.channel_name(index_name=index_name)
@@ -921,6 +945,7 @@ class Subscriptions:
             dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
         self._subs[sub_id] = idx_sub
         self._channel_subs.setdefault(index_channel, set()).add(sub_id)
+        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
 
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
         for row_id in row_ids:
@@ -942,6 +967,8 @@ class Subscriptions:
                 await self._mq_client.unsubscribe(channel)
                 del self._channel_subs[channel]
         self._subs.pop(sub_id)
+        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
+
 
     async def get_updates(self, timeout=None) -> dict[str, dict[int, dict]]:
         """
