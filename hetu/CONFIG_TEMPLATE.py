@@ -43,14 +43,17 @@ ACCESS_LOG = False
 
 # 闲置多少秒未调用System则视为断线
 SYSTEM_CALL_IDLE_TIMEOUT = 60 * 2
-# 限制客户端发送消息的频率，可以设置多个指标，格式为[[最大数量，统计时间（秒）], ...]，默认值目标是限制每秒3条消息
-CLIENT_SEND_LIMITS = [[30, 1], [80, 5], [300, 50], [900, 300]]
-# 限制服务器端发送消息的频率，格式同上
-SERVER_SEND_LIMITS = [[30, 1], [80, 5], [300, 50], [900, 300]]
-# 限制每个客户端最大允许订阅的行数。每次Select算1行，每次Query后算返回的行数。
-ROW_SUBSCRIPTION_LIMIT = 1000
-# 限制每个客户端最大允许订阅的Index数(Query订阅)。每次Query订阅+1。
-INDEX_SUBSCRIPTION_LIMIT = 50
+# 限制未登录客户端发送消息的频率，可以设置多个指标，格式为[[最大数量，统计时间（秒）], ...]，默认值目标是限制每秒3条消息
+# 登录提权后限制次数*10，或自己在login逻辑中修改ctx.client_send_limits值来实现
+CLIENT_SEND_LIMITS = [[10, 1], [27, 5], [100, 50], [300, 300]]
+# 限制服务器端发送给未登录客户端消息的频率，格式同上
+SERVER_SEND_LIMITS = [[10, 1], [27, 5], [100, 50], [300, 300]]
+# 限制未登录客户端最大允许订阅的行数。每次Select算1行，每次Query后算返回的行数。
+# 登录提权后限制数*100，或自己在login逻辑中修改ctx.max_row_sub值来实现
+MAX_ROW_SUBSCRIPTION = 10
+# 限制未登录客户端最大允许订阅的Index数(Query订阅)。每次Query订阅+1。
+MAX_INDEX_SUBSCRIPTION = 1
+
 
 # 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
 PACKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩

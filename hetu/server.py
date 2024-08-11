@@ -68,7 +68,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 
 
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
-                   push_queue: asyncio.Queue, row_limit, index_limit):
+                   push_queue: asyncio.Queue):
     """处理Client SDK调用订阅的命令"""
     # print(executor.context, 'sub', data)
     check_length('sub', data, 4, 100)
@@ -76,10 +76,11 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     if table is None:
         raise ValueError(f"subscribe了不存在的Component名，注意大小写：{data[1]}")
 
-    if executor.context.group and executor.context.group.startswith("admin"):
+    ctx = executor.context
+    if ctx.group and ctx.group.startswith("admin"):
         caller = 'admin'
     else:
-        caller = executor.context.caller
+        caller = ctx.caller
 
     match data[2]:
         case 'select':
@@ -95,7 +96,7 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub = subs.count()
-    if num_row_sub > row_limit or num_idx_sub > index_limit:
+    if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
         raise ValueError(f"订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
 
 
@@ -109,10 +110,10 @@ async def client_receiver(
         executor: SystemExecutor,
         subs: Subscriptions,
         push_queue: asyncio.Queue,
-        flood_checker: connection.ConnectionFloodChecker,
-        row_limit, index_limit
+        flood_checker: connection.ConnectionFloodChecker
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
+    ctx = executor.context
     last_data = None
     try:
         async for message in ws:
@@ -123,7 +124,7 @@ async def client_receiver(
             # print('recv',executor.context, last_data)
             # 检查接受上限
             flood_checker.received()
-            if flood_checker.recv_limit_reached("Coroutines(Websocket.client_receiver)"):
+            if flood_checker.recv_limit_reached(ctx, "Coroutines(Websocket.client_receiver)"):
                 return ws.fail_connection()
             # 执行消息
             match last_data[0]:
@@ -133,7 +134,7 @@ async def client_receiver(
                         print(executor.context, 'call failed, close connection...')
                         return ws.fail_connection()
                 case 'sub':  # sub component_name select/query args ...
-                    await sub_call(last_data, executor, subs, push_queue, row_limit, index_limit)
+                    await sub_call(last_data, executor, subs, push_queue)
                 case 'unsub':  # unsub sub_id
                     check_length('unsub', last_data, 2, 2)
                     await subs.unsubscribe(last_data[1])
@@ -142,7 +143,7 @@ async def client_receiver(
                 case _:
                     raise ValueError(f"Invalid message")
     except asyncio.CancelledError:
-        # print(executor.context, 'client_receiver normal canceled')
+        # print(ctx, 'client_receiver normal canceled')
         pass
     except WebsocketClosed:
         pass
@@ -150,11 +151,11 @@ async def client_receiver(
         logger.error(f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {e}")
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        logger.exception(f"❌ [📡WSReceiver] 执行异常，连接{executor.context}，"
+        logger.exception(f"❌ [📡WSReceiver] 执行异常，连接{ctx}，"
                          f"封包：{last_data}，异常：{e}")
         ws.fail_connection()
     finally:
-        # print(executor.context, 'client_receiver closed')
+        # print(ctx, 'client_receiver closed')
         pass
 
 
@@ -211,21 +212,30 @@ async def websocket_connection(request: Request, ws: Websocket):
     executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
     flood_checker = connection.ConnectionFloodChecker()
     await executor.initialize(request.client_ip)
-    logger.info(f"🔗 [📡WSConnect] 新连接：{executor.context} | IP:{request.client_ip} "
+    ctx = executor.context
+    logger.info(f"🔗 [📡WSConnect] 新连接：{ctx} | IP:{request.client_ip} "
                 f"| TASK:{asyncio.current_task().get_name()}")
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
 
+    # 传递默认配置参数到ctx
+    default_limits = [[10, 1], [25, 5], [100, 50], [300, 300]]
+    ctx.configure(
+        idle_timeout=request.app.config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2),
+        client_limits=request.app.config.get('CLIENT_SEND_LIMITS', default_limits),
+        server_limits=request.app.config.get('SERVER_SEND_LIMITS', default_limits),
+        max_row_sub=request.app.config.get('MAX_ROW_SUBSCRIPTION', 1000),
+        max_index_sub=request.app.config.get('MAX_INDEX_SUBSCRIPTION', 50),
+    )
+
     # 创建接受客户端消息的协程
     protocol = dict(compress=request.app.ctx.compress,
                     crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, executor, subscriptions, push_queue, flood_checker,
-        request.app.config.get('ROW_SUBSCRIPTION_LIMIT', 1000),
-        request.app.config.get('INDEX_SUBSCRIPTION_LIMIT', 50))
+        ws, protocol, executor, subscriptions, push_queue, flood_checker)
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
@@ -245,7 +255,7 @@ async def websocket_connection(request: Request, ws: Websocket):
             await ws.send(encode_message(reply, protocol))
             # 检查发送上限
             flood_checker.sent()
-            if flood_checker.send_limit_reached("Coroutines(Websocket.push)"):
+            if flood_checker.send_limit_reached(ctx, "Coroutines(Websocket.push)"):
                 ws.fail_connection()
                 break
     except asyncio.CancelledError:
@@ -257,7 +267,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.exception(f"❌ [📡WSSender] 发送数据异常：{e}")
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        logger.info(f"⛓️ [📡WSConnect] 连接断开：{executor.context} | IP:{request.client_ip} "
+        logger.info(f"⛓️ [📡WSConnect] 连接断开：{ctx} | IP:{request.client_ip} "
                     f"| TASK:{asyncio.current_task().get_name()}")
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
@@ -314,12 +324,6 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].remove('error_console')
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].remove('console')
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].remove('console')
-
-    # 配置其他选项
-    connection.SYSTEM_CALL_IDLE_TIMEOUT = config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2)
-    default_limits = [[30, 1], [80, 5], [300, 50], [900, 300]]
-    connection.CLIENT_SEND_LIMITS = config.get('CLIENT_SEND_LIMITS', default_limits)
-    connection.SERVER_SEND_LIMITS = config.get('SERVER_SEND_LIMITS', default_limits)
 
     # 加载web服务器
     app = Sanic(app_name, log_config=LOGGING_CONFIG_DEFAULTS)
