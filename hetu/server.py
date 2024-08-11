@@ -68,7 +68,7 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 
 
 async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
-                   push_queue: asyncio.Queue):
+                   push_queue: asyncio.Queue, row_limit, index_limit):
     """处理Client SDK调用订阅的命令"""
     # print(executor.context, 'sub', data)
     check_length('sub', data, 4, 100)
@@ -94,6 +94,10 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     reply = ['sub', sub_id, data]
     await push_queue.put(reply)
 
+    num_row_sub, num_idx_sub = subs.count()
+    if num_row_sub > row_limit or num_idx_sub > index_limit:
+        raise ValueError(f"订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
+
 
 @hetu_bp.route("/")
 async def web_root(request):
@@ -105,7 +109,8 @@ async def client_receiver(
         executor: SystemExecutor,
         subs: Subscriptions,
         push_queue: asyncio.Queue,
-        flood_checker: connection.ConnectionFloodChecker
+        flood_checker: connection.ConnectionFloodChecker,
+        row_limit, index_limit
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     last_data = None
@@ -128,7 +133,7 @@ async def client_receiver(
                         print(executor.context, 'call failed, close connection...')
                         return ws.fail_connection()
                 case 'sub':  # sub component_name select/query args ...
-                    await sub_call(last_data, executor, subs, push_queue)
+                    await sub_call(last_data, executor, subs, push_queue, row_limit, index_limit)
                 case 'unsub':  # unsub sub_id
                     check_length('unsub', last_data, 2, 2)
                     await subs.unsubscribe(last_data[1])
@@ -218,7 +223,9 @@ async def websocket_connection(request: Request, ws: Websocket):
                     crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, executor, subscriptions, push_queue, flood_checker)
+        ws, protocol, executor, subscriptions, push_queue, flood_checker,
+        request.app.config.get('ROW_SUBSCRIPTION_LIMIT', 1000),
+        request.app.config.get('INDEX_SUBSCRIPTION_LIMIT', 50))
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
