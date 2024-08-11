@@ -10,7 +10,7 @@ import random
 import time
 from dataclasses import dataclass
 
-from .connection import Connection
+from .connection import ConnectionAliveChecker
 from .context import Context
 from ..data import Permission
 from ..data.backend import RaceCondition
@@ -45,7 +45,7 @@ class SystemExecutor:
     def __init__(self, namespace: str, comp_mgr: ComponentTableManager):
         self.namespace = namespace
         self.comp_mgr = comp_mgr
-        self.last_active = 0
+        self.alive_checker = ConnectionAliveChecker(comp_mgr)
         self.context = Context(
             caller=None,
             connection_id=0,
@@ -177,19 +177,9 @@ class SystemExecutor:
             return False, None
 
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
-        # 此方法无法通过事务，判断后有其他进程修改了conn.owner问题也不大
-        conn_tbl = self.comp_mgr.get_table(Connection)
-        caller, conn_id = self.context.caller, self.context.connection_id
-        if caller and caller > 0:
-            conn = await conn_tbl.direct_get(conn_id)
-            if conn is None or conn.owner != caller:
-                logger.warning(f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{call}")
-                return False, None
-        # 每2秒更新次last_active，防止批量操作时频繁更新
-        now = time.time()
-        if now - self.last_active > 30:
-            await conn_tbl.direct_set(self.context.connection_id, last_active=now)
-            self.last_active = now
+        illegal = await self.alive_checker.is_illegal(self.context, str(call))
+        if illegal:
+            return False, None
 
         # 开始调用
         return await self._execute(sys, *call.args)

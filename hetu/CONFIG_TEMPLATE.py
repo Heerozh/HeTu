@@ -41,6 +41,17 @@ ACCESS_LOG = False
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
+# 闲置多少秒未调用System则视为断线
+SYSTEM_CALL_IDLE_TIMEOUT = 60 * 2
+# 限制客户端发送消息的频率，可以设置多个指标，格式为[[最大数量，统计时间（秒）], ...]，默认值目标是限制每秒3条消息
+CLIENT_SEND_LIMITS = [[30, 1], [80, 5], [300, 50], [900, 300]]
+# 限制服务器端发送消息的频率，格式同上
+SERVER_SEND_LIMITS = [[30, 1], [80, 5], [300, 50], [900, 300]]
+# 限制每个客户端最大允许订阅的行数。每次Select算1行，每次Query后算返回的行数。
+ROW_SUBSCRIPTION_LIMIT = 1000
+# 限制每个客户端最大允许订阅的Index数(Query订阅)。每次Query订阅+1。
+INDEX_SUBSCRIPTION_LIMIT = 50
+
 # 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
 PACKET_COMPRESSION_CLASS = 'zlib'   # 通过该class的compress和decompress方法进行压缩和解压缩
 PACKET_CRYPTOGRAPHY_CLASS = None    # 通过该class的encrypt和decrypt方法进行加密和解密

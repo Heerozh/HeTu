@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import zlib
+
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from sanic import Blueprint
@@ -24,6 +25,8 @@ import hetu
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
+import hetu.system.connection as connection
+
 
 hetu_bp = Blueprint("my_blueprint")
 _ = zlib  # 标记使用，下方globals()['zlib']会使用
@@ -101,7 +104,8 @@ async def client_receiver(
         ws: Websocket, protocol: dict,
         executor: SystemExecutor,
         subs: Subscriptions,
-        push_queue: asyncio.Queue
+        push_queue: asyncio.Queue,
+        flood_checker: connection.ConnectionFloodChecker
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     last_data = None
@@ -112,6 +116,10 @@ async def client_receiver(
             # 转换消息到array
             last_data = decode_message(message, protocol)
             # print('recv',executor.context, last_data)
+            # 检查接受上限
+            flood_checker.received()
+            if flood_checker.recv_limit_reached("Coroutines(Websocket.client_receiver)"):
+                return ws.fail_connection()
             # 执行消息
             match last_data[0]:
                 case 'sys':  # sys system_name args ...
@@ -196,6 +204,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 初始化执行器，一个连接一个执行器
     comp_mgr = request.app.ctx.comp_mgr
     executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
+    flood_checker = connection.ConnectionFloodChecker()
     await executor.initialize(request.client_ip)
     logger.info(f"🔗 [📡WSConnect] 新连接：{executor.context} | IP:{request.client_ip} "
                 f"| TASK:{asyncio.current_task().get_name()}")
@@ -208,7 +217,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     protocol = dict(compress=request.app.ctx.compress,
                     crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
-    receiver_task = client_receiver(ws, protocol, executor, subscriptions, push_queue)
+    receiver_task = client_receiver(
+        ws, protocol, executor, subscriptions, push_queue, flood_checker)
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
@@ -226,6 +236,11 @@ async def websocket_connection(request: Request, ws: Websocket):
             # todo 增加replay log file，把recv和send的消息都记录，以及事务执行的结果等
             # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
+            # 检查发送上限
+            flood_checker.sent()
+            if flood_checker.send_limit_reached("Coroutines(Websocket.push)"):
+                ws.fail_connection()
+                break
     except asyncio.CancelledError:
         # print(executor.context, 'websocket_connection normal canceled')
         pass
@@ -292,6 +307,12 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].remove('error_console')
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].remove('console')
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].remove('console')
+
+    # 配置其他选项
+    connection.SYSTEM_CALL_IDLE_TIMEOUT = config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2)
+    default_limits = [[30, 1], [80, 5], [300, 50], [900, 300]]
+    connection.CLIENT_SEND_LIMITS = config.get('CLIENT_SEND_LIMITS', default_limits)
+    connection.SERVER_SEND_LIMITS = config.get('SERVER_SEND_LIMITS', default_limits)
 
     # 加载web服务器
     app = Sanic(app_name, log_config=LOGGING_CONFIG_DEFAULTS)
