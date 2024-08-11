@@ -44,6 +44,13 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
+def unlock(unlock_args):
+    import redis
+    r = redis.Redis.from_url(unlock_args.db)
+    r.delete('head_lock')
+    print("🔓 已解锁head_lock")
+
+
 def start(start_args):
     from sanic.config import Config
     from sanic import Sanic
@@ -191,6 +198,11 @@ def main():
     # ==================build==========================
     # todo 增加个build c# class文件
     parser_build = command_parsers.add_parser('build', help='生成客户端c#类型代码')
+
+    parser_unlock = command_parsers.add_parser('unlock', help='解锁head_lock，用于服务器非正常关闭')
+    parser_unlock.add_argument(
+        "--db", metavar="redis://127.0.0.1:6379/0", help="后端数据库地址",
+        default='redis://127.0.0.1:6379/0')
 
     # 开始执行
     args = parser.parse_args()
