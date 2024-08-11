@@ -14,7 +14,8 @@ class UnitTestBackends:
         print('ℹ️ 清理docker...')
         for container in self.containers.values():
             try:
-                container.kill()
+                container.stop()
+                container.wait()
             except (NotFound, ImportError, docker.errors.APIError):
                 pass
         # 因为服务器销毁了，清理下python中的全局lua缓存
