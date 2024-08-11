@@ -4,6 +4,7 @@ import unittest
 import zlib
 
 import sanic_testing
+from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
 from backend_mgr import UnitTestBackends
 from hetu.server import encode_message, decode_message
@@ -14,39 +15,8 @@ from hetu.system import SystemClusters
 class TestWebsocket(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        SystemClusters()._clear()
         cls.backend_mgr = UnitTestBackends()
         cls.backend_mgr.start_redis_server()
-        app_file = os.path.join(os.path.dirname(__file__), 'app.py')
-        cls.app = start_webserver("Hetu-test", {
-            'APP_FILE': app_file,
-            'NAMESPACE': 'ssw',
-            'INSTANCE_NAME': 'unittest1',
-            'LISTEN': f"0.0.0.0:874",
-            'PACKET_COMPRESSION_CLASS': 'zlib',
-            'BACKENDS': {
-                'Redis': {
-                    "type": "Redis",
-                    "master": 'redis://127.0.0.1:23318/0',
-                }
-            },
-            'DEBUG': True,
-            'WORKER_NUM': 4,
-            'ACCESS_LOG': False,
-        }, os.getpid(), True)
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.backend_mgr.teardown()
-
-    def test_websocket(self):
-        from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
-
-        # 测试服务器是否正常启动
-        request, response = self.app.test_client.get("/")
-        self.assertEqual(request.method.lower(), "get")
-        self.assertIn("Powered by HeTu", response.body.decode())
-        self.assertEqual(response.status, 200)
 
         # 设置ws测试routine方法
         protocol = dict(compress=zlib, crypto=None)
@@ -100,6 +70,40 @@ class TestWebsocket(unittest.TestCase):
 
         sanic_testing.testing.websocket_proxy = websocket_proxy
 
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.backend_mgr.teardown()
+
+    @classmethod
+    def create_app_under_current_coroutine(cls):
+        SystemClusters()._clear()
+        app_file = os.path.join(os.path.dirname(__file__), 'app.py')
+        return start_webserver("Hetu-test", {
+            'APP_FILE': app_file,
+            'NAMESPACE': 'ssw',
+            'INSTANCE_NAME': 'unittest1',
+            'LISTEN': f"0.0.0.0:874",
+            'PACKET_COMPRESSION_CLASS': 'zlib',
+            'BACKENDS': {
+                'Redis': {
+                    "type": "Redis",
+                    "master": 'redis://127.0.0.1:23318/0',
+                }
+            },
+            'DEBUG': True,
+            'WORKER_NUM': 4,
+            'ACCESS_LOG': False,
+        }, os.getpid(), True)
+
+    def test_websocket(self):
+        # 测试服务器是否正常启动
+        app = self.create_app_under_current_coroutine()
+        request, response = app.test_client.get("/")
+        self.assertEqual(request.method.lower(), "get")
+        self.assertIn("Powered by HeTu", response.body.decode())
+        self.assertEqual(response.status, 200)
+
         # 测试call和结果
         async def normal_routine(connect):
             client1 = await connect()
@@ -125,7 +129,7 @@ class TestWebsocket(unittest.TestCase):
 
             await client1.recv()
 
-        _, response1 = self.app.test_client.websocket("/hetu", mimic=normal_routine)
+        _, response1 = app.test_client.websocket("/hetu", mimic=normal_routine)
         # print(response1.client_received)
         # 测试hp减2
         self.assertEqual(response1.client_received[0][2]['1'],
@@ -135,7 +139,7 @@ class TestWebsocket(unittest.TestCase):
                          {'id': '1', 'owner': '2', 'value': '99'})
 
         # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-        self.app.ctx.default_backend.reset_connection_pool()
+        app.ctx.default_backend.reset_connection_pool()
 
         # 测试踢掉别人的连接
         async def kick_routine(connect):
@@ -154,11 +158,21 @@ class TestWebsocket(unittest.TestCase):
             with self.assertRaisesRegex(ConnectionClosedError, '.*'):
                 await client1.send(['sys', 'use_hp', 2])
 
-        _, response1 = self.app.test_client.websocket("/hetu", mimic=kick_routine)
+        _, response1 = app.test_client.websocket("/hetu", mimic=kick_routine)
         # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
         self.assertEqual(response1.client_sent[-1], ['sys', 'use_hp', 2], "最后一行没执行到")
-        self.app.ctx.default_backend.reset_connection_pool()
+        app.ctx.default_backend.reset_connection_pool()
 
+    def test_flooding(self):
+        async def flooding_routine(connect):
+            client1 = await connect()
+            for i in range(200):
+                await client1.send(['sys', 'login', 1])
+                await client1.recv()
+
+        app = self.create_app_under_current_coroutine()
+        with self.assertRaises(Exception):
+            app.test_client.websocket("/hetu", mimic=flooding_routine)
 
 if __name__ == '__main__':
     unittest.main()
