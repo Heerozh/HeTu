@@ -198,7 +198,7 @@ class TestWebsocket(unittest.TestCase):
                 await client1.recv()
                 await asyncio.sleep(2/270)
 
-        app.ctx.default_backend.reset_connection_pool()
+        app = self.create_app_under_current_coroutine()
         app.test_client.websocket("/hetu", mimic=normal_routine_lv2)
 
         app.ctx.default_backend.reset_connection_pool()
