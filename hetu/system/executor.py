@@ -49,6 +49,7 @@ class SystemExecutor:
         self.context = Context(
             caller=None,
             connection_id=0,
+            address="NotSet",
             group=None,
             user_data={},
 

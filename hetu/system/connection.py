@@ -16,11 +16,13 @@ from ..system import define_system
 
 logger = logging.getLogger('HeTu')
 
+MAX_ANONYMOUS_CONNECTION_BY_IP = 10  # 占位符，实际由Config里修改
+
 
 @define_component(namespace='HeTu', persist=False, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
-    address: str = Property('', dtype='<U32')  # 连接地址
+    address: str = Property('', dtype='<U32', index=True)  # 连接地址
     device: str = Property('', dtype='<U32')  # 物理设备名
     device_id: str = Property('', dtype='<U128')  # 设备id
     admin: str = Property('', dtype='<U16')  # 是否是admin
@@ -30,6 +32,13 @@ class Connection(BaseComponent):
 
 @define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def new_connection(ctx: Context, address: str):
+    same_ips = await ctx[Connection].query('address', address, limit=1000)
+    same_ip_guests = same_ips[same_ips.owner == 0]
+    if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
+        msg = f"⚠️ [📞Executor] [非法操作] {ctx} | 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+        logger.warning(msg)
+        raise RuntimeError(msg)
+
     row = Connection.new_row()
     row.owner = 0
     row.created = time.time()
@@ -38,6 +47,7 @@ async def new_connection(ctx: Context, address: str):
     await ctx[Connection].insert(row)
     row_ids = await ctx.end_transaction()
     ctx.connection_id = row_ids[0]
+    ctx.address = address
 
 
 @define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))

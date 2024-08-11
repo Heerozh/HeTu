@@ -326,6 +326,9 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].remove('console')
         LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].remove('console')
 
+    # 传递配置
+    connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 10)
+
     # 加载web服务器
     app = Sanic(app_name, log_config=LOGGING_CONFIG_DEFAULTS)
     app.update_config(config)
