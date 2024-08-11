@@ -140,7 +140,9 @@ class ConnectionFloodChecker:
         for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
                 logger.warning(
-                    f"⚠️ [📞Executor] [非法操作] {ctx} | 发送消息数过多，可能是订阅攻击，将断开连接。调用：{info}")
+                    f"⚠️ [📞Executor] [非法操作] {ctx} | "
+                    f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
+                    f"可能是订阅攻击，将断开连接。调用：{info}")
                 return True
         if sent_elapsed > ctx.server_limits[-1][1]:
             self.sent_msgs = 0
@@ -153,7 +155,9 @@ class ConnectionFloodChecker:
         for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
                 logger.warning(
-                    f"⚠️ [📞Executor] [非法操作] {ctx} | 收到消息数过多，可能是flood攻击，将断开连接。调用：{info}")
+                    f"⚠️ [📞Executor] [非法操作] {ctx} | "
+                    f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
+                    f"可能是flood攻击，将断开连接。调用：{info}")
                 return True
         if received_elapsed > ctx.server_limits[-1][1]:
             self.received_msgs = 0
