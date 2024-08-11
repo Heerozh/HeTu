@@ -189,14 +189,16 @@ class TestWebsocket(unittest.TestCase):
             for i in range(270):
                 await client1.send(['sys', 'login', 1])
                 await client1.recv()
-                await asyncio.sleep(2/270)
+                if i == 99:
+                    await asyncio.sleep(1)
 
         async def flooding_routine_lv2(connect):
             client1 = await connect()
             for i in range(271):
                 await client1.send(['sys', 'login', 1])
                 await client1.recv()
-                await asyncio.sleep(2/270)
+                if i == 99:
+                    await asyncio.sleep(1)
 
         app = self.create_app_under_current_coroutine()
         app.test_client.websocket("/hetu", mimic=normal_routine_lv2)
