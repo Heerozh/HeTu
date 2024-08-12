@@ -212,7 +212,6 @@ def main():
     # parser_start = command_parsers.add_parser(
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
     # ==================build==========================
-    # todo 增加个build c# class文件
     parser_build = command_parsers.add_parser('build', help='生成客户端c#类型代码')
     parser_build.add_argument(
         "--app-file", help="河图app的py文件", metavar=".app.py", default="/app/app.py")
