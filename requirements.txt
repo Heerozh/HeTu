@@ -12,4 +12,6 @@ docker  # pip install -U docker
 aiohttp  # pip install -U aiohttp
 sanic-testing  # pip install -U sanic-testing
 
+# 维护工具用
+tqdm  # 和sanic冲突
 # conda install ipykernel ipywidgets
