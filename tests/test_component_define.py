@@ -115,6 +115,22 @@ class TestComponentDefine(unittest.TestCase):
         self.assertEqual(TestString.indexes_['b'], True)
         self.assertEqual(TestString.indexes_['c'], False)
 
+    def test_keyword_define(self):
+        with self.assertRaisesRegex(ValueError, "关键字"):
+            @define_component(namespace='HeTu', persist=False)
+            class TestKeywordComponent(BaseComponent):
+                bool: bool = Property(False)
+
+        with self.assertRaisesRegex(ValueError, "C#"):
+            @define_component(namespace='HeTu', persist=False)
+            class TestKeywordComponent(BaseComponent):
+                sbyte: bool = Property(False)
+
+        with self.assertRaisesRegex(ValueError, "C#"):
+            @define_component(namespace='HeTu', persist=False)
+            class sbyte(BaseComponent):
+                _ok: bool = Property(False)
+
 
 if __name__ == '__main__':
     unittest.main()
