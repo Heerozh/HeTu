@@ -51,6 +51,21 @@ def unlock(unlock_args):
     print("🔓 已解锁head_lock")
 
 
+def build(build_args):
+    import importlib.util
+    # 加载玩家的app文件
+    spec = importlib.util.spec_from_file_location('HeTuApp', build_args.app_file)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules['HeTuApp'] = module
+    spec.loader.exec_module(module)
+    from hetu.system import SystemClusters
+    SystemClusters().build_clusters(build_args.namespace)
+
+    from hetu.sourcegen.csharp import generate_all_components
+    generate_all_components(build_args.namespace, build_args.output)
+    print(f"✅ 已生成C#代码到 {build_args.output}")
+
+
 def start(start_args):
     from sanic.config import Config
     from sanic import Sanic
@@ -199,7 +214,14 @@ def main():
     # ==================build==========================
     # todo 增加个build c# class文件
     parser_build = command_parsers.add_parser('build', help='生成客户端c#类型代码')
-
+    parser_build.add_argument(
+        "--app-file", help="河图app的py文件", metavar=".app.py", default="/app/app.py")
+    parser_build.add_argument(
+        "--namespace", metavar="game1", help="编译app.py中哪个namespace下的数据类型",
+        required=True)
+    parser_build.add_argument(
+        "--output", metavar="./Components.cs", help="输出文件路径", required=True)
+    # ==================unlock==========================
     parser_unlock = command_parsers.add_parser('unlock', help='解锁head_lock，用于服务器非正常关闭')
     parser_unlock.add_argument(
         "--db", metavar="redis://127.0.0.1:6379/0", help="后端数据库地址",

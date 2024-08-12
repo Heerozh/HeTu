@@ -220,7 +220,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             if isinstance(prop, Property):
                 if prop.dtype is None:
                     prop.dtype = dtype
-                if keyword.iskeyword(_name) or _name in __builtins__:
+                if keyword.iskeyword(_name) or _name in ['bool', 'int', 'float', 'str']:
                     raise ValueError(f"{cls.__name__}.{_name}属性的类型定义出错，属性名不能是Python关键字。")
                 if csharp_keyword.iskeyword(_name):
                     raise ValueError(f"{cls.__name__}.{_name}属性的类型定义出错，属性名不能是C#关键字。")
