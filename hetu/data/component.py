@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 from ..common import Singleton
+from ..common import csharp_keyword
 from dataclasses import dataclass
 from enum import IntEnum
 import json
@@ -14,6 +15,7 @@ import git
 import os
 import numpy as np
 import logging
+import keyword
 logger = logging.getLogger('HeTu')
 
 
@@ -206,39 +208,46 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
     会自行自增无法修改。
     """
     def warp(cls):
+        # class名合法性检测
+        if csharp_keyword.iskeyword(cls.__name__):
+            raise ValueError(f"组件名({cls.__name__})是C#关键字，请refactor。")
         # 获取class的property成员列表
         cls_annotations = cls.__dict__.get('__annotations__', {})
         properties = {}
         # 从class读取并删除该成员
-        for name, dtype in cls_annotations.items():
-            prop = getattr(cls, name, None)
+        for _name, dtype in cls_annotations.items():
+            prop = getattr(cls, _name, None)
             if isinstance(prop, Property):
                 if prop.dtype is None:
                     prop.dtype = dtype
+                if keyword.iskeyword(_name) or _name in __builtins__:
+                    raise ValueError(f"{cls.__name__}.{_name}属性的类型定义出错，属性名不能是Python关键字。")
+                if csharp_keyword.iskeyword(_name):
+                    raise ValueError(f"{cls.__name__}.{_name}属性的类型定义出错，属性名不能是C#关键字。")
                 assert np.dtype(prop.dtype).itemsize > 0, \
-                    f"{cls.__name__}.{name}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+                    f"{cls.__name__}.{_name}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
                 assert np.dtype(prop.dtype).type is not np.void, \
-                    f"{cls.__name__}.{name}属性的dtype不支持void类型"
+                    f"{cls.__name__}.{_name}属性的dtype不支持void类型"
                 # bool类型在一些后端数据库中不支持，强制转换为int8
                 if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
                     prop.dtype = np.int8
                 if prop.unique:
                     prop.index = True
                 assert prop.default is not None, \
-                    (f"{cls.__name__}.{name}默认值不能为None。所有属性都要有默认值，"
+                    (f"{cls.__name__}.{_name}默认值不能为None。所有属性都要有默认值，"
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
                 can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
                 if not can_cast and not (type(prop.default) is str or type(prop.default) is bytes):
                     # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败,所以要转为负数再判断一次
                     default_value = -prop.default if prop.default != 0 else -1
                     can_cast = np.can_cast(np.min_scalar_type(default_value), prop.dtype)
-                assert can_cast, (f"{cls.__name__}.{name}的default值："
+                assert can_cast, (f"{cls.__name__}.{_name}的default值："
                                   f"{type(prop.default).__name__}({prop.default})"
                                   f"和属性dtype({prop.dtype})不匹配")
-                properties[name] = prop
+                properties[_name] = prop
             else:
-                raise AssertionError(f"{cls.__name__}.{name}不是Property类型")
-            delattr(cls, name)
+                raise AssertionError(f"{cls.__name__}.{_name}不是Property类型")
+            delattr(cls, _name)
         # Property类型强制要求定义type hint
         for name, value in cls.__dict__.items():
             if isinstance(value, Property) and name not in properties:
