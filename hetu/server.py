@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import zlib
+import logging
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 
@@ -222,7 +223,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     logger.info(f"🔗 [📡WSConnect] 新连接：{ctx} | IP:{request.client_ip} "
                 f"| TASK:{asyncio.current_task().get_name()}")
     # 初始化当前连接的ReplayLogger
-    replay_logger = ConnectionAndTimedRotatingReplayLogger("./replays/", ctx.connection_id)
+    replay_logger = ConnectionAndTimedRotatingReplayLogger("./logs/replays/", ctx.connection_id)
     executor.set_replay_logger(replay_logger)
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
@@ -233,7 +234,7 @@ async def websocket_connection(request: Request, ws: Websocket):
 
 
     # 传递默认配置参数到ctx
-    default_limits = [[10, 1], [27, 5], [100, 50], [300, 300]]
+    default_limits = [] # [[10, 1], [27, 5], [100, 50], [300, 300]]
     ctx.configure(
         idle_timeout=request.app.config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2),
         client_limits=request.app.config.get('CLIENT_SEND_LIMITS', default_limits),

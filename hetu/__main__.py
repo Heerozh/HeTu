@@ -4,23 +4,19 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import argparse
+import gettext
+import logging
 import os
-import sys
 import subprocess
-
+import sys
+import yaml
 import redis
 
 from hetu.server import start_webserver
+from hetu.common import yamlloader
 
-import gettext
-args_loc = {
-    "usage: ": "用法：",
-    "the following arguments are required: %s": "以下参数是必须的： %s",
-}
-gettext.gettext = lambda x: args_loc.get(x, x)
-
-import argparse
-
+logger = logging.getLogger('HeTu')
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -31,6 +27,12 @@ FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  █        █   \033[0m █ █▄▄▄▄▄█ █
 \033[38;2;25;170;255m  █     ▀▀▄█   \033[0m █▀▀▀▀▀▀▀▀▀█
 """
+
+args_loc = {
+    "usage: ": "用法：",
+    "the following arguments are required: %s": "以下参数是必须的： %s",
+}
+gettext.gettext = lambda x: args_loc.get(x, x)
 
 
 def str2bool(v):
@@ -76,7 +78,7 @@ def start(start_args):
     # 自动启动Redis部分
     redis_proc = None
     if os.environ.get('HETU_RUN_REDIS', None) and not start_args.standalone:
-        print(f"💾 正在自动启动Redis...")  #此时logger还未启动
+        print(f"💾 正在自动启动Redis...")  # 此时logger还未启动
         os.mkdir('data') if not os.path.exists('data') else None
         import shutil
         if shutil.which("redis-server"):
@@ -88,9 +90,11 @@ def start(start_args):
     # 命令行转配置文件
     if start_args.config:
         config = Config()
-        # sanic不支持windows path
-        config_file = start_args.config.replace('\\', '/')
-        config.update_config(config_file)
+        config_file = start_args.config
+        with open(config_file, 'r', encoding='utf-8') as f:
+            config_dict = yaml.load(f, yamlloader.Loader)
+        # update_config只会读取大写的值到config变量
+        config.update_config(config_dict)
         config_for_factory = config
     else:
         if not start_args.app_file or not start_args.namespace or not start_args.instance:
@@ -103,7 +107,6 @@ def start(start_args):
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
             'LISTEN': f"0.0.0.0:{start_args.port}",
-            'CERT_CHAIN': start_args.cert,
             'PACKET_COMPRESSION_CLASS': 'zlib',
             'BACKENDS': {
                 'Redis': {
@@ -111,14 +114,16 @@ def start(start_args):
                     "master": start_args.db,
                 }
             },
-            'DEBUG': start_args.debug,
             'WORKER_NUM': start_args.workers,
+
+            'CERT_CHAIN': start_args.cert,
+            'DEBUG': start_args.debug,
             'ACCESS_LOG': False,
         }
         config = Config(config_for_factory)
     # 生成log目录
     os.mkdir('logs') if not os.path.exists('logs') else None
-    os.mkdir('replays') if not os.path.exists('replays') else None
+    os.mkdir('logs/replays') if not os.path.exists('logs/replays') else None
     # prepare用的配置
     fast = config.WORKER_NUM < 0
     workers = fast and 1 or config.WORKER_NUM
@@ -149,7 +154,7 @@ def start(start_args):
                 motd=False,
                 host=host,
                 port=int(port),
-                auto_tls= ssl == 'auto',
+                auto_tls=ssl == 'auto',
                 auto_reload=config.DEBUG,
                 ssl=ssl if ssl != 'auto' else None,
                 fast=fast,
@@ -186,7 +191,7 @@ def main():
         "--app-file", help="河图app的py文件", metavar=".app.py", default="/app/app.py")
     cli_group.add_argument(
         "--namespace", metavar="game1", help="启动app.py中哪个namespace下的System")
-    cli_group.add_argument(               # 不能require=True，因为有config参数
+    cli_group.add_argument(  # 不能require=True，因为有config参数
         "--instance", help="实例名称，每个实例是一个副本", metavar="server1")
     cli_group.add_argument(
         "--port", metavar="2446", help="监听的Websocket端口", default='2466')
@@ -207,7 +212,7 @@ def main():
 
     cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
     cfg_group.add_argument(
-        "--config", help="配置文件模板见CONFIG_TEMPLATE.py", metavar="config.py")
+        "--config", help="配置文件模板见CONFIG_TEMPLATE.yml", metavar="config.yml")
     # ==================migration==========================
     # parser_start = command_parsers.add_parser(
     #     'schema_migration', help='如果Component定义发生改变，在数据库执行版本迁移(未完成）')
