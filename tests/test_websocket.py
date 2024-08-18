@@ -91,6 +91,7 @@ class TestWebsocket(unittest.TestCase):
                     "master": 'redis://127.0.0.1:23318/0',
                 }
             },
+            'CLIENT_SEND_LIMITS': [[10, 1], [27, 5], [100, 50], [300, 300]],
             'DEBUG': True,
             'WORKER_NUM': 4,
             'ACCESS_LOG': False,

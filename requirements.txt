@@ -3,6 +3,7 @@ numpy ~= 2.0 # conda install numpy>=2.0
 redis[hiredis] ~= 5.0  # pip install -U redis[hiredis]
 GitPython ~= 3.0 # pip install -U GitPython
 sortedcontainers ~= 2.0
+pyyaml ~= 6.0  # pip install -U pyyaml
 
 websockets  # sanic自带了，不用安装，只是为了抑制IDE警告列出
 

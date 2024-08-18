@@ -39,7 +39,7 @@ class MyTestCase(unittest.TestCase):
             main()
 
         # 正常启动
-        cfg_file = os.path.join(os.path.dirname(__file__), 'config.py')
+        cfg_file = os.path.join(os.path.dirname(__file__), '../hetu/CONFIG_TEMPLATE.yml')
         sys.argv[1:] = ['start', '--config', cfg_file]
         SystemClusters()._clear()
         # 阻止启动的最后一步，不然就卡死了
