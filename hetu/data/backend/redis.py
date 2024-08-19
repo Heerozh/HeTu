@@ -22,7 +22,7 @@ from ..component import BaseComponent, Property
 from ...common.helper import batched
 from ...common.multimap import MultiMap
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 MAX_SUBSCRIBED = 1000
 
 

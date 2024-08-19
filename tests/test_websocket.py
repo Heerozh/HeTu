@@ -10,6 +10,7 @@ from backend_mgr import UnitTestBackends
 from hetu.server import encode_message, decode_message
 from hetu.server import start_webserver
 from hetu.system import SystemClusters
+from hetu.logging.default import DEFAULT_LOGGING_CONFIG
 
 
 class TestWebsocket(unittest.TestCase):
@@ -92,6 +93,7 @@ class TestWebsocket(unittest.TestCase):
                 }
             },
             'CLIENT_SEND_LIMITS': [[10, 1], [27, 5], [100, 50], [300, 300]],
+            'LOGGING': DEFAULT_LOGGING_CONFIG,
             'DEBUG': True,
             'WORKER_NUM': 4,
             'ACCESS_LOG': False,

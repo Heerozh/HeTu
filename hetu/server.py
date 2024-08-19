@@ -7,28 +7,26 @@
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import sys
 import zlib
-import logging
 
 from redis.exceptions import ConnectionError as RedisConnectionError
-
 from sanic import Blueprint
 from sanic import Request, Websocket, text
 from sanic import Sanic
 from sanic import SanicException
 from sanic.exceptions import WebsocketClosed
-from sanic.log import logger
-from sanic.log import LOGGING_CONFIG_DEFAULTS
 
 import hetu
+import hetu.system.connection as connection
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
+from hetu.logging.replay import ConnectionAndTimedRotatingReplayLogger
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
-import hetu.system.connection as connection
-from hetu.replay import ConnectionAndTimedRotatingReplayLogger
 
+logger = logging.getLogger('HeTu.root')
 
 hetu_bp = Blueprint("my_blueprint")
 _ = zlib  # 标记使用，下方globals()['zlib']会使用
@@ -205,7 +203,8 @@ async def subscription_receiver(
                      f"上次接受了：{len(last_updates)}条消息。")
         return ws.fail_connection()
     except BaseException as e:
-        logger.exception(f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，上条消息：{last_updates}，异常：{e}")
+        logger.exception(f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
+                         f"上条消息：{last_updates}，异常：{e}")
         return ws.fail_connection()
     finally:
         # print('subscription_receiver closed')
@@ -232,9 +231,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 初始化发送/接受计数器
     flood_checker = connection.ConnectionFloodChecker(replay_logger)
 
-
     # 传递默认配置参数到ctx
-    default_limits = [] # [[10, 1], [27, 5], [100, 50], [300, 300]]
+    default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
     ctx.configure(
         idle_timeout=request.app.config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2),
         client_limits=request.app.config.get('CLIENT_SEND_LIMITS', default_limits),
@@ -311,42 +309,17 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         sys.modules['HeTuApp'] = module
         spec.loader.exec_module(module)
 
-    # 重定向logger
-    import logging
-    hetu_logger = logging.getLogger('HeTu')
-    hetu_logger.parent = logger
-
-    # 配置logger文件输出
-    LOGGING_CONFIG_DEFAULTS['handlers']['err_file'] = {
-        "class": "logging.handlers.TimedRotatingFileHandler",
-        "formatter": "generic",
-        "filename": "./logs/hetu_error.log",
-        "when": 'D',
-        "delay": True,  # 解决windows上PermissionError另一个程序正在使用此文件
-        "backupCount": 30,
-    }
-    LOGGING_CONFIG_DEFAULTS['handlers']['debug_file'] = {
-        "class": "logging.handlers.TimedRotatingFileHandler",
-        "formatter": "generic",
-        "filename": "./logs/hetu_debug.log",
-        "when": 'D',
-        "delay": True,  # 解决windows上PermissionError另一个程序正在使用此文件
-        "backupCount": 30,
-    }
-    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].append('err_file')
-    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].append('debug_file')
-    LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].append('debug_file')
-    # 非debug关掉console输出
-    if not config.get('DEBUG', False):
-        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.error']['handlers'].remove('error_console')
-        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.server']['handlers'].remove('console')
-        LOGGING_CONFIG_DEFAULTS['loggers']['sanic.websockets']['handlers'].remove('console')
+    # 重定向logger，把sanic的重定向到hetu
+    root_logger = logging.getLogger("sanic")
+    root_logger.parent = logger
+    if config['DEBUG']:
+        logger.setLevel(logging.DEBUG)
 
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 10)
 
     # 加载web服务器
-    app = Sanic(app_name, log_config=LOGGING_CONFIG_DEFAULTS)
+    app = Sanic(app_name, log_config=config['LOGGING'])
     app.update_config(config)
 
     # 加载协议
