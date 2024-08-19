@@ -7,16 +7,21 @@
 import argparse
 import gettext
 import logging
+import logging.config
+import logging.handlers
 import os
 import subprocess
 import sys
-import yaml
+
 import redis
+import yaml
 
-from hetu.server import start_webserver
 from hetu.common import yamlloader
+from hetu.logging.default import DEFAULT_LOGGING_CONFIG
+from hetu.logging.handlers import AutoListener
+from hetu.server import start_webserver
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
 FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  ▀▄ ▄▄▄▄▄▄▄▄  \033[0m ▄▄▄▄▄▄▄▄▄▄▄  
@@ -71,7 +76,6 @@ def build(build_args):
 def start(start_args):
     from sanic.config import Config
     from sanic import Sanic
-    from sanic.log import logger
     from sanic.worker.loader import AppLoader
     from functools import partial
 
@@ -115,6 +119,7 @@ def start(start_args):
                 }
             },
             'WORKER_NUM': start_args.workers,
+            'LOGGING': DEFAULT_LOGGING_CONFIG,
 
             'CERT_CHAIN': start_args.cert,
             'DEBUG': start_args.debug,
@@ -123,7 +128,6 @@ def start(start_args):
         config = Config(config_for_factory)
     # 生成log目录
     os.mkdir('logs') if not os.path.exists('logs') else None
-    os.mkdir('logs/replays') if not os.path.exists('logs/replays') else None
     # prepare用的配置
     fast = config.WORKER_NUM < 0
     workers = fast and 1 or config.WORKER_NUM
@@ -131,6 +135,17 @@ def start(start_args):
     loader = AppLoader(factory=partial(start_webserver, f"Hetu-{config.NAMESPACE}",
                                        config_for_factory, os.getpid(), start_args.head))
     app = loader.load()
+    # 配置log，上面app.load()会自动调用logging.config.dictConfig(config.LOGGING)
+    # 把dictConfig生成的queue实例存到config里，好传递到子进程
+    for hdl_name, handler_dict in config.LOGGING['handlers'].items():
+        if isinstance(handler_dict.get('queue'), (str, dict, list)):
+            handler = logging.getHandlerByName(hdl_name)
+            if isinstance(handler, logging.handlers.QueueHandler):
+                handler_dict['queue'] = handler.queue
+
+    # 启动日志Listener
+    AutoListener.start_all()
+
     # 显示服务器信息
     host, port = config.LISTEN.rsplit(':', 1)
     ssl = ('CERT_CHAIN' in config) and config.CERT_CHAIN or None
@@ -169,6 +184,9 @@ def start(start_args):
         r.save()
         r.close()
         redis_proc.terminate()
+
+    # 退出log listener
+    AutoListener.stop_all()
 
 
 def main():

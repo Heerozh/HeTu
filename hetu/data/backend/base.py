@@ -42,7 +42,7 @@ import numpy as np
 
 from ..component import BaseComponent, Permission
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
 
 class RaceCondition(Exception):

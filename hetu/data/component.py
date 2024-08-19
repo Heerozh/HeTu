@@ -16,7 +16,7 @@ import os
 import numpy as np
 import logging
 import keyword
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
 
 class Permission(IntEnum):

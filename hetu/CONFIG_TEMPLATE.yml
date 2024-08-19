@@ -11,6 +11,9 @@ INSTANCE_NAME: game_name_region1234
 
 # 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
 DEBUG: false
+# 开启web控制后台，GET /获得信息 POST /reload重载代码 POST /shutdown关闭服务器
+#INSPECTOR: true
+#INSPECTOR_PORT: 6457
 
 # SSL配置
 #CERT_CHAIN:
@@ -83,35 +86,59 @@ BACKENDS:
 # 配置日志，具体格式参考https://docs.python.org/3/library/logging.config.html
 LOGGING:
   version: 1
+  disable_existing_loggers: false
   loggers:
     HeTu.root: # 标准日志记录器
-      level: INFO
-      handlers:
-        - console
-        - log_to_file
-    HeTu.replay: # replay日志记录器，用于回放复现BUG，设为DEBUG才起效。
+      level: INFO  # 接受INFO以上级别的日志
+      handlers:    # 输出目标，这里输出到进程安全的log_queue，这样可以把多进程的日志合并到一起
+        - log_queue
+    HeTu.replay:   # replay日志记录器，用于回放复现BUG，level为DEBUG才起效。同样是多进程的。
       level: DEBUG
       handlers:
-        - replay_to_file
-  handlers:
-    console:
+        - replay_queue
+  handlers:  # 处理器创建，用来决定日志的输出方式
+    console:  # 控制台输出
       class: logging.StreamHandler
-      formatter: generic
-      stream: sys.stdout
-    log_to_file:
+      formatter: colour
+      stream: ext://sys.stdout
+    log_to_file:  # 输出到按日期切割的文件，不可直接输入到这里，因为不是进程安全的
       class: logging.handlers.TimedRotatingFileHandler
       formatter: generic
       filename: logs/hetu.log
+      encoding: utf-8
+      delay: true
       when: D
       interval: 1
-      backupCount: 7
-    replay_to_file:
-      class: logging.handlers.TimedRotatingFileHandler
+      backupCount: 30
+    replay_to_file:  # 输出到按大小切割的文件，不可直接输入到这里，因为不是进程安全的
+      class: logging.handlers.RotatingFileHandler
       formatter: generic
-      filename: logs/hetu.log
-      when: D
-      interval: 1
-      backupCount: 7
+      filename: logs/replay.log
+      encoding: utf-8
+      delay: true
+      maxBytes: !eval [ 2 ^ 28 ]  # 256MB
+      backupCount: 20  # 20 * 256MB = 5GB
+#    syslog:  # 也可以用syslog输出
+#      class: logging.handlers.SysLogHandler
+#      formatter: generic
+#      address: /dev/log
+#      facility: local0
+    log_queue: # 进程安全的queue
+      class: logging.handlers.QueueHandler
+      queue: hetu.logging.handlers.process_safe_queue
+      listener: hetu.logging.handlers.AutoListener  # 定义消费器，AutoListener会自动启动和停止
+      handlers: # 消费此queue的handler
+        - console
+        - log_to_file
+    replay_queue:
+      class: logging.handlers.QueueHandler
+      queue: hetu.logging.handlers.process_safe_queue
+      listener: hetu.logging.handlers.AutoListener
+      handlers:
+        - replay_to_file
   formatters:
-    generic:
-      class: hetu.logging.formatter.AutoFormatter
+    colour:   # 彩色格式
+      class: sanic.logging.formatter.AutoFormatter
+    generic:  # 文本格式
+      format: '%(asctime)s %(levelname)-8s %(name)-12s %(message)s'
+      datefmt: '%Y-%m-%d %H:%M:%S %z'

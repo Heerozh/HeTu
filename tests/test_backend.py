@@ -13,7 +13,7 @@ from hetu.data.backend import (
     ComponentTransaction, Subscriptions)
 from backend_mgr import UnitTestBackends
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 logger.setLevel(logging.DEBUG)
 logging.lastResort.setLevel(logging.DEBUG)
 mock_time = mock.Mock()

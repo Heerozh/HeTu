@@ -18,7 +18,7 @@ from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemDefine
 from ..replay import BaseReplayLogger
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
 
 @dataclass

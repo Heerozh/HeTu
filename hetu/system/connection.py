@@ -14,9 +14,9 @@ from ..data import BaseComponent, define_component, Property, Permission
 from ..manager import ComponentTableManager
 from ..system import define_system
 
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
-MAX_ANONYMOUS_CONNECTION_BY_IP = 10  # 占位符，实际由Config里修改
+MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
 
 
 @define_component(namespace='HeTu', persist=False, permission=Permission.ADMIN)
@@ -34,7 +34,7 @@ class Connection(BaseComponent):
 async def new_connection(ctx: Context, address: str):
     same_ips = await ctx[Connection].query('address', address, limit=1000)
     same_ip_guests = same_ips[same_ips.owner == 0]
-    if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
+    if MAX_ANONYMOUS_CONNECTION_BY_IP and len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
         msg = f"⚠️ [📞Executor] [非法操作] {ctx} | 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
         logger.warning(msg)
         raise RuntimeError(msg)
@@ -151,6 +151,8 @@ class ConnectionFloodChecker:
         self.sent_msgs += count
 
     def send_limit_reached(self, ctx: Context, info: str):
+        if not ctx.server_limits:
+            return False
         now = time.time()
         sent_elapsed = now - self.sent_start_time
         for limit in ctx.server_limits:
@@ -167,6 +169,8 @@ class ConnectionFloodChecker:
         return False
 
     def recv_limit_reached(self, ctx: Context, info: str):
+        if not ctx.client_limits:
+            return False
         now = time.time()
         received_elapsed = now - self.received_start_time
         for limit in ctx.client_limits:
@@ -177,7 +181,7 @@ class ConnectionFloodChecker:
                 self.replay_logger.info(err_msg)
                 logger.warning(err_msg)
                 return True
-        if received_elapsed > ctx.server_limits[-1][1]:
+        if received_elapsed > ctx.client_limits[-1][1]:
             self.received_msgs = 0
             self.received_start_time = now
         return False

@@ -3,7 +3,7 @@ from hetu.system import define_system, Context, ResponseToClient
 import numpy as np
 import asyncio
 import logging
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 
 
 # 定义组件

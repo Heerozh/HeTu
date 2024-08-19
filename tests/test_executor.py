@@ -9,7 +9,7 @@ import hetu
 from backend_mgr import UnitTestBackends
 
 logging.basicConfig(stream=sys.stdout)
-logger = logging.getLogger('HeTu')
+logger = logging.getLogger('HeTu.root')
 logger.setLevel(logging.DEBUG)
 logging.lastResort.setLevel(logging.DEBUG)
 mock_time = mock.Mock()
@@ -76,7 +76,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('HeTu', level='INFO') as cm:
             ok, _ = await executor.exec('magic')
             self.assertTrue(ok)
-            self.assertEqual(cm.output, ['INFO:HeTu:User_123', 'INFO:HeTu:User_3'])
+            self.assertEqual(cm.output, ['INFO:HeTu.root:User_123', 'INFO:HeTu.root:User_3'])
 
         # 测试race
         executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
