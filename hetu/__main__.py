@@ -17,8 +17,7 @@ import redis
 import yaml
 
 from hetu.common import yamlloader
-from hetu.logging.default import DEFAULT_LOGGING_CONFIG
-from hetu.logging.handlers import AutoListener
+from hetu.logging import handlers as log_handlers
 from hetu.server import start_webserver
 
 logger = logging.getLogger('HeTu.root')
@@ -119,7 +118,6 @@ def start(start_args):
                 }
             },
             'WORKER_NUM': start_args.workers,
-            'LOGGING': DEFAULT_LOGGING_CONFIG,
 
             'CERT_CHAIN': start_args.cert,
             'DEBUG': start_args.debug,
@@ -137,14 +135,15 @@ def start(start_args):
     app = loader.load()
     # 配置log，上面app.load()会自动调用logging.config.dictConfig(config.LOGGING)
     # 把dictConfig生成的queue实例存到config里，好传递到子进程
-    for hdl_name, handler_dict in config.LOGGING['handlers'].items():
-        if isinstance(handler_dict.get('queue'), (str, dict, list)):
-            handler = logging.getHandlerByName(hdl_name)
-            if isinstance(handler, logging.handlers.QueueHandler):
-                handler_dict['queue'] = handler.queue
+    if 'LOGGING' in config:
+        for hdl_name, handler_dict in config.LOGGING['handlers'].items():
+            if isinstance(handler_dict.get('queue'), (str, dict, list)):
+                handler = logging.getHandlerByName(hdl_name)
+                if isinstance(handler, logging.handlers.QueueHandler):
+                    handler_dict['queue'] = handler.queue
 
     # 启动日志Listener
-    AutoListener.start_all()
+    log_handlers.AutoListener.start_all()
 
     # 显示服务器信息
     host, port = config.LISTEN.rsplit(':', 1)
@@ -186,7 +185,7 @@ def start(start_args):
         redis_proc.terminate()
 
     # 退出log listener
-    AutoListener.stop_all()
+    log_handlers.AutoListener.stop_all()
 
 
 def main():
