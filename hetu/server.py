@@ -23,11 +23,11 @@ import hetu
 import hetu.system.connection as connection
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
 from hetu.logging.default import DEFAULT_LOGGING_CONFIG
-from hetu.logging.replay import ConnectionAndTimedRotatingReplayLogger
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
 
 logger = logging.getLogger('HeTu.root')
+replay = logging.getLogger('HeTu.replay')
 
 hetu_bp = Blueprint("my_blueprint")
 _ = zlib  # 标记使用，下方globals()['zlib']会使用
@@ -57,13 +57,13 @@ def check_length(name, data: list, left, right):
         raise ValueError(f"Invalid {name} message")
 
 
-async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue, replay_logger):
+async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue):
     """处理Client SDK调用System的命令"""
     # print(executor.context, 'sys', data)
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
-    replay_logger.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
+    replay.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
     if ok and isinstance(res, ResponseToClient):
         await push_queue.put(['rsp', res.message])
     return ok
@@ -113,8 +113,7 @@ async def client_receiver(
         executor: SystemExecutor,
         subs: Subscriptions,
         push_queue: asyncio.Queue,
-        flood_checker: connection.ConnectionFloodChecker,
-        replay_logger
+        flood_checker: connection.ConnectionFloodChecker
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     ctx = executor.context
@@ -125,7 +124,7 @@ async def client_receiver(
                 break
             # 转换消息到array
             last_data = decode_message(message, protocol)
-            replay_logger.recv(last_data)
+            replay.debug("<<< " + str(last_data))
             # 检查接受上限
             flood_checker.received()
             if flood_checker.recv_limit_reached(ctx, "Coroutines(Websocket.client_receiver)"):
@@ -133,7 +132,7 @@ async def client_receiver(
             # 执行消息
             match last_data[0]:
                 case 'sys':  # sys system_name args ...
-                    sys_ok = await sys_call(last_data, executor, push_queue, replay_logger)
+                    sys_ok = await sys_call(last_data, executor, push_queue)
                     if not sys_ok:
                         print(executor.context, 'call failed, close connection...')
                         return ws.fail_connection()
@@ -153,12 +152,12 @@ async def client_receiver(
         pass
     except RedisConnectionError as e:
         err_msg = f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {e}"
-        replay_logger.info(err_msg)
+        replay.info(err_msg)
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
         err_msg = f"❌ [📡WSReceiver] 执行异常，封包：{last_data}，异常：{e}"
-        replay_logger.info(err_msg)
+        replay.info(err_msg)
         logger.exception(err_msg)
         ws.fail_connection()
     finally:
@@ -221,15 +220,12 @@ async def websocket_connection(request: Request, ws: Websocket):
     await executor.initialize(request.client_ip)
     ctx = executor.context
     logger.info(f"🔗 [📡WSConnect] 新连接：{asyncio.current_task().get_name()}")
-    # 初始化当前连接的ReplayLogger
-    replay_logger = ConnectionAndTimedRotatingReplayLogger("./logs/replays/", ctx.connection_id)
-    executor.set_replay_logger(replay_logger)
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
     # 初始化发送/接受计数器
-    flood_checker = connection.ConnectionFloodChecker(replay_logger)
+    flood_checker = connection.ConnectionFloodChecker()
 
     # 传递默认配置参数到ctx
     default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
@@ -246,7 +242,7 @@ async def websocket_connection(request: Request, ws: Websocket):
                     crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, executor, subscriptions, push_queue, flood_checker, replay_logger)
+        ws, protocol, executor, subscriptions, push_queue, flood_checker)
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
@@ -261,7 +257,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     try:
         while True:
             reply = await push_queue.get()
-            replay_logger.send(reply)
+            replay.debug(">>> " + str(reply))
             # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
             # 检查发送上限
@@ -270,18 +266,18 @@ async def websocket_connection(request: Request, ws: Websocket):
                 ws.fail_connection()
                 break
     except asyncio.CancelledError:
-        # print(executor.context, 'websocket_connection normal canceled')
+        print(executor.context, 'websocket_connection normal canceled')
         pass
     except WebsocketClosed:
         pass
     except BaseException as e:
         err_msg = f"❌ [📡WSSender] 发送数据异常：{e}"
-        replay_logger.info(err_msg)
+        replay.info(err_msg)
         logger.exception(err_msg)
     finally:
         # 连接断开，强制关闭此协程时也会调用
         close_msg = f"⛓️ [📡WSConnect] 连接断开：{asyncio.current_task().get_name()}"
-        replay_logger.info(close_msg)
+        replay.info(close_msg)
         logger.info(close_msg)
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)

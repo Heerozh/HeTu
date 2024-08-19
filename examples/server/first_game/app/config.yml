@@ -37,7 +37,7 @@ ACCESS_LOG: false
 
 # 传入消息的最大字节、ping间隔秒、ping无响应关闭连接秒
 # !eval表示返回后面中括号内的代码执行结果
-WEBSOCKET_MAX_SIZE: !eval [ 2 ^ 19 ]  # 0.5MB
+WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ]  # 0.5MB
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
@@ -122,7 +122,7 @@ LOGGING:
       filename: logs/replay.log
       encoding: utf-8
       delay: true
-      maxBytes: !eval [ 2 ^ 28 ]  # 256MB
+      maxBytes: !eval [ 2 ** 28 ]  # 256MB
       backupCount: 20  # 20 * 256MB = 5GB
 #    syslog:  # 也可以用syslog输出
 #      class: logging.handlers.SysLogHandler
