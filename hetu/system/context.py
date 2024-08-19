@@ -33,7 +33,7 @@ class Context:
 
 
     def __str__(self):
-        return f"conn: {self.connection_id}, address: {self.address}, caller: {self.caller}"
+        return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
     def __getitem__(self, item: type[BaseComponent] | str) -> ComponentTransaction | Callable:
         if type(item) is str:

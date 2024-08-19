@@ -13,6 +13,7 @@ from .context import Context
 from ..data import BaseComponent, define_component, Property, Permission
 from ..manager import ComponentTableManager
 from ..system import define_system
+from ..logging.filter import ContextFilter
 
 logger = logging.getLogger('HeTu.root')
 
@@ -35,7 +36,7 @@ async def new_connection(ctx: Context, address: str):
     same_ips = await ctx[Connection].query('address', address, limit=1000)
     same_ip_guests = same_ips[same_ips.owner == 0]
     if MAX_ANONYMOUS_CONNECTION_BY_IP and len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
-        msg = f"⚠️ [📞Executor] [非法操作] {ctx} | 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+        msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
         logger.warning(msg)
         raise RuntimeError(msg)
 
@@ -48,6 +49,7 @@ async def new_connection(ctx: Context, address: str):
     row_ids = await ctx.end_transaction()
     ctx.connection_id = row_ids[0]
     ctx.address = address
+    ContextFilter.set_log_context(str(ctx))
 
 
 @define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
@@ -99,6 +101,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     ctx.max_row_sub *= 100
     ctx.max_index_sub *= 100
 
+    ContextFilter.set_log_context(str(ctx))
     return True, 'SUCCESS'
 
 
@@ -157,7 +160,7 @@ class ConnectionFloodChecker:
         sent_elapsed = now - self.sent_start_time
         for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
-                err_msg = (f"⚠️ [📞Executor] [非法操作] {ctx} | "
+                err_msg = (f"⚠️ [📞Executor] [非法操作] "
                            f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
                            f"可能是订阅攻击，将断开连接。调用：{info}")
                 self.replay_logger.info(err_msg)
@@ -175,7 +178,7 @@ class ConnectionFloodChecker:
         received_elapsed = now - self.received_start_time
         for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
-                err_msg = (f"⚠️ [📞Executor] [非法操作] {ctx} | "
+                err_msg = (f"⚠️ [📞Executor] [非法操作] "
                            f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
                            f"可能是flood攻击，将断开连接。调用：{info}")
                 self.replay_logger.info(err_msg)

@@ -4,8 +4,12 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import logging
 import multiprocessing
 from logging.handlers import QueueListener
+
+logger = logging.getLogger('HeTu.root')
+replay_logger = logging.getLogger('HeTu.replay')
 
 CREATED_LISTENERS = []
 

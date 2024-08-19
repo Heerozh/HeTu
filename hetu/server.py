@@ -22,6 +22,7 @@ from sanic.exceptions import WebsocketClosed
 import hetu
 import hetu.system.connection as connection
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
+from hetu.logging.default import DEFAULT_LOGGING_CONFIG
 from hetu.logging.replay import ConnectionAndTimedRotatingReplayLogger
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
@@ -76,7 +77,7 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     check_length('sub', data, 4, 100)
     table = executor.comp_mgr.get_table(data[1])
     if table is None:
-        raise ValueError(f" [非法操作] {ctx} | subscribe了不存在的Component名，注意大小写：{data[1]}")
+        raise ValueError(f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}")
 
     if ctx.group and ctx.group.startswith("admin"):
         caller = 'admin'
@@ -91,14 +92,14 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
             check_length('query', data, 5, 8)
             sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
         case _:
-            raise ValueError(f" [非法操作] {ctx} | 未知订阅操作：{data[2]}")
+            raise ValueError(f" [非法操作] 未知订阅操作：{data[2]}")
 
     reply = ['sub', sub_id, data]
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub = subs.count()
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
-        raise ValueError(f" [非法操作] {ctx} | 订阅数超过限制："
+        raise ValueError(f" [非法操作] 订阅数超过限制："
                          f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
 
 
@@ -144,7 +145,7 @@ async def client_receiver(
                 case 'motd':
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
-                    raise ValueError(f" [非法操作] {ctx} | 未知消息类型：{last_data[0]}")
+                    raise ValueError(f" [非法操作] 未知消息类型：{last_data[0]}")
     except asyncio.CancelledError:
         # print(ctx, 'client_receiver normal canceled')
         pass
@@ -156,7 +157,7 @@ async def client_receiver(
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        err_msg = f"❌ [📡WSReceiver] 执行异常，连接{ctx}，封包：{last_data}，异常：{e}"
+        err_msg = f"❌ [📡WSReceiver] 执行异常，封包：{last_data}，异常：{e}"
         replay_logger.info(err_msg)
         logger.exception(err_msg)
         ws.fail_connection()
@@ -219,8 +220,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
     await executor.initialize(request.client_ip)
     ctx = executor.context
-    logger.info(f"🔗 [📡WSConnect] 新连接：{ctx} | IP:{request.client_ip} "
-                f"| TASK:{asyncio.current_task().get_name()}")
+    logger.info(f"🔗 [📡WSConnect] 新连接：{asyncio.current_task().get_name()}")
     # 初始化当前连接的ReplayLogger
     replay_logger = ConnectionAndTimedRotatingReplayLogger("./logs/replays/", ctx.connection_id)
     executor.set_replay_logger(replay_logger)
@@ -280,8 +280,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.exception(err_msg)
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        close_msg = (f"⛓️ [📡WSConnect] 连接断开：{ctx} | IP:{request.client_ip} "
-                     f"| TASK:{asyncio.current_task().get_name()}")
+        close_msg = f"⛓️ [📡WSConnect] 连接断开：{asyncio.current_task().get_name()}"
         replay_logger.info(close_msg)
         logger.info(close_msg)
         await request.app.cancel_task(recv_task_id, raise_exception=False)
@@ -319,7 +318,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 10)
 
     # 加载web服务器
-    app = Sanic(app_name, log_config=config['LOGGING'])
+    app = Sanic(app_name, log_config=config.get('LOGGING', DEFAULT_LOGGING_CONFIG))
     app.update_config(config)
 
     # 加载协议
