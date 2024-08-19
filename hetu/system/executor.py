@@ -16,9 +16,9 @@ from ..data import Permission
 from ..data.backend import RaceCondition
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemDefine
-from ..replay import BaseReplayLogger
 
 logger = logging.getLogger('HeTu.root')
+replay = logging.getLogger('HeTu.replay')
 
 
 @dataclass
@@ -49,8 +49,7 @@ class SystemExecutor:
     def __init__(self, namespace: str, comp_mgr: ComponentTableManager):
         self.namespace = namespace
         self.comp_mgr = comp_mgr
-        self.replay_logger = BaseReplayLogger()
-        self.alive_checker = ConnectionAliveChecker(self.comp_mgr, self.replay_logger)
+        self.alive_checker = ConnectionAliveChecker(self.comp_mgr)
         self.context = Context(
             caller=None,
             connection_id=0,
@@ -73,10 +72,6 @@ class SystemExecutor:
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
 
-    def set_replay_logger(self, replay_logger):
-        self.replay_logger = replay_logger
-        self.alive_checker.set_replay_logger(replay_logger)
-
     async def terminate(self):
         if self.context.connection_id == 0:
             return
@@ -91,7 +86,7 @@ class SystemExecutor:
         sys = SystemClusters().get_system(self.namespace, call.system)
         if not sys:
             err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{call}"
-            self.replay_logger.info(err_msg)
+            replay.info(err_msg)
             logger.warning(err_msg)
             return None
 
@@ -101,14 +96,14 @@ class SystemExecutor:
                 if context.caller is None or context.caller == 0:
                     err_msg = (f"⚠️ [📞Executor] [非法操作] {context} | "
                                f"{call.system}无调用权限，检查是否非法调用：{call}")
-                    self.replay_logger.info(err_msg)
+                    replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
             case Permission.ADMIN:
                 if context.group is None or not context.group.startswith("admin"):
                     err_msg = (f"⚠️ [📞Executor] [非法操作] {context} | "
                                f"{call.system}无调用权限，检查是否非法调用：{call}")
-                    self.replay_logger.info(err_msg)
+                    replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
 
@@ -119,7 +114,7 @@ class SystemExecutor:
                        f"要求{sys.arg_count - sys.defaults_count}个参数, "
                        f"传入了{len(call.args)}个。"
                        f"调用内容：{call}")
-            self.replay_logger.info(err_msg)
+            replay.info(err_msg)
             logger.warning(err_msg)
             return None
 
@@ -173,13 +168,13 @@ class SystemExecutor:
                 # 重试时sleep一段时间，可降低再次冲突率约90%。
                 # delay增加会降低冲突率，但也会增加rtt波动。除1:-94%, 2:-91%, 5: -87%, 10: -85%
                 delay = random.random() / 5
-                self.replay_logger.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
+                replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
                 err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{e}"
-                self.replay_logger.info(err_msg)
+                replay.info(err_msg)
                 logger.exception(err_msg)
                 return False, None
             finally:

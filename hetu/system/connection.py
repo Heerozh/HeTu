@@ -16,6 +16,7 @@ from ..system import define_system
 from ..logging.filter import ContextFilter
 
 logger = logging.getLogger('HeTu.root')
+replay = logging.getLogger('HeTu.replay')
 
 MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
 
@@ -110,13 +111,9 @@ class ConnectionAliveChecker:
     连接合规性检查，主要检查连接是否存活
     """
 
-    def __init__(self, comp_mgr: ComponentTableManager, replay_logger):
+    def __init__(self, comp_mgr: ComponentTableManager):
         self.conn_tbl = comp_mgr.get_table(Connection)
-        self.replay_logger = replay_logger
         self.last_active_cache = 0
-
-    def set_replay_logger(self, replay_logger):
-        self.replay_logger = replay_logger
 
     async def is_illegal(self, ctx: Context, info: str):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
@@ -128,7 +125,7 @@ class ConnectionAliveChecker:
             conn = await conn_tbl.direct_get(conn_id)
             if conn is None or conn.owner != caller:
                 err_msg = f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{info}"
-                self.replay_logger.info(err_msg)
+                replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
 
@@ -140,12 +137,11 @@ class ConnectionAliveChecker:
 
 
 class ConnectionFloodChecker:
-    def __init__(self, replay_logger):
+    def __init__(self):
         self.received_msgs = 0  # 收到的消息数, 用来判断flooding攻击
         self.received_start_time = time.time()
         self.sent_msgs = 0  # 发送的消息数，用来判断订阅攻击
         self.sent_start_time = time.time()
-        self.replay_logger = replay_logger
 
     def received(self, count=1):
         self.received_msgs += count
@@ -163,7 +159,7 @@ class ConnectionFloodChecker:
                 err_msg = (f"⚠️ [📞Executor] [非法操作] "
                            f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
                            f"可能是订阅攻击，将断开连接。调用：{info}")
-                self.replay_logger.info(err_msg)
+                replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
         if sent_elapsed > ctx.server_limits[-1][1]:
@@ -181,7 +177,7 @@ class ConnectionFloodChecker:
                 err_msg = (f"⚠️ [📞Executor] [非法操作] "
                            f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
                            f"可能是flood攻击，将断开连接。调用：{info}")
-                self.replay_logger.info(err_msg)
+                replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
         if received_elapsed > ctx.client_limits[-1][1]:

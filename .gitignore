@@ -164,5 +164,4 @@ cython_debug/
 /tests/logs
 /notebooks
 profile.svg
-/tests/replays
 /examples/server/first_game/data
