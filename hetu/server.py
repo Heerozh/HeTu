@@ -266,8 +266,11 @@ async def websocket_connection(request: Request, ws: Websocket):
                 ws.fail_connection()
                 break
     except asyncio.CancelledError:
-        print(executor.context, 'websocket_connection normal canceled')
-        pass
+        if ws.ws_proto.parser_exc:
+            err_msg = f"❌ [📡WSSender] WS协议异常：{ws.ws_proto.parser_exc}"
+            replay.info(err_msg)
+            logger.exception(err_msg, exc_info=ws.ws_proto.parser_exc)
+        # print(executor.context, 'websocket_connection normal canceled', ws.ws_proto.parser_exc)
     except WebsocketClosed:
         pass
     except BaseException as e:
@@ -304,18 +307,20 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         sys.modules['HeTuApp'] = module
         spec.loader.exec_module(module)
 
-    # 重定向logger，把sanic的重定向到hetu
-    root_logger = logging.getLogger("sanic")
-    root_logger.parent = logger
-    if config['DEBUG']:
-        logger.setLevel(logging.DEBUG)
-
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 10)
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get('LOGGING', DEFAULT_LOGGING_CONFIG))
     app.update_config(config)
+
+    # 重定向logger，把sanic的重定向到hetu
+    root_logger = logging.getLogger("sanic")
+    root_logger.parent = logger
+    if config['DEBUG']:
+        logger.setLevel(logging.DEBUG)
+        logging.getLogger().setLevel(logging.DEBUG)
+        root_logger.setLevel(logging.DEBUG)
 
     # 加载协议
     app.ctx.compress, app.ctx.crypto = None, None

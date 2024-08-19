@@ -150,7 +150,8 @@ def start(start_args):
     ssl = ('CERT_CHAIN' in config) and config.CERT_CHAIN or None
 
     logger.info(FULL_COLOR_LOGO)
-    logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers")
+    logger.info(f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers, "
+                f"manager pid: {os.getpid()}")
     logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
     logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
     logger.info(f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
@@ -172,9 +173,13 @@ def start(start_args):
                 auto_reload=config.DEBUG,
                 ssl=ssl if ssl != 'auto' else None,
                 fast=fast,
-                workers=workers)
+                workers=workers,
+                single_process=workers==1)
     # 启动并堵塞
-    Sanic.serve(primary=app, app_loader=loader)
+    if workers == 1:
+        Sanic.serve_single(primary=app)
+    else:
+        Sanic.serve(primary=app, app_loader=loader)
 
     # 保存管理的redis
     if redis_proc:

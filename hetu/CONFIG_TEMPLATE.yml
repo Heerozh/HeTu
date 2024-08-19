@@ -89,12 +89,15 @@ LOGGING:
   disable_existing_loggers: false
 
   loggers:
-    HeTu.root: # 标准日志记录器
-      level: INFO  # 接受INFO以上级别的日志，当服务器调试模式时，此项自动变为DEBUG
+    root: # 根日志记录器，所有未被过滤掉的日志都会经过这里
+      level: DEBUG  # 接受日志级别，生产用INFO
       handlers:    # 输出目标，这里输出到进程安全的log_queue，这样可以把多进程的日志合并到一起
         - log_queue
+    HeTu.root:     # 河图的日志记录器
+      level: DEBUG
     HeTu.replay:   # replay日志记录器，用于回放复现BUG，level为DEBUG才起效。同样是多进程的。
       level: DEBUG
+      propagate: false  # 不向上级传递，不然会传递给root
       handlers:
         - replay_queue
 
