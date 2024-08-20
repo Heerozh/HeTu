@@ -41,6 +41,7 @@ class MyTestCase(unittest.TestCase):
         # 正常启动
         cfg_file = os.path.join(os.path.dirname(__file__), '../hetu/CONFIG_TEMPLATE.yml')
         sys.argv[1:] = ['start', '--config', cfg_file]
+        os.chdir(os.path.join(os.path.dirname(__file__)))
         SystemClusters()._clear()
         # 阻止启动的最后一步，不然就卡死了
         r = redis.Redis(host='127.0.0.1', port=6379)
