@@ -245,7 +245,7 @@ class ComponentTransaction:
     def attached(self) -> BackendTransaction:
         return self._trx_conn
 
-    async def _db_get(self, row_id: int) -> None | np.record:
+    async def _db_get(self, row_id: int, lock_row=True) -> None | np.record:
         # 继承，并实现获取行数据的操作，返回值要通过dict_to_row包裹下
         # 如果不存在该行数据，返回None
         # 如果用乐观锁，这里同时要让乐观锁锁定该行。sql是记录该行的version，事务提交时判断
@@ -377,7 +377,7 @@ class ComponentTransaction:
 
     async def query(
             self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True,
-            index_only=False
+            index_only=False, lock_rows=True
     ) -> np.recarray | list[int]:
         """
         查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
@@ -399,7 +399,7 @@ class ComponentTransaction:
 
             锁定分2种：
 
-            * 行锁定：任何其他协程/进程对查询结果所含行的修改会引发事务冲突，但无关行不会。此锁定是强制的，不可关闭。
+            * 行锁定：任何其他协程/进程对查询结果所含行的修改会引发事务冲突，但无关行不会。
             * Index锁定：任何其他协程/进程修改了该index(插入新行/update本列/删除任意行)都会引起事务冲突。
               如果慢日志回报了大量的事务冲突，再考虑设为 `False`。
 
@@ -414,6 +414,9 @@ class ComponentTransaction:
 
             由于1在查询完后，已经对所有查询到的行进行了锁定，即使不锁定index，2也可以保证道具不会被其他进程修改。
             所以如果不锁定index，只会导致1和2之间，有新道具进入背包，删除可能不彻底，没有其他害处。
+        lock_rows: bool
+            是否锁定查询到的行，默认锁定。如果不锁定，该数据只能做只读操作，不然会有数据写入冲突。
+            一般不需要关闭锁定，除非慢日志回报了大量的事务冲突，考虑清楚后再做调整。
         index_only: bool
             如果只需要获取Index的查询结果，不需要行数据，可以选择index_only=True。
             返回的是List[int] of row_id。
@@ -460,13 +463,14 @@ class ComponentTransaction:
             row_id = int(row_id)
             if (row := self._cache.get(row_id)) is not None:
                 rtn.append(row)
-            elif (row := await self._db_get(row_id)) is not None:
+            elif (row := await self._db_get(row_id, lock_row=lock_rows)) is not None:
                 # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
                 # 由于index是分离的，且不能锁定index(不然事务冲突率很高），所以检测get结果是否在查询范围内，
                 # 不在就抛出冲突
                 if not (left <= row[index_name] <= right):
                     raise RaceCondition(f'select: row.{index_name}值变动了')
-                self._cache[row_id] = row
+                if lock_rows:
+                    self._cache[row_id] = row
                 rtn.append(row)
             else:
                 raise RaceCondition('select: row中途被删除了')
