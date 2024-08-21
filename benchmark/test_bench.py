@@ -46,12 +46,12 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
                 raw_call = packet()
                 # 组合封包
                 call = json.dumps(raw_call).encode()
-                call = zlib.compress(call)
+                # call = zlib.compress(call)
                 # 为了测试准确的性能，采用call-response模式
                 await ws.send(call)
                 # 统计事务冲突率
                 received = await ws.recv()
-                received = zlib.decompress(received)
+                # received = zlib.decompress(received)
                 received = json.loads(received)
                 # 记录当前分钟的执行数
                 cur_min = int(time.time() // 60)

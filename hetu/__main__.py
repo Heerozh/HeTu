@@ -110,7 +110,6 @@ def start(start_args):
             'NAMESPACE': start_args.namespace,
             'INSTANCE_NAME': start_args.instance,
             'LISTEN': f"0.0.0.0:{start_args.port}",
-            'PACKET_COMPRESSION_CLASS': 'zlib',
             'BACKENDS': {
                 'Redis': {
                     "type": "Redis",

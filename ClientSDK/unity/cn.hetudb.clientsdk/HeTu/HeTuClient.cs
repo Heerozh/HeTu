@@ -154,7 +154,7 @@ namespace HeTu
         LogFunction _logError;
         LogFunction _logInfo;
         LogFunction _logDebug;
-        IProtocol _protocol = new ZlibProtocol();
+        IProtocol _protocol = null;
         byte[] _rxBuff;
 
         Task _sendingTask;
