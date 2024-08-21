@@ -67,7 +67,7 @@ MAX_INDEX_SUBSCRIPTION: 1
 
 
 # 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
-PACKET_COMPRESSION_CLASS: zlib     # 通过该class的compress和decompress静态方法进行压缩和解压缩
+PACKET_COMPRESSION_CLASS: null     # 通过该class的compress和decompress静态方法进行压缩和解压缩
 PACKET_CRYPTOGRAPHY_CLASS: null    # 通过该class的encrypt和decrypt静态方法进行加密和解密
 
 # ！！ 注意 ！！
@@ -95,7 +95,7 @@ LOGGING:
         - log_queue
     HeTu.root:     # 河图的日志记录器
       level: DEBUG
-    HeTu.replay:   # replay日志记录器，用于回放复现BUG，level为DEBUG才起效。同样是多进程的。
+    HeTu.replay:   # replay日志记录器，用于回放复现BUG，level为DEBUG起效，设为ERROR完全关闭。
       level: DEBUG
       propagate: false  # 不向上级传递，不然会传递给root
       handlers:

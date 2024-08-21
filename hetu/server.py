@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import sys
-import zlib
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Blueprint
@@ -30,7 +29,6 @@ logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
 
 hetu_bp = Blueprint("my_blueprint")
-_ = zlib  # 标记使用，下方globals()['zlib']会使用
 
 
 def decode_message(message: bytes, protocol: dict):
@@ -327,13 +325,23 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     compress = config.get('PACKET_COMPRESSION_CLASS')
     crypto = config.get('PACKET_CRYPTOGRAPHY_CLASS')
     if compress is not None:
-        if compress not in globals():
-            raise ValueError(f"该压缩模块未在全局变量中找到：{compress}")
-        app.ctx.compress = globals()[compress]
+        from logging.config import BaseConfigurator
+        try:
+            compress_module = BaseConfigurator({}).resolve(compress)
+        except ValueError as e:
+            raise ValueError(f"该压缩模块无法解析，请使用可以import的字符串：{compress}") from e
+        if not hasattr(compress_module, 'compress') or not hasattr(compress_module, 'decompress'):
+            raise ValueError(f"该压缩模块没有实现compress和decompress方法：{compress}")
+        app.ctx.compress = compress_module
     if crypto is not None:
-        if crypto not in globals():
-            raise ValueError(f"该加密模块未在全局变量中找到：{crypto}")
-        app.ctx.crypto = globals()[crypto]
+        from logging.config import BaseConfigurator
+        try:
+            crypto_module = BaseConfigurator({}).resolve(crypto)
+        except ValueError as e:
+            raise ValueError(f"该压缩模块无法解析，请使用可以import的字符串：{crypto}") from e
+        if not hasattr(crypto_module, 'encrypt') or not hasattr(crypto_module, 'decrypt'):
+            raise ValueError(f"该加密模块没有实现encrypt和decrypt方法：{crypto}")
+        app.ctx.crypto = crypto_module
 
     # 创建后端连接池
     backends = {}
