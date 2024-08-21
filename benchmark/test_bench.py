@@ -38,9 +38,11 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
         ssl_context.verify_mode = ssl.CERT_NONE  # 应该使用ssl_context.load_cert_chain(cert_file)更安全
     else:
         ssl_context = None
-    print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
+    print(name, '正在连接', pid, '号客户端')
     try:
         async with websockets.connect(address, ssl=ssl_context) as ws:
+            await asyncio.sleep(10) # 等待其他协程连接成功
+            print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
             while True:
                 # 随机读写30w数据中的一个
                 raw_call = packet()
@@ -81,6 +83,7 @@ async def bench_pubsub_routine(address, duration, name: str, pid: str):
     print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
     try:
         async with websockets.connect(address, ssl=ssl_context) as ws:
+            await asyncio.sleep(10)
             # 组合封包
             raw_call = ['sub', 'IntTable', 'query', 'number', 0, 100, 100]
             call = json.dumps(raw_call).encode()

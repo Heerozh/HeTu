@@ -34,12 +34,14 @@ class Connection(BaseComponent):
 
 @define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def new_connection(ctx: Context, address: str):
-    same_ips = await ctx[Connection].query('address', address, limit=1000)
-    same_ip_guests = same_ips[same_ips.owner == 0]
-    if MAX_ANONYMOUS_CONNECTION_BY_IP and len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
-        msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
-        logger.warning(msg)
-        raise RuntimeError(msg)
+    if MAX_ANONYMOUS_CONNECTION_BY_IP:
+        same_ips = await ctx[Connection].query('address', address, limit=1000,
+                                               lock_index=False, lock_rows=False)
+        same_ip_guests = same_ips[same_ips.owner == 0]
+        if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
+            msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+            logger.warning(msg)
+            raise RuntimeError(msg)
 
     row = Connection.new_row()
     row.owner = 0

@@ -201,23 +201,31 @@ class RedisTransaction(BackendTransaction):
     lua_check_unique = None
     lua_run_stacked = None
 
-    def __init__(self, backend: RedisBackend, cluster_id: int):
-        super().__init__(backend, cluster_id)
-
-        cls = self.__class__
+    @classmethod
+    def _load_scripts(cls, backend):
         if cls.lua_check_unique is None:
             cls.lua_check_unique = backend.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
             backend.io.script_load(cls.LUA_CHECK_UNIQUE_SCRIPT)
         if cls.lua_run_stacked is None:
             cls.lua_run_stacked = backend.aio.register_script(cls.LUA_IF_RUN_STACKED_SCRIPT)
             backend.io.script_load(cls.LUA_IF_RUN_STACKED_SCRIPT)
-            from redis.asyncio.client import Pipeline
-            # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
-            async def _pipeline_lua_speedup(_):
-                return
 
-            Pipeline.load_scripts_org = Pipeline.load_scripts
-            Pipeline.load_scripts = _pipeline_lua_speedup
+    @classmethod
+    def _patch_redis_py_lib(cls):
+        from redis.asyncio.client import Pipeline
+        # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
+        async def _pipeline_lua_speedup(_):
+            return
+
+        Pipeline.load_scripts_org = Pipeline.load_scripts
+        Pipeline.load_scripts = _pipeline_lua_speedup
+
+    def __init__(self, backend: RedisBackend, cluster_id: int):
+        super().__init__(backend, cluster_id)
+
+        cls = self.__class__
+        cls._load_scripts(backend)
+        cls._patch_redis_py_lib()
 
         self._uuid = uuid.uuid4().hex
         self._checks = []  # 事务中的unique检查
@@ -276,6 +284,14 @@ class RedisTransaction(BackendTransaction):
                 result = result[-1]
             except redis.WatchError:
                 raise RaceCondition(f"watched key被其他事务修改")
+            except redis.exceptions.NoScriptError:
+                logger.warning("⚠️ [💾Redis] lua脚本丢失，正在重新初始化...")
+                # 服务器重启，脚本丢失，重新初始化脚本，当前玩家断线。
+                cls = self.__class__
+                cls.lua_check_unique = None
+                cls.lua_run_stacked = None
+                cls._load_scripts(self._backend)
+                raise
             else:
                 return result
             finally:
@@ -649,13 +665,14 @@ class RedisComponentTransaction(ComponentTransaction):
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
 
-    async def _db_get(self, row_id: int) -> None | np.record:
+    async def _db_get(self, row_id: int, lock_row=True) -> None | np.record:
         # 获取行数据的操作
         key = self._key_prefix + str(row_id)
         pipe = self._trx_conn.pipe
 
         # 同时要让乐观锁锁定该行
-        await pipe.watch(key)
+        if lock_row:
+            await pipe.watch(key)
         # 返回值要通过dict_to_row包裹下
         if row := await pipe.hgetall(key):
             return self._component_cls.dict_to_row(row)
