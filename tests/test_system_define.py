@@ -54,7 +54,7 @@ class TestSystemDefine(unittest.TestCase):
             pass
 
         # 要能取到定义
-        sys1_def = SystemClusters().get_system('ssw', 'system1')
+        sys1_def = SystemClusters().get_system('system1', namespace='ssw')
         self.assertNotEqual(sys1_def.func, system1)
         self.assertEqual(sys1_def.components, (GalaxyPosition, Hp, Inventory))
         self.assertEqual(sys1_def.arg_count, 3)
@@ -127,8 +127,7 @@ class TestSystemDefine(unittest.TestCase):
 
         SystemClusters().build_clusters('ssw')
 
-        sys_def = SystemClusters().get_system(
-            'ssw', 'system_inherit2')
+        sys_def = SystemClusters().get_system('system_inherit2', namespace='ssw')
         clu = SystemClusters().get_cluster('ssw', 0)
         self.assertEqual(sys_def.full_components, {GalaxyPosition, Hp, Inventory, World})
         self.assertEqual(clu.components, {GalaxyPosition, Hp, Inventory, World})
@@ -236,19 +235,19 @@ class TestSystemDefine(unittest.TestCase):
         self.assertEqual(clusters.get_clusters('ssw2')[0].id, 0)
 
         self.assertEqual(
-            clusters.get_system('ssw', 'system1').cluster_id, 0)
+            clusters.get_system('system1', namespace='ssw').cluster_id, 0)
         self.assertEqual(
-            clusters.get_system('ssw', 'system4').cluster_id, 1)
+            clusters.get_system('system4', namespace='ssw').cluster_id, 1)
         self.assertEqual(
-            clusters.get_system('ssw2', 'system4').cluster_id, 0)
+            clusters.get_system( 'system4', namespace='ssw2').cluster_id, 0)
         self.assertEqual(
-            clusters.get_system('ssw', 'system5').cluster_id, 1)
+            clusters.get_system('system5', namespace='ssw').cluster_id, 1)
         self.assertEqual(
-            clusters.get_system('ssw', 'system4').full_non_trx, {Map, })
+            clusters.get_system('system4', namespace='ssw').full_non_trx, {Map, })
 
         # bug 测试clusters.append是忘记sys_def.full_components.copy()的bug
         self.assertEqual(
-            clusters.get_system('ssw', 'system4').full_components,
+            clusters.get_system('system4', namespace='ssw').full_components,
             {GalaxyPosition})
 
 

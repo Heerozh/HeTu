@@ -4,6 +4,7 @@ redis[hiredis] ~= 5.0  # pip install -U redis[hiredis]
 GitPython ~= 3.0 # pip install -U GitPython
 sortedcontainers ~= 2.0
 pyyaml ~= 6.0  # pip install -U pyyaml
+orjson ~= 3.0  # pip install -U orjson
 
 websockets  # sanic comes with it, no need to install, just to suppress IDE warnings
 

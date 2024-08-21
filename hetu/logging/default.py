@@ -18,13 +18,16 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     'loggers': {
-        'HeTu.root': {
+        'root': {
             'handlers': ['console'],
             'level': 'INFO',
         },
-        'HeTu.replay': {
-            'handlers': [],
+        'HeTu.root': {
             'level': 'INFO',
+        },
+        'HeTu.replay': {
+            'level': 'ERROR',
+            'propagate': False,
         },
     },
     'formatters': {

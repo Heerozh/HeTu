@@ -6,7 +6,7 @@
 """
 import asyncio
 import importlib.util
-import json
+import orjson
 import logging
 import os
 import sys
@@ -38,11 +38,16 @@ def decode_message(message: bytes, protocol: dict):
         message = crypto.decrypt(message)
     if compress := protocol['compress']:
         message = compress.decompress(message)
-    return json.loads(message.decode())
+    json_parsed = orjson.loads(message)
+    return json_parsed
 
 
 def encode_message(message: list | dict, protocol: dict):
-    message = json.dumps(message).encode()
+    try:
+        message = orjson.dumps(message)
+    except Exception as e:
+        logger.exception(f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{e}")
+        raise
     if compress := protocol['compress']:
         message = compress.compress(message)
     if crypto := protocol['crypto']:
@@ -61,7 +66,8 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
     check_length('sys', data, 2, 100)
     call = SystemCall(data[1], tuple(data[2:]))
     ok, res = await executor.execute(call)
-    replay.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
+    if replay.level < logging.ERROR:  # 如果关闭了replay，为了速度不执行下面的字符串序列化
+        replay.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
     if ok and isinstance(res, ResponseToClient):
         await push_queue.put(['rsp', res.message])
     return ok
@@ -122,7 +128,8 @@ async def client_receiver(
                 break
             # 转换消息到array
             last_data = decode_message(message, protocol)
-            replay.debug("<<< " + str(last_data))
+            if replay.level < logging.ERROR: # 如果关闭了replay，为了速度不执行下面的字符串序列化
+                replay.debug("<<< " + str(last_data))
             # 检查接受上限
             flood_checker.received()
             if flood_checker.recv_limit_reached(ctx, "Coroutines(Websocket.client_receiver)"):
@@ -255,7 +262,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     try:
         while True:
             reply = await push_queue.get()
-            replay.debug(">>> " + str(reply))
+            if replay.level < logging.ERROR: # 如果关闭了replay，为了速度不执行下面的字符串序列化
+                replay.debug(">>> " + str(reply))
             # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))
             # 检查发送上限
@@ -306,7 +314,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         spec.loader.exec_module(module)
 
     # 传递配置
-    connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 10)
+    connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 0)
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get('LOGGING', DEFAULT_LOGGING_CONFIG))

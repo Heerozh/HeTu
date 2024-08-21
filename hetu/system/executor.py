@@ -67,7 +67,7 @@ class SystemExecutor:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        sys = SystemClusters().get_system(self.namespace, 'new_connection')
+        sys = SystemClusters().get_system('new_connection')
         ok, _ = await self._execute(sys, address)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
@@ -76,14 +76,14 @@ class SystemExecutor:
         if self.context.connection_id == 0:
             return
         # 释放connection
-        sys = SystemClusters().get_system(self.namespace, 'del_connection')
+        sys = SystemClusters().get_system('del_connection')
         await self._execute(sys)
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
         """检查调用是否合法"""
         context = self.context
         # 读取保存的system define
-        sys = SystemClusters().get_system(self.namespace, call.system)
+        sys = SystemClusters().get_system(call.system)
         if not sys:
             err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{call}"
             replay.info(err_msg)
@@ -144,8 +144,7 @@ class SystemExecutor:
 
         # 复制inherited函数
         for base_name in sys.full_bases:
-            context.inherited[base_name] = SystemClusters().get_system(
-                self.namespace, base_name).func
+            context.inherited[base_name] = SystemClusters().get_system(base_name).func
 
         # 调用系统
         while context.retry_count < sys.max_retry:
@@ -196,7 +195,7 @@ class SystemExecutor:
             return False, None
 
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
-        illegal = await self.alive_checker.is_illegal(self.context, str(call))
+        illegal = await self.alive_checker.is_illegal(self.context, call)
         if illegal:
             return False, None
 
