@@ -20,6 +20,7 @@ from sanic.exceptions import WebsocketClosed
 
 import hetu
 import hetu.system.connection as connection
+from hetu.common.helper import resolve_import
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
 from hetu.logging.default import DEFAULT_LOGGING_CONFIG
 from hetu.manager import ComponentTableManager
@@ -333,20 +334,18 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     compress = config.get('PACKET_COMPRESSION_CLASS')
     crypto = config.get('PACKET_CRYPTOGRAPHY_CLASS')
     if compress is not None:
-        from logging.config import BaseConfigurator
         try:
-            compress_module = BaseConfigurator({}).resolve(compress)
+            compress_module = resolve_import(compress)
         except ValueError as e:
-            raise ValueError(f"该压缩模块无法解析，请使用可以import的字符串：{compress}") from e
+            raise ValueError(f"该压缩模块无法解析，请使用可被import的字符串：{compress}") from e
         if not hasattr(compress_module, 'compress') or not hasattr(compress_module, 'decompress'):
             raise ValueError(f"该压缩模块没有实现compress和decompress方法：{compress}")
         app.ctx.compress = compress_module
     if crypto is not None:
-        from logging.config import BaseConfigurator
         try:
-            crypto_module = BaseConfigurator({}).resolve(crypto)
+            crypto_module = resolve_import(crypto)
         except ValueError as e:
-            raise ValueError(f"该压缩模块无法解析，请使用可以import的字符串：{crypto}") from e
+            raise ValueError(f"该加密模块无法解析，请使用可被import的字符串：{crypto}") from e
         if not hasattr(crypto_module, 'encrypt') or not hasattr(crypto_module, 'decrypt'):
             raise ValueError(f"该加密模块没有实现encrypt和decrypt方法：{crypto}")
         app.ctx.crypto = crypto_module
