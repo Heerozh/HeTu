@@ -51,14 +51,18 @@ class SystemClusters(metaclass=Singleton):
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
         self._global_system_map = {}  # type: dict[str, SystemDefine]
+        self._main_system_map = {}
 
     def _clear(self):
         self._clusters = {}
         self._component_map = {}
         self._system_map = {}
 
-    def get_system(self, namespace: str, system_name: str) -> SystemDefine | None:
-        return self._system_map[namespace].get(system_name, None)
+    def get_system(self, system_name: str, namespace: str = None) -> SystemDefine | None:
+        if namespace:
+            return self._system_map[namespace].get(system_name, None)
+        else:
+            return self._main_system_map.get(system_name, None)
 
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
         return {name: self.get_system(cluster.namespace, name) for name in cluster.systems}
@@ -144,6 +148,8 @@ class SystemClusters(metaclass=Singleton):
                     self._system_map[cluster.namespace][sys_name].cluster_id = cluster.id
                 for comp in cluster.components:
                     self._component_map[comp] = cluster.id
+
+        self._main_system_map = self._system_map[main_namespace]
 
         # 检查是否有component被non_transactions引用，但没有任何正常方式引用了它，必须至少有一个标准引用
         for comp in non_trx:

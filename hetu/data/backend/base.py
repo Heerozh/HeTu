@@ -277,6 +277,35 @@ class ComponentTransaction:
         # 继承，并实现往BackendTransaction里stack删除数据的操作
         raise NotImplementedError
 
+    async def get_by_ids(self, row_ids: list[int] | np.ndarray) -> np.recarray:
+        """
+        通过row_id，批量获取行数据，返回numpy array。一般用在query获得row_ids后。
+
+        假设我们有个Slot组件，每个Slot有一个item_id指向道具
+        >>> @define_component
+        ... class Slot(BaseComponent):
+        ...     owner: np.int64 = Property(0, index=True)
+        ...     item_id: np.int64 = Property(0)
+        取出所有slot.owner == caller的道具数据：
+        >>> @define_system(components=(Slot, Item))
+        ... async def get_all_items(ctx):
+        ...     slots = await ctx[Slot].query('owner', ctx.caller, limit=100, lock_index=False)
+        ...     items = await ctx[Item].get_by_ids(slots.item_id)
+        """
+        rtn = []
+        for row_id in row_ids:
+            if (row := self._cache.get(row_id)) is not None:
+                if type(row) is str and row == 'deleted':
+                    raise RaceCondition('gets: row已经被你自己删除了')
+                rtn.append(row)
+            else:
+                if (row := await self._db_get(row_id)) is None:
+                    raise RaceCondition('gets: row中途被删除了')
+                self._cache[row_id] = row
+                rtn.append(row)
+
+        return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
+
     async def select(self, value, where: str = 'id') -> None | np.record:
         """
         获取 `where` == `value` 的单行数据，返回c-struct like。
@@ -698,7 +727,7 @@ class MQClient:
 
 
 class BaseSubscription:
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
         raise NotImplementedError
 
     @property
@@ -722,19 +751,20 @@ class RowSubscription(BaseSubscription):
     def clear_cache(cls, channel):
         cls.__cache.pop(channel, None)
 
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
             return set(), set(), cache
 
         rows = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
         if len(rows) == 0:
-            rtn = {self.row_id: None}
+            # get_updated主要发给客户端，需要json，所以key直接用str
+            rtn = {str(self.row_id): None}
         else:
             if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
-                rtn = {self.row_id: rows[0]}
+                rtn = {str(self.row_id): rows[0]}
             else:
-                rtn = {self.row_id: None}
+                rtn = {str(self.row_id): None}
         RowSubscription.__cache[channel] = rtn
         return set(), set(), rtn
 
@@ -761,7 +791,7 @@ class IndexSubscription(BaseSubscription):
     def add_row_subscriber(self, channel, row_id):
         self.row_subs[channel] = RowSubscription(self.table, self.req_owner, channel, row_id)
 
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[int, dict | None]]:
+    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
             row_ids = await self.table.direct_query(**self.query_param, row_format='id')
@@ -780,13 +810,13 @@ class IndexSubscription(BaseSubscription):
                     continue  # 可能是刚添加就删了
                 else:
                     if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
-                        rtn[row_id] = rows[0]
+                        rtn[str(row_id)] = rows[0]
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
                         self.table, self.req_owner, new_chan_name, row_id)
             for row_id in deletes:
-                rtn[row_id] = None
+                rtn[str(row_id)] = None
                 rem_chan_name = self.table.channel_name(row_id=row_id)
                 rem_chans.add(rem_chan_name)
                 self.row_subs.pop(rem_chan_name)
@@ -970,7 +1000,7 @@ class Subscriptions:
         self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
 
 
-    async def get_updates(self, timeout=None) -> dict[str, dict[int, dict]]:
+    async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
         """
         pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
         返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
