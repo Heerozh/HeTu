@@ -306,14 +306,11 @@ class ComponentTransaction:
 
         return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def select(self, value, where: str = 'id') -> None | np.record:
+    async def select(self, value, where: str = 'id', lock_row=True) -> None | np.record:
         """
         获取 `where` == `value` 的单行数据，返回c-struct like。
         `where` 不是unique索引时，返回升序排序的第一条数据。
-        就是query的语法糖，等同以下代码：
-        >>> async def some_system(ctx):
-        ...     rows = await ctx[Item].query(where, value, limit=1, lock_index=False)
-        ...     return rows[0] if rows else None
+        本方法等于 `query(where, value, limit=1, lock_index=False,lock_row=lock_row)`，但速度更快一些。
 
         Parameters
         ----------
@@ -321,6 +318,9 @@ class ComponentTransaction:
             查询的值
         where: str
             查询的索引名，如 'id', 'owner', 'name' 等
+        lock_row: bool
+            是否锁定查询到的行，默认锁定。如果不锁定，该数据只能做只读操作，不然会有数据写入冲突。
+            一般不需要关闭锁定，除非慢日志回报了大量的事务冲突，考虑清楚后再做调整。
 
         Returns
         -------
@@ -363,7 +363,7 @@ class ComponentTransaction:
         # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
         # 所以检测get结果是否在查询范围内，不在就抛出冲突
-        if (row := await self._db_get(row_id)) is None:
+        if (row := await self._db_get(row_id, lock_row=lock_row)) is None:
             if where == 'id':
                 return None  # 如果不是从index查询到的id，而是直接传入，那就不需要判断race了
             else:
