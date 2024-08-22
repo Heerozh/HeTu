@@ -13,7 +13,7 @@ from .context import Context
 from ..data import BaseComponent, define_component, Property, Permission
 from ..manager import ComponentTableManager
 from ..system import define_system
-from ..logging.filter import ContextFilter
+from ..safelogging.filter import ContextFilter
 
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
