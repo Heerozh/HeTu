@@ -1,7 +1,7 @@
 [![codecov](https://codecov.io/github/Heerozh/HeTu/graph/badge.svg?token=YFPF963NB0)](https://codecov.io/github/Heerozh/HeTu)
 
 > [!NOTE]  
-> 仍在开发中，80%...
+> 仍在测试中，正在公司内部开发使用
 
 # 河图HeTu
 
@@ -212,16 +212,16 @@ Redis基准性能CPS(每秒调用次数)结果为：
 
 ### 测试河图性能：
 
-- hello world测试: 序列化并返回hello world，主要消耗在json和zlib压缩
+- hello world测试: 序列化并返回hello world。
 - select + update：单Component获取行并写入行操作，表总数据量3W行。
 
 CPS(每秒调用次数)测试结果为：
 
 |         | hello world(Calls) | select(Calls) | select + update(Calls) | select*2 + update*2(Calls) |
 |:--------|-------------------:|--------------:|-----------------------:|---------------------------:|
-| Avg(每秒) |            151,418 |        73,822 |                 30,595 |                   16,226.3 |
+| Avg(每秒) |            151,418 |       78131.1 |                 30,595 |                   16,226.3 |
 | CPU负载   |                99% |           99% |                    68% |                        54% |
-| Redis负载 |                 0% |           92% |                    99% |                        99% |
+| Redis负载 |                 0% |           96% |                    99% |                        99% |
 
 以上测试为单Component，多个Component有机会（要低耦合度）通过Redis Cluster扩展。
 
@@ -231,8 +231,8 @@ CPS(每秒调用次数)测试结果为：
 
 |         | hello world(Calls) | select(Calls) | select + update(Calls) | select*2 + update*2(Calls) |
 |:--------|-------------------:|--------------:|-----------------------:|---------------------------:|
-| Avg(每秒) |            4577.93 |       706.328 |                639.094 |                    410.622 |     
-| RTT(ms) |           0.218439 |       1.41577 |                1.56471 |                    2.43533 |           
+| Avg(每秒) |            4577.93 |       1194.38 |                639.094 |                    410.622 |     
+| RTT(ms) |           0.218439 |      0.837252 |                1.56471 |                    2.43533 |           
     
 
 
@@ -263,7 +263,7 @@ docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest star
 ```
 可以启动多台hetu standalone服务器，然后用反向代理对连接进行负载均衡。
 
-后续启动的服务器需要把`--head`参数设为`False`，以防止它们进行数据库初始化工作（主要是重建索引，删除临时数据等）。
+后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
 
 如果你的项目有其他依赖项，比如用到了pyTorch，则需要自己build docker镜像，或用原生启动。
 
