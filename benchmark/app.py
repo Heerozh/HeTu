@@ -19,7 +19,7 @@ class IntTable(hetu.data.BaseComponent):
 @hetu.system.define_system(namespace='bench', components=(IntTable, ),
                            permission=hetu.data.Permission.EVERYBODY)
 async def just_select(ctx: hetu.system.Context, number):
-    row = await ctx[IntTable].select(number, 'number')
+    row = await ctx[IntTable].select(number, 'id', lock_row=False)
     return hetu.system.ResponseToClient([ctx.retry_count])
 
 
