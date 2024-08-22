@@ -120,8 +120,8 @@ class BaseComponent:
     def dict_to_row(cls, data: dict):
         """从dict转换为c-struct like数据行"""
         row = cls.new_row()
-        for name, _ in cls.dtype_map_.items():
-            row[name] = data[name]
+        for i, (name, _) in enumerate(cls.properties_):
+            row[i] = data[name]
         return row
 
 
