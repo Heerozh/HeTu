@@ -227,7 +227,6 @@ class RedisTransaction(BackendTransaction):
         cls._load_scripts(backend)
         cls._patch_redis_py_lib()
 
-        self._uuid = uuid.uuid4().hex
         self._checks = []  # 事务中的unique检查
         self._stack = []  # 事务中的更新操作
         self._request_auto_incr = False
@@ -265,7 +264,8 @@ class RedisTransaction(BackendTransaction):
             # 在提交前最后检查一遍unique
             # 之前的insert和update时也有unique检查，但为了降低事务冲突并不锁定index，因此可能有变化
             # 这里在lua中检查unique，不用锁定index
-            unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + self._uuid
+            _uuid = uuid.uuid4().hex
+            unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + _uuid
             lua_unique_keys = [unique_check_key, ]
             lua_unique_argv = self._checks
 
