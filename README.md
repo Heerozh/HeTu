@@ -5,17 +5,16 @@
 
 # 河图HeTu
 
-河图是一个轻量化的分布式游戏服务器引擎。集成了数据库概念，因此开发和维护极其便捷，适用于从万人 MMO 到多人联机的各种场景。
+河图是一个轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
+开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题。
 
 基于 ECS(Entity-Component-System) 结构，采用 Python 语言，支持各种数据科学库，拥抱未来。
 具体性能见下方[性能测试](#性能测试)。
 
-开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题，降低心智负担。
-
 ## 游戏服务器引擎，也可称为数据库
 
 河图把数据查询接口"暴露"给游戏客户端，客户端通过SDK直接进行 select，query 查询，并订阅同步，
-所以河图自称为数据库。写入操作通过 System，也就是游戏的逻辑代码。
+所以河图自称为数据库。写入操作通过 System，也就是服务器的逻辑代码。
 
 这种结构可以大幅减少游戏服务器和客户端的开发量。
 
@@ -78,7 +77,6 @@ async def login_test(ctx: Context, user_id):
     permission=Permission.USER,     
 )
 async def move_to(ctx: Context, x, y):
-    # todo: 客户端传入的参数（x, y）都要验证合法性，防止用户修改数据，这里省略。
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
     async with ctx[Position].select_or_create(ctx.caller, where='owner') as pos:
         pos.x = x
@@ -95,11 +93,13 @@ async def move_to(ctx: Context, x, y):
 安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要外网）：
 
 ```bash
+cd examples/server/first_game
 docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest start --namespace=ssw --instance=walking
 ````
 * `-p` 是映射本地端口到hetu容器端口，比如要修改成443端口就使用`-p 443:2466`
 * `-v` 是映射本地目录到hetu容器目录(`/app`和`/data`和`/logs`目录)
 * 其他参数见帮助`docker run --rm heerozh/hetu:latest start --help`
+
 
 ### 客户端代码部分
 
@@ -188,11 +188,11 @@ public class FirstGame : MonoBehaviour
 
 ### 配置：
 
-|       |                     服务器 型号 |                                  设置 |   
-|:------|---------------------------:|------------------------------------:|
-| 河图    |           ecs.ic5.16xlarge |           64核，关SSL，参数: --workers=76 |
-| Redis |     redis.shard.small.2.ce |             单可用区，双机热备，非Cluster，内网直连 |   
-| 跑分程序  |                         本地 |         参数： --clients=1000 --time=5 |        
+|       |                 服务器 型号 |                            设置 |   
+|:------|-----------------------:|------------------------------:|
+| 河图    |       ecs.ic5.16xlarge | 32核64线程，关SSL，参数: --workers=76 |
+| Redis | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
+| 跑分程序  |                     本地 |   参数： --clients=1000 --time=5 |        
 
 ### 基准：
 
@@ -217,22 +217,22 @@ Redis基准性能CPS(每秒调用次数)结果为：
 
 CPS(每秒调用次数)测试结果为：
 
-|         | hello world(Calls) | select + update(Calls) | select\*2 + update\*2(Calls) |
-|:--------|-------------------:|-----------------------:|-----------------------------:|
-| Avg(每秒) |            125,117 |               30,285.1 |                     16,112.7 |
-| CPU负载   |               100% |                    65% |                          45% |
-| Redis负载 |                 0% |                   100% |                         100% |
+|         | hello world(Calls) | select(Calls) | select + update(Calls) | select*2 + update*2(Calls) |
+|:--------|-------------------:|--------------:|-----------------------:|---------------------------:|
+| Avg(每秒) |            151,418 |        73,822 |                 30,595 |                   16,226.3 |
+| CPU负载   |                99% |           99% |                    68% |                        54% |
+| Redis负载 |                 0% |           92% |                    99% |                        99% |
 
-以上测试为单Component，多个Component有机会（但不多）通过Redis Cluster扩展。
+以上测试为单Component，多个Component有机会（要低耦合度）通过Redis Cluster扩展。
 
 ### 单连接性能：
 
-测试程序使用`--clients=1`参数测试，未用满CPU，主要测试RTT：
+测试程序使用`--clients=1`参数测试，单线程同步堵塞模式，主要测试RTT：
 
-|         | hello world(Calls) | select + update(Calls) | select\*2 + update\*2(Calls) |
-|:--------|-------------------:|-----------------------:|-----------------------------:|
-| Avg(每秒) |            3766.88 |                 659.95 |                       412.55 |     
-| RTT(ms) |           0.265471 |                1.51527 |                      2.42395 |           
+|         | hello world(Calls) | select(Calls) | select + update(Calls) | select*2 + update*2(Calls) |
+|:--------|-------------------:|--------------:|-----------------------:|---------------------------:|
+| Avg(每秒) |            4577.93 |       706.328 |                639.094 |                    410.622 |     
+| RTT(ms) |           0.218439 |       1.41577 |                1.56471 |                    2.43533 |           
     
 
 
@@ -259,11 +259,13 @@ docker run --rm -v .\本地app目录/app:/app -v .\本地数据目录:/data -p 2
 
 也可以使用Standalone模式，只启动河图，不启动Redis。
 ```bash
-docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest start --config /app/config.py --standalone
+docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest start --config /app/config.yml --standalone
 ```
 可以启动多台hetu standalone服务器，然后用反向代理对连接进行负载均衡。
 
 后续启动的服务器需要把`--head`参数设为`False`，以防止它们进行数据库初始化工作（主要是重建索引，删除临时数据等）。
+
+如果你的项目有其他依赖项，比如用到了pyTorch，则需要自己build docker镜像，或用原生启动。
 
 ### 原生启动！
 
@@ -271,7 +273,7 @@ docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest star
 
 Redis部署，我们推荐用master+多机只读replica的分布式架构，这里跳过。
 
-先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)软件管理器，含有编译好的Python任意版本，河图需要Python3.11.3以上版本。
+先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)软件管理器，含有编译好的Python任意版本，河图需要Python3.12.5以上版本。
 
 服务器部署可用安装脚本（清华镜像）：
 ```shell
@@ -286,7 +288,7 @@ exec bash
 然后创建新的Python环境：
 
 ```shell
-conda create -n hetu python=3.11
+conda create -n hetu python=3.12
 ```
 
 别忘了激活环境:
@@ -305,8 +307,8 @@ pip install git+https://github.com/Heerozh/HeTu.git
 ```bash
 hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
 ```
-其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.py`方式启动，
-配置模板见CONFIG_TEMPLATE.py文件。
+其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.yml`方式启动，
+配置模板见CONFIG_TEMPLATE.yml文件。
 
 ## 详细文档：
 
