@@ -341,9 +341,9 @@ if __name__ == '__main__':
         case 'call':
             all_results = [
                 run_bench(bench_hello_world, args, 'hello world'),
-                run_bench(bench_just_select, args, 'just select'),
                 run_bench(bench_select_update, args, 'select + update'),
                 run_bench(bench_exchange_data, args, 'select*2 + update*2'),
+                run_bench(bench_just_select, args, 'select'),
             ]
         case 'pubsub':
             # 再开一个写入进程

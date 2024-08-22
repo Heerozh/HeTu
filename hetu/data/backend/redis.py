@@ -15,6 +15,7 @@ import warnings
 
 import numpy as np
 import redis
+from redis.asyncio.client import Pipeline
 
 from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, MQClient
 from .base import RaceCondition, HeadLockFailed
@@ -24,6 +25,10 @@ from ...common.multimap import MultiMap
 
 logger = logging.getLogger('HeTu.root')
 MAX_SUBSCRIBED = 1000
+
+
+async def _pipeline_lua_mock(_):
+    return
 
 
 class RedisBackend(Backend):
@@ -212,13 +217,10 @@ class RedisTransaction(BackendTransaction):
 
     @classmethod
     def _patch_redis_py_lib(cls):
-        from redis.asyncio.client import Pipeline
         # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
-        async def _pipeline_lua_speedup(_):
-            return
-
-        Pipeline.load_scripts_org = Pipeline.load_scripts
-        Pipeline.load_scripts = _pipeline_lua_speedup
+        if not hasattr(Pipeline, 'load_scripts_org'):
+            Pipeline.load_scripts_org = Pipeline.load_scripts
+            Pipeline.load_scripts = _pipeline_lua_mock
 
     def __init__(self, backend: RedisBackend, cluster_id: int):
         super().__init__(backend, cluster_id)
