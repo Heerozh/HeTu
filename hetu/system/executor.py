@@ -19,6 +19,8 @@ from ..system import SystemClusters, SystemDefine
 
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
+SYSTEM_CLUSTERS = SystemClusters()
+SystemClusters = None
 
 
 @dataclass
@@ -67,7 +69,7 @@ class SystemExecutor:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        sys = SystemClusters().get_system('new_connection')
+        sys = SYSTEM_CLUSTERS.get_system('new_connection')
         ok, _ = await self._execute(sys, address)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
@@ -76,14 +78,14 @@ class SystemExecutor:
         if self.context.connection_id == 0:
             return
         # 释放connection
-        sys = SystemClusters().get_system('del_connection')
+        sys = SYSTEM_CLUSTERS.get_system('del_connection')
         await self._execute(sys)
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
         """检查调用是否合法"""
         context = self.context
         # 读取保存的system define
-        sys = SystemClusters().get_system(call.system)
+        sys = SYSTEM_CLUSTERS.get_system(call.system)
         if not sys:
             err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{call}"
             replay.info(err_msg)
@@ -144,7 +146,7 @@ class SystemExecutor:
 
         # 复制inherited函数
         for base_name in sys.full_bases:
-            context.inherited[base_name] = SystemClusters().get_system(base_name).func
+            context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base_name).func
 
         # 调用系统
         while context.retry_count < sys.max_retry:
@@ -170,6 +172,8 @@ class SystemExecutor:
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
                 await asyncio.sleep(delay)
+                # todo 加个慢日志，可以通过统计方式，定期的推送到日志
+                #   比如直接推送执行速度最慢的几个，包括retry次数
                 continue
             except Exception as e:
                 err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{e}"

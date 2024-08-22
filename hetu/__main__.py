@@ -7,7 +7,6 @@
 import argparse
 import gettext
 import logging
-import logging.config
 import logging.handlers
 import os
 import subprocess
@@ -17,7 +16,7 @@ import redis
 import yaml
 
 from hetu.common import yamlloader
-from hetu.logging import handlers as log_handlers
+from hetu.safelogging import handlers as log_handlers
 from hetu.server import start_webserver
 
 logger = logging.getLogger('HeTu.root')
@@ -173,7 +172,7 @@ def start(start_args):
                 ssl=ssl if ssl != 'auto' else None,
                 fast=fast,
                 workers=workers,
-                single_process=workers==1)
+                single_process=workers == 1)
     # 启动并堵塞
     if workers == 1:
         Sanic.serve_single(primary=app)

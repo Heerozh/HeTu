@@ -22,7 +22,7 @@ import hetu
 import hetu.system.connection as connection
 from hetu.common.helper import resolve_import
 from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
-from hetu.logging.default import DEFAULT_LOGGING_CONFIG
+from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
 
