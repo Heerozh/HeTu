@@ -1,7 +1,7 @@
 """
 @author: Heerozh (Zhang Jianhao)
 @copyright: Copyright 2024, Heerozh. All rights reserved.
-@license: MIT 可用作商业项目，再随便找个角落提及用到了此项目 :D
+@license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
 import asyncio
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from .connection import ConnectionAliveChecker
 from .context import Context
+from ..common.slowlog import SlowLog
 from ..data import Permission
 from ..data.backend import RaceCondition
 from ..manager import ComponentTableManager
@@ -21,6 +22,7 @@ logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
 SYSTEM_CLUSTERS = SystemClusters()
 SystemClusters = None
+SLOW_LOG = SlowLog()
 
 
 @dataclass
@@ -148,6 +150,7 @@ class SystemExecutor:
         for base_name in sys.full_bases:
             context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base_name).func
 
+        start_time = time.perf_counter()
         # 调用系统
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
@@ -172,8 +175,6 @@ class SystemExecutor:
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
                 await asyncio.sleep(delay)
-                # todo 加个慢日志，可以通过统计方式，定期的推送到日志
-                #   比如直接推送执行速度最慢的几个，包括retry次数
                 continue
             except Exception as e:
                 err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{e}"
@@ -184,6 +185,9 @@ class SystemExecutor:
                 if trx is not None:
                     # 上面如果执行过end_transaction了，那么这句不生效的，主要用于保证连接关闭
                     await trx.end_transaction(discard=True)
+                # 记录时间和重试次数到内存
+                elapsed = time.perf_counter() - start_time
+                SLOW_LOG.log(elapsed, sys_name, context.retry_count)
 
         logger.debug(f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
         return False, None

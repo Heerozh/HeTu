@@ -5,6 +5,8 @@ GitPython ~= 3.0 # pip install -U GitPython
 sortedcontainers ~= 2.0
 pyyaml ~= 6.0  # pip install -U pyyaml
 orjson ~= 3.0  # pip install -U orjson
+tabulate
+wcwidth  # 有这个才能中文对齐
 
 websockets  # sanic comes with it, no need to install, just to suppress IDE warnings
 

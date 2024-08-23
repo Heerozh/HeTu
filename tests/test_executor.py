@@ -76,7 +76,9 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         with self.assertLogs('HeTu', level='INFO') as cm:
             ok, _ = await executor.exec('magic')
             self.assertTrue(ok)
-            self.assertEqual(cm.output, ['INFO:HeTu.root:User_123', 'INFO:HeTu.root:User_3'])
+            self.assertEqual(cm.output[:2], ['INFO:HeTu.root:User_123', 'INFO:HeTu.root:User_3'])
+            self.assertIn('慢日志', cm.output[2])
+            self.assertIn('magic', cm.output[2])
 
         # 测试race
         executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)

@@ -9,9 +9,9 @@ import time
 import zlib
 
 import redis
+import tabulate
 
 try:
-    import tabulate
     import pandas as pd
 except ImportError:
     raise ImportError("压测程序要安装pandas + tabulate库：pip install pandas tabulate")
@@ -24,6 +24,7 @@ from hetu.data.backend import (
 )
 import websockets
 import app
+
 _ = tabulate
 
 BENCH_ROW_COUNT = 30000
@@ -41,7 +42,7 @@ async def bench_sys_call_routine(address, duration, name: str, pid: str, packet)
     print(name, '正在连接', pid, '号客户端')
     try:
         async with websockets.connect(address, ssl=ssl_context) as ws:
-            await asyncio.sleep(10) # 等待其他协程连接成功
+            await asyncio.sleep(10)  # 等待其他协程连接成功
             print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
             while True:
                 # 随机读写30w数据中的一个
@@ -233,12 +234,14 @@ async def bench_direct_redis_routine(address, duration, name: str, pid: str):
         await aio.aclose()
     return call_count, retry_count
 
+
 async def bench_just_select(address, duration, name: str, pid: str):
     def packet():
         row_id = random.randint(1, BENCH_ROW_COUNT)
         return ['sys', 'just_select', row_id]
 
     return await bench_sys_call_routine(address, duration, name, pid, packet)
+
 
 async def bench_select_update(address, duration, name: str, pid: str):
     def packet():
@@ -385,4 +388,3 @@ if __name__ == '__main__':
             print(race_stat.to_markdown())
         case 'pubsub':
             p_uper.kill()
-
