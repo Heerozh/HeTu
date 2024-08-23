@@ -101,8 +101,8 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     # 已登录用户扩张限制
     ctx.server_limits = [[limit[0] * 10, limit[1]] for limit in ctx.server_limits]
     ctx.client_limits = [[limit[0] * 10, limit[1]] for limit in ctx.client_limits]
-    ctx.max_row_sub *= 100
-    ctx.max_index_sub *= 100
+    ctx.max_row_sub *= 50
+    ctx.max_index_sub *= 50
 
     ContextFilter.set_log_context(str(ctx))
     return True, 'SUCCESS'

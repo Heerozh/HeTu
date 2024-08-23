@@ -59,10 +59,10 @@ SERVER_SEND_LIMITS:
   - [ 27, 5 ]
   - [ 100, 50 ]
   - [ 300, 300 ]
-# 限制未登录客户端最大允许订阅的行数。每次Select算1行，每次Query后算返回的行数。
-# 登录提权后限制数*100，或自己在login逻辑中修改ctx.max_row_sub值来实现
+# 限制未登录客户端最大允许订阅的行数。每次HeTuClientSDK.Select算1行，每次HeTuClientSDK.Query后根据返回的行数计入。
+# elevate会把限制数*50，可在elevate后修改ctx.max_row_sub值来自定义登陆后的限制，不宜超过1000
 MAX_ROW_SUBSCRIPTION: 10
-# 限制未登录客户端最大允许订阅的Index数(Query订阅)。每次Query订阅+1。
+# 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.Query)。每次Query订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
 
 
