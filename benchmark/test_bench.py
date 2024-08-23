@@ -14,7 +14,7 @@ import tabulate
 try:
     import pandas as pd
 except ImportError:
-    raise ImportError("压测程序要安装pandas + tabulate库：pip install pandas tabulate")
+    raise ImportError("压测程序要安装pandas库：pip install pandas")
 from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process
