@@ -5,11 +5,13 @@
 @email: heeroz@gmail.com
 """
 import logging
+import random
+import time
 
 from tabulate import tabulate
 
 logger = logging.getLogger('HeTu.root')
-SLOW_LOG_TIME_THRESHOLD = 0.1
+SLOW_LOG_TIME_THRESHOLD = 1
 SLOW_LOG_RETRY_THRESHOLD = 5
 
 
@@ -35,19 +37,37 @@ class SlowLog:
     def __init__(self):
         self._time_averages = {}
         self._retry_averages = {}
+        self._logged = {}
+        self.log_interval = random.randint(60, 600)
+        self._last_clean = time.time()
 
-    def log(self, time, name, retry):
+    def clear(self):
+        self._time_averages.clear()
+        self._retry_averages.clear()
+        self._logged.clear()
+        self._last_clean = time.time()
+
+    def log(self, elapsed, name, retry):
+        # 每小时清理一次，防止InplaceAverage的数据越来越不准
+        now = time.time()
+        if now - self._last_clean > 3600:
+            self.clear()
+        # 记录慢日志
         if (time_avg := self._time_averages.get(name)) is None:
             time_avg = InplaceAverage()
             self._time_averages[name] = time_avg
         if (retry_avg := self._retry_averages.get(name)) is None:
             retry_avg = InplaceAverage()
             self._retry_averages[name] = retry_avg
-        time_avg.add(time)
+        time_avg.add(elapsed)
         retry_avg.add(retry)
-        if time > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD:
-            logger.warning(f"⚠️ [📞慢日志] 系统 {name} 执行时间 {time:.3f}秒，事务冲突次数 {retry}，"
-                           f"平均时间 {time_avg.value:.3f}秒\n{self}")
+        # 1分钟打印一次消息
+        if elapsed > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD:
+            if now - self._logged.get(name, 0) > self.log_interval:
+                logger.warning(
+                    f"⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed:.3f}秒，事务冲突次数 {retry}，"
+                    f"平均时间 {time_avg.value:.3f}秒\n{self}")
+                self._logged[name] = now
 
     def __str__(self):
         slow20 = sorted(self._time_averages.items(), key=lambda x: x[1].value, reverse=True)[:20]
