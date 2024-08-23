@@ -18,6 +18,10 @@ mock_time = mock.Mock()
 class TestExecutor(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
+        # 测试慢日志阈值
+        import hetu.common.slowlog
+        hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
+
         # 加载玩家的app文件
         import app
         _ = app
@@ -64,8 +68,9 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         ok, _ = await executor.exec('test_hp', 100 - 9)
         self.assertTrue(ok)
 
+
         # 测试magic方法，自身+-10距离内的位置都会被攻击到
-        # 先添加3个位置供magic查询
+        # 添加3个位置供magic查询
         ok, _ = await executor.exec('create_user', executor.context.caller, 10, 10)
         self.assertTrue(ok)
         ok, _ = await executor.exec('create_user', 3, 0, 0)
