@@ -24,7 +24,7 @@ from ...common.helper import batched
 from ...common.multimap import MultiMap
 
 logger = logging.getLogger('HeTu.root')
-MAX_SUBSCRIBED = 1000
+MAX_SUBSCRIBED = 5000
 
 
 async def _pipeline_lua_mock(_):
@@ -823,8 +823,7 @@ class RedisMQClient(MQClient):
         self.subscribed.add(channel_name)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
-            logger.warning(f"⚠️ [💾Redis] 订阅数据数超过1000行，可能导致网络和CPU消耗过大，"
-                           f"当前订阅数：{len(self.subscribed)}。")
+            logger.warning(f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，")
 
     async def unsubscribe(self, channel_name) -> None:
         await self._mq.unsubscribe(channel_name)
