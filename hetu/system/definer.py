@@ -219,8 +219,8 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     components: list of BaseComponent class
         引用Component，引用的Component可以在`ctx`中进行相关的事务操作，保证数据一致性。
     non_transactions: list of BaseComponent class
-        直接获得该Component底层类，因此可以绕过事务直接写入，注意不保证数据一致性，请只做原子操作。写入操作只支
-        持对无索引的属性写入，因为带索引的无法实现原子操作。
+        直接获得该Component底层类，因此可以绕过事务直接写入，注意不保证数据一致性，请只做原子操作。写入操作不支持
+        字符串索引属性写入，因为字符串索引无法实现原子操作。
 
         一般用在Hub Component上，System之间引用的components有交集的，形成一个簇，表示这些System互相之间可能
         有事务冲突，大量System都引用的Component称为Hub，会导致簇过大，从而数据库无法通过Cluster模式提升性能，

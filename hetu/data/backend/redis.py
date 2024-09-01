@@ -633,10 +633,28 @@ class RedisComponentTable(ComponentTable):
         aio = self._backend.aio
         key = self._key_prefix + str(row_id)
 
+        update_index = False
         for prop in kwargs:
             if prop in self._component_cls.indexes_:
-                raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
-        await aio.hset(key, mapping=kwargs)
+                update_index = True
+
+        if not update_index:
+            await aio.hset(key, mapping=kwargs)
+        else:
+            pipe = aio.pipeline()
+            pipe.hset(key, mapping=kwargs)
+            idx_prefix = self._idx_prefix
+            for idx_name, str_type in self._component_cls.indexes_.items():
+                if idx_name not in kwargs:
+                    continue
+                idx_key = idx_prefix + idx_name
+                if str_type:
+                    raise ValueError(f"字符串类型索引`{idx_name}`不支持`direct_set`修改")
+                elif idx_name == 'id':
+                    pipe.zadd(idx_key, {row_id: row_id})
+                else:
+                    pipe.zadd(idx_key, {kwargs[idx_name]: row_id})
+            await pipe.execute()
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
