@@ -199,6 +199,7 @@ class ComponentTable:
     async def direct_set(self, row_id: int, **kwargs):
         """
         不通过事务，直接设置数据库某行的值。此方法不检查任何正确性，比如row_id不存在也会设置。
+        不可修改字符串类型，且开启索引的属性。
 
         .. warning:: ⚠️ 警告：由于不在事务中，值随时可能被其他进程修改/删除，不保证数据一致性。
         请勿在System中使用，除非原子操作。
