@@ -495,7 +495,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    def select_or_create(self, value, where: str = None) -> 'UpdateOrInsert':
+    def update_or_insert(self, value, where: str = None) -> 'UpdateOrInsert':
         """
         同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
@@ -516,7 +516,7 @@ class ComponentTransaction:
         ...     cash: np.int64 = Property(0)
         >>> @define_system(components=(Portfolio, ))
         ... async def deposit_franklin(ctx):
-        ...     async with ctx[].select_or_create(ctx.caller, 'owner') as row:
+        ...     async with ctx[].update_or_insert(ctx.caller, 'owner') as row:
         ...         row.cash += 100
         """
         return UpdateOrInsert(self, value, where)

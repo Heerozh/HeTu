@@ -1,7 +1,7 @@
 [![codecov](https://codecov.io/github/Heerozh/HeTu/graph/badge.svg?token=YFPF963NB0)](https://codecov.io/github/Heerozh/HeTu)
 
 > [!NOTE]  
-> 仍在测试中，正在公司内部开发使用
+> 内测中，正在公司内部开发使用
 
 # 河图HeTu
 
@@ -78,7 +78,7 @@ async def login_test(ctx: Context, user_id):
 )
 async def move_to(ctx: Context, x, y):
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    async with ctx[Position].select_or_create(ctx.caller, where='owner') as pos:
+    async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
         pos.x = x
         pos.y = y
         # with结束后会自动提交修改
@@ -209,7 +209,7 @@ Redis基准性能CPS(每秒调用次数)结果为：
 | Avg(每秒) |            30,345.2 |
 
 * 某云倚天版(ARM)的Redis性能，hset/get性能一致，但牵涉事务后性能大约下降40%
-* 某云Tair测试性能高35%，CPS为45,471，但只是兼容Redis指令，并非Redis。之前测试订阅有问题，未开源也不确定事务是否一致。
+* 某云Tair只是半兼容Redis指令，并非Redis，并不能正常使用。
 
 ### 测试河图性能：
 
@@ -238,7 +238,7 @@ CPS(每秒调用次数)测试结果为：
 
 ### 关于Python性能
 
-河图是分布式的，吞吐量上限不受制于逻辑代码，而受制于后端Redis，语言性能只影响RTT。作为参考，Python性能大概是PHP7水平。
+河图是分布式的，吞吐量和RTT都不受制于语言，而受制于后端Redis。作为参考，Python性能大概是PHP7水平。
 
 之前一直用LuaJIT，虽然速度很快，但代码实在是太繁重了。
 
