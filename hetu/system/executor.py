@@ -150,6 +150,8 @@ class SystemExecutor:
         for base_name in sys.full_bases:
             context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base_name).func
 
+        # todo 实现non_transactions的引用
+
         start_time = time.perf_counter()
         # 调用系统
         while context.retry_count < sys.max_retry:
