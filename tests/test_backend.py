@@ -88,12 +88,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             result = await tbl.query('id', 0, 2)
             self.assertIs(type(result), np.recarray)
 
-        # 测试可用select_or_create
+        # 测试可用update_or_insert
         async with backend.transaction(1) as trx:
             tbl = singular_unique.attach(trx)
-            async with tbl.select_or_create('test', 'name') as row:
+            async with tbl.update_or_insert('test', 'name') as row:
                 self.assertEqual(row.name, 'test')
-            async with tbl.select_or_create('', 'name') as row:
+            async with tbl.update_or_insert('', 'name') as row:
                 self.assertEqual(row.id, 1)
             row_ids = await trx.end_transaction(False)
         self.assertEqual(row_ids, [2])
@@ -161,8 +161,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             row.time = 2
             with self.assertRaisesRegex(UniqueViolation, "time"):
                 await tbl.insert(row)
-            # 测试能用select_or_create
-            async with tbl.select_or_create(1, 'owner') as row:
+            # 测试能用update_or_insert
+            async with tbl.update_or_insert(1, 'owner') as row:
                 self.assertEqual(row.owner, 1)
 
         # 先插入25条数据
@@ -840,7 +840,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     async def test_update_or_insert_race_bug(
             self, table_cls: type[ComponentTable],backend_cls: type[Backend], config
     ):
-        # 测试select_or_create UniqueViolation是否转化为了RaceCondition
+        # 测试update_or_insert UniqueViolation是否转化为了RaceCondition
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
         item_data.create_or_migrate()
@@ -848,7 +848,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async def main_task():
             async with backend.transaction(1) as trx:
                 tbl = item_data.attach(trx)
-                async with tbl.select_or_create('uni_vio', 'name') as row:
+                async with tbl.update_or_insert('uni_vio', 'name') as row:
                     await asyncio.sleep(0.1)
                     row.qty = 1
 

@@ -41,7 +41,7 @@ class Users(BaseComponent):
     components=(MP,),
 )
 async def use_mp(ctx: Context, value):
-    async with ctx[MP].select_or_create(ctx.caller, 'owner') as row:
+    async with ctx[MP].update_or_insert(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
 
@@ -61,7 +61,7 @@ async def login(ctx: Context, user_id, kick_logged_in=True):
     permission=Permission.USER
 )
 async def use_hp(ctx: Context, value):
-    async with ctx[HP].select_or_create(ctx.caller, 'owner') as row:
+    async with ctx[HP].update_or_insert(ctx.caller, 'owner') as row:
         row.value -= value
     return row.value
 
@@ -88,7 +88,7 @@ async def create_user(ctx: Context, user_id, x, y):
     usr.entity_id = user_id
     await ctx[Users].insert(usr)
 
-    async with ctx[Position].select_or_create(user_id, 'owner') as pos:
+    async with ctx[Position].update_or_insert(user_id, 'owner') as pos:
         pos.x = x
         pos.y = y
 
@@ -98,7 +98,7 @@ async def create_user(ctx: Context, user_id, x, y):
     components=(Position, ),
 )
 async def move_user(ctx: Context, user_id, x, y):
-    async with ctx[Position].select_or_create(user_id, 'owner') as pos:
+    async with ctx[Position].update_or_insert(user_id, 'owner') as pos:
         pos.x = x
         pos.y = y
 

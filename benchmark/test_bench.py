@@ -138,7 +138,7 @@ async def bench_direct_backend_routine(address, duration, name: str, pid: str):
                 async with backend.transaction(0) as trx:
                     tbl = int_tbl.attach(trx)
                     sel_num = random.randint(1, BENCH_ROW_COUNT)
-                    async with tbl.select_or_create(sel_num, 'number') as row:
+                    async with tbl.update_or_insert(sel_num, 'number') as row:
                         row.name = ''.join(
                             random.choices(string.ascii_uppercase + string.digits, k=3))
                 call_count[cur_min] += 1

@@ -23,7 +23,7 @@ async def login_test(ctx: Context, user_id):
 async def move_to(ctx: Context, x, y):
     # 客户端传入的参数（x, y）都要验证合法性，防止用户修改数据，这里省略。
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    async with ctx[Position].select_or_create(ctx.caller, where='owner') as pos:
+    async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
         pos.x = x
         pos.y = y
         # with结束后会自动提交修改
