@@ -275,7 +275,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
     """
-
+    # todo non_transactions名字还是不够好，考虑改名为direct_refs
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
 

@@ -207,6 +207,10 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
     每个Component表都有个默认的主键`id: np.int64 = Property(default=0, unique=True)`，
     会自行自增无法修改。
     """
+    # todo component增加副本功能，system调用的时候可以传入副本名，此时该system就是可副本化的system，inherit时也需要指定副本名
+    #      executor在生成ctx时，根据副本名动态生成table，并执行迁移等初始化操作
+    #      该功能主要目的是为了解耦hub component，一些全局数据容易成为hub，但它们的数据不一定有唯一要求
+    #      因此可以通过多个副本来解耦簇
     def warp(cls):
         # class名合法性检测
         if csharp_keyword.iskeyword(cls.__name__):
