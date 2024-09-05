@@ -75,6 +75,9 @@ class UnitTestBackends:
                 except Exception:
                     pass
             print('⚠️ 已启动redis docker.')
+        # 先清除已加载lua的标记
+        RedisBackend.lua_check_and_run = None
+        # 返回backend
         return RedisComponentTable, RedisBackend, {
             "master": f"redis://127.0.0.1:{port}/0",
             "servants": [f"redis://127.0.0.1:{port+1}/0", ]

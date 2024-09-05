@@ -33,6 +33,73 @@ async def _pipeline_lua_mock(_):
 
 class RedisBackend(Backend):
     """储存到Redis后端的连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
+    # key: 1：要写入的row keys， args： 要检查的keys的value，按顺序+END_CHECK+stacked的命令
+    LUA_CHECK_AND_RUN_SCRIPT = """
+    local redis = redis
+    local i = 1
+    while i <= #ARGV do
+        if ARGV[i] == 'END_CHECK' then
+            break
+        end
+        local rows = redis.call('zrange', ARGV[i], ARGV[i+1], ARGV[i+2], ARGV[i+3], 'LIMIT', 0, 1)
+        if #rows > 0 then
+            return 'FAIL'
+        end
+        i = i + 4
+    end
+    
+    local tonumber = tonumber
+    local unpack = unpack
+    local gsub = string.gsub
+    local insert = table.insert
+
+    local cur = i + 1
+    local last_row_id = nil
+    local rtn = {}
+    while cur <= #ARGV do
+        local len = tonumber(ARGV[cur])
+        local cmds = {unpack(ARGV, cur+1, cur+len)}
+        cur = cur + len + 1
+        if cmds[1] == 'AUTO_INCR' then
+            local idx_key = cmds[2]
+            local ids = redis.call('zrange', idx_key, 0, 0, 'REV', 'WITHSCORES')
+            if #ids == 0 then 
+                last_row_id = 1
+            else
+                last_row_id = tonumber(ids[2]) + 1
+            end
+            insert(rtn, last_row_id)
+        elseif cmds[1] == 'END_INCR' then
+            last_row_id = nil
+        else
+            if last_row_id ~= nil then
+                local _
+                for i = 2, #cmds, 1 do
+                    cmds[i], _ = gsub(cmds[i], '{rowid}', last_row_id)
+                end
+            end
+            -- redis.log(2, table.concat(cmds, ','))
+            redis.call(unpack(cmds))
+        end
+    end
+    return rtn
+    """
+    lua_check_and_run = None
+
+    def load_lua_scripts(self):
+        cls = self.__class__
+        if cls.lua_check_and_run is None:
+            # 注册脚本到异步io
+            cls.lua_check_and_run = self._aio.register_script(cls.LUA_CHECK_AND_RUN_SCRIPT)
+            # 上传脚本到服务器使用同步io
+            self.io.script_load(cls.LUA_CHECK_AND_RUN_SCRIPT)
+
+    @classmethod
+    def _patch_redis_py_lib(cls):
+        # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
+        if not hasattr(Pipeline, 'load_scripts_org'):
+            Pipeline.load_scripts_org = Pipeline.load_scripts
+            Pipeline.load_scripts = _pipeline_lua_mock
 
     def __init__(self, config: dict):
         super().__init__(config)
@@ -42,6 +109,9 @@ class RedisBackend(Backend):
         self.io = redis.from_url(self.master_url, decode_responses=True)
         self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
         self.dbi = self.io.connection_pool.connection_kwargs['db']
+        # 加载lua脚本
+        self.load_lua_scripts()
+        self._patch_redis_py_lib()
         # 连接只读数据库
         self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
                          for url in self.servant_urls]
@@ -143,91 +213,10 @@ class RedisBackend(Backend):
 
 class RedisTransaction(BackendTransaction):
     """数据库事务类，负责开始事务，并提交事务"""
-    # key: 1:结果保存到哪个key, 2-n:要检查的keys， args： 要检查的keys的value，按顺序
-    LUA_CHECK_UNIQUE_SCRIPT = """
-    local result_key = KEYS[1]
-    local redis = redis
-
-    for i = 1, #ARGV, 4 do
-        local rows = redis.call('zrange', ARGV[i], ARGV[i+1], ARGV[i+2], ARGV[i+3], 'LIMIT', 0, 1)
-        if #rows > 0 then
-            redis.call('set', result_key, 0, 'PX', 100)
-            return 'FAIL'
-        end
-    end
-    redis.call('set', result_key, 1, 'PX', 100)
-    return 'OK'
-    """
-    # key: 1:是否执行的标记key, 2-n:不使用，仅供客户端判断hash slot用, args: stacked的命令
-    LUA_IF_RUN_STACKED_SCRIPT = """
-    local result_key = KEYS[1]
-    local redis = redis
-    local tonumber = tonumber
-    local unpack = unpack
-    local gsub = string.gsub
-    local insert = table.insert
-
-    local unique_check_ok = redis.call('get',  result_key)
-    if tonumber(unique_check_ok) <= 0 then
-        return 'FAIL'
-    end
-
-    local cur = 1
-    local last_row_id = nil
-    local rtn = {}
-    while cur <= #ARGV do
-        local len = tonumber(ARGV[cur])
-        local cmds = {unpack(ARGV, cur+1, cur+len)}
-        cur = cur + len + 1
-        if cmds[1] == 'AUTO_INCR' then
-            local idx_key = cmds[2]
-            local ids = redis.call('zrange', idx_key, 0, 0, 'REV', 'WITHSCORES')
-            if #ids == 0 then 
-                last_row_id = 1
-            else
-                last_row_id = tonumber(ids[2]) + 1
-            end
-            insert(rtn, last_row_id)
-        elseif cmds[1] == 'END_INCR' then
-            last_row_id = nil
-        else
-            if last_row_id ~= nil then
-                local _
-                for i = 2, #cmds, 1 do
-                    cmds[i], _ = gsub(cmds[i], '{rowid}', last_row_id)
-                end
-            end
-            -- redis.log(2, table.concat(cmds, ','))
-            redis.call(unpack(cmds))
-        end
-    end
-    return rtn
-    """
-    lua_check_unique = None
-    lua_run_stacked = None
-
-    @classmethod
-    def _load_scripts(cls, backend):
-        if cls.lua_check_unique is None:
-            cls.lua_check_unique = backend.aio.register_script(cls.LUA_CHECK_UNIQUE_SCRIPT)
-            backend.io.script_load(cls.LUA_CHECK_UNIQUE_SCRIPT)
-        if cls.lua_run_stacked is None:
-            cls.lua_run_stacked = backend.aio.register_script(cls.LUA_IF_RUN_STACKED_SCRIPT)
-            backend.io.script_load(cls.LUA_IF_RUN_STACKED_SCRIPT)
-
-    @classmethod
-    def _patch_redis_py_lib(cls):
-        # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
-        if not hasattr(Pipeline, 'load_scripts_org'):
-            Pipeline.load_scripts_org = Pipeline.load_scripts
-            Pipeline.load_scripts = _pipeline_lua_mock
 
     def __init__(self, backend: RedisBackend, cluster_id: int):
         super().__init__(backend, cluster_id)
-
-        cls = self.__class__
-        cls._load_scripts(backend)
-        cls._patch_redis_py_lib()
+        self._backend = backend  # 虽然上面super.__init__已经设置过了，但为了告知IDE明确的类型，再设置一次
 
         self._checks = []  # 事务中的unique检查
         self._stack = []  # 事务中的更新操作
@@ -266,18 +255,12 @@ class RedisTransaction(BackendTransaction):
             # 在提交前最后检查一遍unique
             # 之前的insert和update时也有unique检查，但为了降低事务冲突并不锁定index，因此可能有变化
             # 这里在lua中检查unique，不用锁定index
-            _uuid = uuid.uuid4().hex
-            unique_check_key = f'unique_check:{{CLU{self.cluster_id}}}:' + _uuid
-            lua_unique_keys = [unique_check_key, ]
-            lua_unique_argv = self._checks
-
             # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
-            lua_run_keys = [unique_check_key, ]
-            lua_run_argv = self._stack
+            lua_run_keys = [f'NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY' , ]
+            lua_run_argv = self._checks + ['END_CHECK'] + self._stack
 
             pipe.multi()
-            await self.lua_check_unique(args=lua_unique_argv, keys=lua_unique_keys, client=pipe)
-            await self.lua_run_stacked(args=lua_run_argv, keys=lua_run_keys, client=pipe)
+            await self._backend.lua_check_and_run(args=lua_run_argv, keys=lua_run_keys, client=pipe)
 
             try:
                 result = await pipe.execute()
@@ -288,11 +271,9 @@ class RedisTransaction(BackendTransaction):
                 raise RaceCondition(f"watched key被其他事务修改")
             except redis.exceptions.NoScriptError:
                 logger.warning("⚠️ [💾Redis] lua脚本丢失，正在重新初始化...")
-                # 服务器重启，脚本丢失，重新初始化脚本，当前玩家断线。
-                cls = self.__class__
-                cls.lua_check_unique = None
-                cls.lua_run_stacked = None
-                cls._load_scripts(self._backend)
+                # redis服务器重启，脚本丢失，重新初始化脚本，当前玩家断线。
+                self._backend.__class__.lua_check_and_run = None
+                self._backend.load_lua_scripts()
                 raise
             else:
                 return result
