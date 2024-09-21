@@ -209,6 +209,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         await item_data.direct_set(1, owner=911)
         np.testing.assert_array_equal((await item_data.direct_get(1)).owner, 911)
         np.testing.assert_array_equal((await item_data.direct_query('owner', 911)).owner, 911)
+        row_ids = await item_data.direct_insert(owner=912, time=912)
+        np.testing.assert_array_equal((await item_data.direct_get(row_ids[0])).owner, 912)
+        np.testing.assert_array_equal((await item_data.direct_query('owner', 912)).owner, 912)
+        await item_data.direct_delete(row_ids[0])
 
         # update
         async with backend.transaction(1) as trx:
