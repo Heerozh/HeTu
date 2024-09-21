@@ -168,7 +168,8 @@ class ComponentTable:
         """
         不通过事务直接从servant数据库查询值，不影响Master性能，但没有数据一致性保证。
 
-        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，在System中使用要确保逻辑能接受数据不一致。
+        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，值随时可能被其他进程修改/删除，
+        在System中使用要确保逻辑能接受数据不一致。
 
         Parameters
         ----------
@@ -192,17 +193,40 @@ class ComponentTable:
         """
         不通过事务，从servant数据库直接读取某行的值。
 
-        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，在System中使用要确保逻辑能接受数据不一致。
+        .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，值随时可能被其他进程修改/删除，
+        使用时要确保逻辑能接受数据不一致。
         """
         raise NotImplementedError
 
     async def direct_set(self, row_id: int, **kwargs):
         """
-        不通过事务，直接设置数据库某行的值。此方法不检查任何正确性，比如row_id不存在也会设置。
-        不可修改字符串类型，且开启索引的属性。
+        不通过System事务，直接设置数据库某行的值。
 
-        .. warning:: ⚠️ 警告：由于不在事务中，值随时可能被其他进程修改/删除，不保证数据一致性。
-        请勿在System中使用，除非原子操作。
+        .. warning:: ⚠️ 警告：由于不在System事务中，如果`direct_set`的逻辑基于`direct_get/query`等的返回值，
+        则不保证数据一致性。使用时要确保逻辑能接受数据不一致。
+        """
+        raise NotImplementedError
+
+    async def direct_insert(self, **kwargs) -> list[int] | None:
+        """
+        不通过System事务，直接数据库插入行。
+
+        .. warning:: ⚠️ 警告：由于不在System事务中，如果`direct_insert`的逻辑基于`direct_get/query`等的返回值，
+        则不保证数据一致性。使用时要确保逻辑能接受数据不一致。
+
+        Returns
+        -------
+        row_ids: list
+        按插入顺序的row id
+        """
+        raise NotImplementedError
+
+    async def direct_delete(self, row_id: int):
+        """
+        不通过System事务，直接对数据库删除行。
+
+        .. warning:: ⚠️ 警告：由于不在System事务中，如果`direct_delete`的逻辑基于`direct_get/query`等的返回值，
+        则不保证数据一致性。使用时要确保逻辑能接受数据不一致。
         """
         raise NotImplementedError
 

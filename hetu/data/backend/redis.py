@@ -10,7 +10,6 @@ import itertools
 import logging
 import random
 import time
-import uuid
 import warnings
 
 import numpy as np
@@ -252,9 +251,7 @@ class RedisTransaction(BackendTransaction):
 
         # 2种模式，如果有unique要检查，或者有auto incr要执行，就用lua脚本执行所有命令
         if len(self._checks) > 0 or self._request_auto_incr:
-            # 在提交前最后检查一遍unique
-            # 之前的insert和update时也有unique检查，但为了降低事务冲突并不锁定index，因此可能有变化
-            # 这里在lua中检查unique，不用锁定index
+            # 在提交前最后检查一遍unique，在lua中检查unique是为了不用锁定index
             # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
             lua_run_keys = [f'NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY' , ]
             lua_run_argv = self._checks + ['END_CHECK'] + self._stack
@@ -610,32 +607,70 @@ class RedisComponentTable(ComponentTable):
         else:
             return None
 
-    async def direct_set(self, row_id: int, **kwargs):
+    async def direct_hset_(self, row_id: int, **kwargs):
         aio = self._backend.aio
         key = self._key_prefix + str(row_id)
 
-        update_index = False
         for prop in kwargs:
             if prop in self._component_cls.indexes_:
-                update_index = True
+                raise ValueError(f"索引字段`{prop}`不允许用direct_hset_修改")
+        await aio.hset(key, mapping=kwargs)
 
-        if not update_index:
-            await aio.hset(key, mapping=kwargs)
-        else:
-            pipe = aio.pipeline()
-            pipe.hset(key, mapping=kwargs)
-            idx_prefix = self._idx_prefix
-            for idx_name, str_type in self._component_cls.indexes_.items():
-                if idx_name not in kwargs:
-                    continue
-                idx_key = idx_prefix + idx_name
-                if str_type:
-                    raise ValueError(f"字符串类型索引`{idx_name}`不支持`direct_set`修改")
-                elif idx_name == 'id':
-                    pipe.zadd(idx_key, {row_id: row_id})
-                else:
-                    pipe.zadd(idx_key, {kwargs[idx_name]: row_id})
-            await pipe.execute()
+    async def direct_set(self, row_id: int, **kwargs):
+        assert 'id' not in kwargs, "id不允许修改"
+
+        while True:
+            try:
+                async with self._backend.transaction(self._cluster_id) as trx:
+                    tbl = self.attach(trx)
+                    row = await tbl.select(row_id)
+                    if row is None:
+                        raise KeyError(f"direct_set: row_id {row_id} 不存在")
+                    for prop, value in kwargs.items():
+                        if prop in self._component_cls.prop_idx_map_:
+                            row[prop] = value
+                    await tbl.update(row_id, row)
+                return
+            except RaceCondition:
+                await asyncio.sleep(random.random() / 5)
+                continue
+            except Exception:
+                await trx.end_transaction(discard=True)
+                raise
+
+    async def direct_insert(self, **kwargs) -> list[int] | None:
+        while True:
+            try:
+                async with self._backend.transaction(self._cluster_id) as trx:
+                    tbl = self.attach(trx)
+                    row = self.component_cls.new_row()
+                    for prop, value in kwargs.items():
+                        if prop in self._component_cls.prop_idx_map_:
+                            row[prop] = value
+                    row.id = 0
+                    await tbl.insert(row)
+                    row_ids = await trx.end_transaction(False)
+                return row_ids
+            except RaceCondition:
+                await asyncio.sleep(random.random() / 5)
+                continue
+            except Exception:
+                await trx.end_transaction(discard=True)
+                raise
+
+    async def direct_delete(self, row_id: int):
+        while True:
+            try:
+                async with self._backend.transaction(self._cluster_id) as trx:
+                    tbl = self.attach(trx)
+                    await tbl.delete(row_id)
+                return
+            except RaceCondition:
+                await asyncio.sleep(random.random() / 5)
+                continue
+            except Exception:
+                await trx.end_transaction(discard=True)
+                raise
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
@@ -778,7 +813,8 @@ class RedisComponentTransaction(ComponentTransaction):
                 trx.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
                 trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
             elif idx_name == 'id':
-                trx.stack_cmd('zadd', idx_key, row_id, row_id)
+                # trx.stack_cmd('zadd', idx_key, row_id, row_id)
+                raise RuntimeError("id不允许修改")  # 其实上面代码是可以改的，但id是隐藏的，不应该提供此功能
             else:
                 trx.stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
 
