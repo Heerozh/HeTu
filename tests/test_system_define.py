@@ -250,6 +250,43 @@ class TestSystemDefine(unittest.TestCase):
             clusters.get_system('system4', namespace='ssw').full_components,
             {GalaxyPosition})
 
+    def test_system_copy(self):
+        # 先卸载SystemClusters单件防止重定义
+        SystemClusters()._clear()
+
+        # 定义测试系统
+        @define_system(
+            namespace="ssw",
+            components=(GalaxyPosition, GalaxyPosition.duplicate('copy')),
+        )
+        async def __not_used__(ctx, ):
+            pass
+
+        @define_system(
+            namespace="ssw",
+            components=(Map, Hp,),
+            non_transactions=(GalaxyPosition, )
+        )
+        async def system1(ctx, ):
+            pass
+
+        @define_system(
+            namespace="ssw",
+            bases=('system1:copy',),
+        )
+        async def system_copy1(ctx, ):
+            pass
+
+        # 检测
+        clusters = SystemClusters()
+        clusters.build_clusters('ssw')
+
+        self.assertEqual(
+            clusters.get_system('system_copy1', namespace='ssw').full_components,
+            {Map.duplicate('copy'), Hp.duplicate('copy')})
+        self.assertEqual(
+            clusters.get_system('system_copy1', namespace='ssw').full_non_trx,
+            {GalaxyPosition.duplicate('copy')})
 
 if __name__ == '__main__':
     unittest.main()

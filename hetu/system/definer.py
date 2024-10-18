@@ -94,12 +94,18 @@ class SystemClusters(metaclass=Singleton):
             return False
 
         def inherit_components(namespace_, bases, req: set, n_trx: set, inh: set):
-            for base_system in bases:
-                if base_system not in self._system_map[namespace_]:
-                    raise RuntimeError(f"`bases`引用的System `{base_system}` 不存在")
-                base_def = self._system_map[namespace_][base_system]
-                req.update(base_def.components)
-                n_trx.update(base_def.non_transactions)
+            for base_sys in bases:
+                base_name, sys_suffix = base_sys.split(':') if ':' in base_sys else (base_sys, '')
+                if base_name not in self._system_map[namespace_]:
+                    raise RuntimeError(f"`bases`引用的System `{sys_name}` 不存在")
+                base_def = self._system_map[namespace_][base_name]
+                if sys_suffix:
+                    # 复制Component
+                    req.update([comp.duplicate(sys_suffix) for comp in base_def.components])
+                    n_trx.update([comp.duplicate(sys_suffix) for comp in base_def.non_transactions])
+                else:
+                    req.update(base_def.components)
+                    n_trx.update(base_def.non_transactions)
                 inh.update(base_def.bases)
                 inherit_components(namespace_, base_def.bases, req, n_trx, inh)
 
@@ -152,10 +158,15 @@ class SystemClusters(metaclass=Singleton):
         self._main_system_map = self._system_map[main_namespace]
 
         # 检查是否有component被non_transactions引用，但没有任何正常方式引用了它，必须至少有一个标准引用
+        # 加入这个限制的原因是，不被事务引用下，本方法就无法确定该Component应该储存在哪个Cluster中
         for comp in non_trx:
             if comp not in self._component_map:
-                raise RuntimeError(f"Component {comp.__name__} 被non_transactions方式引用过，"
-                                   f"但没有被任何System正常引用，必须至少有1个正常事务方式的引用。")
+                raise RuntimeError(f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
+                                   f"Component {comp.__name__} 至少有一个正常引用。"
+                                   +
+                                   (f"该Component是副本，每个副本也同样要保证至少有一个正常引用。"
+                                   if ':' in comp.__name__ else ""))
+
 
     def add(self, namespace, func, components, non_trx, force, permission, bases, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
@@ -234,7 +245,9 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
     bases: tuple of str
-        继承其他System, 让System中可以调用其他System，并不破坏事务一致性。但是簇会和其他系统绑定。
+        传入System名称列表，继承其他System, 让System中可以调用其他System，并不破坏事务一致性。注意
+        当前System以及继承的System，将被合并进同一个交集簇(Cluster)中。
+        如果希望使用System副本，可以使用':'+后缀。具体见Notes。
 
     Notes
     -----
@@ -274,6 +287,27 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         await ctx.end_transaction(discard=False):
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
+
+    **System副本：**
+
+    System副本是指，引用的Component都将用该副本名创建新的表，并在这些副本表中操作数据。
+
+    代码示例：
+    >>> @define_system(namespace="global", components=(Position, ), )
+    ... async def move(ctx: Context, new_pos):
+    ...     async with ctx[Position].update_or_insert(ctx.caller, 'owner') as pos:
+    ...         pos.x = new_pos.x
+    ...         pos.y = new_pos.y
+    >>> @define_system(namespace="game", bases=('move:Map1', ))
+    ... async def move_in_map1(ctx: Context, new_pos):
+    ...     return await ctx['move:Map1'](new_pos)
+
+    `bases=('move:Map1', )`等同创建一个新的`move` System，但是使用
+    `components=(Position.duplicate(suffix='Map1'), )` 参数。
+
+    正常调用`move`(不使用System副本)的话，pos是保存在名为 `Position` 的表中。
+    在这个例子中，`move_in_map1` 会调用继承的 `move` 函数，但是 `move` 函数中的`pos`数据会储存在名为
+    `Position:Map1`的表中。
     """
     # todo non_transactions名字还是不够好，考虑改名为direct_refs
     def warp(func):
