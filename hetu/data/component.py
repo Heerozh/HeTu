@@ -133,6 +133,8 @@ class BaseComponent:
         """复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。"""
         if not suffix:
             return cls
+        if suffix in cls.instances_:
+            return cls.instances_[suffix]
         new_cls = BaseComponent.load_json(cls.json_, suffix)
         cls.instances_[suffix] = new_cls
         return new_cls
