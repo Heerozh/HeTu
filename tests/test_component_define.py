@@ -3,6 +3,7 @@ import numpy as np
 from hetu.data import (
     define_component, Property, BaseComponent, ComponentDefines
     )
+from hetu.system.executor import SystemClusters
 
 
 class TestComponentDefine(unittest.TestCase):
@@ -114,6 +115,37 @@ class TestComponentDefine(unittest.TestCase):
         self.assertEqual(TestString.indexes_['a'], True)
         self.assertEqual(TestString.indexes_['b'], True)
         self.assertEqual(TestString.indexes_['c'], False)
+
+    def test_instance_define(self):
+        @define_component(namespace="ssw")
+        class Health(BaseComponent):
+            value: np.int8 = Property(0, False)
+
+        from hetu.system import define_system, SystemClusters
+
+        @define_system(components=(Health.duplicate("copy"), ), namespace="ssw")
+        async def test_hp(ctx):
+            pass
+
+        # 测试system和instance是否正确定义
+        sys_def = SystemClusters().get_system("test_hp", "ssw")
+        self.assertEqual(
+            Health.instances_["copy"],
+            next(iter(sys_def.components))
+        )
+        self.assertEqual(
+            Health.instances_["copy"].component_name_,
+            "Health:copy"
+        )
+        self.assertEqual(
+            Health.instances_["copy"].properties_,
+            Health.properties_
+        )
+        # 测试instance的instances属性应该为空
+        self.assertEqual(
+            Health.instances_["copy"].instances_,
+            {}
+        )
 
     def test_keyword_define(self):
         with self.assertRaisesRegex(ValueError, "关键字"):
