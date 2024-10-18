@@ -53,6 +53,7 @@ class BaseComponent:
     indexes_ = None         # type: dict[str, bool]     # 索引名->是否是字符串类型 的映射
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
+    instances_ = None       # type: dict[str, type[BaseComponent]] # 该Component的所有副本实例
 
     @staticmethod
     def make_json(properties, namespace, component_name, permission, persist, readonly,
@@ -74,8 +75,10 @@ class BaseComponent:
         })
 
     @classmethod
-    def load_json(cls, json_str: str):
+    def load_json(cls, json_str: str, suffix: str = "") -> type['BaseComponent']:
         data = json.loads(json_str)
+        if suffix:
+            data['component_name'] += ":" + suffix
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
             comp = type(data['component_name'], (BaseComponent, ), {})
@@ -90,6 +93,7 @@ class BaseComponent:
         comp.properties_ = [(name, Property(**prop)) for name, prop in data['properties'].items()]
         comp.properties_ = sorted(comp.properties_, key=lambda x: x[0])
         comp.json_ = json.dumps(data)  # 重新序列化，保持一致
+        comp.instances_ = {}
         # 成员变量初始化
         # 从properties生成np structured dtype，align为True更慢，arm服务器会好些
         comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in comp.properties_], align=False)
@@ -123,6 +127,15 @@ class BaseComponent:
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
+
+    @classmethod
+    def duplicate(cls, suffix: str) -> type['BaseComponent']:
+        """复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。"""
+        if not suffix:
+            return cls
+        new_cls = BaseComponent.load_json(cls.json_, suffix)
+        cls.instances_[suffix] = new_cls
+        return new_cls
 
 
 class ComponentDefines(metaclass=Singleton):
