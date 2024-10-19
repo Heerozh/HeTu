@@ -54,6 +54,7 @@ class BaseComponent:
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
     instances_ = None       # type: dict[str, type[BaseComponent]] # 该Component的所有副本实例
+    master_ = None          # type: type[BaseComponent]  # 该Component的主实例
 
     @staticmethod
     def make_json(properties, namespace, component_name, permission, persist, readonly,
@@ -137,6 +138,7 @@ class BaseComponent:
             return cls.instances_[suffix]
         new_cls = BaseComponent.load_json(cls.json_, suffix)
         cls.instances_[suffix] = new_cls
+        new_cls.master_ = cls
         return new_cls
 
 

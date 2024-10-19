@@ -143,3 +143,10 @@ async def race(ctx: Context, sleep):
 )
 def do_nothing(ctx: Context, sleep):
     pass
+
+@define_system(
+    namespace="ssw",
+    bases=('use_hp:copy1', ),
+)
+async def use_hp_copy(ctx: Context, value):
+    return await ctx['use_hp:copy1'](ctx, value)

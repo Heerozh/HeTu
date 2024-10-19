@@ -42,6 +42,7 @@ class ResponseToClient(SystemResult):
         self.message = message
 
     def __repr__(self):
+        # 代码格式返回response，未来可用于replay还原
         return f"ResponseToClient({self.message})"
 
 
@@ -148,7 +149,8 @@ class SystemExecutor:
 
         # 复制inherited函数
         for base_name in sys.full_bases:
-            context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base_name).func
+            base, _, suffix = base_name.partition(':')
+            context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base).func
 
         # todo 实现non_transactions的引用
 
@@ -161,7 +163,8 @@ class SystemExecutor:
                 trx = backend.transaction(sys.cluster_id)
                 for comp in sys.full_components:
                     tbl = comp_mgr.get_table(comp)
-                    context.transactions[comp] = tbl.attach(trx)
+                    master = comp.master_ or comp
+                    context.transactions[master] = tbl.attach(trx)
             # 执行system和事务
             try:
                 rtn = await sys.func(context, *args)
