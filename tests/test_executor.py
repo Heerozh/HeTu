@@ -117,8 +117,8 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
 
         backend = self.backends['default']
-        import app
-        hp_copy = app.HP.duplicate('copy1')
+        HP = hetu.data.ComponentDefines().get_component('ssw', 'HP')
+        hp_copy = HP.duplicate('copy1')
         hp_data = self.comp_mgr.get_table(hp_copy)
         async with backend.transaction(hp_data.cluster_id) as trx:
             tbl = hp_data.attach(trx)
