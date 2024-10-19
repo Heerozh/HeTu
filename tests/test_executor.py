@@ -21,6 +21,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         # 测试慢日志阈值
         import hetu.common.slowlog
         hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
+        hetu.system.SystemClusters()._clear()
 
         # 加载玩家的app文件
         import app
@@ -99,6 +100,30 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
         # 结束连接
         await executor.terminate()
+
+    async def test_execute_system_copy(self):
+        executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)
+        await executor.initialize("")
+
+        ok, _ = await executor.exec('login', 1001)
+        self.assertTrue(ok)
+        ok, _ = await executor.exec('use_hp_copy', 9)
+        self.assertTrue(ok)
+        ok, _ = await executor.exec('use_hp', 1)
+        self.assertTrue(ok)
+
+        # 去数据库读取内容看是否正确
+        ok, _ = await executor.exec('test_hp', 100-1)
+        self.assertTrue(ok)
+
+        backend = self.backends['default']
+        import app
+        hp_copy = app.HP.duplicate('copy1')
+        hp_data = self.comp_mgr.get_table(hp_copy)
+        async with backend.transaction(hp_data.cluster_id) as trx:
+            tbl = hp_data.attach(trx)
+            row = await tbl.select(1001, 'owner')
+            self.assertEqual(row.value, 100-9)
 
     @mock.patch('time.time', mock_time)
     async def test_connect(self):
