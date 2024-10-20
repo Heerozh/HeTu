@@ -5,11 +5,13 @@
 
 # 河图HeTu
 
-河图是一个轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
+河图是一个开源轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
 开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题。
 
-基于 ECS(Entity-Component-System) 结构，采用 Python 语言，支持各种数据科学库，拥抱未来。
+基于 ECS(Entity-Component-System) 概念，采用 Python 语言，支持各种数据科学库，拥抱未来。
 具体性能见下方[性能测试](#性能测试)。
+
+开源并免费，欢迎贡献代码。商业使用只需在Credits中注明即可。
 
 ## 游戏服务器引擎，也可称为数据库
 
@@ -20,9 +22,9 @@
 
 ## 手把手快速示例
 
-登录，并在地图上移动的简单示例，服务器只要20行代码，0配置文件。
+一个登录，并在地图上移动的简单示例。首先是服务器端部分，服务器只要20行代码，0配置文件：
 
-### 首先定义组件
+### 定义组件
 
 河图的数据表结构（Schema），可通过代码完成定义。
 
@@ -46,29 +48,12 @@ class Position(BaseComponent):
 
 ### 然后写System
 
-#### Login登录逻辑
-
-通过内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
-
-System包含事务处理，不可直接函数调用，想要调用其他System，必须通过参数`bases`继承。
-
-```Python
-from hetu.system import define_system, Context
-
-# permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=('elevate',))
-async def login_test(ctx: Context, user_id): 
-    # 提权以后ctx.caller就是user_id。
-    await ctx['elevate'](ctx, user_id, kick_logged_in=True)
-```
-我们让客户端直接传入user_id，省去验证过程。实际应该传递token验证。
-
 #### move_to移动逻辑
 
-然后是玩家移动逻辑`move_to`，通过参数`components`引用要操作的表，这里我们操作玩家位置数据`Position`。
+玩家移动逻辑`move_to`通过`define_system`定义，参数`components`引用要操作的表，这里我们操作玩家位置数据`Position`。
 
 `permission`设置为只有USER组的用户才能调用，
-`ctx.caller`就是之前`elevate`传入的`user_id`。
+`ctx.caller`是登录用户的id，此id稍后登录时会通过`elevate`方法决定。
 
 ```Python
 @define_system(
@@ -84,13 +69,32 @@ async def move_to(ctx: Context, x, y):
         # with结束后会自动提交修改
 ```
 
+#### Login登录逻辑
+
+可通过调用内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
+
+但System包含事务处理，不可直接函数调用，想要调用其他System，必须通过参数`bases`继承。
+
+```Python
+from hetu.system import define_system, Context
+
+# permission定义为任何人可调用
+@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=('elevate',))
+async def login_test(ctx: Context, user_id): 
+    # 提权以后ctx.caller就是user_id。
+    await ctx['elevate'](ctx, user_id, kick_logged_in=True)
+```
+我们让客户端直接传入user_id，省去验证过程。实际应该传递token验证。
+
+
+
 服务器就完成了，我们不需要传输数据的代码，因为河图是个“数据库”，客户端可直接查询。
 
 把以上内容存到`.\app\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
 
 #### 启动服务器
 
-安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要外网）：
+安装Docker Desktop后，直接在任何系统下执行一行命令即可（需要海外网）：
 
 ```bash
 cd examples/server/first_game
@@ -121,11 +125,11 @@ public class FirstGame : MonoBehaviour
     async void Start()
     {
         HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
-        // 连接河图，这是异步函数，不await就是射后不管
+        // 连接河图，这其实是异步函数，我们没await，实际效果类似射后不管
         HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
             Application.exitCancellationToken);
             
-        // 调用登录，会启动线程在后台发送
+        // 调用登录System，相关封包会启动线程在后台发送
         HeTuClient.Instance.CallSystem("login_test", SelfID);
         
         await SubscribeOthersPositions();
@@ -168,7 +172,7 @@ public class FirstGame : MonoBehaviour
         // 当有玩家删除时
         _allPlayerData.OnDelete += (sender, rowID) => {
         };
-        // 当有Position行任意属性修改时（这也是Component属性要少的原因）
+        // 当_allPlayerData数据中某行的“任何属性值”被修改时（这也是Component属性要少的原因）
         _allPlayerData.OnUpdate += (sender, rowID) => {
             var data = sender.Rows[rowID];
             var playerID = long.Parse(data["owner"]);  // 前面Query时没有带类型，所以数据都是字符串型
@@ -194,7 +198,7 @@ public class FirstGame : MonoBehaviour
 | Redis7.0 | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
 | 跑分程序     |                     本地 |   参数： --clients=1000 --time=5 |        
 
-### 基准：
+### Redis基准：
 
 直接在Redis上压测以下最少事务指令作为基准，这指令序列等价于之后的select + update测试：
 
