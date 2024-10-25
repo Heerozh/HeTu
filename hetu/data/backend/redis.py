@@ -876,13 +876,14 @@ class RedisMQClient(MQClient):
         msg = await mq.get_message(ignore_subscribe_messages=True, timeout=None)
         if msg is not None:
             channel_name = msg['channel']
-            # 判断是否已在deque中了，get_message会自动去重，这里判断是为了防止pop的时间正好夹断2条相同的消息
+            # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
+            dropped = set(self.pulled_deque.pop(0, time.time() - 120))
+            self.pulled_set -= dropped
+
+            # 判断是否已在deque中了，get_message也会自动去重，但get_message一次只取部分消息，不能完全去重
             if channel_name not in self.pulled_set:
                 self.pulled_deque.add(time.time(), channel_name)
                 self.pulled_set.add(channel_name)
-                # pop 2分钟前的消息，防止队列溢出
-                dropped = set(self.pulled_deque.pop(0, time.time() - 120))
-                self.pulled_set -= dropped
 
     async def get_message(self) -> set[str]:
         pulled_deque = self.pulled_deque

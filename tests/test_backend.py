@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import time
+from time import time as time_time
 import unittest
 from typing import Type
 from unittest import mock
@@ -839,6 +840,82 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 关闭连接
         task.cancel()
         await backend.close()
+
+    @mock.patch('time.time', mock_time)
+    @parameterized(implements)
+    async def test_mq_pull_stack(self, table_cls: type[ComponentTable],
+                                 backend_cls: type[Backend], config):
+        # 测试mq消息堆积的情况
+        mock_time.return_value = time_time()
+        backend = backend_cls(config)
+        backend.configure()
+        if type(backend) is RedisBackend:
+            self.assertEqual(
+                backend.io.config_get('notify-keyspace-events')["notify-keyspace-events"],
+                "")
+
+        item_data = table_cls(Item, 'test', 1, backend)
+        item_data.flush(force=True)
+        item_data.create_or_migrate()
+        # 初始化测试数据
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            for i in range(25):
+                row = Item.new_row()
+                row.id = 0
+                row.name = f'Itm{i + 10}'
+                row.owner = 10
+                row.time = i + 110
+                row.qty = 999
+                await tbl.insert(row)
+
+        # 等待replica同步，因为不知道backend的类型，所以直接sleep
+        time.sleep(0.5)
+
+        # 初始化订阅器
+        sub_mgr = Subscriptions(backend)
+        await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
+        await sub_mgr.subscribe_select(item_data, 'admin', 'Itm11', 'name')
+
+        # 先pull空
+        try:
+            async with asyncio.timeout(0.1):
+                await sub_mgr.mq_pull()
+                await sub_mgr.mq_pull()
+
+        except TimeoutError:
+            pass
+
+        # 修改row1，并pull消息
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.qty = 998
+            await tbl.update(1, row)
+        await asyncio.sleep(0.1)
+        await sub_mgr.mq_pull()
+
+        # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
+        mock_time.return_value = time_time() + 200
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(1)
+            row.qty = 997
+            await tbl.update(1, row)
+        await asyncio.sleep(0.1)
+        await sub_mgr.mq_pull()
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            row = await tbl.select(2)
+            row.qty = 997
+            await tbl.update(2, row)
+        await sub_mgr.mq_pull()
+
+        mq = sub_mgr._mq_client
+        mock_time.return_value = time_time() + 210
+        notified_channels = await mq.get_message()
+        self.assertEqual(len(notified_channels), 2)
+
 
     @parameterized(implements)
     async def test_update_or_insert_race_bug(
