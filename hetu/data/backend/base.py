@@ -176,7 +176,8 @@ class ComponentTable:
         index_name: str
             查询Component中的哪条索引
         left, right: str or number
-            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间
+            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+            如果right不填写，则精确查询等于left的数据
         limit: int
             限制返回的行数，越低越快
         desc: bool
@@ -413,7 +414,8 @@ class ComponentTransaction:
         index_name: str
             查询Component中的哪条索引
         left, right: str or number
-            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间
+            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+            如果right不填写，则精确查询等于left的数据。
         limit: int
             限制返回的行数，越低越快
         desc: bool
@@ -1035,6 +1037,8 @@ class Subscriptions:
         pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
         返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
         timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
+
+        遇到消息堆积会丢弃，其他也有可能会有丢失消息的情况，客户端SDK通过一定时间强制更新数据来解决此问题。
         """
         mq = self._mq_client
         channel_subs = self._channel_subs

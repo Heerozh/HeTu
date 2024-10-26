@@ -194,12 +194,12 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
     backend: str
         指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
     permission: Permission
-        设置读取权限，只对hetu client sdk的读取查询调用起作用。
+        设置读取权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
 
-        - everybody: 任何客户端都可以读，适合读一些服务器状态类的数据，如在线人数
-        - user: 已登录客户端都可以读
-        - admin: 只有管理员可以读
-        - owner: 只有owner属性值==登录的用户id（`ctx.caller`）时可以读，如果无owner值则认为该行不可读
+        - everybody: 任何客户端连接都可以读，适合读一些服务器状态类的数据，如在线人数
+        - user: 只有已登录的客户端都连接可以读
+        - admin: 只有管理员权限客户端连接可以读
+        - owner: 只有owner属性值==登录的用户id（`ctx.caller`）的连接可以读，如果无owner值则认为该行不可读
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class
@@ -215,7 +215,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         - `index` 表示此属性开启索引；
         - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
 
-    .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。
+    .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
     属性值的类型由type hint决定（如 `: np.float32`），请使用长度明确的np类型。
     字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
@@ -224,10 +224,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
     每个Component表都有个默认的主键`id: np.int64 = Property(default=0, unique=True)`，
     会自行自增无法修改。
     """
-    # todo component增加副本功能，system调用的时候可以传入副本名，此时该system就是可副本化的system，inherit时也需要指定副本名
-    #      executor在生成ctx时，根据副本名动态生成table，并执行迁移等初始化操作
-    #      该功能主要目的是为了解耦hub component，一些全局数据容易成为hub，但它们的数据不一定有唯一要求
-    #      因此可以通过多个副本来解耦簇
+
     def warp(cls):
         # class名合法性检测
         if csharp_keyword.iskeyword(cls.__name__):
