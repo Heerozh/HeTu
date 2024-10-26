@@ -253,8 +253,8 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭
     bases: tuple of str
-        传入System名称列表，继承其他System, 让System中可以调用其他System，并不破坏事务一致性。注意
-        当前System以及继承的System，将被合并进同一个交集簇(Cluster)中。
+        继承其他System，传入System名称列表。继承后可以通过ctx['system_name']调用其他System，且同属一个事务。
+        注意当前System以及继承的System，将被合并进同一个交集簇(Cluster)中。
         如果希望使用System副本，可以使用':'+后缀。具体见Notes。
     call_lock: bool
         是否对此System启用调用锁，启用后在调用时可以通过传入调用UUID来防止System重复执行。
@@ -262,7 +262,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
 
     Notes
     -----
-    System分为3个主要内容，1.定义；2. System函数；3.ctx
+    System分为3个主要内容，1. 定义；2. System函数；3. ctx；4. System副本
 
     **System函数部分：**
 
@@ -271,7 +271,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     async:
         System必须是异步函数。
     ctx: Context
-        上下文，具体见Context部分
+        上下文，具体见下述Context部分
     其他参数:
         为hetu client SDK调用时传入的参数。
     System返回值:
@@ -287,14 +287,14 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         ctx.retry_count: int
             当前因为事务冲突的重试次数，0表示首次执行。
         ctx[Component Class]: ComponentTransaction
-            获取Component事务实例，如 `ctx[Position]`，只能获取 `components` 中引用的实例。
+            获取Component事务实例，如 `ctx[Position]`，只能获取定义时在 `components` 中引用的实例。
             类型为 `ComponentTransaction`，可以进行数据库操作，并自动包装为事务在System结束后执行。
             具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
         ctx['SystemName']: func
-            获取继承的System函数。
+            获取定义时在 `bases` 中继承的System函数。
         ctx.nontrxs[Component Class]: ComponentTable
-            获取non_transactions中引用的Component实例，类型为 `ComponentTable`，此方法危险，
-            且不保证数据一致性，请只做原子操作。写入操作只支持对无索引的属性写入，因为带索引的无法实现原子操作。
+            获取non_transactions中引用的Component实例，类型为 `ComponentTable`，可以direct_get/set数据，
+            而不通过事务，因此危险不保证数据一致性，请只做原子操作。
         await ctx.end_transaction(discard=False):
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
