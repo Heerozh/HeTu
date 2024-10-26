@@ -24,6 +24,10 @@ class Context:
     retry_count: int  # 当前事务冲突重试次数
     transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
     inherited: dict[str, callable]  # 继承的父事务函数
+    # 让system调用其他system还有个办法，在这里可以做一个list存放一些快速延后调用，让外面的executor负责调用，
+    # 但考虑了下作用不大，如果system有写入需求，必定不希望丢失，存放到list很可能就因为断线或服务器宕机，造成调用本身丢失，
+    # 如果没有写入需求，自然可以用一般函数通过direct_get来获取数据，不需要做成system
+    # queued_calls: list[any]   # 延后调用的队列
     # 限制变量
     idle_timeout: int              = 0  # 闲置超时时间
     client_limits: list[list[int]] = () # 客户端消息发送限制（次数）
@@ -42,6 +46,7 @@ class Context:
             return self.transactions[item]
 
     def configure(self, idle_timeout, client_limits, server_limits, max_row_sub, max_index_sub):
+        """配置连接选项"""
         self.idle_timeout = idle_timeout
         self.client_limits = client_limits
         self.server_limits = server_limits
@@ -49,6 +54,36 @@ class Context:
         self.max_index_sub = max_index_sub
 
     async def end_transaction(self, discard: bool = False):
+        """
+        提前显式结束事务，提交所有写入操作。如果遇到事务冲突，会抛出异常，因此后续的代码行不会执行。
+        主要用于获取插入后的row id。
+        注意：调用完 `end_transaction`，`ctx` 将不再能够读写 `components` 。且后续不再属于事务，
+             也就是说遇到宕机/crash可能导致整个函数执行不完全。
+
+        Parameters
+        ----------
+        discard: bool
+            默认为False，设为True为放弃当前事务，不提交
+
+        Returns
+        -------
+        insert_ids: None | list[int]
+            如果事务执行成功，返回所有insert的row id列表，按调用顺序。如果没有insert操作，返回空List
+            如果discard或者已经提交过，返回None
+            如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition。
+            异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试。其他任何异常会
+            记录日志并断开客户端连接。
+
+        Examples
+        --------
+        获得插入后的row id：
+        >>> @define_system(components=(Item, ))
+        ... async def create_item(ctx):
+        ...     ctx[Item].insert(...)
+        ...     inserted_ids = await ctx.trx.end_transaction(discard=False)
+        ...     ctx.user_data['my_id'] = inserted_ids[0]  # 如果事务冲突，这句不会执行
+
+        """
         comp_trx = next(iter(self.transactions.values()), None)
         if comp_trx is not None:
             self.transactions = {}
