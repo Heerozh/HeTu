@@ -4,14 +4,17 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
-import copy
 import asyncio
+import copy
 from dataclasses import dataclass
 from inspect import signature
 from typing import Type
 
+from .execution import ExecutionLock
 from ..common import Singleton
 from ..data import BaseComponent, Permission
+
+SYSTEM_NAME_MAX_LEN = 32
 
 
 @dataclass
@@ -165,8 +168,7 @@ class SystemClusters(metaclass=Singleton):
                                    f"Component {comp.__name__} 至少有一个正常引用。"
                                    +
                                    (f"该Component是副本，每个副本也同样要保证至少有一个正常引用。"
-                                   if ':' in comp.__name__ else ""))
-
+                                    if ':' in comp.__name__ else ""))
 
     def add(self, namespace, func, components, non_trx, force, permission, bases, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
@@ -194,7 +196,7 @@ class SystemClusters(metaclass=Singleton):
 def define_system(components: tuple[Type[BaseComponent], ...] = None,
                   non_transactions: tuple[Type[BaseComponent], ...] = None,
                   namespace: str = "default", force: bool = False, permission=Permission.USER,
-                  retry: int = 9999, bases: tuple[str] = tuple()):
+                  retry: int = 9999, bases: tuple[str] = tuple(), call_lock=False):
     """
     定义System(函数)
 
@@ -241,13 +243,22 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
-        System权限，OWNER权限这里不可使用，其他同Component权限。
+        System执行权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
+
+        - everybody: 任何客户端连接都可以调用执行。（不安全）
+        - user: 只有已登录客户端连接可以调用
+        - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
+        - admin: 只有管理员权限客户端连接可以调用
+
     retry: int
-        如果System遇到事务冲突，会重复执行直到成功。设为0关闭。
+        如果System遇到事务冲突，会重复执行直到成功。设为0关闭
     bases: tuple of str
         传入System名称列表，继承其他System, 让System中可以调用其他System，并不破坏事务一致性。注意
         当前System以及继承的System，将被合并进同一个交集簇(Cluster)中。
         如果希望使用System副本，可以使用':'+后缀。具体见Notes。
+    call_lock: bool
+        是否对此System启用调用锁，启用后在调用时可以通过传入调用UUID来防止System重复执行。
+        如果此System需要给未来调用使用，则此项必须为True。
 
     Notes
     -----
@@ -258,7 +269,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     >>> async def system_dash(ctx: Context, entity_self, entity_target, vec)
 
     async:
-        如果 `define_system` 中的 `components` 不为空，则System必须是异步函数。
+        System必须是异步函数。
     ctx: Context
         上下文，具体见Context部分
     其他参数:
@@ -309,6 +320,7 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
     在这个例子中，`move_in_map1` 会调用继承的 `move` 函数，但是 `move` 函数中的`pos`数据会储存在名为
     `Position:Map1`的表中。
     """
+
     # todo non_transactions名字还是不够好，考虑改名为direct_refs
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
@@ -322,16 +334,30 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
 
         assert permission != permission.OWNER, "System的权限不支持OWNER"
 
+        assert len(func.__name__) <= SYSTEM_NAME_MAX_LEN, \
+            f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
+
+        assert asyncio.iscoroutinefunction(func), \
+            f"System {func.__name__} 必须是异步函数(`async def ...`)"
+
         if components is not None and len(components) > 0:
-            assert asyncio.iscoroutinefunction(func), \
-                (f"System {func.__name__} 必须是异步函数(`async def ...`)，"
-                 f"不然数据库请求会堵塞整个Worker。")
             # 检查components是否都是同一个backend
             backend_names = [comp.backend_ for comp in components]
             assert len(set(backend_names)) <= 1, \
                 f"System {func.__name__} 引用的Component必须都是同一种backend"
 
-        SystemClusters().add(namespace, func, components, non_transactions, force,
+        _components = components
+
+        # 把call lock的表添加到components中
+        if call_lock:
+            lock_table = ExecutionLock.duplicate(func.__name__)
+            if components is not None and len(components) > 0:
+                lock_table.backend_ = components[0].backend_
+                _components = list(components) + [lock_table]
+            else:
+                _components = [lock_table]
+
+        SystemClusters().add(namespace, func, _components, non_transactions, force,
                              permission, bases, retry)
 
         # 返回假的func，因为不允许直接调用。

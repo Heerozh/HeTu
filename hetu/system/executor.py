@@ -12,6 +12,7 @@ from dataclasses import dataclass
 
 from .connection import ConnectionAliveChecker
 from .context import Context
+from .execution import ExecutionLock
 from ..common.slowlog import SlowLog
 from ..data import Permission
 from ..data.backend import RaceCondition
@@ -29,6 +30,7 @@ SLOW_LOG = SlowLog()
 class SystemCall:
     system: str  # 目标system名
     args: tuple  # 目标system参数
+    uuid: str = ''  # 唯一id，如果设置了，则会储存一个标记用于确保不会重复调用
 
 
 class SystemResult:
@@ -125,7 +127,7 @@ class SystemExecutor:
 
         return sys
 
-    async def _execute(self, sys: SystemDefine, *args) -> tuple[bool, dict | None]:
+    async def _execute(self, sys: SystemDefine, *args, uuid='') -> tuple[bool, dict | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，System返回值
@@ -167,7 +169,21 @@ class SystemExecutor:
                     context.transactions[master] = tbl.attach(trx)
             # 执行system和事务
             try:
+                # 先检查uuid是否执行过了
+                if uuid and (await context[ExecutionLock].is_exist(uuid, 'uuid'))[0]:
+                    replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
+                    logger.debug(f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过")
+                    return True, None
+                # 执行
                 rtn = await sys.func(context, *args)
+                # 标记uuid已执行
+                if uuid:
+                    async with context[ExecutionLock].update_or_insert(
+                            uuid, 'uuid') as exe_row:
+                        exe_row.caller = context.caller
+                        exe_row.called = time.time()
+                        exe_row.name = sys_name
+                # 执行事务
                 if trx is not None:
                     await trx.end_transaction(discard=False)
                 # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
@@ -213,7 +229,7 @@ class SystemExecutor:
             return False, None
 
         # 开始调用
-        return await self._execute(sys, *call.args)
+        return await self._execute(sys, *call.args, uuid=call.uuid)
 
     async def exec(self, name: str, *args):
         """execute的便利调用方法"""

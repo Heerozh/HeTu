@@ -7,6 +7,7 @@ from unittest import mock
 
 import hetu
 from backend_mgr import UnitTestBackends
+from hetu.system import SystemCall
 
 logging.basicConfig(stream=sys.stdout)
 logger = logging.getLogger('HeTu.root')
@@ -124,6 +125,34 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
             tbl = hp_data.attach(trx)
             row = await tbl.select(1001, 'owner')
             self.assertEqual(row.value, 100-9)
+
+        # 结束连接
+        await executor.terminate()
+
+
+    async def test_execute_system_call_lock(self):
+        executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)
+        await executor.initialize("")
+
+        ok, _ = await executor.exec('login', 1101)
+        self.assertTrue(ok)
+        ok, _ = await executor.exec('use_hp', 1)
+        self.assertTrue(ok)
+        ok, _ = await executor.exec('use_hp', 1)
+        self.assertTrue(ok)
+
+        ok, _ = await executor.execute(SystemCall('use_hp', (2,), 'uuid1'))
+        self.assertTrue(ok)
+        ok, _ = await executor.execute(SystemCall('use_hp', (3,), 'uuid1'))
+        self.assertTrue(ok)
+
+        # 去数据库读取内容看是否正确
+        ok, _ = await executor.exec('test_hp', 100-4)
+        self.assertTrue(ok)
+
+        # 结束连接
+        await executor.terminate()
+
 
     @mock.patch('time.time', mock_time)
     async def test_connect(self):
