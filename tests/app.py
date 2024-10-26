@@ -58,7 +58,8 @@ async def login(ctx: Context, user_id, kick_logged_in=True):
 @define_system(
     namespace="ssw",
     components=(HP,),
-    permission=Permission.USER
+    permission=Permission.USER,
+    call_lock=True
 )
 async def use_hp(ctx: Context, value):
     async with ctx[HP].update_or_insert(ctx.caller, 'owner') as row:
@@ -141,7 +142,7 @@ async def race(ctx: Context, sleep):
 @define_system(
     namespace="game_short_name",
 )
-def do_nothing(ctx: Context, sleep):
+async def do_nothing(ctx: Context, sleep):  # used in test_required_parameters
     pass
 
 @define_system(

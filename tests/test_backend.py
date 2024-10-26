@@ -916,6 +916,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         notified_channels = await mq.get_message()
         self.assertEqual(len(notified_channels), 2)
 
+        # close backend
+        await backend.close()
+
 
     @parameterized(implements)
     async def test_update_or_insert_race_bug(
