@@ -8,6 +8,7 @@ import logging
 import random
 import time
 import uuid
+import datetime
 
 import numpy as np
 from datetime import datetime
@@ -15,6 +16,7 @@ from datetime import datetime
 from .context import Context
 from .execution import ExecutionLock
 from ..data import BaseComponent, define_component, Property, Permission
+from ..data.backend import ComponentTransaction
 from ..manager import ComponentTableManager
 from ..system import define_system, SystemClusters, SystemDefine
 from ..system.definer import SYSTEM_NAME_MAX_LEN
@@ -24,21 +26,6 @@ SYSTEM_CLUSTERS = SystemClusters()
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
 
-# 首先是create一个未来调用,
-#    存到数据库, 包含到期时间索引
-# 每个worker在服务器启动时开一个后台task，
-#   head启动时清空excitor的已执行id数据，只包括excitor的uuid不存在FutureCalls里的
-#   随机休眠一段时间，减少竞态
-#   循环开始
-#     休眠1秒
-#     循环所有FutureCalls副本
-#       对该副本创建事务
-#       query limit=1获得到期任务
-#       update到期的任务scheduled属性为新的timeout时间，如果为0则删除任务
-#       break
-#     执行到期的任务
-#     看执行的结果正常的话，则删除任务
-#     不正常则log并不管继续循环
 
 @define_component(namespace='HeTu', persist=True, permission=Permission.ADMIN)
 class FutureCalls(BaseComponent):
@@ -60,12 +47,12 @@ async def create_future_call(ctx: Context, at: float, system: str, *args, timeou
     """
     创建一个未来调用，到约定时间后会由内部进程执行该System。未来调用储存在FutureCalls组件中，服务器重启不会丢失。
     timeout不为0时，则保证目标System事务一定成功，且只执行一次。
-    只执行一次的保证使用call_lock实现，要求定义System时开启call_lock。
+    只执行一次的保证通过call_lock引发的事务冲突实现，要求定义System时开启call_lock。
 
     Notes
     -----
     * System执行时的Context是内部服务，而不是用户连接，无法获取用户ID，要自己作为参数传入
-    * 触发精度<=1秒，由每个Node每秒运行一次循环检查并触发
+    * 触发精度<=1秒，由每个Worker每秒运行一次循环检查并触发
 
     Parameters
     ----------
@@ -76,10 +63,10 @@ async def create_future_call(ctx: Context, at: float, system: str, *args, timeou
     system: str
         未来调用的目标system名
     *args
-        目标system的参数
+        目标system的参数，注意，只支持可以通过repr转义为string并不丢失信息的参数，比如基础类型。
     timeout: int
-        再次调用时间（秒）。超过这个时间依然没有System事务成功的记录，就会再次触发调用。
-        如果设为0，则不保证任务成功。比如执行时遇到服务器宕机/Crash，则未来调用丢失。
+        再次调用时间（秒）。如果超过这个时间System调用依然没有完成，就会再次触发调用。
+        如果设为0，则不重试，因此不保证任务被调用。比如执行时遇到服务器宕机/Crash，则未来调用丢失。
 
         如果timeout设的太低，再次触发时前一次还未完成，会引起事务竞态，其中一个事务会被抛弃。
         * 注意：抛弃的只有事务(所有ctx[components]的操作)，修改全局变量、写入文件等操作是永久的
@@ -109,8 +96,17 @@ async def create_future_call(ctx: Context, at: float, system: str, *args, timeou
     timeout = max(timeout, 5) if timeout != 0 else 0
     at = time.time() + abs(at) if at <= 0 else at
 
-    if len(args_str := ','.join(map(str, args))) > 1024:
+    args_str = repr(args)
+    if len(args_str) > 1024:
         raise ValueError(f"args长度超过1024字符: {len(args_str)}")
+
+    try:
+        revert = eval(args_str)
+    except Exception as e:
+        raise AssertionError("args无法通过eval还原") from e
+    assert revert == args, "args通过eval还原丢失了信息"
+
+    assert not recurring or timeout != 0, "recurring=True时timeout不能为0"
 
     # 读取保存的system define，检查是否开了call lock
     sys = SYSTEM_CLUSTERS.get_system(system)
@@ -137,81 +133,131 @@ async def pop_expired_future_call(table):
     """
     从FutureCalls表中取出最早到期的任务，如果到期则返回，否则返回None
     """
+
     # 取出最早到期的任务
-    while True:
-        try:
-            async with self._backend.transaction(self._cluster_id) as trx:
-                tbl = self.attach(trx)
-                row = await tbl.select(row_id)
-                if row is None:
-                    raise KeyError(f"direct_set: row_id {row_id} 不存在")
-                for prop, value in kwargs.items():
-                    if prop in self._component_cls.prop_idx_map_:
-                        row[prop] = value
-                await tbl.update(row_id, row)
-            return
-        except RaceCondition:
-            await asyncio.sleep(random.random() / 5)
-            continue
-        except Exception:
-            await trx.end_transaction(discard=True)
-            raise
+    # while True:
+    #     try:
+    #         async with self._backend.transaction(self._cluster_id) as trx:
+    #             tbl = self.attach(trx)
+    #             row = await tbl.select(row_id)
+    #             if row is None:
+    #                 raise KeyError(f"direct_set: row_id {row_id} 不存在")
+    #             for prop, value in kwargs.items():
+    #                 if prop in self._component_cls.prop_idx_map_:
+    #                     row[prop] = value
+    #             await tbl.update(row_id, row)
+    #         return
+    #     except RaceCondition:
+    #         await asyncio.sleep(random.random() / 5)
+    #         continue
+    #     except Exception:
+    #         await trx.end_transaction(discard=True)
+    #         raise
 
-async def future_call_worker(app):
-    """
-    未来调用的worker，每个Node启动时会开一个，执行到期的未来调用。
-    """
+async def clean_expired_call_locks(comp_mgr: ComponentTableManager):
+    """清空超过7天的call_lock的已执行uuid数据，只有服务器非正常关闭才可能遗留这些数据，因此只需服务器启动时调用。"""
+    for comp in [ExecutionLock] + list(ExecutionLock.instances_.values()):
+        tbl = comp_mgr.get_table(comp)
+        backend = tbl.backend
+        deleted = 0
+        while True:
+            async with backend.transaction(tbl.cluster_id) as trx:
+                tbl_trx = tbl.attach(trx)
+                rows = await tbl_trx.query(
+                    'called',
+                    left=0, right=time.time() - datetime.timedelta(days=7).total_seconds(),
+                    limit=1000)
+                # 循环每行数据，删除
+                for row in rows:
+                    await tbl_trx.delete(row.id)
+                deleted += len(rows)
+                if len(rows) != 0:
+                    break
+        logger.info(f"🔗 [⚙️Future] 释放了 {comp.component_name_} 的 {deleted} 条过期数据")
 
+async def future_call_task(app):
+    """
+    未来调用的后台task，每个Worker启动时会开一个，执行到期的未来调用。
+    """
     from hetu.system import  SystemExecutor, SystemCall, ResponseToClient
     from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
-
     import asyncio
 
-    # 随机sleep一段时间，减少竞态
+    comp_mgr = app.ctx.comp_mgr
+
+    # 启动时清空超过7天的call_lock的已执行uuid数据
+    await clean_expired_call_locks(comp_mgr)
+
+    # 随机sleep一段时间，错开各worker的执行时间
     await asyncio.sleep(random.random())
 
-    # 启动时清空executor的已执行uuid数据，只包括不存在FutureCalls里的
+    # 每个worker在服务器启动时开一个后台task，
+    #   head启动时清空excitor的已执行id数据，只包括excitor的uuid不存在FutureCalls里的
+    #   随机休眠一段时间，减少竞态
+    #   循环开始
+    #     休眠1秒
+    #     循环所有FutureCalls副本
+    #       对该副本创建事务
+    #       query limit=1获得到期任务
+    #       update到期的任务scheduled属性为新的timeout时间，如果为0则删除任务
+    #       break
+    #     执行到期的任务
+    #     看执行的结果正常的话，则删除任务
+    #     不正常则log并不管继续循环
 
-
-    # 初始化worker的执行器
-    comp_mgr = app.ctx.comp_mgr
+    # 初始化task的执行器
     executor = SystemExecutor(app.config['NAMESPACE'], comp_mgr)
     await executor.initialize('localhost')
-    logger.info(f"🔗 [⚙️Future] 新Worker：{asyncio.current_task().get_name()}")
-    # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息可能丢失，导致部分任务可能卡很久不执行
+    logger.info(f"🔗 [⚙️Future] 新Task：{asyncio.current_task().get_name()}")
+    # 获取所有未来调用组件
+    comp_tables = [comp_mgr.get_table(FutureCalls)] + [comp_mgr.get_table(comp)
+                                                       for comp in FutureCalls.instances_.values()]
+    # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，导致部分任务可能卡很久不执行
+    # 所以这里使用最基础的，每一段时间循环的方式
     while True:
-        await asyncio.sleep(1)
-
-        # 获得所有FutureCalls和副本的到期数据
-        if not (expired := pop_expired_future_call(FutureCalls)):
-            for suffix, comp in FutureCalls.instances_.items():
-                if expired := pop_expired_future_call(comp):
-                    break
-        if not expired:
+        # 随机选一个未来调用组件
+        tbl = random.choice(comp_tables)
+        # query limit=1 获得即将到期任务(1秒内）
+        calls = await tbl.direct_query('scheduled', left=0, right=time.time() + 1, limit=1,
+                                       row_format='raw')
+        # 如果无任务，则sleep并continue
+        if not calls:
+            await asyncio.sleep(1)
             continue
+
+        # sleep将到期时间
+        seconds_left = calls[0]['scheduled'] - time.time()
+        await asyncio.sleep(seconds_left)
+        # 事务开始，取出并修改到期任务
+        async with tbl.backend.transaction(tbl.cluster_id) as trx:
+            tbl_trx = tbl.attach(trx)
+            # 取出最早到期的任务
+            calls = await tbl_trx.query('scheduled', left=0, right=time.time() + 0.1, limit=1)
+            # 检查可能被其他worker消费了
+            if calls.size == 0:
+                continue
+            call = calls[0]
+            # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+            if call.timeout == 0:
+                await tbl_trx.delete(call.id)
+            else:
+                call.scheduled = time.time() + call.timeout
+                await tbl_trx.update(call.id, call)
+
         # 执行到期的未来调用
-        call = SystemCall(data[1], tuple(data[2:]))
-        ok, res = await executor.execute(call)
+        args = eval(call.args)
+        if call.recurring:
+            # 如果是循环任务，没必要用uuid保证仅一次调用
+            system_call = SystemCall(call.system, tuple(args))
+        else:
+            system_call = SystemCall(call.system, tuple(args), call.uuid)
+        ok, res = await executor.execute(system_call)
         if replay.level < logging.ERROR:  # 如果关闭了replay，为了速度不执行下面的字符串序列化
-            replay.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
-
-
-
-    # # 通过订阅获取到期调用，增加一些检查的错开事件，防止所有worker都在竞态
-    # subscriptions = Subscriptions(app.ctx.default_backend)
-    # table = comp_mgr.get_table(FutureCalls)
-    # await subscriptions.subscribe_query(
-    #     table, 'admin', 'scheduled',
-    #     0, 0xFFFFFFFF, limit=1, force=True)
-    #
-    # while True:
-    #     # mq_pull大部分情况下只在收到通知后返回
-    #     不行，订阅的消息是可能丢失的，不是保证一定能收到的，可能会导致丢失任务（如果订阅index，不会丢弃，但是可能任务执行时间卡很久）。
-    #     还是做成每秒检查，简洁清晰？
-    #
-    #     await subscriptions.mq_pull()
-    #     if subscriptions.
-    #     不过subscipts也是用sleep来定时取数据的，不如我sleep query
-
-
-
+            replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
+        # 执行完毕后，删除未来调用
+        if not call.recurring:
+            async with tbl.backend.transaction(tbl.cluster_id) as trx:
+                tbl_trx = tbl.attach(trx)
+                await tbl_trx.delete(call.id)
+            # 再删除call_lock uuid数据
+            await executor.remove_call_lock(call.system, call.uuid)
