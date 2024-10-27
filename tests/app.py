@@ -151,3 +151,13 @@ async def do_nothing(ctx: Context, sleep):  # used in test_required_parameters
 )
 async def use_hp_copy(ctx: Context, value):
     return await ctx['use_hp:copy1'](ctx, value)
+
+
+@define_system(
+    namespace="ssw",
+    permission=Permission.EVERYBODY,
+    bases=('create_future_call:copy1', ),
+)
+async def use_hp_future(ctx: Context, value, recurring):
+    return await ctx['create_future_call:copy1'](
+        ctx, -1, 'use_hp', value, timeout=10, recurring=recurring)

@@ -100,7 +100,7 @@ class SystemClusters(metaclass=Singleton):
             for base_sys in bases:
                 base_name, sys_suffix = base_sys.split(':') if ':' in base_sys else (base_sys, '')
                 if base_name not in self._system_map[namespace_]:
-                    raise RuntimeError(f"`bases`引用的System `{sys_name}` 不存在")
+                    raise RuntimeError(f"{sys_name} 的 `bases` 引用的System {base_name} 不存在")
                 base_def = self._system_map[namespace_][base_name]
                 if sys_suffix:
                     # 复制Component
