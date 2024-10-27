@@ -75,7 +75,7 @@ class SystemExecutor:
             return
         # 通过connection component分配自己一个连接id
         sys = SYSTEM_CLUSTERS.get_system('new_connection')
-        ok, _ = await self._execute(sys, address)
+        ok, _ = await self.execute_(sys, address)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
 
@@ -84,7 +84,7 @@ class SystemExecutor:
             return
         # 释放connection
         sys = SYSTEM_CLUSTERS.get_system('del_connection')
-        await self._execute(sys)
+        await self.execute_(sys)
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
         """检查调用是否合法"""
@@ -127,7 +127,7 @@ class SystemExecutor:
 
         return sys
 
-    async def _execute(self, sys: SystemDefine, *args, uuid='') -> tuple[bool, dict | None]:
+    async def execute_(self, sys: SystemDefine, *args, uuid='') -> tuple[bool, dict | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，System返回值
@@ -229,7 +229,7 @@ class SystemExecutor:
             return False, None
 
         # 开始调用
-        return await self._execute(sys, *call.args, uuid=call.uuid)
+        return await self.execute_(sys, *call.args, uuid=call.uuid)
 
     async def exec(self, name: str, *args):
         """execute的便利调用方法"""

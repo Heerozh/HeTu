@@ -102,10 +102,13 @@ class TestWebsocket(unittest.TestCase):
     def test_websocket(self):
         # 测试服务器是否正常启动
         app = self.create_app_under_current_coroutine()
+        # 这行future出现异常是正常的，因为下面的请求很快就关闭了
         request, response = app.test_client.get("/")
         self.assertEqual(request.method.lower(), "get")
         self.assertIn("Powered by HeTu", response.body.decode())
         self.assertEqual(response.status, 200)
+        # 因为上面get("/")会启动future线程，也因此启动了redis，所以要切换下connection_pool
+        app.ctx.default_backend.reset_connection_pool()
 
         # 测试call和结果
         async def normal_routine(connect):

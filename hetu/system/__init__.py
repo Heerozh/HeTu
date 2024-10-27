@@ -17,3 +17,8 @@ from .executor import (
     SystemCall,
     ResponseToClient,
 )
+
+# future并不需要引用任何东西，只是为了让define生效
+from .future import (
+    FutureCalls,
+)

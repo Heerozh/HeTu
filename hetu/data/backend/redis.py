@@ -584,11 +584,11 @@ class RedisComponentTable(ComponentTable):
         key_prefix = self._key_prefix
         rows = []
         for _id in row_ids:
-            row = await replica.hgetall(key_prefix + str(_id))
-            if raw:
-                rows.append(row)
-            else:
-                rows.append(self._component_cls.dict_to_row(row))
+            if row := await replica.hgetall(key_prefix + str(_id)):
+                if raw:
+                    rows.append(row)
+                else:
+                    rows.append(self._component_cls.dict_to_row(row))
 
         if raw:
             return rows

@@ -25,6 +25,7 @@ from hetu.data.backend import Subscriptions, Backend, HeadLockFailed
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
+from hetu.system.future import future_call_task
 
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
@@ -395,6 +396,9 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     # 服务器work和main关闭回调
     app.after_server_stop(server_close)
     app.main_process_stop(server_close)
+
+    # 启动未来调用worker
+    app.add_task(future_call_task(app))
 
     # 启动服务器监听
     app.blueprint(hetu_bp)
