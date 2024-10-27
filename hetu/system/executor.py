@@ -234,3 +234,19 @@ class SystemExecutor:
     async def exec(self, name: str, *args):
         """execute的便利调用方法"""
         return await self.execute(SystemCall(name, args))
+
+    async def remove_call_lock(self, system: str, uuid: str):
+        """删除call lock"""
+        sys = SYSTEM_CLUSTERS.get_system(system)
+
+        comp_mgr = self.comp_mgr
+
+        for comp in sys.full_components:
+            if comp == ExecutionLock or comp.master_ == ExecutionLock:
+                tbl = comp_mgr.get_table(comp)
+                async with tbl.backend.transaction(sys.cluster_id) as trx:
+                    tbl_trx = tbl.attach(trx)
+                    row = await tbl_trx.select(uuid, 'uuid')
+                    if row:
+                        await tbl_trx.delete(row.id)
+                break
