@@ -199,7 +199,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
         - everybody: 任何客户端连接都可以读，适合读一些服务器状态类的数据，如在线人数
         - user: 只有已登录的客户端都连接可以读
         - admin: 只有管理员权限客户端连接可以读
-        - owner: 只有owner属性值==登录的用户id（`ctx.caller`）的连接可以读，如果无owner值则认为该行不可读
+        - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class

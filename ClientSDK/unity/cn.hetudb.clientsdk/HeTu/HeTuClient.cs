@@ -28,7 +28,7 @@ namespace HeTu
     {
         public long id => long.Parse(this["id"]);
     }
-    
+
     public abstract class BaseSubscription
     {
         public readonly string ComponentName;
@@ -53,7 +53,7 @@ namespace HeTu
     {
         public T Data { get; private set; }
 
-        public RowSubscription(string subscriptID, string componentName, T row) : 
+        public RowSubscription(string subscriptID, string componentName, T row) :
             base(subscriptID, componentName)
         {
             Data = row;
@@ -61,7 +61,7 @@ namespace HeTu
 
         public event Action<RowSubscription<T>> OnUpdate;
         public event Action<RowSubscription<T>> OnDelete;
-        
+
         public override void Update(long rowID, JObject data)
         {
             if (data is null)
@@ -75,15 +75,15 @@ namespace HeTu
                 OnUpdate?.Invoke(this);
             }
         }
-        
+
     }
-    
+
     /// Query结果的订阅对象
     public class IndexSubscription<T> : BaseSubscription where T: IBaseComponent
     {
         public Dictionary<long, T> Rows { get; private set; }
 
-        public IndexSubscription(string subscriptID, string componentName, List<T> rows) : 
+        public IndexSubscription(string subscriptID, string componentName, List<T> rows) :
             base(subscriptID, componentName)
         {
             Rows = rows.ToDictionary(row => row.id);
@@ -158,7 +158,7 @@ namespace HeTu
         byte[] _rxBuff;
 
         Task _sendingTask;
-        
+
         private void _StopAllTcs()
         {
             _logInfo?.Invoke("[HeTuClient] 停止所有等待任务...");
@@ -176,7 +176,7 @@ namespace HeTu
         // 收到System返回的`ResponseToClient`时的回调，根据你服务器发送的是什么数据类型来转换
         // 比如服务器发送的是字典，可以用JObject.ToObject<Dictionary<string, object>>();
         public event Action<JObject> OnResponse;
-        
+
         // 本地调用System时的回调。调用时立即就会回调，是否成功调用未知。
         public Dictionary<string, Action<object[]>> SystemCallbacks = new();
 
@@ -234,7 +234,7 @@ namespace HeTu
         {
             // 连接websocket
             try
-            {   
+            {
                 // 前置清理
                 _logInfo?.Invoke($"[HeTuClient] 正在连接到：{url}...");
                 _rxBuff = new byte[_buffSize];
@@ -316,7 +316,7 @@ namespace HeTu
             _StopAllTcs();
             return null;
         }
-    
+
         // 关闭河图连接
         public async Task Close()
         {
@@ -326,14 +326,20 @@ namespace HeTu
             _StopAllTcs();
         }
 
-        // 发送System调用，立即返回，后台执行
-        public void CallSystem(string method, params object[] args)
+        /// <summary>
+        /// 后台发送System调用，此方法立即返回。
+        /// 可通过`HeTuClient.Instance.SystemCallbacks["system_name"] = (args) => {}`
+        /// 注册客户端调用回调（非服务器端回调）。
+        /// </summary>
+        public void CallSystem(string systemName, params object[] args)
         {
-            var payload = new object[] { "sys", method }.Concat(args);
-            _Send(payload);
-            SystemCallbacks.TryGetValue(method, out var callbacks);
+            var payload = new object[] { "sys", systemName }.Concat(args);
+            _Send(payload);  // 后台线程发送，这里无论成功立即返回
+            SystemCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
+
+        // todo async的ACallSystem，并等待服务器回应，外加等待timeout，不要一直等
 
         /// <summary>
         /// 订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。
@@ -368,7 +374,7 @@ namespace HeTu
         /// Debug.log("My HP:" + subscription.Data.value);
         /// </code>
         public async Task<RowSubscription<T>> Select<T>(
-            object value, string where = "id", string componentName = null) 
+            object value, string where = "id", string componentName = null)
             where T: IBaseComponent
         {
             componentName ??= typeof(T).Name;
@@ -384,12 +390,12 @@ namespace HeTu
                         throw new InvalidCastException(
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
             }
-            
+
             // 向服务器订阅
             var payload = new [] { "sub", componentName, "select", value, where };
             _Send(payload);
             _logDebug?.Invoke($"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
-            
+
             // 等待服务器结果
             var tcs = new TaskCompletionSource<List<object>>();
             _waitingSubTasks.Enqueue(tcs);
@@ -416,7 +422,6 @@ namespace HeTu
                     throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
 
-            
             var data = ((JObject)subMsg[2]).ToObject<T>();
             var newSub = new RowSubscription<T>(subID, componentName, data);
             _subscriptions[subID] = new WeakReference(newSub, false);
@@ -429,7 +434,7 @@ namespace HeTu
         {
             return Select<DictComponent>(value, where, componentName);
         }
-        
+
         /// <summary>
         /// 订阅组件的索引数据。`index`是开启了索引的属性名，`left`和`right`为索引范围，
         /// `limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
@@ -439,10 +444,17 @@ namespace HeTu
         /// 可通过`IndexSubscription.Rows`获取数据。
         /// 并可以注册`IndexSubscription.OnInsert`和`OnUpdate`，`OnDelete`数据事件。
         /// </returns>
+        /// <remarks>
+        /// 可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, string}`类型。
+        /// 使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
+        /// 使用默认的Dictionary更自由灵活，但都是字符串类型需要自行转换。
+        ///
+        /// 如果目标组件权限为Owner，则只能查询到`owner`属性==自己的行。
+        /// </remarks>
         /// <code>
         /// //使用示例
         /// var subscription = await HeTuClient.Instance.Query("HP", "owner", 0, 9999, 10);
-        /// foreach (var row in subscription.Rows) 
+        /// foreach (var row in subscription.Rows)
         ///     Debug.log($"HP: {row.Key}:{row.Value["value"]}");
         /// subscription.OnUpdate += (sender, rowID) => {
         ///     Debug.log($"New HP: {rowID}:{sender.Rows[rowID]["value"]}");
@@ -452,8 +464,8 @@ namespace HeTu
         /// }
         /// </code>
         public async Task<IndexSubscription<T>> Query<T> (
-            string index, object left, object right, int limit, 
-            bool desc=false, bool force=true, string componentName = null) 
+            string index, object left, object right, int limit,
+            bool desc=false, bool force=true, string componentName = null)
             where T: IBaseComponent
         {
             componentName ??= typeof(T).Name;
@@ -467,7 +479,7 @@ namespace HeTu
                 else
                     throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
-            
+
             // 发送订阅请求
             var payload = new []
             {
@@ -475,7 +487,7 @@ namespace HeTu
             };
             _Send(payload);
             _logDebug?.Invoke($"[HeTuClient] 发送Query订阅: {predictID}");
-            
+
             // 等待服务器结果
             var tcs = new TaskCompletionSource<List<object>>();
             _waitingSubTasks.Enqueue(tcs);
@@ -490,7 +502,7 @@ namespace HeTu
                 _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
                 throw;
             }
-            
+
             var subID = (string)subMsg[1];
             // 如果没有查询到值
             if (subID is null) return null;
@@ -501,7 +513,7 @@ namespace HeTu
                 else
                     throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
-            
+
             var rows = ((JArray)subMsg[2]).ToObject<List<T>>();
             var newSub = new IndexSubscription<T>(subID, componentName, rows);
             _subscriptions[subID] = new WeakReference(newSub, false);
@@ -510,22 +522,22 @@ namespace HeTu
         }
 
         public Task<IndexSubscription<DictComponent>> Query(
-            string componentName, string index, object left, object right, int limit, 
+            string componentName, string index, object left, object right, int limit,
             bool desc = false, bool force = true)
         {
             return Query<DictComponent>(index, left, right, limit, desc, force, componentName);
         }
-        
+
         // --------------以下为内部方法----------------
-        
-        internal void _unsubscribe(string subID) 
+
+        internal void _unsubscribe(string subID)
         {
             _subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
             _Send(payload);
             _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription析构，已取消订阅 {subID}");
         }
-        
+
         static string _makeSubID(string table, string index, object left, object right,
             int limit, bool desc)
         {
@@ -594,7 +606,7 @@ namespace HeTu
             buffer = _protocol?.Decrypt(buffer) ?? buffer;
             buffer = _protocol?.Decompress(buffer) ?? buffer;
             var decoded = Encoding.UTF8.GetString(buffer);
-            // 处理消息 
+            // 处理消息
             // _logInfo?.Invoke($"[HeTuClient] 收到消息: {decoded}");
             var structuredMsg = JsonConvert.DeserializeObject<List<object>>(decoded);
             if (structuredMsg is null) return;
