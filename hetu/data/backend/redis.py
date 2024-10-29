@@ -521,15 +521,13 @@ class RedisComponentTable(ComponentTable):
         logger.warning(f"  ✔️ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
                        f"{added}个属性。")
 
-    @classmethod
+    @staticmethod
     def make_query_cmd(
-            cls, component_cls, index_name: str, left, right, limit, desc
+            component_cls, index_name: str, left, right, limit, desc
     ) -> dict[str, str] | list[int]:
         """生成数据库查询命令，在direct_query和_db_query中复用此类。"""
         if right is None:
             right = left
-            if index_name == 'id':
-                return [int(left)]
         if desc:
             left, right = right, left
 
@@ -566,16 +564,11 @@ class RedisComponentTable(ComponentTable):
         replica = self._backend.random_replica()
         idx_key = self._idx_prefix + index_name
 
-        cmds = RedisComponentTable.make_query_cmd(
-            self._component_cls, index_name, left, right, limit, desc)
-
-        if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
-            row_ids = cmds
-        else:
-            row_ids = await replica.zrange(name=idx_key, **cmds)
-            str_type = self._component_cls.indexes_[index_name]
-            if str_type:
-                row_ids = [vk.split(':')[-1] for vk in row_ids]
+        cmds = self.make_query_cmd(self._component_cls, index_name, left, right, limit, desc)
+        row_ids = await replica.zrange(name=idx_key, **cmds)
+        str_type = self._component_cls.indexes_[index_name]
+        if str_type:
+            row_ids = [vk.split(':')[-1] for vk in row_ids]
 
         if row_format == 'id':
             return list(map(int, row_ids))
@@ -598,12 +591,15 @@ class RedisComponentTable(ComponentTable):
             else:
                 return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
-    async def direct_get(self, row_id: int) -> None | np.record:
+    async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
         replica = self._backend.random_replica()
         key = self._key_prefix + str(row_id)
         row = await replica.hgetall(key)
         if row:
-            return self._component_cls.dict_to_row(row)
+            if row_format == 'raw':
+                return row
+            else:
+                return self._component_cls.dict_to_row(row)
         else:
             return None
 
@@ -729,9 +725,6 @@ class RedisComponentTransaction(ComponentTransaction):
 
         cmds = RedisComponentTable.make_query_cmd(
             self._component_cls, index_name, left, right, limit, desc)
-
-        if type(cmds) is list:  # 如果是list说明不需要查询直接返回id
-            return cmds
 
         if lock_index:
             await pipe.watch(idx_key)

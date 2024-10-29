@@ -297,6 +297,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             np.testing.assert_array_equal((await tbl.query('id', 6, 9, limit=999)).id, [6, 8, 9])
             self.assertEqual(len(await tbl.query('id', -np.inf, +np.inf, limit=999)), 27)
 
+        # 测试is_exist是否正常
+        async with backend.transaction(1) as trx:
+            tbl = item_data.attach(trx)
+            x = await tbl.is_exist(999, 'id')
+            self.assertEqual(x[0], False)
+            x = await tbl.is_exist(12, 'id')
+            self.assertEqual(x[0], True)
+
         # 测试保存后再读回来
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)

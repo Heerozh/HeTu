@@ -190,7 +190,7 @@ class ComponentTable:
         # 请使用servant数据库来操作
         raise NotImplementedError
 
-    async def direct_get(self, row_id: int) -> None | np.record:
+    async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
         """
         不通过事务，从servant数据库直接读取某行的值。
 
@@ -788,13 +788,13 @@ class RowSubscription(BaseSubscription):
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
             return set(), set(), cache
 
-        rows = await self.table.direct_query('id', self.row_id, limit=1, row_format='raw')
-        if len(rows) == 0:
+        row = await self.table.direct_get(self.row_id, row_format='raw')
+        if row is None:
             # get_updated主要发给客户端，需要json，所以key直接用str
             rtn = {str(self.row_id): None}
         else:
-            if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
-                rtn = {str(self.row_id): rows[0]}
+            if self.req_owner is None or int(row.get('owner', 0)) == self.req_owner:
+                rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
         RowSubscription.__cache[channel] = rtn
@@ -835,14 +835,13 @@ class IndexSubscription(BaseSubscription):
             rem_chans = set()
             rtn = {}
             for row_id in inserts:
-                rows = await self.table.direct_query(
-                    'id', row_id, limit=1, row_format='raw')
-                if len(rows) == 0:
+                row = await self.table.direct_get(row_id, row_format='raw')
+                if row is None:
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    if self.req_owner is None or int(rows[0].get('owner', 0)) == self.req_owner:
-                        rtn[str(row_id)] = rows[0]
+                    if self.req_owner is None or int(row.get('owner', 0)) == self.req_owner:
+                        rtn[str(row_id)] = row
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
@@ -934,9 +933,13 @@ class Subscriptions:
         if not self._has_table_permission(table, caller):
             return None, None
 
-        if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
-            return None, None
-        row = rows[0]
+        if where == 'id':
+            if (row := await table.direct_get(value, row_format='raw')) is None:
+                return None, None
+        else:
+            if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
+                return None, None
+            row = rows[0]
         row['id'] = int(row['id'])
 
         # 再次caller要对该row有权限
@@ -1019,7 +1022,7 @@ class Subscriptions:
         return sub_id, rows
 
     async def unsubscribe(self, sub_id) -> None:
-        """取消订阅数据"""
+        """取消该sub_id的订阅"""
         if sub_id not in self._subs:
             return
 
