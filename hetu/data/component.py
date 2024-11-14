@@ -293,7 +293,7 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
                                            persist, readonly, backend)
         cls.load_json(json_str)
 
-        # 保存app文件的版本信息
+        # 保存app文件的git版本信息，目前无作用，主要用于以后支持自动迁移
         caller = inspect.stack()[1]
         try:
             repo = git.Repo(caller.filename, search_parent_directories=True)
@@ -304,9 +304,9 @@ def define_component(_cls=None,  /, *, namespace: str = "default", force: bool =
             cls.git_hash_ = sha
         except (KeyError, git.exc.InvalidGitRepositoryError):
             lib_path = os.path.abspath(__file__ + '/../../')
-            if lib_path not in caller.filename:
-                warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
-                              f"将无法检测组件{cls.__name__}的版本。")
+            # if lib_path not in caller.filename: 等自动迁移完成后再打开
+            #     warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
+            #                   f"将无法用于根据文件版本变化自动迁移{cls.__name__}组件的功能。")
             cls.git_hash_ = 'untracked'
 
         # 把class加入到总集中
