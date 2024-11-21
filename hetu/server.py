@@ -12,8 +12,7 @@ import os
 import sys
 
 from redis.exceptions import ConnectionError as RedisConnectionError
-from sanic import Blueprint
-from sanic import Request, Websocket, text
+from sanic import Request, Websocket
 from sanic import Sanic
 from sanic import SanicException
 from sanic.exceptions import WebsocketClosed
@@ -26,11 +25,10 @@ from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.manager import ComponentTableManager
 from hetu.system import SystemClusters, SystemExecutor, SystemCall, ResponseToClient
 from hetu.system.future import future_call_task
+from hetu.web import APP_BLUEPRINT
 
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
-
-hetu_bp = Blueprint("my_blueprint")
 
 
 def decode_message(message: bytes, protocol: dict):
@@ -97,6 +95,9 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
         case 'query':
             check_length('query', data, 5, 8)
             sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
+        case 'logic_query':
+            # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
+            pass
         case _:
             raise ValueError(f" [非法操作] 未知订阅操作：{data[2]}")
 
@@ -107,11 +108,6 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
         raise ValueError(f" [非法操作] 订阅数超过限制："
                          f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
-
-
-@hetu_bp.route("/")
-async def web_root(request):
-    return text(f"Powered by HeTu(v{hetu.__version__}) Database! ")
 
 
 async def client_receiver(
@@ -218,7 +214,7 @@ async def subscription_receiver(
         pass
 
 
-@hetu_bp.websocket("/hetu")  # noqa
+@APP_BLUEPRINT.websocket("/hetu")  # noqa
 async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
     # 初始化执行器，一个连接一个执行器
@@ -401,5 +397,5 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     app.add_task(future_call_task(app))
 
     # 启动服务器监听
-    app.blueprint(hetu_bp)
+    app.blueprint(APP_BLUEPRINT)
     return app
