@@ -4,7 +4,7 @@ redis[hiredis] ~= 5.0  # pip install -U redis[hiredis]
 GitPython ~= 3.0 # pip install -U GitPython
 sortedcontainers ~= 2.0
 pyyaml ~= 6.0  # pip install -U pyyaml
-orjson ~= 3.0  # pip install -U orjson
+orjson ~= 3.10  # pip install -U orjson
 tabulate
 wcwidth  # for chinese character alignment
 
