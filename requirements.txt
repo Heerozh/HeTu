@@ -1,4 +1,4 @@
-sanic ~= 24.0  # pip install -U sanic
+sanic ~= 24.6  # pip install -U sanic
 numpy ~= 2.0 # conda install numpy>=2.0
 redis[hiredis] ~= 5.0  # pip install -U redis[hiredis]
 GitPython ~= 3.0 # pip install -U GitPython
