@@ -6,7 +6,7 @@
 # 河图HeTu
 
 河图是一个开源轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
-开发简单、透明，没有复杂的API调用，同时隐去了恼人的事务、线程冲突等问题。
+开发简单、透明，没有复杂的API调用，高数据一致性保证，同时隐去了恼人的事务、线程冲突等问题。
 
 基于 ECS(Entity-Component-System) 概念，采用 Python 语言，支持各种数据科学库，拥抱未来。
 具体性能见下方[性能测试](#性能测试)。
@@ -24,7 +24,7 @@
 
 一个登录，并在地图上移动的简单示例。首先是服务器端部分，服务器只要20行代码，0配置文件：
 
-### 定义组件
+### 定义组件（Component）
 
 河图的数据表结构（Schema），可通过代码完成定义。
 
@@ -46,7 +46,7 @@ class Position(BaseComponent):
 > 不要创建名叫Player的大表，而是把Player的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
 然后通过`owner`属性关联到Player身上。大表会严重影响性能和扩展性。
 
-### 然后写System
+### 然后写 System（逻辑）
 
 #### move_to移动逻辑
 
@@ -69,11 +69,22 @@ async def move_to(ctx: Context, x, y):
         # with结束后会自动提交修改
 ```
 
+客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`调用`move_to`方法，数据变更会自动推送给所有关注此行数据的客户端。
+
 #### Login登录逻辑
 
-可通过调用内置System `elevate`完成，`elevate`会把当前连接提权到USER组，并关联`user_id`。
+我们定义一个`login_test`System，作为客户端登录接口。
 
-但System包含事务处理，不可直接函数调用，想要调用其他System，必须通过参数`bases`继承。
+河图有个内部System叫`elevate`可以帮我们完成登录，它会把当前连接提权到USER组，并关联`user_id`。
+
+> [!NOTE]  
+> 什么是内部System? 
+> 内部System为Admin权限的System，客户端不可调用。
+
+> [!NOTE]  
+> 为什么要通过内部System？直接函数调用不行么？
+> 任何函数方法，如果牵涉到数据库操作，都需要通过System走事务。
+> 想要调用其他System，必须通过参数`bases`继承。
 
 ```Python
 from hetu.system import define_system, Context
@@ -85,7 +96,6 @@ async def login_test(ctx: Context, user_id):
     await ctx['elevate'](ctx, user_id, kick_logged_in=True)
 ```
 我们让客户端直接传入user_id，省去验证过程。实际应该传递token验证。
-
 
 
 服务器就完成了，我们不需要传输数据的代码，因为河图是个“数据库”，客户端可直接查询。
@@ -100,8 +110,8 @@ async def login_test(ctx: Context, user_id):
 cd examples/server/first_game
 docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest start --namespace=ssw --instance=walking
 ````
-* `-p` 是映射本地端口到hetu容器端口，比如要修改成443端口就使用`-p 443:2466`
-* `-v` 是映射本地目录到hetu容器目录(`/app`和`/data`和`/logs`目录)
+* `-p` 是映射本地端口:到hetu容器端口，比如要修改成443端口就使用`-p 443:2466`
+* `-v` 是映射本地目录:到容器目录，需映射`/app`代码目录，`/data`快照目录。`/logs`目录可选
 * 其他参数见帮助`docker run --rm heerozh/hetu:latest start --help`
 
 
@@ -127,7 +137,7 @@ public class FirstGame : MonoBehaviour
         HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
         // 连接河图，这其实是异步函数，我们没await，实际效果类似射后不管
         HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
-            Application.exitCancellationToken);
+            this.GetCancellationTokenOnDestroy());
             
         // 调用登录System，相关封包会启动线程在后台发送
         HeTuClient.Instance.CallSystem("login_test", SelfID);
@@ -163,7 +173,7 @@ public class FirstGame : MonoBehaviour
             "Position", "owner", 1, 999, 100);
         // 把查询到的玩家加到场景中
         foreach(var data in _allPlayerData.Rows.Values)
-            AddPlayer(data);
+            AddPlayer(data);  // 代码省略
         
         // 当有新Position行创建时(新玩家)
         _allPlayerData.OnInsert += (sender, rowID) => {
@@ -171,8 +181,9 @@ public class FirstGame : MonoBehaviour
         };
         // 当有玩家删除时
         _allPlayerData.OnDelete += (sender, rowID) => {
+            // 代码省略
         };
-        // 当_allPlayerData数据中某行的“任何属性值”被修改时（这也是Component属性要少的原因）
+        // 当_allPlayerData数据中有任何行发生变动时（任何属性变动都会触发整行事件，这也是Component属性要少的原因）
         _allPlayerData.OnUpdate += (sender, rowID) => {
             var data = sender.Rows[rowID];
             var playerID = long.Parse(data["owner"]);  // 前面Query时没有带类型，所以数据都是字符串型
@@ -198,22 +209,22 @@ public class FirstGame : MonoBehaviour
 | Redis7.0 | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
 | 跑分程序     |                     本地 |   参数： --clients=1000 --time=5 |        
 
-### Redis基准：
+### Redis对照：
 
-直接在Redis上压测以下最少事务指令作为基准，这指令序列等价于之后的select + update测试：
+先压测Redis，看看Redis的性能上限作为对照，这指令序列等价于之后的"select + update"测试项目：
 
 ```redis
 ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
 ```
 
-Redis基准性能CPS(每秒调用次数)结果为：
+CPS(每秒调用次数)结果为：
 
 |         | direct redis(Calls) |
 |:--------|--------------------:|
 | Avg(每秒) |            30,345.2 |
 
-* 某云倚天版(ARM)的Redis性能，hset/get性能一致，但牵涉事务后性能大约下降40%
-* 某云Tair只是半兼容Redis指令，并非Redis，并不能正常使用。
+* ARM版的Redis性能，hset/get性能一致，但牵涉zrange和multi指令后性能低40%，不建议
+* 各种兼容Redis指令的数据库，并非Redis，不可使用，可能有奇怪BUG
 
 ### 测试河图性能：
 
@@ -242,7 +253,7 @@ CPS(每秒调用次数)测试结果为：
 
 ### 关于Python性能
 
-河图是分布式的，吞吐量和RTT都不受制于语言，而受制于后端Redis。作为参考，Python性能大概是PHP7水平。
+河图是异步+分布式的，吞吐量和RTT都不受制于语言，而受制于后端Redis。作为参考，Python性能大概是PHP7水平。
 
 之前一直用LuaJIT，虽然速度很快，但代码实在是太繁重了。
 
@@ -313,9 +324,26 @@ hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=
 其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.yml`方式启动，
 配置模板见CONFIG_TEMPLATE.yml文件。
 
+### 内网离线环境
+
+想要在内网设置环境，外网机执行上述原生启动步骤后，把miniconda的整个安装目录复制过去即可。
+
+### 生产部署
+
+生产环境下，除了执行上述一种启动步骤外，还要建议设立一层反向代理，并进行负载均衡。
+
+反向代理选择：
+- Caddy: 自动https证书，自动反代头设置和合法验证，可通过api调用动态配置负载均衡
+  - 命令行：caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000
+- Nginx: 老了，配置复杂，且歧义多，不推荐
+
+
 ## 详细文档：
 
-文档链接在这：建设中...
+由于结构简单，只有几个类方法，具体可以直接参考代码文档注释，建议通过github的AI直接询问。
+
+如果日后接口方法变多时，会有详细文档。
+
 
 ## 代码规范
 
@@ -323,6 +351,6 @@ hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 # Copyright & Thanks
 
-Copyright (C) 2023-2024, by Zhang Jianhao (heeroz@gmail.com), All rights reserved.
+Copyright (C) 2023-2025, by Zhang Jianhao (heeroz@gmail.com), All rights reserved.
 
 
