@@ -385,7 +385,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             comp_mgr.flush_volatile()
     except HeadLockFailed as e:
         message = (f"检测有其他head=True的node正在运行，只能启动一台head node。"
-                   f"此标记位于{e}，如果之前服务器未正常关闭，请手动删除该键值")
+                   f"如果上次Head服务器宕机了，可运行 hetu unlock --db=redis://host:6379/0 来强制删除此标记。")
         logger.exception("❌ [📡Server] " + message)
         raise HeadLockFailed(message)
 

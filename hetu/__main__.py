@@ -49,10 +49,14 @@ def str2bool(v):
         raise argparse.ArgumentTypeError('Boolean value expected.')
 
 
-def unlock(unlock_args):
+def remove_head_lock(url):
     import redis
-    r = redis.Redis.from_url(unlock_args.db)
+    r = redis.Redis.from_url(url)
     r.delete('head_lock')
+
+
+def unlock(unlock_args):
+    remove_head_lock(unlock_args.db)
     print("🔓 已解锁head_lock")
 
 
@@ -86,6 +90,7 @@ def start(start_args):
         if shutil.which("redis-server"):
             redis_proc = subprocess.Popen(
                 ["redis-server", "--daemonize yes", "--save 60 1", "--dir /data/"])
+            remove_head_lock('redis://127.0.0.1:6379/0')
         else:
             print("❌ 未找到redis-server，请手动启动")
 
