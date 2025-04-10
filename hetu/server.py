@@ -30,7 +30,7 @@ from hetu.web import APP_BLUEPRINT
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
 
-
+# todo 拆到message文件
 def decode_message(message: bytes, protocol: dict):
     if len(message) > 10240:
         raise ValueError("Message too long，为了防止性能攻击限制长度")
@@ -109,7 +109,7 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
         raise ValueError(f" [非法操作] 订阅数超过限制："
                          f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅")
 
-
+# -------------拆到receiver文件------------------
 async def client_receiver(
         ws: Websocket, protocol: dict,
         executor: SystemExecutor,
@@ -214,6 +214,8 @@ async def subscription_receiver(
         pass
 
 
+# ----------------拆到websocket文件-----------------------
+
 @APP_BLUEPRINT.websocket("/hetu")  # noqa
 async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
@@ -301,7 +303,7 @@ async def server_close(app):
             logger.info(f"⌚ [📡Server] Closing backend {attrib}...")
             await backend.close()
 
-
+# ----------保留在server文件
 def start_webserver(app_name, config, main_pid, head) -> Sanic:
     """config： dict或者py目录"""
     # 加载玩家的app文件
