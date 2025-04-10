@@ -105,8 +105,14 @@ class RedisBackend(Backend):
         # 同步io连接, 异步io连接, 只读io连接
         self.master_url = config['master']
         self.servant_urls = config.get('servants', [])
-        self.io = redis.from_url(self.master_url, decode_responses=True)
-        self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
+        self.clustering = config.get('clustering', False)
+        if self.clustering:
+            self.io = redis.cluster.RedisCluster.from_url(self.master_url, decode_responses=True)
+            self._aio = redis.asyncio.cluster.RedisCluster.from_url(
+                self.master_url, decode_responses=True)
+        else:
+            self.io = redis.from_url(self.master_url, decode_responses=True)
+            self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
         self.dbi = self.io.connection_pool.connection_kwargs['db']
         # 加载lua脚本
         self.load_lua_scripts()
