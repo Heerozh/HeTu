@@ -15,7 +15,10 @@ DEBUG: false
 #INSPECTOR: true
 #INSPECTOR_PORT: 6457
 
-# SSL配置
+# 前置反向代理的数量。用于获取真实IP，host等，一般为1，除非是多级代理
+PROXIES_COUNT: 1
+
+# SSL配置，推荐用反向代理caddy，而不要这里弄
 #CERT_CHAIN:
 #  - null  # 第一个设null禁止通过IP查看证书
 #  - cert: /path/to/example.com/fullchain.pem
@@ -80,6 +83,7 @@ BACKENDS:
     type: Redis                        # 指定backend的类型，目前只支持Redis
     # url格式：redis://[[username]:[password]]@localhost:6379/0
     master: redis://127.0.0.1:6379/0   # 指定master服务器，只能一个地址
+    clustering: false                   # master是否开启集群模式
     servants: [ ]                      # 只读副本服务器，如果设置了，所有客户端查询随机在只读副本上进行
 
 
