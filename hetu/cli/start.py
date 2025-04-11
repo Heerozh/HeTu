@@ -225,4 +225,4 @@ class StartCommand(CommandInterface):
             redis_proc.terminate()
 
         # 退出log listener
-        log_handlers.AutoListener.stop_all()
+        log_handlers.stop_all_logging_handlers()

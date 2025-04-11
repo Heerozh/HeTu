@@ -5,13 +5,16 @@ Worker进程入口文件
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import asyncio
 import importlib.util
 import logging
 import os
 import sys
+from hetu.safelogging import handlers as log_handlers
 
 from sanic import Sanic
 
+import hetu.server.websocket  # noqa: F401 (防止未使用警告)
 import hetu.system.connection as connection
 from hetu.common.helper import resolve_import
 from hetu.data.backend import Backend, HeadLockFailed
@@ -20,8 +23,6 @@ from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.system import SystemClusters
 from hetu.system.future import future_call_task
 from hetu.web import APP_BLUEPRINT
-import hetu.server.websocket  # noqa: F401 (防止未使用警告)
-
 
 logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
@@ -120,6 +121,15 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         message = (f"检测有其他head=True的node正在运行，只能启动一台head node。"
                    f"如果上次Head服务器宕机了，可运行 hetu unlock --db=redis://host:6379/0 来强制删除此标记。")
         logger.exception("❌ [📡Server] " + message)
+        # 退出logger进程，以及redis，(主要是logger的Queue)，不然直接调用此函数的地方会卡死
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(server_close(app))
+        else:
+            loop.run_until_complete(server_close(app))
+            loop.close()
+        log_handlers.stop_all_logging_handlers()
         raise HeadLockFailed(message)
 
     # 服务器work和main关闭回调
