@@ -206,7 +206,7 @@ namespace HeTu
         ///     此方法会异步堵塞，在连接断开前不会结束。
         /// </summary>
         /// <returns>
-        ///     返回连接断开的异常，如果正常断开则返回null，或者编辑器停止Play会抛出OperationCanceledException。
+        ///     返回连接断开的异常，如果正常断开则返回null，或者编辑器停止Play会返回OperationCanceledException。
         /// </returns>
         /// <code>
         ///     //UnityEngine使用示例：
