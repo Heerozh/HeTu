@@ -10,7 +10,7 @@ from hetu.cli import CommandIndex
 def main():
     cli = CommandIndex()
     cli.register()
-    cli.execute()
+    return cli.execute()
 
 
 if __name__ == "__main__":

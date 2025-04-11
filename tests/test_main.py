@@ -47,7 +47,7 @@ class MyTestCase(unittest.TestCase):
         r = redis.Redis(host='127.0.0.1', port=6379)
         r.set('head_lock', '1')
         with self.assertRaises(HeadLockFailed):
-             main()
+            main()
 
 
 if __name__ == '__main__':

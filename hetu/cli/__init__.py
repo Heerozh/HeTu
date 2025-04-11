@@ -41,6 +41,8 @@ class CommandIndex:
     def execute(self):
         args = self.parser.parse_args()
 
+        rtn = None
         for cmd in COMMANDS:
             if cmd.name() == args.command:
-                cmd.execute(args)
+                rtn = cmd.execute(args)
+        return rtn
