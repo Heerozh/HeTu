@@ -1,11 +1,17 @@
+"""
+@author: Heerozh (Zhang Jianhao)
+@copyright: Copyright 2024-2025, Heerozh. All rights reserved.
+@license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+@email: heeroz@gmail.com
+"""
 import argparse
 import gettext
 
 from .base import CommandInterface
 from .build import BuildCommand
-from .unlock import UnlockCommand
 from .migration import MigrationCommand
 from .start import StartCommand
+from .unlock import UnlockCommand
 
 args_loc = {
     "usage: ": "用法：",
