@@ -60,6 +60,19 @@ def unlock(unlock_args):
     print("🔓 已解锁head_lock")
 
 
+def wait_for_port(host, port, timeout=30):
+    """轮询检测端口是否可用"""
+    import time, socket
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        try:
+            with socket.create_connection((host, port), timeout=1):
+                return True
+        except (socket.timeout, ConnectionRefusedError):
+            time.sleep(0.5)
+    return False
+
+
 def build(build_args):
     import importlib.util
     # 加载玩家的app文件
@@ -90,6 +103,7 @@ def start(start_args):
         if shutil.which("redis-server"):
             redis_proc = subprocess.Popen(
                 ["redis-server", "--daemonize yes", "--save 60 1", "--dir /data/"])
+            wait_for_port("127.0.0.1", 6379)
             remove_head_lock('redis://127.0.0.1:6379/0')
         else:
             print("❌ 未找到redis-server，请手动启动")
