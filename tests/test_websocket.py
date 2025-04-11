@@ -7,7 +7,7 @@ import sanic_testing
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
 from backend_mgr import UnitTestBackends
-from hetu.server import encode_message, decode_message
+from hetu.server.message import encode_message, decode_message
 from hetu.server import start_webserver
 from hetu.system import SystemClusters
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
@@ -169,6 +169,8 @@ class TestWebsocket(unittest.TestCase):
         self.assertEqual(response1.client_sent[-1], ['sys', 'use_hp', 2], "最后一行没执行到")
         app.ctx.default_backend.reset_connection_pool()
 
+        app.stop()
+
     def test_flooding(self):
         async def normal_routine(connect):
             client1 = await connect()
@@ -206,6 +208,7 @@ class TestWebsocket(unittest.TestCase):
                 if i == 99:
                     await asyncio.sleep(1)
 
+        app.stop()
         app = self.create_app_under_current_coroutine()
         app.test_client.websocket("/hetu", mimic=normal_routine_lv2)
 
@@ -213,6 +216,7 @@ class TestWebsocket(unittest.TestCase):
         with self.assertRaises(Exception):
             app.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
 
+        app.stop()
 
 if __name__ == '__main__':
     unittest.main()
