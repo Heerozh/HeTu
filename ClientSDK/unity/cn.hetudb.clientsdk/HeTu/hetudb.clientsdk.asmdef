@@ -1,7 +1,10 @@
 {
     "name": "河图ClientSDK DLL",
     "rootNamespace": "",
-    "references": [],
+    "references": [
+        "UnityWebSocket.Runtime",
+        "UniTask"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
@@ -10,5 +13,5 @@
     "autoReferenced": true,
     "defineConstraints": [],
     "versionDefines": [],
-    "noEngineReferences": true
+    "noEngineReferences": false
 }

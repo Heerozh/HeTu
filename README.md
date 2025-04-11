@@ -260,7 +260,7 @@ CPS(每秒调用次数)测试结果为：
 考虑到现在的CPU价格远低于开发人员成本，快速迭代，数据分析，无缝AI等特性具有优势。
 
 
-## 安装和启动
+## 服务器安装和启动
 
 ### 容器启动
 
@@ -337,6 +337,27 @@ hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=
   - 命令行：caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000
 - Nginx: 老了，配置复杂，且歧义多，不推荐
 
+
+## 客户端SDK安装
+
+### C# SDK
+
+此SDK基于.Net WebSocket和多线程，也支持Unity 2022及以上版本（除WebGL平台）
+
+可直接使用`ClientSDK/csharp/HeTuClient.cs`。
+
+### Unity SDK
+
+此SDK支持Unity 2018.3及以上版本，含所有平台（包括WebGL），基于UnityWebSocket和UniTask，已内置在SDK库中。
+
+在Unity Package Manager中使用以下地址安装：
+`https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
+
+如果项目已有UniTask依赖，可以择一删除。
+
+### TypeScript SDK
+
+`npm install --save Heerozh/HeTu#npm`
 
 ## 详细文档：
 

@@ -1,9 +1,9 @@
 {
   "name": "cn.hetudb.clientsdk",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "\u6cb3\u56feClientSDK",
   "description": "\u6cb3\u56fe\u662f\u4e00\u4e2a\u8f7b\u91cf\u5316\u7684\u5206\u5e03\u5f0f\u6e38\u620f\u670d\u52a1\u5668\u5f15\u64ce\u3002\u96c6\u6210\u4e86\u6570\u636e\u5e93\u6982\u5ff5\uff0c\u56e0\u6b64\u5f00\u53d1\u548c\u7ef4\u62a4\u6781\u5176\u4fbf\u6377\uff0c\u9002\u7528\u4e8e\u4ece\u4e07\u4eba MMO \u5230\u591a\u4eba\u8054\u673a\u7684\u5404\u79cd\u573a\u666f\u3002\r\n\r\n\u6b64\u5305\u662f\u6cb3\u56fe\u7684\u5ba2\u6237\u7aefSDK\uff0c\u7528\u4e8e\u8fde\u63a5\u6cb3\u56fe",
-  "unity": "2021.2",
+  "unity": "2018.3",
   "documentationUrl": "https://hetudb.cn/",
   "changelogUrl": "https://hetudb.cn/changelog.html",
   "licensesUrl": "https://hetudb.cn/licensing.html",

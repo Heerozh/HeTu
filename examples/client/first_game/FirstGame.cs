@@ -30,7 +30,7 @@ public class FirstGame : MonoBehaviour
         HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
         // 连接河图，我们没有await该Task，暂时先射后不管
         var task = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
-            Application.exitCancellationToken);
+            this.GetCancellationTokenOnDestroy());  // Unity2022以上使用 Application.exitCancellationToken()
         
         // 调用登录
         HeTuClient.Instance.CallSystem("login_test", _selfID);
