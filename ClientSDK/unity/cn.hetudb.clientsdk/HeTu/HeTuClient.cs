@@ -19,16 +19,13 @@ namespace HeTu
 {
     public interface IBaseComponent
     {
-        public long id
-        {
-            get;
-        }
+        public long id { get; }
     }
 
     [Preserve]
     public class DictComponent : Dictionary<string, string>, IBaseComponent
     {
-        [Preserve]  // strip会导致Unable to find a default constructor to use for type [0].id
+        [Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
         public long id => long.Parse(this["id"]);
     }
 
@@ -52,7 +49,7 @@ namespace HeTu
     }
 
     /// Select结果的订阅对象
-    public class RowSubscription<T> : BaseSubscription where T: IBaseComponent
+    public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         public T Data { get; private set; }
 
@@ -78,11 +75,10 @@ namespace HeTu
                 OnUpdate?.Invoke(this);
             }
         }
-
     }
 
     /// Query结果的订阅对象
-    public class IndexSubscription<T> : BaseSubscription where T: IBaseComponent
+    public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         public Dictionary<long, T> Rows { get; private set; }
 
@@ -158,7 +154,7 @@ namespace HeTu
         LogFunction _logDebug;
         IProtocol _protocol = null;
 
-        private void _StopAllTcs()
+        void _StopAllTcs()
         {
             _logInfo?.Invoke("[HeTuClient] 取消所有等待任务...");
             foreach (var tcs in _waitingSubTasks)
@@ -226,7 +222,7 @@ namespace HeTu
         ///                 await Task.Delay(1000);
         ///     }}}
         /// </code>
-        public async UniTask<Exception> Connect(string url, CancellationToken token)
+        public async UniTask<Exception> Connect(string url, CancellationToken? token)
         {
             // 检查连接状态(应该不会遇到）
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
@@ -235,14 +231,14 @@ namespace HeTu
                 _logError?.Invoke("[HeTuClient] Connect前请先Close Socket。");
                 return null;
             }
-            
+
             // 前置清理
             _logInfo?.Invoke($"[HeTuClient] 正在连接到：{url}...");
             _subscriptions = new Dictionary<string, WeakReference>();
-            
+
             // 连接并等待
             var tcs = new UniTaskCompletionSource<Exception>();
-			var lastState = "ReadyForConnect";
+            var lastState = "ReadyForConnect";
             _socket = new WebSocket(url);
             _socket.OnOpen += (object sender, OpenEventArgs e) =>
             {
@@ -253,10 +249,7 @@ namespace HeTu
                     _socket.SendAsync(data);
                 _sendingQueue.Clear();
             };
-            _socket.OnMessage += (object sender, MessageEventArgs e) =>
-            {
-                _OnReceived(e.RawData);
-            };
+            _socket.OnMessage += (object sender, MessageEventArgs e) => { _OnReceived(e.RawData); };
             _socket.OnClose += (object sender, CloseEventArgs e) =>
             {
                 _StopAllTcs();
@@ -294,19 +287,19 @@ namespace HeTu
                     case "Connected":
                         _logError?.Invoke($"[HeTuClient] 接受消息时发生异常: {e.Message}");
                         break;
-                } 
+                }
             };
             _socket.ConnectAsync();
-            
+
             // token可取消等待
-            token.Register(() =>
+            token?.Register(() =>
             {
                 _logInfo?.Invoke($"[HeTuClient] 连接断开，收到了CancellationToken取消请求.");
                 _socket.CloseAsync();
                 _StopAllTcs();
                 tcs.TrySetResult(new OperationCanceledException());
             });
-            
+
             // 等待连接断开
             return await tcs.Task;
         }
@@ -314,7 +307,7 @@ namespace HeTu
         // 关闭河图连接
         public void Close()
         {
-            _logInfo?.Invoke("[HeTuClient] 连接断开，因为主动调用了Close");
+            _logInfo?.Invoke("[HeTuClient] 主动调用了Close");
             _StopAllTcs();
             _socket.CloseAsync();
         }
@@ -327,7 +320,7 @@ namespace HeTu
         public void CallSystem(string systemName, params object[] args)
         {
             var payload = new object[] { "sys", systemName }.Concat(args);
-            _Send(payload);  // 后台线程发送，这里无论成功立即返回
+            _Send(payload); // 后台线程发送，这里无论成功立即返回
             SystemCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
@@ -368,7 +361,7 @@ namespace HeTu
         /// </code>
         public async UniTask<RowSubscription<T>> Select<T>(
             object value, string where = "id", string componentName = null)
-            where T: IBaseComponent
+            where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
             // 如果where是id，我们可以事先判断是否已经订阅过
@@ -385,7 +378,7 @@ namespace HeTu
             }
 
             // 向服务器订阅
-            var payload = new [] { "sub", componentName, "select", value, where };
+            var payload = new[] { "sub", componentName, "select", value, where };
             _Send(payload);
             _logDebug?.Invoke($"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
 
@@ -395,7 +388,7 @@ namespace HeTu
             List<object> subMsg;
             try
             {
-				// await UniTask会调用task.GetResult()，如果cancel了，会抛出异常
+                // await UniTask会调用task.GetResult()，如果cancel了，会抛出异常
                 subMsg = await tcs.Task;
             }
             catch (OperationCanceledException e)
@@ -457,10 +450,10 @@ namespace HeTu
         ///     Debug.log($"Delete row: {rowID}，之前的数据：{sender.Rows[rowID]["value"]}");
         /// }
         /// </code>
-        public async UniTask<IndexSubscription<T>> Query<T> (
+        public async UniTask<IndexSubscription<T>> Query<T>(
             string index, object left, object right, int limit,
-            bool desc=false, bool force=true, string componentName = null)
-            where T: IBaseComponent
+            bool desc = false, bool force = true, string componentName = null)
+            where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
 
@@ -475,7 +468,7 @@ namespace HeTu
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
 
             // 发送订阅请求
-            var payload = new []
+            var payload = new[]
             {
                 "sub", componentName, "query", index, left, right, limit, desc, force
             };
@@ -543,15 +536,16 @@ namespace HeTu
             var buffer = Encoding.UTF8.GetBytes(JsonConvert.SerializeObject(payload));
             buffer = _protocol?.Compress(buffer) ?? buffer;
             buffer = _protocol?.Crypt(buffer) ?? buffer;
-            
-            if(_socket.ReadyState == WebSocketState.Open)
+
+            if (_socket.ReadyState == WebSocketState.Open)
+            {
                 _socket.SendAsync(buffer);
+            }
             else
             {
                 _logInfo?.Invoke("尝试发送数据但连接未建立，将加入队列在建立后发送。");
                 _sendingQueue.Enqueue(buffer);
             }
-
         }
 
         void _OnReceived(byte[] buffer)
