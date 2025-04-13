@@ -4,18 +4,20 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
-from ..common import Singleton
-from ..common import csharp_keyword
+import inspect
+import json
+import keyword
+import logging
+import os
 from dataclasses import dataclass
 from enum import IntEnum
-import json
-import warnings
-import inspect
+
 import git
-import os
 import numpy as np
-import logging
-import keyword
+
+from ..common import Singleton
+from ..common import csharp_keyword
+
 logger = logging.getLogger('HeTu.root')
 
 
@@ -82,7 +84,7 @@ class BaseComponent:
             data['component_name'] += ":" + suffix
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
-            comp = type(data['component_name'], (BaseComponent, ), {})
+            comp = type(data['component_name'], (BaseComponent,), {})
         else:
             comp = cls
         comp.namespace_ = data['namespace']
@@ -168,9 +170,17 @@ class ComponentDefines(metaclass=Singleton):
         comp_map[component_cls.component_name_] = component_cls
 
 
-def define_component(_cls=None,  /, *, namespace: str = "default", force: bool = False,
-                     permission=Permission.USER, persist=True, readonly=False,
-                     backend: str = 'default'):
+def define_component(
+    _cls=None,
+    /,
+    *,
+    namespace: str = "default",
+    force: bool = False,
+    permission=Permission.USER,
+    persist=True,
+    readonly=False,
+    backend: str = "default",
+):
     """
     定义Component组件（表）的数据结构
 
