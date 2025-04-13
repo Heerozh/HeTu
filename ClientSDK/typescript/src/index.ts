@@ -2,6 +2,9 @@
  * 河图Client SDK
  */
 
+import { logger } from "./logger.ts";
+
+/// WebSocket API基类，为了各种平台不同的实现
 interface WebSocketInterface {
     constructor(url: string): void;
     onopen: ((this: WebSocketInterface, ev: Event) => any) | null;
@@ -123,11 +126,11 @@ class HeTuClientImpl {
     public systemCallbacks: Map<string, (args: any[]) => void> = new Map();
 
     constructor() {
-        console.log("HeTuClientSDK initialized");
+        logger.info("HeTuClientSDK initialized");
     }
 
     private _cancelAllTasks(): void {
-        console.log("[HeTuClient] 取消所有等待任务...");
+        logger.info("[HeTuClient] 取消所有等待任务...");
         this._waitingCallbacks = [];
     }
 
@@ -142,19 +145,19 @@ class HeTuClientImpl {
     public connect(url: string): Promise<Error | null> {
         return new Promise((resolve) => {
             if (this._socket && this._socket.readyState !== WebSocket.CLOSED) {
-                console.error("[HeTuClient] Please close socket before connecting again.");
+                logger.error("[HeTuClient] Connect前请先Close Socket。");
                 resolve(null);
                 return;
             }
 
-            console.log(`[HeTuClient] Connecting to: ${url}...`);
+            logger.info(`[HeTuClient] 正在连接到: ${url}...`);
             this._subscriptions = new Map();
 
             let lastState = "ReadyForConnect";
             this._socket = new HeTuClientImpl._socketLib(url);
 
             this._socket.onopen = () => {
-                console.log("[HeTuClient] Connection established.");
+                logger.info("[HeTuClient] 连接成功。");
                 lastState = "Connected";
                 if (this.onConnected) this.onConnected();
 
@@ -179,20 +182,20 @@ class HeTuClientImpl {
             this._socket.onclose = (event) => {
                 this._cancelAllTasks();
                 if (event.code === 1000) {
-                    console.log("[HeTuClient] Connection closed normally.");
+                    logger.info("[HeTuClient] 连接断开，收到了服务器Close消息。");
                     resolve(null);
                 } else {
-                    resolve(new Error(event.reason || "Connection closed abnormally"));
+                    resolve(new Error(event.reason || "连接异常断开"));
                 }
             };
 
             this._socket.onerror = (event) => {
                 switch (lastState) {
                     case "ReadyForConnect":
-                        console.error(`[HeTuClient] Connection failed: ${event}`);
+                        logger.error(`[HeTuClient] 连接失败: ${event}`);
                         break;
                     case "Connected":
-                        console.error(`[HeTuClient] Error receiving message: ${event}`);
+                        logger.error(`[HeTuClient] 接受消息时发生异常: ${event}`);
                         break;
                 }
             };
@@ -200,7 +203,7 @@ class HeTuClientImpl {
     }
 
     public close(): void {
-        console.log("[HeTuClient] Actively calling Close");
+        logger.info("[HeTuClient] 主动调用了Close");
         this._cancelAllTasks();
         this._socket?.close();
     }
@@ -229,7 +232,7 @@ class HeTuClientImpl {
 
         const payload = ["sub", componentName, "select", value, where];
         this._send(payload);
-        console.debug(`[HeTuClient] Sending Select subscription: ${componentName}.${where}[${value}:]`);
+        logger.debug(`[HeTuClient] 发送Select订阅: ${componentName}.${where}[${value}:]`);
 
         return new Promise<RowSubscription<T> | null>((resolve, reject) => {
             this._waitingCallbacks.push((subMsg) => {
@@ -248,7 +251,7 @@ class HeTuClientImpl {
                 const data = subMsg[2] as T;
                 const newSub = new RowSubscription<T>(subID, componentName as string, data);
                 this._subscriptions.set(subID, new WeakRef(newSub));
-                console.log(`[HeTuClient] Successfully subscribed to ${subID}`);
+                logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
                 resolve(newSub);
             });
         });
@@ -273,7 +276,7 @@ class HeTuClientImpl {
 
         const payload = ["sub", componentName, "query", index, left, right, limit, desc, force];
         this._send(payload);
-        console.debug(`[HeTuClient] Sending Query subscription: ${predictID}`);
+        logger.debug(`[HeTuClient] 发送Query订阅: ${predictID}`);
 
         return new Promise<IndexSubscription<T> | null>((resolve, reject) => {
             this._waitingCallbacks.push((subMsg) => {
@@ -292,7 +295,7 @@ class HeTuClientImpl {
                 const rows = subMsg[2] as T[];
                 const newSub = new IndexSubscription<T>(subID, componentName as string, rows);
                 this._subscriptions.set(subID, new WeakRef(newSub));
-                console.log(`[HeTuClient] Successfully subscribed to ${subID}`);
+                logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
                 resolve(newSub);
             });
         });
@@ -303,7 +306,7 @@ class HeTuClientImpl {
         this._subscriptions.delete(subID);
         const payload = ["unsub", subID];
         this._send(payload);
-        console.log(`[HeTuClient] Unsubscribed ${subID} due to BaseSubscription disposal`);
+        logger.info(`[HeTuClient] 因BaseSubscription析构，已取消订阅 ${subID}`);
     }
 
     private _makeSubID(
@@ -331,7 +334,7 @@ class HeTuClientImpl {
         if (this._socket && this._socket.readyState === WebSocket.OPEN) {
             this._socket.send(buffer);
         } else {
-            console.log("Trying to send data but connection not established, will queue for later");
+            logger.info("尝试发送数据但连接未建立，将加入队列在建立后发送。");
             this._sendingQueue.push(buffer);
         }
     }
