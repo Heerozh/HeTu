@@ -21,4 +21,4 @@ class MigrationCommand(CommandInterface):
 
     @classmethod
     def execute(cls, args):
-        raise NotImplementedError("Subclasses should implement this method.")
+        raise NotImplementedError("还未实现")
