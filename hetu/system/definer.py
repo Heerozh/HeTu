@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import asyncio
 import copy
 from dataclasses import dataclass
@@ -20,16 +21,16 @@ SYSTEM_NAME_MAX_LEN = 32
 @dataclass
 class SystemDefine:
     func: callable
-    components: set[Type[BaseComponent]]        # 引用的Components
-    full_components: set[Type[BaseComponent]]   # 完整的引用Components，包括继承自父System的
+    components: set[Type[BaseComponent]]  # 引用的Components
+    full_components: set[Type[BaseComponent]]  # 完整的引用Components，包括继承自父System的
     non_transactions: set[Type[BaseComponent]]  # 直接获取的Components，不走事务
-    full_non_trx: set[Type[BaseComponent]]      # 完整的直接Components，包括继承自父System的
+    full_non_trx: set[Type[BaseComponent]]  # 完整的直接Components，包括继承自父System的
     bases: set[str]
     full_bases: set[str]
     permission: Permission
     max_retry: int
-    arg_count: int         # 全部参数个数（含默认参数）
-    defaults_count: int    # 默认参数个数
+    arg_count: int  # 全部参数个数（含默认参数）
+    defaults_count: int  # 默认参数个数
     cluster_id: int
 
 
@@ -193,10 +194,16 @@ class SystemClusters(metaclass=Singleton):
             self._global_system_map[func.__name__] = sub_map[func.__name__]
 
 
-def define_system(components: tuple[Type[BaseComponent], ...] = None,
-                  non_transactions: tuple[Type[BaseComponent], ...] = None,
-                  namespace: str = "default", force: bool = False, permission=Permission.USER,
-                  retry: int = 9999, bases: tuple[str] = tuple(), call_lock=False):
+def define_system(
+        components: tuple[Type[BaseComponent], ...] = None,
+        non_transactions: tuple[Type[BaseComponent], ...] = None,
+        namespace: str = "default",
+        force: bool = False,
+        permission=Permission.USER,
+        retry: int = 9999,
+        bases: tuple[str] = tuple(),
+        call_lock=False,
+):
     """
     定义System(函数)
 
@@ -328,9 +335,9 @@ def define_system(components: tuple[Type[BaseComponent], ...] = None,
         # 严格要求第一个参数命名
         func_args = signature(func).parameters
         func_arg_names = list(func_args.keys())[:1]
-        assert func_arg_names == ["ctx"], \
-            (f"System参数名定义错误，第一个参数必须为：ctx。"
-             f"你的：{func_arg_names}")
+        assert func_arg_names == ["ctx"], (
+            f"System参数名定义错误，第一个参数必须为：ctx。" f"你的：{func_arg_names}"
+        )
 
         assert permission != permission.OWNER, "System的权限不支持OWNER"
 
