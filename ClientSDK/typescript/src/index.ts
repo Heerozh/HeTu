@@ -3,46 +3,59 @@
  */
 
 import { logger } from "./logger.ts";
+import { IProtocol } from "./protocol.ts";
 
 /// WebSocket API基类，为了各种平台不同的实现
-interface WebSocketInterface {
-    constructor(url: string): void;
-    onopen: ((this: WebSocketInterface, ev: Event) => any) | null;
-    onmessage: ((this: WebSocketInterface, ev: MessageEvent) => any) | null;
-    onclose: ((this: WebSocketInterface, ev: CloseEvent) => any) | null;
-    onerror: ((this: WebSocketInterface, ev: Event) => any) | null;
+export interface IWebSocket {
+    connect(url: string): void;
+    onopen: ((ev: Event) => any) | null;
+    onmessage: ((ev: MessageEvent) => any) | null;
+    onclose: ((ev: CloseEvent) => any) | null;
+    onerror: ((ev: Event) => any) | null;
     send(data: ArrayBuffer | string): void;
-    close(code?: number, reason?: string): void;
+    close(): void;
     readonly readyState: number;
 }
 
-interface IBaseComponent {
+export interface ComponentNameTypeMap {
+    // name: type
+}
+
+// 根据组件名获取对应类型，如果不存在则使用默认类型
+type GetComponentType<Name extends string, DefaultType = DictComponent> =
+    Name extends keyof ComponentNameTypeMap
+        ? ComponentNameTypeMap[Name]
+        : DefaultType;
+
+export interface IBaseComponent {
     id: number;
 }
 
-class DictComponent extends Map<string, string> implements IBaseComponent {
+export class DictComponent extends Map<string, string> implements IBaseComponent {
     get id(): number {
         return Number(this.get('id'));
     }
 }
 
-abstract class BaseSubscription {
+export abstract class BaseSubscription {
     readonly componentName: string;
-    private subscriptID: string;
+    private readonly _subscriptID: string;
 
-    constructor(subscriptID: string, componentName: string) {
-        this.subscriptID = subscriptID;
+    protected constructor(subscriptID: string, componentName: string) {
+        this._subscriptID = subscriptID;
         this.componentName = componentName;
     }
 
     abstract update(rowID: number, data: any): void;
 
+    /// 销毁远端订阅对象。
+    /// Dispose应该明确调用，虽然gc回收时会调用，但时间不确定，这会导致服务器端该对象销毁不及时。
     dispose(): void {
-        HeTuClient._unsubscribe(this.subscriptID);
+        HeTuClient._unsubscribe(this._subscriptID, "dispose");
     }
 }
 
-class RowSubscription<T extends IBaseComponent> extends BaseSubscription {
+export class RowSubscription<T extends IBaseComponent> extends BaseSubscription {
     private _data: T;
 
     onUpdate: ((subscription: RowSubscription<T>) => void) | null = null;
@@ -59,17 +72,17 @@ class RowSubscription<T extends IBaseComponent> extends BaseSubscription {
 
     override update(_rowID: number, data: any): void {
         if (data === null) {
-            if (this.onDelete) this.onDelete(this);
+            this.onDelete?.(this);
             this._data = null as any;
         } else {
             this._data = data as T;
-            if (this.onUpdate) this.onUpdate(this);
+            this.onUpdate?.(this);
         }
     }
 }
 
-class IndexSubscription<T extends IBaseComponent> extends BaseSubscription {
-    private _rows: Map<number, T>;
+export class IndexSubscription<T extends IBaseComponent> extends BaseSubscription {
+    private readonly _rows: Map<number, T>;
 
     onUpdate: ((subscription: IndexSubscription<T>, rowID: number) => void) | null = null;
     onDelete: ((subscription: IndexSubscription<T>, rowID: number) => void) | null = null;
@@ -91,42 +104,48 @@ class IndexSubscription<T extends IBaseComponent> extends BaseSubscription {
 
         if (isDelete) {
             if (!exist) return;
-            if (this.onDelete) this.onDelete(this, rowID);
+            this.onDelete?.(this, rowID);
             this._rows.delete(rowID);
         } else {
             const tData = data as T;
             this._rows.set(rowID, tData);
             if (exist) {
-                if (this.onUpdate) this.onUpdate(this, rowID);
+                this.onUpdate?.(this, rowID);
             } else {
-                if (this.onInsert) this.onInsert(this, rowID);
+                this.onInsert?.(this, rowID);
             }
         }
     }
 }
 
-interface IProtocol {
-    compress(data: Uint8Array): Uint8Array;
-    decompress(data: Uint8Array): Uint8Array;
-    crypt?(data: Uint8Array): Uint8Array;
-    decrypt?(data: Uint8Array): Uint8Array;
-}
-
-
 class HeTuClientImpl {
-    private static _socketLib: new (url: string) => WebSocketInterface;
+    private static _socketLib: new (url: string) => IWebSocket;
     private _sendingQueue: Uint8Array[] = [];
     private _waitingCallbacks: ((result: any) => void)[] = [];
     private _subscriptions: Map<string, WeakRef<BaseSubscription>> = new Map();
-    private _socket: WebSocketInterface | null = null;
+    private _socket: IWebSocket | null = null;
     private _protocol: IProtocol | null = null;
 
+    // 连接成功时的回调
     public onConnected: (() => void) | null = null;
+    // 收到System返回的`ResponseToClient`时的回调，根据你服务器发送的是什么数据类型来转换
     public onResponse: ((data: any) => void) | null = null;
+    // 本地调用System时的回调。调用时立即就会回调，是否成功调用未知。
     public systemCallbacks: Map<string, (args: any[]) => void> = new Map();
 
     constructor() {
         logger.info("HeTuClientSDK initialized");
+        this._runLeakDetectionTask();
+    }
+
+    private _runLeakDetectionTask(): void {
+        setInterval(() => {
+            for (const [subID, weakRef] of this._subscriptions.entries()) {
+                if (!weakRef.deref()) {
+                    this._unsubscribe(subID, "检测到泄露");
+                }
+            }
+        }, 30000); // 每30秒检查一次
     }
 
     private _cancelAllTasks(): void {
@@ -134,32 +153,75 @@ class HeTuClientImpl {
         this._waitingCallbacks = [];
     }
 
+    // 设置封包的编码/解码协议，封包可以进行压缩和加密。默认不加密，使用zlib压缩。
+    // 协议要和你的河图服务器中的配置一致
     public setProtocol(protocol: IProtocol): void {
         this._protocol = protocol;
     }
 
-    public setWebSocketLib(socketLib: new (url: string) => WebSocketInterface): void {
+    // 设置WebSocket的实现类，默认使用浏览器的WebSocket实现
+    public setWebSocketLib(socketLib: new (url: string) => IWebSocket): void {
         HeTuClientImpl._socketLib = socketLib;
     }
 
-    public connect(url: string): Promise<Error | null> {
+    /*
+     * 连接到河图url，url格式为"wss://host:port/hetu"
+     * 此方法为async/await异步堵塞，在连接断开前不会结束。
+     *
+     * 返回异常（而不是抛出异常）。
+     * - 连接异常断开返回Exception；
+     * - 正常断开返回null。
+     *
+     * 使用示例：
+     * ```typescript
+     * import { HeTuClient } from 'hetu-client-sdk';
+     * import { logger } from 'hetu-client-sdk/logger';
+     * import { BrowserWebSocket } from 'hetu-client-sdk/dom-socket';
+     * // 微信使用hetu-client-sdk/wx-socket库
+     * logger.setLevel(0); // 设置日志级别为DEBUG
+     * HeTuClient.setWebSocketLib(BrowserWebSocket);
+     * HeTuClient.setProtocol(new Protocol())
+     * HeTuClient.onConnected = () => {
+     *   HeTuClient.vallSystem("login", "userToken");
+     * }
+     * // 手游可以放入while循环，实现断线自动重连
+     * while (true) {
+     *     var e = await HeTuClient.vonnect("wss://host:port/hetu");
+     *     // 断线处理...是否重连等等
+     *     if (e is null)
+     *         break;
+     *     else
+     *         logger.warn("连接断开, 将继续重连：" + e.Message);
+     *     await sleep(1000);
+     * }
+     * ```
+     */
+    public async connect(url: string): Promise<Error | null> {
+        // 检查连接状态(应该不会遇到）
+        if (this._socket && this._socket.readyState !== WebSocket.CLOSED) {
+            logger.error("[HeTuClient] Connect前请先Close Socket。");
+            return null;
+        }
+
+        // 前置清理
+        logger.info(`[HeTuClient] 正在连接到: ${url}...`);
+        this._subscriptions = new Map();
+
+        // 导入默认的WebSocket实现
+        let lastState = "ReadyForConnect";
+        if (!HeTuClientImpl._socketLib) {
+            const dom_socket = await import('./dom-socket')
+            HeTuClientImpl._socketLib = dom_socket.BrowserWebSocket;
+        }
+
+        // 连接，并等待连接关闭
         return new Promise((resolve) => {
-            if (this._socket && this._socket.readyState !== WebSocket.CLOSED) {
-                logger.error("[HeTuClient] Connect前请先Close Socket。");
-                resolve(null);
-                return;
-            }
-
-            logger.info(`[HeTuClient] 正在连接到: ${url}...`);
-            this._subscriptions = new Map();
-
-            let lastState = "ReadyForConnect";
             this._socket = new HeTuClientImpl._socketLib(url);
 
             this._socket.onopen = () => {
                 logger.info("[HeTuClient] 连接成功。");
                 lastState = "Connected";
-                if (this.onConnected) this.onConnected();
+                this.onConnected?.();
 
                 for (const data of this._sendingQueue) {
                     this._socket?.send(data);
@@ -179,16 +241,6 @@ class HeTuClientImpl {
                 Promise.resolve(data).then(buffer => this._onReceived(buffer));
             };
 
-            this._socket.onclose = (event) => {
-                this._cancelAllTasks();
-                if (event.code === 1000) {
-                    logger.info("[HeTuClient] 连接断开，收到了服务器Close消息。");
-                    resolve(null);
-                } else {
-                    resolve(new Error(event.reason || "连接异常断开"));
-                }
-            };
-
             this._socket.onerror = (event) => {
                 switch (lastState) {
                     case "ReadyForConnect":
@@ -199,57 +251,108 @@ class HeTuClientImpl {
                         break;
                 }
             };
+
+            this._socket.onclose = (event) => {
+                this._cancelAllTasks();
+                if (event.code === 1000) {
+                    logger.info("[HeTuClient] 连接断开，收到了服务器Close消息。");
+                    resolve(null);
+                } else {
+                    resolve(new Error(event.reason || "连接异常断开"));
+                }
+            };
         });
     }
 
+    // 关闭河图连接
     public close(): void {
         logger.info("[HeTuClient] 主动调用了Close");
         this._cancelAllTasks();
         this._socket?.close();
     }
 
+    /// 后台发送System调用，此方法立即返回。
+    /// 可通过`HeTuClient.systemCallbacks["system_name"] = (args) => {}`
+    /// 注册客户端调用回调（非服务器端回调）。
     public callSystem(systemName: string, ...args: any[]): void {
         const payload = ["sys", systemName, ...args];
         this._send(payload);
         const callback = this.systemCallbacks.get(systemName);
-        if (callback) callback(args);
+        callback?.(args);
     }
 
-    public async select<T extends IBaseComponent>(
+    // todo 异步堵塞的CallSystem，会等待并返回服务器回应
+
+    /*
+     * 订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。
+     * `select`只对“单行”订阅，如果没有查询到行，会返回`null`。
+     * 如果想要订阅不存在的行，请用`query`订阅索引。
+     *
+     * 返回`null`如果没查询到行，否则返回`RowSubscription`对象。
+     * 可通过`RowSubscription.data`获取数据。
+     * 可以注册`RowSubscription.onUpdate`和`onDelete`事件处理数据更新。
+     *
+     * 如果使用了服务器端工具自动生成了ts interface定义并导入，则`select`会
+     * 自动返回该结构数据，否则返回Json格式。使用结构数据要自己维护版本，
+     * 防止和服务器不一致。
+     *
+     * 使用示例
+     * ```typescript
+     * // 假设HP组件有owner属性，表示属于哪个玩家，value属性表示hp值。
+     * var subscription = await HeTuClient.select("HP", user_id, "owner");
+     * logger.debug("My HP:" + subscription.data["value"]);
+     *
+     * subscription.onUpdate += (sender, rowID) => {
+     *     logger.debug("My New HP:" + sender.data["value"]);
+     * }
+     * // --------或者--------
+     * // 假设用服务器工具生成了结构。注意版本要一致
+     * interface HP : IBaseComponent {
+     *     public long id {get; set;}
+     *     public long owner;
+     *     public int value;
+     * }
+     * var subscription = await HeTuClient.select("HP", user_id, "owner");
+     * logger.debug("My HP:" + subscription.data.value);  // 此时Data是HP类型
+     * ```
+     */
+    public async select<T extends string, D extends IBaseComponent = DictComponent>(
+        componentName: T,
         value: any,
         where: string = "id",
-        componentName?: string
-    ): Promise<RowSubscription<T> | null> {
-        componentName = componentName ?? (typeof T !== 'function' ? "DictComponent" : T.name);
-
+    ): Promise< RowSubscription<GetComponentType<T, D> > | null> {
+        // 如果where是id，我们可以事先判断是否已经订阅过
         if (where === "id") {
             const predictID = this._makeSubID(componentName, "id", value, null, 1, false);
             const subscribed = this._subscriptions.get(predictID)?.deref();
             if (subscribed instanceof RowSubscription) {
-                return subscribed as RowSubscription<T>;
+                return subscribed as RowSubscription<GetComponentType<T, D>>;
             }
         }
 
+        // 向服务器订阅
         const payload = ["sub", componentName, "select", value, where];
         this._send(payload);
         logger.debug(`[HeTuClient] 发送Select订阅: ${componentName}.${where}[${value}:]`);
 
-        return new Promise<RowSubscription<T> | null>((resolve, reject) => {
+        // 等待服务器结果
+        return new Promise<RowSubscription<GetComponentType<T,  D>> | null>((resolve) => {
             this._waitingCallbacks.push((subMsg) => {
+                // 如果没有查询到值
                 const subID = subMsg[1] as string;
                 if (subID === null) {
                     resolve(null);
                     return;
                 }
-
-                const stillSubscribed = this._subscriptions.get(subID)?.deref();
-                if (stillSubscribed instanceof RowSubscription) {
-                    resolve(stillSubscribed as RowSubscription<T>);
+                // 如果依然是重复订阅，直接返回副本
+                const duplicateSubscribed = this._subscriptions.get(subID)?.deref();
+                if (duplicateSubscribed instanceof RowSubscription) {
+                    resolve(duplicateSubscribed as RowSubscription<GetComponentType<T, D>>);
                     return;
                 }
 
-                const data = subMsg[2] as T;
-                const newSub = new RowSubscription<T>(subID, componentName as string, data);
+                const data = subMsg[2] as GetComponentType<T,  D>;
+                const newSub = new RowSubscription<GetComponentType<T,  D>>(subID, componentName as string, data);
                 this._subscriptions.set(subID, new WeakRef(newSub));
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
                 resolve(newSub);
@@ -257,43 +360,70 @@ class HeTuClientImpl {
         });
     }
 
-    public async query<T extends IBaseComponent>(
+    /*
+     * 订阅组件的索引数据。`index`是开启了索引的属性名，`left`和`right`为索引范围，
+     * `limit`为返回数量，`desc`为是否降序，`force`为未查询到数据时是否也强制订阅。
+     *
+     * 返回`IndexSubscription`对象。
+     * 可通过`IndexSubscription.rows`获取数据。
+     * 并可以注册`IndexSubscription.onInsert`和`onUpdate`，`onDelete`数据事件。
+     *
+     * 如果使用了服务器端工具自动生成了ts interface定义并导入，则`query`会
+     * 自动返回该结构数据，否则返回Json格式。使用结构数据要自己维护版本，
+     * 防止和服务器不一致。
+     * 如果目标组件权限为Owner，则只能查询到`owner`属性==自己的行。
+     *
+     * 使用示例
+     * ```typescript
+     * var subscription = await HeTuClient.query("HP", "owner", 0, 9999, 10);
+     * foreach (var row in subscription.rows)
+     *     logger.info($"HP: {row}");
+     * subscription.onUpdate += (sender, rowID) => {
+     *     logger.info($"New HP: {rowID}:{sender.rows[rowID]}");
+     * }
+     * subscription.onDelete += (sender, rowID) => {
+     *     logger.info($"Delete row: {rowID}，之前的数据：{sender.rows[rowID]}");
+     * }
+     * ```
+     */
+    public async query<T extends string, D extends IBaseComponent = DictComponent>(
+        componentName: T,
         index: string,
         left: any,
         right: any,
         limit: number,
         desc: boolean = false,
         force: boolean = true,
-        componentName?: string
-    ): Promise<IndexSubscription<T> | null> {
-        componentName = componentName ?? (typeof T !== 'function' ? "DictComponent" : T.name);
-
+    ): Promise<IndexSubscription<GetComponentType<T, D>> | null> {
+        // 先要组合sub_id看看是否已订阅过
         const predictID = this._makeSubID(componentName, index, left, right, limit, desc);
         const subscribed = this._subscriptions.get(predictID)?.deref();
         if (subscribed instanceof IndexSubscription) {
-            return subscribed as IndexSubscription<T>;
+            return subscribed as IndexSubscription<GetComponentType<T, D>>;
         }
 
+        // 发送订阅请求
         const payload = ["sub", componentName, "query", index, left, right, limit, desc, force];
         this._send(payload);
         logger.debug(`[HeTuClient] 发送Query订阅: ${predictID}`);
 
-        return new Promise<IndexSubscription<T> | null>((resolve, reject) => {
+        return new Promise<IndexSubscription<GetComponentType<T, D>> | null>((resolve) => {
             this._waitingCallbacks.push((subMsg) => {
                 const subID = subMsg[1] as string;
+                // 如果没有查询到值
                 if (subID === null) {
                     resolve(null);
                     return;
                 }
-
-                const stillSubscribed = this._subscriptions.get(subID)?.deref();
-                if (stillSubscribed instanceof IndexSubscription) {
-                    resolve(stillSubscribed as IndexSubscription<T>);
+                // 如果依然是重复订阅，直接返回副本
+                const duplicateSubscribed = this._subscriptions.get(subID)?.deref();
+                if (duplicateSubscribed instanceof IndexSubscription) {
+                    resolve(duplicateSubscribed as IndexSubscription<GetComponentType<T, D>>);
                     return;
                 }
 
-                const rows = subMsg[2] as T[];
-                const newSub = new IndexSubscription<T>(subID, componentName as string, rows);
+                const rows = subMsg[2] as GetComponentType<T, D>[];
+                const newSub = new IndexSubscription<GetComponentType<T, D>>(subID, componentName as string, rows);
                 this._subscriptions.set(subID, new WeakRef(newSub));
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
                 resolve(newSub);
@@ -301,12 +431,14 @@ class HeTuClientImpl {
         });
     }
 
-    // Internal methods
-    _unsubscribe(subID: string): void {
+    // --------------以下为内部方法----------------
+
+    _unsubscribe(subID: string, from: string): void {
+        if (!this._subscriptions.has(subID)) return;
         this._subscriptions.delete(subID);
         const payload = ["unsub", subID];
         this._send(payload);
-        logger.info(`[HeTuClient] 因BaseSubscription析构，已取消订阅 ${subID}`);
+        logger.info(`[HeTuClient] 因BaseSubscription ${from}，已取消订阅 ${subID}`);
     }
 
     private _makeSubID(
@@ -340,6 +472,7 @@ class HeTuClientImpl {
     }
 
     private _onReceived(buffer: Uint8Array): void {
+        // 解码消息
         if (this._protocol) {
             if (this._protocol.decrypt) {
                 buffer = this._protocol.decrypt(buffer);
@@ -351,10 +484,10 @@ class HeTuClientImpl {
         const structuredMsg = JSON.parse(decoded);
 
         if (!structuredMsg) return;
-
+        // 处理消息
         switch (structuredMsg[0]) {
             case "rsp":
-                if (this.onResponse) this.onResponse(structuredMsg[1]);
+                this.onResponse?.(structuredMsg[1]);
                 break;
             case "sub":
                 const callback = this._waitingCallbacks.shift();
