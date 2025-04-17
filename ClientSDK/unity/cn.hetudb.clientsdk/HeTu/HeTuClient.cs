@@ -41,10 +41,19 @@ namespace HeTu
         }
 
         public abstract void Update(long rowID, JObject data);
+        
+        /// <summary>
+        /// 销毁远端订阅对象。
+        /// Dispose应该明确调用，虽然gc回收时会调用，但时间不确定，这会导致服务器端该对象销毁不及时。
+        /// </summary>
+        public void Dispose()
+        {
+            HeTuClient.Instance._unsubscribe(_subscriptID, "Dispose");
+        }
 
         ~BaseSubscription()
         {
-            HeTuClient.Instance._unsubscribe(_subscriptID);
+            HeTuClient.Instance._unsubscribe(_subscriptID, "析构");
         }
     }
 
@@ -517,12 +526,13 @@ namespace HeTu
 
         // --------------以下为内部方法----------------
 
-        internal void _unsubscribe(string subID)
+        internal void _unsubscribe(string subID, string from)
         {
+            if (!_subscriptions.ContainsKey(subID)) return;
             _subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
             _Send(payload);
-            _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription析构，已取消订阅 {subID}");
+            _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
         static string _makeSubID(string table, string index, object left, object right,
