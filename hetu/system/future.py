@@ -270,5 +270,5 @@ async def future_call_task(app):
             break
         except Exception as e:
             # 遇到backend断线正常，其他异常不应该发生
-            err_msg = f"❌ [⚙️Future] Task执行异常：{e}"
+            err_msg = f"❌ [⚙️Future] Task执行异常：{type(e).__name__}:{e}"
             logger.exception(err_msg)

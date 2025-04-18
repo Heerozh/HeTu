@@ -198,7 +198,7 @@ class SystemExecutor:
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
-                err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{e}"
+                err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
                 replay.info(err_msg)
                 logger.exception(err_msg)
                 return False, None
