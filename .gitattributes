@@ -1,0 +1,4 @@
+# 忽略特定目录
+ClientSDK/unity/UniTask/* linguist-vendored
+ClientSDK/unity/cn.hetudb.clientsdk/UniTask/* linguist-vendored
+ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket/* linguist-vendored
