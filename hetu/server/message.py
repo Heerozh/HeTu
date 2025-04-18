@@ -28,7 +28,7 @@ def encode_message(message: list | dict, protocol: dict):
     try:
         message = orjson.dumps(message)
     except Exception as e:
-        logger.exception(f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{e}")
+        logger.exception(f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{type(e).__name__}:{e}")
         raise
     if compress := protocol['compress']:
         message = compress.compress(message)

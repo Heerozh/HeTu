@@ -122,12 +122,12 @@ async def client_receiver(
     except WebsocketClosed:
         pass
     except RedisConnectionError as e:
-        err_msg = f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {e}"
+        err_msg = f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
         replay.info(err_msg)
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        err_msg = f"❌ [📡WSReceiver] 执行异常，封包：{last_data}，异常：{e}"
+        err_msg = f"❌ [📡WSReceiver] 执行异常，封包：{last_data}，异常：{type(e).__name__}:{e}"
         replay.info(err_msg)
         logger.exception(err_msg)
         ws.fail_connection()
@@ -144,11 +144,11 @@ async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
     except asyncio.CancelledError:
         pass
     except RedisConnectionError as e:
-        logger.error(f"❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {e}"
+        logger.error(f"❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
                      f"网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。")
         return ws.fail_connection()
     except BaseException as e:
-        logger.exception(f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{e}")
+        logger.exception(f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{type(e).__name__}:{e}")
         return ws.fail_connection()
     finally:
         pass
@@ -171,12 +171,12 @@ async def subscription_receiver(
         # print('subscription_receiver normal canceled')
         pass
     except RedisConnectionError as e:
-        logger.error(f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {e}"
+        logger.error(f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
                      f"上次接受了：{len(last_updates)}条消息。")
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
-                         f"上条消息：{last_updates}，异常：{e}")
+                         f"上条消息：{last_updates}，异常：{type(e).__name__}:{e}")
         return ws.fail_connection()
     finally:
         # print('subscription_receiver closed')

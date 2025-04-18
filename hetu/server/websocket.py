@@ -85,7 +85,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     except WebsocketClosed:
         pass
     except BaseException as e:
-        err_msg = f"❌ [📡WSSender] 发送数据异常：{e}"
+        err_msg = f"❌ [📡WSSender] 发送数据异常：{type(e).__name__}:{e}"
         replay.info(err_msg)
         logger.exception(err_msg)
     finally:
