@@ -1,10 +1,10 @@
-import pako from 'pako';
+import pako from 'pako'
 
 export interface IProtocol {
-    compress(data: Uint8Array): Uint8Array;
-    decompress(data: Uint8Array): Uint8Array;
-    crypt?(data: Uint8Array): Uint8Array;
-    decrypt?(data: Uint8Array): Uint8Array;
+    compress(data: Uint8Array): Uint8Array
+    decompress(data: Uint8Array): Uint8Array
+    crypt?(data: Uint8Array): Uint8Array
+    decrypt?(data: Uint8Array): Uint8Array
 }
 
 /**
@@ -18,10 +18,10 @@ export class ZlibProtocol implements IProtocol {
      */
     public compress(data: Uint8Array): Uint8Array {
         try {
-            return pako.deflate(data);
+            return pako.deflate(data)
         } catch (error) {
-            console.error('压缩数据失败:', error);
-            return data; // 出错时返回原始数据
+            console.error('压缩数据失败:', error)
+            return data // 出错时返回原始数据
         }
     }
 
@@ -32,10 +32,10 @@ export class ZlibProtocol implements IProtocol {
      */
     public decompress(data: Uint8Array): Uint8Array {
         try {
-            return pako.inflate(data);
+            return pako.inflate(data)
         } catch (error) {
-            console.error('解压缩数据失败:', error);
-            return data; // 出错时返回原始数据
+            console.error('解压缩数据失败:', error)
+            return data // 出错时返回原始数据
         }
     }
 }
