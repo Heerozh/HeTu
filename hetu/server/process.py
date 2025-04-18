@@ -43,7 +43,13 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         spec = importlib.util.spec_from_file_location('HeTuApp', app_file)
         module = importlib.util.module_from_spec(spec)
         sys.modules['HeTuApp'] = module
-        spec.loader.exec_module(module)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as e:
+            raise ValueError(f"无法加载主启动文件：{app_file}，检查以下可能性："
+                             f"* 如果是命令行启动，检查--app-file参数路径是否正确"
+                             f"* 如果是通过Config启动，此文件由APP_FILE参数设置"
+                             f"* 如果由Docker启动，还需检查是否正确映射了/app目录") from e
 
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get('MAX_ANONYMOUS_CONNECTION_BY_IP', 0)
