@@ -1,19 +1,24 @@
 {
-  "name": "typescript",
+  "name": "hetu_client",
   "private": true,
   "version": "0.0.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "vitest",
   },
   "devDependencies": {
-    "typescript": "~5.7.2",
+    "@types/pako": "^2.0.3",
+    "typescript": "~5.8.3",
     "vite": "^6.2.0",
-    "vitest": "^3.1.1"
+    "vitest": "^3.1.1",
+    "ws": "^8.18.1"
   },
   "dependencies": {
-    "pako": "^2.1.0"
+    "@types/ws": "^8.18.1",
+    "pako": "^2.1.0",
+    "tsc": "^2.0.4"
   }
 }

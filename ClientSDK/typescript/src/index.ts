@@ -4,10 +4,13 @@
 
 import { logger } from "./logger.ts";
 import { IProtocol } from "./protocol.ts";
+import typia from "typia";
+
 
 /// WebSocket API基类，为了各种平台不同的实现
 export interface IWebSocket {
-    connect(url: string): void;
+    url: string;
+    connect(): void;
     onopen: ((ev: Event) => any) | null;
     onmessage: ((ev: MessageEvent) => any) | null;
     onclose: ((ev: CloseEvent) => any) | null;
@@ -75,7 +78,7 @@ export class RowSubscription<T extends IBaseComponent> extends BaseSubscription 
             this.onDelete?.(this);
             this._data = null as any;
         } else {
-            this._data = data as T;
+            this._data = typia.assert<T>(data);
             this.onUpdate?.(this);
         }
     }
@@ -107,7 +110,7 @@ export class IndexSubscription<T extends IBaseComponent> extends BaseSubscriptio
             this.onDelete?.(this, rowID);
             this._rows.delete(rowID);
         } else {
-            const tData = data as T;
+            const tData = typia.assert<T>(data);
             this._rows.set(rowID, tData);
             if (exist) {
                 this.onUpdate?.(this, rowID);
@@ -119,7 +122,6 @@ export class IndexSubscription<T extends IBaseComponent> extends BaseSubscriptio
 }
 
 class HeTuClientImpl {
-    private static _socketLib: new (url: string) => IWebSocket;
     private _sendingQueue: Uint8Array[] = [];
     private _waitingCallbacks: ((result: any) => void)[] = [];
     private _subscriptions: Map<string, WeakRef<BaseSubscription>> = new Map();
@@ -159,11 +161,6 @@ class HeTuClientImpl {
         this._protocol = protocol;
     }
 
-    // 设置WebSocket的实现类，默认使用浏览器的WebSocket实现
-    public setWebSocketLib(socketLib: new (url: string) => IWebSocket): void {
-        HeTuClientImpl._socketLib = socketLib;
-    }
-
     /*
      * 连接到河图url，url格式为"wss://host:port/hetu"
      * 此方法为async/await异步堵塞，在连接断开前不会结束。
@@ -179,14 +176,13 @@ class HeTuClientImpl {
      * import { BrowserWebSocket } from 'hetu-client-sdk/dom-socket';
      * // 微信使用hetu-client-sdk/wx-socket库
      * logger.setLevel(0); // 设置日志级别为DEBUG
-     * HeTuClient.setWebSocketLib(BrowserWebSocket);
      * HeTuClient.setProtocol(new Protocol())
      * HeTuClient.onConnected = () => {
-     *   HeTuClient.vallSystem("login", "userToken");
+     *   HeTuClient.callSystem("login", "userToken");
      * }
      * // 手游可以放入while循环，实现断线自动重连
      * while (true) {
-     *     var e = await HeTuClient.vonnect("wss://host:port/hetu");
+     *     var e = await HeTuClient.connect(new BrowserWebSocket("wss://host:port/hetu"));
      *     // 断线处理...是否重连等等
      *     if (e is null)
      *         break;
@@ -196,7 +192,7 @@ class HeTuClientImpl {
      * }
      * ```
      */
-    public async connect(url: string): Promise<Error | null> {
+    public async connect(socket: IWebSocket): Promise<Error | null> {
         // 检查连接状态(应该不会遇到）
         if (this._socket && this._socket.readyState !== WebSocket.CLOSED) {
             logger.error("[HeTuClient] Connect前请先Close Socket。");
@@ -204,20 +200,13 @@ class HeTuClientImpl {
         }
 
         // 前置清理
-        logger.info(`[HeTuClient] 正在连接到: ${url}...`);
+        logger.info(`[HeTuClient] 正在创建新连接...${socket.url}`);
         this._subscriptions = new Map();
 
-        // 导入默认的WebSocket实现
-        let lastState = "ReadyForConnect";
-        if (!HeTuClientImpl._socketLib) {
-            const dom_socket = await import('./dom-socket')
-            HeTuClientImpl._socketLib = dom_socket.BrowserWebSocket;
-        }
-
         // 连接，并等待连接关闭
+        let lastState = "ReadyForConnect";
         return new Promise((resolve) => {
-            this._socket = new HeTuClientImpl._socketLib(url);
-
+            this._socket = socket;
             this._socket.onopen = () => {
                 logger.info("[HeTuClient] 连接成功。");
                 lastState = "Connected";
@@ -231,11 +220,14 @@ class HeTuClientImpl {
 
             this._socket.onmessage = (event) => {
                 const data = event.data instanceof Blob
-                    ? new Promise<ArrayBuffer>(resolve => {
-                        const reader = new FileReader();
-                        reader.onload = () => resolve(reader.result as ArrayBuffer);
-                        reader.readAsArrayBuffer(event.data as Blob);
-                    }).then(buffer => new Uint8Array(buffer))
+                    ? (typeof window !== 'undefined'
+                        ? new Promise<ArrayBuffer>(resolve => {
+                            const reader = new FileReader();
+                            reader.onload = () => resolve(reader.result as ArrayBuffer);
+                            reader.readAsArrayBuffer(event.data as Blob);
+                        })
+                        : (event.data as Blob).arrayBuffer()
+                    ).then(buffer => new Uint8Array(buffer))
                     : new Uint8Array(event.data as ArrayBuffer);
 
                 Promise.resolve(data).then(buffer => this._onReceived(buffer));
@@ -261,6 +253,8 @@ class HeTuClientImpl {
                     resolve(new Error(event.reason || "连接异常断开"));
                 }
             };
+
+            this._socket.connect();
         });
     }
 
@@ -332,8 +326,8 @@ class HeTuClientImpl {
 
         // 向服务器订阅
         const payload = ["sub", componentName, "select", value, where];
-        this._send(payload);
         logger.debug(`[HeTuClient] 发送Select订阅: ${componentName}.${where}[${value}:]`);
+        this._send(payload);
 
         // 等待服务器结果
         return new Promise<RowSubscription<GetComponentType<T,  D>> | null>((resolve) => {
@@ -351,7 +345,7 @@ class HeTuClientImpl {
                     return;
                 }
 
-                const data = subMsg[2] as GetComponentType<T,  D>;
+                const data = typia.assert<GetComponentType<T,  D>>(subMsg[2]);
                 const newSub = new RowSubscription<GetComponentType<T,  D>>(subID, componentName as string, data);
                 this._subscriptions.set(subID, new WeakRef(newSub));
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
@@ -404,8 +398,8 @@ class HeTuClientImpl {
 
         // 发送订阅请求
         const payload = ["sub", componentName, "query", index, left, right, limit, desc, force];
-        this._send(payload);
         logger.debug(`[HeTuClient] 发送Query订阅: ${predictID}`);
+        this._send(payload);
 
         return new Promise<IndexSubscription<GetComponentType<T, D>> | null>((resolve) => {
             this._waitingCallbacks.push((subMsg) => {
@@ -422,7 +416,7 @@ class HeTuClientImpl {
                     return;
                 }
 
-                const rows = subMsg[2] as GetComponentType<T, D>[];
+                const rows = typia.assert<GetComponentType<T, D>[]>(subMsg[2]);
                 const newSub = new IndexSubscription<GetComponentType<T, D>>(subID, componentName as string, rows);
                 this._subscriptions.set(subID, new WeakRef(newSub));
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`);
