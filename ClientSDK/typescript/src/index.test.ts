@@ -69,38 +69,39 @@ describe('HeTuClient测试', () => {
         HeTuClient.callSystem('use_hp', 1)
         const successSub = await HeTuClient.select('HP', 123, 'owner')
         expect(successSub).not.toBeNull()
-        const lastValue = successSub!.data.value
+        const lastValue = successSub!.data!.value
         console.log(`订阅时值：${lastValue}`)
 
         // 测试订阅事件
         let newValue = null
         successSub!.onUpdate = (sender) => {
-            newValue = sender.data.value
+            newValue = sender.data!.value
             console.log(`收到了更新...${newValue}`)
         }
         HeTuClient.callSystem('use_hp', 2)
         await new Promise((resolve) => setTimeout(resolve, 1000))
         expect(lastValue - 2).toEqual(newValue)
 
-        // 测试重复订阅，但换一个类型，应该报错
+        // 测试重复订阅，返回的值应该是旧的
         HeTuClient.callSystem('use_hp', 1)
         let success = false
         try {
-            await HeTuClient.select('HP', 123, 'owner')
+            let dupSub = await HeTuClient.select('HP', 123, 'owner')
             success = true
+            // 测试上面的use_hp没有生效，因为这里没有任何切换线程的时间
+            expect(dupSub!.data!.value).toEqual(lastValue - 2)
         } catch (error) {
             // 期望抛出类型错误
         }
+        expect(success).toBeTruthy()
 
-        expect(success).toBeFalsy()
-
-        // 模拟垃圾回收
-        // TypeScript中无法直接控制垃圾回收，这里简化处理
+        // 测试取消订阅并垃圾回收
+        successSub!.dispose()
 
         // 测试回收自动反订阅，顺带测试Class类型
         const typedSub = await HeTuClient.select('HP', 123, 'owner')
         expect(typedSub).not.toBeNull()
-        expect(typedSub!.data.value).toEqual(lastValue - 3)
+        expect(typedSub!.data!.value).toEqual(lastValue - 3)
 
         console.log('TestRowSubscribe结束')
     })
