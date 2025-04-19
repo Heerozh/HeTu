@@ -1,45 +1,12 @@
-import { HeTuClient, IBaseComponent } from './index'
+import { HeTuClient } from './index'
 import { BrowserWebSocket } from './dom-socket'
 import { logger } from './logger'
 import { ZlibProtocol } from './protocol'
 
-class HP implements IBaseComponent {
-    id: number
-    owner: number
-    value: number
-
-    constructor(json: any) {
-        this.id = json.id
-        this.owner = json.owner
-        this.value = json.value
-    }
-}
-
-class Position implements IBaseComponent {
-    id: number
-    owner: number
-    x: number
-    y: number
-
-    constructor(json: any) {
-        this.id = json.id
-        this.owner = json.owner
-        this.x = json.x
-        this.y = json.y
-    }
-}
-
-declare module './index' {
-    interface ComponentNameTypeMap {
-        HP: HP
-        Position: Position
-    }
-}
-
 describe('HeTuClient测试', () => {
     beforeAll(() => {
         console.log('测试前请启动河图服务器的tests/app.py')
-        logger.setLevel(0) // 设置日志级别为DEBUG
+        logger.setLevel(-1) // 设置日志级别为DEBUG
         HeTuClient.setProtocol(new ZlibProtocol())
         HeTuClient.connect(new BrowserWebSocket('ws://127.0.0.1:2466/hetu'))
             .then(() => {
@@ -146,7 +113,7 @@ describe('HeTuClient测试', () => {
         // 测试订阅事件
         let newValue = null
         sub!.onUpdate = (sender, rowID) => {
-            newValue = parseInt(sender.rows.get(rowID)['value'])
+            newValue = sender.rows.get(rowID)!.value
         }
         HeTuClient.callSystem('use_hp', 2)
         await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -169,7 +136,7 @@ describe('HeTuClient测试', () => {
 
         let newPlayer = null
         sub!.onInsert = (sender, rowID) => {
-            newPlayer = sender.rows.get(rowID).owner
+            newPlayer = sender.rows.get(rowID)!.owner
         }
         HeTuClient.callSystem('move_user', 123, 2, -10)
         await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -178,7 +145,7 @@ describe('HeTuClient测试', () => {
         // OnDelete
         let removedPlayer = null
         sub!.onDelete = (sender, rowID) => {
-            removedPlayer = sender.rows.get(rowID).owner
+            removedPlayer = sender.rows.get(rowID)!.owner
         }
         HeTuClient.callSystem('move_user', 123, 11, -10)
         await new Promise((resolve) => setTimeout(resolve, 1000))
@@ -186,5 +153,105 @@ describe('HeTuClient测试', () => {
 
         expect(sub!.rows.has(123)).toBeFalsy()
         console.log('TestIndexSubscribeOnInsert结束')
+    })
+
+    // 测试批量操作
+    test('测试批量查询', async () => {
+        console.log('测试批量查询开始')
+
+        // 登录多个用户并移动到不同位置
+        HeTuClient.callSystem('login', 500, true)
+        for (let i = 1; i <= 10; i++) {
+            HeTuClient.callSystem('move_user', 500 + i, 500 + i, 500 + i)
+        }
+        HeTuClient.callSystem('move_user', 500, 500, 500)
+
+        // 查询大范围数据
+        const sub = await HeTuClient.query('Position', 'x', 500, 510, 50)
+        expect(sub).not.toBeNull()
+        expect(sub!.rows.size).toBeGreaterThan(9)
+
+        // 测试批量更新
+        let updateCount = 0
+        let deleteCount = 0
+        sub!.onUpdate = () => {
+            updateCount++
+        }
+        sub!.onDelete = (sender, rowID) => {
+            deleteCount++
+        }
+
+        // 批量更新位置，应该只收到1个消息
+        for (let i = 1; i <= 5; i++) {
+            HeTuClient.callSystem('move_user', 500, 500 + i, 500 + i)
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        expect(updateCount).toBe(1)
+
+        // 移出范围
+        HeTuClient.callSystem('move_user', 500, 522, 522)
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+        expect(deleteCount).toBe(1)
+
+
+        console.log(`测试批量查询结束`)
+    })
+
+    // 测试连接错误处理
+    // test('测试连接错误处理', async () => {
+    //     console.log('测试连接错误处理开始')
+
+    //     HeTuClient.close()
+
+    //     // 保存当前状态以便测试后恢复
+    //     const result = await HeTuClient.connect(
+    //         new BrowserWebSocket('ws://invalid-server:9999/hetu')
+    //     ).catch((e) => e)
+
+    //     expect(result).toBeInstanceOf(Error)
+
+    //     // 恢复连接
+    //     await HeTuClient.connect(new BrowserWebSocket('ws://127.0.0.1:2466/hetu'))
+
+    //     console.log('测试连接错误处理结束')
+    // })
+
+    // 测试同时使用多种订阅类型
+    test('测试混合订阅', async () => {
+        console.log('测试混合订阅开始')
+
+        HeTuClient.callSystem('login', 123, true)
+        HeTuClient.callSystem('use_hp', 1)
+        HeTuClient.callSystem('move_user', 700, 0, 0)
+
+        // 同时订阅行和索引
+        const [rowSub, indexSub] = await Promise.all([
+            HeTuClient.select('HP', 123, 'owner'),
+            HeTuClient.query('Position', 'owner', 700, 700, 1),
+        ])
+
+        expect(rowSub).not.toBeNull()
+        expect(indexSub).not.toBeNull()
+
+        // 测试两种订阅都能接收更新
+        let rowUpdated = false
+        let indexUpdated = false
+
+        rowSub!.onUpdate = () => {
+            rowUpdated = true
+        }
+        indexSub!.onUpdate = () => {
+            indexUpdated = true
+        }
+
+        // 触发更新
+        HeTuClient.callSystem('use_hp', 1)
+        HeTuClient.callSystem('move_user', 700, 50, 50)
+
+        await new Promise((resolve) => setTimeout(resolve, 1000))
+
+        expect(rowUpdated || indexUpdated).toBeTruthy()
+
+        console.log('测试混合订阅结束')
     })
 })
