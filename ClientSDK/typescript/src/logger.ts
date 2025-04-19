@@ -1,4 +1,5 @@
 enum LogLevel {
+    REPLAY = -1,
     DEBUG = 0,
     INFO = 1,
     WARN = 2,
@@ -12,6 +13,13 @@ class Logger {
     // 设置日志级别
     setLevel(level: LogLevel): void {
         this.level = level
+    }
+
+    // replay 级别日志
+    replay(...args: any[]): void {
+        if (this.level <= LogLevel.REPLAY) {
+            console.debug('[REPLAY]', ...args)
+        }
     }
 
     // DEBUG 级别日志

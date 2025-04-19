@@ -249,6 +249,7 @@ class HeTuClientImpl {
     public callSystem(systemName: string, ...args: any[]): void {
         const payload = ['sys', systemName, ...args]
         this._send(payload)
+        logger.debug(`[HeTuClient] 发送System调用: ${systemName}(${args.join(', ')})`)
         const callback = this.systemCallbacks.get(systemName)
         callback?.(args)
     }
@@ -264,9 +265,6 @@ class HeTuClientImpl {
      * 可通过`RowSubscription.data`获取数据。
      * 可以注册`RowSubscription.onUpdate`和`onDelete`事件处理数据更新。
      *
-     * 如果使用了服务器端工具自动生成了ts interface定义并导入，则`select`会
-     * 自动返回该结构数据，否则返回Json格式。使用结构数据要自己维护版本，
-     * 防止和服务器不一致。
      *
      * 使用示例
      * ```typescript
@@ -277,15 +275,8 @@ class HeTuClientImpl {
      * subscription.onUpdate += (sender, rowID) => {
      *     logger.debug("My New HP:" + sender.data["value"]);
      * }
-     * // --------或者--------
-     * // 假设用服务器工具生成了结构。注意版本要一致
-     * interface HP : IBaseComponent {
-     *     public long id {get; set;}
-     *     public long owner;
-     *     public int value;
-     * }
      * var subscription = await HeTuClient.select("HP", user_id, "owner");
-     * logger.debug("My HP:" + subscription.data.value);  // 此时Data是HP类型
+     * logger.debug("My HP:" + subscription.data.value);
      * ```
      */
     public async select(
@@ -313,6 +304,7 @@ class HeTuClientImpl {
                 // 如果没有查询到值
                 const subID = subMsg[1] as string
                 if (subID === null) {
+                    logger.replay(`[HeTuClient] select没有查询到值；也可能无权限`)
                     resolve(null)
                     return
                 }
@@ -384,6 +376,7 @@ class HeTuClientImpl {
                 const subID = subMsg[1] as string
                 // 如果没有查询到值
                 if (subID === null) {
+                    logger.replay(`[HeTuClient] select没有查询到值；也可能无权限`)
                     resolve(null)
                     return
                 }
@@ -463,10 +456,16 @@ class HeTuClientImpl {
                 break
             case 'sub':
                 const callback = this._waitingCallbacks.shift()
+                if (structuredMsg[2] !== null) {
+                    logger.replay(`[HeTuClient] 收到了订阅值: ${JSON.stringify(structuredMsg[2])}`)
+                }
                 if (callback) callback(structuredMsg)
                 break
             case 'updt':
                 const subID = structuredMsg[1] as string
+                logger.replay(
+                    `[HeTuClient] 收到了更新: ${subID}: ${JSON.stringify(structuredMsg[2])}`
+                )
                 const subscription = this._subscriptions.get(subID)?.deref()
                 if (!subscription) break
 
