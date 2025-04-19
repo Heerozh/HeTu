@@ -18,26 +18,6 @@ export interface IWebSocket {
     readonly readyState: number
 }
 
-export interface ComponentNameTypeMap {
-    // name: type
-}
-
-// 根据组件名获取对应类型，如果不存在则使用默认类型
-type GetComponentType<
-    Name extends string,
-    DefaultType = DictComponent,
-> = Name extends keyof ComponentNameTypeMap ? ComponentNameTypeMap[Name] : DefaultType
-
-export interface IBaseComponent {
-    id: number
-}
-
-export class DictComponent extends Map<string, string> implements IBaseComponent {
-    get id(): number {
-        return Number(this.get('id'))
-    }
-}
-
 export abstract class BaseSubscription {
     readonly componentName: string
     private readonly _subscriptID: string
@@ -56,61 +36,50 @@ export abstract class BaseSubscription {
     }
 }
 
-type ComponentConstructor<T> = new (data: any) => T
+export class RowSubscription extends BaseSubscription {
+    private _data: Record<string, any> | null = null
 
-export class RowSubscription<T extends IBaseComponent> extends BaseSubscription {
-    private _data: T
-    private _ctor: ComponentConstructor<T>
+    onUpdate: ((subscription: RowSubscription) => void) | null = null
+    onDelete: ((subscription: RowSubscription) => void) | null = null
 
-    onUpdate: ((subscription: RowSubscription<T>) => void) | null = null
-    onDelete: ((subscription: RowSubscription<T>) => void) | null = null
-
-    constructor(subscriptID: string, componentName: string, row: T, ctor: ComponentConstructor<T>) {
+    constructor(subscriptID: string, componentName: string, row: Record<string, any>) {
         super(subscriptID, componentName)
         this._data = row
-        this._ctor = ctor
     }
 
-    get data(): T {
+    get data(): Record<string, any> | null {
         return this._data
     }
 
-    override update(_rowID: number, data: any): void {
+    override update(_rowID: number, data: Record<string, any> | null): void {
         if (data === null) {
             this.onDelete?.(this)
-            this._data = null as any
+            this._data = null
         } else {
-            this._data = new this._ctor(data)
+            this._data = data
             this.onUpdate?.(this)
         }
     }
 }
 
-export class IndexSubscription<T extends IBaseComponent> extends BaseSubscription {
-    private readonly _rows: Map<number, T>
-    private readonly _ctor: ComponentConstructor<T>
+export class IndexSubscription extends BaseSubscription {
+    private readonly _rows: Map<number, Record<string, any>>
 
-    onUpdate: ((subscription: IndexSubscription<T>, rowID: number) => void) | null = null
-    onDelete: ((subscription: IndexSubscription<T>, rowID: number) => void) | null = null
-    onInsert: ((subscription: IndexSubscription<T>, rowID: number) => void) | null = null
+    onUpdate: ((subscription: IndexSubscription, rowID: number) => void) | null = null
+    onDelete: ((subscription: IndexSubscription, rowID: number) => void) | null = null
+    onInsert: ((subscription: IndexSubscription, rowID: number) => void) | null = null
 
-    constructor(
-        subscriptID: string,
-        componentName: string,
-        rows: T[],
-        ctor: ComponentConstructor<T>
-    ) {
+    constructor(subscriptID: string, componentName: string, rows: Record<string, any>[]) {
         super(subscriptID, componentName)
         this._rows = new Map()
-        this._ctor = ctor
         rows.forEach((row) => this._rows.set(row.id, row))
     }
 
-    get rows(): Map<number, T> {
+    get rows(): Map<number, Record<string, any>> {
         return this._rows
     }
 
-    override update(rowID: number, data: any): void {
+    override update(rowID: number, data: Record<string, any> | null): void {
         const exist = this._rows.has(rowID)
         const isDelete = data === null
 
@@ -119,8 +88,7 @@ export class IndexSubscription<T extends IBaseComponent> extends BaseSubscriptio
             this.onDelete?.(this, rowID)
             this._rows.delete(rowID)
         } else {
-            const tData = new this._ctor(data)
-            this._rows.set(rowID, tData)
+            this._rows.set(rowID, data)
             if (exist) {
                 this.onUpdate?.(this, rowID)
             } else {
@@ -320,17 +288,17 @@ class HeTuClientImpl {
      * logger.debug("My HP:" + subscription.data.value);  // 此时Data是HP类型
      * ```
      */
-    public async select<T extends string, D extends IBaseComponent = DictComponent>(
-        componentName: T,
+    public async select(
+        componentName: string,
         value: any,
         where: string = 'id'
-    ): Promise<RowSubscription<GetComponentType<T, D>> | null> {
+    ): Promise<RowSubscription | null> {
         // 如果where是id，我们可以事先判断是否已经订阅过
         if (where === 'id') {
             const predictID = this._makeSubID(componentName, 'id', value, null, 1, false)
             const subscribed = this._subscriptions.get(predictID)?.deref()
             if (subscribed instanceof RowSubscription) {
-                return subscribed as RowSubscription<GetComponentType<T, D>>
+                return subscribed as RowSubscription
             }
         }
 
@@ -340,7 +308,7 @@ class HeTuClientImpl {
         this._send(payload)
 
         // 等待服务器结果
-        return new Promise<RowSubscription<GetComponentType<T, D>> | null>((resolve) => {
+        return new Promise<RowSubscription | null>((resolve) => {
             this._waitingCallbacks.push((subMsg) => {
                 // 如果没有查询到值
                 const subID = subMsg[1] as string
@@ -351,17 +319,12 @@ class HeTuClientImpl {
                 // 如果依然是重复订阅，直接返回副本
                 const duplicateSubscribed = this._subscriptions.get(subID)?.deref()
                 if (duplicateSubscribed instanceof RowSubscription) {
-                    resolve(duplicateSubscribed as RowSubscription<GetComponentType<T, D>>)
+                    resolve(duplicateSubscribed as RowSubscription)
                     return
                 }
 
-                const data = subMsg[2] as GetComponentType<T, D>
-                const newSub = new RowSubscription(
-                    subID,
-                    componentName as string,
-                    data,
-                    GetComponentType<T, D>
-                )
+                const data = subMsg[2]
+                const newSub = new RowSubscription(subID, componentName as string, data)
                 this._subscriptions.set(subID, new WeakRef(newSub))
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`)
                 resolve(newSub)
@@ -395,20 +358,20 @@ class HeTuClientImpl {
      * }
      * ```
      */
-    public async query<T extends string, D extends IBaseComponent = DictComponent>(
-        componentName: T,
+    public async query(
+        componentName: string,
         index: string,
         left: any,
         right: any,
         limit: number,
         desc: boolean = false,
         force: boolean = true
-    ): Promise<IndexSubscription<GetComponentType<T, D>> | null> {
+    ): Promise<IndexSubscription | null> {
         // 先要组合sub_id看看是否已订阅过
         const predictID = this._makeSubID(componentName, index, left, right, limit, desc)
         const subscribed = this._subscriptions.get(predictID)?.deref()
         if (subscribed instanceof IndexSubscription) {
-            return subscribed as IndexSubscription<GetComponentType<T, D>>
+            return subscribed as IndexSubscription
         }
 
         // 发送订阅请求
@@ -416,7 +379,7 @@ class HeTuClientImpl {
         logger.debug(`[HeTuClient] 发送Query订阅: ${predictID}`)
         this._send(payload)
 
-        return new Promise<IndexSubscription<GetComponentType<T, D>> | null>((resolve) => {
+        return new Promise<IndexSubscription | null>((resolve) => {
             this._waitingCallbacks.push((subMsg) => {
                 const subID = subMsg[1] as string
                 // 如果没有查询到值
@@ -427,16 +390,12 @@ class HeTuClientImpl {
                 // 如果依然是重复订阅，直接返回副本
                 const duplicateSubscribed = this._subscriptions.get(subID)?.deref()
                 if (duplicateSubscribed instanceof IndexSubscription) {
-                    resolve(duplicateSubscribed as IndexSubscription<GetComponentType<T, D>>)
+                    resolve(duplicateSubscribed as IndexSubscription)
                     return
                 }
 
-                const rows = subMsg[2] as GetComponentType<T, D>[]
-                const newSub = new IndexSubscription<GetComponentType<T, D>>(
-                    subID,
-                    componentName as string,
-                    rows
-                )
+                const rows = subMsg[2] as Record<string, any>[]
+                const newSub = new IndexSubscription(subID, componentName as string, rows)
                 this._subscriptions.set(subID, new WeakRef(newSub))
                 logger.info(`[HeTuClient] 成功订阅了 ${subID}`)
                 resolve(newSub)
