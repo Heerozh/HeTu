@@ -1,4 +1,4 @@
-import { HeTuClient } from './index'
+import { HeTuClient } from './client'
 import { BrowserWebSocket } from './dom-socket'
 import { logger } from './logger'
 import { ZlibProtocol } from './protocol'
