@@ -18,14 +18,14 @@ class BuildCommand(CommandInterface):
 
     @classmethod
     def register(cls, subparsers):
-        parser_build = subparsers.add_parser('build', help='生成客户端SDK C#/TS 类型代码')
+        parser_build = subparsers.add_parser('build', help='生成客户端SDK C# 类型代码')
         parser_build.add_argument(
             "--app-file", help="河图app的py文件", metavar=".app.py", default="/app/app.py")
         parser_build.add_argument(
             "--namespace", metavar="game1", help="编译app.py中哪个namespace下的数据类型",
             required=True)
         parser_build.add_argument(
-            "--output", metavar="./Components.cs", help="输出文件路径，扩展名可选cs/ts",
+            "--output", metavar="./Components.cs", help="输出文件路径",
             required=True)
 
     @classmethod

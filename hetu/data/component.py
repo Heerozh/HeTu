@@ -38,7 +38,7 @@ class Property:
 
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
-    properties_ = []                                    # Component的属性们
+    properties_ = []        # type:list[tuple[str, Property]] # Ordered属性列表
     component_name_ = None
     namespace_ = None
     permission_ = Permission.USER
@@ -125,11 +125,18 @@ class BaseComponent:
 
     @classmethod
     def dict_to_row(cls, data: dict):
-        """从dict转换为c-struct like数据行"""
+        """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
         row = cls.new_row()
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
+
+    @classmethod
+    def row_to_dict(cls, data: np.record | np.ndarray | np.recarray | dict):
+        """从c-struct like的行数据转换为typed dict"""
+        if type(data) is dict:
+            return data
+        return dict(zip(data.dtype.names, data.item()))
 
     @classmethod
     def duplicate(cls, suffix: str) -> type['BaseComponent']:
@@ -192,6 +199,7 @@ def define_component(
     ...     x: np.float32 = Property(default=0)
     ...     y: np.float32 = Property(default=0)
     ...     owner: np.int64 = Property(default=0, unique=True)
+    ...     name: '<U8' = Property(default="12345678")
 
     Parameters
     ----------
