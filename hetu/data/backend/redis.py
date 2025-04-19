@@ -578,18 +578,21 @@ class RedisComponentTable(ComponentTable):
 
         if row_format == 'id':
             return list(map(int, row_ids))
-        raw = row_format == 'raw'
+
+        typed = row_format == 'typed_dict' or row_format == 'struct'
+        dict_fmt = row_format == 'raw' or row_format == 'typed_dict'
 
         key_prefix = self._key_prefix
         rows = []
         for _id in row_ids:
             if row := await replica.hgetall(key_prefix + str(_id)):
-                if raw:
-                    rows.append(row)
-                else:
-                    rows.append(self._component_cls.dict_to_row(row))
+                if typed:
+                    row = self._component_cls.dict_to_row(row)
+                if dict_fmt:
+                    row = self._component_cls.row_to_dict(row)
+                rows.append(row)
 
-        if raw:
+        if dict_fmt:
             return rows
         else:
             if len(rows) == 0:
@@ -602,10 +605,14 @@ class RedisComponentTable(ComponentTable):
         key = self._key_prefix + str(row_id)
         row = await replica.hgetall(key)
         if row:
-            if row_format == 'raw':
-                return row
-            else:
-                return self._component_cls.dict_to_row(row)
+            typed = row_format == 'typed_dict' or row_format == 'struct'
+            dict_fmt = row_format == 'raw' or row_format == 'typed_dict'
+
+            if typed:
+                row = self._component_cls.dict_to_row(row)
+            if dict_fmt:
+                row = self._component_cls.row_to_dict(row)
+            return row
         else:
             return None
 

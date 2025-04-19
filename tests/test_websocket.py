@@ -139,10 +139,10 @@ class TestWebsocket(unittest.TestCase):
         # print(response1.client_received)
         # 测试hp减2
         self.assertEqual(response1.client_received[0][2]['1'],
-                         {'id': '1', 'owner': '1', 'value': '98'})
+                         {'id': 1, 'owner': 1, 'value': 98})
         # 测试收到连接2减的mp
         self.assertEqual(response1.client_received[1][2]['1'],
-                         {'id': '1', 'owner': '2', 'value': '99'})
+                         {'id': 1, 'owner': 2, 'value': 99})
 
         # 准备下一轮测试，重置redis connection_pool，因为切换线程了
         app.ctx.default_backend.reset_connection_pool()

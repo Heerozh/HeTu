@@ -183,8 +183,9 @@ class ComponentTable:
         desc: bool
             是否降序排列
         row_format:
-            'struct': 包装成component struct返回
+            'struct': 包装成component struct返回，类型np.record
             'raw': 直接返回数据库中的值，由dict包装，可能包含多余数据，也不会进行类型转换。
+            'typed_dict’: 直接返回dict，但是进行类型转换，删除多余数据。
             'id': 只返回row_id列表
         """
         # 请使用servant数据库来操作
@@ -193,6 +194,15 @@ class ComponentTable:
     async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
         """
         不通过事务，从servant数据库直接读取某行的值。
+
+        Parameters
+        ----------
+        row_id: int
+            需要读取的行id
+        row_format:
+            'struct': 包装成component struct返回，类型np.record
+            'raw': 直接返回数据库中的值，由dict包装，可能包含多余数据，也不会进行类型转换。
+            'typed_dict’: 直接返回dict，但是进行类型转换，删除多余数据。
 
         .. warning:: ⚠️ 警告：从servant读取值存在更新延迟，且脱离事务，值随时可能被其他进程修改/删除，
         使用时要确保逻辑能接受数据不一致。
@@ -788,12 +798,12 @@ class RowSubscription(BaseSubscription):
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
             return set(), set(), cache
 
-        row = await self.table.direct_get(self.row_id, row_format='raw')
+        row = await self.table.direct_get(self.row_id, row_format='typed_dict')
         if row is None:
             # get_updated主要发给客户端，需要json，所以key直接用str
             rtn = {str(self.row_id): None}
         else:
-            if self.req_owner is None or int(row.get('owner', 0)) == self.req_owner:
+            if self.req_owner is None or row.get('owner', 0) == self.req_owner:
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
@@ -835,12 +845,12 @@ class IndexSubscription(BaseSubscription):
             rem_chans = set()
             rtn = {}
             for row_id in inserts:
-                row = await self.table.direct_get(row_id, row_format='raw')
+                row = await self.table.direct_get(row_id, row_format='typed_dict')
                 if row is None:
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    if self.req_owner is None or int(row.get('owner', 0)) == self.req_owner:
+                    if self.req_owner is None or row.get('owner', 0) == self.req_owner:
                         rtn[str(row_id)] = row
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
@@ -906,7 +916,7 @@ class Subscriptions:
             return False
 
     @classmethod
-    def _has_row_permission(cls, table: ComponentTable, caller: int | str, row: dict) -> bool:
+    def _has_row_permission(cls, table: ComponentTable, caller: int | str, row: dict | np.record) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         comp_permission = table.component_cls.permission_
         # 非owner权限在_has_table_permission里判断
@@ -916,7 +926,8 @@ class Subscriptions:
         if caller == 'admin':
             return True
         else:
-            if int(row.get('owner', 0)) == caller:
+            owner = int(row.get('owner', 0)) if type(row) is dict else getattr(row, 'owner', 0)
+            if owner == caller:
                 return True
             else:
                 return False
@@ -934,13 +945,12 @@ class Subscriptions:
             return None, None
 
         if where == 'id':
-            if (row := await table.direct_get(value, row_format='raw')) is None:
+            if (row := await table.direct_get(value, row_format='typed_dict')) is None:
                 return None, None
         else:
-            if len(rows := await table.direct_query(where, value, limit=1, row_format='raw')) == 0:
+            if len(rows := await table.direct_query(where, value, limit=1, row_format='typed_dict')) == 0:
                 return None, None
             row = rows[0]
-        row['id'] = int(row['id'])
 
         # 再次caller要对该row有权限
         if not self._has_row_permission(table, caller, row):
@@ -987,7 +997,7 @@ class Subscriptions:
             return None, []
 
         rows = await table.direct_query(
-            index_name, left, right, limit, desc, row_format='raw')
+            index_name, left, right, limit, desc, row_format='typed_dict')
 
         # 如果是owner权限，只取owner相同的
         if table.component_cls.permission_ == Permission.OWNER:

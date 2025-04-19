@@ -686,7 +686,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 测试订阅的返回值，和订阅管理器的私有值
         sub_id1, row = await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
-        self.assertEqual(row['time'], '110')
+        self.assertEqual(row['time'], 110)
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
         self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 1)
@@ -752,10 +752,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates), 4)
-        self.assertEqual(updates[sub_id1]["1"]['owner'], '11')  # row订阅数据更新
+        self.assertEqual(updates[sub_id1]["1"]['owner'], 11)  # row订阅数据更新
         self.assertEqual(updates[sub_id2]["1"], None)           # query 10删除了1
-        self.assertEqual(updates[sub_id3]["1"]['owner'], '11')  # query 10-11更新row数据
-        self.assertEqual(updates[sub_id4]["1"]['owner'], '11')  # query 11-12更新row数据
+        self.assertEqual(updates[sub_id3]["1"]['owner'], 11)  # query 10-11更新row数据
+        self.assertEqual(updates[sub_id4]["1"]['owner'], 11)  # query 11-12更新row数据
 
         # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
         self.assertEqual(len(sub_mgr._subs[sub_id2].row_subs), 24)
@@ -770,9 +770,9 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates), 3)
-        self.assertEqual(updates[sub_id1]["1"]['owner'], '12')  # row订阅数据更新
+        self.assertEqual(updates[sub_id1]["1"]['owner'], 12)  # row订阅数据更新
         self.assertEqual(updates[sub_id3]["1"], None)  # query 10-11删除了1
-        self.assertEqual(updates[sub_id4]["1"]['owner'], '12')  # query 11-12更新row数据
+        self.assertEqual(updates[sub_id4]["1"]['owner'], 12)  # query 11-12更新row数据
 
         # 测试取消订阅
         self.assertEqual(len(sub_mgr._subs), 4)
@@ -802,7 +802,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sub_id5, None)
         # 测试订阅单行，owner改变后要删除
         sub_id5, row = await sub_mgr.subscribe_select(item_data, 10, 3)
-        self.assertEqual(row['owner'], '10')
+        self.assertEqual(row['owner'], 10)
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             row = await tbl.select(3)
@@ -814,7 +814,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         # 测试owner query只传输owner相等的数据
         sub_id6, rows = await sub_mgr.subscribe_query(
             item_data, 10, 'owner', 1, right=20, limit=55)
-        self.assertEqual([row['owner'] for row in rows], ['10'] * 23)
+        self.assertEqual([row['owner'] for row in rows], [10] * 23)
         self.assertEqual(len(sub_mgr._subs[sub_id6].row_subs), 23)
         # 测试更新数值，看query的update是否会删除/添加owner相符的
         async with backend.transaction(1) as trx:
@@ -834,7 +834,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await tbl.update(4, row)
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates[sub_id6]), 1)
-        self.assertEqual(updates[sub_id6]["4"]['owner'], '10')
+        self.assertEqual(updates[sub_id6]["4"]['owner'], 10)
         # 测试insert新数据能否得到通知
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
@@ -843,7 +843,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             await tbl.insert(new)
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates[sub_id6]), 1)
-        self.assertEqual(updates[sub_id6]["26"]['owner'], '10')
+        self.assertEqual(updates[sub_id6]["26"]['owner'], 10)
 
         # 关闭连接
         task.cancel()
