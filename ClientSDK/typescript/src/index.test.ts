@@ -177,7 +177,7 @@ describe('HeTuClient测试', () => {
         sub!.onUpdate = () => {
             updateCount++
         }
-        sub!.onDelete = (sender, rowID) => {
+        sub!.onDelete = (_sender, _rowID) => {
             deleteCount++
         }
 
@@ -192,7 +192,6 @@ describe('HeTuClient测试', () => {
         HeTuClient.callSystem('move_user', 500, 522, 522)
         await new Promise((resolve) => setTimeout(resolve, 1000))
         expect(deleteCount).toBe(1)
-
 
         console.log(`测试批量查询结束`)
     })
