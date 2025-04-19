@@ -172,13 +172,14 @@ class HeTuClientImpl {
     public async connect(socket: IWebSocket): Promise<Error | null> {
         // 检查连接状态(应该不会遇到）
         if (this._socket && this._socket.readyState !== WebSocket.CLOSED) {
-            logger.error('[HeTuClient] Connect前请先Close Socket。')
+            logger.error(`[HeTuClient] Connect前请先Close Socket。readyState: ${this._socket.readyState}`)
             return null
         }
 
         // 前置清理
         logger.info(`[HeTuClient] 正在创建新连接...${socket.url}`)
         this._subscriptions = new Map()
+        this._waitingCallbacks = []
 
         // 连接，并等待连接关闭
         let lastState = 'ReadyForConnect'
@@ -212,12 +213,29 @@ class HeTuClientImpl {
             }
 
             this._socket.onerror = (event) => {
+                const errorDetails =
+                    typeof event === 'object' && event !== null
+                        ? JSON.stringify(
+                              {
+                                  message: (event as any).message,
+                                  type: (event as any).type,
+                                  target:
+                                      (event as any).target?.url ||
+                                      ((event as any).target?.readyState !== undefined
+                                          ? `WebSocket(readyState=${(event as any).target.readyState})`
+                                          : undefined),
+                              },
+                              null,
+                              2
+                          )
+                        : String(event)
+
                 switch (lastState) {
                     case 'ReadyForConnect':
-                        logger.error(`[HeTuClient] 连接失败: ${event}`)
+                        logger.error(`[HeTuClient] 连接失败: ${errorDetails}`)
                         break
                     case 'Connected':
-                        logger.error(`[HeTuClient] 接受消息时发生异常: ${event}`)
+                        logger.error(`[HeTuClient] 接受消息时发生异常: ${errorDetails}`)
                         break
                 }
             }
@@ -241,6 +259,7 @@ class HeTuClientImpl {
         logger.info('[HeTuClient] 主动调用了Close')
         this._cancelAllTasks()
         this._socket?.close()
+        this._socket = null
     }
 
     /// 后台发送System调用，此方法立即返回。
