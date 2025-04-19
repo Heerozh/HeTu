@@ -1,38 +1,23 @@
-﻿using System.Collections.Generic;
-using System;
+﻿using System;
+using System.Collections.Generic;
 using System.Linq;
-using System.Threading;
 using System.Threading.Tasks;
 using Cysharp.Threading.Tasks;
 using HeTu;
-using UnityEngine;
 using NUnit.Framework;
+using UnityEngine;
 
 namespace Tests.HeTu
 {
     [TestFixture]
     public class HeTuClientTest
     {
-        class HP : IBaseComponent
-        {
-            public long id { get; set; }
-            public long owner;
-            public int value;
-        }
-
-        class Position : IBaseComponent
-        {
-            public long id { get; set; }
-            public long owner;
-            public float x;
-            public float y;
-        }
-
         [OneTimeSetUp]
         public void Init()
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
             HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError);
+            HeTuClient.Instance.SetProtocol(new ZlibProtocol());
             HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
                 null).Forget();
         }
@@ -42,6 +27,21 @@ namespace Tests.HeTu
         {
             Debug.Log("测试结束");
             HeTuClient.Instance.Close();
+        }
+
+        class HP : IBaseComponent
+        {
+            public long owner;
+            public int value;
+            public long id { get; set; }
+        }
+
+        class Position : IBaseComponent
+        {
+            public long owner;
+            public float x;
+            public float y;
+            public long id { get; set; }
         }
 
         [Test]
@@ -64,7 +64,7 @@ namespace Tests.HeTu
 
             // 测试订阅事件
             int? newValue = null;
-            sub.OnUpdate += (sender) =>
+            sub.OnUpdate += sender =>
             {
                 Debug.Log("收到了更新...");
                 newValue = int.Parse(sender.Data["value"]);
@@ -112,7 +112,7 @@ namespace Tests.HeTu
             Debug.Log("TestSystemCall开始");
 
             long responseID = 0;
-            HeTuClient.Instance.OnResponse += (jsonData) =>
+            HeTuClient.Instance.OnResponse += jsonData =>
             {
                 var data = jsonData.ToObject<Dictionary<string, object>>();
                 responseID = (long)data["id"];
@@ -120,7 +120,7 @@ namespace Tests.HeTu
 
             var callbackCalled = false;
             var a = HeTuClient.Instance.SystemCallbacks["login"] =
-                (args) => { callbackCalled = true; };
+                args => { callbackCalled = true; };
 
             HeTuClient.Instance.CallSystem("login", 123, true);
             await UniTask.Delay(300);
