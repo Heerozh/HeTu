@@ -1,0 +1,47 @@
+name: Sync NPM Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'ClientSDK/typescript/**'  # 只有当这个目录有变化时才触发
+
+jobs:
+  sync-npm-package:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整的 git 历史
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'GitHub Actions'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Sync to npm-package branch
+        run: |
+          # 如果 npm 分支不存在，创建它
+          if ! git ls-remote --heads origin npm; then
+            git checkout --orphan npm
+            git rm -rf .
+          else
+            git checkout npm
+            git rm -rf .
+          fi
+
+          # 从 main 分支获取 ClientSDK/typescript 目录
+          git checkout main -- ClientSDK/typescript/
+
+          # 移动文件到根目录
+          mv ClientSDK/typescript/* .
+          rm -rf ClientSDK
+
+          # 提交更改
+          git add .
+          git commit -m "Sync from main branch $(git rev-parse --short main)" || echo "No changes to commit"
+          
+          # 推送到 npm 分支
+          git push origin npm

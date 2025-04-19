@@ -1,14 +1,35 @@
 {
-  "name": "hetu_client",
-  "private": true,
-  "version": "0.0.0",
-  "type": "module",
+  "name": "hetu-client",
+  "version": "0.1.0",
+  "description": "Hetu Client SDK for TypeScript",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/heerozh/hetu.git",
+    "directory": "ClientSDK/typescript"
+  },
+  "bugs": {
+    "url": "https://github.com/heerozh/hetu/issues"
+  },
+  "homepage": "https://github.com/heerozh/hetu#readme",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
+    "build": "tsc",
+    "prepare": "npm run build",
     "test": "vitest"
   },
+  "keywords": [
+    "hetu",
+    "client",
+    "sdk"
+  ],
+  "author": "Heerozh",
+  "license": "Apache-2.0",
   "devDependencies": {
     "@types/pako": "^2.0.3",
     "prettier": "3.5.3",
@@ -19,7 +40,6 @@
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
-    "pako": "^2.1.0",
-    "tsc": "^2.0.4"
+    "pako": "^2.1.0"
   }
 }
