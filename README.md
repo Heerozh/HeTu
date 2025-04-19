@@ -261,7 +261,7 @@ CPS(每秒调用次数)测试结果为：
 
 首先河图是异步+分布式的，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。作为参考，Python 性能大概是 PHP7 水平。
 
-之前基于性能选择过 LuaJIT，但 Lua 写起来并不轻松，社区也差。考虑到现在的 CPU 价格远低于开发人员成本，快速迭代，数据分析，无缝 AI，社区活跃的宛如人肉 JIT 的 Python，更具有优势。
+之前基于性能选择过 LuaJIT，但 Lua 写起来并不轻松，社区也小。考虑到现在的 CPU 价格远低于开发人员成本，快速迭代，数据分析，无缝 AI，社区活跃的宛如人肉 JIT 的 Python，更具有优势。
 
 HeTu 未来会支持 Rust 代码，可提供 Native 的性能（实现中)，况且 Component 本来就是 C 结构。
 
@@ -371,9 +371,39 @@ Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL�
 
 ### TypeScript SDK
 
-用法和接口几个 SDK 都基本一致，但 TS 的可以省去本地类型转换，比 C# 方便。
+用法和接口和之前的 Unity 示例基本一致，但 TS 的可以省去本地类型转换，比 C# 方便。
 
 `npm install --save Heerozh/HeTu#npm`
+
+用法：
+```typescript
+import { HeTuClient, ZlibProtocol, BrowserWebSocket, logger as HeTuLogger } from "hetu-sdk";
+HeTuLogger.setLevel(-1) // 设置日志级别
+HeTuClient.setProtocol(new ZlibProtocol()) // 设置压缩协议
+HeTuClient.connect(new BrowserWebSocket('ws://127.0.0.1:2466/hetu'))
+
+// 订阅行 (类似select * from HP where owner=100)
+const sub1 = await HeTuClient.select('HP', 100, 'owner')
+
+// 订阅索引 (类似select * form Position where x >=0 and x <= 10 limit 100)
+// 并注册更新回调
+const sub2 = await HeTuClient.query('Position', 'x', 0, 10, 100)
+sub2?.onInsert = (sender, rowID) => {
+    newPlayer = sender.rows.get(rowID)?.owner
+}    
+sub2?.onDelete = (sender, rowID) => {
+    removedPlayer = sender.rows.get(rowID)?.owner
+}
+sub2?.onUpdate = (sender, rowID) => {
+    const data = sender.rows.get(rowID)
+}
+// 调用远端函数
+HeTuClient.callSystem('move_user', ...)
+// 取消订阅，在这之前订阅都会持续推送数据变更情况
+sub2.dispose()
+// 退出        
+HeTuClient.close()
+```
 
 ## 📚 文档：
 

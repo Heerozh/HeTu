@@ -1,9 +1,19 @@
 {
-  "name": "hetu-client",
-  "version": "0.1.0",
+  "name": "hetu-sdk",
+  "version": "0.1.1",
   "description": "Hetu Client SDK for TypeScript",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "keywords": [
+    "hetu",
+    "client",
+    "mmo",
+    "game",
+    "server",
+    "database",
+    "multiplayer",
+    "multi-player"
+  ],
+  "author": "Heerozh",
+  "license": "Apache-2.0",
   "files": [
     "dist",
     "README.md",
@@ -14,22 +24,21 @@
     "url": "git+https://github.com/heerozh/hetu.git",
     "directory": "ClientSDK/typescript"
   },
-  "bugs": {
-    "url": "https://github.com/heerozh/hetu/issues"
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
   },
-  "homepage": "https://github.com/heerozh/hetu#readme",
   "scripts": {
     "build": "tsc",
     "prepare": "npm run build",
     "test": "vitest"
   },
-  "keywords": [
-    "hetu",
-    "client",
-    "sdk"
-  ],
-  "author": "Heerozh",
-  "license": "Apache-2.0",
   "devDependencies": {
     "@types/pako": "^2.0.3",
     "prettier": "3.5.3",
