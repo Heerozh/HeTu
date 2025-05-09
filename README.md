@@ -263,7 +263,23 @@ CPS(每秒调用次数)测试结果为：
 
 之前基于性能选择过 LuaJIT，但 Lua 写起来并不轻松，社区也小。考虑到现在的 CPU 价格远低于开发人员成本，快速迭代，数据分析，无缝 AI，社区活跃的宛如人肉 JIT 的 Python，更具有优势。
 
-HeTu 未来会支持 Rust 代码，可提供 Native 的性能（实现中)，况且 Component 本来就是 C 结构。
+### Native 计算
+
+由于 Component 数据本来就是 C 结构，Python可以使用LuaJIT的FFI，传入你的C/Rust代码，可以极低代价实现Native性能：
+```python
+from cffi import FFI
+ffi = FFI()
+ffi.cdef("""
+    void process(char* data);
+""")
+c_lib = self.ffi.dlopen('lib.dll')
+
+async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
+    c_lib.process(ffi.from_buffer(pos))
+```
+
+注意，你的 C 代码并不会比 numpy 自带的方法更快，因为 numpy 的方法都是并行及 SIMD 优化的，先询问 AI 用 numpy 的解决方案。
+
 
 ## ⚙️ 服务器安装
 
@@ -368,6 +384,9 @@ Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL�
 `https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
 
 如果项目已有 UniTask 依赖，可以择一删除。
+
+> [!NOTE]
+> 如果使用 Unity 6 及以上版本，SDK 使用Unity 原生 Async 库，可以直接删除 UniTask 目录。
 
 ### TypeScript SDK
 
