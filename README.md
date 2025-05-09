@@ -316,6 +316,10 @@ docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest star
 容器一般有 30%的性能损失，为了性能，也可以用原生方式。
 
 先[安装uv](https://docs.astral.sh/uv/getting-started/installation/)包管理器。
+Windows可在命令行执行：
+```bash
+winget install --id=astral-sh.uv  -e
+```
 
 新建项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.13可以去掉）
 
