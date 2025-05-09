@@ -270,17 +270,23 @@ CPS(每秒调用次数)测试结果为：
 from cffi import FFI
 ffi = FFI()
 ffi.cdef("""
-    void process(char* data);
+    void process(char* data); // char*需转换成Position*
 """)
 c_lib = self.ffi.dlopen('lib.dll')
 
-# System:
+# 获取Array of Position
 rows = await ctx[Position].query('x', self_pos.x - 10, self_pos.x + 10)
 c_lib.process(ffi.from_buffer(rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
 注意，你的 C 代码不一定比 NumPy 自带的方法更快，NumPy 的方法都是并行及 SIMD 优化的。如果不确定，先询问 AI，能几行描述的需求一般都可以用 NumPy 解决。
+
+比如把上述查询结果，小于自己x坐标的，全部推远10距离，这段 Python 代码比 C 循环写要快的多：
+```python
+rows.x[rows.x < self_pos.x] -= 10
+```
+
 
 
 ## ⚙️ 服务器安装
@@ -338,7 +344,7 @@ hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 ### 内网离线环境
 
-想要在内网设置环境，外网机执行上述原生启动步骤后，把 miniconda 的整个安装目录复制过去即可。
+想要在内网设置环境，外网机执行上述原生启动步骤后，把整个项目目录（包含.venv）复制过去即可。
 
 ### 生产部署
 
