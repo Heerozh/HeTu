@@ -2,7 +2,9 @@
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+#if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
+#endif
 using HeTu;
 using NUnit.Framework;
 using UnityEngine;
@@ -19,7 +21,7 @@ namespace Tests.HeTu
             HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError);
             HeTuClient.Instance.SetProtocol(new ZlibProtocol());
             HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
-                null).Forget();
+                null); //.Forget();
         }
 
         [OneTimeTearDown]
@@ -70,7 +72,11 @@ namespace Tests.HeTu
                 newValue = int.Parse(sender.Data["value"]);
             };
             HeTuClient.Instance.CallSystem("use_hp", 2);
+            #if UNITY_6000_0_OR_NEWER
+            await Awaitable.WaitForSecondsAsync(1);
+            #else
             await UniTask.Delay(1000);
+            #endif
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
@@ -94,7 +100,11 @@ namespace Tests.HeTu
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
+                #if UNITY_6000_0_OR_NEWER
+                await Awaitable.WaitForSecondsAsync(1);
+                #else
                 await UniTask.Delay(1);
+                #endif
             }
 
             // 测试回收自动反订阅，顺带测试Class类型
@@ -123,7 +133,11 @@ namespace Tests.HeTu
                 args => { callbackCalled = true; };
 
             HeTuClient.Instance.CallSystem("login", 123, true);
+            #if UNITY_6000_0_OR_NEWER
+            await Awaitable.WaitForSecondsAsync(1);
+            #else
             await UniTask.Delay(300);
+            #endif
             Assert.AreEqual(123, responseID);
 
             Assert.True(callbackCalled);
@@ -152,7 +166,11 @@ namespace Tests.HeTu
                 newValue = int.Parse(sender.Rows[rowID]["value"]);
             };
             HeTuClient.Instance.CallSystem("use_hp", 2);
+            #if UNITY_6000_0_OR_NEWER
+            await Awaitable.WaitForSecondsAsync(1);
+            #else
             await UniTask.Delay(1000);
+            #endif
             Assert.AreEqual(newValue, lastValue - 2);
 
             Debug.Log("TestIndexSubscribeOnUpdate结束");
@@ -175,14 +193,22 @@ namespace Tests.HeTu
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].owner; };
             HeTuClient.Instance.CallSystem("move_user", 123, 2, -10);
+            #if UNITY_6000_0_OR_NEWER
+            await Awaitable.WaitForSecondsAsync(1);
+            #else
             await UniTask.Delay(1000);
+            #endif
             Assert.AreEqual(newPlayer, 123);
 
             // OnDelete
             long? removedPlayer = null;
             sub.OnDelete += (sender, rowID) => { removedPlayer = sender.Rows[rowID].owner; };
             HeTuClient.Instance.CallSystem("move_user", 123, 11, -10);
+            #if UNITY_6000_0_OR_NEWER
+            await Awaitable.WaitForSecondsAsync(1);
+            #else
             await UniTask.Delay(1000);
+            #endif
             Assert.AreEqual(removedPlayer, 123);
 
             Assert.False(sub.Rows.ContainsKey(123));
