@@ -3,6 +3,8 @@
 > [!NOTE]
 > 内测中，正在公司内部开发使用
 
+ [ <img src="https://devin.ai/favicon.ico" style="height: 1em;"/> English Summary (AI) ](https://deepwiki.com/Heerozh/HeTu)
+
 # 🌌 河图 HeTu
 
 河图是一个开源轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
@@ -80,13 +82,9 @@ async def move_to(ctx: Context, x, y):
 河图有个内部 System 叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联`user_id`。
 
 > [!NOTE]
-> 什么是内部 System?
-> 内部 System 为 Admin 权限的 System，客户端不可调用。
-
-> [!NOTE]
-> 为什么要通过内部 System？直接函数调用不行么？
-> 任何函数方法，如果牵涉到数据库操作，都需要通过 System 走事务。
-> 想要调用其他 System，必须通过参数`bases`继承。
+> 什么是内部 System? 如何调用？
+> 内部 System 为 Admin 权限的 System，用户不可调用。
+> 因牵涉到数据库事务操作，必须通过参数`bases`继承，然后即可通过`ctx`调用。
 
 ```Python
 from hetu.system import define_system, Context
@@ -170,7 +168,8 @@ public class FirstGame : MonoBehaviour
 }
 ```
 
-最后就是显示其他玩家的实时位置，可以在任意`async`函数中进行。
+最后就是显示其他玩家的实时位置，我们通过订阅回调，自动获取玩家数据更新。
+订阅是推送性的，如果没数据变更，服务器端无消耗。
 
 ```c#
     async void SubscribeOthersPositions()
@@ -191,7 +190,8 @@ public class FirstGame : MonoBehaviour
         _allPlayerData.OnDelete += (sender, rowID) => {
             // 代码省略
         };
-        // 当_allPlayerData数据中有任何行发生变动时（任何属性变动都会触发整行事件，这也是Component属性要少的原因）
+        // 当_allPlayerData数据中有任何行发生变动时
+        //（任何属性变动都会触发整行事件，这也是Component属性要少的原因）
         _allPlayerData.OnUpdate += (sender, rowID) => {
             var data = sender.Rows[rowID];
             var playerID = long.Parse(data["owner"]);  // 前面Query时没有带类型，所以数据都是字符串型
@@ -225,9 +225,9 @@ ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
 
 CPS(每秒调用次数)结果为：
 
-|         | direct redis(Calls) |
-|:--------|--------------------:|
-| Avg(每秒) |            30,345.2 |
+| Time\Calls | ZRANG...EXEC |
+| :--------- | -----------: |
+| Avg(每秒)  |     30,345.2 |
 
 - ARM 版的 Redis 性能，hset/get 性能一致，但牵涉 zrange 和 multi 指令后性能低 40%，不建议
 - 各种兼容 Redis 指令的数据库，并非 Redis，不可使用，可能有奇怪 BUG
@@ -263,7 +263,23 @@ CPS(每秒调用次数)测试结果为：
 
 之前基于性能选择过 LuaJIT，但 Lua 写起来并不轻松，社区也小。考虑到现在的 CPU 价格远低于开发人员成本，快速迭代，数据分析，无缝 AI，社区活跃的宛如人肉 JIT 的 Python，更具有优势。
 
-HeTu 未来会支持 Rust 代码，可提供 Native 的性能（实现中)，况且 Component 本来就是 C 结构。
+### Native 计算
+
+由于 Component 数据本来就是 C 结构，Python可以使用LuaJIT的FFI，传入你的C/Rust代码，可以极低代价实现Native性能：
+```python
+from cffi import FFI
+ffi = FFI()
+ffi.cdef("""
+    void process(char* data);
+""")
+c_lib = self.ffi.dlopen('lib.dll')
+
+async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
+    c_lib.process(ffi.from_buffer(pos))
+```
+
+注意，你的 C 代码并不会比 numpy 自带的方法更快，因为 numpy 的方法都是并行及 SIMD 优化的，先询问 AI 用 numpy 的解决方案。
+
 
 ## ⚙️ 服务器安装
 
@@ -369,9 +385,12 @@ Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL�
 
 如果项目已有 UniTask 依赖，可以择一删除。
 
+> [!NOTE]
+> 如果使用 Unity 6 及以上版本，SDK 使用Unity 原生 Async 库，可以直接删除 UniTask 目录。
+
 ### TypeScript SDK
 
-用法和接口和之前的 Unity 示例基本一致，但 TS 的可以省去本地类型转换，比 C# 方便。
+用法和接口和之前的 Unity 示例基本一致，安装：
 
 `npm install --save Heerozh/HeTu#npm`
 
@@ -388,18 +407,19 @@ const sub1 = await HeTuClient.select('HP', 100, 'owner')
 // 订阅索引 (类似select * form Position where x >=0 and x <= 10 limit 100)
 // 并注册更新回调
 const sub2 = await HeTuClient.query('Position', 'x', 0, 10, 100)
-sub2?.onInsert = (sender, rowID) => {
+sub2!.onInsert = (sender, rowID) => {
     newPlayer = sender.rows.get(rowID)?.owner
 }    
-sub2?.onDelete = (sender, rowID) => {
+sub2!.onDelete = (sender, rowID) => {
     removedPlayer = sender.rows.get(rowID)?.owner
 }
-sub2?.onUpdate = (sender, rowID) => {
+sub2!.onUpdate = (sender, rowID) => {
     const data = sender.rows.get(rowID)
 }
 // 调用远端函数
 HeTuClient.callSystem('move_user', ...)
-// 取消订阅，在这之前订阅都会持续推送数据变更情况
+// 取消订阅，在这之前数据有变更都会对订阅推送
+sub1.dispose()
 sub2.dispose()
 // 退出        
 HeTuClient.close()

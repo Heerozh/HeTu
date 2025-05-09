@@ -10,7 +10,12 @@ using System.Linq;
 using System.Text;
 using UnityWebSocket;
 using System.Threading;
+#if UNITY_6000_0_OR_NEWER
+using System.Threading.Tasks;
+using UnityEngine;
+#else
 using Cysharp.Threading.Tasks;
+#endif
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine.Scripting;
@@ -155,7 +160,11 @@ namespace HeTu
         // ------------Private定义------------
         static readonly Lazy<HeTuClient> Lazy = new(() => new HeTuClient());
         readonly ConcurrentQueue<byte[]> _sendingQueue = new();
+        #if UNITY_6000_0_OR_NEWER
+        readonly ConcurrentQueue<TaskCompletionSource<List<object>>> _waitingSubTasks = new();
+        #else
         readonly ConcurrentQueue<UniTaskCompletionSource<List<object>>> _waitingSubTasks = new();
+        #endif
         Dictionary<string, WeakReference> _subscriptions = new();
         IWebSocket _socket;
         LogFunction _logError;
@@ -231,7 +240,11 @@ namespace HeTu
         ///                 await Task.Delay(1000);
         ///     }}}
         /// </code>
+        #if UNITY_6000_0_OR_NEWER
+        public async Awaitable<Exception> Connect(string url, CancellationToken? token)
+        #else
         public async UniTask<Exception> Connect(string url, CancellationToken? token)
+        #endif
         {
             // 检查连接状态(应该不会遇到）
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
@@ -246,7 +259,11 @@ namespace HeTu
             _subscriptions = new Dictionary<string, WeakReference>();
 
             // 连接并等待
+            #if UNITY_6000_0_OR_NEWER
+            var tcs = new TaskCompletionSource<Exception>();
+            #else
             var tcs = new UniTaskCompletionSource<Exception>();
+            #endif
             var lastState = "ReadyForConnect";
             _socket = new WebSocket(url);
             _socket.OnOpen += (object sender, OpenEventArgs e) =>
@@ -368,7 +385,11 @@ namespace HeTu
         /// var subscription = await HeTuClient.Instance.Select{HP}(user_id, "owner");
         /// Debug.log("My HP:" + subscription.Data.value);
         /// </code>
+        #if UNITY_6000_0_OR_NEWER
+        public async Awaitable<RowSubscription<T>> Select<T>(
+        #else
         public async UniTask<RowSubscription<T>> Select<T>(
+        #endif
             object value, string where = "id", string componentName = null)
             where T : IBaseComponent
         {
@@ -392,7 +413,11 @@ namespace HeTu
             _logDebug?.Invoke($"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
 
             // 等待服务器结果
+            #if UNITY_6000_0_OR_NEWER
+            var tcs = new TaskCompletionSource<List<object>>();
+            #else
             var tcs = new UniTaskCompletionSource<List<object>>();
+            #endif
             _waitingSubTasks.Enqueue(tcs);
             List<object> subMsg;
             try
@@ -425,10 +450,14 @@ namespace HeTu
             return newSub;
         }
 
-        public UniTask<RowSubscription<DictComponent>> Select(
+        #if UNITY_6000_0_OR_NEWER
+        public async Awaitable<RowSubscription<DictComponent>> Select(
+        #else
+        public async UniTask<RowSubscription<DictComponent>> Select(
+        #endif
             string componentName, object value, string where = "id")
         {
-            return Select<DictComponent>(value, where, componentName);
+            return await Select<DictComponent>(value, where, componentName);
         }
 
         /// <summary>
@@ -459,7 +488,11 @@ namespace HeTu
         ///     Debug.log($"Delete row: {rowID}，之前的数据：{sender.Rows[rowID]["value"]}");
         /// }
         /// </code>
+        #if UNITY_6000_0_OR_NEWER
+        public async Awaitable<IndexSubscription<T>> Query<T>(
+        #else
         public async UniTask<IndexSubscription<T>> Query<T>(
+        #endif
             string index, object left, object right, int limit,
             bool desc = false, bool force = true, string componentName = null)
             where T : IBaseComponent
@@ -485,7 +518,11 @@ namespace HeTu
             _logDebug?.Invoke($"[HeTuClient] 发送Query订阅: {predictID}");
 
             // 等待服务器结果
+            #if UNITY_6000_0_OR_NEWER
+            var tcs = new TaskCompletionSource<List<object>>();
+            #else
             var tcs = new UniTaskCompletionSource<List<object>>();
+            #endif
             _waitingSubTasks.Enqueue(tcs);
             List<object> subMsg;
             try
@@ -517,11 +554,15 @@ namespace HeTu
             return newSub;
         }
 
-        public UniTask<IndexSubscription<DictComponent>> Query(
+        #if UNITY_6000_0_OR_NEWER
+        public async Awaitable<IndexSubscription<DictComponent>> Query(
+        #else
+        public async UniTask<IndexSubscription<DictComponent>> Query(
+        #endif
             string componentName, string index, object left, object right, int limit,
             bool desc = false, bool force = true)
         {
-            return Query<DictComponent>(index, left, right, limit, desc, force, componentName);
+            return await Query<DictComponent>(index, left, right, limit, desc, force, componentName);
         }
 
         // --------------以下为内部方法----------------
