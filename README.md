@@ -265,7 +265,7 @@ CPS(每秒调用次数)测试结果为：
 
 ### Native 计算
 
-由于 Component 数据本来就是 C 结构，Python可以使用LuaJIT的FFI，传入你的C/Rust代码，可以极低代价实现Native性能：
+由于 Component 数据本来就是 NumPy C 结构，可以使用LuaJIT的FFI，以极低代价调用 C/Rust 代码：
 ```python
 from cffi import FFI
 ffi = FFI()
@@ -274,11 +274,13 @@ ffi.cdef("""
 """)
 c_lib = self.ffi.dlopen('lib.dll')
 
-async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
-    c_lib.process(ffi.from_buffer(pos))
+# System:
+rows = await ctx[Position].query('x', self_pos.x - 10, self_pos.x + 10)
+c_lib.process(ffi.from_buffer(rows))  # 无拷贝，传递指针
+await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码并不会比 numpy 自带的方法更快，因为 numpy 的方法都是并行及 SIMD 优化的，先询问 AI 用 numpy 的解决方案。
+注意，你的 C 代码不一定比 NumPy 自带的方法更快，NumPy 的方法都是并行及 SIMD 优化的。如果不确定，先询问 AI，能几行描述的需求一般都可以用 NumPy 解决。
 
 
 ## ⚙️ 服务器安装
@@ -307,39 +309,21 @@ docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest star
 
 容器一般有 30%的性能损失，为了性能，也可以用原生方式。
 
-先安装[miniconda](https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/)
-软件管理器，含有编译好的 Python 任意版本，河图需要 Python3.12.5 以上版本。
+先[安装uv](https://docs.astral.sh/uv/getting-started/installation/)包管理器。
 
-服务器部署可用安装脚本（清华镜像）：
-
-```shell
-mkdir -p ~/miniconda3
-wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
-bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-rm -rf ~/miniconda3/miniconda.sh
-~/miniconda3/bin/conda init bash
-exec bash
-```
-
-然后创建新的 Python 环境：
+新建项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.13可以去掉）
 
 ```shell
-conda create -n hetu python=3.12
+uv init --python ">=3.12.5, <3.13"
 ```
 
-别忘了激活环境:
+然后把河图添加到你的项目依赖中：
 
 ```shell
-conda activate hetu
+uv add git+https://github.com/Heerozh/HeTu.git
 ```
 
-然后用传统 pip 方式安装河图到当前环境：
-
-```shell
-pip install git+https://github.com/Heerozh/HeTu.git
-```
-
-国内镜像地址：`pip install git+https://gitee.com/heerozh/hetu.git`
+国内镜像地址：`uv add git+https://gitee.com/heerozh/hetu.git`
 
 还要部署 Redis，持久化模式，这里跳过。
 
