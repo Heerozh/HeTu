@@ -8,29 +8,30 @@
 # 🌌 河图 HeTu
 
 河图是一个开源轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
-开发简单、透明，没有复杂的 API 调用，高数据一致性保证，同时隐去了恼人的事务、线程冲突等问题。
+
+超高开发效率：天然响应式，视图与业务解耦；透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
 
 基于 ECS(Entity-Component-System) 概念，采用 Python 语言，支持各种数据科学库，拥抱未来。
 具体性能见下方[性能测试](#性能测试)。
 
-开源并免费，欢迎贡献代码。商业使用只需在 Credits 中注明即可。
-
 ## 游戏服务器引擎，也可称为数据库
 
-河图把数据查询接口"暴露"给游戏客户端，客户端通过 SDK 直接进行 select，query 查询，并订阅同步，
+河图把数据查询接口"暴露"给游戏客户端，客户端通过 SDK 直接进行 select，query 查询/订阅，
 所以河图自称为数据库。写入操作通过 System，也就是服务器的逻辑代码。
 
-这种结构可以大幅减少游戏服务器和客户端的开发量。
+查询返回的是自动同步的订阅，可进行响应式数据绑定。
 
-## 🔰 手把手快速示例
+## 开源免费
 
-一个登录，并在地图上移动的简单示例。首先是服务器端部分，服务器只要 20 行代码，0 配置文件：
+欢迎贡献代码。商业使用只需在 Credits 中注明即可。
+
+## 🔰 快速示例（30行）
+
+一个登录，并在地图上移动的简单示例。
 
 ### 定义组件（Component）
 
-河图的数据表结构（Schema），可通过代码完成定义。
-
-为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表），通过`owner`属性将其关联到玩家 ID。
+为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表Schema），通过`owner`属性将其关联到玩家 ID。
 组件的权限设为`Permission.USER`，所有登录的客户端都可直接向河图查询该组件。
 
 ```Python
@@ -50,7 +51,7 @@ class Position(BaseComponent):
 > 不要创建名叫 Player 的大表，而是把 Player 的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
 > 然后通过`owner`属性关联到 Player 身上。大表会严重影响性能和扩展性。
 
-### 然后写 System（逻辑）
+### 定义 System（逻辑）
 
 #### move_to 移动逻辑
 
@@ -73,7 +74,7 @@ async def move_to(ctx: Context, x, y):
         # with结束后会自动提交修改
 ```
 
-客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`调用`move_to`方法，数据变更会自动推送给所有关注此行数据的客户端。
+客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`调用。
 
 #### Login 登录逻辑
 
@@ -117,7 +118,7 @@ docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest s
 
 ### 客户端代码部分
 
-河图 Unity SDK 使用 UniTask 库，基于 async/await，支持老版本 Unity 和 WebGL 平台。
+河图 Unity SDK 基于 async/await，支持 Unity 2018 以上 和 WebGL 平台。
 
 首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package from git URL”
 
@@ -144,7 +145,7 @@ public class FirstGame : MonoBehaviour
         HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
             this.GetCancellationTokenOnDestroy());
 
-        // 调用登录System，相关封包会启动线程在后台发送
+        // 调用登录System，连接成功后会在后台发送
         HeTuClient.Instance.CallSystem("login_test", SelfID);
 
         await SubscribeOthersPositions();
@@ -259,9 +260,9 @@ CPS(每秒调用次数)测试结果为：
 
 ### 关于 Python 性能
 
-首先河图是异步+分布式的，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。作为参考，Python 性能大概是 PHP7 水平。
+现在Python社区活跃，宛如人肉JIT，性能已不是问题。而且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
 
-之前基于性能选择过 LuaJIT，但 Lua 写起来并不轻松，社区也小。考虑到现在的 CPU 价格远低于开发人员成本，快速迭代，数据分析，无缝 AI，社区活跃的宛如人肉 JIT 的 Python，更具有优势。
+另一方面，CPU 价格已远低于开发人员成本，快速迭代，数据分析，无缝 AI 更具有优势。
 
 ### Native 计算
 
@@ -316,6 +317,10 @@ docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest star
 容器一般有 30%的性能损失，为了性能，也可以用原生方式。
 
 先[安装uv](https://docs.astral.sh/uv/getting-started/installation/)包管理器。
+Windows可在命令行执行：
+```bash
+winget install --id=astral-sh.uv  -e
+```
 
 新建项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.13可以去掉）
 
