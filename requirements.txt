@@ -1,5 +1,5 @@
 sanic ~= 25.3  # pip install -U sanic
-numpy ~= 2.2 # conda install numpy>=2.0
+numpy ~= 2.3 # conda install numpy>=2.0
 redis[hiredis] ~= 6.2  # pip install -U redis[hiredis]
 GitPython ~= 3.1 # pip install -U GitPython
 sortedcontainers ~= 2.4
