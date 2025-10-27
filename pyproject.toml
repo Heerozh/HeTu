@@ -1,17 +1,17 @@
 [project]
 name = "hetu"
 version = "0.1.0"
-description = "Add your description here"
+description = "河图：基于ECS理念，整合数据库和逻辑的游戏服务器框架"
 readme = "README.md"
 requires-python = ">=3.12.5"
 dependencies = [
     "aiohttp>=3.11.18",
     "docker>=7.1.0",
     "gitpython~=3.1",
-    "numpy~=2.2",
-    "orjson~=3.10",
+    "numpy~=2.3",
+    "orjson~=3.11",
     "pyyaml~=6.0",
-    "redis[hiredis]~=5.2",
+    "redis[hiredis]~=6.4",
     "sanic~=25.3",
     "sanic-testing>=24.6.0",
     "sortedcontainers~=2.4",
