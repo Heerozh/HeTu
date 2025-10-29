@@ -1,0 +1,33 @@
+[git]
+conventional_commits = false
+filter_unconventional = false
+tag_pattern = "v?[0-9]+\\.[0-9]+\\.[0-9]+"
+
+commit_parsers = [
+  { message = "^ENH:",  group = "Enhancements" },
+  { message = "^BUG:",  group = "Bug Fixes" },
+  { message = "^DOC:",  group = "Documentation" },
+  { message = "^MAINT:", group = "Maintenance" },
+  { message = "^PERF:", group = "Performance" },
+  { message = "^REF:",  group = "Refactoring" },
+  { message = "^TST:",  group = "Tests" },
+  { message = "^CI:",   group = "CI" },
+  { message = "^BLD:",  group = "Build" },
+  { message = ".*",     group = "Other" },
+]
+
+[changelog]
+header = ""
+trim = true
+body = """
+{% if version %}## {{ version }} - {{ now() | date("%Y-%m-%d") }}{% endif %}
+
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group }}
+{% for commit in commits %}
+- {{ commit.message | split(pat="\n") | first | regex_replace(pattern="^[A-Z]+:\\s*", replacement="") }} ({{ commit.id | truncate(length=7) }})
+{% endfor %}
+
+{% endfor %}
+"""
+footer = ""
