@@ -9,13 +9,3 @@ tabulate
 wcwidth  # for chinese character alignment
 
 websockets  # sanic comes with it, no need to install, just to suppress IDE warnings
-
-# for UnitTest
-trustme  # pip install -U trustme
-docker  # pip install -U docker
-aiohttp  # pip install -U aiohttp
-sanic-testing  # pip install -U sanic-testing
-
-# for maintaining
-tqdm  # Conflict with Sanic
-# conda install ipykernel ipywidgets
