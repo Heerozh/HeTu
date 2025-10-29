@@ -3,21 +3,25 @@ name = "hetu"
 version = "0.1.0"
 description = "河图：基于ECS理念，整合数据库和逻辑的游戏服务器框架"
 readme = "README.md"
-requires-python = ">=3.12.5"
+requires-python = ">=3.13"
 dependencies = [
-    "aiohttp>=3.11.18",
-    "docker>=7.1.0",
     "gitpython~=3.1",
     "numpy~=2.3",
     "orjson~=3.11",
     "pyyaml~=6.0",
     "redis[hiredis]~=7.0",
     "sanic~=25.3",
-    "sanic-testing>=24.6.0",
     "sortedcontainers~=2.4",
     "tabulate>=0.9.0",
-    "tqdm>=4.67.1",
-    "trustme>=1.2.1",
     "wcwidth>=0.2.13",
     "websockets>=15.0.1",
+]
+
+[dependency-groups]
+dev = [
+    "aiohttp>=3.13.1",
+    "docker>=7.1.0",
+    "sanic-testing>=24.6.0",
+    "tqdm>=4.67.1",
+    "trustme>=1.2.1",
 ]
