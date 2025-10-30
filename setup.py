@@ -17,7 +17,7 @@ setup(
         "Programming Language :: Python :: 3",
         "Operating System :: OS Independent",
     ],
-    python_requires='>=3.12.5',
+    python_requires='>=3.13',
     install_requires=requirements,
 
     version=re.findall(r"^__version__ = \"([^']+)\"\r?$",
