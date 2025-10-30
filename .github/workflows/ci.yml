@@ -1,5 +1,11 @@
 name: Workflow for Codecov python
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - '**.py'
+  pull_request:
+    paths:
+      - '**.py'
 jobs:
   run:
     timeout-minutes: 3
