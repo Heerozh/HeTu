@@ -20,9 +20,9 @@ jobs:
         with:
           python-version: '3.13'
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: pip install -e .
       - name: Install pytest
-        run: pip install -r requirements-dev.txt
+        run: pip install --dependency-groups dev
       - name: Run tests and collect coverage
         run: |
           PWD=$(pwd)

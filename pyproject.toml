@@ -1,9 +1,26 @@
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "hetu"
-version = "0.1.0"
+dynamic = ["version"]
 description = "河图：基于ECS理念，整合数据库和逻辑的游戏服务器框架"
 readme = "README.md"
 requires-python = ">=3.13"
+license = {text = "Apache 2.0"}
+authors = [
+    {name = "Zhang Jianhao", email = "heeroz@gmail.com"}
+]
+keywords = [
+    "online", "game", "server", "database",
+    "ecs", "entity", "component",
+    "mmo", "multiplayer", "gamedev", "game-framework", "game-server", "game-engine"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "gitpython~=3.1",
     "numpy~=2.3",
@@ -17,6 +34,12 @@ dependencies = [
     "websockets>=15.0.1",
 ]
 
+[project.urls]
+Homepage = "https://hetudb.cn"
+
+[project.scripts]
+hetu = "hetu.__main__:main"
+
 [dependency-groups]
 dev = [
     "aiohttp>=3.13.1",
@@ -25,3 +48,10 @@ dev = [
     "tqdm>=4.67.1",
     "trustme>=1.2.1",
 ]
+
+[tool.setuptools_scm]
+# 从 git tag 自动生成版本号
+version_scheme = "guess-next-dev"
+version_file = "hetu/__version__.py"
+
+[tool.setuptools.packages.find]
