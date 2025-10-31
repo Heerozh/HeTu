@@ -5,3 +5,4 @@
 [submodule "ClientSDK/unity/UniTask"]
 	path = ClientSDK/unity/UniTask
 	url = https://github.com/Cysharp/UniTask.git
+	branch = master
