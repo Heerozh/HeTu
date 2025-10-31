@@ -113,6 +113,12 @@ class RedisBackend(Backend):
         else:
             self.io = redis.from_url(self.master_url, decode_responses=True)
             self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
+        # 测试连接是否正常
+        try:
+            self.io.ping()
+        except redis.exceptions.ConnectionError as e:
+            raise ConnectionError(f"无法连接到Redis数据库：{self.master_url}") from e
+
         self.dbi = self.io.connection_pool.connection_kwargs['db']
         # 加载lua脚本
         self.load_lua_scripts()
@@ -123,6 +129,12 @@ class RedisBackend(Backend):
         if not self.servant_urls:
             self.servant_urls.append(self.master_url)
             self.replicas.append(self._aio)
+        # 测试连通性
+        for replica in self.replicas:
+            try:
+                replica.ping()
+            except redis.exceptions.ConnectionError as e:
+                raise ConnectionError(f"无法连接到replicas：{replica}") from e
         # 限制aio运行的coroutine
         try:
             self.loop_id = hash(asyncio.get_running_loop())
