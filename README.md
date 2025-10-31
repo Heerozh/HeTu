@@ -105,16 +105,15 @@ async def login_test(ctx: Context, user_id):
 
 #### 启动服务器
 
-安装 Docker Desktop 后，直接在任何系统下执行一行命令即可（需要海外网）：
+详见 [安装](#安装) 部分：
 
 ```bash
+# 安装Docker Desktop后，启动Redis服务器(开发环境用，需外网）
+docker run -d --rm --name hetu-redis -p 6379:6379 redis:latest
+# 启动你的App服务器
 cd examples/server/first_game
-docker run --rm -p 2466:2466 -v .\app:/app -v .\data:/data heerozh/hetu:latest start --namespace=ssw --instance=walking
+uv run hetu start --app-file=./src/app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=walking
 ```
-
-- `-p` 是映射本地端口:到 hetu 容器端口，比如要修改成 443 端口就使用`-p 443:2466`
-- `-v` 是映射本地目录:到容器目录，需映射`/app`代码目录，`/data`快照目录。`/logs`目录可选
-- 其他参数见帮助`docker run --rm heerozh/hetu:latest start --help`
 
 ### 客户端代码部分
 
@@ -212,7 +211,7 @@ public class FirstGame : MonoBehaviour
 
 |          |                 服务器 型号 |                            设置 |   
 |:---------|-----------------------:|------------------------------:|
-| 河图       |        ecs.c7.16xlarge | 32核64线程，默认配置，参数: --workers=76 |
+| 河图       |        ecs.c8a.16xlarge | 32核64线程，默认配置，参数: --workers=76 |
 | Redis7.0 | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
 | 跑分程序     |                     本地 |   参数： --clients=1000 --time=5 |        
 
@@ -242,25 +241,26 @@ CPS(每秒调用次数)测试结果为：
 
 | Time     | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
 |:---------|-------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒)  |            222,443 |               33,900.6 |                   18,237.6 |      90,979.6 |
-| CPU负载    |                99% |                    50% |                        40% |           70% |
+| Avg(每秒)  |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
+| CPU负载    |                99% |                    34% |                        26% |           65% |
 | Redis负载  |                 0% |                    99% |                        99% |           99% |
 
 以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。
+在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），其他项目受限数据库性能，不影响。
 
 ### 单连接性能：
 
 测试程序使用`--clients=1`参数测试，单线程同步堵塞模式，主要测试 RTT：
 
-| Time     | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:---------|-------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒)  |           8,738.96 |               1,034.67 |                     632.65 |      1,943.82 |
-| RTT(ms)  |            0.11443 |               0.966495 |                    1.58065 |       0.51445 |
+| Time     |  hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
+|:---------|--------------------:|-----------------------:|---------------------------:|--------------:|
+| Avg(每秒)  |            14,353.7 |               1,142.13 |                    698.544 |      2,142.06 |
+| RTT(ms)  |           0.0696686 |               0.875555 |                    1.43155 |      0.466841 |
     
 
 ### 关于 Python 性能
 
-现在Python社区活跃，宛如人肉JIT，性能已不是问题。而且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
+现在Python社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
 
 另一方面，CPU 价格已远低于开发人员成本，快速迭代，数据分析，无缝 AI 更具有优势。
 
@@ -273,48 +273,20 @@ ffi = FFI()
 ffi.cdef("""
     void process(char* data); // char*需转换成Position*
 """)
-c_lib = self.ffi.dlopen('lib.dll')
+c_lib = ffi.dlopen('lib.dll')
 
 # 获取Array of Position
-rows = await ctx[Position].query('x', self_pos.x - 10, self_pos.x + 10)
-c_lib.process(ffi.from_buffer(rows))  # 无拷贝，传递指针
+rows = await ctx[Position].query('x', pos.x - 10, pos.x + 10)
+c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更快，NumPy 的方法都是并行及 SIMD 优化的。如果不确定，先询问 AI，能几行描述的需求一般都可以用 NumPy 解决。
-
-比如把上述查询结果，小于自己x坐标的，全部推远10距离，这段 Python 代码比 C 循环写要快的多：
-```python
-rows.x[rows.x < self_pos.x] -= 10
-```
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：`rows.x[rows.x < self_pos.x] -= 10`
 
 
+## ⚙️ 安装
 
-## ⚙️ 服务器安装
-
-### 容器启动
-
-使用 hetu 的 docker 镜像，此镜像内部集成了 Redis，适合快速开始。
-
-```bash
-docker run --rm -v .\本地app目录/app:/app -v .\本地数据目录:/data -p 2466:2466 heerozh/hetu:latest start --namespace=namespace --instance=server_name
-```
-
-其他参数可用`docker run --rm heerozh/hetu:latest --help`查看，
-
-也可以使用 Standalone 模式，只启动河图，不启动 Redis。
-
-```bash
-docker run --rm -p 2466:2466 -v .\本地目录\app:/app heerozh/hetu:latest start --config /app/config.yml --standalone
-```
-
-可以启动多台 hetu standalone 服务器，然后用反向代理对连接进行负载均衡。
-
-后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
-
-### 原生启动！
-
-容器一般有 30%的性能损失，为了性能，也可以用原生方式。
+开发环境建议用 uv 包管理安装（需外网）。
 
 先[安装uv](https://docs.astral.sh/uv/getting-started/installation/)包管理器。
 Windows可在命令行执行：
@@ -322,40 +294,106 @@ Windows可在命令行执行：
 winget install --id=astral-sh.uv  -e
 ```
 
-新建项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.13可以去掉）
+新建你的项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.14可以去掉）
 
 ```shell
-uv init --python ">=3.12.5, <3.13"
+uv init --python ">=3.13, <3.14"
 ```
 
-然后把河图添加到你的项目依赖中：
+此后你的项目就由uv管理，类似npm，然后把河图添加到你的项目依赖中：
 
 ```shell
-uv add git+https://github.com/Heerozh/HeTu.git
+uv add hetudb
 ```
 
-国内镜像地址：`uv add git+https://gitee.com/heerozh/hetu.git`
+还要部署 Redis，开启持久化模式，这里跳过。
 
-还要部署 Redis，持久化模式，这里跳过。
-
-大功告成：
+启动河图：
 
 ```bash
-hetu start --app-file=/path/to/app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
+uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=server_name
 ```
 
 其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.yml`方式启动，
 配置模板见 CONFIG_TEMPLATE.yml 文件。
 
-### 内网离线环境
+### 内网离线开发环境
 
-想要在内网设置环境，外网机执行上述原生启动步骤后，把整个项目目录（包含.venv）复制过去即可。
+uv会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
 
-### 生产部署
+内网也可以跳过uv直接用`source .venv/bin/activate`激活环境使用。
 
-生产环境下，除了执行上述一种启动步骤外，还要建议设立一层反向代理，并进行负载均衡。
+## 🎉 生产部署
 
-Redis 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到 replica，大幅降低 master 负载。
+生产环境推荐用 Docker 部署或 pip 直接安装，这2种都有国内镜像源。
+
+### Docker 部署
+
+安装 Docker，详见[阿里云镜像](https://help.aliyun.com/zh/ecs/user-guide/install-and-use-docker):
+
+```bash
+#更新包管理工具
+sudo apt-get update
+#添加Docker软件包源
+sudo apt-get -y install apt-transport-https ca-certificates curl software-properties-common
+sudo curl -fsSL http://mirrors.cloud.aliyuncs.com/docker-ce/linux/debian/gpg | sudo apt-key add -
+sudo add-apt-repository -y "deb [arch=$(dpkg --print-architecture)] http://mirrors.cloud.aliyuncs.com/docker-ce/linux/debian $(lsb_release -cs) stable"
+#安装Docker社区版本，容器运行时containerd.io，以及Docker构建和Compose插件
+sudo apt-get -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+
+在你的项目目录下，创建 `Dockerfile` 文件，内容如下：
+
+```Dockerfile
+# 如果是阿里云内网请用 registry-vpc.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
+FROM registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
+
+WORKDIR /app
+
+COPY . .
+RUN pip install .
+
+ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
+```
+
+这里使用的是国内镜像，你也可以用 [Docker Hub 的镜像](https://hub.docker.com/r/heerozh/hetu)。
+`hetu:latest`表示最新版本，你也可以指定版本号。
+
+注意你的项目目录格式得符合src-layout，不然RUN pip install .会失败。
+
+然后执行：
+
+```bash
+# 编译你的应用镜像
+docker build -t app_image_name .
+# 启动你的应用
+docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
+```
+
+使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用9折的抢占服务器，然后用反向代理对连接进行负载均衡。
+
+后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
+
+### pip 原生部署
+
+容器一般有 30%的性能损失，常驻服务器可以用pip的方式部署 (无须安装uv)，且pip在国内云服务器都自带加速镜像。
+
+```bash
+# 进入项目目录
+cd your_app_directory
+# 根据项目pyproject.toml安装依赖，河图应该在其中
+pip install .
+# 启动河图
+hetu start --config=./config.yml --head=True
+```
+
+### Redis部署
+
+Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到 replica，大幅降低 master 负载。
+
+### 负载均衡
+
+生产环境下，对河图还要建议设立一层反向代理，并进行负载均衡。
 
 反向代理选择：
 
