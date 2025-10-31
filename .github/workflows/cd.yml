@@ -19,7 +19,39 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  release-on-tag:
+  publish-pypi-on-tag:
+    name: Publish to PyPI on Tag
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+      url: https://pypi.org/p/hetudb
+    permissions:
+      id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install build twine
+
+      - name: Build the package
+        run: python -m build
+
+      - name: Upload to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+
+  publish-docker-on-tag:
     name: Publish Docker and GitHub Release on Tag
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
