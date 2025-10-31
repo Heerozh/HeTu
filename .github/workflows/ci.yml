@@ -3,6 +3,7 @@ on:
   push:
     paths:
       - '**.py'
+      - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - '**.py'
