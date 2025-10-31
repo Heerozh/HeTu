@@ -320,7 +320,7 @@ def define_component(
             blob = tree[relpath]
             sha = blob.hexsha
             cls.git_hash_ = sha
-        except (KeyError, git.exc.InvalidGitRepositoryError):
+        except (KeyError, git.exc.InvalidGitRepositoryError, ValueError):
             lib_path = os.path.abspath(__file__ + '/../../')
             # if lib_path not in caller.filename: 等自动迁移完成后再打开
             #     warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
