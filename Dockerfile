@@ -1,7 +1,7 @@
 # 河图的image
-FROM python:3.13-alpine
+FROM python:3.13-slim
 
-RUN apk add git
+RUN apt-get update && apt-get install -y git
 
 # RUN pip install git+https://github.com/Heerozh/HeTu.git 用copy才能判断文件是否已更改
 COPY ./hetu /hetu
