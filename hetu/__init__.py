@@ -9,4 +9,10 @@ from . import system
 from . import common
 
 from .manager import ComponentTableManager
-from .__version__ import __version__
+
+from importlib.metadata import version, PackageNotFoundError
+
+try:
+    __version__ = version("hetu")
+except PackageNotFoundError:
+    __version__ = "hetu is not installed in a proper way"

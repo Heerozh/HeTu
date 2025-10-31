@@ -5,8 +5,7 @@ RUN apk add git
 
 # RUN pip install git+https://github.com/Heerozh/HeTu.git 用copy才能判断文件是否已更改
 COPY ./hetu /hetu
-COPY ./setup.py /setup.py
-COPY ./requirements.txt /requirements.txt
+COPY ./pyproject.toml /pyproject.toml
 COPY ./README.md /README.md
 RUN pip install /
 
