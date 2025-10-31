@@ -55,5 +55,7 @@ dev = [
 # 从 git tag 自动生成版本号
 version_scheme = "guess-next-dev"
 version_file = "hetu/__version__.py"
+# for dependabot to work
+fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
