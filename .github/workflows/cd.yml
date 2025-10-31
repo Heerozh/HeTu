@@ -21,7 +21,7 @@ concurrency:
 jobs:
   publish-pypi-on-tag:
     name: Publish to PyPI on Tag
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     runs-on: ubuntu-latest
     environment:
       name: release
@@ -53,7 +53,7 @@ jobs:
 
   publish-docker-on-tag:
     name: Publish Docker and GitHub Release on Tag
-    if: startsWith(github.ref, 'refs/tags/')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     runs-on: ubuntu-latest
     steps:
       - name: Check out the repo
