@@ -3,7 +3,7 @@ requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "hetu"
+name = "hetudb"
 dynamic = ["version"]
 description = "河图：基于ECS理念，整合数据库和逻辑的游戏服务器框架"
 readme = "README.md"
