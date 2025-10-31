@@ -9,6 +9,7 @@ from hetu.data.backend.redis import RedisTransaction
 class UnitTestBackends:
     def __init__(self):
         self.containers = {}
+        self.network = None
 
     def teardown(self):
         print('ℹ️ 清理docker...')
@@ -18,6 +19,11 @@ class UnitTestBackends:
                 container.wait()
             except (NotFound, ImportError, docker.errors.APIError):
                 pass
+        print('ℹ️ 清理交换机')
+        try:
+            self.network.remove()
+        except (docker.errors.NotFound, docker.errors.APIError):
+            pass
         # 因为服务器销毁了，清理下python中的全局lua缓存
         RedisTransaction.lua_check_unique = None
         RedisTransaction.lua_run_stacked = None
@@ -50,16 +56,20 @@ class UnitTestBackends:
                 client.containers.get('hetu_test_redis_replica').remove()
             except (docker.errors.NotFound, docker.errors.APIError):
                 pass
+            try:
+                client.networks.get('hetu_test_net').remove()
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass
+            # 启动交换机
+            self.network = client.networks.create("hetu_test_net", driver="bridge")
             # 启动服务器
             self.containers['redis'] = client.containers.run(
                 "redis:latest", detach=True, ports={'6379/tcp': port}, name='hetu_test_redis',
-                auto_remove=True)
-            host_ip = socket.gethostbyname(socket.gethostname())
-            print("host_ip:", host_ip)
+                auto_remove=True, network="hetu_test_net", hostname="redis-master")
             self.containers['redis_replica'] = client.containers.run(
                 "redis:latest", detach=True, ports={'6379/tcp': port+1},
-                name='hetu_test_redis_replica', auto_remove=True,
-                command=["redis-server", f"--replicaof {host_ip} {port}", "--replica-read-only yes"])
+                name='hetu_test_redis_replica', auto_remove=True, network="hetu_test_net",
+                command=["redis-server", f"--replicaof redis-master 6379", "--replica-read-only yes"])
             r = redis.Redis(host="127.0.0.1", port=port)
             r_slave = redis.Redis(host="127.0.0.1", port=port+1)
             # 等待docker启动完毕
