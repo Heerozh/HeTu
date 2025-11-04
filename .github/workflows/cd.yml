@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   publish-pypi-on-tag:
+    timeout-minutes: 10
     name: Publish to PyPI on Tag
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     runs-on: ubuntu-latest
@@ -52,6 +53,7 @@ jobs:
 
 
   publish-docker-on-tag:
+    timeout-minutes: 10
     name: Publish Docker and GitHub Release on Tag
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
     runs-on: ubuntu-latest
@@ -122,6 +124,7 @@ jobs:
           generate_release_notes: false
 
   nightly_build:
+    timeout-minutes: 10
     name: Nightly build and push (if new commits)
     # 仅在定时或手动触发时运行
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
