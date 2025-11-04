@@ -40,7 +40,7 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "@types/pako": "^2.0.3",
+    "@types/pako": "^2.0.4",
     "prettier": "3.6.2",
     "typescript": "~5.8.3",
     "vite": "^7.1.12",
