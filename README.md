@@ -7,19 +7,21 @@
 
 # 🌌 河图 HeTu
 
-河图是一个开源轻量化的分布式游戏服务器引擎。集成了数据库概念，适用于从万人 MMO 到多人联机的各种场景。
+河图是一个分布式游戏服务器引擎。类似supabase，但专为游戏轻量化设计。
 
-超高开发效率：天然响应式，视图与业务解耦；透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
+- 高开发效率：透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
+- Python 语言：支持各种数据科学库，拥抱未来。
+- 高性能：高并发异步架构 + Redis 后端，数据库操作性能约10x倍于supabase等。
+- Unity客户端SDK：支持C# Reactive，调用简单，基于服务器推送的天然响应式，视图与业务解耦。
 
-基于 ECS(Entity-Component-System) 概念，采用 Python 语言，支持各种数据科学库，拥抱未来。
-具体性能见下方[性能测试](#性能测试)。
+具体性能见下方[性能测试](#-性能测试)。
 
-## 游戏服务器引擎，也可称为数据库
+## 实时数据库
 
-河图把数据查询接口"暴露"给游戏客户端，客户端通过 SDK 直接进行 select，query 查询/订阅，
-所以河图自称为数据库。写入操作通过 System，也就是服务器的逻辑代码。
+河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的进行 select/query 订阅。
+订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
 
-查询返回的是自动同步的订阅，可进行响应式数据绑定。
+写入操作只能由服务器的逻辑代码执行，客户端通过RPC远程调用。类似BaaS的储存过程，但更易写。
 
 ## 开源免费
 
@@ -74,7 +76,7 @@ async def move_to(ctx: Context, x, y):
         # with结束后会自动提交修改
 ```
 
-客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`调用。
+客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`可直接调用。
 
 #### Login 登录逻辑
 
@@ -85,7 +87,7 @@ async def move_to(ctx: Context, x, y):
 > [!NOTE]
 > 什么是内部 System? 如何调用？
 > 内部 System 为 Admin 权限的 System，用户不可调用。
-> 因牵涉到数据库事务操作，必须通过参数`bases`继承，然后即可通过`ctx`调用。
+> System都牵涉到数据库事务操作，因此须通过参数`bases`继承，让事务连续。
 
 ```Python
 from hetu.system import define_system, Context
@@ -101,11 +103,11 @@ async def login_test(ctx: Context, user_id):
 
 服务器就完成了，我们不需要传输数据的代码，因为河图是个“数据库”，客户端可直接查询。
 
-把以上内容存到`.\app\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
+把以上内容存到`.\src\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
 
 #### 启动服务器
 
-详见 [安装](#安装) 部分：
+详见 [安装](#%EF%B8%8F-安装) 部分：
 
 ```bash
 # 安装Docker Desktop后，启动Redis服务器(开发环境用，需外网）
@@ -165,11 +167,9 @@ public class FirstGame : MonoBehaviour
         if (vec != Vector3.zero)
             HeTuClient.Instance.CallSystem("move_to", transform.position.x, transform.position.z);
     }
-}
 ```
 
 最后就是显示其他玩家的实时位置，我们通过订阅回调，自动获取玩家数据更新。
-订阅是推送性的，如果没数据变更，服务器端无消耗。
 
 ```c#
     async void SubscribeOthersPositions()
@@ -245,8 +245,8 @@ CPS(每秒调用次数)测试结果为：
 | CPU负载    |                99% |                    34% |                        26% |           65% |
 | Redis负载  |                 0% |                    99% |                        99% |           99% |
 
-以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。
-在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），其他项目受限数据库性能，不影响。
+* _以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。_
+* _在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），其他项目受限数据库性能，不影响。_
 
 ### 单连接性能：
 
@@ -260,9 +260,9 @@ CPS(每秒调用次数)测试结果为：
 
 ### 关于 Python 性能
 
-现在Python社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
+不用担心 Python 的性能。CPU 价格已远低于开发人员成本，快速迭代，数据分析，AI 生态更具有优势。
 
-另一方面，CPU 价格已远低于开发人员成本，快速迭代，数据分析，无缝 AI 更具有优势。
+现在 Python 社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
 
 ### Native 计算
 
@@ -281,23 +281,20 @@ c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：`rows.x[rows.x < self_pos.x] -= 10`
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：`rows.x[rows.x >= 10] -= 10`
 
 
 ## ⚙️ 安装
 
-开发环境建议用 uv 包管理安装（需外网）。
-
-先[安装uv](https://docs.astral.sh/uv/getting-started/installation/)包管理器。
-Windows可在命令行执行：
+开发环境建议用 uv 包管理安装。 Windows可在命令行执行：
 ```bash
 winget install --id=astral-sh.uv  -e
 ```
 
-新建你的项目目录，在目录中初始化uv：（如果你不需要pyTorch，<3.14可以去掉）
+新建你的项目目录，在目录中初始化uv，最低版本需求 `3.13`：
 
 ```shell
-uv init --python ">=3.13, <3.14"
+uv init --python "3.13"
 ```
 
 此后你的项目就由uv管理，类似npm，然后把河图添加到你的项目依赖中：
@@ -321,7 +318,7 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 uv会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
 
-内网也可以跳过uv直接用`source .venv/bin/activate`激活环境使用。
+内网建议跳过uv直接用`source .venv/bin/activate`激活环境使用。
 
 ## 🎉 生产部署
 
@@ -356,7 +353,7 @@ RUN pip install .
 ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
 ```
 
-这里使用的是国内镜像，你也可以用 [Docker Hub 的镜像](https://hub.docker.com/r/heerozh/hetu)。
+这里使用的是国内镜像，国外可用 [Docker Hub 的镜像](https://hub.docker.com/r/heerozh/hetu)。
 `hetu:latest`表示最新版本，你也可以指定版本号。
 
 注意你的项目目录格式得符合src-layout，不然RUN pip install .会失败。
@@ -376,11 +373,26 @@ docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
 
 ### pip 原生部署
 
-容器一般有 30%的性能损失，常驻服务器可以用pip的方式部署 (无须安装uv)，且pip在国内云服务器都自带加速镜像。
+容器一般有 20% 的性能损失，常驻服务器可以用pip的方式部署 (无须安装uv)，且pip在国内云服务器都自带加速镜像。
+
+原生部署困难处在于如何安装高版本 python，建议通过清华miniconda源安装，uv、pyenv等都需要海外网。
 
 ```bash
+# 通过miniconda安装python 3.13
+mkdir -p ~/miniconda3
+wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
+bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
+rm -rf ~/miniconda3/miniconda.sh
+~/miniconda3/bin/conda init bash
+exec bash
+
+# 然后创建新的Python环境：
+conda create -n hetu python=3.13
+
 # 进入项目目录
 cd your_app_directory
+# 每次执行python指令前都要执行此命令激活环境
+conda activate hetu  
 # 根据项目pyproject.toml安装依赖，河图应该在其中
 pip install .
 # 启动河图
@@ -390,6 +402,10 @@ hetu start --config=./config.yml --head=True
 ### Redis部署
 
 Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到 replica，大幅降低 master 负载。
+
+> [!NOTE]
+> * 不要使用兼容 Redis
+> * 不要使用非直连的 Redis
 
 ### 负载均衡
 

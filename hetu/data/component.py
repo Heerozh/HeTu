@@ -24,7 +24,7 @@ logger = logging.getLogger('HeTu.root')
 class Permission(IntEnum):
     EVERYBODY = 1
     USER = 2
-    OWNER = 3
+    OWNER = 3  # todo 改成RLS，然后由rls_func参数决定具体的rls逻辑
     ADMIN = 999
 
 
