@@ -51,18 +51,14 @@ async def sub_call(data: list, executor: SystemExecutor, subs: Subscriptions,
     if table is None:
         raise ValueError(f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}")
 
-    if ctx.group and ctx.group.startswith("admin"):
-        caller = 'admin'
-    else:
-        caller = ctx.caller
-
+    sub_id = None
     match data[2]:
         case 'select':
             check_length('select', data, 5, 5)
-            sub_id, data = await subs.subscribe_select(table, caller, *data[3:])
+            sub_id, data = await subs.subscribe_select(table, ctx, *data[3:])
         case 'query':
             check_length('query', data, 5, 8)
-            sub_id, data = await subs.subscribe_query(table, caller, *data[3:])
+            sub_id, data = await subs.subscribe_query(table, ctx, *data[3:])
         case 'logic_query':
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
