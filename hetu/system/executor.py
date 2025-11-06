@@ -107,7 +107,7 @@ class SystemExecutor:
                     logger.warning(err_msg)
                     return None
             case Permission.ADMIN:
-                if context.group is None or not context.group.startswith("admin"):
+                if not context.is_admin():
                     err_msg = (f"⚠️ [📞Executor] [非法操作] {context} | "
                                f"{call.system}无调用权限，检查是否非法调用：{call}")
                     replay.info(err_msg)

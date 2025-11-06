@@ -45,6 +45,9 @@ class Context:
         else:
             return self.transactions[item]
 
+    def is_admin(self):
+        return True if self.group and self.group.startswith("admin") else False
+
     def configure(self, idle_timeout, client_limits, server_limits, max_row_sub, max_index_sub):
         """配置连接选项"""
         self.idle_timeout = idle_timeout
