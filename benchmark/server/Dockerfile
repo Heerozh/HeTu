@@ -15,6 +15,5 @@ CMD [ \
 ]
 
 # 使用方式：
-# REDIS_URL="redis://:password@host:6379/0"
 # docker build -t hetu_bench_srv .
-# docker run -it --rm -p 2466:2466 --name my-running-bench hetu_bench_srv
+# docker run -it --rm -p 2466:2466 -e REDIS_URL=redis://:password@host:6379/0 --name my-running-bench hetu_bench_srv
