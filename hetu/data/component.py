@@ -8,9 +8,12 @@ import inspect
 import json
 import keyword
 import logging
+import operator
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Any
 
 import git
 import numpy as np
@@ -24,13 +27,14 @@ logger = logging.getLogger('HeTu.root')
 class Permission(IntEnum):
     EVERYBODY = 1
     USER = 2
-    OWNER = 3  # todo 改成RLS，然后由rls_func参数决定具体的rls逻辑
+    OWNER = 3  # 同RLS权限，只是预设了RLS_COMPARE为(equal, 'owner', 'caller')
+    RLS = 4  # 由RLS_COMPARE参数(func, ComponentPropertyName, ContextPropertyName)决定具体的rls逻辑
     ADMIN = 999
 
 
 @dataclass
 class Property:
-    default: any                # 属性的默认值
+    default: Any                # 属性的默认值
     unique: bool = False        # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool = False         # 是否是排序索引
     dtype: str | type = None          # 数据类型，最好用np的明确定义
@@ -42,6 +46,7 @@ class BaseComponent:
     component_name_ = None
     namespace_ = None
     permission_ = Permission.USER
+    rls_compare_ = (operator.eq, 'owner', 'caller')     # type: tuple[Callable[[Any, Any], bool], str, str]
     persist_ = True                                     # 只是标记，每次启动时会清空此标记的数据
     readonly_ = False                                   # 只是标记，调用写入会警告
     backend_ = None         # type: str                 # 该Component由哪个后端(数据库)负责储存和查询
