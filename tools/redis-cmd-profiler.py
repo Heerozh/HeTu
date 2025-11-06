@@ -3,7 +3,8 @@ import pandas as pd
 import re
 import matplotlib.pyplot as plt
 
-# 必须在Redis CPU 100%时，保存的MONITOR的日志（或者用Insight工具保存），然后用这个脚本分析
+# 必须压测Redis到CPU 100%时(不然有OFF CPU时间)，保存的MONITOR的日志（或者用Insight工具保存），然后用这个脚本分析
+# MONITOR格式 1339518083.107412 [0 127.0.0.1:60866] "keys" "*"
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='hetu', description='Hetu redis monitor log 绘图')

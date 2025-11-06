@@ -23,7 +23,7 @@ from hetu.data.backend import (
     RaceCondition
 )
 import websockets
-import app
+from benchmark.server import app
 
 _ = tabulate
 
