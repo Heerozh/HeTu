@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+import numpy as np
 from dataclasses import dataclass
 from typing import Callable
 
@@ -48,6 +49,22 @@ class Context:
     def is_admin(self):
         return True if self.group and self.group.startswith("admin") else False
 
+    def rls_check(self, component: type[BaseComponent], row: np.record | np.ndarray | np.recarray | dict) -> bool:
+        """检查当前用户对某个component的权限"""
+        # 非rls权限通过所有rls检查。要求调用此方法前，首先要由tls(表级权限)检查通过
+        if component.is_rls():
+            return True
+        # admin组拥有所有权限
+        if self.is_admin():
+            return True
+        rls_func, comp_attr, ctx_attr = component.rls_compare_
+        b = getattr(self, ctx_attr, np.nan)
+        a = type(b)(
+            row.get(comp_attr, np.nan)
+            if type(row) is dict else getattr(row, 'owner', np.nan)
+        )
+        return bool(rls_func(a, b))
+
     def configure(self, idle_timeout, client_limits, server_limits, max_row_sub, max_index_sub):
         """配置连接选项"""
         self.idle_timeout = idle_timeout
@@ -91,3 +108,4 @@ class Context:
         if comp_trx is not None:
             self.transactions = {}
             return await comp_trx.attached.end_transaction(discard)
+        return None

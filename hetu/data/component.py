@@ -161,6 +161,11 @@ class BaseComponent:
         new_cls.master_ = cls
         return new_cls
 
+    @classmethod
+    def is_rls(cls) -> bool:
+        """此Component是否是RLS权限"""
+        return cls.permission_ in (Permission.OWNER, Permission.RLS)
+
 
 class ComponentDefines(metaclass=Singleton):
     """
