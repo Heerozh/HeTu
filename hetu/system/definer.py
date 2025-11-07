@@ -339,7 +339,7 @@ def define_system(
             f"System参数名定义错误，第一个参数必须为：ctx。" f"你的：{func_arg_names}"
         )
 
-        assert permission != permission.OWNER, "System的权限不支持OWNER"
+        assert permission not in (permission.OWNER, permission.RLS), "System的权限不支持OWNER/RLS"
 
         assert len(func.__name__) <= SYSTEM_NAME_MAX_LEN, \
             f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
