@@ -35,13 +35,14 @@
   │   等待Subs返回消息   │
   └────────────────────┘
 """
+
 import logging
 
 import numpy as np
 
 from ..component import BaseComponent
 
-logger = logging.getLogger('HeTu.root')
+logger = logging.getLogger("HeTu.root")
 
 
 class RaceCondition(Exception):
@@ -84,11 +85,11 @@ class Backend:
         """
         raise NotImplementedError
 
-    def transaction(self, cluster_id: int) -> 'BackendTransaction':
+    def transaction(self, cluster_id: int) -> "BackendTransaction":
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
-    def get_mq_client(self) -> 'MQClient':
+    def get_mq_client(self) -> "MQClient":
         """获取消息队列连接"""
         raise NotImplementedError
 
@@ -125,7 +126,8 @@ class ComponentTable:
     """
 
     def __init__(
-            self, component_cls: type[BaseComponent],
+            self,
+            component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
             backend: Backend,
@@ -162,7 +164,7 @@ class ComponentTable:
             right=None,
             limit=10,
             desc=False,
-            row_format='struct',
+            row_format="struct",
     ) -> np.recarray | list[dict | int]:
         """
         不通过事务直接从servant数据库查询值，不影响Master性能，但没有数据一致性保证。
@@ -190,7 +192,9 @@ class ComponentTable:
         # 请使用servant数据库来操作
         raise NotImplementedError
 
-    async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
+    async def direct_get(
+            self, row_id: int, row_format="struct"
+    ) -> None | np.record | dict:
         """
         不通过事务，从servant数据库直接读取某行的值。
 
@@ -240,13 +244,13 @@ class ComponentTable:
         """
         raise NotImplementedError
 
-    def attach(self, backend_trx: BackendTransaction) -> 'ComponentTransaction':
+    def attach(self, backend_trx: BackendTransaction) -> "ComponentTransaction":
         """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
         # return YourComponentTransaction(self, backend_trx)
         raise NotImplementedError
 
-    def new_transaction(self) -> tuple[BackendTransaction, 'ComponentTransaction']:
+    def new_transaction(self) -> tuple[BackendTransaction, "ComponentTransaction"]:
         """返回当前组件的事务操作类，并新建一个后端事务连接"""
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
@@ -264,8 +268,9 @@ class ComponentTransaction:
     """
 
     def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
-        assert trx_conn.cluster_id == comp_tbl.cluster_id, \
-            "事务只能在对应的cluster_id中执行，不能跨cluster"
+        assert (
+                trx_conn.cluster_id == comp_tbl.cluster_id
+        ), "事务只能在对应的cluster_id中执行，不能跨cluster"
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
@@ -287,12 +292,7 @@ class ComponentTransaction:
         raise NotImplementedError
 
     async def _db_query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
+            self, index_name: str, left, right=None, limit=10, desc=False,
             lock_index=True
     ) -> list[int]:
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
@@ -330,18 +330,18 @@ class ComponentTransaction:
         rtn = []
         for row_id in row_ids:
             if (row := self._cache.get(row_id)) is not None:
-                if type(row) is str and row == 'deleted':
-                    raise RaceCondition('gets: row已经被你自己删除了')
+                if type(row) is str and row == "deleted":
+                    raise RaceCondition("gets: row已经被你自己删除了")
                 rtn.append(row)
             else:
                 if (row := await self._db_get(row_id)) is None:
-                    raise RaceCondition('gets: row中途被删除了')
+                    raise RaceCondition("gets: row中途被删除了")
                 self._cache[row_id] = row
                 rtn.append(row)
 
         return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def select(self, value, where: str = 'id', lock_row=True) -> None | np.record:
+    async def select(self, value, where: str = "id", lock_row=True) -> None | np.record:
         """
         获取 `where` == `value` 的单行数据，返回c-struct like。
         `where` 不是unique索引时，返回升序排序的第一条数据。
@@ -374,23 +374,27 @@ class ComponentTransaction:
         ...     item_row = await ctx[Item].select(ctx.caller, 'owner')
         ...     print(item_row.name)
         """
-        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(
+            value
+        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert (
+                where in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
 
         # 查询
-        if where == 'id':
+        if where == "id":
             row_id = value
         else:
-            if len(row_ids := await self._db_query(where, value, limit=1, lock_index=False)) == 0:
+            row_ids = await self._db_query(where, value, limit=1, lock_index=False)
+            if len(row_ids) == 0:
                 return None
             row_id = int(row_ids[0])
 
         if (row := self._cache.get(row_id)) is not None:
-            if type(row) is str and row == 'deleted':
+            if type(row) is str and row == "deleted":
                 return None
             else:
                 return row.copy()
@@ -399,20 +403,27 @@ class ComponentTransaction:
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
         # 所以检测get结果是否在查询范围内，不在就抛出冲突
         if (row := await self._db_get(row_id, lock_row=lock_row)) is None:
-            if where == 'id':
+            if where == "id":
                 return None  # 如果不是从index查询到的id，而是直接传入，那就不需要判断race了
             else:
-                raise RaceCondition('select: row中途被删除了')
+                raise RaceCondition("select: row中途被删除了")
         if row[where] != value:
-            raise RaceCondition(f'select: row.{where}值变动了')
+            raise RaceCondition(f"select: row.{where}值变动了")
 
         self._cache[row_id] = row
 
         return row.copy()
 
     async def query(
-            self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True,
-            index_only=False, lock_rows=True
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False,
+            lock_index=True,
+            index_only=False,
+            lock_rows=True,
     ) -> np.recarray | list[int]:
         """
         查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
@@ -475,9 +486,12 @@ class ComponentTransaction:
         >>> few_items = items[items.amount < 10]
 
         """
-        assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
-        assert index_name in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
+        assert np.isscalar(
+            left
+        ), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
+        assert (
+                index_name in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
 
         left = int(left) if np.issubdtype(type(left), np.bool_) else left
         left = left.item() if issubclass(type(left), np.generic) else left
@@ -504,12 +518,12 @@ class ComponentTransaction:
                 # 由于index是分离的，且不能锁定index(不然事务冲突率很高），所以检测get结果是否在查询范围内，
                 # 不在就抛出冲突
                 if not (left <= row[index_name] <= right):
-                    raise RaceCondition(f'select: row.{index_name}值变动了')
+                    raise RaceCondition(f"select: row.{index_name}值变动了")
                 if lock_rows:
                     self._cache[row_id] = row
                 rtn.append(row)
             else:
-                raise RaceCondition('select: row中途被删除了')
+                raise RaceCondition("select: row中途被删除了")
 
         # 返回numpy array
         if len(rtn) == 0:
@@ -517,11 +531,14 @@ class ComponentTransaction:
         else:
             return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def is_exist(self, value, where: str = 'id') -> tuple[bool, int | None]:
+    async def is_exist(self, value, where: str = "id") -> tuple[bool, int | None]:
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
-        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(
+            value
+        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert (
+                where in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -530,7 +547,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    def update_or_insert(self, value, where: str = None) -> 'UpdateOrInsert':
+    def update_or_insert(self, value, where: str = None) -> "UpdateOrInsert":
         """
         同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
@@ -557,10 +574,7 @@ class ComponentTransaction:
         return UpdateOrInsert(self, value, where)
 
     async def _check_uniques(
-            self,
-            old_row: [np.record, None],
-            new_row: np.record,
-            ignores=None
+            self, old_row: [np.record, None], new_row: np.record, ignores=None
     ) -> None:
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
@@ -573,22 +587,28 @@ class ComponentTransaction:
             # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
                 row_ids = await self._db_query(
-                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False)
+                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False
+                )
                 if len(row_ids) > 0:
                     raise UniqueViolation(
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
-                        f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
+                        f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert"
+                    )
 
     async def update(self, row_id: int, row) -> None:
         """修改row_id行的数据"""
         row_id = int(row_id)
 
         if row_id in self._updt_flags:
-            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
-                           f"已经在事务中更新过了，不允许重复更新。")
+            raise KeyError(
+                f"{self._component_cls.component_name_}行（id:{row_id}）"
+                f"已经在事务中更新过了，不允许重复更新。"
+            )
         if row_id in self._del_flags:
-            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
-                           f"已经在事务中删除了，不允许再次更新。")
+            raise KeyError(
+                f"{self._component_cls.component_name_}行（id:{row_id}）"
+                f"已经在事务中删除了，不允许再次更新。"
+            )
 
         assert type(row) is np.record, "update数据必须是单行数据"
 
@@ -598,7 +618,9 @@ class ComponentTransaction:
         # 先查询旧数据是否存在，一般update调用时，旧数据都在_cache里，不然你哪里获得的row数据
         old_row = self._cache.get(row_id)  # or await self._db_get(row_id)
         if old_row is None:
-            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
+            )
 
         # 检查先决条件
         await self._check_uniques(old_row, row)
@@ -611,7 +633,9 @@ class ComponentTransaction:
         self._trx_update(row_id, old_row, row)
 
     async def update_rows(self, rows: np.recarray) -> None:
-        assert type(rows) is np.recarray and rows.shape[0] > 1, "update_rows数据必须是多行数据"
+        assert (
+                type(rows) is np.recarray and rows.shape[0] > 1
+        ), "update_rows数据必须是多行数据"
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
@@ -653,7 +677,7 @@ class ComponentTransaction:
 
         # 提交到事务前先检查无unique冲突
         try:
-            await self._check_uniques(None, row, ignores={'id'})
+            await self._check_uniques(None, row, ignores={"id"})
         except UniqueViolation:
             if unique_violation_as_race:
                 raise RaceCondition("插入数据时，unique冲突")
@@ -669,26 +693,34 @@ class ComponentTransaction:
         row_id = int(row_id)
 
         if row_id in self._updt_flags:
-            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
-                           f"在事务中已有update命令，不允许再次删除。")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                f"在事务中已有update命令，不允许再次删除。"
+            )
         if row_id in self._del_flags:
-            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
-                           f"已经在事务中删除了，不允许重复删除。")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                f"已经在事务中删除了，不允许重复删除。"
+            )
 
         # 先查询旧数据是否存在
         old_row = self._cache.get(row_id) or await self._db_get(row_id)
         if old_row is None:
-            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
+            )
 
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
-        self._cache[row_id] = 'deleted'
+        self._cache[row_id] = "deleted"
         self._del_flags.add(row_id)
         self._trx_delete(row_id, old_row)
 
     async def delete_rows(self, row_ids: list[int] | np.ndarray) -> None:
-        assert type(row_ids) is np.ndarray and row_ids.shape[0] > 1, "deletes数据必须是多行数据"
+        assert (
+                type(row_ids) is np.ndarray and row_ids.shape[0] > 1
+        ), "deletes数据必须是多行数据"
         for row_id in row_ids:
             await self.delete(row_id)
 
@@ -729,7 +761,8 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
-    UPDATE_FREQUENCY = 10   # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
+
+    UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
     async def close(self):
         raise NotImplementedError
@@ -768,11 +801,11 @@ class MQClient:
 
 
 class BaseSubscription:
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    async def get_updated(
+            self, channel
+    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         raise NotImplementedError
 
     @property
     def channels(self) -> set[str]:
         raise NotImplementedError
-
-

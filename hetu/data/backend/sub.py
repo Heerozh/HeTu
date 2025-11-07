@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import asyncio
 import logging
 from typing import Any
@@ -14,13 +15,15 @@ from ..component import BaseComponent, Permission
 from .base import BaseSubscription, ComponentTable, Backend
 from ...system import Context
 
-logger = logging.getLogger('HeTu.root')
+logger = logging.getLogger("HeTu.root")
 
 
 class RowSubscription(BaseSubscription):
     __cache = {}
 
-    def __init__(self, table: ComponentTable, ctx: Context | None, channel: str, row_id: int):
+    def __init__(
+            self, table: ComponentTable, ctx: Context | None, channel: str, row_id: int
+    ):
         self.table = table
         if table.component_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
@@ -33,17 +36,19 @@ class RowSubscription(BaseSubscription):
     def clear_cache(cls, channel):
         cls.__cache.pop(channel, None)
 
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    async def get_updated(
+            self, channel
+    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
             return set(), set(), cache
 
-        row = await self.table.direct_get(self.row_id, row_format='typed_dict')
+        row = await self.table.direct_get(self.row_id, row_format="typed_dict")
         if row is None:
             # get_updated主要发给客户端，需要json，所以key直接用str
             rtn = {str(self.row_id): None}
         else:
-            if self.rls_ctx and self.rls_ctx.rls_check(self.table.component_cls, row):
+            if (ctx := self.rls_ctx) and ctx.rls_check(self.table.component_cls, row):
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
@@ -57,8 +62,12 @@ class RowSubscription(BaseSubscription):
 
 class IndexSubscription(BaseSubscription):
     def __init__(
-            self, table: ComponentTable, ctx: Context,
-            index_channel: str, last_query, query_param: dict
+            self,
+            table: ComponentTable,
+            ctx: Context,
+            index_channel: str,
+            last_query,
+            query_param: dict,
     ):
         self.table = table
         if table.component_cls.is_rls() and ctx and not ctx.is_admin():
@@ -71,12 +80,16 @@ class IndexSubscription(BaseSubscription):
         self.last_query = last_query
 
     def add_row_subscriber(self, channel, row_id):
-        self.row_subs[channel] = RowSubscription(self.table, self.rls_ctx, channel, row_id)
+        self.row_subs[channel] = RowSubscription(
+            self.table, self.rls_ctx, channel, row_id
+        )
 
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    async def get_updated(
+            self, channel
+    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
-            row_ids = await self.table.direct_query(**self.query_param, row_format='id')
+            row_ids = await self.table.direct_query(**self.query_param, row_format="id")
             row_ids = set(row_ids)
             inserts = row_ids - self.last_query
             deletes = self.last_query - row_ids
@@ -85,17 +98,19 @@ class IndexSubscription(BaseSubscription):
             rem_chans = set()
             rtn = {}
             for row_id in inserts:
-                row = await self.table.direct_get(row_id, row_format='typed_dict')
+                row = await self.table.direct_get(row_id, row_format="typed_dict")
                 if row is None:
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    if self.rls_ctx and self.rls_ctx.rls_check(self.table.component_cls, row):
+                    if (ctx := self.rls_ctx) and ctx.rls_check(self.table.component_cls,
+                                                               row):
                         rtn[str(row_id)] = row
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
-                        self.table, self.rls_ctx, new_chan_name, row_id)
+                        self.table, ctx, new_chan_name, row_id
+                    )
             for row_id in deletes:
                 rtn[str(row_id)] = None
                 rem_chan_name = self.table.channel_name(row_id=row_id)
@@ -138,9 +153,13 @@ class Subscriptions:
         return len(self._subs) - self._index_sub_count, self._index_sub_count
 
     @classmethod
-    def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
-        return (f"{table.component_cls.component_name_}.{index_name}"
-                f"[{left}:{right}:{desc and -1 or 1}][:{limit}]")
+    def _make_query_str(
+            cls, table: ComponentTable, index_name: str, left, right, limit, desc
+    ):
+        return (
+            f"{table.component_cls.component_name_}.{index_name}"
+            f"[{left}:{right}:{desc and -1 or 1}][:{limit}]"
+        )
 
     @classmethod
     def _has_table_permission(cls, table: ComponentTable, ctx: Context) -> bool:
@@ -158,12 +177,14 @@ class Subscriptions:
             return False
 
     @classmethod
-    def _has_row_permission(cls, table: ComponentTable, ctx: Context, row: dict | np.record) -> bool:
+    def _has_row_permission(
+            cls, table: ComponentTable, ctx: Context, row: dict | np.record
+    ) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table.component_cls, row)
 
     async def subscribe_select(
-            self, table: ComponentTable, ctx: Context, value: Any, where: str = 'id'
+            self, table: ComponentTable, ctx: Context, value: Any, where: str = "id"
     ) -> tuple[str | None, np.record | None]:
         """
         获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
@@ -174,11 +195,13 @@ class Subscriptions:
         if not self._has_table_permission(table, ctx):
             return None, None
 
-        if where == 'id':
-            if (row := await table.direct_get(value, row_format='typed_dict')) is None:
+        if where == "id":
+            if (row := await table.direct_get(value, row_format="typed_dict")) is None:
                 return None, None
         else:
-            if len(rows := await table.direct_query(where, value, limit=1, row_format='typed_dict')) == 0:
+            rows = await table.direct_query(where, value, limit=1,
+                                            row_format='typed_dict')
+            if len(rows) == 0:
                 return None, None
             row = rows[0]
 
@@ -187,16 +210,15 @@ class Subscriptions:
             return None, None
 
         # 开始订阅
-        sub_id = self._make_query_str(
-            table, 'id', row['id'], None, 1, False)
+        sub_id = self._make_query_str(table, "id", row["id"], None, 1, False)
         if sub_id in self._subs:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
 
-        channel_name = table.channel_name(row_id=row['id'])
+        channel_name = table.channel_name(row_id=row["id"])
         await self._mq_client.subscribe(channel_name)
 
-        self._subs[sub_id] = RowSubscription(table, ctx, channel_name, row['id'])
+        self._subs[sub_id] = RowSubscription(table, ctx, channel_name, row["id"])
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         return sub_id, row
 
@@ -222,12 +244,15 @@ class Subscriptions:
         """
         # 首先caller要对整个表有权限，不然就算force也不给订阅
         if not self._has_table_permission(table, ctx):
-            logger.warning(f"⚠️ [💾Subscription] {table.component_cls.component_name_}无调用权限，"
-                           f"检查是否非法调用，caller：{ctx.caller}")
+            logger.warning(
+                f"⚠️ [💾Subscription] {table.component_cls.component_name_}无调用权限，"
+                f"检查是否非法调用，caller：{ctx.caller}"
+            )
             return None, []
 
         rows = await table.direct_query(
-            index_name, left, right, limit, desc, row_format='typed_dict')
+            index_name, left, right, limit, desc, row_format="typed_dict"
+        )
 
         # 如果是owner权限，只取owner相同的
         if table.component_cls.permission_ == Permission.OWNER:
@@ -244,13 +269,19 @@ class Subscriptions:
         index_channel = table.channel_name(index_name=index_name)
         await self._mq_client.subscribe(index_channel)
 
-        row_ids = {int(row['id']) for row in rows}
+        row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
-            table, ctx, index_channel, row_ids,
-            dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
+            table,
+            ctx,
+            index_channel,
+            row_ids,
+            dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc),
+        )
         self._subs[sub_id] = idx_sub
         self._channel_subs.setdefault(index_channel, set()).add(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
+        self._index_sub_count = list(map(type, self._subs.values())).count(
+            IndexSubscription
+        )
 
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
         for row_id in row_ids:
@@ -272,8 +303,9 @@ class Subscriptions:
                 await self._mq_client.unsubscribe(channel)
                 del self._channel_subs[channel]
         self._subs.pop(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
-
+        self._index_sub_count = list(map(type, self._subs.values())).count(
+            IndexSubscription
+        )
 
     async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
         """

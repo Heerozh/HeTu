@@ -104,8 +104,7 @@ class BaseComponent:
         comp.json_ = json.dumps(data)  # 重新序列化，保持一致
         comp.instances_ = {}
         # dump rls
-        rls = data['rls_compare']
-        if rls:
+        if rls := data['rls_compare']:
             rls = (getattr(operator, rls[0]), *rls[1:])
         comp.rls_compare_ = rls
         # 成员变量初始化
