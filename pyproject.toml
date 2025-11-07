@@ -43,6 +43,7 @@ hetu = "hetu.__main__:main"
 [dependency-groups]
 dev = [
     "aiohttp>=3.13.1",
+    "black>=25.9.0",
     "docker>=7.1.0",
     "matplotlib>=3.10.7",
     "pandas>=2.3.3",
