@@ -9,6 +9,7 @@ from unittest import mock
 import numpy as np
 
 from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
+from hetu.system import Context
 from hetu.data.backend import (
     RaceCondition, UniqueViolation, ComponentTable, Backend, RedisBackend,
     ComponentTransaction, Subscriptions)
@@ -678,6 +679,30 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 初始化订阅器
         sub_mgr = Subscriptions(backend)
+        admin_ctx = Context(
+            caller=None,
+            connection_id=0,
+            address="NotSet",
+            group="admin",
+            user_data={},
+
+            timestamp=0,
+            retry_count=0,
+            transactions={},
+            inherited={}
+        )
+        user10_ctx = Context(
+            caller=10,
+            connection_id=0,
+            address="NotSet",
+            group=None,
+            user_data={},
+
+            timestamp=0,
+            retry_count=0,
+            transactions={},
+            inherited={}
+        )
 
         async def puller():
             while True:
@@ -685,14 +710,14 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         task = asyncio.create_task(puller())
 
         # 测试订阅的返回值，和订阅管理器的私有值
-        sub_id1, row = await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
+        sub_id1, row = await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm10', 'name')
         self.assertEqual(row['time'], 110)
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
         self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 1)
 
         sub_id2, rows = await sub_mgr.subscribe_query(
-            item_data, 'admin', 'owner', 10, limit=33)
+            item_data, admin_ctx, 'owner', 10, limit=33)
         self.assertEqual(len(rows), 25)
         self.assertEqual(sub_id2, 'Item.owner[10:None:1][:33]')
         self.assertEqual(len(sub_mgr._subs[sub_id2].channels), 25 + 1)  # 加1 index channel
@@ -703,12 +728,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 26)
 
         sub_id3, rows = await sub_mgr.subscribe_query(
-            item_data, 'admin', 'owner', 10, right=11, limit=44)
+            item_data, admin_ctx, 'owner', 10, right=11, limit=44)
         self.assertEqual(len(rows), 25)
         self.assertEqual(sub_id3, 'Item.owner[10:11:1][:44]')
 
         sub_id4, rows = await sub_mgr.subscribe_query(
-            item_data, 'admin', 'owner', 11, right=12, limit=55)
+            item_data, admin_ctx, 'owner', 11, right=12, limit=55)
         self.assertEqual(len(rows), 0)
         self.assertEqual(len(sub_mgr._subs[sub_id4].row_subs), 0)
         self.assertEqual(sub_id4, 'Item.owner[11:12:1][:55]')
@@ -798,10 +823,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sub_mgr._mq_client.subscribed_channels), 0)
 
         # 测试owner不符不给订阅
-        sub_id5, row = await sub_mgr.subscribe_select(item_data, 10, 1)
+        sub_id5, row = await sub_mgr.subscribe_select(item_data, user10_ctx, 1)
         self.assertEqual(sub_id5, None)
         # 测试订阅单行，owner改变后要删除
-        sub_id5, row = await sub_mgr.subscribe_select(item_data, 10, 3)
+        sub_id5, row = await sub_mgr.subscribe_select(item_data, user10_ctx, 3)
         self.assertEqual(row['owner'], 10)
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
@@ -813,7 +838,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 测试owner query只传输owner相等的数据
         sub_id6, rows = await sub_mgr.subscribe_query(
-            item_data, 10, 'owner', 1, right=20, limit=55)
+            item_data, user10_ctx, 'owner', 1, right=20, limit=55)
         self.assertEqual([row['owner'] for row in rows], [10] * 23)
         self.assertEqual(len(sub_mgr._subs[sub_id6].row_subs), 23)
         # 测试更新数值，看query的update是否会删除/添加owner相符的
@@ -882,6 +907,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         # 初始化订阅器
         sub_mgr = Subscriptions(backend)
+
         await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
         await sub_mgr.subscribe_select(item_data, 'admin', 'Itm11', 'name')
 
