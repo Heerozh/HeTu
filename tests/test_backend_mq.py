@@ -66,14 +66,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     def tearDownClass(cls):
         test_backends.teardown()
 
-    @parameterized(implements)
-    async def test_message_queue(self, table_cls: type[ComponentTable],
-                                 backend_cls: type[Backend], config):
-        backend = backend_cls(config)
+    async def setUpBackend(self, backend: Backend, table_cls):
         backend.configure()
         if type(backend) is RedisBackend:
             self.assertEqual(
-                backend.io.config_get('notify-keyspace-events')["notify-keyspace-events"],
+                backend.io.config_get('notify-keyspace-events')[
+                    "notify-keyspace-events"],
                 "")
 
         item_data = table_cls(Item, 'test', 1, backend)
@@ -90,12 +88,12 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                 row.time = i + 110
                 row.qty = 999
                 await tbl.insert(row)
-
         # 等待replica同步，因为不知道backend的类型，所以直接sleep
         time.sleep(0.5)
+        return backend, item_data
 
-        # 初始化订阅器
-        sub_mgr = Subscriptions(backend)
+    @classmethod
+    def setUpAccount(cls):
         admin_ctx = Context(
             caller=None,
             connection_id=0,
@@ -120,14 +118,37 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             transactions={},
             inherited={}
         )
+        return admin_ctx, user10_ctx
+
+    @classmethod
+    def setUpSubscription(cls, backend: Backend):
+        # 初始化订阅器
+        sub_mgr = Subscriptions(backend)
 
         async def puller():
             while True:
                 await sub_mgr.mq_pull()
-        task = asyncio.create_task(puller())
+
+        return asyncio.create_task(puller()), sub_mgr
+
+    @classmethod
+    async def tearDownAll(self, backend, task):
+        # 关闭连接
+        task.cancel()
+        await backend.close()
+
+    @parameterized(implements)
+    async def test_message_queue(self, table_cls: type[ComponentTable],
+                                 backend_cls: type[Backend], config):
+        backend, item_data = await self.setUpBackend(backend_cls(config), table_cls)
+        admin_ctx, user10_ctx = self.setUpAccount()
+        task, sub_mgr = self.setUpSubscription(backend)
+
+        # todo 这些老的测试要慢慢移到重构的测试中去
 
         # 测试订阅的返回值，和订阅管理器的私有值
-        sub_id1, row = await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm10', 'name')
+        sub_id1, row = await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm10',
+                                                      'name')
         self.assertEqual(row['time'], 110)
         self.assertEqual(sub_id1, 'Item.id[1:None:1][:1]')
         self.assertEqual(sub_mgr._subs[sub_id1].row_id, 1)
@@ -137,7 +158,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             item_data, admin_ctx, 'owner', 10, limit=33)
         self.assertEqual(len(rows), 25)
         self.assertEqual(sub_id2, 'Item.owner[10:None:1][:33]')
-        self.assertEqual(len(sub_mgr._subs[sub_id2].channels), 25 + 1)  # 加1 index channel
+        self.assertEqual(len(sub_mgr._subs[sub_id2].channels),
+                         25 + 1)  # 加1 index channel
         self.assertEqual(len(sub_mgr._subs[sub_id2].row_subs), 25)
         self.assertEqual(sub_mgr._subs[sub_id2].last_query, {i for i in range(1, 26)})
         first_row_channel = next(iter(sorted(sub_mgr._subs[sub_id2].channels)))
@@ -195,7 +217,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         updates = await sub_mgr.get_updates()
         self.assertEqual(len(updates), 4)
         self.assertEqual(updates[sub_id1]["1"]['owner'], 11)  # row订阅数据更新
-        self.assertEqual(updates[sub_id2]["1"], None)           # query 10删除了1
+        self.assertEqual(updates[sub_id2]["1"], None)  # query 10删除了1
         self.assertEqual(updates[sub_id3]["1"]['owner'], 11)  # query 10-11更新row数据
         self.assertEqual(updates[sub_id4]["1"]['owner'], 11)  # query 11-12更新row数据
 
@@ -297,36 +319,15 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
                                  backend_cls: type[Backend], config):
         # 测试mq消息堆积的情况
         mock_time.return_value = time_time()
-        backend = backend_cls(config)
-        backend.configure()
-        if type(backend) is RedisBackend:
-            self.assertEqual(
-                backend.io.config_get('notify-keyspace-events')["notify-keyspace-events"],
-                "")
-
-        item_data = table_cls(Item, 'test', 1, backend)
-        item_data.flush(force=True)
-        item_data.create_or_migrate()
-        # 初始化测试数据
-        async with backend.transaction(1) as trx:
-            tbl = item_data.attach(trx)
-            for i in range(25):
-                row = Item.new_row()
-                row.id = 0
-                row.name = f'Itm{i + 10}'
-                row.owner = 10
-                row.time = i + 110
-                row.qty = 999
-                await tbl.insert(row)
-
-        # 等待replica同步，因为不知道backend的类型，所以直接sleep
-        time.sleep(0.5)
+        backend, item_data = await self.setUpBackend(backend_cls(config), table_cls)
+        admin_ctx, user10_ctx = self.setUpAccount()
+        task, sub_mgr = self.setUpSubscription(backend)
 
         # 初始化订阅器
         sub_mgr = Subscriptions(backend)
 
-        await sub_mgr.subscribe_select(item_data, 'admin', 'Itm10', 'name')
-        await sub_mgr.subscribe_select(item_data, 'admin', 'Itm11', 'name')
+        await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm10', 'name')
+        await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm11', 'name')
 
         # 先pull空
         try:
