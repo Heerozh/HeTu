@@ -11,8 +11,8 @@ from typing import Any
 
 import numpy as np
 
-from ..component import BaseComponent, Permission
 from .base import BaseSubscription, ComponentTable, Backend
+from ..component import Permission
 from ...system import Context
 
 logger = logging.getLogger("HeTu.root")
@@ -48,7 +48,8 @@ class RowSubscription(BaseSubscription):
             # get_updated主要发给客户端，需要json，所以key直接用str
             rtn = {str(self.row_id): None}
         else:
-            if (ctx := self.rls_ctx) and ctx.rls_check(self.table.component_cls, row):
+            ctx = self.rls_ctx
+            if ctx is None or ctx.rls_check(self.table.component_cls, row):
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
@@ -103,8 +104,8 @@ class IndexSubscription(BaseSubscription):
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
-                    if (ctx := self.rls_ctx) and ctx.rls_check(self.table.component_cls,
-                                                               row):
+                    ctx = self.rls_ctx
+                    if ctx is None or ctx.rls_check(self.table.component_cls, row):
                         rtn[str(row_id)] = row
                     new_chan_name = self.table.channel_name(row_id=row_id)
                     new_chans.add(new_chan_name)
@@ -310,7 +311,7 @@ class Subscriptions:
     async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
         """
         pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
-        返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
+        返回值为dict: key是sub_id；value是更新的行数据，value格式为dict：key是row_id，value是数据库raw值。
         timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
 
         遇到消息堆积会丢弃通知。
