@@ -1,19 +1,18 @@
 import asyncio
 import logging
 import time
-from time import time as time_time
 import unittest
-from typing import Type
+from time import time as time_time
 from unittest import mock
 
 import numpy as np
 
-from hetu.data import define_component, Property, BaseComponent, ComponentDefines, Permission
-from hetu.system import Context
-from hetu.data.backend import (
-    RaceCondition, UniqueViolation, ComponentTable, Backend, RedisBackend,
-    ComponentTransaction, Subscriptions)
 from backend_mgr import UnitTestBackends
+from hetu.data import define_component, Property, BaseComponent, Permission
+from hetu.data.backend import (
+    ComponentTable, Backend, RedisBackend,
+    Subscriptions)
+from hetu.system import Context
 
 logger = logging.getLogger('HeTu.root')
 logger.setLevel(logging.DEBUG)

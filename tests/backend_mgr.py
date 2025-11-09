@@ -1,7 +1,8 @@
 import time
+import unittest
+
 import docker
 from docker.errors import NotFound
-import unittest
 
 from hetu.data.backend.redis import RedisTransaction
 
