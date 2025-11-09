@@ -39,7 +39,7 @@ class MyTestCase(unittest.TestCase):
             main()
 
         # 正常启动
-        cfg_file = os.path.join(os.path.dirname(__file__), '../hetu/CONFIG_TEMPLATE.yml')
+        cfg_file = os.path.join(os.path.dirname(__file__), '../../hetu/CONFIG_TEMPLATE.yml')
         sys.argv[1:] = ['start', '--config', cfg_file]
         os.chdir(os.path.join(os.path.dirname(__file__)))
         SystemClusters()._clear()
