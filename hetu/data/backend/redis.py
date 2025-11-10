@@ -123,18 +123,20 @@ class RedisBackend(Backend):
         # 加载lua脚本
         self.load_lua_scripts()
         self._patch_redis_py_lib()
+        # 先测试只读数据库连通性
+        for servant_url in self.servant_urls:
+            try:
+                # 使用同步io连接
+                temp_conn = redis.from_url(servant_url, decode_responses=True)
+                temp_conn.ping()
+            except redis.exceptions.ConnectionError as e:
+                raise ConnectionError(f"无法连接到replicas：{servant_url}") from e
         # 连接只读数据库
         self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
                          for url in self.servant_urls]
         if not self.servant_urls:
             self.servant_urls.append(self.master_url)
             self.replicas.append(self._aio)
-        # 测试连通性
-        for replica in self.replicas:
-            try:
-                replica.ping()
-            except redis.exceptions.ConnectionError as e:
-                raise ConnectionError(f"无法连接到replicas：{replica}") from e
         # 限制aio运行的coroutine
         try:
             self.loop_id = hash(asyncio.get_running_loop())
@@ -361,6 +363,11 @@ class RedisComponentTable(ComponentTable):
         json: 组件的结构信息
         version: json的hash
         cluster_id: 所属簇id
+
+        Parameters
+        ----------
+        cluster_only : bool
+            如果为True，则只处理cluster_id的变更，其他结构迁移和重建索引等不处理。
         """
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
