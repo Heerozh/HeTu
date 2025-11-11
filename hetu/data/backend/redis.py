@@ -178,6 +178,17 @@ class RedisBackend(Backend):
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
+    async def synced(self) -> bool:
+        info = await self.aio.info('replication')
+        master_offset = info.get('master_repl_offset', 0)
+        for key, value in info.items():
+            # 兼容 Redis 新旧版本（slave/replica 字段）
+            if key.startswith('slave') or key.startswith('replica'):
+                lag_of_offset = master_offset - int(value.get('offset', 0))
+                if lag_of_offset > 0:
+                    return False
+        return True
+
     @property
     def aio(self):
         if self.loop_id is None:

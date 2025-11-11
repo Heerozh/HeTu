@@ -76,6 +76,13 @@ class Backend:
         """
         raise NotImplementedError
 
+    async def synced(self) -> bool:
+        """
+        检查各个slave数据库和master数据库的数据是否已完成同步。
+        主要用于test用例。
+        """
+        raise NotImplementedError
+
     def requires_head_lock(self) -> bool:
         """
         要求持有head锁，防止启动2台有head标记的服务器。

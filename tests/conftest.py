@@ -30,7 +30,8 @@ async def item_table(auto_backend, defined_item_component):
 
 
 @pytest.fixture
-async def fill_item_table(auto_backend, defined_item_component, item_table):
+async def filled_item_table(auto_backend, defined_item_component, item_table):
+    import asyncio
     comp_tbl_class, get_or_create_backend = auto_backend
 
     backend = get_or_create_backend('main')
@@ -47,7 +48,12 @@ async def fill_item_table(auto_backend, defined_item_component, item_table):
             row.time = i + 110
             row.qty = 999
             await tbl.insert(row)
-    # 等待replica同步，因为不知道backend的类型，所以直接sleep
-    import time
-    time.sleep(0.5)
-    return backend, item_table
+    # 等待replica同步
+    while True:
+        if await backend.synced():
+            break
+        await asyncio.sleep(0.001)
+
+    yield item_table
+
+    item_table.flush(force=True)
