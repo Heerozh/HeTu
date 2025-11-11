@@ -16,7 +16,8 @@ import numpy as np
 import redis
 from redis.asyncio.client import Pipeline
 
-from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, MQClient
+from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, \
+    MQClient
 from .base import RaceCondition, HeadLockFailed
 from ..component import BaseComponent, Property
 from ...common.helper import batched
@@ -89,7 +90,8 @@ class RedisBackend(Backend):
         cls = self.__class__
         if cls.lua_check_and_run is None:
             # 注册脚本到异步io
-            cls.lua_check_and_run = self._aio.register_script(cls.LUA_CHECK_AND_RUN_SCRIPT)
+            cls.lua_check_and_run = self._aio.register_script(
+                cls.LUA_CHECK_AND_RUN_SCRIPT)
             # 上传脚本到服务器使用同步io
             self.io.script_load(cls.LUA_CHECK_AND_RUN_SCRIPT)
 
@@ -107,7 +109,8 @@ class RedisBackend(Backend):
         self.servant_urls = config.get('servants', [])
         self.clustering = config.get('clustering', False)
         if self.clustering:
-            self.io = redis.cluster.RedisCluster.from_url(self.master_url, decode_responses=True)
+            self.io = redis.cluster.RedisCluster.from_url(self.master_url,
+                                                          decode_responses=True)
             self._aio = redis.asyncio.cluster.RedisCluster.from_url(
                 self.master_url, decode_responses=True)
         else:
@@ -156,7 +159,8 @@ class RedisBackend(Backend):
             r = redis.from_url(servant_url)
             try:
                 # 设置keyspace通知
-                db_keyspace = r.config_get('notify-keyspace-events')['notify-keyspace-events']
+                db_keyspace = r.config_get('notify-keyspace-events')[
+                    'notify-keyspace-events']
                 db_keyspace = db_keyspace.replace('A', 'g$lshztxed')
                 db_keyspace_new = db_keyspace
                 for flag in list(target_keyspace):
@@ -284,16 +288,18 @@ class RedisTransaction(BackendTransaction):
         if len(self._checks) > 0 or self._request_auto_incr:
             # 在提交前最后检查一遍unique，在lua中检查unique是为了不用锁定index
             # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
-            lua_run_keys = [f'NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY' , ]
+            lua_run_keys = [f'NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY', ]
             lua_run_argv = self._checks + ['END_CHECK'] + self._stack
 
             pipe.multi()
-            await self._backend.lua_check_and_run(args=lua_run_argv, keys=lua_run_keys, client=pipe)
+            await self._backend.lua_check_and_run(args=lua_run_argv, keys=lua_run_keys,
+                                                  client=pipe)
 
             try:
                 result = await pipe.execute()
                 if result[-1] == 'FAIL':
-                    raise RaceCondition(f"unique index在事务中变动，被其他事务添加了相同值")
+                    raise RaceCondition(
+                        f"unique index在事务中变动，被其他事务添加了相同值")
                 result = result[-1]
             except redis.WatchError:
                 raise RaceCondition(f"watched key被其他事务修改")
@@ -386,14 +392,16 @@ class RedisComponentTable(ComponentTable):
         io = self._backend.io
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         if cluster_only:
-            logger.info(f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。")
+            logger.info(
+                f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。")
         with io.lock(self._init_lock_key, timeout=60 * 5):
             # 获取redis已存的组件信息
             meta = io.hgetall(self._meta_key)
             if not meta:
                 self._create_emtpy()
             else:
-                version = hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest()
+                version = hashlib.md5(
+                    self._component_cls.json_.encode("utf-8")).hexdigest()
                 # 如果cluster_id改变，则迁移改key名
                 if int(meta['cluster_id']) != self._cluster_id:
                     self._migration_cluster_id(old=int(meta['cluster_id']))
@@ -418,7 +426,8 @@ class RedisComponentTable(ComponentTable):
         if not self._component_cls.persist_ or force:
 
             io = self._backend.io
-            logger.info(f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中...")
+            logger.info(
+                f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中...")
 
             with io.lock(self._init_lock_key, timeout=60 * 5):
                 del_keys = io.keys(self._root_prefix + '*')
@@ -434,12 +443,14 @@ class RedisComponentTable(ComponentTable):
             raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
 
     def _create_emtpy(self):
-        logger.info(f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
+        logger.info(
+            f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
 
         # 只需要写入meta，其他的_rebuild_index会创建
         meta = {
             'json': self._component_cls.json_,
-            'version': hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest(),
+            'version': hashlib.md5(
+                self._component_cls.json_.encode("utf-8")).hexdigest(),
             'cluster_id': self._cluster_id,
         }
         self._backend.io.hset(self._meta_key, mapping=meta)
@@ -474,7 +485,8 @@ class RedisComponentTable(ComponentTable):
             # 建立redis索引
             if str_type:
                 # 字符串类型要特殊处理，score=0, member='name:1'形式
-                io.zadd(idx_key, {f'{value}:{rid}': 0 for rid, value in zip(row_ids, values)})
+                io.zadd(idx_key,
+                        {f'{value}:{rid}': 0 for rid, value in zip(row_ids, values)})
             else:
                 # zadd 会替换掉member相同的值，等于是set
                 io.zadd(idx_key, dict(zip(row_ids, values)))
@@ -513,12 +525,13 @@ class RedisComponentTable(ComponentTable):
         if dtypes_in_db == new_dtypes:
             return
 
-        logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] 代码定义的Schema与已存的不一致，"
-                       f"数据库中：\n"
-                       f"{dtypes_in_db}\n"
-                       f"代码定义的：\n"
-                       f"{new_dtypes}\n "
-                       f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）：")
+        logger.warning(
+            f"  ⚠️ [💾Redis][{self._name}组件] 代码定义的Schema与已存的不一致，"
+            f"数据库中：\n"
+            f"{dtypes_in_db}\n"
+            f"代码定义的：\n"
+            f"{new_dtypes}\n "
+            f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）：")
 
         # todo 调用自定义版本迁移代码（define_migration）
 
@@ -554,8 +567,9 @@ class RedisComponentTable(ComponentTable):
         io.hset(self._meta_key, 'version', version)
         io.hset(self._meta_key, 'json', self._component_cls.json_)
 
-        logger.warning(f"  ✔️ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
-                       f"{added}个属性。")
+        logger.warning(
+            f"  ✔️ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
+            f"{added}个属性。")
 
     @staticmethod
     def make_query_cmd(
@@ -600,7 +614,8 @@ class RedisComponentTable(ComponentTable):
         replica = self._backend.random_replica()
         idx_key = self._idx_prefix + index_name
 
-        cmds = self.make_query_cmd(self._component_cls, index_name, left, right, limit, desc)
+        cmds = self.make_query_cmd(self._component_cls, index_name, left, right, limit,
+                                   desc)
         row_ids = await replica.zrange(name=idx_key, **cmds)
         str_type = self._component_cls.indexes_[index_name]
         if str_type:
@@ -630,7 +645,8 @@ class RedisComponentTable(ComponentTable):
             else:
                 return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
-    async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
+    async def direct_get(self, row_id: int,
+                         row_format='struct') -> None | np.record | dict:
         replica = self._backend.random_replica()
         key = self._key_prefix + str(row_id)
         row = await replica.hgetall(key)
@@ -885,7 +901,8 @@ class RedisMQClient(MQClient):
         self.subscribed.add(channel_name)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
-            logger.warning(f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，")
+            logger.warning(
+                f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，")
 
     async def unsubscribe(self, channel_name) -> None:
         await self._mq.unsubscribe(channel_name)
@@ -905,9 +922,14 @@ class RedisMQClient(MQClient):
             channel_name = msg['channel']
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
-            self.pulled_set -= dropped
+            if dropped:
+                self.pulled_set -= dropped
+                logger.warning(
+                    f"⚠️ [💾Redis] 订阅更新通知来不及处理，"
+                    f"丢弃了2分钟前的消息共{len(dropped)}条")
 
-            # 判断是否已在deque中了，get_message也会自动去重，但get_message一次只取部分消息，不能完全去重
+            # 判断是否已在deque中了，self.get_message也会自动去重，
+            # 但get_message一次只取部分(interval)消息，不能完全去重
             if channel_name not in self.pulled_set:
                 self.pulled_deque.add(time.time(), channel_name)
                 self.pulled_set.add(channel_name)
