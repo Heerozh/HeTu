@@ -5,7 +5,7 @@ import docker
 from docker.errors import NotFound
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def redis_service():
     try:
         client = docker.from_env()
@@ -80,33 +80,40 @@ def redis_service():
         pass
 
 
-def redis_backend(redis_service):
+@pytest.fixture
+async def redis_backend(redis_service):
     from hetu.data.backend import RedisComponentTable, RedisBackend
     from hetu.data.backend.redis import RedisTransaction
 
-    def _create_redis_backend(backend_cls, config):
-        backend = backend_cls(config)
-        backend.configure()
-        if type(backend) is RedisBackend:
-            assert(
-                backend.io.config_get('notify-keyspace-events')[
-                    "notify-keyspace-events"],
-                "")
+    backends = {}
+    # 支持创建多个backend连接
+    def _create_redis_backend(key="main"):
+        if key in backends:
+            return backends[key]
 
-        item_data = table_cls(Item, 'test', 1, backend)
-        item_data.flush(force=True)
-        item_data.create_or_migrate()
-
-    yield RedisComponentTable, RedisBackend, {
+        config = {
             "master": redis_service[0],
             "servants": [redis_service[1], ]
         }
+
+        _backend = RedisBackend(config)
+        backends[key] = _backend
+        _backend.configure()
+        return _backend
+
+    yield RedisComponentTable, _create_redis_backend
+
+    for backend in backends.values():
+        await backend.close()
     # 服务器销毁时，需要清理全局lua缓存，不然会认为lua脚本还在。这里强制清理下
     RedisTransaction.lua_check_unique = None
     RedisTransaction.lua_run_stacked = None
 
 
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(params=[redis_backend, ])
-def backend(request):
-    return request.param()
+@pytest.fixture(params=["redis", ])
+def auto_backend(request):
+    if request.param == "redis":
+        return request.getfixturevalue("redis_backend")
+    else:
+        raise ValueError("Unknown db type: %s" % request.param)

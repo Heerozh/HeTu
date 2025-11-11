@@ -260,12 +260,12 @@ class RedisTransaction(BackendTransaction):
 
     async def end_transaction(self, discard) -> list[int] | None:
         if self._trx_pipe is None:
-            return
+            return None
         # 并实现事务提交的操作，将_stack中的命令写入事务
         if discard or len(self._stack) == 0:
             await self._trx_pipe.reset()
             self._trx_pipe = None
-            return
+            return None
 
         pipe = self._trx_pipe
 
@@ -649,8 +649,8 @@ class RedisComponentTable(ComponentTable):
 
         while True:
             try:
-                async with self._backend.transaction(self._cluster_id) as trx:
-                    tbl = self.attach(trx)
+                async with self._backend.transaction(self._cluster_id) as session:
+                    tbl = self.attach(session)
                     row = await tbl.select(row_id)
                     if row is None:
                         raise KeyError(f"direct_set: row_id {row_id} 不存在")
@@ -662,43 +662,34 @@ class RedisComponentTable(ComponentTable):
             except RaceCondition:
                 await asyncio.sleep(random.random() / 5)
                 continue
-            except Exception:
-                await trx.end_transaction(discard=True)
-                raise
 
     async def direct_insert(self, **kwargs) -> list[int] | None:
         while True:
             try:
-                async with self._backend.transaction(self._cluster_id) as trx:
-                    tbl = self.attach(trx)
+                async with self._backend.transaction(self._cluster_id) as session:
+                    tbl = self.attach(session)
                     row = self.component_cls.new_row()
                     for prop, value in kwargs.items():
                         if prop in self._component_cls.prop_idx_map_:
                             row[prop] = value
                     row.id = 0
                     await tbl.insert(row)
-                    row_ids = await trx.end_transaction(False)
+                    row_ids = await session.end_transaction(False)
                 return row_ids
             except RaceCondition:
                 await asyncio.sleep(random.random() / 5)
                 continue
-            except Exception:
-                await trx.end_transaction(discard=True)
-                raise
 
     async def direct_delete(self, row_id: int):
         while True:
             try:
-                async with self._backend.transaction(self._cluster_id) as trx:
-                    tbl = self.attach(trx)
+                async with self._backend.transaction(self._cluster_id) as session:
+                    tbl = self.attach(session)
                     await tbl.delete(row_id)
                 return
             except RaceCondition:
                 await asyncio.sleep(random.random() / 5)
                 continue
-            except Exception:
-                await trx.end_transaction(discard=True)
-                raise
 
     def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
         # 这里不用检查cluster_id，因为ComponentTransaction会检查

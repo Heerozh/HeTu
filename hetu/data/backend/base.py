@@ -116,7 +116,10 @@ class BackendTransaction:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.end_transaction(discard=False)
+        if exc_type is None:
+            await self.end_transaction(discard=False)
+        else:
+            await self.end_transaction(discard=True)
 
 
 class ComponentTable:
@@ -667,7 +670,7 @@ class ComponentTransaction:
         >>> @define_system(components=(Item, ))
         ... async def create_item(ctx):
         ...     ctx[Item].insert(...)
-        ...     inserted_ids = await ctx.trx.end_transaction(discard=False)
+        ...     inserted_ids = await ctx.end_transaction(discard=False)
         ...     ctx.user_data['my_id'] = inserted_ids[0]  # 如果事务冲突，这句不会执行
 
         ⚠️ 注意：调用完end_transaction，ctx将不再能够获取Components
