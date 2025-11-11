@@ -1,7 +1,7 @@
 from fixtures.backends import *
 
-@pytest.fixture
-async def defined_item_component():
+@pytest.fixture(scope="module")
+async def mod_item_component():
     from hetu.data import define_component, Property, BaseComponent, Permission
     import numpy as np
     global Item
@@ -19,29 +19,29 @@ async def defined_item_component():
     return Item
 
 
-@pytest.fixture
-async def item_table(auto_backend, defined_item_component):
-    comp_tbl_class, get_or_create_backend = auto_backend
+@pytest.fixture(scope="module")
+async def mod_item_table(mod_auto_backend, mod_item_component):
+    comp_tbl_class, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
     item_table = comp_tbl_class(
-        defined_item_component, 'ItemTestTable', 1, backend)
+        mod_item_component, 'ItemTestTable', 1, backend)
     return item_table
 
 
 @pytest.fixture
-async def filled_item_table(auto_backend, defined_item_component, item_table):
+async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table):
     import asyncio
-    comp_tbl_class, get_or_create_backend = auto_backend
+    comp_tbl_class, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
-    item_table.flush(force=True)
-    item_table.create_or_migrate()
+    mod_item_table.flush(force=True)
+    mod_item_table.create_or_migrate()
     # 初始化测试数据
     async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+        tbl = mod_item_table.attach(session)
         for i in range(25):
-            row = defined_item_component.new_row()
+            row = mod_item_component.new_row()
             row.id = 0
             row.name = f'Itm{i + 10}'
             row.owner = 10
@@ -54,6 +54,6 @@ async def filled_item_table(auto_backend, defined_item_component, item_table):
             break
         await asyncio.sleep(0.001)
 
-    yield item_table
+    yield mod_item_table
 
-    item_table.flush(force=True)
+    mod_item_table.flush(force=True)

@@ -1,15 +1,15 @@
 from hetu.data.backend import ComponentTable
 
 
-async def test_session_exception(auto_backend, defined_item_component,
-                                 item_table: ComponentTable):
-    comp_tbl_class, get_or_create_backend = auto_backend
+async def test_session_exception(mod_auto_backend, mod_item_component,
+                                 mod_item_table: ComponentTable):
+    comp_tbl_class, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend()
     try:
         async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
-            row = defined_item_component.new_row()
+            tbl = mod_item_table.attach(session)
+            row = mod_item_component.new_row()
             row.owner = 123
             await tbl.insert(row)
 
@@ -22,8 +22,8 @@ async def test_session_exception(auto_backend, defined_item_component,
         pass
 
     # 验证数据没有被提交
-    row = await item_table.direct_get(0)
+    row = await mod_item_table.direct_get(0)
     assert row is None
 
-    row = await item_table.direct_get(1)
+    row = await mod_item_table.direct_get(1)
     assert row is None

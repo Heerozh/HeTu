@@ -6,7 +6,7 @@ from docker.errors import NotFound
 
 
 @pytest.fixture(scope="module")
-def redis_service():
+def mod_redis_service():
     try:
         client = docker.from_env()
     except docker.errors.DockerException:
@@ -80,8 +80,8 @@ def redis_service():
         pass
 
 
-@pytest.fixture
-async def redis_backend(redis_service):
+@pytest.fixture(scope="module")
+async def mod_redis_backend(mod_redis_service):
     from hetu.data.backend import RedisComponentTable, RedisBackend
     from hetu.data.backend.redis import RedisTransaction
 
@@ -92,8 +92,8 @@ async def redis_backend(redis_service):
             return backends[key]
 
         config = {
-            "master": redis_service[0],
-            "servants": [redis_service[1], ]
+            "master": mod_redis_service[0],
+            "servants": [mod_redis_service[1], ]
         }
 
         _backend = RedisBackend(config)
@@ -111,9 +111,9 @@ async def redis_backend(redis_service):
 
 
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(params=["redis", ])
-def auto_backend(request):
+@pytest.fixture(params=["redis", ], scope="module")
+def mod_auto_backend(request):
     if request.param == "redis":
-        return request.getfixturevalue("redis_backend")
+        return request.getfixturevalue("mod_redis_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)
