@@ -771,7 +771,7 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
-
+    # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
     async def close(self):
