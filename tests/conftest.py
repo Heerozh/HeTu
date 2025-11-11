@@ -1,7 +1,15 @@
 from fixtures.backends import *
 
+
 @pytest.fixture(scope="module")
-async def mod_item_component():
+async def mod_clear_all_component_define():
+    # 此方法mod范围，因此只要依赖与他，就可以每个mod首次都clear
+    from hetu.data import ComponentDefines
+    ComponentDefines().clear_()
+
+
+@pytest.fixture(scope="module")
+async def mod_item_component(mod_clear_all_component_define):
     from hetu.data import define_component, Property, BaseComponent, Permission
     import numpy as np
     global Item

@@ -156,7 +156,7 @@ async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTabl
 
 
 async def test_subscribe_updates(sub_mgr, filled_item_table, admin_ctx,
-                                          background_mq_puller_task):
+                                 background_mq_puller_task):
     backend = sub_mgr._backend
 
     # 测试4种范围的订阅是否正常工作
@@ -192,8 +192,9 @@ async def test_subscribe_updates(sub_mgr, filled_item_table, admin_ctx,
     assert len(sub_mgr._subs[sub_10].row_subs) == 24
     assert len(sub_mgr._subs[sub_11_12].row_subs) == 1
 
+
 async def test_row_subscribe_cache(sub_mgr, filled_item_table, admin_ctx,
-                                          background_mq_puller_task):
+                                   background_mq_puller_task):
     backend = sub_mgr._backend
 
     # row订阅会用全局cache加速相同数据的更新，当一个row更新时，应该cache中有该值
@@ -234,31 +235,48 @@ async def test_row_subscribe_cache(sub_mgr, filled_item_table, admin_ctx,
     assert len(updates) == 3
     assert updates[sub_row]["1"]['owner'] == 12  # row订阅数据更新
     assert sub_10 not in updates
-    assert updates[sub_10_11]["1"] == None  # query 10-11删除了1
+    assert updates[sub_10_11]["1"] is None  # query 10-11删除了1
     assert updates[sub_11_12]["1"]['owner'] == 12  # query 11-12更新row数据
-#
-#     # 测试取消订阅
-#     assert len(sub_mgr._subs) == 4
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 26
-#
-#     await sub_mgr.unsubscribe(sub_id2)
-#     assert len(sub_mgr._subs) == 3
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 26
-#
-#     await sub_mgr.unsubscribe(sub_id3)
-#     assert len(sub_mgr._channel_subs) == 2
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 2
-#
-#     await sub_mgr.unsubscribe(sub_id1)
-#     assert len(sub_mgr._channel_subs) == 2
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 2
-#     await sub_mgr.unsubscribe(sub_id1)  # 测试重复取消订阅没变化
-#     assert len(sub_mgr._channel_subs) == 2
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 2
-#
-#     await sub_mgr.unsubscribe(sub_id4)
-#     assert len(sub_mgr._channel_subs) == 0
-#     assert len(sub_mgr._mq_client.subscribed_channels) == 0
+
+
+async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
+                                   background_mq_puller_task):
+    sub_row, _ = await sub_mgr.subscribe_select(
+        filled_item_table, admin_ctx, 'Itm10', 'name')
+    sub_10, _ = await sub_mgr.subscribe_query(
+        filled_item_table, admin_ctx, 'owner', 10, limit=33)
+    sub_10_11, _ = await sub_mgr.subscribe_query(
+        filled_item_table, admin_ctx, 'owner', 10, right=11, limit=44)
+    sub_11_12, _ = await sub_mgr.subscribe_query(
+        filled_item_table, admin_ctx, 'owner', 11, right=12, limit=55)
+
+    # 测试取消订阅
+    assert len(sub_mgr._subs) == 4
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26 # 25行+1个index
+
+    await sub_mgr.unsubscribe(sub_10)
+    assert len(sub_mgr._subs) == 3
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26 # 其他sub依旧订阅所有行
+
+    await sub_mgr.unsubscribe(sub_row)
+    assert len(sub_mgr._subs) == 2
+    assert len(sub_mgr._channel_subs) == 26  # 10 row还是被sub_10_11订阅着
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+    # 测试重复取消订阅没变化
+    await sub_mgr.unsubscribe(sub_row)
+    assert len(sub_mgr._subs) == 2
+    assert len(sub_mgr._channel_subs) == 26
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+
+    await sub_mgr.unsubscribe(sub_10_11)
+    assert len(sub_mgr._subs) == 1
+    assert len(sub_mgr._channel_subs) == 1
+    assert len(sub_mgr._mq_client.subscribed_channels) == 1
+
+    await sub_mgr.unsubscribe(sub_11_12)
+    assert len(sub_mgr._subs) == 0
+    assert len(sub_mgr._channel_subs) == 0
+    assert len(sub_mgr._mq_client.subscribed_channels) == 0
 #
 #     # 测试owner不符不给订阅
 #     sub_id5, row = await sub_mgr.subscribe_select(item_data, user10_ctx, 1)
