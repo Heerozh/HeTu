@@ -160,13 +160,13 @@ class SystemExecutor:
         # 调用系统
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
-            trx = None
+            session = None
             if len(sys.full_components) > 0:
-                trx = backend.transaction(sys.cluster_id)
+                session = backend.transaction(sys.cluster_id)
                 for comp in sys.full_components:
                     tbl = comp_mgr.get_table(comp)
                     master = comp.master_ or comp
-                    context.transactions[master] = tbl.attach(trx)
+                    context.transactions[master] = tbl.attach(session)
             # 执行system和事务
             try:
                 # 先检查uuid是否执行过了
@@ -184,8 +184,8 @@ class SystemExecutor:
                         exe_row.called = time.time()
                         exe_row.name = sys_name
                 # 执行事务
-                if trx is not None:
-                    await trx.end_transaction(discard=False)
+                if session is not None:
+                    await session.end_transaction(discard=False)
                 # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
@@ -203,9 +203,9 @@ class SystemExecutor:
                 logger.exception(err_msg)
                 return False, None
             finally:
-                if trx is not None:
+                if session is not None:
                     # 上面如果执行过end_transaction了，那么这句不生效的，主要用于保证连接关闭
-                    await trx.end_transaction(discard=True)
+                    await session.end_transaction(discard=True)
                 # 记录时间和重试次数到内存
                 elapsed = time.perf_counter() - start_time
                 SLOW_LOG.log(elapsed, sys_name, context.retry_count)
@@ -244,8 +244,8 @@ class SystemExecutor:
         for comp in sys.full_components:
             if comp == ExecutionLock or comp.master_ == ExecutionLock:
                 tbl = comp_mgr.get_table(comp)
-                async with tbl.backend.transaction(sys.cluster_id) as trx:
-                    tbl_trx = tbl.attach(trx)
+                async with tbl.backend.transaction(sys.cluster_id) as session:
+                    tbl_trx = tbl.attach(session)
                     row = await tbl_trx.select(uuid, 'uuid')
                     if row:
                         await tbl_trx.delete(row.id)

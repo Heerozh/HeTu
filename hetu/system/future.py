@@ -151,8 +151,8 @@ async def clean_expired_call_locks(comp_mgr):
         backend = tbl.backend
         deleted = 0
         while True:
-            async with backend.transaction(tbl.cluster_id) as trx:
-                tbl_trx = tbl.attach(trx)
+            async with backend.transaction(tbl.cluster_id) as session:
+                tbl_trx = tbl.attach(session)
                 rows = await tbl_trx.query(
                     'called',
                     left=0, right=time.time() - datetime.timedelta(days=7).total_seconds(),
@@ -184,8 +184,8 @@ async def sleep_for_upcoming(tbl: ComponentTable):
 
 async def pop_upcoming_call(tbl: ComponentTable):
     """取出并修改到期任务"""
-    async with tbl.backend.transaction(tbl.cluster_id) as trx:
-        tbl_trx = tbl.attach(trx)
+    async with tbl.backend.transaction(tbl.cluster_id) as session:
+        tbl_trx = tbl.attach(session)
         # 取出最早到期的任务
         now = time.time()
         calls = await tbl_trx.query('scheduled', left=0, right=now + 0.1, limit=1)
@@ -221,8 +221,8 @@ async def exec_future_call(call: np.record, executor: SystemExecutor, tbl: Compo
         replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
-        async with tbl.backend.transaction(tbl.cluster_id) as trx:
-            tbl_trx = tbl.attach(trx)
+        async with tbl.backend.transaction(tbl.cluster_id) as session:
+            tbl_trx = tbl.attach(session)
             await tbl_trx.delete(call.id)
         # 再删除call_lock uuid数据，只有ok的执行才有call lock
         await executor.remove_call_lock(call.system, call.uuid)
