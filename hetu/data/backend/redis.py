@@ -890,8 +890,8 @@ class RedisMQClient(MQClient):
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
         self._mq = redis_conn.pubsub()
         self.subscribed = set()
-        self.pulled_deque = MultiMap()
-        self.pulled_set = set()
+        self.pulled_deque = MultiMap() # 可按时间查询的消息队列
+        self.pulled_set = set() # 和pulled_deque内容保持一致的set，方便去重
 
     async def close(self):
         return await self._mq.aclose()
@@ -928,7 +928,7 @@ class RedisMQClient(MQClient):
                     f"⚠️ [💾Redis] 订阅更新通知来不及处理，"
                     f"丢弃了2分钟前的消息共{len(dropped)}条")
 
-            # 判断是否已在deque中了，self.get_message也会自动去重，
+            # 判断是否已在deque中了，去重用。self.get_message也会自动去重，
             # 但get_message一次只取部分(interval)消息，不能完全去重
             if channel_name not in self.pulled_set:
                 self.pulled_deque.add(time.time(), channel_name)
