@@ -7,6 +7,12 @@ from docker.errors import NotFound
 
 @pytest.fixture(scope="module")
 def mod_redis_service():
+    from hetu.data.backend.redis import RedisBackend
+    # redis服务器设置了不会保存lua脚本，redis服务销毁/重建时，需要清理全局lua缓存标记，
+    # 此标记用来加速redis客户端请求速度，不然客户端每次都有逻辑需要保证脚本存在
+    # 这里强制清理下
+    RedisBackend.lua_check_and_run = None
+
     try:
         client = docker.from_env()
     except docker.errors.DockerException:
@@ -83,7 +89,6 @@ def mod_redis_service():
 @pytest.fixture(scope="module")
 async def mod_redis_backend(mod_redis_service):
     from hetu.data.backend import RedisComponentTable, RedisBackend
-    from hetu.data.backend.redis import RedisTransaction
 
     backends = {}
     # 支持创建多个backend连接
@@ -105,9 +110,7 @@ async def mod_redis_backend(mod_redis_service):
 
     for backend in backends.values():
         await backend.close()
-    # 服务器销毁时，需要清理全局lua缓存，不然会认为lua脚本还在。这里强制清理下
-    RedisTransaction.lua_check_unique = None
-    RedisTransaction.lua_run_stacked = None
+
 
 
 # 要测试新的backend，请添加backend到params中
