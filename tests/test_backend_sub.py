@@ -73,6 +73,21 @@ async def user_id10_ctx():
         inherited={}
     )
 
+@pytest.fixture
+async def user_id11_ctx():
+    from hetu.system import Context
+    return Context(
+        caller=11,
+        connection_id=0,
+        address="NotSet",
+        group=None,
+        user_data={},
+
+        timestamp=0,
+        retry_count=0,
+        transactions={},
+        inherited={}
+    )
 
 async def test_redis_notify_configuration(mod_redis_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
@@ -284,58 +299,120 @@ async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
     assert len(sub_mgr._subs) == 0
     assert len(sub_mgr._channel_subs) == 0
     assert len(sub_mgr._mq_client.subscribed_channels) == 0
-#
-#     # 测试owner不符不给订阅
-#     sub_id5, row = await sub_mgr.subscribe_select(item_data, user10_ctx, 1)
-#     assert sub_id5 == None
-#     # 测试订阅单行，owner改变后要删除
-#     sub_id5, row = await sub_mgr.subscribe_select(item_data, user10_ctx, 3)
-#     assert row['owner'] == 10
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(3)
-#         row.owner = 11
-#         await tbl.update(3, row)
-#     updates = await sub_mgr.get_updates()
-#     assert updates[sub_id5]["3"] == None
-#
-#     # 测试owner query只传输owner相等的数据
-#     sub_id6, rows = await sub_mgr.subscribe_query(
-#         item_data, user10_ctx, 'owner', 1, right=20, limit=55)
-#     assert [row['owner'] for row in rows] == [10] * 23
-#     assert len(sub_mgr._subs[sub_id6].row_subs) == 23
-#     # 测试更新数值，看query的update是否会删除/添加owner相符的
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(4)
-#         row.owner = 11
-#         await tbl.update(4, row)
-#     updates = await sub_mgr.get_updates()
-#     assert len(updates[sub_id6]) == 1
-#     assert updates[sub_id6]["4"] == None
-#     # 因为会注册query的所有结果，不管是不是owner相符，所以注册数量又变成了25，这里就不测试了
-#     # assert len(sub_mgr._subs[sub_id6].row_subs) == 25
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(4)
-#         row.owner = 10
-#         await tbl.update(4, row)
-#     updates = await sub_mgr.get_updates()
-#     assert len(updates[sub_id6]) == 1
-#     assert updates[sub_id6]["4"]['owner'] == 10
-#     # 测试insert新数据能否得到通知
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         new = Item.new_row()
-#         new.owner = 10
-#         await tbl.insert(new)
-#     updates = await sub_mgr.get_updates()
-#     assert len(updates[sub_id6]) == 1
-#     assert updates[sub_id6]["26"]['owner'] == 10
-#
-#     # 关闭连接
-#     task.cancel()
-#     await backend.close()
+
+
+async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx, user_id11_ctx,
+                             background_mq_puller_task):
+    # 测试owner不符不给订阅
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 1)
+    assert sub_id is not None
+
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id11_ctx, 1)
+    assert sub_id is None
+
+
+
+async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx,
+                             background_mq_puller_task):
+    # 先改掉一个人的owner值
+    backend = sub_mgr._backend
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(3)
+        row.owner = 11
+        await tbl.update(3, row)
+
+    # 测试owner query只传输owner相等的数据
+    sub_id, rows = await sub_mgr.subscribe_query(
+        filled_item_table, user_id10_ctx, 'owner', 1, right=20, limit=55)
+    assert [row['owner'] for row in rows] == [10] * 24
+    assert len(sub_mgr._subs[sub_id].row_subs) == 24
+
+
+async def test_select_subscribe_rls_update(sub_mgr, filled_item_table, user_id10_ctx,
+                                   background_mq_puller_task):
+    backend = sub_mgr._backend
+
+    # 测试订阅单行，owner改变后要删除
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 3)
+    assert row['owner'] == 10
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(3)
+        row.owner = 11
+        await tbl.update(3, row)
+    updates = await sub_mgr.get_updates()
+    assert updates[sub_id]["3"] is None
+
+
+async def test_query_subscribe_rls_lost(sub_mgr, filled_item_table, mod_item_component, user_id10_ctx,
+                                   background_mq_puller_task):
+    backend = sub_mgr._backend
+
+    sub_id, rows = await sub_mgr.subscribe_query(
+        filled_item_table, user_id10_ctx, 'owner', 1, right=20, limit=55)
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+
+    # 测试更新数值，看query的update是否会删除/添加owner相符的
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(4)
+        row.owner = 11
+        await tbl.update(4, row)
+    updates = await sub_mgr.get_updates()
+    assert len(updates[sub_id]) == 1
+    assert updates[sub_id]["4"] is None
+
+    # query订阅的原理是只订阅符合rls的行，但如果数值变了导致失去了某行rls并不会管，由行订阅执行处理
+    # 所以注册数量25不变。（但是如果获得了新的rls会管）
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+
+
+async def test_query_subscribe_rls_gain(sub_mgr, filled_item_table,
+                                            mod_item_component, user_id10_ctx,
+                                            background_mq_puller_task):
+    # query订阅的rls gain处理的原理是，每次index变化都检查所有未注册行的rls
+    # 如果中途获得rls，就加入订阅
+
+    # 先预先取掉一行rls
+    backend = sub_mgr._backend
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(4)
+        row.owner = 11
+        await tbl.update(4, row)
+
+    sub_id, rows = await sub_mgr.subscribe_query(
+        filled_item_table, user_id10_ctx, 'owner', 1, right=20, limit=55)
+    assert len(sub_mgr._subs[sub_id].row_subs) == 24
+
+    # 测试改回来是否重新出现
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(4)
+        row.owner = 10
+        await tbl.update(4, row)
+    updates = await sub_mgr.get_updates()
+    assert len(updates[sub_id]) == 1
+    assert updates[sub_id]["4"]['owner'] == 10
+
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+
+    # 测试insert新数据能否得到通知
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        new = mod_item_component.new_row()
+        new.owner = 10
+        await tbl.insert(new)
+    updates = await sub_mgr.get_updates()
+    assert len(updates[sub_id]) == 1
+    assert updates[sub_id]["26"]['owner'] == 10
+
+
+async def test_query_subscribe_rls_gain_without_index(sub_mgr, filled_item_table,
+                                            mod_item_component, user_id10_ctx,
+                                            background_mq_puller_task):
+    pass
 #
 # @mock.patch('time.time', mock_time)
 # @parameterized(implements)
