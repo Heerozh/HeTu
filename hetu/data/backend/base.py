@@ -35,14 +35,15 @@
   │   等待Subs返回消息   │
   └────────────────────┘
 """
-import asyncio
+
 import logging
+import asyncio
 
 import numpy as np
 
-from ..component import BaseComponent, Permission
+from ..component import BaseComponent
 
-logger = logging.getLogger('HeTu.root')
+logger = logging.getLogger("HeTu.root")
 
 
 class RaceCondition(Exception):
@@ -76,6 +77,21 @@ class Backend:
         """
         raise NotImplementedError
 
+    async def is_synced(self) -> bool:
+        """
+        检查各个slave数据库和master数据库的数据是否已完成同步。
+        主要用于test用例。
+        """
+        raise NotImplementedError
+
+    async def wait_for_synced(self) -> None:
+        """
+        等待各个slave数据库和master数据库的数据完成同步。
+        主要用于test用例。
+        """
+        while not await self.is_synced():
+            await asyncio.sleep(0.1)
+
     def requires_head_lock(self) -> bool:
         """
         要求持有head锁，防止启动2台有head标记的服务器。
@@ -85,11 +101,11 @@ class Backend:
         """
         raise NotImplementedError
 
-    def transaction(self, cluster_id: int) -> 'BackendTransaction':
+    def transaction(self, cluster_id: int) -> "BackendTransaction":
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
-    def get_mq_client(self) -> 'MQClient':
+    def get_mq_client(self) -> "MQClient":
         """获取消息队列连接"""
         raise NotImplementedError
 
@@ -116,7 +132,10 @@ class BackendTransaction:
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
-        await self.end_transaction(discard=False)
+        if exc_type is None:
+            await self.end_transaction(discard=False)
+        else:
+            await self.end_transaction(discard=True)
 
 
 class ComponentTable:
@@ -126,7 +145,8 @@ class ComponentTable:
     """
 
     def __init__(
-            self, component_cls: type[BaseComponent],
+            self,
+            component_cls: type[BaseComponent],
             instance_name: str,
             cluster_id: int,
             backend: Backend,
@@ -163,7 +183,7 @@ class ComponentTable:
             right=None,
             limit=10,
             desc=False,
-            row_format='struct',
+            row_format="struct",
     ) -> np.recarray | list[dict | int]:
         """
         不通过事务直接从servant数据库查询值，不影响Master性能，但没有数据一致性保证。
@@ -191,7 +211,9 @@ class ComponentTable:
         # 请使用servant数据库来操作
         raise NotImplementedError
 
-    async def direct_get(self, row_id: int, row_format='struct') -> None | np.record | dict:
+    async def direct_get(
+            self, row_id: int, row_format="struct"
+    ) -> None | np.record | dict:
         """
         不通过事务，从servant数据库直接读取某行的值。
 
@@ -241,13 +263,13 @@ class ComponentTable:
         """
         raise NotImplementedError
 
-    def attach(self, backend_trx: BackendTransaction) -> 'ComponentTransaction':
+    def attach(self, backend_trx: BackendTransaction) -> "ComponentTransaction":
         """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
         # return YourComponentTransaction(self, backend_trx)
         raise NotImplementedError
 
-    def new_transaction(self) -> tuple[BackendTransaction, 'ComponentTransaction']:
+    def new_transaction(self) -> tuple[BackendTransaction, "ComponentTransaction"]:
         """返回当前组件的事务操作类，并新建一个后端事务连接"""
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
@@ -265,8 +287,9 @@ class ComponentTransaction:
     """
 
     def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
-        assert trx_conn.cluster_id == comp_tbl.cluster_id, \
-            "事务只能在对应的cluster_id中执行，不能跨cluster"
+        assert (
+                trx_conn.cluster_id == comp_tbl.cluster_id
+        ), "事务只能在对应的cluster_id中执行，不能跨cluster"
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
@@ -288,12 +311,7 @@ class ComponentTransaction:
         raise NotImplementedError
 
     async def _db_query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
+            self, index_name: str, left, right=None, limit=10, desc=False,
             lock_index=True
     ) -> list[int]:
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
@@ -331,18 +349,18 @@ class ComponentTransaction:
         rtn = []
         for row_id in row_ids:
             if (row := self._cache.get(row_id)) is not None:
-                if type(row) is str and row == 'deleted':
-                    raise RaceCondition('gets: row已经被你自己删除了')
+                if type(row) is str and row == "deleted":
+                    raise RaceCondition("gets: row已经被你自己删除了")
                 rtn.append(row)
             else:
                 if (row := await self._db_get(row_id)) is None:
-                    raise RaceCondition('gets: row中途被删除了')
+                    raise RaceCondition("gets: row中途被删除了")
                 self._cache[row_id] = row
                 rtn.append(row)
 
         return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def select(self, value, where: str = 'id', lock_row=True) -> None | np.record:
+    async def select(self, value, where: str = "id", lock_row=True) -> None | np.record:
         """
         获取 `where` == `value` 的单行数据，返回c-struct like。
         `where` 不是unique索引时，返回升序排序的第一条数据。
@@ -375,23 +393,27 @@ class ComponentTransaction:
         ...     item_row = await ctx[Item].select(ctx.caller, 'owner')
         ...     print(item_row.name)
         """
-        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(
+            value
+        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert (
+                where in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
 
         # 查询
-        if where == 'id':
+        if where == "id":
             row_id = value
         else:
-            if len(row_ids := await self._db_query(where, value, limit=1, lock_index=False)) == 0:
+            row_ids = await self._db_query(where, value, limit=1, lock_index=False)
+            if len(row_ids) == 0:
                 return None
             row_id = int(row_ids[0])
 
         if (row := self._cache.get(row_id)) is not None:
-            if type(row) is str and row == 'deleted':
+            if type(row) is str and row == "deleted":
                 return None
             else:
                 return row.copy()
@@ -400,20 +422,27 @@ class ComponentTransaction:
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
         # 所以检测get结果是否在查询范围内，不在就抛出冲突
         if (row := await self._db_get(row_id, lock_row=lock_row)) is None:
-            if where == 'id':
+            if where == "id":
                 return None  # 如果不是从index查询到的id，而是直接传入，那就不需要判断race了
             else:
-                raise RaceCondition('select: row中途被删除了')
+                raise RaceCondition("select: row中途被删除了")
         if row[where] != value:
-            raise RaceCondition(f'select: row.{where}值变动了')
+            raise RaceCondition(f"select: row.{where}值变动了")
 
         self._cache[row_id] = row
 
         return row.copy()
 
     async def query(
-            self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True,
-            index_only=False, lock_rows=True
+            self,
+            index_name: str,
+            left,
+            right=None,
+            limit=10,
+            desc=False,
+            lock_index=True,
+            index_only=False,
+            lock_rows=True,
     ) -> np.recarray | list[int]:
         """
         查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
@@ -476,9 +505,12 @@ class ComponentTransaction:
         >>> few_items = items[items.amount < 10]
 
         """
-        assert np.isscalar(left), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
-        assert index_name in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
+        assert np.isscalar(
+            left
+        ), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
+        assert (
+                index_name in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
 
         left = int(left) if np.issubdtype(type(left), np.bool_) else left
         left = left.item() if issubclass(type(left), np.generic) else left
@@ -505,12 +537,12 @@ class ComponentTransaction:
                 # 由于index是分离的，且不能锁定index(不然事务冲突率很高），所以检测get结果是否在查询范围内，
                 # 不在就抛出冲突
                 if not (left <= row[index_name] <= right):
-                    raise RaceCondition(f'select: row.{index_name}值变动了')
+                    raise RaceCondition(f"select: row.{index_name}值变动了")
                 if lock_rows:
                     self._cache[row_id] = row
                 rtn.append(row)
             else:
-                raise RaceCondition('select: row中途被删除了')
+                raise RaceCondition("select: row中途被删除了")
 
         # 返回numpy array
         if len(rtn) == 0:
@@ -518,11 +550,14 @@ class ComponentTransaction:
         else:
             return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
 
-    async def is_exist(self, value, where: str = 'id') -> tuple[bool, int | None]:
+    async def is_exist(self, value, where: str = "id") -> tuple[bool, int | None]:
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
-        assert np.isscalar(value), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert where in self._component_cls.indexes_, \
-            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(
+            value
+        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        assert (
+                where in self._component_cls.indexes_
+        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -531,7 +566,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    def update_or_insert(self, value, where: str = None) -> 'UpdateOrInsert':
+    def update_or_insert(self, value, where: str = None) -> "UpdateOrInsert":
         """
         同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
@@ -558,10 +593,7 @@ class ComponentTransaction:
         return UpdateOrInsert(self, value, where)
 
     async def _check_uniques(
-            self,
-            old_row: [np.record, None],
-            new_row: np.record,
-            ignores=None
+            self, old_row: [np.record, None], new_row: np.record, ignores=None
     ) -> None:
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
@@ -574,22 +606,28 @@ class ComponentTransaction:
             # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
                 row_ids = await self._db_query(
-                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False)
+                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False
+                )
                 if len(row_ids) > 0:
                     raise UniqueViolation(
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
-                        f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert")
+                        f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert"
+                    )
 
     async def update(self, row_id: int, row) -> None:
         """修改row_id行的数据"""
         row_id = int(row_id)
 
         if row_id in self._updt_flags:
-            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
-                           f"已经在事务中更新过了，不允许重复更新。")
+            raise KeyError(
+                f"{self._component_cls.component_name_}行（id:{row_id}）"
+                f"已经在事务中更新过了，不允许重复更新。"
+            )
         if row_id in self._del_flags:
-            raise KeyError(f"{self._component_cls.component_name_}行（id:{row_id}）"
-                           f"已经在事务中删除了，不允许再次更新。")
+            raise KeyError(
+                f"{self._component_cls.component_name_}行（id:{row_id}）"
+                f"已经在事务中删除了，不允许再次更新。"
+            )
 
         assert type(row) is np.record, "update数据必须是单行数据"
 
@@ -599,7 +637,9 @@ class ComponentTransaction:
         # 先查询旧数据是否存在，一般update调用时，旧数据都在_cache里，不然你哪里获得的row数据
         old_row = self._cache.get(row_id)  # or await self._db_get(row_id)
         if old_row is None:
-            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
+            )
 
         # 检查先决条件
         await self._check_uniques(old_row, row)
@@ -612,7 +652,9 @@ class ComponentTransaction:
         self._trx_update(row_id, old_row, row)
 
     async def update_rows(self, rows: np.recarray) -> None:
-        assert type(rows) is np.recarray and rows.shape[0] > 1, "update_rows数据必须是多行数据"
+        assert (
+                type(rows) is np.recarray and rows.shape[0] > 1
+        ), "update_rows数据必须是多行数据"
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
@@ -644,7 +686,7 @@ class ComponentTransaction:
         >>> @define_system(components=(Item, ))
         ... async def create_item(ctx):
         ...     ctx[Item].insert(...)
-        ...     inserted_ids = await ctx.trx.end_transaction(discard=False)
+        ...     inserted_ids = await ctx.end_transaction(discard=False)
         ...     ctx.user_data['my_id'] = inserted_ids[0]  # 如果事务冲突，这句不会执行
 
         ⚠️ 注意：调用完end_transaction，ctx将不再能够获取Components
@@ -654,7 +696,7 @@ class ComponentTransaction:
 
         # 提交到事务前先检查无unique冲突
         try:
-            await self._check_uniques(None, row, ignores={'id'})
+            await self._check_uniques(None, row, ignores={"id"})
         except UniqueViolation:
             if unique_violation_as_race:
                 raise RaceCondition("插入数据时，unique冲突")
@@ -670,26 +712,34 @@ class ComponentTransaction:
         row_id = int(row_id)
 
         if row_id in self._updt_flags:
-            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
-                           f"在事务中已有update命令，不允许再次删除。")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                f"在事务中已有update命令，不允许再次删除。"
+            )
         if row_id in self._del_flags:
-            raise KeyError(f"{self._component_cls.component_name_} 行（id:{row_id}）"
-                           f"已经在事务中删除了，不允许重复删除。")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 行（id:{row_id}）"
+                f"已经在事务中删除了，不允许重复删除。"
+            )
 
         # 先查询旧数据是否存在
         old_row = self._cache.get(row_id) or await self._db_get(row_id)
         if old_row is None:
-            raise KeyError(f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行")
+            raise KeyError(
+                f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
+            )
 
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
-        self._cache[row_id] = 'deleted'
+        self._cache[row_id] = "deleted"
         self._del_flags.add(row_id)
         self._trx_delete(row_id, old_row)
 
     async def delete_rows(self, row_ids: list[int] | np.ndarray) -> None:
-        assert type(row_ids) is np.ndarray and row_ids.shape[0] > 1, "deletes数据必须是多行数据"
+        assert (
+                type(row_ids) is np.ndarray and row_ids.shape[0] > 1
+        ), "deletes数据必须是多行数据"
         for row_id in row_ids:
             await self.delete(row_id)
 
@@ -730,7 +780,8 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
-    UPDATE_FREQUENCY = 10   # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
+    # todo 加入到config中去，设置服务器的通知tick
+    UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
     async def close(self):
         raise NotImplementedError
@@ -769,330 +820,11 @@ class MQClient:
 
 
 class BaseSubscription:
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    async def get_updated(
+            self, channel
+    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         raise NotImplementedError
 
     @property
     def channels(self) -> set[str]:
         raise NotImplementedError
-
-
-class RowSubscription(BaseSubscription):
-    __cache = {}
-
-    def __init__(self, table: ComponentTable, caller: int | str, channel: str, row_id: int):
-        self.table = table
-        if table.component_cls.permission_ == Permission.OWNER and caller != 'admin':
-            self.req_owner = caller
-        else:
-            self.req_owner = None
-        self.channel = channel
-        self.row_id = row_id
-
-    @classmethod
-    def clear_cache(cls, channel):
-        cls.__cache.pop(channel, None)
-
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
-        # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
-        if (cache := RowSubscription.__cache.get(channel, None)) is not None:
-            return set(), set(), cache
-
-        row = await self.table.direct_get(self.row_id, row_format='typed_dict')
-        if row is None:
-            # get_updated主要发给客户端，需要json，所以key直接用str
-            rtn = {str(self.row_id): None}
-        else:
-            if self.req_owner is None or row.get('owner', 0) == self.req_owner:
-                rtn = {str(self.row_id): row}
-            else:
-                rtn = {str(self.row_id): None}
-        RowSubscription.__cache[channel] = rtn
-        return set(), set(), rtn
-
-    @property
-    def channels(self) -> set[str]:
-        return {self.channel}
-
-
-class IndexSubscription(BaseSubscription):
-    def __init__(
-            self, table: ComponentTable, caller: int | str,
-            index_channel: str, last_query, query_param: dict
-    ):
-        self.table = table
-        if table.component_cls.permission_ == Permission.OWNER and caller != 'admin':
-            self.req_owner = caller
-        else:
-            self.req_owner = None
-        self.index_channel = index_channel
-        self.query_param = query_param
-        self.row_subs: dict[str, RowSubscription] = {}
-        self.last_query = last_query
-
-    def add_row_subscriber(self, channel, row_id):
-        self.row_subs[channel] = RowSubscription(self.table, self.req_owner, channel, row_id)
-
-    async def get_updated(self, channel) -> tuple[set[str], set[str], dict[str, dict | None]]:
-        if channel == self.index_channel:
-            # 查询index更新，比较row_id是否有变化
-            row_ids = await self.table.direct_query(**self.query_param, row_format='id')
-            row_ids = set(row_ids)
-            inserts = row_ids - self.last_query
-            deletes = self.last_query - row_ids
-            self.last_query = row_ids
-            new_chans = set()
-            rem_chans = set()
-            rtn = {}
-            for row_id in inserts:
-                row = await self.table.direct_get(row_id, row_format='typed_dict')
-                if row is None:
-                    self.last_query.remove(row_id)
-                    continue  # 可能是刚添加就删了
-                else:
-                    if self.req_owner is None or row.get('owner', 0) == self.req_owner:
-                        rtn[str(row_id)] = row
-                    new_chan_name = self.table.channel_name(row_id=row_id)
-                    new_chans.add(new_chan_name)
-                    self.row_subs[new_chan_name] = RowSubscription(
-                        self.table, self.req_owner, new_chan_name, row_id)
-            for row_id in deletes:
-                rtn[str(row_id)] = None
-                rem_chan_name = self.table.channel_name(row_id=row_id)
-                rem_chans.add(rem_chan_name)
-                self.row_subs.pop(rem_chan_name)
-
-            return new_chans, rem_chans, rtn
-        elif channel in self.row_subs:
-            return await self.row_subs[channel].get_updated(channel)
-
-    @property
-    def channels(self) -> set[str]:
-        return {self.index_channel, *self.row_subs.keys()}
-
-
-class Subscriptions:
-    """
-    Component的数据订阅和查询接口
-    """
-
-    def __init__(self, backend: Backend):
-        self._backend = backend
-        self._mq_client = backend.get_mq_client()
-
-        self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
-        self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
-        self._index_sub_count = 0
-
-    async def close(self):
-        return await self._mq_client.close()
-
-    async def mq_pull(self):
-        """从MQ获得消息，并存放到本地内存。需要单独的协程反复调用，防止MQ消息堆积。"""
-        return await self._mq_client.pull()
-
-    def count(self):
-        """获取订阅数，返回row订阅数，index订阅数"""
-        return len(self._subs) - self._index_sub_count, self._index_sub_count
-
-    @classmethod
-    def _make_query_str(cls, table: ComponentTable, index_name: str, left, right, limit, desc):
-        return (f"{table.component_cls.component_name_}.{index_name}"
-                f"[{left}:{right}:{desc and -1 or 1}][:{limit}]")
-
-    @classmethod
-    def _has_table_permission(cls, table: ComponentTable, caller: int | str) -> bool:
-        """判断caller是否对整个表有权限"""
-        comp_permission = table.component_cls.permission_
-        # admin和EVERYBODY权限永远返回True
-        if caller == 'admin' or comp_permission == Permission.EVERYBODY:
-            return True
-        else:
-            # 其他权限要求至少登陆过
-            if comp_permission == Permission.ADMIN:
-                return False
-            if caller and caller > 0:
-                return True
-            return False
-
-    @classmethod
-    def _has_row_permission(cls, table: ComponentTable, caller: int | str, row: dict | np.record) -> bool:
-        """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
-        comp_permission = table.component_cls.permission_
-        # 非owner权限在_has_table_permission里判断
-        if comp_permission != Permission.OWNER:
-            return True
-        # admin永远返回true
-        if caller == 'admin':
-            return True
-        else:
-            owner = int(row.get('owner', 0)) if type(row) is dict else getattr(row, 'owner', 0)
-            if owner == caller:
-                return True
-            else:
-                return False
-
-    async def subscribe_select(
-            self, table: ComponentTable, caller: int | str, value: any, where: str = 'id'
-    ) -> tuple[str | None, np.record | None]:
-        """
-        获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
-        如果未查询到数据，或owner不符，返回None, None。
-        如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
-        """
-        # 首先caller要对整个表有权限
-        if not self._has_table_permission(table, caller):
-            return None, None
-
-        if where == 'id':
-            if (row := await table.direct_get(value, row_format='typed_dict')) is None:
-                return None, None
-        else:
-            if len(rows := await table.direct_query(where, value, limit=1, row_format='typed_dict')) == 0:
-                return None, None
-            row = rows[0]
-
-        # 再次caller要对该row有权限
-        if not self._has_row_permission(table, caller, row):
-            return None, None
-
-        # 开始订阅
-        sub_id = self._make_query_str(
-            table, 'id', row['id'], None, 1, False)
-        if sub_id in self._subs:
-            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
-            return sub_id, row
-
-        channel_name = table.channel_name(row_id=row['id'])
-        await self._mq_client.subscribe(channel_name)
-
-        self._subs[sub_id] = RowSubscription(table, caller, channel_name, row['id'])
-        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
-        return sub_id, row
-
-    async def subscribe_query(
-            self,
-            table: ComponentTable,
-            caller: int | str,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            force=True,
-    ) -> tuple[str | None, list[dict]]:
-        """
-        获取并订阅多行数据，返回订阅id(sub_id: str)，和多行数据(rows: list[dict])。
-        如果未查询到数据，返回None, []。
-        但force参数可以强制未查询到数据时也订阅，返回订阅id(sub_id: str)，和[]。
-        如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
-
-        时间复杂度是O(log(N)+M)，N是index的条目数；M是查询到的行数。
-        Component权限是OWNER时，查询到的行在最后再根据owner值筛选，M为筛选前的行数。
-        """
-        # 首先caller要对整个表有权限，不然就算force也不给订阅
-        if not self._has_table_permission(table, caller):
-            logger.warning(f"⚠️ [💾Subscription] {table.component_cls.component_name_}无调用权限，"
-                           f"检查是否非法调用，caller：{caller}")
-            return None, []
-
-        rows = await table.direct_query(
-            index_name, left, right, limit, desc, row_format='typed_dict')
-
-        # 如果是owner权限，只取owner相同的
-        if table.component_cls.permission_ == Permission.OWNER:
-            rows = [row for row in rows if self._has_row_permission(table, caller, row)]
-
-        if not force and len(rows) == 0:
-            return None, rows
-
-        sub_id = self._make_query_str(table, index_name, left, right, limit, desc)
-        if sub_id in self._subs:
-            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
-            return sub_id, rows
-
-        index_channel = table.channel_name(index_name=index_name)
-        await self._mq_client.subscribe(index_channel)
-
-        row_ids = {int(row['id']) for row in rows}
-        idx_sub = IndexSubscription(
-            table, caller, index_channel, row_ids,
-            dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc))
-        self._subs[sub_id] = idx_sub
-        self._channel_subs.setdefault(index_channel, set()).add(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
-
-        # 还要订阅每行的信息，这样每行数据变更时才能收到消息
-        for row_id in row_ids:
-            row_channel = table.channel_name(row_id=row_id)
-            await self._mq_client.subscribe(row_channel)
-            idx_sub.add_row_subscriber(row_channel, row_id)
-            self._channel_subs.setdefault(row_channel, set()).add(sub_id)
-
-        return sub_id, rows
-
-    async def unsubscribe(self, sub_id) -> None:
-        """取消该sub_id的订阅"""
-        if sub_id not in self._subs:
-            return
-
-        for channel in self._subs[sub_id].channels:
-            self._channel_subs[channel].remove(sub_id)
-            if len(self._channel_subs[channel]) == 0:
-                await self._mq_client.unsubscribe(channel)
-                del self._channel_subs[channel]
-        self._subs.pop(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(IndexSubscription)
-
-
-    async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
-        """
-        pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
-        返回值为dict: key是sub_id；value是更新的行数据，格式为dict：key是row_id，value是数据库raw值。
-        timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
-
-        遇到消息堆积会丢弃通知。
-
-        对于丢失的消息，也许客户端SDK可以通过定期强制刷新的方式弥补，但是对于insert消息的丢失，无法有效判断刷新时机。
-        可以考虑如下方式：
-             1.RowSubscription/IndexSubscription如果一定时间未收到数据，则强制向服务器取消订阅/重新订阅
-                  无法准确判断index消息的丢失，只有index完全没消息时才有效，对中途漏了几个消息的丢失无法弥补
-                  重新订阅会带来重复的insert消息，客户端逻辑会有问题
-             2.做行更新，就是每个行数据都带时间戳，如果过期就强制更新行，因此delete/update事件可以补回
-                  但是无法解决insert消息的丢失
-                  可以加一个定期的强制index对比，但时间太短会增加双方负担，时间长用户又能感知到错误
-                  这服务器端要多做2个方法，此方法还要另外专门做权限的判断，代码想必不会简洁
-            都不怎么好，还是先多测试架构，减少丢失的可能性
-        """
-        mq = self._mq_client
-        channel_subs = self._channel_subs
-
-        rtn = {}
-        if timeout is not None:
-            try:
-                async with asyncio.timeout(timeout):
-                    updated_channels = await mq.get_message()
-            except TimeoutError:
-                return rtn
-        else:
-            updated_channels = await mq.get_message()
-        for channel in updated_channels:
-            RowSubscription.clear_cache(channel)
-            sub_ids = channel_subs.get(channel, [])
-            for sub_id in sub_ids:
-                sub = self._subs[sub_id]
-                # 获取sub更新的行数据
-                new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
-                # 如果有行添加或删除，订阅或取消订阅
-                for new_chan in new_chans:
-                    await mq.subscribe(new_chan)
-                    channel_subs.setdefault(new_chan, set()).add(sub_id)
-                for rem_chan in rem_chans:
-                    channel_subs[rem_chan].remove(sub_id)
-                    if len(channel_subs[rem_chan]) == 0:
-                        await mq.unsubscribe(rem_chan)
-                        del channel_subs[rem_chan]
-                # 添加行数据到返回值
-                if len(sub_updates) > 0:
-                    rtn.setdefault(sub_id, dict()).update(sub_updates)
-        return rtn

@@ -7,5 +7,6 @@
 
 from .base import (ComponentTable, Backend, ComponentTransaction,
                    RaceCondition, UniqueViolation, HeadLockFailed,
-                   Subscriptions)
+                   )
+from .sub import Subscriptions
 from .redis import RedisBackend, RedisComponentTable, RedisComponentTransaction

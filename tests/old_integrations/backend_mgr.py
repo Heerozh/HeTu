@@ -1,9 +1,10 @@
 import time
-import socket
-import docker
 import unittest
+
+import docker
 from docker.errors import NotFound
-from hetu.data.backend.redis import RedisTransaction
+
+from hetu.data.backend import RedisBackend
 
 
 class UnitTestBackends:
@@ -25,8 +26,7 @@ class UnitTestBackends:
         except (docker.errors.NotFound, docker.errors.APIError):
             pass
         # 因为服务器销毁了，清理下python中的全局lua缓存
-        RedisTransaction.lua_check_unique = None
-        RedisTransaction.lua_run_stacked = None
+        RedisBackend.lua_check_and_run = None
 
     def get_all_backends(self):
         # 启动所有start_*_server函数，并返回它们的连接配置
@@ -64,14 +64,17 @@ class UnitTestBackends:
             self.network = client.networks.create("hetu_test_net", driver="bridge")
             # 启动服务器
             self.containers['redis'] = client.containers.run(
-                "redis:latest", detach=True, ports={'6379/tcp': port}, name='hetu_test_redis',
+                "redis:latest", detach=True, ports={'6379/tcp': port},
+                name='hetu_test_redis',
                 auto_remove=True, network="hetu_test_net", hostname="redis-master")
             self.containers['redis_replica'] = client.containers.run(
-                "redis:latest", detach=True, ports={'6379/tcp': port+1},
-                name='hetu_test_redis_replica', auto_remove=True, network="hetu_test_net",
-                command=["redis-server", f"--replicaof redis-master 6379", "--replica-read-only yes"])
+                "redis:latest", detach=True, ports={'6379/tcp': port + 1},
+                name='hetu_test_redis_replica', auto_remove=True,
+                network="hetu_test_net",
+                command=["redis-server", f"--replicaof redis-master 6379",
+                         "--replica-read-only yes"])
             r = redis.Redis(host="127.0.0.1", port=port)
-            r_slave = redis.Redis(host="127.0.0.1", port=port+1)
+            r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
             # 等待docker启动完毕
             while True:
                 try:
@@ -79,7 +82,8 @@ class UnitTestBackends:
                     print("version:", r.info()['redis_version'], r.role(),
                           r.config_get('notify-keyspace-events'))
                     r.wait(1, 10000)
-                    print("slave version:", r_slave.info()['redis_version'], r_slave.role(),
+                    print("slave version:", r_slave.info()['redis_version'],
+                          r_slave.role(),
                           r_slave.config_get('notify-keyspace-events'))
                     break
                 except Exception:
@@ -90,5 +94,5 @@ class UnitTestBackends:
         # 返回backend
         return RedisComponentTable, RedisBackend, {
             "master": f"redis://127.0.0.1:{port}/0",
-            "servants": [f"redis://127.0.0.1:{port+1}/0", ]
+            "servants": [f"redis://127.0.0.1:{port + 1}/0", ]
         }
