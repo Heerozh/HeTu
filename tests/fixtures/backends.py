@@ -91,6 +91,7 @@ async def mod_redis_backend(mod_redis_service):
     from hetu.data.backend import RedisComponentTable, RedisBackend
 
     backends = {}
+
     # 支持创建多个backend连接
     def _create_redis_backend(key="main"):
         if key in backends:
@@ -110,7 +111,6 @@ async def mod_redis_backend(mod_redis_service):
 
     for backend in backends.values():
         await backend.close()
-
 
 
 # 要测试新的backend，请添加backend到params中

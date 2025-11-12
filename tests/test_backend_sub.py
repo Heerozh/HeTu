@@ -17,6 +17,8 @@ async def sub_mgr(mod_auto_backend):
     from hetu.data.backend import Subscriptions
     # 初始化订阅器
     sub_mgr = Subscriptions(get_or_create_backend('main'))
+    # 清空row订阅缓存
+    RowSubscription._RowSubscription__cache = {}
 
     yield sub_mgr
 
@@ -73,6 +75,7 @@ async def user_id10_ctx():
 
 
 async def test_redis_notify_configuration(mod_redis_backend):
+    """测试redis的notify-keyspace-events配置是否正确"""
     comp_tbl_class, get_or_create_backend = mod_redis_backend
     backend = get_or_create_backend()
 
@@ -127,9 +130,13 @@ async def test_subscribe_query(sub_mgr, filled_item_table, admin_ctx):
 
 
 async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTable,
-                                          filled_item_table, background_mq_puller_task):
+                                          filled_item_table, admin_ctx,
+                                          background_mq_puller_task):
     backend = sub_mgr._backend
     mq = sub_mgr._mq_client
+
+    sub_row, _ = await sub_mgr.subscribe_select(
+        filled_item_table, admin_ctx, 'Itm10', 'name')
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.transaction(1) as session:
@@ -240,7 +247,7 @@ async def test_row_subscribe_cache(sub_mgr, filled_item_table, admin_ctx,
 
 
 async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
-                                   background_mq_puller_task):
+                                background_mq_puller_task):
     sub_row, _ = await sub_mgr.subscribe_select(
         filled_item_table, admin_ctx, 'Itm10', 'name')
     sub_10, _ = await sub_mgr.subscribe_query(
@@ -252,11 +259,11 @@ async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
 
     # 测试取消订阅
     assert len(sub_mgr._subs) == 4
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26 # 25行+1个index
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26  # 25行+1个index
 
     await sub_mgr.unsubscribe(sub_10)
     assert len(sub_mgr._subs) == 3
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26 # 其他sub依旧订阅所有行
+    assert len(sub_mgr._mq_client.subscribed_channels) == 26  # 其他sub依旧订阅所有行
 
     await sub_mgr.unsubscribe(sub_row)
     assert len(sub_mgr._subs) == 2
