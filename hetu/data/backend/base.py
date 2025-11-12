@@ -37,6 +37,7 @@
 """
 
 import logging
+import asyncio
 
 import numpy as np
 
@@ -76,12 +77,20 @@ class Backend:
         """
         raise NotImplementedError
 
-    async def synced(self) -> bool:
+    async def is_synced(self) -> bool:
         """
         检查各个slave数据库和master数据库的数据是否已完成同步。
         主要用于test用例。
         """
         raise NotImplementedError
+
+    async def wait_for_synced(self) -> None:
+        """
+        等待各个slave数据库和master数据库的数据完成同步。
+        主要用于test用例。
+        """
+        while not await self.is_synced():
+            await asyncio.sleep(0.1)
 
     def requires_head_lock(self) -> bool:
         """

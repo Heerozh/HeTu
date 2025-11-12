@@ -19,6 +19,7 @@ logger.setLevel(logging.DEBUG)
 logging.lastResort.setLevel(logging.DEBUG)
 mock_time = mock.Mock()
 
+# todo 此文件已迁移到新的pytest中，此文件保留作为老的集成测试参考，未来会删除，不要再添加内容
 
 def parameterized(test_items):
     def wrapper(func):
