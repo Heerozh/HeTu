@@ -189,7 +189,7 @@ class Subscriptions:
     ) -> tuple[str | None, np.record | None]:
         """
         获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
-        如果未查询到数据，或owner不符，返回None, None。
+        如果未查询到数据，或rls不符，返回None, None。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
         """
         # 首先caller要对整个表有权限
@@ -240,8 +240,17 @@ class Subscriptions:
         但force参数可以强制未查询到数据时也订阅，返回订阅id(sub_id: str)，和[]。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
 
+        订阅会观察数据的变化/添加/删除，收到对应通知，由get_updates调用时处理。
+
         时间复杂度是O(log(N)+M)，N是index的条目数；M是查询到的行数。
-        Component权限是OWNER时，查询到的行在最后再根据owner值筛选，M为筛选前的行数。
+        Component权限是RLS时，查询到的行在最后再根据权限值筛选，M为筛选前的行数。
+
+        Notes
+        -----
+        目前不会对rls权限获得做出反应，由订阅时的rls权限决定。
+        - 当某行已查询到的数据，失去rls权限时，**会**收到该行被删除的通知
+        - 当某行符合查询条件的数据，之前没权限被剔除，现在新获得rls权限时，**不会**收到该行被添加的通知
+
         """
         # 首先caller要对整个表有权限，不然就算force也不给订阅
         if not self._has_table_permission(table, ctx):
@@ -255,8 +264,8 @@ class Subscriptions:
             index_name, left, right, limit, desc, row_format="typed_dict"
         )
 
-        # 如果是owner权限，只取owner相同的
-        if table.component_cls.permission_ == Permission.OWNER:
+        # 如果是rls权限，需要对每行数据进行权限判断
+        if table.component_cls.is_rls():
             rows = [row for row in rows if self._has_row_permission(table, ctx, row)]
 
         if not force and len(rows) == 0:

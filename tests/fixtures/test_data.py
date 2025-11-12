@@ -49,7 +49,7 @@ async def mod_rls_test_component(mod_clear_all_component_define):
         owner: np.int64 = Property(0, unique=False, index=True)
         friend: np.int8 = Property(1, unique=False, index=False)
 
-    return Item
+    return RLSTest
 
 @pytest.fixture(scope="module")
 async def mod_rls_test_table(mod_auto_backend, mod_rls_test_component):

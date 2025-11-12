@@ -73,6 +73,7 @@ async def user_id10_ctx():
         inherited={}
     )
 
+
 @pytest.fixture
 async def user_id11_ctx():
     from hetu.system import Context
@@ -88,6 +89,7 @@ async def user_id11_ctx():
         transactions={},
         inherited={}
     )
+
 
 async def test_redis_notify_configuration(mod_redis_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
@@ -169,7 +171,7 @@ async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTabl
     await asyncio.sleep(0.1)
 
     # mq.get_message必须要后台puller任务在跑，否则消息无法获取
-    notified_channels = await mq.get_message()
+    notified_channels = await mq.get_message(timeout=5)
     assert len(notified_channels) == 1
 
     # 测试更新消息能否获得，因为我get_message取掉了，应该没有了
@@ -301,8 +303,9 @@ async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
     assert len(sub_mgr._mq_client.subscribed_channels) == 0
 
 
-async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx, user_id11_ctx,
-                             background_mq_puller_task):
+async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx,
+                                    user_id11_ctx,
+                                    background_mq_puller_task):
     # 测试owner不符不给订阅
     sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 1)
     assert sub_id is not None
@@ -311,9 +314,8 @@ async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx, u
     assert sub_id is None
 
 
-
 async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx,
-                             background_mq_puller_task):
+                                   background_mq_puller_task):
     # 先改掉一个人的owner值
     backend = sub_mgr._backend
     async with backend.transaction(1) as session:
@@ -330,7 +332,7 @@ async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx,
 
 
 async def test_select_subscribe_rls_update(sub_mgr, filled_item_table, user_id10_ctx,
-                                   background_mq_puller_task):
+                                           background_mq_puller_task):
     backend = sub_mgr._backend
 
     # 测试订阅单行，owner改变后要删除
@@ -345,8 +347,9 @@ async def test_select_subscribe_rls_update(sub_mgr, filled_item_table, user_id10
     assert updates[sub_id]["3"] is None
 
 
-async def test_query_subscribe_rls_lost(sub_mgr, filled_item_table, mod_item_component, user_id10_ctx,
-                                   background_mq_puller_task):
+async def test_query_subscribe_rls_lost(sub_mgr, filled_item_table, mod_item_component,
+                                        user_id10_ctx,
+                                        background_mq_puller_task):
     backend = sub_mgr._backend
 
     sub_id, rows = await sub_mgr.subscribe_query(
@@ -369,8 +372,8 @@ async def test_query_subscribe_rls_lost(sub_mgr, filled_item_table, mod_item_com
 
 
 async def test_query_subscribe_rls_gain(sub_mgr, filled_item_table,
-                                            mod_item_component, user_id10_ctx,
-                                            background_mq_puller_task):
+                                        mod_item_component, user_id10_ctx,
+                                        background_mq_puller_task):
     # query订阅的rls gain处理的原理是，每次index变化都检查所有未注册行的rls
     # 如果中途获得rls，就加入订阅
 
@@ -409,10 +412,68 @@ async def test_query_subscribe_rls_gain(sub_mgr, filled_item_table,
     assert updates[sub_id]["26"]['owner'] == 10
 
 
-async def test_query_subscribe_rls_gain_without_index(sub_mgr, filled_item_table,
-                                            mod_item_component, user_id10_ctx,
-                                            background_mq_puller_task):
-    pass
+async def test_query_subscribe_rls_lost_without_index(sub_mgr, filled_rls_test_table,
+                                                      mod_rls_test_component, user_id11_ctx,
+                                                      background_mq_puller_task):
+    # filled_rls_test_table的权限是要求ctx.caller == row.friend
+    # 默认数据是owner=10, friend=11
+    backend = sub_mgr._backend
+
+    sub_id, rows = await sub_mgr.subscribe_query(
+        filled_rls_test_table, user_id11_ctx, 'owner', 1, right=20, limit=55)
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+
+    # 去掉一个
+    async with backend.transaction(1) as session:
+        tbl = filled_rls_test_table.attach(session)
+        row = await tbl.select(4)
+        row.friend = 12
+        await tbl.update(4, row)
+    updates = await sub_mgr.get_updates(timeout=5)
+    assert len(updates) == 1
+    assert len(updates[sub_id]) == 1
+    assert updates[sub_id]["4"] is None
+
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+
+
+@pytest.mark.xfail(reason="目前有已知缺陷，未来也许修也许不修", strict=True)
+async def test_query_subscribe_rls_gain_without_index(sub_mgr, filled_rls_test_table,
+                                                      mod_rls_test_component, user_id11_ctx,
+                                                      background_mq_puller_task):
+    # filled_rls_test_table的权限是要求ctx.caller == row.friend
+    # 默认数据是owner=10, friend=11
+    # todo 目前的设计是，rls获得并不能正确得到insert通知，除非query的正是rls属性（这里是friend）
+    #      未来如果有需要，可以专门做个rls属性watch，变化了则通知所有IndexSubscription检查rls
+
+    # 先预先取掉一行rls
+    backend = sub_mgr._backend
+    async with backend.transaction(1) as session:
+        tbl = filled_rls_test_table.attach(session)
+        row = await tbl.select(4)
+        row.friend = 12
+        await tbl.update(4, row)
+        # 修改owner不应该影响rls
+        row = await tbl.select(1)
+        row.owner = 12
+        await tbl.update(1, row)
+
+    sub_id, rows = await sub_mgr.subscribe_query(
+        filled_rls_test_table, user_id11_ctx, 'owner', 1, right=20, limit=55)
+    assert len(sub_mgr._subs[sub_id].row_subs) == 24
+
+    # 测试改回来是否重新出现
+    async with backend.transaction(1) as session:
+        tbl = filled_rls_test_table.attach(session)
+        row = await tbl.select(4)
+        row.friend = 11
+        await tbl.update(4, row)
+    updates = await sub_mgr.get_updates(timeout=5)
+    assert len(updates) == 1
+    assert len(updates[sub_id]) == 1
+    assert updates[sub_id]["4"]['friend'] == 11
+
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25
 #
 # @mock.patch('time.time', mock_time)
 # @parameterized(implements)
