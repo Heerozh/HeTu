@@ -8,9 +8,12 @@ import inspect
 import json
 import keyword
 import logging
+import operator
 import os
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
+from typing import Any
 
 import git
 import numpy as np
@@ -24,13 +27,14 @@ logger = logging.getLogger('HeTu.root')
 class Permission(IntEnum):
     EVERYBODY = 1
     USER = 2
-    OWNER = 3  # todo 改成RLS，然后由rls_func参数决定具体的rls逻辑
+    OWNER = 3  # 同RLS权限，只是预设了rls_compare为('eq', 'owner', 'caller')
+    RLS = 4  # 由rls_compare参数(operator_function, component_property_name, context_property_name)决定具体的rls逻辑
     ADMIN = 999
 
 
 @dataclass
 class Property:
-    default: any                # 属性的默认值
+    default: Any                # 属性的默认值
     unique: bool = False        # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool = False         # 是否是排序索引
     dtype: str | type = None          # 数据类型，最好用np的明确定义
@@ -42,6 +46,7 @@ class BaseComponent:
     component_name_ = None
     namespace_ = None
     permission_ = Permission.USER
+    rls_compare_ = None     # type: tuple[Callable[[Any, Any], bool], str, str] | None
     persist_ = True                                     # 只是标记，每次启动时会清空此标记的数据
     readonly_ = False                                   # 只是标记，调用写入会警告
     backend_ = None         # type: str                 # 该Component由哪个后端(数据库)负责储存和查询
@@ -60,11 +65,12 @@ class BaseComponent:
 
     @staticmethod
     def make_json(properties, namespace, component_name, permission, persist, readonly,
-                  backend):
+                  backend, rls_compare):
         return json.dumps({
             'namespace': str(namespace),
             'component_name': str(component_name),
             'permission': permission.name,
+            'rls_compare': rls_compare,
             'persist': bool(persist),
             'readonly': bool(readonly),
             'backend': str(backend),
@@ -97,6 +103,10 @@ class BaseComponent:
         comp.properties_ = sorted(comp.properties_, key=lambda x: x[0])
         comp.json_ = json.dumps(data)  # 重新序列化，保持一致
         comp.instances_ = {}
+        # dump rls
+        if rls := data['rls_compare']:
+            rls = (getattr(operator, rls[0]), *rls[1:])
+        comp.rls_compare_ = rls
         # 成员变量初始化
         # 从properties生成np structured dtype，align为True更慢，arm服务器会好些
         comp.dtypes = np.dtype([(name, prop.dtype) for name, prop in comp.properties_], align=False)
@@ -150,6 +160,11 @@ class BaseComponent:
         new_cls.master_ = cls
         return new_cls
 
+    @classmethod
+    def is_rls(cls) -> bool:
+        """此Component是否是RLS权限"""
+        return cls.permission_ in (Permission.OWNER, Permission.RLS)
+
 
 class ComponentDefines(metaclass=Singleton):
     """
@@ -187,6 +202,7 @@ def define_component(
     persist=True,
     readonly=False,
     backend: str = "default",
+    rls_compare: tuple[str, str, str] = None,
 ):
     """
     定义Component组件（表）的数据结构
@@ -217,7 +233,12 @@ def define_component(
         - everybody: 任何客户端连接都可以读，适合读一些服务器状态类的数据，如在线人数
         - user: 只有已登录的客户端都连接可以读
         - admin: 只有管理员权限客户端连接可以读
-        - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取
+        - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
+                 此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
+        - rls: 行级权限，需要配合rls_compare参数使用，定义具体的行级权限逻辑
+    rls_compare:
+        当permission设置为RLS(行级权限)时，定义行级安全的比较函数和属性名，格式为(operator方法名, 表属性名, context属性名)，
+        只有operator.operator方法名(row.表属性名, ctx.context属性名)返回True时允许读取此行。如果属性不存在，按nan处理（无法和任何值比较）。
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class
@@ -300,15 +321,35 @@ def define_component(
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
 
         # 检查OWNER权限必须有owner属性
+        nonlocal rls_compare
         if permission == Permission.OWNER:
+            assert rls_compare is None, \
+                f"{cls.__name__}权限设置为OWNER时，不能再设置rls_compare参数"
+            # 修改闭包外的变量rls_compare
+            rls_compare = ('eq', 'owner', 'caller')
             assert 'owner' in properties, \
                 f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
             assert np.issubdtype(properties['owner'].dtype, np.number), \
                 f"{cls.__name__}的owner属性必需是numeric数字(int, np.int64, ...)类型"
 
+        # 检查RLS定义
+        if permission == Permission.RLS:
+            assert rls_compare is not None, \
+                f"{cls.__name__}权限设置为RLS时，必须设置rls_compare参数，定义行级权限逻辑"
+            assert all(type(e) is str for e in rls_compare), \
+                f"{cls.__name__}.rls_compare参数必须全部是字符串类型"
+            assert len(rls_compare) == 3, \
+                f"{cls.__name__}.rls_compare参数必须只有3个元素)"
+
+            assert hasattr(operator, rls_compare[0]), \
+                f"{cls.__name__}权限设置为RLS: {rls_compare}，但operator模块没有{rls_compare[0]}方法"
+
+            assert rls_compare[1] in properties, \
+                f"{cls.__name__}权限设置为RLS: {rls_compare}，但表没有定义{rls_compare[1]}属性"
+
         # 生成json格式，并通过json加载到class中
         json_str = BaseComponent.make_json(properties, namespace, cls.__name__, permission,
-                                           persist, readonly, backend)
+                                           persist, readonly, backend, rls_compare)
         cls.load_json(json_str)
 
         # 保存app文件的git版本信息，目前无作用，主要用于以后支持自动迁移
