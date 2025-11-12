@@ -1,6 +1,6 @@
 import logging
 import pytest
-import asyncio
+import time
 from hetu.data.backend import ComponentTable
 from hetu.data.backend.sub import RowSubscription
 
@@ -161,17 +161,16 @@ async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTabl
         row = await tbl.select(1)
         row.qty = 998
         await tbl.update(1, row)
-    await asyncio.sleep(0.01)
 
     async with backend.transaction(1) as session:
         tbl = mod_item_table.attach(session)
         row = await tbl.select(1)
         row.qty = 997
         await tbl.update(1, row)
-    await asyncio.sleep(0.1)
+    await backend.wait_for_synced()
 
     # mq.get_message必须要后台puller任务在跑，否则消息无法获取
-    notified_channels = await mq.get_message(timeout=5)
+    notified_channels = await mq.get_message()
     assert len(notified_channels) == 1
 
     # 测试更新消息能否获得，因为我get_message取掉了，应该没有了
@@ -263,8 +262,7 @@ async def test_row_subscribe_cache(sub_mgr, filled_item_table, admin_ctx,
     assert updates[sub_11_12]["1"]['owner'] == 12  # query 11-12更新row数据
 
 
-async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
-                                background_mq_puller_task):
+async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx):
     sub_row, _ = await sub_mgr.subscribe_select(
         filled_item_table, admin_ctx, 'Itm10', 'name')
     sub_10, _ = await sub_mgr.subscribe_query(
@@ -304,8 +302,7 @@ async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx,
 
 
 async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx,
-                                    user_id11_ctx,
-                                    background_mq_puller_task):
+                                    user_id11_ctx):
     # 测试owner不符不给订阅
     sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 1)
     assert sub_id is not None
@@ -314,8 +311,7 @@ async def test_subscribe_select_rls(sub_mgr, filled_item_table, user_id10_ctx,
     assert sub_id is None
 
 
-async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx,
-                                   background_mq_puller_task):
+async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx):
     # 先改掉一个人的owner值
     backend = sub_mgr._backend
     async with backend.transaction(1) as session:
@@ -413,7 +409,8 @@ async def test_query_subscribe_rls_gain(sub_mgr, filled_item_table,
 
 
 async def test_query_subscribe_rls_lost_without_index(sub_mgr, filled_rls_test_table,
-                                                      mod_rls_test_component, user_id11_ctx,
+                                                      mod_rls_test_component,
+                                                      user_id11_ctx,
                                                       background_mq_puller_task):
     # filled_rls_test_table的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
@@ -439,7 +436,8 @@ async def test_query_subscribe_rls_lost_without_index(sub_mgr, filled_rls_test_t
 
 @pytest.mark.xfail(reason="目前有已知缺陷，未来也许修也许不修", strict=True)
 async def test_query_subscribe_rls_gain_without_index(sub_mgr, filled_rls_test_table,
-                                                      mod_rls_test_component, user_id11_ctx,
+                                                      mod_rls_test_component,
+                                                      user_id11_ctx,
                                                       background_mq_puller_task):
     # filled_rls_test_table的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
@@ -474,62 +472,49 @@ async def test_query_subscribe_rls_gain_without_index(sub_mgr, filled_rls_test_t
     assert updates[sub_id]["4"]['friend'] == 11
 
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
-#
-# @mock.patch('time.time', mock_time)
-# @parameterized(implements)
-# async def test_mq_pull_stack(self, table_cls: type[ComponentTable],
-#                              backend_cls: type[Backend], config):
-#     # 测试mq消息堆积的情况
-#     mock_time.return_value = time_time()
-#     backend, item_data = await self.setUpBackend(backend_cls(config), table_cls)
-#     admin_ctx, user10_ctx = self.setUpAccount()
-#     task, sub_mgr = self.setUpSubscription(backend)
-#
-#     # 初始化订阅器
-#     sub_mgr = Subscriptions(backend)
-#
-#     await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm10', 'name')
-#     await sub_mgr.subscribe_select(item_data, admin_ctx, 'Itm11', 'name')
-#
-#     # 先pull空
-#     try:
-#         async with asyncio.timeout(0.1):
-#             await sub_mgr.mq_pull()
-#             await sub_mgr.mq_pull()
-#
-#     except TimeoutError:
-#         pass
-#
-#     # 修改row1，并pull消息
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(1)
-#         row.qty = 998
-#         await tbl.update(1, row)
-#     await asyncio.sleep(0.1)
-#     await sub_mgr.mq_pull()
-#
-#     # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
-#     mock_time.return_value = time_time() + 200
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(1)
-#         row.qty = 997
-#         await tbl.update(1, row)
-#     await asyncio.sleep(0.1)
-#     await sub_mgr.mq_pull()
-#     async with backend.transaction(1) as trx:
-#         tbl = item_data.attach(trx)
-#         row = await tbl.select(2)
-#         row.qty = 997
-#         await tbl.update(2, row)
-#     await sub_mgr.mq_pull()
-#
-#     mq = sub_mgr._mq_client
-#     mock_time.return_value = time_time() + 210
-#     notified_channels = await mq.get_message()
-#     assert len(notified_channels) == 2
-#
-#     # close backend
-#     await backend.close()
-#
+
+
+async def test_mq_backlog(monkeypatch, sub_mgr, filled_item_table,
+                          mod_item_component, admin_ctx):
+    time_time = time.time
+    # 测试mq消息堆积的情况
+    backend = sub_mgr._backend
+
+    await sub_mgr.subscribe_select(filled_item_table, admin_ctx, 'Itm10', 'name')
+    await sub_mgr.subscribe_select(filled_item_table, admin_ctx, 'Itm11', 'name')
+
+    # 预约mq_pull，不然前几次my_pull会没反应
+    await sub_mgr.mq_pull()
+    await sub_mgr.mq_pull()
+
+    # 修改row1，并pull消息
+    async with backend.transaction(1) as trx:
+        tbl = filled_item_table.attach(trx)
+        row = await tbl.select(1)
+        row.qty = 998
+        await tbl.update(1, row)
+    await backend.wait_for_synced()
+    await sub_mgr.mq_pull()
+
+    # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
+    monkeypatch.setattr(time, "time", lambda: time_time() + 200)
+    async with backend.transaction(1) as trx:
+        tbl = filled_item_table.attach(trx)
+        row = await tbl.select(1)
+        row.qty = 997
+        await tbl.update(1, row)
+    await backend.wait_for_synced()
+    await sub_mgr.mq_pull()
+
+    async with backend.transaction(1) as trx:
+        tbl = filled_item_table.attach(trx)
+        row = await tbl.select(2)
+        row.qty = 996
+        await tbl.update(2, row)
+    await backend.wait_for_synced()
+    await sub_mgr.mq_pull()
+
+    mq = sub_mgr._mq_client
+    monkeypatch.setattr(time, "time", lambda: time_time() + 210)
+    notified_channels = await mq.get_message()
+    assert len(notified_channels) == 2

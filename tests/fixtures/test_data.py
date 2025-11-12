@@ -63,7 +63,6 @@ async def mod_rls_test_table(mod_auto_backend, mod_rls_test_component):
 
 @pytest.fixture
 async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table):
-    import asyncio
     comp_tbl_class, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
@@ -81,10 +80,7 @@ async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table
             row.qty = 999
             await tbl.insert(row)
     # 等待replica同步
-    while True:
-        if await backend.synced():
-            break
-        await asyncio.sleep(0.001)
+    await backend.wait_for_synced()
 
     yield mod_item_table
 
@@ -93,7 +89,6 @@ async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table
 
 @pytest.fixture
 async def filled_rls_test_table(mod_auto_backend, mod_rls_test_component, mod_rls_test_table):
-    import asyncio
     comp_tbl_class, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
@@ -109,10 +104,7 @@ async def filled_rls_test_table(mod_auto_backend, mod_rls_test_component, mod_rl
             row.friend = 11
             await tbl.insert(row)
     # 等待replica同步
-    while True:
-        if await backend.synced():
-            break
-        await asyncio.sleep(0.001)
+    await backend.wait_for_synced()
 
     yield mod_rls_test_table
 

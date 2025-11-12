@@ -182,7 +182,7 @@ class RedisBackend(Backend):
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
-    async def synced(self) -> bool:
+    async def is_synced(self) -> bool:
         info = await self.aio.info('replication')
         master_offset = info.get('master_repl_offset', 0)
         for key, value in info.items():
@@ -890,8 +890,8 @@ class RedisMQClient(MQClient):
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
         self._mq = redis_conn.pubsub()
         self.subscribed = set()
-        self.pulled_deque = MultiMap() # 可按时间查询的消息队列
-        self.pulled_set = set() # 和pulled_deque内容保持一致的set，方便去重
+        self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
+        self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重
 
     async def close(self):
         return await self._mq.aclose()
