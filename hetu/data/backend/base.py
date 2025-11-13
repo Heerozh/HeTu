@@ -514,6 +514,7 @@ class ComponentTransaction:
 
         left = int(left) if np.issubdtype(type(left), np.bool_) else left
         left = left.item() if issubclass(type(left), np.generic) else left
+        right = int(right) if np.issubdtype(type(right), np.bool_) else right
         right = right.item() if issubclass(type(right), np.generic) else right
 
         if right is None:

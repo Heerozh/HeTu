@@ -70,7 +70,7 @@ async def test_table(mod_item_component, item_table):
             assert row.owner == 1
 
 
-async def test_table_query_number_index(mod_item_component, filled_item_table):
+async def test_query_number_index(filled_item_table):
     backend = filled_item_table.backend
 
     # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
@@ -86,9 +86,15 @@ async def test_table_query_number_index(mod_item_component, filled_item_table):
         assert (await tbl.query('owner', 10, limit=30)).shape[0] == 25
         assert (await tbl.query('owner', 10, limit=8)).shape[0] == 8
         assert (await tbl.query('owner', 11)).shape[0] == 0
+        # query id
+        np.testing.assert_array_equal((await tbl.query('id', 5, 7, limit=999)).id,
+                                      [5, 6, 7])
+        # 测试query的方向反了
+        # AssertionError: right必须大于等于left，你的:
+        with pytest.raises(AssertionError, match="right.*left"):
+           await tbl.query('time', 115, 110)
 
-
-async def test_table_query_string_index(mod_item_component, filled_item_table):
+async def test_query_string_index(filled_item_table):
     backend = filled_item_table.backend
 
     # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
@@ -102,12 +108,50 @@ async def test_table_query_string_index(mod_item_component, filled_item_table):
         assert (await tbl.query('name', '11')).shape[0] == 0
         assert (await tbl.query('name', "Itm11")).shape[0] == 1
         assert (await tbl.query('name', "Itm11")).time == 111
+        assert (await tbl.select('Itm11', where='name')).id == 2
+        assert (await tbl.select('Itm13', where='name')).id == 4
         np.testing.assert_array_equal(
             (await tbl.query('name', 'Itm11', 'Itm12')).time,
             [111, 112])
         # reverse query one row
         assert (await tbl.query('time', 111)).name == ['Itm11']
         assert len((await tbl.query('time', 111)).name) == 1
+
+
+async def test_query_bool(filled_item_table):
+    backend = filled_item_table.backend
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(5)
+        row.used = True
+        await tbl.update(row.id, row)
+        row = await tbl.select(7)
+        row.used = True
+        await tbl.update(row.id, row)
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        assert set((await tbl.query('used', True)).id) == {5, 7}
+        assert set((await tbl.query('used', False, limit=99)).id) == set(range(1, 26)) - {5, 7}
+        assert set((await tbl.query('used', 0, 1, limit=99)).id) == set(range(1, 26))
+        assert set((await tbl.query('used', False, True, limit=99)).id) == set(range(1, 26))
+
+async def test_table_update(filled_item_table):
+    backend = filled_item_table.backend
+
+    # update
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = (await tbl.query('owner', 10))[0]
+        old_name = row.name
+        assert (await tbl.select(old_name, where='name')).name == old_name
+        row.owner = 11
+        row.name = 'updated'
+        await tbl.update(row.id, row)
+        # 测试能否命中cache
+        row = await tbl.select(row.id)
+        assert row.name == 'updated'
 
 
 async def test_unique_table(mod_auto_backend):
