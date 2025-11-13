@@ -147,6 +147,9 @@ class RedisBackend(Backend):
             self.loop_id = None
 
     def configure(self):
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         # 检测redis版本
         version = self.io.info('server')['redis_version']
         assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
@@ -183,6 +186,9 @@ class RedisBackend(Backend):
             # pubsub值建议为$剩余内存/预估在线数$
 
     async def is_synced(self) -> bool:
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         info = await self.aio.info('replication')
         master_offset = info.get('master_repl_offset', 0)
         for key, value in info.items():
@@ -211,15 +217,24 @@ class RedisBackend(Backend):
             replica.connection_pool.reset()
 
     async def close(self):
+        if not self.io:
+            return
+
         if self.io.get('head_lock') == str(id(self)):
             self.io.delete('head_lock')
 
         self.io.close()
         await self._aio.aclose()
+        self.io, self._aio = None, None
+
         for replica in self.replicas:
             await replica.aclose()
+        self.replicas = []
 
     def requires_head_lock(self) -> bool:
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         self.io.set('head_lock', id(self), nx=True)
         # 不在set中get，兼容一些redis变种
         locked = self.io.get('head_lock')
@@ -238,10 +253,14 @@ class RedisBackend(Backend):
 
     def get_mq_client(self) -> 'RedisMQClient':
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
         return RedisMQClient(self.random_replica())
 
     def transaction(self, cluster_id: int) -> 'RedisTransaction':
         """进入db的事务模式，返回事务连接"""
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
         return RedisTransaction(self, cluster_id)
 
 

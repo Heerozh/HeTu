@@ -245,6 +245,60 @@ async def test_batch_delete(filled_item_table):
         assert x[0] == True
 
 
+async def test_reconnect(mod_auto_backend, mod_item_component):
+    backend_component_table, get_or_create_backend = mod_auto_backend
+
+    backend = get_or_create_backend('save_test')
+    loc_item_table = backend_component_table(
+        mod_item_component, 'ItemSaveTestTable', 1, backend)
+    loc_item_table.flush(force=True)
+    loc_item_table.create_or_migrate()
+
+    # 初始化测试数据
+    async with backend.transaction(1) as session:
+        tbl = loc_item_table.attach(session)
+        for i in range(25):
+            row = mod_item_component.new_row()
+            await tbl.insert(row)
+    # 等待replica同步
+    await backend.wait_for_synced()
+
+    # 测试保存(断开连接）后再读回来
+    async with backend.transaction(1) as session:
+        tbl = loc_item_table.attach(session)
+        await tbl.delete(1)
+        await tbl.delete(9)
+    async with backend.transaction(1) as session:
+        tbl = loc_item_table.attach(session)
+        size = len(await tbl.query('id', -np.inf, +np.inf, limit=999))
+
+    # 测试连接关闭
+    await backend.close()  # 不close不能重建backend_component_table
+    await backend.close()  # 再次close不该报错
+    with pytest.raises(ConnectionError):
+        backend.transaction(1)
+    with pytest.raises(ConnectionError):
+        backend.configure()
+    with pytest.raises(ConnectionError):
+        await backend.wait_for_synced()
+    with pytest.raises(ConnectionError):
+        await backend.requires_head_lock()
+    with pytest.raises(ConnectionError):
+        await backend.get_mq_client()
+
+    # 重新初始化table和连接后再试
+    backend = None
+    loc_item_table = None
+    backend2 = get_or_create_backend('load_test')
+
+    loc_item_table2 = backend_component_table(mod_item_component, 'ItemSaveTestTable',
+                                              1, backend2)
+    loc_item_table2.create_or_migrate()
+    async with backend2.transaction(1) as session:
+        tbl = loc_item_table2.attach(session)
+        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == size
+
+
 async def test_unique_table(mod_auto_backend):
     backend_component_table, get_or_create_backend = mod_auto_backend
     backend = get_or_create_backend()
