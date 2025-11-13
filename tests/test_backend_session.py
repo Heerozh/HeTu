@@ -200,6 +200,51 @@ async def test_query_after_delete(filled_item_table):
         assert (await tbl.query('time', 114, 116)).shape[0] == 1
 
 
+async def test_string_length_cutoff(filled_item_table, mod_item_component):
+    backend = filled_item_table.backend
+
+    # 测试插入的字符串超出长度是否截断
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = mod_item_component.new_row()
+        row.name = "reinsert2"  # 超出U8长度会被截断
+        await tbl.insert(row)
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        assert (await tbl.select('reinsert', 'name') is not None,
+                "超出U8长度应该要被截断，这里没索引出来说明没截断")
+        assert (await tbl.select('reinsert', 'name')).id == 26
+        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 26
+
+
+async def test_batch_delete(filled_item_table):
+    backend = filled_item_table.backend
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        for i in range(20):
+            await tbl.delete(24 - i)  # 再删掉
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        np.testing.assert_array_equal((await tbl.query('id', 0, 100, limit=999)).id,
+                                      [1, 2, 3, 4, 25])
+        np.testing.assert_array_equal((await tbl.query('id', 3, 25, limit=999)).id,
+                                      [3, 4, 25])
+        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 5
+
+    # 测试is_exist是否正常
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        x = await tbl.is_exist(999, 'id')
+        assert x[0] == False
+        x = await tbl.is_exist(5, 'id')
+        assert x[0] == False
+        x = await tbl.is_exist(4, 'id')
+        assert x[0] == True
+
+
 async def test_unique_table(mod_auto_backend):
     backend_component_table, get_or_create_backend = mod_auto_backend
     backend = get_or_create_backend()
