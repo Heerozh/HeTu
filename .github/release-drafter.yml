@@ -36,6 +36,5 @@ version-resolver:
       - 'patch'
   default: patch
 template: |
-  ## 改了什么
 
   $CHANGES
