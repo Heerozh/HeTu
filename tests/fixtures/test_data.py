@@ -29,10 +29,10 @@ async def mod_item_component(mod_clear_all_component_define):
 
 @pytest.fixture(scope="module")
 async def mod_item_table(mod_auto_backend, mod_item_component):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
-    test_table = comp_tbl_class(
+    test_table = backend_component_table(
         mod_item_component, 'ItemTestTable', 1, backend)
     return test_table
 
@@ -53,17 +53,17 @@ async def mod_rls_test_component(mod_clear_all_component_define):
 
 @pytest.fixture(scope="module")
 async def mod_rls_test_table(mod_auto_backend, mod_rls_test_component):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
-    test_table = comp_tbl_class(
+    test_table = backend_component_table(
         mod_rls_test_component, 'RLSTestTable', 1, backend)
     return test_table
 
 
 @pytest.fixture
 async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
     mod_item_table.flush(force=True)
@@ -89,7 +89,7 @@ async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table
 
 @pytest.fixture
 async def filled_rls_test_table(mod_auto_backend, mod_rls_test_component, mod_rls_test_table):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
     mod_rls_test_table.flush(force=True)

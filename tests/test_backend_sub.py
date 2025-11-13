@@ -12,7 +12,7 @@ logging.lastResort.setLevel(logging.DEBUG)
 @pytest.fixture
 async def sub_mgr(mod_auto_backend):
     """初始化订阅管理器的fixture"""
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     from hetu.data.backend import Subscriptions
     # 初始化订阅器
@@ -93,7 +93,7 @@ async def user_id11_ctx():
 
 async def test_redis_notify_configuration(mod_redis_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
-    comp_tbl_class, get_or_create_backend = mod_redis_backend
+    backend_component_table, get_or_create_backend = mod_redis_backend
     backend = get_or_create_backend()
 
     from hetu.data.backend import RedisBackend
