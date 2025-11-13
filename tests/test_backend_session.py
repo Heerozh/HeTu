@@ -2,7 +2,8 @@ from hetu.data.backend import ComponentTable
 import numpy as np
 import pytest
 
-async def test_table( mod_item_component, item_table):
+
+async def test_table(mod_item_component, item_table):
     backend = item_table.backend
 
     # 测试插入数据
@@ -67,6 +68,46 @@ async def test_table( mod_item_component, item_table):
         # 测试能用update_or_insert
         async with tbl.update_or_insert(1, 'owner') as row:
             assert row.owner == 1
+
+
+async def test_table_query_number_index(mod_item_component, filled_item_table):
+    backend = filled_item_table.backend
+
+    # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        # time范围为110-134，共25个，query是[l, r]，但range是[l, r)
+        np.testing.assert_array_equal(
+            (await tbl.query('time', 110, 115)).time, range(110, 116))
+        np.testing.assert_array_equal(
+            (await tbl.query('time', 110, 115, desc=True)).time, range(115, 109, -1))
+        # query owner单项和limit
+        assert (await tbl.query('owner', 10)).shape[0] == 10
+        assert (await tbl.query('owner', 10, limit=30)).shape[0] == 25
+        assert (await tbl.query('owner', 10, limit=8)).shape[0] == 8
+        assert (await tbl.query('owner', 11)).shape[0] == 0
+
+
+async def test_table_query_string_index(mod_item_component, filled_item_table):
+    backend = filled_item_table.backend
+
+    # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        # 测试query的值类型和定义不符：
+        # AssertionError: 字符串类型索引`name`的查询(left=11, <class 'int'>)变量类型必须是str
+        with pytest.raises(AssertionError, match="name.*int.*str"):
+            assert (await tbl.query('name', 11)).shape[0] == 0
+        # query on str typed unique
+        assert (await tbl.query('name', '11')).shape[0] == 0
+        assert (await tbl.query('name', "Itm11")).shape[0] == 1
+        assert (await tbl.query('name', "Itm11")).time == 111
+        np.testing.assert_array_equal(
+            (await tbl.query('name', 'Itm11', 'Itm12')).time,
+            [111, 112])
+        # reverse query one row
+        assert (await tbl.query('time', 111)).name == ['Itm11']
+        assert len((await tbl.query('time', 111)).name) == 1
 
 
 async def test_unique_table(mod_auto_backend):
