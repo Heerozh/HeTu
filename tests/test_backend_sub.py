@@ -146,8 +146,7 @@ async def test_subscribe_query(sub_mgr, filled_item_table, admin_ctx):
     assert len(sub_mgr._mq_client.subscribed_channels) == 26
 
 
-async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTable,
-                                          filled_item_table, admin_ctx,
+async def test_subscribe_mq_merge_message(sub_mgr, filled_item_table, admin_ctx,
                                           background_mq_puller_task):
     backend = sub_mgr._backend
     mq = sub_mgr._mq_client
@@ -157,13 +156,13 @@ async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTabl
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.transaction(1) as session:
-        tbl = mod_item_table.attach(session)
+        tbl = filled_item_table.attach(session)
         row = await tbl.select(1)
         row.qty = 998
         await tbl.update(1, row)
 
     async with backend.transaction(1) as session:
-        tbl = mod_item_table.attach(session)
+        tbl = filled_item_table.attach(session)
         row = await tbl.select(1)
         row.qty = 997
         await tbl.update(1, row)
