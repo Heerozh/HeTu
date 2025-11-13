@@ -12,6 +12,16 @@ categories:
       - 'bug'
   - title: '🧰 杂项维护'
     label: 'chore'
+autolabeler:
+  - label: 'chore'
+    branch:
+      - '/maint\/.+/'
+  - label: 'bug'
+    branch:
+      - '/fix\/.+/'
+  - label: 'enhancement'
+    branch:
+      - '/feature\/.+/'
 change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
 change-title-escapes: '\<*_&' # You can add # and @ to disable mentions, and add ` to disable code blocks.
 version-resolver:
