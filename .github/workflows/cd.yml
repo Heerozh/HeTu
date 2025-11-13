@@ -105,23 +105,23 @@ jobs:
             registry.cn-shanghai.aliyuncs.com/heerozh/hetu:${{ steps.ver.outputs.norm }}
             registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
 
-      - name: Generate release notes with git-cliff
-        uses: orhun/git-cliff-action@v4
-        with:
-          # 仓库中的配置文件路径
-          config: .github/cliff.toml
-          # 传给 git-cliff 的参数：针对当前 tag 生成到文件
-          args: --tag ${{ steps.ver.outputs.ref }} --output RELEASE_NOTES.md
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#      - name: Generate release notes with git-cliff
+#        uses: orhun/git-cliff-action@v4
+#        with:
+#          # 仓库中的配置文件路径
+#          config: .github/cliff.toml
+#          # 传给 git-cliff 的参数：针对当前 tag 生成到文件
+#          args: --tag ${{ steps.ver.outputs.ref }} --output RELEASE_NOTES.md
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create GitHub Release (draft)
-        uses: softprops/action-gh-release@v2
-        with:
-          draft: true
-          tag_name: ${{ steps.ver.outputs.ref }}
-          body_path: RELEASE_NOTES.md
-          generate_release_notes: false
+#      - name: Create GitHub Release (draft)
+#        uses: softprops/action-gh-release@v2
+#        with:
+#          draft: true
+#          tag_name: ${{ steps.ver.outputs.ref }}
+#          body_path: RELEASE_NOTES.md
+#          generate_release_notes: false
 
   nightly_build:
     timeout-minutes: 10
