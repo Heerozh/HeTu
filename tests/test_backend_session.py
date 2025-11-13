@@ -92,7 +92,8 @@ async def test_query_number_index(filled_item_table):
         # 测试query的方向反了
         # AssertionError: right必须大于等于left，你的:
         with pytest.raises(AssertionError, match="right.*left"):
-           await tbl.query('time', 115, 110)
+            await tbl.query('time', 115, 110)
+
 
 async def test_query_string_index(filled_item_table):
     backend = filled_item_table.backend
@@ -133,11 +134,24 @@ async def test_query_bool(filled_item_table):
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
         assert set((await tbl.query('used', True)).id) == {5, 7}
-        assert set((await tbl.query('used', False, limit=99)).id) == set(range(1, 26)) - {5, 7}
+        assert set((await tbl.query('used', False, limit=99)).id) == set(
+            range(1, 26)) - {5, 7}
         assert set((await tbl.query('used', 0, 1, limit=99)).id) == set(range(1, 26))
-        assert set((await tbl.query('used', False, True, limit=99)).id) == set(range(1, 26))
+        assert set((await tbl.query('used', False, True, limit=99)).id) == set(
+            range(1, 26))
 
-async def test_table_update(filled_item_table):
+    # delete
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        await tbl.delete(5)
+        await tbl.delete(7)
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        assert set((await tbl.query('used', True)).id) == set()
+
+
+async def test_query_after_update(filled_item_table):
     backend = filled_item_table.backend
 
     # update
@@ -152,6 +166,38 @@ async def test_table_update(filled_item_table):
         # 测试能否命中cache
         row = await tbl.select(row.id)
         assert row.name == 'updated'
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(row.id)  # 测试用numpy type进行select是否报错
+        assert row.name == 'updated'
+        assert (await tbl.query('owner', row.owner, limit=30)).shape[0] == 1
+        assert (await tbl.query('owner', 10, limit=30)).shape[0] == 24
+        assert (await tbl.query('owner', 11)).shape[0] == 1
+        assert (await tbl.query('owner', 11)).name == 'updated'
+        assert (await tbl.select('updated', where='name')).name == 'updated'
+        assert await tbl.select(old_name, where='name') is None
+        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 25
+
+
+async def test_query_after_delete(filled_item_table):
+    backend = filled_item_table.backend
+
+    # delete
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        await tbl.delete(5)
+        await tbl.delete(7)
+        # 测试能否命中cache
+        row = await tbl.select(5)
+        assert row is None
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 23
+        assert await tbl.select('Itm14', where='name') is None
+        assert await tbl.select('Itm16', where='name') is None
+        assert (await tbl.query('time', 114, 116)).shape[0] == 1
 
 
 async def test_unique_table(mod_auto_backend):
