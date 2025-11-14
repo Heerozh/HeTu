@@ -108,7 +108,7 @@ class TestWebsocket(unittest.TestCase):
         self.assertIn("Powered by HeTu", response.body.decode())
         self.assertEqual(response.status, 200)
         # 因为上面get("/")会启动future线程，也因此启动了redis，所以要切换下connection_pool
-        app.ctx.default_backend.reset_connection_pool()
+        # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
         # 测试call和结果
         async def normal_routine(connect):
@@ -145,7 +145,7 @@ class TestWebsocket(unittest.TestCase):
                          {'id': 1, 'owner': 2, 'value': 99})
 
         # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-        app.ctx.default_backend.reset_connection_pool()
+        # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
         # 测试踢掉别人的连接
         async def kick_routine(connect):
@@ -167,7 +167,7 @@ class TestWebsocket(unittest.TestCase):
         _, response1 = app.test_client.websocket("/hetu", mimic=kick_routine)
         # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
         self.assertEqual(response1.client_sent[-1], ['sys', 'use_hp', 2], "最后一行没执行到")
-        app.ctx.default_backend.reset_connection_pool()
+        # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
         app.stop()
 
@@ -188,8 +188,7 @@ class TestWebsocket(unittest.TestCase):
         app.test_client.websocket("/hetu", mimic=normal_routine)
 
         # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-        # todo 改进process后应该不需要该调用
-        # app.ctx.default_backend.reset_connection_pool()
+        # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
         with self.assertRaises(Exception):
             app.test_client.websocket("/hetu", mimic=flooding_routine)
 

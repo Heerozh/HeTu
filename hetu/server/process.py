@@ -28,7 +28,7 @@ logger = logging.getLogger('HeTu.root')
 replay = logging.getLogger('HeTu.replay')
 
 
-def start_backends(app):
+def start_backends(app: Sanic):
     # 创建后端连接池
     backends = {}
     table_constructors = {}
@@ -40,19 +40,15 @@ def start_backends(app):
             backends[name] = backend
             table_constructors['Redis'] = RedisComponentTable
             app.ctx.__setattr__(name, backend)
-        elif db_cfg["type"] == "SQL":
+        elif db_cfg["type"] == "PostgreSQL":
             # import sqlalchemy
             # app.ctx.__setattr__(name, sqlalchemy.create_engine(db_cfg["addr"]))
-            raise NotImplementedError(
-                "SQL后端未实现，实现SQL后端还需要redis或zmq在前面一层负责推送，较复杂")
+            raise NotImplementedError("PostgreSQL后端未实现")
         # 把config第一个设置为default后端
         if 'default' not in backends:
             backends['default'] = backends[name]
             table_constructors['default'] = table_constructors[db_cfg["type"]]
             app.ctx.__setattr__('default_backend', backends['default'])
-
-    # 初始化SystemCluster
-    SystemClusters().build_clusters(app.config['NAMESPACE'])
 
     # 初始化所有ComponentTable
     comp_mgr = ComponentTableManager(
@@ -61,7 +57,7 @@ def start_backends(app):
     app.ctx.__setattr__('comp_mgr', comp_mgr)
 
 
-async def close_backends(app):
+async def close_backends(app: Sanic):
     for attrib in dir(app.ctx):
         backend = app.ctx.__getattribute__(attrib)
         if isinstance(backend, Backend):
@@ -69,7 +65,7 @@ async def close_backends(app):
             await backend.close()
 
 
-async def worker_start(app):
+async def worker_start(app: Sanic):
     start_backends(app)
 
     # 打印信息
@@ -89,8 +85,8 @@ async def worker_close(app):
 
 def start_webserver(app_name, config, main_pid, head) -> Sanic:
     """
-    此函数会执行 workers+1 次。
-    第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
+    此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
+    多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
     后续Workers进程才会执行app.add_task和注册的listener。
     """
 
@@ -107,6 +103,9 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
                   f"* 如果是通过Config启动，此文件由APP_FILE参数设置\n"
                   f"* 如果由Docker启动，还需检查是否正确映射了/app目录\n")
             raise e
+
+    # 初始化SystemCluster
+    SystemClusters().build_clusters(config['NAMESPACE'])
 
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get(
@@ -152,8 +151,8 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
         app.ctx.crypto = crypto_module
 
     # 如果本app是Head Node，且本进程为main进程（非worker)，则额外启动一次backend清空非持久化表
+    # 注意如果是单worker模式，则main进程也是worker进程，因此worker_start里会再次执行start_backends
     if head and os.getpid() == main_pid:
-        # todo 部分情况，比如test，会直接用main的进程，考虑怎么统一掉
         start_backends(app)
         # 主进程+Head启动时执行检查schema, 清空所有非持久化表
         try:
