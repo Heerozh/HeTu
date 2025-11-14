@@ -144,7 +144,8 @@ async def create_future_call(ctx: Context, at: float, system: str, *args, timeou
 
 async def clean_expired_call_locks(comp_mgr):
     """清空超过7天的call_lock的已执行uuid数据，只有服务器非正常关闭才可能遗留这些数据，因此只需服务器启动时调用。"""
-    for comp in [ExecutionLock] + list(ExecutionLock.instances_.values()):
+    duplicates = ExecutionLock.get_duplicates(comp_mgr.namespace).values()
+    for comp in [ExecutionLock] + list(duplicates):
         tbl = comp_mgr.get_table(comp)
         if tbl is None: # 说明项目没任何地方引用此Component
             continue
@@ -249,7 +250,8 @@ async def future_call_task(app):
     comp_tables = [comp_mgr.get_table(FutureCalls)]
     if comp_tables[0] is None:  # 可能主组件没人使用
         comp_tables = []
-    comp_tables += [comp_mgr.get_table(comp) for comp in FutureCalls.instances_.values()]
+    duplicates = FutureCalls.get_duplicates(comp_mgr.namespace).values()
+    comp_tables += [comp_mgr.get_table(comp) for comp in duplicates]
     # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，导致部分任务可能卡很久不执行
     # 所以这里使用最基础的，每一段时间循环的方式
     while True:

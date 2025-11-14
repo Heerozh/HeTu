@@ -60,7 +60,7 @@ class BaseComponent:
     indexes_ = None         # type: dict[str, bool]     # 索引名->是否是字符串类型 的映射
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
-    instances_ = None       # type: dict[str, type[BaseComponent]] # 该Component的所有副本实例
+    instances_ = {}         # type: dict[str, dict[str, type[BaseComponent]]] # 该Component的所有副本实例
     master_ = None          # type: type[BaseComponent]  # 该Component的主实例
 
     @staticmethod
@@ -149,16 +149,27 @@ class BaseComponent:
         return dict(zip(data.dtype.names, data.item()))
 
     @classmethod
-    def duplicate(cls, suffix: str) -> type['BaseComponent']:
-        """复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。"""
-        if not suffix:
+    def duplicate(cls, namespace: str, suffix: str) -> type['BaseComponent']:
+        """
+        复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
+        注意：只能在define阶段使用
+        """
+        if namespace == cls.namespace_ and not suffix:
             return cls
-        if suffix in cls.instances_:
-            return cls.instances_[suffix]
+
+        instances = cls.instances_.setdefault(namespace, {})
+        if suffix in instances:
+            return instances[suffix]
+
         new_cls = BaseComponent.load_json(cls.json_, suffix)
-        cls.instances_[suffix] = new_cls
+        instances[suffix] = new_cls
         new_cls.master_ = cls
         return new_cls
+
+    @classmethod
+    def get_duplicates(cls, namespace: str) -> dict[str, type['BaseComponent']]:
+        """获取此Component在指定namespace下的所有副本实例"""
+        return cls.instances_.get(namespace, {})
 
     @classmethod
     def is_rls(cls) -> bool:
