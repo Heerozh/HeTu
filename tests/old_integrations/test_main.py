@@ -39,13 +39,14 @@ class MyTestCase(unittest.TestCase):
             main()
 
         # 正常启动
-        cfg_file = os.path.join(os.path.dirname(__file__), '../../hetu/CONFIG_TEMPLATE.yml')
+        cfg_file = os.path.join(os.path.dirname(__file__), '../../CONFIG_TEMPLATE.yml')
         sys.argv[1:] = ['start', '--config', cfg_file]
         os.chdir(os.path.join(os.path.dirname(__file__)))
         SystemClusters()._clear()
         # 阻止启动的最后一步，不然就卡死了
         r = redis.Redis(host='127.0.0.1', port=6379)
         r.set('head_lock', '1')
+        # 如果卡在这里，说明启动成功了，不应该，考虑加个timeout
         with self.assertRaises(HeadLockFailed):
             main()
 
