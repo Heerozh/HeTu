@@ -34,6 +34,7 @@ class Connection(BaseComponent):
 
 @define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
 async def new_connection(ctx: Context, address: str):
+    # todo bug: 服务器自己的（future call之类的localhost）连接不应该受IP限制
     if MAX_ANONYMOUS_CONNECTION_BY_IP:
         same_ips = await ctx[Connection].query('address', address, limit=1000,
                                                lock_index=False, lock_rows=False)
