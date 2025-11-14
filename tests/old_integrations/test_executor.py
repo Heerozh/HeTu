@@ -120,7 +120,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
         backend = self.backends['default']
         HP = hetu.data.ComponentDefines().get_component('ssw', 'HP')
-        hp_copy = HP.duplicate('copy1')
+        hp_copy = HP.duplicate('ssw', 'copy1')
         hp_tbl = self.comp_mgr.get_table(hp_copy)
         async with backend.transaction(hp_tbl.cluster_id) as trx:
             hp_trx = hp_tbl.attach(trx)
@@ -216,7 +216,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
 
         backend = self.backends['default']
         from hetu.system.future import FutureCalls
-        FutureCallsCopy1 = FutureCalls.duplicate('copy1')
+        FutureCallsCopy1 = FutureCalls.duplicate('ssw', 'copy1')
         fc_tbl = self.comp_mgr.get_table(FutureCallsCopy1)
 
         # 测试未来调用创建是否正常
@@ -235,7 +235,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         # 测试过期清理是否正常
         await executor1.execute(SystemCall('use_hp', (2, ), 'test_uuid'))
         from hetu.system.execution import ExecutionLock
-        ExecutionLock_use_hp = ExecutionLock.duplicate('use_hp')
+        ExecutionLock_use_hp = ExecutionLock.duplicate('ssw','use_hp')
         lock_tbl = self.comp_mgr.get_table(ExecutionLock_use_hp)
 
         from hetu.system.future import clean_expired_call_locks

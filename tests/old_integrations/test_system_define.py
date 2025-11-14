@@ -264,7 +264,7 @@ class TestSystemDefine(unittest.TestCase):
 
         @define_system(
             namespace="ssw",
-            components=(GalaxyPosition.duplicate('copy'), ),
+            components=(GalaxyPosition.duplicate("ssw", 'copy'), ),
         )
         async def __not_used2__(ctx, ):
             pass
@@ -290,10 +290,10 @@ class TestSystemDefine(unittest.TestCase):
 
         self.assertEqual(
             clusters.get_system('system_copy1', namespace='ssw').full_components,
-            {Map.duplicate('copy'), Hp.duplicate('copy')})
+            {Map.duplicate("ssw", 'copy'), Hp.duplicate("ssw", 'copy')})
         self.assertEqual(
             clusters.get_system('system_copy1', namespace='ssw').full_non_trx,
-            {GalaxyPosition.duplicate('copy')})
+            {GalaxyPosition.duplicate("ssw", 'copy')})
 
         # 检测cluster不相关
         self.assertNotEqual(
