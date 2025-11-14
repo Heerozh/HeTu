@@ -188,7 +188,8 @@ class TestWebsocket(unittest.TestCase):
         app.test_client.websocket("/hetu", mimic=normal_routine)
 
         # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-        app.ctx.default_backend.reset_connection_pool()
+        # todo 改进process后应该不需要该调用
+        # app.ctx.default_backend.reset_connection_pool()
         with self.assertRaises(Exception):
             app.test_client.websocket("/hetu", mimic=flooding_routine)
 
@@ -212,7 +213,7 @@ class TestWebsocket(unittest.TestCase):
         app = self.create_app_under_current_coroutine()
         app.test_client.websocket("/hetu", mimic=normal_routine_lv2)
 
-        app.ctx.default_backend.reset_connection_pool()
+        # app.ctx.default_backend.reset_connection_pool()
         with self.assertRaises(Exception):
             app.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
 

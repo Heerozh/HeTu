@@ -153,6 +153,7 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
 
     # 如果本app是Head Node，且本进程为main进程（非worker)，则额外启动一次backend清空非持久化表
     if head and os.getpid() == main_pid:
+        # todo 部分情况，比如test，会直接用main的进程，考虑怎么统一掉
         start_backends(app)
         # 主进程+Head启动时执行检查schema, 清空所有非持久化表
         try:
