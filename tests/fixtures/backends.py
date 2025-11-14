@@ -120,3 +120,11 @@ def mod_auto_backend(request):
         return request.getfixturevalue("mod_redis_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)
+
+# 要测试新的backend，请添加backend到params中
+@pytest.fixture(params=["redis", ], scope="module")
+def auto_backend(request):
+    if request.param == "redis":
+        return request.getfixturevalue("mod_redis_backend")
+    else:
+        raise ValueError("Unknown db type: %s" % request.param)
