@@ -16,6 +16,9 @@ class ComponentTableManager:
     ComponentTable管理类，负责对每个ComponentTable的初始化和获取。
     此类只能在SystemCluster.build_clusters()后初始化
     """
+    @property
+    def namespace(self) -> str:
+        return self._namespace
 
     def __init__(
             self,
@@ -24,8 +27,9 @@ class ComponentTableManager:
             backends: dict[str, Backend],
             table_constructors: dict[str, type[ComponentTable]]
     ):
-        self.tables = {}
-        self.tables_by_name = {}
+        self._tables = {}
+        self._tables_by_name = {}
+        self._namespace = namespace
 
         clusters = SystemClusters().get_clusters(namespace)
         for cluster in clusters:
@@ -35,24 +39,24 @@ class ComponentTableManager:
                 if backend is None or table_constructor is None:
                     raise ValueError(f"Backend {comp.backend_} not found")
                 table = table_constructor(comp, instance_name, cluster.id, backend)
-                self.tables[comp] = table
-                self.tables_by_name[comp.component_name_] = table
+                self._tables[comp] = table
+                self._tables_by_name[comp.component_name_] = table
 
     def create_or_migrate_all(self):
-        for comp, tbl in self.tables.items():
+        for comp, tbl in self._tables.items():
             # 非持久化的Component需要cluster迁移，不然数据就永远的留在了数据库中
             tbl.create_or_migrate(cluster_only=not comp.persist_)
 
     def flush_volatile(self):
-        for comp, tbl in self.tables.items():
+        for comp, tbl in self._tables.items():
             if not comp.persist_:
                 tbl.flush()
 
     def get_table(self, component_cls: type[BaseComponent] | str) -> ComponentTable | None:
         if type(component_cls) is str:
-            return self.tables_by_name.get(component_cls)
+            return self._tables_by_name.get(component_cls)
         else:
-            return self.tables.get(component_cls)
+            return self._tables.get(component_cls)
 
     def items(self) -> ItemsView[type[BaseComponent], ComponentTable]:
-        return self.tables.items()
+        return self._tables.items()
