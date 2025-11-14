@@ -123,27 +123,27 @@ class TestComponentDefine(unittest.TestCase):
 
         from hetu.system import define_system, SystemClusters
 
-        @define_system(components=(Health.duplicate("copy"), ), namespace="ssw")
+        @define_system(components=(Health.duplicate("ssw", "copy"), ), namespace="ssw")
         async def test_hp(ctx):
             pass
 
         # 测试system和instance是否正确定义
         sys_def = SystemClusters().get_system("test_hp", "ssw")
         self.assertEqual(
-            Health.instances_["copy"],
+            Health.get_duplicates("ssw")["copy"],
             next(iter(sys_def.components))
         )
         self.assertEqual(
-            Health.instances_["copy"].component_name_,
+            Health.get_duplicates("ssw")["copy"].component_name_,
             "Health:copy"
         )
         self.assertEqual(
-            Health.instances_["copy"].properties_,
+            Health.get_duplicates("ssw")["copy"].properties_,
             Health.properties_
         )
         # 测试instance的instances属性应该为空
         self.assertEqual(
-            Health.instances_["copy"].instances_,
+            Health.get_duplicates("ssw")["copy"].instances_,
             {}
         )
 
