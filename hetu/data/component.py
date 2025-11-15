@@ -36,7 +36,7 @@ class Permission(IntEnum):
 class Property:
     default: Any                # 属性的默认值
     unique: bool = False        # 是否是字典索引 (此项优先级高于index，查询速度高)
-    index: bool = False         # 是否是排序索引
+    index: bool | None = None         # 是否是排序索引
     dtype: str | type = None          # 数据类型，最好用np的明确定义
 
 
@@ -300,7 +300,13 @@ def define_component(
                 if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
                     prop.dtype = np.int8
                 if prop.unique:
+                    if prop.index is False:
+                        logger.warning(f"⚠️ [🛠️Define] "
+                                       f"{cls.__name__}.{_name}属性设置为unique时，"
+                                       f"index不能设置为False。")
                     prop.index = True
+                if prop.index is None:
+                    prop.index = False
                 assert prop.default is not None, \
                     (f"{cls.__name__}.{_name}默认值不能为None。所有属性都要有默认值，"
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
@@ -340,6 +346,9 @@ def define_component(
             rls_compare = ('eq', 'owner', 'caller')
             assert 'owner' in properties, \
                 f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
+            # if not properties['owner'].unique:
+            #     logger.warning(f"⚠️ [🛠️Define] {cls.__name__}.owner属性不是unique唯一，"
+            #                    f"你确定正确么？")
             assert np.issubdtype(properties['owner'].dtype, np.number), \
                 f"{cls.__name__}的owner属性必需是numeric数字(int, np.int64, ...)类型"
 
