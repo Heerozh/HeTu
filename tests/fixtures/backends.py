@@ -39,17 +39,19 @@ def mod_redis_service():
 
     # 启动服务器
     containers = {}
+
     def run_redis_service(port=23318):
-        containers['redis'] = client.containers.run(
-            "redis:latest", detach=True, ports={'6379/tcp': port},
-            name='hetu_test_redis',
-            auto_remove=True, network="hetu_test_net", hostname="redis-master")
-        containers['redis_replica'] = client.containers.run(
-            "redis:latest", detach=True, ports={'6379/tcp': port + 1},
-            name='hetu_test_redis_replica', auto_remove=True,
-            network="hetu_test_net",
-            command=["redis-server", f"--replicaof redis-master 6379",
-                     "--replica-read-only yes"])
+        if 'redis' not in containers:
+            containers['redis'] = client.containers.run(
+                "redis:latest", detach=True, ports={'6379/tcp': port},
+                name='hetu_test_redis',
+                auto_remove=True, network="hetu_test_net", hostname="redis-master")
+            containers['redis_replica'] = client.containers.run(
+                "redis:latest", detach=True, ports={'6379/tcp': port + 1},
+                name='hetu_test_redis_replica', auto_remove=True,
+                network="hetu_test_net",
+                command=["redis-server", f"--replicaof redis-master 6379",
+                         "--replica-read-only yes"])
 
         # 验证docker启动完毕
         import redis
