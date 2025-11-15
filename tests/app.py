@@ -128,8 +128,20 @@ async def composer_system(ctx: Context):
     permission=Permission.EVERYBODY,
     components=(IndexComp1, ),
 )
-async def race(ctx: Context, sleep):
+async def race_select(ctx: Context, sleep):
     async with ctx[IndexComp1].upsert(3, 'owner') as row:
         print(ctx, 'selected', row)
         await asyncio.sleep(sleep)
         row.value = sleep
+
+
+@define_system(
+    namespace="pytest",
+    permission=Permission.EVERYBODY,
+    components=(IndexComp1, ),
+)
+async def race_query(ctx: Context, sleep):
+    _rows = await ctx[IndexComp1].query("owner", 3)
+    await asyncio.sleep(sleep)
+    _rows[0].value = sleep
+    await ctx[IndexComp1].update(_rows[0].id, _rows[0])

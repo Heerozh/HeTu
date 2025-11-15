@@ -780,6 +780,8 @@ class UpdateOrInsert:
 
     async def __aenter__(self):
         if self.comp_trx.insert_cache_exists(self.value, self.where):
+            # todo: 更好的实现，应该撤销上一次insert，然后获取上一次的row值作为select结果返回
+            #       目前redis insert是stack的，无法索引撤销
             raise UniqueViolation(
                 f"upsert: 事务中已经插入过该值 ({self.where}: {self.value})，"
                 f"违反unique约束")
