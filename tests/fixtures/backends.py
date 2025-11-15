@@ -39,38 +39,40 @@ def mod_redis_service():
 
     # 启动服务器
     containers = {}
-    port = 23318
-    containers['redis'] = client.containers.run(
-        "redis:latest", detach=True, ports={'6379/tcp': port},
-        name='hetu_test_redis',
-        auto_remove=True, network="hetu_test_net", hostname="redis-master")
-    containers['redis_replica'] = client.containers.run(
-        "redis:latest", detach=True, ports={'6379/tcp': port + 1},
-        name='hetu_test_redis_replica', auto_remove=True,
-        network="hetu_test_net",
-        command=["redis-server", f"--replicaof redis-master 6379",
-                 "--replica-read-only yes"])
+    def run_redis_service(port=23318):
+        containers['redis'] = client.containers.run(
+            "redis:latest", detach=True, ports={'6379/tcp': port},
+            name='hetu_test_redis',
+            auto_remove=True, network="hetu_test_net", hostname="redis-master")
+        containers['redis_replica'] = client.containers.run(
+            "redis:latest", detach=True, ports={'6379/tcp': port + 1},
+            name='hetu_test_redis_replica', auto_remove=True,
+            network="hetu_test_net",
+            command=["redis-server", f"--replicaof redis-master 6379",
+                     "--replica-read-only yes"])
 
-    # 验证docker启动完毕
-    import redis
-    r = redis.Redis(host="127.0.0.1", port=port)
-    r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
-    while True:
-        try:
-            time.sleep(1)
-            print("version:", r.info()['redis_version'], r.role(),
-                  r.config_get('notify-keyspace-events'))
-            r.wait(1, 10000)
-            print("slave version:", r_slave.info()['redis_version'],
-                  r_slave.role(),
-                  r_slave.config_get('notify-keyspace-events'))
-            break
-        except Exception:
-            pass
-    print('⚠️ 已启动redis docker.')
+        # 验证docker启动完毕
+        import redis
+        r = redis.Redis(host="127.0.0.1", port=port)
+        r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
+        while True:
+            try:
+                time.sleep(1)
+                print("version:", r.info()['redis_version'], r.role(),
+                      r.config_get('notify-keyspace-events'))
+                r.wait(1, 10000)
+                print("slave version:", r_slave.info()['redis_version'],
+                      r_slave.role(),
+                      r_slave.config_get('notify-keyspace-events'))
+                break
+            except Exception:
+                pass
+        print('⚠️ 已启动redis docker.')
 
-    # 返回redis地址
-    yield f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
+        # 返回redis地址
+        return f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
+
+    yield run_redis_service
 
     print('ℹ️ 清理docker...')
     for container in containers.values():
@@ -93,13 +95,14 @@ async def mod_redis_backend(mod_redis_service):
     backends = {}
 
     # 支持创建多个backend连接
-    def _create_redis_backend(key="main"):
+    def _create_redis_backend(key="main", port=23318):
         if key in backends:
             return backends[key]
 
+        redis_url, replica_url = mod_redis_service(port)
         config = {
-            "master": mod_redis_service[0],
-            "servants": [mod_redis_service[1], ]
+            "master": redis_url,
+            "servants": [replica_url, ]
         }
 
         _backend = RedisBackend(config)
