@@ -593,6 +593,9 @@ class ComponentTransaction:
         """
         return UpdateOrInsert(self, value, where)
 
+    def upsert(self, value, where: str = None) -> "UpdateOrInsert":
+        return self.update_or_insert(value, where)
+
     async def unique_value_exists(self, index_name: str, value) -> bool:
         """检查单个unique索引是否满足条件"""
         row_ids = await self._db_query(index_name, value, limit=1, lock_index=False)
