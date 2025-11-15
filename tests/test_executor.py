@@ -1,5 +1,6 @@
 import logging
 import sys
+import pytest
 
 logging.basicConfig(stream=sys.stdout)
 logger = logging.getLogger("HeTu.root")
@@ -7,16 +8,8 @@ logger.setLevel(logging.DEBUG)
 logging.lastResort.setLevel(logging.DEBUG)
 
 
-#
-# def setUpClass(cls):
-#     # 测试慢日志阈值
-#     import hetu.common.slowlog
-#     hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
-#
-
-
 async def test_call_not_exist(mod_test_app, mod_executor):
-    # 测试无权限call
+    # 测试不能存在的system call
     ok, _ = await mod_executor.exec("not_exist_system", "any_value")
     assert not ok
 
@@ -27,36 +20,71 @@ async def test_call_no_permission(mod_test_app, mod_executor):
     assert not ok
 
 
-# async def test_execute_system(self):
-#
-#     # 测试登录
-#     ok, _ = await executor.exec('login', 1234)
-#     assert ok
-#
-#     # 测试有权限call
-#     ok, _ = await executor.exec('use_hp', 9)
-#     assert ok
-#
-#     # 去数据库读取内容看是否正确
-#     ok, _ = await executor.exec('test_hp', 100 - 9)
-#     assert ok
-#
-#
-#     # 测试magic方法，自身+-10距离内的位置都会被攻击到
-#     # 添加3个位置供magic查询
-#     ok, _ = await executor.exec('create_user', executor.context.caller, 10, 10)
-#     assert ok
-#     ok, _ = await executor.exec('create_user', 3, 0, 0)
-#     assert ok
-#     ok, _ = await executor.exec('create_user', 4, 10, -11)
-#     assert ok
-#
-#     with self.assertLogs('HeTu', level='INFO') as cm:
-#         ok, _ = await executor.exec('magic')
-#         assert ok
-#         assert cm.output[:2], ['INFO:HeTu.root:User_123' == 'INFO:HeTu.root:User_3']
-#         self.assertIn('慢日志', cm.output[2])
-#         self.assertIn('magic', cm.output[2])
+async def test_system_with_rls(mod_test_app, mod_executor):
+    # 测试登录
+    ok, _ = await mod_executor.exec('login', 1234)
+    assert ok
+
+    # 测试有权限call
+    ok, _ = await mod_executor.exec('add_rls_comp_value', 9)
+    assert ok
+
+    # 去数据库读取内容看是否正确
+    ok, _ = await mod_executor.exec('test_rls_comp_value', 100 - 9)
+    assert ok
+
+    # 故意传不正确的值
+    ok, _ = await mod_executor.exec('test_rls_comp_value', 100 - 10)
+    assert not ok
+
+
+@pytest.mark.timeout(5)
+async def test_unique_violate_bug(mod_test_app, mod_executor):
+    # BUG: insert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
+    # (unique_violation_as_race=True)会把非自己查询的属性的Unique违反也当成RaceCondition重试
+    ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
+    assert ok
+
+    # unique违反 应该失败，而不是无限RaceCondition重试
+    ok, _ = await mod_executor.exec('create_row', 6, 21, "d")
+    assert not ok
+
+
+async def test_slow_log(mod_test_app, mod_executor, caplog):
+    # 测试慢日志输出
+    import hetu.common.slowlog
+    hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
+
+    # 登录用户1234
+    ok, _ = await mod_executor.exec('login', 1234)
+    assert ok
+
+    # 添加3行数据
+    ok, _ = await mod_executor.exec('create_row', mod_executor.context.caller, 10, "b")
+    assert ok
+    ok, _ = await mod_executor.exec('create_row', 3, 0, "a")  # b-d query不符合
+    assert ok
+    ok, _ = await mod_executor.exec('create_row', 4, 19, "c")
+    assert ok
+    ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
+    assert ok
+    ok, _ = await mod_executor.exec('create_row', 6, 21, "d") # unique违反
+    assert not ok
+    ok, _ = await mod_executor.exec('create_row', 6, 21, "e") # 0-20和b-d query都不符合
+    assert ok
+
+    with caplog.at_level(logging.INFO, logger='HeTu'):
+        ok, _ = await mod_executor.exec('composer_system')
+        assert ok
+
+    # 检查日志输出
+    assert len(caplog.records) == 4
+    assert "[User_b]" in caplog.messages
+    assert "[User_c]" in caplog.messages
+    assert "[User_d]" in caplog.messages
+    assert '慢日志' in caplog.messages
+    print(caplog.messages)
+
 #
 #     # 测试race
 #     executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
