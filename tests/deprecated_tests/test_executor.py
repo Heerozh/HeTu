@@ -26,7 +26,7 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         hetu.system.SystemClusters()._clear()
 
         # 加载玩家的app文件
-        import app
+        import deprecated_tests.app as app
         _ = app
         # 初始化SystemCluster
         hetu.system.SystemClusters().build_clusters('ssw')
