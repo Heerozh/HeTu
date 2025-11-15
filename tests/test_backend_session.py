@@ -1,4 +1,4 @@
-from hetu.data.backend import ComponentTable
+from hetu.data.backend import ComponentTable, UniqueViolation
 import numpy as np
 import pytest
 
@@ -340,3 +340,24 @@ async def test_session_exception(mod_item_component, item_table):
 
     row = await item_table.direct_get(1)
     assert row is None
+
+
+async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_table):
+    backend = item_table.backend
+
+    # 同事务中插入多个重复Unique数据应该失败
+    with pytest.raises(UniqueViolation, match="name"):
+        async with backend.transaction(1) as session:
+            tbl = item_table.attach(session)
+
+            row = mod_item_component.new_row()
+            row.name = "Item1"
+            await tbl.insert(row)
+
+            row = mod_item_component.new_row()
+            row.name = "Item1"
+            await tbl.insert(row)
+
+            row = mod_item_component.new_row()
+            row.name = "Item1"
+            await tbl.insert(row)
