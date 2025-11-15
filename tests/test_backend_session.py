@@ -250,7 +250,7 @@ async def test_unique_table(mod_auto_backend):
     backend = get_or_create_backend()
 
     from hetu.data import define_component, Property, BaseComponent
-    @define_component(namespace="ssw")
+    @define_component(namespace="pytest")
     class UniqueTest(BaseComponent):
         name: 'U8' = Property('', unique=True, index=True)
         timestamp: float = Property(0, unique=False, index=True)
