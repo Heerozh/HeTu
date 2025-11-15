@@ -4,10 +4,6 @@ import time
 from hetu.data.backend import ComponentTable
 from hetu.data.backend.sub import RowSubscription
 
-logger = logging.getLogger('HeTu.root')
-logger.setLevel(logging.DEBUG)
-logging.lastResort.setLevel(logging.DEBUG)
-
 
 @pytest.fixture
 async def sub_mgr(mod_auto_backend):

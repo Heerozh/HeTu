@@ -2,11 +2,6 @@ import logging
 import sys
 import pytest
 
-logging.basicConfig(stream=sys.stdout)
-logger = logging.getLogger("HeTu.root")
-logger.setLevel(logging.DEBUG)
-logging.lastResort.setLevel(logging.DEBUG)
-
 
 async def test_call_not_exist(mod_test_app, mod_executor):
     # 测试不能存在的system call
@@ -88,21 +83,24 @@ async def test_slow_log(mod_test_app, executor, caplog):
     assert '慢日志' in caplog.text
     print(caplog.text)
 
-#
-#     # 测试race
-#     executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor2.initialize("")
-#
-#     task1 = asyncio.create_task(executor.exec('race', 0.4))
-#     task2 = asyncio.create_task(executor2.exec('race', 0.1)) # 必须设高点才能让task1先执行到select
-#     await asyncio.gather(task2)
-#     await task1
-#
-#     assert executor.context.retry_count == 1
-#     assert executor2.context.retry_count == 0
-#
-#     # 结束连接
-#     await executor.terminate()
+async def test_race_condition(mod_test_app, comp_mgr, executor):
+    # 测试race
+    import hetu
+    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    await executor2.initialize("")
+
+    import asyncio
+    # 必须差距大才能保证某个task先select
+    await asyncio.gather(
+        executor.exec('race', 0.4),
+        executor2.exec("race", 0.1)
+    )
+
+    assert executor.context.retry_count == 1
+    assert executor2.context.retry_count == 0
+
+    # 结束连接
+    await executor2.terminate()
 #
 # async def test_execute_system_copy(self):
 #     executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)

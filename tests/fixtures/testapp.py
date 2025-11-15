@@ -28,6 +28,11 @@ def mod_comp_mgr(mod_auto_backend):
     return hetu.ComponentTableManager("pytest", "server1", backends, comp_tbl_classes)
 
 
+@pytest.fixture(scope="function")
+def comp_mgr(mod_comp_mgr):
+    return mod_comp_mgr
+
+
 @pytest.fixture(scope="module")
 async def mod_executor(mod_comp_mgr):
     import hetu
@@ -41,10 +46,10 @@ async def mod_executor(mod_comp_mgr):
 
 
 @pytest.fixture(scope="function")
-async def executor(mod_comp_mgr):
+async def executor(comp_mgr):
     import hetu
 
-    executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
+    executor = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor.initialize("")
     yield executor
 
