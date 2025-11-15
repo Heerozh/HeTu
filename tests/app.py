@@ -107,3 +107,18 @@ async def composer_system(ctx: Context):
     for target_id in targets_id:
         target = await ctx[IndexComp2].select(target_id, 'owner')
         logger.info(f"[{target.name}]")
+
+
+# ============================
+
+
+@define_system(
+    namespace="pytest",
+    permission=Permission.EVERYBODY,
+    components=(IndexComp1, ),
+)
+async def race(ctx: Context, sleep):
+    async with ctx[IndexComp1].upsert(3, 'owner') as row:
+        print(ctx, 'selected', row)
+        await asyncio.sleep(sleep)
+        row.value = sleep
