@@ -102,7 +102,7 @@ async def test_slow_log(mod_test_app, executor, caplog):
     assert '慢日志' in caplog.text
     print(caplog.text)
 
-async def test_race_condition(mod_test_app, comp_mgr, executor):
+async def test_select_race_condition(mod_test_app, comp_mgr, executor):
     # 测试race
     import hetu
     executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
@@ -111,8 +111,35 @@ async def test_race_condition(mod_test_app, comp_mgr, executor):
     import asyncio
     # 必须差距大才能保证某个task先select
     await asyncio.gather(
-        executor.exec('race', 0.4),
-        executor2.exec("race", 0.1)
+        executor.exec('race_select', 0.4),
+        executor2.exec("race_select", 0.1)
+    )
+
+    assert executor.context.retry_count == 1
+    assert executor2.context.retry_count == 0
+
+    # 结束连接
+    await executor2.terminate()
+
+
+async def test_query_race_condition(mod_test_app, comp_mgr, executor):
+    # 测试race
+    import hetu
+    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    await executor2.initialize("")
+
+    # 登录用户1234
+    ok, _ = await executor.exec('login', 1234)
+    assert ok
+    # 先添加一行
+    ok, _ = await executor.exec('create_row', 3, 0, "a")  # b-d query不符合
+    assert ok
+
+    import asyncio
+    # 必须差距大才能保证某个task先query
+    await asyncio.gather(
+        executor.exec('race_query', 0.4),
+        executor2.exec("race_query", 0.1)
     )
 
     assert executor.context.retry_count == 1
