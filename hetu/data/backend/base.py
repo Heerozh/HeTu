@@ -293,6 +293,9 @@ class ComponentTransaction:
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
+        # insert缓存数据，因为没有id，所以用list存储
+        self._insert_caches = np.rec.array(np.empty(
+            0, dtype=self._component_cls.dtypes))
         self._del_flags = set()  # 事务中的删除操作标记
         self._updt_flags = set()  # 事务中的更新操作标记
 
@@ -596,10 +599,19 @@ class ComponentTransaction:
     def upsert(self, value, where: str = None) -> "UpdateOrInsert":
         return self.update_or_insert(value, where)
 
-    async def unique_value_exists(self, index_name: str, value) -> bool:
+
+    def insert_cache_exists(self, value, where: str) -> bool:
+        """检查是否已插入过该值"""
+        return (self._insert_caches[where] == value).any()
+
+
+    async def unique_value_exists(self, value, index_name: str) -> bool:
         """检查单个unique索引是否满足条件"""
         row_ids = await self._db_query(index_name, value, limit=1, lock_index=False)
-        return len(row_ids) > 0
+        if len(row_ids) > 0:
+            return True
+        return self.insert_cache_exists(value, index_name)
+
 
     async def _check_uniques(
         self, old_row: np.record | None, new_row: np.record, ignores=None
@@ -614,7 +626,7 @@ class ComponentTransaction:
                 continue
             # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
-                if await self.unique_value_exists(idx_name, new_row[idx_name].item()):
+                if await self.unique_value_exists(new_row[idx_name].item(), idx_name):
                     raise UniqueViolation(
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert"
@@ -705,6 +717,7 @@ class ComponentTransaction:
         # 加入到更新队列
         row = row.copy()
         self._trx_insert(row)
+        self._insert_caches = np.append(self._insert_caches, row)
 
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
@@ -759,13 +772,18 @@ class UpdateOrInsert:
     async def commit(self):
         if self.row_id == 0:
             # 如果是insert，但是where依据却存在，说明违反unique约束，重试即可
-            if await self.comp_trx.unique_value_exists(self.where, self.value):
+            if await self.comp_trx.unique_value_exists(self.value, self.where):
                 raise RaceCondition("upsert决定插入数据时，发现unique冲突")
             await self.comp_trx.insert(self.row)
         else:
             await self.comp_trx.update(self.row_id, self.row)
 
     async def __aenter__(self):
+        if self.comp_trx.insert_cache_exists(self.value, self.where):
+            raise UniqueViolation(
+                f"upsert: 事务中已经插入过该值 ({self.where}: {self.value})，"
+                f"违反unique约束")
+
         row = await self.comp_trx.select(self.value, self.where)
         if row is None:
             row = self.comp_trx.component_cls.new_row()

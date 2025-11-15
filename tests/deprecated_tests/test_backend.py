@@ -285,7 +285,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         async with backend.transaction(1) as trx:
             tbl = item_data.attach(trx)
             for i in range(30):
-                row.time = row.id + 100
+                row.time = i + 100
                 row.id = 0
                 row.name = f're{i}'
                 await tbl.insert(row)
@@ -351,9 +351,11 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             tbl = item_data.attach(trx)
             row = Item.new_row()
             row.time = 12345
+            row.name = "12345"
             await tbl.insert(row)
             row = Item.new_row()
             row.time = 22345
+            row.name = "22345"
             await tbl.insert(row)
             self.assertTrue(len(trx._stack) > 0)
 
