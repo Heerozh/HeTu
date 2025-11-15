@@ -654,6 +654,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             self, table_cls: type[ComponentTable],backend_cls: type[Backend], config
     ):
         # 测试update_or_insert UniqueViolation是否转化为了RaceCondition
+        # update_or_insert的where依据的index，不应该有 unique violation才对，
+        # 要保证永远正确执行
         backend = backend_cls(config)
         item_data = table_cls(Item, 'test', 1, backend)
         item_data.create_or_migrate()
