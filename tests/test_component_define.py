@@ -148,3 +148,18 @@ def test_keyword_define(new_component_env):
         @define_component(namespace='HeTu', persist=False)
         class sbyte(BaseComponent):
             _ok: bool = Property(False)
+
+
+def test_unique_index_false(new_component_env, caplog):
+    @define_component(namespace="pytest", force=True)
+    class TestComp(BaseComponent):
+        a: np.int64 = Property(0, unique=True, index=False)
+
+    assert "index" in caplog.text
+    caplog.clear()
+
+    @define_component(namespace="pytest", force=True)
+    class TestComp(BaseComponent):
+        a: np.int64 = Property(0, unique=True)
+
+    assert "index" not in caplog.text
