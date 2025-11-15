@@ -74,8 +74,8 @@ PACKET_COMPRESSION_CLASS: null     # 通过该class的compress和decompress静�
 PACKET_CRYPTOGRAPHY_CLASS: null    # 通过该class的encrypt和decrypt静态方法进行加密和解密
 
 # ！！ 注意 ！！
-# 如果从容器启动standalone模式河图，redis的地址不能用127.0.0.1，因为这是容器内部地址
-# 要使用redis所在机器的实际内网ip。比如192.168.1.100
+# 如果河图在容器内启动，访问宿主机（或另一个容器）的redis不能用127.0.0.1，因为容器网络和宿主机独立。
+# 要使用redis所在机器的实际内网ip，或可用host.docker.internal表示宿主机地址
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS:
