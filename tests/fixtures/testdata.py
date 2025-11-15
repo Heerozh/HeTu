@@ -59,7 +59,7 @@ async def mod_rls_test_component(mod_clear_all_component_define):
     import numpy as np
     global RLSTest
 
-    @define_component(namespace="ssw", permission=Permission.RLS, rls_compare=("eq", "friend", "caller"))
+    @define_component(namespace="pytest", permission=Permission.RLS, rls_compare=("eq", "friend", "caller"))
     class RLSTest(BaseComponent):
         owner: np.int64 = Property(0, unique=False, index=True)
         friend: np.int8 = Property(1, unique=False, index=False)
