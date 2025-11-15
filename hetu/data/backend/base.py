@@ -36,8 +36,8 @@
   └────────────────────┘
 """
 
-import logging
 import asyncio
+import logging
 
 import numpy as np
 
@@ -593,8 +593,13 @@ class ComponentTransaction:
         """
         return UpdateOrInsert(self, value, where)
 
+    async def unique_value_exists(self, index_name: str, value) -> bool:
+        """检查单个unique索引是否满足条件"""
+        row_ids = await self._db_query(index_name, value, limit=1, lock_index=False)
+        return len(row_ids) > 0
+
     async def _check_uniques(
-            self, old_row: [np.record, None], new_row: np.record, ignores=None
+        self, old_row: np.record | None, new_row: np.record, ignores=None
     ) -> None:
         """检查新行所有unique索引是否满足条件"""
         is_update = old_row is not None
@@ -606,10 +611,7 @@ class ComponentTransaction:
                 continue
             # 如果值变动了，或是插入新行
             if (is_update and old_row[idx_name] != new_row[idx_name]) or is_insert:
-                row_ids = await self._db_query(
-                    idx_name, new_row[idx_name].item(), limit=1, lock_index=False
-                )
-                if len(row_ids) > 0:
+                if await self.unique_value_exists(idx_name, new_row[idx_name].item()):
                     raise UniqueViolation(
                         f"Unique索引{self._component_cls.component_name_}.{idx_name}，"
                         f"已经存在值为({new_row[idx_name]})的行，无法Update/Insert"
@@ -659,10 +661,9 @@ class ComponentTransaction:
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
-    async def insert(self, row: np.record, unique_violation_as_race=False) -> None:
+    async def insert(self, row: np.record) -> None:
         """
-        插入单行数据。unique_violation_as_race表示是否把
-        UniqueViolation(插入时遇到Unique值被占用)当作RaceCondition(事务冲突)抛出。
+        插入单行数据。
 
         Examples
         --------
@@ -696,13 +697,7 @@ class ComponentTransaction:
         assert row.id == 0, "插入数据要求 row.id == 0"
 
         # 提交到事务前先检查无unique冲突
-        try:
-            await self._check_uniques(None, row, ignores={"id"})
-        except UniqueViolation:
-            if unique_violation_as_race:
-                raise RaceCondition("插入数据时，unique冲突")
-            else:
-                raise
+        await self._check_uniques(None, row, ignores={"id"})
 
         # 加入到更新队列
         row = row.copy()
@@ -747,6 +742,11 @@ class ComponentTransaction:
 
 class UpdateOrInsert:
     def __init__(self, comp_trx: ComponentTransaction, value, where):
+        if where not in comp_trx.component_cls.uniques_:
+            raise ValueError(
+                "UpdateOrInsert只能用于unique索引，"
+                f"{comp_trx.component_cls.component_name_}组件的{where}不是unique索引"
+            )
         self.comp_trx = comp_trx
         self.value = value
         self.where = where
@@ -755,7 +755,10 @@ class UpdateOrInsert:
 
     async def commit(self):
         if self.row_id == 0:
-            await self.comp_trx.insert(self.row, unique_violation_as_race=True)
+            # 如果是insert，但是where依据却存在，说明违反unique约束，重试即可
+            if await self.comp_trx.unique_value_exists(self.where, self.value):
+                raise RaceCondition("upsert决定插入数据时，发现unique冲突")
+            await self.comp_trx.insert(self.row)
         else:
             await self.comp_trx.update(self.row_id, self.row)
 

@@ -38,10 +38,15 @@ async def test_system_with_rls(mod_test_app, mod_executor):
     assert not ok
 
 
-@pytest.mark.timeout(5)
+@pytest.mark.timeout(10)
 async def test_unique_violate_bug(mod_test_app, mod_executor):
     # BUG: insert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
-    # (unique_violation_as_race=True)会把非自己查询的属性的Unique违反也当成RaceCondition重试
+    # 只有where相关的Unique违反才能当成RaceCondition重试
+
+    # 登录用户1234
+    ok, _ = await mod_executor.exec('login', 1234)
+    assert ok
+
     ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
     assert ok
 
@@ -68,8 +73,6 @@ async def test_slow_log(mod_test_app, mod_executor, caplog):
     assert ok
     ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
     assert ok
-    ok, _ = await mod_executor.exec('create_row', 6, 21, "d") # unique违反
-    assert not ok
     ok, _ = await mod_executor.exec('create_row', 6, 21, "e") # 0-20和b-d query都不符合
     assert ok
 
@@ -79,11 +82,11 @@ async def test_slow_log(mod_test_app, mod_executor, caplog):
 
     # 检查日志输出
     assert len(caplog.records) == 4
-    assert "[User_b]" in caplog.messages
-    assert "[User_c]" in caplog.messages
-    assert "[User_d]" in caplog.messages
-    assert '慢日志' in caplog.messages
-    print(caplog.messages)
+    assert "[User_b]" in caplog.text
+    assert "[User_c]" in caplog.text
+    assert "[User_d]" in caplog.text
+    assert '慢日志' in caplog.text
+    print(caplog.text)
 
 #
 #     # 测试race

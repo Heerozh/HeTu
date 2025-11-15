@@ -289,6 +289,15 @@ async def test_unique_table(mod_auto_backend):
         assert result.id[0] == 2
 
 
+async def test_upsert_limit(mod_item_component, item_table):
+    backend = item_table.backend
+
+    with pytest.raises(ValueError, match="unique"):
+        async with backend.transaction(1) as session:
+            tbl = item_table.attach(session)
+            async with tbl.update_or_insert(True, 'used') as row:
+                pass
+
 async def test_session_exception(mod_item_component, item_table):
     backend = item_table.backend
     try:
