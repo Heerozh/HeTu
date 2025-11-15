@@ -346,6 +346,7 @@ def define_component(
             rls_compare = ('eq', 'owner', 'caller')
             assert 'owner' in properties, \
                 f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
+            # 取消, owner有很多地方需要不是唯一，比如每行一个道具的情况
             # if not properties['owner'].unique:
             #     logger.warning(f"⚠️ [🛠️Define] {cls.__name__}.owner属性不是unique唯一，"
             #                    f"你确定正确么？")
