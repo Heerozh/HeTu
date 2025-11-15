@@ -16,7 +16,7 @@ async def mod_item_component(mod_clear_all_component_define):
     import numpy as np
     global Item
 
-    @define_component(namespace="ssw", permission=Permission.OWNER)
+    @define_component(namespace="pytest", permission=Permission.OWNER)
     class Item(BaseComponent):
         owner: np.int64 = Property(0, unique=False, index=True)
         model: np.int32 = Property(0, unique=False, index=True)
@@ -59,15 +59,18 @@ async def mod_rls_test_component(mod_clear_all_component_define):
     import numpy as np
     global RLSTest
 
-    @define_component(namespace="pytest", permission=Permission.RLS, rls_compare=("eq", "friend", "caller"))
+    @define_component(namespace="pytest", permission=Permission.RLS,
+                      rls_compare=("eq", "friend", "caller"))
     class RLSTest(BaseComponent):
         owner: np.int64 = Property(0, unique=False, index=True)
         friend: np.int8 = Property(1, unique=False, index=False)
 
     return RLSTest
 
+
 @pytest.fixture(scope="module")
-async def mod_rls_test_table(mod_auto_backend, mod_rls_test_component) -> ComponentTable:
+async def mod_rls_test_table(mod_auto_backend,
+                             mod_rls_test_component) -> ComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
@@ -101,7 +104,6 @@ async def filled_item_table(mod_item_component, item_table):
 
 @pytest.fixture
 async def filled_rls_test_table(mod_rls_test_component, mod_rls_test_table):
-
     backend = mod_rls_test_table.backend
     # 初始化测试数据
     async with backend.transaction(1) as session:
