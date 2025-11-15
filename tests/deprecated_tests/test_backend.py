@@ -164,8 +164,8 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(UniqueViolation, "time"):
                 await tbl.insert(row)
             # 测试能用update_or_insert
-            async with tbl.update_or_insert(1, 'owner') as row:
-                self.assertEqual(row.owner, 1)
+            async with tbl.update_or_insert('Item1', 'name') as row:
+                self.assertEqual(row.name, 'Item1')
 
         # 先插入25条数据
         async with backend.transaction(1) as trx:

@@ -65,9 +65,28 @@ async def test_table(mod_item_component, item_table):
         row.time = 2
         with pytest.raises(UniqueViolation, match="time"):
             await tbl.insert(row)
-        # 测试能用update_or_insert
-        async with tbl.update_or_insert(1, 'owner') as row:
-            assert row.owner == 1
+
+async def test_upsert(mod_item_component, item_table):
+    backend = item_table.backend
+
+    # 测试能用update_or_insert
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+
+        async with tbl.update_or_insert("item1", 'name') as row:
+            row.time = 1
+
+        async with tbl.update_or_insert("items4", 'name') as row:
+            row.time = 4
+
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+
+        async with tbl.update_or_insert("item1", 'name') as row:
+            assert row.time == 1
+
+        async with tbl.update_or_insert("items4", 'name') as row:
+            assert row.time == 4
 
 
 async def test_query_number_index(filled_item_table):
