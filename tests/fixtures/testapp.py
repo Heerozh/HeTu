@@ -10,9 +10,9 @@ def mod_test_app():
 
     import app
 
-    _ = app
     # 初始化SystemCluster
     hetu.system.SystemClusters().build_clusters("pytest")
+    return app
 
 
 @pytest.fixture(scope="module")

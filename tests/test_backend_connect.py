@@ -23,6 +23,8 @@ async def test_reconnect(auto_backend, mod_item_component):
         tbl = loc_item_table.attach(session)
         for i in range(25):
             row = mod_item_component.new_row()
+            row.time = i  # 防止unique冲突
+            row.name = f"Item_{i}" # 防止unique冲突
             await tbl.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()

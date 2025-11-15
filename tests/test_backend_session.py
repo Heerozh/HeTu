@@ -352,12 +352,44 @@ async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_tab
 
             row = mod_item_component.new_row()
             row.name = "Item1"
+            row.time = 1
             await tbl.insert(row)
 
             row = mod_item_component.new_row()
             row.name = "Item1"
+            row.time = 2
             await tbl.insert(row)
+
+    with pytest.raises(UniqueViolation, match="time"):
+        async with backend.transaction(1) as session:
+            tbl = item_table.attach(session)
 
             row = mod_item_component.new_row()
             row.name = "Item1"
+            row.time = 1
             await tbl.insert(row)
+
+            row = mod_item_component.new_row()
+            row.name = "Item2"
+            row.time = 2
+            await tbl.insert(row)
+
+            row = mod_item_component.new_row()
+            row.name = "Item3"
+            row.time = 2
+            await tbl.insert(row)
+
+
+async def test_unique_batch_upsert_in_same_session_bug(mod_item_component, item_table):
+    backend = item_table.backend
+
+    # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环
+    with pytest.raises(UniqueViolation, match="name"):
+        async with backend.transaction(1) as session:
+            tbl = item_table.attach(session)
+
+            async with tbl.upsert("Item1", 'name') as row:
+                row.time = 1
+
+            async with tbl.upsert("Item1", "name") as row:
+                row.time = 2

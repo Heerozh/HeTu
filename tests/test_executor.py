@@ -34,7 +34,7 @@ async def test_system_with_rls(mod_test_app, executor):
 
 
 @pytest.mark.timeout(10)
-async def test_unique_violate_bug(mod_test_app, executor):
+async def test_unique_violate_bug(mod_test_app, executor, caplog):
     # BUG: insert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
     # 只有where相关的Unique违反才能当成RaceCondition重试
 
@@ -48,6 +48,25 @@ async def test_unique_violate_bug(mod_test_app, executor):
     # unique违反 应该失败，而不是无限RaceCondition重试
     ok, _ = await executor.exec('create_row', 21, 99, "zz")
     assert not ok
+
+    assert "RaceCondition" not in caplog.text
+    assert "UniqueViolation" in caplog.text
+
+
+@pytest.mark.timeout(10)
+async def test_unique_violate_bug2(mod_test_app, executor, caplog):
+    # BUG: insert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
+    # 这里是连续upsert 2次时出现
+
+    # 登录用户1234
+    ok, _ = await executor.exec('login', 1234)
+    assert ok
+
+    ok, _ = await executor.exec('create_row_2_upsert', 99, "zz")
+    assert not ok
+
+    assert "RaceCondition" not in caplog.text
+    assert "UniqueViolation" in caplog.text
 
 
 async def test_slow_log(mod_test_app, executor, caplog):

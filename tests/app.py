@@ -85,6 +85,17 @@ async def create_row(ctx: Context, owner, v1, v2):
     async with ctx[IndexComp2].update_or_insert(owner, 'owner') as row2:
         row2.name = f"User_{v2}"
 
+# 测试bug用
+@define_system(
+    namespace="pytest",
+    components=(IndexComp2, ),
+)
+async def create_row_2_upsert(ctx, owner, v2):
+    async with ctx[IndexComp2].update_or_insert(owner, "owner") as row:
+        row.name = f"User_{v2}"
+    async with ctx[IndexComp2].update_or_insert(owner, "owner") as row:
+        row.name = f"User_{v2}"
+
 
 @define_system(
     namespace="pytest",
