@@ -20,64 +20,64 @@ async def test_call_no_permission(mod_test_app, mod_executor):
     assert not ok
 
 
-async def test_system_with_rls(mod_test_app, mod_executor):
+async def test_system_with_rls(mod_test_app, executor):
     # 测试登录
-    ok, _ = await mod_executor.exec('login', 1234)
+    ok, _ = await executor.exec('login', 1234)
     assert ok
 
     # 测试有权限call
-    ok, _ = await mod_executor.exec('add_rls_comp_value', 9)
+    ok, _ = await executor.exec('add_rls_comp_value', 9)
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await mod_executor.exec('test_rls_comp_value', 100 - 9)
+    ok, _ = await executor.exec('test_rls_comp_value', 100 - 9)
     assert ok
 
     # 故意传不正确的值
-    ok, _ = await mod_executor.exec('test_rls_comp_value', 100 - 10)
+    ok, _ = await executor.exec('test_rls_comp_value', 100 - 10)
     assert not ok
 
 
 @pytest.mark.timeout(10)
-async def test_unique_violate_bug(mod_test_app, mod_executor):
+async def test_unique_violate_bug(mod_test_app, executor):
     # BUG: insert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
     # 只有where相关的Unique违反才能当成RaceCondition重试
 
     # 登录用户1234
-    ok, _ = await mod_executor.exec('login', 1234)
+    ok, _ = await executor.exec('login', 1234)
     assert ok
 
-    ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
+    ok, _ = await executor.exec('create_row', 20, 99, "zz")
     assert ok
 
     # unique违反 应该失败，而不是无限RaceCondition重试
-    ok, _ = await mod_executor.exec('create_row', 6, 21, "d")
+    ok, _ = await executor.exec('create_row', 21, 99, "zz")
     assert not ok
 
 
-async def test_slow_log(mod_test_app, mod_executor, caplog):
+async def test_slow_log(mod_test_app, executor, caplog):
     # 测试慢日志输出
     import hetu.common.slowlog
     hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
 
     # 登录用户1234
-    ok, _ = await mod_executor.exec('login', 1234)
+    ok, _ = await executor.exec('login', 1234)
     assert ok
 
     # 添加3行数据
-    ok, _ = await mod_executor.exec('create_row', mod_executor.context.caller, 10, "b")
+    ok, _ = await executor.exec('create_row', executor.context.caller, 10, "b")
     assert ok
-    ok, _ = await mod_executor.exec('create_row', 3, 0, "a")  # b-d query不符合
+    ok, _ = await executor.exec('create_row', 3, 0, "a")  # b-d query不符合
     assert ok
-    ok, _ = await mod_executor.exec('create_row', 4, 19, "c")
+    ok, _ = await executor.exec('create_row', 4, 19, "c")
     assert ok
-    ok, _ = await mod_executor.exec('create_row', 5, 20, "d")
+    ok, _ = await executor.exec('create_row', 5, 20, "d")
     assert ok
-    ok, _ = await mod_executor.exec('create_row', 6, 21, "e") # 0-20和b-d query都不符合
+    ok, _ = await executor.exec('create_row', 6, 21, "e") # 0-20和b-d query都不符合
     assert ok
 
     with caplog.at_level(logging.INFO, logger='HeTu'):
-        ok, _ = await mod_executor.exec('composer_system')
+        ok, _ = await executor.exec('composer_system')
         assert ok
 
     # 检查日志输出

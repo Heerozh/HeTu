@@ -32,6 +32,15 @@ def mod_comp_mgr(mod_auto_backend):
 async def mod_executor(mod_comp_mgr):
     import hetu
 
-    executor = hetu.system.SystemExecutor("ssw", mod_comp_mgr)
+    executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
+    await executor.initialize("")
+    return executor
+
+
+@pytest.fixture(scope="function")
+async def executor(mod_comp_mgr):
+    import hetu
+
+    executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
     await executor.initialize("")
     return executor
