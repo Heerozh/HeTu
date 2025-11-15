@@ -34,7 +34,10 @@ async def mod_executor(mod_comp_mgr):
 
     executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
     await executor.initialize("")
-    return executor
+    yield executor
+
+    # 结束连接
+    await executor.terminate()
 
 
 @pytest.fixture(scope="function")
@@ -43,4 +46,7 @@ async def executor(mod_comp_mgr):
 
     executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
     await executor.initialize("")
-    return executor
+    yield executor
+
+    # 结束连接
+    await executor.terminate()
