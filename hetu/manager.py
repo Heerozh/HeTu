@@ -48,9 +48,15 @@ class ComponentTableManager:
             tbl.create_or_migrate(cluster_only=not comp.persist_)
 
     def flush_volatile(self):
+        """ 清空所有非持久化数据 """
         for comp, tbl in self._tables.items():
             if not comp.persist_:
                 tbl.flush()
+
+    def _flush_all(self, force=False):
+        """ 测试用，清空所有数据 """
+        for comp, tbl in self._tables.items():
+            tbl.flush(force)
 
     def get_table(self, component_cls: type[BaseComponent] | str) -> ComponentTable | None:
         if type(component_cls) is str:

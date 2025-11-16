@@ -15,8 +15,7 @@ def mod_test_app():
     return app
 
 
-@pytest.fixture(scope="module")
-def mod_comp_mgr(mod_auto_backend):
+def comp_mgr_factory(mod_auto_backend):
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     # 为每个test初始化comp_mgr，因为每个test的线程不同
@@ -25,12 +24,21 @@ def mod_comp_mgr(mod_auto_backend):
 
     import hetu
 
-    return hetu.ComponentTableManager("pytest", "server1", backends, comp_tbl_classes)
+    comp_mgr = hetu.ComponentTableManager(
+        "pytest", "server1", backends, comp_tbl_classes)
+    comp_mgr._flush_all(force=True)
+
+    return comp_mgr
+
+
+@pytest.fixture(scope="module")
+def mod_comp_mgr(mod_auto_backend):
+    return comp_mgr_factory(mod_auto_backend)
 
 
 @pytest.fixture(scope="function")
-def comp_mgr(mod_comp_mgr):
-    return mod_comp_mgr
+def comp_mgr(mod_auto_backend):
+    return comp_mgr_factory(mod_auto_backend)
 
 
 @pytest.fixture(scope="module")

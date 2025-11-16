@@ -132,7 +132,7 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
     ok, _ = await executor.exec('login', 1234)
     assert ok
     # 先添加一行
-    ok, _ = await executor.exec('create_row', 3, 0, "a")  # b-d query不符合
+    ok, _ = await executor.exec('create_row', 3, 0, "a")
     assert ok
 
     import asyncio
