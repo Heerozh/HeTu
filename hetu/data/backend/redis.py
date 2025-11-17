@@ -509,6 +509,13 @@ class RedisComponentTable(ComponentTable):
             else:
                 # zadd 会替换掉member相同的值，等于是set
                 io.zadd(idx_key, dict(zip(row_ids, values)))
+            # 检测是否有unique违反
+            if idx_name in self._component_cls.uniques_:
+                if len(values) != len(set(values)):
+                    raise RuntimeError(
+                        f"组件{self._name}的unique索引`{idx_name}`在重建时发现违反unique约束，"
+                        f"可能是迁移时缩短了值类型、或新增了Unique标记导致。")
+
         logger.info(f"  ✔️ [💾Redis][{self._name}组件] 索引重建完成, "
                     f"{len(rows)}行 * {len(self._component_cls.indexes_)}个索引。")
 

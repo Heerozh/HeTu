@@ -35,7 +35,7 @@ async def test_migration_unique_violation(filled_item_table):
         new_item_table.create_or_migrate()
 
 
-async def test_auto_migration(filled_item_table):
+async def test_auto_migration(filled_item_table, caplog):
     # 测试自动迁移
     backend = filled_item_table.backend
     table_cls = filled_item_table.__class__
@@ -64,6 +64,10 @@ async def test_auto_migration(filled_item_table):
     new_item_table = table_cls(renamed_new_item_cls, 'ItemTestTable', 2, backend)
 
     new_item_table.create_or_migrate()
+
+    assert "qty 在新的组件定义中不存在" in caplog.text
+    assert "多出属性 qty_new" in caplog.text
+    assert "25行 * 1个属性" in caplog.text
 
     # 检测跨cluster报错
     with pytest.raises(AssertionError, match="cluster"):
