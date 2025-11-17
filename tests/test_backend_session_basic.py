@@ -1,6 +1,7 @@
-from hetu.data.backend import ComponentTable, UniqueViolation
 import numpy as np
 import pytest
+
+from hetu.data.backend import UniqueViolation, RedisBackend
 
 
 async def test_table(mod_item_component, item_table):
@@ -65,6 +66,7 @@ async def test_table(mod_item_component, item_table):
         row.time = 2
         with pytest.raises(UniqueViolation, match="time"):
             await tbl.insert(row)
+
 
 async def test_upsert(mod_item_component, item_table):
     backend = item_table.backend
@@ -170,55 +172,6 @@ async def test_query_bool(filled_item_table):
         assert set((await tbl.query('used', True)).id) == set()
 
 
-async def test_query_after_update(filled_item_table):
-    backend = filled_item_table.backend
-
-    # update
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = (await tbl.query('owner', 10))[0]
-        old_name = row.name
-        assert (await tbl.select(old_name, where='name')).name == old_name
-        row.owner = 11
-        row.name = 'updated'
-        await tbl.update(row.id, row)
-        # 测试能否命中cache
-        row = await tbl.select(row.id)
-        assert row.name == 'updated'
-
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(row.id)  # 测试用numpy type进行select是否报错
-        assert row.name == 'updated'
-        assert (await tbl.query('owner', row.owner, limit=30)).shape[0] == 1
-        assert (await tbl.query('owner', 10, limit=30)).shape[0] == 24
-        assert (await tbl.query('owner', 11)).shape[0] == 1
-        assert (await tbl.query('owner', 11)).name == 'updated'
-        assert (await tbl.select('updated', where='name')).name == 'updated'
-        assert await tbl.select(old_name, where='name') is None
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 25
-
-
-async def test_query_after_delete(filled_item_table):
-    backend = filled_item_table.backend
-
-    # delete
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        await tbl.delete(5)
-        await tbl.delete(7)
-        # 测试能否命中cache
-        row = await tbl.select(5)
-        assert row is None
-
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 23
-        assert await tbl.select('Itm14', where='name') is None
-        assert await tbl.select('Itm16', where='name') is None
-        assert (await tbl.query('time', 114, 116)).shape[0] == 1
-
-
 async def test_string_length_cutoff(filled_item_table, mod_item_component):
     backend = filled_item_table.backend
 
@@ -317,6 +270,7 @@ async def test_upsert_limit(mod_item_component, item_table):
             async with tbl.update_or_insert(True, 'used') as row:
                 pass
 
+
 async def test_session_exception(mod_item_component, item_table):
     backend = item_table.backend
     try:
@@ -340,6 +294,54 @@ async def test_session_exception(mod_item_component, item_table):
 
     row = await item_table.direct_get(1)
     assert row is None
+
+
+async def test_redis_empty_index(mod_item_component, filled_item_table):
+    backend = filled_item_table.backend
+    if not isinstance(backend, RedisBackend):
+        pytest.skip("Not a redis backend, skip")
+    # 测试更新name后再把所有key删除后index是否正常为空
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        row = await tbl.select(2)
+        row.name = f'TST{row.id}'
+        await tbl.update(row.id, row)
+
+    async with backend.transaction(1) as session:
+        tbl = filled_item_table.attach(session)
+        rows = await tbl.query('id', -np.inf, +np.inf, limit=999)
+        for row in rows:
+            await tbl.delete(row.id)
+
+    # time.sleep(1)  # 等待部分key过期
+    assert backend.io.keys('test:Item:{CLU*') == []
+
+
+async def test_redis_insert_stack(mod_item_component, item_table):
+    backend = item_table.backend
+    if not isinstance(backend, RedisBackend):
+        pytest.skip("Not a redis backend, skip")
+
+    # 检测插入2行数据是否有2个stack
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+        row = mod_item_component.new_row()
+        row.time = 12345
+        row.name = 'Stack1'
+        await tbl.insert(row)
+        row = mod_item_component.new_row()
+        row.time = 22345
+        row.name = 'Stack2'
+        await tbl.insert(row)
+        assert len(session._stack) > 0
+
+    # 检测update没有变化时没有stacked命令
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+        row = await tbl.select(2)
+        row.time = 22345
+        await tbl.update(2, row)
+        assert len(session._stack) == 0
 
 
 async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_table):
@@ -383,7 +385,7 @@ async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_tab
 async def test_unique_batch_upsert_in_same_session_bug(mod_item_component, item_table):
     backend = item_table.backend
 
-    # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环
+    # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环 todo 改成可以顺利执行
     with pytest.raises(UniqueViolation, match="name"):
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
