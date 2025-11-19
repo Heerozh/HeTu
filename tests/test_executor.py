@@ -18,19 +18,19 @@ async def test_call_no_permission(mod_test_app, mod_executor):
 
 async def test_system_with_rls(mod_test_app, executor):
     # 测试登录
-    ok, _ = await executor.exec('login', 1234)
+    ok, _ = await executor.exec("login", 1234)
     assert ok
 
     # 测试有权限call
-    ok, _ = await executor.exec('add_rls_comp_value', 9)
+    ok, _ = await executor.exec("add_rls_comp_value", 9)
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec('test_rls_comp_value', 100 + 9)
+    ok, _ = await executor.exec("test_rls_comp_value", 100 + 9)
     assert ok
 
     # 故意传不正确的值
-    ok, _ = await executor.exec('test_rls_comp_value', 100 + 10)
+    ok, _ = await executor.exec("test_rls_comp_value", 100 + 10)
     assert not ok
 
 
@@ -40,14 +40,14 @@ async def test_unique_violate_bug(mod_test_app, executor, caplog):
     # 只有upsert的where参数相关的Unique违反才能当成RaceCondition重试
 
     # 登录用户1234
-    ok, _ = await executor.exec('login', 1234)
+    ok, _ = await executor.exec("login", 1234)
     assert ok
 
-    ok, _ = await executor.exec('create_row', 20, 99, "zz")
+    ok, _ = await executor.exec("create_row", 20, 99, "zz")
     assert ok
 
     # unique违反 应该失败，而不是无限RaceCondition重试
-    ok, _ = await executor.exec('create_row', 21, 99, "zz")
+    ok, _ = await executor.exec("create_row", 21, 99, "zz")
     assert not ok
 
     assert "RaceCondition" not in caplog.text
@@ -60,10 +60,10 @@ async def test_unique_violate_bug2(mod_test_app, executor, caplog):
     # 这里是连续upsert 2次时出现
 
     # 登录用户1234
-    ok, _ = await executor.exec('login', 1234)
+    ok, _ = await executor.exec("login", 1234)
     assert ok
 
-    ok, _ = await executor.exec('create_row_2_upsert', 99, "zz")
+    ok, _ = await executor.exec("create_row_2_upsert", 99, "zz")
     assert not ok
 
     assert "RaceCondition" not in caplog.text
@@ -73,26 +73,27 @@ async def test_unique_violate_bug2(mod_test_app, executor, caplog):
 async def test_slow_log(mod_test_app, executor, caplog):
     # 测试慢日志输出
     import hetu.common.slowlog
+
     hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
 
     # 登录用户1234
-    ok, _ = await executor.exec('login', 1234)
+    ok, _ = await executor.exec("login", 1234)
     assert ok
 
     # 添加3行数据
-    ok, _ = await executor.exec('create_row', executor.context.caller, 10, "b")
+    ok, _ = await executor.exec("create_row", executor.context.caller, 10, "b")
     assert ok
-    ok, _ = await executor.exec('create_row', 3, 0, "a")  # b-d query不符合
+    ok, _ = await executor.exec("create_row", 3, 0, "a")  # b-d query不符合
     assert ok
-    ok, _ = await executor.exec('create_row', 4, 19, "c")
+    ok, _ = await executor.exec("create_row", 4, 19, "c")
     assert ok
-    ok, _ = await executor.exec('create_row', 5, 20, "d")
+    ok, _ = await executor.exec("create_row", 5, 20, "d")
     assert ok
-    ok, _ = await executor.exec('create_row', 6, 21, "e")  # 0-20和b-d query都不符合
+    ok, _ = await executor.exec("create_row", 6, 21, "e")  # 0-20和b-d query都不符合
     assert ok
 
-    with caplog.at_level(logging.INFO, logger='HeTu'):
-        ok, _ = await executor.exec('composer_system')
+    with caplog.at_level(logging.INFO, logger="HeTu"):
+        ok, _ = await executor.exec("composer_system")
         assert ok
 
     # 检查日志输出
@@ -100,7 +101,7 @@ async def test_slow_log(mod_test_app, executor, caplog):
     assert "[User_b]" in caplog.text
     assert "[User_c]" in caplog.text
     assert "[User_d]" in caplog.text
-    assert '慢日志' in caplog.text
+    assert "慢日志" in caplog.text
     print(caplog.text)
 
 
@@ -110,10 +111,10 @@ async def test_select_race_condition(mod_test_app, comp_mgr, executor):
     await executor2.initialize("")
 
     import asyncio
+
     # 必须差距大才能保证某个task先select
     await asyncio.gather(
-        executor.exec('race_select', 0.4),
-        executor2.exec("race_select", 0.1)
+        executor.exec("race_select", 0.4), executor2.exec("race_select", 0.1)
     )
 
     assert executor.context.retry_count == 1
@@ -129,17 +130,17 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
     await executor2.initialize("")
 
     # 登录用户1234
-    ok, _ = await executor.exec('login', 1234)
+    ok, _ = await executor.exec("login", 1234)
     assert ok
     # 先添加一行
-    ok, _ = await executor.exec('create_row', 3, 0, "a")
+    ok, _ = await executor.exec("create_row", 3, 0, "a")
     assert ok
 
     import asyncio
+
     # 必须差距大才能保证某个task先query
     await asyncio.gather(
-        executor.exec('race_query', 0.4),
-        executor2.exec("race_query", 0.1)
+        executor.exec("race_query", 0.4), executor2.exec("race_query", 0.1)
     )
 
     assert executor.context.retry_count == 1
@@ -150,77 +151,78 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 
 
 async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
-    ok, _ = await executor.exec('login', 1001)
+    ok, _ = await executor.exec("login", 1001)
     assert ok
     # 使用copy的system，应该对应的储存空间也是copy的
-    ok, _ = await executor.exec('add_rls_comp_value_copy', 9)
+    ok, _ = await executor.exec("add_rls_comp_value_copy", 9)
     assert ok
-    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    ok, _ = await executor.exec("add_rls_comp_value", 1)
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec('test_rls_comp_value', 100 + 1)
+    ok, _ = await executor.exec("test_rls_comp_value", 100 + 1)
     assert ok
-    ok, _ = await executor.exec('test_rls_comp_value_copy', 100 + 9)
+    ok, _ = await executor.exec("test_rls_comp_value_copy", 100 + 9)
     assert ok
 
     # 直接通过Comp读取
     backend = comp_mgr.backends.get("default")
-    RLSComp = hetu.data.ComponentDefines().get_component('pytest', 'RLSComp')
-    RLSCompCopy = RLSComp.duplicate('pytest', 'copy1')
+    RLSComp = hetu.data.ComponentDefines().get_component("pytest", "RLSComp")
+    RLSCompCopy = RLSComp.duplicate("pytest", "copy1")
     copied_tbl = comp_mgr.get_table(RLSCompCopy)
     async with backend.transaction(copied_tbl.cluster_id) as session:
         tbl = copied_tbl.attach(session)
-        row = await tbl.select(1001, 'owner')
+        row = await tbl.select(1001, "owner")
         assert row.value == 100 + 9
 
 
 async def test_execute_system_call_lock(mod_test_app, executor):
-    ok, _ = await executor.exec('login', 1101)
+    ok, _ = await executor.exec("login", 1101)
     assert ok
-    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    ok, _ = await executor.exec("add_rls_comp_value", 1)
     assert ok
-    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    ok, _ = await executor.exec("add_rls_comp_value", 1)
     assert ok
 
     # 测试带uuid的call应该只执行1次
     from hetu.system import SystemCall
-    ok, _ = await executor.execute(SystemCall('add_rls_comp_value', (2,), 'uuid1'))
+
+    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "uuid1"))
     assert ok
-    ok, _ = await executor.execute(SystemCall('add_rls_comp_value', (3,), 'uuid1'))
+    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (3,), "uuid1"))
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec('test_rls_comp_value', 100 + 4)
+    ok, _ = await executor.exec("test_rls_comp_value", 100 + 4)
     assert ok
 
 
 async def test_connect_kick(monkeypatch, mod_test_app, comp_mgr):
 
     # 先登录2个连接
-    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1.initialize("")
-    await executor1.exec('login', 1)
+    await executor1.exec("login", 1)
 
-    executor2 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor2.initialize("")
-    await executor2.exec('login', 2)
+    await executor2.exec("login", 2)
 
-    ok, _ = await executor1.exec('add_rls_comp_value', 1)
+    ok, _ = await executor1.exec("add_rls_comp_value", 1)
     assert ok
-    ok, _ = await executor2.exec('add_rls_comp_value', 10)
+    ok, _ = await executor2.exec("add_rls_comp_value", 10)
     assert ok
 
     # 测试重复登录踢出已登录用户
-    executor1_replaced = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor1_replaced = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1_replaced.initialize("")
-    await executor1_replaced.exec('login', 1)
+    await executor1_replaced.exec("login", 1)
 
     # 测试运行第一个连接的system，然后看是否失败
-    ok, _ = await executor1.exec('test_rls_comp_value', 101)
+    ok, _ = await executor1.exec("test_rls_comp_value", 101)
     assert not ok
     # 这个的值应该是之前executor1的
-    ok, _ = await executor1_replaced.exec('test_rls_comp_value', 101)
+    ok, _ = await executor1_replaced.exec("test_rls_comp_value", 101)
     assert ok
 
     # 结束连接
@@ -234,66 +236,66 @@ async def test_connect_not_kick(monkeypatch, mod_test_app, comp_mgr):
     import hetu.system.connection as connection
 
     # 初始化第一个连接
-    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1.initialize("")
-    await executor1.exec('login', 1)
-    ok, _ = await executor1.exec('add_rls_comp_value', 2)
+    await executor1.exec("login", 1)
+    ok, _ = await executor1.exec("add_rls_comp_value", 2)
     assert ok
-    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    ok, _ = await executor1.exec("test_rls_comp_value", 102)
     assert ok
 
     # 不强制踢出是否生效
-    executor1_not_replace = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor1_not_replace = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1_not_replace.initialize("")
     # 默认为0, 要设为1防止下面依旧强制踢出。注意目前t是按连接方ctx的imeout值来判断的，此值
     connection.SYSTEM_CALL_IDLE_TIMEOUT = 1
-    ok, app_login_rsp = await executor1_not_replace.exec('login', 1, False)
-    assert app_login_rsp.message['id'] is None  # app中定义的返回值
-    ok, _ = await executor1.exec('test_rls_comp_value', 102)
+    ok, app_login_rsp = await executor1_not_replace.exec("login", 1, False)
+    assert app_login_rsp.message["id"] is None  # app中定义的返回值
+    ok, _ = await executor1.exec("test_rls_comp_value", 102)
     assert ok
 
     # 结束连接
     await executor1.terminate()
     await executor1_not_replace.terminate()
 
+
 async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     time_time = time.time
     import hetu.system.connection as connection
 
     # 初始化第一个连接
-    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1.initialize("")
-    await executor1.exec('login', 1)
-    ok, _ = await executor1.exec('add_rls_comp_value', 3)
+    await executor1.exec("login", 1)
+    ok, _ = await executor1.exec("add_rls_comp_value", 3)
     assert ok
-    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    ok, _ = await executor1.exec("test_rls_comp_value", 103)
     assert ok
 
     # 测试last active超时是否踢出用户
     # 不强制踢出，但是timeout应该生效
-    executor1_timeout_replaced = hetu.system.SystemExecutor(
-        'pytest', comp_mgr)
+    executor1_timeout_replaced = hetu.system.SystemExecutor("pytest", comp_mgr)
     monkeypatch.setattr(
-        time, "time",
-        lambda: time_time() + connection.SYSTEM_CALL_IDLE_TIMEOUT
+        time, "time", lambda: time_time() + connection.SYSTEM_CALL_IDLE_TIMEOUT
     )
     await executor1_timeout_replaced.initialize("")
-    ok, app_login_rsp = await executor1_timeout_replaced.exec('login', 1, False)
-    assert app_login_rsp.message['id'] == 1  # app中定义的返回值
+    ok, app_login_rsp = await executor1_timeout_replaced.exec("login", 1, False)
+    assert app_login_rsp.message["id"] == 1  # app中定义的返回值
 
     # 上一次kick的连接应该失效
-    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    ok, _ = await executor1.exec("test_rls_comp_value", 103)
     assert not ok
 
     # 新的应该有效
-    ok, _ = await executor1_timeout_replaced.exec('add_rls_comp_value', -2)
+    ok, _ = await executor1_timeout_replaced.exec("add_rls_comp_value", -2)
     assert ok
-    ok, _ = await executor1_timeout_replaced.exec('test_rls_comp_value', 101)
+    ok, _ = await executor1_timeout_replaced.exec("test_rls_comp_value", 101)
     assert ok
 
     # 结束连接
     await executor1.terminate()
     await executor1_timeout_replaced.terminate()
+
 
 #
 # async def test_future_call(monkeypatch, comp_mgr):
