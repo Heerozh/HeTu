@@ -149,8 +149,8 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
     # 结束连接
     await executor2.terminate()
 
-async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
 
+async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     ok, _ = await executor.exec('login', 1001)
     assert ok
     # 使用copy的system，应该对应的储存空间也是copy的
@@ -160,9 +160,9 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec('test_rls_comp_value', 100+1)
+    ok, _ = await executor.exec('test_rls_comp_value', 100 + 1)
     assert ok
-    ok, _ = await executor.exec('test_rls_comp_value_copy', 100+9)
+    ok, _ = await executor.exec('test_rls_comp_value_copy', 100 + 9)
     assert ok
 
     # 直接通过Comp读取
@@ -174,32 +174,28 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     async with backend.transaction(copied_tbl.cluster_id) as session:
         tbl = copied_tbl.attach(session)
         row = await tbl.select(1001, 'owner')
-        assert row.value == 100+9
+        assert row.value == 100 + 9
 
-#
-#
-# async def test_execute_system_call_lock(self):
-#     executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor.initialize("")
-#
-#     ok, _ = await executor.exec('login', 1101)
-#     assert ok
-#     ok, _ = await executor.exec('use_hp', 1)
-#     assert ok
-#     ok, _ = await executor.exec('use_hp', 1)
-#     assert ok
-#
-#     ok, _ = await executor.execute(SystemCall('use_hp', (2,), 'uuid1'))
-#     assert ok
-#     ok, _ = await executor.execute(SystemCall('use_hp', (3,), 'uuid1'))
-#     assert ok
-#
-#     # 去数据库读取内容看是否正确
-#     ok, _ = await executor.exec('test_hp', 100-4)
-#     assert ok
-#
-#     # 结束连接
-#     await executor.terminate()
+
+async def test_execute_system_call_lock(mod_test_app, executor):
+    ok, _ = await executor.exec('login', 1101)
+    assert ok
+    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    assert ok
+    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    assert ok
+
+    # 测试带uuid的call应该只执行1次
+    from hetu.system import SystemCall
+    ok, _ = await executor.execute(SystemCall('add_rls_comp_value', (2,), 'uuid1'))
+    assert ok
+    ok, _ = await executor.execute(SystemCall('add_rls_comp_value', (3,), 'uuid1'))
+    assert ok
+
+    # 去数据库读取内容看是否正确
+    ok, _ = await executor.exec('test_rls_comp_value', 100 + 4)
+    assert ok
+
 #
 #
 # @mock.patch('time.time', mock_time)
