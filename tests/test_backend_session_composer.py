@@ -1,6 +1,23 @@
 import numpy as np
 import pytest
 
+@pytest.mark.xfail(reason="todo: 等idmap")
+async def test_double_upsert(item_table):
+    backend = item_table.backend
+
+    # 测试2此upsert，应该最后次为准
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+
+        async with tbl.update_or_insert('itm1', 'name') as row:
+            row.time = 32345
+        async with tbl.update_or_insert('itm1', 'name') as row:
+            row.time = 32346
+
+    async with backend.transaction(1) as session:
+        tbl = item_table.attach(session)
+        async with tbl.update_or_insert('itm1', 'name') as row:
+            assert row.time == 32346
 
 async def test_query_after_update(filled_item_table):
     backend = filled_item_table.backend
