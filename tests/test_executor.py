@@ -25,11 +25,11 @@ async def test_system_with_rls(mod_test_app, executor):
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec('test_rls_comp_value', 100 - 9)
+    ok, _ = await executor.exec('test_rls_comp_value', 100 + 9)
     assert ok
 
     # 故意传不正确的值
-    ok, _ = await executor.exec('test_rls_comp_value', 100 - 10)
+    ok, _ = await executor.exec('test_rls_comp_value', 100 + 10)
     assert not ok
 
 
@@ -148,33 +148,34 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 
     # 结束连接
     await executor2.terminate()
-#
-# async def test_execute_system_copy(self):
-#     executor = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor.initialize("")
-#
-#     ok, _ = await executor.exec('login', 1001)
-#     assert ok
-#     ok, _ = await executor.exec('use_hp_copy', 9)
-#     assert ok
-#     ok, _ = await executor.exec('use_hp', 1)
-#     assert ok
-#
-#     # 去数据库读取内容看是否正确
-#     ok, _ = await executor.exec('test_hp', 100-1)
-#     assert ok
-#
-#     backend = self.backends['default']
-#     HP = hetu.data.ComponentDefines().get_component('ssw', 'HP')
-#     hp_copy = HP.duplicate('ssw', 'copy1')
-#     hp_tbl = self.comp_mgr.get_table(hp_copy)
-#     async with backend.transaction(hp_tbl.cluster_id) as trx:
-#         hp_trx = hp_tbl.attach(trx)
-#         row = await hp_trx.select(1001, 'owner')
-#         assert row.value == 100-9
-#
-#     # 结束连接
-#     await executor.terminate()
+
+async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
+
+    ok, _ = await executor.exec('login', 1001)
+    assert ok
+    # 使用copy的system，应该对应的储存空间也是copy的
+    ok, _ = await executor.exec('add_rls_comp_value_copy', 9)
+    assert ok
+    ok, _ = await executor.exec('add_rls_comp_value', 1)
+    assert ok
+
+    # 去数据库读取内容看是否正确
+    ok, _ = await executor.exec('test_rls_comp_value', 100+1)
+    assert ok
+    ok, _ = await executor.exec('test_rls_comp_value_copy', 100+9)
+    assert ok
+
+    # 直接通过Comp读取
+    import hetu
+    backend = comp_mgr.backends.get("default")
+    RLSComp = hetu.data.ComponentDefines().get_component('pytest', 'RLSComp')
+    RLSCompCopy = RLSComp.duplicate('pytest', 'copy1')
+    copied_tbl = comp_mgr.get_table(RLSCompCopy)
+    async with backend.transaction(copied_tbl.cluster_id) as session:
+        tbl = copied_tbl.attach(session)
+        row = await tbl.select(1001, 'owner')
+        assert row.value == 100+9
+
 #
 #
 # async def test_execute_system_call_lock(self):
@@ -267,8 +268,8 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 #
 #     # 测试未来调用创建是否正常
 #     ok, uuid = await executor1.exec('use_hp_future',1, False)
-#     async with backend.transaction(fc_tbl.cluster_id) as trx:
-#         fc_trx = fc_tbl.attach(trx)
+#     async with backend.transaction(fc_tbl.cluster_id) as session:
+#         fc_trx = fc_tbl.attach(session)
 #         expire_time = time() + 1.1
 #         rows = await fc_trx.query('scheduled', left=0, right=expire_time, limit=1)
 #         assert rows[0].uuid == uuid
@@ -320,8 +321,8 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 #     self.assertGreater(time() - start, 1)
 #     assert not have_task
 #     # 检测pop的task数据是否修改了
-#     async with backend.transaction(fc_tbl.cluster_id) as trx:
-#         fc_trx = fc_tbl.attach(trx)
+#     async with backend.transaction(fc_tbl.cluster_id) as session:
+#         fc_trx = fc_tbl.attach(session)
 #         row = await fc_trx.select(uuid, 'uuid')
 #         assert row.last_run == mock_time.return_value
 #         assert row.scheduled == mock_time.return_value + 10
@@ -333,8 +334,8 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 #     ok = await exec_future_call(call, executor1, fc_tbl)
 #     assert ok
 #     # 检测task是否删除
-#     async with backend.transaction(fc_tbl.cluster_id) as trx:
-#         fc_trx = fc_tbl.attach(trx)
+#     async with backend.transaction(fc_tbl.cluster_id) as session:
+#         fc_trx = fc_tbl.attach(session)
 #         row = await fc_trx.select(uuid, 'uuid')
 #         self.assertIs(row, None)
 #     # 测试hp

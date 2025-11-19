@@ -44,7 +44,7 @@ class RLSComp(BaseComponent):
 )
 async def add_rls_comp_value(ctx: Context, value):
     async with ctx[RLSComp].update_or_insert(ctx.caller, 'owner') as row:
-        row.value -= value
+        row.value += value
     return row.value
 
 
@@ -53,10 +53,29 @@ async def add_rls_comp_value(ctx: Context, value):
     components=(RLSComp,),
     permission=Permission.USER
 )
-async def test_rls_comp_value(ctx: Context, hp):
+async def test_rls_comp_value(ctx: Context, value):
     row = await ctx[RLSComp].select(ctx.caller, 'owner')
-    assert row.value == hp
+    print(row, value)
+    assert row.value == value
 
+
+# ---------------------------------
+
+
+@define_system(
+    namespace="pytest",
+    bases=('add_rls_comp_value:copy1', ),
+)
+async def add_rls_comp_value_copy(ctx: Context, value):
+    return await ctx['add_rls_comp_value:copy1'](ctx, value)
+
+
+@define_system(
+    namespace="pytest",
+    bases=('test_rls_comp_value:copy1', ),
+)
+async def test_rls_comp_value_copy(ctx: Context, value):
+    return await ctx['test_rls_comp_value:copy1'](ctx, value)
 
 # ============================
 

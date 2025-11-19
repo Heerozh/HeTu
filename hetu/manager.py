@@ -20,6 +20,10 @@ class ComponentTableManager:
     def namespace(self) -> str:
         return self._namespace
 
+    @property
+    def backends(self) -> dict[str, Backend]:
+        return self._backends
+
     def __init__(
             self,
             namespace: str,
@@ -30,6 +34,7 @@ class ComponentTableManager:
         self._tables = {}
         self._tables_by_name = {}
         self._namespace = namespace
+        self._backends = backends
 
         clusters = SystemClusters().get_clusters(namespace)
         for cluster in clusters:
