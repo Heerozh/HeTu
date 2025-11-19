@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import asyncio
 import logging
 import random
@@ -19,8 +20,8 @@ from ..data.backend import RaceCondition
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemDefine
 
-logger = logging.getLogger('HeTu.root')
-replay = logging.getLogger('HeTu.replay')
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
 SYSTEM_CLUSTERS = SystemClusters()
 SystemClusters = None
 SLOW_LOG = SlowLog()
@@ -30,7 +31,7 @@ SLOW_LOG = SlowLog()
 class SystemCall:
     system: str  # 目标system名
     args: tuple  # 目标system参数
-    uuid: str = ''  # 唯一id，如果设置了，则会储存一个标记用于确保不会重复调用
+    uuid: str = ""  # 唯一id，如果设置了，则会储存一个标记用于确保不会重复调用
 
 
 class SystemResult:
@@ -63,18 +64,17 @@ class SystemExecutor:
             address="NotSet",
             group=None,
             user_data={},
-
             timestamp=0,
             retry_count=0,
             transactions={},
-            inherited={}
+            inherited={},
         )
 
     async def initialize(self, address: str):
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        sys = SYSTEM_CLUSTERS.get_system('new_connection')
+        sys = SYSTEM_CLUSTERS.get_system("new_connection")
         ok, _ = await self.execute_(sys, address)
         if not ok:
             raise Exception("连接初始化失败，new_connection调用失败")
@@ -83,7 +83,7 @@ class SystemExecutor:
         if self.context.connection_id == 0:
             return
         # 释放connection
-        sys = SYSTEM_CLUSTERS.get_system('del_connection')
+        sys = SYSTEM_CLUSTERS.get_system("del_connection")
         await self.execute_(sys)
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
@@ -101,33 +101,41 @@ class SystemExecutor:
         match sys.permission:
             case Permission.USER:
                 if context.caller is None or context.caller == 0:
-                    err_msg = (f"⚠️ [📞Executor] [非法操作] {context} | "
-                               f"{call.system}无调用权限，检查是否非法调用：{call}")
+                    err_msg = (
+                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"{call.system}无调用权限，检查是否非法调用：{call}"
+                    )
                     replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
             case Permission.ADMIN:
                 if not context.is_admin():
-                    err_msg = (f"⚠️ [📞Executor] [非法操作] {context} | "
-                               f"{call.system}无调用权限，检查是否非法调用：{call}")
+                    err_msg = (
+                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"{call.system}无调用权限，检查是否非法调用：{call}"
+                    )
                     replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
 
         # 检测args数量是否对得上
         if len(call.args) < (sys.arg_count - sys.defaults_count - 3):
-            err_msg = (f"❌ [📞Executor] [非法操作] {context} | "
-                       f"{call.system}参数数量不对，检查客户端代码。"
-                       f"要求{sys.arg_count - sys.defaults_count}个参数, "
-                       f"传入了{len(call.args)}个。"
-                       f"调用内容：{call}")
+            err_msg = (
+                f"❌ [📞Executor] [非法操作] {context} | "
+                f"{call.system}参数数量不对，检查客户端代码。"
+                f"要求{sys.arg_count - sys.defaults_count}个参数, "
+                f"传入了{len(call.args)}个。"
+                f"调用内容：{call}"
+            )
             replay.info(err_msg)
             logger.warning(err_msg)
             return None
 
         return sys
 
-    async def execute_(self, sys: SystemDefine, *args, uuid='') -> tuple[bool, dict | None]:
+    async def execute_(
+        self, sys: SystemDefine, *args, uuid=""
+    ) -> tuple[bool, ResponseToClient | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，System返回值
@@ -151,7 +159,7 @@ class SystemExecutor:
 
         # 复制inherited函数
         for base_name in sys.full_bases:
-            base, _, suffix = base_name.partition(':')
+            base, _, suffix = base_name.partition(":")
             context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base).func
 
         # todo 实现non_transactions的引用
@@ -170,16 +178,19 @@ class SystemExecutor:
             # 执行system和事务
             try:
                 # 先检查uuid是否执行过了
-                if uuid and (await context[ExecutionLock].is_exist(uuid, 'uuid'))[0]:
+                if uuid and (await context[ExecutionLock].is_exist(uuid, "uuid"))[0]:
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
-                    logger.debug(f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过")
+                    logger.debug(
+                        f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                    )
                     return True, None
                 # 执行
                 rtn = await sys.func(context, *args)
                 # 标记uuid已执行
                 if uuid:
                     async with context[ExecutionLock].update_or_insert(
-                            uuid, 'uuid') as exe_row:
+                        uuid, "uuid"
+                    ) as exe_row:
                         exe_row.caller = context.caller
                         exe_row.called = time.time()
                         exe_row.name = sys_name
@@ -194,7 +205,9 @@ class SystemExecutor:
                 # delay增加会降低冲突率，但也会增加rtt波动。除1:-94%, 2:-91%, 5: -87%, 10: -85%
                 delay = random.random() / 5
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
-                logger.debug(f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试")
+                logger.debug(
+                    f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                )
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
@@ -210,10 +223,12 @@ class SystemExecutor:
                 elapsed = time.perf_counter() - start_time
                 SLOW_LOG.log(elapsed, sys_name, context.retry_count)
 
-        logger.debug(f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
+        logger.debug(
+            f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}"
+        )
         return False, None
 
-    async def execute(self, call: SystemCall) -> tuple[bool, dict | None]:
+    async def execute(self, call: SystemCall) -> tuple[bool, ResponseToClient | None]:
         """
         调用System，返回True表示调用成功，
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
@@ -246,7 +261,7 @@ class SystemExecutor:
                 tbl = comp_mgr.get_table(comp)
                 async with tbl.backend.transaction(sys.cluster_id) as session:
                     tbl_trx = tbl.attach(session)
-                    row = await tbl_trx.select(uuid, 'uuid')
+                    row = await tbl_trx.select(uuid, "uuid")
                     if row:
                         await tbl_trx.delete(row.id)
                 break

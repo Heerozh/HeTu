@@ -72,3 +72,7 @@ asyncio_mode = "auto" # or "strict"
 # 夹具和测试函数的asyncio loop在同一个文件中保持一致
 asyncio_default_fixture_loop_scope="module"
 asyncio_default_test_loop_scope="module"
+
+
+[tool.black]
+line-length = 88
