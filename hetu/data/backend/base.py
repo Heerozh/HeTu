@@ -145,11 +145,11 @@ class ComponentTable:
     """
 
     def __init__(
-            self,
-            component_cls: type[BaseComponent],
-            instance_name: str,
-            cluster_id: int,
-            backend: Backend,
+        self,
+        component_cls: type[BaseComponent],
+        instance_name: str,
+        cluster_id: int,
+        backend: Backend,
     ):
         self._component_cls = component_cls
         self._instance_name = instance_name
@@ -177,13 +177,13 @@ class ComponentTable:
         raise NotImplementedError
 
     async def direct_query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            row_format="struct",
+        self,
+        index_name: str,
+        left,
+        right=None,
+        limit=10,
+        desc=False,
+        row_format="struct",
     ) -> np.recarray | list[dict | int]:
         """
         不通过事务直接从servant数据库查询值，不影响Master性能，但没有数据一致性保证。
@@ -212,7 +212,7 @@ class ComponentTable:
         raise NotImplementedError
 
     async def direct_get(
-            self, row_id: int, row_format="struct"
+        self, row_id: int, row_format="struct"
     ) -> None | np.record | dict:
         """
         不通过事务，从servant数据库直接读取某行的值。
@@ -288,14 +288,15 @@ class ComponentTransaction:
 
     def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
         assert (
-                trx_conn.cluster_id == comp_tbl.cluster_id
+            trx_conn.cluster_id == comp_tbl.cluster_id
         ), "事务只能在对应的cluster_id中执行，不能跨cluster"
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
         # insert缓存数据，因为没有id，所以用list存储
-        self._insert_caches = np.rec.array(np.empty(
-            0, dtype=self._component_cls.dtypes))
+        self._insert_caches = np.rec.array(
+            np.empty(0, dtype=self._component_cls.dtypes)
+        )
         self._del_flags = set()  # 事务中的删除操作标记
         self._updt_flags = set()  # 事务中的更新操作标记
 
@@ -314,8 +315,7 @@ class ComponentTransaction:
         raise NotImplementedError
 
     async def _db_query(
-            self, index_name: str, left, right=None, limit=10, desc=False,
-            lock_index=True
+        self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
     ) -> list[int]:
         # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
         # 未查询到数据时返回[]
@@ -400,7 +400,7 @@ class ComponentTransaction:
             value
         ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert (
-                where in self._component_cls.indexes_
+            where in self._component_cls.indexes_
         ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
@@ -437,15 +437,15 @@ class ComponentTransaction:
         return row.copy()
 
     async def query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            lock_index=True,
-            index_only=False,
-            lock_rows=True,
+        self,
+        index_name: str,
+        left,
+        right=None,
+        limit=10,
+        desc=False,
+        lock_index=True,
+        index_only=False,
+        lock_rows=True,
     ) -> np.recarray | list[int]:
         """
         查询 索引`index_name` 在 `left` 和 `right` 之间的数据，限制 `limit` 条，是否降序 `desc`。
@@ -512,7 +512,7 @@ class ComponentTransaction:
             left
         ), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
         assert (
-                index_name in self._component_cls.indexes_
+            index_name in self._component_cls.indexes_
         ), f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
 
         left = int(left) if np.issubdtype(type(left), np.bool_) else left
@@ -560,7 +560,7 @@ class ComponentTransaction:
             value
         ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
         assert (
-                where in self._component_cls.indexes_
+            where in self._component_cls.indexes_
         ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
 
         if issubclass(type(value), np.generic):
@@ -599,11 +599,9 @@ class ComponentTransaction:
     def upsert(self, value, where: str = None) -> "UpdateOrInsert":
         return self.update_or_insert(value, where)
 
-
     def insert_cache_exists(self, value, where: str) -> bool:
         """检查是否已插入过该值"""
         return (self._insert_caches[where] == value).any()
-
 
     async def unique_value_exists(self, value, index_name: str) -> bool:
         """检查单个unique索引是否满足条件"""
@@ -611,7 +609,6 @@ class ComponentTransaction:
         if len(row_ids) > 0:
             return True
         return self.insert_cache_exists(value, index_name)
-
 
     async def _check_uniques(
         self, old_row: np.record | None, new_row: np.record, ignores=None
@@ -671,7 +668,7 @@ class ComponentTransaction:
 
     async def update_rows(self, rows: np.recarray) -> None:
         assert (
-                type(rows) is np.recarray and rows.shape[0] > 1
+            type(rows) is np.recarray and rows.shape[0] > 1
         ), "update_rows数据必须是多行数据"
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
@@ -750,7 +747,7 @@ class ComponentTransaction:
 
     async def delete_rows(self, row_ids: list[int] | np.ndarray) -> None:
         assert (
-                type(row_ids) is np.ndarray and row_ids.shape[0] > 1
+            type(row_ids) is np.ndarray and row_ids.shape[0] > 1
         ), "deletes数据必须是多行数据"
         for row_id in row_ids:
             await self.delete(row_id)
@@ -784,7 +781,8 @@ class UpdateOrInsert:
             #       目前redis insert是stack的，无法索引撤销
             raise UniqueViolation(
                 f"upsert: 事务中已经插入过该值 ({self.where}: {self.value})，"
-                f"违反unique约束")
+                f"违反unique约束"
+            )
 
         row = await self.comp_trx.select(self.value, self.where)
         if row is None:
@@ -807,6 +805,7 @@ class UpdateOrInsert:
 
 class MQClient:
     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
@@ -848,7 +847,7 @@ class MQClient:
 
 class BaseSubscription:
     async def get_updated(
-            self, channel
+        self, channel
     ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         raise NotImplementedError
 

@@ -25,7 +25,8 @@ def comp_mgr_factory(mod_auto_backend):
     import hetu
 
     comp_mgr = hetu.ComponentTableManager(
-        "pytest", "server1", backends, comp_tbl_classes)
+        "pytest", "server1", backends, comp_tbl_classes
+    )
     comp_mgr._flush_all(force=True)
 
     return comp_mgr
