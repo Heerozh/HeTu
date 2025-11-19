@@ -1,6 +1,7 @@
 import logging
-
+import time
 import pytest
+import hetu
 
 
 async def test_call_not_exist(mod_test_app, mod_executor):
@@ -105,7 +106,6 @@ async def test_slow_log(mod_test_app, executor, caplog):
 
 async def test_select_race_condition(mod_test_app, comp_mgr, executor):
     # 测试race
-    import hetu
     executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor2.initialize("")
 
@@ -125,7 +125,6 @@ async def test_select_race_condition(mod_test_app, comp_mgr, executor):
 
 async def test_query_race_condition(mod_test_app, comp_mgr, executor):
     # 测试race
-    import hetu
     executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor2.initialize("")
 
@@ -166,7 +165,6 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     assert ok
 
     # 直接通过Comp读取
-    import hetu
     backend = comp_mgr.backends.get("default")
     RLSComp = hetu.data.ComponentDefines().get_component('pytest', 'RLSComp')
     RLSCompCopy = RLSComp.duplicate('pytest', 'copy1')
@@ -196,71 +194,120 @@ async def test_execute_system_call_lock(mod_test_app, executor):
     ok, _ = await executor.exec('test_rls_comp_value', 100 + 4)
     assert ok
 
+
+async def test_connect_kick(monkeypatch, mod_test_app, comp_mgr):
+
+    # 先登录2个连接
+    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor1.initialize("")
+    await executor1.exec('login', 1)
+
+    executor2 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor2.initialize("")
+    await executor2.exec('login', 2)
+
+    ok, _ = await executor1.exec('add_rls_comp_value', 1)
+    assert ok
+    ok, _ = await executor2.exec('add_rls_comp_value', 10)
+    assert ok
+
+    # 测试重复登录踢出已登录用户
+    executor1_replaced = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor1_replaced.initialize("")
+    await executor1_replaced.exec('login', 1)
+
+    # 测试运行第一个连接的system，然后看是否失败
+    ok, _ = await executor1.exec('test_rls_comp_value', 101)
+    assert not ok
+    # 这个的值应该是之前executor1的
+    ok, _ = await executor1_replaced.exec('test_rls_comp_value', 101)
+    assert ok
+
+    # 结束连接
+    await executor1.terminate()
+    await executor2.terminate()
+    await executor1_replaced.terminate()
+
+
+async def test_connect_not_kick(monkeypatch, mod_test_app, comp_mgr):
+    time_time = time.time
+    import hetu.system.connection as connection
+
+    # 初始化第一个连接
+    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor1.initialize("")
+    await executor1.exec('login', 1)
+    ok, _ = await executor1.exec('add_rls_comp_value', 2)
+    assert ok
+    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    assert ok
+
+    # 不强制踢出是否生效
+    executor1_not_replace = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor1_not_replace.initialize("")
+    # 默认为0, 要设为1防止下面依旧强制踢出。注意目前t是按连接方ctx的imeout值来判断的，此值
+    connection.SYSTEM_CALL_IDLE_TIMEOUT = 1
+    ok, app_login_rsp = await executor1_not_replace.exec('login', 1, False)
+    assert app_login_rsp.message['id'] is None  # app中定义的返回值
+    ok, _ = await executor1.exec('test_rls_comp_value', 102)
+    assert ok
+
+    # 结束连接
+    await executor1.terminate()
+    await executor1_not_replace.terminate()
+
+async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
+    time_time = time.time
+    import hetu.system.connection as connection
+
+    # 初始化第一个连接
+    executor1 = hetu.system.SystemExecutor('pytest', comp_mgr)
+    await executor1.initialize("")
+    await executor1.exec('login', 1)
+    ok, _ = await executor1.exec('add_rls_comp_value', 3)
+    assert ok
+    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    assert ok
+
+    # 测试last active超时是否踢出用户
+    # 不强制踢出，但是timeout应该生效
+    executor1_timeout_replaced = hetu.system.SystemExecutor(
+        'pytest', comp_mgr)
+    monkeypatch.setattr(
+        time, "time",
+        lambda: time_time() + connection.SYSTEM_CALL_IDLE_TIMEOUT
+    )
+    await executor1_timeout_replaced.initialize("")
+    ok, app_login_rsp = await executor1_timeout_replaced.exec('login', 1, False)
+    assert app_login_rsp.message['id'] == 1  # app中定义的返回值
+
+    # 上一次kick的连接应该失效
+    ok, _ = await executor1.exec('test_rls_comp_value', 103)
+    assert not ok
+
+    # 新的应该有效
+    ok, _ = await executor1_timeout_replaced.exec('add_rls_comp_value', -2)
+    assert ok
+    ok, _ = await executor1_timeout_replaced.exec('test_rls_comp_value', 101)
+    assert ok
+
+    # 结束连接
+    await executor1.terminate()
+    await executor1_timeout_replaced.terminate()
+
 #
+# async def test_future_call(monkeypatch, comp_mgr):
+#     import hetu
+#     time_time = time.time
 #
-# @mock.patch('time.time', mock_time)
-# async def test_connect(self):
-#     # 先登录几个连接
-#     mock_time.return_value = time()
-#     executor1 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor1.initialize("")
-#     await executor1.exec('login', 1)
-#
-#     executor2 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor2.initialize("")
-#     await executor2.exec('login', 2)
-#
-#     ok, _ = await executor1.exec('use_hp', 1)
-#     assert ok
-#     ok, _ = await executor2.exec('use_hp', 1)
-#     assert ok
-#
-#     # 测试重复登录踢出已登录用户
-#     executor3 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor3.initialize("")
-#     await executor3.exec('login', 1)
-#
-#     # 测试运行第一个连接的system，然后看是否失败
-#     ok, _ = await executor1.exec('test_hp', 99)
-#     assert not ok
-#     ok, _ = await executor3.exec('test_hp', 99)
-#     assert ok
-#
-#     # 测试last active超时是否踢出用户
-#     # 先测试不强制踢出是否生效
-#     executor4 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     await executor4.initialize("")
-#     await executor4.exec('login', 1, False)
-#     ok, _ = await executor3.exec('test_hp', 99)
-#     assert ok
-#     # 然后是不强制踢出，但是timeout应该生效
-#     executor5 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-#     mock_time.return_value = time() + executor5.context.idle_timeout
-#     await executor5.initialize("")
-#     await executor5.exec('login', 1, False)
-#
-#     ok, _ = await executor3.exec('test_hp', 99)
-#     assert not ok
-#
-#     # 结束连接
-#     await executor1.terminate()
-#     await executor2.terminate()
-#     await executor3.terminate()
-#     await executor4.terminate()
-#     await executor5.terminate()
-#
-# @mock.patch('time.time', mock_time)
-# async def test_future_call(self):
-#     mock_time.return_value = time()
-#
-#     executor1 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
+#     executor1 = hetu.system.SystemExecutor('ssw', comp_mgr)
 #     await executor1.initialize("")
 #     await executor1.exec('login', 1020)
 #
-#     backend = self.backends['default']
+#     backend = comp_mgr.backends.get("default")
 #     from hetu.system.future import FutureCalls
 #     FutureCallsCopy1 = FutureCalls.duplicate('ssw', 'copy1')
-#     fc_tbl = self.comp_mgr.get_table(FutureCallsCopy1)
+#     fc_tbl = comp_mgr.get_table(FutureCallsCopy1)
 #
 #     # 测试未来调用创建是否正常
 #     ok, uuid = await executor1.exec('use_hp_future',1, False)
@@ -276,20 +323,21 @@ async def test_execute_system_call_lock(mod_test_app, executor):
 #         expire_time = rows[0].scheduled
 #
 #     # 测试过期清理是否正常
+#     from hetu.system import SystemCall
 #     await executor1.execute(SystemCall('use_hp', (2, ), 'test_uuid'))
 #     from hetu.system.execution import ExecutionLock
 #     ExecutionLock_use_hp = ExecutionLock.duplicate('ssw','use_hp')
-#     lock_tbl = self.comp_mgr.get_table(ExecutionLock_use_hp)
+#     lock_tbl = comp_mgr.get_table(ExecutionLock_use_hp)
 #
 #     from hetu.system.future import clean_expired_call_locks
 #     # 未清理
-#     await clean_expired_call_locks(self.comp_mgr)
+#     await clean_expired_call_locks(comp_mgr)
 #     rows = await lock_tbl.direct_query('called', left=0, right=time(), limit=1, row_format='raw')
 #     assert len(rows) == 1
 #
 #     # 清理
 #     mock_time.return_value = time() + datetime.timedelta(days=8).total_seconds()
-#     await clean_expired_call_locks(self.comp_mgr)
+#     await clean_expired_call_locks(comp_mgr)
 #     rows =await lock_tbl.direct_query('called', left=0, right=0xFFFFFFFF, limit=1, row_format='raw')
 #     assert len(rows) == 0
 #
@@ -339,4 +387,3 @@ async def test_execute_system_call_lock(mod_test_app, executor):
 #     assert ok
 #
 #     await executor1.terminate()
-#
