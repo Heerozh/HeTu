@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 from typing import ItemsView
 
 from hetu.data.backend.base import Backend, ComponentTable
@@ -16,6 +17,7 @@ class ComponentTableManager:
     ComponentTable管理类，负责对每个ComponentTable的初始化和获取。
     此类只能在SystemCluster.build_clusters()后初始化
     """
+
     @property
     def namespace(self) -> str:
         return self._namespace
@@ -25,11 +27,11 @@ class ComponentTableManager:
         return self._backends
 
     def __init__(
-            self,
-            namespace: str,
-            instance_name: str,
-            backends: dict[str, Backend],
-            table_constructors: dict[str, type[ComponentTable]]
+        self,
+        namespace: str,
+        instance_name: str,
+        backends: dict[str, Backend],
+        table_constructors: dict[str, type[ComponentTable]],
     ):
         self._tables = {}
         self._tables_by_name = {}
@@ -53,17 +55,19 @@ class ComponentTableManager:
             tbl.create_or_migrate(cluster_only=not comp.persist_)
 
     def flush_volatile(self):
-        """ 清空所有非持久化数据 """
+        """清空所有非持久化数据"""
         for comp, tbl in self._tables.items():
             if not comp.persist_:
                 tbl.flush()
 
     def _flush_all(self, force=False):
-        """ 测试用，清空所有数据 """
+        """测试用，清空所有数据"""
         for comp, tbl in self._tables.items():
             tbl.flush(force)
 
-    def get_table(self, component_cls: type[BaseComponent] | str) -> ComponentTable | None:
+    def get_table(
+        self, component_cls: type[BaseComponent] | str
+    ) -> ComponentTable | None:
         if type(component_cls) is str:
             return self._tables_by_name.get(component_cls)
         else:
