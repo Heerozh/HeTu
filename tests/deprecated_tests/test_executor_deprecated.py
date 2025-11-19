@@ -192,7 +192,8 @@ class TestExecutor(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         # 然后是不强制踢出，但是timeout应该生效
         executor5 = hetu.system.SystemExecutor('ssw', self.comp_mgr)
-        mock_time.return_value = time() + executor5.context.idle_timeout
+        import hetu.system.connection as connection
+        mock_time.return_value = time() + connection.SYSTEM_CALL_IDLE_TIMEOUT
         await executor5.initialize("")
         await executor5.exec('login', 1, False)
 
