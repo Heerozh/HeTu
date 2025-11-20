@@ -11,19 +11,19 @@ async def test_table(mod_item_component, item_table):
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
         row = mod_item_component.new_row()
-        row.name = 'Item1'
+        row.name = "Item1"
         row.owner = 1
         row.time = 1
         await tbl.insert(row)
 
         row.id = 0
-        row.name = 'Item2'
+        row.name = "Item2"
         row.owner = 1
         row.time = 2
         await tbl.insert(row)
 
         row.id = 0
-        row.name = 'Item3'
+        row.name = "Item3"
         row.owner = 2
         row.time = 3
         await tbl.insert(row)
@@ -32,16 +32,16 @@ async def test_table(mod_item_component, item_table):
 
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
-        result = await tbl.query('id', -np.inf, +np.inf)
+        result = await tbl.query("id", -np.inf, +np.inf)
         np.testing.assert_array_equal(result.id, [1, 2, 3])
-        assert (await tbl.select(1)).name == 'Item1'
+        assert (await tbl.select(1)).name == "Item1"
         # 测试第一行dict select不出来的历史bug
-        assert (await tbl.select('Item1', 'name')).name == 'Item1'
-        assert type(await tbl.select('Item1', 'name')) is not np.recarray
+        assert (await tbl.select("Item1", "name")).name == "Item1"
+        assert type(await tbl.select("Item1", "name")) is not np.recarray
 
     np.testing.assert_array_equal(
-        (await item_table.direct_query('id', -np.inf, +np.inf)).id,
-        [1, 2, 3])
+        (await item_table.direct_query("id", -np.inf, +np.inf)).id, [1, 2, 3]
+    )
 
     # 测试update是否正确
     async with backend.transaction(1) as session:
@@ -53,16 +53,17 @@ async def test_table(mod_item_component, item_table):
 
     # 测试插入Unique重复数据
     from hetu.data.backend import UniqueViolation
+
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
         row.id = 0
-        row.name = 'Item2'
+        row.name = "Item2"
         row.owner = 2
         row.time = 999
         with pytest.raises(UniqueViolation, match="name"):
             await tbl.insert(row)
         row.id = 0
-        row.name = 'Item4'
+        row.name = "Item4"
         row.time = 2
         with pytest.raises(UniqueViolation, match="time"):
             await tbl.insert(row)
@@ -75,19 +76,19 @@ async def test_upsert(mod_item_component, item_table):
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
 
-        async with tbl.update_or_insert("item1", 'name') as row:
+        async with tbl.update_or_insert("item1", "name") as row:
             row.time = 1
 
-        async with tbl.update_or_insert("items4", 'name') as row:
+        async with tbl.update_or_insert("items4", "name") as row:
             row.time = 4
 
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
 
-        async with tbl.update_or_insert("item1", 'name') as row:
+        async with tbl.update_or_insert("item1", "name") as row:
             assert row.time == 1
 
-        async with tbl.update_or_insert("items4", 'name') as row:
+        async with tbl.update_or_insert("items4", "name") as row:
             assert row.time == 4
 
 
@@ -99,21 +100,24 @@ async def test_query_number_index(filled_item_table):
         tbl = filled_item_table.attach(session)
         # time范围为110-134，共25个，query是[l, r]，但range是[l, r)
         np.testing.assert_array_equal(
-            (await tbl.query('time', 110, 115)).time, range(110, 116))
+            (await tbl.query("time", 110, 115)).time, range(110, 116)
+        )
         np.testing.assert_array_equal(
-            (await tbl.query('time', 110, 115, desc=True)).time, range(115, 109, -1))
+            (await tbl.query("time", 110, 115, desc=True)).time, range(115, 109, -1)
+        )
         # query owner单项和limit
-        assert (await tbl.query('owner', 10)).shape[0] == 10
-        assert (await tbl.query('owner', 10, limit=30)).shape[0] == 25
-        assert (await tbl.query('owner', 10, limit=8)).shape[0] == 8
-        assert (await tbl.query('owner', 11)).shape[0] == 0
+        assert (await tbl.query("owner", 10)).shape[0] == 10
+        assert (await tbl.query("owner", 10, limit=30)).shape[0] == 25
+        assert (await tbl.query("owner", 10, limit=8)).shape[0] == 8
+        assert (await tbl.query("owner", 11)).shape[0] == 0
         # query id
-        np.testing.assert_array_equal((await tbl.query('id', 5, 7, limit=999)).id,
-                                      [5, 6, 7])
+        np.testing.assert_array_equal(
+            (await tbl.query("id", 5, 7, limit=999)).id, [5, 6, 7]
+        )
         # 测试query的方向反了
         # AssertionError: right必须大于等于left，你的:
         with pytest.raises(AssertionError, match="right.*left"):
-            await tbl.query('time', 115, 110)
+            await tbl.query("time", 115, 110)
 
 
 async def test_query_string_index(filled_item_table):
@@ -122,22 +126,19 @@ async def test_query_string_index(filled_item_table):
     # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        # 测试query的值类型和定义不符：
-        # AssertionError: 字符串类型索引`name`的查询(left=11, <class 'int'>)变量类型必须是str
-        with pytest.raises(AssertionError, match="name.*int.*str"):
-            assert (await tbl.query('name', 11)).shape[0] == 0
+        assert (await tbl.query("name", 11)).shape[0] == 0
         # query on str typed unique
-        assert (await tbl.query('name', '11')).shape[0] == 0
-        assert (await tbl.query('name', "Itm11")).shape[0] == 1
-        assert (await tbl.query('name', "Itm11")).time == 111
-        assert (await tbl.select('Itm11', where='name')).id == 2
-        assert (await tbl.select('Itm13', where='name')).id == 4
+        assert (await tbl.query("name", "11")).shape[0] == 0
+        assert (await tbl.query("name", "Itm11")).shape[0] == 1
+        assert (await tbl.query("name", "Itm11")).time == 111
+        assert (await tbl.select("Itm11", where="name")).id == 2
+        assert (await tbl.select("Itm13", where="name")).id == 4
         np.testing.assert_array_equal(
-            (await tbl.query('name', 'Itm11', 'Itm12')).time,
-            [111, 112])
+            (await tbl.query("name", "Itm11", "Itm12")).time, [111, 112]
+        )
         # reverse query one row
-        assert (await tbl.query('time', 111)).name == ['Itm11']
-        assert len((await tbl.query('time', 111)).name) == 1
+        assert (await tbl.query("time", 111)).name == ["Itm11"]
+        assert len((await tbl.query("time", 111)).name) == 1
 
 
 async def test_query_bool(filled_item_table):
@@ -154,12 +155,14 @@ async def test_query_bool(filled_item_table):
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        assert set((await tbl.query('used', True)).id) == {5, 7}
-        assert set((await tbl.query('used', False, limit=99)).id) == set(
-            range(1, 26)) - {5, 7}
-        assert set((await tbl.query('used', 0, 1, limit=99)).id) == set(range(1, 26))
-        assert set((await tbl.query('used', False, True, limit=99)).id) == set(
-            range(1, 26))
+        assert set((await tbl.query("used", True)).id) == {5, 7}
+        assert set((await tbl.query("used", False, limit=99)).id) == set(
+            range(1, 26)
+        ) - {5, 7}
+        assert set((await tbl.query("used", 0, 1, limit=99)).id) == set(range(1, 26))
+        assert set((await tbl.query("used", False, True, limit=99)).id) == set(
+            range(1, 26)
+        )
 
     # delete
     async with backend.transaction(1) as session:
@@ -169,7 +172,7 @@ async def test_query_bool(filled_item_table):
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        assert set((await tbl.query('used', True)).id) == set()
+        assert set((await tbl.query("used", True)).id) == set()
 
 
 async def test_string_length_cutoff(filled_item_table, mod_item_component):
@@ -184,10 +187,12 @@ async def test_string_length_cutoff(filled_item_table, mod_item_component):
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        assert (await tbl.select('reinsert', 'name') is not None,
-                "超出U8长度应该要被截断，这里没索引出来说明没截断")
-        assert (await tbl.select('reinsert', 'name')).id == 26
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 26
+        assert (
+            await tbl.select("reinsert", "name") is not None,
+            "超出U8长度应该要被截断，这里没索引出来说明没截断",
+        )
+        assert (await tbl.select("reinsert", "name")).id == 26
+        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
 
 
 async def test_batch_delete(filled_item_table):
@@ -200,20 +205,22 @@ async def test_batch_delete(filled_item_table):
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        np.testing.assert_array_equal((await tbl.query('id', 0, 100, limit=999)).id,
-                                      [1, 2, 3, 4, 25])
-        np.testing.assert_array_equal((await tbl.query('id', 3, 25, limit=999)).id,
-                                      [3, 4, 25])
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == 5
+        np.testing.assert_array_equal(
+            (await tbl.query("id", 0, 100, limit=999)).id, [1, 2, 3, 4, 25]
+        )
+        np.testing.assert_array_equal(
+            (await tbl.query("id", 3, 25, limit=999)).id, [3, 4, 25]
+        )
+        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 5
 
     # 测试is_exist是否正常
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        x = await tbl.is_exist(999, 'id')
+        x = await tbl.is_exist(999, "id")
         assert x[0] == False
-        x = await tbl.is_exist(5, 'id')
+        x = await tbl.is_exist(5, "id")
         assert x[0] == False
-        x = await tbl.is_exist(4, 'id')
+        x = await tbl.is_exist(4, "id")
         assert x[0] == True
 
 
@@ -222,13 +229,14 @@ async def test_unique_table(mod_auto_backend):
     backend = get_or_create_backend()
 
     from hetu.data import define_component, Property, BaseComponent
+
     @define_component(namespace="pytest")
     class UniqueTest(BaseComponent):
-        name: 'U8' = Property('', unique=True, index=True)
+        name: "U8" = Property("", unique=True, index=True)
         timestamp: float = Property(0, unique=False, index=True)
 
     # 测试连接数据库并创建表
-    unique_test_table = backend_component_table(UniqueTest, 'UniqueTest', 1, backend)
+    unique_test_table = backend_component_table(UniqueTest, "UniqueTest", 1, backend)
     unique_test_table.create_or_migrate()
 
     # 测试insert是否正确
@@ -242,22 +250,22 @@ async def test_unique_table(mod_auto_backend):
 
     async with backend.transaction(1) as session:
         tbl = unique_test_table.attach(session)
-        result = await tbl.query('id', 0, 2)
+        result = await tbl.query("id", 0, 2)
         assert type(result) is np.recarray
 
     # 测试可用update_or_insert
     async with backend.transaction(1) as session:
         tbl = unique_test_table.attach(session)
-        async with tbl.update_or_insert('test', 'name') as row:
-            assert row.name == 'test'
-        async with tbl.update_or_insert('', 'name') as row:
+        async with tbl.update_or_insert("test", "name") as row:
+            assert row.name == "test"
+        async with tbl.update_or_insert("", "name") as row:
             assert row.id == 1
         row_ids = await session.end_transaction(False)
     assert row_ids == [2]
 
     async with backend.transaction(1) as session:
         tbl = unique_test_table.attach(session)
-        result = await tbl.query('name', 'test')
+        result = await tbl.query("name", "test")
         assert result.id[0] == 2
 
 
@@ -267,7 +275,7 @@ async def test_upsert_limit(mod_item_component, item_table):
     with pytest.raises(ValueError, match="unique"):
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
-            async with tbl.update_or_insert(True, 'used') as row:
+            async with tbl.update_or_insert(True, "used") as row:
                 pass
 
 
@@ -304,17 +312,17 @@ async def test_redis_empty_index(mod_item_component, filled_item_table):
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
         row = await tbl.select(2)
-        row.name = f'TST{row.id}'
+        row.name = f"TST{row.id}"
         await tbl.update(row.id, row)
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        rows = await tbl.query('id', -np.inf, +np.inf, limit=999)
+        rows = await tbl.query("id", -np.inf, +np.inf, limit=999)
         for row in rows:
             await tbl.delete(row.id)
 
     # time.sleep(1)  # 等待部分key过期
-    assert backend.io.keys('test:Item:{CLU*') == []
+    assert backend.io.keys("test:Item:{CLU*") == []
 
 
 async def test_redis_insert_stack(mod_item_component, item_table):
@@ -327,11 +335,11 @@ async def test_redis_insert_stack(mod_item_component, item_table):
         tbl = item_table.attach(session)
         row = mod_item_component.new_row()
         row.time = 12345
-        row.name = 'Stack1'
+        row.name = "Stack1"
         await tbl.insert(row)
         row = mod_item_component.new_row()
         row.time = 22345
-        row.name = 'Stack2'
+        row.name = "Stack2"
         await tbl.insert(row)
         assert len(session._stack) > 0
 
@@ -390,7 +398,7 @@ async def test_unique_batch_upsert_in_same_session_bug(mod_item_component, item_
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
 
-            async with tbl.upsert("Item1", 'name') as row:
+            async with tbl.upsert("Item1", "name") as row:
                 row.time = 1
 
             async with tbl.upsert("Item1", "name") as row:

@@ -120,7 +120,7 @@ async def test_pop_upcoming_call(monkeypatch, mod_test_app, comp_mgr, executor):
         row = await fc_trx.select(uuid, "uuid")
         assert row is None
     # 测试hp
-    ok, _ = await executor.exec("test_rls_comp_value_copy", 100 + 4)
+    ok, _ = await executor.exec("test_rls_comp_value", 100 + 4)
     assert ok
 
 

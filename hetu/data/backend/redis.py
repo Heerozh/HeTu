@@ -655,9 +655,9 @@ class RedisComponentTable(ComponentTable):
         if str_type:
             left = str(left)
             right = str(right)
-            # 不应该用assert type is str，因为有很多str的变种，比如numpy.str_等
+            # 判断type效率太低了，特别是isinstance，取消掉
             # assert (
-            #     type(left) is str and type(right) is str
+            #     isinstance(left, (str, np.str_)) and isinstance(right, (str, np.str_))
             # ), f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
             if not left.startswith(("(", "[")):
                 left = f"[{left}"
