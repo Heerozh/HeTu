@@ -51,10 +51,13 @@ class SystemClusters(metaclass=Singleton):
         systems: set[str]
 
     def __init__(self):
+        # @define_system(namespace=xxx) 定义的所有System
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
+        # @define_system(namespace="global") 定义的所有System
         self._global_system_map = {}  # type: dict[str, SystemDefine]
+        # 方便快速访问主namespace的System定义
         self._main_system_map = {}
 
     def _clear(self):

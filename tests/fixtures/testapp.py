@@ -4,11 +4,13 @@ import pytest
 @pytest.fixture(scope="module")
 def mod_test_app():
     import hetu
+    import app
+    import importlib
 
     hetu.data.ComponentDefines().clear_()
-    hetu.system.SystemClusters()._clear()
+    hetu.system.SystemClusters()._clear(all_defines=True)
 
-    import app
+    importlib.reload(app)
 
     # 初始化SystemCluster
     hetu.system.SystemClusters().build_clusters("pytest")
