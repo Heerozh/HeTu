@@ -1,16 +1,22 @@
+import time
+import pytest
+
+
 async def test_future_call_create(mod_test_app, comp_mgr, executor):
     time_time = time.time
+
+    # 创建一个未来调用
+    from hetu.system.future import FutureCalls
 
     await executor.exec("login", 1020)
     backend = comp_mgr.backends.get("default")
 
-    from hetu.system.future import FutureCalls
-
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
     fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
 
-    # 测试未来调用创建是否正常
     ok, uuid = await executor.exec("add_rls_comp_value_future", 4, False)
+
+    # 测试未来调用数据是否正确
     async with backend.transaction(fc_tbl.cluster_id) as session:
         fc_uow = fc_tbl.attach(session)
         expire_time = time_time() + 1.1
@@ -22,48 +28,10 @@ async def test_future_call_create(mod_test_app, comp_mgr, executor):
         assert rows[0].owner == 1020
 
 
-async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, executor):
-    time_time = time.time
-
-    # 测试lock数据过期清理是否正常
-    from hetu.system import SystemCall
-
-    await executor.exec("login", 1020)
-    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
-    assert ok
-    from hetu.system.execution import ExecutionLock
-
-    # call lock每次会按system名复制一份ExecutionLock表
-    ExecutionLock_for_system = ExecutionLock.duplicate("pytest", "add_rls_comp_value")
-    lock_tbl = comp_mgr.get_table(ExecutionLock_for_system)
-    assert lock_tbl
-
-    from hetu.system.future import clean_expired_call_locks
-
-    # 未清理
-    await clean_expired_call_locks(comp_mgr)
-    rows = await lock_tbl.direct_query(
-        "called", left=0, right=time_time(), limit=1, row_format="raw"
-    )
-    assert len(rows) == 1
-
-    # 清理
-    import datetime
-
-    monkeypatch.setattr(
-        time, "time", lambda: time_time() + datetime.timedelta(days=8).total_seconds()
-    )
-    await clean_expired_call_locks(comp_mgr)
-    rows = await lock_tbl.direct_query(
-        "called", left=0, right=0xFFFFFFFF, limit=1, row_format="raw"
-    )
-    assert len(rows) == 0
-
-
 async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor):
-    # 测试sleep_for_upcoming(等待下一个到期任务)是否正常
     time_time = time.time
-    from hetu.system.future import sleep_for_upcoming
+
+    # 创建一个未来调用
     from hetu.system.future import FutureCalls
 
     await executor.exec("login", 1020)
@@ -72,13 +40,17 @@ async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor)
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
     fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
 
-    # 未来调用创建
     ok, uuid = await executor.exec("add_rls_comp_value_future", 4, False)
+
+    # 获取任务到期时间
     async with backend.transaction(fc_tbl.cluster_id) as session:
         fc_uow = fc_tbl.attach(session)
         expire_time = time_time() + 1.1
         rows = await fc_uow.query("scheduled", left=0, right=expire_time, limit=1)
         expire_time = rows[0].scheduled
+
+    # 测试sleep_for_upcoming(等待下一个到期任务)是否正常
+    from hetu.system.future import sleep_for_upcoming
 
     have_task = await sleep_for_upcoming(fc_tbl)
     # 检测当前时间是否~>任务到期时间
@@ -94,6 +66,15 @@ async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor)
 
 
 async def test_pop_upcoming_call(monkeypatch, mod_test_app, comp_mgr, executor):
+    # 创建一个未来调用
+    from hetu.system.future import FutureCalls
+
+    await executor.exec("login", 1020)
+    backend = comp_mgr.backends.get("default")
+
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
+
     # 测试pop_upcoming_call是否正常
     from hetu.system.future import pop_upcoming_call
 

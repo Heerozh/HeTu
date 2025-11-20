@@ -295,3 +295,41 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     # 结束连接
     await executor1.terminate()
     await executor1_timeout_replaced.terminate()
+
+
+async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, executor):
+    time_time = time.time
+
+    # 测试lock数据过期清理是否正常
+    from hetu.system import SystemCall
+
+    await executor.exec("login", 1020)
+    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
+    assert ok
+    from hetu.system.execution import ExecutionLock
+
+    # call lock每次会按system名复制一份ExecutionLock表
+    ExecutionLock_for_system = ExecutionLock.duplicate("pytest", "add_rls_comp_value")
+    lock_tbl = comp_mgr.get_table(ExecutionLock_for_system)
+    assert lock_tbl
+
+    from hetu.system.execution import clean_expired_call_locks
+
+    # 未清理
+    await clean_expired_call_locks(comp_mgr)
+    rows = await lock_tbl.direct_query(
+        "called", left=0, right=time_time(), limit=1, row_format="raw"
+    )
+    assert len(rows) == 1
+
+    # 清理
+    import datetime
+
+    monkeypatch.setattr(
+        time, "time", lambda: time_time() + datetime.timedelta(days=8).total_seconds()
+    )
+    await clean_expired_call_locks(comp_mgr)
+    rows = await lock_tbl.direct_query(
+        "called", left=0, right=0xFFFFFFFF, limit=1, row_format="raw"
+    )
+    assert len(rows) == 0
