@@ -8,7 +8,7 @@ def mod_test_app():
     import importlib
 
     hetu.data.ComponentDefines().clear_()
-    hetu.system.SystemClusters()._clear(all_defines=True)
+    hetu.system.SystemClusters()._clear()
 
     importlib.reload(app)
 
