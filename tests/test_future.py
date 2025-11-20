@@ -28,7 +28,7 @@ async def test_future_call_create(mod_test_app, comp_mgr, executor):
         assert rows[0].owner == 1020
 
 
-async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor):
+async def test_sleep_for_upcoming(mod_test_app, comp_mgr, executor):
     time_time = time.time
 
     # 创建一个未来调用
@@ -64,8 +64,22 @@ async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor)
     assert time_time() - start < 0.1
     assert have_task
 
+    # 删除未来任务
+    from hetu.system.future import pop_upcoming_call
+
+    call = await pop_upcoming_call(fc_tbl)
+    assert call.uuid == uuid
+
+    # 再次调用sleep应该返回无任务False，并睡1秒
+    start = time_time()
+    have_task = await sleep_for_upcoming(fc_tbl)
+    assert time_time() - start > 1
+    assert not have_task
+
 
 async def test_pop_upcoming_call(monkeypatch, mod_test_app, comp_mgr, executor):
+    time_time = time.time
+
     # 创建一个未来调用
     from hetu.system.future import FutureCalls
 
@@ -75,40 +89,39 @@ async def test_pop_upcoming_call(monkeypatch, mod_test_app, comp_mgr, executor):
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
     fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
 
+    ok, uuid = await executor.exec("add_rls_comp_value_future", 4, False)
+
     # 测试pop_upcoming_call是否正常
     from hetu.system.future import pop_upcoming_call
 
+    # 让时间延迟，才能pop出来
+    last_time = time_time() + 1
+    monkeypatch.setattr(time, "time", lambda: last_time)
     call = await pop_upcoming_call(fc_tbl)
     assert call.uuid == uuid
-    # 再次调用sleep应该返回False，并睡1秒
-    start = time()
-    have_task = await sleep_for_upcoming(fc_tbl)
-    self.assertGreater(time() - start, 1)
-    assert not have_task
+
     # 检测pop的task数据是否修改了
     async with backend.transaction(fc_tbl.cluster_id) as session:
         fc_trx = fc_tbl.attach(session)
         row = await fc_trx.select(uuid, "uuid")
-        assert row.last_run == mock_time.return_value
-        assert row.scheduled == mock_time.return_value + 10
+        assert row.last_run == last_time
+        assert row.scheduled == last_time + 10
 
     # 测试exec_future_call调用是否正常
-    mock_time.return_value = time()
+    last_time = time_time() + 2
     from hetu.system.future import exec_future_call
 
     # 此时future_call用的是已login的executor，实际运行future_call不可能有login的executor
-    ok = await exec_future_call(call, executor1, fc_tbl)
+    ok = await exec_future_call(call, executor, fc_tbl)
     assert ok
     # 检测task是否删除
     async with backend.transaction(fc_tbl.cluster_id) as session:
         fc_trx = fc_tbl.attach(session)
         row = await fc_trx.select(uuid, "uuid")
-        self.assertIs(row, None)
+        assert row is None
     # 测试hp
-    ok, _ = await executor1.exec("test_hp", 100 - 3)
+    ok, _ = await executor.exec("test_rls_comp_value_copy", 100 + 4)
     assert ok
-
-    await executor1.terminate()
 
 
 def test_duplicate_bug(mod_auto_backend, new_clusters_env):
