@@ -24,6 +24,9 @@ def comp_mgr_factory(mod_auto_backend):
 
     import hetu
 
+    if hetu.system.SystemClusters().get_clusters("pytest") is None:
+        raise RuntimeError("需要至少含有一个test_app，比如添加mod_test_app夹具")
+
     comp_mgr = hetu.ComponentTableManager(
         "pytest", "server1", backends, comp_tbl_classes
     )

@@ -55,6 +55,16 @@ async def test_rls_comp_value(ctx: Context, value):
     assert row.value == value
 
 
+@define_system(
+    namespace="pytest",
+    permission=Permission.EVERYBODY,
+    bases=('create_future_call:copy1', ),
+)
+async def add_rls_comp_value_future(ctx: Context, value, recurring):
+    return await ctx['create_future_call:copy1'](
+        ctx, -1, 'add_rls_comp_value', value, timeout=10, recurring=recurring)
+
+
 # ---------------------------------
 
 

@@ -197,7 +197,7 @@ async def test_execute_system_call_lock(mod_test_app, executor):
     assert ok
 
 
-async def test_connect_kick(monkeypatch, mod_test_app, comp_mgr):
+async def test_connect_kick(mod_test_app, comp_mgr):
 
     # 先登录2个连接
     executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
@@ -231,7 +231,7 @@ async def test_connect_kick(monkeypatch, mod_test_app, comp_mgr):
     await executor1_replaced.terminate()
 
 
-async def test_connect_not_kick(monkeypatch, mod_test_app, comp_mgr):
+async def test_connect_not_kick(mod_test_app, comp_mgr):
     time_time = time.time
     import hetu.system.connection as connection
 
@@ -297,95 +297,116 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     await executor1_timeout_replaced.terminate()
 
 
-#
-# async def test_future_call(monkeypatch, comp_mgr):
-#     import hetu
-#     time_time = time.time
-#
-#     executor1 = hetu.system.SystemExecutor('ssw', comp_mgr)
-#     await executor1.initialize("")
-#     await executor1.exec('login', 1020)
-#
-#     backend = comp_mgr.backends.get("default")
-#     from hetu.system.future import FutureCalls
-#     FutureCallsCopy1 = FutureCalls.duplicate('ssw', 'copy1')
-#     fc_tbl = comp_mgr.get_table(FutureCallsCopy1)
-#
-#     # 测试未来调用创建是否正常
-#     ok, uuid = await executor1.exec('use_hp_future',1, False)
-#     async with backend.transaction(fc_tbl.cluster_id) as session:
-#         fc_trx = fc_tbl.attach(session)
-#         expire_time = time() + 1.1
-#         rows = await fc_trx.query('scheduled', left=0, right=expire_time, limit=1)
-#         assert rows[0].uuid == uuid
-#         assert rows[0].timeout == 10
-#         assert rows[0].system == 'use_hp'
-#         assert rows[0].recurring == False
-#         assert rows[0].owner == 1020
-#         expire_time = rows[0].scheduled
-#
-#     # 测试过期清理是否正常
-#     from hetu.system import SystemCall
-#     await executor1.execute(SystemCall('use_hp', (2, ), 'test_uuid'))
-#     from hetu.system.execution import ExecutionLock
-#     ExecutionLock_use_hp = ExecutionLock.duplicate('ssw','use_hp')
-#     lock_tbl = comp_mgr.get_table(ExecutionLock_use_hp)
-#
-#     from hetu.system.future import clean_expired_call_locks
-#     # 未清理
-#     await clean_expired_call_locks(comp_mgr)
-#     rows = await lock_tbl.direct_query('called', left=0, right=time(), limit=1, row_format='raw')
-#     assert len(rows) == 1
-#
-#     # 清理
-#     mock_time.return_value = time() + datetime.timedelta(days=8).total_seconds()
-#     await clean_expired_call_locks(comp_mgr)
-#     rows =await lock_tbl.direct_query('called', left=0, right=0xFFFFFFFF, limit=1, row_format='raw')
-#     assert len(rows) == 0
-#
-#     # 测试sleep_for_upcoming是否正常
-#     mock_time.return_value = time()
-#     from hetu.system.future import sleep_for_upcoming
-#     have_task = await sleep_for_upcoming(fc_tbl)
-#     # 检测当前时间是否~>=任务到期时间
-#     self.assertGreater(time(), expire_time)
-#     self.assertAlmostEqual(expire_time, time(), delta=0.1)
-#     assert have_task
-#     # 再调用应该只Sleep 0秒
-#     mock_time.return_value = time()
-#     start = time()
-#     have_task = await sleep_for_upcoming(fc_tbl)
-#     self.assertLess(time() - start, 0.1)
-#
-#     # 测试pop_upcoming_call是否正常
-#     from hetu.system.future import pop_upcoming_call
-#     call = await pop_upcoming_call(fc_tbl)
-#     assert call.uuid == uuid
-#     # 再次调用sleep应该返回False，并睡1秒
-#     start = time()
-#     have_task = await sleep_for_upcoming(fc_tbl)
-#     self.assertGreater(time() - start, 1)
-#     assert not have_task
-#     # 检测pop的task数据是否修改了
-#     async with backend.transaction(fc_tbl.cluster_id) as session:
-#         fc_trx = fc_tbl.attach(session)
-#         row = await fc_trx.select(uuid, 'uuid')
-#         assert row.last_run == mock_time.return_value
-#         assert row.scheduled == mock_time.return_value + 10
-#
-#     # 测试exec_future_call调用是否正常
-#     mock_time.return_value = time()
-#     from hetu.system.future import exec_future_call
-#     # 此时future_call用的是已login的executor，实际运行future_call不可能有login的executor
-#     ok = await exec_future_call(call, executor1, fc_tbl)
-#     assert ok
-#     # 检测task是否删除
-#     async with backend.transaction(fc_tbl.cluster_id) as session:
-#         fc_trx = fc_tbl.attach(session)
-#         row = await fc_trx.select(uuid, 'uuid')
-#         self.assertIs(row, None)
-#     # 测试hp
-#     ok, _ = await executor1.exec('test_hp', 100-3)
-#     assert ok
-#
-#     await executor1.terminate()
+async def test_future_call_create(mod_test_app, comp_mgr, executor):
+    time_time = time.time
+
+    await executor.exec("login", 1020)
+    backend = comp_mgr.backends.get("default")
+
+    from hetu.system.future import FutureCalls
+
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
+
+    # 测试未来调用创建是否正常
+    ok, uuid = await executor.exec("add_rls_comp_value_future", 4, False)
+    async with backend.transaction(fc_tbl.cluster_id) as session:
+        fc_uow = fc_tbl.attach(session)
+        expire_time = time_time() + 1.1
+        rows = await fc_uow.query("scheduled", left=0, right=expire_time, limit=1)
+        assert rows[0].uuid == uuid
+        assert rows[0].timeout == 10
+        assert rows[0].system == "add_rls_comp_value"
+        assert rows[0].recurring == False
+        assert rows[0].owner == 1020
+        expire_time = rows[0].scheduled
+
+
+async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, executor):
+    time_time = time.time
+
+    # 测试lock数据过期清理是否正常
+    from hetu.system import SystemCall
+
+    await executor.exec("login", 1020)
+    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
+    assert ok
+    from hetu.system.execution import ExecutionLock
+
+    # call lock每次会按system名复制一份ExecutionLock表
+    ExecutionLock_for_system = ExecutionLock.duplicate("pytest", "add_rls_comp_value")
+    lock_tbl = comp_mgr.get_table(ExecutionLock_for_system)
+    assert lock_tbl
+
+    from hetu.system.future import clean_expired_call_locks
+
+    # 未清理
+    await clean_expired_call_locks(comp_mgr)
+    rows = await lock_tbl.direct_query(
+        "called", left=0, right=time_time(), limit=1, row_format="raw"
+    )
+    assert len(rows) == 1
+
+    # 清理
+    import datetime
+
+    monkeypatch.setattr(
+        time, "time", lambda: time_time() + datetime.timedelta(days=8).total_seconds()
+    )
+    await clean_expired_call_locks(comp_mgr)
+    rows = await lock_tbl.direct_query(
+        "called", left=0, right=0xFFFFFFFF, limit=1, row_format="raw"
+    )
+    assert len(rows) == 0
+
+
+async def test_sleep_for_upcoming(monkeypatch, mod_test_app, comp_mgr, executor):
+    # 测试sleep_for_upcoming是否正常
+    mock_time.return_value = time()
+    from hetu.system.future import sleep_for_upcoming
+
+    have_task = await sleep_for_upcoming(fc_tbl)
+    # 检测当前时间是否~>=任务到期时间
+    self.assertGreater(time(), expire_time)
+    self.assertAlmostEqual(expire_time, time(), delta=0.1)
+    assert have_task
+    # 再调用应该只Sleep 0秒
+    mock_time.return_value = time()
+    start = time()
+    have_task = await sleep_for_upcoming(fc_tbl)
+    self.assertLess(time() - start, 0.1)
+
+    # 测试pop_upcoming_call是否正常
+    from hetu.system.future import pop_upcoming_call
+
+    call = await pop_upcoming_call(fc_tbl)
+    assert call.uuid == uuid
+    # 再次调用sleep应该返回False，并睡1秒
+    start = time()
+    have_task = await sleep_for_upcoming(fc_tbl)
+    self.assertGreater(time() - start, 1)
+    assert not have_task
+    # 检测pop的task数据是否修改了
+    async with backend.transaction(fc_tbl.cluster_id) as session:
+        fc_trx = fc_tbl.attach(session)
+        row = await fc_trx.select(uuid, "uuid")
+        assert row.last_run == mock_time.return_value
+        assert row.scheduled == mock_time.return_value + 10
+
+    # 测试exec_future_call调用是否正常
+    mock_time.return_value = time()
+    from hetu.system.future import exec_future_call
+
+    # 此时future_call用的是已login的executor，实际运行future_call不可能有login的executor
+    ok = await exec_future_call(call, executor1, fc_tbl)
+    assert ok
+    # 检测task是否删除
+    async with backend.transaction(fc_tbl.cluster_id) as session:
+        fc_trx = fc_tbl.attach(session)
+        row = await fc_trx.select(uuid, "uuid")
+        self.assertIs(row, None)
+    # 测试hp
+    ok, _ = await executor1.exec("test_hp", 100 - 3)
+    assert ok
+
+    await executor1.terminate()
