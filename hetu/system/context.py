@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 from dataclasses import dataclass
 from typing import Callable
 
@@ -31,7 +32,6 @@ class Context:
     # 如果没有写入需求，自然可以用一般函数通过direct_get来获取数据，不需要做成system
     # queued_calls: list[any]   # 延后调用的队列
     # 限制变量
-    idle_timeout: int = 0  # 闲置超时时间
     client_limits: list[list[int]] = ()  # 客户端消息发送限制（次数）
     server_limits: list[list[int]] = ()  # 服务端消息发送限制（次数）
     max_row_sub: int = 0  # 行订阅限制
@@ -40,8 +40,9 @@ class Context:
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
-    def __getitem__(self,
-                    item: type[BaseComponent] | str) -> ComponentTransaction | Callable:
+    def __getitem__(
+        self, item: type[BaseComponent] | str
+    ) -> ComponentTransaction | Callable:
         if type(item) is str:
             return self.inherited[item]
         else:
@@ -50,8 +51,11 @@ class Context:
     def is_admin(self):
         return True if self.group and self.group.startswith("admin") else False
 
-    def rls_check(self, component: type[BaseComponent],
-                  row: np.record | np.ndarray | np.recarray | dict) -> bool:
+    def rls_check(
+        self,
+        component: type[BaseComponent],
+        row: np.record | np.ndarray | np.recarray | dict,
+    ) -> bool:
         """检查当前用户对某个component的权限"""
         # 非rls权限通过所有rls检查。要求调用此方法前，首先要由tls(表级权限)检查通过
         if not component.is_rls():
@@ -63,14 +67,13 @@ class Context:
         b = getattr(self, ctx_attr, np.nan)
         a = type(b)(
             row.get(comp_attr, np.nan)
-            if type(row) is dict else getattr(row, 'owner', np.nan)
+            if type(row) is dict
+            else getattr(row, "owner", np.nan)
         )
         return bool(rls_func(a, b))
 
-    def configure(self, idle_timeout, client_limits, server_limits, max_row_sub,
-                  max_index_sub):
+    def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
         """配置连接选项"""
-        self.idle_timeout = idle_timeout
         self.client_limits = client_limits
         self.server_limits = server_limits
         self.max_row_sub = max_row_sub

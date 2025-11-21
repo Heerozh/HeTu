@@ -1,5 +1,7 @@
 import pytest
 
+from hetu.data.backend import ComponentTable
+
 
 @pytest.fixture(scope="module")
 async def mod_clear_all_component_define():
@@ -14,7 +16,7 @@ async def mod_item_component(mod_clear_all_component_define):
     import numpy as np
     global Item
 
-    @define_component(namespace="ssw", permission=Permission.OWNER)
+    @define_component(namespace="pytest", permission=Permission.OWNER)
     class Item(BaseComponent):
         owner: np.int64 = Property(0, unique=False, index=True)
         model: np.int32 = Property(0, unique=False, index=True)
@@ -28,14 +30,27 @@ async def mod_item_component(mod_clear_all_component_define):
 
 
 @pytest.fixture(scope="module")
-async def mod_item_table(mod_auto_backend, mod_item_component):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+async def mod_item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
-    test_table = comp_tbl_class(
-        mod_item_component, 'ItemTestTable', 1, backend)
+    test_table = backend_component_table(
+        mod_item_component, 'ModItemTestTable', 1, backend)
+    test_table.flush(force=True)
+    test_table.create_or_migrate()
     return test_table
 
+
+@pytest.fixture(scope="function")
+async def item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+    backend_component_table, get_or_create_backend = mod_auto_backend
+
+    backend = get_or_create_backend('main')
+    test_table = backend_component_table(
+        mod_item_component, 'ItemTestTable', 1, backend)
+    test_table.flush(force=True)
+    test_table.create_or_migrate()
+    return test_table
 
 
 @pytest.fixture(scope="module")
@@ -44,33 +59,35 @@ async def mod_rls_test_component(mod_clear_all_component_define):
     import numpy as np
     global RLSTest
 
-    @define_component(namespace="ssw", permission=Permission.RLS, rls_compare=("eq", "friend", "caller"))
+    @define_component(namespace="pytest", permission=Permission.RLS,
+                      rls_compare=("eq", "friend", "caller"))
     class RLSTest(BaseComponent):
         owner: np.int64 = Property(0, unique=False, index=True)
         friend: np.int8 = Property(1, unique=False, index=False)
 
     return RLSTest
 
+
 @pytest.fixture(scope="module")
-async def mod_rls_test_table(mod_auto_backend, mod_rls_test_component):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+async def mod_rls_test_table(mod_auto_backend,
+                             mod_rls_test_component) -> ComponentTable:
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend('main')
-    test_table = comp_tbl_class(
-        mod_rls_test_component, 'RLSTestTable', 1, backend)
+    test_table = backend_component_table(
+        mod_rls_test_component, 'ModRLSTestTable', 1, backend)
+    test_table.flush(force=True)
+    test_table.create_or_migrate()
     return test_table
 
 
 @pytest.fixture
-async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+async def filled_item_table(mod_item_component, item_table):
+    backend = item_table.backend
 
-    backend = get_or_create_backend('main')
-    mod_item_table.flush(force=True)
-    mod_item_table.create_or_migrate()
     # 初始化测试数据
     async with backend.transaction(1) as session:
-        tbl = mod_item_table.attach(session)
+        tbl = item_table.attach(session)
         for i in range(25):
             row = mod_item_component.new_row()
             row.id = 0
@@ -82,18 +99,12 @@ async def filled_item_table(mod_auto_backend, mod_item_component, mod_item_table
     # 等待replica同步
     await backend.wait_for_synced()
 
-    yield mod_item_table
-
-    mod_item_table.flush(force=True)
+    return item_table
 
 
 @pytest.fixture
-async def filled_rls_test_table(mod_auto_backend, mod_rls_test_component, mod_rls_test_table):
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
-
-    backend = get_or_create_backend('main')
-    mod_rls_test_table.flush(force=True)
-    mod_rls_test_table.create_or_migrate()
+async def filled_rls_test_table(mod_rls_test_component, mod_rls_test_table):
+    backend = mod_rls_test_table.backend
     # 初始化测试数据
     async with backend.transaction(1) as session:
         tbl = mod_rls_test_table.attach(session)

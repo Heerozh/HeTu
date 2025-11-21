@@ -1,0 +1,71 @@
+import pytest
+
+
+@pytest.fixture(scope="module")
+def mod_test_app():
+    import hetu
+    import app
+    import importlib
+
+    hetu.data.ComponentDefines().clear_()
+    hetu.system.SystemClusters()._clear()
+
+    importlib.reload(app)
+
+    # 初始化SystemCluster
+    hetu.system.SystemClusters().build_clusters("pytest")
+    return app
+
+
+def comp_mgr_factory(mod_auto_backend):
+    backend_component_table, get_or_create_backend = mod_auto_backend
+
+    # 为每个test初始化comp_mgr，因为每个test的线程不同
+    backends = {"default": get_or_create_backend()}
+    comp_tbl_classes = {"default": backend_component_table}
+
+    import hetu
+
+    if hetu.system.SystemClusters().get_clusters("pytest") is None:
+        raise RuntimeError("需要至少含有一个test_app，比如添加mod_test_app夹具")
+
+    comp_mgr = hetu.ComponentTableManager(
+        "pytest", "server1", backends, comp_tbl_classes
+    )
+    comp_mgr._flush_all(force=True)
+
+    return comp_mgr
+
+
+@pytest.fixture(scope="module")
+def mod_comp_mgr(mod_auto_backend):
+    return comp_mgr_factory(mod_auto_backend)
+
+
+@pytest.fixture(scope="function")
+def comp_mgr(mod_auto_backend):
+    return comp_mgr_factory(mod_auto_backend)
+
+
+@pytest.fixture(scope="module")
+async def mod_executor(mod_comp_mgr):
+    import hetu
+
+    executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
+    await executor.initialize("")
+    yield executor
+
+    # 结束连接
+    await executor.terminate()
+
+
+@pytest.fixture(scope="function")
+async def executor(comp_mgr):
+    import hetu
+
+    executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+    await executor.initialize("")
+    yield executor
+
+    # 结束连接
+    await executor.terminate()

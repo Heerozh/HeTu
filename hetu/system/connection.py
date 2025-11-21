@@ -4,39 +4,46 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import logging
 import time
+from typing import Any
 
 import numpy as np
 
 from .context import Context
 from ..data import BaseComponent, define_component, Property, Permission
 from ..manager import ComponentTableManager
-from ..system import define_system
 from ..safelogging.filter import ContextFilter
+from ..system import define_system
 
-logger = logging.getLogger('HeTu.root')
-replay = logging.getLogger('HeTu.replay')
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
 
 MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
+SYSTEM_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 
 
-@define_component(namespace='HeTu', persist=False, permission=Permission.ADMIN)
+@define_component(namespace="HeTu", persist=False, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     owner: np.int64 = Property(0, index=True)
-    address: str = Property('', dtype='<U32', index=True)  # 连接地址
-    device: str = Property('', dtype='<U32')  # 物理设备名
-    device_id: str = Property('', dtype='<U128')  # 设备id
-    admin: str = Property('', dtype='<U16')  # 是否是admin
+    address: str = Property("", dtype="<U32", index=True)  # 连接地址
+    device: str = Property("", dtype="<U32")  # 物理设备名
+    device_id: str = Property("", dtype="<U128")  # 设备id
+    admin: str = Property("", dtype="<U16")  # 是否是admin
     created: np.double = Property(0)  # 连接创建时间
     last_active: np.double = Property(0)  # 最后活跃时间
 
 
-@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
+@define_system(
+    namespace="global", permission=Permission.ADMIN, components=(Connection,)
+)
 async def new_connection(ctx: Context, address: str):
-    if MAX_ANONYMOUS_CONNECTION_BY_IP:
-        same_ips = await ctx[Connection].query('address', address, limit=1000,
-                                               lock_index=False, lock_rows=False)
+    # 服务器自己的（future call之类的localhost）连接不应该受IP限制
+    if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
+        same_ips = await ctx[Connection].query(
+            "address", address, limit=1000, lock_index=False, lock_rows=False
+        )
         same_ip_guests = same_ips[same_ips.owner == 0]
         if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
             msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
@@ -55,7 +62,9 @@ async def new_connection(ctx: Context, address: str):
     ContextFilter.set_log_context(str(ctx))
 
 
-@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
+@define_system(
+    namespace="global", permission=Permission.ADMIN, components=(Connection,)
+)
 async def del_connection(ctx: Context):
     try:
         await ctx[Connection].delete(ctx.connection_id)
@@ -63,7 +72,9 @@ async def del_connection(ctx: Context):
         pass
 
 
-@define_system(namespace='global', permission=Permission.ADMIN, components=(Connection,))
+@define_system(
+    namespace="global", permission=Permission.ADMIN, components=(Connection,)
+)
 async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     """
     提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
@@ -77,17 +88,17 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
 
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
-        return False, 'CURRENT_CONNECTION_ALREADY_ELEVATED'
+        return False, "CURRENT_CONNECTION_ALREADY_ELEVATED"
     # 如果此用户已经登录
-    logged_conn = await ctx[Connection].select(user_id, 'owner')
+    logged_conn = await ctx[Connection].select(user_id, "owner")
     if logged_conn is not None:
         now = time.time()
         # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
-        if kick_logged_in or now - logged_conn.last_active > ctx.idle_timeout:
+        if kick_logged_in or now - logged_conn.last_active > SYSTEM_CALL_IDLE_TIMEOUT:
             logged_conn.owner = 0  # 去掉该连接的owner，当该连接下次执行System时会被关闭
             await ctx[Connection].update(logged_conn.id, logged_conn)
         else:
-            return False, 'USER_ALREADY_LOGGED_IN'
+            return False, "USER_ALREADY_LOGGED_IN"
 
     # 在数据库中关联connection和user
     conn = await ctx[Connection].select(ctx.connection_id)
@@ -105,7 +116,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     ctx.max_index_sub *= 50
 
     ContextFilter.set_log_context(str(ctx))
-    return True, 'SUCCESS'
+    return True, "SUCCESS"
 
 
 class ConnectionAliveChecker:
@@ -117,7 +128,7 @@ class ConnectionAliveChecker:
         self.conn_tbl = comp_mgr.get_table(Connection)
         self.last_active_cache = 0
 
-    async def is_illegal(self, ctx: Context, ex_info: any):
+    async def is_illegal(self, ctx: Context, ex_info: Any):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         conn_tbl = self.conn_tbl
         caller, conn_id = ctx.caller, ctx.connection_id
@@ -133,9 +144,13 @@ class ConnectionAliveChecker:
 
         # idle时间内只往数据库写入5次last_active，防止批量操作时频繁更新
         now = time.time()
-        if now - self.last_active_cache > (ctx.idle_timeout / 5):
+        if now - self.last_active_cache > (SYSTEM_CALL_IDLE_TIMEOUT / 5):
             await conn_tbl.direct_set(ctx.connection_id, last_active=now)
             self.last_active_cache = now
+        return False
+
+
+# todo last_active超时的连接，要定时任务统一批量删除
 
 
 class ConnectionFloodChecker:
@@ -158,9 +173,11 @@ class ConnectionFloodChecker:
         sent_elapsed = now - self.sent_start_time
         for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
-                err_msg = (f"⚠️ [📞Executor] [非法操作] "
-                           f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
-                           f"可能是订阅攻击，将断开连接。调用：{info}")
+                err_msg = (
+                    f"⚠️ [📞Executor] [非法操作] "
+                    f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
+                    f"可能是订阅攻击，将断开连接。调用：{info}"
+                )
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
@@ -176,9 +193,11 @@ class ConnectionFloodChecker:
         received_elapsed = now - self.received_start_time
         for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
-                err_msg = (f"⚠️ [📞Executor] [非法操作] "
-                           f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
-                           f"可能是flood攻击，将断开连接。调用：{info}")
+                err_msg = (
+                    f"⚠️ [📞Executor] [非法操作] "
+                    f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
+                    f"可能是flood攻击，将断开连接。调用：{info}"
+                )
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True

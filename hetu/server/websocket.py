@@ -40,7 +40,6 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 传递默认配置参数到ctx
     default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
     ctx.configure(
-        idle_timeout=request.app.config.get('SYSTEM_CALL_IDLE_TIMEOUT', 60 * 2),
         client_limits=request.app.config.get('CLIENT_SEND_LIMITS', default_limits),
         server_limits=request.app.config.get('SERVER_SEND_LIMITS', default_limits),
         max_row_sub=request.app.config.get('MAX_ROW_SUBSCRIPTION', 1000),

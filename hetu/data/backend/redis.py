@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import asyncio
 import hashlib
 import itertools
@@ -16,14 +17,19 @@ import numpy as np
 import redis
 from redis.asyncio.client import Pipeline
 
-from .base import ComponentTransaction, ComponentTable, Backend, BackendTransaction, \
-    MQClient
+from .base import (
+    ComponentTransaction,
+    ComponentTable,
+    Backend,
+    BackendTransaction,
+    MQClient,
+)
 from .base import RaceCondition, HeadLockFailed
 from ..component import BaseComponent, Property
 from ...common.helper import batched
 from ...common.multimap import MultiMap
 
-logger = logging.getLogger('HeTu.root')
+logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
 
 
@@ -33,6 +39,7 @@ async def _pipeline_lua_mock(_):
 
 class RedisBackend(Backend):
     """储存到Redis后端的连接，服务器启动时由server.py根据Config初始化，并传入RedisComponentBackend。"""
+
     # key: 1：要写入的row keys， args： 要检查的keys的value，按顺序+END_CHECK+stacked的命令
     LUA_CHECK_AND_RUN_SCRIPT = """
     local redis = redis
@@ -91,28 +98,31 @@ class RedisBackend(Backend):
         if cls.lua_check_and_run is None:
             # 注册脚本到异步io
             cls.lua_check_and_run = self._aio.register_script(
-                cls.LUA_CHECK_AND_RUN_SCRIPT)
+                cls.LUA_CHECK_AND_RUN_SCRIPT
+            )
             # 上传脚本到服务器使用同步io
             self.io.script_load(cls.LUA_CHECK_AND_RUN_SCRIPT)
 
     @classmethod
     def _patch_redis_py_lib(cls):
         # 不要让pipeline每次执行lua脚本运行script exist命令，这个命令会占用Redis 20%CPU
-        if not hasattr(Pipeline, 'load_scripts_org'):
+        if not hasattr(Pipeline, "load_scripts_org"):
             Pipeline.load_scripts_org = Pipeline.load_scripts
             Pipeline.load_scripts = _pipeline_lua_mock
 
     def __init__(self, config: dict):
         super().__init__(config)
         # 同步io连接, 异步io连接, 只读io连接
-        self.master_url = config['master']
-        self.servant_urls = config.get('servants', [])
-        self.clustering = config.get('clustering', False)
+        self.master_url = config["master"]
+        self.servant_urls = config.get("servants", [])
+        self.clustering = config.get("clustering", False)
         if self.clustering:
-            self.io = redis.cluster.RedisCluster.from_url(self.master_url,
-                                                          decode_responses=True)
+            self.io = redis.cluster.RedisCluster.from_url(
+                self.master_url, decode_responses=True
+            )
             self._aio = redis.asyncio.cluster.RedisCluster.from_url(
-                self.master_url, decode_responses=True)
+                self.master_url, decode_responses=True
+            )
         else:
             self.io = redis.from_url(self.master_url, decode_responses=True)
             self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
@@ -122,7 +132,7 @@ class RedisBackend(Backend):
         except redis.exceptions.ConnectionError as e:
             raise ConnectionError(f"无法连接到Redis数据库：{self.master_url}") from e
 
-        self.dbi = self.io.connection_pool.connection_kwargs['db']
+        self.dbi = self.io.connection_pool.connection_kwargs["db"]
         # 加载lua脚本
         self.load_lua_scripts()
         self._patch_redis_py_lib()
@@ -135,8 +145,10 @@ class RedisBackend(Backend):
             except redis.exceptions.ConnectionError as e:
                 raise ConnectionError(f"无法连接到replicas：{servant_url}") from e
         # 连接只读数据库
-        self.replicas = [redis.asyncio.from_url(url, decode_responses=True)
-                         for url in self.servant_urls]
+        self.replicas = [
+            redis.asyncio.from_url(url, decode_responses=True)
+            for url in self.servant_urls
+        ]
         if not self.servant_urls:
             self.servant_urls.append(self.master_url)
             self.replicas.append(self._aio)
@@ -147,48 +159,59 @@ class RedisBackend(Backend):
             self.loop_id = None
 
     def configure(self):
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         # 检测redis版本
-        version = self.io.info('server')['redis_version']
-        assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
+        parse_version = lambda x: tuple(map(int, x.split(".")))
+        version = self.io.info("server")["redis_version"]
+        assert parse_version(version) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         for url in self.servant_urls:
-            version = redis.from_url(url).info('server')['redis_version']
-            assert tuple(map(int, version.split("."))) >= (7, 0), "Redis版本过低，至少需要7.0版本"
+            version = redis.from_url(url).info("server")["redis_version"]
+            assert parse_version(version) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         # 检查servants设置
-        target_keyspace = 'Kghz'
+        target_keyspace = "Kghz"
         for servant_url in self.servant_urls:
             r = redis.from_url(servant_url)
             try:
                 # 设置keyspace通知
-                db_keyspace = r.config_get('notify-keyspace-events')[
-                    'notify-keyspace-events']
-                db_keyspace = db_keyspace.replace('A', 'g$lshztxed')
+                db_keyspace = r.config_get("notify-keyspace-events")[
+                    "notify-keyspace-events"
+                ]
+                db_keyspace = db_keyspace.replace("A", "g$lshztxed")
                 db_keyspace_new = db_keyspace
                 for flag in list(target_keyspace):
                     if flag not in db_keyspace:
                         db_keyspace_new += flag
                 if db_keyspace_new != db_keyspace:
-                    r.config_set('notify-keyspace-events', db_keyspace_new)
+                    r.config_set("notify-keyspace-events", db_keyspace_new)
             except (redis.exceptions.NoPermissionError, redis.exceptions.ResponseError):
                 logger.warning(
                     f"⚠️ [💾Redis] 无权限调用数据库{servant_url}的config_set命令，数据订阅将"
-                    f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}")
+                    f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
+                )
             # 检查是否是replica模式
             if servant_url != self.master_url:
-                db_replica = r.config_get('replica-read-only')
-                if db_replica.get('replica-read-only') != 'yes':
-                    logger.warning("⚠️ [💾Redis] servant必须是Read Only Replica模式。"
-                                   f"{servant_url} 未设置replica-read-only=yes")
+                db_replica = r.config_get("replica-read-only")
+                if db_replica.get("replica-read-only") != "yes":
+                    logger.warning(
+                        "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
+                        f"{servant_url} 未设置replica-read-only=yes"
+                    )
                 # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
     async def is_synced(self) -> bool:
-        info = await self.aio.info('replication')
-        master_offset = info.get('master_repl_offset', 0)
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
+        info = await self.aio.info("replication")
+        master_offset = info.get("master_repl_offset", 0)
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
-            if key.startswith('slave') or key.startswith('replica'):
-                lag_of_offset = master_offset - int(value.get('offset', 0))
+            if key.startswith("slave") or key.startswith("replica"):
+                lag_of_offset = master_offset - int(value.get("offset", 0))
                 if lag_of_offset > 0:
                     return False
         return True
@@ -199,8 +222,9 @@ class RedisBackend(Backend):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert hash(asyncio.get_running_loop()) == self.loop_id, \
-            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert (
+            hash(asyncio.get_running_loop()) == self.loop_id
+        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 
         return self._aio
 
@@ -211,18 +235,27 @@ class RedisBackend(Backend):
             replica.connection_pool.reset()
 
     async def close(self):
-        if self.io.get('head_lock') == str(id(self)):
-            self.io.delete('head_lock')
+        if not self.io:
+            return
+
+        if self.io.get("head_lock") == str(id(self)):
+            self.io.delete("head_lock")
 
         self.io.close()
         await self._aio.aclose()
+        self.io, self._aio = None, None
+
         for replica in self.replicas:
             await replica.aclose()
+        self.replicas = []
 
     def requires_head_lock(self) -> bool:
-        self.io.set('head_lock', id(self), nx=True)
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
+
+        self.io.set("head_lock", id(self), nx=True)
         # 不在set中get，兼容一些redis变种
-        locked = self.io.get('head_lock')
+        locked = self.io.get("head_lock")
         if locked is None:
             locked = str(id(self))
         return locked == str(id(self))
@@ -231,17 +264,22 @@ class RedisBackend(Backend):
         """随机返回一个只读连接"""
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())
-        assert hash(asyncio.get_running_loop()) == self.loop_id, \
-            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert (
+            hash(asyncio.get_running_loop()) == self.loop_id
+        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 
         return random.choice(self.replicas)
 
-    def get_mq_client(self) -> 'RedisMQClient':
+    def get_mq_client(self) -> "RedisMQClient":
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
         return RedisMQClient(self.random_replica())
 
-    def transaction(self, cluster_id: int) -> 'RedisTransaction':
+    def transaction(self, cluster_id: int) -> "RedisTransaction":
         """进入db的事务模式，返回事务连接"""
+        if not self.io:
+            raise ConnectionError("连接已关闭，已调用过close")
         return RedisTransaction(self, cluster_id)
 
 
@@ -266,12 +304,12 @@ class RedisTransaction(BackendTransaction):
 
     def stack_unique_check(self, index_key: str, start, stop, byscore) -> None:
         """加入需要在end_transaction时进行unique检查的index和value"""
-        self._checks.extend([index_key, start, stop, 'BYSCORE' if byscore else 'BYLEX'])
+        self._checks.extend([index_key, start, stop, "BYSCORE" if byscore else "BYLEX"])
 
     def stack_cmd(self, *args):
-        if args[0] == 'AUTO_INCR':
+        if args[0] == "AUTO_INCR":
             self._request_auto_incr = True
-        self._stack.extend([len(args), ] + list(args))
+        self._stack.extend([len(args)] + list(args))
 
     async def end_transaction(self, discard) -> list[int] | None:
         if self._trx_pipe is None:
@@ -288,18 +326,20 @@ class RedisTransaction(BackendTransaction):
         if len(self._checks) > 0 or self._request_auto_incr:
             # 在提交前最后检查一遍unique，在lua中检查unique是为了不用锁定index
             # 生成事务stack，让lua来判断unique检查通过的情况下，才执行。减少冲突概率。
-            lua_run_keys = [f'NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY', ]
-            lua_run_argv = self._checks + ['END_CHECK'] + self._stack
+            lua_run_keys = [f"NOT_USE:{{CLU{self.cluster_id}}}:FAKE_KEY"]
+            lua_run_argv = self._checks + ["END_CHECK"] + self._stack
 
             pipe.multi()
-            await self._backend.lua_check_and_run(args=lua_run_argv, keys=lua_run_keys,
-                                                  client=pipe)
+            await self._backend.lua_check_and_run(
+                args=lua_run_argv, keys=lua_run_keys, client=pipe
+            )
 
             try:
                 result = await pipe.execute()
-                if result[-1] == 'FAIL':
+                if result[-1] == "FAIL":
                     raise RaceCondition(
-                        f"unique index在事务中变动，被其他事务添加了相同值")
+                        f"unique index在事务中变动，被其他事务添加了相同值"
+                    )
                 result = result[-1]
             except redis.WatchError:
                 raise RaceCondition(f"watched key被其他事务修改")
@@ -323,7 +363,7 @@ class RedisTransaction(BackendTransaction):
             cur = 0
             while cur < len(self._stack):
                 arg_len = int(self._stack[cur])
-                cmds = self._stack[cur + 1:cur + arg_len + 1]
+                cmds = self._stack[cur + 1 : cur + arg_len + 1]
                 cur = cur + arg_len + 1
                 await pipe.execute_command(*cmds)
 
@@ -354,23 +394,23 @@ class RedisComponentTable(ComponentTable):
     """
 
     def __init__(
-            self,
-            component_cls: type[BaseComponent],
-            instance_name: str,
-            cluster_id: int,
-            backend: RedisBackend
+        self,
+        component_cls: type[BaseComponent],
+        instance_name: str,
+        cluster_id: int,
+        backend: RedisBackend,
     ):
         super().__init__(component_cls, instance_name, cluster_id, backend)
         self._backend = backend  # 为了让代码提示知道类型是RedisBackend
         component_cls.hosted_ = self
         # redis key名
-        hash_tag = f'{{CLU{cluster_id}}}:'
+        hash_tag = f"{{CLU{cluster_id}}}:"
         self._name = component_cls.component_name_
-        self._root_prefix = f'{instance_name}:{self._name}:'
-        self._key_prefix = f'{self._root_prefix}{hash_tag}id:'
-        self._idx_prefix = f'{self._root_prefix}{hash_tag}index:'
-        self._init_lock_key = f'{self._root_prefix}init_lock'
-        self._meta_key = f'{self._root_prefix}meta'
+        self._root_prefix = f"{instance_name}:{self._name}:"
+        self._key_prefix = f"{self._root_prefix}{hash_tag}id:"
+        self._idx_prefix = f"{self._root_prefix}{hash_tag}index:"
+        self._init_lock_key = f"{self._root_prefix}init_lock"
+        self._meta_key = f"{self._root_prefix}meta"
         self._trx_pipe = None
 
     def create_or_migrate(self, cluster_only=False):
@@ -393,7 +433,8 @@ class RedisComponentTable(ComponentTable):
         logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
         if cluster_only:
             logger.info(
-                f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。")
+                f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。"
+            )
         with io.lock(self._init_lock_key, timeout=60 * 5):
             # 获取redis已存的组件信息
             meta = io.hgetall(self._meta_key)
@@ -401,14 +442,15 @@ class RedisComponentTable(ComponentTable):
                 self._create_emtpy()
             else:
                 version = hashlib.md5(
-                    self._component_cls.json_.encode("utf-8")).hexdigest()
+                    self._component_cls.json_.encode("utf-8")
+                ).hexdigest()
                 # 如果cluster_id改变，则迁移改key名
-                if int(meta['cluster_id']) != self._cluster_id:
-                    self._migration_cluster_id(old=int(meta['cluster_id']))
+                if int(meta["cluster_id"]) != self._cluster_id:
+                    self._migration_cluster_id(old=int(meta["cluster_id"]))
 
                 # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-                if meta['version'] != version and not cluster_only:
-                    self._migration_schema(old=meta['json'])
+                if meta["version"] != version and not cluster_only:
+                    self._migration_schema(old=meta["json"])
 
             # 重建索引数据
             if not cluster_only:
@@ -427,10 +469,11 @@ class RedisComponentTable(ComponentTable):
 
             io = self._backend.io
             logger.info(
-                f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中...")
+                f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
+            )
 
             with io.lock(self._init_lock_key, timeout=60 * 5):
-                del_keys = io.keys(self._root_prefix + '*')
+                del_keys = io.keys(self._root_prefix + "*")
                 del_keys.remove(self._init_lock_key)
                 for batch in batched(del_keys, 1000):
                     with io.pipeline() as pipe:
@@ -444,14 +487,16 @@ class RedisComponentTable(ComponentTable):
 
     def _create_emtpy(self):
         logger.info(
-            f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表...")
+            f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+        )
 
         # 只需要写入meta，其他的_rebuild_index会创建
         meta = {
-            'json': self._component_cls.json_,
-            'version': hashlib.md5(
-                self._component_cls.json_.encode("utf-8")).hexdigest(),
-            'cluster_id': self._cluster_id,
+            "json": self._component_cls.json_,
+            "version": hashlib.md5(
+                self._component_cls.json_.encode("utf-8")
+            ).hexdigest(),
+            "cluster_id": self._cluster_id,
         }
         self._backend.io.hset(self._meta_key, mapping=meta)
         logger.info(f"  ✔️ [💾Redis][{self._name}组件] 空表创建完成")
@@ -460,7 +505,7 @@ class RedisComponentTable(ComponentTable):
     def _rebuild_index(self):
         logger.info(f"  ➖ [💾Redis][{self._name}组件] 正在重建索引...")
         io = self._backend.io
-        rows = io.keys(self._key_prefix + '*')
+        rows = io.keys(self._key_prefix + "*")
         if len(rows) == 0:
             logger.info(f"  ✔️ [💾Redis][{self._name}组件] 无数据，无需重建索引。")
             return
@@ -473,7 +518,7 @@ class RedisComponentTable(ComponentTable):
             pipe = io.pipeline()
             row_ids = []
             for row in rows:
-                row_id = row.split(':')[-1]
+                row_id = row.split(":")[-1]
                 row_ids.append(row_id)
                 pipe.hget(row, idx_name)
             values = pipe.execute()
@@ -485,34 +530,49 @@ class RedisComponentTable(ComponentTable):
             # 建立redis索引
             if str_type:
                 # 字符串类型要特殊处理，score=0, member='name:1'形式
-                io.zadd(idx_key,
-                        {f'{value}:{rid}': 0 for rid, value in zip(row_ids, values)})
+                io.zadd(
+                    idx_key,
+                    {f"{value}:{rid}": 0 for rid, value in zip(row_ids, values)},
+                )
             else:
                 # zadd 会替换掉member相同的值，等于是set
                 io.zadd(idx_key, dict(zip(row_ids, values)))
-        logger.info(f"  ✔️ [💾Redis][{self._name}组件] 索引重建完成, "
-                    f"{len(rows)}行 * {len(self._component_cls.indexes_)}个索引。")
+            # 检测是否有unique违反
+            if idx_name in self._component_cls.uniques_:
+                if len(values) != len(set(values)):
+                    raise RuntimeError(
+                        f"组件{self._name}的unique索引`{idx_name}`在重建时发现违反unique约束，"
+                        f"可能是迁移时缩短了值类型、或新增了Unique标记导致。"
+                    )
+
+        logger.info(
+            f"  ✔️ [💾Redis][{self._name}组件] 索引重建完成, "
+            f"{len(rows)}行 * {len(self._component_cls.indexes_)}个索引。"
+        )
 
     def _migration_cluster_id(self, old):
-        logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
-                       f"cluster_id 由 {old} 变更为 {self._cluster_id}，"
-                       f"将尝试迁移cluster数据...")
+        logger.warning(
+            f"  ⚠️ [💾Redis][{self._name}组件] "
+            f"cluster_id 由 {old} 变更为 {self._cluster_id}，"
+            f"将尝试迁移cluster数据..."
+        )
         # 重命名key
-        old_hash_tag = f'{{CLU{old}}}:'
-        new_hash_tag = f'{{CLU{self._cluster_id}}}:'
-        old_prefix = f'{self._root_prefix}{old_hash_tag}'
+        old_hash_tag = f"{{CLU{old}}}:"
+        new_hash_tag = f"{{CLU{self._cluster_id}}}:"
+        old_prefix = f"{self._root_prefix}{old_hash_tag}"
         old_prefix_len = len(old_prefix)
-        new_prefix = f'{self._root_prefix}{new_hash_tag}'
+        new_prefix = f"{self._root_prefix}{new_hash_tag}"
 
         io = self._backend.io
-        old_keys = io.keys(old_prefix + '*')
+        old_keys = io.keys(old_prefix + "*")
         for old_key in old_keys:
             new_key = new_prefix + old_key[old_prefix_len:]
             io.rename(old_key, new_key)
         # 更新meta
-        io.hset(self._meta_key, 'cluster_id', self._cluster_id)
+        io.hset(self._meta_key, "cluster_id", self._cluster_id)
         logger.warning(
-            f"  ✔️ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。")
+            f"  ✔️ [💾Redis][{self._name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。"
+        )
 
     def _migration_schema(self, old):
         """如果数据库中的属性和定义不一致，尝试进行简单迁移，可以处理属性更名以外的情况。"""
@@ -531,30 +591,37 @@ class RedisComponentTable(ComponentTable):
             f"{dtypes_in_db}\n"
             f"代码定义的：\n"
             f"{new_dtypes}\n "
-            f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）：")
+            f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）："
+        )
 
         # todo 调用自定义版本迁移代码（define_migration）
 
         # 检查是否有属性被删除
         for prop_name in dtypes_in_db.fields:
             if prop_name not in new_dtypes.fields:
-                logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
-                               f"数据库中的属性 {prop_name} 在新的组件定义中不存在，如果改名了需要手动迁移，"
-                               f"默认丢弃该属性数据。")
+                logger.warning(
+                    f"  ⚠️ [💾Redis][{self._name}组件] "
+                    f"数据库中的属性 {prop_name} 在新的组件定义中不存在，如果改名了需要手动迁移，"
+                    f"默认丢弃该属性数据。"
+                )
 
         # 多出来的列再次报警告，然后忽略
         io = self._backend.io
-        rows = io.keys(self._key_prefix + '*')
+        rows = io.keys(self._key_prefix + "*")
         props = dict(self._component_cls.properties_)  # type: dict[str, Property]
         added = 0
         for prop_name in new_dtypes.fields:
             if prop_name not in dtypes_in_db.fields:
-                logger.warning(f"  ⚠️ [💾Redis][{self._name}组件] "
-                               f"新的代码定义中多出属性 {prop_name}，将使用默认值填充。")
+                logger.warning(
+                    f"  ⚠️ [💾Redis][{self._name}组件] "
+                    f"新的代码定义中多出属性 {prop_name}，将使用默认值填充。"
+                )
                 default = props[prop_name].default
                 if default is None:
-                    logger.error(f"  ⚠️ [💾Redis][{self._name}组件] "
-                                 f"迁移时尝试新增 {prop_name} 属性失败，该属性没有默认值，无法新增。")
+                    logger.error(
+                        f"  ⚠️ [💾Redis][{self._name}组件] "
+                        f"迁移时尝试新增 {prop_name} 属性失败，该属性没有默认值，无法新增。"
+                    )
                     raise ValueError("迁移失败")
                 pipe = io.pipeline()
                 for row in rows:
@@ -564,16 +631,17 @@ class RedisComponentTable(ComponentTable):
 
         # 更新meta
         version = hashlib.md5(self._component_cls.json_.encode("utf-8")).hexdigest()
-        io.hset(self._meta_key, 'version', version)
-        io.hset(self._meta_key, 'json', self._component_cls.json_)
+        io.hset(self._meta_key, "version", version)
+        io.hset(self._meta_key, "json", self._component_cls.json_)
 
         logger.warning(
             f"  ✔️ [💾Redis][{self._name}组件] 新属性增加完成，共处理{len(rows)}行 * "
-            f"{added}个属性。")
+            f"{added}个属性。"
+        )
 
     @staticmethod
     def make_query_cmd(
-            component_cls, index_name: str, left, right, limit, desc
+        component_cls, index_name: str, left, right, limit, desc
     ) -> dict[str, str] | list[int]:
         """生成数据库查询命令，在direct_query和_db_query中复用此类。"""
         if right is None:
@@ -585,47 +653,59 @@ class RedisComponentTable(ComponentTable):
         str_type = component_cls.indexes_[index_name]
         by_lex = False
         if str_type:
-            assert type(left) is str and type(right) is str, \
-                f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
-            if not left.startswith(('(', '[')):
-                left = f'[{left}'
-            if not right.startswith(('(', '[')):
-                right = f'[{right}'
+            left = str(left)
+            right = str(right)
+            # 判断type效率太低了，特别是isinstance，取消掉
+            # assert (
+            #     isinstance(left, (str, np.str_)) and isinstance(right, (str, np.str_))
+            # ), f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
+            if not left.startswith(("(", "[")):
+                left = f"[{left}"
+            if not right.startswith(("(", "[")):
+                right = f"[{right}"
 
-            if not left.endswith((':', ';')):
-                left = f'{left}:'  # name:id 形式，所以:作为结尾标识符
-            if not right.endswith((':', ';')):
-                right = f'{right};'  # ';' = 3B, ':' = 3A
+            if not left.endswith((":", ";")):
+                left = f"{left}:"  # name:id 形式，所以:作为结尾标识符
+            if not right.endswith((":", ";")):
+                right = f"{right};"  # ';' = 3B, ':' = 3A
 
             by_lex = True
 
-        return {'start': left, 'end': right, 'desc': desc, 'offset': 0,
-                'num': limit, 'bylex': by_lex, 'byscore': not by_lex}
+        return {
+            "start": left,
+            "end": right,
+            "desc": desc,
+            "offset": 0,
+            "num": limit,
+            "bylex": by_lex,
+            "byscore": not by_lex,
+        }
 
     async def direct_query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            row_format='struct',
+        self,
+        index_name: str,
+        left,
+        right=None,
+        limit=10,
+        desc=False,
+        row_format="struct",
     ) -> np.recarray | list[dict | int]:
         replica = self._backend.random_replica()
         idx_key = self._idx_prefix + index_name
 
-        cmds = self.make_query_cmd(self._component_cls, index_name, left, right, limit,
-                                   desc)
+        cmds = self.make_query_cmd(
+            self._component_cls, index_name, left, right, limit, desc
+        )
         row_ids = await replica.zrange(name=idx_key, **cmds)
         str_type = self._component_cls.indexes_[index_name]
         if str_type:
-            row_ids = [vk.split(':')[-1] for vk in row_ids]
+            row_ids = [vk.split(":")[-1] for vk in row_ids]
 
-        if row_format == 'id':
+        if row_format == "id":
             return list(map(int, row_ids))
 
-        typed = row_format == 'typed_dict' or row_format == 'struct'
-        dict_fmt = row_format == 'raw' or row_format == 'typed_dict'
+        typed = row_format == "typed_dict" or row_format == "struct"
+        dict_fmt = row_format == "raw" or row_format == "typed_dict"
 
         key_prefix = self._key_prefix
         rows = []
@@ -645,14 +725,15 @@ class RedisComponentTable(ComponentTable):
             else:
                 return np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))
 
-    async def direct_get(self, row_id: int,
-                         row_format='struct') -> None | np.record | dict:
+    async def direct_get(
+        self, row_id: int, row_format="struct"
+    ) -> None | np.record | dict:
         replica = self._backend.random_replica()
         key = self._key_prefix + str(row_id)
         row = await replica.hgetall(key)
         if row:
-            typed = row_format == 'typed_dict' or row_format == 'struct'
-            dict_fmt = row_format == 'raw' or row_format == 'typed_dict'
+            typed = row_format == "typed_dict" or row_format == "struct"
+            dict_fmt = row_format == "raw" or row_format == "typed_dict"
 
             if typed:
                 row = self._component_cls.dict_to_row(row)
@@ -672,7 +753,7 @@ class RedisComponentTable(ComponentTable):
         await aio.hset(key, mapping=kwargs)
 
     async def direct_set(self, row_id: int, **kwargs):
-        assert 'id' not in kwargs, "id不允许修改"
+        assert "id" not in kwargs, "id不允许修改"
 
         while True:
             try:
@@ -718,28 +799,29 @@ class RedisComponentTable(ComponentTable):
                 await asyncio.sleep(random.random() / 5)
                 continue
 
-    def attach(self, backend_trx: RedisTransaction) -> 'RedisComponentTransaction':
+    def attach(self, backend_trx: RedisTransaction) -> "RedisComponentTransaction":
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
         # assert backend_trx.cluster_id == self._cluster_id
         return RedisComponentTransaction(
-            self, backend_trx, self._key_prefix, self._idx_prefix)
+            self, backend_trx, self._key_prefix, self._idx_prefix
+        )
 
     def channel_name(self, index_name: str = None, row_id: int = None):
         dbi = self._backend.dbi
         if index_name:
-            return f'__keyspace@{dbi}__:{self._idx_prefix + index_name}'
+            return f"__keyspace@{dbi}__:{self._idx_prefix + index_name}"
         elif row_id is not None:
-            return f'__keyspace@{dbi}__:{self._key_prefix + str(row_id)}'
+            return f"__keyspace@{dbi}__:{self._key_prefix + str(row_id)}"
         raise ValueError("index_name和row_id必须有一个")
 
 
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
-            self,
-            comp_tbl: RedisComponentTable,
-            trx_conn: RedisTransaction,
-            key_prefix: str,
-            index_prefix: str
+        self,
+        comp_tbl: RedisComponentTable,
+        trx_conn: RedisTransaction,
+        key_prefix: str,
+        index_prefix: str,
     ):
         super().__init__(comp_tbl, trx_conn)
         self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisTransaction
@@ -762,19 +844,14 @@ class RedisComponentTransaction(ComponentTransaction):
             return None
 
     async def _db_query(
-            self,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            lock_index=True
+        self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
     ) -> list[int]:
         idx_key = self._idx_prefix + index_name
         pipe = self._trx_conn.pipe
 
         cmds = RedisComponentTable.make_query_cmd(
-            self._component_cls, index_name, left, right, limit, desc)
+            self._component_cls, index_name, left, right, limit, desc
+        )
 
         if lock_index:
             await pipe.watch(idx_key)
@@ -782,7 +859,7 @@ class RedisComponentTransaction(ComponentTransaction):
 
         str_type = self._component_cls.indexes_[index_name]
         if str_type:
-            row_ids = [vk.split(':')[-1] for vk in row_ids]
+            row_ids = [vk.split(":")[-1] for vk in row_ids]
 
         # 未查询到数据时返回[]
         return list(map(int, row_ids))
@@ -793,14 +870,14 @@ class RedisComponentTransaction(ComponentTransaction):
         idx_prefix = self._idx_prefix
 
         for idx in component_cls.uniques_:
-            if idx == 'id':  # insert不需要检查id, update也不需要因为基类里会确认id一样
+            if idx == "id":  # insert不需要检查id, update也不需要因为基类里会确认id一样
                 continue
             if old_row is None or old_row[idx] != new_row[idx]:
                 key = idx_prefix + idx
                 str_type = component_cls.indexes_[idx]
                 qv = new_row[idx].item()
                 if str_type:
-                    trx.stack_unique_check(key, f'[{qv}:', f'[{qv};', False)
+                    trx.stack_unique_check(key, f"[{qv}:", f"[{qv};", False)
                 else:
                     trx.stack_unique_check(key, qv, qv, True)
 
@@ -811,24 +888,24 @@ class RedisComponentTransaction(ComponentTransaction):
 
         self._trx_check_unique(None, row)
         # 开始自增id模式, 并用placeholder {rowid}替换id
-        trx.stack_cmd('AUTO_INCR', idx_prefix + 'id')
-        row_id = '{rowid}'
+        trx.stack_cmd("AUTO_INCR", idx_prefix + "id")
+        row_id = "{rowid}"
         row_key = self._key_prefix + str(row_id)
         # 设置row数据
         kvs = itertools.chain.from_iterable(zip(row.dtype.names, row.tolist()))
-        trx.stack_cmd('hset', row_key, *kvs)
+        trx.stack_cmd("hset", row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
             idx_key = idx_prefix + idx_name
             if str_type:
-                trx.stack_cmd('zadd', idx_key, 0, f'{row[idx_name]}:{row_id}')
-            elif idx_name == 'id':
-                trx.stack_cmd('zadd', idx_key, row_id, row_id)
+                trx.stack_cmd("zadd", idx_key, 0, f"{row[idx_name]}:{row_id}")
+            elif idx_name == "id":
+                trx.stack_cmd("zadd", idx_key, row_id, row_id)
             else:
-                trx.stack_cmd('zadd', idx_key, row[idx_name].item(), row_id)
+                trx.stack_cmd("zadd", idx_key, row[idx_name].item(), row_id)
         # 结束自增id模式
-        trx.stack_cmd('hset', row_key, 'id', row_id)
-        trx.stack_cmd('END_INCR')
+        trx.stack_cmd("hset", row_key, "id", row_id)
+        trx.stack_cmd("END_INCR")
 
     def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
         trx = self._trx_conn
@@ -846,20 +923,22 @@ class RedisComponentTransaction(ComponentTransaction):
         if len(kvs) == 0:
             return
         # 更新数据
-        trx.stack_cmd('hset', row_key, *kvs)
+        trx.stack_cmd("hset", row_key, *kvs)
         # 更新索引
         for idx_name, str_type in component_cls.indexes_.items():
             if old_row[idx_name] == new_row[idx_name]:
                 continue
             idx_key = idx_prefix + idx_name
             if str_type:
-                trx.stack_cmd('zadd', idx_key, 0, f'{new_row[idx_name]}:{row_id}')
-                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
-            elif idx_name == 'id':
+                trx.stack_cmd("zadd", idx_key, 0, f"{new_row[idx_name]}:{row_id}")
+                trx.stack_cmd("zrem", idx_key, f"{old_row[idx_name]}:{row_id}")
+            elif idx_name == "id":
                 # trx.stack_cmd('zadd', idx_key, row_id, row_id)
-                raise RuntimeError("id不允许修改")  # 其实上面代码是可以改的，但id是隐藏的，不应该提供此功能
+                raise RuntimeError(
+                    "id不允许修改"
+                )  # 其实上面代码是可以改的，但id是隐藏的，不应该提供此功能
             else:
-                trx.stack_cmd('zadd', idx_key, new_row[idx_name].item(), row_id)
+                trx.stack_cmd("zadd", idx_key, new_row[idx_name].item(), row_id)
 
     def _trx_delete(self, row_id: int, old_row: np.record) -> None:
         trx = self._trx_conn
@@ -867,14 +946,14 @@ class RedisComponentTransaction(ComponentTransaction):
         idx_prefix = self._idx_prefix
 
         row_key = self._key_prefix + str(row_id)
-        trx.stack_cmd('del', row_key)
+        trx.stack_cmd("del", row_key)
 
         for idx_name, str_type in component_cls.indexes_.items():
             idx_key = idx_prefix + idx_name
             if str_type:
-                trx.stack_cmd('zrem', idx_key, f'{old_row[idx_name]}:{row_id}')
+                trx.stack_cmd("zrem", idx_key, f"{old_row[idx_name]}:{row_id}")
             else:
-                trx.stack_cmd('zrem', idx_key, row_id)
+                trx.stack_cmd("zrem", idx_key, row_id)
 
 
 ##############################
@@ -902,7 +981,8 @@ class RedisMQClient(MQClient):
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
             logger.warning(
-                f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，")
+                f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，"
+            )
 
     async def unsubscribe(self, channel_name) -> None:
         await self._mq.unsubscribe(channel_name)
@@ -919,14 +999,16 @@ class RedisMQClient(MQClient):
         # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
         msg = await mq.get_message(ignore_subscribe_messages=True, timeout=None)
         if msg is not None:
-            channel_name = msg['channel']
+            channel_name = msg["channel"]
+            logger.debug(f"🔔 [💾Redis] 收到订阅更新通知: {channel_name}")
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
             if dropped:
                 self.pulled_set -= dropped
                 logger.warning(
                     f"⚠️ [💾Redis] 订阅更新通知来不及处理，"
-                    f"丢弃了2分钟前的消息共{len(dropped)}条")
+                    f"丢弃了2分钟前的消息共{len(dropped)}条"
+                )
 
             # 判断是否已在deque中了，去重用。self.get_message也会自动去重，
             # 但get_message一次只取部分(interval)消息，不能完全去重
@@ -947,6 +1029,7 @@ class RedisMQClient(MQClient):
             rtn = set(pulled_deque.pop(0, time.time() - interval))
             if rtn:
                 self.pulled_set -= rtn
+                # logger.debug(f"🔔 [💾Redis] 发送通知给客户端: {str(rtn)[0:100]}...")
                 return rtn
             await asyncio.sleep(interval)
 
