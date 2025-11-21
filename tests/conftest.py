@@ -13,8 +13,10 @@ def force_print_logging():
     """
     修复PyCharm测试控制台不显示错误日志的问题
     """
-    # 1. 获取根记录器
+    # 1. 获取根记录器 & replay 记录器
     root_logger = logging.getLogger()
+    replay_logger = logging.getLogger("HeTu.replay")
+    replay_logger.setLevel(logging.DEBUG)
 
     # 2. 创建一个流处理器，直接指向 stderr (PyCharm 控制台能捕获 stderr)
     stream_handler = logging.StreamHandler(sys.stderr)
@@ -30,8 +32,10 @@ def force_print_logging():
 
     # 5. 将处理器添加到 root logger
     root_logger.addHandler(stream_handler)
+    replay_logger.addHandler(stream_handler)
 
     yield
 
     # 6. 清理：测试结束后移除这个 handler，防止污染
     root_logger.removeHandler(stream_handler)
+    replay_logger.removeHandler(stream_handler)
