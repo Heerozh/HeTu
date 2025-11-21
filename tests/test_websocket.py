@@ -173,29 +173,38 @@ def test_websocket_kick_connect(test_server):
     async def kick_routine(connect):
         client1 = await connect()
         await client1.send(["sys", "login", 1])
-        await client1.send(["sys", "use_hp", 1])
+        await client1.send(["sys", "add_rls_comp_value", 1])
         await asyncio.sleep(0.1)
 
         client2 = await connect()
         await client2.send(["sys", "login", 1])
-        await client2.send(["sys", "use_hp", 1])
+        await client2.send(["sys", "add_rls_comp_value", 2])
         await asyncio.sleep(0.1)
 
-        await client1.send(["sys", "use_hp", 1])
-        await asyncio.sleep(0.1)
-        with self.assertRaisesRegex(ConnectionClosedError, ".*"):
-            await client1.send(["sys", "use_hp", 2])
+        # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
+        # 需要调用一次system才能发现自己被踢掉了
+        await client1.send(["sys", "add_rls_comp_value", 3])
 
-    _, response1 = app.test_client.websocket("/hetu", mimic=kick_routine)
+        # 测试踢出成功
+        await asyncio.sleep(0.1)
+        with pytest.raises(ConnectionClosedError):
+            await client1.send(["sys", "add_rls_comp_value", 4])
+
+    _, response1 = test_server.test_client.websocket("/hetu", mimic=kick_routine)
     # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
-    assert response1.client_sent[-1] == ["sys", "use_hp", 2], "最后一行没执行到"
+    assert response1.client_sent[-1] == [
+        "sys",
+        "add_rls_comp_value",
+        4,
+    ], "最后一行没执行到"
 
-    # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
-    app.stop()
-
-
-def test_flooding(test_server):
+def test_call_flooding_lv1(test_server):
+    # 测试CLIENT_SEND_LIMITS配置
+    # CLIENT_SEND_LIMITS:
+    # - [ 10, 1 ]  <---测试该层
+    # - [ 27, 5 ]
+    # 登录后默认CLIENT_SEND_LIMITS值乘10,所以是100次/秒
     async def normal_routine(connect):
         client1 = await connect()
         for i in range(100):
@@ -204,17 +213,22 @@ def test_flooding(test_server):
 
     async def flooding_routine(connect):
         client1 = await connect()
-        for i in range(101):
-            await client1.send(["sys", "login", 1])
-            await client1.recv()
+        with pytest.raises(ConnectionClosedError):
+            for i in range(101):
+                await client1.send(["sys", "login", 1])
+                await client1.recv()
 
     test_server.test_client.websocket("/hetu", mimic=normal_routine)
 
-    # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-    # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
-    with pytest.raises(Exception):
-        test_server.test_client.websocket("/hetu", mimic=flooding_routine)
+    test_server.test_client.websocket("/hetu", mimic=flooding_routine)
 
+
+def test_call_flooding_lv2(test_server):
+    # 测试CLIENT_SEND_LIMITS配置
+    # CLIENT_SEND_LIMITS:
+    # - [ 10, 1 ]
+    # - [ 27, 5 ]  <---测试该层
+    # 登录后默认CLIENT_SEND_LIMITS值乘10,所以是270次/秒
     async def normal_routine_lv2(connect):
         client1 = await connect()
         for i in range(270):
@@ -225,18 +239,13 @@ def test_flooding(test_server):
 
     async def flooding_routine_lv2(connect):
         client1 = await connect()
-        for i in range(271):
-            await client1.send(["sys", "login", 1])
-            await client1.recv()
-            if i == 99:
-                await asyncio.sleep(1)
+        with pytest.raises(ConnectionClosedError):
+            for i in range(271):
+                await client1.send(["sys", "login", 1])
+                await client1.recv()
+                if i == 99:
+                    await asyncio.sleep(1)
 
-    test_server.stop()
-    app = self.create_app_under_current_coroutine()
-    app.test_client.websocket("/hetu", mimic=normal_routine_lv2)
+    test_server.test_client.websocket("/hetu", mimic=normal_routine_lv2)
 
-    # app.ctx.default_backend.reset_connection_pool()
-    with pytest.raises(Exception):
-        app.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
-
-    app.stop()
+    test_server.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
