@@ -4,6 +4,7 @@ import zlib
 from typing import Callable
 
 import pytest
+import logging
 
 import sanic_testing
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
@@ -12,6 +13,10 @@ from hetu.server.message import encode_message, decode_message
 from hetu.server import start_webserver
 from hetu.system import SystemClusters
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
+
+logger = logging.getLogger("HeTu.root")
+logger.setLevel(logging.DEBUG)
+logging.lastResort.setLevel(logging.DEBUG)
 
 
 @pytest.fixture
@@ -40,11 +45,13 @@ def setup_websocket_proxy():
             do_recv = ws.recv
 
             async def send(data):
+                logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
                 ws_proxy.client_sent.append(data)
                 await do_send(encode_message(data, protocol))
 
             async def recv():
                 message = decode_message(await do_recv(), protocol)
+                logger.debug(f"< Received: {message} [{len(repr(message))} bytes]")
                 ws_proxy.client_received.append(message)
                 return message
 
@@ -75,7 +82,9 @@ def test_server(setup_websocket_proxy, mod_redis_service):
     port = 23318
     mod_redis_service(port)
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
-    return start_webserver(
+    logging_cfg = DEFAULT_LOGGING_CONFIG
+    logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
+    server = start_webserver(
         "Hetu-test",
         {
             "APP_FILE": app_file,
@@ -90,7 +99,7 @@ def test_server(setup_websocket_proxy, mod_redis_service):
                 }
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
-            "LOGGING": DEFAULT_LOGGING_CONFIG,
+            "LOGGING": logging_cfg,
             "DEBUG": True,
             "WORKER_NUM": 4,
             "ACCESS_LOG": False,
@@ -98,6 +107,10 @@ def test_server(setup_websocket_proxy, mod_redis_service):
         os.getpid(),
         True,
     )
+
+    yield server
+
+    server.stop()
 
 
 def test_websocket_started(test_server):
@@ -111,43 +124,51 @@ def test_websocket_started(test_server):
     # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
 
+@pytest.mark.timeout(20)
 def test_websocket_call_system(test_server):
     # 测试call和结果
     async def normal_routine(connect):
         client1 = await connect()
         await client1.send(["sys", "login", 1])
         await client1.recv()
-        await client1.send(["sub", "HP", "query", "owner", 1, 999])
+
+        await client1.send(["sub", "RLSComp", "query", "owner", 1, 999])
+        await client1.send(["sub", "IndexComp1", "query", "owner", 1, 999])
         await client1.recv()
-        await client1.send(["sub", "MP", "query", "owner", 1, 999])
         await client1.recv()
-        await client1.send(["sys", "use_hp", 1])
-        await client1.send(["sys", "login", 2])  # 测试重复登录
+
+        await client1.send(["sys", "add_rls_comp_value", 1])
+        await client1.recv()  # 首次sub这里会卡至少0.5s等待连接
+
+        await client1.send(["sys", "login", 2])  # 测试重复登录应该无效
         await client1.recv()
-        client1.clear_recv()
 
         # 正式开始接受sub消息
-        await client1.send(["sys", "use_hp", 1])
+        await client1.send(["sys", "add_rls_comp_value", 1])
         await client1.recv()
 
+        # 模拟其他用户修改了用户1订阅的数据
         client2 = await connect()
         await client2.send(["sys", "login", 2])
-        await client2.send(["sys", "use_mp", 1])
+        # 这个是rls数据，client1不会收到
+        await client2.send(["sys", "add_rls_comp_value", 9])
+        # 这个client1应该收到
+        await client2.send(["sys", "create_row", 2, 9, "1"])
         await asyncio.sleep(0.1)
 
-        await client1.recv()
+        await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
 
     _, response1 = test_server.test_client.websocket("/hetu", mimic=normal_routine)
     # print(response1.client_received)
-    # 测试hp减2
-    assert response1.client_received[0][2]["1"] == {"id": 1, "owner": 1, "value": 98}
+    # 测试add_rls_comp_value调用了2次
+    assert response1.client_received[3][2]["1"] == {"id": 1, "owner": 1, "value": 101}
+    assert response1.client_received[5][2]["1"] == {"id": 1, "owner": 1, "value": 102}
 
-    # 测试收到连接2减的mp
-    assert response1.client_received[1][2]["1"] == {"id": 1, "owner": 2, "value": 99}
+    # 测试收到连接2的+9
+    assert response1.client_received[6][2]["1"] == {"id": 1, "owner": 2, "value": 9}
 
-    # 准备下一轮测试，重置redis connection_pool，因为切换线程了
-    # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
+def test_websocket_kick_connect(test_server):
     # 测试踢掉别人的连接
     async def kick_routine(connect):
         client1 = await connect()
