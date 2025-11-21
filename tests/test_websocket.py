@@ -199,7 +199,7 @@ def test_websocket_kick_connect(test_server):
     ], "最后一行没执行到"
 
 
-def test_call_flooding_lv1(test_server):
+def test_call_flooding_lv1_normal(test_server):
     # 测试CLIENT_SEND_LIMITS配置
     # CLIENT_SEND_LIMITS:
     # - [ 10, 1 ]  <---测试该层
@@ -211,6 +211,13 @@ def test_call_flooding_lv1(test_server):
             await client1.send(["sys", "login", 1])
             await client1.recv()
 
+    test_server.test_client.websocket("/hetu", mimic=normal_routine)
+
+
+def test_call_flooding_lv1_flooding(test_server):
+    # 因为同时启动2个websocket会报
+    # sanic.exceptions.ServerError: Sanic server could not start: [Errno 98] Address already in use.
+    # 所以分2个测试，或者可以尝试启动时用随机的port
     async def flooding_routine(connect):
         client1 = await connect()
         with pytest.raises(ConnectionClosedError):
@@ -218,12 +225,10 @@ def test_call_flooding_lv1(test_server):
                 await client1.send(["sys", "login", 1])
                 await client1.recv()
 
-    test_server.test_client.websocket("/hetu", mimic=normal_routine)
-
     test_server.test_client.websocket("/hetu", mimic=flooding_routine)
 
 
-def test_call_flooding_lv2(test_server):
+def test_call_flooding_lv2_normal(test_server):
     # 测试CLIENT_SEND_LIMITS配置
     # CLIENT_SEND_LIMITS:
     # - [ 10, 1 ]
@@ -237,6 +242,10 @@ def test_call_flooding_lv2(test_server):
             if i == 99:
                 await asyncio.sleep(1)
 
+    test_server.test_client.websocket("/hetu", mimic=normal_routine_lv2)
+
+
+def test_call_flooding_lv2_flooding(test_server):
     async def flooding_routine_lv2(connect):
         client1 = await connect()
         with pytest.raises(ConnectionClosedError):
@@ -245,7 +254,5 @@ def test_call_flooding_lv2(test_server):
                 await client1.recv()
                 if i == 99:
                     await asyncio.sleep(1)
-
-    test_server.test_client.websocket("/hetu", mimic=normal_routine_lv2)
 
     test_server.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
