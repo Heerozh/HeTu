@@ -119,7 +119,7 @@ async def magic(ctx: Context):
     targets_iny = await ctx[Position].query('y', self_pos.y-10, self_pos.y+10)
     targets_id = set(targets_inx.owner) & set(targets_iny.owner)
 
-    await ctx['use_mp'](ctx, 90)
+    # await ctx['use_mp'](ctx, 90)
 
     for target_id in targets_id:
         target = await ctx[Users].select(target_id, 'entity_id')

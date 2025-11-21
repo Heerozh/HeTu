@@ -22,9 +22,9 @@ SYSTEM_NAME_MAX_LEN = 32
 class SystemDefine:
     func: callable
     components: set[Type[BaseComponent]]  # 引用的Components
-    full_components: set[Type[BaseComponent]]  # 完整的引用Components，包括继承自父System的
+    full_components: set[Type[BaseComponent]]  # 完整的引用，包括继承自父System的
     non_transactions: set[Type[BaseComponent]]  # 直接获取的Components，不走事务
-    full_non_trx: set[Type[BaseComponent]]  # 完整的直接Components，包括继承自父System的
+    full_non_trx: set[Type[BaseComponent]]  # 完整的无事务引用，包括继承自父System的
     bases: set[str]
     full_bases: set[str]
     permission: Permission
@@ -51,10 +51,13 @@ class SystemClusters(metaclass=Singleton):
         systems: set[str]
 
     def __init__(self):
+        # @define_system(namespace=xxx) 定义的所有System
         self._system_map = {}  # type: dict[str, dict[str, SystemDefine]]
         self._component_map = {}  # type: dict[Type[BaseComponent], int]
         self._clusters = {}  # type: dict[str, list[SystemClusters.Cluster]]
+        # @define_system(namespace="global") 定义的所有System
         self._global_system_map = {}  # type: dict[str, SystemDefine]
+        # 方便快速访问主namespace的System定义
         self._main_system_map = {}
 
     def _clear(self):
@@ -62,35 +65,44 @@ class SystemClusters(metaclass=Singleton):
         self._component_map = {}
         self._system_map = {}
 
-    def get_system(self, system_name: str, namespace: str = None) -> SystemDefine | None:
+    def get_system(
+        self, system_name: str, namespace: str = None
+    ) -> SystemDefine | None:
         if namespace:
             return self._system_map[namespace].get(system_name, None)
         else:
             return self._main_system_map.get(system_name, None)
 
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
-        return {name: self.get_system(cluster.namespace, name) for name in cluster.systems}
+        return {
+            name: self.get_system(cluster.namespace, name) for name in cluster.systems
+        }
 
     def get_component_cluster_id(self, comp: Type[BaseComponent]) -> int:
         return self._component_map.get(comp, None)
 
     def get_clusters(self, namespace: str):
-        return self._clusters[namespace]
+        return self._clusters.get(namespace, None)
 
     def get_cluster(self, namespace: str, cluster_id: int):
         return self._clusters[namespace][cluster_id]
 
     def build_clusters(self, main_namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
-        assert main_namespace in self._system_map, f"没有找到namespace={main_namespace}的System定义"
+        assert (
+            main_namespace in self._system_map
+        ), f"没有找到namespace={main_namespace}的System定义"
 
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):
             """合并2个冲突的簇"""
             for x in range(len(clusters_)):
                 for y in range(x + 1, len(clusters_)):
-                    if (clusters_[x].namespace == clusters_[y].namespace and
-                            clusters_[x].components.intersection(clusters_[y].components)):
+                    same_namespace = clusters_[x].namespace == clusters_[y].namespace
+                    have_intersection = clusters_[x].components.intersection(
+                        clusters_[y].components
+                    )
+                    if same_namespace and have_intersection:
                         clusters_[x].components.update(clusters_[y].components)
                         clusters_[x].systems.update(clusters_[y].systems)
                         del clusters_[y]
@@ -99,14 +111,28 @@ class SystemClusters(metaclass=Singleton):
 
         def inherit_components(namespace_, bases, req: set, n_trx: set, inh: set):
             for base_sys in bases:
-                base_name, sys_suffix = base_sys.split(':') if ':' in base_sys else (base_sys, '')
+                base_name, sys_suffix = (
+                    base_sys.split(":") if ":" in base_sys else (base_sys, "")
+                )
                 if base_name not in self._system_map[namespace_]:
-                    raise RuntimeError(f"{sys_name} 的 `bases` 引用的System {base_name} 不存在")
+                    raise RuntimeError(
+                        f"{sys_name} 的 `bases` 引用的System {base_name} 不存在"
+                    )
                 base_def = self._system_map[namespace_][base_name]
                 if sys_suffix:
                     # 复制Component
-                    req.update([comp.duplicate(sys_suffix) for comp in base_def.components])
-                    n_trx.update([comp.duplicate(sys_suffix) for comp in base_def.non_transactions])
+                    req.update(
+                        [
+                            comp.duplicate(namespace_, sys_suffix)
+                            for comp in base_def.components
+                        ]
+                    )
+                    n_trx.update(
+                        [
+                            comp.duplicate(namespace_, sys_suffix)
+                            for comp in base_def.non_transactions
+                        ]
+                    )
                 else:
                     req.update(base_def.components)
                     n_trx.update(base_def.non_transactions)
@@ -125,20 +151,31 @@ class SystemClusters(metaclass=Singleton):
                 sys_def.full_components = set(sys_def.components)
                 sys_def.full_bases = set(sys_def.bases)
                 sys_def.full_non_trx = set(sys_def.non_transactions)
-                inherit_components(namespace, sys_def.bases, sys_def.full_components,
-                                   sys_def.full_non_trx, sys_def.full_bases)
+                inherit_components(
+                    namespace,
+                    sys_def.bases,
+                    sys_def.full_components,
+                    sys_def.full_non_trx,
+                    sys_def.full_bases,
+                )
                 non_trx.update(sys_def.full_non_trx)
                 # 检查所有System引用的Component和继承的也是同一个backend
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
                 if len(set(backend_names)) > 1:
-                    refs = [f"{comp.component_name_}:{comp.backend_}"
-                            for comp in sys_def.full_components]
-                    raise AssertionError(f"System {sys_name} 引用的Component必须都是同一种backend，"
-                                         f"现在有：{refs}")
+                    refs = [
+                        f"{comp.component_name_}:{comp.backend_}"
+                        for comp in sys_def.full_components
+                    ]
+                    raise AssertionError(
+                        f"System {sys_name} 引用的Component必须都是同一种backend，"
+                        f"现在有：{refs}"
+                    )
                 # 添加到clusters
-                clusters.append(SystemClusters.Cluster(
-                    -1, sys_def.full_components.copy(),
-                    namespace, {sys_name}))
+                clusters.append(
+                    SystemClusters.Cluster(
+                        -1, sys_def.full_components.copy(), namespace, {sys_name}
+                    )
+                )
 
             self._clusters[namespace] = clusters
 
@@ -148,14 +185,17 @@ class SystemClusters(metaclass=Singleton):
 
             # 先按system数排序，然后按第一个system的alphabet排序，让簇id尽量不变
             # todo 需要改成取这个组中最hub的Component作为名字来排序，在实际生产环境中测试下是不是比较稳定
-            sorted(clusters, key=lambda x: f"{len(x.systems):02}_{next(iter(x.systems))}")
+            sorted(
+                clusters, key=lambda x: f"{len(x.systems):02}_{next(iter(x.systems))}"
+            )
             for i in range(len(clusters)):
                 clusters[i].id = i
 
             # 把簇的id重新分配个系统定义
             for cluster in clusters:
+                sys_map = self._system_map[cluster.namespace]
                 for sys_name in cluster.systems:
-                    self._system_map[cluster.namespace][sys_name].cluster_id = cluster.id
+                    sys_map[sys_name].cluster_id = cluster.id
                 for comp in cluster.components:
                     self._component_map[comp] = cluster.id
 
@@ -165,13 +205,19 @@ class SystemClusters(metaclass=Singleton):
         # 加入这个限制的原因是，不被事务引用下，本方法就无法确定该Component应该储存在哪个Cluster中
         for comp in non_trx:
             if comp not in self._component_map:
-                raise RuntimeError(f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
-                                   f"Component {comp.__name__} 至少有一个正常引用。"
-                                   +
-                                   (f"该Component是副本，每个副本也同样要保证至少有一个正常引用。"
-                                    if ':' in comp.__name__ else ""))
+                raise RuntimeError(
+                    f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
+                    f"Component {comp.__name__} 至少有一个正常引用。"
+                    + (
+                        f"该Component是副本，每个副本也同样要保证至少有一个正常引用。"
+                        if ":" in comp.__name__
+                        else ""
+                    )
+                )
 
-    def add(self, namespace, func, components, non_trx, force, permission, bases, max_retry):
+    def add(
+        self, namespace, func, components, non_trx, force, permission, bases, max_retry
+    ):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -186,23 +232,33 @@ class SystemClusters(metaclass=Singleton):
         defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
         sub_map[func.__name__] = SystemDefine(
-            func=func, components=components, non_transactions=non_trx, bases=bases,
-            max_retry=max_retry, arg_count=arg_count, defaults_count=defaults_count, cluster_id=-1,
-            permission=permission, full_components=set(), full_non_trx=set(), full_bases=set())
+            func=func,
+            components=components,
+            non_transactions=non_trx,
+            bases=bases,
+            max_retry=max_retry,
+            arg_count=arg_count,
+            defaults_count=defaults_count,
+            cluster_id=-1,
+            permission=permission,
+            full_components=set(),
+            full_non_trx=set(),
+            full_bases=set(),
+        )
 
         if namespace == "global":
             self._global_system_map[func.__name__] = sub_map[func.__name__]
 
 
 def define_system(
-        components: tuple[Type[BaseComponent], ...] = None,
-        non_transactions: tuple[Type[BaseComponent], ...] = None,
-        namespace: str = "default",
-        force: bool = False,
-        permission=Permission.USER,
-        retry: int = 9999,
-        bases: tuple[str] = tuple(),
-        call_lock=False,
+    components: tuple[Type[BaseComponent], ...] = None,
+    non_transactions: tuple[Type[BaseComponent], ...] = None,
+    namespace: str = "default",
+    force: bool = False,
+    permission=Permission.USER,
+    retry: int = 9999,
+    bases: tuple[str] = tuple(),
+    call_lock=False,
 ):
     """
     定义System(函数)
@@ -321,7 +377,7 @@ def define_system(
     ...     return await ctx['move:Map1'](new_pos)
 
     `bases=('move:Map1', )`等同创建一个新的`move` System，但是使用
-    `components=(Position.duplicate(suffix='Map1'), )` 参数。
+    `components=(Position.duplicate(namespace, suffix='Map1'), )` 参数。
 
     正常调用`move`(不使用System副本)的话，pos是保存在名为 `Position` 的表中。
     在这个例子中，`move_in_map1` 会调用继承的 `move` 函数，但是 `move` 函数中的`pos`数据会储存在名为
@@ -339,33 +395,47 @@ def define_system(
             f"System参数名定义错误，第一个参数必须为：ctx。" f"你的：{func_arg_names}"
         )
 
-        assert permission not in (permission.OWNER, permission.RLS), "System的权限不支持OWNER/RLS"
+        assert permission not in (
+            permission.OWNER,
+            permission.RLS,
+        ), "System的权限不支持OWNER/RLS"
 
-        assert len(func.__name__) <= SYSTEM_NAME_MAX_LEN, \
-            f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
+        assert (
+            len(func.__name__) <= SYSTEM_NAME_MAX_LEN
+        ), f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
 
-        assert asyncio.iscoroutinefunction(func), \
-            f"System {func.__name__} 必须是异步函数(`async def ...`)"
+        assert asyncio.iscoroutinefunction(
+            func
+        ), f"System {func.__name__} 必须是异步函数(`async def ...`)"
 
         if components is not None and len(components) > 0:
             # 检查components是否都是同一个backend
             backend_names = [comp.backend_ for comp in components]
-            assert len(set(backend_names)) <= 1, \
-                f"System {func.__name__} 引用的Component必须都是同一种backend"
+            assert (
+                len(set(backend_names)) <= 1
+            ), f"System {func.__name__} 引用的Component必须都是同一种backend"
 
         _components = components
 
         # 把call lock的表添加到components中
         if call_lock:
-            lock_table = ExecutionLock.duplicate(func.__name__)
+            lock_table = ExecutionLock.duplicate(namespace, func.__name__)
             if components is not None and len(components) > 0:
                 lock_table.backend_ = components[0].backend_
                 _components = list(components) + [lock_table]
             else:
                 _components = [lock_table]
 
-        SystemClusters().add(namespace, func, _components, non_transactions, force,
-                             permission, bases, retry)
+        SystemClusters().add(
+            namespace,
+            func,
+            _components,
+            non_transactions,
+            force,
+            permission,
+            bases,
+            retry,
+        )
 
         # 返回假的func，因为不允许直接调用。
         def warp_system_call(*_, **__):

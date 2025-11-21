@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 from typing import ItemsView
 
 from hetu.data.backend.base import Backend, ComponentTable
@@ -17,15 +18,25 @@ class ComponentTableManager:
     此类只能在SystemCluster.build_clusters()后初始化
     """
 
+    @property
+    def namespace(self) -> str:
+        return self._namespace
+
+    @property
+    def backends(self) -> dict[str, Backend]:
+        return self._backends
+
     def __init__(
-            self,
-            namespace: str,
-            instance_name: str,
-            backends: dict[str, Backend],
-            table_constructors: dict[str, type[ComponentTable]]
+        self,
+        namespace: str,
+        instance_name: str,
+        backends: dict[str, Backend],
+        table_constructors: dict[str, type[ComponentTable]],
     ):
-        self.tables = {}
-        self.tables_by_name = {}
+        self._tables = {}
+        self._tables_by_name = {}
+        self._namespace = namespace
+        self._backends = backends
 
         clusters = SystemClusters().get_clusters(namespace)
         for cluster in clusters:
@@ -35,24 +46,32 @@ class ComponentTableManager:
                 if backend is None or table_constructor is None:
                     raise ValueError(f"Backend {comp.backend_} not found")
                 table = table_constructor(comp, instance_name, cluster.id, backend)
-                self.tables[comp] = table
-                self.tables_by_name[comp.component_name_] = table
+                self._tables[comp] = table
+                self._tables_by_name[comp.component_name_] = table
 
     def create_or_migrate_all(self):
-        for comp, tbl in self.tables.items():
+        for comp, tbl in self._tables.items():
             # 非持久化的Component需要cluster迁移，不然数据就永远的留在了数据库中
             tbl.create_or_migrate(cluster_only=not comp.persist_)
 
     def flush_volatile(self):
-        for comp, tbl in self.tables.items():
+        """清空所有非持久化数据"""
+        for comp, tbl in self._tables.items():
             if not comp.persist_:
                 tbl.flush()
 
-    def get_table(self, component_cls: type[BaseComponent] | str) -> ComponentTable | None:
+    def _flush_all(self, force=False):
+        """测试用，清空所有数据"""
+        for comp, tbl in self._tables.items():
+            tbl.flush(force)
+
+    def get_table(
+        self, component_cls: type[BaseComponent] | str
+    ) -> ComponentTable | None:
         if type(component_cls) is str:
-            return self.tables_by_name.get(component_cls)
+            return self._tables_by_name.get(component_cls)
         else:
-            return self.tables.get(component_cls)
+            return self._tables.get(component_cls)
 
     def items(self) -> ItemsView[type[BaseComponent], ComponentTable]:
-        return self.tables.items()
+        return self._tables.items()

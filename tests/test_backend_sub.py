@@ -4,15 +4,11 @@ import time
 from hetu.data.backend import ComponentTable
 from hetu.data.backend.sub import RowSubscription
 
-logger = logging.getLogger('HeTu.root')
-logger.setLevel(logging.DEBUG)
-logging.lastResort.setLevel(logging.DEBUG)
-
 
 @pytest.fixture
 async def sub_mgr(mod_auto_backend):
     """初始化订阅管理器的fixture"""
-    comp_tbl_class, get_or_create_backend = mod_auto_backend
+    backend_component_table, get_or_create_backend = mod_auto_backend
 
     from hetu.data.backend import Subscriptions
     # 初始化订阅器
@@ -93,7 +89,7 @@ async def user_id11_ctx():
 
 async def test_redis_notify_configuration(mod_redis_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
-    comp_tbl_class, get_or_create_backend = mod_redis_backend
+    backend_component_table, get_or_create_backend = mod_redis_backend
     backend = get_or_create_backend()
 
     from hetu.data.backend import RedisBackend
@@ -146,8 +142,7 @@ async def test_subscribe_query(sub_mgr, filled_item_table, admin_ctx):
     assert len(sub_mgr._mq_client.subscribed_channels) == 26
 
 
-async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTable,
-                                          filled_item_table, admin_ctx,
+async def test_subscribe_mq_merge_message(sub_mgr, filled_item_table, admin_ctx,
                                           background_mq_puller_task):
     backend = sub_mgr._backend
     mq = sub_mgr._mq_client
@@ -157,13 +152,13 @@ async def test_subscribe_mq_merge_message(sub_mgr, mod_item_table: ComponentTabl
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.transaction(1) as session:
-        tbl = mod_item_table.attach(session)
+        tbl = filled_item_table.attach(session)
         row = await tbl.select(1)
         row.qty = 998
         await tbl.update(1, row)
 
     async with backend.transaction(1) as session:
-        tbl = mod_item_table.attach(session)
+        tbl = filled_item_table.attach(session)
         row = await tbl.select(1)
         row.qty = 997
         await tbl.update(1, row)

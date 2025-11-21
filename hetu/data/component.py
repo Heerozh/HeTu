@@ -36,7 +36,7 @@ class Permission(IntEnum):
 class Property:
     default: Any                # 属性的默认值
     unique: bool = False        # 是否是字典索引 (此项优先级高于index，查询速度高)
-    index: bool = False         # 是否是排序索引
+    index: bool | None = None         # 是否是排序索引
     dtype: str | type = None          # 数据类型，最好用np的明确定义
 
 
@@ -60,7 +60,7 @@ class BaseComponent:
     indexes_ = None         # type: dict[str, bool]     # 索引名->是否是字符串类型 的映射
     json_ = None            # type: str                 # Component定义的json字符串
     git_hash_ = None        # type: str                 # Component定义的app文件版本
-    instances_ = None       # type: dict[str, type[BaseComponent]] # 该Component的所有副本实例
+    instances_ = {}         # type: dict[str, dict[str, type[BaseComponent]]] # 该Component的所有副本实例
     master_ = None          # type: type[BaseComponent]  # 该Component的主实例
 
     @staticmethod
@@ -149,16 +149,27 @@ class BaseComponent:
         return dict(zip(data.dtype.names, data.item()))
 
     @classmethod
-    def duplicate(cls, suffix: str) -> type['BaseComponent']:
-        """复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。"""
-        if not suffix:
+    def duplicate(cls, namespace: str, suffix: str) -> type['BaseComponent']:
+        """
+        复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
+        注意：只能在define阶段使用
+        """
+        if namespace == cls.namespace_ and not suffix:
             return cls
-        if suffix in cls.instances_:
-            return cls.instances_[suffix]
+
+        instances = cls.instances_.setdefault(namespace, {})
+        if suffix in instances:
+            return instances[suffix]
+
         new_cls = BaseComponent.load_json(cls.json_, suffix)
-        cls.instances_[suffix] = new_cls
+        instances[suffix] = new_cls
         new_cls.master_ = cls
         return new_cls
+
+    @classmethod
+    def get_duplicates(cls, namespace: str) -> dict[str, type['BaseComponent']]:
+        """获取此Component在指定namespace下的所有副本实例"""
+        return cls.instances_.get(namespace, {})
 
     @classmethod
     def is_rls(cls) -> bool:
@@ -289,7 +300,13 @@ def define_component(
                 if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == '?':
                     prop.dtype = np.int8
                 if prop.unique:
+                    if prop.index is False:
+                        logger.warning(f"⚠️ [🛠️Define] "
+                                       f"{cls.__name__}.{_name}属性设置为unique时，"
+                                       f"index不能设置为False。")
                     prop.index = True
+                if prop.index is None:
+                    prop.index = False
                 assert prop.default is not None, \
                     (f"{cls.__name__}.{_name}默认值不能为None。所有属性都要有默认值，"
                      f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。")
@@ -329,6 +346,10 @@ def define_component(
             rls_compare = ('eq', 'owner', 'caller')
             assert 'owner' in properties, \
                 f"{cls.__name__}权限设置为OWNER时，必须有owner属性，该属性表明此条数据属于哪个用户"
+            # 取消, owner有很多地方需要不是唯一，比如每行一个道具的情况
+            # if not properties['owner'].unique:
+            #     logger.warning(f"⚠️ [🛠️Define] {cls.__name__}.owner属性不是unique唯一，"
+            #                    f"你确定正确么？")
             assert np.issubdtype(properties['owner'].dtype, np.number), \
                 f"{cls.__name__}的owner属性必需是numeric数字(int, np.int64, ...)类型"
 
