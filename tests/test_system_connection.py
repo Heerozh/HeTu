@@ -1,7 +1,9 @@
-import logging
 import time
+
 import pytest
+
 import hetu
+import hetu.system.connection as connection
 
 
 async def test_connect_kick(mod_test_app, comp_mgr):
@@ -39,9 +41,6 @@ async def test_connect_kick(mod_test_app, comp_mgr):
 
 
 async def test_connect_not_kick(mod_test_app, comp_mgr):
-    time_time = time.time
-    import hetu.system.connection as connection
-
     # 初始化第一个连接
     executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1.initialize("")
@@ -68,7 +67,6 @@ async def test_connect_not_kick(mod_test_app, comp_mgr):
 
 async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     time_time = time.time
-    import hetu.system.connection as connection
 
     # 初始化第一个连接
     executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
@@ -104,6 +102,34 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     await executor1_timeout_replaced.terminate()
 
 
-def test_future_call_bypass_flood_detect(mod_test_app, comp_mgr):
-    # todo 测试连接，包括flood检测等，特别是future不应该遇到flood检测
-    pass
+async def test_flood_detect(mod_test_app, comp_mgr, caplog):
+    connection.MAX_ANONYMOUS_CONNECTION_BY_IP = 3
+
+    executors = []
+    with pytest.raises(RuntimeError, match="new_connection调用失败"):
+        for i in range(5):
+            loc_executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+            await loc_executor.initialize(f"233.111.111.111")
+            executors.append(loc_executor)
+
+    assert "IP匿名连接数" in caplog.text
+
+    for loc_executor in executors:
+        await loc_executor.terminate()
+
+
+async def test_future_call_bypass_flood_detect(mod_test_app, comp_mgr):
+    # 测试连接，包括flood检测等，特别是future不应该遇到flood检测
+    # 不然服务器反复重启后会提示flood
+    connection.MAX_ANONYMOUS_CONNECTION_BY_IP = 3
+
+    executors = []
+    # 以下代码应该成功调用没有报错
+    for i in range(5):
+        loc_executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+        # 使用localhost ip地址让连接flood检测不报错
+        await loc_executor.initialize(f"localhost")
+        executors.append(loc_executor)
+
+    for loc_executor in executors:
+        await loc_executor.terminate()

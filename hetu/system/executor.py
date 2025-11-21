@@ -77,7 +77,7 @@ class SystemExecutor:
         sys = SYSTEM_CLUSTERS.get_system("new_connection")
         ok, _ = await self.execute_(sys, address)
         if not ok:
-            raise Exception("连接初始化失败，new_connection调用失败")
+            raise RuntimeError("连接初始化失败，new_connection调用失败")
 
     async def terminate(self):
         if self.context.connection_id == 0:
