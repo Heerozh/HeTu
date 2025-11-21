@@ -188,9 +188,9 @@ async def test_string_length_cutoff(filled_item_table, mod_item_component):
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
         assert (
-            await tbl.select("reinsert", "name") is not None,
-            "超出U8长度应该要被截断，这里没索引出来说明没截断",
-        )
+            await tbl.select("reinsert", "name")
+        ) is not None, "超出U8长度应该要被截断，这里没索引出来说明没截断"
+
         assert (await tbl.select("reinsert", "name")).id == 26
         assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
 
