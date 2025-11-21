@@ -1000,6 +1000,7 @@ class RedisMQClient(MQClient):
         msg = await mq.get_message(ignore_subscribe_messages=True, timeout=None)
         if msg is not None:
             channel_name = msg["channel"]
+            logger.debug(f"🔔 [💾Redis] 收到订阅更新通知: {channel_name}")
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
             if dropped:
@@ -1028,6 +1029,7 @@ class RedisMQClient(MQClient):
             rtn = set(pulled_deque.pop(0, time.time() - interval))
             if rtn:
                 self.pulled_set -= rtn
+                # logger.debug(f"🔔 [💾Redis] 发送通知给客户端: {str(rtn)[0:100]}...")
                 return rtn
             await asyncio.sleep(interval)
 
