@@ -22,7 +22,7 @@ class RowSubscription(BaseSubscription):
     __cache = {}
 
     def __init__(
-            self, table: ComponentTable, ctx: Context | None, channel: str, row_id: int
+        self, table: ComponentTable, ctx: Context | None, channel: str, row_id: int
     ):
         self.table = table
         if table.component_cls.is_rls() and ctx and not ctx.is_admin():
@@ -37,7 +37,7 @@ class RowSubscription(BaseSubscription):
         cls.__cache.pop(channel, None)
 
     async def get_updated(
-            self, channel
+        self, channel
     ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
@@ -63,12 +63,12 @@ class RowSubscription(BaseSubscription):
 
 class IndexSubscription(BaseSubscription):
     def __init__(
-            self,
-            table: ComponentTable,
-            ctx: Context,
-            index_channel: str,
-            last_query,
-            query_param: dict,
+        self,
+        table: ComponentTable,
+        ctx: Context,
+        index_channel: str,
+        last_query,
+        query_param: dict,
     ):
         self.table = table
         if table.component_cls.is_rls() and ctx and not ctx.is_admin():
@@ -86,7 +86,7 @@ class IndexSubscription(BaseSubscription):
         )
 
     async def get_updated(
-            self, channel
+        self, channel
     ) -> tuple[set[str], set[str], dict[str, dict | None]]:
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
@@ -155,7 +155,7 @@ class Subscriptions:
 
     @classmethod
     def _make_query_str(
-            cls, table: ComponentTable, index_name: str, left, right, limit, desc
+        cls, table: ComponentTable, index_name: str, left, right, limit, desc
     ):
         return (
             f"{table.component_cls.component_name_}.{index_name}"
@@ -179,13 +179,13 @@ class Subscriptions:
 
     @classmethod
     def _has_row_permission(
-            cls, table: ComponentTable, ctx: Context, row: dict | np.record
+        cls, table: ComponentTable, ctx: Context, row: dict | np.record
     ) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table.component_cls, row)
 
     async def subscribe_select(
-            self, table: ComponentTable, ctx: Context, value: Any, where: str = "id"
+        self, table: ComponentTable, ctx: Context, value: Any, where: str = "id"
     ) -> tuple[str | None, np.record | None]:
         """
         获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
@@ -200,8 +200,9 @@ class Subscriptions:
             if (row := await table.direct_get(value, row_format="typed_dict")) is None:
                 return None, None
         else:
-            rows = await table.direct_query(where, value, limit=1,
-                                            row_format='typed_dict')
+            rows = await table.direct_query(
+                where, value, limit=1, row_format="typed_dict"
+            )
             if len(rows) == 0:
                 return None, None
             row = rows[0]
@@ -224,15 +225,15 @@ class Subscriptions:
         return sub_id, row
 
     async def subscribe_query(
-            self,
-            table: ComponentTable,
-            ctx: Context,
-            index_name: str,
-            left,
-            right=None,
-            limit=10,
-            desc=False,
-            force=True,
+        self,
+        table: ComponentTable,
+        ctx: Context,
+        index_name: str,
+        left,
+        right=None,
+        limit=10,
+        desc=False,
+        force=True,
     ) -> tuple[str | None, list[dict]]:
         """
         获取并订阅多行数据，返回订阅id(sub_id: str)，和多行数据(rows: list[dict])。
