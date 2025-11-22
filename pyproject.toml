@@ -7,7 +7,7 @@ name = "hetudb"
 dynamic = ["version"]
 description = "河图：基于ECS理念，整合数据库和逻辑的游戏服务器框架"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.14"
 license = "Apache-2.0"
 authors = [
     {name = "Zhang Jianhao", email = "heeroz@gmail.com"}
