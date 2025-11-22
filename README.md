@@ -70,7 +70,8 @@ class Position(BaseComponent):
 )
 async def move_to(ctx: Context, x, y):
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    async with ctx[Position].update_or_insert(ctx.caller, where='owner') as pos:
+    # 注：可简写为ctx[Position].upsert
+    async with ctx.session.select(Position).upsert(ctx.caller, where='owner') as pos:
         pos.x = x
         pos.y = y
         # with结束后会自动提交修改
@@ -91,12 +92,13 @@ async def move_to(ctx: Context, x, y):
 
 ```Python
 from hetu.system import define_system, Context
+from hetu.system import elevate
 
 # permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=('elevate',))
+@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=(elevate,))
 async def login_test(ctx: Context, user_id):
     # 提权以后ctx.caller就是user_id。
-    await ctx['elevate'](ctx, user_id, kick_logged_in=True)
+    await elevate(ctx, user_id, kick_logged_in=True)
 ```
 
 我们让客户端直接传入 user_id，省去验证过程。实际应该传递 token 验证。
@@ -318,7 +320,7 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 uv会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
 
-内网建议跳过uv直接用`source .venv/bin/activate`激活环境使用。
+内网建议跳过uv直接用`source .venv/bin/activate` (或`.\.venv\Scripts\activate.ps1`) 激活环境使用。
 
 ## 🎉 生产部署
 

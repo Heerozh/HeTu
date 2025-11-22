@@ -426,6 +426,8 @@ class RedisComponentTable(ComponentTable):
         cluster_only : bool
             如果为True，则只处理cluster_id的变更，其他结构迁移和重建索引等不处理。
         """
+        # todo 考虑取消head_lock，通过记录版本号来实现，只要版本号不一致，就停止服务要求迁移
+        #       同时把迁移移动到专门的cli命令中，不是自动执行而是手动让ci/cd发布流程调用
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
 
@@ -458,6 +460,8 @@ class RedisComponentTable(ComponentTable):
             logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
     def flush(self, force=False):
+        # todo 考虑取消head_lock，建议易失数据全部加上行级timeout信息，过期后自动删除
+        #       flush命令则依然是交给ci/cd来执行
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
 

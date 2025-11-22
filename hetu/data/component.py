@@ -262,6 +262,7 @@ def define_component(
         你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
     persist: bool
         表示是否持久化，设为False时，每次启动你的数据会被清除，请小心。
+        对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。
     readonly: bool
         是否只读Component，只读Component不会被加事务保护，增加并行性。
     backend: str

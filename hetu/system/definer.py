@@ -315,19 +315,19 @@ def define_system(
 
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭
-    bases: tuple of str
-        继承其他System，传入System名称列表。继承后可以通过ctx['system_name']调用其他System，且同属一个事务。
-        注意当前System以及继承的System，将被合并进同一个交集簇(Cluster)中。
-        如果希望使用System副本，可以使用':'+后缀。具体见Notes。
+    bases: tuple of str(or callable)
+        继承其他System，然后可在本System中调用这些父System，且同属同一个事务。
+        可传入System函数本身，或字符串，如('system1', system2)。
+        字符串式继承可通过`ctx['system1'](...)`调用函数。
+        如果希望使用System副本，可以使用字符串式继承，加':副本名后缀'。具体见Notes。
+        注意: 本System以及父System，将被合并进同一个交集簇(Cluster)中。
     call_lock: bool
         是否对此System启用调用锁，启用后在调用时可以通过传入调用UUID来防止System重复执行。
         如果此System需要给未来调用使用，则此项必须为True。
 
     Notes
     -----
-    System分为3个主要内容，1. 定义；2. System函数；3. ctx；4. System副本
-
-    **System函数部分：**
+    **System函数：**
 
     >>> async def system_dash(ctx: Context, entity_self, entity_target, vec)
 
@@ -338,7 +338,7 @@ def define_system(
     其他参数:
         为hetu client SDK调用时传入的参数。
     System返回值:
-        如果调用方是其他System，通过`bases`调用，则返回值会原样传给调用方；
+        如果调用方是子System，通过`bases`调用，则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
             - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
@@ -362,9 +362,7 @@ def define_system(
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
             注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
 
-    **System副本：**
-
-    System副本是指，引用的Component都将用该副本名创建新的表，并在这些副本表中操作数据。
+    **System副本继承：**
 
     代码示例：
     >>> @define_system(namespace="global", components=(Position, ), )
@@ -379,9 +377,18 @@ def define_system(
     `bases=('move:Map1', )`等同创建一个新的`move` System，但是使用
     `components=(Position.duplicate(namespace, suffix='Map1'), )` 参数。
 
-    正常调用`move`(不使用System副本)的话，pos是保存在名为 `Position` 的表中。
-    在这个例子中，`move_in_map1` 会调用继承的 `move` 函数，但是 `move` 函数中的`pos`数据会储存在名为
-    `Position:Map1`的表中。
+    正常调用`move`(不使用System副本)的话，数据是保存在名为 `Position` 的表中。
+    在这个例子中，`move_in_map1` 会调用继承的 `move` 函数，但是 `move` 函数中的数据会储存在名为
+    `Position:Map1`的表中，从而实现同一套System逻辑在不同数据集上的操作。
+
+    这么做的意义是不同数据集不会事务冲突，可以拆分成不同的Cluster，从而放到不同的数据库节点上，
+    提升性能和扩展性。
+
+    比如create_future_call这个内置System就是，它引用了FutureCalls队列组件，如果不使用副本继承，那么
+    所有用到未来调用的System都将在同一个数据库节点上运行，形成一个大簇，影响扩展性。
+    因此通过副本继承此方法，可以拆解出一部分System到不同的数据库节点上运行。
+    不用担心，未来调用的后台任务，在检查调用队列时，会循环检查所有FutureCalls副本组件队列。
+
     """
 
     # todo non_transactions名字还是不够好，考虑改名为direct_refs
@@ -438,10 +445,11 @@ def define_system(
         )
 
         # 返回假的func，因为不允许直接调用。
-        def warp_system_call(*_, **__):
+        def warp_direct_system_call(*_, **__):
+            # todo，检测ctx是否存在，存在，且确实继承了后，还是允许调用
             raise RuntimeError("系统函数不允许直接调用")
             # return call_system(namespace, func.__name__, *args, **kwargs)
 
-        return warp_system_call
+        return warp_direct_system_call
 
     return warp
