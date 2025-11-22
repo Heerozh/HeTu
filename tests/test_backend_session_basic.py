@@ -9,6 +9,14 @@ async def test_table(mod_item_component, item_table):
 
     # 测试插入数据
     async with backend.transaction(1) as session:
+        # todo 语法改成：
+        #   row = mod_item_component.new_row()
+        #   session.insert(row)
+        #   session.select(mod_item_component).get(id=id)
+        #   session.select(mod_item_component).range(index=(left, right))
+        #   session.update(id, row)
+        #   session.delete(id)
+        #   session.upsert(index=row.index, row)
         tbl = item_table.attach(session)
         row = mod_item_component.new_row()
         row.name = "Item1"

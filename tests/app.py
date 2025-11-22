@@ -58,11 +58,12 @@ async def test_rls_comp_value(ctx: Context, value):
 @define_system(
     namespace="pytest",
     permission=Permission.EVERYBODY,
-    bases=('create_future_call:copy1', ),
+    bases=("create_future_call:copy1",),
 )
 async def add_rls_comp_value_future(ctx: Context, value, recurring):
-    return await ctx['create_future_call:copy1'](
-        ctx, -1, 'add_rls_comp_value', value, timeout=10, recurring=recurring)
+    return await ctx["create_future_call:copy1"](
+        ctx, -1, "add_rls_comp_value", value, timeout=10, recurring=recurring
+    )
 
 
 # ---------------------------------
@@ -128,10 +129,10 @@ async def create_row_2_upsert(ctx, owner, v2):
 @define_system(
     namespace="pytest",
     components=(RLSComp, IndexComp1, IndexComp2),
-    bases=("add_rls_comp_value",),
+    bases=(add_rls_comp_value,),
 )
 async def composer_system(ctx: Context):
-    rls_comp_value = await ctx["add_rls_comp_value"](ctx, 10)
+    rls_comp_value = await add_rls_comp_value(ctx, 10)
 
     await asyncio.sleep(0.1)
 

@@ -5,11 +5,7 @@
 @email: heeroz@gmail.com
 """
 
-from .definer import (
-    define_system,
-    SystemClusters,
-    SystemDefine
-)
+from .definer import define_system, SystemClusters, SystemDefine
 
 from .executor import (
     SystemExecutor,
@@ -17,6 +13,8 @@ from .executor import (
     SystemCall,
     ResponseToClient,
 )
+
+from .connection import Connection, elevate
 
 # future并不需要引用任何东西，只是为了让define生效
 from .future import (
