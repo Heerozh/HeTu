@@ -291,10 +291,10 @@ await ctx[Position].update_rows(rows)
 winget install --id=astral-sh.uv  -e
 ```
 
-新建你的项目目录，在目录中初始化uv，最低版本需求 `3.13`：
+新建你的项目目录，在目录中初始化uv（最低版本需求 `3.13`）：
 
 ```shell
-uv init --python "3.13"
+uv init --python "3.14"
 ```
 
 此后你的项目就由uv管理，类似npm，然后把河图添加到你的项目依赖中：
@@ -378,7 +378,7 @@ docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
 原生部署困难处在于如何安装高版本 python，建议通过清华miniconda源安装，uv、pyenv等都需要海外网。
 
 ```bash
-# 通过miniconda安装python 3.13
+# 通过miniconda安装python 3.14
 mkdir -p ~/miniconda3
 wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
 bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
@@ -387,7 +387,7 @@ rm -rf ~/miniconda3/miniconda.sh
 exec bash
 
 # 然后创建新的Python环境：
-conda create -n hetu python=3.13
+conda create -n hetu python=3.14
 
 # 进入项目目录
 cd your_app_directory
