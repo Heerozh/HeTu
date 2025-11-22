@@ -11,6 +11,14 @@ on:
       - '**.py'
       - 'pyproject.toml'
       - 'uv.lock'
+
+concurrency:
+  # github.ref = refs/heads/branch_name or refs/tags/tag_name
+  # github.workflow = top-level workflow name
+  group: ${{ github.workflow }}-${{ github.ref }}  # branch上只同时运行一个
+  cancel-in-progress: true
+
+
 jobs:
   run:
     timeout-minutes: 10
