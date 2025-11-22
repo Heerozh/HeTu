@@ -5,8 +5,8 @@
 @email: heeroz@gmail.com
 """
 
-import asyncio
 import copy
+import inspect
 from dataclasses import dataclass
 from inspect import signature
 from typing import Type
@@ -404,7 +404,7 @@ def define_system(
             len(func.__name__) <= SYSTEM_NAME_MAX_LEN
         ), f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
 
-        assert asyncio.iscoroutinefunction(
+        assert inspect.iscoroutinefunction(
             func
         ), f"System {func.__name__} 必须是异步函数(`async def ...`)"
 
