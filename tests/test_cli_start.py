@@ -43,4 +43,6 @@ def test_start_with_redis_head_lock(new_clusters_env, mod_redis_backend):
     except RuntimeError as e:
         if "This event loop is already running" in str(e):
             pytest.xfail(f"Temporary failure: {e}")
+        else:
+            raise
     backend.close()
