@@ -386,7 +386,7 @@ def define_component(
         if csharp_keyword.iskeyword(cls.__name__):
             raise ValueError(f"组件名({cls.__name__})是C#关键字，请refactor。")
         # 获取class的property成员列表
-        cls_annotations = cls.__dict__.get("__annotations__", {})
+        cls_annotations = inspect.get_annotations(cls)
         properties = {}
         # 从class读取并删除该成员
         for _name, anno_type in cls_annotations.items():

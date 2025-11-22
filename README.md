@@ -291,7 +291,7 @@ await ctx[Position].update_rows(rows)
 winget install --id=astral-sh.uv  -e
 ```
 
-新建你的项目目录，在目录中初始化uv，最低版本需求 `3.14`：
+新建你的项目目录，在目录中初始化uv（最低版本需求 `3.13`）：
 
 ```shell
 uv init --python "3.14"
