@@ -11,12 +11,13 @@ categories:
       - 'bugfix'
       - 'bug'
   - title: '🧰 杂项维护'
-    label: 'chore'
+    labels:
+      - 'chore'
+      - 'dependencies'
 autolabeler:
   - label: 'chore'
     branch:
       - '/maint\/.+/'
-      - '/dependabot\/.+/'
   - label: 'bug'
     branch:
       - '/fix\/.+/'
