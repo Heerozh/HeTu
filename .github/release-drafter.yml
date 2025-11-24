@@ -16,6 +16,7 @@ autolabeler:
   - label: 'chore'
     branch:
       - '/maint\/.+/'
+      - '/dependabot\/.+/'
   - label: 'bug'
     branch:
       - '/fix\/.+/'
