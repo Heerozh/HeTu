@@ -1,0 +1,24 @@
+# 组合Redis和Hetu
+services:
+  database:
+    image: redis:latest
+    ports:
+      - "6379:6379"
+    env_file:
+      - .env
+    volumes:
+      - ./data:/data
+    restart: always
+
+  application:
+    build:
+      dockerfile: Dockerfile
+    ports:
+      - "2466:2466"
+    env_file:
+      - .env
+    volumes:
+      - ./app:/app
+    depends_on:
+      - redis
+    restart: always

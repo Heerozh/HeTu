@@ -9,13 +9,21 @@ description = "河图：基于ECS理念，整合数据库和逻辑的游戏服�
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
-authors = [
-    {name = "Zhang Jianhao", email = "heeroz@gmail.com"}
-]
+authors = [{ name = "Zhang Jianhao", email = "heeroz@gmail.com" }]
 keywords = [
-    "online", "game", "server", "database",
-    "ecs", "entity", "component",
-    "mmo", "multiplayer", "gamedev", "game-framework", "game-server", "game-engine"
+    "online",
+    "game",
+    "server",
+    "database",
+    "ecs",
+    "entity",
+    "component",
+    "mmo",
+    "multiplayer",
+    "gamedev",
+    "game-framework",
+    "game-server",
+    "game-engine",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -70,9 +78,12 @@ fallback_version = "0.0.0"
 # 自动发现async test_*函数
 asyncio_mode = "auto" # or "strict"
 # 夹具和测试函数的asyncio loop在同一个文件中保持一致
-asyncio_default_fixture_loop_scope="module"
-asyncio_default_test_loop_scope="module"
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
 
 
 [tool.black]
+line-length = 88
+
+[tool.ruff]
 line-length = 88
