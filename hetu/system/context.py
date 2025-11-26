@@ -17,7 +17,8 @@ from ..data.backend import ComponentTransaction
 @dataclass
 class Context:
     # 通用变量
-    caller: int | None  # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
+    # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
+    caller: int | None
     connection_id: int  # 调用方的connection id
     address: str | None  # 调用方的ip
     group: str | None  # 所属组名，目前只用于判断是否admin
@@ -26,14 +27,14 @@ class Context:
     timestamp: int  # 调用时间戳
     retry_count: int  # 当前事务冲突重试次数
     transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
-    inherited: dict[str, callable]  # 继承的父事务函数
+    inherited: dict[str, Callable]  # 继承的父事务函数
     # 让system调用其他system还有个办法，在这里可以做一个list存放一些快速延后调用，让外面的executor负责调用，
     # 但考虑了下作用不大，如果system有写入需求，必定不希望丢失，存放到list很可能就因为断线或服务器宕机，造成调用本身丢失，
     # 如果没有写入需求，自然可以用一般函数通过direct_get来获取数据，不需要做成system
     # queued_calls: list[any]   # 延后调用的队列
     # 限制变量
-    client_limits: list[list[int]] = ()  # 客户端消息发送限制（次数）
-    server_limits: list[list[int]] = ()  # 服务端消息发送限制（次数）
+    client_limits: list[list[int]] = []  # 客户端消息发送限制（次数）
+    server_limits: list[list[int]] = []  # 服务端消息发送限制（次数）
     max_row_sub: int = 0  # 行订阅限制
     max_index_sub: int = 0  # 索引订阅限制
 
