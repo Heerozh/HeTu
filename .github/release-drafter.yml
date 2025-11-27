@@ -1,6 +1,9 @@
 name-template: 'v$RESOLVED_VERSION 🌈'
 tag-template: 'v$RESOLVED_VERSION'
 categories:
+  - title: '💥 重大变更'
+    labels:
+      - 'major'
   - title: '🚀 新功能'
     labels:
       - 'feature'
