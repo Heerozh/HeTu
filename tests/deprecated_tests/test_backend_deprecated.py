@@ -1,3 +1,10 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import asyncio
 import logging
 import time
@@ -10,7 +17,7 @@ import numpy as np
 
 from hetu.data import (
     define_component,
-    Property,
+    property_field,
     BaseComponent,
     ComponentDefines,
     Permission,
@@ -57,18 +64,18 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         @define_component(namespace="ssw", permission=Permission.OWNER)
         class Item(BaseComponent):
-            owner: np.int64 = Property(0, unique=False, index=True)
-            model: np.int32 = Property(0, unique=False, index=True)
-            qty: np.int16 = Property(1, unique=False, index=False)
-            level: np.int8 = Property(1, unique=False, index=False)
-            time: np.int64 = Property(0, unique=True, index=True)
-            name: "U8" = Property("", unique=True, index=False)
-            used: bool = Property(False, unique=False, index=True)
+            owner: np.int64 = property_field(0, unique=False, index=True)
+            model: np.int32 = property_field(0, unique=False, index=True)
+            qty: np.int16 = property_field(1, unique=False, index=False)
+            level: np.int8 = property_field(1, unique=False, index=False)
+            time: np.int64 = property_field(0, unique=True, index=True)
+            name: "U8" = property_field("", unique=True, index=False)
+            used: bool = property_field(False, unique=False, index=True)
 
         @define_component(namespace="ssw")
         class SingleUnique(BaseComponent):
-            name: "U8" = Property("", unique=True, index=True)
-            timestamp: float = Property(0, unique=False, index=True)
+            name: "U8" = property_field("", unique=True, index=True)
+            timestamp: float = property_field(0, unique=False, index=True)
 
     @classmethod
     def setUpClass(cls):
@@ -632,13 +639,13 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         @define_component(namespace="ssw")
         class ItemNew(BaseComponent):
-            owner: np.int64 = Property(0, unique=False, index=True)
-            model: np.int32 = Property(0, unique=False, index=True)
-            qty_new: np.int16 = Property(111, unique=False, index=False)
-            level: np.int8 = Property(1, unique=False, index=False)
-            time: np.int64 = Property(0, unique=True, index=True)
-            name: "U6" = Property("", unique=True, index=False)
-            used: bool = Property(False, unique=False, index=True)
+            owner: np.int64 = property_field(0, unique=False, index=True)
+            model: np.int32 = property_field(0, unique=False, index=True)
+            qty_new: np.int16 = property_field(111, unique=False, index=False)
+            level: np.int8 = property_field(1, unique=False, index=False)
+            time: np.int64 = property_field(0, unique=True, index=True)
+            name: "U6" = property_field("", unique=True, index=False)
+            used: bool = property_field(False, unique=False, index=True)
 
         # 从ItemNew改名回Item，以便迁移同名的
         import json
@@ -673,7 +680,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
         @define_component(namespace="ssw", persist=False)
         class TempData(BaseComponent):
-            data: np.int64 = Property(0, unique=True)
+            data: np.int64 = property_field(0, unique=True)
 
         temp_data = table_cls(TempData, "test", 1, backend)
         temp_data.create_or_migrate()

@@ -11,7 +11,6 @@ import keyword
 import logging
 import operator
 import os
-from collections.abc import Callable
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Any
@@ -19,8 +18,7 @@ from typing import Any
 import git
 import numpy as np
 
-from ..common import Singleton
-from ..common import csharp_keyword
+from ..common import Singleton, csharp_keyword
 
 logger = logging.getLogger("HeTu.root")
 
@@ -38,7 +36,17 @@ class Property:
     default: Any  # 属性的默认值
     unique: bool = False  # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool | None = None  # 是否是排序索引
-    dtype: str | type = None  # 数据类型，最好用np的明确定义
+    dtype: str | type | None = None  # 数据类型，最好用np的明确定义
+
+
+# 辅助函数，过滤类型检查器报错
+def property_field(
+    default: Any,
+    unique: bool = False,
+    index: bool | None = None,
+    dtype: str | type | None = None,
+) -> Any:
+    return Property(default=default, unique=unique, index=index, dtype=dtype)
 
 
 class BaseComponent:
@@ -248,13 +256,13 @@ def define_component(
 
     Examples
     --------
-    >>> from hetu.data import BaseComponent, Property, define_component, Permission
+    >>> from hetu.data import BaseComponent, property_field, define_component, Permission
     >>> @define_component(namespace="ssw")
     ... class Position(BaseComponent):
-    ...     x: np.float32 = Property(default=0)
-    ...     y: np.float32 = Property(default=0)
-    ...     owner: np.int64 = Property(default=0, unique=True)
-    ...     name: '<U8' = Property(default="12345678")
+    ...     x: np.float32 = property_field(default=0)
+    ...     y: np.float32 = property_field(default=0)
+    ...     owner: np.int64 = property_field(default=0, unique=True)
+    ...     name: '<U8' = property_field(default="12345678")
 
     Parameters
     ----------
@@ -262,6 +270,7 @@ def define_component(
         你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
     persist: bool
         表示是否持久化，设为False时，每次启动你的数据会被清除，请小心。
+        对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。
     readonly: bool
         是否只读Component，只读Component不会被加事务保护，增加并行性。
     backend: str
@@ -289,7 +298,7 @@ def define_component(
 
     Notes
     -----
-    `Property(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
+    `property_field(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
         - `index` 表示此属性开启索引；
         - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
 
@@ -297,9 +306,9 @@ def define_component(
 
     属性值的类型由type hint决定（如 `: np.float32`），请使用长度明确的np类型。
     字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
-    不想看到"<U8"在IDE里标红语法错误的话，可用 `name = Property(dtype='<U8')` 方式。
+    不想看到"<U8"在IDE里标红语法错误的话，可用 `name = property_field(dtype='<U8')` 方式。
 
-    每个Component表都有个默认的主键`id: np.int64 = Property(default=0, unique=True)`，
+    每个Component表都有个默认的主键`id: np.int64 = property_field(default=0, unique=True)`，
     会自行自增无法修改。
     """
 
@@ -313,12 +322,12 @@ def define_component(
         if csharp_keyword.iskeyword(pname):
             raise ValueError(f"{cname}.{pname}属性定义出错，属性名不能是C#关键字。")
         # 判断类型，以及长度合法性
-        assert (
-            np.dtype(prop.dtype).itemsize > 0
-        ), f"{cname}.{pname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
-        assert (
-            np.dtype(prop.dtype).type is not np.void
-        ), f"{cname}.{pname}属性的dtype不支持void类型"
+        assert np.dtype(prop.dtype).itemsize > 0, (
+            f"{cname}.{pname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+        )
+        assert np.dtype(prop.dtype).type is not np.void, (
+            f"{cname}.{pname}属性的dtype不支持void类型"
+        )
         # bool类型在一些后端数据库中不支持，强制转换为int8
         if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == "?":
             prop.dtype = np.int8
@@ -359,27 +368,27 @@ def define_component(
             # if not properties['owner'].unique:
             #     logger.warning(f"⚠️ [🛠️Define] {cls.__name__}.owner属性不是unique唯一，"
             #                    f"你确定正确么？")
-            assert np.issubdtype(
-                properties["owner"].dtype, np.number
-            ), f"{cname}的owner属性必需是numeric数字(int, np.int64, ...)类型"
+            assert np.issubdtype(properties["owner"].dtype, np.number), (
+                f"{cname}的owner属性必需是numeric数字(int, np.int64, ...)类型"
+            )
 
         # 检查RLS定义
         if permission == Permission.RLS:
-            assert (
-                rls_compare is not None
-            ), f"{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
-            assert all(
-                type(e) is str for e in rls_compare
-            ), f"{cname}.rls_compare参数必须全部是字符串类型"
+            assert rls_compare is not None, (
+                f"{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
+            )
+            assert all(type(e) is str for e in rls_compare), (
+                f"{cname}.rls_compare参数必须全部是字符串类型"
+            )
             assert len(rls_compare) == 3, f"{cname}.rls_compare参数必须只有3个元素)"
 
-            assert hasattr(
-                operator, rls_compare[0]
-            ), f"{cname}权限为RLS: {rls_compare}，但operator模块没有{rls_compare[0]}方法"
+            assert hasattr(operator, rls_compare[0]), (
+                f"{cname}权限为RLS: {rls_compare}，但operator模块没有{rls_compare[0]}方法"
+            )
 
-            assert (
-                rls_compare[1] in properties
-            ), f"{cname}权限为RLS: {rls_compare}，但表没有定义{rls_compare[1]}属性"
+            assert rls_compare[1] in properties, (
+                f"{cname}权限为RLS: {rls_compare}，但表没有定义{rls_compare[1]}属性"
+            )
 
     def warp(cls):
         # class名合法性检测
@@ -402,15 +411,15 @@ def define_component(
             if isinstance(value, Property) and name not in properties:
                 raise ValueError(
                     f"{cls.__name__}.{name}属性未定义type hint。请使用以下形式，"
-                    f"{name}: type = Property(...)"
+                    f"{name}: type = property_field(...)"
                 )
 
         assert properties, f"{cls.__name__}至少要有1个Property成员"
 
         # 添加id主键，如果冲突，报错
-        assert (
-            "id" not in properties
-        ), f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
+        assert "id" not in properties, (
+            f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
+        )
         # 必备索引，只进行unique索引为了基础性能
         properties["id"] = Property(0, True, True, np.int64)
 

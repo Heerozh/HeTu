@@ -25,7 +25,7 @@ from .base import (
     MQClient,
 )
 from .base import RaceCondition, HeadLockFailed
-from ..component import BaseComponent, Property
+from ..component import BaseComponent
 from ...common.helper import batched
 from ...common.multimap import MultiMap
 
@@ -222,9 +222,9 @@ class RedisBackend(Backend):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert (
-            hash(asyncio.get_running_loop()) == self.loop_id
-        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        )
 
         return self._aio
 
@@ -264,9 +264,9 @@ class RedisBackend(Backend):
         """随机返回一个只读连接"""
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())
-        assert (
-            hash(asyncio.get_running_loop()) == self.loop_id
-        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        )
 
         return random.choice(self.replicas)
 
@@ -426,6 +426,8 @@ class RedisComponentTable(ComponentTable):
         cluster_only : bool
             如果为True，则只处理cluster_id的变更，其他结构迁移和重建索引等不处理。
         """
+        # todo 考虑取消head_lock，通过记录版本号来实现，只要版本号不一致，就停止服务要求迁移
+        #       同时把迁移移动到专门的cli命令中，不是自动执行而是手动让ci/cd发布流程调用
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
 
@@ -458,6 +460,8 @@ class RedisComponentTable(ComponentTable):
             logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
     def flush(self, force=False):
+        # todo 考虑取消head_lock，建议易失数据全部加上行级timeout信息，过期后自动删除
+        #       flush命令则依然是交给ci/cd来执行
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
 
@@ -466,7 +470,6 @@ class RedisComponentTable(ComponentTable):
 
         # 如果非持久化组件，则允许调用flush主动清空数据
         if not self._component_cls.persist_ or force:
-
             io = self._backend.io
             logger.info(
                 f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
@@ -608,7 +611,7 @@ class RedisComponentTable(ComponentTable):
         # 多出来的列再次报警告，然后忽略
         io = self._backend.io
         rows = io.keys(self._key_prefix + "*")
-        props = dict(self._component_cls.properties_)  # type: dict[str, Property]
+        props = dict(self._component_cls.properties_)
         added = 0
         for prop_name in new_dtypes.fields:
             if prop_name not in dtypes_in_db.fields:

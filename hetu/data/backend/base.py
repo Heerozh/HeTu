@@ -287,9 +287,9 @@ class ComponentTransaction:
     """
 
     def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
-        assert (
-            trx_conn.cluster_id == comp_tbl.cluster_id
-        ), "事务只能在对应的cluster_id中执行，不能跨cluster"
+        assert trx_conn.cluster_id == comp_tbl.cluster_id, (
+            "事务只能在对应的cluster_id中执行，不能跨cluster"
+        )
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
         self._trx_conn = trx_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
@@ -341,8 +341,8 @@ class ComponentTransaction:
         假设我们有个Slot组件，每个Slot有一个item_id指向道具
         >>> @define_component
         ... class Slot(BaseComponent):
-        ...     owner: np.int64 = Property(0, index=True)
-        ...     item_id: np.int64 = Property(0)
+        ...     owner: np.int64 = property_field(0, index=True)
+        ...     item_id: np.int64 = property_field(0)
         取出所有slot.owner == caller的道具数据：
         >>> @define_system(components=(Slot, Item))
         ... async def get_all_items(ctx):
@@ -387,21 +387,21 @@ class ComponentTransaction:
         Examples
         --------
         >>> from hetu.system import define_system
-        >>> from hetu.data import define_component, Property
+        >>> from hetu.data import define_component, property_field
         >>> @define_component
         ... class Item(BaseComponent):
-        ...     owner: np.int64 = Property(0, index=True)
+        ...     owner: np.int64 = property_field(0, index=True)
         >>> @define_system(components=(Item, ))
         ... async def some_system(ctx):
         ...     item_row = await ctx[Item].select(ctx.caller, 'owner')
         ...     print(item_row.name)
         """
-        assert np.isscalar(
-            value
-        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert (
-            where in self._component_cls.indexes_
-        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(value), (
+            f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        )
+        assert where in self._component_cls.indexes_, (
+            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        )
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -508,12 +508,12 @@ class ComponentTransaction:
         >>> few_items = items[items.amount < 10]
 
         """
-        assert np.isscalar(
-            left
-        ), f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
-        assert (
-            index_name in self._component_cls.indexes_
-        ), f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
+        assert np.isscalar(left), (
+            f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
+        )
+        assert index_name in self._component_cls.indexes_, (
+            f"{self._component_cls.component_name_} 组件没有叫 {index_name} 的索引"
+        )
 
         left = int(left) if np.issubdtype(type(left), np.bool_) else left
         left = left.item() if issubclass(type(left), np.generic) else left
@@ -556,12 +556,12 @@ class ComponentTransaction:
 
     async def is_exist(self, value, where: str = "id") -> tuple[bool, int | None]:
         """查询索引是否存在该键值，并返回row_id，返回值：(bool, int)"""
-        assert np.isscalar(
-            value
-        ), f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
-        assert (
-            where in self._component_cls.indexes_
-        ), f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        assert np.isscalar(value), (
+            f"value必须为标量类型(数字，字符串等), 你的:{type(value)}, {value}"
+        )
+        assert where in self._component_cls.indexes_, (
+            f"{self._component_cls.component_name_} 组件没有叫 {where} 的索引"
+        )
 
         if issubclass(type(value), np.generic):
             value = value.item()
@@ -570,7 +570,7 @@ class ComponentTransaction:
         found = len(row_ids) > 0
         return found, found and int(row_ids[0]) or None
 
-    def update_or_insert(self, value, where: str = None) -> "UpdateOrInsert":
+    def update_or_insert(self, value, where: str = None) -> UpdateOrInsert:
         """
         同 :py:func:`hetu.data.ComponentTransaction.select`，只是返回的是一个自动更新的上下文。
 
@@ -584,11 +584,11 @@ class ComponentTransaction:
         --------
         使用方法如下：
         >>> from hetu.system import define_system
-        >>> from hetu.data import define_component, Property
+        >>> from hetu.data import define_component, property_field
         >>> @define_component
         ... class Portfolio(BaseComponent):
-        ...     owner: np.int64 = Property(0, index=True)
-        ...     cash: np.int64 = Property(0)
+        ...     owner: np.int64 = property_field(0, index=True)
+        ...     cash: np.int64 = property_field(0)
         >>> @define_system(components=(Portfolio, ))
         ... async def deposit_franklin(ctx):
         ...     async with ctx[].update_or_insert(ctx.caller, 'owner') as row:
@@ -596,7 +596,7 @@ class ComponentTransaction:
         """
         return UpdateOrInsert(self, value, where)
 
-    def upsert(self, value, where: str = None) -> "UpdateOrInsert":
+    def upsert(self, value, where: str = None) -> UpdateOrInsert:
         return self.update_or_insert(value, where)
 
     def insert_cache_exists(self, value, where: str) -> bool:
@@ -667,9 +667,9 @@ class ComponentTransaction:
         self._trx_update(row_id, old_row, row)
 
     async def update_rows(self, rows: np.recarray) -> None:
-        assert (
-            type(rows) is np.recarray and rows.shape[0] > 1
-        ), "update_rows数据必须是多行数据"
+        assert type(rows) is np.recarray and rows.shape[0] > 1, (
+            "update_rows数据必须是多行数据"
+        )
         for i, id_ in enumerate(rows.id):
             await self.update(id_, rows[i])
 
@@ -680,11 +680,11 @@ class ComponentTransaction:
         Examples
         --------
         >>> from hetu.system import define_system
-        >>> from hetu.data import define_component, Property
+        >>> from hetu.data import define_component, property_field
         >>> @define_component
         ... class Item(BaseComponent):
-        ...     owner: np.int64 = Property(0, index=True)
-        ...     model: str = Property("", dtype='<U8')
+        ...     owner: np.int64 = property_field(0, index=True)
+        ...     model: str = property_field("", dtype='<U8')
         >>> @define_system(components=(Item, ))
         ... async def create_item(ctx):
         ...     new_item = Item.new_row()
@@ -746,9 +746,9 @@ class ComponentTransaction:
         self._trx_delete(row_id, old_row)
 
     async def delete_rows(self, row_ids: list[int] | np.ndarray) -> None:
-        assert (
-            type(row_ids) is np.ndarray and row_ids.shape[0] > 1
-        ), "deletes数据必须是多行数据"
+        assert type(row_ids) is np.ndarray and row_ids.shape[0] > 1, (
+            "deletes数据必须是多行数据"
+        )
         for row_id in row_ids:
             await self.delete(row_id)
 
