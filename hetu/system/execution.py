@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 
-from ..data import BaseComponent, define_component, Property, Permission
+from ..data import BaseComponent, define_component, property_field, Permission
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -21,10 +21,10 @@ replay = logging.getLogger("HeTu.replay")
 class ExecutionLock(BaseComponent):
     """带有UUID的SystemCall执行记录，用于锁住防止相同uuid的调用重复执行。调用方用完后要记得删除自己的记录。"""
 
-    uuid: str = Property("", dtype="<U32", unique=True)  # 唯一标识
-    name: str = Property("", dtype="<U32")  # 系统名
-    caller: np.int64 = Property(0)
-    called: np.double = Property(0, index=True)  # 执行时间
+    uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
+    name: str = property_field("", dtype="<U32")  # 系统名
+    caller: np.int64 = property_field(0)
+    called: np.double = property_field(0, index=True)  # 执行时间
 
 
 async def clean_expired_call_locks(comp_mgr):

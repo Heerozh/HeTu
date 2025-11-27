@@ -25,7 +25,7 @@ from .base import (
     MQClient,
 )
 from .base import RaceCondition, HeadLockFailed
-from ..component import BaseComponent, Property
+from ..component import BaseComponent
 from ...common.helper import batched
 from ...common.multimap import MultiMap
 
@@ -222,9 +222,9 @@ class RedisBackend(Backend):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert (
-            hash(asyncio.get_running_loop()) == self.loop_id
-        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        )
 
         return self._aio
 
@@ -264,9 +264,9 @@ class RedisBackend(Backend):
         """随机返回一个只读连接"""
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())
-        assert (
-            hash(asyncio.get_running_loop()) == self.loop_id
-        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        )
 
         return random.choice(self.replicas)
 
@@ -470,7 +470,6 @@ class RedisComponentTable(ComponentTable):
 
         # 如果非持久化组件，则允许调用flush主动清空数据
         if not self._component_cls.persist_ or force:
-
             io = self._backend.io
             logger.info(
                 f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
@@ -612,7 +611,7 @@ class RedisComponentTable(ComponentTable):
         # 多出来的列再次报警告，然后忽略
         io = self._backend.io
         rows = io.keys(self._key_prefix + "*")
-        props = dict(self._component_cls.properties_)  # type: dict[str, Property]
+        props = dict(self._component_cls.properties_)
         added = 0
         for prop_name in new_dtypes.fields:
             if prop_name not in dtypes_in_db.fields:

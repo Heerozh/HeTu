@@ -6,16 +6,19 @@
 """
 
 import copy
+import functools
 import inspect
 from dataclasses import dataclass
 from inspect import signature
-from typing import Any
 from types import FunctionType
-import functools
+from typing import TYPE_CHECKING, Any
+from ..data import Permission
 
-from .execution import ExecutionLock
 from ..common import Singleton
-from ..data import BaseComponent, Permission
+from .execution import ExecutionLock
+
+if TYPE_CHECKING:
+    from ..data import BaseComponent
 
 SYSTEM_NAME_MAX_LEN = 32
 
@@ -276,13 +279,13 @@ def define_system(
 
     Examples
     --------
-    >>> from hetu.data import BaseComponent, define_component, Property
+    >>> from hetu.data import BaseComponent, define_component, property_field
     >>> @define_component
     ... class Position(BaseComponent):
-    ...     x: int = Property(0)
+    ...     x: int = property_field(0)
     >>> @define_component
     ... class HP(BaseComponent):
-    ...     hp: int = Property(0)
+    ...     hp: int = property_field(0)
     ...
     >>> from hetu.system import define_system, Context, ResponseToClient
     >>> @define_system(

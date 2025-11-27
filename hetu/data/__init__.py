@@ -5,12 +5,11 @@
 @email: heeroz@gmail.com
 """
 
-from .component import (
-    define_component,
-    Property,
-    BaseComponent,
-    Permission,
-    ComponentDefines,
-)
-
 from . import backend
+from .component import (
+    BaseComponent,
+    ComponentDefines,
+    Permission,
+    define_component,
+    property_field,
+)

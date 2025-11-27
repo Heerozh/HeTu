@@ -18,7 +18,7 @@ from .context import Context
 from .definer import define_system, SystemClusters, SYSTEM_NAME_MAX_LEN
 from .execution import ExecutionLock, clean_expired_call_locks
 from .executor import SystemExecutor
-from ..data import BaseComponent, define_component, Property, Permission
+from ..data import BaseComponent, define_component, property_field, Permission
 from ..data.backend import ComponentTable
 
 SYSTEM_CLUSTERS = SystemClusters()
@@ -28,15 +28,15 @@ replay = logging.getLogger("HeTu.replay")
 
 @define_component(namespace="HeTu", persist=True, permission=Permission.ADMIN)
 class FutureCalls(BaseComponent):
-    owner: np.int64 = Property(0, index=True)  # 创建方
-    uuid: str = Property("", dtype="<U32", unique=True)  # 唯一标识
-    system: str = Property("", dtype=f"<U{SYSTEM_NAME_MAX_LEN}")  # 目标system名
-    args: str = Property("", dtype="<U1024")  # 目标system参数
-    recurring: bool = Property(False)  # 是否永不结束重复触发
-    created: np.double = Property(0)  # 创建时间
-    last_run: np.double = Property(0)  # 最后执行时间
-    scheduled: np.double = Property(0, index=True)  # 计划执行时间
-    timeout: np.int32 = Property(60)  # 再次调用时间（秒）
+    owner: np.int64 = property_field(0, index=True)  # 创建方
+    uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
+    system: str = property_field("", dtype=f"<U{SYSTEM_NAME_MAX_LEN}")  # 目标system名
+    args: str = property_field("", dtype="<U1024")  # 目标system参数
+    recurring: bool = property_field(False)  # 是否永不结束重复触发
+    created: np.double = property_field(0)  # 创建时间
+    last_run: np.double = property_field(0)  # 最后执行时间
+    scheduled: np.double = property_field(0, index=True)  # 计划执行时间
+    timeout: np.int32 = property_field(60)  # 再次调用时间（秒）
 
 
 # permission设为admin权限阻止客户端调用
