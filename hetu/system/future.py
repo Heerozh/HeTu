@@ -96,11 +96,11 @@ async def create_future_call(
     >>> @define_system(namespace='test', permission=Permission.ADMIN)
     ... def test_future_call(ctx: Context, *args):
     ...     print('Future call test', args)
-    >>> @define_system(namespace='test', permission=Permission.ADMIN, bases=('create_future_call:test') )
+    >>> @define_system(namespace='test', permission=Permission.ADMIN, subsystems=('create_future_call:test') )
     ... def test_future_create(ctx: Context):
     ...     ctx['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
 
-    示例中，`bases`继承使用':'符号创建了`create_future_call`的test副本。
+    示例中，`subsystems`继承使用':'符号创建了`create_future_call`的test副本。
     继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
     增加backend的扩展性，具体参考簇相关的文档。
 

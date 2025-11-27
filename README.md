@@ -88,14 +88,14 @@ async def move_to(ctx: Context, x, y):
 > [!NOTE]
 > 什么是内部 System? 如何调用？
 > 内部 System 为 Admin 权限的 System，用户不可调用。
-> System都牵涉到数据库事务操作，因此须通过参数`bases`继承，让事务连续。
+> System都牵涉到数据库事务操作，因此须通过参数`subsystems`链接，让事务连续。
 
 ```Python
 from hetu.system import define_system, Context
 from hetu.system import elevate
 
 # permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, bases=(elevate,))
+@define_system(namespace="ssw", permission=Permission.EVERYBODY, subsystems=(elevate,))
 async def login_test(ctx: Context, user_id):
     # 提权以后ctx.caller就是user_id。
     await elevate(ctx, user_id, kick_logged_in=True)

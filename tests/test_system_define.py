@@ -132,12 +132,14 @@ def test_system_inheritance(test_component):
         pass
 
     @define_system(
-        namespace="pytest", components=(comp2, comp3), bases=("system_base",)
+        namespace="pytest", components=(comp2, comp3), subsystems=("system_base",)
     )
     async def system_inherit1(ctx, param1, param2):
         pass
 
-    @define_system(namespace="pytest", components=(comp4,), bases=(system_inherit1,))
+    @define_system(
+        namespace="pytest", components=(comp4,), subsystems=(system_inherit1,)
+    )
     async def system_inherit2(ctx, param1):
         pass
 
@@ -193,7 +195,7 @@ def test_system_inh_backend_consistent(test_component):
         pass
 
     @define_system(
-        namespace="pytest", components=test_component, bases=("system_postgresql",)
+        namespace="pytest", components=test_component, subsystems=("system_postgresql",)
     )
     async def system_diff_inh_backend(ctx, vec, hit):
         pass
@@ -319,7 +321,7 @@ def test_system_copy(test_component):
 
     @define_system(
         namespace="pytest",
-        bases=("system1:copy",),
+        subsystems=("system1:copy",),
     )
     async def system_copy1(
         ctx,

@@ -133,7 +133,7 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     @define_system(
         namespace="ns1",
         permission=Permission.EVERYBODY,
-        bases=("create_future_call:copy1",),
+        subsystems=("create_future_call:copy1",),
     )
     async def use_future_namespace1(ctx: Context, value, recurring):
         return await ctx["create_future_call:copy1"](
@@ -143,7 +143,7 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     @define_system(
         namespace="ns2",
         permission=Permission.EVERYBODY,
-        bases=("create_future_call:copy1",),
+        subsystems=("create_future_call:copy1",),
     )
     async def use_future_namespace2(ctx: Context, value, recurring):
         return await ctx["create_future_call:copy1"](
