@@ -66,7 +66,7 @@ class TestSystemDefine(unittest.TestCase):
         self.assertEqual(sys1_def.defaults_count, 1)
 
         # 直接调用要禁止
-        with self.assertRaisesRegex(RuntimeError, "调用"):
+        with self.assertRaisesRegex(AssertionError, "Context"):
             system1(1, 2, 3)
 
         # 重复定义
