@@ -6,16 +6,16 @@
 
                       事务相关结构
     ┌────────────────┐           ┌──────────────────┐
-    │    Backend     ├──────────►│BackendTransaction│
+    │    Backend     ├──────────►│BackendTransaction│     todo 首先要先改名BackendSession, 包含idmap
     │数据库直连池（单件)│           │    事务模式连接     │
     └────────────────┘           └──────────────────┘
             ▲                             ▲
             │初始化数据                     │ 写入数据
   ┌─────────┴──────────┐      ┌───────────┴────────────┐
   │   ComponentTable   │      │  ComponentTransaction  │
-  │  组件数据管理（单件)  │      │      组件相关事务操作     │
+  │  组件数据管理（单件)  │      │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
   └────────────────────┘      └────────────────────────┘
-
+  todo 直接select出来的就是此类
 
         数据订阅结构
     ┌─────────────────┐
@@ -291,7 +291,7 @@ class ComponentTransaction:
             "事务只能在对应的cluster_id中执行，不能跨cluster"
         )
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
-        self._trx_conn = trx_conn
+        self._trx_conn = trx_conn  # todo 改成_session_conn
         self._cache = {}  # 事务中缓存数据，key为row_id，value为row
         # insert缓存数据，因为没有id，所以用list存储
         self._insert_caches = np.rec.array(
