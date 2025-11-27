@@ -75,6 +75,7 @@ class SystemExecutor:
             return
         # 通过connection component分配自己一个连接id
         sys = SYSTEM_CLUSTERS.get_system("new_connection")
+        assert sys is not None
         ok, _ = await self.execute_(sys, address)
         if not ok:
             raise RuntimeError("连接初始化失败，new_connection调用失败")
@@ -158,7 +159,7 @@ class SystemExecutor:
         backend = first_comp and comp_mgr.get_table(first_comp).backend or None
 
         # 复制inherited函数
-        for base_name in sys.full_bases:
+        for base_name in sys.full_subsystems:
             base, _, suffix = base_name.partition(":")
             context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base).func
 

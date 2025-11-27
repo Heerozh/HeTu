@@ -21,7 +21,9 @@ async def do_nothing(ctx: Context, sleep):
 # ============================
 
 
-@define_system(namespace="pytest", permission=Permission.EVERYBODY, bases=("elevate",))
+@define_system(
+    namespace="pytest", permission=Permission.EVERYBODY, subsystems=("elevate",)
+)
 async def login(ctx: Context, user_id, kick_logged_in=True):
     await ctx["elevate"](ctx, user_id, kick_logged_in)
     return ResponseToClient({"id": ctx.caller})
@@ -58,7 +60,7 @@ async def test_rls_comp_value(ctx: Context, value):
 @define_system(
     namespace="pytest",
     permission=Permission.EVERYBODY,
-    bases=("create_future_call:copy1",),
+    subsystems=("create_future_call:copy1",),
 )
 async def add_rls_comp_value_future(ctx: Context, value, recurring):
     return await ctx["create_future_call:copy1"](
@@ -71,7 +73,7 @@ async def add_rls_comp_value_future(ctx: Context, value, recurring):
 
 @define_system(
     namespace="pytest",
-    bases=("add_rls_comp_value:copy1",),
+    subsystems=("add_rls_comp_value:copy1",),
 )
 async def add_rls_comp_value_copy(ctx: Context, value):
     return await ctx["add_rls_comp_value:copy1"](ctx, value)
@@ -79,7 +81,7 @@ async def add_rls_comp_value_copy(ctx: Context, value):
 
 @define_system(
     namespace="pytest",
-    bases=("test_rls_comp_value:copy1",),
+    subsystems=("test_rls_comp_value:copy1",),
 )
 async def test_rls_comp_value_copy(ctx: Context, value):
     return await ctx["test_rls_comp_value:copy1"](ctx, value)
@@ -129,7 +131,7 @@ async def create_row_2_upsert(ctx, owner, v2):
 @define_system(
     namespace="pytest",
     components=(RLSComp, IndexComp1, IndexComp2),
-    bases=(add_rls_comp_value,),
+    subsystems=(add_rls_comp_value,),
 )
 async def composer_system(ctx: Context):
     rls_comp_value = await add_rls_comp_value(ctx, 10)
