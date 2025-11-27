@@ -9,7 +9,7 @@ import copy
 import inspect
 from dataclasses import dataclass
 from inspect import signature
-from typing import Callable, Any
+from typing import Any
 from types import FunctionType
 import functools
 
@@ -262,8 +262,8 @@ class SystemClusters(metaclass=Singleton):
 
 
 def define_system(
-    components: tuple[type[BaseComponent], ...] = None,
-    non_transactions: tuple[type[BaseComponent], ...] = None,
+    components: tuple[type[BaseComponent], ...] | None = None,
+    non_transactions: tuple[type[BaseComponent], ...] | None = None,
     namespace: str = "default",
     force: bool = False,
     permission=Permission.USER,
@@ -407,6 +407,7 @@ def define_system(
     不用担心，未来调用的后台任务在检查调用队列时，会循环检查所有FutureCalls副本组件队列。
 
     """
+    from .context import Context
 
     # todo non_transactions名字还是不够好，考虑改名为direct_refs
     def warp(func):
@@ -466,12 +467,22 @@ def define_system(
             retry,
         )
 
-        # 返回假的func，因为不允许直接调用。
-        @functools.wraps(func)
-        def warp_direct_system_call(*_, **__):
-            # todo，检测ctx是否存在，存在，且确实继承了后，还是允许调用
-            raise RuntimeError("系统函数不允许直接调用")
-            # return call_system(namespace, func.__name__, *args, **kwargs)
+        # 返回包装的func，因为不允许直接调用，需要检查。
+        @functools.wraps(func)  # 传入原函数meta信息
+        def warp_direct_system_call(*_args, **__kwargs) -> Any:
+            # 检查ctx
+            ctx = _args[0]
+            assert isinstance(ctx, Context), "第一个参数必须是Context实例"
+            # 检查当前ctx[]
+            try:
+                assert ctx[func.__name__] == func, (
+                    f"错误，ctx[{func.__name__}] 返回值不是本函数"
+                )
+            except KeyError:
+                raise RuntimeError(
+                    "要调用其他System必须在define_system时通过subsystems参数定义"
+                )
+            return func(*_args, **__kwargs)
 
         return warp_direct_system_call
 
