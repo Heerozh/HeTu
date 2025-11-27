@@ -1,8 +1,15 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import unittest
 
 from hetu.data import (
     define_component,
-    Property,
+    property_field,
     BaseComponent,
     ComponentDefines,
     Permission,
@@ -17,29 +24,29 @@ class TestSystemDefine(unittest.TestCase):
 
         @define_component(namespace="ssw", force=True)
         class GalaxyPosition(BaseComponent):
-            x: float = Property(0, True)
-            y: float = Property(0, True)
+            x: float = property_field(0, True)
+            y: float = property_field(0, True)
 
         @define_component(namespace="ssw", force=True)
         class Hp(BaseComponent):
-            hp: float = Property(0, True)
-            max_hp: float = Property(0, True)
+            hp: float = property_field(0, True)
+            max_hp: float = property_field(0, True)
 
         @define_component(namespace="ssw", force=True)
         class Inventory(BaseComponent):
-            owner: int = Property(0, True)
+            owner: int = property_field(0, True)
 
         @define_component(namespace="ssw", force=True)
         class Map(BaseComponent):
-            owner: int = Property(0, True)
+            owner: int = property_field(0, True)
 
         @define_component(namespace="ssw", force=True, persist=False)
         class Time(BaseComponent):
-            clock: int = Property(0, False)
+            clock: int = property_field(0, False)
 
         @define_component(namespace="ssw", force=True, persist=False, readonly=True)
         class World(BaseComponent):
-            some: int = Property(0, False)
+            some: int = property_field(0, False)
 
     @classmethod
     def setUpClass(cls):
@@ -151,8 +158,8 @@ class TestSystemDefine(unittest.TestCase):
 
             @define_component(namespace="ssw", force=True, backend="Mysql")
             class GalaxyPositionMysql(BaseComponent):
-                x: float = Property(0, True)
-                y: float = Property(0, True)
+                x: float = property_field(0, True)
+                y: float = property_field(0, True)
 
             @define_system(
                 namespace="ssw",

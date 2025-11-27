@@ -11,9 +11,14 @@ from typing import Any
 
 import numpy as np
 
-from .base import BaseSubscription, ComponentTable, Backend
+from .base import BaseSubscription
 from ..component import Permission
-from ...system import Context
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ...system import Context
+    from .base import ComponentTable, Backend
 
 logger = logging.getLogger("HeTu.root")
 

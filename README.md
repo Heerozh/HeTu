@@ -3,7 +3,7 @@
 > [!NOTE]
 > 内测中，正在公司内部开发使用
 
- [ <img src="https://devin.ai/favicon.ico" style="height: 1em;"/> English Summary (AI) ](https://deepwiki.com/Heerozh/HeTu)
+[ <img src="https://devin.ai/favicon.ico" style="height: 1em;"/> English Summary (AI) ](https://deepwiki.com/Heerozh/HeTu)
 
 # 🌌 河图 HeTu
 
@@ -18,7 +18,8 @@
 
 ## 实时数据库
 
-河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的进行 select/query 订阅。
+河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的
+进行 select/query 订阅。
 订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
 
 写入操作只能由服务器的逻辑代码执行，客户端通过RPC远程调用。类似BaaS的储存过程，但更易写。
@@ -33,20 +34,21 @@
 
 ### 定义组件（Component）
 
-为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表Schema），通过`owner`属性将其关联到玩家 ID。
+为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表Schema），通过`owner`属性
+将其关联到玩家 ID。
 组件的权限设为`Permission.USER`，所有登录的客户端都可直接向河图查询该组件。
 
 ```Python
 import numpy as np
-from hetu.data import define_component, Property, Permission, BaseComponent
+from hetu.data import define_component, property_field, Permission, BaseComponent
 
 
 # 通过@define_component修饰，表示Position结构是一个组件
 @define_component(namespace='ssw', permission=Permission.USER)
 class Position(BaseComponent):
-    x: np.float32 = Property(default=0)  # 定义Position.x为np.float32类型，默认值为0
-    y: np.float32 = Property(default=0)  # 只能定义为c类型(np类型)
-    owner: np.int64 = Property(default=0, unique=True)  # 开启unique索引
+    x: np.float32 = property_field(default=0)  # 定义Position.x为np.float32类型，默认值为0
+    y: np.float32 = property_field(default=0)  # 只能定义为c类型(np类型)
+    owner: np.int64 = property_field(default=0, unique=True)  # 开启unique索引
 ```
 
 > [!WARNING]
@@ -57,7 +59,8 @@ class Position(BaseComponent):
 
 #### move_to 移动逻辑
 
-玩家移动逻辑`move_to`通过`define_system`定义，参数`components`引用要操作的表，这里我们操作玩家位置数据`Position`。
+玩家移动逻辑`move_to`通过`define_system`定义，参数`components`引用要操作的表，这里我们操作玩家位置数据
+`Position`。
 
 `permission`设置为只有 USER 组的用户才能调用，
 `ctx.caller`是登录用户的 id，此 id 稍后登录时会通过`elevate`方法决定。
@@ -83,7 +86,8 @@ async def move_to(ctx: Context, x, y):
 
 我们定义一个`login_test`System，作为客户端登录接口。
 
-河图有个内部 System 叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联`user_id`。
+河图有个内部 System 叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联
+`user_id`。
 
 > [!NOTE]
 > 什么是内部 System? 如何调用？
@@ -93,6 +97,7 @@ async def move_to(ctx: Context, x, y):
 ```Python
 from hetu.system import define_system, Context
 from hetu.system import elevate
+
 
 # permission定义为任何人可调用
 @define_system(namespace="ssw", permission=Permission.EVERYBODY, subsystems=(elevate,))
@@ -123,12 +128,14 @@ uv run hetu start --app-file=./src/app.py --db=redis://127.0.0.1:6379/0 --namesp
 
 河图 Unity SDK 基于 async/await，支持 Unity 2018 以上 和 WebGL 平台。
 
-首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package from git URL”
+首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package from
+git URL”
 
 <img src="https://github.com/Heerozh/HeTu/blob/media/sdk1.png" width="306.5" height="156.5"/>
 <img src="https://github.com/Heerozh/HeTu/blob/media/sdk2.png" width="208.5" height="162.5"/>
 
-然后输入安装地址：`https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
+然后输入安装地址：
+`https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
 
 > 如果没外网可用国内镜像
 > `https://gitee.com/heerozh/hetu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
@@ -213,7 +220,7 @@ public class FirstGame : MonoBehaviour
 
 |          |                 服务器 型号 |                            设置 |   
 |:---------|-----------------------:|------------------------------:|
-| 河图       |        ecs.c8a.16xlarge | 32核64线程，默认配置，参数: --workers=76 |
+| 河图       |       ecs.c8a.16xlarge | 32核64线程，默认配置，参数: --workers=76 |
 | Redis7.0 | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
 | 跑分程序     |                     本地 |   参数： --clients=1000 --time=5 |        
 
@@ -228,8 +235,8 @@ ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
 CPS(每秒调用次数)结果为：
 
 | Time\Calls | ZRANG...EXEC |
-| :--------- | -----------: |
-| Avg(每秒)  |     30,345.2 |
+|:-----------|-------------:|
+| Avg(每秒)    |     30,345.2 |
 
 - ARM 版的 Redis 性能，hset/get 性能一致，但牵涉 zrange 和 multi 指令后性能低 40%，不建议
 - 各种兼容 Redis 指令的数据库，并非 Redis，不可使用，可能有奇怪 BUG
@@ -241,36 +248,39 @@ CPS(每秒调用次数)结果为：
 
 CPS(每秒调用次数)测试结果为：
 
-| Time     | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:---------|-------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒)  |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
-| CPU负载    |                99% |                    34% |                        26% |           65% |
-| Redis负载  |                 0% |                    99% |                        99% |           99% |
+| Time    | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
+|:--------|-------------------:|-----------------------:|---------------------------:|--------------:|
+| Avg(每秒) |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
+| CPU负载   |                99% |                    34% |                        26% |           65% |
+| Redis负载 |                 0% |                    99% |                        99% |           99% |
 
 * _以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。_
-* _在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），其他项目受限数据库性能，不影响。_
+* _在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），
+  其他项目受限数据库性能，不影响。_
 
 ### 单连接性能：
 
 测试程序使用`--clients=1`参数测试，单线程同步堵塞模式，主要测试 RTT：
 
-| Time     |  hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:---------|--------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒)  |            14,353.7 |               1,142.13 |                    698.544 |      2,142.06 |
-| RTT(ms)  |           0.0696686 |               0.875555 |                    1.43155 |      0.466841 |
-    
+| Time    | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
+|:--------|-------------------:|-----------------------:|---------------------------:|--------------:|
+| Avg(每秒) |           14,353.7 |               1,142.13 |                    698.544 |      2,142.06 |
+| RTT(ms) |          0.0696686 |               0.875555 |                    1.43155 |      0.466841 |
 
 ### 关于 Python 性能
 
 不用担心 Python 的性能。CPU 价格已远低于开发人员成本，快速迭代，数据分析，AI 生态更具有优势。
 
-现在 Python 社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端 Redis。
+现在 Python 社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端
+Redis。
 
 ### Native 计算
 
 由于 Component 数据本来就是 NumPy C 结构，可以使用LuaJIT的FFI，以极低代价调用 C/Rust 代码：
+
 ```python
 from cffi import FFI
+
 ffi = FFI()
 ffi.cdef("""
     void process(char* data); // char*需转换成Position*
@@ -283,12 +293,13 @@ c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：`rows.x[rows.x >= 10] -= 10`
-
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：
+`rows.x[rows.x >= 10] -= 10`
 
 ## ⚙️ 安装
 
 开发环境建议用 uv 包管理安装。 Windows可在命令行执行：
+
 ```bash
 winget install --id=astral-sh.uv  -e
 ```
@@ -320,7 +331,8 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 uv会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
 
-内网建议跳过uv直接用`source .venv/bin/activate` (或`.\.venv\Scripts\activate.ps1`) 激活环境使用。
+内网建议跳过uv直接用`source .venv/bin/activate` (或`.\.venv\Scripts\activate.ps1`)
+激活环境使用。
 
 ## 🎉 生产部署
 
@@ -328,7 +340,8 @@ uv会把所有依赖放在项目目录下（.venv），因此很简单，外网�
 
 ### Docker 部署
 
-安装 Docker，详见[阿里云镜像](https://help.aliyun.com/zh/ecs/user-guide/install-and-use-docker):
+安装 Docker，详见
+[阿里云镜像](https://help.aliyun.com/zh/ecs/user-guide/install-and-use-docker):
 
 ```bash
 #更新包管理工具
@@ -403,7 +416,8 @@ hetu start --config=./config.yml --head=True
 
 ### Redis部署
 
-Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到 replica，大幅降低 master 负载。
+Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到
+replica，大幅降低 master 负载。
 
 > [!NOTE]
 > * 不要使用兼容 Redis
@@ -416,7 +430,8 @@ Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica
 反向代理选择：
 
 - Caddy: 自动 https 证书，自动反代头设置和合法验证，可通过 api 调用动态配置负载均衡
-  - 命令行：`caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000`
+    - 命令行：
+      `caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000`
 - Nginx: 老了，配置复杂，且歧义多，不推荐
 
 ## ⚙️ 客户端 SDK 安装
@@ -429,7 +444,8 @@ Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica
 
 ### Unity SDK
 
-Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL），基于 UnityWebSocket 和 UniTask，已内置在 SDK 库中。
+Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL），基于 UnityWebSocket 和
+UniTask，已内置在 SDK 库中。
 
 在 Unity Package Manager 中使用以下地址安装：
 `https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
@@ -446,6 +462,7 @@ Unity SDK 支持 Unity 2018.3 及以上版本，含所有平台（包括 WebGL�
 `npm install --save Heerozh/HeTu#npm`
 
 用法：
+
 ```typescript
 import { HeTuClient, ZlibProtocol, BrowserWebSocket, logger as HeTuLogger } from "hetu-sdk";
 HeTuLogger.setLevel(-1) // 设置日志级别

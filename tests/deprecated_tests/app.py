@@ -1,4 +1,11 @@
-from hetu.data import BaseComponent, Property, define_component, Permission
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
+from hetu.data import BaseComponent, property_field, define_component, Permission
 from hetu.system import define_system, Context, ResponseToClient
 import numpy as np
 import asyncio
@@ -12,27 +19,27 @@ logger = logging.getLogger("HeTu.root")
 
 @define_component(namespace="ssw", force=True)
 class Position(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    x: float = Property(0, index=True)
-    y: float = Property(0, index=True)
+    owner: np.int64 = property_field(0, unique=True)
+    x: float = property_field(0, index=True)
+    y: float = property_field(0, index=True)
 
 
 @define_component(namespace="ssw", force=True)
 class MP(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    value: np.int32 = Property(100)
+    owner: np.int64 = property_field(0, unique=True)
+    value: np.int32 = property_field(100)
 
 
 @define_component(namespace="ssw", force=True, permission=Permission.OWNER)
 class HP(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    value: np.int32 = Property(100)
+    owner: np.int64 = property_field(0, unique=True)
+    value: np.int32 = property_field(100)
 
 
 @define_component(namespace="ssw", force=True)
 class Users(BaseComponent):
-    entity_id: np.int64 = Property(0, unique=True)
-    name: "U8" = Property("", unique=True)
+    entity_id: np.int64 = property_field(0, unique=True)
+    name: "U8" = property_field("", unique=True)
 
 
 # ====================================================

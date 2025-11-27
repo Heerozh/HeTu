@@ -1,6 +1,13 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import pytest
 
-from hetu.data import define_component, Property, BaseComponent, Permission
+from hetu.data import define_component, property_field, BaseComponent, Permission
 from hetu.system import SystemClusters, define_system, Context
 
 
@@ -8,21 +15,21 @@ from hetu.system import SystemClusters, define_system, Context
 def test_component(new_component_env, new_clusters_env):
     @define_component(namespace="pytest", force=True)
     class Comp1(BaseComponent):
-        index1: float = Property(0, True)
-        index2: float = Property(0, True)
+        index1: float = property_field(0, True)
+        index2: float = property_field(0, True)
 
     @define_component(namespace="pytest", force=True)
     class Comp2(BaseComponent):
-        value1: float = Property(0)
-        value2: float = Property(0)
+        value1: float = property_field(0)
+        value2: float = property_field(0)
 
     @define_component(namespace="pytest", force=True)
     class Comp3(BaseComponent):
-        owner: int = Property(0, True)
+        owner: int = property_field(0, True)
 
     @define_component(namespace="pytest", force=True)
     class Comp4(BaseComponent):
-        value1: float = Property(0)
+        value1: float = property_field(0)
 
     return Comp1, Comp2, Comp3, Comp4
 
@@ -183,8 +190,8 @@ def test_system_backend_consistent(test_component):
 
         @define_component(namespace="pytest", force=True, backend="PostgreSQL")
         class PostgreSQLComp(BaseComponent):
-            x: float = Property(0, True)
-            y: float = Property(0, True)
+            x: float = property_field(0, True)
+            y: float = property_field(0, True)
 
         @define_system(
             namespace="ssw",
@@ -198,8 +205,8 @@ def test_system_inh_backend_consistent(test_component):
     # 检测继承的backend也要一致
     @define_component(namespace="pytest", force=True, backend="PostgreSQL")
     class PostgreSQLComp(BaseComponent):
-        x: float = Property(0, True)
-        y: float = Property(0, True)
+        x: float = property_field(0, True)
+        y: float = property_field(0, True)
 
     @define_system(
         namespace="pytest",

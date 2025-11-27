@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 
 from .context import Context
-from ..data import BaseComponent, define_component, Property, Permission
+from ..data import BaseComponent, define_component, property_field, Permission
 from ..manager import ComponentTableManager
 from ..safelogging.filter import ContextFilter
 from ..system import define_system
@@ -26,13 +26,13 @@ SYSTEM_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 
 @define_component(namespace="HeTu", persist=False, permission=Permission.ADMIN)
 class Connection(BaseComponent):
-    owner: np.int64 = Property(0, index=True)
-    address: str = Property("", dtype="<U32", index=True)  # 连接地址
-    device: str = Property("", dtype="<U32")  # 物理设备名
-    device_id: str = Property("", dtype="<U128")  # 设备id
-    admin: str = Property("", dtype="<U16")  # 是否是admin
-    created: np.double = Property(0)  # 连接创建时间
-    last_active: np.double = Property(0)  # 最后活跃时间
+    owner: np.int64 = property_field(0, index=True)
+    address: str = property_field("", dtype="<U32", index=True)  # 连接地址
+    device: str = property_field("", dtype="<U32")  # 物理设备名
+    device_id: str = property_field("", dtype="<U128")  # 设备id
+    admin: str = property_field("", dtype="<U16")  # 是否是admin
+    created: np.double = property_field(0)  # 连接创建时间
+    last_active: np.double = property_field(0)  # 最后活跃时间
 
 
 @define_system(

@@ -1,3 +1,10 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import numpy as np
 import pytest
 
@@ -8,18 +15,18 @@ async def test_migration_unique_violation(filled_item_table):
     table_cls = filled_item_table.__class__
 
     # 重新定义新的属性
-    from hetu.data import define_component, Property, BaseComponent, ComponentDefines
+    from hetu.data import define_component, property_field, BaseComponent, ComponentDefines
     ComponentDefines().clear_()
 
     @define_component(namespace="pytest")
     class ItemNew(BaseComponent):
-        owner: np.int64 = Property(0, unique=False, index=True)
-        model: np.int32 = Property(0, unique=False, index=True)
-        qty_new: np.int16 = Property(111, unique=False, index=False)
-        level: np.int8 = Property(1, unique=False, index=False)
-        time: np.int64 = Property(0, unique=True, index=True)
-        name: 'U4' = Property("", unique=True, index=False)
-        used: bool = Property(False, unique=False, index=True)
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        model: np.int32 = property_field(0, unique=False, index=True)
+        qty_new: np.int16 = property_field(111, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: 'U4' = property_field("", unique=True, index=False)
+        used: bool = property_field(False, unique=False, index=True)
 
     # 从ItemNew改名回Item，以便迁移同名的
     import json
@@ -41,18 +48,18 @@ async def test_auto_migration(filled_item_table, caplog):
     table_cls = filled_item_table.__class__
 
     # 重新定义新的属性
-    from hetu.data import define_component, Property, BaseComponent, ComponentDefines
+    from hetu.data import define_component, property_field, BaseComponent, ComponentDefines
     ComponentDefines().clear_()
 
     @define_component(namespace="pytest")
     class ItemNew(BaseComponent):
-        owner: np.int64 = Property(0, unique=False, index=True)
-        model: np.int32 = Property(0, unique=False, index=True)
-        qty_new: np.int16 = Property(111, unique=False, index=False)
-        level: np.int8 = Property(1, unique=False, index=False)
-        time: np.int64 = Property(0, unique=True, index=True)
-        name: 'U4' = Property("", unique=False, index=True)
-        used: bool = Property(False, unique=False, index=True)
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        model: np.int32 = property_field(0, unique=False, index=True)
+        qty_new: np.int16 = property_field(111, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: 'U4' = property_field("", unique=False, index=True)
+        used: bool = property_field(False, unique=False, index=True)
 
     # 从ItemNew改名回Item，以便迁移同名的
     import json
