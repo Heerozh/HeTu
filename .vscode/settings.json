@@ -1,0 +1,14 @@
+{
+    "cSpell.words": [
+        "caplog",
+        "hetu",
+        "Heerozh",
+        "Jianhao",
+        "Zhang"
+    ],
+    "python.testing.pytestArgs": [
+        "tests"
+    ],
+    "python.testing.unittestEnabled": false,
+    "python.testing.pytestEnabled": true
+}

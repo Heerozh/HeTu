@@ -1,9 +1,16 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import logging
 import asyncio
 
 import numpy as np
 
-from hetu.data import BaseComponent, Property, define_component, Permission
+from hetu.data import BaseComponent, property_field, define_component, Permission
 from hetu.system import define_system, Context, ResponseToClient
 
 logger = logging.getLogger("HeTu.root")
@@ -21,7 +28,9 @@ async def do_nothing(ctx: Context, sleep):
 # ============================
 
 
-@define_system(namespace="pytest", permission=Permission.EVERYBODY, bases=("elevate",))
+@define_system(
+    namespace="pytest", permission=Permission.EVERYBODY, subsystems=("elevate",)
+)
 async def login(ctx: Context, user_id, kick_logged_in=True):
     await ctx["elevate"](ctx, user_id, kick_logged_in)
     return ResponseToClient({"id": ctx.caller})
@@ -32,8 +41,8 @@ async def login(ctx: Context, user_id, kick_logged_in=True):
 
 @define_component(namespace="pytest", force=True, permission=Permission.OWNER)
 class RLSComp(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    value: np.int32 = Property(100)
+    owner: np.int64 = property_field(0, unique=True)
+    value: np.int32 = property_field(100)
 
 
 @define_system(
@@ -58,11 +67,12 @@ async def test_rls_comp_value(ctx: Context, value):
 @define_system(
     namespace="pytest",
     permission=Permission.EVERYBODY,
-    bases=('create_future_call:copy1', ),
+    subsystems=("create_future_call:copy1",),
 )
 async def add_rls_comp_value_future(ctx: Context, value, recurring):
-    return await ctx['create_future_call:copy1'](
-        ctx, -1, 'add_rls_comp_value', value, timeout=10, recurring=recurring)
+    return await ctx["create_future_call:copy1"](
+        ctx, -1, "add_rls_comp_value", value, timeout=10, recurring=recurring
+    )
 
 
 # ---------------------------------
@@ -70,7 +80,7 @@ async def add_rls_comp_value_future(ctx: Context, value, recurring):
 
 @define_system(
     namespace="pytest",
-    bases=("add_rls_comp_value:copy1",),
+    subsystems=("add_rls_comp_value:copy1",),
 )
 async def add_rls_comp_value_copy(ctx: Context, value):
     return await ctx["add_rls_comp_value:copy1"](ctx, value)
@@ -78,7 +88,7 @@ async def add_rls_comp_value_copy(ctx: Context, value):
 
 @define_system(
     namespace="pytest",
-    bases=("test_rls_comp_value:copy1",),
+    subsystems=("test_rls_comp_value:copy1",),
 )
 async def test_rls_comp_value_copy(ctx: Context, value):
     return await ctx["test_rls_comp_value:copy1"](ctx, value)
@@ -89,14 +99,14 @@ async def test_rls_comp_value_copy(ctx: Context, value):
 
 @define_component(namespace="pytest", force=True)
 class IndexComp1(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    value: float = Property(0, index=True)
+    owner: np.int64 = property_field(0, unique=True)
+    value: float = property_field(0, index=True)
 
 
 @define_component(namespace="pytest", force=True)
 class IndexComp2(BaseComponent):
-    owner: np.int64 = Property(0, unique=True)
-    name: "U8" = Property("", unique=True)
+    owner: np.int64 = property_field(0, unique=True)
+    name: "U8" = property_field("", unique=True)
 
 
 @define_system(
@@ -128,10 +138,10 @@ async def create_row_2_upsert(ctx, owner, v2):
 @define_system(
     namespace="pytest",
     components=(RLSComp, IndexComp1, IndexComp2),
-    bases=("add_rls_comp_value",),
+    subsystems=(add_rls_comp_value,),
 )
 async def composer_system(ctx: Context):
-    rls_comp_value = await ctx["add_rls_comp_value"](ctx, 10)
+    rls_comp_value = await add_rls_comp_value(ctx, 10)
 
     await asyncio.sleep(0.1)
 

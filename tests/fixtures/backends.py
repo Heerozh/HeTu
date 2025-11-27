@@ -61,7 +61,7 @@ def mod_redis_service():
                 network="hetu_test_net",
                 command=[
                     "redis-server",
-                    f"--replicaof redis-master 6379",
+                    "--replicaof redis-master 6379",
                     "--replica-read-only yes",
                 ],
             )

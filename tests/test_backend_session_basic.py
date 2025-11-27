@@ -1,3 +1,10 @@
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import numpy as np
 import pytest
 
@@ -9,6 +16,14 @@ async def test_table(mod_item_component, item_table):
 
     # 测试插入数据
     async with backend.transaction(1) as session:
+        # todo 语法改成：
+        #   row = mod_item_component.new_row()
+        #   session.insert(row)
+        #   session.select(mod_item_component).get(id=id)
+        #   session.select(mod_item_component).range(index=(left, right))
+        #   session.update(id, row)
+        #   session.delete(id)
+        #   session.upsert(index=row.index, row)
         tbl = item_table.attach(session)
         row = mod_item_component.new_row()
         row.name = "Item1"
@@ -187,9 +202,9 @@ async def test_string_length_cutoff(filled_item_table, mod_item_component):
 
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        assert (
-            await tbl.select("reinsert", "name")
-        ) is not None, "超出U8长度应该要被截断，这里没索引出来说明没截断"
+        assert (await tbl.select("reinsert", "name")) is not None, (
+            "超出U8长度应该要被截断，这里没索引出来说明没截断"
+        )
 
         assert (await tbl.select("reinsert", "name")).id == 26
         assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
@@ -228,12 +243,12 @@ async def test_unique_table(mod_auto_backend):
     backend_component_table, get_or_create_backend = mod_auto_backend
     backend = get_or_create_backend()
 
-    from hetu.data import define_component, Property, BaseComponent
+    from hetu.data import define_component, property_field, BaseComponent
 
     @define_component(namespace="pytest")
     class UniqueTest(BaseComponent):
-        name: "U8" = Property("", unique=True, index=True)
-        timestamp: float = Property(0, unique=False, index=True)
+        name: "U8" = property_field("", unique=True, index=True)
+        timestamp: float = property_field(0, unique=False, index=True)
 
     # 测试连接数据库并创建表
     unique_test_table = backend_component_table(UniqueTest, "UniqueTest", 1, backend)

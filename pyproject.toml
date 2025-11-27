@@ -9,13 +9,21 @@ description = "河图：基于ECS理念，整合数据库和逻辑的游戏服�
 readme = "README.md"
 requires-python = ">=3.14"
 license = "Apache-2.0"
-authors = [
-    {name = "Zhang Jianhao", email = "heeroz@gmail.com"}
-]
+authors = [{ name = "Zhang Jianhao", email = "heeroz@gmail.com" }]
 keywords = [
-    "online", "game", "server", "database",
-    "ecs", "entity", "component",
-    "mmo", "multiplayer", "gamedev", "game-framework", "game-server", "game-engine"
+    "online",
+    "game",
+    "server",
+    "database",
+    "ecs",
+    "entity",
+    "component",
+    "mmo",
+    "multiplayer",
+    "gamedev",
+    "game-framework",
+    "game-server",
+    "game-engine",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
@@ -43,7 +51,6 @@ hetu = "hetu.__main__:main"
 [dependency-groups]
 dev = [
     "aiohttp>=3.13.1",
-    "black>=25.9.0",
     "docker>=7.1.0",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.7",
@@ -52,6 +59,7 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
+    "ruff>=0.14.6",
     "sanic-testing>=24.6.0",
     "tqdm>=4.67.1",
     "trustme>=1.2.1",
@@ -70,9 +78,12 @@ fallback_version = "0.0.0"
 # 自动发现async test_*函数
 asyncio_mode = "auto" # or "strict"
 # 夹具和测试函数的asyncio loop在同一个文件中保持一致
-asyncio_default_fixture_loop_scope="module"
-asyncio_default_test_loop_scope="module"
+asyncio_default_fixture_loop_scope = "module"
+asyncio_default_test_loop_scope = "module"
 
 
 [tool.black]
+line-length = 88
+
+[tool.ruff]
 line-length = 88
