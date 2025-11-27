@@ -1,7 +1,7 @@
 import pytest
 
 from hetu.data import define_component, Property, BaseComponent, Permission
-from hetu.system import SystemClusters, define_system
+from hetu.system import SystemClusters, define_system, Context
 
 
 @pytest.fixture
@@ -52,8 +52,22 @@ def test_define(test_component, test_system1):
 
 def test_direct_func_call_forbid(test_system1):
     # 直接调用要禁止
-    with pytest.raises(RuntimeError, match="调用"):
+    with pytest.raises(AssertionError, match="Context"):
         test_system1(1, 2, 3)
+
+    ctx = Context(
+        caller=1,
+        connection_id=1,
+        address="127.0.0.1",
+        group="admin",
+        timestamp=0,
+        user_data={},
+        retry_count=0,
+        transactions={},
+        inherited={},
+    )
+    with pytest.raises(RuntimeError, match="subsystems"):
+        test_system1(ctx, 2, 3)
 
 
 def test_duplicate_define(test_system1):
