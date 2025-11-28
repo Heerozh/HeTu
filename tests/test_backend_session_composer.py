@@ -79,7 +79,7 @@ async def test_dup_update(mod_item_component, filled_item_table):
     #      insert时，放入idmap，并标记为脏，且id为None。该有的Unique检查也要在idmap和数据库中同时进行
     #      update时，修改idmap值，并标记为脏
     #      delete时，标记idmap为删除状态
-    #      upsert时，先要从idmap筛选where值，如果不存在才去数据库取
+    #      upsert时，先要从idmap筛选where值(range(where=(value, value))，如果不存在才去数据库取
     #      commit时，按照insert, update, delete标记修改数据库
 
     # 检测重复update报错 todo 改成可以顺利执行
