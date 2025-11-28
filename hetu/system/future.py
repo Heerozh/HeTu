@@ -19,7 +19,7 @@ from .definer import define_system, SystemClusters, SYSTEM_NAME_MAX_LEN
 from .execution import ExecutionLock, clean_expired_call_locks
 from .executor import SystemExecutor
 from ..data import BaseComponent, define_component, property_field, Permission
-from ..data.backend import ComponentTable
+from ..data.backend import RawComponentTable
 
 SYSTEM_CLUSTERS = SystemClusters()
 logger = logging.getLogger("HeTu.root")
@@ -161,7 +161,7 @@ async def create_future_call(
     return _uuid
 
 
-async def sleep_for_upcoming(tbl: ComponentTable):
+async def sleep_for_upcoming(tbl: RawComponentTable):
     """等待下一个即将到期的任务，返回是否有任务"""
     # query limit=1 获得即将到期任务(1秒内）
     calls = await tbl.direct_query(
@@ -178,7 +178,7 @@ async def sleep_for_upcoming(tbl: ComponentTable):
     return True
 
 
-async def pop_upcoming_call(tbl: ComponentTable):
+async def pop_upcoming_call(tbl: RawComponentTable):
     """取出并修改到期任务"""
     async with tbl.backend.transaction(tbl.cluster_id) as session:
         tbl_trx = tbl.attach(session)
@@ -200,7 +200,7 @@ async def pop_upcoming_call(tbl: ComponentTable):
 
 
 async def exec_future_call(
-    call: np.record, executor: SystemExecutor, tbl: ComponentTable
+    call: np.record, executor: SystemExecutor, tbl: RawComponentTable
 ):
     # 准备System
     sys = SYSTEM_CLUSTERS.get_system(call.system)

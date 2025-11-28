@@ -1,7 +1,7 @@
 import logging
 import pytest
 import time
-from hetu.data.backend import ComponentTable
+from hetu.data.backend import RawComponentTable
 from hetu.data.backend.sub import RowSubscription
 
 
