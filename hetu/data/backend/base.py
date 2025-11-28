@@ -6,7 +6,7 @@
 
                       事务相关结构
     ┌────────────────┐           ┌──────────────────┐
-    │    Backend     ├──────────►│BackendTransaction│     todo 首先要先改名BackendSession, 包含idmap
+    │    Backend     ├──────────►│  BackendSession  │     todo 首先要先改名BackendSession, 包含idmap
     │数据库直连池（单件)│           │    事务模式连接     │
     └────────────────┘           └──────────────────┘
             ▲                             ▲
@@ -101,16 +101,16 @@ class Backend:
         """
         raise NotImplementedError
 
-    def transaction(self, cluster_id: int) -> "BackendTransaction":
+    def transaction(self, cluster_id: int) -> BackendSession:
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
-    def get_mq_client(self) -> "MQClient":
+    def get_mq_client(self) -> MQClient:
         """获取消息队列连接"""
         raise NotImplementedError
 
 
-class BackendTransaction:
+class BackendSession:
     """数据库事务类，负责开始事务，并提交事务"""
 
     def __init__(self, backend: Backend, cluster_id: int):
@@ -263,13 +263,13 @@ class ComponentTable:
         """
         raise NotImplementedError
 
-    def attach(self, backend_trx: BackendTransaction) -> "ComponentTransaction":
+    def attach(self, backend_trx: BackendSession) -> ComponentTransaction:
         """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
         # return YourComponentTransaction(self, backend_trx)
         raise NotImplementedError
 
-    def new_transaction(self) -> tuple[BackendTransaction, "ComponentTransaction"]:
+    def new_transaction(self) -> tuple[BackendSession, ComponentTransaction]:
         """返回当前组件的事务操作类，并新建一个后端事务连接"""
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
@@ -286,7 +286,7 @@ class ComponentTransaction:
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
 
-    def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
+    def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendSession):
         assert trx_conn.cluster_id == comp_tbl.cluster_id, (
             "事务只能在对应的cluster_id中执行，不能跨cluster"
         )
@@ -305,7 +305,7 @@ class ComponentTransaction:
         return self._component_cls
 
     @property
-    def attached(self) -> BackendTransaction:
+    def attached(self) -> BackendSession:
         return self._trx_conn
 
     async def _db_get(self, row_id: int, lock_row=True) -> None | np.record:
@@ -323,15 +323,15 @@ class ComponentTransaction:
         raise NotImplementedError
 
     def _trx_insert(self, row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack插入数据的操作
+        # 继承，并实现往BackendSession里stack插入数据的操作
         raise NotImplementedError
 
     def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack更新数据的操作
+        # 继承，并实现往BackendSession里stack更新数据的操作
         raise NotImplementedError
 
     def _trx_delete(self, row_id: int, old_row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack删除数据的操作
+        # 继承，并实现往BackendSession里stack删除数据的操作
         raise NotImplementedError
 
     async def get_by_ids(self, row_ids: list[int] | np.ndarray) -> np.recarray:
