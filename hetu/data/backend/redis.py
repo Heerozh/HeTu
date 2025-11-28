@@ -96,6 +96,7 @@ class RedisBackend(Backend):
     def load_lua_scripts(self):
         cls = self.__class__
         if cls.lua_check_and_run is None:
+            assert self._aio
             # 注册脚本到异步io
             cls.lua_check_and_run = self._aio.register_script(
                 cls.LUA_CHECK_AND_RUN_SCRIPT
@@ -120,12 +121,18 @@ class RedisBackend(Backend):
             self.io = redis.cluster.RedisCluster.from_url(
                 self.master_url, decode_responses=True
             )
-            self._aio = redis.asyncio.cluster.RedisCluster.from_url(
-                self.master_url, decode_responses=True
+            self._aio: redis.asyncio.RedisCluster = (
+                redis.asyncio.cluster.RedisCluster.from_url(
+                    self.master_url, decode_responses=True
+                )
             )
         else:
-            self.io = redis.from_url(self.master_url, decode_responses=True)
-            self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
+            self.io: redis.Redis = redis.from_url(
+                self.master_url, decode_responses=True
+            )
+            self._aio: redis.asyncio.Redis = redis.asyncio.from_url(
+                self.master_url, decode_responses=True
+            )
         # 测试连接是否正常
         try:
             self.io.ping()
@@ -145,7 +152,7 @@ class RedisBackend(Backend):
             except redis.exceptions.ConnectionError as e:
                 raise ConnectionError(f"无法连接到replicas：{servant_url}") from e
         # 连接只读数据库
-        self.replicas = [
+        self.replicas: list[redis.asyncio.Redis | redis.asyncio.RedisCluster] = [
             redis.asyncio.from_url(url, decode_responses=True)
             for url in self.servant_urls
         ]
@@ -163,7 +170,9 @@ class RedisBackend(Backend):
             raise ConnectionError("连接已关闭，已调用过close")
 
         # 检测redis版本
-        parse_version = lambda x: tuple(map(int, x.split(".")))
+        def parse_version(x):
+            return tuple(map(int, x.split(".")))
+
         version = self.io.info("server")["redis_version"]
         assert parse_version(version) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         for url in self.servant_urls:
@@ -260,7 +269,7 @@ class RedisBackend(Backend):
             locked = str(id(self))
         return locked == str(id(self))
 
-    def random_replica(self) -> redis.Redis:
+    def random_replica(self) -> redis.asyncio.Redis:
         """随机返回一个只读连接"""
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())

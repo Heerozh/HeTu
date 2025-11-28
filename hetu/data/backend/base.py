@@ -274,7 +274,7 @@ class ComponentTable:
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
 
-    def channel_name(self, index_name: str = None, row_id: int = None):
+    def channel_name(self, index_name: str | None = None, row_id: int | None = None):
         """返回当前组件表，在消息队列中的频道名。表如果有数据变动，会发送到对应频道"""
         raise NotImplementedError
 
