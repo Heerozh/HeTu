@@ -7,7 +7,7 @@
 
 import pytest
 
-from hetu.data.backend import ComponentTable
+from hetu.data.backend import RawComponentTable
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +39,7 @@ async def mod_item_component(mod_clear_all_component_define):
 
 
 @pytest.fixture(scope="module")
-async def mod_item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+async def mod_item_table(mod_auto_backend, mod_item_component) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
@@ -52,7 +52,7 @@ async def mod_item_table(mod_auto_backend, mod_item_component) -> ComponentTable
 
 
 @pytest.fixture(scope="function")
-async def item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+async def item_table(mod_auto_backend, mod_item_component) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
@@ -86,7 +86,7 @@ async def mod_rls_test_component(mod_clear_all_component_define):
 @pytest.fixture(scope="module")
 async def mod_rls_test_table(
     mod_auto_backend, mod_rls_test_component
-) -> ComponentTable:
+) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")

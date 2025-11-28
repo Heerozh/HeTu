@@ -15,7 +15,7 @@ from hetu.data import (
     define_component, property_field, BaseComponent,
 )
 from hetu.data.backend import (
-    RedisComponentTable, RedisBackend,
+    RedisRawComponentTable, RedisBackend,
     RaceCondition
 )
 
@@ -49,7 +49,7 @@ async def timeit(func, repeat=1, repeat_mul=1, concurrency=100, *args):
 
 async def run_bench(inst, redis_address):
     backend = RedisBackend({"master": redis_address})
-    item_data = RedisComponentTable(Item, inst, 1, backend)
+    item_data = RedisRawComponentTable(Item, inst, 1, backend)
     # clean db
     keys = backend.io.keys(f'{item_data._root_prefix}*')
     if keys:

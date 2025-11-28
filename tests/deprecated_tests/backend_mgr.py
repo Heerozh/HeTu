@@ -37,7 +37,7 @@ class UnitTestBackends:
         return rtn
 
     def start_redis_server(self, port=23318):
-        from hetu.data.backend import RedisComponentTable, RedisBackend
+        from hetu.data.backend import RedisRawComponentTable, RedisBackend
         import redis
         # 如果已启动则跳过
         if 'redis' not in self.containers:
@@ -92,7 +92,7 @@ class UnitTestBackends:
         # 先清除已加载lua的标记
         RedisBackend.lua_check_and_run = None
         # 返回backend
-        return RedisComponentTable, RedisBackend, {
+        return RedisRawComponentTable, RedisBackend, {
             "master": f"redis://127.0.0.1:{port}/0",
             "servants": [f"redis://127.0.0.1:{port + 1}/0", ]
         }

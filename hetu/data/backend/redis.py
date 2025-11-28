@@ -19,7 +19,7 @@ from redis.asyncio.client import Pipeline
 
 from .base import (
     ComponentTransaction,
-    ComponentTable,
+    RawComponentTable,
     Backend,
     BackendSession,
     MQClient,
@@ -387,7 +387,7 @@ class RedisSession(BackendSession):
                 self._trx_pipe = None
 
 
-class RedisComponentTable(ComponentTable):
+class RedisRawComponentTable(RawComponentTable):
     """
     在redis种初始化/管理Component数据表，提供事务指令。
 
@@ -830,7 +830,7 @@ class RedisComponentTable(ComponentTable):
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
         self,
-        comp_tbl: RedisComponentTable,
+        comp_tbl: RedisRawComponentTable,
         trx_conn: RedisSession,
         key_prefix: str,
         index_prefix: str,
@@ -861,7 +861,7 @@ class RedisComponentTransaction(ComponentTransaction):
         idx_key = self._idx_prefix + index_name
         pipe = self._trx_conn.pipe
 
-        cmds = RedisComponentTable.make_query_cmd(
+        cmds = RedisRawComponentTable.make_query_cmd(
             self._component_cls, index_name, left, right, limit, desc
         )
 
