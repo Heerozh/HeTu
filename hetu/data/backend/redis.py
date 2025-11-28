@@ -21,7 +21,7 @@ from .base import (
     ComponentTransaction,
     ComponentTable,
     Backend,
-    BackendTransaction,
+    BackendSession,
     MQClient,
 )
 from .base import RaceCondition, HeadLockFailed
@@ -279,20 +279,20 @@ class RedisBackend(Backend):
 
         return random.choice(self.replicas)
 
-    def get_mq_client(self) -> "RedisMQClient":
+    def get_mq_client(self) -> RedisMQClient:
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
         if not self.io:
             raise ConnectionError("连接已关闭，已调用过close")
         return RedisMQClient(self.random_replica())
 
-    def transaction(self, cluster_id: int) -> "RedisTransaction":
+    def transaction(self, cluster_id: int) -> RedisSession:
         """进入db的事务模式，返回事务连接"""
         if not self.io:
             raise ConnectionError("连接已关闭，已调用过close")
-        return RedisTransaction(self, cluster_id)
+        return RedisSession(self, cluster_id)
 
 
-class RedisTransaction(BackendTransaction):
+class RedisSession(BackendSession):
     """数据库事务类，负责开始事务，并提交事务"""
 
     def __init__(self, backend: RedisBackend, cluster_id: int):
@@ -811,7 +811,7 @@ class RedisComponentTable(ComponentTable):
                 await asyncio.sleep(random.random() / 5)
                 continue
 
-    def attach(self, backend_trx: RedisTransaction) -> "RedisComponentTransaction":
+    def attach(self, backend_trx: RedisSession) -> RedisComponentTransaction:
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
         # assert backend_trx.cluster_id == self._cluster_id
         return RedisComponentTransaction(
@@ -831,12 +831,12 @@ class RedisComponentTransaction(ComponentTransaction):
     def __init__(
         self,
         comp_tbl: RedisComponentTable,
-        trx_conn: RedisTransaction,
+        trx_conn: RedisSession,
         key_prefix: str,
         index_prefix: str,
     ):
         super().__init__(comp_tbl, trx_conn)
-        self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisTransaction
+        self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisSession
 
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
