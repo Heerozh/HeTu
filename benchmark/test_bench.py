@@ -19,7 +19,7 @@ from collections import defaultdict
 from functools import partial
 from multiprocessing import Pool, Process
 from hetu.data.backend import (
-    RedisComponentTable, RedisBackend,
+    RedisRawComponentTable, RedisBackend,
     RaceCondition
 )
 import websockets
@@ -128,7 +128,7 @@ async def bench_direct_backend_routine(address, duration, name: str, pid: str):
     retry_count = defaultdict(int)
 
     backend = RedisBackend({"master": address})
-    int_tbl = RedisComponentTable(app.IntTable, 'bench1', 0, backend)
+    int_tbl = RedisRawComponentTable(app.IntTable, 'bench1', 0, backend)
 
     print(name, '开始测试', pid, '号客户端', duration, '分钟运行时间')
     try:

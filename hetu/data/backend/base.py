@@ -12,7 +12,7 @@
             ▲                             ▲
             │初始化数据                     │ 写入数据
   ┌─────────┴──────────┐      ┌───────────┴────────────┐
-  │   ComponentTable   │      │  ComponentTransaction  │
+  │ RawComponentTable  │      │  ComponentTransaction  │
   │  组件数据管理（单件)  │      │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
   └────────────────────┘      └────────────────────────┘
   todo 直接select出来的就是此类
@@ -138,7 +138,7 @@ class BackendSession:
             await self.end_transaction(discard=True)
 
 
-class ComponentTable:
+class RawComponentTable:
     """
     Component数据主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
     继承此类，完善所有NotImplementedError的方法。
@@ -286,7 +286,7 @@ class ComponentTransaction:
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
 
-    def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendSession):
+    def __init__(self, comp_tbl: RawComponentTable, trx_conn: BackendSession):
         assert trx_conn.cluster_id == comp_tbl.cluster_id, (
             "事务只能在对应的cluster_id中执行，不能跨cluster"
         )

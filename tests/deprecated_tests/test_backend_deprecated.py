@@ -26,7 +26,7 @@ from hetu.system import Context
 from hetu.data.backend import (
     RaceCondition,
     UniqueViolation,
-    ComponentTable,
+    RawComponentTable,
     Backend,
     RedisBackend,
     ComponentTransaction,
@@ -87,7 +87,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_basic(
-        self, table_cls: type[ComponentTable], backend_cls: Type[type[Backend]], config
+        self, table_cls: type[RawComponentTable], backend_cls: Type[type[Backend]], config
     ):
         # 测试连接数据库并创建表
         backend = backend_cls(config)
@@ -389,7 +389,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_duplicate_op(
-        self, table_cls: type[ComponentTable], backend_cls: Type[type[Backend]], config
+        self, table_cls: type[RawComponentTable], backend_cls: Type[type[Backend]], config
     ):
         # 测试重复update
         backend = backend_cls(config)
@@ -465,7 +465,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_race(
-        self, table_cls: type[ComponentTable], backend_cls: type[Backend], config
+        self, table_cls: type[RawComponentTable], backend_cls: type[Backend], config
     ):
         # 测试竞态，通过2个协程来测试
         backend = backend_cls(config)
@@ -615,7 +615,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_migration(
-        self, table_cls: type[ComponentTable], backend_cls: type[Backend], config
+        self, table_cls: type[RawComponentTable], backend_cls: type[Backend], config
     ):
         # 测试迁移，先用原定义写入数据
         backend = backend_cls(config)
@@ -674,7 +674,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_flush(
-        self, table_cls: type[ComponentTable], backend_cls: type[Backend], config
+        self, table_cls: type[RawComponentTable], backend_cls: type[Backend], config
     ):
         backend = backend_cls(config)
 
@@ -707,7 +707,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_update_or_insert_race_bug(
-        self, table_cls: type[ComponentTable], backend_cls: type[Backend], config
+        self, table_cls: type[RawComponentTable], backend_cls: type[Backend], config
     ):
         # 测试update_or_insert UniqueViolation是否转化为了RaceCondition
         # update_or_insert的where依据的index，不应该有 unique violation才对，

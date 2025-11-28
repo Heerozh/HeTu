@@ -113,7 +113,7 @@ def mod_redis_service():
 
 @pytest.fixture(scope="module")
 async def mod_redis_backend(mod_redis_service):
-    from hetu.data.backend import RedisComponentTable, RedisBackend
+    from hetu.data.backend import RedisRawComponentTable, RedisBackend
 
     backends = {}
 
@@ -135,7 +135,7 @@ async def mod_redis_backend(mod_redis_service):
         _backend.configure()
         return _backend
 
-    yield RedisComponentTable, _create_redis_backend
+    yield RedisRawComponentTable, _create_redis_backend
 
     for backend in backends.values():
         await backend.close()

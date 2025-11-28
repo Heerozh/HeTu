@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ...system import Context
-    from .base import ComponentTable, Backend
+    from .base import RawComponentTable, Backend
 
 logger = logging.getLogger("HeTu.root")
 
@@ -27,7 +27,7 @@ class RowSubscription(BaseSubscription):
     __cache = {}
 
     def __init__(
-        self, table: ComponentTable, ctx: Context | None, channel: str, row_id: int
+        self, table: RawComponentTable, ctx: Context | None, channel: str, row_id: int
     ):
         self.table = table
         if table.component_cls.is_rls() and ctx and not ctx.is_admin():
@@ -69,7 +69,7 @@ class RowSubscription(BaseSubscription):
 class IndexSubscription(BaseSubscription):
     def __init__(
         self,
-        table: ComponentTable,
+        table: RawComponentTable,
         ctx: Context,
         index_channel: str,
         last_query,
@@ -160,7 +160,7 @@ class Subscriptions:
 
     @classmethod
     def _make_query_str(
-        cls, table: ComponentTable, index_name: str, left, right, limit, desc
+        cls, table: RawComponentTable, index_name: str, left, right, limit, desc
     ):
         return (
             f"{table.component_cls.component_name_}.{index_name}"
@@ -168,7 +168,7 @@ class Subscriptions:
         )
 
     @classmethod
-    def _has_table_permission(cls, table: ComponentTable, ctx: Context) -> bool:
+    def _has_table_permission(cls, table: RawComponentTable, ctx: Context) -> bool:
         """判断caller是否对整个表有权限"""
         comp_permission = table.component_cls.permission_
         # admin和EVERYBODY权限永远返回True
@@ -184,13 +184,13 @@ class Subscriptions:
 
     @classmethod
     def _has_row_permission(
-        cls, table: ComponentTable, ctx: Context, row: dict | np.record
+        cls, table: RawComponentTable, ctx: Context, row: dict | np.record
     ) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table.component_cls, row)
 
     async def subscribe_select(
-        self, table: ComponentTable, ctx: Context, value: Any, where: str = "id"
+        self, table: RawComponentTable, ctx: Context, value: Any, where: str = "id"
     ) -> tuple[str | None, np.record | None]:
         """
         获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
@@ -231,7 +231,7 @@ class Subscriptions:
 
     async def subscribe_query(
         self,
-        table: ComponentTable,
+        table: RawComponentTable,
         ctx: Context,
         index_name: str,
         left,

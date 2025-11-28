@@ -16,7 +16,7 @@ from enum import IntEnum
 from typing import Callable, Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .backend import ComponentTable
+    from .backend import RawComponentTable
 
 import git
 import numpy as np
@@ -65,7 +65,7 @@ class BaseComponent:
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype | None = None  # np structured dtype
     default_row: np.ndarray | None = None  # 默认空数据行
-    hosted_: ComponentTable | None = None  # 该Component运行时被托管的实例
+    hosted_: RawComponentTable | None = None  # 该Component运行时被托管的实例
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性 的映射
     dtype_map_: dict[str, np.dtype] | None = None  # 属性名->dtype的映射
     uniques_: set[str] | None = None  # 唯一索引的属性名集合
