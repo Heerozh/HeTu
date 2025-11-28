@@ -7,7 +7,7 @@
 
 from typing import ItemsView
 
-from hetu.data.backend.base import Backend, ComponentTable
+from hetu.data.backend.base import Backend, RawComponentTable
 from hetu.data.component import BaseComponent
 from hetu.system import SystemClusters
 
@@ -31,7 +31,7 @@ class ComponentTableManager:
         namespace: str,
         instance_name: str,
         backends: dict[str, Backend],
-        table_constructors: dict[str, type[ComponentTable]],
+        table_constructors: dict[str, type[RawComponentTable]],
     ):
         self._tables = {}
         self._tables_by_name = {}
@@ -67,11 +67,11 @@ class ComponentTableManager:
 
     def get_table(
         self, component_cls: type[BaseComponent] | str
-    ) -> ComponentTable | None:
+    ) -> RawComponentTable | None:
         if type(component_cls) is str:
             return self._tables_by_name.get(component_cls)
         else:
             return self._tables.get(component_cls)
 
-    def items(self) -> ItemsView[type[BaseComponent], ComponentTable]:
+    def items(self) -> ItemsView[type[BaseComponent], RawComponentTable]:
         return self._tables.items()

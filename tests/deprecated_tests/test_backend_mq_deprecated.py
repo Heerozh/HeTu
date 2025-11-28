@@ -17,7 +17,7 @@ import numpy as np
 from backend_mgr import UnitTestBackends
 from hetu.data import define_component, property_field, BaseComponent, Permission
 from hetu.data.backend import (
-    ComponentTable, Backend, RedisBackend,
+    RawComponentTable, Backend, RedisBackend,
     Subscriptions)
 from hetu.system import Context
 
@@ -145,7 +145,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
         await backend.close()
 
     @parameterized(implements)
-    async def test_message_queue(self, table_cls: type[ComponentTable],
+    async def test_message_queue(self, table_cls: type[RawComponentTable],
                                  backend_cls: type[Backend], config):
         backend, item_data = await self.setUpBackend(backend_cls(config), table_cls)
         admin_ctx, user10_ctx = self.setUpAccount()
@@ -322,7 +322,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @mock.patch('time.time', mock_time)
     @parameterized(implements)
-    async def test_mq_pull_stack(self, table_cls: type[ComponentTable],
+    async def test_mq_pull_stack(self, table_cls: type[RawComponentTable],
                                  backend_cls: type[Backend], config):
         # 测试mq消息堆积的情况
         mock_time.return_value = time_time()
