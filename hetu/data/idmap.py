@@ -6,8 +6,24 @@
 """
 
 import logging
+from enum import Enum
+from typing import TYPE_CHECKING
+
+import numpy as np
+
+if TYPE_CHECKING:
+    from .component import BaseComponent
 
 logger = logging.getLogger("HeTu.root")
+
+
+class RowState(Enum):
+    """行状态枚举"""
+
+    CLEAN = 0  # 干净，无需更新
+    INSERT = 1  # 新插入
+    UPDATE = 2  # 已更新
+    DELETE = 3  # 已删除
 
 
 class IdentityMap:
@@ -17,20 +33,199 @@ class IdentityMap:
     BackendSession在提交时可以通过本类，获得脏对象列表，然后想办法合并成事务指令。
     """
 
-    # 帮我实现IdentityMap，要有如下功能：
-    # add_clean(row)方法，添加一个查询到的对象到row缓存中，可以通过row类型判断对应comp表，row缓存是个np表
-    #    该np表可以用np.rec.array(np.empty(0, dtype=self._component_cls.dtypes))初始化
-    #    用np.rec.array(np.stack(rows, dtype=self._component_cls.dtypes))堆叠
-    #    如果数据行已存在，则更新该行。
-    #    除了row的np表，还有维护一个row id对应的状态表，标记row是insert, update, delete等
-    # get(comp_cls，id)方法，如果该comp的row缓存中有则返回缓存中的对象，否则返回None表示要调用方去数据库查询
-    # -----
-    # add_range(index_name=(left, right), rows)方法，index_name是动态参数，表示索引名称，left和right表示范围
-    #    表示调用方把range查询结果储存到范围缓存中，rows是查询结果列表，储存到row缓存，可以通过row类型判断对应comp表
-    # range(comp_cls，index_name=(left, right))方法，首先看范围是否在范围缓存中，如果在，因为row缓存是np表，可以直接np[条件]方式返回。
-    #    如果不在，则返回None表示要调用方去数据库查询
-    # -----
-    # add_insert(row)方法，添加一个新插入的对象到row缓存中，并标记为insert状态，row的id为累加负数
-    # update(row)方法，更新一个对象到row缓存中，并标记为update状态
-    # mark_deleted(id)方法，标记id对应的对象为删除状态
-    # get_dirty_rows()方法，返回所有脏对象的列表，按insert, update, delete状态分开
+    def __init__(self):
+        # 每个Component类型对应一个缓存
+        # {component_cls: np.recarray} - 存储行数据
+        self._row_cache: dict[type[BaseComponent], np.recarray] = {}
+
+        # {component_cls: {row_id: RowState}} - 存储每行的状态
+        self._row_states: dict[type[BaseComponent], dict[int, RowState]] = {}
+
+        # 范围查询缓存
+        # {component_cls: {index_name: [(left, right), ...]}} - 存储已缓存的范围
+        self._range_cache: dict[type[BaseComponent], dict[str, list[tuple]]] = {}
+
+        # 用于生成新插入行的负ID
+        self._next_insert_id = -1
+
+    def add_clean(
+        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
+    ) -> None:
+        """
+        添加一个查询到的对象到row缓存中。
+        如果数据行已存在，则会报错ValueError。
+        """
+        row_id = int(row["id"])
+
+        # 初始化该component的缓存
+        if comp_cls not in self._row_cache:
+            self._row_cache[comp_cls] = np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+            self._row_states[comp_cls] = {}
+
+        cache = self._row_cache[comp_cls]
+        states = self._row_states[comp_cls]
+
+        # 查找是否已存在该ID的行
+        if len(cache) > 0:
+            existing_idx = np.where(cache["id"] == row_id)[0]
+            if len(existing_idx) > 0:
+                # # 更新已存在的行
+                # cache[existing_idx[0]] = row
+                # # 只有在状态为CLEAN时才保持CLEAN，否则保持原状态
+                # if row_id not in states:
+                #     states[row_id] = RowState.CLEAN
+                # return
+                raise ValueError(f"Row with id {row_id} already exists in cache")
+
+        # 添加新行
+        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row))
+        # 标记为CLEAN（除非之前已有其他状态）
+        if row_id not in states:
+            states[row_id] = RowState.CLEAN
+
+    def get(self, comp_cls: type[BaseComponent], row_id: int) -> np.record | None:
+        """
+        从缓存中获取指定ID的行。
+
+        Args:
+            comp_cls: Component类
+            row_id: 行ID
+
+        Returns:
+            如果缓存中有则返回行数据，否则返回None
+        """
+        if comp_cls not in self._row_cache:
+            return None
+
+        cache = self._row_cache[comp_cls]
+        if len(cache) == 0:
+            return None
+
+        # 查找指定ID的行
+        idx = np.where(cache["id"] == row_id)[0]
+        if len(idx) == 0:
+            return None
+
+        # 检查是否已删除
+        states = self._row_states[comp_cls]
+        if states.get(row_id) == RowState.DELETE:
+            return None
+
+        return cache[idx[0]]
+
+    def add_insert(
+        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
+    ) -> np.record:
+        """
+        添加一个新插入的对象到缓存，并标记为INSERT状态。
+
+        Returns:
+            分配了临时ID（负数）的行数据
+        """
+        # 初始化缓存
+        if comp_cls not in self._row_cache:
+            self._row_cache[comp_cls] = np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+            self._row_states[comp_cls] = {}
+
+        # 分配负ID
+        row_copy = row.copy()
+        row_copy["id"] = self._next_insert_id
+        self._next_insert_id -= 1
+
+        # 添加到缓存
+        cache = self._row_cache[comp_cls]
+        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row_copy))
+
+        # 标记为INSERT
+        self._row_states[comp_cls][int(row_copy["id"])] = RowState.INSERT
+
+        return row_copy
+
+    def update(
+        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
+    ) -> None:
+        """
+        更新一个对象到缓存，并标记为UPDATE状态。
+        """
+        row_id = int(row["id"])
+
+        if comp_cls not in self._row_cache:
+            raise ValueError(f"Component {comp_cls} not in cache")
+
+        cache = self._row_cache[comp_cls]
+        states = self._row_states[comp_cls]
+
+        # 查找并更新行
+        idx = np.where(cache["id"] == row_id)[0]
+        if len(idx) == 0:
+            raise ValueError(f"Row with id {row_id} not found in cache")
+
+        # 如果是删除状态，不能更新
+        if states.get(row_id) == RowState.DELETE:
+            raise ValueError(
+                f"Row with id {row_id} is marked as DELETE and cannot be updated"
+            )
+
+        cache[idx[0]] = row
+
+        # 如果是新插入的行，保持INSERT状态；否则标记为UPDATE
+        if states.get(row_id) != RowState.INSERT:
+            states[row_id] = RowState.UPDATE
+
+    def mark_deleted(self, comp_cls: type[BaseComponent], row_id: int) -> None:
+        """
+        标记指定ID的对象为删除状态。
+
+        Args:
+            comp_cls: Component类
+            row_id: 行ID
+        """
+        if comp_cls not in self._row_states:
+            raise ValueError(f"Component {comp_cls} not in cache")
+
+        states = self._row_states[comp_cls]
+
+        # 标记为DELETE
+        states[row_id] = RowState.DELETE
+
+    def get_dirty_rows(self) -> dict[str, dict[type[BaseComponent], np.ndarray]]:
+        """
+        返回所有脏对象的列表，按INSERT、UPDATE、DELETE状态分开。
+
+        Returns:
+            {
+                'insert': {comp_cls: np.ndarray, ...},
+                'update': {comp_cls: np.ndarray, ...},
+                'delete': {comp_cls: np.ndarray, ...}  # 只包含id
+            }
+        """
+        result = {"insert": {}, "update": {}, "delete": {}}
+
+        for comp_cls, states in self._row_states.items():
+            cache = self._row_cache[comp_cls]
+
+            # 收集各状态的行ID
+            insert_ids = [
+                row_id for row_id, state in states.items() if state == RowState.INSERT
+            ]
+            update_ids = [
+                row_id for row_id, state in states.items() if state == RowState.UPDATE
+            ]
+            delete_ids = [
+                row_id for row_id, state in states.items() if state == RowState.DELETE
+            ]
+
+            # 从缓存中获取对应的行数据
+            if insert_ids:
+                mask = np.isin(cache["id"], insert_ids)
+                result["insert"][comp_cls] = cache[mask]
+
+            if update_ids:
+                mask = np.isin(cache["id"], update_ids)
+                result["update"][comp_cls] = cache[mask]
+
+            if delete_ids:
+                # DELETE只需要ID列表
+                result["delete"][comp_cls] = np.array(delete_ids, dtype=np.int64)
+
+        return result
