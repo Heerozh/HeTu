@@ -846,6 +846,8 @@ class RedisComponentTransaction(ComponentTransaction):
         key = self._key_prefix + str(row_id)
         pipe = self._trx_conn.pipe
 
+        # todo 改成版本号+lua的方式，而不用watch/multi 先测试下性能区别
+
         # 同时要让乐观锁锁定该行
         if lock_row:
             await pipe.watch(key)
@@ -894,6 +896,7 @@ class RedisComponentTransaction(ComponentTransaction):
                     trx.stack_unique_check(key, qv, qv, True)
 
     def _trx_insert(self, row: np.record) -> None:
+        # todo 检测row数据是否符合component_cls的定义+tests
         trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix

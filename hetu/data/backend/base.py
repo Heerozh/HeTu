@@ -6,13 +6,13 @@
 
                       事务相关结构
     ┌────────────────┐           ┌──────────────────┐
-    │    Backend     ├──────────►│  BackendSession  │     todo 首先要先改名BackendSession, 包含idmap
-    │数据库直连池（单件)│           │    事务模式连接     │
+    │    Backend     ├──────────►│  BackendSession  │     todo 包含idmap
+    │数据库直连池（单件)│           │    事务模式连接    │
     └────────────────┘           └──────────────────┘
             ▲                             ▲
             │初始化数据                     │ 写入数据
   ┌─────────┴──────────┐      ┌───────────┴────────────┐
-  │ RawComponentTable  │      │  ComponentTransaction  │
+  │ ComponentRepository│      │  ComponentTransaction  │
   │  组件数据管理（单件)  │      │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
   └────────────────────┘      └────────────────────────┘
   todo 直接select出来的就是此类
@@ -138,9 +138,9 @@ class BackendSession:
             await self.end_transaction(discard=True)
 
 
-class RawComponentTable:
+class RawComponentTable:  # todo 可能改叫ComponentRepository更好
     """
-    Component数据主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
+    Component数据原生处理类，负责对每个Component数据的直接操作，无事务。
     继承此类，完善所有NotImplementedError的方法。
     """
 
