@@ -47,14 +47,14 @@ async def test_volatile_table_flush(auto_backend):
         assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 0
 
 
-async def test_reconnect(auto_backend, mod_item_component):
+async def test_reconnect(auto_backend, mod_item_model):
     # 因为要用不同的连接flush，所以只能用function scope的auto_backend
     # 且当前文件不能有其他地方用mod_auto_backend，否则会冲突
     backend_component_table, get_or_create_backend = auto_backend
 
     backend = get_or_create_backend("save_test")
     loc_item_table = backend_component_table(
-        mod_item_component, "ItemSaveTestTable", 1, backend
+        mod_item_model, "ItemSaveTestTable", 1, backend
     )
     loc_item_table.flush(force=True)
     loc_item_table.create_or_migrate()
@@ -63,7 +63,7 @@ async def test_reconnect(auto_backend, mod_item_component):
     async with backend.transaction(1) as session:
         tbl = loc_item_table.attach(session)
         for i in range(25):
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.time = i  # 防止unique冲突
             row.name = f"Item_{i}"  # 防止unique冲突
             await tbl.insert(row)
@@ -99,7 +99,7 @@ async def test_reconnect(auto_backend, mod_item_component):
     backend2 = get_or_create_backend("load_test")
 
     loc_item_table2 = backend_component_table(
-        mod_item_component, "ItemSaveTestTable", 1, backend2
+        mod_item_model, "ItemSaveTestTable", 1, backend2
     )
     loc_item_table2.create_or_migrate()
     async with backend2.transaction(1) as session:
