@@ -1,9 +1,6 @@
 # 河图的image
 FROM python:3.14-slim
 
-RUN apt-get update && apt-get install -y git
-
-# RUN pip install git+https://github.com/Heerozh/HeTu.git 用copy才能判断文件是否已更改
 WORKDIR /src/hetu
 COPY ./pyproject.toml ./README.md ./
 COPY ./hetu ./hetu

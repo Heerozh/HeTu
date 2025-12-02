@@ -10,7 +10,6 @@ import json
 import keyword
 import logging
 import operator
-import os
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Callable, Any, TYPE_CHECKING
@@ -18,7 +17,6 @@ from typing import Callable, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from .backend import RawComponentTable
 
-import git
 import numpy as np
 
 from ..common import Singleton, csharp_keyword
@@ -59,19 +57,18 @@ class BaseComponent:
     namespace_: str | None = None
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
-    persist_: bool = True  # 只是标记，每次启动时会清空此标记的数据
-    readonly_: bool = False  # 只是标记，调用写入会警告
+    persist_: bool = True  # 持久化标记，无此标记的Component每次重启会清空数据
+    readonly_: bool = False  # todo: 只读标记，调用写入会警告
     backend_: str | None = None  # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype | None = None  # np structured dtype
     default_row: np.ndarray | None = None  # 默认空数据行
-    hosted_: RawComponentTable | None = None  # 该Component运行时被托管的实例
-    prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性 的映射
+    hosted_: RawComponentTable | None = None  # 该Component运行时被托管的DOA实例
+    prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype] | None = None  # 属性名->dtype的映射
     uniques_: set[str] | None = None  # 唯一索引的属性名集合
     indexes_: dict[str, bool] | None = None  # 索引名->是否是字符串类型 的映射
     json_: str | None = None  # Component定义的json字符串
-    git_hash_: str | None = None  # Component定义的app文件版本
     instances_: dict[str, dict[str, type[BaseComponent]]] = {}  # 所有副本实例
     master_: type[BaseComponent] | None = None  # 该Component的主实例
 
@@ -161,8 +158,6 @@ class BaseComponent:
             comp.prop_idx_map_[name] = len(comp.prop_idx_map_)
             comp.dtype_map_[name] = np.dtype(prop.dtype)
 
-        # 从json生成的Component没有git版本信息
-        comp.git_hash_ = ""
         return comp
 
     @classmethod
@@ -450,24 +445,6 @@ def define_component(
             rls_compare,
         )
         cls.load_json(json_str)
-
-        # 保存app文件的git版本信息，目前无作用，主要用于以后支持自动迁移
-        caller = inspect.stack()[1]
-        try:
-            repo = git.Repo(caller.filename, search_parent_directories=True)
-            tree = repo.head.commit.tree
-            relpath = os.path.relpath(caller.filename, repo.working_dir).replace(
-                os.sep, "/"
-            )
-            blob = tree[relpath]
-            sha = blob.hexsha
-            cls.git_hash_ = sha
-        except (KeyError, git.exc.InvalidGitRepositoryError, ValueError):
-            lib_path = os.path.abspath(__file__ + "/../../")
-            # if lib_path not in caller.filename: 等自动迁移完成后再打开
-            #     warnings.warn(f"⚠️ [🛠️Define] {caller.filename}文件不在git版本控制中，"
-            #                   f"将无法用于根据文件版本变化自动迁移{cls.__name__}组件的功能。")
-            cls.git_hash_ = "untracked"
 
         # 把class加入到总集中
         ComponentDefines().add_component(namespace, cls, force)

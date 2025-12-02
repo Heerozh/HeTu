@@ -199,7 +199,11 @@ class IdentityMap:
                 'delete': {comp_cls: np.ndarray, ...}  # 只包含id
             }
         """
-        result: dict[str, dict[type[BaseComponent], np.ndarray]] = {"insert": {}, "update": {}, "delete": {}}
+        result: dict[str, dict[type[BaseComponent], np.ndarray]] = {
+            "insert": {},
+            "update": {},
+            "delete": {},
+        }
 
         for comp_cls, states in self._row_states.items():
             cache = self._row_cache[comp_cls]

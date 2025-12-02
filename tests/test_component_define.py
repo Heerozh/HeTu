@@ -8,9 +8,7 @@
 import numpy as np
 import pytest
 
-from hetu.data import (
-    define_component, property_field, BaseComponent
-)
+from hetu.data import define_component, property_field, BaseComponent
 
 
 def test_normal_define(new_component_env):
@@ -26,14 +24,15 @@ def test_normal_define(new_component_env):
 
     # 测试属性是否正确放入了_properties
     assert GalaxyPosition.properties_ == [
-        ('aaa', property_field(0, False, False, np.dtype(np.int8).str)),
-        ('id', property_field(0, True, True, np.dtype(np.int64).str)),
-        ('x', property_field(0, True, True, np.dtype(int).str)),
-        ('y', property_field(0, False, False, np.dtype(float).str))
+        ("aaa", property_field(0, False, False, np.dtype(np.int8).str)),
+        ("id", property_field(0, True, True, np.dtype(np.int64).str)),
+        ("x", property_field(0, True, True, np.dtype(int).str)),
+        ("y", property_field(0, False, False, np.dtype(float).str)),
     ]
 
     # 测试是否会提示无Property错误
     with pytest.raises(AssertionError, match="Property"):
+
         @define_component(namespace="pytest")
         class GalaxyPosition(BaseComponent):
             x: int = 0
@@ -41,6 +40,7 @@ def test_normal_define(new_component_env):
 
     # 测试是否会提示【继承】错误
     with pytest.raises(AssertionError, match="BaseComponent"):
+
         @define_component(namespace="pytest")
         class GalaxyPosition:
             x: int = property_field(0, True)
@@ -48,6 +48,7 @@ def test_normal_define(new_component_env):
 
     # 测试是否会提示重复定义错误
     with pytest.raises(AssertionError):
+
         @define_component(namespace="pytest")
         class GalaxyPosition(BaseComponent):
             x: int = property_field(0, True)
@@ -61,22 +62,26 @@ def test_normal_define(new_component_env):
 
     # 测试重定义id
     with pytest.raises(AssertionError, match="id"):
+
         @define_component(namespace="pytest", force=True)
         class GalaxyPosition(BaseComponent):
             id: int = property_field(0, True)
 
     # 测试默认值和dtype冲突
     with pytest.raises(AssertionError, match="default值"):
+
         @define_component(namespace="pytest", force=True)
         class GalaxyPosition(BaseComponent):
-            name: np.int8 = property_field('0')
+            name: np.int8 = property_field("0")
 
     with pytest.raises(AssertionError, match="default值"):
+
         @define_component(namespace="pytest", force=True)
         class GalaxyPosition(BaseComponent):
-            name: 'U8' = property_field(99999999999)
+            name: "U8" = property_field(99999999999)
 
     with pytest.raises(AssertionError, match="None"):
+
         @define_component(namespace="pytest", force=True)
         class GalaxyPosition(BaseComponent):
             name: float = property_field(None)
@@ -97,26 +102,24 @@ def test_normal_define(new_component_env):
     @define_component(namespace="pytest", force=True)
     class TestBool(BaseComponent):
         a: bool = property_field(True, True)
-        b: '?' = property_field(True, False)
+        b: "?" = property_field(True, False)
         c: np.bool_ = property_field(True, False)
 
     np.testing.assert_array_equal(
         np.array(list(TestBool.dtypes.fields.values()))[:, 0],
-        [np.int8, np.int8, np.int8, np.int64])
-
-    # 测试版本信息, git hash 长度40
-    assert len(TestBool.git_hash_) == 40
+        [np.int8, np.int8, np.int8, np.int64],
+    )
 
     # 测试字符串byte类型
     @define_component(namespace="pytest", force=True)
     class TestString(BaseComponent):
-        a: 'U8' = property_field(b'123', True, True)
-        b: 'S8' = property_field(b'123', True, False)
-        c: 'b' = property_field(1, True, False)
+        a: "U8" = property_field(b"123", True, True)
+        b: "S8" = property_field(b"123", True, False)
+        c: "b" = property_field(1, True, False)
 
-    assert TestString.indexes_['a'] == True
-    assert TestString.indexes_['b'] == True
-    assert TestString.indexes_['c'] == False
+    assert TestString.indexes_["a"] == True
+    assert TestString.indexes_["b"] == True
+    assert TestString.indexes_["c"] == False
 
 
 def test_instance_define(new_component_env, new_clusters_env):
@@ -142,17 +145,20 @@ def test_instance_define(new_component_env, new_clusters_env):
 
 def test_keyword_define(new_component_env):
     with pytest.raises(ValueError, match="关键字"):
-        @define_component(namespace='HeTu', persist=False)
+
+        @define_component(namespace="HeTu", persist=False)
         class TestKeywordComponent(BaseComponent):
             bool: bool = property_field(False)
 
     with pytest.raises(ValueError, match="C#"):
-        @define_component(namespace='HeTu', persist=False)
+
+        @define_component(namespace="HeTu", persist=False)
         class TestKeywordComponent(BaseComponent):
             sbyte: bool = property_field(False)
 
     with pytest.raises(ValueError, match="C#"):
-        @define_component(namespace='HeTu', persist=False)
+
+        @define_component(namespace="HeTu", persist=False)
         class sbyte(BaseComponent):
             _ok: bool = property_field(False)
 
