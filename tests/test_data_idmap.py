@@ -1,6 +1,7 @@
 import pytest
 import numpy as np
-from hetu.data.idmap import IdentityMap
+from hetu.data.component import BaseComponent
+from hetu.data.idmap import IdentityMap, RowState
 
 
 def test_add_clean_and_get(mod_item_model):
@@ -18,10 +19,11 @@ def test_add_clean_and_get(mod_item_model):
     id_map.add_clean(Item, row)
 
     # 验证获取
-    fetched_row = id_map.get(Item, 100)
+    fetched_row, status = id_map.get(Item, 100)
     assert fetched_row is not None
     assert fetched_row["id"] == 100
     assert fetched_row["name"] == "TestItem"
+    assert status == RowState.CLEAN
 
     # 验证重复添加报错
     with pytest.raises(ValueError, match="already exists"):
@@ -38,16 +40,17 @@ def test_add_insert(mod_item_model):
     row.owner = 2
 
     # 添加插入
-    inserted_row = id_map.add_insert(Item, row)
+    id_map.add_insert(Item, row)
 
     # 验证分配了负ID
-    assert inserted_row["id"] < 0
-    temp_id = inserted_row["id"]
+    assert row["id"] < 0
+    temp_id = row["id"]
 
     # 验证缓存中存在
-    fetched = id_map.get(Item, temp_id)
+    fetched, status = id_map.get(Item, temp_id)
     assert fetched is not None
     assert fetched["name"] == "NewItem"
+    assert status == RowState.INSERT
 
     # 验证状态
     dirty = id_map.get_dirty_rows()
@@ -73,8 +76,10 @@ def test_update_clean_row(mod_item_model):
     id_map.update(Item, row_update)
 
     # 验证数据已更新
-    fetched = id_map.get(Item, 200)
+    fetched, status = id_map.get(Item, 200)
+    assert fetched is not None
     assert fetched["name"] == "Updated"
+    assert status == RowState.UPDATE
 
     # 验证状态流转为 UPDATE
     dirty = id_map.get_dirty_rows()
@@ -91,16 +96,17 @@ def test_update_inserted_row(mod_item_model):
     # 插入数据
     row = Item.new_row()
     row.name = "Original"
-    inserted = id_map.add_insert(Item, row)
-    temp_id = inserted["id"]
+    id_map.add_insert(Item, row)
+    temp_id = row["id"]
 
     # 更新插入的数据
-    row_update = inserted.copy()
+    row_update = row.copy()
     row_update.name = "Updated"
     id_map.update(Item, row_update)
 
     # 验证数据更新
-    fetched = id_map.get(Item, temp_id)
+    fetched, status = id_map.get(Item, temp_id)
+    assert fetched is not None
     assert fetched["name"] == "Updated"
 
     # 验证状态仍为 INSERT，不应出现在 UPDATE 列表中
@@ -123,7 +129,9 @@ def test_mark_deleted(mod_item_model):
     id_map.mark_deleted(Item, 300)
 
     # 验证 get 返回 None
-    assert id_map.get(Item, 300) is None
+    fetched, status = id_map.get(Item, 300)
+    assert fetched.id == 300
+    assert status is RowState.DELETE
 
     # 验证无法更新已删除的行
     with pytest.raises(ValueError, match="marked as DELETE"):
@@ -141,7 +149,7 @@ def test_exceptions(mod_item_model):
     id_map = IdentityMap()
 
     # 获取不存在的 Component
-    assert id_map.get(Item, 999) is None
+    assert id_map.get(Item, 999) == (None, None)
 
     # 更新不存在的 Component
     row = Item.new_row()
@@ -160,7 +168,7 @@ def test_exceptions(mod_item_model):
     # 标记删除不存在的 Component
     # 注意：mark_deleted 检查的是 _row_states，add_clean 会初始化它
     # 如果完全没加过该 Component，会报错
-    class OtherComponent:
+    class OtherComponent(BaseComponent):
         pass
 
     with pytest.raises(ValueError, match="not in cache"):
