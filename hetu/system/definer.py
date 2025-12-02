@@ -367,8 +367,8 @@ def define_system(
             具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
         ctx['SystemName']: func
             获取定义时在 `subsystems` 中传入的System函数。
-        ctx.nontrxs[Component Class]: ComponentTable
-            获取non_transactions中引用的Component实例，类型为 `ComponentTable`，可以direct_get/set数据，
+        ctx.nontrxs[Component Class]: RawComponentTable
+            获取non_transactions中引用的Component实例，类型为 `RawComponentTable`，可以direct_get/set数据，
             而不通过事务，因此危险不保证数据一致性，请只做原子操作。
         await ctx.end_transaction(discard=False):
             提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。

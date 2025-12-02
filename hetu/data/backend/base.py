@@ -5,22 +5,26 @@
 @email: heeroz@gmail.com
 
                       事务相关结构
-    ┌────────────────┐           ┌──────────────────┐
-    │    Backend     ├──────────►│BackendTransaction│
-    │数据库直连池（单件)│           │    事务模式连接     │
-    └────────────────┘           └──────────────────┘
-            ▲                             ▲
-            │初始化数据                     │ 写入数据
-  ┌─────────┴──────────┐      ┌───────────┴────────────┐
-  │   ComponentTable   │      │  ComponentTransaction  │
-  │  组件数据管理（单件)  │      │      组件相关事务操作     │
-  └────────────────────┘      └────────────────────────┘
-
+                  ┌────────────────┐
+                  │    Backend     │ 继承此类实现各种backend
+                  │数据库直连池（单件)│
+                  └────────────────┘
+                           ▲
+            ┌──────────────┴────────────┐
+  ┌─────────┴──────────┐      ┌─────────┴────────┐
+  │   ComponentTable   │      │      Session     │     todo 包含idmap
+  │  组件数据访问（单件)  │      │     事务处理类    │
+  └────────────────────┘      └──────────────────┘
+                                       ▲
+                           ┌───────────┴────────────┐
+                           │         Select         │    todo 直接select出来的就是此类
+                           │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
+                           └────────────────────────┘
 
         数据订阅结构
     ┌─────────────────┐
     │     MQClient    │
-    │消息队列连接(每用户）│
+    │消息队列连接(每用户）│  继承此类实现各种backend
     └─────────────────┘
             ▲
             │
@@ -42,6 +46,7 @@ import logging
 import numpy as np
 
 from ..component import BaseComponent
+from ..idmap import IdentityMap, RowState
 
 logger = logging.getLogger("HeTu.root")
 
@@ -101,16 +106,16 @@ class Backend:
         """
         raise NotImplementedError
 
-    def transaction(self, cluster_id: int) -> "BackendTransaction":
+    def transaction(self, cluster_id: int) -> BackendSession:
         """进入db的事务模式，返回事务连接，事务只能在对应的cluster_id中执行，不能跨cluster"""
         raise NotImplementedError
 
-    def get_mq_client(self) -> "MQClient":
+    def get_mq_client(self) -> MQClient:
         """获取消息队列连接"""
         raise NotImplementedError
 
 
-class BackendTransaction:
+class BackendSession:
     """数据库事务类，负责开始事务，并提交事务"""
 
     def __init__(self, backend: Backend, cluster_id: int):
@@ -138,9 +143,9 @@ class BackendTransaction:
             await self.end_transaction(discard=True)
 
 
-class ComponentTable:
+class RawComponentTable:  # todo 可能改叫ComponentRepository更好
     """
-    Component数据主类，负责对每个Component数据的初始化操作，并可以启动Component相关的事务操作。
+    Component数据原生处理类，负责对每个Component数据的直接操作，无事务。
     继承此类，完善所有NotImplementedError的方法。
     """
 
@@ -263,18 +268,18 @@ class ComponentTable:
         """
         raise NotImplementedError
 
-    def attach(self, backend_trx: BackendTransaction) -> "ComponentTransaction":
+    def attach(self, backend_trx: BackendSession) -> ComponentTransaction:
         """返回当前组件的事务操作类，并附加到现有的后端事务连接"""
         # 继承，并执行：
         # return YourComponentTransaction(self, backend_trx)
         raise NotImplementedError
 
-    def new_transaction(self) -> tuple[BackendTransaction, "ComponentTransaction"]:
+    def new_transaction(self) -> tuple[BackendSession, ComponentTransaction]:
         """返回当前组件的事务操作类，并新建一个后端事务连接"""
         conn = self._backend.transaction(self._cluster_id)
         return conn, self.attach(conn)
 
-    def channel_name(self, index_name: str = None, row_id: int = None):
+    def channel_name(self, index_name: str | None = None, row_id: int | None = None):
         """返回当前组件表，在消息队列中的频道名。表如果有数据变动，会发送到对应频道"""
         raise NotImplementedError
 
@@ -286,17 +291,13 @@ class ComponentTransaction:
     已写的方法可能不能完全适用所有情况，有些数据库可能要重写这些方法。
     """
 
-    def __init__(self, comp_tbl: ComponentTable, trx_conn: BackendTransaction):
+    def __init__(self, comp_tbl: RawComponentTable, trx_conn: BackendSession):
         assert trx_conn.cluster_id == comp_tbl.cluster_id, (
             "事务只能在对应的cluster_id中执行，不能跨cluster"
         )
         self._component_cls = comp_tbl.component_cls  # type: type[BaseComponent]
-        self._trx_conn = trx_conn
-        self._cache = {}  # 事务中缓存数据，key为row_id，value为row
-        # insert缓存数据，因为没有id，所以用list存储
-        self._insert_caches = np.rec.array(
-            np.empty(0, dtype=self._component_cls.dtypes)
-        )
+        self._trx_conn = trx_conn  # todo 改成_session_conn
+        self._idmap = IdentityMap()  # 用于缓存和管理事务中的对象
         self._del_flags = set()  # 事务中的删除操作标记
         self._updt_flags = set()  # 事务中的更新操作标记
 
@@ -305,7 +306,7 @@ class ComponentTransaction:
         return self._component_cls
 
     @property
-    def attached(self) -> BackendTransaction:
+    def attached(self) -> BackendSession:
         return self._trx_conn
 
     async def _db_get(self, row_id: int, lock_row=True) -> None | np.record:
@@ -317,21 +318,21 @@ class ComponentTransaction:
     async def _db_query(
         self, index_name: str, left, right=None, limit=10, desc=False, lock_index=True
     ) -> list[int]:
-        # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库同时返回了数据，可以存到_cache中
+        # 继承，并实现范围查询的操作，返回List[int] of row_id。如果你的数据库不光返回id，同时返回了数据，可以存到_idmap中
         # 未查询到数据时返回[]
         # 如果你用乐观锁，要考虑清楚何时检查
         raise NotImplementedError
 
     def _trx_insert(self, row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack插入数据的操作
+        # 继承，并实现往BackendSession里stack插入数据的操作
         raise NotImplementedError
 
     def _trx_update(self, row_id: int, old_row: np.record, new_row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack更新数据的操作
+        # 继承，并实现往BackendSession里stack更新数据的操作
         raise NotImplementedError
 
     def _trx_delete(self, row_id: int, old_row: np.record) -> None:
-        # 继承，并实现往BackendTransaction里stack删除数据的操作
+        # 继承，并实现往BackendSession里stack删除数据的操作
         raise NotImplementedError
 
     async def get_by_ids(self, row_ids: list[int] | np.ndarray) -> np.recarray:
@@ -351,14 +352,15 @@ class ComponentTransaction:
         """
         rtn = []
         for row_id in row_ids:
-            if (row := self._cache.get(row_id)) is not None:
-                if type(row) is str and row == "deleted":
+            row, status = self._idmap.get(self._component_cls, row_id)
+            if row is not None:
+                if status is RowState.DELETE:
                     raise RaceCondition("gets: row已经被你自己删除了")
                 rtn.append(row)
             else:
                 if (row := await self._db_get(row_id)) is None:
                     raise RaceCondition("gets: row中途被删除了")
-                self._cache[row_id] = row
+                self._idmap.add_clean(self._component_cls, row)
                 rtn.append(row)
 
         return np.rec.array(np.stack(rtn, dtype=self._component_cls.dtypes))
@@ -415,11 +417,12 @@ class ComponentTransaction:
                 return None
             row_id = int(row_ids[0])
 
-        if (row := self._cache.get(row_id)) is not None:
-            if type(row) is str and row == "deleted":
+        row, status = self._idmap.get(self._component_cls, row_id)
+        if row is not None:
+            if status is RowState.DELETE:
                 return None
             else:
-                return row.copy()
+                return row.copy()  # recarray convert to record(single row)
 
         # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
@@ -432,7 +435,7 @@ class ComponentTransaction:
         if row[where] != value:
             raise RaceCondition(f"select: row.{where}值变动了")
 
-        self._cache[row_id] = row
+        self._idmap.add_clean(self._component_cls, row)
 
         return row.copy()
 
@@ -534,7 +537,8 @@ class ComponentTransaction:
         rtn = []
         for row_id in row_ids:
             row_id = int(row_id)
-            if (row := self._cache.get(row_id)) is not None:
+            row, status = self._idmap.get(self._component_cls, row_id)
+            if row is not None and status is not RowState.DELETE:
                 rtn.append(row)
             elif (row := await self._db_get(row_id, lock_row=lock_rows)) is not None:
                 # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
@@ -543,7 +547,7 @@ class ComponentTransaction:
                 if not (left <= row[index_name] <= right):
                     raise RaceCondition(f"select: row.{index_name}值变动了")
                 if lock_rows:
-                    self._cache[row_id] = row
+                    self._idmap.add_clean(self._component_cls, row)
                 rtn.append(row)
             else:
                 raise RaceCondition("select: row中途被删除了")
@@ -599,16 +603,17 @@ class ComponentTransaction:
     def upsert(self, value, where: str = None) -> UpdateOrInsert:
         return self.update_or_insert(value, where)
 
-    def insert_cache_exists(self, value, where: str) -> bool:
+    def idmap_unique_value_exists(self, value, where: str) -> bool:
         """检查是否已插入过该值"""
-        return (self._insert_caches[where] == value).any()
+        return len(self._idmap.filter(self.component_cls, **{where: value})) > 0
 
     async def unique_value_exists(self, value, index_name: str) -> bool:
         """检查单个unique索引是否满足条件"""
         row_ids = await self._db_query(index_name, value, limit=1, lock_index=False)
         if len(row_ids) > 0:
             return True
-        return self.insert_cache_exists(value, index_name)
+        # 也检查事务内新增的数据
+        return self.idmap_unique_value_exists(value, index_name)
 
     async def _check_uniques(
         self, old_row: np.record | None, new_row: np.record, ignores=None
@@ -649,9 +654,9 @@ class ComponentTransaction:
         if row.id != row_id:
             raise ValueError(f"更新的row.id {row.id} 与传入的row_id {row_id} 不一致")
 
-        # 先查询旧数据是否存在，一般update调用时，旧数据都在_cache里，不然你哪里获得的row数据
-        old_row = self._cache.get(row_id)  # or await self._db_get(row_id)
-        if old_row is None:
+        # 先查询旧数据是否存在，一般update调用时，旧数据都在_idmap里，不然你哪里获得的row数据
+        old_row, status = self._idmap.get(self._component_cls, row_id)
+        if old_row is None or status is RowState.DELETE:
             raise KeyError(
                 f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
             )
@@ -661,7 +666,7 @@ class ComponentTransaction:
         # 更新cache数据
         row = row.copy()
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
-        self._cache[row_id] = row
+        self._idmap.update(self._component_cls, row)
         self._updt_flags.add(row_id)
         # 加入到更新队列
         self._trx_update(row_id, old_row, row)
@@ -714,7 +719,7 @@ class ComponentTransaction:
         # 加入到更新队列
         row = row.copy()
         self._trx_insert(row)
-        self._insert_caches = np.append(self._insert_caches, row)
+        self._idmap.add_insert(self._component_cls, row)
 
     async def delete(self, row_id: int | np.integer) -> None:
         """删除row_id行"""
@@ -732,7 +737,10 @@ class ComponentTransaction:
             )
 
         # 先查询旧数据是否存在
-        old_row = self._cache.get(row_id) or await self._db_get(row_id)
+        old_row, status = self._idmap.get(self._component_cls, row_id)
+        if status is None:
+            old_row = await self._db_get(row_id)
+            self._idmap.add_clean(self.component_cls, old_row)
         if old_row is None:
             raise KeyError(
                 f"{self._component_cls.component_name_} 组件没有id为 {row_id} 的行"
@@ -741,7 +749,7 @@ class ComponentTransaction:
         old_row = old_row.copy()  # 因为要放入_updates，从cache获取的，得copy防止修改
 
         # 标记删除
-        self._cache[row_id] = "deleted"
+        self._idmap.mark_deleted(self._component_cls, row_id)
         self._del_flags.add(row_id)
         self._trx_delete(row_id, old_row)
 
@@ -776,7 +784,7 @@ class UpdateOrInsert:
             await self.comp_trx.update(self.row_id, self.row)
 
     async def __aenter__(self):
-        if self.comp_trx.insert_cache_exists(self.value, self.where):
+        if self.comp_trx.idmap_unique_value_exists(self.value, self.where):
             # todo: 更好的实现，应该撤销上一次insert，然后获取上一次的row值作为select结果返回
             #       目前redis insert是stack的，无法索引撤销
             raise UniqueViolation(

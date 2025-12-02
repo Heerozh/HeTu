@@ -19,9 +19,9 @@ from redis.asyncio.client import Pipeline
 
 from .base import (
     ComponentTransaction,
-    ComponentTable,
+    RawComponentTable,
     Backend,
-    BackendTransaction,
+    BackendSession,
     MQClient,
 )
 from .base import RaceCondition, HeadLockFailed
@@ -96,6 +96,7 @@ class RedisBackend(Backend):
     def load_lua_scripts(self):
         cls = self.__class__
         if cls.lua_check_and_run is None:
+            assert self._aio
             # 注册脚本到异步io
             cls.lua_check_and_run = self._aio.register_script(
                 cls.LUA_CHECK_AND_RUN_SCRIPT
@@ -120,12 +121,18 @@ class RedisBackend(Backend):
             self.io = redis.cluster.RedisCluster.from_url(
                 self.master_url, decode_responses=True
             )
-            self._aio = redis.asyncio.cluster.RedisCluster.from_url(
-                self.master_url, decode_responses=True
+            self._aio: redis.asyncio.RedisCluster = (
+                redis.asyncio.cluster.RedisCluster.from_url(
+                    self.master_url, decode_responses=True
+                )
             )
         else:
-            self.io = redis.from_url(self.master_url, decode_responses=True)
-            self._aio = redis.asyncio.from_url(self.master_url, decode_responses=True)
+            self.io: redis.Redis = redis.from_url(
+                self.master_url, decode_responses=True
+            )
+            self._aio: redis.asyncio.Redis = redis.asyncio.from_url(
+                self.master_url, decode_responses=True
+            )
         # 测试连接是否正常
         try:
             self.io.ping()
@@ -145,7 +152,7 @@ class RedisBackend(Backend):
             except redis.exceptions.ConnectionError as e:
                 raise ConnectionError(f"无法连接到replicas：{servant_url}") from e
         # 连接只读数据库
-        self.replicas = [
+        self.replicas: list[redis.asyncio.Redis | redis.asyncio.RedisCluster] = [
             redis.asyncio.from_url(url, decode_responses=True)
             for url in self.servant_urls
         ]
@@ -163,7 +170,9 @@ class RedisBackend(Backend):
             raise ConnectionError("连接已关闭，已调用过close")
 
         # 检测redis版本
-        parse_version = lambda x: tuple(map(int, x.split(".")))
+        def parse_version(x):
+            return tuple(map(int, x.split(".")))
+
         version = self.io.info("server")["redis_version"]
         assert parse_version(version) >= (7, 0), "Redis版本过低，至少需要7.0版本"
         for url in self.servant_urls:
@@ -260,7 +269,7 @@ class RedisBackend(Backend):
             locked = str(id(self))
         return locked == str(id(self))
 
-    def random_replica(self) -> redis.Redis:
+    def random_replica(self) -> redis.asyncio.Redis:
         """随机返回一个只读连接"""
         if self.loop_id is None:
             self.loop_id = hash(asyncio.get_running_loop())
@@ -270,20 +279,20 @@ class RedisBackend(Backend):
 
         return random.choice(self.replicas)
 
-    def get_mq_client(self) -> "RedisMQClient":
+    def get_mq_client(self) -> RedisMQClient:
         """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
         if not self.io:
             raise ConnectionError("连接已关闭，已调用过close")
         return RedisMQClient(self.random_replica())
 
-    def transaction(self, cluster_id: int) -> "RedisTransaction":
+    def transaction(self, cluster_id: int) -> RedisSession:
         """进入db的事务模式，返回事务连接"""
         if not self.io:
             raise ConnectionError("连接已关闭，已调用过close")
-        return RedisTransaction(self, cluster_id)
+        return RedisSession(self, cluster_id)
 
 
-class RedisTransaction(BackendTransaction):
+class RedisSession(BackendSession):
     """数据库事务类，负责开始事务，并提交事务"""
 
     def __init__(self, backend: RedisBackend, cluster_id: int):
@@ -378,7 +387,7 @@ class RedisTransaction(BackendTransaction):
                 self._trx_pipe = None
 
 
-class RedisComponentTable(ComponentTable):
+class RedisRawComponentTable(RawComponentTable):
     """
     在redis种初始化/管理Component数据表，提供事务指令。
 
@@ -802,7 +811,7 @@ class RedisComponentTable(ComponentTable):
                 await asyncio.sleep(random.random() / 5)
                 continue
 
-    def attach(self, backend_trx: RedisTransaction) -> "RedisComponentTransaction":
+    def attach(self, backend_trx: RedisSession) -> RedisComponentTransaction:
         # 这里不用检查cluster_id，因为ComponentTransaction会检查
         # assert backend_trx.cluster_id == self._cluster_id
         return RedisComponentTransaction(
@@ -821,13 +830,13 @@ class RedisComponentTable(ComponentTable):
 class RedisComponentTransaction(ComponentTransaction):
     def __init__(
         self,
-        comp_tbl: RedisComponentTable,
-        trx_conn: RedisTransaction,
+        comp_tbl: RedisRawComponentTable,
+        trx_conn: RedisSession,
         key_prefix: str,
         index_prefix: str,
     ):
         super().__init__(comp_tbl, trx_conn)
-        self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisTransaction
+        self._trx_conn = trx_conn  # 为了让代码提示知道类型是RedisSession
 
         self._key_prefix = key_prefix
         self._idx_prefix = index_prefix
@@ -836,6 +845,8 @@ class RedisComponentTransaction(ComponentTransaction):
         # 获取行数据的操作
         key = self._key_prefix + str(row_id)
         pipe = self._trx_conn.pipe
+
+        # todo 改成版本号+lua的方式，而不用watch/multi 先测试下性能区别
 
         # 同时要让乐观锁锁定该行
         if lock_row:
@@ -852,7 +863,7 @@ class RedisComponentTransaction(ComponentTransaction):
         idx_key = self._idx_prefix + index_name
         pipe = self._trx_conn.pipe
 
-        cmds = RedisComponentTable.make_query_cmd(
+        cmds = RedisRawComponentTable.make_query_cmd(
             self._component_cls, index_name, left, right, limit, desc
         )
 
@@ -885,6 +896,7 @@ class RedisComponentTransaction(ComponentTransaction):
                     trx.stack_unique_check(key, qv, qv, True)
 
     def _trx_insert(self, row: np.record) -> None:
+        # todo 检测row数据是否符合component_cls的定义+tests
         trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix

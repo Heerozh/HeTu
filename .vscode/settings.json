@@ -1,9 +1,13 @@
 {
     "cSpell.words": [
         "caplog",
-        "hetu",
         "Heerozh",
+        "hetu",
+        "idmap",
         "Jianhao",
+        "keyspace",
+        "recarray",
+        "replicaof",
         "Zhang"
     ],
     "python.testing.pytestArgs": [

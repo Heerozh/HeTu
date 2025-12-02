@@ -11,21 +11,21 @@ import pytest
 from hetu.data.backend import UniqueViolation, RedisBackend
 
 
-async def test_table(mod_item_component, item_table):
+async def test_table(mod_item_model, item_table):
     backend = item_table.backend
 
     # 测试插入数据
     async with backend.transaction(1) as session:
         # todo 语法改成：
-        #   row = mod_item_component.new_row()
-        #   session.insert(row)
-        #   session.select(mod_item_component).get(id=id)
-        #   session.select(mod_item_component).range(index=(left, right))
-        #   session.update(id, row)
-        #   session.delete(id)
-        #   session.upsert(index=row.index, row)
+        #   row = mod_item_model.new_row()
+        #   session.select(mod_item_model).insert(row)
+        #   session.select(mod_item_model).get(id=id)
+        #   session.select(mod_item_model).range(index=(left, right))
+        #   session.select(mod_item_model).update(id, row)
+        #   session.select(mod_item_model).delete(id)
+        #   session.select(mod_item_model).upsert(index=row.index, row)
         tbl = item_table.attach(session)
-        row = mod_item_component.new_row()
+        row = mod_item_model.new_row()
         row.name = "Item1"
         row.owner = 1
         row.time = 1
@@ -84,7 +84,7 @@ async def test_table(mod_item_component, item_table):
             await tbl.insert(row)
 
 
-async def test_upsert(mod_item_component, item_table):
+async def test_upsert(mod_item_model, item_table):
     backend = item_table.backend
 
     # 测试能用update_or_insert
@@ -190,13 +190,13 @@ async def test_query_bool(filled_item_table):
         assert set((await tbl.query("used", True)).id) == set()
 
 
-async def test_string_length_cutoff(filled_item_table, mod_item_component):
+async def test_string_length_cutoff(filled_item_table, mod_item_model):
     backend = filled_item_table.backend
 
     # 测试插入的字符串超出长度是否截断
     async with backend.transaction(1) as session:
         tbl = filled_item_table.attach(session)
-        row = mod_item_component.new_row()
+        row = mod_item_model.new_row()
         row.name = "reinsert2"  # 超出U8长度会被截断
         await tbl.insert(row)
 
@@ -284,7 +284,7 @@ async def test_unique_table(mod_auto_backend):
         assert result.id[0] == 2
 
 
-async def test_upsert_limit(mod_item_component, item_table):
+async def test_upsert_limit(mod_item_model, item_table):
     backend = item_table.backend
 
     with pytest.raises(ValueError, match="unique"):
@@ -294,12 +294,12 @@ async def test_upsert_limit(mod_item_component, item_table):
                 pass
 
 
-async def test_session_exception(mod_item_component, item_table):
+async def test_session_exception(mod_item_model, item_table):
     backend = item_table.backend
     try:
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.owner = 123
             await tbl.insert(row)
 
@@ -319,7 +319,7 @@ async def test_session_exception(mod_item_component, item_table):
     assert row is None
 
 
-async def test_redis_empty_index(mod_item_component, filled_item_table):
+async def test_redis_empty_index(mod_item_model, filled_item_table):
     backend = filled_item_table.backend
     if not isinstance(backend, RedisBackend):
         pytest.skip("Not a redis backend, skip")
@@ -340,7 +340,7 @@ async def test_redis_empty_index(mod_item_component, filled_item_table):
     assert backend.io.keys("test:Item:{CLU*") == []
 
 
-async def test_redis_insert_stack(mod_item_component, item_table):
+async def test_redis_insert_stack(mod_item_model, item_table):
     backend = item_table.backend
     if not isinstance(backend, RedisBackend):
         pytest.skip("Not a redis backend, skip")
@@ -348,11 +348,11 @@ async def test_redis_insert_stack(mod_item_component, item_table):
     # 检测插入2行数据是否有2个stack
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
-        row = mod_item_component.new_row()
+        row = mod_item_model.new_row()
         row.time = 12345
         row.name = "Stack1"
         await tbl.insert(row)
-        row = mod_item_component.new_row()
+        row = mod_item_model.new_row()
         row.time = 22345
         row.name = "Stack2"
         await tbl.insert(row)
@@ -367,7 +367,7 @@ async def test_redis_insert_stack(mod_item_component, item_table):
         assert len(session._stack) == 0
 
 
-async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_table):
+async def test_unique_batch_add_in_same_session_bug(mod_item_model, item_table):
     backend = item_table.backend
 
     # 同事务中插入多个重复Unique数据应该失败
@@ -375,12 +375,12 @@ async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_tab
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
 
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.name = "Item1"
             row.time = 1
             await tbl.insert(row)
 
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.name = "Item1"
             row.time = 2
             await tbl.insert(row)
@@ -389,23 +389,23 @@ async def test_unique_batch_add_in_same_session_bug(mod_item_component, item_tab
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
 
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.name = "Item1"
             row.time = 1
             await tbl.insert(row)
 
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.name = "Item2"
             row.time = 2
             await tbl.insert(row)
 
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.name = "Item3"
             row.time = 2
             await tbl.insert(row)
 
 
-async def test_unique_batch_upsert_in_same_session_bug(mod_item_component, item_table):
+async def test_unique_batch_upsert_in_same_session_bug(mod_item_model, item_table):
     backend = item_table.backend
 
     # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环 todo 改成可以顺利执行

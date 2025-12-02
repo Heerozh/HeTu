@@ -1,27 +1,27 @@
 import pytest
 
 
-
-async def test_race(mod_item_component, item_table):
+async def test_race(mod_item_model, item_table):
     import asyncio
     from hetu.data.backend import RaceCondition
+
     # 测试竞态，通过2个协程来测试
     backend = item_table.backend
 
     # 测试query时，另一个del和update的竞态
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
-        row = mod_item_component.new_row()
+        row = mod_item_model.new_row()
         row.owner = 65535
-        row.name = 'Self'
+        row.name = "Self"
         row.time = 233874
         await tbl.insert(row)
         row.id = 0
-        row.name = 'ForUpdt'
+        row.name = "ForUpdt"
         row.time += 1
         await tbl.insert(row)
         row.id = 0
-        row.name = 'ForDel'
+        row.name = "ForDel"
         row.time += 1
         await tbl.insert(row)
 
@@ -40,53 +40,53 @@ async def test_race(mod_item_component, item_table):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
             mock_slow_query(_tbl)
-            rows = await _tbl.query('owner', value, lock_index=False)
+            rows = await _tbl.query("owner", value, lock_index=False)
             print(rows)
 
     async def select_owner(value):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
             mock_slow_query(_tbl)
-            rows = await _tbl.select(value, 'owner')
+            rows = await _tbl.select(value, "owner")
             print(rows)
 
     async def del_row(name):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            _row = await _tbl.select(name, 'name')
+            _row = await _tbl.select(name, "name")
             await _tbl.delete(_row.id)
 
     async def update_owner(name):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            _row = await _tbl.select(name, 'name')
+            _row = await _tbl.select(name, "name")
             _row.owner = 999
             await _tbl.update(_row.id, _row)
 
     # 测试del和query竞态是否激发race condition
     task1 = asyncio.create_task(query_owner(65535))
-    task2 = asyncio.create_task(del_row('ForDel'))
+    task2 = asyncio.create_task(del_row("ForDel"))
     await asyncio.gather(task2)
     with pytest.raises(RaceCondition):
         await task1
 
     # 测试update和query竞态是否激发race condition
     task1 = asyncio.create_task(query_owner(65535))
-    task2 = asyncio.create_task(update_owner('ForUpdt'))
+    task2 = asyncio.create_task(update_owner("ForUpdt"))
     await asyncio.gather(task2)
     with pytest.raises(RaceCondition):
         await task1
 
     # 测试update和select竞态是否激发race condition
     task1 = asyncio.create_task(select_owner(65535))
-    task2 = asyncio.create_task(update_owner('Self'))
+    task2 = asyncio.create_task(update_owner("Self"))
     await asyncio.gather(task2)
     with pytest.raises(RaceCondition):
         await task1
 
     # 测试del和select竞态是否激发race condition
     task1 = asyncio.create_task(select_owner(999))
-    task2 = asyncio.create_task(del_row('Self'))
+    task2 = asyncio.create_task(del_row("Self"))
     await asyncio.gather(task2)
     with pytest.raises(RaceCondition):
         await task1
@@ -95,7 +95,7 @@ async def test_race(mod_item_component, item_table):
     async def insert_and_sleep(db, uni_val, sleep):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            _row = mod_item_component.new_row()
+            _row = mod_item_model.new_row()
             _row.owner = 874233
             _row.name = str(uni_val)
             _row.time = uni_val
@@ -118,7 +118,7 @@ async def test_race(mod_item_component, item_table):
     async def update_and_sleep(db, sleep):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            _row = await _tbl.select('111111', 'name')
+            _row = await _tbl.select("111111", "name")
             _row.time = 874233
             await _tbl.update(_row.id, _row)
             await asyncio.sleep(sleep)
@@ -133,10 +133,10 @@ async def test_race(mod_item_component, item_table):
     async def query_then_update(sleep):
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            _rows = await _tbl.query('model', 2)
+            _rows = await _tbl.query("model", 2)
             await asyncio.sleep(sleep)
             if len(_rows) == 0:
-                _row = await _tbl.select(0, 'model')
+                _row = await _tbl.select(0, "model")
                 _row.model = 2
                 await _tbl.update(_row.id, _row)
 
@@ -147,7 +147,7 @@ async def test_race(mod_item_component, item_table):
         await task1
 
 
-async def test_update_or_insert_race_bug(mod_item_component, item_table):
+async def test_update_or_insert_race_bug(mod_item_model, item_table):
     import asyncio
     from hetu.data.backend import RaceCondition
 
@@ -157,15 +157,15 @@ async def test_update_or_insert_race_bug(mod_item_component, item_table):
     async def main_task():
         async with backend.transaction(1) as session:
             tbl = item_table.attach(session)
-            async with tbl.update_or_insert('uni_vio', 'name') as row:
+            async with tbl.update_or_insert("uni_vio", "name") as row:
                 await asyncio.sleep(0.1)
                 row.qty = 1
 
     async def trouble_task():
         async with backend.transaction(1) as _session:
             _tbl = item_table.attach(_session)
-            row = mod_item_component.new_row()
-            row.name = 'uni_vio'
+            row = mod_item_model.new_row()
+            row.name = "uni_vio"
             await _tbl.insert(row)
 
     task1 = asyncio.create_task(main_task())
