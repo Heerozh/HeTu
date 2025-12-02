@@ -90,23 +90,23 @@ def test_update_inserted_row(mod_item_model):
 
     # 插入数据
     row = Item.new_row()
-    row.name = "InsertOriginal"
+    row.name = "Original"
     inserted = id_map.add_insert(Item, row)
     temp_id = inserted["id"]
 
     # 更新插入的数据
     row_update = inserted.copy()
-    row_update.name = "InsertUpdated"
+    row_update.name = "Updated"
     id_map.update(Item, row_update)
 
     # 验证数据更新
     fetched = id_map.get(Item, temp_id)
-    assert fetched["name"] == "InsertUpdated"
+    assert fetched["name"] == "Updated"
 
     # 验证状态仍为 INSERT，不应出现在 UPDATE 列表中
     dirty = id_map.get_dirty_rows()
     assert len(dirty["insert"][Item]) == 1
-    assert dirty["insert"][Item][0]["name"] == "InsertUpdated"
+    assert dirty["insert"][Item][0]["name"] == "Updated"
     assert Item not in dirty["update"]
 
 
