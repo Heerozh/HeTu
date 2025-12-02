@@ -7,7 +7,7 @@
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
@@ -85,7 +85,7 @@ class IdentityMap:
 
     def get(
         self, comp_cls: type[BaseComponent], row_id: int
-    ) -> tuple[np.ndarray | None, RowState | None]:
+    ) -> tuple[np.recarray | None, RowState | None]:
         """
         从缓存中获取指定ID的行。
 
@@ -110,7 +110,10 @@ class IdentityMap:
 
         # 主要提供状态：是否已删除
         states = self._row_states[comp_cls]
-        return cache[idx[0]], states.get(row_id)
+
+        # recarray是基于ndarray的，传入参数可以用np.ndarray类型，返回值
+        # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
+        return cast(np.recarray, cache[idx[0]]), states.get(row_id)
 
     def add_insert(
         self, comp_cls: type[BaseComponent], row: np.record | np.ndarray

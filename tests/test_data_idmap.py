@@ -1,5 +1,4 @@
 import pytest
-import numpy as np
 from hetu.data.component import BaseComponent
 from hetu.data.idmap import IdentityMap, RowState
 
@@ -130,6 +129,7 @@ def test_mark_deleted(mod_item_model):
 
     # 验证 get 返回 None
     fetched, status = id_map.get(Item, 300)
+    assert fetched is not None
     assert fetched.id == 300
     assert status is RowState.DELETE
 
