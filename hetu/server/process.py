@@ -35,12 +35,12 @@ def start_backends(app: Sanic):
     table_constructors = {}
     for name, db_cfg in app.config.BACKENDS.items():
         if db_cfg["type"] == "Redis":
-            from ..data.backend import RedisBackend, RedisComponentTable
+            from ..data.backend import RedisBackend, RedisRawComponentTable
 
             backend = RedisBackend(db_cfg)
             backend.configure()
             backends[name] = backend
-            table_constructors["Redis"] = RedisComponentTable
+            table_constructors["Redis"] = RedisRawComponentTable
             app.ctx.__setattr__(name, backend)
         elif db_cfg["type"] == "PostgreSQL":
             # import sqlalchemy

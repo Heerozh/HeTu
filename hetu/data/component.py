@@ -13,7 +13,10 @@ import operator
 import os
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Any
+from typing import Callable, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .backend import RawComponentTable
 
 import git
 import numpy as np
@@ -51,26 +54,26 @@ def property_field(
 
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
-    properties_ = []  # type:list[tuple[str, Property]] # Ordered属性列表
-    component_name_ = None
-    namespace_ = None
-    permission_ = Permission.USER
-    rls_compare_ = None  # type: tuple[Callable[[Any, Any], bool], str, str] | None
-    persist_ = True  # 只是标记，每次启动时会清空此标记的数据
-    readonly_ = False  # 只是标记，调用写入会警告
-    backend_ = None  # type: str      # 该Component由哪个后端(数据库)负责储存和查询
+    properties_: list[tuple[str, Property]] = []  # Ordered属性列表
+    component_name_: str | None = None
+    namespace_: str | None = None
+    permission_: Permission = Permission.USER
+    rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
+    persist_: bool = True  # 只是标记，每次启动时会清空此标记的数据
+    readonly_: bool = False  # 只是标记，调用写入会警告
+    backend_: str | None = None  # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
-    dtypes = None  # type: np.dtype            # np structured dtype
-    default_row = None  # type: np.ndarray      # 默认空数据行
-    hosted_ = None  # type: "ComponentTable"    # 该Component运行时被托管的实例
-    prop_idx_map_ = None  # type: dict[str, int]  # 属性名->第几个属性 的映射
-    dtype_map_ = None  # type: dict[str, np.dtype] # 属性名->dtype的映射
-    uniques_ = None  # type: set[str]            # 唯一索引的属性名集合
-    indexes_ = None  # type: dict[str, bool]     # 索引名->是否是字符串类型 的映射
-    json_ = None  # type: str                 # Component定义的json字符串
-    git_hash_ = None  # type: str                 # Component定义的app文件版本
-    instances_ = {}  # type: dict[str, dict[str, type[BaseComponent]]] # 所有副本实例
-    master_ = None  # type: type[BaseComponent]  # 该Component的主实例
+    dtypes: np.dtype | None = None  # np structured dtype
+    default_row: np.ndarray | None = None  # 默认空数据行
+    hosted_: RawComponentTable | None = None  # 该Component运行时被托管的实例
+    prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性 的映射
+    dtype_map_: dict[str, np.dtype] | None = None  # 属性名->dtype的映射
+    uniques_: set[str] | None = None  # 唯一索引的属性名集合
+    indexes_: dict[str, bool] | None = None  # 索引名->是否是字符串类型 的映射
+    json_: str | None = None  # Component定义的json字符串
+    git_hash_: str | None = None  # Component定义的app文件版本
+    instances_: dict[str, dict[str, type[BaseComponent]]] = {}  # 所有副本实例
+    master_: type[BaseComponent] | None = None  # 该Component的主实例
 
     @staticmethod
     def make_json(
@@ -115,15 +118,17 @@ class BaseComponent:
             data["component_name"] += ":" + suffix
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
-            comp = type(data["component_name"], (BaseComponent,), {})
+            comp: type[BaseComponent] = type(
+                data["component_name"], (BaseComponent,), {}
+            )
         else:
             comp = cls
-        comp.namespace_ = data["namespace"]
-        comp.component_name_ = data["component_name"]
+        comp.namespace_ = str(data["namespace"])
+        comp.component_name_ = str(data["component_name"])
         comp.permission_ = Permission[data["permission"]]
-        comp.persist_ = data["persist"]
-        comp.readonly_ = data["readonly"]
-        comp.backend_ = data["backend"]
+        comp.persist_ = bool(data["persist"])
+        comp.readonly_ = bool(data["readonly"])
+        comp.backend_ = str(data["backend"])
         comp.properties_ = [
             (name, Property(**prop)) for name, prop in data["properties"].items()
         ]
@@ -154,14 +159,14 @@ class BaseComponent:
         comp.dtype_map_ = {}
         for name, prop in comp.properties_:
             comp.prop_idx_map_[name] = len(comp.prop_idx_map_)
-            comp.dtype_map_[name] = prop.dtype
+            comp.dtype_map_[name] = np.dtype(prop.dtype)
 
         # 从json生成的Component没有git版本信息
         comp.git_hash_ = ""
         return comp
 
     @classmethod
-    def new_row(cls, size=1) -> np.record | np.ndarray | np.recarray:
+    def new_row(cls, size=1) -> np.record | np.recarray:
         """返回空数据行，id为0，用于insert"""
         row = (
             cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
@@ -249,7 +254,7 @@ def define_component(
     persist=True,
     readonly=False,
     backend: str = "default",
-    rls_compare: tuple[str, str, str] = None,
+    rls_compare: tuple[str, str, str] | None = None,
 ):
     """
     定义Component组件（表）的数据结构

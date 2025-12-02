@@ -7,7 +7,7 @@
 
 import pytest
 
-from hetu.data.backend import ComponentTable
+from hetu.data.backend import RawComponentTable
 
 
 @pytest.fixture(scope="module")
@@ -19,7 +19,7 @@ async def mod_clear_all_component_define():
 
 
 @pytest.fixture(scope="module")
-async def mod_item_component(mod_clear_all_component_define):
+async def mod_item_model(mod_clear_all_component_define):
     from hetu.data import define_component, property_field, BaseComponent, Permission
     import numpy as np
 
@@ -39,33 +39,29 @@ async def mod_item_component(mod_clear_all_component_define):
 
 
 @pytest.fixture(scope="module")
-async def mod_item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+async def mod_item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
-    test_table = backend_component_table(
-        mod_item_component, "ModItemTestTable", 1, backend
-    )
+    test_table = backend_component_table(mod_item_model, "ModItemTestTable", 1, backend)
     test_table.flush(force=True)
     test_table.create_or_migrate()
     return test_table
 
 
 @pytest.fixture(scope="function")
-async def item_table(mod_auto_backend, mod_item_component) -> ComponentTable:
+async def item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
-    test_table = backend_component_table(
-        mod_item_component, "ItemTestTable", 1, backend
-    )
+    test_table = backend_component_table(mod_item_model, "ItemTestTable", 1, backend)
     test_table.flush(force=True)
     test_table.create_or_migrate()
     return test_table
 
 
 @pytest.fixture(scope="module")
-async def mod_rls_test_component(mod_clear_all_component_define):
+async def mod_rls_test_model(mod_clear_all_component_define):
     from hetu.data import define_component, property_field, BaseComponent, Permission
     import numpy as np
 
@@ -84,14 +80,12 @@ async def mod_rls_test_component(mod_clear_all_component_define):
 
 
 @pytest.fixture(scope="module")
-async def mod_rls_test_table(
-    mod_auto_backend, mod_rls_test_component
-) -> ComponentTable:
+async def mod_rls_test_table(mod_auto_backend, mod_rls_test_model) -> RawComponentTable:
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
     test_table = backend_component_table(
-        mod_rls_test_component, "ModRLSTestTable", 1, backend
+        mod_rls_test_model, "ModRLSTestTable", 1, backend
     )
     test_table.flush(force=True)
     test_table.create_or_migrate()
@@ -99,14 +93,14 @@ async def mod_rls_test_table(
 
 
 @pytest.fixture
-async def filled_item_table(mod_item_component, item_table):
+async def filled_item_table(mod_item_model, item_table):
     backend = item_table.backend
 
     # 初始化测试数据
     async with backend.transaction(1) as session:
         tbl = item_table.attach(session)
         for i in range(25):
-            row = mod_item_component.new_row()
+            row = mod_item_model.new_row()
             row.id = 0
             row.name = f"Itm{i + 10}"
             row.owner = 10
@@ -120,13 +114,13 @@ async def filled_item_table(mod_item_component, item_table):
 
 
 @pytest.fixture
-async def filled_rls_test_table(mod_rls_test_component, mod_rls_test_table):
+async def filled_rls_test_table(mod_rls_test_model, mod_rls_test_table):
     backend = mod_rls_test_table.backend
     # 初始化测试数据
     async with backend.transaction(1) as session:
         tbl = mod_rls_test_table.attach(session)
         for i in range(25):
-            row = mod_rls_test_component.new_row()
+            row = mod_rls_test_model.new_row()
             row.id = 0
             row.owner = 10
             row.friend = 11
