@@ -422,7 +422,7 @@ class ComponentTransaction:
             if status is RowState.DELETE:
                 return None
             else:
-                return row[0].copy()  # recarray convert to record(single row)
+                return row.copy()  # recarray convert to record(single row)
 
         # 如果cache里没有row，说明query时后端没有返回行数据，说明后端架构index和行数据是分离的，
         # 由于index是分离的，且不能锁定index(不然事务冲突率很高, 而且乐观锁也要写入时才知道冲突），
