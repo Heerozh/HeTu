@@ -30,7 +30,6 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "gitpython~=3.1",
     "numpy~=2.3",
     "orjson~=3.11",
     "pyyaml~=6.0",
