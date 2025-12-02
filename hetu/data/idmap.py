@@ -83,7 +83,9 @@ class IdentityMap:
         if row_id not in states:
             states[row_id] = RowState.CLEAN
 
-    def get(self, comp_cls: type[BaseComponent], row_id: int) -> np.record | None:
+    def get(
+        self, comp_cls: type[BaseComponent], row_id: int
+    ) -> tuple[np.ndarray | None, RowState | None]:
         """
         从缓存中获取指定ID的行。
 
@@ -95,29 +97,27 @@ class IdentityMap:
             如果缓存中有则返回行数据，否则返回None
         """
         if comp_cls not in self._row_cache:
-            return None
+            return None, None
 
         cache = self._row_cache[comp_cls]
         if len(cache) == 0:
-            return None
+            return None, None
 
         # 查找指定ID的行
         idx = np.where(cache["id"] == row_id)[0]
         if len(idx) == 0:
-            return None
+            return None, None
 
-        # 检查是否已删除
+        # 主要提供状态：是否已删除
         states = self._row_states[comp_cls]
-        if states.get(row_id) == RowState.DELETE:
-            return None
-
-        return cache[idx[0]]
+        return cache[idx[0]], states.get(row_id)
 
     def add_insert(
         self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
-    ) -> np.record:
+    ) -> None:
         """
         添加一个新插入的对象到缓存，并标记为INSERT状态。
+        注意此方法会修改传入Row的ID字段，分配一个负数ID。
 
         Returns:
             分配了临时ID（负数）的行数据
@@ -128,18 +128,15 @@ class IdentityMap:
             self._row_states[comp_cls] = {}
 
         # 分配负ID
-        row_copy = row.copy()
-        row_copy["id"] = self._next_insert_id
+        row["id"] = self._next_insert_id
         self._next_insert_id -= 1
 
         # 添加到缓存
         cache = self._row_cache[comp_cls]
-        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row_copy))
+        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row))
 
         # 标记为INSERT
-        self._row_states[comp_cls][int(row_copy["id"])] = RowState.INSERT
-
-        return row_copy
+        self._row_states[comp_cls][int(row["id"])] = RowState.INSERT
 
     def update(
         self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
