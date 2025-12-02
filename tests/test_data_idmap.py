@@ -173,3 +173,44 @@ def test_exceptions(mod_item_model):
 
     with pytest.raises(ValueError, match="not in cache"):
         id_map.mark_deleted(OtherComponent, 1)
+
+
+def test_filter(mod_item_model):
+    """测试过滤已删除行"""
+    Item = mod_item_model
+    id_map = IdentityMap()
+
+    # 添加干净行
+    row1 = Item.new_row()
+    row1.id = 1
+    row1.name = "Item1"
+    row1.level = 10
+    id_map.add_clean(Item, row1)
+
+    row2 = Item.new_row()
+    row2.id = 2
+    row2.name = "Item2"
+    row2.level = 10
+    id_map.add_clean(Item, row2)
+
+    row3 = Item.new_row()
+    row3.id = 3
+    row3.name = "Item3"
+    row3.level = 10
+    id_map.add_clean(Item, row3)
+
+    row4 = Item.new_row()
+    row4.id = 4
+    row4.name = "Item1"
+    row4.level = 20
+    id_map.add_clean(Item, row4)
+
+    # 标记第二行删除
+    id_map.mark_deleted(Item, 2)
+
+    # 获取所有符合条件行，过滤已删除的
+    rows = id_map.filter(Item, level=10, name="Item1")
+
+    assert len(rows) == 1
+    assert rows[0]["id"] == 1
+    assert rows[0]["name"] == "Item1"

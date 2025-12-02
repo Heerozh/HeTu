@@ -229,3 +229,32 @@ class IdentityMap:
                 result["delete"][comp_cls] = np.array(delete_ids, dtype=np.int64)
 
         return result
+
+    def filter(self, comp_cls: type[BaseComponent], **kwargs) -> np.recarray:
+        """
+        选择出idmap中条件符合index=value的行，排除已删除的行。支持多条件过滤。
+
+        示例:
+            rows = id_map.filter(Item, index_name=value, ...)
+
+        Returns:
+            过滤后的行数据，可能只有0行
+        """
+        if comp_cls not in self._row_cache:
+            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+
+        cache = self._row_cache[comp_cls]
+        states = self._row_states[comp_cls]
+
+        # 构建过滤掩码
+        mask = np.ones(len(cache), dtype=bool)
+        for index_name, value in kwargs.items():
+            mask &= cache[index_name] == value
+
+        # 排除已删除的行
+        for i in range(len(cache)):
+            row_id = int(cache[i]["id"])
+            if states.get(row_id) == RowState.DELETE:
+                mask[i] = False
+
+        return cast(np.recarray, cache[mask])
