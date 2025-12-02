@@ -33,7 +33,7 @@ class IdentityMap:
     BackendSession在提交时可以通过本类，获得脏对象列表，然后想办法合并成事务指令。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # 每个Component类型对应一个缓存
         # {component_cls: np.recarray} - 存储行数据
         self._row_cache: dict[type[BaseComponent], np.recarray] = {}
@@ -85,7 +85,7 @@ class IdentityMap:
 
     def get(
         self, comp_cls: type[BaseComponent], row_id: int
-    ) -> tuple[np.recarray | None, RowState | None]:
+    ) -> tuple[np.record | None, RowState | None]:
         """
         从缓存中获取指定ID的行。
 
@@ -113,7 +113,7 @@ class IdentityMap:
 
         # recarray是基于ndarray的，传入参数可以用np.ndarray类型，返回值
         # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
-        return cast(np.recarray, cache[idx[0]]), states.get(row_id)
+        return cast(np.record, cache[idx[0]]), states.get(row_id)
 
     def add_insert(
         self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
@@ -199,7 +199,7 @@ class IdentityMap:
                 'delete': {comp_cls: np.ndarray, ...}  # 只包含id
             }
         """
-        result = {"insert": {}, "update": {}, "delete": {}}
+        result: dict[str, dict[type[BaseComponent], np.ndarray]] = {"insert": {}, "update": {}, "delete": {}}
 
         for comp_cls, states in self._row_states.items():
             cache = self._row_cache[comp_cls]

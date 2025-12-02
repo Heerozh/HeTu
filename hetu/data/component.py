@@ -166,7 +166,7 @@ class BaseComponent:
         return comp
 
     @classmethod
-    def new_row(cls, size=1) -> np.record | np.ndarray | np.recarray:
+    def new_row(cls, size=1) -> np.record | np.recarray:
         """返回空数据行，id为0，用于insert"""
         row = (
             cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
