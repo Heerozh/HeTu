@@ -41,10 +41,10 @@
   },
   "devDependencies": {
     "@types/pako": "^2.0.4",
-    "prettier": "3.6.2",
+    "prettier": "3.7.3",
     "typescript": "~5.8.3",
-    "vite": "^7.2.4",
-    "vitest": "^4.0.13",
+    "vite": "^7.2.6",
+    "vitest": "^4.0.14",
     "ws": "^8.18.3"
   },
   "dependencies": {
