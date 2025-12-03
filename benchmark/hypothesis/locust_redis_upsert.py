@@ -8,13 +8,13 @@
 # 3. update back
 #
 # 不初始化数据集，但预设一个数据规模
-# 数据模型：User(id, uid, name, age, email, version)
-# 索引：uid为唯一索引
+# 数据模型：User(id, acc_id, name, age, email, version)
+# 索引：acc_id为唯一索引
 #
 # 使用一种locust User, 两个不同的task，来分别测试两种事务实现方式的性能
-# 任务1: 使用watch(index)->zrange(uid)->watch(key)->hgetall(不存在就create)->multi->hset->exec的方式，修改随机一行数据
+# 任务1: 使用watch(index)->zrange(acc_id)->watch(key)->hgetall(不存在就create)->multi->hset->exec的方式，修改随机一行数据
 #       注意事务会有其他locust User客户端竞态，所以第一步就要watch index
-# 任务2: 使用zrange(uid)->hgetall（不存在就create）->lua(检测version，如果version是0表示create则检测index是否不存在该uid)的方式，修改随机一行数据
+# 任务2: 使用zrange(acc_id)->hgetall（不存在就create）->lua(检测version，如果version是0表示create则检测index是否不存在该acc_id)的方式，修改随机一行数据
 
 import os
 import random
@@ -33,23 +33,23 @@ REDIS_DB = int(os.getenv("REDIS_DB", 0))
 
 # Data Scale
 # 预设数据规模，例如10000个用户
-UID_RANGE = 10000
+ACC_ID_RANGE = 10000
 
 # ================= Lua 脚本 =================
 # 核心逻辑：
-# 1. 检查 Index 是否存在 UID。
+# 1. 检查 Index 是否存在 acc_id。
 # 2. 如果存在，检查对应的 user_key 版本号是否匹配。
 # 3. 如果不存在，检查传入的 expect_version 是否为 0（Create模式）。
 # 4. 如果一切匹配，执行 update/create。
 LUA_SCRIPT = """
 local index_key = KEYS[1]
-local uid = ARGV[1]
+local acc_id = ARGV[1]
 local key_id = ARGV[2]  -- key ID，仅在Create时使用
 local data = cmsgpack.unpack(ARGV[3])     -- 修改后的数据
 local expect_ver = tonumber(ARGV[4])
 
 -- 1. 查询 Index
-local existing_keys = redis.call('zrangebyscore', index_key, uid, uid)
+local existing_keys = redis.call('zrangebyscore', index_key, acc_id, acc_id)
 local is_create = false
 
 if not existing_keys then
@@ -89,7 +89,7 @@ redis.call('HMSET', user_key, unpack(flat_data))
 
 
 if is_create then
-    redis.call('ZSET', index_key, uid, key_id)
+    redis.call('ZSET', index_key, acc_id, key_id)
 end
 
 return 1 -- 成功
@@ -102,7 +102,7 @@ class RedisClient:
     @classmethod
     def get_client(cls):
         if cls._client is None:
-            cls._client = redis.asyncio.Redis(
+            cls._client = redis.Redis(
                 host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
             )
         return cls._client
@@ -119,14 +119,14 @@ class BaseRedisUser(User):
         self.sha = self.client.script_load(LUA_SCRIPT)
 
     @classmethod
-    def generate_user_data(cls, uid=None, version=1):
-        if uid is None:
-            uid = random.randint(1, UID_RANGE)
+    def generate_user_data(cls, acc_id=None, version=1):
+        if acc_id is None:
+            acc_id = random.randint(1, ACC_ID_RANGE)
         return {
-            "uid": str(uid),
-            "name": f"user_{uid}",
+            "acc_id": str(acc_id),
+            "name": f"user_{acc_id}",
             "age": str(random.randint(18, 80)),
-            "email": f"user_{uid}@example.com",
+            "email": f"user_{acc_id}@example.com",
             "version": str(version),
         }
 
@@ -139,8 +139,8 @@ class RedisBenchUser(BaseRedisUser):
 
     @task
     @tag("watch")
-    async def task_watch_multi(self):
-        uid = random.randint(1, UID_RANGE)
+    def task_watch_multi(self):
+        acc_id = random.randint(1, ACC_ID_RANGE)
         start_time = time.time()
         try:
             # 乐观锁重试循环
@@ -148,32 +148,36 @@ class RedisBenchUser(BaseRedisUser):
             for _ in range(max_retries):
                 try:
                     with self.client.pipeline() as pipe:
-                        # 1. ZRANGE (Lookup ID by UID)
-                        await pipe.watch("users:index:uid")
-                        str_ids = await pipe.zrangebyscore("users:index:uid", uid, uid)
-                        if not str_ids:
-                            str_id = str(uuid.uuid4())
+                        # 1. ZRANGE (Lookup ID by acc_id)
+                        pipe.watch("users:index:acc_id")
+                        key_ids = pipe.zrangebyscore(
+                            "users:index:acc_id", acc_id, acc_id
+                        )
+                        if not key_ids:
+                            key_id = str(uuid.uuid4())
                         else:
-                            str_id = str_ids[0]
+                            key_id = key_ids[0]
 
                         # 2. hgetall
-                        user_key = f"user:{str_id}"
-                        await pipe.watch(user_key)
-                        if not str_ids:
+                        user_key = f"user:{key_id}"
+                        pipe.watch(user_key)
+                        if not key_ids:
                             new_ver = 1
                         else:
-                            current_data = await pipe.hgetall(user_key)
+                            current_data = pipe.hgetall(user_key)
                             current_ver = int(current_data.get("version", 0))
                             new_ver = current_ver + 1
-                        new_data = self.generate_user_data(uid=uid, version=new_ver)
-                        new_data["id"] = str_id
+                        new_data = self.generate_user_data(
+                            acc_id=acc_id, version=new_ver
+                        )
+                        new_data["id"] = key_id
 
                         # 4. update
-                        await pipe.multi()
-                        await pipe.hset(user_key, mapping=new_data)
-                        if not str_ids:
-                            await pipe.zadd("users:index:uid", {uid: str_id})
-                        await pipe.execute()
+                        pipe.multi()
+                        pipe.hset(user_key, mapping=new_data)
+                        if not key_ids:
+                            pipe.zadd("users:index:acc_id", {key_id: acc_id})
+                        pipe.execute()
                         break  # 成功则跳出循环
                 except redis.WatchError:
                     continue  # 冲突，重试
@@ -194,36 +198,38 @@ class RedisBenchUser(BaseRedisUser):
 
     @task
     @tag("lua")
-    async def task_lua_version(self):
+    def task_lua_version(self):
         """
         任务2: Version + Lua 实现
         流程: Get Index -> Get User (No Lock) -> Python Calc -> Lua (Check Ver + Write)
         """
-        uid = random.randint(1, UID_RANGE)
+        acc_id = random.randint(1, ACC_ID_RANGE)
         start_time = time.time()
         try:
             # 乐观锁重试循环
             max_retries = 20
             for _ in range(max_retries):
                 # 1. 读阶段 (无锁)
-                str_ids = await self.client.zrangebyscore("users:index:uid", uid, uid)
+                key_ids = self.client.zrangebyscore(
+                    "users:index:acc_id", acc_id, acc_id
+                )
 
-                if not str_ids:
-                    str_id = str(uuid.uuid4())
+                if not key_ids:
+                    key_id = str(uuid.uuid4())
                 else:
-                    str_id = str_ids[0]
+                    key_id = key_ids[0]
 
-                user_key = f"user:{str_id}"
+                user_key = f"user:{key_id}"
 
                 # 2. 计算期望版本号
-                if not str_ids:
+                if not key_ids:
                     old_ver = 0
                 else:
                     current_data = self.client.hgetall(user_key)
                     old_ver = int(current_data.get("version", 0))
                 new_ver = old_ver + 1
-                new_data = self.generate_user_data(uid=uid, version=new_ver)
-                new_data["id"] = str_id
+                new_data = self.generate_user_data(acc_id=acc_id, version=new_ver)
+                new_data["id"] = key_id
 
                 # 3. Lua 提交 (CAS)
                 try:
@@ -233,9 +239,9 @@ class RedisBenchUser(BaseRedisUser):
                     res = self.client.evalsha(
                         self.sha,
                         1,  # numkeys
-                        "users:index:uid",
-                        uid,
-                        str_id,
+                        "users:index:acc_id",
+                        acc_id,
+                        key_id,
                         msgpack.packb(new_data),
                         old_ver,
                     )
@@ -278,10 +284,26 @@ class RedisBenchUser(BaseRedisUser):
                 exception=e,
             )
 
+
 """
 # 启动 50 个并发用户，只运行打标为 watch 的任务
-locust -f locustfile.py --tags watch --users 50 --spawn-rate 10 --headless -t 1m
+cd benchmark/hypothesis/
+locust -f locust_redis_upsert.py --tags watch --users 50 --spawn-rate 10 --headless -t 1m
 
 # 启动 50 个并发用户，只运行打标为 lua 的任务
-locust -f locustfile.py --tags lua --users 50 --spawn-rate 10 --headless -t 1m
+locust -f locust_redis_upsert --tags lua --users 50 --spawn-rate 10 --headless -t 1m
+"""
+
+
+# todo 还是自己写个bench框架
+"""
+帮我写个python benchmark框架叫ya，实现以下功能：
+- 命令行 ya <script.py> -n 10 -w 5 -t 5 [--task function_name_without_benchmark_] 其他任意参数
+- script.py可以写任意函数，工具会找到所有benchmark_开头的函数作为benchmark任务，或按--task指定的函数作为benchmark任务
+- 压测工具会把其他任意函数，整理成dict传给benchmark任务作为参数
+- 压测工具使用multiprocessing，启动-w个worker进程
+- 每个进程会启动-n个async任务执行器，这些执行器while True循环调用benchmark任务，直到-t分钟后结束
+- benchmark任务的返回值为ms级响应时间, async任务执行器会收集这些响应时间到一个list
+- 最后执行完成后，主进程会收集所有worker的响应时间list，计算每个任务的平均响应时间、p90、p99，以及cps到pandas DataFrame，并打印出来
+
 """
