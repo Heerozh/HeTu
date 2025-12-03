@@ -299,10 +299,10 @@ locust -f locust_redis_upsert --tags lua --users 50 --spawn-rate 10 --headless -
 """
 帮我写个python benchmark框架叫ya，实现以下功能：
 - 命令行 ya <script.py> -n 10 -w 5 -t 5 [--task function_name_without_benchmark_] 其他任意参数
-- script.py可以写任意函数，工具会找到所有benchmark_开头的函数作为benchmark任务，或按--task指定的函数作为benchmark任务
-- 压测工具会把其他任意函数，整理成dict传给benchmark任务作为参数
+- script.py可以写任意函数，工具会找到所有benchmark_开头的函数作为"benchmark任务"，或按--task指定的函数作为benchmark任务
+- 压测工具会把其他任意参数，整理成dict传给benchmark任务作为参数
 - 压测工具使用multiprocessing，启动-w个worker进程
-- 每个进程会启动-n个async任务执行器，这些执行器while True循环调用benchmark任务，直到-t分钟后结束
+- 每个进程会启动-n个async任务执行器，这些执行器先执行"benchmark任务"+"_setup"函数，然后执行器while True循环调用benchmark任务，直到-t分钟后结束，结束后调用"benchmark任务"+"_teardown"函数
 - benchmark任务的返回值为ms级响应时间, async任务执行器会收集这些响应时间到一个list
 - 最后执行完成后，主进程会收集所有worker的响应时间list，计算每个任务的平均响应时间、p90、p99，以及cps到pandas DataFrame，并打印出来
 
