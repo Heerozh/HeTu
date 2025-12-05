@@ -19,8 +19,8 @@
 import os
 import random
 import uuid
-import msgspec
 
+import msgspec
 import redis
 
 # Configuration
@@ -28,6 +28,7 @@ import redis
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 REDIS_DB = int(os.getenv("REDIS_DB", 0))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 
 # Data Scale
 # 预设数据规模，例如10000个用户
@@ -99,7 +100,11 @@ return 1 -- 成功
 
 async def redis_client():
     client = redis.asyncio.Redis(
-        host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        db=REDIS_DB,
+        password=REDIS_PASSWORD,
+        decode_responses=True,
     )
     yield client
     await client.close()
