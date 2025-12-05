@@ -167,3 +167,4 @@ profile.svg
 /examples/server/first_game/data
 data/dump.rdb
 /hetu/__version__.py
+benchmark_results.csv
