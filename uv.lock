@@ -1743,8 +1743,8 @@ wheels = [
 
 [[package]]
 name = "ya"
-version = "1.1.0"
-source = { git = "https://github.com/Heerozh/ya.git#ad23d071324a5830dfdc9d304dee660d25eb8436" }
+version = "1.2.0"
+source = { git = "https://github.com/Heerozh/ya.git#4825de30504671db1d4b640fe5039e64a81c6dfc" }
 dependencies = [
     { name = "jinja2" },
     { name = "numpy" },

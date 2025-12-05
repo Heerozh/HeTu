@@ -129,46 +129,41 @@ async def task_watch_multi(redis_client):
     流程: WATCH Index -> Check Index -> (WATCH User -> Get User) -> MULTI -> EXEC
     """
     acc_id = random.randint(1, ACC_ID_RANGE)
-    try:
-        # 乐观锁重试循环
-        max_retries = 20
-        for _ in range(max_retries):
-            try:
-                async with redis_client.pipeline() as pipe:
-                    # 1. ZRANGE (Lookup ID by acc_id)
-                    await pipe.watch("users:index:acc_id")
-                    key_ids = await pipe.zrangebyscore(
-                        "users:index:acc_id", acc_id, acc_id
-                    )
-                    if not key_ids:
-                        key_id = str(uuid.uuid4())
-                    else:
-                        key_id = key_ids[0]
+    # 乐观锁重试循环
+    max_retries = 20
+    for _ in range(max_retries):
+        try:
+            async with redis_client.pipeline() as pipe:
+                # 1. ZRANGE (Lookup ID by acc_id)
+                await pipe.watch("users:index:acc_id")
+                key_ids = await pipe.zrangebyscore("users:index:acc_id", acc_id, acc_id)
+                if not key_ids:
+                    key_id = str(uuid.uuid4())
+                else:
+                    key_id = key_ids[0]
 
-                    # 2. hgetall
-                    user_key = f"user:{key_id}"
-                    await pipe.watch(user_key)
-                    if not key_ids:
-                        new_ver = 1
-                    else:
-                        current_data = await pipe.hgetall(user_key)
-                        current_ver = int(current_data.get("version", 0))
-                        new_ver = current_ver + 1
-                    new_data = generate_user_data(acc_id=acc_id, version=new_ver)
-                    new_data["id"] = key_id
+                # 2. hgetall
+                user_key = f"user:{key_id}"
+                await pipe.watch(user_key)
+                if not key_ids:
+                    new_ver = 1
+                else:
+                    current_data = await pipe.hgetall(user_key)
+                    current_ver = int(current_data.get("version", 0))
+                    new_ver = current_ver + 1
+                new_data = generate_user_data(acc_id=acc_id, version=new_ver)
+                new_data["id"] = key_id
 
-                    # 4. update
-                    await pipe.multi()
-                    await pipe.hset(user_key, mapping=new_data)
-                    if not key_ids:
-                        await pipe.zadd("users:index:acc_id", {key_id: acc_id})
-                    await pipe.execute()
-                    break  # 成功则跳出循环
-            except redis.WatchError:
-                continue  # 冲突，重试
-        pass
-    except Exception as e:
-        pass
+                # 4. update
+                pipe.multi()
+                await pipe.hset(user_key, mapping=new_data)
+                if not key_ids:
+                    await pipe.zadd("users:index:acc_id", {key_id: acc_id})
+                await pipe.execute()
+                break  # 成功则跳出循环
+        except redis.WatchError:
+            continue  # 冲突，重试
+    pass
 
 
 async def task_lua_version(redis_client, lua_sha):
@@ -177,62 +172,53 @@ async def task_lua_version(redis_client, lua_sha):
     流程: Get Index -> Get User (No Lock) -> Python Calc -> Lua (Check Ver + Write)
     """
     acc_id = random.randint(1, ACC_ID_RANGE)
-    try:
-        # 乐观锁重试循环
-        max_retries = 20
-        for _ in range(max_retries):
-            # 1. 读阶段 (无锁)
-            key_ids = await redis_client.zrangebyscore(
-                "users:index:acc_id", acc_id, acc_id
-            )
+    # 乐观锁重试循环
+    max_retries = 20
+    for _ in range(max_retries):
+        # 1. 读阶段 (无锁)
+        key_ids = await redis_client.zrangebyscore("users:index:acc_id", acc_id, acc_id)
 
-            if not key_ids:
-                key_id = str(uuid.uuid4())
-            else:
-                key_id = key_ids[0]
+        if not key_ids:
+            key_id = str(uuid.uuid4())
+        else:
+            key_id = key_ids[0]
 
-            user_key = f"user:{key_id}"
+        user_key = f"user:{key_id}"
 
-            # 2. 计算期望版本号
-            if not key_ids:
-                old_ver = 0
-            else:
-                current_data = await redis_client.hgetall(user_key)
-                old_ver = int(current_data.get("version", 0))
-            new_ver = old_ver + 1
-            new_data = generate_user_data(acc_id=acc_id, version=new_ver)
-            new_data["id"] = key_id
+        # 2. 计算期望版本号
+        if not key_ids:
+            old_ver = 0
+        else:
+            current_data = await redis_client.hgetall(user_key)
+            old_ver = int(current_data.get("version", 0))
+        new_ver = old_ver + 1
+        new_data = generate_user_data(acc_id=acc_id, version=new_ver)
+        new_data["id"] = key_id
 
-            # 3. Lua 提交 (CAS)
-            try:
-                # keys: [index_key, user_key] (实际上user_key在lua里拼可能更好，但为了传参方便这里不拼，只传index)
-                # 修正：为了符合 Cluster hash tag 规范，通常 index 和 user 很难在同一 slot。
-                # 这里假设是单机 Redis。
-                res = await redis_client.evalsha(
-                    lua_sha,
-                    1,  # numkeys
-                    "users:index:acc_id",
-                    acc_id,
-                    key_id,
-                    msgspec.msgpack.encode(new_data),
-                    old_ver,
-                )
+        # 3. Lua 提交 (CAS)
+        # keys: [index_key, user_key] (实际上user_key在lua里拼可能更好，但为了传参方便这里不拼，只传index)
+        # 修正：为了符合 Cluster hash tag 规范，通常 index 和 user 很难在同一 slot。
+        # 这里假设是单机 Redis。
+        res = await redis_client.evalsha(
+            lua_sha,
+            1,  # numkeys
+            "users:index:acc_id",
+            acc_id,
+            key_id,
+            msgspec.msgpack.encode(new_data),
+            old_ver,
+        )
 
-                if res == 1:
-                    break
-                elif res == 0:
-                    # Version 冲突 (被人改了数据)
-                    continue
-                elif res == -1 or res == -2:
-                    # Index 状态变化 (本来以为是Create结果被人Create了，或者反之)
-                    continue
-                else:
-                    break
-
-            except Exception as e:
-                pass
-    except Exception as e:
-        pass
+        if res == 1:
+            break
+        elif res == 0:
+            # Version 冲突 (被人改了数据)
+            continue
+        elif res == -1 or res == -2:
+            # Index 状态变化 (本来以为是Create结果被人Create了，或者反之)
+            continue
+        else:
+            break
 
 
 # ==============================
