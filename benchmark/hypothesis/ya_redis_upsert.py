@@ -50,7 +50,7 @@ local expect_ver = tonumber(ARGV[4])
 local existing_keys = redis.call('zrangebyscore', index_key, acc_id, acc_id)
 local is_create = false
 
-if not existing_keys then
+if #existing_keys == 0 then
     -- Create 场景
     if expect_ver ~= 0 then
         return -1 -- 错误：索引不存在，但客户端以为是 Update
@@ -81,7 +81,6 @@ if not is_create then
 end
 
 -- 3. 执行写入
--- 解析 JSON (简单起见，这里直接存 JSON 字符串到 data 字段，实际可用 HMSET 展开)
 local flat_data = {}
 for k, v in pairs(data) do
     table.insert(flat_data, k)
@@ -91,7 +90,7 @@ redis.call('HMSET', user_key, unpack(flat_data))
 
 
 if is_create then
-    redis.call('ZSET', index_key, acc_id, key_id)
+    redis.call('zadd', index_key, acc_id, key_id)
 end
 
 return 1 -- 成功
