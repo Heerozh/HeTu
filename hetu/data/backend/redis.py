@@ -847,6 +847,11 @@ class RedisComponentTransaction(ComponentTransaction):
         pipe = self._trx_conn.pipe
 
         # todo 改成版本号+lua的方式，而不用watch/multi 先测试下性能区别
+        #      注意，此方法key id必须是uuid，不然会有aba问题
+        #      aba问题要么 使用crc32作为 Version (ETag 模式)
+        #      要么 禁止 ORM 层的 RENAME 操作
+        #      建议用此方法，保持现状，id累加且严格要求不许修改
+        #      lua里应该把这个 ID 作为乐观锁检查条件的一部分，检测version时记得id也要检测
 
         # 同时要让乐观锁锁定该行
         if lock_row:
