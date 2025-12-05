@@ -53,7 +53,6 @@ dev = [
     "aiohttp>=3.13.1",
     "docker>=7.1.0",
     "ipykernel>=7.1.0",
-    "locust>=2.42.6",
     "matplotlib>=3.10.7",
     "mypy>=1.19.0",
     "pandas>=2.3.3",
@@ -65,6 +64,7 @@ dev = [
     "sanic-testing>=24.6.0",
     "tqdm>=4.67.1",
     "trustme>=1.2.1",
+    "ya",
 ]
 
 [tool.setuptools_scm]
@@ -89,3 +89,6 @@ line-length = 88
 
 [tool.ruff]
 line-length = 88
+
+[tool.uv.sources]
+ya = { git = "https://github.com/Heerozh/ya.git" }
