@@ -97,12 +97,12 @@ return 1 -- 成功
 """
 
 
-def redis_client():
+async def redis_client():
     client = redis.asyncio.Redis(
         host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB, decode_responses=True
     )
-    return client
-    # client.close()
+    yield client
+    await client.close()
 
 
 async def lua_sha(redis_client):
@@ -122,7 +122,7 @@ def generate_user_data(acc_id=None, version=1):
     }
 
 
-async def task_watch_multi(redis_client):
+async def benchmark_watch_multi(redis_client):
     """
     任务1: WATCH + MULTI 实现
     流程: WATCH Index -> Check Index -> (WATCH User -> Get User) -> MULTI -> EXEC
@@ -130,7 +130,7 @@ async def task_watch_multi(redis_client):
     acc_id = random.randint(1, ACC_ID_RANGE)
     # 乐观锁重试循环
     max_retries = 20
-    for _ in range(max_retries):
+    for retry_count in range(max_retries):
         try:
             async with redis_client.pipeline() as pipe:
                 # 1. ZRANGE (Lookup ID by acc_id)
@@ -159,13 +159,14 @@ async def task_watch_multi(redis_client):
                 if not key_ids:
                     await pipe.zadd("users:index:acc_id", {key_id: acc_id})
                 await pipe.execute()
-                break  # 成功则跳出循环
+                return retry_count
         except redis.WatchError:
             continue  # 冲突，重试
-    pass
+    # 超过重试次数
+    return "exceeded"
 
 
-async def task_lua_version(redis_client, lua_sha):
+async def benchmark_lua_version(redis_client, lua_sha):
     """
     任务2: Version + Lua 实现
     流程: Get Index -> Get User (No Lock) -> Python Calc -> Lua (Check Ver + Write)
@@ -173,7 +174,7 @@ async def task_lua_version(redis_client, lua_sha):
     acc_id = random.randint(1, ACC_ID_RANGE)
     # 乐观锁重试循环
     max_retries = 20
-    for _ in range(max_retries):
+    for retry_count in range(max_retries):
         # 1. 读阶段 (无锁)
         key_ids = await redis_client.zrangebyscore("users:index:acc_id", acc_id, acc_id)
 
@@ -209,7 +210,7 @@ async def task_lua_version(redis_client, lua_sha):
         )
 
         if res == 1:
-            break
+            return retry_count
         elif res == 0:
             # Version 冲突 (被人改了数据)
             continue
@@ -217,39 +218,9 @@ async def task_lua_version(redis_client, lua_sha):
             # Index 状态变化 (本来以为是Create结果被人Create了，或者反之)
             continue
         else:
-            break
-
-
-# ==============================
-
-
-async def benchmark_watch_multi_setup():
-    return redis_client()
-
-
-async def benchmark_watch_multi(redis_client):
-    await task_watch_multi(redis_client)
-
-
-async def benchmark_watch_multi_teardown(redis_client):
-    await redis_client.close()
-
-
-# ==============================
-
-
-async def benchmark_lua_version_setup():
-    client = redis_client()
-    sha = await lua_sha(client)
-    return client, sha
-
-
-async def benchmark_lua_version(redis_client, lua_sha):
-    await task_lua_version(redis_client, lua_sha)
-
-
-async def benchmark_lua_version_teardown(redis_client, lua_sha):
-    await redis_client.close()
+            raise RuntimeError(f"Unexpected result from Lua script: {res}")
+    # 超过重试次数
+    return "exceeded"
 
 
 # ==============================
