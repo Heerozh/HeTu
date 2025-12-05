@@ -1,8 +1,6 @@
 # Redis Upsert Benchmark Results
 
-结论：
-lua 模式使用网络流量少，因此在带宽有限的网络环境下性能优势更明显；
-但如果在内网环境可以跑到 200M 带宽，则 watch 性能更佳
+结论：2 种方式性能差异不大，Lua 方式灵活性更高，支持更多种类的 Redis 和架构。
 
 ## 运行命令
 
@@ -62,6 +60,36 @@ Return Value Distribution Statistics:
 | 3 | benchmark_watch_multi | 0 | 2154917 | 99.74 |
 | 4 | benchmark_watch_multi | 1 | 5494 | 0.25 |
 | 5 | benchmark_watch_multi | 2 | 26 | 0 |
+
+## 服务器本地 ecs.c8a.4xlarge debian13 Redis-8.4.0 默认设置
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 1,453,482 | 1,632,153 | 1,624,670 | 1,622,845 | 1,624,070 | 183,986 |
+| benchmark_watch_multi | 1,083,064 | 1,329,259 | 1,328,652 | 1,328,851 | 1,336,031 | 247,944 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 27,112.19 |
+| benchmark_watch_multi | 22,141.17 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|------:|---------:|
+| benchmark_lua_version | 7.07 | 6.76 | 7.9 | 10.21 | 8,141,206 | 0.48 | 26.78 | 6.76 |
+| benchmark_watch_multi | 8.66 | 8.39 | 9.07 | 13.53 | 6,653,801 | 0.68 | 32.85 | 8.39 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 8123538 | 99.78 |
+| 1 | benchmark_lua_version | 1 | 17623 | 0.22 |
+| 2 | benchmark_lua_version | 2 | 45 | 0 |
+| 3 | benchmark_watch_multi | 0 | 6636655 | 99.74 |
+| 4 | benchmark_watch_multi | 1 | 17092 | 0.26 |
+| 5 | benchmark_watch_multi | 2 | 54 | 0 |
 
 ## 阿里云 redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
 
