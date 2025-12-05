@@ -354,17 +354,6 @@ sudo add-apt-repository -y "deb [arch=$(dpkg --print-architecture)] http://mirro
 sudo apt-get -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
 
-> [!NOTE]
-> 如果要使用 uv，需要代理：
->
-> ```bash
-> export SOCKS_PROXY=socks5://localhost:1080
-> export ALL_PROXY=$SOCKS_PROXY
-> curl -LsSf https://astral.sh/uv/install.sh | sh
-> source $HOME/.local/bin/env
->
-> ```
-
 在你的项目目录下，创建 `Dockerfile` 文件，内容如下：
 
 ```Dockerfile
@@ -412,6 +401,7 @@ rm -rf ~/miniconda3/miniconda.sh
 ~/miniconda3/bin/conda init bash
 exec bash
 
+
 # 然后创建新的Python环境：
 conda create -n hetu python=3.14
 
@@ -424,6 +414,17 @@ pip install .
 # 启动河图
 hetu start --config=./config.yml --head=True
 ```
+
+> [!NOTE]
+> 如果要使用 uv，需要代理：
+>
+> ```bash
+> export SOCKS_PROXY=socks5://localhost:1080
+> export ALL_PROXY=$SOCKS_PROXY
+> curl -LsSf https://astral.sh/uv/install.sh | sh
+> source $HOME/.local/bin/env
+>
+> ```
 
 ### Redis 部署
 
