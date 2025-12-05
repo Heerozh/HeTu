@@ -7,12 +7,12 @@
 
 # 🌌 河图 HeTu
 
-河图是一个分布式游戏服务器引擎。类似supabase，但专为游戏轻量化设计。
+河图是一个分布式游戏服务器引擎。类似 supabase，但专为游戏轻量化设计。
 
 - 高开发效率：透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
 - Python 语言：支持各种数据科学库，拥抱未来。
-- 高性能：高并发异步架构 + Redis 后端，数据库操作性能约10x倍于supabase等。
-- Unity客户端SDK：支持C# Reactive，调用简单，基于服务器推送的天然响应式，视图与业务解耦。
+- 高性能：高并发异步架构 + Redis 后端，数据库操作性能约 10x 倍于 supabase 等。
+- Unity 客户端 SDK：支持 C# Reactive，调用简单，基于服务器推送的天然响应式，视图与业务解耦。
 
 具体性能见下方[性能测试](#-性能测试)。
 
@@ -22,19 +22,19 @@
 进行 select/query 订阅。
 订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
 
-写入操作只能由服务器的逻辑代码执行，客户端通过RPC远程调用。类似BaaS的储存过程，但更易写。
+写入操作只能由服务器的逻辑代码执行，客户端通过 RPC 远程调用。类似 BaaS 的储存过程，但更易写。
 
 ## 开源免费
 
 欢迎贡献代码。商业使用只需在 Credits 中注明即可。
 
-## 🔰 快速示例（30行）
+## 🔰 快速示例（30 行）
 
 一个登录，并在地图上移动的简单示例。
 
 ### 定义组件（Component）
 
-为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表Schema），通过`owner`属性
+为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表 Schema），通过`owner`属性
 将其关联到玩家 ID。
 组件的权限设为`Permission.USER`，所有登录的客户端都可直接向河图查询该组件。
 
@@ -92,7 +92,7 @@ async def move_to(ctx: Context, x, y):
 > [!NOTE]
 > 什么是内部 System? 如何调用？
 > 内部 System 为 Admin 权限的 System，用户不可调用。
-> System都牵涉到数据库事务操作，因此须通过参数`subsystems`链接，让事务连续。
+> System 都牵涉到数据库事务操作，因此须通过参数`subsystems`链接，让事务连续。
 
 ```Python
 from hetu.system import define_system, Context
@@ -218,11 +218,11 @@ public class FirstGame : MonoBehaviour
 
 ### 配置：
 
-|          |                 服务器 型号 |                            设置 |   
-|:---------|-----------------------:|------------------------------:|
-| 河图       |       ecs.c8a.16xlarge | 32核64线程，默认配置，参数: --workers=76 |
-| Redis7.0 | redis.shard.small.2.ce |       单可用区，双机热备，非Cluster，内网直连 |   
-| 跑分程序     |                     本地 |   参数： --clients=1000 --time=5 |        
+|          |            服务器 型号 |                                        设置 |
+| :------- | ---------------------: | ------------------------------------------: |
+| 河图     |       ecs.c8a.16xlarge | 32 核 64 线程，默认配置，参数: --workers=76 |
+| Redis7.0 | redis.shard.small.2.ce |    单可用区，双机热备，非 Cluster，内网直连 |
+| 跑分程序 |                   本地 |              参数： --clients=1000 --time=5 |
 
 ### Redis 对照：
 
@@ -235,8 +235,8 @@ ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
 CPS(每秒调用次数)结果为：
 
 | Time\Calls | ZRANG...EXEC |
-|:-----------|-------------:|
-| Avg(每秒)    |     30,345.2 |
+| :--------- | -----------: |
+| Avg(每秒)  |     30,345.2 |
 
 - ARM 版的 Redis 性能，hset/get 性能一致，但牵涉 zrange 和 multi 指令后性能低 40%，不建议
 - 各种兼容 Redis 指令的数据库，并非 Redis，不可使用，可能有奇怪 BUG
@@ -248,35 +248,35 @@ CPS(每秒调用次数)结果为：
 
 CPS(每秒调用次数)测试结果为：
 
-| Time    | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:--------|-------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒) |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
-| CPU负载   |                99% |                    34% |                        26% |           65% |
-| Redis负载 |                 0% |                    99% |                        99% |           99% |
+| Time       | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
+| :--------- | -----------------: | ---------------------: | -------------------------: | ------------: |
+| Avg(每秒)  |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
+| CPU 负载   |                99% |                    34% |                        26% |           65% |
+| Redis 负载 |                 0% |                    99% |                        99% |           99% |
 
-* _以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。_
-* _在Docker中压测，hello world结果为314,241（需要关闭bridge网络--net=host），
+- _以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。_
+- _在 Docker 中压测，hello world 结果为 314,241（需要关闭 bridge 网络--net=host），
   其他项目受限数据库性能，不影响。_
 
 ### 单连接性能：
 
 测试程序使用`--clients=1`参数测试，单线程同步堵塞模式，主要测试 RTT：
 
-| Time    | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:--------|-------------------:|-----------------------:|---------------------------:|--------------:|
+| Time      | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
+| :-------- | -----------------: | ---------------------: | -------------------------: | ------------: |
 | Avg(每秒) |           14,353.7 |               1,142.13 |                    698.544 |      2,142.06 |
-| RTT(ms) |          0.0696686 |               0.875555 |                    1.43155 |      0.466841 |
+| RTT(ms)   |          0.0696686 |               0.875555 |                    1.43155 |      0.466841 |
 
 ### 关于 Python 性能
 
 不用担心 Python 的性能。CPU 价格已远低于开发人员成本，快速迭代，数据分析，AI 生态更具有优势。
 
-现在 Python 社区活跃，宛如人肉JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端
+现在 Python 社区活跃，宛如人肉 JIT，且在异步+分布式架构下，吞吐量和 RTT 都不受制于语言，而受制于后端
 Redis。
 
 ### Native 计算
 
-由于 Component 数据本来就是 NumPy C 结构，可以使用LuaJIT的FFI，以极低代价调用 C/Rust 代码：
+由于 Component 数据本来就是 NumPy C 结构，可以使用 LuaJIT 的 FFI，以极低代价调用 C/Rust 代码：
 
 ```python
 from cffi import FFI
@@ -293,24 +293,24 @@ c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在Python下支持SIMD更快：
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD 更快：
 `rows.x[rows.x >= 10] -= 10`
 
 ## ⚙️ 安装
 
-开发环境建议用 uv 包管理安装。 Windows可在命令行执行：
+开发环境建议用 uv 包管理安装。 Windows 可在命令行执行：
 
 ```bash
 winget install --id=astral-sh.uv  -e
 ```
 
-新建你的项目目录，在目录中初始化uv（最低版本需求 `3.13`）：
+新建你的项目目录，在目录中初始化 uv（最低版本需求 `3.13`）：
 
 ```shell
 uv init --python "3.14"
 ```
 
-此后你的项目就由uv管理，类似npm，然后把河图添加到你的项目依赖中：
+此后你的项目就由 uv 管理，类似 npm，然后把河图添加到你的项目依赖中：
 
 ```shell
 uv add hetudb
@@ -329,14 +329,14 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 
 ### 内网离线开发环境
 
-uv会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
+uv 会把所有依赖放在项目目录下（.venv），因此很简单，外网机执行上述步骤后，把整个项目目录复制过去即可。
 
-内网建议跳过uv直接用`source .venv/bin/activate` (或`.\.venv\Scripts\activate.ps1`)
+内网建议跳过 uv 直接用`source .venv/bin/activate` (或`.\.venv\Scripts\activate.ps1`)
 激活环境使用。
 
 ## 🎉 生产部署
 
-生产环境推荐用 Docker 部署或 pip 直接安装，这2种都有国内镜像源。
+生产环境推荐用 Docker 部署或 pip 直接安装，这 2 种都有国内镜像源。
 
 ### Docker 部署
 
@@ -353,6 +353,17 @@ sudo add-apt-repository -y "deb [arch=$(dpkg --print-architecture)] http://mirro
 #安装Docker社区版本，容器运行时containerd.io，以及Docker构建和Compose插件
 sudo apt-get -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 ```
+
+> [!NOTE]
+> 如果要使用 uv，需要代理：
+>
+> ```bash
+> export SOCKS_PROXY=socks5://localhost:1080
+> export ALL_PROXY=$SOCKS_PROXY
+> curl -LsSf https://astral.sh/uv/install.sh | sh
+> source $HOME/.local/bin/env
+>
+> ```
 
 在你的项目目录下，创建 `Dockerfile` 文件，内容如下：
 
@@ -371,7 +382,7 @@ ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
 这里使用的是国内镜像，国外可用 [Docker Hub 的镜像](https://hub.docker.com/r/heerozh/hetu)。
 `hetu:latest`表示最新版本，你也可以指定版本号。
 
-注意你的项目目录格式得符合src-layout，不然RUN pip install .会失败。
+注意你的项目目录格式得符合 src-layout，不然 RUN pip install .会失败。
 
 然后执行：
 
@@ -382,15 +393,15 @@ docker build -t app_image_name .
 docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
 ```
 
-使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用9折的抢占服务器，然后用反向代理对连接进行负载均衡。
+使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用 9 折的抢占服务器，然后用反向代理对连接进行负载均衡。
 
 后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
 
 ### pip 原生部署
 
-容器一般有 20% 的性能损失，常驻服务器可以用pip的方式部署 (无须安装uv)，且pip在国内云服务器都自带加速镜像。
+容器一般有 20% 的性能损失，常驻服务器可以用 pip 的方式部署 (无须安装 uv)，且 pip 在国内云服务器都自带加速镜像。
 
-原生部署困难处在于如何安装高版本 python，建议通过清华miniconda源安装，uv、pyenv等都需要海外网。
+原生部署困难处在于如何安装高版本 python，建议通过清华 miniconda 源安装，uv、pyenv 等都需要海外网。
 
 ```bash
 # 通过miniconda安装python 3.14
@@ -407,21 +418,22 @@ conda create -n hetu python=3.14
 # 进入项目目录
 cd your_app_directory
 # 每次执行python指令前都要执行此命令激活环境
-conda activate hetu  
+conda activate hetu
 # 根据项目pyproject.toml安装依赖，河图应该在其中
 pip install .
 # 启动河图
 hetu start --config=./config.yml --head=True
 ```
 
-### Redis部署
+### Redis 部署
 
 Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到
 replica，大幅降低 master 负载。
 
 > [!NOTE]
-> * 不要使用兼容 Redis
-> * 不要使用非直连的 Redis
+>
+> - 不要使用兼容 Redis
+> - 不要使用非直连的 Redis
 
 ### 负载均衡
 
@@ -430,8 +442,8 @@ replica，大幅降低 master 负载。
 反向代理选择：
 
 - Caddy: 自动 https 证书，自动反代头设置和合法验证，可通过 api 调用动态配置负载均衡
-    - 命令行：
-      `caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000`
+  - 命令行：
+    `caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000`
 - Nginx: 老了，配置复杂，且歧义多，不推荐
 
 ## ⚙️ 客户端 SDK 安装
@@ -453,7 +465,7 @@ UniTask，已内置在 SDK 库中。
 如果项目已有 UniTask 依赖，可以择一删除。
 
 > [!NOTE]
-> 如果使用 Unity 6 及以上版本，SDK 使用Unity 原生 Async 库，可以直接删除 UniTask 目录。
+> 如果使用 Unity 6 及以上版本，SDK 使用 Unity 原生 Async 库，可以直接删除 UniTask 目录。
 
 ### TypeScript SDK
 
@@ -477,7 +489,7 @@ const sub1 = await HeTuClient.select('HP', 100, 'owner')
 const sub2 = await HeTuClient.query('Position', 'x', 0, 10, 100)
 sub2!.onInsert = (sender, rowID) => {
     newPlayer = sender.rows.get(rowID)?.owner
-}    
+}
 sub2!.onDelete = (sender, rowID) => {
     removedPlayer = sender.rows.get(rowID)?.owner
 }
@@ -489,7 +501,7 @@ HeTuClient.callSystem('move_user', ...)
 // 取消订阅，在这之前数据有变更都会对订阅推送
 sub1.dispose()
 sub2.dispose()
-// 退出        
+// 退出
 HeTuClient.close()
 ```
 
