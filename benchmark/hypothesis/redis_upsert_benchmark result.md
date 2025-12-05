@@ -1,0 +1,226 @@
+# Redis Upsert Benchmark Results
+
+结论：
+lua 模式使用网络流量少，因此在带宽有限的网络环境下性能优势更明显；
+但如果在内网环境可以跑到 200M 带宽，则 watch 性能更佳
+
+## 运行命令
+
+```
+$ export REDIS_HOST=r-uf6v7vch86ipmsqmhq.redis.rds.aliyuncs.com
+$ export REDIS_PASSWORD=...
+$ uv run ya ./benchmark/hypothesis/ya_redis_upsert.py
+```
+
+Found 2 benchmark(s): benchmark_lua_version, benchmark_watch_multi
+Running with 64 workers, 3 tasks per worker, for 5.0 minute(s)
+
+## 本机 9950x3D redis:latest Docker 默认设置
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 14,711.09 |
+| benchmark_watch_multi | 9,011.41 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|------------:|------:|--------:|---------:|
+| benchmark_lua_version | 13.04 | 12.35 | 17.52 | 26.15 | 4.41535e+06 | 0.9 | 110.18 | 12.35 |
+| benchmark_watch_multi | 21.31 | 20.09 | 27.42 | 38.3 | 2.70347e+06 | 1.62 | 1495.56 | 20.09 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 4406139 | 99.79 |
+| 1 | benchmark_lua_version | 1 | 9183 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 32 | 0 |
+| 3 | benchmark_watch_multi | 0 | 2696598 | 99.75 |
+| 4 | benchmark_watch_multi | 1 | 6845 | 0.25 |
+| 5 | benchmark_watch_multi | 2 | 25 | 0 |
+
+## 本机 9950x3D Redis-8.4.0-Windows-x64-msys2 默认设置
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:---------|
+| benchmark_lua_version | 9,998.63 |
+| benchmark_watch_multi | 7,205.46 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|------------:|------:|-------:|---------:|
+| benchmark_lua_version | 19.05 | 18.9 | 21.89 | 25.3 | 3.02424e+06 | 0.46 | 64.46 | 18.9 |
+| benchmark_watch_multi | 26.66 | 26.17 | 30.58 | 35.78 | 2.16044e+06 | 0.64 | 100.19 | 26.17 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 3017631 | 99.78 |
+| 1 | benchmark_lua_version | 1 | 6590 | 0.22 |
+| 2 | benchmark_lua_version | 2 | 22 | 0 |
+| 3 | benchmark_watch_multi | 0 | 2154917 | 99.74 |
+| 4 | benchmark_watch_multi | 1 | 5494 | 0.25 |
+| 5 | benchmark_watch_multi | 2 | 26 | 0 |
+
+## 阿里云 redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 429,795 | 1,364,324 | 1,375,803 | 1,372,913 | 1,372,445 | 940,366 |
+| benchmark_watch_multi | 465,692 | 1,820,799 | 1,814,199 | 1,816,239 | 1,832,204 | 1,355,230 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 22,869.12 |
+| benchmark_watch_multi | 30,362.09 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|------:|---------:|
+| benchmark_lua_version | 8.4 | 8.36 | 8.88 | 10.6 | 6,855,646 | 1.46 | 29.42 | 8.36 |
+| benchmark_watch_multi | 6.33 | 6.46 | 10.24 | 15.07 | 9,104,363 | 0.95 | 46.74 | 6.46 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 6840913 | 99.79 |
+| 1 | benchmark_lua_version | 1 | 14680 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 53 | 0 |
+| 3 | benchmark_watch_multi | 0 | 9081730 | 99.75 |
+| 4 | benchmark_watch_multi | 1 | 22555 | 0.25 |
+| 5 | benchmark_watch_multi | 2 | 78 | 0 |
+
+## 阿里云 redis.shard.3xlarge.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 833,812 | 1,444,162 | 1,442,625 | 1,442,746 | 1,455,626 | 621,759 |
+| benchmark_watch_multi | 931,326 | 1,841,098 | 1,838,810 | 1,837,894 | 1,838,097 | 907,612 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 24,097.11 |
+| benchmark_watch_multi | 30,649.54 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|-------:|---------:|
+| benchmark_lua_version | 7.95 | 7.93 | 8.43 | 9.84 | 7,240,730 | 1.19 | 35.86 | 7.93 |
+| benchmark_watch_multi | 6.26 | 6.97 | 10.89 | 15 | 9,194,837 | 1.13 | 229.94 | 6.97 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 7225260 | 99.79 |
+| 1 | benchmark_lua_version | 1 | 15407 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 63 | 0 |
+| 3 | benchmark_watch_multi | 0 | 9172849 | 99.76 |
+| 4 | benchmark_watch_multi | 1 | 21942 | 0.24 |
+| 5 | benchmark_watch_multi | 2 | 45 | 0 |
+| 6 | benchmark_watch_multi | 3 | 1 | 0 |
+
+## 阿里云 redis.shard.small.y.ee 倚天 7.0(25.11.0.0) 云原生 单节点 高可用 默认设置
+
+- 注： redis cpu 未跑满
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 766,901 | 1,080,846 | 1,085,838 | 1,074,854 | 1,092,980 | 320,386 |
+| benchmark_watch_multi | 700,482 | 1,064,379 | 1,066,189 | 1,063,714 | 1,065,482 | 363,905 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 18,049.29 |
+| benchmark_watch_multi | 17,749.01 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|-------:|---------:|
+| benchmark_lua_version | 10.62 | 10.55 | 12.35 | 14.94 | 5,421,805 | 3.29 | 233.58 | 10.55 |
+| benchmark_watch_multi | 10.82 | 10.57 | 12.98 | 14.17 | 5,324,151 | 7.5 | 243.59 | 10.57 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 5410265 | 99.79 |
+| 1 | benchmark_lua_version | 1 | 11506 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 34 | 0 |
+| 3 | benchmark_watch_multi | 0 | 5310607 | 99.75 |
+| 4 | benchmark_watch_multi | 1 | 13487 | 0.25 |
+| 5 | benchmark_watch_multi | 2 | 57 | 0 |
+
+## 阿里云 tair.scm.standard.1m.4d Tair 内存持久型 6.0(1.2.7.2) 云原生 单节点 默认设置
+
+Tair 的 watch 支持有问题，只有 lua 模式有实际意义。测试数据仅供参考
+
+- 注： Tair cpu 无法跑满，可能和 tair 自身实现有关
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 640,987 | 1,304,144 | 1,288,367 | 1,306,130 | 1,310,749 | 675,871 |
+| benchmark_watch_multi | 367,084 | 858,328 | 858,261 | 858,957 | 859,059 | 491,412 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 21,706.46 |
+| benchmark_watch_multi | 14,310.06 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|------:|---------:|
+| benchmark_lua_version | 8.83 | 8.83 | 9.54 | 10.57 | 6,526,248 | 4.71 | 32.02 | 8.83 |
+| benchmark_watch_multi | 13.42 | 13.4 | 14.44 | 15 | 4,293,101 | 11.02 | 69.88 | 13.4 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 6512751 | 99.79 |
+| 1 | benchmark_lua_version | 1 | 13444 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 53 | 0 |
+| 3 | benchmark_watch_multi | 0 | 4282266 | 99.75 |
+| 4 | benchmark_watch_multi | 1 | 10801 | 0.25 |
+| 5 | benchmark_watch_multi | 2 | 34 | 0 |
+
+## 阿里云 tair.rdb.1g Tair 内存型 7.0(25.11.0.0) 云原生 单节点 默认设置
+
+Tair 的 watch 支持有问题，只有 lua 模式有实际意义。测试数据仅供参考
+
+- 注： Tair cpu 无法跑满，可能和 tair 自身实现有关
+
+Calls Per Minute (CPM) Statistics:
+| benchmark | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
+|:----------------------|:-----------|:-----------|:-----------|:-----------|:-----------|:-----------|
+| benchmark_lua_version | 1,223,400 | 1,543,845 | 1,533,293 | 1,533,128 | 1,536,916 | 319,376 |
+| benchmark_watch_multi | 1,343,757 | 1,860,132 | 1,861,999 | 1,857,989 | 1,863,530 | 514,687 |
+
+Average CPS (Calls Per Second) per Function:
+| | CPS |
+|:----------------------|:----------|
+| benchmark_lua_version | 25,611.31 |
+| benchmark_watch_multi | 31,004.29 |
+
+Function Execution Time Statistics:
+| | Mean | k50 | k90 | k99 | Count | Min | Max | Median |
+|:----------------------|-------:|------:|------:|------:|:----------|------:|------:|---------:|
+| benchmark_lua_version | 7.49 | 6.63 | 11.58 | 13.77 | 7,689,958 | 0.96 | 42.59 | 6.63 |
+| benchmark_watch_multi | 6.19 | 7 | 7.95 | 12.22 | 9,302,094 | 1.09 | 50.92 | 7 |
+
+Return Value Distribution Statistics:
+| | benchmark | return_value | count | percentage |
+|---:|:----------------------|---------------:|--------:|-------------:|
+| 0 | benchmark_lua_version | 0 | 7673394 | 99.78 |
+| 1 | benchmark_lua_version | 1 | 16511 | 0.21 |
+| 2 | benchmark_lua_version | 2 | 52 | 0 |
+| 3 | benchmark_lua_version | 3 | 1 | 0 |
+| 4 | benchmark_watch_multi | 0 | 9280827 | 99.77 |
+| 5 | benchmark_watch_multi | 1 | 21201 | 0.23 |
+| 6 | benchmark_watch_multi | 2 | 66 | 0 |
