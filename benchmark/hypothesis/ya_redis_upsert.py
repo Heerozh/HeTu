@@ -46,9 +46,12 @@ local acc_id = ARGV[1]
 local key_id = ARGV[2]  -- key ID
 local data = cmsgpack.unpack(ARGV[3])     -- 修改后的数据
 local expect_ver = tonumber(ARGV[4])
+local redis_call = redis.call
+local table_insert = table.insert
+local tostring = tostring
 
 -- 1. 查询 Index
-local existing_keys = redis.call('zrangebyscore', index_key, acc_id, acc_id)
+local existing_keys = redis_call('zrangebyscore', index_key, acc_id, acc_id)
 local is_create = false
 
 if #existing_keys == 0 then
@@ -73,7 +76,7 @@ local user_key = "user:" .. key_id
 
 -- 2. 乐观锁版本检查 (如果不是新建)
 if not is_create then
-    local current_ver = redis.call('HGET', user_key, "version")
+    local current_ver = redis_call('HGET', user_key, "version")
     if not current_ver then current_ver = 0 end
 
     if tonumber(current_ver) ~= expect_ver then
@@ -84,14 +87,14 @@ end
 -- 3. 执行写入
 local flat_data = {}
 for k, v in pairs(data) do
-    table.insert(flat_data, k)
-    table.insert(flat_data, tostring(v))
+    table_insert(flat_data, k)
+    table_insert(flat_data, tostring(v))
 end
-redis.call('HMSET', user_key, unpack(flat_data))
+redis_call('HMSET', user_key, unpack(flat_data))
 
 
 if is_create then
-    redis.call('zadd', index_key, acc_id, key_id)
+    redis_call('zadd', index_key, acc_id, key_id)
 end
 
 return 1 -- 成功
