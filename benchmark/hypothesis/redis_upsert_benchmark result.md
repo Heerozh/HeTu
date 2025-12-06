@@ -2,6 +2,8 @@
 
 结论：2 种方式性能差异不大，Lua 方式灵活性更高，支持更多种类的 Redis 和架构。
 
+主要损耗在网络 IO 上，得想办法减少 Lua 外 GET 的次数，比如增加缓存层，而不去 redis 读。
+
 ## 运行命令
 
 ```
@@ -13,7 +15,7 @@ $ uv run ya ./benchmark/hypothesis/ya_redis_upsert.py
 Found 2 benchmark(s): benchmark_lua_version, benchmark_watch_multi
 Running with 64 workers, 3 tasks per worker, for 5.0 minute(s)
 
-## 本机 9950x3D redis:latest Docker 默认设置
+## 本机 9950x3D redis:latest Windows Docker 默认设置
 
 Average CPS (Calls Per Second) per Function:
 | | CPS |
@@ -38,6 +40,8 @@ Return Value Distribution Statistics:
 | 5 | benchmark_watch_multi | 2 | 25 | 0 |
 
 ## 本机 9950x3D Redis-8.4.0-Windows-x64-msys2 默认设置
+
+和 memurai 性能一致。
 
 Average CPS (Calls Per Second) per Function:
 | | CPS |
