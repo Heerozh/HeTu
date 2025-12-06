@@ -1,9 +1,62 @@
--- 使用cjson或cmsgpack来获取参数
+-- 我在写一个redis的orm框架，事务采用version属性值作为乐观锁+lua脚本的机制实现。
+-- 因为没有使用任何watch机制，所以lua脚本需要做完整的检查和操作。
+--
+-- 数据库设计信息：
+--    - 数据库数据是以hash存储的，key_name是"table_name:雪花算法的uid"的形式。
+--    - 有些属性会有zset索引，储存在"table_name:index:属性名"里，有些属性会要求有unique约束。
+--      所有索引包括unique约束都是通过zset实现的。
+--    - 如果值是字符串类型，score是0, member是"字符串值:雪花算法的uid"。如果为数字，score是数字值，member是"雪花算法的uid"。
+--    lua事先会有个schema全局变量，里面有每个table的unique和index属性定义，所有unique属性也会在index里列出。
+--      应用层会把 Schema 硬编码进 Lua 脚本字符串中，所以这里不用处理，直接使用即可。
+--    key的version属性是数据库管理的，用户无法修改。所以提交数据都是原样获取后原样传入，如果version变了则说明有竞态
+--    key_name是调用方按“table_name:雪花算法的uid”组合出来的，且不允许rename操作
+--
+-- 现在我在写这个框架的redis lua脚本，用于处理事务commit。
+-- 首先使用cmsgpack来获取提交的payload。
+-- payload是dict包含
+--{
+--    "insert": {
+--        table_name1 = {
+--            key_name1: {属性1:value,...} , key_name2: {}, ...
+--        }, ...
+--    },
+--    "update": {
+--        table_name1 = {
+--            key_name1: {属性1:value,...} , key_name2: {}, ...
+--        }, ...
+--    },
+--    "delete": {
+--        table_name1 = {
+--            key_name1: {version:1} , key_name2: {version:2}, ...
+--        }, ...
+--    },
+--}
+--
+-- 由于lua脚本失败不会回滚，所以我们要先做检查。
+-- 对于3种操作，检查逻辑如下：
+-- * insert:
+--   - insert提交的主要问题有: 可能有其他人预先竞态插入了相同的unique值。
+--   - 所以处理前要检查unique的值是否已存在，table有哪些unique属性可以从lua的schema全局变量里获取，此变量
+--     事先就有，格式为{table_name: {unique: {set}, indexes{set}}}。
+--   - 然后检查payload的version应该是0，且数据库中不应该exists该key。
+--
+-- * update:
+--   - 首先获取完整的旧值并保存，检测旧值version和数据库中的是否相同，不同的话就返回竞态错误。
+--   - 然后获取值变化的属性，检查这些属性里是否有unique约束的，有的话检查新的值是否已存在。
+--
+-- * delete:
+--   首先获取完整的旧值，检测旧值version和数据库中的是否相同，不同的话就返回竞态错误。
+--
+-- 然后开始写入操作，这些操作必须全部成功，不能有失败的可能
+-- 对于3种操作，写入逻辑如下：
+-- * insert:
+--   - payload version+1后，写入数据，同时循环所有标记为index的属性，更新zset索引。
+--
+-- * update:
+--   - 获取值变化的属性，如果这些属性标记为index，根据旧 Hash 值从 ZSET 中移除旧索引
+--   - zadd新值到索引
+--   - version+1，更新数据。
+-- * delete:
+--   循环所有标记为index的属性，用zrem旧值从zset删除索引
+--   最后删除hash key。
 
--- version检查部分
-
-
--- 分析各个op，然后做Unique检查
-
-
--- 分析各个op，然后组合命令执行
