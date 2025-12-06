@@ -421,7 +421,9 @@ def define_component(
             f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
         )
         # 必备索引，只进行unique索引为了基础性能
+        # todo 改成用雪花算法生成的uuid，worker_id从
         properties["id"] = Property(0, True, True, np.int64)
+        # todo 增加version属性，且该属性只读（只能lua修改）
 
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
