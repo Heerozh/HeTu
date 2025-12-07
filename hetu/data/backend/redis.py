@@ -469,8 +469,9 @@ class RedisRawComponentTable(RawComponentTable):
             logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
 
     def flush(self, force=False):
-        # todo 考虑取消head_lock，建议易失数据全部加上行级timeout信息，过期后自动删除
-        #       flush命令则依然是交给ci/cd来执行
+        # todo 考虑取消head_lock，建议易失数据全部加上component行级timeout信息，过期后由
+        #       hetu自己启动事务删除row,包括Index.
+        #       flush命令则是交给ci/cd来执行，因为需要重启服务器必然牵涉到app版本提升，不然停机干嘛？
         if not self._backend.requires_head_lock():
             raise HeadLockFailed("redis中head_lock键")
 

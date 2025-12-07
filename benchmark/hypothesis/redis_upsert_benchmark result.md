@@ -7,9 +7,9 @@
 ## 运行命令
 
 ```
-$ export REDIS_HOST=r-uf6v7vch86ipmsqmhq.redis.rds.aliyuncs.com
-$ export REDIS_PASSWORD=...
-$ uv run ya ./benchmark/hypothesis/ya_redis_upsert.py
+export REDIS_HOST=r-uf6v7vch86ipmsqmhq.redis.rds.aliyuncs.com
+export REDIS_PASSWORD=...
+uv run ya ./benchmark/hypothesis/ya_redis_upsert.py
 ```
 
 Found 2 benchmark(s): benchmark_lua_version, benchmark_watch_multi
