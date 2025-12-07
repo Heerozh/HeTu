@@ -130,6 +130,10 @@ def generate_user_data(acc_id=None, version=1):
     }
 
 
+async def benchmark_ping(redis_client):
+    await redis_client.ping()
+
+
 async def benchmark_watch_multi(redis_client):
     """
     任务1: WATCH + MULTI 实现
