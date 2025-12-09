@@ -95,7 +95,7 @@ def test_normal_define(new_component_env):
     row = GalaxyPosition.new_row()
     assert row.x == 88
 
-    row = GalaxyPosition.new_row(2)
+    row = GalaxyPosition.new_rows(2)
     assert row.x[1] == 88
 
     # 测试布尔值强制更换
