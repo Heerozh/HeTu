@@ -8,7 +8,6 @@
 from typing import TYPE_CHECKING
 
 import numpy as np
-from numbers import Number
 from .idmap import IdentityMap
 
 if TYPE_CHECKING:
@@ -35,8 +34,8 @@ class Session:
     def query_ids(
         self,
         index: str,
-        left: Number | str,
-        right: Number | str | None,
+        left: int | float | str,
+        right: int | float | str | None,
         limit: int,
         desc: bool = False,
     ) -> list[int]:

@@ -67,7 +67,7 @@ class BaseComponent:
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype] | None = None  # 属性名->dtype的映射
     uniques_: set[str] | None = None  # 唯一索引的属性名集合
-    indexes_: dict[str, bool] | None = None  # 索引名->是否是字符串类型 的映射
+    indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
     json_: str | None = None  # Component定义的json字符串
     instances_: dict[str, dict[str, type[BaseComponent]]] = {}  # 所有副本实例
     master_: type[BaseComponent] | None = None  # 该Component的主实例
