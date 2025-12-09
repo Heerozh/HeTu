@@ -169,14 +169,14 @@ class BaseComponent:
         return row
 
     @classmethod
-    def dict_to_row(cls, data: dict):
+    def dict_to_row(cls, data: dict):  # todo rename to dict_to_struct
         """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
         row = cls.new_row()
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
 
-    @classmethod
+    @classmethod  # todo rename struct_to_dict
     def row_to_dict(cls, data: np.record | np.ndarray | np.recarray | dict):
         """从c-struct like的行数据转换为typed dict"""
         if type(data) is dict:
@@ -312,21 +312,21 @@ def define_component(
     会自行自增无法修改。
     """
 
-    def _normalize_prop(cname: str, pname: str, anno_type, prop: Property):
+    def _normalize_prop(cname: str, fname: str, anno_type, prop: Property):
         # 如果未设置dtype，则用type hint
         if prop.dtype is None:
             prop.dtype = anno_type
         # 判断名称合法性
-        if keyword.iskeyword(pname) or pname in ["bool", "int", "float", "str"]:
-            raise ValueError(f"{cname}.{pname}属性定义出错，属性名不能是Python关键字。")
-        if csharp_keyword.iskeyword(pname):
-            raise ValueError(f"{cname}.{pname}属性定义出错，属性名不能是C#关键字。")
+        if keyword.iskeyword(fname) or fname in ["bool", "int", "float", "str"]:
+            raise ValueError(f"{cname}.{fname}属性定义出错，属性名不能是Python关键字。")
+        if csharp_keyword.iskeyword(fname):
+            raise ValueError(f"{cname}.{fname}属性定义出错，属性名不能是C#关键字。")
         # 判断类型，以及长度合法性
         assert np.dtype(prop.dtype).itemsize > 0, (
-            f"{cname}.{pname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+            f"{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
         )
         assert np.dtype(prop.dtype).type is not np.void, (
-            f"{cname}.{pname}属性的dtype不支持void类型"
+            f"{cname}.{fname}属性的dtype不支持void类型"
         )
         # bool类型在一些后端数据库中不支持，强制转换为int8
         if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == "?":
@@ -335,7 +335,7 @@ def define_component(
         if prop.unique:
             if prop.index is False:
                 logger.warning(
-                    f"⚠️ [🛠️Define] {cname}.{pname}属性设置为unique时，"
+                    f"⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，"
                     f"index不能设置为False。"
                 )
             prop.index = True
@@ -344,18 +344,18 @@ def define_component(
             prop.index = False
         # 判断default值必须设置
         assert prop.default is not None, (
-            f"{cname}.{pname}默认值不能为None。所有属性都要有默认值，"
+            f"{cname}.{fname}默认值不能为None。所有属性都要有默认值，"
             f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。"
         )
         # 判断default值和dtype匹配，包括长度能安全转换
         can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
         non_numeric = (str, bytes)
-        if not can_cast and not (type(prop.default) in non_numeric):
+        if not can_cast and type(prop.default) not in non_numeric:
             # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败,所以要转为负数再判断一次
             default_value = -prop.default if prop.default != 0 else -1
             can_cast = np.can_cast(np.min_scalar_type(default_value), prop.dtype)
         assert can_cast, (
-            f"{cname}.{pname}的default值："
+            f"{cname}.{fname}的default值："
             f"{type(prop.default).__name__}({prop.default})"
             f"和属性dtype({prop.dtype})不匹配"
         )
