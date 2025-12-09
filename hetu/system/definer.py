@@ -413,6 +413,8 @@ def define_system(
     from .context import Context
 
     # todo non_transactions名字还是不够好，考虑改名为direct_refs
+    # todo 不用non_transactions，而是允许分割事务，可以传入多组事务，分别执行。
+    #      不然每次客户端的一个命令，会强制都在一个事务，而future_call概念太复杂。
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
 
