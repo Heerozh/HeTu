@@ -1,20 +1,20 @@
 {
-    "cSpell.words": [
-        "caplog",
-        "Heerozh",
-        "hetu",
-        "idmap",
-        "Jianhao",
-        "keyspace",
-        "recarray",
-        "replicaof",
-        "Zhang",
-        "ZRANGE",
-        "zrangebyscore"
-    ],
-    "python.testing.pytestArgs": [
-        "tests"
-    ],
-    "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+  "cSpell.words": [
+    "caplog",
+    "Heerozh",
+    "hetu",
+    "hgetall",
+    "idmap",
+    "itemsize",
+    "Jianhao",
+    "keyspace",
+    "recarray",
+    "replicaof",
+    "Zhang",
+    "ZRANGE",
+    "zrangebyscore"
+  ],
+  "python.testing.pytestArgs": ["tests"],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true
 }

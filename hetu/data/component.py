@@ -12,7 +12,7 @@ import logging
 import operator
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import Callable, Any, TYPE_CHECKING
+from typing import Callable, Any, TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
     from .backend import RawComponentTable
@@ -62,7 +62,7 @@ class BaseComponent:
     backend_: str | None = None  # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype | None = None  # np structured dtype
-    default_row: np.ndarray | None = None  # 默认空数据行
+    default_row: np.recarray  # 默认空数据行
     hosted_: RawComponentTable | None = None  # 该Component运行时被托管的DOA实例
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype] | None = None  # 属性名->dtype的映射
@@ -161,26 +161,28 @@ class BaseComponent:
         return comp
 
     @classmethod
-    def new_row(cls, size=1) -> np.record | np.recarray:
+    def new_row(cls) -> np.record:
         """返回空数据行，id为0，用于insert"""
-        row = (
-            cls.default_row[0].copy() if size == 1 else cls.default_row.repeat(size, 0)
-        )
-        return row
+        return cast(np.record, cls.default_row[0].copy())
 
     @classmethod
-    def dict_to_row(cls, data: dict):  # todo rename to dict_to_struct
+    def new_rows(cls, size) -> np.recarray:
+        """返回空数据行，id为0，用于insert"""
+        row = cls.default_row.copy() if size == 1 else cls.default_row.repeat(size, 0)
+        return cast(np.recarray, row)
+
+    @classmethod
+    def dict_to_row(cls, data: dict) -> np.record:  # todo rename to dict_to_struct_row
         """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
         row = cls.new_row()
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
 
-    @classmethod  # todo rename struct_to_dict
-    def row_to_dict(cls, data: np.record | np.ndarray | np.recarray | dict):
+    @classmethod  # todo rename struct_row_to_dict
+    def row_to_dict(cls, data: np.record) -> dict[str, Any]:
         """从c-struct like的行数据转换为typed dict"""
-        if type(data) is dict:
-            return data
+        assert data.dtype.names
         return dict(zip(data.dtype.names, data.item()))
 
     @classmethod
