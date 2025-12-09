@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import random
+import msgspec
 from pathlib import Path
 
 from typing import Callable, Any
@@ -57,15 +58,13 @@ class RedisBackend(BackendClient, alias="redis"):
 
         return random.choice(self._async_ios)
 
-    def __init__(self, config: dict, is_servant=False):
-        super().__init__(config, is_servant=is_servant)
-
-        # 从配置文件取出连接url
-        self.urls = config.get("servants", []) if is_servant else [config["master"]]
+    def __init__(self, endpoint: str | list[str], clustering: bool, is_servant=False):
+        super().__init__(endpoint, clustering, is_servant)
+        # redis的endpoint配置为url, 或list of url
+        self.urls = [endpoint] if type(endpoint) is str else endpoint
         assert len(self.urls) > 0, "必须至少指定一个数据库连接URL"
 
         # 创建连接
-        self.clustering = config.get("clustering", False)
         self._ios = []
         self._async_ios = []
         for url in self.urls:
@@ -154,6 +153,22 @@ class RedisBackend(BackendClient, alias="redis"):
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
+    async def is_synced(self) -> bool:
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
+        assert not self.is_servant, "is_synced只能在master上调用"
+
+        info = await self.aio.info("replication")
+        master_offset = info.get("master_repl_offset", 0)
+        for key, value in info.items():
+            # 兼容 Redis 新旧版本（slave/replica 字段）
+            if key.startswith("slave") or key.startswith("replica"):
+                lag_of_offset = master_offset - int(value.get("offset", 0))
+                if lag_of_offset > 0:
+                    return False
+        return True
+
     def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
@@ -189,6 +204,8 @@ class RedisBackend(BackendClient, alias="redis"):
         key = self._key_prefix + str(row_id)
         row = await self.aio.hgetall(key)
         if row:
+            # todo 此时的row数据都是byte
+
             match row_format:
                 case RowFormat.RAW:
                     return row
@@ -247,6 +264,7 @@ class RedisBackend(BackendClient, alias="redis"):
     ) -> list[int] | np.recarray:
         """查询index数据"""
         # todo 所有get query要合批
+        # todo 想一下这几个keyprefix如何处理，可以先把session做完了再考虑？
         idx_key = self._idx_prefix + index_name
         aio = self.aio  # 保存随机选中的aio连接
 
@@ -301,7 +319,14 @@ class RedisBackend(BackendClient, alias="redis"):
 
     async def commit(self, idmap: IdentityMap) -> None:
         """提交修改事务，使用从IdentityMap中获取的脏数据"""
-        raise NotImplementedError
+        assert not self.is_servant, "从节点不允许提交事务"
+
+        dirty_rows = idmap.get_dirty_rows()
+        assert len(dirty_rows) > 0, "没有脏数据需要提交"
+
+        payload = msgspec.msgpack.encode(dirty_rows)
+        keys = []  # todo 需要添加一个表示cluster的key
+        return await self.lua_commit(keys, payload)
 
     # 还需要
     # create table

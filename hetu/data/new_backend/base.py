@@ -48,6 +48,8 @@
 import numpy as np
 from enum import Enum
 from typing import Any
+import asyncio
+import random
 
 from ..component import BaseComponent
 from ..idmap import IdentityMap
@@ -74,7 +76,7 @@ class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。继承方法：
     class PostgresClient(BackendClient, alias="postgres")
-    服务器启动时，server.py会根据Config中backend type配置，寻找对应alias初始化Client。
+    服务器启动时，Backend会根据Config中type配置，寻找对应alias初始化Client。
     继承此类，完善所有NotImplementedError的方法。
     """
 
@@ -85,8 +87,22 @@ class BackendClient:
         super().__init_subclass__(**kwargs)
         BackendClient._registry[kwargs["alias"]] = cls
 
-    def __init__(self, config: dict, is_servant=False):
-        """通过config初始化连接，is_servant指定本连接是否为从节点"""
+    @classmethod
+    def create(
+        cls, alias: str, endpoint: Any, clustering: bool, is_servant=False
+    ) -> BackendClient:
+        return cls._registry[alias](endpoint, clustering, is_servant)
+
+    def __init__(self, endpoint: Any, clustering: bool, is_servant=False):
+        """
+        建立数据库连接。
+        endpoint为config中master，或者servants的内容。
+        clustering表示数据库是一个垂直分片（按Component分片）的集群，每个Component的
+        所属集群cluster_id可以通过SystemClusters获得，发生变更时也要Client负责迁移。
+        is_servant指定endpoint是否为从节点，从节点只读。
+        """
+        self.endpoint = endpoint
+        self.clustering = clustering
         self.is_servant = is_servant
 
     async def close(self):
@@ -94,6 +110,14 @@ class BackendClient:
 
     def configure(self) -> None:
         """启动时检查并配置数据库，减少运维压力的帮助方法，非必须。"""
+        raise NotImplementedError
+
+    async def is_synced(self) -> bool:
+        """
+        在主库上查询同步状态，返回是否已完成同步。
+        主要用于test用例。
+        """
+        # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
 
     # def get_mq_client(self) -> "MQClient":
@@ -118,103 +142,87 @@ class BackendClient:
         desc: bool = False,
         row_format=RowFormat.STRUCT,
     ) -> list[int] | np.recarray:
-        """查询index数据"""
+        """查询index数据，并返回行id，或完整的行数据"""
         raise NotImplementedError
 
     async def commit(self, idmap: IdentityMap) -> None:
         """提交修改事务，使用从IdentityMap中获取的脏数据"""
         raise NotImplementedError
 
-    # def flush(self, comp_cls: type[BaseComponent], force=False):
-    #     raise NotImplementedError
 
+class Backend:
+    """
+    管理master, servants连接。
+    """
 
-# class Backend:
-#     """
-#     存放数据库连接的池，并负责开始事务。
-#     继承此类，完善所有NotImplementedError的方法。
-#     """
+    def __init__(self, config: dict):
+        """
+        从配置字典初始化Backend，创建master和servants连接。
+        config为配置BACKENDS[i]内容。
+        """
+        clustering = config.get("clustering", False)
+        self._master = BackendClient.create(
+            config["type"], config["master"], clustering, False
+        )
+        self._servants = [
+            BackendClient.create(config["type"], servant, clustering, True)
+            for servant in config.get("servants", [])
+        ]
+        # master_weight表示选中的权重，
+        #   - 1.0 表示主数据库和从数据库的权重相同。
+        #   - 2.0 表示主数据库的权重是任一从数据库的两倍，选中概率为2/(2+从数据库数量)。
+        #   如果master任务不繁重，提高此值可以降低事务冲突概率。
+        #   反之降低此值减少主数据库读取负载，但提高冲突概率，也许反而会增加master负载。
+        self._master_weight = config.get("master_weight", 1.0)
+        self._all_clients = self._servants + [self._master]
+        self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
 
-#     def __init__(self, config: dict):
-#         self.master =
-#         pass
+    async def close(self):
+        await self._master.close()
+        for servant in self._servants:
+            await servant.close()
 
-#     async def close(self):
-#         raise NotImplementedError
+    def configure(self):
+        """
+        启动时检查并配置数据库，减少运维压力的帮助方法，非必须。
+        """
+        self._master.configure()
+        for servant in self._servants:
+            servant.configure()
 
-#     def configure(self):
-#         """
-#         启动时检查并配置数据库，减少运维压力的帮助方法，非必须。
-#         """
-#         raise NotImplementedError
+    async def wait_for_synced(self) -> None:
+        """
+        等待各个savants数据库和master数据库的数据完成同步。
+        主要用于test用例。
+        """
+        while not await self._master.is_synced():
+            await asyncio.sleep(0.1)
 
-#     async def is_synced(self) -> bool:
-#         """
-#         检查各个slave数据库和master数据库的数据是否已完成同步。
-#         主要用于test用例。
-#         """
-#         raise NotImplementedError
+    @property
+    def master(self) -> BackendClient:
+        """返回主数据库连接"""
+        return self._master
 
-#     async def wait_for_synced(self) -> None:
-#         """
-#         等待各个slave数据库和master数据库的数据完成同步。
-#         主要用于test用例。
-#         """
-#         while not await self.is_synced():
-#             await asyncio.sleep(0.1)
+    @property
+    def servant(self) -> BackendClient:
+        """返回一个从数据库连接，随机选择。如果没有从数据库，则返回主数据库。"""
+        if not self._servants:
+            return self._master
+        return random.choice(self._servants)
+
+    @property
+    def master_or_servant(self) -> BackendClient:
+        """
+        返回主数据库连接或一个从数据库连接，随机选择。
+        """
+        return random.choices(
+            self._all_clients,
+            self._all_weights,
+        )[0]
+
 
 #     def get_mq_client(self) -> MQClient:
 #         """获取消息队列连接"""
-#         raise NotImplementedError
-
-#     # 这几个是通过BackendClient来抽象，还是通过自己的private方法来抽象？
-#     # 用BackendClient可以分别创建master和slave的连接池，而连接不用管自己是啥。不过master和slave的config方式不一样，还是无法逻辑分开
-#     async def master_get(
-#         self,
-#         comp_cls: type[BaseComponent],
-#         row_id: int,
-#         row_format="struct",
-#     ) -> np.record | None:
-#         """从主节点获取行数据"""
-#         raise NotImplementedError
-
-#     async def master_query(
-#         self,
-#         comp_cls: type[BaseComponent],
-#         index_name: str,
-#         left,
-#         right,
-#         limit: int = 100,
-#         desc: bool = False,
-#         row_format="struct",
-#     ) -> np.recarray:
-#         """从主节点查询index数据"""
-#         raise NotImplementedError
-
-#     async def master_commit(self, dirty_rows) -> None:
-#         """提交修改事务到主节点，dirty_rows为从IdentityMap中获取的脏数据"""
-#         raise NotImplementedError
-
-#     async def servant_get(
-#         self,
-#         comp_cls: type[BaseComponent],
-#         row_id: int,
-#         row_format="struct",
-#     ) -> np.record | None:
-#         """从从节点获取行数据"""
-#         raise NotImplementedError
-
-#     async def servant_query(
-#         self,
-#         comp_cls: type[BaseComponent],
-#         index_name: str,
-#         left,
-#         right,
-#         limit: int = 100,
-#         desc: bool = False,
-#         row_format="struct",
-#     ) -> np.recarray:
-#         """从从节点查询index数据"""
 #         raise NotImplementedError
 
 
