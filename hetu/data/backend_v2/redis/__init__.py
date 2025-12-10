@@ -12,3 +12,4 @@
 # 提供replica_get, replica_query等接口
 # 然后做一个专门的单元测试，测试这些接口是否正常
 
+from .client import RedisBackendClient

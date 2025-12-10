@@ -26,7 +26,7 @@ from ..base import BackendClient, RowFormat
 logger = logging.getLogger("HeTu.root")
 
 
-class RedisBackend(BackendClient, alias="redis"):
+class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
     def load_lua_scripts(self, file: str | Path) -> Callable:

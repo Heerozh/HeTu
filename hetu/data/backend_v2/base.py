@@ -81,18 +81,10 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
-    _registry: dict[str, type["BackendClient"]] = {}
-
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
         super().__init_subclass__(**kwargs)
-        BackendClient._registry[kwargs["alias"]] = cls
-
-    @classmethod
-    def create(
-        cls, alias: str, endpoint: Any, clustering: bool, is_servant=False
-    ) -> BackendClient:
-        return cls._registry[alias](endpoint, clustering, is_servant)
+        BackendClientFactory.register(kwargs["alias"], cls)
 
     def __init__(self, endpoint: Any, clustering: bool, is_servant=False):
         """
@@ -151,6 +143,20 @@ class BackendClient:
         raise NotImplementedError
 
 
+class BackendClientFactory:
+    _registry: dict[str, type["BackendClient"]] = {}
+
+    @staticmethod
+    def register(alias: str, client_cls: type["BackendClient"]) -> None:
+        BackendClientFactory._registry[alias] = client_cls
+
+    @staticmethod
+    def create(
+        alias: str, endpoint: Any, clustering: bool, is_servant=False
+    ) -> BackendClient:
+        return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
+
+
 class Backend:
     """
     管理master, servants连接。
@@ -162,11 +168,11 @@ class Backend:
         config为配置BACKENDS[i]内容。
         """
         clustering = config.get("clustering", False)
-        self._master = BackendClient.create(
+        self._master = BackendClientFactory.create(
             config["type"], config["master"], clustering, False
         )
         self._servants = [
-            BackendClient.create(config["type"], servant, clustering, True)
+            BackendClientFactory.create(config["type"], servant, clustering, True)
             for servant in config.get("servants", [])
         ]
         # master_weight表示选中的权重，
