@@ -7,18 +7,18 @@
                       后端相关结构
                   ┌────────────────┐
                   │  BackendClient │ 继承此类实现各种BackendClient
-                  │数据库连接/事务处理│
+                  │数据库连接/事务处理 │
                   └────────────────┘
                            ▲
                   ┌────────┴─────────┐
                   │     Backend      │
-                  │数据库连接管理（单件)│
+                  │数据库连接管理（单件) │
                   └──────────────────┘
                            ▲
             ┌──────────────┴────────────┐
   ┌─────────┴──────────┐      ┌─────────┴────────┐
   │   ComponentTable   │      │      Session     │     todo 包含idmap
-  │  组件数据访问（单件)  │      │     事务处理类    │
+  │  组件数据访问（单件)   │      │     事务处理类     │
   └────────────────────┘      └──────────────────┘
                                        ▲
                            ┌───────────┴────────────┐
@@ -45,11 +45,12 @@
   └────────────────────┘
 """
 
-import numpy as np
-from enum import Enum
-from typing import Any
 import asyncio
 import random
+from enum import Enum
+from typing import Any
+
+import numpy as np
 
 from ..component import BaseComponent
 from ..idmap import IdentityMap
@@ -215,10 +216,7 @@ class Backend:
         """
         返回主数据库连接或一个从数据库连接，随机选择。
         """
-        return random.choices(
-            self._all_clients,
-            self._all_weights,
-        )[0]
+        return random.choices(self._all_clients, self._all_weights)[0]
 
 
 #     def get_mq_client(self) -> MQClient:

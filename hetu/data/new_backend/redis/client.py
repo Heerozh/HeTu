@@ -8,11 +8,10 @@
 import asyncio
 import logging
 import random
-import msgspec
 from pathlib import Path
+from typing import Any, Callable
 
-from typing import Callable, Any
-
+import msgspec
 import numpy as np
 import redis
 import redis.asyncio
@@ -20,9 +19,9 @@ import redis.asyncio.cluster
 import redis.cluster
 import redis.exceptions
 
-from ..base import BackendClient, RowFormat
-from ...idmap import IdentityMap
 from ...component import BaseComponent
+from ...idmap import IdentityMap
+from ..base import BackendClient, RowFormat
 
 logger = logging.getLogger("HeTu.root")
 

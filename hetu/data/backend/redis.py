@@ -17,17 +17,18 @@ import numpy as np
 import redis
 from redis.asyncio.client import Pipeline
 
-from .base import (
-    ComponentTransaction,
-    RawComponentTable,
-    Backend,
-    BackendSession,
-    MQClient,
-)
-from .base import RaceCondition, HeadLockFailed
-from ..component import BaseComponent
 from ...common.helper import batched
 from ...common.multimap import MultiMap
+from ..component import BaseComponent
+from .base import (
+    Backend,
+    BackendSession,
+    ComponentTransaction,
+    HeadLockFailed,
+    MQClient,
+    RaceCondition,
+    RawComponentTable,
+)
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
@@ -726,7 +727,7 @@ class RedisRawComponentTable(RawComponentTable):
             if row := await replica.hgetall(key_prefix + str(_id)):
                 if typed:
                     row = self._component_cls.dict_to_row(row)
-                if dict_fmt:
+                if dict_fmt and type(row) is not dict:
                     row = self._component_cls.row_to_dict(row)
                 rows.append(row)
 
