@@ -40,6 +40,7 @@ async def background_mq_puller_task(sub_mgr):
 
 @pytest.fixture
 async def admin_ctx():
+    """管理员权限的ctx（连接上下文）"""
     from hetu.system import Context
 
     return Context(
@@ -57,6 +58,7 @@ async def admin_ctx():
 
 @pytest.fixture
 async def user_id10_ctx():
+    """用户ID为10的ctx（连接上下文）"""
     from hetu.system import Context
 
     return Context(
@@ -74,6 +76,7 @@ async def user_id10_ctx():
 
 @pytest.fixture
 async def user_id11_ctx():
+    """用户ID为11的ctx（连接上下文）"""
     from hetu.system import Context
 
     return Context(

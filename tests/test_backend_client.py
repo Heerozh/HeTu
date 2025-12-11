@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from hetu.data.backend_v2 import UniqueViolation, RedisBackendClient, Backend
+from hetu.data.backend_v2 import random
 
 
 async def test_table(mod_item_model, mod_auto_backend_v2):

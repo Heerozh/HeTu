@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 
 import msgspec
 import numpy as np
@@ -29,15 +29,21 @@ logger = logging.getLogger("HeTu.root")
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
-    def load_lua_scripts(self, file: str | Path) -> Callable:
-        assert self._async_ios
+    def load_commit_scripts(self, file: str | Path) -> Callable:
+        assert self._async_ios, "连接已关闭，已调用过close"
+        assert self.is_servant is False, (
+            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+        )
+        assert len(self._async_ios) == 1, (
+            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+        )
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
         # 上传脚本到服务器使用同步io
-        self.io.script_load(script_text)
-        # 注册脚本到异步io
-        return self.aio.register_script(script_text)
+        self._ios[0].script_load(script_text)
+        # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了
+        return self._async_ios[0].register_script(script_text)
 
     @property
     def io(self):
@@ -64,8 +70,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert len(self.urls) > 0, "必须至少指定一个数据库连接URL"
 
         # 创建连接
-        self._ios = []
-        self._async_ios = []
+        self._ios: list[redis.Redis | redis.cluster.RedisCluster] = []
+        self._async_ios: list[
+            redis.asyncio.Redis | redis.asyncio.cluster.RedisCluster
+        ] = []
         for url in self.urls:
             if self.clustering:
                 # todo: 测试byte数据是否能正确的储存和读取
@@ -83,12 +91,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 raise ConnectionError(f"无法连接到Redis数据库：{self.urls[i]}") from e
 
         # 获得db index
-        self.dbi = self._ios[0].connection_pool.connection_kwargs["db"]
+        if self.clustering:
+            self.dbi = 0  # 集群模式没有db的概念，默认0
+        else:
+            io = cast(redis.Redis, self._ios[0])  # 转换类型，为了通过类型检查
+            self.dbi = io.connection_pool.connection_kwargs["db"]
 
         # 加载lua脚本，注意pipeline里不能用lua，会反复检测script exists性能极低
-        self.lua_commit = self.load_lua_scripts(
-            Path(__file__).parent.resolve() / "commit.lua"
-        )
+        if not self.is_servant:
+            self.lua_commit = self.load_commit_scripts(
+                Path(__file__).parent.resolve() / "commit.lua"
+            )
 
         # 限制aio运行的coroutine
         try:
@@ -111,8 +124,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             return tuple(map(int, x.split(".")))
 
         for i, io in enumerate(self._ios):
-            version = io.info("server")["redis_version"]
-            assert parse_version(version) >= (7, 0), "Redis版本过低，至少需要7.0版本"
+            info: dict = cast(dict, io.info("server"))  # 防止Awaitable类型检查报错
+            redis_ver = parse_version(info["redis_version"])
+            assert redis_ver >= (7, 0), "Redis版本过低，至少需要7.0版本"
 
     def configure_servant(self) -> None:
         if not self._ios:
@@ -122,10 +136,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         target_keyspace = "Kghz"
         for i, io in enumerate(self._ios):
             try:
-                # 设置keyspace通知
-                db_keyspace = io.config_get("notify-keyspace-events")[
-                    "notify-keyspace-events"
-                ]
+                # 设置keyspace通知，先cast防止Awaitable类型检查报错
+                notify_config = cast(dict, io.config_get("notify-keyspace-events"))
+                db_keyspace = notify_config["notify-keyspace-events"]
                 db_keyspace = db_keyspace.replace("A", "g$lshztxed")
                 db_keyspace_new = db_keyspace
                 for flag in list(target_keyspace):
@@ -142,7 +155,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
                 )
             # 检查是否是replica模式
-            db_replica = io.config_get("replica-read-only")
+            db_replica = cast(dict, io.config_get("replica-read-only"))
             if db_replica.get("replica-read-only") != "yes":
                 logger.warning(
                     "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
@@ -168,11 +181,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     return False
         return True
 
-    def reset_async_connection_pool(self):
+    async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
         for aio in self._async_ios:
-            aio.connection_pool.reset()
+            if isinstance(aio, redis.asyncio.cluster.RedisCluster):
+                await aio.aclose()  # 未测试
+            else:
+                aio.connection_pool.reset()
 
     async def close(self):
         if not self._ios:
@@ -218,8 +234,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             return None
 
+    @staticmethod
     def _range_normalize(
-        self,
         is_str_index: bool,
         left: int | float | str,
         right: int | float | str | None,
