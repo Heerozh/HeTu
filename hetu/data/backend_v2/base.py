@@ -45,8 +45,6 @@
   └────────────────────┘
 """
 
-import asyncio
-import random
 from enum import Enum
 from typing import Any
 
@@ -83,7 +81,7 @@ class BackendClient:
 
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
-        super().__init_subclass__(**kwargs)
+        super().__init_subclass__()
         BackendClientFactory.register(kwargs["alias"], cls)
 
     def __init__(self, endpoint: Any, clustering: bool, is_servant=False):
@@ -143,11 +141,16 @@ class BackendClient:
         raise NotImplementedError
 
 
+#     def get_mq_client(self) -> MQClient:
+#         """获取消息队列连接"""
+#         raise NotImplementedError
+
+
 class BackendClientFactory:
-    _registry: dict[str, type["BackendClient"]] = {}
+    _registry: dict[str, type[BackendClient]] = {}
 
     @staticmethod
-    def register(alias: str, client_cls: type["BackendClient"]) -> None:
+    def register(alias: str, client_cls: type[BackendClient]) -> None:
         BackendClientFactory._registry[alias] = client_cls
 
     @staticmethod
@@ -155,79 +158,6 @@ class BackendClientFactory:
         alias: str, endpoint: Any, clustering: bool, is_servant=False
     ) -> BackendClient:
         return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
-
-
-class Backend:
-    """
-    管理master, servants连接。
-    """
-
-    def __init__(self, config: dict):
-        """
-        从配置字典初始化Backend，创建master和servants连接。
-        config为配置BACKENDS[i]内容。
-        """
-        clustering = config.get("clustering", False)
-        self._master = BackendClientFactory.create(
-            config["type"], config["master"], clustering, False
-        )
-        self._servants = [
-            BackendClientFactory.create(config["type"], servant, clustering, True)
-            for servant in config.get("servants", [])
-        ]
-        # master_weight表示选中的权重，
-        #   - 1.0 表示主数据库和从数据库的权重相同。
-        #   - 2.0 表示主数据库的权重是任一从数据库的两倍，选中概率为2/(2+从数据库数量)。
-        #   如果master任务不繁重，提高此值可以降低事务冲突概率。
-        #   反之降低此值减少主数据库读取负载，但提高冲突概率，也许反而会增加master负载。
-        self._master_weight = config.get("master_weight", 1.0)
-        self._all_clients = self._servants + [self._master]
-        self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
-
-    async def close(self):
-        await self._master.close()
-        for servant in self._servants:
-            await servant.close()
-
-    def configure(self):
-        """
-        启动时检查并配置数据库，减少运维压力的帮助方法，非必须。
-        """
-        self._master.configure()
-        for servant in self._servants:
-            servant.configure()
-
-    async def wait_for_synced(self) -> None:
-        """
-        等待各个savants数据库和master数据库的数据完成同步。
-        主要用于test用例。
-        """
-        while not await self._master.is_synced():
-            await asyncio.sleep(0.1)
-
-    @property
-    def master(self) -> BackendClient:
-        """返回主数据库连接"""
-        return self._master
-
-    @property
-    def servant(self) -> BackendClient:
-        """返回一个从数据库连接，随机选择。如果没有从数据库，则返回主数据库。"""
-        if not self._servants:
-            return self._master
-        return random.choice(self._servants)
-
-    @property
-    def master_or_servant(self) -> BackendClient:
-        """
-        返回主数据库连接或一个从数据库连接，随机选择。
-        """
-        return random.choices(self._all_clients, self._all_weights)[0]
-
-
-#     def get_mq_client(self) -> MQClient:
-#         """获取消息队列连接"""
-#         raise NotImplementedError
 
 
 # # === === === === === === 数据订阅 === === === === === ===

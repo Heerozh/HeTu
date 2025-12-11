@@ -18,6 +18,7 @@ async def mod_redis_backend_v2(mod_redis_service):
 
         redis_url, replica_url = mod_redis_service(port)
         config = {
+            "type": "redis",
             "master": redis_url,
             "servants": [
                 replica_url,

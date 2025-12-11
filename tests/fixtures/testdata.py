@@ -11,15 +11,8 @@ from hetu.data.backend import RawComponentTable
 
 
 @pytest.fixture(scope="module")
-async def mod_clear_all_component_define():
-    # 此方法mod范围，因此只要依赖与他，就可以每个mod首次都clear
-    from hetu.data import ComponentDefines
-
-    ComponentDefines().clear_()
-
-
-@pytest.fixture(scope="module")
-async def mod_item_model(mod_clear_all_component_define):
+async def mod_item_model(mod_new_component_env):
+    """定义测试用的Item组件模型，返回模型类"""
     from hetu.data import define_component, property_field, BaseComponent, Permission
     import numpy as np
 
@@ -40,6 +33,7 @@ async def mod_item_model(mod_clear_all_component_define):
 
 @pytest.fixture(scope="module")
 async def mod_item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
+    """"""
     backend_component_table, get_or_create_backend = mod_auto_backend
 
     backend = get_or_create_backend("main")
@@ -61,7 +55,8 @@ async def item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
 
 
 @pytest.fixture(scope="module")
-async def mod_rls_test_model(mod_clear_all_component_define):
+async def mod_rls_test_model(mod_new_component_env):
+    """定义测试用RLS的组件模型，返回模型类"""
     from hetu.data import define_component, property_field, BaseComponent, Permission
     import numpy as np
 
@@ -94,6 +89,7 @@ async def mod_rls_test_table(mod_auto_backend, mod_rls_test_model) -> RawCompone
 
 @pytest.fixture
 async def filled_item_table(mod_item_model, item_table):
+    """填充Item测试数据，返回填充后的表格对象"""
     backend = item_table.backend
 
     # 初始化测试数据
@@ -115,6 +111,7 @@ async def filled_item_table(mod_item_model, item_table):
 
 @pytest.fixture
 async def filled_rls_test_table(mod_rls_test_model, mod_rls_test_table):
+    """填充RLS测试表格的数据，返回填充后的表格对象"""
     backend = mod_rls_test_table.backend
     # 初始化测试数据
     async with backend.transaction(1) as session:
