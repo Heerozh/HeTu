@@ -7,24 +7,28 @@
                       后端相关结构
                   ┌────────────────┐
                   │  BackendClient │ 继承此类实现各种BackendClient
-                  │数据库连接/事务处理 │
+                  │数据库连接/事务处理│
                   └────────────────┘
                            ▲
-                  ┌────────┴─────────┐
-                  │     Backend      │
-                  │数据库连接管理（单件) │
-                  └──────────────────┘
+                           ├───────────────────────────┐
+                 ┌─────────┴──────────┐      ┌─────────┴─────────┐
+                 │      Backend       │      │CLITableMaintenance│ 继承此类实现数据维护
+                 │   数据库连接管理器    │      │     组件表维护类    │
+                 └────────────────────┘      └───────────────────┘
                            ▲
             ┌──────────────┴────────────┐
   ┌─────────┴──────────┐      ┌─────────┴────────┐
   │   ComponentTable   │      │      Session     │     todo 包含idmap
-  │  组件数据访问（单件)   │      │     事务处理类     │
+  │    组件数据访问      │      │     事务处理类     │
   └────────────────────┘      └──────────────────┘
-                                       ▲
-                           ┌───────────┴────────────┐
-                           │         Select         │    todo 直接select出来的就是此类
-                           │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
-                           └────────────────────────┘
+            ▲                          ▲
+ ┌──────────┴──────────┐   ┌───────────┴────────────┐
+ │ComponentTableManager│   │         Select         │    todo 直接select出来的就是此类
+ │   组件数据访问管理器   │   │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
+ └─────────────────────┘   └────────────────────────┘
+
+
+
 
         数据订阅结构
     ┌─────────────────┐
@@ -46,12 +50,14 @@
 """
 
 from enum import Enum
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
-from ..component import BaseComponent
-from ..idmap import IdentityMap
+if TYPE_CHECKING:
+    from ..component import BaseComponent
+    from ..idmap import IdentityMap
+    from .table import TableReference
 
 
 class RaceCondition(Exception):
@@ -116,7 +122,7 @@ class BackendClient:
 
     async def get(
         self,
-        comp_cls: type[BaseComponent],
+        table_ref: TableReference,
         row_id: int,
         row_format=RowFormat.STRUCT,
     ) -> np.record | dict[str, Any] | None:
@@ -125,14 +131,14 @@ class BackendClient:
 
     async def range(
         self,
-        comp_cls: type[BaseComponent],
+        table_ref: TableReference,
         index_name: str,
         left: int | float | str,
         right: int | float | str | None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
-    ) -> list[int] | np.recarray:
+    ) -> list[int] | list[dict[str, Any]] | np.recarray:
         """查询index数据，并返回行id，或完整的行数据"""
         raise NotImplementedError
 
@@ -158,6 +164,60 @@ class BackendClientFactory:
         alias: str, endpoint: Any, clustering: bool, is_servant=False
     ) -> BackendClient:
         return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
+
+
+class CLITableMaintenance:
+    """
+    提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
+    继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
+    """
+
+    def __init__(self, client: BackendClient):
+        self.client = client
+
+    # 检测是否需要维护的方法
+    def check_table(self, comp_cls: type[BaseComponent], namespace: str, cluster_id):
+        """
+        检查组件表是否需要维护，返回True表示需要维护。
+        主要检查表是否存在，cluster_id是否一致，schema是否一致。
+        """
+        raise NotImplementedError
+
+    def create_table(self, comp_cls: type[BaseComponent], namespace: str) -> None:
+        """创建组件表。如果已存在，会抛出异常"""
+        raise NotImplementedError
+
+    # 无需drop_table, 此类操作适合人工删除
+
+    def migration_cluster_id(
+        self,
+        comp_cls: type[BaseComponent],
+        namespace: str,
+        old_cluster_id: int,
+        new_cluster_id: int,
+    ) -> None:
+        """迁移组件表的cluster_id"""
+        raise NotImplementedError
+
+    def migration_schema(
+        self,
+        comp_cls: type[BaseComponent],
+        namespace: str,
+        old_json: str,
+    ) -> None:
+        """迁移组件表的schema"""
+        raise NotImplementedError
+
+    def flush(self, comp_cls: type[BaseComponent], namespace: str, force=False) -> None:
+        """
+        清空易失性组件表数据，force为True时强制清空任意组件表。
+        注意：此操作会删除所有数据！
+        """
+        raise NotImplementedError
+
+    def rebuild_index(self, comp_cls: type[BaseComponent], namespace: str) -> None:
+        """重建组件表的索引数据"""
+        raise NotImplementedError
 
 
 # # === === === === === === 数据订阅 === === === === === ===

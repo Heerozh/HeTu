@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 if TYPE_CHECKING:
-    from ..component import BaseComponent
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -49,11 +48,27 @@ class IdentityMap:
         # 用于生成新插入行的负ID
         self._next_insert_id = -1
 
+    def first_reference(self) -> TableReference | None:
+        if not self._row_cache:
+            return None
+        return next(iter(self._row_cache.keys()))
+
+    def transaction_able(self, other: TableReference) -> bool:
+        first_reference = self.first_reference()
+        if first_reference is None:
+            return True
+        return first_reference.transaction_able(other)
+
     def add_clean(self, table_ref: TableReference, row: np.record | np.ndarray) -> None:
         """
         添加一个查询到的对象到row缓存中。
         如果数据行已存在，则会报错ValueError。
         """
+        # 检测新添加数据，和之前的数据是否在同一个实例/集群下
+        assert self.transaction_able(table_ref), (
+            f"{table_ref} has different transaction context"
+        )
+
         row_id = int(row["id"])
 
         # 初始化该component的缓存
@@ -126,6 +141,10 @@ class IdentityMap:
         Returns:
             分配了临时ID（负数）的行数据
         """
+        # 检测新添加数据，和之前的数据是否在同一个实例/集群下
+        assert self.transaction_able(table_ref), (
+            f"{table_ref} has different transaction context"
+        )
         # 初始化缓存
         if table_ref not in self._row_cache:
             self._row_cache[table_ref] = np.rec.array(
@@ -148,6 +167,11 @@ class IdentityMap:
         """
         更新一个对象到缓存，并标记为UPDATE状态。
         """
+        # 检测新添加数据，和之前的数据是否在同一个实例/集群下
+        assert self.transaction_able(table_ref), (
+            f"{table_ref} has different transaction context"
+        )
+
         row_id = int(row["id"])
 
         if table_ref not in self._row_cache:
