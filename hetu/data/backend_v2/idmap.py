@@ -12,7 +12,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 if TYPE_CHECKING:
-    from .component import BaseComponent
+    from ..component import BaseComponent
+    from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
 
@@ -36,21 +37,19 @@ class IdentityMap:
     def __init__(self) -> None:
         # 每个Component类型对应一个缓存
         # {component_cls: np.recarray} - 存储行数据
-        self._row_cache: dict[type[BaseComponent], np.recarray] = {}
+        self._row_cache: dict[TableReference, np.recarray] = {}
 
         # {component_cls: {row_id: RowState}} - 存储每行的状态
-        self._row_states: dict[type[BaseComponent], dict[int, RowState]] = {}
+        self._row_states: dict[TableReference, dict[int, RowState]] = {}
 
         # 范围查询缓存
         # {component_cls: {index_name: [(left, right), ...]}} - 存储已缓存的范围
-        self._range_cache: dict[type[BaseComponent], dict[str, list[tuple]]] = {}
+        self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
 
         # 用于生成新插入行的负ID
         self._next_insert_id = -1
 
-    def add_clean(
-        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
-    ) -> None:
+    def add_clean(self, table_ref: TableReference, row: np.record | np.ndarray) -> None:
         """
         添加一个查询到的对象到row缓存中。
         如果数据行已存在，则会报错ValueError。
@@ -58,12 +57,14 @@ class IdentityMap:
         row_id = int(row["id"])
 
         # 初始化该component的缓存
-        if comp_cls not in self._row_cache:
-            self._row_cache[comp_cls] = np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-            self._row_states[comp_cls] = {}
+        if table_ref not in self._row_cache:
+            self._row_cache[table_ref] = np.rec.array(
+                np.empty(0, dtype=table_ref.comp_cls.dtypes)
+            )
+            self._row_states[table_ref] = {}
 
-        cache = self._row_cache[comp_cls]
-        states = self._row_states[comp_cls]
+        cache = self._row_cache[table_ref]
+        states = self._row_states[table_ref]
 
         # 查找是否已存在该ID的行
         if len(cache) > 0:
@@ -78,13 +79,13 @@ class IdentityMap:
                 raise ValueError(f"Row with id {row_id} already exists in cache")
 
         # 添加新行
-        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row))
+        self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
         # 标记为CLEAN（除非之前已有其他状态）
         if row_id not in states:
             states[row_id] = RowState.CLEAN
 
     def get(
-        self, comp_cls: type[BaseComponent], row_id: int
+        self, table_ref: TableReference, row_id: int
     ) -> tuple[np.record | None, RowState | None]:
         """
         从缓存中获取指定ID的行。
@@ -96,10 +97,10 @@ class IdentityMap:
         Returns:
             如果缓存中有则返回行数据，否则返回None
         """
-        if comp_cls not in self._row_cache:
+        if table_ref not in self._row_cache:
             return None, None
 
-        cache = self._row_cache[comp_cls]
+        cache = self._row_cache[table_ref]
         if len(cache) == 0:
             return None, None
 
@@ -109,14 +110,14 @@ class IdentityMap:
             return None, None
 
         # 主要提供状态：是否已删除
-        states = self._row_states[comp_cls]
+        states = self._row_states[table_ref]
 
         # recarray是基于ndarray的，传入参数可以用np.ndarray类型，返回值
         # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
         return cast(np.record, cache[idx[0]]), states.get(row_id)
 
     def add_insert(
-        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
+        self, table_ref: TableReference, row: np.record | np.ndarray
     ) -> None:
         """
         添加一个新插入的对象到缓存，并标记为INSERT状态。
@@ -126,34 +127,34 @@ class IdentityMap:
             分配了临时ID（负数）的行数据
         """
         # 初始化缓存
-        if comp_cls not in self._row_cache:
-            self._row_cache[comp_cls] = np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-            self._row_states[comp_cls] = {}
+        if table_ref not in self._row_cache:
+            self._row_cache[table_ref] = np.rec.array(
+                np.empty(0, dtype=table_ref.comp_cls.dtypes)
+            )
+            self._row_states[table_ref] = {}
 
         # 分配负ID
         row["id"] = self._next_insert_id
         self._next_insert_id -= 1
 
         # 添加到缓存
-        cache = self._row_cache[comp_cls]
-        self._row_cache[comp_cls] = np.rec.array(np.append(cache, row))
+        cache = self._row_cache[table_ref]
+        self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
 
         # 标记为INSERT
-        self._row_states[comp_cls][int(row["id"])] = RowState.INSERT
+        self._row_states[table_ref][int(row["id"])] = RowState.INSERT
 
-    def update(
-        self, comp_cls: type[BaseComponent], row: np.record | np.ndarray
-    ) -> None:
+    def update(self, table_ref: TableReference, row: np.record | np.ndarray) -> None:
         """
         更新一个对象到缓存，并标记为UPDATE状态。
         """
         row_id = int(row["id"])
 
-        if comp_cls not in self._row_cache:
-            raise ValueError(f"Component {comp_cls} not in cache")
+        if table_ref not in self._row_cache:
+            raise ValueError(f"Component {table_ref} not in cache")
 
-        cache = self._row_cache[comp_cls]
-        states = self._row_states[comp_cls]
+        cache = self._row_cache[table_ref]
+        states = self._row_states[table_ref]
 
         # 查找并更新行
         idx = np.where(cache["id"] == row_id)[0]
@@ -172,7 +173,7 @@ class IdentityMap:
         if states.get(row_id) != RowState.INSERT:
             states[row_id] = RowState.UPDATE
 
-    def mark_deleted(self, comp_cls: type[BaseComponent], row_id: int) -> None:
+    def mark_deleted(self, table_ref: TableReference, row_id: int) -> None:
         """
         标记指定ID的对象为删除状态。
 
@@ -180,15 +181,15 @@ class IdentityMap:
             comp_cls: Component类
             row_id: 行ID
         """
-        if comp_cls not in self._row_states:
-            raise ValueError(f"Component {comp_cls} not in cache")
+        if table_ref not in self._row_states:
+            raise ValueError(f"Component {table_ref} not in cache")
 
-        states = self._row_states[comp_cls]
+        states = self._row_states[table_ref]
 
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
-    def get_dirty_rows(self) -> dict[str, dict[type[BaseComponent], np.ndarray]]:
+    def get_dirty_rows(self) -> dict[str, dict[TableReference, np.ndarray]]:
         """
         返回所有脏对象的列表，按INSERT、UPDATE、DELETE状态分开。
 
@@ -199,14 +200,14 @@ class IdentityMap:
                 'delete': {comp_cls: np.ndarray, ...}  # 只包含id
             }
         """
-        result: dict[str, dict[type[BaseComponent], np.ndarray]] = {
+        result: dict[str, dict[TableReference, np.ndarray]] = {
             "insert": {},
             "update": {},
             "delete": {},
         }
 
-        for comp_cls, states in self._row_states.items():
-            cache = self._row_cache[comp_cls]
+        for table_ref, states in self._row_states.items():
+            cache = self._row_cache[table_ref]
 
             # 收集各状态的行ID
             insert_ids = [
@@ -222,19 +223,18 @@ class IdentityMap:
             # 从缓存中获取对应的行数据
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
-                result["insert"][comp_cls] = cache[mask]
+                result["insert"][table_ref] = cache[mask]
 
             if update_ids:
                 mask = np.isin(cache["id"], update_ids)
-                result["update"][comp_cls] = cache[mask]
-
+                result["update"][table_ref] = cache[mask]
             if delete_ids:
                 # DELETE只需要ID列表
-                result["delete"][comp_cls] = np.array(delete_ids, dtype=np.int64)
+                result["delete"][table_ref] = np.array(delete_ids, dtype=np.int64)
 
         return result
 
-    def filter(self, comp_cls: type[BaseComponent], **kwargs) -> np.recarray:
+    def filter(self, table_ref: TableReference, **kwargs) -> np.recarray:
         """
         选择出idmap中条件符合index=value的行，排除已删除的行。支持多条件过滤。
 
@@ -244,11 +244,11 @@ class IdentityMap:
         Returns:
             过滤后的行数据，可能只有0行
         """
-        if comp_cls not in self._row_cache:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+        if table_ref not in self._row_cache:
+            return np.rec.array(np.empty(0, dtype=table_ref.comp_cls.dtypes))
 
-        cache = self._row_cache[comp_cls]
-        states = self._row_states[comp_cls]
+        cache = self._row_cache[table_ref]
+        states = self._row_states[table_ref]
 
         # 构建过滤掩码
         mask = np.ones(len(cache), dtype=bool)
