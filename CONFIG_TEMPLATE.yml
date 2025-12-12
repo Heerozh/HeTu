@@ -81,9 +81,9 @@ BACKENDS:
     type: Redis # 指定backend的类型，目前只支持Redis
     # url格式：redis://[[username]:[password]]@localhost:6379/0
     master: redis://127.0.0.1:6379/0 # 指定master服务器，只能一个地址
-    master_weight: 1.0 # 主数据库权重，提高此值可以降低事务冲突概率，降低此值可减少主数据库读取负载。
-    clustering: false # master以及servants是否开启集群模式
-    servants: [] # 只读副本服务器，如果设置了，所有客户端查询随机在只读副本上进行
+    master_weight: 1.0 # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库请求负载
+    clustering: false # 开启集群功能，master以及servants都需要是Redis Cluster集群
+    servants: [] # 只读副本服务器们，每台副本事务读权重固定为1，其他读如客户端查询，只在只读副本上进行
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:
