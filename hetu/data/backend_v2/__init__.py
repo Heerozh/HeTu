@@ -12,7 +12,7 @@ from .base import (
     BackendClient,
     BackendClientFactory,
 )
-from .redis import RedisBackendClient
+from .redis import RedisBackendClient, RedisCLITableMaintenance
 
 
 __all__ = [
@@ -22,6 +22,7 @@ __all__ = [
     "BackendClient",
     "Backend",
     "RedisBackendClient",
+    "RedisCLITableMaintenance",
 ]
 
 
@@ -47,10 +48,8 @@ class Backend:
             BackendClientFactory.create(config["type"], servant, clustering, True)
             for servant in config.get("servants", [])
         ]
-        # master_weight表示选中的权重，
-        #   - 1.0 表示主数据库和从数据库的权重相同。
-        #   - 2.0 表示主数据库的权重是任一从数据库的两倍，选中概率为2/(2+从数据库数量)。
-        #   如果master任务不繁重，提高此值可以降低事务冲突概率。
+        # master_weight表示选中的权重，每台副本数据库权重固定为1.0
+        #   如果master任务不繁重，理论上提高此值可以降低事务冲突概率，因为从副本读取的值可能落后。
         #   反之降低此值减少主数据库读取负载，但提高冲突概率，也许反而会增加master负载。
         self._master_weight = config.get("master_weight", 1.0)
         self._all_clients = self._servants + [self._master]
