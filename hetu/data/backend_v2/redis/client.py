@@ -9,19 +9,21 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, cast, TYPE_CHECKING
 
 import msgspec
 import numpy as np
 import redis
-import redis.asyncio
-import redis.asyncio.cluster
-import redis.cluster
-import redis.exceptions
 
-from ...component import BaseComponent
-from ...idmap import IdentityMap
-from ..base import BackendClient, RowFormat
+if TYPE_CHECKING:
+    from ...component import BaseComponent
+    from ..idmap import IdentityMap
+    from ..base import BackendClient, RowFormat
+    from ..table import TableReference
+    import redis.asyncio
+    import redis.asyncio.cluster
+    import redis.cluster
+    import redis.exceptions
 
 logger = logging.getLogger("HeTu.root")
 
@@ -62,6 +64,35 @@ class RedisBackendClient(BackendClient, alias="redis"):
         )
 
         return random.choice(self._async_ios)
+
+    @staticmethod
+    def row_key(table_ref: TableReference, row_id: str | int) -> str:
+        """获取redis表行的key名"""
+        return (
+            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
+            f"{{CLU{table_ref.cluster_id}}}:id:{str(row_id)}"
+        )
+
+    @staticmethod
+    def row_key_prefix(table_ref: TableReference) -> str:
+        """获取redis表行的key名前缀，储存前缀组合速度快1倍"""
+        return (
+            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
+            f"{{CLU{table_ref.cluster_id}}}:id:"
+        )
+
+    @staticmethod
+    def index_key(table_ref: TableReference, index_name: str) -> str:
+        """获取redis表索引的key名"""
+        return (
+            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
+            f"{{CLU{table_ref.cluster_id}}}:index:{index_name}"
+        )
+
+    @staticmethod
+    def meta_key(table_ref: TableReference) -> str:
+        """获取redis表元数据的key名"""
+        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:meta"
 
     def __init__(self, endpoint: str | list[str], clustering: bool, is_servant=False):
         super().__init__(endpoint, clustering, is_servant)
@@ -208,29 +239,34 @@ class RedisBackendClient(BackendClient, alias="redis"):
     #         raise ConnectionError("连接已关闭，已调用过close")
     #     return RedisMQClient(self.random_replica())
 
+    def _row_encode(
+        self, comp_cls: type[BaseComponent], row: dict[str, str], format: RowFormat
+    ) -> np.record | dict[str, Any]:
+        """将redis获取的行数据编码为指定格式"""
+        match format:
+            case RowFormat.RAW:
+                # todo encode byte
+                return row
+            case RowFormat.STRUCT:
+                return comp_cls.dict_to_row(row)
+            case RowFormat.TYPED_DICT:
+                struct_row = comp_cls.dict_to_row(row)
+                return comp_cls.row_to_dict(struct_row)
+            case _:
+                raise ValueError(f"不可用的行格式: {format}")
+
     async def get(
         self,
-        comp_cls: type[BaseComponent],
+        table_ref: TableReference,
         row_id: int,
         row_format=RowFormat.STRUCT,
     ) -> np.record | dict[str, Any] | None:
         """获取行数据"""
         # todo 所有get query要合批
-        key = self._key_prefix + str(row_id)
-        row = await self.aio.hgetall(key)
-        if row:
+        key = self.row_key(table_ref, row_id)
+        if row := await self.aio.hgetall(key):
             # todo 此时的row数据都是byte
-
-            match row_format:
-                case RowFormat.RAW:
-                    return row
-                case RowFormat.STRUCT:
-                    return comp_cls.dict_to_row(row)
-                case RowFormat.TYPED_DICT:
-                    struct_row = comp_cls.dict_to_row(row)
-                    return comp_cls.row_to_dict(struct_row)
-                case _:
-                    raise ValueError(f"不可用的行格式: {row_format}")
+            return self._row_encode(table_ref.comp_cls, row, row_format)
         else:
             return None
 
@@ -269,21 +305,21 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     async def range(
         self,
-        comp_cls: type[BaseComponent],
+        table_ref: TableReference,
         index_name: str,
         left: int | float | str,
         right: int | float | str | None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
-    ) -> list[int] | np.recarray:
+    ) -> list[int] | list[dict[str, Any]] | np.recarray:
         """查询index数据"""
         # todo 所有get query要合批
-        # todo 想一下这几个keyprefix如何处理，可以先把session做完了再考虑？
-        idx_key = self._idx_prefix + index_name
+        idx_key = self.index_key(table_ref, index_name)
         aio = self.aio  # 保存随机选中的aio连接
 
         # 生成zrange命令
+        comp_cls = table_ref.comp_cls
         is_str_index = comp_cls.indexes_[index_name]
         left, right = self._range_normalize(
             is_str_index,
@@ -311,26 +347,20 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if row_format == RowFormat.ID_LIST:
             return list(map(int, row_ids))
 
-        typed = row_format == RowFormat.TYPED_DICT or row_format == RowFormat.STRUCT
-        dict_fmt = row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT
-
-        key_prefix = self._key_prefix
+        key_prefix = self.row_key_prefix(table_ref)  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
             if row := await aio.hgetall(key_prefix + str(_id)):
-                if typed:
-                    row = comp_cls.dict_to_row(row)
-                if dict_fmt:
-                    row = comp_cls.row_to_dict(row)
-                rows.append(row)
+                rows.append(self._row_encode(comp_cls, row, row_format))
 
-        if dict_fmt:
-            return rows
+        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
+            return cast(list[dict[str, Any]], rows)
         else:
             if len(rows) == 0:
                 return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
             else:
-                return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
+                record_list = cast(list[np.record], rows)
+                return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
     async def commit(self, idmap: IdentityMap) -> None:
         """提交修改事务，使用从IdentityMap中获取的脏数据"""
@@ -338,9 +368,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         dirty_rows = idmap.get_dirty_rows()
         assert len(dirty_rows) > 0, "没有脏数据需要提交"
+        ref = idmap.first_reference()
+        assert ref is not None, "不该走到这里，仅用于typing检查"
 
         payload = msgspec.msgpack.encode(dirty_rows)
-        keys = []  # todo 需要添加一个表示cluster的key
+        # 添加一个带cluster id的key，指明lua脚本执行的集群
+        keys = [self.row_key(ref, 1)]
         return await self.lua_commit(keys, payload)
 
     # 还需要
@@ -350,6 +383,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
     # flush table
     # rebuild table index
     # 可以考虑一个table_maintenance类专门做这个
+    # 这个类只需要启动时运行一次，然后就可以丢掉了。
+    # 每启动一次namespace应该都需要启动一次table_maintenance
 
     # def flush(self, comp_cls: type[BaseComponent], force=False):
     #     if force:
