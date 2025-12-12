@@ -35,14 +35,14 @@ class IdentityMap:
 
     def __init__(self) -> None:
         # 每个Component类型对应一个缓存
-        # {component_cls: np.recarray} - 存储行数据
+        # {TableReference: np.recarray} - 存储行数据
         self._row_cache: dict[TableReference, np.recarray] = {}
 
-        # {component_cls: {row_id: RowState}} - 存储每行的状态
+        # {TableReference: {row_id: RowState}} - 存储每行的状态
         self._row_states: dict[TableReference, dict[int, RowState]] = {}
 
         # 范围查询缓存
-        # {component_cls: {index_name: [(left, right), ...]}} - 存储已缓存的范围
+        # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
         self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
 
         # 用于生成新插入行的负ID

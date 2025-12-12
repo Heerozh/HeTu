@@ -112,7 +112,7 @@ end
 -- Number: Score=val, Member="uid"
 local function get_index_member_score(val, uid)
     if is_number(val) then
-        return uid, val -- member, score
+        return uid, val                       -- member, score
     else
         return tostring(val) .. ":" .. uid, 0 -- member, score
     end
@@ -138,7 +138,7 @@ local function check_unique_constraint(table_name, field, val, current_uid)
         -- 字符串类型 Unique 检查: Member prefix = "val:"
         -- 使用 ZRANGEBYLEX [val: [val:\xff
         local search_start = "[" .. tostring(val) .. ":"
-        local search_end = "[" .. tostring(val) .. ":\xff"
+        local search_end = "[" .. tostring(val) .. ":\255"
         local res = redis.call('ZRANGEBYLEX', index_key, search_start, search_end)
 
         if #res > 0 then
@@ -183,7 +183,10 @@ if payload["insert"] then
             for field, val in pairs(fields) do
                 if table_schema.unique and table_schema.unique[field] then
                     if check_unique_constraint(table_name, field, val, uid) then
-                        return { err = "Unique constraint violation: " .. table_name .. "." .. field .. "=" .. tostring(val) }
+                        return {
+                            err = "Unique constraint violation: " ..
+                                table_name .. "." .. field .. "=" .. tostring(val)
+                        }
                     end
                 end
             end
@@ -236,7 +239,10 @@ if payload["update"] then
                 if field ~= "version" and tostring(new_val) ~= old_row[field] then
                     if table_schema.unique and table_schema.unique[field] then
                         if check_unique_constraint(table_name, field, new_val, uid) then
-                            return { err = "Unique constraint violation: " .. table_name .. "." .. field .. "=" .. tostring(new_val) }
+                            return {
+                                err = "Unique constraint violation: " ..
+                                    table_name .. "." .. field .. "=" .. tostring(new_val)
+                            }
                         end
                     end
                 end

@@ -56,7 +56,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
-    from ..idmap import IdentityMap
+    from .idmap import IdentityMap
     from .table import TableReference
 
 
