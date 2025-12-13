@@ -33,12 +33,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     def load_commit_scripts(self, file: str | Path) -> Callable:
         assert self._async_ios, "连接已关闭，已调用过close"
-        assert self.is_servant is False, (
-            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
-        )
-        assert len(self._async_ios) == 1, (
-            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
-        )
+        assert (
+            self.is_servant is False
+        ), "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+        assert (
+            len(self._async_ios) == 1
+        ), "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
@@ -59,9 +59,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert hash(asyncio.get_running_loop()) == self.loop_id, (
-            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
-        )
+        assert (
+            hash(asyncio.get_running_loop()) == self.loop_id
+        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
 
         return random.choice(self._async_ios)
 
@@ -93,6 +93,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def meta_key(table_ref: TableReference) -> str:
         """获取redis表元数据的key名"""
         return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:meta"
+
+    async def reset_async_connection_pool(self):
+        """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
+        self.loop_id = 0
+        for aio in self._async_ios:
+            if isinstance(aio, redis.asyncio.cluster.RedisCluster):
+                await aio.aclose()  # 未测试
+            else:
+                aio.connection_pool.reset()
+
+    # ============ 继承自BackendClient的方法 ============
 
     def __init__(self, endpoint: str | list[str], clustering: bool, is_servant=False):
         super().__init__(endpoint, clustering, is_servant)
@@ -212,15 +223,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     return False
         return True
 
-    async def reset_async_connection_pool(self):
-        """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
-        self.loop_id = 0
-        for aio in self._async_ios:
-            if isinstance(aio, redis.asyncio.cluster.RedisCluster):
-                await aio.aclose()  # 未测试
-            else:
-                aio.connection_pool.reset()
-
     async def close(self):
         if not self._ios:
             return
@@ -239,11 +241,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
     #         raise ConnectionError("连接已关闭，已调用过close")
     #     return RedisMQClient(self.random_replica())
 
-    def _row_encode(
-        self, comp_cls: type[BaseComponent], row: dict[str, str], format: RowFormat
+    @staticmethod
+    def _row_decode(
+        comp_cls: type[BaseComponent], row: dict[str, str], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
-        """将redis获取的行数据编码为指定格式"""
-        match format:
+        """将redis获取的行byte数据解码为指定格式"""
+        match fmt:
             case RowFormat.RAW:
                 # todo encode byte
                 return row
@@ -253,20 +256,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 struct_row = comp_cls.dict_to_row(row)
                 return comp_cls.row_to_dict(struct_row)
             case _:
-                raise ValueError(f"不可用的行格式: {format}")
+                raise ValueError(f"不可用的行格式: {fmt}")
 
     async def get(
-        self,
-        table_ref: TableReference,
-        row_id: int,
-        row_format=RowFormat.STRUCT,
+        self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
     ) -> np.record | dict[str, Any] | None:
         """获取行数据"""
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
         if row := await self.aio.hgetall(key):
             # todo 此时的row数据都是byte
-            return self._row_encode(table_ref.comp_cls, row, row_format)
+            return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
 
@@ -351,7 +351,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         rows = []
         for _id in row_ids:
             if row := await aio.hgetall(key_prefix + str(_id)):
-                rows.append(self._row_encode(comp_cls, row, row_format))
+                rows.append(self._row_decode(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
             return cast(list[dict[str, Any]], rows)

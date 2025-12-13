@@ -1,6 +1,6 @@
 import pytest
 from hetu.data.component import BaseComponent
-from hetu.data.backend_v2.idmap import IdentityMap, RowState
+from hetu.data.backend.idmap import IdentityMap, RowState
 
 
 def test_add_clean_and_get(mod_item_model):

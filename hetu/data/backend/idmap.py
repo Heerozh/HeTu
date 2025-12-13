@@ -20,10 +20,10 @@ logger = logging.getLogger("HeTu.root")
 class RowState(Enum):
     """行状态枚举"""
 
-    CLEAN = 0  # 干净，无需更新
+    CLEAN = 0  # 干净，无变化
     INSERT = 1  # 新插入
-    UPDATE = 2  # 已更新
-    DELETE = 3  # 已删除
+    UPDATE = 2  # 需更新数据
+    DELETE = 3  # 需从数据库删除
 
 
 class IdentityMap:
@@ -105,12 +105,9 @@ class IdentityMap:
         """
         从缓存中获取指定ID的行。
 
-        Args:
-            comp_cls: Component类
-            row_id: 行ID
-
-        Returns:
-            如果缓存中有则返回行数据，否则返回None
+        Returns
+        -------
+        如果缓存中有则返回行数据，否则返回None
         """
         if table_ref not in self._row_cache:
             return None, None
@@ -138,8 +135,9 @@ class IdentityMap:
         添加一个新插入的对象到缓存，并标记为INSERT状态。
         注意此方法会修改传入Row的ID字段，分配一个负数ID。
 
-        Returns:
-            分配了临时ID（负数）的行数据
+        Returns
+        -------
+        分配了临时ID（负数）的行数据
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.transaction_able(table_ref), (
@@ -200,10 +198,6 @@ class IdentityMap:
     def mark_deleted(self, table_ref: TableReference, row_id: int) -> None:
         """
         标记指定ID的对象为删除状态。
-
-        Args:
-            comp_cls: Component类
-            row_id: 行ID
         """
         if table_ref not in self._row_states:
             raise ValueError(f"Component {table_ref} not in cache")
@@ -217,12 +211,13 @@ class IdentityMap:
         """
         返回所有脏对象的列表，按INSERT、UPDATE、DELETE状态分开。
 
-        Returns:
-            {
-                'insert': {comp_cls: np.ndarray, ...},
-                'update': {comp_cls: np.ndarray, ...},
-                'delete': {comp_cls: np.ndarray, ...}  # 只包含id
-            }
+        Returns
+        -------
+        {
+            'insert': {comp_cls: np.ndarray, ...},
+            'update': {comp_cls: np.ndarray, ...},
+            'delete': {comp_cls: np.ndarray, ...}  # 只包含id
+        }
         """
         result: dict[str, dict[TableReference, np.ndarray]] = {
             "insert": {},
@@ -265,8 +260,9 @@ class IdentityMap:
         示例:
             rows = id_map.filter(Item, index_name=value, ...)
 
-        Returns:
-            过滤后的行数据，可能只有0行
+        Returns
+        -------
+        滤后的行数据，可能只有0行
         """
         if table_ref not in self._row_cache:
             return np.rec.array(np.empty(0, dtype=table_ref.comp_cls.dtypes))

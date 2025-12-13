@@ -6,9 +6,51 @@
 """
 
 from ..base import CLITableMaintenance
+from ..table import TableReference
 
 
 class RedisCLITableMaintenance(CLITableMaintenance):
+    def check_table(self, table_ref: TableReference):
+        """
+        检查组件表在数据库中的状态。
+
+        Returns
+        -------
+        status: str
+            "not_exists" - 表不存在
+            "ok" - 表存在且状态正常
+            "cluster_mismatch" - 表存在但cluster_id不匹配
+            "schema_mismatch" - 表存在但schema不匹配
+        """
+        pass
+
+    def create_table(self, table_ref: TableReference) -> None:
+        """创建组件表。如果已存在，会抛出异常"""
+        raise NotImplementedError
+
+    # 无需drop_table, 此类操作适合人工删除
+
+    def migration_cluster_id(
+        self, table_ref: TableReference, old_cluster_id: int
+    ) -> None:
+        """迁移组件表的cluster_id"""
+        raise NotImplementedError
+
+    def migration_schema(self, table_ref: TableReference, old_json: str) -> None:
+        """迁移组件表的schema"""
+        raise NotImplementedError
+
+    def flush(self, table_ref: TableReference, force=False) -> None:
+        """
+        清空易失性组件表数据，force为True时强制清空任意组件表。
+        注意：此操作会删除所有数据！
+        """
+        raise NotImplementedError
+
+    def rebuild_index(self, table_ref: TableReference) -> None:
+        """重建组件表的索引数据"""
+        raise NotImplementedError
+
     def create_or_migrate(self, cluster_only=False):
         """
         检查表结构是否正确，不正确则尝试进行迁移。此方法同时会强制重建表的索引。

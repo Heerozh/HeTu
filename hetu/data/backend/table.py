@@ -15,16 +15,16 @@ if TYPE_CHECKING:
 @dataclass(frozen=True, eq=True)  # 定义为不可变，且可以作为按内容hash的dict键
 class TableReference:
     """
-    Table表的信息，在后端，组件持久化的目标称为表。
-    组件实际存在数据库中时，需要实例名和cluster id等信息。
+    Table表的地址信息，在后端，组件持久化的目标称为表。
+    组件实际储存在数据库中时，需要实例名和cluster id等信息，此类封装了这些信息。
     """
 
     comp_cls: type[BaseComponent]
     instance_name: str
     cluster_id: int
 
-    def transaction_able(self, other: "TableReference") -> bool:
+    def transaction_able(self, other: TableReference) -> bool:
         return (
-            self.instance_name == other.instance_name
-            and self.cluster_id == other.cluster_id
+                self.instance_name == other.instance_name
+                and self.cluster_id == other.cluster_id
         )
