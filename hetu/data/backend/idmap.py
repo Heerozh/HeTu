@@ -59,7 +59,7 @@ class IdentityMap:
             return True
         return first_reference.transaction_able(other)
 
-    def add_clean(self, table_ref: TableReference, row: np.record | np.ndarray) -> None:
+    def add_clean(self, table_ref: TableReference, row: np.record) -> None:
         """
         添加一个查询到的对象到row缓存中。
         如果数据行已存在，则会报错ValueError。
@@ -67,6 +67,11 @@ class IdentityMap:
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.transaction_able(table_ref), (
             f"{table_ref} has different transaction context"
+        )
+        # 检测comp_cls和row格式是否一致
+        assert row.dtype == table_ref.comp_cls.dtypes, (
+            f"row dtype({row.dtype}) does not match component class "
+            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
         row_id = int(row["id"])
@@ -128,9 +133,7 @@ class IdentityMap:
         # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
         return cast(np.record, cache[idx[0]]), states.get(row_id)
 
-    def add_insert(
-        self, table_ref: TableReference, row: np.record | np.ndarray
-    ) -> None:
+    def add_insert(self, table_ref: TableReference, row: np.record) -> None:
         """
         添加一个新插入的对象到缓存，并标记为INSERT状态。
         注意此方法会修改传入Row的ID字段，分配一个负数ID。
@@ -143,6 +146,12 @@ class IdentityMap:
         assert self.transaction_able(table_ref), (
             f"{table_ref} has different transaction context"
         )
+        # 检测comp_cls和row格式是否一致
+        assert row.dtype == table_ref.comp_cls.dtypes, (
+            f"row dtype({row.dtype}) does not match component class "
+            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
+        )
+
         # 初始化缓存
         if table_ref not in self._row_cache:
             self._row_cache[table_ref] = np.rec.array(
@@ -161,13 +170,18 @@ class IdentityMap:
         # 标记为INSERT
         self._row_states[table_ref][int(row["id"])] = RowState.INSERT
 
-    def update(self, table_ref: TableReference, row: np.record | np.ndarray) -> None:
+    def update(self, table_ref: TableReference, row: np.record) -> None:
         """
         更新一个对象到缓存，并标记为UPDATE状态。
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.transaction_able(table_ref), (
             f"{table_ref} has different transaction context"
+        )
+        # 检测comp_cls和row格式是否一致
+        assert row.dtype == table_ref.comp_cls.dtypes, (
+            f"row dtype({row.dtype}) does not match component class "
+            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
         row_id = int(row["id"])

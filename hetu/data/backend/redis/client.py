@@ -15,10 +15,11 @@ import msgspec
 import numpy as np
 import redis
 
+from ..base import BackendClient, RowFormat
+
 if TYPE_CHECKING:
     from ...component import BaseComponent
     from ..idmap import IdentityMap
-    from ..base import BackendClient, RowFormat
     from ..table import TableReference
     import redis.asyncio
     import redis.asyncio.cluster

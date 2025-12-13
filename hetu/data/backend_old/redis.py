@@ -903,7 +903,6 @@ class RedisComponentTransaction(ComponentTransaction):
                     trx.stack_unique_check(key, qv, qv, True)
 
     def _trx_insert(self, row: np.record) -> None:
-        # todo 检测row数据是否符合component_cls的定义+tests
         trx = self._trx_conn
         component_cls = self._component_cls
         idx_prefix = self._idx_prefix

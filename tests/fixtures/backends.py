@@ -40,7 +40,7 @@ async def mod_redis_backend(mod_redis_service):
 @pytest.fixture(params=["redis"], scope="module")
 def mod_auto_backend(request):
     if request.param == "redis":
-        return request.getfixturevalue("mod_redis_backend_v2")
+        return request.getfixturevalue("mod_redis_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)
 
@@ -49,6 +49,6 @@ def mod_auto_backend(request):
 @pytest.fixture(params=["redis"], scope="module")
 def auto_backend(request):
     if request.param == "redis":
-        return request.getfixturevalue("mod_redis_backend_v2")
+        return request.getfixturevalue("mod_redis_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)

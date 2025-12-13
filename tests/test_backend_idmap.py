@@ -1,11 +1,15 @@
 import pytest
-from hetu.data.component import BaseComponent
+
 from hetu.data.backend.idmap import IdentityMap, RowState
+from hetu.data.backend.table import TableReference
+from hetu.data.component import BaseComponent
 
 
 def test_add_clean_and_get(mod_item_model):
     """测试添加干净行和获取行"""
     Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+
     id_map = IdentityMap()
 
     # 创建测试数据
@@ -15,7 +19,7 @@ def test_add_clean_and_get(mod_item_model):
     row.owner = 1
 
     # 添加到缓存
-    id_map.add_clean(Item, row)
+    id_map.add_clean(item_ref, row)
 
     # 验证获取
     fetched_row, status = id_map.get(Item, 100)
@@ -27,6 +31,28 @@ def test_add_clean_and_get(mod_item_model):
     # 验证重复添加报错
     with pytest.raises(ValueError, match="already exists"):
         id_map.add_clean(Item, row)
+
+
+def test_add_wrong_component(mod_item_model, mod_rls_test_model):
+    """测试添加错误组件类型报错"""
+    item_ref = TableReference(mod_item_model, "TestServer", 1)
+    rls_ref = TableReference(mod_rls_test_model, "TestServer", 1)
+    id_map = IdentityMap()
+
+    item_row = mod_item_model.new_row()
+    item_row.name = "AnotherItem"
+
+    rls_row = mod_rls_test_model.new_row()
+    rls_row.friend = 1
+
+    id_map.add_clean(item_ref, item_row)
+
+    with pytest.raises(AssertionError, match="dtype"):
+        id_map.add_clean(item_ref, rls_row)
+    with pytest.raises(AssertionError, match="dtype"):
+        id_map.add_insert(item_ref, rls_row)
+    with pytest.raises(AssertionError, match="dtype"):
+        id_map.update(item_ref, rls_row)
 
 
 def test_add_insert(mod_item_model):
