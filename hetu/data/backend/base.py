@@ -143,8 +143,14 @@ class BackendClient:
         """查询index数据，并返回行id，或完整的行数据"""
         raise NotImplementedError
 
-    async def commit(self, idmap: IdentityMap) -> None:
-        """提交修改事务，使用从IdentityMap中获取的脏数据"""
+    async def commit(self, idmap: IdentityMap) -> list[int]:
+        """
+        提交修改事务，使用从IdentityMap中获取的脏数据
+        Returns
+        -------
+        new_ids: list[int]
+            返回新插入行的ID列表，顺序和插入顺序一致。
+        """
         raise NotImplementedError
 
 

@@ -57,9 +57,12 @@ class SystemClusters(metaclass=Singleton):
         systems: set[str]
 
     def __init__(self):
-        # @define_system(namespace=xxx) 定义的所有System
+        # ==== @define_system(namespace=xxx) 定义的所有System ====
+        # 所有system定义表，按namespace分类
         self._system_map: dict[str, dict[str, SystemDefine]] = {}
+        # 所有Component所属的cluster id表，只包含被system引用过的Component
         self._component_map: dict[type[BaseComponent], int] = {}
+        # 所有namespace下的clusters信息列表
         self._clusters: dict[str, list[SystemClusters.Cluster]] = {}
         # @define_system(namespace="global") 定义的所有System
         self._global_system_map: dict[str, SystemDefine] = {}
@@ -86,6 +89,10 @@ class SystemClusters(metaclass=Singleton):
 
     def get_component_cluster_id(self, comp: type[BaseComponent]) -> int | None:
         return self._component_map.get(comp, None)
+
+    def get_components(self) -> dict[type[BaseComponent], int]:
+        """返回所有被System引用过的Component及其所属簇id"""
+        return self._component_map
 
     def get_clusters(self, namespace: str):
         return self._clusters.get(namespace, None)

@@ -34,12 +34,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     def load_commit_scripts(self, file: str | Path) -> Callable:
         assert self._async_ios, "连接已关闭，已调用过close"
-        assert (
-            self.is_servant is False
-        ), "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
-        assert (
-            len(self._async_ios) == 1
-        ), "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+        assert self.is_servant is False, (
+            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+        )
+        assert len(self._async_ios) == 1, (
+            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+        )
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
@@ -60,9 +60,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert (
-            hash(asyncio.get_running_loop()) == self.loop_id
-        ), "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+        )
 
         return random.choice(self._async_ios)
 
@@ -363,15 +363,21 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 record_list = cast(list[np.record], rows)
                 return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
-    async def commit(self, idmap: IdentityMap) -> None:
-        """提交修改事务，使用从IdentityMap中获取的脏数据"""
+    async def commit(self, idmap: IdentityMap) -> list[int]:
+        """
+        提交修改事务，使用从IdentityMap中获取的脏数据
+        Returns
+        -------
+        new_ids: list[int]
+            返回新插入行的ID列表，顺序和插入顺序一致。
+        """
         assert not self.is_servant, "从节点不允许提交事务"
 
         dirty_rows = idmap.get_dirty_rows()
         assert len(dirty_rows) > 0, "没有脏数据需要提交"
         ref = idmap.first_reference()
         assert ref is not None, "不该走到这里，仅用于typing检查"
-
+        # todo 首先要做组合schema然后替换lua脚本里的schema定义
         payload = msgspec.msgpack.encode(dirty_rows)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
