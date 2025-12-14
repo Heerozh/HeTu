@@ -51,9 +51,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         from ....system.definer import SystemClusters
 
         lua_schema_def = ["{"]
-        for comp_cls, cluster_id in SystemClusters().get_components().items():
-            table_name = f"{comp_cls.component_name_}:{{CLU{cluster_id}}}"
-            lua_schema_def.append(f'["{table_name}"] = {{')
+        for comp_cls in SystemClusters().get_components().keys():
+            lua_schema_def.append(f'["{comp_cls.component_name_}"] = {{')
             # unique
             lua_schema_def.append("unique = {")
             for field in comp_cls.uniques_:
@@ -95,28 +94,22 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return random.choice(self._async_ios)
 
     @staticmethod
-    def row_key(table_ref: TableReference, row_id: str | int) -> str:
+    def table_prefix(table_ref: TableReference) -> str:
+        """获取redis表名前缀"""
+        return (
+            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
+            f"{{CLU{table_ref.cluster_id}}}"
+        )
+
+    @classmethod
+    def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
         """获取redis表行的key名"""
-        return (
-            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
-            f"{{CLU{table_ref.cluster_id}}}:id:{str(row_id)}"
-        )
+        return f"{cls.table_prefix(table_ref)}:id:{str(row_id)}"
 
-    @staticmethod
-    def row_key_prefix(table_ref: TableReference) -> str:
-        """获取redis表行的key名前缀，储存前缀组合速度快1倍"""
-        return (
-            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
-            f"{{CLU{table_ref.cluster_id}}}:id:"
-        )
-
-    @staticmethod
-    def index_key(table_ref: TableReference, index_name: str) -> str:
+    @classmethod
+    def index_key(cls, table_ref: TableReference, index_name: str) -> str:
         """获取redis表索引的key名"""
-        return (
-            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
-            f"{{CLU{table_ref.cluster_id}}}:index:{index_name}"
-        )
+        return f"{cls.table_prefix(table_ref)}:index:{index_name}"
 
     @staticmethod
     def meta_key(table_ref: TableReference) -> str:
@@ -376,7 +369,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if row_format == RowFormat.ID_LIST:
             return list(map(int, row_ids))
 
-        key_prefix = self.row_key_prefix(table_ref)  # 存下前缀组合key快1倍
+        key_prefix = self.table_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
             if row := await aio.hgetall(key_prefix + str(_id)):
@@ -403,13 +396,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         dirty_rows = idmap.get_dirty_rows()
         assert len(dirty_rows) > 0, "没有脏数据需要提交"
+
         ref = idmap.first_reference()
         assert ref is not None, "不该走到这里，仅用于typing检查"
-        # todo 首先要做组合schema然后替换lua脚本里的schema定义
-        payload = msgspec.msgpack.encode(dirty_rows)
+
+        # 转换dirty_rows为纯lua可用的信息格式：
+        # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
+        payload: dict[str, dict[str, list[dict[str, Any]]]] = {
+            txn_type: {
+                self.table_prefix(ref): [ref.comp_cls.row_to_dict(row) for row in rows]
+                for ref, rows in txn_data.items()
+            }
+            for txn_type, txn_data in dirty_rows.items()
+        }
+
+        payload_json = msgspec.msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
-        return await self.lua_commit(keys, payload)
+        return await self.lua_commit(keys, payload_json)
 
     # 还需要
     # create table

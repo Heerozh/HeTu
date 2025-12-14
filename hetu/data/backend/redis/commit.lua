@@ -90,10 +90,10 @@ local context = {}
 -- 辅助函数
 -- ============================================================================
 
--- 分割 key_name 获取 table 和 uid (格式 "table:uid")
-local function get_key_parts(key)
-    local t, u = string.match(key, "^(.-):(%d+)$")
-    return t, u
+-- 分割 "instance_name:User:{CLU0}" 获取 tablename
+local function get_table_ref(key)
+    local i, t, c = string.match(key, "^(.-):(.-):{CLU(%d+)}$")
+    return i, t, c
 end
 
 -- 生成索引的 Key
@@ -178,19 +178,21 @@ end
 
 -- 1.1 Check Insert
 if payload["insert"] then
-    for table_name, rows in pairs(payload["insert"]) do
+    for table_ref, rows in pairs(payload["insert"]) do
         -- 确保 Context 结构存在
-        if not context[table_name] then
-            context[table_name] = {}
+        if not context[table_ref] then
+            context[table_ref] = {}
         end
-
-        local table_schema = SCHEMA[table_name] or { unique = {}, indexes = {} }
-
-        for key, fields in pairs(rows) do
-            local _, uid = get_key_parts(key)
-            if not uid then
-                return { err = "Invalid key format: " .. key }
-            end
+        -- 解析 table_ref
+        local instance_name, table_name, cluster_id = get_table_ref(table_name)
+        -- 获取表结构
+        local table_schema = SCHEMA[table_name]
+        if not table_schema then
+            error("Schema not found for table: " .. table_name)
+        end
+        -- 开始执行insert
+        for _, row in ipairs(rows) do
+            local uid = row.id
 
             -- 检查 1: Key 是否已存在
             if redis.call('EXISTS', key) == 1 then

@@ -210,6 +210,8 @@ class SystemClusters(metaclass=Singleton):
                 for sys_name in cluster.systems:
                     sys_map[sys_name].cluster_id = cluster.id
                 for comp in cluster.components:
+                    assert comp not in self._component_map
+                    # fixme: 不同的namespace，component应该是放在不同的簇中的吧？
                     self._component_map[comp] = cluster.id
 
         self._main_system_map = self._system_map[main_namespace]
