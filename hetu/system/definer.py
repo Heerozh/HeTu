@@ -12,9 +12,9 @@ from dataclasses import dataclass
 from inspect import signature
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
-from ..data import Permission
 
 from ..common import Singleton
+from ..common.permission import Permission
 from .execution import ExecutionLock
 
 if TYPE_CHECKING:

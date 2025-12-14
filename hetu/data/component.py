@@ -11,25 +11,18 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
-from enum import IntEnum
-from typing import Callable, Any, TYPE_CHECKING, cast
-
-if TYPE_CHECKING:
-    from .backend import RawComponentTable
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import numpy as np
 
 from ..common import Singleton, csharp_keyword
+from ..common.permission import Permission
+
+if TYPE_CHECKING:
+    from .backend import RawComponentTable
+
 
 logger = logging.getLogger("HeTu.root")
-
-
-class Permission(IntEnum):
-    EVERYBODY = 1
-    USER = 2
-    OWNER = 3  # 同RLS权限，只是预设了rls_compare为('eq', 'owner', 'caller')
-    RLS = 4  # 由rls_compare参数(operator_function, component_property_name, context_property_name)决定具体的rls逻辑
-    ADMIN = 999
 
 
 @dataclass

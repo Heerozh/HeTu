@@ -8,9 +8,22 @@ import numpy as np
 import pytest
 
 from hetu.data.backend import Backend, RedisBackendClient, UniqueViolation, random
+from hetu.system import define_system, SystemClusters
 
 
-async def test_table(mod_item_model, mod_rls_test_model, mod_auto_backend):
+async def test_table(
+    mod_item_model, mod_rls_test_model, mod_auto_backend, new_clusters_env
+):
+    # 需要先定义System以确保Component被注册
+    @define_system(
+        namespace="TestServer", components=(mod_item_model, mod_rls_test_model)
+    )
+    async def ref_components(ctx):
+        pass
+
+    SystemClusters().build_clusters("TestServer")
+
+    # 启动backend
     backend: Backend = mod_auto_backend()
     client = backend.master_or_servant
 

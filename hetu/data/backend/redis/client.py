@@ -43,6 +43,34 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
+        # 读取namespace下的所有schema定义，然后替换lua脚本里的schema定义
+        # ["User:{CLU1}"] = {
+        #     unique = { ["email"] = true, ["phone"] = true },
+        #     indexes = { ["email"] = false, ["age"] = true, ["phone"] = true }
+        # }
+        from ....system.definer import SystemClusters
+
+        lua_schema_def = ["{"]
+        for comp_cls, cluster_id in SystemClusters().get_components().items():
+            table_name = f"{comp_cls.component_name_}:{{CLU{cluster_id}}}"
+            lua_schema_def.append(f'["{table_name}"] = {{')
+            # unique
+            lua_schema_def.append("unique = {")
+            for field in comp_cls.uniques_:
+                lua_schema_def.append(f'["{field}"] = true,')
+            lua_schema_def.append("},")
+            # indexes
+            lua_schema_def.append("indexes = {")
+            for field, is_str in comp_cls.indexes_.items():
+                str_flag = "true" if is_str else "false"
+                lua_schema_def.append(f'["{field}"] = {str_flag},')
+            lua_schema_def.append("},")
+            lua_schema_def.append("},")
+        lua_schema_def.append("}")
+        lua_schema_text = "\n".join(lua_schema_def)
+        # replace PLACEHOLDER_SCHEMA_DEFINITIONS in script_text
+        script_text = script_text.replace("PLACEHOLDER_SCHEMA", lua_schema_text)
+
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
         # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了

@@ -11,7 +11,8 @@ import time
 
 import numpy as np
 
-from ..data import BaseComponent, define_component, property_field, Permission
+from ..common.permission import Permission
+from ..data import BaseComponent, define_component, property_field
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")

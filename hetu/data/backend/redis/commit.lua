@@ -69,16 +69,15 @@
 local cmsgpack = cmsgpack
 
 -- 1. SCHEMA 定义 (由应用层硬编码注入，这里仅作示例结构)
--- 实际生产中，请将应用层的 Schema JSON 转换成此 Lua Table 格式并替换此处
-local SCHEMA = {
-    -- 示例结构
-    -- ["user"] = {
-    --     unique = { ["email"] = true, ["phone"] = true },
-    --     indexes = { ["email"] = true, ["age"] = true, ["phone"] = true }
-    --     -- 注意: unique 字段也必须在 indexes 里列出
-    -- }
-}
--- 如果应用层通过 KEYS/ARGV 传入 Schema，请自行调整，这里假设已存在 SCHEMA 全局变量
+local SCHEMA = PLACEHOLDER_SCHEMA
+-- 示例结构
+-- local SCHEMA = {
+--   ["User:{CLU1}"] = {
+--     unique = { ["email"] = true, ["phone"] = true },
+--     indexes = { ["email"] = true, ["age"] = true, ["phone"] = true }
+--     -- 注意: unique 字段也必须在 indexes 里列出
+--   }
+--}
 
 -- 获取 payload
 local payload = cmsgpack.unpack(ARGV[1])
@@ -158,6 +157,25 @@ end
 -- Phase 1: Check & Prepare (只读/验证)
 -- ============================================================================
 
+-- payload示例结构：
+-- payload = {
+--     insert = {
+--         ["instance_name:User:{CLU0}"] = {
+--             {属性1 = value, ...},
+--         },
+--     },
+--     update = {
+--         ["instance_name:User:{CLU0}"] = {
+--             {属性1 = value, ...}
+--         },
+--     },
+--     delete = {
+--         ["instance_name:User:{CLU0}"] = {
+--             {version = 1},
+--         },
+--     },
+-- }
+
 -- 1.1 Check Insert
 if payload["insert"] then
     for table_name, rows in pairs(payload["insert"]) do
@@ -185,7 +203,7 @@ if payload["insert"] then
                     if check_unique_constraint(table_name, field, val, uid) then
                         return {
                             err = "Unique constraint violation: " ..
-                                table_name .. "." .. field .. "=" .. tostring(val)
+                                    table_name .. "." .. field .. "=" .. tostring(val)
                         }
                     end
                 end
@@ -241,7 +259,7 @@ if payload["update"] then
                         if check_unique_constraint(table_name, field, new_val, uid) then
                             return {
                                 err = "Unique constraint violation: " ..
-                                    table_name .. "." .. field .. "=" .. tostring(new_val)
+                                        table_name .. "." .. field .. "=" .. tostring(new_val)
                             }
                         end
                     end
