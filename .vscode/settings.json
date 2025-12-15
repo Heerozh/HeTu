@@ -3,6 +3,7 @@
     "bylex",
     "byscore",
     "caplog",
+    "cmsgpack",
     "Heerozh",
     "hetu",
     "hgetall",

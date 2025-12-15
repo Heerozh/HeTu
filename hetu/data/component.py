@@ -247,7 +247,7 @@ def define_component(
     rls_compare: tuple[str, str, str] | None = None,
 ):
     """
-    定义Component组件（表）的数据结构
+    定义Component组件的schema模型
 
     Examples
     --------
@@ -433,10 +433,10 @@ def define_component(
         # 生成json格式，并通过json加载到class中
         json_str = BaseComponent.make_json(
             properties,
-            namespace,
+            namespace,  # todo 看看组件的namespace能否取消
             cls.__name__,
             permission,
-            persist,
+            persist,  # todo 改成相反的volatile，默认值false比较安全
             readonly,
             backend,
             rls_compare,
