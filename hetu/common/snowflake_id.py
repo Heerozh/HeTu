@@ -68,10 +68,6 @@ class SnowflakeID(metaclass=Singleton):
         self.sequence = 0
         self.last_timestamp = -1
 
-    @staticmethod
-    def _current_timestamp() -> int:
-        return int(time() * 1000)
-
     async def next_id(self) -> int:
         """
         生成下一个 ID (异步方法)
@@ -81,7 +77,7 @@ class SnowflakeID(metaclass=Singleton):
         # 如果这里加锁，虽然能防止大量协程都进入sleep发生切换，但平日性能会下降6倍
         # 所以还是用while方式
         while True:
-            timestamp = self._current_timestamp()
+            timestamp = int(time() * 1000)
             last_timestamp = self.last_timestamp
 
             # 如果时钟回拨，使用最后的时间
