@@ -123,6 +123,24 @@ wheels = [
 ]
 
 [[package]]
+name = "austin-dist"
+version = "4.0.0"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f1/60/3d7eb8841f2687c2874bb425fd6c0a1a08a6747fbf926f51e546c0151a25/austin_dist-4.0.0-py3-none-macosx_11_0_arm64.whl", hash = "sha256:534a0194ff0bc58486e883e80078be4a413a6616c98c3acd67c54eeebf48dc0c", size = 44550, upload-time = "2025-11-01T09:27:48.604Z" },
+    { url = "https://files.pythonhosted.org/packages/04/fa/e3b72415da6699f66c97a2f864abdbdf10111a537284bd1a742d4975c4af/austin_dist-4.0.0-py3-none-macosx_11_0_x86_64.whl", hash = "sha256:79337a658acb942a4ab4c6eab04a08b347c8f5a9c572abb47f1c73981fe7ac3e", size = 45331, upload-time = "2025-11-01T09:27:49.867Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/cd/000b1cdfc16c65145a7e5762126ab328404870f17da16b7313a02f6aee90/austin_dist-4.0.0-py3-none-manylinux_2_12_x86_64.manylinux2010_x86_64.whl", hash = "sha256:d7b5c8025ccad164899829f493f8865ac6abeca3624be00efc06307a4f4ed098", size = 1054201, upload-time = "2025-11-01T09:29:19.918Z" },
+    { url = "https://files.pythonhosted.org/packages/c0/25/89c1b7f953ab2de491492f3c38692063e229f2bf1a8a15b1764293d80231/austin_dist-4.0.0-py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:7f9d6df6237146a8914e0fcbedc7173bb6ec06d6bacd85eafb501a5cffc950b6", size = 845813, upload-time = "2025-11-02T14:45:21.174Z" },
+    { url = "https://files.pythonhosted.org/packages/43/e9/e42bee6467c46cccd01b9500438c768905d45f37a7158337335a28ba3403/austin_dist-4.0.0-py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:e4f9d15f9610dbb794905a3d61fac9d3a77c342623d826f09bf6a3b3a75cb986", size = 617386, upload-time = "2025-11-02T14:45:38.606Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/6d/fe22badf0483b01a03afdb171b41ac0ff83ec1b69e4a24be361dd6ac7c59/austin_dist-4.0.0-py3-none-manylinux_2_17_ppc64le.manylinux2014_ppc64le.whl", hash = "sha256:1fc064776a2968bf06218cfea0b150914f5dd5b194bc29bd974e3278b2e6d64c", size = 911069, upload-time = "2025-11-02T14:45:45.7Z" },
+    { url = "https://files.pythonhosted.org/packages/1c/7f/58c4cbbfddfedcf29ea74bcb3361b576cdfb9b40ebbf7bfd20f70cda8761/austin_dist-4.0.0-py3-none-musllinux_1_1_aarch64.whl", hash = "sha256:2681e592dcf6d430953f72a46795583fd25286fe101b8cfd716dcbb6675f032e", size = 44031, upload-time = "2025-11-02T14:45:23.233Z" },
+    { url = "https://files.pythonhosted.org/packages/e3/f2/81e6b35046aeff47c9c6db37fd46eb161e77d297e2278535b70737affd36/austin_dist-4.0.0-py3-none-musllinux_1_1_armv7l.whl", hash = "sha256:c9198f2450154f4c2c7d90e4420aacb9792f1e1b9d08568974f8813b38e1c02a", size = 46490, upload-time = "2025-11-02T14:45:40.116Z" },
+    { url = "https://files.pythonhosted.org/packages/95/56/f253d976015fa3f13d06b8ba9edb810153c85fe5c1030b9523745edd409e/austin_dist-4.0.0-py3-none-musllinux_1_1_ppc64le.whl", hash = "sha256:027c39acee72615badf028ec9b9659df2c8be72517e54a73e525ce77c047b5c0", size = 45470, upload-time = "2025-11-02T14:45:47.103Z" },
+    { url = "https://files.pythonhosted.org/packages/60/27/35b6526192e569b31dcec807acb99539ae5585e10ee67a79ee309a8f7887/austin_dist-4.0.0-py3-none-musllinux_1_1_x86_64.whl", hash = "sha256:d8a7bcded0020d0c66869b7cf6703da79434051f422458f6555fea9f4aff488b", size = 44133, upload-time = "2025-11-01T09:29:21.202Z" },
+    { url = "https://files.pythonhosted.org/packages/38/70/81d96e8c33f300f01935a9a87fa1ff124ca25eb1cb85dcf30ce06f7c5360/austin_dist-4.0.0-py3-none-win_amd64.whl", hash = "sha256:8a59d8b4d00eed828b2734e73661d437487906486de71a7e414e4445dde7ab63", size = 59324, upload-time = "2025-11-01T09:28:10.713Z" },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.11.12"
 source = { registry = "https://pypi.org/simple" }
@@ -479,13 +497,16 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "aiohttp" },
+    { name = "austin-dist" },
     { name = "docker" },
     { name = "ipykernel" },
     { name = "matplotlib" },
     { name = "mypy" },
     { name = "pandas" },
+    { name = "py-spy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "pytest-benchmark" },
     { name = "pytest-cov" },
     { name = "pytest-timeout" },
     { name = "ruff" },
@@ -512,13 +533,16 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "aiohttp", specifier = ">=3.13.1" },
+    { name = "austin-dist", specifier = ">=4.0.0" },
     { name = "docker", specifier = ">=7.1.0" },
     { name = "ipykernel", specifier = ">=7.1.0" },
     { name = "matplotlib", specifier = ">=3.10.7" },
     { name = "mypy", specifier = ">=1.19.0" },
     { name = "pandas", specifier = ">=2.3.3" },
+    { name = "py-spy", specifier = ">=0.4.1" },
     { name = "pytest", specifier = ">=8.4.2" },
     { name = "pytest-asyncio", specifier = ">=1.3.0" },
+    { name = "pytest-benchmark", specifier = ">=5.2.3" },
     { name = "pytest-cov", specifier = ">=7.0.0" },
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "ruff", specifier = ">=0.14.6" },
@@ -1249,6 +1273,30 @@ wheels = [
 ]
 
 [[package]]
+name = "py-cpuinfo"
+version = "9.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/37/a8/d832f7293ebb21690860d2e01d8115e5ff6f2ae8bbdc953f0eb0fa4bd2c7/py-cpuinfo-9.0.0.tar.gz", hash = "sha256:3cdbbf3fac90dc6f118bfd64384f309edeadd902d7c8fb17f02ffa1fc3f49690", size = 104716, upload-time = "2022-10-25T20:38:06.303Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e0/a9/023730ba63db1e494a271cb018dcd361bd2c917ba7004c3e49d5daf795a2/py_cpuinfo-9.0.0-py3-none-any.whl", hash = "sha256:859625bc251f64e21f077d099d4162689c762b5d6a4c3c97553d56241c9674d5", size = 22335, upload-time = "2022-10-25T20:38:27.636Z" },
+]
+
+[[package]]
+name = "py-spy"
+version = "0.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/19/e2/ff811a367028b87e86714945bb9ecb5c1cc69114a8039a67b3a862cef921/py_spy-0.4.1.tar.gz", hash = "sha256:e53aa53daa2e47c2eef97dd2455b47bb3a7e7f962796a86cc3e7dbde8e6f4db4", size = 244726, upload-time = "2025-07-31T19:33:25.172Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/14/e3/3a32500d845bdd94f6a2b4ed6244982f42ec2bc64602ea8fcfe900678ae7/py_spy-0.4.1-py2.py3-none-macosx_10_12_x86_64.macosx_11_0_arm64.macosx_10_12_universal2.whl", hash = "sha256:809094208c6256c8f4ccadd31e9a513fe2429253f48e20066879239ba12cd8cc", size = 3682508, upload-time = "2025-07-31T19:33:13.753Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/bf/e4d280e9e0bec71d39fc646654097027d4bbe8e04af18fb68e49afcff404/py_spy-0.4.1-py2.py3-none-macosx_11_0_arm64.whl", hash = "sha256:1fb8bf71ab8df95a95cc387deed6552934c50feef2cf6456bc06692a5508fd0c", size = 1796395, upload-time = "2025-07-31T19:33:15.325Z" },
+    { url = "https://files.pythonhosted.org/packages/df/79/9ed50bb0a9de63ed023aa2db8b6265b04a7760d98c61eb54def6a5fddb68/py_spy-0.4.1-py2.py3-none-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:ee776b9d512a011d1ad3907ed53ae32ce2f3d9ff3e1782236554e22103b5c084", size = 2034938, upload-time = "2025-07-31T19:33:17.194Z" },
+    { url = "https://files.pythonhosted.org/packages/53/a5/36862e3eea59f729dfb70ee6f9e14b051d8ddce1aa7e70e0b81d9fe18536/py_spy-0.4.1-py2.py3-none-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:532d3525538254d1859b49de1fbe9744df6b8865657c9f0e444bf36ce3f19226", size = 2658968, upload-time = "2025-07-31T19:33:18.916Z" },
+    { url = "https://files.pythonhosted.org/packages/08/f8/9ea0b586b065a623f591e5e7961282ec944b5fbbdca33186c7c0296645b3/py_spy-0.4.1-py2.py3-none-manylinux_2_5_i686.manylinux1_i686.whl", hash = "sha256:4972c21890b6814017e39ac233c22572c4a61fd874524ebc5ccab0f2237aee0a", size = 2147541, upload-time = "2025-07-31T19:33:20.565Z" },
+    { url = "https://files.pythonhosted.org/packages/68/fb/bc7f639aed026bca6e7beb1e33f6951e16b7d315594e7635a4f7d21d63f4/py_spy-0.4.1-py2.py3-none-manylinux_2_5_x86_64.manylinux1_x86_64.whl", hash = "sha256:6a80ec05eb8a6883863a367c6a4d4f2d57de68466f7956b6367d4edd5c61bb29", size = 2763338, upload-time = "2025-07-31T19:33:22.202Z" },
+    { url = "https://files.pythonhosted.org/packages/e1/da/fcc9a9fcd4ca946ff402cff20348e838b051d69f50f5d1f5dca4cd3c5eb8/py_spy-0.4.1-py2.py3-none-win_amd64.whl", hash = "sha256:d92e522bd40e9bf7d87c204033ce5bb5c828fca45fa28d970f58d71128069fdc", size = 1818784, upload-time = "2025-07-31T19:33:23.802Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "2.23"
 source = { registry = "https://pypi.org/simple" }
@@ -1301,6 +1349,19 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/90/2c/8af215c0f776415f3590cac4f9086ccefd6fd463befeae41cd4d3f193e5a/pytest_asyncio-1.3.0.tar.gz", hash = "sha256:d7f52f36d231b80ee124cd216ffb19369aa168fc10095013c6b014a34d3ee9e5", size = 50087, upload-time = "2025-11-10T16:07:47.256Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/35/f8b19922b6a25bc0880171a2f1a003eaeb93657475193ab516fd87cac9da/pytest_asyncio-1.3.0-py3-none-any.whl", hash = "sha256:611e26147c7f77640e6d0a92a38ed17c3e9848063698d5c93d5aa7aa11cebff5", size = 15075, upload-time = "2025-11-10T16:07:45.537Z" },
+]
+
+[[package]]
+name = "pytest-benchmark"
+version = "5.2.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "py-cpuinfo" },
+    { name = "pytest" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/24/34/9f732b76456d64faffbef6232f1f9dbec7a7c4999ff46282fa418bd1af66/pytest_benchmark-5.2.3.tar.gz", hash = "sha256:deb7317998a23c650fd4ff76e1230066a76cb45dcece0aca5607143c619e7779", size = 341340, upload-time = "2025-11-09T18:48:43.215Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/33/29/e756e715a48959f1c0045342088d7ca9762a2f509b945f362a316e9412b7/pytest_benchmark-5.2.3-py3-none-any.whl", hash = "sha256:bc839726ad20e99aaa0d11a127445457b4219bdb9e80a1afc4b51da7f96b0803", size = 45255, upload-time = "2025-11-09T18:48:39.765Z" },
 ]
 
 [[package]]
@@ -1733,8 +1794,8 @@ wheels = [
 
 [[package]]
 name = "ya"
-version = "1.3.3"
-source = { git = "https://github.com/Heerozh/ya.git#420156315291b414aeac0acc9d878c0896b32a7e" }
+version = "1.3.4"
+source = { git = "https://github.com/Heerozh/ya.git#32e918debb780b2accbe2174daf8737deafb43af" }
 dependencies = [
     { name = "jinja2" },
     { name = "numpy" },

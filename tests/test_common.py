@@ -57,7 +57,7 @@ async def test_snowflake_id(monkeypatch):
     # Set start time to TW_EPOCH/1000 + 1000s
     start_ts = 1766000000.0 + 1000.0
 
-    monkeypatch.setattr("time.time", lambda: start_ts)
+    monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts)
     # 1. Test structure
     id_val = await generator.next_id()
     assert id_val > 0
@@ -84,7 +84,7 @@ async def test_snowflake_id(monkeypatch):
     assert last_seq == first_seq + count - 1
 
     # 测试时间回拨
-    monkeypatch.setattr("time.time", lambda: start_ts - 2)
+    monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts - 2)
 
     id_val_rollback = await generator.next_id()
     assert id_val_rollback > 0
@@ -111,13 +111,13 @@ async def test_snowflake_id_sleep(monkeypatch):
 
     start_ts = 1766000000.0 + 1000.0
 
-    monkeypatch.setattr("time.time", lambda: start_ts)
+    monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts)
     sleep_called = 0
 
     async def mock_sleep(_):
         nonlocal sleep_called
         sleep_called += 1
-        monkeypatch.setattr("time.time", lambda: start_ts + 1)
+        monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts + 1)
         return
 
     monkeypatch.setattr("asyncio.sleep", mock_sleep)

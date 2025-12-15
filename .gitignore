@@ -168,3 +168,4 @@ profile.svg
 data/dump.rdb
 /hetu/__version__.py
 benchmark_results.csv
+*.mojo
