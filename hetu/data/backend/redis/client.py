@@ -9,23 +9,24 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import Any, Callable, cast, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 import msgspec
 import numpy as np
 import redis
 
-from ..base import BackendClient, RowFormat
 from ....common.snowflake_id import RedisWorkerKeeper
+from ..base import BackendClient, RowFormat
 
 if TYPE_CHECKING:
-    from ...component import BaseComponent
-    from ..idmap import IdentityMap
-    from ..table import TableReference
     import redis.asyncio
     import redis.asyncio.cluster
     import redis.cluster
     import redis.exceptions
+
+    from ...component import BaseComponent
+    from ..idmap import IdentityMap
+    from ..table import TableReference
 
 logger = logging.getLogger("HeTu.root")
 
@@ -251,7 +252,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
         """
         assert not self.is_servant, "get_worker_keeper"
-        return RedisWorkerKeeper(self.aio)
+        return RedisWorkerKeeper(self.io, self.aio)
 
     async def close(self):
         if not self._ios:
@@ -392,7 +393,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 record_list = cast(list[np.record], rows)
                 return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
-    async def commit(self, idmap: IdentityMap) -> list[int]:
+    async def commit(self, idmap: IdentityMap) -> None:
         """
         提交修改事务，使用从IdentityMap中获取的脏数据
         Returns

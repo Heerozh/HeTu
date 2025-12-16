@@ -7,10 +7,10 @@
 
 import asyncio
 import logging
-from datetime import datetime
-from time import time, sleep
-from typing import TYPE_CHECKING
 import uuid
+from datetime import datetime
+from time import sleep, time
+from typing import TYPE_CHECKING, cast
 
 import redis.asyncio
 
@@ -163,7 +163,7 @@ class SnowflakeID(metaclass=Singleton):
 
 
 class WorkerKeeper:
-    subclasses = []
+    subclasses: list[type[WorkerKeeper]] = []
 
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
@@ -235,7 +235,7 @@ class RedisWorkerKeeper(WorkerKeeper):
                 return worker_id
             else:
                 # 判断node_id是否相同，相同则说明是重启，直接使用
-                existing_node_id = self.io.get(key)
+                existing_node_id = cast(bytes, self.io.get(key))
                 if (
                     existing_node_id is not None
                     and int(existing_node_id) == self.node_id
@@ -253,7 +253,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         从 Redis 中获取上次生成 ID 的时间戳。
         """
         key = f"{self.last_timestamp_key}:{self.node_id}"
-        last_timestamp = self.io.get(key)
+        last_timestamp = cast(bytes, self.io.get(key))
         # 返回当前时间加10秒，防止重启回拨
         if last_timestamp is not None:
             logger.info(
@@ -281,7 +281,6 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 记录last_timestamp到redis，防止重启回拨
         key = f"{self.last_timestamp_key}:{self.node_id}"
         await self.aio.set(key, last_timestamp, ex=86400)
-
 
 
 # 后期如果需要其他数据库的实现，再放到新的文件中
