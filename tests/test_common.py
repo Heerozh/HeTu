@@ -59,7 +59,7 @@ async def test_snowflake_id(monkeypatch):
 
     monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts)
     # 1. Test structure
-    id_val = await generator.next_id()
+    id_val = await generator.next_id_async()
     assert id_val > 0
 
     # worker_id is 1 (10 bits)
@@ -71,7 +71,7 @@ async def test_snowflake_id(monkeypatch):
     ids = []
     count = 100
     for _ in range(count):
-        new_id = await generator.next_id()
+        new_id = await generator.next_id_async()
         ids.append(new_id)
 
     assert len(set(ids)) == count
@@ -86,7 +86,7 @@ async def test_snowflake_id(monkeypatch):
     # 测试时间回拨
     monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts - 2)
 
-    id_val_rollback = await generator.next_id()
+    id_val_rollback = await generator.next_id_async()
     assert id_val_rollback > 0
     assert id_val_rollback >= ids[-1]
 
@@ -123,7 +123,7 @@ async def test_snowflake_id_sleep(monkeypatch):
     monkeypatch.setattr("asyncio.sleep", mock_sleep)
     last_id = None
     for _ in range(4099):
-        last_id = await generator.next_id()
+        last_id = await generator.next_id_async()
 
     # 4096 IDs + 3 for the sleep
     assert sleep_called == 1

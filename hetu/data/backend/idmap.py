@@ -45,9 +45,6 @@ class IdentityMap:
         # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
         self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
 
-        # 用于生成新插入行的负ID
-        self._next_insert_id = -1
-
     def first_reference(self) -> TableReference | None:
         if not self._row_cache:
             return None
@@ -74,7 +71,7 @@ class IdentityMap:
             f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
-        row_id = int(row["id"])
+        row_id = row["id"]
 
         # 初始化该component的缓存
         if table_ref not in self._row_cache:
@@ -136,11 +133,6 @@ class IdentityMap:
     def add_insert(self, table_ref: TableReference, row: np.record) -> None:
         """
         添加一个新插入的对象到缓存，并标记为INSERT状态。
-        注意此方法会修改传入Row的ID字段，分配一个负数ID。
-
-        Returns
-        -------
-        分配了临时ID（负数）的行数据
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.transaction_able(table_ref), (
@@ -159,16 +151,12 @@ class IdentityMap:
             )
             self._row_states[table_ref] = {}
 
-        # 分配负ID
-        row["id"] = self._next_insert_id
-        self._next_insert_id -= 1
-
         # 添加到缓存
         cache = self._row_cache[table_ref]
         self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
 
         # 标记为INSERT
-        self._row_states[table_ref][int(row["id"])] = RowState.INSERT
+        self._row_states[table_ref][row["id"]] = RowState.INSERT
 
     def update(self, table_ref: TableReference, row: np.record) -> None:
         """
@@ -184,7 +172,7 @@ class IdentityMap:
             f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
-        row_id = int(row["id"])
+        row_id = row["id"]
 
         if table_ref not in self._row_cache:
             raise ValueError(f"Component {table_ref} not in cache")
@@ -196,6 +184,8 @@ class IdentityMap:
         idx = np.where(cache["id"] == row_id)[0]
         if len(idx) == 0:
             raise ValueError(f"Row with id {row_id} not found in cache")
+
+        assert row["_version"] == cache[idx[0]]["_version"], "不得修改_version字段"
 
         # 如果是删除状态，不能更新
         if states.get(row_id) == RowState.DELETE:

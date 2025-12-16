@@ -184,7 +184,7 @@ if payload["insert"] then
             context[table_ref] = {}
         end
         -- 解析 table_ref
-        local instance_name, table_name, cluster_id = get_table_ref(table_name)
+        local instance_name, table_name, cluster_id = get_table_ref(table_ref)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
@@ -205,7 +205,7 @@ if payload["insert"] then
                     if check_unique_constraint(table_name, field, val, uid) then
                         return {
                             err = "Unique constraint violation: " ..
-                                    table_name .. "." .. field .. "=" .. tostring(val)
+                                table_name .. "." .. field .. "=" .. tostring(val)
                         }
                     end
                 end
@@ -261,7 +261,7 @@ if payload["update"] then
                         if check_unique_constraint(table_name, field, new_val, uid) then
                             return {
                                 err = "Unique constraint violation: " ..
-                                        table_name .. "." .. field .. "=" .. tostring(new_val)
+                                    table_name .. "." .. field .. "=" .. tostring(new_val)
                             }
                         end
                     end

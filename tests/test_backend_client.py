@@ -43,7 +43,7 @@ async def test_table(
     row.owner = 11
     idmap.add_insert(rls_ref, row)
 
-    ids = await client.commit(idmap)
+    await client.commit(idmap)
 
     # 测试insert的是否有效
     row_get = client.get(item_ref, ids[0])

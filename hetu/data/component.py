@@ -11,6 +11,7 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
+from ..common.snowflake_id import SnowflakeID
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 import numpy as np
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger("HeTu.root")
+SNOWFLAKE_ID = SnowflakeID()
 
 
 @dataclass
@@ -155,14 +157,18 @@ class BaseComponent:
 
     @classmethod
     def new_row(cls) -> np.record:
-        """返回空数据行，id为0，用于insert"""
-        return cast(np.record, cls.default_row[0].copy())
+        """返回空数据行，id生成uuid，用于insert"""
+        row = cast(np.record, cls.default_row[0].copy())
+        row.id = SNOWFLAKE_ID.next_id()
+        return row
 
     @classmethod
     def new_rows(cls, size) -> np.recarray:
-        """返回空数据行，id为0，用于insert"""
-        row = cls.default_row.copy() if size == 1 else cls.default_row.repeat(size, 0)
-        return cast(np.recarray, row)
+        """返回空数据行，id生成uuid，用于insert"""
+        rows = cls.default_row.copy() if size == 1 else cls.default_row.repeat(size, 0)
+        for i in range(size):
+            rows[i].id = SNOWFLAKE_ID.next_id()
+        return cast(np.recarray, rows)
 
     @classmethod
     def dict_to_row(cls, data: dict) -> np.record:  # todo rename to dict_to_struct_row
@@ -303,8 +309,8 @@ def define_component(
     字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
     不想看到"<U8"在IDE里标红语法错误的话，可用 `name = property_field(dtype='<U8')` 方式。
 
-    每个Component表都有个默认的主键`id: np.int64 = property_field(default=0, unique=True)`，
-    会自行自增无法修改。
+    每个Component表都有个默认的主键`id: np.int64 = property_field(default=雪花uuid, unique=True)`，
+    是一个uuid，无法修改。
     """
 
     def _normalize_prop(cname: str, fname: str, anno_type, prop: Property):
@@ -415,10 +421,10 @@ def define_component(
         assert "id" not in properties, (
             f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
         )
-        # 必备索引，只进行unique索引为了基础性能
-        # todo 改成用雪花算法生成的uuid，worker_id从
+        # 必备索引，调用new_row时会用雪花算法生成uuid，该属性无法修改(idmap管理)。加unique索引防止意外
         properties["id"] = Property(0, True, True, np.int64)
-        # todo 增加version属性，且该属性只读（只能lua修改）
+        # 增加version属性，该属性只读（idmap管理, 只能lua修改）
+        properties["_version"] = Property(0, False, False, np.int32)
 
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"

@@ -7,7 +7,7 @@
 
 import asyncio
 import logging
-from time import time
+from time import time, sleep
 from typing import TYPE_CHECKING
 import uuid
 
@@ -41,7 +41,7 @@ SEQUENCE_MASK = -1 ^ (-1 << SEQUENCE_BITS)
 
 class SnowflakeID(metaclass=Singleton):
     """
-    标准的雪花算法 (Snowflake) 实现，针对 Python 异步环境优化。
+    标准的雪花算法 (Snowflake) 实现，针对单线程多进程环境。
 
     结构 (64位):
     1位符号 | 41位时间戳 (毫秒) | 0位数据中心ID | 10位Worker ID | 12位序列号
@@ -73,7 +73,7 @@ class SnowflakeID(metaclass=Singleton):
         Parameters
         ----------
         worker_id: int
-            工作ID (0-1023)
+            工作ID (0-1023)，每个进程一个
         last_timestamp: int
             上次生成ID的时间戳 (毫秒)，用于防止重启时时间发生回拨造成的id重复.
             如果持久化的时间戳精度为10秒，建议传入时加上10000。
@@ -88,51 +88,74 @@ class SnowflakeID(metaclass=Singleton):
         self.sequence = 0
         self.last_timestamp = last_timestamp
 
-    async def next_id(self) -> int:
+    def _next_id(self) -> int | None:
         """
-        生成下一个 ID (异步方法)
+        生成下一个 ID，超标时返回 None。
         """
         worker_id = self.worker_id
-        assert worker_id >= 0
-        # 如果这里加锁，虽然能防止大量协程都进入sleep发生切换，但平日性能会下降6倍
-        # 所以还是用while方式
-        while True:
-            timestamp = int(time() * 1000)
-            last_timestamp = self.last_timestamp
+        assert worker_id >= 0, "SnowflakeID 未初始化，请先调用 init() 方法。"
 
-            # 如果时钟回拨，使用最后的时间
-            if timestamp < last_timestamp:
-                # 警告：时钟回拨发生。
-                logger.warning(f"[❄️ID] 时钟回拨了 {last_timestamp - timestamp} 毫秒。")
-                # 策略：假装时间没有倒流，继续使用 last_timestamp
-                # 这会导致我们在“过去”的时间里消耗序列号，直到系统时间追上来
-                timestamp = last_timestamp
+        timestamp = int(time() * 1000)
+        last_timestamp = self.last_timestamp
 
-            # 如果是同一毫秒内生成的
-            if last_timestamp == timestamp:
-                # 序列号自增，并与掩码进行与运算，保证不溢出
-                next_sequence = (self.sequence + 1) & SEQUENCE_MASK
+        # 如果时钟回拨，使用最后的时间
+        if timestamp < last_timestamp:
+            # 警告：时钟回拨发生。
+            logger.warning(f"[❄️ID] 时钟回拨了 {last_timestamp - timestamp} 毫秒。")
+            # 策略：假装时间没有倒流，继续使用 last_timestamp
+            # 这会导致我们在“过去”的时间里消耗序列号，直到系统时间追上来
+            timestamp = last_timestamp
 
-                # 如果序列号溢出 (变成0)，说明该毫秒内的 4096 个 ID 已用完
-                if next_sequence == 0:
-                    # 如果序列用完，asyncio.sleep 下一毫秒
-                    await asyncio.sleep(0.001)
-                    logger.debug("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms")
-                    # 重新loop
-                    continue
-            else:
-                # 如果是新的毫秒，序列号重置
-                next_sequence = 0
-            self.sequence = next_sequence
+        # 如果是同一毫秒内生成的
+        if last_timestamp == timestamp:
+            # 序列号自增，并与掩码进行与运算，保证不溢出
+            next_sequence = (self.sequence + 1) & SEQUENCE_MASK
 
-            # 更新最后生成时间
-            self.last_timestamp = timestamp
+            # 如果序列号溢出 (变成0)，说明该毫秒内的 4096 个 ID 已用完
+            if next_sequence == 0:
+                # 如果序列用完，asyncio.sleep 下一毫秒
+                return None
+        else:
+            # 如果是新的毫秒，序列号重置
+            next_sequence = 0
+        self.sequence = next_sequence
 
-            # 移位并通过或运算拼凑 64 位 ID
-            new_id = ((timestamp - TW_EPOCH) << 22) | (worker_id << 12) | next_sequence
+        # 更新最后生成时间
+        self.last_timestamp = timestamp
 
-            return new_id
-        raise RuntimeError("disable return none warning")
+        # 移位并通过或运算拼凑 64 位 ID
+        new_id = ((timestamp - TW_EPOCH) << 22) | (worker_id << 12) | next_sequence
+
+        return new_id
+
+    def next_id(self) -> int:
+        """
+        生成下一个 ID，同步方法。
+        如果在同一毫秒内生成的 ID 超过 4096 个，会sleep到下一毫秒继续生成。
+        """
+        new_id = self._next_id()
+        while new_id is None:
+            logger.debug("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms")
+            # 等待到下一毫秒
+            sleep(0.001)
+            new_id = self._next_id()
+        return new_id
+
+    async def next_id_async(self) -> int:
+        """
+        生成下一个 ID，异步方法。
+        如果在同一毫秒内生成的 ID 超过 4096 个，会await sleep到下一毫秒继续生成。
+
+        注意：此方法基本不需要！！
+        除非发生时间回拨，不然基本不可能发生sleep，因为单线程Call/ms到不了4096。
+        """
+        new_id = self._next_id()
+        while new_id is None:
+            logger.debug("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms")
+            # 等待到下一毫秒
+            await asyncio.sleep(0.001)
+            new_id = self._next_id()
+        return new_id
 
 
 class WorkerKeeper:

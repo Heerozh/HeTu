@@ -143,13 +143,13 @@ class BackendClient:
         """查询index数据，并返回行id，或完整的行数据"""
         raise NotImplementedError
 
-    async def commit(self, idmap: IdentityMap) -> list[int]:
+    async def commit(self, idmap: IdentityMap) -> None:
         """
         提交修改事务，使用从IdentityMap中获取的脏数据
-        Returns
-        -------
-        new_ids: list[int]
-            返回新插入行的ID列表，顺序和插入顺序一致。
+        Exceptions
+        --------
+        RaceCondition
+            当提交数据时，发现数据已被其他事务修改，抛出此异常
         """
         raise NotImplementedError
 
