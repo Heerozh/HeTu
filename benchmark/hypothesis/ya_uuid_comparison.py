@@ -3,7 +3,7 @@ import uuid
 from hetu.common.snowflake_id import SnowflakeID
 
 generator = SnowflakeID()
-generator.init(worker_id=1)
+generator.init(worker_id=1, last_timestamp=0)
 
 # Mock current timestamp to ensure uniqueness in benchmark
 # 不需要，因为现在cps就在1附近
@@ -20,8 +20,8 @@ generator.init(worker_id=1)
 async def benchmark_snowflake_id():
     """基准测试SnowflakeID生成速度"""
     for _ in range(4096000):  # 测试雪花允许的1秒最高生成id数
-        await generator.next_id()
-    return await generator.next_id()
+        generator.next_id()
+    return generator.next_id()
 
 
 async def benchmark_uuid6():
