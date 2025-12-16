@@ -412,13 +412,23 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 转换dirty_rows为纯lua可用的信息格式：
         # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
         payload: dict[str, dict[str, list[dict[str, Any]]]] = {
-            txn_type: {
+            "insert": {
                 self.table_prefix(ref): [ref.comp_cls.row_to_dict(row) for row in rows]
-                for ref, rows in txn_data.items()
-            }
-            for txn_type, txn_data in dirty_rows.items()
+                for ref, rows in dirty_rows["insert"].items()
+            },
+            "update": {
+                self.table_prefix(ref): [ref.comp_cls.row_to_dict(row) for row in rows]
+                for ref, rows in dirty_rows["update"].items()
+            },
+            "delete": {
+                self.table_prefix(ref): [
+                    # 只需要id和_version字段
+                    {"id": row["id"], "_version": row["_version"]}
+                    for row in rows
+                ]
+                for ref, rows in dirty_rows["delete"].items()
+            },
         }
-
         payload_json = msgspec.msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]

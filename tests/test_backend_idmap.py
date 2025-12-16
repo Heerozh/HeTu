@@ -1,9 +1,9 @@
 import pytest
 
+from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend.idmap import IdentityMap, RowState
 from hetu.data.backend.table import TableReference
 from hetu.data.component import BaseComponent
-from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
 
@@ -204,7 +204,11 @@ def test_exceptions(mod_item_model):
     with pytest.raises(ValueError, match="not found in cache"):
         id_map.update(item_ref, row)
 
-    # 标记删除不存在的 Component
+    # 删除不存在的 Row
+    with pytest.raises(ValueError, match="not found in cache"):
+        id_map.mark_deleted(item_ref, row.id)
+
+    # 删除不存在的 Component
     # 注意：mark_deleted 检查的是 _row_states，add_clean 会初始化它
     # 如果完全没加过该 Component，会报错
     class OtherComponent(BaseComponent):

@@ -206,7 +206,13 @@ class IdentityMap:
         if table_ref not in self._row_states:
             raise ValueError(f"Component {table_ref} not in cache")
 
+        cache = self._row_cache[table_ref]
         states = self._row_states[table_ref]
+
+        # 查找行必须已存在
+        idx = np.where(cache["id"] == row_id)[0]
+        if len(idx) == 0:
+            raise ValueError(f"Row with id {row_id} not found in cache")
 
         # 标记为DELETE
         states[row_id] = RowState.DELETE
@@ -220,7 +226,7 @@ class IdentityMap:
         {
             'insert': {comp_cls: np.ndarray, ...},
             'update': {comp_cls: np.ndarray, ...},
-            'delete': {comp_cls: np.ndarray, ...}  # 只包含id
+            'delete': {comp_cls: np.ndarray, ...}  # 包含所有，但其实只需要id, _version字段
         }
         """
         result: dict[str, dict[TableReference, np.ndarray]] = {
@@ -251,9 +257,11 @@ class IdentityMap:
             if update_ids:
                 mask = np.isin(cache["id"], update_ids)
                 result["update"][table_ref] = cache[mask]
+
             if delete_ids:
                 # DELETE只需要ID列表
-                result["delete"][table_ref] = np.array(delete_ids, dtype=np.int64)
+                mask = np.isin(cache["id"], delete_ids)
+                result["delete"][table_ref] = cache[mask]
 
         return result
 

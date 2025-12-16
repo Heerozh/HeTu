@@ -62,9 +62,13 @@
 -- ```
 
 local table_concat = table.concat
+local string_match = string.match
+local type = type
 local redis = redis
 local ipairs = ipairs
 local pairs = pairs
+local tonumber = tonumber
+local tostring = tostring
 
 -- ============================================================================
 -- Redis Lua ORM Transaction Script
@@ -97,7 +101,7 @@ local context = {}
 
 -- 分割 "instance_name:User:{CLU0}" 获取 tablename
 local function get_table_ref(key)
-    local i, t, c = string.match(key, "^(.-):(.-):{CLU(%d+)}$")
+    local i, t, c = string_match(key, "^(.-):(.-):{CLU(%d+)}$")
     return i, t, c
 end
 
@@ -178,10 +182,6 @@ end
 -- 1.1 Check Insert
 if payload["insert"] then
     for table_prefix, rows in pairs(payload["insert"]) do
-        -- 确保 Context 结构存在
-        if not context[table_prefix] then
-            context[table_prefix] = {}
-        end
         -- 解析 table_ref
         local instance_name, table_name, cluster_id = get_table_ref(table_prefix)
         -- 获取表结构
@@ -189,7 +189,7 @@ if payload["insert"] then
         if not table_schema then
             error("Schema not found for table: " .. table_name)
         end
-        -- 开始执行insert
+        -- 开始检查insert
         for _, row in ipairs(rows) do
             local uid = row.id
             local key = row_key(table_prefix, uid)
@@ -203,7 +203,7 @@ if payload["insert"] then
             for field, _ in pairs(table_schema.unique) do
                 if check_unique_constraint(table_prefix, field, row[field]) then
                     return {
-                        err = "UNIQUE: constraint violation: " ..
+                        err = "UNIQUE: Constraint violation: " ..
                                 table_name .. "." .. field .. "=" .. tostring(row[field])
                     }
                 end
@@ -214,19 +214,27 @@ end
 
 -- 1.2 Check Update
 if payload["update"] then
-    for table_name, rows in pairs(payload["update"]) do
-        if not context[table_name] then
-            context[table_name] = {}
+    for table_prefix, rows in pairs(payload["update"]) do
+        -- 确保 Context 结构存在
+        if not context[table_prefix] then
+            context[table_prefix] = {}
         end
-        local table_schema = SCHEMA[table_name] or { unique = {}, indexes = {} }
+        -- 解析 table_ref
+        local instance_name, table_name, cluster_id = get_table_ref(table_prefix)
+        -- 获取表结构
+        local table_schema = SCHEMA[table_name]
+        if not table_schema then
+            error("Schema not found for table: " .. table_name)
+        end
 
-        for key, new_fields in pairs(rows) do
-            local _, uid = get_key_parts(key)
+        for rows_i, row in ipairs(rows) do
+            local uid = row.id
+            local key = row_key(table_prefix, uid)
 
             -- 获取旧数据 (Snapshot)
             local old_row_raw = redis.call('HGETALL', key)
             if #old_row_raw == 0 then
-                return { err = "Key not found for update: " .. key }
+                return { err = "RACE: Try update key but not exists: " .. key }
             end
 
             -- 将 HGETALL 的 array 转换为 map
@@ -236,66 +244,66 @@ if payload["update"] then
             end
 
             -- 保存到 context 供 Phase 2 使用
-            context[table_name][key] = old_row
+            context[table_prefix][key] = old_row
 
             -- 检查 1: 乐观锁 (Version)
             -- 数据库里的 version 可能是 string，需要转 number 对比
-            local db_ver = tonumber(old_row["version"] or "0")
-            local payload_ver = tonumber(new_fields["version"] or "-1")
-
-            -- 注意：Payload 里的 update 对象通常包含要做检查的 version
-            -- 这里假设 payload 里的 new_fields 包含 "version" 字段用于乐观锁检查
-            -- 如果 payload 结构是 {field: val}, 且 version 单独传，请调整此处逻辑
-            -- 按照 ORM 惯例，提交上来的数据包含旧版本号
+            local db_ver = tonumber(old_row["_version"] or "0")
+            local payload_ver = tonumber(row["_version"])
             if db_ver ~= payload_ver then
-                return { err = "Optimistic lock failure: " .. key .. " DB=" .. db_ver .. " Req=" .. tostring(payload_ver) }
+                return { err = "RACE: Optimistic lock failure(update): " .. key .. " DB=" .. db_ver .. " Req=" .. tostring(payload_ver) }
             end
 
-            -- 检查 2: Unique 约束 (仅检查被修改的字段)
-            for field, new_val in pairs(new_fields) do
-                -- 跳过 version 字段和未改变的字段
-                if field ~= "version" and tostring(new_val) ~= old_row[field] then
+            -- 检查 2: 获取改变的字段，和Unique 约束检查 (仅检查被修改的字段)
+            local changed_fields = {}
+            for field, new_val in pairs(row) do
+                -- 跳过未改变的字段
+                if tostring(new_val) ~= old_row[field] then
+                    changed_fields[field] = new_val
                     if table_schema.unique and table_schema.unique[field] then
-                        if check_unique_constraint(table_name, field, new_val, uid) then
+                        if check_unique_constraint(table_name, field, new_val) then
                             return {
-                                err = "Unique constraint violation: " ..
+                                err = "UNIQUE: Constraint violation: " ..
                                         table_name .. "." .. field .. "=" .. tostring(new_val)
                             }
                         end
                     end
                 end
             end
+            rows[rows_i] = changed_fields -- 只保留变更字段，供 Phase 2 使用
         end
     end
 end
 
 -- 1.3 Check Delete
 if payload["delete"] then
-    for table_name, rows in pairs(payload["delete"]) do
-        if not context[table_name] then
-            context[table_name] = {}
+    for table_prefix, rows in pairs(payload["delete"]) do
+        if not context[table_prefix] then
+            context[table_prefix] = {}
         end
 
-        for key, criteria in pairs(rows) do
+        for _, row in ipairs(rows) do
+            local uid = row.id
+            local key = row_key(table_prefix, uid)
             -- 获取旧数据 (Snapshot) 以便后续删除索引
             local old_row_raw = redis.call('HGETALL', key)
             if #old_row_raw == 0 then
-                -- 如果已经不存在，根据业务逻辑可能报错或忽略，这里选择报错
-                return { err = "Key not found for delete: " .. key }
+                -- 如果已经不存在，说明冲突
+                return { err = "RACE: Try delete key but not exists: " .. key }
             end
 
             local old_row = {}
             for i = 1, #old_row_raw, 2 do
                 old_row[old_row_raw[i]] = old_row_raw[i + 1]
             end
-            context[table_name][key] = old_row
+            context[table_prefix][key] = old_row
 
             -- 检查: 乐观锁
-            local db_ver = tonumber(old_row["version"] or "0")
-            local req_ver = tonumber(criteria["version"])
+            local db_ver = tonumber(old_row["_version"] or "0")
+            local payload_ver = tonumber(row["_version"])
 
-            if db_ver ~= req_ver then
-                return { err = "Optimistic lock failure (delete): " .. key }
+            if db_ver ~= payload_ver then
+                return { err = "RACE: Optimistic lock failure (delete): " .. key .. " DB=" .. db_ver .. " Req=" .. tostring(payload_ver) }
             end
         end
     end
