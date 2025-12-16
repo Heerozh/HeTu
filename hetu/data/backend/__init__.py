@@ -27,6 +27,11 @@ __all__ = [
 
 import asyncio
 import random
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from ...common.snowflake_id import WorkerKeeper
 
 
 class Backend:
@@ -74,6 +79,13 @@ class Backend:
         """
         while not await self._master.is_synced():
             await asyncio.sleep(0.1)
+
+    def get_worker_keeper(self) -> WorkerKeeper | None:
+        """
+        获取WorkerKeeper实例，用于雪花ID的worker id管理。
+        如果不支持worker id管理，可以返回None
+        """
+        return self._master.get_worker_keeper()
 
     @property
     def master(self) -> BackendClient:

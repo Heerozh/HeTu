@@ -141,23 +141,23 @@ async def test_redis_worker_keeper(mod_redis_backend):
 
     from hetu.common.snowflake_id import RedisWorkerKeeper
 
-    worker_keeper = RedisWorkerKeeper(redis_client)
+    worker_keeper = RedisWorkerKeeper(redis.master.io, redis_client)
 
     # 测试获得id
-    worker_id = await worker_keeper.get_worker_id()
+    worker_id = worker_keeper.get_worker_id()
     assert worker_id == 0
 
     # 再次获得应该id一样
-    worker_id_again = await worker_keeper.get_worker_id()
+    worker_id_again = worker_keeper.get_worker_id()
     assert worker_id_again == worker_id
 
     # 模拟另一个机器
     worker_keeper.node_id += 1
-    worker_id_2 = await worker_keeper.get_worker_id()
+    worker_id_2 = worker_keeper.get_worker_id()
     assert worker_id_2 == 1
 
     # 再次获得应该id一样
-    worker_id_again = await worker_keeper.get_worker_id()
+    worker_id_again = worker_keeper.get_worker_id()
     assert worker_id_again == worker_id_2
 
     # 测试续约
@@ -168,7 +168,7 @@ async def test_redis_worker_keeper(mod_redis_backend):
     assert expire <= 20
     # 续约
     await worker_keeper.keep_alive(123)
-    last_ts = await worker_keeper.get_last_timestamp()
+    last_ts = worker_keeper.get_last_timestamp()
     assert last_ts == 123 + 10000
     expire = await redis_client.ttl(f"{worker_keeper.worker_id_key}:{worker_id_2}")
     assert expire > 86400 - 1

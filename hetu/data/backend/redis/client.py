@@ -16,6 +16,7 @@ import numpy as np
 import redis
 
 from ..base import BackendClient, RowFormat
+from ....common.snowflake_id import RedisWorkerKeeper
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
@@ -244,6 +245,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 if lag_of_offset > 0:
                     return False
         return True
+
+    def get_worker_keeper(self) -> RedisWorkerKeeper:
+        """
+        获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
+        """
+        assert not self.is_servant, "get_worker_keeper"
+        return RedisWorkerKeeper(self.aio)
 
     async def close(self):
         if not self._ios:

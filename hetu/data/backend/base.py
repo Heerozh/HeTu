@@ -50,12 +50,12 @@
 """
 
 from enum import Enum
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 if TYPE_CHECKING:
-    from ..component import BaseComponent
+    from ...common.snowflake_id import WorkerKeeper
     from .idmap import IdentityMap
     from .table import TableReference
 
@@ -119,6 +119,13 @@ class BackendClient:
         主要用于test用例。
         """
         # assert not self.is_servant, "is_synced只能在master上调用"
+        raise NotImplementedError
+
+    def get_worker_keeper(self) -> WorkerKeeper | None:
+        """
+        获取WorkerKeeper实例，用于雪花ID的worker id管理。
+        如果不支持worker id管理，可以返回None
+        """
         raise NotImplementedError
 
     # def get_mq_client(self) -> "MQClient":
