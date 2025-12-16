@@ -128,3 +128,47 @@ async def test_snowflake_id_sleep(monkeypatch):
     # 4096 IDs + 3 for the sleep
     assert sleep_called == 1
     assert last_id & 0xFFF == 2
+
+
+async def test_redis_worker_keeper(mod_redis_backend):
+    redis = mod_redis_backend()
+    redis_client = redis.master.aio
+
+    # 清空数据
+    keys_to_delete = await redis_client.keys("snowflake:*")
+    if keys_to_delete:
+        await redis_client.delete(*keys_to_delete)
+
+    from hetu.common.snowflake_id import RedisWorkerKeeper
+
+    worker_keeper = RedisWorkerKeeper(redis_client)
+
+    # 测试获得id
+    worker_id = await worker_keeper.get_worker_id()
+    assert worker_id == 0
+
+    # 再次获得应该id一样
+    worker_id_again = await worker_keeper.get_worker_id()
+    assert worker_id_again == worker_id
+
+    # 模拟另一个机器
+    worker_keeper.node_id += 1
+    worker_id_2 = await worker_keeper.get_worker_id()
+    assert worker_id_2 == 1
+
+    # 再次获得应该id一样
+    worker_id_again = await worker_keeper.get_worker_id()
+    assert worker_id_again == worker_id_2
+
+    # 测试续约
+    # 手动快过期
+    expire = await redis_client.expire(
+        f"{worker_keeper.worker_id_key}:{worker_id_2}", 20
+    )
+    assert expire <= 20
+    # 续约
+    await worker_keeper.keep_alive(123)
+    last_ts = await worker_keeper.get_last_timestamp()
+    assert last_ts == 123 + 10000
+    expire = await redis_client.ttl(f"{worker_keeper.worker_id_key}:{worker_id_2}")
+    assert expire > 86400 - 1

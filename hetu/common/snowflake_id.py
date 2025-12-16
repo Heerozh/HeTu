@@ -8,8 +8,15 @@
 import asyncio
 import logging
 from time import time
+from typing import TYPE_CHECKING
+import uuid
+
+import redis.asyncio
 
 from hetu.common.singleton import Singleton
+
+if TYPE_CHECKING:
+    import redis
 
 logger = logging.getLogger("HeTu.root")
 
@@ -37,8 +44,18 @@ class SnowflakeID(metaclass=Singleton):
     标准的雪花算法 (Snowflake) 实现，针对 Python 异步环境优化。
 
     结构 (64位):
-    0 - 0000000000 0000000000 0000000000 0000000000 0 - 00000 - 00000 - 000000000000
-    1位标识 | 41位时间戳 (毫秒) | 0位数据中心ID | 10位Worker ID | 12位序列号
+    1位符号 | 41位时间戳 (毫秒) | 0位数据中心ID | 10位Worker ID | 12位序列号
+
+    雪花ID必须保证服务器ntp同步准确，不会发生10秒以上的时钟回拨。
+    类会记录最后的时间，如果发生回拨，会sleep等待，时间过长会卡死服务器。
+
+    重启回拨问题
+    ---------
+    重启时如果服务器有时间回拨会导致ID重复。
+    - 为尽可能减少这个情况，需要持久化最后的时间戳(精度<=n秒，重启不可能n秒内完成)，来防止此情况。
+    - 使用方要尽可能保证worker id不变，不然使用了别的机器的id，而重启后机器间有时间差异也会导致ID重复。
+
+    以上2点已通过WorkerKeeper类实现。
     """
 
     def __init__(self):
@@ -47,16 +64,19 @@ class SnowflakeID(metaclass=Singleton):
         self.sequence = 0
         self.last_timestamp = -1
 
-    def init(self, worker_id: int):
+    def init(self, worker_id: int, last_timestamp: int = int(time() * 1000) + 10000):
         """
         初始化雪花生成器。
-        此方法必须保证服务器ntp同步准确，不会发生10秒以上的时钟回拨。
-        如果有长时间的时钟回拨，会导致服务器卡死，此时重启服务器又会导致ID重复。
+
+        worker_id必须唯一，请在数据库保存自己的worker_id。
 
         Parameters
         ----------
         worker_id: int
             工作ID (0-1023)
+        last_timestamp: int
+            上次生成ID的时间戳 (毫秒)，用于防止重启时时间发生回拨造成的id重复.
+            如果持久化的时间戳精度为10秒，建议传入时加上10000。
         """
         if worker_id > MAX_WORKER_ID or worker_id < 0:
             raise ValueError(
@@ -66,7 +86,7 @@ class SnowflakeID(metaclass=Singleton):
         self.worker_id = worker_id
 
         self.sequence = 0
-        self.last_timestamp = -1
+        self.last_timestamp = last_timestamp
 
     async def next_id(self) -> int:
         """
@@ -113,3 +133,106 @@ class SnowflakeID(metaclass=Singleton):
 
             return new_id
         raise RuntimeError("disable return none warning")
+
+
+class WorkerKeeper:
+    def __init__(self):
+        pass
+
+    async def get_worker_id(self) -> int:
+        raise NotImplementedError
+
+    async def get_last_timestamp(self) -> int:
+        raise NotImplementedError
+
+    async def keep_alive(self, last_timestamp: int):
+        raise NotImplementedError
+
+
+class RedisWorkerKeeper(WorkerKeeper):
+    """
+    基于 Redis 的 Worker ID 管理器。
+
+    通过
+        SET snowflake:worker:{worker_id} {uuid.getnode()} NX EX 86400
+    成功：拿到了 WorkerID = {worker_id}
+    失败：说明 ID 正在被别的机器占用，如果node id不符，循环尝试 ID {worker_id + 1}。
+         直到1024次失败报错。
+
+    后台设置个5秒的Task持续续约此key
+    """
+
+    def __init__(self, redis_client: redis.asyncio.Redis | redis.asyncio.RedisCluster):
+        """
+        初始化 RedisWorkerKeeper。
+
+        Parameters
+        ----------
+        redis_client: Any
+            已连接的 Redis 客户端实例。
+        """
+        super().__init__()
+        self.redis_client = redis_client
+        self.worker_id_key = "snowflake:worker"
+        self.last_timestamp_key = "snowflake:last_timestamp"
+        self.worker_id = -1
+        self.node_id = uuid.getnode()
+
+    async def get_worker_id(self) -> int:
+        """
+        从Redis中获取一个可用的 Worker ID。
+        """
+        for worker_id in range(0, MAX_WORKER_ID + 1):
+            key = f"{self.worker_id_key}:{worker_id}"
+            # 尝试设置键，NX 表示仅当键不存在时设置，EX 86400 表示键过期时间为1天
+            result = await self.redis_client.set(key, self.node_id, nx=True, ex=86400)
+            if result:
+                logger.info(f"[❄️ID] 成功获取 Worker ID: {worker_id}")
+                self.worker_id = worker_id
+                return worker_id
+            else:
+                # 判断node_id是否相同，相同则说明是重启，直接使用
+                existing_node_id = await self.redis_client.get(key)
+                if (
+                    existing_node_id is not None
+                    and int(existing_node_id) == self.node_id
+                ):
+                    logger.info(
+                        f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} (node_id 相同)"
+                    )
+                    self.worker_id = worker_id
+                    return worker_id
+        raise SystemExit("无法获取可用的 Worker ID，所有 ID 均被占用。")
+
+    async def keep_alive(self, last_timestamp: int):
+        """
+        续租 Worker ID 的有效期，
+        """
+        worker_id = self.worker_id
+        key = f"{self.worker_id_key}:{worker_id}"
+        # 刷新键的过期时间
+        resp = await self.redis_client.expire(key, 86400)
+        if resp != 1:
+            logger.error(
+                f"[❄️ID] 续约 Worker ID {worker_id} 失败，可能已被其他实例占用。"
+            )
+            # 关闭Worker todo 需要测试是否有效
+            raise SystemExit("Worker ID 续约失败，不该出现的错误，系统退出。")
+        # 记录last_timestamp到redis，防止重启回拨
+        key = f"{self.last_timestamp_key}:{self.node_id}"
+        await self.redis_client.set(key, last_timestamp, ex=86400)
+
+    async def get_last_timestamp(self) -> int:
+        """
+        从 Redis 中获取上次生成 ID 的时间戳。
+        """
+        key = f"{self.last_timestamp_key}:{self.node_id}"
+        last_timestamp = await self.redis_client.get(key)
+        # 返回当前时间加10秒，防止重启回拨
+        if last_timestamp is not None:
+            return int(last_timestamp) + 10000
+        else:
+            return int(time() * 1000) + 10000
+
+
+# 后期如果需要其他数据库的实现，再放到新的文件中
