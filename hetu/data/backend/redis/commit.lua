@@ -61,6 +61,11 @@
 --   最后删除hash key。
 -- ```
 
+local table_concat = table.concat
+local redis = redis
+local ipairs = ipairs
+local pairs = pairs
+
 -- ============================================================================
 -- Redis Lua ORM Transaction Script
 -- ============================================================================
@@ -96,9 +101,13 @@ local function get_table_ref(key)
     return i, t, c
 end
 
+local function row_key(table_prefix, row_uuid)
+    return table_prefix .. ":id:" .. row_uuid
+end
+
 -- 生成索引的 Key
-local function get_index_key(table_name, field)
-    return table_name .. ":index:" .. field
+local function index_key(table_prefix, field_name)
+    return table_prefix .. ":index:" .. field_name
 end
 
 -- 判断是否为数字
@@ -119,35 +128,25 @@ end
 
 -- 检查 Unique 约束
 -- 返回 true 表示冲突(失败), false 表示通过
-local function check_unique_constraint(table_name, field, val, current_uid)
-    local index_key = get_index_key(table_name, field)
+local function check_unique_constraint(table_prefix, field, new_val)
+    local key = index_key(table_prefix, field)
 
-    if is_number(val) then
+    if is_number(new_val) then
         -- 数字类型 Unique 检查: Score = val
         -- 检查 range [val, val] 是否存在元素，且元素不等于 current_uid
-        local res = redis.call('ZRANGEBYSCORE', index_key, val, val)
+        local res = redis.call('zrange', key, new_val, new_val, 'BYSCORE', 'LIMIT', 0, 1)
         if #res > 0 then
-            for _, existing_uid in ipairs(res) do
-                if existing_uid ~= current_uid then
-                    return true
-                end -- 冲突
-            end
+            return true
         end
     else
         -- 字符串类型 Unique 检查: Member prefix = "val:"
-        -- 使用 ZRANGEBYLEX [val: [val:\xff
-        local search_start = "[" .. tostring(val) .. ":"
-        local search_end = "[" .. tostring(val) .. ":\255"
-        local res = redis.call('ZRANGEBYLEX', index_key, search_start, search_end)
+        -- 使用 ZRANGE BYLEX [val: [val:\xff
+        local search_start = "[" .. tostring(new_val) .. ":"
+        local search_end = "[" .. tostring(new_val) .. ":\255"
+        local res = redis.call('zrange', key, search_start, search_end, 'BYLEX', 'LIMIT', 0, 1)
 
         if #res > 0 then
-            for _, member in ipairs(res) do
-                -- member 格式为 "val:uid"，需要提取 uid
-                local _, existing_uid = string.match(member, "^(.-):(%d+)$")
-                if existing_uid ~= current_uid then
-                    return true
-                end -- 冲突
-            end
+            return true
         end
     end
     return false
@@ -178,13 +177,13 @@ end
 
 -- 1.1 Check Insert
 if payload["insert"] then
-    for table_ref, rows in pairs(payload["insert"]) do
+    for table_prefix, rows in pairs(payload["insert"]) do
         -- 确保 Context 结构存在
-        if not context[table_ref] then
-            context[table_ref] = {}
+        if not context[table_prefix] then
+            context[table_prefix] = {}
         end
         -- 解析 table_ref
-        local instance_name, table_name, cluster_id = get_table_ref(table_ref)
+        local instance_name, table_name, cluster_id = get_table_ref(table_prefix)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
@@ -193,21 +192,20 @@ if payload["insert"] then
         -- 开始执行insert
         for _, row in ipairs(rows) do
             local uid = row.id
+            local key = row_key(table_prefix, uid)
 
             -- 检查 1: Key 是否已存在
             if redis.call('EXISTS', key) == 1 then
-                return { err = "Duplicate key entry: " .. key }
+                return { err = "RACE: Try insert but key exists: " .. key }
             end
 
             -- 检查 2: Unique 约束
-            for field, val in pairs(fields) do
-                if table_schema.unique and table_schema.unique[field] then
-                    if check_unique_constraint(table_name, field, val, uid) then
-                        return {
-                            err = "Unique constraint violation: " ..
-                                table_name .. "." .. field .. "=" .. tostring(val)
-                        }
-                    end
+            for field, _ in pairs(table_schema.unique) do
+                if check_unique_constraint(table_prefix, field, row[field]) then
+                    return {
+                        err = "UNIQUE: constraint violation: " ..
+                                table_name .. "." .. field .. "=" .. tostring(row[field])
+                    }
                 end
             end
         end
@@ -261,7 +259,7 @@ if payload["update"] then
                         if check_unique_constraint(table_name, field, new_val, uid) then
                             return {
                                 err = "Unique constraint violation: " ..
-                                    table_name .. "." .. field .. "=" .. tostring(new_val)
+                                        table_name .. "." .. field .. "=" .. tostring(new_val)
                             }
                         end
                     end
