@@ -10,20 +10,25 @@ import pytest
 
 from hetu.data import define_component, property_field, BaseComponent
 
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
+
 
 def test_normal_define(new_component_env):
     @define_component(namespace="pytest")
-    class GalaxyPosition(BaseComponent):
+    class MyPosition(BaseComponent):
         x: int = property_field(0, True)
         y: float = property_field(0, False)
         aaa: np.int8 = property_field(0, False)
 
     # 测试是否删除了定义的属性
     with pytest.raises(AttributeError):
-        print(GalaxyPosition.x)
+        print(MyPosition.x)
 
     # 测试属性是否正确放入了_properties
-    assert GalaxyPosition.properties_ == [
+    assert MyPosition.properties_ == [
+        ("_version", property_field(0, False, False, np.dtype(np.int32).str)),
         ("aaa", property_field(0, False, False, np.dtype(np.int8).str)),
         ("id", property_field(0, True, True, np.dtype(np.int64).str)),
         ("x", property_field(0, True, True, np.dtype(int).str)),
@@ -34,7 +39,7 @@ def test_normal_define(new_component_env):
     with pytest.raises(AssertionError, match="Property"):
 
         @define_component(namespace="pytest")
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             x: int = 0
             y: float = 0
 
@@ -42,7 +47,7 @@ def test_normal_define(new_component_env):
     with pytest.raises(AssertionError, match="BaseComponent"):
 
         @define_component(namespace="pytest")
-        class GalaxyPosition:
+        class MyPosition:
             x: int = property_field(0, True)
             y: float = property_field(0, False)
 
@@ -50,13 +55,13 @@ def test_normal_define(new_component_env):
     with pytest.raises(AssertionError):
 
         @define_component(namespace="pytest")
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             x: int = property_field(0, True)
             y: float = property_field(0, False)
 
     # 强制重定义
     @define_component(namespace="pytest", force=True)
-    class GalaxyPosition(BaseComponent):
+    class MyPosition(BaseComponent):
         x: int = property_field(0, True)
         y: float = property_field(0, False)
 
@@ -64,38 +69,38 @@ def test_normal_define(new_component_env):
     with pytest.raises(AssertionError, match="id"):
 
         @define_component(namespace="pytest", force=True)
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             id: int = property_field(0, True)
 
     # 测试默认值和dtype冲突
     with pytest.raises(AssertionError, match="default值"):
 
         @define_component(namespace="pytest", force=True)
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             name: np.int8 = property_field("0")
 
     with pytest.raises(AssertionError, match="default值"):
 
         @define_component(namespace="pytest", force=True)
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             name: "U8" = property_field(99999999999)
 
     with pytest.raises(AssertionError, match="None"):
 
         @define_component(namespace="pytest", force=True)
-        class GalaxyPosition(BaseComponent):
+        class MyPosition(BaseComponent):
             name: float = property_field(None)
 
     # 测试默认值
     @define_component(namespace="pytest", force=True)
-    class GalaxyPosition(BaseComponent):
+    class MyPosition(BaseComponent):
         x: int = property_field(88, True)
         y: float = property_field(44, False)
 
-    row = GalaxyPosition.new_row()
+    row = MyPosition.new_row()
     assert row.x == 88
 
-    row = GalaxyPosition.new_rows(2)
+    row = MyPosition.new_rows(2)
     assert row.x[1] == 88
 
     # 测试布尔值强制更换
@@ -107,7 +112,7 @@ def test_normal_define(new_component_env):
 
     np.testing.assert_array_equal(
         np.array(list(TestBool.dtypes.fields.values()))[:, 0],
-        [np.int8, np.int8, np.int8, np.int64],
+        [np.int32, np.int8, np.int8, np.int8, np.int64],
     )
 
     # 测试字符串byte类型
