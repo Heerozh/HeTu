@@ -178,7 +178,7 @@ def test_mark_deleted(mod_item_model):
     # 验证脏数据列表
     dirty = id_map.get_dirty_rows()
     assert item_ref in dirty["delete"]
-    assert 300 in dirty["delete"][item_ref]
+    assert 300 in dirty["delete"][item_ref].id
 
 
 def test_exceptions(mod_item_model):
