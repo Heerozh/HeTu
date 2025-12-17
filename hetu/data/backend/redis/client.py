@@ -375,10 +375,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         row_ids = await aio.zrange(name=idx_key, **cmds)
         if is_str_index:
-            row_ids = [vk.split(":")[-1] for vk in row_ids]
+            row_ids = [
+                int(vk.decode("utf-8", "ignore").split(":")[-1]) for vk in row_ids
+            ]
+        else:
+            row_ids = list(map(int, row_ids))
 
         if row_format == RowFormat.ID_LIST:
-            return list(map(int, row_ids))
+            return row_ids
 
         key_prefix = self.table_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []

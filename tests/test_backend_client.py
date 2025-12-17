@@ -17,6 +17,7 @@ SnowflakeID().init(1, 0)
 async def test_insert(
     mod_item_model, mod_rls_test_model, mod_auto_backend, env_builder
 ):
+    """测试client的commit(insert)/get"""
     # 建立环境，定义用哪些表
     env_builder(mod_item_model, mod_rls_test_model)
 
@@ -52,8 +53,48 @@ async def test_insert(
     assert row_get == row2
 
 
-def test_update_delete(
-    mod_item_model, mod_rls_test_model, mod_auto_backend, new_clusters_env
+async def test_update_delete(
+    mod_item_model, mod_rls_test_model, mod_auto_backend, env_builder
 ):
-    pass
+    """测试client的commit(update/delete) get/range"""
+    # 建立环境，定义用哪些表
+    env_builder(mod_item_model, mod_rls_test_model)
+
+    # 启动backend
+    backend: Backend = mod_auto_backend()
+    client = backend.master
+
+    from hetu.data.backend.idmap import IdentityMap
+    from hetu.data.backend.table import TableReference
+
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
+    idmap = IdentityMap()
+
+    # 添加多条数据
+    for i in range(10):
+        row1 = mod_item_model.new_row()
+        row1.owner = i
+        row1.time = i + 10
+        row1.name = f"Item{i + 100}"
+        idmap.add_insert(item_ref, row1)
+
+        row2 = mod_rls_test_model.new_row()
+        row2.owner = i
+        idmap.add_insert(rls_ref, row2)
+
+    await client.commit(idmap)
+
+    # 测试range查询
+    rows = await client.range(item_ref, "time", 12, 14)
+
+    # 测试update查询到的数据
+    row1.name = "123"
+    idmap.update(item_ref, row1)
+
+    # 测试update后再次查询是否更新了
+
+    # 测试删除
+
+    # 测试删除后再次查询
     # 测试client的commit(insert/update/delete)数据，以及get, range查询
