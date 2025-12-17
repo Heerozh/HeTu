@@ -116,6 +116,8 @@ def test_update_clean_row(mod_item_model):
     assert item_ref in dirty["update"]
     assert len(dirty["update"][item_ref]) == 1
     assert dirty["update"][item_ref][0]["name"] == "Updated"
+    # 只含有更新的字段
+    assert set(dirty["update"][item_ref][0].keys()) == {"id", "name", "_version"}
 
     # 修改_version 字段报错
     row_update._version += 1
@@ -178,7 +180,7 @@ def test_mark_deleted(mod_item_model):
     # 验证脏数据列表
     dirty = id_map.get_dirty_rows()
     assert item_ref in dirty["delete"]
-    assert 300 in dirty["delete"][item_ref].id
+    assert 300 in [d["id"] for d in dirty["delete"][item_ref]]
 
 
 def test_exceptions(mod_item_model):

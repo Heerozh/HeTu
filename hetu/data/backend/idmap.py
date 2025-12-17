@@ -7,7 +7,7 @@
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, Any
 
 import numpy as np
 
@@ -37,6 +37,9 @@ class IdentityMap:
         # 每个Component类型对应一个缓存
         # {TableReference: np.recarray} - 存储行数据
         self._row_cache: dict[TableReference, np.recarray] = {}
+
+        # 储存查询到的行数据初始值，用于对比变更
+        self._row_clean: dict[TableReference, np.recarray] = {}
 
         # {TableReference: {row_id: RowState}} - 存储每行的状态
         self._row_states: dict[TableReference, dict[int, RowState]] = {}
@@ -78,9 +81,13 @@ class IdentityMap:
             self._row_cache[table_ref] = np.rec.array(
                 np.empty(0, dtype=table_ref.comp_cls.dtypes)
             )
+            self._row_clean[table_ref] = np.rec.array(
+                np.empty(0, dtype=table_ref.comp_cls.dtypes)
+            )
             self._row_states[table_ref] = {}
 
         cache = self._row_cache[table_ref]
+        clean_cache = self._row_clean[table_ref]
         states = self._row_states[table_ref]
 
         # 查找是否已存在该ID的行
@@ -97,6 +104,7 @@ class IdentityMap:
 
         # 添加新行
         self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
+        self._row_clean[table_ref] = np.rec.array(np.append(clean_cache, row))
         # 标记为CLEAN（除非之前已有其他状态）
         if row_id not in states:
             states[row_id] = RowState.CLEAN
@@ -216,19 +224,19 @@ class IdentityMap:
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
-    def get_dirty_rows(self) -> dict[str, dict[TableReference, np.ndarray]]:
+    def get_dirty_rows(self) -> dict[str, dict[TableReference, list[dict[str, Any]]]]:
         """
         返回所有脏对象的列表，按INSERT、UPDATE、DELETE状态分开。
 
         Returns
         -------
         {
-            'insert': {comp_cls: np.ndarray, ...},
-            'update': {comp_cls: np.ndarray, ...},
-            'delete': {comp_cls: np.ndarray, ...}  # 包含所有，但其实只需要id, _version字段
+            'insert': [{all_field: value}, ]
+            'update': [{changed_fields: value}, ]
+            'delete': [{id: xxx, _version: 0}, ]
         }
         """
-        result: dict[str, dict[TableReference, np.ndarray]] = {
+        result: dict[str, dict[TableReference, list[dict[str, Any]]]] = {
             "insert": {},
             "update": {},
             "delete": {},
@@ -236,6 +244,7 @@ class IdentityMap:
 
         for table_ref, states in self._row_states.items():
             cache = self._row_cache[table_ref]
+            comp_cls = table_ref.comp_cls
 
             # 收集各状态的行ID
             insert_ids = [
@@ -251,16 +260,33 @@ class IdentityMap:
             # 从缓存中获取对应的行数据
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
-                result["insert"][table_ref] = cache[mask]
+                result["insert"][table_ref] = [
+                    comp_cls.row_to_dict(row) for row in cache[mask]
+                ]
 
             if update_ids:
+                clean_cache = self._row_clean[table_ref]
                 mask = np.isin(cache["id"], update_ids)
-                result["update"][table_ref] = cache[mask]
+                # 只保存变更的数据
+                result["update"][table_ref] = []
+                for row in cache[mask]:
+                    clean_row = clean_cache[np.where(clean_cache["id"] == row.id)[0][0]]
+                    changed_fields = {}
+                    for field in row.dtype.names:
+                        if row[field] != clean_row[field]:
+                            changed_fields[field] = row[field].item()
+                    if changed_fields:
+                        changed_fields["id"] = row["id"].item()
+                        changed_fields["_version"] = row["_version"].item()
+                        result["update"][table_ref].append(changed_fields)
 
             if delete_ids:
                 # DELETE只需要ID列表
                 mask = np.isin(cache["id"], delete_ids)
-                result["delete"][table_ref] = cache[mask]
+                result["delete"][table_ref] = [
+                    {"id": row["id"].item(), "_version": row["_version"].item()}
+                    for row in cache[mask]
+                ]
 
         return result
 
