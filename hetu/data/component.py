@@ -33,6 +33,7 @@ class Property:
     unique: bool = False  # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool | None = None  # 是否是排序索引
     dtype: str | type | None = None  # 数据类型，最好用np的明确定义
+    # todo nullable: bool = False  # 是否允许NULL值，目前不支持
 
 
 # 辅助函数，过滤类型检查器报错
@@ -417,13 +418,16 @@ def define_component(
 
         assert properties, f"{cls.__name__}至少要有1个Property成员"
 
-        # 添加id主键，如果冲突，报错
+        # 添加保留键，如果冲突，报错
         assert "id" not in properties, (
             f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
         )
-        # 必备索引，调用new_row时会用雪花算法生成uuid，该属性无法修改(idmap管理)。加unique索引防止意外
+        assert "_version" not in properties, (
+            f"{cls.__name__}._version是保留的内置主键，外部不能重定义"
+        )
+        # 必备索引，调用new_row时会用雪花算法生成uuid，该属性无法修改。加unique索引防止意外
         properties["id"] = Property(0, True, True, np.int64)
-        # 增加version属性，该属性只读（idmap管理, 只能lua修改）
+        # 增加version属性，该属性只读（只能lua修改）
         properties["_version"] = Property(0, False, False, np.int32)
 
         # 检查class必须继承于BaseComponent

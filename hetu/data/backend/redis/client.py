@@ -401,6 +401,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         new_ids: list[int]
             返回新插入行的ID列表，顺序和插入顺序一致。
         """
+        # todo 在事务的insert方法需要判断：unique，version为0
+        #      update要判断 有列修改 已修改列的unique id不允许修改
+
         assert not self.is_servant, "从节点不允许提交事务"
 
         dirty_rows = idmap.get_dirty_rows()

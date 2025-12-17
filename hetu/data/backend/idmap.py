@@ -172,8 +172,6 @@ class IdentityMap:
             f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
-        row_id = row["id"]
-
         if table_ref not in self._row_cache:
             raise ValueError(f"Component {table_ref} not in cache")
 
@@ -181,6 +179,7 @@ class IdentityMap:
         states = self._row_states[table_ref]
 
         # 查找并更新行
+        row_id = row["id"]
         idx = np.where(cache["id"] == row_id)[0]
         if len(idx) == 0:
             raise ValueError(f"Row with id {row_id} not found in cache")
