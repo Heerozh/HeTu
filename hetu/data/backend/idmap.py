@@ -224,9 +224,10 @@ class IdentityMap:
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
-    def get_dirty_rows(self) -> dict[str, dict[TableReference, list[dict[str, Any]]]]:
+    def get_dirty_rows(self) -> dict[str, dict[TableReference, list[dict[str, str]]]]:
         """
-        返回所有脏对象的列表，按INSERT、UPDATE、DELETE状态分开。
+        返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
+        既然是提交给数据库用，所以返回的数据都是str类型
 
         Returns
         -------
@@ -236,7 +237,7 @@ class IdentityMap:
             'delete': [{id: xxx, _version: 0}, ]
         }
         """
-        result: dict[str, dict[TableReference, list[dict[str, Any]]]] = {
+        result: dict[str, dict[TableReference, list[dict[str, str]]]] = {
             "insert": {},
             "update": {},
             "delete": {},
@@ -261,7 +262,8 @@ class IdentityMap:
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
                 result["insert"][table_ref] = [
-                    comp_cls.row_to_dict(row) for row in cache[mask]
+                    dict(zip(row.dtype.names, map(str, row.item())))
+                    for row in cache[mask]
                 ]
 
             if update_ids:
@@ -274,17 +276,17 @@ class IdentityMap:
                     changed_fields = {}
                     for field in row.dtype.names:
                         if row[field] != clean_row[field]:
-                            changed_fields[field] = row[field].item()
+                            changed_fields[field] = str(row[field])
                     if changed_fields:
-                        changed_fields["id"] = row["id"].item()
-                        changed_fields["_version"] = row["_version"].item()
+                        changed_fields["id"] = str(row["id"])
+                        changed_fields["_version"] = str(row["_version"])
                         result["update"][table_ref].append(changed_fields)
 
             if delete_ids:
                 # DELETE只需要ID列表
                 mask = np.isin(cache["id"], delete_ids)
                 result["delete"][table_ref] = [
-                    {"id": row["id"].item(), "_version": row["_version"].item()}
+                    {"id": str(row["id"]), "_version": str(row["_version"])}
                     for row in cache[mask]
                 ]
 

@@ -16,7 +16,7 @@ import numpy as np
 import redis
 
 from ....common.snowflake_id import RedisWorkerKeeper
-from ..base import BackendClient, RowFormat
+from ..base import BackendClient, RowFormat, RaceCondition, UniqueViolation
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -423,7 +423,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         payload_json = msgspec.msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
-        return await self.lua_commit(keys, payload_json)
+        resp = (await self.lua_commit(keys, [payload_json])).decode("utf-8")
+        if resp != "committed":
+            if resp.startswith("RACE"):
+                raise RaceCondition(resp)
+            elif resp.startswith("UNIQUE"):
+                raise UniqueViolation(resp)
+            else:
+                raise RuntimeError(f"未知的提交错误：{resp}")
 
     # 还需要
     # create table
