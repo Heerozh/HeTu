@@ -14,7 +14,7 @@
 --
 -- 首先使用cmsgpack来获取提交的payload。
 -- payload是dict包含
---{
+-- {
 --    "insert": {
 --        table_name1 = {
 --            key_name1: {属性1:value,...} , key_name2: {}, ...
@@ -30,7 +30,7 @@
 --            key_name1: {version:1} , key_name2: {version:2}, ...
 --        }, ...
 --    },
---}
+-- }
 --
 -- 由于lua脚本失败不会回滚，所以我们要先做检查。
 -- 对于3种操作，检查逻辑如下：
@@ -60,7 +60,6 @@
 --   循环所有标记为index的属性，用zrem旧值从zset删除索引
 --   最后删除hash key。
 -- ```
-
 local table_concat = table.concat
 local string_match = string.match
 local type = type
@@ -86,7 +85,7 @@ local SCHEMA = PLACEHOLDER_SCHEMA
 --     indexes = { ["email"] = true, ["age"] = true, ["phone"] = true }
 --     -- 注意: unique 字段也必须在 indexes 里列出
 --   }
---}
+-- }
 
 -- 获取 payload
 local payload = cmsgpack.unpack(ARGV[1])
@@ -124,7 +123,7 @@ end
 -- Number: Score=val, Member="uid"
 local function get_index_member_score(val, uid)
     if is_number(val) then
-        return uid, val                       -- member, score
+        return uid, val -- member, score
     else
         return tostring(val) .. ":" .. uid, 0 -- member, score
     end
@@ -196,15 +195,17 @@ if payload["insert"] then
 
             -- 检查 1: Key 是否已存在
             if redis.call('EXISTS', key) == 1 then
-                return { err = "RACE: Try insert but key exists: " .. key }
+                return {
+                    err = "RACE: Try insert but key exists: " .. key
+                }
             end
 
             -- 检查 2: Unique 约束
             for field, _ in pairs(table_schema.unique) do
                 if check_unique_constraint(table_prefix, field, row[field]) then
                     return {
-                        err = "UNIQUE: Constraint violation: " ..
-                                table_name .. "." .. field .. "=" .. tostring(row[field])
+                        err = "UNIQUE: Constraint violation: " .. table_name .. "." .. field .. "=" ..
+                                tostring(row[field])
                     }
                 end
             end
@@ -234,7 +235,9 @@ if payload["update"] then
             -- 获取旧数据 (Snapshot)
             local old_row_raw = redis.call('HGETALL', key)
             if #old_row_raw == 0 then
-                return { err = "RACE: Try update key but not exists: " .. key }
+                return {
+                    err = "RACE: Try update key but not exists: " .. key
+                }
             end
 
             -- 将 HGETALL 的 array 转换为 map
@@ -251,7 +254,10 @@ if payload["update"] then
             local db_ver = tonumber(old_row["_version"] or "0")
             local payload_ver = tonumber(row["_version"])
             if db_ver ~= payload_ver then
-                return { err = "RACE: Optimistic lock failure(update): " .. key .. " DB=" .. db_ver .. " Req=" .. tostring(payload_ver) }
+                return {
+                    err = "RACE: Optimistic lock failure(update): " .. key .. " DB=" .. db_ver .. " Req=" ..
+                            tostring(payload_ver)
+                }
             end
 
             -- 检查 2: 获取改变的字段，和Unique 约束检查 (仅检查被修改的字段)
@@ -263,8 +269,8 @@ if payload["update"] then
                     if table_schema.unique and table_schema.unique[field] then
                         if check_unique_constraint(table_name, field, new_val) then
                             return {
-                                err = "UNIQUE: Constraint violation: " ..
-                                        table_name .. "." .. field .. "=" .. tostring(new_val)
+                                err = "UNIQUE: Constraint violation: " .. table_name .. "." .. field .. "=" ..
+                                        tostring(new_val)
                             }
                         end
                     end
@@ -289,7 +295,9 @@ if payload["delete"] then
             local old_row_raw = redis.call('HGETALL', key)
             if #old_row_raw == 0 then
                 -- 如果已经不存在，说明冲突
-                return { err = "RACE: Try delete key but not exists: " .. key }
+                return {
+                    err = "RACE: Try delete key but not exists: " .. key
+                }
             end
 
             local old_row = {}
@@ -303,7 +311,10 @@ if payload["delete"] then
             local payload_ver = tonumber(row["_version"])
 
             if db_ver ~= payload_ver then
-                return { err = "RACE: Optimistic lock failure (delete): " .. key .. " DB=" .. db_ver .. " Req=" .. tostring(payload_ver) }
+                return {
+                    err = "RACE: Optimistic lock failure (delete): " .. key .. " DB=" .. db_ver .. " Req=" ..
+                            tostring(payload_ver)
+                }
             end
         end
     end
@@ -316,7 +327,10 @@ end
 -- 2.1 Execute Insert
 if payload["insert"] then
     for table_name, rows in pairs(payload["insert"]) do
-        local table_schema = SCHEMA[table_name] or { unique = {}, indexes = {} }
+        local table_schema = SCHEMA[table_name] or {
+            unique = {},
+            indexes = {}
+        }
 
         for key, fields in pairs(rows) do
             local _, uid = get_key_parts(key)
@@ -347,7 +361,10 @@ end
 -- 2.2 Execute Update
 if payload["update"] then
     for table_name, rows in pairs(payload["update"]) do
-        local table_schema = SCHEMA[table_name] or { unique = {}, indexes = {} }
+        local table_schema = SCHEMA[table_name] or {
+            unique = {},
+            indexes = {}
+        }
 
         for key, new_fields in pairs(rows) do
             local _, uid = get_key_parts(key)
@@ -406,7 +423,10 @@ end
 -- 2.3 Execute Delete
 if payload["delete"] then
     for table_name, rows in pairs(payload["delete"]) do
-        local table_schema = SCHEMA[table_name] or { unique = {}, indexes = {} }
+        local table_schema = SCHEMA[table_name] or {
+            unique = {},
+            indexes = {}
+        }
 
         for key, _ in pairs(rows) do
             local _, uid = get_key_parts(key)
@@ -431,4 +451,6 @@ if payload["delete"] then
 end
 
 -- 全部成功
-return { ok = "committed" }
+return {
+    ok = "committed"
+}
