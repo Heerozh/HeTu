@@ -142,7 +142,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         ] = []
         for url in self.urls:
             if self.clustering:
-                # todo: 测试byte数据是否能正确的储存和读取
                 self._ios.append(redis.cluster.RedisCluster.from_url(url))
                 self._async_ios.append(redis.asyncio.cluster.RedisCluster.from_url(url))
             else:
@@ -274,17 +273,21 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     @staticmethod
     def _row_decode(
-        comp_cls: type[BaseComponent], row: dict[str, str], fmt: RowFormat
+        comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         """将redis获取的行byte数据解码为指定格式"""
+        row_decoded = {
+            k.decode("utf-8", "ignore"): v.decode("utf-8", "ignore")
+            for k, v in row.items()
+        }
         match fmt:
             case RowFormat.RAW:
                 # todo encode byte
-                return row
+                return row_decoded
             case RowFormat.STRUCT:
-                return comp_cls.dict_to_row(row)
+                return comp_cls.dict_to_row(row_decoded)
             case RowFormat.TYPED_DICT:
-                struct_row = comp_cls.dict_to_row(row)
+                struct_row = comp_cls.dict_to_row(row_decoded)
                 return comp_cls.row_to_dict(struct_row)
             case _:
                 raise ValueError(f"不可用的行格式: {fmt}")
@@ -296,7 +299,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
         if row := await self.aio.hgetall(key):
-            # todo 此时的row数据都是byte
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None

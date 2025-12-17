@@ -7,7 +7,7 @@
 
 import pytest
 
-from hetu.data.backend import RawComponentTable
+from hetu.data.backend_old import RawComponentTable
 
 
 @pytest.fixture(scope="module")
@@ -25,7 +25,7 @@ async def mod_item_model(mod_new_component_env):
         qty: np.int16 = property_field(1, unique=False, index=False)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
-        name: "U8" = property_field("", unique=True, index=False)
+        name: "U8" = property_field("", unique=True, index=True)
         used: bool = property_field(False, unique=False, index=True)
 
     return Item
@@ -128,3 +128,24 @@ async def filled_rls_test_table(mod_rls_test_model, mod_rls_test_table):
     yield mod_rls_test_table
 
     mod_rls_test_table.flush(force=True)
+
+
+@pytest.fixture
+def env_builder():
+    """
+    清理System定义，保证每个测试用例使用干净的System定义环境
+    """
+    from hetu.system import define_system, SystemClusters
+
+    def _build(*args):
+        SystemClusters()._clear()
+
+        # 需要定义System以确保Component被注册，不然Component schema不会加入到lua脚本中
+        @define_system(namespace="pytest", components=args)
+        async def ref_components(ctx):
+            pass
+
+        # 初始化instance & clusters
+        SystemClusters().build_clusters("pytest")
+
+    return _build

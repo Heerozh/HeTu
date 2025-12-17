@@ -15,16 +15,10 @@ SnowflakeID().init(1, 0)
 
 
 async def test_insert(
-    mod_item_model, mod_rls_test_model, mod_auto_backend, new_clusters_env
+    mod_item_model, mod_rls_test_model, mod_auto_backend, env_builder
 ):
-    # 需要先定义System以确保Component被注册
-    @define_system(
-        namespace="TestServer", components=(mod_item_model, mod_rls_test_model)
-    )
-    async def ref_components(ctx):
-        pass
-
-    SystemClusters().build_clusters("TestServer")
+    # 建立环境，定义用哪些表
+    env_builder(mod_item_model, mod_rls_test_model)
 
     # 启动backend
     backend: Backend = mod_auto_backend()
@@ -33,8 +27,8 @@ async def test_insert(
     from hetu.data.backend.idmap import IdentityMap
     from hetu.data.backend.table import TableReference
 
-    item_ref = TableReference(mod_item_model, "TestServer", 1)
-    rls_ref = TableReference(mod_rls_test_model, "TestServer", 1)
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
     idmap = IdentityMap()
 
     # 测试client的commit(insert)数据，以及get
@@ -50,6 +44,16 @@ async def test_insert(
 
     # 测试insert的是否有效
     row_get = await client.get(item_ref, row1.id)
+    row1._version += 1
     assert row_get == row1
 
+    row_get = await client.get(rls_ref, row2.id)
+    row2._version += 1
+    assert row_get == row2
+
+
+def test_update_delete(
+    mod_item_model, mod_rls_test_model, mod_auto_backend, new_clusters_env
+):
+    pass
     # 测试client的commit(insert/update/delete)数据，以及get, range查询
