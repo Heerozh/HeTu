@@ -61,7 +61,7 @@ class SystemClusters(metaclass=Singleton):
         # 所有system定义表，按namespace分类
         self._system_map: dict[str, dict[str, SystemDefine]] = {}
         # 所有Component所属的cluster id表，只包含被system引用过的Component
-        self._component_map: dict[type[BaseComponent], int] = {}
+        self._component_map: dict[str, dict[type[BaseComponent], int]] = {}
         # 所有namespace下的clusters信息列表
         self._clusters: dict[str, list[SystemClusters.Cluster]] = {}
         # @define_system(namespace="global") 定义的所有System
@@ -87,12 +87,14 @@ class SystemClusters(metaclass=Singleton):
             name: self.get_system(cluster.namespace, name) for name in cluster.systems
         }  # type: ignore
 
-    def get_component_cluster_id(self, comp: type[BaseComponent]) -> int | None:
-        return self._component_map.get(comp, None)
+    def get_component_cluster_id(
+        self, namespace: str, comp: type[BaseComponent]
+    ) -> int | None:
+        return self.get_components(namespace).get(comp, None)
 
-    def get_components(self) -> dict[type[BaseComponent], int]:
+    def get_components(self, namespace: str) -> dict[type[BaseComponent], int]:
         """返回所有被System引用过的Component及其所属簇id"""
-        return self._component_map
+        return self._component_map.get(namespace, {})
 
     def get_clusters(self, namespace: str):
         return self._clusters.get(namespace, None)
@@ -210,25 +212,27 @@ class SystemClusters(metaclass=Singleton):
                 for sys_name in cluster.systems:
                     sys_map[sys_name].cluster_id = cluster.id
                 for comp in cluster.components:
-                    assert comp not in self._component_map
-                    # fixme: 不同的namespace，component应该是放在不同的簇中的吧？
-                    self._component_map[comp] = cluster.id
+                    if cluster.namespace not in self._component_map:
+                        self._component_map[cluster.namespace] = {}
+                    assert comp not in self._component_map[cluster.namespace]
+                    self._component_map[cluster.namespace][comp] = cluster.id
 
         self._main_system_map = self._system_map[main_namespace]
 
         # 检查是否有component被non_transactions引用，但没有任何正常方式引用了它，必须至少有一个标准引用
         # 加入这个限制的原因是，不被事务引用下，本方法就无法确定该Component应该储存在哪个Cluster中
         for comp in non_trx:
-            if comp not in self._component_map:
-                raise RuntimeError(
-                    f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
-                    f"Component {comp.__name__} 至少有一个正常引用。"
-                    + (
-                        "该Component是副本，每个副本也同样要保证至少有一个正常引用。"
-                        if ":" in comp.__name__
-                        else ""
+            for _, comp_map in self._component_map.items():
+                if comp not in comp_map:
+                    raise RuntimeError(
+                        f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
+                        f"Component {comp.__name__} 至少有一个正常引用。"
+                        + (
+                            "该Component是副本，每个副本也同样要保证至少有一个正常引用。"
+                            if ":" in comp.__name__
+                            else ""
+                        )
                     )
-                )
 
     def add(
         self,
