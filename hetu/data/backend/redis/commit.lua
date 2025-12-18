@@ -46,13 +46,13 @@ local function get_table_name(key)
     return string_sub(key, s + 1, e - 1)
 end
 
-local function row_key(table_prefix, row_uuid)
-    return table_prefix .. ":id:" .. row_uuid
+local function row_key(cluster_prefix, row_uuid)
+    return cluster_prefix .. ":id:" .. row_uuid
 end
 
 -- 生成索引的 Key
-local function index_key(table_prefix, field_name)
-    return table_prefix .. ":index:" .. field_name
+local function index_key(cluster_prefix, field_name)
+    return cluster_prefix .. ":index:" .. field_name
 end
 
 -- 生成 ZSet 的 Member 和 Score
@@ -69,8 +69,8 @@ end
 
 -- 检查 Unique 约束
 -- 返回 true 表示冲突(失败), false 表示通过
-local function check_unique_constraint(table_prefix, field, new_val, is_str)
-    local key = index_key(table_prefix, field)
+local function check_unique_constraint(cluster_prefix, field, new_val, is_str)
+    local key = index_key(cluster_prefix, field)
     assert(is_str ~= nil)
     if is_str == false then
         -- 数字类型 Unique 检查: Score = val
@@ -119,9 +119,9 @@ end
 -- 1.1 Check Insert
 local insert_rows = payload["insert"]
 if insert_rows then
-    for table_prefix, rows in pairs(insert_rows) do
+    for cluster_prefix, rows in pairs(insert_rows) do
         -- 解析 table_ref
-        local table_name = get_table_name(table_prefix)
+        local table_name = get_table_name(cluster_prefix)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
@@ -130,7 +130,7 @@ if insert_rows then
         -- 开始检查insert
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
+            local key = row_key(cluster_prefix, uid)
 
             -- 检查 payload 里的 version 必须是0
             local payload_ver = row["_version"]
@@ -146,7 +146,7 @@ if insert_rows then
             -- 检查 2: Unique 约束
             for field, _ in pairs(table_schema.unique) do
                 local is_str = table_schema.indexes[field]
-                if check_unique_constraint(table_prefix, field, row[field], is_str) then
+                if check_unique_constraint(cluster_prefix, field, row[field], is_str) then
                     return table_concat({
                         "UNIQUE: Constraint violation: ",
                         table_name, ".", field, "=", row[field]
@@ -160,13 +160,13 @@ end
 -- 1.2 Check Update
 local update_rows = payload["update"]
 if update_rows then
-    for table_prefix, rows in pairs(update_rows) do
+    for cluster_prefix, rows in pairs(update_rows) do
         -- 确保 Context 结构存在
-        if not context[table_prefix] then
-            context[table_prefix] = {}
+        if not context[cluster_prefix] then
+            context[cluster_prefix] = {}
         end
         -- 解析 table_ref
-        local table_name = get_table_name(table_prefix)
+        local table_name = get_table_name(cluster_prefix)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
@@ -175,7 +175,7 @@ if update_rows then
 
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
+            local key = row_key(cluster_prefix, uid)
 
             -- 获取旧数据 (Snapshot)
             local old_row_raw = redis_call('HGETALL', key)
@@ -222,7 +222,7 @@ if update_rows then
             end
 
             -- 保存到 context 供 Phase 2 使用
-            context[table_prefix][key] = old_row
+            context[cluster_prefix][key] = old_row
         end
     end
 end
@@ -230,14 +230,14 @@ end
 -- 1.3 Check Delete
 local delete_rows = payload["delete"]
 if delete_rows then
-    for table_prefix, rows in pairs(delete_rows) do
-        if not context[table_prefix] then
-            context[table_prefix] = {}
+    for cluster_prefix, rows in pairs(delete_rows) do
+        if not context[cluster_prefix] then
+            context[cluster_prefix] = {}
         end
 
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
+            local key = row_key(cluster_prefix, uid)
             -- 获取旧数据 (Snapshot) 以便后续删除索引
             local old_row_raw = redis_call('HGETALL', key)
             if #old_row_raw == 0 then
@@ -264,7 +264,7 @@ if delete_rows then
             end
 
             -- 保存到 context 供 Phase 2 使用
-            context[table_prefix][key] = old_row
+            context[cluster_prefix][key] = old_row
         end
     end
 end
@@ -275,13 +275,13 @@ end
 
 -- 2.1 Execute Insert
 if insert_rows then
-    for table_prefix, rows in pairs(insert_rows) do
-        local table_name = get_table_name(table_prefix)
+    for cluster_prefix, rows in pairs(insert_rows) do
+        local table_name = get_table_name(cluster_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
+            local key = row_key(cluster_prefix, uid)
 
             -- 设置 Version = 1
             row["_version"] = tonumber(row["_version"]) + 1
@@ -296,7 +296,7 @@ if insert_rows then
 
             -- 更新索引
             for field, is_str in pairs(table_schema.indexes) do
-                local idx_key = index_key(table_prefix, field)
+                local idx_key = index_key(cluster_prefix, field)
                 local member, score = get_index_member_score(is_str, row[field], uid)
                 redis_call('ZADD', idx_key, score, member)
             end
@@ -306,14 +306,14 @@ end
 
 -- 2.2 Execute Update
 if update_rows then
-    for table_prefix, rows in pairs(update_rows) do
-        local table_name = get_table_name(table_prefix)
+    for cluster_prefix, rows in pairs(update_rows) do
+        local table_name = get_table_name(cluster_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
-            local old_row = context[table_prefix][key] -- 从上下文获取旧值
+            local key = row_key(cluster_prefix, uid)
+            local old_row = context[cluster_prefix][key] -- 从上下文获取旧值
 
             -- 设置 Version += 1
             row["_version"] = tonumber(old_row["_version"]) + 1
@@ -356,14 +356,14 @@ end
 
 -- 2.3 Execute Delete
 if delete_rows then
-    for table_prefix, rows in pairs(delete_rows) do
-        local table_name = get_table_name(table_prefix)
+    for cluster_prefix, rows in pairs(delete_rows) do
+        local table_name = get_table_name(cluster_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
             local uid = row.id
-            local key = row_key(table_prefix, uid)
-            local old_row = context[table_prefix][key]
+            local key = row_key(cluster_prefix, uid)
+            local old_row = context[cluster_prefix][key]
 
             -- 删除索引
             for field, is_str in pairs(table_schema.indexes) do

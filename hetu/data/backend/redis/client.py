@@ -101,6 +101,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
     @staticmethod
     def table_prefix(table_ref: TableReference) -> str:
         """获取redis表名前缀"""
+        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}"
+
+    @staticmethod
+    def cluster_prefix(table_ref: TableReference) -> str:
+        """获取redis表名前缀"""
         return (
             f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
             f"{{CLU{table_ref.cluster_id}}}"
@@ -109,12 +114,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
     @classmethod
     def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
         """获取redis表行的key名"""
-        return f"{cls.table_prefix(table_ref)}:id:{str(row_id)}"
+        return f"{cls.cluster_prefix(table_ref)}:id:{str(row_id)}"
 
     @classmethod
     def index_key(cls, table_ref: TableReference, index_name: str) -> str:
         """获取redis表索引的key名"""
-        return f"{cls.table_prefix(table_ref)}:index:{index_name}"
+        return f"{cls.cluster_prefix(table_ref)}:index:{index_name}"
 
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
@@ -450,7 +455,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if row_format == RowFormat.ID_LIST:
             return row_ids
 
-        key_prefix = self.table_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
             if row := await aio.hgetall(key_prefix + str(_id)):
@@ -493,7 +498,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         #      sets有hmset/zadd/zrem/del
         payload = {
             commit_type: {
-                self.table_prefix(ref): rows for ref, rows in commit_data.items()
+                self.cluster_prefix(ref): rows for ref, rows in commit_data.items()
             }
             for commit_type, commit_data in dirty_rows.items()
         }

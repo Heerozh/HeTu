@@ -36,7 +36,7 @@ class RedisCLITableMaintenance(CLITableMaintenance):
     @staticmethod
     def meta_key(table_ref: TableReference) -> str:
         """获取redis表元数据的key名"""
-        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:meta"
+        return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
 
     def __init__(self, client: RedisBackendClient):
         super().__init__(client)
@@ -121,44 +121,28 @@ class RedisCLITableMaintenance(CLITableMaintenance):
 
         # 如果非持久化组件，则允许调用flush主动清空数据
         if table_ref.comp_cls.volatile_ or force:
-            io = self._backend.io
+            io = self.client.io
             logger.info(
-                f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
+                f"⌚ [💾Redis][{table_ref.comp_name}组件] 对非持久化组件flush清空数据中..."
             )
 
-            with io.lock(self._init_lock_key, timeout=60 * 5):
-                del_keys = io.keys(self._root_prefix + "*")
-                del_keys.remove(self._init_lock_key)
+            with self.lock:
+                del_keys = io.keys(self.client.table_prefix(table_ref) + ":*")
                 for batch in batched(del_keys, 1000):
                     with io.pipeline() as pipe:
                         list(map(pipe.delete, batch))
                         pipe.execute()
-            logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
 
-            self.create_or_migrate()
+            logger.info(
+                f"✅ [💾Redis][{table_ref.comp_name}组件] 已删除{len(del_keys)}个键值"
+            )
+            self.create_table(table_ref)
         else:
-            raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
+            raise ValueError(f"{table_ref.comp_name}是持久化组件，不允许flush操作")
 
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
         raise NotImplementedError
-
-    def _create_emtpy(self):
-        logger.info(
-            f"  ➖ [💾Redis][{self._name}组件] 组件无meta信息，数据不存在，正在创建空表..."
-        )
-
-        # 只需要写入meta，其他的_rebuild_index会创建
-        meta = {
-            "json": self._component_cls.json_,
-            "version": hashlib.md5(
-                self._component_cls.json_.encode("utf-8")
-            ).hexdigest(),
-            "cluster_id": self._cluster_id,
-        }
-        self._backend.io.hset(self._meta_key, mapping=meta)
-        logger.info(f"  ✔️ [💾Redis][{self._name}组件] 空表创建完成")
-        return meta
 
     def _rebuild_index(self):
         logger.info(f"  ➖ [💾Redis][{self._name}组件] 正在重建索引...")
