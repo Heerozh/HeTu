@@ -1,4 +1,5 @@
 import pytest
+import numpy as np
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend.idmap import IdentityMap, RowState
@@ -71,8 +72,8 @@ def test_add_insert(mod_item_model):
     # 添加插入
     id_map.add_insert(item_ref, row)
 
-    # 验证分配了负ID
-    assert row["id"] < 0
+    # 验证分配了ID
+    assert row["id"] > 0
     temp_id = row["id"]
 
     # 验证缓存中存在
@@ -85,7 +86,16 @@ def test_add_insert(mod_item_model):
     dirty = id_map.get_dirty_rows()
     assert item_ref in dirty["insert"]
     assert len(dirty["insert"][item_ref]) == 1
-    assert dirty["insert"][item_ref][0]["id"] == temp_id
+    assert int(dirty["insert"][item_ref][0]["id"]) == temp_id
+
+    # 测试添加多行干净
+    rows = Item.new_rows(5)
+    rows.id = [1, 2, 3, 4, 5]
+
+    id_map.add_clean(item_ref, rows)
+    # 验证状态
+    _, clean_cache, _ = id_map._cache(item_ref)
+    np.testing.assert_array_equal(clean_cache.id, [1, 2, 3, 4, 5])
 
 
 def test_update_clean_row(mod_item_model):
@@ -180,7 +190,7 @@ def test_mark_deleted(mod_item_model):
     # 验证脏数据列表
     dirty = id_map.get_dirty_rows()
     assert item_ref in dirty["delete"]
-    assert 300 in [d["id"] for d in dirty["delete"][item_ref]]
+    assert "300" in [d["id"] for d in dirty["delete"][item_ref]]
 
 
 def test_exceptions(mod_item_model):
@@ -202,6 +212,9 @@ def test_exceptions(mod_item_model):
     dummy = Item.new_row()
     dummy.id = 1
     id_map.add_clean(item_ref, dummy)
+
+    with pytest.raises(ValueError, match="exists"):
+        id_map.add_clean(item_ref, dummy)
 
     with pytest.raises(ValueError, match="not found in cache"):
         id_map.update(item_ref, row)

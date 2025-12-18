@@ -60,26 +60,6 @@ class IdentityMap:
         return first_reference.is_same_txn_group(other)
 
     def _cache(self, table_ref: TableReference):
-        return self._row_cache[table_ref]
-
-    def add_clean(self, table_ref: TableReference, row: np.record) -> None:
-        """
-        添加一个查询到的对象到row缓存中。
-        如果数据行已存在，则会报错ValueError。
-        """
-        # 检测新添加数据，和之前的数据是否在同一个实例/集群下
-        assert self.is_same_txn_group(table_ref), (
-            f"{table_ref} has different transaction context"
-        )
-        # 检测comp_cls和row格式是否一致
-        assert row.dtype == table_ref.comp_cls.dtypes, (
-            f"row dtype({row.dtype}) does not match component class "
-            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
-        )
-
-        row_id = row["id"]
-
-        # 初始化该component的缓存
         if table_ref not in self._row_cache:
             self._row_cache[table_ref] = np.rec.array(
                 np.empty(0, dtype=table_ref.comp_cls.dtypes)
@@ -88,23 +68,49 @@ class IdentityMap:
                 np.empty(0, dtype=table_ref.comp_cls.dtypes)
             )
             self._row_states[table_ref] = {}
+        return (
+            self._row_cache[table_ref],
+            self._row_clean[table_ref],
+            self._row_states[table_ref],
+        )
 
-        cache = self._row_cache[table_ref]
-        clean_cache = self._row_clean[table_ref]
-        states = self._row_states[table_ref]
+    def add_clean(
+        self, table_ref: TableReference, row_s: np.record | np.recarray
+    ) -> None:
+        """
+        添加 一个/多个 查询到的对象到row缓存中。
+        如果数据行已存在，则会报错ValueError。
+        """
+        # 检测新添加数据，和之前的数据是否在同一个实例/集群下
+        assert self.is_same_txn_group(table_ref), (
+            f"{table_ref} has different transaction context"
+        )
+        # 检测comp_cls和row格式是否一致
+        assert row_s.dtype == table_ref.comp_cls.dtypes, (
+            f"row dtype({row_s.dtype}) does not match component class "
+            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
+        )
+
+        # 初始化该component的缓存
+        cache, clean_cache, states = self._cache(table_ref)
 
         # 查找是否已存在该ID的行
         if len(cache) > 0:
-            existing_idx = np.where(cache["id"] == row_id)[0]
-            if len(existing_idx) > 0:
-                raise ValueError(f"Row with id {row_id} already exists in cache")
+            existing_idx = np.isin(cache["id"], row_s["id"])
+            if np.any(existing_idx):
+                raise ValueError(
+                    f"Row with id {cache['id'][existing_idx]} already exists in cache"
+                )
 
         # 添加新行
-        self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
-        self._row_clean[table_ref] = np.rec.array(np.append(clean_cache, row))
-        # 标记为CLEAN（除非之前已有其他状态）
-        if row_id not in states:
-            states[row_id] = RowState.CLEAN
+        self._row_cache[table_ref] = np.rec.array(np.append(cache, row_s))
+        self._row_clean[table_ref] = np.rec.array(np.append(clean_cache, row_s))
+        # 标记为CLEAN
+        if row_s.ndim == 0:
+            # 如果是单行数据，直接添加状态
+            states[row_s["id"]] = RowState.CLEAN
+        else:
+            states.update({key: RowState.CLEAN for key in row_s["id"]})
 
     def get(
         self, table_ref: TableReference, row_id: int
@@ -152,18 +158,13 @@ class IdentityMap:
         assert row["_version"] == 0, "不得修改_version字段"
 
         # 初始化缓存
-        if table_ref not in self._row_cache:
-            self._row_cache[table_ref] = np.rec.array(
-                np.empty(0, dtype=table_ref.comp_cls.dtypes)
-            )
-            self._row_states[table_ref] = {}
 
         # 添加到缓存
-        cache = self._row_cache[table_ref]
+        cache, _, states = self._cache(table_ref)
         self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
 
         # 标记为INSERT
-        self._row_states[table_ref][row["id"]] = RowState.INSERT
+        states[row["id"]] = RowState.INSERT
 
     def update(self, table_ref: TableReference, row: np.record) -> None:
         """
@@ -182,8 +183,7 @@ class IdentityMap:
         if table_ref not in self._row_cache:
             raise ValueError(f"Component {table_ref} not in cache")
 
-        cache = self._row_cache[table_ref]
-        states = self._row_states[table_ref]
+        cache, _, states = self._cache(table_ref)
 
         # 查找并更新行
         row_id = row["id"]
@@ -212,8 +212,7 @@ class IdentityMap:
         if table_ref not in self._row_states:
             raise ValueError(f"Component {table_ref} not in cache")
 
-        cache = self._row_cache[table_ref]
-        states = self._row_states[table_ref]
+        cache, clean_cache, states = self._cache(table_ref)
 
         # 查找行必须已存在
         idx = np.where(cache["id"] == row_id)[0]
