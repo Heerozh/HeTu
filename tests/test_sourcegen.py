@@ -11,7 +11,7 @@ from hetu.data import BaseComponent, property_field, define_component, Permissio
 
 
 def test_component_csharp_gen():
-    @define_component(namespace="HeTu", persist=False, permission=Permission.ADMIN)
+    @define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
     class TestComponent(BaseComponent):
         int64b: ">i8" = property_field(0)
         int64l: "<i8" = property_field(0)

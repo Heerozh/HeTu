@@ -53,7 +53,7 @@ class BaseComponent:
     namespace_: str | None = None
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
-    persist_: bool = True  # 持久化标记，无此标记的Component每次重启会清空数据
+    volatile_: bool = False  # 易失标记，此标记的Component每次维护会清空数据
     readonly_: bool = False  # todo: 只读标记，调用写入会警告
     backend_: str | None = None  # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
@@ -74,7 +74,7 @@ class BaseComponent:
         namespace,
         component_name,
         permission,
-        persist,
+        volatile,
         readonly,
         backend,
         rls_compare,
@@ -85,7 +85,7 @@ class BaseComponent:
                 "component_name": str(component_name),
                 "permission": permission.name,
                 "rls_compare": rls_compare,
-                "persist": bool(persist),
+                "volatile": bool(volatile),
                 "readonly": bool(readonly),
                 "backend": str(backend),
                 "properties": {
@@ -119,7 +119,7 @@ class BaseComponent:
         comp.namespace_ = str(data["namespace"])
         comp.component_name_ = str(data["component_name"])
         comp.permission_ = Permission[data["permission"]]
-        comp.persist_ = bool(data["persist"])
+        comp.volatile_ = bool(data["volatile"])
         comp.readonly_ = bool(data["readonly"])
         comp.backend_ = str(data["backend"])
         comp.properties_ = [
@@ -248,7 +248,7 @@ def define_component(
     namespace: str = "default",
     force: bool = False,
     permission=Permission.USER,
-    persist=True,
+    volatile=False,
     readonly=False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
@@ -270,8 +270,8 @@ def define_component(
     ----------
     namespace: str
         你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
-    persist: bool
-        表示是否持久化，设为False时，每次启动你的数据会被清除，请小心。
+    volatile: bool
+        是否是易失表，设为True时，每次维护你的数据会被清除，请小心。
         对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。
     readonly: bool
         是否只读Component，只读Component不会被加事务保护，增加并行性。
@@ -446,7 +446,7 @@ def define_component(
             namespace,  # todo 看看组件的namespace能否取消
             cls.__name__,
             permission,
-            persist,  # todo 改成相反的volatile，默认值false比较安全
+            volatile,
             readonly,
             backend,
             rls_compare,

@@ -40,11 +40,11 @@ class TestSystemDefine(unittest.TestCase):
         class Map(BaseComponent):
             owner: int = property_field(0, True)
 
-        @define_component(namespace="ssw", force=True, persist=False)
+        @define_component(namespace="ssw", force=True, volatile=True)
         class Time(BaseComponent):
             clock: int = property_field(0, False)
 
-        @define_component(namespace="ssw", force=True, persist=False, readonly=True)
+        @define_component(namespace="ssw", force=True, volatile=True, readonly=True)
         class World(BaseComponent):
             some: int = property_field(0, False)
 

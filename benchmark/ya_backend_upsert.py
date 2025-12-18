@@ -28,7 +28,7 @@ ACC_ID_RANGE = 30000
 
 
 @hetu.data.define_component(
-    namespace="bench", persist=False, permission=hetu.data.Permission.EVERYBODY
+    namespace="bench", volatile=True, permission=hetu.data.Permission.EVERYBODY
 )
 class IntTable(hetu.data.BaseComponent):
     number: np.int32 = hetu.data.property_field(0, unique=True)

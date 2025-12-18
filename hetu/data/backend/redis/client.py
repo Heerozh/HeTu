@@ -509,38 +509,3 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 raise RaceCondition(resp)
             else:
                 raise RuntimeError(f"未知的提交错误：{resp}")
-
-    # 还需要
-    # create table
-    # migration table schema
-    # migration cluster id
-    # flush table
-    # rebuild table index
-    # 可以考虑一个table_maintenance类专门做这个
-    # 这个类只需要启动时运行一次，然后就可以丢掉了。
-    # 每启动一次namespace应该都需要启动一次table_maintenance
-
-    # def flush(self, comp_cls: type[BaseComponent], force=False):
-    #     if force:
-    #         warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
-
-    #     # 如果非持久化组件，则允许调用flush主动清空数据
-    #     if not comp_cls.persist_ or force:
-    #         io = self.io
-    #         logger.info(
-    #             f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
-    #         )
-
-    #         # 这部分要想办法
-    #         with io.lock(self._init_lock_key, timeout=60 * 5):
-    #             del_keys = io.keys(self._root_prefix + "*")
-    #             del_keys.remove(self._init_lock_key)
-    #             for batch in batched(del_keys, 1000):
-    #                 with io.pipeline() as pipe:
-    #                     list(map(pipe.delete, batch))
-    #                     pipe.execute()
-    #         logger.info(f"✅ [💾Redis][{self._name}组件] 已删除{len(del_keys)}个键值")
-
-    #         self.create_or_migrate()
-    #     else:
-    #         raise ValueError(f"{self._name}是持久化组件，不允许flush操作")

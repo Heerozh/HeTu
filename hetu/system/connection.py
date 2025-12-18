@@ -24,7 +24,7 @@ MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
 SYSTEM_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 
 
-@define_component(namespace="HeTu", persist=False, permission=Permission.ADMIN)
+@define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     owner: np.int64 = property_field(0, index=True)
     address: str = property_field("", dtype="<U32", index=True)  # 连接地址

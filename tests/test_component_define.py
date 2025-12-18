@@ -151,19 +151,19 @@ def test_instance_define(new_component_env, new_clusters_env):
 def test_keyword_define(new_component_env):
     with pytest.raises(ValueError, match="关键字"):
 
-        @define_component(namespace="HeTu", persist=False)
+        @define_component(namespace="HeTu", volatile=True)
         class TestKeywordComponent(BaseComponent):
             bool: bool = property_field(False)
 
     with pytest.raises(ValueError, match="C#"):
 
-        @define_component(namespace="HeTu", persist=False)
+        @define_component(namespace="HeTu", volatile=True)
         class TestKeywordComponent(BaseComponent):
             sbyte: bool = property_field(False)
 
     with pytest.raises(ValueError, match="C#"):
 
-        @define_component(namespace="HeTu", persist=False)
+        @define_component(namespace="HeTu", volatile=True)
         class sbyte(BaseComponent):
             _ok: bool = property_field(False)
 

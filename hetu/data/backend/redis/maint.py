@@ -25,6 +25,11 @@ logger = logging.getLogger("HeTu.root")
 
 
 class RedisCLITableMaintenance(CLITableMaintenance):
+    """
+    提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
+    继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
+    """
+
     _lock_key = "maintenance:lock"
     client: RedisBackendClient
 
@@ -90,7 +95,7 @@ class RedisCLITableMaintenance(CLITableMaintenance):
                 ).hexdigest(),
                 "cluster_id": table_ref.cluster_id,
             }
-            self._backend.io.hset(self.meta_key(table_ref), mapping=meta)
+            self.client.io.hset(self.meta_key(table_ref), mapping=meta)
             logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
             return meta
 
@@ -111,70 +116,11 @@ class RedisCLITableMaintenance(CLITableMaintenance):
         清空易失性组件表数据，force为True时强制清空任意组件表。
         注意：此操作会删除所有数据！
         """
-        raise NotImplementedError
-
-    def rebuild_index(self, table_ref: TableReference) -> None:
-        """重建组件表的索引数据"""
-        raise NotImplementedError
-
-    def create_or_migrate(self, cluster_only=False):
-        """
-        检查表结构是否正确，不正确则尝试进行迁移。此方法同时会强制重建表的索引。
-        meta格式:
-        json: 组件的结构信息
-        version: json的hash
-        cluster_id: 所属簇id
-
-        Parameters
-        ----------
-        cluster_only : bool
-            如果为True，则只处理cluster_id的变更，其他结构迁移和重建索引等不处理。
-        """
-        # todo 考虑取消head_lock，通过记录版本号来实现，只要版本号不一致，就停止服务要求迁移
-        #       同时把迁移移动到专门的cli命令中，不是自动执行而是手动让ci/cd发布流程调用
-        if not self._backend.requires_head_lock():
-            raise HeadLockFailed("redis中head_lock键")
-
-        io = self._backend.io
-        logger.info(f"⌚ [💾Redis][{self._name}组件] 准备锁定检查meta信息...")
-        if cluster_only:
-            logger.info(
-                f"  ℹ️ [💾Redis][{self._name}组件] 此表仅cluster id迁移模式开启。"
-            )
-        with io.lock(self._init_lock_key, timeout=60 * 5):
-            # 获取redis已存的组件信息
-            meta = io.hgetall(self._meta_key)
-            if not meta:
-                self._create_emtpy()
-            else:
-                version = hashlib.md5(
-                    self._component_cls.json_.encode("utf-8")
-                ).hexdigest()
-                # 如果cluster_id改变，则迁移改key名
-                if int(meta["cluster_id"]) != self._cluster_id:
-                    self._migration_cluster_id(old=int(meta["cluster_id"]))
-
-                # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-                if meta["version"] != version and not cluster_only:
-                    self._migration_schema(old=meta["json"])
-
-            # 重建索引数据
-            if not cluster_only:
-                self._rebuild_index()
-            logger.info(f"✅ [💾Redis][{self._name}组件] 检查完成，解锁组件")
-
-    def flush(self, force=False):
-        # todo 考虑取消head_lock，建议易失数据全部加上component行级timeout信息，过期后由
-        #       hetu自己启动事务删除row,包括Index.
-        #       flush命令则是交给ci/cd来执行，因为需要重启服务器必然牵涉到app版本提升，不然停机干嘛？
-        if not self._backend.requires_head_lock():
-            raise HeadLockFailed("redis中head_lock键")
-
         if force:
             warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
 
         # 如果非持久化组件，则允许调用flush主动清空数据
-        if not self._component_cls.persist_ or force:
+        if table_ref.comp_cls.volatile_ or force:
             io = self._backend.io
             logger.info(
                 f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."
@@ -192,6 +138,10 @@ class RedisCLITableMaintenance(CLITableMaintenance):
             self.create_or_migrate()
         else:
             raise ValueError(f"{self._name}是持久化组件，不允许flush操作")
+
+    def rebuild_index(self, table_ref: TableReference) -> None:
+        """重建组件表的索引数据"""
+        raise NotImplementedError
 
     def _create_emtpy(self):
         logger.info(

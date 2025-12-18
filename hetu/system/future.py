@@ -19,14 +19,14 @@ from .definer import define_system, SystemClusters, SYSTEM_NAME_MAX_LEN
 from .execution import ExecutionLock, clean_expired_call_locks
 from .executor import SystemExecutor
 from ..data import BaseComponent, define_component, property_field, Permission
-from ..data.backend import RawComponentTable
+from ..data.backend_old import RawComponentTable
 
 SYSTEM_CLUSTERS = SystemClusters()
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@define_component(namespace="HeTu", persist=True, permission=Permission.ADMIN)
+@define_component(namespace="HeTu", permission=Permission.ADMIN)
 class FutureCalls(BaseComponent):
     owner: np.int64 = property_field(0, index=True)  # 创建方
     uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识

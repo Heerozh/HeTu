@@ -22,7 +22,7 @@ async def test_volatile_table_flush(auto_backend):
 
     from hetu.data import define_component, property_field, BaseComponent
 
-    @define_component(namespace="pytest", persist=False)
+    @define_component(namespace="pytest", volatile=True)
     class TempData(BaseComponent):
         data: np.int64 = property_field(0, unique=True)
 

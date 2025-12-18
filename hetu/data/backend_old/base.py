@@ -46,7 +46,7 @@ import logging
 import numpy as np
 
 from ..component import BaseComponent
-from ..idmap import IdentityMap, RowState
+from ..backend.idmap import IdentityMap, RowState
 
 logger = logging.getLogger("HeTu.root")
 

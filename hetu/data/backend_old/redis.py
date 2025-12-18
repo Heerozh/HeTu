@@ -48,7 +48,7 @@ class RedisBackend(Backend):
     while i <= #ARGV do
         if ARGV[i] == 'END_CHECK' then
             break
-        end
+        end                            -- [index_key, start, stop, "BYSCORE" if byscore else "BYLEX"]
         local rows = redis.call('zrange', ARGV[i], ARGV[i+1], ARGV[i+2], ARGV[i+3], 'LIMIT', 0, 1)
         if #rows > 0 then
             return 'FAIL'
@@ -480,7 +480,7 @@ class RedisRawComponentTable(RawComponentTable):
             warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
 
         # 如果非持久化组件，则允许调用flush主动清空数据
-        if not self._component_cls.persist_ or force:
+        if self._component_cls.volatile_ or force:
             io = self._backend.io
             logger.info(
                 f"⌚ [💾Redis][{self._name}组件] 对非持久化组件flush清空数据中..."

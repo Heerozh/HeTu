@@ -87,7 +87,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_basic(
-        self, table_cls: type[RawComponentTable], backend_cls: Type[type[Backend]], config
+        self,
+        table_cls: type[RawComponentTable],
+        backend_cls: Type[type[Backend]],
+        config,
     ):
         # 测试连接数据库并创建表
         backend = backend_cls(config)
@@ -389,7 +392,10 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
 
     @parameterized(implements)
     async def test_duplicate_op(
-        self, table_cls: type[RawComponentTable], backend_cls: Type[type[Backend]], config
+        self,
+        table_cls: type[RawComponentTable],
+        backend_cls: Type[type[Backend]],
+        config,
     ):
         # 测试重复update
         backend = backend_cls(config)
@@ -678,7 +684,7 @@ class TestBackend(unittest.IsolatedAsyncioTestCase):
     ):
         backend = backend_cls(config)
 
-        @define_component(namespace="ssw", persist=False)
+        @define_component(namespace="ssw", volatile=True)
         class TempData(BaseComponent):
             data: np.int64 = property_field(0, unique=True)
 

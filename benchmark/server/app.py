@@ -11,14 +11,14 @@ import random
 import string
 
 
-@hetu.data.define_component(namespace="bench", persist=False)
+@hetu.data.define_component(namespace="bench", volatile=True)
 class StrTable(hetu.data.BaseComponent):
     name: "<U16" = hetu.data.property_field("", unique=True)
     number: np.int32 = hetu.data.property_field(0)
 
 
 @hetu.data.define_component(
-    namespace="bench", persist=False, permission=hetu.data.Permission.EVERYBODY
+    namespace="bench", volatile=True, permission=hetu.data.Permission.EVERYBODY
 )
 class IntTable(hetu.data.BaseComponent):
     number: np.int32 = hetu.data.property_field(0, unique=True)

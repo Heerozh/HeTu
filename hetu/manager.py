@@ -7,7 +7,7 @@
 
 from typing import ItemsView
 
-from hetu.data.backend.base import Backend, RawComponentTable
+from hetu.data.backend_old.base import Backend, RawComponentTable
 from hetu.data.component import BaseComponent
 from hetu.system import SystemClusters
 
@@ -52,12 +52,12 @@ class ComponentTableManager:
     def create_or_migrate_all(self):
         for comp, tbl in self._tables.items():
             # 非持久化的Component需要cluster迁移，不然数据就永远的留在了数据库中
-            tbl.create_or_migrate(cluster_only=not comp.persist_)
+            tbl.create_or_migrate(cluster_only=comp.volatile_)
 
     def flush_volatile(self):
         """清空所有非持久化数据"""
         for comp, tbl in self._tables.items():
-            if not comp.persist_:
+            if comp.volatile_:
                 tbl.flush()
 
     def _flush_all(self, force=False):

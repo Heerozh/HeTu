@@ -7,6 +7,7 @@
     "Heerozh",
     "hetu",
     "hgetall",
+    "hmset",
     "idmap",
     "itemsize",
     "Jianhao",
@@ -16,9 +17,11 @@
     "maint",
     "recarray",
     "replicaof",
+    "zadd",
     "Zhang",
     "ZRANGE",
-    "zrangebyscore"
+    "zrangebyscore",
+    "zrem"
   ],
   "python.testing.pytestArgs": ["tests"],
   "python.testing.unittestEnabled": false,

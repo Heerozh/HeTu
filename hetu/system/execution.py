@@ -18,7 +18,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@define_component(namespace="HeTu", persist=False, permission=Permission.ADMIN)
+@define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
 class ExecutionLock(BaseComponent):
     """带有UUID的SystemCall执行记录，用于锁住防止相同uuid的调用重复执行。调用方用完后要记得删除自己的记录。"""
 
