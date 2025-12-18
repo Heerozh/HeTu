@@ -1,20 +1,5 @@
-# 对redis进行Read-Modify-Write事务基准测试
-# 验证以下假设：
-# 使用版本号+lua的事务，比watch+multi的事务性能更好
-#
-# 事务内容(get-or-create + 修改 + update)：
-# 1. get or create, by some unique index
-# 2. modify some fields by previous value + random delta
-# 3. update back
-#
-# 不初始化数据集，但预设一个数据规模
-# 数据模型：User(id, acc_id, name, age, email, version)
-# 索引：acc_id为唯一索引
-#
-# 使用两个不同的task，来分别测试两种事务实现方式的性能
-# 任务1: 使用watch(index)->zrange(acc_id)->watch(key)->hgetall(不存在就create)->multi->hset->exec的方式，修改随机一行数据
-#       注意事务会有其他客户端竞态，所以第一步就要watch index
-# 任务2: 使用zrange(acc_id)->hgetall（不存在就create）->lua(检测version，如果version是0表示create则检测index是否不存在该acc_id)的方式，修改随机一行数据
+# 测试在redis用lua做事务和watch multi做事务的性能差距
+# 结果：均未超过网络io限制
 
 import os
 import random
@@ -238,9 +223,13 @@ async def benchmark_lua_version(redis_client, lua_sha):
 # ==============================
 
 """
+
+export REDIS_HOST=...
+export REDIS_PASSWORD=...
+
 # 启动 200 个并发用户
 cd benchmark/hypothesis/
-ya ya_redis_upsert.py -n 200 -t 1
+ya ya_redis_raw_upsert.py -n 200 -t 1
 
 
 """

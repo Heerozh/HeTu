@@ -365,7 +365,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         table_ref: TableReference,
         index_name: str,
         left: int | float | str,
-        right: int | float | str | None,
+        right: int | float | str | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
@@ -504,7 +504,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):
-                raise UniqueViolation(resp)
+                # unique违反就是index的竞态原因
+                raise RaceCondition(resp)
             else:
                 raise RuntimeError(f"未知的提交错误：{resp}")
 
