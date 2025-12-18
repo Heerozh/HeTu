@@ -87,8 +87,8 @@ async def benchmark_redis_upsert(redis_backend):
             )
             id_map.add_insert(item_ref, row)
         try:
-            await client.commit(id_map)
             count += 1
+            await client.commit(id_map)
             return count
         except RaceCondition:
             # 如果发生了竞争条件，重新尝试

@@ -1,7 +1,8 @@
 local table_concat = table.concat
 local table_insert = table.insert
 local unpack = unpack
-local string_match = string.match
+local string_find = string.find
+local string_sub = string.sub
 local assert = assert
 local redis_call = redis.call
 local ipairs = ipairs
@@ -38,9 +39,10 @@ local context = {}
 -- ============================================================================
 
 -- 分割 "instance_name:User:{CLU0}" 获取 tablename
-local function get_table_ref(key)
-    local i, t, c = string_match(key, "^(.-):(.-):{CLU(%d+)}$")
-    return i, t, c -- instance_name, table_name, cluster_id
+local function get_table_name(key)
+    local s = string_find(key, ":")
+    local e = string_find(key, ":", s + 1)
+    return string_sub(key, s + 1, e - 1)
 end
 
 local function row_key(table_prefix, row_uuid)
@@ -72,7 +74,7 @@ local function check_unique_constraint(table_prefix, field, new_val, is_str)
     if is_str == false then
         -- 数字类型 Unique 检查: Score = val
         -- 检查 range [val, val] 是否存在元素，且元素不等于 current_uid
-        local res = redis.call('zrange', key, new_val, new_val, 'BYSCORE', 'LIMIT', 0, 1)
+        local res = redis_call('zrange', key, new_val, new_val, 'BYSCORE', 'LIMIT', 0, 1)
         if #res > 0 then
             return true
         end
@@ -81,7 +83,7 @@ local function check_unique_constraint(table_prefix, field, new_val, is_str)
         -- 使用 ZRANGE BYLEX [val: [val:\xff
         local search_start = "[" .. new_val .. ":"
         local search_end = "[" .. new_val .. ":\255"
-        local res = redis.call('zrange', key, search_start, search_end, 'BYLEX', 'LIMIT', 0, 1)
+        local res = redis_call('zrange', key, search_start, search_end, 'BYLEX', 'LIMIT', 0, 1)
 
         if #res > 0 then
             return true
@@ -114,10 +116,11 @@ end
 -- }
 
 -- 1.1 Check Insert
-if payload["insert"] then
-    for table_prefix, rows in pairs(payload["insert"]) do
+local insert_rows = payload["insert"]
+if insert_rows then
+    for table_prefix, rows in pairs(insert_rows) do
         -- 解析 table_ref
-        local _, table_name, _ = get_table_ref(table_prefix)
+        local table_name = get_table_name(table_prefix)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
@@ -154,21 +157,22 @@ if payload["insert"] then
 end
 
 -- 1.2 Check Update
-if payload["update"] then
-    for table_prefix, rows in pairs(payload["update"]) do
+local update_rows = payload["update"]
+if update_rows then
+    for table_prefix, rows in pairs(update_rows) do
         -- 确保 Context 结构存在
         if not context[table_prefix] then
             context[table_prefix] = {}
         end
         -- 解析 table_ref
-        local _, table_name, _ = get_table_ref(table_prefix)
+        local table_name = get_table_name(table_prefix)
         -- 获取表结构
         local table_schema = SCHEMA[table_name]
         if not table_schema then
             error("Schema not found for table: " .. table_name)
         end
 
-        for rows_i, row in ipairs(rows) do
+        for _, row in ipairs(rows) do
             local uid = row.id
             local key = row_key(table_prefix, uid)
 
@@ -204,7 +208,7 @@ if payload["update"] then
                                 " commit: " .. field .. "=" .. new_val ..
                                 " db: " .. field .. "=" .. old_row[field])
                     end
-                    if table_schema.unique and table_schema.unique[field] then
+                    if table_schema.unique[field] then
                         local is_str = table_schema.indexes[field]
                         if check_unique_constraint(table_name, field, new_val, is_str) then
                             return table_concat({
@@ -223,8 +227,9 @@ if payload["update"] then
 end
 
 -- 1.3 Check Delete
-if payload["delete"] then
-    for table_prefix, rows in pairs(payload["delete"]) do
+local delete_rows = payload["delete"]
+if delete_rows then
+    for table_prefix, rows in pairs(delete_rows) do
         if not context[table_prefix] then
             context[table_prefix] = {}
         end
@@ -268,9 +273,9 @@ end
 -- ============================================================================
 
 -- 2.1 Execute Insert
-if payload["insert"] then
-    for table_prefix, rows in pairs(payload["insert"]) do
-        local _, table_name, _ = get_table_ref(table_prefix)
+if insert_rows then
+    for table_prefix, rows in pairs(insert_rows) do
+        local table_name = get_table_name(table_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
@@ -299,9 +304,9 @@ if payload["insert"] then
 end
 
 -- 2.2 Execute Update
-if payload["update"] then
-    for table_prefix, rows in pairs(payload["update"]) do
-        local _, table_name, _ = get_table_ref(table_prefix)
+if update_rows then
+    for table_prefix, rows in pairs(update_rows) do
+        local table_name = get_table_name(table_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
@@ -349,9 +354,9 @@ if payload["update"] then
 end
 
 -- 2.3 Execute Delete
-if payload["delete"] then
-    for table_prefix, rows in pairs(payload["delete"]) do
-        local _, table_name, _ = get_table_ref(table_prefix)
+if delete_rows then
+    for table_prefix, rows in pairs(delete_rows) do
+        local table_name = get_table_name(table_prefix)
         local table_schema = SCHEMA[table_name]
 
         for _, row in ipairs(rows) do
