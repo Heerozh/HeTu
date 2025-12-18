@@ -84,24 +84,67 @@ async def test_update_delete(
         idmap.add_insert(rls_ref, row2)
 
     # update insert的内容
-    rows = idmap._cache(item_ref)
-    row = rows[5]
+    rows_cache, _, _ = idmap._cache(item_ref)
+    row = rows_cache[5]
     row.name = "mid"
     idmap.update(item_ref, row)
 
     await client.commit(idmap)
 
+    # 开始测试新的事务
+    idmap = IdentityMap()
+
     # 测试range查询
-    rows = await client.range(item_ref, "time", 13, 16)
-    np.testing.assert_equal(rows.time, [13, 14, 15, 16])
+    rows1 = await client.range(item_ref, "time", 13, 16)
+    np.testing.assert_array_equal(
+        rows1.name,
+        [f"Item{3 + 100}", f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+    )
+
+    rows2 = await client.range(rls_ref, "owner", 9, 15)
+    np.testing.assert_array_equal(rows2.owner, [9])
+
+    idmap.add_clean(item_ref, rows1)
+    idmap.add_clean(rls_ref, rows2)
 
     # 测试update查询到的数据
-    row1.name = "123"
+    row1 = rows1[rows1.time == 13][0]
+    row1.name = "updated"
     idmap.update(item_ref, row1)
 
+    row2 = rows2[0]
+    row2.owner = 11
+    idmap.update(rls_ref, row2)
+
+    await client.commit(idmap)
+
     # 测试update后再次查询是否更新了
+    rows1 = await client.range(item_ref, "time", 13, 16)
+    np.testing.assert_array_equal(
+        rows1.name,
+        [f"updated", f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+    )
+
+    rows2 = await client.range(rls_ref, "owner", 9, 15)
+    np.testing.assert_array_equal(rows2.owner, [11])
 
     # 测试删除
+    idmap = IdentityMap()
+    idmap.add_clean(item_ref, rows1)
+    idmap.add_clean(rls_ref, rows2)
+
+    idmap.mark_deleted(item_ref, rows1[rows1.time == 13].id[0])
+    idmap.mark_deleted(rls_ref, rows2.id[0])
+    await client.commit(idmap)
 
     # 测试删除后再次查询
-    # 测试client的commit(insert/update/delete)数据，以及get, range查询
+    rows1 = await client.range(item_ref, "time", 13, 16)
+    np.testing.assert_array_equal(
+        rows1.name,
+        [f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+    )
+
+    rows2 = await client.range(rls_ref, "owner", 9, 15)
+    np.testing.assert_array_equal(rows2.owner, [])
+
+

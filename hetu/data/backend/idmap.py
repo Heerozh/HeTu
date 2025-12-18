@@ -145,6 +145,8 @@ class IdentityMap:
         """
         添加一个新插入的对象到缓存，并标记为INSERT状态。
         """
+        assert row.ndim == 0, "不能用np.recarry类型，请用np.recarry[0]转换为record"
+
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"
@@ -170,6 +172,7 @@ class IdentityMap:
         """
         更新一个对象到缓存，并标记为UPDATE状态。
         """
+        assert row.ndim == 0, "不能用np.recarry类型，请用np.recarry[0]转换为record"
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
         assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"

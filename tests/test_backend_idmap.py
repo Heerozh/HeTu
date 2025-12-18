@@ -40,7 +40,6 @@ def test_add_clean_and_get(mod_item_model):
 def test_add_wrong_component(mod_item_model, mod_rls_test_model):
     """测试添加错误组件类型报错"""
     item_ref = TableReference(mod_item_model, "TestServer", 1)
-    rls_ref = TableReference(mod_rls_test_model, "TestServer", 1)
     id_map = IdentityMap()
 
     item_row = mod_item_model.new_row()
