@@ -59,6 +59,9 @@ class IdentityMap:
             return True
         return first_reference.is_same_txn_group(other)
 
+    def _cache(self, table_ref: TableReference):
+        return self._row_cache[table_ref]
+
     def add_clean(self, table_ref: TableReference, row: np.record) -> None:
         """
         添加一个查询到的对象到row缓存中。

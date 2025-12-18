@@ -83,10 +83,17 @@ async def test_update_delete(
         row2.owner = i
         idmap.add_insert(rls_ref, row2)
 
+    # update insert的内容
+    rows = idmap._cache(item_ref)
+    row = rows[5]
+    row.name = "mid"
+    idmap.update(item_ref, row)
+
     await client.commit(idmap)
 
     # 测试range查询
-    rows = await client.range(item_ref, "time", 12, 14)
+    rows = await client.range(item_ref, "time", 13, 16)
+    np.testing.assert_equal(rows.time, [13, 14, 15, 16])
 
     # 测试update查询到的数据
     row1.name = "123"

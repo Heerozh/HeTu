@@ -295,7 +295,31 @@ class RedisBackendClient(BackendClient, alias="redis"):
     async def get(
         self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
     ) -> np.record | dict[str, Any] | None:
-        """获取行数据"""
+        """
+        从数据库直接获取单行数据。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。
+        row_id: int
+            row id主键
+        row_format
+            返回数据解码格式，见 "Returns"
+
+        Returns
+        -------
+        row: np.record or dict[str, any] or None
+            如果未查询到匹配数据，则返回 None。
+            否则根据 `row_format` 参数返回以下格式之一：
+
+            - RowFormat.STRUCT - **默认值**
+                返回 np.record (c-struct) 的单行数据
+            - RowFormat.RAW
+                返回无类型的原始数据 (dict[str, str])
+            - RowFormat.TYPED_DICT
+                返回符合Component定义的，有格式的dict类型。
+        """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
         if row := await self.aio.hgetall(key):
@@ -346,7 +370,51 @@ class RedisBackendClient(BackendClient, alias="redis"):
         desc: bool = False,
         row_format=RowFormat.STRUCT,
     ) -> list[int] | list[dict[str, Any]] | np.recarray:
-        """查询index数据"""
+        """
+        从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
+        如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。
+        index_name: str
+            查询Component中的哪条索引
+        left, right: str or number
+            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+            如果right不填写，则精确查询等于left的数据。
+        limit: int
+            限制返回的行数，越少越快
+        desc: bool
+            是否降序排列
+        row_format
+            返回数据解码格式，见 "Returns"
+
+        Returns
+        -------
+        row: np.recarray or list[id] or list[dict]
+            根据 `row_format` 参数返回以下格式之一：
+
+            - RowFormat.STRUCT - **默认值**
+                返回 `numpy.recarray`，如果没有查询到数据，返回空 `numpy.recarray`。
+                `numpy.recarray` 是一种 c-struct array。
+            - RowFormat.RAW
+                返回无类型的原始数据 (dict[str, str]) 列表，如果没有查询到数据，返回空list
+            - RowFormat.TYPED_DICT
+                返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
+            - RowFormat.ID_LIST
+                返回查询到的 row id 列表，如果没有查询到数据，返回空list
+
+        Notes
+        -----
+        如何复合条件查询？
+        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选：
+
+        >>> items = client.range(ref, "owner", player_id, limit=100)  # noqa
+        >>> few_items = items[items.amount < 10]
+
+        由于python numpy支持SIMD，比直接在数据库复合查询快。
+        """
         # todo 所有get query要合批
         idx_key = self.index_key(table_ref, index_name)
         aio = self.aio  # 保存随机选中的aio连接
@@ -401,11 +469,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     async def commit(self, idmap: IdentityMap) -> None:
         """
-        提交修改事务，使用从IdentityMap中获取的脏数据
-        Returns
-        -------
-        new_ids: list[int]
-            返回新插入行的ID列表，顺序和插入顺序一致。
+        使用事务，向数据库提交IdentityMap中的所有数据修改
+
+        Exceptions
+        --------
+        RaceCondition
+            当提交数据时，发现数据已被其他事务修改，抛出此异常
+
         """
         # todo 在事务的insert方法需要判断：unique，version为0
         #      update要判断 有列修改 已修改列的unique id不允许修改
