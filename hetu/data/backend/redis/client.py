@@ -113,11 +113,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """获取redis表索引的key名"""
         return f"{cls.table_prefix(table_ref)}:index:{index_name}"
 
-    @staticmethod
-    def meta_key(table_ref: TableReference) -> str:
-        """获取redis表元数据的key名"""
-        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:meta"
-
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0

@@ -28,3 +28,7 @@ class TableReference:
             self.instance_name == other.instance_name
             and self.cluster_id == other.cluster_id
         )
+
+    @property
+    def comp_name(self) -> str:
+        return self.comp_cls.component_name_

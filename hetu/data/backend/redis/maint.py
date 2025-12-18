@@ -7,12 +7,50 @@
 
 from ..base import CLITableMaintenance
 from ..table import TableReference
+import asyncio
+import hashlib
+import itertools
+import logging
+import random
+import time
+import warnings
+
+import numpy as np
+import redis
+from redis.asyncio.client import Pipeline
+
+from ....common.helper import batched
+from ....common.multimap import MultiMap
+from ...component import BaseComponent
+from .. import (
+    Backend,
+    RaceCondition,
+    RedisBackendClient,
+)
+
+logger = logging.getLogger("HeTu.root")
 
 
 class RedisCLITableMaintenance(CLITableMaintenance):
+    _lock_key = "maintenance:lock"
+    client: RedisBackendClient
+
+    @staticmethod
+    def meta_key(table_ref: TableReference) -> str:
+        """获取redis表元数据的key名"""
+        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:meta"
+
+    def __init__(self, client: RedisBackendClient):
+        super().__init__(client)
+        self.lock = self.client.io.lock(self._lock_key, timeout=60 * 5)
+
+    async def lock(self):
+        await self.lock.acquire()
+
     def check_table(self, table_ref: TableReference):
         """
         检查组件表在数据库中的状态。
+        此方法检查各个组件表的meta键值。
 
         Returns
         -------
@@ -22,11 +60,46 @@ class RedisCLITableMaintenance(CLITableMaintenance):
             "cluster_mismatch" - 表存在但cluster_id不匹配
             "schema_mismatch" - 表存在但schema不匹配
         """
-        pass
+        io = self.client.io
 
-    def create_table(self, table_ref: TableReference) -> None:
+        # 获取redis已存的组件信息
+        key = self.meta_key(table_ref)
+        meta = io.hgetall(key)
+        if not meta:
+            return "not_exists"
+        else:
+            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+            # 如果cluster_id改变，则迁移改key名
+            if int(meta["cluster_id"]) != table_ref.cluster_id:
+                return "cluster_mismatch"
+
+            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+            if meta["version"] != version:
+                return "schema_mismatch"
+
+        return "ok"
+
+    def create_table(self, table_ref: TableReference) -> dict:
         """创建组件表。如果已存在，会抛出异常"""
-        raise NotImplementedError
+        with self.lock:
+            if self.check_table(table_ref) != "not_exists":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已存在，无法创建。"
+                )
+            logger.info(
+                f"  ➖ [💾Redis][{table_ref.comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+            )
+            # 只需要写入meta，其他的_rebuild_index会创建
+            meta = {
+                "json": table_ref.comp_cls.json_,
+                "version": hashlib.md5(
+                    table_ref.comp_cls.json_.encode("utf-8")
+                ).hexdigest(),
+                "cluster_id": table_ref.cluster_id,
+            }
+            self._backend.io.hset(self.meta_key(table_ref), mapping=meta)
+            logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
+            return meta
 
     # 无需drop_table, 此类操作适合人工删除
 

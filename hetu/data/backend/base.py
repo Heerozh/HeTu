@@ -257,6 +257,7 @@ class CLITableMaintenance:
     """
 
     def __init__(self, client: BackendClient):
+        """传入master连接的BackendClient实例"""
         self.client = client
 
     # 检测是否需要维护的方法
@@ -274,7 +275,7 @@ class CLITableMaintenance:
         """
         raise NotImplementedError
 
-    def create_table(self, table_ref: TableReference) -> None:
+    def create_table(self, table_ref: TableReference) -> dict:
         """创建组件表。如果已存在，会抛出异常"""
         raise NotImplementedError
 
