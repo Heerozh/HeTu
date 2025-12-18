@@ -7,7 +7,7 @@
 
 import logging
 from enum import Enum
-from typing import TYPE_CHECKING, cast, Any
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
@@ -53,11 +53,11 @@ class IdentityMap:
             return None
         return next(iter(self._row_cache.keys()))
 
-    def transaction_able(self, other: TableReference) -> bool:
+    def is_same_txn_group(self, other: TableReference) -> bool:
         first_reference = self.first_reference()
         if first_reference is None:
             return True
-        return first_reference.transaction_able(other)
+        return first_reference.is_same_txn_group(other)
 
     def add_clean(self, table_ref: TableReference, row: np.record) -> None:
         """
@@ -65,7 +65,7 @@ class IdentityMap:
         如果数据行已存在，则会报错ValueError。
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
-        assert self.transaction_able(table_ref), (
+        assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"
         )
         # 检测comp_cls和row格式是否一致
@@ -94,12 +94,6 @@ class IdentityMap:
         if len(cache) > 0:
             existing_idx = np.where(cache["id"] == row_id)[0]
             if len(existing_idx) > 0:
-                # # 更新已存在的行
-                # cache[existing_idx[0]] = row
-                # # 只有在状态为CLEAN时才保持CLEAN，否则保持原状态
-                # if row_id not in states:
-                #     states[row_id] = RowState.CLEAN
-                # return
                 raise ValueError(f"Row with id {row_id} already exists in cache")
 
         # 添加新行
@@ -143,7 +137,7 @@ class IdentityMap:
         添加一个新插入的对象到缓存，并标记为INSERT状态。
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
-        assert self.transaction_able(table_ref), (
+        assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"
         )
         # 检测comp_cls和row格式是否一致
@@ -151,6 +145,8 @@ class IdentityMap:
             f"row dtype({row.dtype}) does not match component class "
             f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
+
+        assert row["_version"] == 0, "不得修改_version字段"
 
         # 初始化缓存
         if table_ref not in self._row_cache:
@@ -171,7 +167,7 @@ class IdentityMap:
         更新一个对象到缓存，并标记为UPDATE状态。
         """
         # 检测新添加数据，和之前的数据是否在同一个实例/集群下
-        assert self.transaction_able(table_ref), (
+        assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"
         )
         # 检测comp_cls和row格式是否一致
@@ -245,7 +241,6 @@ class IdentityMap:
 
         for table_ref, states in self._row_states.items():
             cache = self._row_cache[table_ref]
-            comp_cls = table_ref.comp_cls
 
             # 收集各状态的行ID
             insert_ids = [

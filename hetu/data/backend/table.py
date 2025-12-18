@@ -23,8 +23,8 @@ class TableReference:
     instance_name: str
     cluster_id: int
 
-    def transaction_able(self, other: TableReference) -> bool:
+    def is_same_txn_group(self, other: TableReference) -> bool:
         return (
-                self.instance_name == other.instance_name
-                and self.cluster_id == other.cluster_id
+            self.instance_name == other.instance_name
+            and self.cluster_id == other.cluster_id
         )
