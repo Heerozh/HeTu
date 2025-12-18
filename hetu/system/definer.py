@@ -56,6 +56,10 @@ class SystemClusters(metaclass=Singleton):
         namespace: str
         systems: set[str]
 
+    @property
+    def main_namespace(self):
+        return self._main_namespace
+
     def __init__(self):
         # ==== @define_system(namespace=xxx) 定义的所有System ====
         # 所有system定义表，按namespace分类
@@ -67,6 +71,7 @@ class SystemClusters(metaclass=Singleton):
         # @define_system(namespace="global") 定义的所有System
         self._global_system_map: dict[str, SystemDefine] = {}
         # 方便快速访问主namespace的System定义
+        self._main_namespace: str = ""
         self._main_system_map: dict[str, SystemDefine] = {}
 
     def _clear(self):
@@ -92,8 +97,12 @@ class SystemClusters(metaclass=Singleton):
     ) -> int | None:
         return self.get_components(namespace).get(comp, None)
 
-    def get_components(self, namespace: str) -> dict[type[BaseComponent], int]:
+    def get_components(
+        self, namespace: str | None = None
+    ) -> dict[type[BaseComponent], int]:
         """返回所有被System引用过的Component及其所属簇id"""
+        if not namespace:
+            return self._component_map.get(self._main_namespace, {})
         return self._component_map.get(namespace, {})
 
     def get_clusters(self, namespace: str):
@@ -107,6 +116,7 @@ class SystemClusters(metaclass=Singleton):
         assert main_namespace in self._system_map, (
             f"没有找到namespace={main_namespace}的System定义"
         )
+        self._main_namespace = main_namespace
 
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):

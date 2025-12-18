@@ -5,28 +5,21 @@
 @email: heeroz@gmail.com
 """
 
-from ..base import CLITableMaintenance
-from ..table import TableReference
-import asyncio
 import hashlib
-import itertools
 import logging
-import random
-import time
 import warnings
-
-import numpy as np
-import redis
-from redis.asyncio.client import Pipeline
+from typing import TYPE_CHECKING
 
 from ....common.helper import batched
-from ....common.multimap import MultiMap
 from ...component import BaseComponent
 from .. import (
-    Backend,
     RaceCondition,
-    RedisBackendClient,
 )
+from ..base import CLITableMaintenance
+from ..table import TableReference
+
+if TYPE_CHECKING:
+    from .client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")
 
