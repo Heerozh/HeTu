@@ -16,7 +16,7 @@ import numpy as np
 import redis
 
 from ....common.snowflake_id import RedisWorkerKeeper
-from ..base import BackendClient, RowFormat, RaceCondition, UniqueViolation
+from ..base import BackendClient, RaceCondition, RowFormat, UniqueViolation
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -71,6 +71,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         lua_schema_text = "\n".join(lua_schema_def)
         # replace PLACEHOLDER_SCHEMA_DEFINITIONS in script_text
         script_text = script_text.replace("PLACEHOLDER_SCHEMA", lua_schema_text)
+
+        with open(str(file) + ".debug.lua", "w", encoding="utf-8") as f:
+            f.write(script_text)
 
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
@@ -485,6 +488,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 转换dirty_rows为纯lua可用的信息格式：
         # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
+        # todo 尝试组合成checks/sets命令表，减少lua脚本的复杂度
+        #      checks有exists/unique/version
+        #      sets有hmset/zadd/zrem/del
         payload = {
             commit_type: {
                 self.table_prefix(ref): rows for ref, rows in commit_data.items()

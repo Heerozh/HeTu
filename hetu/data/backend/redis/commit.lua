@@ -17,6 +17,7 @@ local tonumber = tonumber
 local cmsgpack = cmsgpack
 
 -- 1. SCHEMA 定义 (由应用层硬编码注入，这里仅作示例结构)
+-- todo 如果项目变大这个可能会有性能问题，需要改成要么放redis，要么外面组合好命令进来
 local SCHEMA = PLACEHOLDER_SCHEMA
 -- 示例结构
 -- local SCHEMA = {

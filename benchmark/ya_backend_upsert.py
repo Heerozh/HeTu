@@ -3,17 +3,17 @@
 
 
 import os
-import hetu
-from hetu.data.backend import Backend
-from hetu.data.backend.idmap import IdentityMap
-from hetu.data.backend.table import TableReference
-import numpy as np
 import random
 import string
-from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import RaceCondition
 import uuid
 
+import numpy as np
+
+import hetu
+from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Backend, RaceCondition
+from hetu.data.backend.idmap import IdentityMap
+from hetu.data.backend.table import TableReference
 
 # Configuration
 # 可以通过环境变量配置Redis连接
