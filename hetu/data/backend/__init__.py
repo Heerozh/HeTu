@@ -12,6 +12,7 @@ from .base import (
     RowFormat,
     UniqueViolation,
 )
+from .table import TableReference
 from .redis import RedisBackendClient, RedisTableMaintenance
 
 __all__ = [
@@ -22,6 +23,7 @@ __all__ = [
     "Backend",
     "RedisBackendClient",
     "RedisTableMaintenance",
+    "TableReference",
 ]
 
 

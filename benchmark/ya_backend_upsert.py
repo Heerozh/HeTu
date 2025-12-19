@@ -64,7 +64,7 @@ async def redis_backend():
     await _backend.close()
 
 
-async def benchmark_redis_upsert(redis_backend):
+async def benchmark_redis_upsert(redis_backend: Backend):
     client = redis_backend.master
     count = 0
     while True:
