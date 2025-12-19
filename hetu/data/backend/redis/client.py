@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast, final, override
+from typing import TYPE_CHECKING, Any, cast, final, override, overload, Literal
 
 import msgspec
 import numpy as np
@@ -34,6 +34,81 @@ logger = logging.getLogger("HeTu.root")
 @final
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
+
+    # ------类型注解部分------
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.record | None: ...
+
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> dict[str, str] | None: ...
+
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> dict[str, Any] | None: ...
+
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.recarray: ...
+
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> list[dict[str, str]]: ...
+
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> list[dict[str, Any]]: ...
+
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.ID_LIST] = ...,
+    ) -> list[int]: ...
+
+    # ------------
 
     def load_commit_scripts(self, file: str | Path):
         assert self._async_ios, "连接已关闭，已调用过close"
