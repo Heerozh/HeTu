@@ -6,6 +6,6 @@
 """
 
 from .client import RedisBackendClient
-from .maint import RedisCLITableMaintenance
+from .maint import RedisTableMaintenance
 
-__all__ = ["RedisBackendClient", "RedisCLITableMaintenance"]
+__all__ = ["RedisBackendClient", "RedisTableMaintenance"]

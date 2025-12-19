@@ -12,7 +12,7 @@
                            ▲
                            ├───────────────────────────┐
                  ┌─────────┴──────────┐      ┌─────────┴─────────┐
-                 │      Backend       │      │CLITableMaintenance│ 继承此类实现数据维护
+                 │      Backend       │      │  TableMaintenance │ 继承此类实现数据维护
                  │   数据库连接管理器    │      │     组件表维护类    │
                  └────────────────────┘      └───────────────────┘
                            ▲
@@ -250,7 +250,7 @@ class BackendClientFactory:
         return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
 
 
-class CLITableMaintenance:
+class TableMaintenance:
     """
     提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
     继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。

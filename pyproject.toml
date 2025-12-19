@@ -52,6 +52,7 @@ hetu = "hetu.__main__:main"
 dev = [
     "aiohttp>=3.13.1",
     "austin-dist>=4.0.0",
+    "basedpyright>=1.36.1",
     "docker>=7.1.0",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.7",
@@ -95,3 +96,8 @@ line-length = 88
 
 [tool.uv.sources]
 ya = { git = "https://github.com/Heerozh/ya.git" }
+
+[tool.pyright]
+typeCheckingMode = "standard"
+# reportUnknownVariableType = false
+# reportUnknownMemberType = false

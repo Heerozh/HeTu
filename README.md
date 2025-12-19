@@ -100,7 +100,8 @@ from hetu.system import elevate
 
 
 # permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY, subsystems=(elevate,))
+@define_system(namespace="ssw", permission=Permission.EVERYBODY,
+               subsystems=(elevate,))
 async def login_test(ctx: Context, user_id):
     # 提权以后ctx.caller就是user_id。
     await elevate(ctx, user_id, kick_logged_in=True)
@@ -128,7 +129,8 @@ uv run hetu start --app-file=./src/app.py --db=redis://127.0.0.1:6379/0 --namesp
 
 河图 Unity SDK 基于 async/await，支持 Unity 2018 以上 和 WebGL 平台。
 
-首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package from
+首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package
+from
 git URL”
 
 <img src="https://github.com/Heerozh/HeTu/blob/media/sdk1.png" width="306.5" height="156.5"/>
@@ -226,7 +228,8 @@ public class FirstGame : MonoBehaviour
 
 ### Redis 对照：
 
-先压测 Redis，看看 Redis 的性能上限作为对照，这指令序列等价于之后的"select + update"测试项目：
+先压测 Redis，看看 Redis 的性能上限作为对照，这指令序列等价于之后的"select + update"
+测试项目：
 
 ```redis
 ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
@@ -276,7 +279,8 @@ Redis。
 
 ### Native 计算
 
-由于 Component 数据本来就是 NumPy C 结构，可以使用 LuaJIT 的 FFI，以极低代价调用 C/Rust 代码：
+由于 Component 数据本来就是 NumPy C 结构，可以使用 LuaJIT 的 FFI，以极低代价调用 C/Rust
+代码：
 
 ```python
 from cffi import FFI
@@ -293,7 +297,8 @@ c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD 更快：
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD
+更快：
 `rows.x[rows.x >= 10] -= 10`
 
 ## ⚙️ 安装
@@ -382,15 +387,18 @@ docker build -t app_image_name .
 docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
 ```
 
-使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用 9 折的抢占服务器，然后用反向代理对连接进行负载均衡。
+使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用
+9 折的抢占服务器，然后用反向代理对连接进行负载均衡。
 
 后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
 
 ### pip 原生部署
 
-容器一般有 20% 的性能损失，常驻服务器可以用 pip 的方式部署 (无须安装 uv)，且 pip 在国内云服务器都自带加速镜像。
+容器一般有 20% 的性能损失，常驻服务器可以用 pip 的方式部署 (无须安装 uv)，且 pip
+在国内云服务器都自带加速镜像。
 
-原生部署困难处在于如何安装高版本 python，建议通过清华 miniconda 源安装，uv、pyenv 等都需要海外网。
+原生部署困难处在于如何安装高版本 python，建议通过清华 miniconda 源安装，uv、pyenv
+等都需要海外网。
 
 ```bash
 # 通过miniconda安装python 3.14
@@ -518,7 +526,9 @@ HeTuClient.close()
 
 ## ⚖️ 代码规范
 
-按照 python 的标准代码规范，PEP8，注释要求为中文。
+使用basedPyright和PyCharm进行代码检查，Ruff进行格式化。
+
+Docstring要求为中文英文双语。
 
 # ©️ Copyright & Thanks
 

@@ -12,7 +12,7 @@ from .base import (
     RowFormat,
     UniqueViolation,
 )
-from .redis import RedisBackendClient, RedisCLITableMaintenance
+from .redis import RedisBackendClient, RedisTableMaintenance
 
 __all__ = [
     "RaceCondition",
@@ -21,14 +21,13 @@ __all__ = [
     "BackendClient",
     "Backend",
     "RedisBackendClient",
-    "RedisCLITableMaintenance",
+    "RedisTableMaintenance",
 ]
 
 
 import asyncio
 import random
 from typing import TYPE_CHECKING
-
 
 if TYPE_CHECKING:
     from ...common.snowflake_id import WorkerKeeper

@@ -15,7 +15,7 @@ from ...component import BaseComponent
 from .. import (
     RaceCondition,
 )
-from ..base import CLITableMaintenance
+from ..base import TableMaintenance
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("HeTu.root")
 
 
-class RedisCLITableMaintenance(CLITableMaintenance):
+class RedisTableMaintenance(TableMaintenance):
     """
     提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
     继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。

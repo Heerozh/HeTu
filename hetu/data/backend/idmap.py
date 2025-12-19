@@ -46,7 +46,7 @@ class IdentityMap:
 
         # 范围查询缓存
         # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
-        self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
+        # self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
 
     def first_reference(self) -> TableReference | None:
         if not self._row_cache:

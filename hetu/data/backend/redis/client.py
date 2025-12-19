@@ -9,14 +9,14 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, cast, final, override
 
 import msgspec
 import numpy as np
 import redis
 
-from ....common.snowflake_id import RedisWorkerKeeper
-from ..base import BackendClient, RaceCondition, RowFormat, UniqueViolation
+from ..base import BackendClient, RaceCondition, RowFormat
+from .worker_keeper import RedisWorkerKeeper
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -31,10 +31,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger("HeTu.root")
 
 
+@final
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
-    def load_commit_scripts(self, file: str | Path) -> Callable:
+    def load_commit_scripts(self, file: str | Path):
         assert self._async_ios, "连接已关闭，已调用过close"
         assert self.is_servant is False, (
             "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
@@ -73,15 +74,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
         script_text = script_text.replace("PLACEHOLDER_SCHEMA", lua_schema_text)
 
         with open(str(file) + ".debug.lua", "w", encoding="utf-8") as f:
-            f.write(script_text)
+            _ = f.write(script_text)
 
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
         # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了
-        return self._async_ios[0].register_script(script_text)
+        return self._async_ios[0].register_script(script_text)  # pyright: ignore[reportAttributeAccessIssue]
 
     @property
-    def io(self):
+    def io(self) -> redis.Redis | redis.cluster.RedisCluster:
         """随机返回一个同步连接"""
         return random.choice(self._ios)
 
@@ -162,7 +163,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if self.clustering:
             self.dbi = 0  # 集群模式没有db的概念，默认0
         else:
-            io = cast(redis.Redis, self._ios[0])  # 转换类型，为了通过类型检查
+            io = self._ios[0]
+            assert isinstance(io, redis.Redis)  # for type checking
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         # 加载lua脚本，注意pipeline里不能用lua，会反复检测script exists性能极低
@@ -177,6 +179,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         except RuntimeError:
             self.loop_id = 0
 
+    @override
     def configure(self) -> None:
         if self.is_servant:
             self.configure_servant()
@@ -218,21 +221,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 redis.exceptions.NoPermissionError,
                 redis.exceptions.ResponseError,
             ):
-                logger.warning(
+                msg = (
                     f"⚠️ [💾Redis] 无权限调用数据库{self.urls[i]}的config_set命令，数据订阅将"
                     f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
                 )
+                logger.warning(msg)
             # 检查是否是replica模式
             db_replica = cast(dict, io.config_get("replica-read-only"))
             if db_replica.get("replica-read-only") != "yes":
-                logger.warning(
+                msg = (
                     "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
                     f"{self.urls[i]} 未设置replica-read-only=yes"
                 )
+                logger.warning(msg)
                 # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
+    @override
     async def is_synced(self) -> bool:
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
@@ -240,7 +246,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert not self.is_servant, "is_synced只能在master上调用"
 
         info = await self.aio.info("replication")
-        master_offset = info.get("master_repl_offset", 0)
+        master_offset = int(info.get("master_repl_offset", 0))
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
             if key.startswith("slave") or key.startswith("replica"):
@@ -249,6 +255,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     return False
         return True
 
+    @override
     def get_worker_keeper(self) -> RedisWorkerKeeper:
         """
         获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
@@ -256,6 +263,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert not self.is_servant, "get_worker_keeper"
         return RedisWorkerKeeper(self.io, self.aio)
 
+    @override
     async def close(self):
         if not self._ios:
             return
@@ -285,7 +293,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         }
         match fmt:
             case RowFormat.RAW:
-                # todo encode byte
                 return row_decoded
             case RowFormat.STRUCT:
                 return comp_cls.dict_to_row(row_decoded)
@@ -295,6 +302,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             case _:
                 raise ValueError(f"不可用的行格式: {fmt}")
 
+    @override
     async def get(
         self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
     ) -> np.record | dict[str, Any] | None:
@@ -325,7 +333,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
-        if row := await self.aio.hgetall(key):
+        if row := await self.aio.hgetall(key):  # pyright: ignore[reportGeneralTypeIssues]
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
@@ -363,6 +371,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         return left, right
 
+    @override
     async def range(
         self,
         table_ref: TableReference,
@@ -458,7 +467,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
-            if row := await aio.hgetall(key_prefix + str(_id)):
+            if row := await aio.hgetall(key_prefix + str(_id)):  # pyright: ignore[reportGeneralTypeIssues]
                 rows.append(self._row_decode(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
@@ -470,6 +479,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 record_list = cast(list[np.record], rows)
                 return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
+    @override
     async def commit(self, idmap: IdentityMap) -> None:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
@@ -505,7 +515,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         payload_json = msgspec.msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
-        resp = (await self.lua_commit(keys, [payload_json])).decode("utf-8")
+        resp = (await self.lua_commit(keys, [payload_json])).decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
         if resp != "committed":
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
