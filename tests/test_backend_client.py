@@ -5,10 +5,8 @@
 #  @email: heeroz@gmail.com
 #  """
 import numpy as np
-import pytest
 
-from hetu.data.backend import Backend, RedisBackendClient, UniqueViolation, random
-from hetu.system import define_system, SystemClusters
+from hetu.data.backend import Backend
 from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
@@ -98,7 +96,7 @@ async def test_update_delete(
     rows1 = await client.range(item_ref, "time", 13, 16)
     np.testing.assert_array_equal(
         rows1.name,
-        [f"Item{3 + 100}", f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+        [f"Item{3 + 100}", f"Item{4 + 100}", "mid", f"Item{6 + 100}"],
     )
 
     rows2 = await client.range(rls_ref, "owner", 9, 15)
@@ -122,7 +120,7 @@ async def test_update_delete(
     rows1 = await client.range(item_ref, "time", 13, 16)
     np.testing.assert_array_equal(
         rows1.name,
-        [f"updated", f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+        ["updated", f"Item{4 + 100}", "mid", f"Item{6 + 100}"],
     )
 
     rows2 = await client.range(rls_ref, "owner", 9, 15)
@@ -133,7 +131,7 @@ async def test_update_delete(
     idmap.add_clean(item_ref, rows1)
     idmap.add_clean(rls_ref, rows2)
 
-    idmap.mark_deleted(item_ref, rows1[rows1.time == 13].id[0])
+    idmap.mark_deleted(item_ref, rows1[rows1.time == 13]["id"][0])
     idmap.mark_deleted(rls_ref, rows2.id[0])
     await client.commit(idmap)
 
@@ -141,10 +139,8 @@ async def test_update_delete(
     rows1 = await client.range(item_ref, "time", 13, 16)
     np.testing.assert_array_equal(
         rows1.name,
-        [f"Item{4 + 100}", f"mid", f"Item{6 + 100}"],
+        [f"Item{4 + 100}", "mid", f"Item{6 + 100}"],
     )
 
     rows2 = await client.range(rls_ref, "owner", 9, 15)
     np.testing.assert_array_equal(rows2.owner, [])
-
-

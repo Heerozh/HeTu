@@ -50,7 +50,7 @@
 """
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, overload, Literal
 import logging
 
 import numpy as np
@@ -131,8 +131,72 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    # def get_mq_client(self) -> "MQClient":
-    #     raise NotImplementedError
+    # 类型注解部分
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.record | None: ...
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> dict[str, str] | None: ...
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> dict[str, Any] | None: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.recarray: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> list[dict[str, str]]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> list[dict[str, Any]]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.ID_LIST] = ...,
+    ) -> list[int]: ...
 
     async def get(
         self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
@@ -173,7 +237,7 @@ class BackendClient:
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
-    ) -> list[int] | list[dict[str, Any]] | np.recarray:
+    ):
         """
         从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
         如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -233,10 +297,9 @@ class BackendClient:
         """
         raise NotImplementedError
 
-
-#     def get_mq_client(self) -> MQClient:
-#         """获取消息队列连接"""
-#         raise NotImplementedError
+    #     def get_mq_client(self) -> MQClient:
+    #         """获取消息队列连接"""
+    #         raise NotImplementedError
 
 
 class BackendClientFactory:

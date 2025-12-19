@@ -8,7 +8,6 @@
 import hashlib
 import logging
 import warnings
-
 from typing import TYPE_CHECKING, cast, final, override
 
 from ....common.helper import batched
@@ -22,6 +21,7 @@ from ..table import TableReference
 if TYPE_CHECKING:
     import redis
     import redis.lock
+
     from .client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")
