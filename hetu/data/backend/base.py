@@ -50,7 +50,8 @@
 """
 
 from enum import Enum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
+import logging
 
 import numpy as np
 
@@ -58,6 +59,8 @@ if TYPE_CHECKING:
     from ...common.snowflake_id import WorkerKeeper
     from .idmap import IdentityMap
     from .table import TableReference
+
+logger = logging.getLogger("HeTu.root")
 
 
 class RaceCondition(Exception):
@@ -256,6 +259,49 @@ class TableMaintenance:
     继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
     """
 
+    @staticmethod
+    def _load_migration_schema_script(
+        table_ref: TableReference, old_version: str
+    ) -> Callable | None:
+        """加载组件模型的的用户迁移脚本"""
+        # todo test
+        import sys
+        from pathlib import Path
+        import importlib.util
+        import hashlib
+
+        new_version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+        migration_file = f"{table_ref.comp_name}_{old_version}_to_{new_version}.py"
+        # 组合当前目录 + maint/migration/目录 + 迁移文件名
+        script_path = Path.cwd() / "maint" / "migration" / migration_file
+        script_path = script_path.absolute()
+        if script_path.exists():
+            logger.warning(
+                f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
+                f"发现自定义迁移脚本 {script_path}，将调用脚本进行迁移..."
+            )
+            module_name = (
+                f"Migration_{table_ref.comp_name}_{old_version}_to_{new_version}"
+            )
+            spec = importlib.util.spec_from_file_location(module_name, script_path)
+            assert spec and spec.loader, "Could not load script:" + str(script_path)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[module_name] = module
+            spec.loader.exec_module(module)
+
+            migration_func = getattr(module, "do_migration", None)
+            assert migration_func, "Migration script must define do_migration function"
+
+            # todo 这个方法应该是，首先用老的comp_cls，把所有rows读取
+            #      然后传给do_migration，返回新的rows，然后再用hmset写回去
+            #      或者直接用commit，都不用写专门代码了
+            return migration_func
+        logger.warning(
+            f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
+            f"未发现自定义迁移脚本 {script_path}，将使用默认迁移逻辑..."
+        )
+        return None
+
     def __init__(self, client: BackendClient):
         """传入master连接的BackendClient实例"""
         self.client = client
@@ -287,7 +333,9 @@ class TableMaintenance:
         """迁移组件表的cluster_id"""
         raise NotImplementedError
 
-    def migration_schema(self, table_ref: TableReference, old_json: str) -> None:
+    def migration_schema(
+        self, table_ref: TableReference, old_json: str, old_version: str
+    ) -> None:
         """迁移组件表的schema"""
         raise NotImplementedError
 
