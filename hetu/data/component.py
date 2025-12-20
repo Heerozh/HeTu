@@ -292,11 +292,11 @@ def define_component(
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class
-        当所有参数使用默认值时，可以直接无参数使用，如：
+        当所有参数使用默认值时，可以直接无参数使用，如::
 
-        >>> @define_component
-        ... class Position(BaseComponent):
-        ...    ...
+            @define_component
+            class Position(BaseComponent):
+                ...
 
     Notes
     -----

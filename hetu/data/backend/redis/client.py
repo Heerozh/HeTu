@@ -69,8 +69,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
@@ -80,8 +80,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
@@ -91,8 +91,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
@@ -102,8 +102,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
@@ -113,8 +113,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: RowFormat = ...,
@@ -428,8 +428,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
     @staticmethod
     def _range_normalize(
         is_str_index: bool,
-        left: int | float | str,
-        right: int | float | str | None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None,
         desc: bool,
     ) -> tuple[int | float | str, int | float | str]:
         """规范化范围查询的左边界和右边界"""
@@ -463,8 +463,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str,
-        right: int | float | str | None = None,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
@@ -507,10 +507,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         Notes
         -----
         如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选：
+        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
-        >>> items = client.range(ref, "owner", player_id, limit=100)  # noqa
-        >>> few_items = items[items.amount < 10]
+            items = client.range(ref, "owner", player_id, limit=100)
+            few_items = items[items.amount < 10]
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
