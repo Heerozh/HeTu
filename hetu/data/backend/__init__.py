@@ -14,6 +14,7 @@ from .base import (
 )
 from .table import TableReference
 from .redis import RedisBackendClient, RedisTableMaintenance
+from .session import Session
 
 __all__ = [
     "RaceCondition",
@@ -21,6 +22,7 @@ __all__ = [
     "RowFormat",
     "BackendClient",
     "Backend",
+    "Session",
     "RedisBackendClient",
     "RedisTableMaintenance",
     "TableReference",

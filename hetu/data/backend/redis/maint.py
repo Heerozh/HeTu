@@ -44,8 +44,8 @@ class RedisTableMaintenance(TableMaintenance):
         """获取redis表元数据的key名"""
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
 
-    def __init__(self, client: RedisBackendClient):
-        super().__init__(client)
+    def __init__(self, master: RedisBackendClient):
+        super().__init__(master)
         self.lock: redis.lock.Lock = self.client.io.lock(self._lock_key, timeout=60 * 5)
 
     @override

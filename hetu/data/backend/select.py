@@ -18,10 +18,12 @@ if TYPE_CHECKING:
     from .session import Session
 
 
-class Select:
+class SessionSelect:
+    """帮助方法，从数据库查询数据并放入Session缓存。"""
+
     def __init__(self, session: Session, comp_cls: type[BaseComponent]) -> None:
         self.session = session
-        self.table_ref: TableReference = TableReference(
+        self.ref: TableReference = TableReference(
             comp_cls, session.instance_name, session.cluster_id
         )
 
@@ -41,10 +43,10 @@ class Select:
             返回 np.record (c-struct) 的单行数据
         """
         row = await self.session.master_or_servant.get(
-            self.table_ref, row_id, RowFormat.STRUCT
+            self.ref, row_id, RowFormat.STRUCT
         )
         if row is not None:
-            self.session.idmap.add_clean(self.table_ref, row)
+            self.session.idmap.add_clean(self.ref, row)
         return row
 
     async def range(
@@ -89,9 +91,54 @@ class Select:
         """
         client = self.session.master_or_servant
         rows = await client.range(
-            self.table_ref, index_name, left, right, limit, desc, RowFormat.STRUCT
+            self.ref, index_name, left, right, limit, desc, RowFormat.STRUCT
         )
         if rows.shape[0] > 0:
-            self.session.idmap.add_clean(self.table_ref, rows)
+            self.session.idmap.add_clean(self.ref, rows)
 
         return rows
+
+    def insert(self, row: np.record) -> None:
+        """
+        向Session中添加一行待插入数据。
+
+        Parameters
+        ----------
+        row: np.record
+            待插入的行数据，必须是 `c-struct` 格式。
+        """
+        assert row["_version"] == 0, "Insert row's _version must be 0."
+
+        # todo unique check
+
+        self.session.idmap.add_insert(self.ref, row)
+
+    def update(self, row: np.record) -> None:
+        """
+        向Session中添加一行待更新数据。
+
+        Parameters
+        ----------
+        row : np.record
+            待更新的行数据，必须是 `c-struct` 格式。
+        """
+        # todo 检查和cache中的_version一致
+
+        # todo 检查有修改的列
+
+        # TODO unique check
+
+        self.session.idmap.update(self.ref, row)
+
+    def delete(self, row_id: int) -> None:
+        """
+        向Session中添加一行待删除数据。
+
+        Parameters
+        ----------
+        row_id : int
+            待删除行的主键ID。
+        """
+        # todo 检查和cache中的_version一致
+
+        self.session.idmap.mark_deleted(self.ref, row_id)

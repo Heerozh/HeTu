@@ -18,13 +18,13 @@
                            ▲
             ┌──────────────┴────────────┐
   ┌─────────┴──────────┐      ┌─────────┴────────┐
-  │   ComponentTable   │      │      Session     │
-  │    组件数据访问      │      │     事务处理类     │
+  │    DirectSelect    │      │      Session     │
+  │   直接组件数据访问    │      │     事务处理类     │
   └────────────────────┘      └──────────────────┘
             ▲                          ▲
  ┌──────────┴──────────┐   ┌───────────┴────────────┐
- │ComponentTableManager│   │         Select         │    todo 直接select出来的就是此类
- │   组件数据访问管理器   │   │      组件相关事务操作     │  # todo 改成SessionComponentTable，读写其实是传给idmap，提交也是idmap
+ │ComponentTableManager│   │     SessionSelect      │
+ │   组件数据访问管理器   │    │      组件相关事务操作     │
  └─────────────────────┘   └────────────────────────┘
 
 
@@ -383,9 +383,9 @@ class TableMaintenance:
         )
         return None
 
-    def __init__(self, client: BackendClient):
+    def __init__(self, master: BackendClient):
         """传入master连接的BackendClient实例"""
-        self.client = client
+        self.client = master
 
     # 检测是否需要维护的方法
     def check_table(self, table_ref: TableReference):

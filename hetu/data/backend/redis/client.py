@@ -578,9 +578,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
             当提交数据时，发现数据已被其他事务修改，抛出此异常
 
         """
-        # todo 在事务的insert方法需要判断：unique，version为0
-        #      update要判断 有列修改 已修改列的unique id不允许修改
-
         assert not self.is_servant, "从节点不允许提交事务"
 
         dirty_rows = idmap.get_dirty_rows()
@@ -603,7 +600,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         payload_json = msgspec.msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
-        resp = (await self.lua_commit(keys, [payload_json])).decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
+
+        # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
+        resp = await self.lua_commit(keys, [payload_json])
+        resp = resp.decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
+
         if resp != "committed":
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
