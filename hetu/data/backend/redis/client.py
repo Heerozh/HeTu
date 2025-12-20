@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from ...component import BaseComponent
     from ..idmap import IdentityMap
     from ..table import TableReference
+    from .maint import RedisTableMaintenance
 
 logger = logging.getLogger("HeTu.root")
 
@@ -613,3 +614,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 raise RaceCondition(resp)
             else:
                 raise RuntimeError(f"未知的提交错误：{resp}")
+
+    def get_table_maintenance(self) -> RedisTableMaintenance:
+        """
+        获取表维护对象。
+        """
+        from .maint import RedisTableMaintenance
+
+        return RedisTableMaintenance(self)

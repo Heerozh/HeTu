@@ -8,51 +8,39 @@
 import numpy as np
 import pytest
 
-from hetu.data.backend import UniqueViolation, RedisBackend
+from hetu.data.backend import UniqueViolation
+from hetu.data.backend.select import SessionSelect
 
 
-async def test_table(mod_item_model, item_table):
-    backend = item_table.backend
-
+async def test_table(mod_item_model, item_select: SessionSelect):
     # 测试插入数据
-    async with backend.transaction(1) as session:
-        # todo 语法改成：
-        #   row = mod_item_model.new_row()
-        #   session.select(mod_item_model).insert(row)
-        #   session.select(mod_item_model).get(id=id)
-        #   session.select(mod_item_model).range(index=(left, right))
-        #   session.select(mod_item_model).update(id, row)
-        #   session.select(mod_item_model).delete(id)
-        #   session.select(mod_item_model).upsert(index=row.index, row)
-        tbl = item_table.attach(session)
+    async with item_select.session as session:
         row = mod_item_model.new_row()
         row.name = "Item1"
         row.owner = 1
         row.time = 1
-        await tbl.insert(row)
+        item_select.insert(row)
 
         row.id = 0
         row.name = "Item2"
         row.owner = 1
         row.time = 2
-        await tbl.insert(row)
+        item_select.insert(row)
 
         row.id = 0
         row.name = "Item3"
         row.owner = 2
         row.time = 3
-        await tbl.insert(row)
-        row_ids = await session.end_transaction(False)
-    assert row_ids, [1, 2 == 3]
+        item_select.insert(row)
+        await session.commit()
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        result = await tbl.query("id", -np.inf, +np.inf)
+    async with item_select.session as session:
+        result = await item_select.range(limit=1, id=(-np.inf, +np.inf))
         np.testing.assert_array_equal(result.id, [1, 2, 3])
-        assert (await tbl.select(1)).name == "Item1"
+        assert (await item_select.get(id=1)).name == "Item1"
         # 测试第一行dict select不出来的历史bug
-        assert (await tbl.select("Item1", "name")).name == "Item1"
-        assert type(await tbl.select("Item1", "name")) is not np.recarray
+        assert (await item_select.get(name="Item1")).name == "Item1"
+        assert type(await item_select.get(name="Item1")) is not np.recarray
 
     np.testing.assert_array_equal(
         (await item_table.direct_query("id", -np.inf, +np.inf)).id, [1, 2, 3]

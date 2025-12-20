@@ -12,9 +12,9 @@ from .base import (
     RowFormat,
     UniqueViolation,
 )
-from .table import TableReference
 from .redis import RedisBackendClient, RedisTableMaintenance
 from .session import Session
+from .table import TableReference
 
 __all__ = [
     "RaceCondition",
@@ -108,3 +108,9 @@ class Backend:
         返回主数据库连接或一个从数据库连接，随机选择。
         """
         return random.choices(self._all_clients, self._all_weights)[0]
+
+    def get_table_maintenance(self):
+        """
+        获取表维护对象，根据不同后端类型返回不同的实现。
+        """
+        return self._master.get_table_maintenance()

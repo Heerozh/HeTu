@@ -101,3 +101,10 @@ ya = { git = "https://github.com/Heerozh/ya.git" }
 typeCheckingMode = "standard"
 # reportUnknownVariableType = false
 # reportUnknownMemberType = false
+
+[[tool.pyright.executionEnvironments]]
+root = "tests"
+# 把“可选值使用不安全”的报告降级（或关闭）
+#reportOptionalMemberAccess = "none"
+#reportOptionalSubscript = "none"
+#reportOptionalIterable = "none"

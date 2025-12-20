@@ -6,8 +6,10 @@
 #  """
 
 import pytest
-
-from hetu.data.backend_old import RawComponentTable
+from hetu.data.backend import Session
+from hetu.data.backend import RaceCondition
+from hetu.data.backend.base import TableMaintenance
+from hetu.data.backend.select import SessionSelect
 
 
 @pytest.fixture(scope="module")
@@ -44,14 +46,23 @@ async def mod_item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
 
 
 @pytest.fixture(scope="function")
-async def item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
-    backend_component_table, get_or_create_backend = mod_auto_backend
+async def item_select(mod_auto_backend, mod_item_model) -> SessionSelect:
+    get_or_create_backend = mod_auto_backend
 
+    # 返回表格session
     backend = get_or_create_backend("main")
-    test_table = backend_component_table(mod_item_model, "ItemTestTable", 1, backend)
-    test_table.flush(force=True)
-    test_table.create_or_migrate()
-    return test_table
+    session = Session(backend, "pytest", 1)
+    select = session.select(mod_item_model)
+
+    # 初始化表格
+    table_maint = backend.get_table_maintenance()
+    table_maint.flush(select.ref, force=True)
+    try:
+        table_maint.create_table(select.ref)
+    except RaceCondition:
+        pass
+
+    return select
 
 
 @pytest.fixture(scope="module")

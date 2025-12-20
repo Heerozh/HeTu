@@ -12,9 +12,7 @@ from typing import TYPE_CHECKING, cast, final, override
 
 from ....common.helper import batched
 from ...component import BaseComponent
-from .. import (
-    RaceCondition,
-)
+from .. import RaceCondition
 from ..base import TableMaintenance
 from ..table import TableReference
 
@@ -42,6 +40,8 @@ class RedisTableMaintenance(TableMaintenance):
     @staticmethod
     def meta_key(table_ref: TableReference) -> str:
         """获取redis表元数据的key名"""
+        from .client import RedisBackendClient
+
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
 
     def __init__(self, master: RedisBackendClient):

@@ -315,6 +315,12 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def get_table_maintenance(self) -> TableMaintenance:
+        """
+        获取表维护对象，根据不同后端类型返回不同的实现。
+        """
+        raise NotImplementedError
+
     #     def get_mq_client(self) -> MQClient:
     #         """获取消息队列连接"""
     #         raise NotImplementedError
