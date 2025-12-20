@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast, final, override, overload, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
 import msgspec
 import numpy as np
@@ -43,7 +43,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         row_id: int,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
     ) -> np.record | None: ...
-
     @overload
     async def get(
         self,
@@ -51,7 +50,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         row_id: int,
         row_format: Literal[RowFormat.RAW] = ...,
     ) -> dict[str, str] | None: ...
-
     @overload
     async def get(
         self,
@@ -59,7 +57,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         row_id: int,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
     ) -> dict[str, Any] | None: ...
-
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: RowFormat = ...,
+    ) -> np.record | dict[str, str] | dict[str, Any] | None: ...
     @overload
     async def range(
         self,
@@ -71,7 +75,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
     ) -> np.recarray: ...
-
     @overload
     async def range(
         self,
@@ -83,7 +86,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
     ) -> list[dict[str, str]]: ...
-
     @overload
     async def range(
         self,
@@ -95,7 +97,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
     ) -> list[dict[str, Any]]: ...
-
     @overload
     async def range(
         self,
@@ -107,6 +108,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
     ) -> list[int]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: RowFormat = ...,
+    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
 
     # ------------
 
@@ -542,6 +554,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
+            # todo 要么用合批的请求方法，要么用pipeline
             if row := await aio.hgetall(key_prefix + str(_id)):  # pyright: ignore[reportGeneralTypeIssues]
                 rows.append(self._row_decode(comp_cls, row, row_format))
 

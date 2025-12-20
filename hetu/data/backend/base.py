@@ -49,9 +49,9 @@
   └────────────────────┘
 """
 
-from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, overload, Literal
 import logging
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Callable, Literal, overload
 
 import numpy as np
 
@@ -154,6 +154,13 @@ class BackendClient:
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
     ) -> dict[str, Any] | None: ...
     @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: RowFormat = ...,
+    ) -> np.record | dict[str, str] | dict[str, Any] | None: ...
+    @overload
     async def range(
         self,
         table_ref: TableReference,
@@ -197,6 +204,17 @@ class BackendClient:
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
     ) -> list[int]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str,
+        right: int | float | str | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: RowFormat = ...,
+    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
 
     async def get(
         self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
@@ -328,10 +346,10 @@ class TableMaintenance:
     ) -> Callable | None:
         """加载组件模型的的用户迁移脚本"""
         # todo test
+        import hashlib
+        import importlib.util
         import sys
         from pathlib import Path
-        import importlib.util
-        import hashlib
 
         new_version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
         migration_file = f"{table_ref.comp_name}_{old_version}_to_{new_version}.py"

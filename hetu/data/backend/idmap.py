@@ -48,6 +48,14 @@ class IdentityMap:
         # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
         # self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
 
+    @property
+    def is_dirty(self) -> bool:
+        """检查是否有脏数据"""
+        for states in self._row_states.values():
+            if any(state != RowState.CLEAN for state in states.values()):
+                return True
+        return False
+
     def first_reference(self) -> TableReference | None:
         if not self._row_cache:
             return None

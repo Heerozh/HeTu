@@ -11,13 +11,13 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
-from ..common.snowflake_id import SnowflakeID
 from typing import TYPE_CHECKING, Any, Callable, cast
 
 import numpy as np
 
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
+from ..common.snowflake_id import SnowflakeID
 
 if TYPE_CHECKING:
     from .backend import RawComponentTable
@@ -49,7 +49,7 @@ def property_field(
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
     properties_: list[tuple[str, Property]] = []  # Ordered属性列表
-    component_name_: str | None = None
+    component_name_: str
     namespace_: str | None = None
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
