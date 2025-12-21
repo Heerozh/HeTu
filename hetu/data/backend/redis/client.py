@@ -255,11 +255,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             assert isinstance(io, redis.Redis)  # for type checking
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
-        # 加载lua脚本，注意pipeline里不能用lua，会反复检测script exists性能极低
-        if not self.is_servant:
-            self.lua_commit = self.load_commit_scripts(
-                Path(__file__).parent.resolve() / "commit.lua"
-            )
+        self.lua_commit = None
 
         # 限制aio运行的coroutine
         try:
@@ -268,7 +264,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.loop_id = 0
 
     @override
-    def configure(self) -> None:
+    def post_configure(self) -> None:
+        """
+        对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
+        此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
+        """
         if self.is_servant:
             self.configure_servant()
         else:
@@ -285,7 +285,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
         for i, io in enumerate(self._ios):
             info: dict = cast(dict, io.info("server"))  # 防止Awaitable类型检查报错
             redis_ver = parse_version(info["redis_version"])
-            assert redis_ver >= (7, 0), "Redis版本过低，至少需要7.0版本"
+            assert redis_ver >= (7, 0), "Redis/Valkey 版本过低，至少需要7.0版本"
+
+        # 加载lua脚本，注意redis-py的pipeline里不能用lua，会反复检测script exists性能极低
+        self.lua_commit = self.load_commit_scripts(
+            Path(__file__).parent.resolve() / "commit.lua"
+        )
 
     def configure_servant(self) -> None:
         if not self._ios:
@@ -363,12 +368,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         for aio in self._async_ios:
             await aio.aclose()
         self._async_ios = []
-
-    # def get_mq_client(self) -> RedisMQClient:
-    #     """每个websocket连接获得一个随机的replica连接，用于读取订阅"""
-    #     if not self.io:
-    #         raise ConnectionError("连接已关闭，已调用过close")
-    #     return RedisMQClient(self.random_replica())
 
     @staticmethod
     def _row_decode(

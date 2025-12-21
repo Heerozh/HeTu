@@ -85,7 +85,7 @@ async def test_reconnect(auto_backend, mod_item_model):
     with pytest.raises(ConnectionError):
         backend.transaction(1)
     with pytest.raises(ConnectionError):
-        backend.configure()
+        backend.post_configure()
     with pytest.raises(ConnectionError):
         await backend.wait_for_synced()
     with pytest.raises(ConnectionError):
@@ -104,6 +104,4 @@ async def test_reconnect(auto_backend, mod_item_model):
     loc_item_table2.create_or_migrate()
     async with backend2.transaction(1) as session:
         tbl = loc_item_table2.attach(session)
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == size
-
-
+        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == size

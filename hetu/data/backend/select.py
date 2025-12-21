@@ -56,7 +56,7 @@ class SessionSelect:
     async def get(self, **kwargs: IndexScalar) -> np.record | None:
         """
         从数据库获取单行数据，并放入Session缓存。
-        推荐通过"id"主键查询，这样可以命中缓存。否则会执行1-2次查询，先通过索引查询到id，再查询数据行。
+        推荐通过"id"主键查询，这样无须查询索引。否则会执行1-2次查询，先通过索引查询到id，再查询数据行。
 
         Parameters
         ----------

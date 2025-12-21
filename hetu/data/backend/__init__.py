@@ -67,13 +67,14 @@ class Backend:
         for servant in self._servants:
             await servant.close()
 
-    def configure(self):
+    def post_configure(self):
         """
-        启动时检查并配置数据库，减少运维压力的帮助方法，非必须。
+        对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
+        此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
         """
-        self._master.configure()
+        self._master.post_configure()
         for servant in self._servants:
-            servant.configure()
+            servant.post_configure()
 
     async def wait_for_synced(self) -> None:
         """

@@ -72,11 +72,11 @@ class RedisTableMaintenance(TableMaintenance):
         else:
             version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
             # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
-            if int(meta["cluster_id"]) != table_ref.cluster_id:
+            if int(meta[b"cluster_id"]) != table_ref.cluster_id:
                 return "cluster_mismatch"
 
             # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-            if meta["version"] != version:
+            if meta[b"version"].decode() != version:
                 return "schema_mismatch"
 
         return "ok"

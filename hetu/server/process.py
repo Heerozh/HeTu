@@ -39,7 +39,7 @@ def start_backends(app: Sanic):
             from ..data.backend import RedisBackend, RedisRawComponentTable
 
             backend = RedisBackend(db_cfg)
-            backend.configure()
+            backend.post_configure()  # todo 最后调用
             backends[name] = backend
             table_constructors["Redis"] = RedisRawComponentTable
             app.ctx.__setattr__(name, backend)
