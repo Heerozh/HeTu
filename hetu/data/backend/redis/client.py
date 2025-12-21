@@ -16,7 +16,6 @@ import numpy as np
 import redis
 
 from ..base import BackendClient, RaceCondition, RowFormat
-from .worker_keeper import RedisWorkerKeeper
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -28,6 +27,7 @@ if TYPE_CHECKING:
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import RedisTableMaintenance
+    from .worker_keeper import RedisWorkerKeeper
 
 logger = logging.getLogger("HeTu.root")
 
@@ -139,6 +139,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         #     unique = { ["email"] = true, ["phone"] = true },
         #     indexes = { ["email"] = false, ["age"] = true, ["phone"] = true }
         # }
+        # todo 不该在这耦合system的东西， lua改成直接stack cmd
         from ....system.definer import SystemClusters
 
         lua_schema_def = ["{"]
@@ -354,6 +355,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
         """
         assert not self.is_servant, "get_worker_keeper"
+        from .worker_keeper import RedisWorkerKeeper
+
         return RedisWorkerKeeper(self.io, self.aio)
 
     @override

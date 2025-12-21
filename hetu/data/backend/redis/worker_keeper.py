@@ -18,9 +18,13 @@ logger = logging.getLogger("HeTu.root")
 class RedisWorkerKeeper(WorkerKeeper):
     """
     基于 Redis 的 Worker ID 管理器。
+    此类的目的是为了尽可能让worker id在重启后不变，通过对照上次服务器时间，来减少时间回拨导致ID重复的风险。
+    注：1. 保证机器ntp持续工作，回拨不超过10秒，这样限制每次重启等10秒以上可解决重启回拨问题。
+       2. 再加上本类的keep_alive持续记录服务器时间戳，保证记录间隔<=10秒。
+       方式2已基本可以99.99%保证重启回拨问题，因此可减少对服务器运维的依赖。
 
     通过
-        SET snowflake:worker:{worker_id} {uuid.getnode()} NX EX 86400
+        SET snowflake:worker:{worker_id} {uuid.getnode():启动序列号} NX EX 86400
     成功：拿到了 WorkerID = {worker_id}
     失败：说明 ID 正在被别的机器占用，如果node id不符，循环尝试 ID {worker_id + 1}。
          直到1024次失败报错。
@@ -30,16 +34,12 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     def __init__(
         self,
+        sequence_id: int,
         io: redis.Redis | redis.RedisCluster,
         aio: redis.asyncio.Redis | redis.asyncio.RedisCluster,
     ):
         """
         初始化 RedisWorkerKeeper。
-
-        Parameters
-        ----------
-        redis_client: Any
-            已连接的 Redis 客户端实例。
         """
         super().__init__()
         self.io = io
@@ -47,7 +47,8 @@ class RedisWorkerKeeper(WorkerKeeper):
         self.worker_id_key = "snowflake:worker"
         self.last_timestamp_key = "snowflake:last_timestamp"
         self.worker_id = -1
-        self.node_id = uuid.getnode()
+        # getnode返回的机器码，为了让worker id重启不变，sequence_id应该用启动进程的顺序id
+        self.node_id = f"{uuid.getnode()}:{sequence_id}"
 
     @override
     def get_worker_id(self) -> int:
@@ -60,20 +61,17 @@ class RedisWorkerKeeper(WorkerKeeper):
             result = self.io.set(key, self.node_id, nx=True, ex=86400)
             if result:
                 logger.info(
-                    f"[❄️ID] 成功获取 Worker ID: {worker_id}, 机器码: {self.node_id}"
+                    f"[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {self.node_id}"
                 )
                 self.worker_id = worker_id
                 return worker_id
             else:
                 # 判断node_id是否相同，相同则说明是重启，直接使用
-                existing_node_id = cast(bytes, self.io.get(key))
-                if (
-                    existing_node_id is not None
-                    and int(existing_node_id) == self.node_id
-                ):
+                existing_node_id = self.io.get(key).decode("ascii")
+                if existing_node_id is not None and existing_node_id == self.node_id:
                     logger.info(
                         f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
-                        f"(通过相同机器码 {self.node_id} )"
+                        f"(通过相同进程码 {self.node_id} )"
                     )
                     self.worker_id = worker_id
                     return worker_id
@@ -86,20 +84,22 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         key = f"{self.last_timestamp_key}:{self.node_id}"
         last_timestamp = cast(bytes, self.io.get(key))
-        # 返回当前时间加10秒，防止重启回拨
         if last_timestamp is not None:
             logger.info(
                 f"[❄️ID] 成功获取 {self.node_id} 持久化的 last_timestamp: "
                 f"{datetime.fromtimestamp(int(last_timestamp) / 1000):%Y-%m-%d %H:%M:%S}"
             )
-            return int(last_timestamp) + 10000
+            # 返回持久化的时间戳和当前时间的最大值，因为这是为了防止回拨，自然要取最大值
+            return max(int(last_timestamp), int(time() * 1000))
         else:
-            return int(time() * 1000) + 10000
+            return int(time() * 1000)
 
     @override
     async def keep_alive(self, last_timestamp: int):
         """
-        续租 Worker ID 的有效期，
+        续租 Worker ID 的有效期，并保存雪花ID上次生成用的时间戳。
+        续约失败则抛出异常，表示 Worker ID 可能中途被其他实例占用了。
+        此方法需要每5秒调用1次，因为回拨误差是10秒。
         """
         worker_id = self.worker_id
         key = f"{self.worker_id_key}:{worker_id}"

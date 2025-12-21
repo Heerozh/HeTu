@@ -7,6 +7,9 @@ from docker.errors import NotFound
 
 @pytest.fixture(scope="module")
 def mod_redis_service():
+    """
+    启动redis docker服务，测试结束后销毁服务
+    """
     from hetu.data.backend_old.redis import RedisBackend
 
     # redis服务器设置了不会保存lua脚本，redis服务销毁/重建时，需要清理全局lua缓存标记，

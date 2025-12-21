@@ -33,6 +33,8 @@ SEQUENCE_MASK = -1 ^ (-1 << SEQUENCE_BITS)
 # DATACENTER_ID_SHIFT = SEQUENCE_BITS + WORKER_ID_BITS
 # TIMESTAMP_LEFT_SHIFT = SEQUENCE_BITS + WORKER_ID_BITS + DATACENTER_ID_BITS
 
+TIME_ROLLBACK_TOLERANCE_MS = 10_000  # 允许的时间回拨容忍度，单位毫秒
+
 
 @final
 class SnowflakeID(metaclass=Singleton):
@@ -48,8 +50,8 @@ class SnowflakeID(metaclass=Singleton):
     重启回拨问题
     ---------
     重启时如果服务器有时间回拨会导致ID重复。
-    - 为尽可能减少这个情况，需要持久化最后的时间戳(精度<=n秒，重启不可能n秒内完成)，来防止此情况。
-    - 使用方要尽可能保证worker id不变，不然使用了别的机器的id，而重启后机器间有时间差异也会导致ID重复。
+    - 为尽可能减少这个情况，需要持久化最后的时间戳(精度要<=容忍度秒)，重启后再等待容忍度秒，来防止此情况。
+    - 使用方要尽可能保证worker id不变，或者用别的worker id时，也用别人的最后时间戳。
 
     以上2点已通过WorkerKeeper类实现。
     """
@@ -80,7 +82,9 @@ class SnowflakeID(metaclass=Singleton):
             )
 
         if last_timestamp < 0:
-            last_timestamp = int(time() * 1000) + 10000  # 默认加10秒，防止重启回拨
+            last_timestamp = (
+                int(time() * 1000) + TIME_ROLLBACK_TOLERANCE_MS
+            )  # 默认加10秒，防止重启回拨
 
         self.worker_id = worker_id
         self.sequence = 0

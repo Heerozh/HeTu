@@ -111,6 +111,7 @@ async def worker_close(app):
 
 
 async def worker_keeper_renewal(app: Sanic):
+    # todo 要循环每5秒续约一次worker id
     await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
 
 
