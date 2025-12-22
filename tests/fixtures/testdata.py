@@ -7,14 +7,11 @@
 
 import pytest
 from hetu.data.backend import Session
-from hetu.data.backend import RaceCondition
-from hetu.data.backend.base import TableMaintenance
+from hetu.data.backend import TableReference
 from hetu.data.backend.select import SessionSelect
 
 
-@pytest.fixture(scope="module")
-async def mod_item_model(mod_new_component_env):
-    """定义测试用的Item组件模型，返回模型类"""
+def def_item():
     from hetu.data import define_component, property_field, BaseComponent, Permission
     import numpy as np
 
@@ -31,6 +28,63 @@ async def mod_item_model(mod_new_component_env):
         used: bool = property_field(False, unique=False, index=True)
 
     return Item
+
+
+def def_rls_test():
+    from hetu.data import define_component, property_field, BaseComponent, Permission
+    import numpy as np
+
+    global RLSTest
+
+    @define_component(
+        namespace="pytest",
+        permission=Permission.RLS,
+        rls_compare=("eq", "friend", "caller"),
+    )
+    class RLSTest(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        friend: np.int8 = property_field(1, unique=False, index=False)
+
+    return RLSTest
+
+
+def create_ref(model, backend) -> TableReference:
+    """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
+    # 创建空表
+    from hetu.data.backend import RaceCondition
+
+    model_ref = TableReference(model, "pytest", 1)
+    table_maint = backend.get_table_maintenance()
+    try:
+        table_maint.check_table(model_ref)
+    except RaceCondition:
+        table_maint.flush(model_ref, force=True)
+
+    return model_ref
+
+
+@pytest.fixture(scope="module")
+async def mod_item_ref(mod_new_component_env, mod_auto_backend) -> TableReference:
+    """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
+    return create_ref(def_item(), mod_auto_backend())
+
+
+@pytest.fixture(scope="module")
+async def mod_rls_test_ref(mod_new_component_env, mod_auto_backend) -> TableReference:
+    """定义测试用RLS的组件模型，返回模型类"""
+    return create_ref(def_rls_test(), mod_auto_backend())
+
+
+@pytest.fixture(scope="function")
+async def item_ref(new_component_env, mod_auto_backend) -> TableReference:
+    """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
+    return create_ref(def_item(), mod_auto_backend())
+
+
+@pytest.fixture(scope="function")
+async def rls_ref(new_component_env, mod_auto_backend) -> TableReference:
+    """定义测试用RLS的组件模型，返回模型类"""
+    return create_ref(def_rls_test(), mod_auto_backend())
 
 
 @pytest.fixture(scope="module")
@@ -63,26 +117,6 @@ async def item_select(mod_auto_backend, mod_item_model) -> SessionSelect:
         pass
 
     return select
-
-
-@pytest.fixture(scope="module")
-async def mod_rls_test_model(mod_new_component_env):
-    """定义测试用RLS的组件模型，返回模型类"""
-    from hetu.data import define_component, property_field, BaseComponent, Permission
-    import numpy as np
-
-    global RLSTest
-
-    @define_component(
-        namespace="pytest",
-        permission=Permission.RLS,
-        rls_compare=("eq", "friend", "caller"),
-    )
-    class RLSTest(BaseComponent):
-        owner: np.int64 = property_field(0, unique=False, index=True)
-        friend: np.int8 = property_field(1, unique=False, index=False)
-
-    return RLSTest
 
 
 @pytest.fixture(scope="module")
@@ -139,24 +173,3 @@ async def filled_rls_test_table(mod_rls_test_model, mod_rls_test_table):
     yield mod_rls_test_table
 
     mod_rls_test_table.flush(force=True)
-
-
-@pytest.fixture
-def env_builder():
-    """
-    清理System定义，保证每个测试用例使用干净的System定义环境
-    """
-    from hetu.system import define_system, SystemClusters
-
-    def _build(*args):
-        SystemClusters()._clear()
-
-        # 需要定义System以确保Component被注册，不然Component schema不会加入到lua脚本中
-        @define_system(namespace="pytest", components=args)
-        async def ref_components(ctx):
-            pass
-
-        # 初始化instance & clusters
-        SystemClusters().build_clusters("pytest")
-
-    return _build

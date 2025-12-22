@@ -12,33 +12,24 @@ from hetu.common.snowflake_id import SnowflakeID
 SnowflakeID().init(1, 0)
 
 
-async def test_insert(
-    mod_item_model, mod_rls_test_model, mod_auto_backend, env_builder
-):
+async def test_insert(item_ref, rls_ref, mod_auto_backend):
     """测试client的commit(insert)/get"""
-    # 建立环境，定义用哪些表
-    env_builder(mod_item_model, mod_rls_test_model)
-
     # 启动backend
     backend: Backend = mod_auto_backend()
     client = backend.master
 
     from hetu.data.backend.idmap import IdentityMap
-    from hetu.data.backend.table import TableReference
-
-    item_ref = TableReference(mod_item_model, "pytest", 1)
-    rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
-    idmap = IdentityMap()
 
     # 测试client的commit(insert)数据，以及get
-    row1 = mod_item_model.new_row()
+    idmap = IdentityMap()
+
+    row1 = item_ref.comp_cls.new_row()
     row1.owner = 10
     idmap.add_insert(item_ref, row1)
 
-    row2 = mod_rls_test_model.new_row()
+    row2 = rls_ref.comp_cls.new_row()
     row2.owner = 11
     idmap.add_insert(rls_ref, row2)
-
     await client.commit(idmap)
 
     # 测试insert的是否有效
@@ -51,33 +42,23 @@ async def test_insert(
     assert row_get == row2
 
 
-async def test_update_delete(
-    mod_item_model, mod_rls_test_model, mod_auto_backend, env_builder
-):
+async def test_update_delete(item_ref, rls_ref, mod_auto_backend):
     """测试client的commit(update/delete) get/range"""
-    # 建立环境，定义用哪些表
-    env_builder(mod_item_model, mod_rls_test_model)
-
     # 启动backend
     backend: Backend = mod_auto_backend()
     client = backend.master
 
     from hetu.data.backend.idmap import IdentityMap
-    from hetu.data.backend.table import TableReference
-
-    item_ref = TableReference(mod_item_model, "pytest", 1)
-    rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
-    idmap = IdentityMap()
 
     # 添加多条数据
+    idmap = IdentityMap()
     for i in range(10):
-        row1 = mod_item_model.new_row()
+        row1 = item_ref.comp_cls.new_row()
         row1.owner = i
         row1.time = i + 10
         row1.name = f"Item{i + 100}"
         idmap.add_insert(item_ref, row1)
-
-        row2 = mod_rls_test_model.new_row()
+        row2 = rls_ref.comp_cls.new_row()
         row2.owner = i
         idmap.add_insert(rls_ref, row2)
 
@@ -104,7 +85,6 @@ async def test_update_delete(
 
     idmap.add_clean(item_ref, rows1)
     idmap.add_clean(rls_ref, rows2)
-
     # 测试update查询到的数据
     row1 = rows1[rows1.time == 13][0]
     row1.name = "updated"
@@ -113,7 +93,6 @@ async def test_update_delete(
     row2 = rows2[0]
     row2.owner = 11
     idmap.update(rls_ref, row2)
-
     await client.commit(idmap)
 
     # 测试update后再次查询是否更新了
