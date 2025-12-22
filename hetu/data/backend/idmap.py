@@ -116,6 +116,7 @@ class IdentityMap:
         # 标记为CLEAN
         if row_s.ndim == 0:
             # 如果是单行数据，直接添加状态
+            row_s = cast(np.record, row_s)
             states[row_s["id"]] = RowState.CLEAN
         else:
             states.update({key: RowState.CLEAN for key in row_s["id"]})
@@ -165,7 +166,7 @@ class IdentityMap:
             f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
         )
 
-        assert row["_version"] == 0, "不得修改_version字段"
+        assert row["_version"] == 0, f"不得修改_version字段，{row['_version']}"
 
         # 初始化缓存
 

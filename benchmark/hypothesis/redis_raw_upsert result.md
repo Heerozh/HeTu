@@ -9,13 +9,13 @@
 ```
 export REDIS_HOST=r-uf6v7vch86ipmsqmhq.redis.rds.aliyuncs.com
 export REDIS_PASSWORD=...
-uv run ya ./benchmark/hypothesis/ya_redis_upsert.py
+uv run ya ./benchmark/hypothesis/ya_redis_raw_upsert.py
 ```
 
 Found 2 benchmark(s): benchmark_lua_version, benchmark_watch_multi
 Running with 64 workers, 3 tasks per worker, for 5.0 minute(s)
 
-## 本机 9950x3D redis:latest Windows Docker 默认设置
+## 本机 9950x3D redis:8.0 Windows Docker 默认设置
 
 Calls Per Minute (CPM) Statistics:
 

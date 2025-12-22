@@ -11,7 +11,7 @@ import random
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
-import msgspec
+from msgspec import msgpack
 import numpy as np
 import redis
 
@@ -613,7 +613,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             }
             for commit_type, commit_data in dirty_rows.items()
         }
-        payload_json = msgspec.msgpack.encode(payload)
+        payload_json = msgpack.encode(payload)
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
 

@@ -59,7 +59,7 @@ async def redis_backend():
     SnowflakeID().init(hash(uuid.getnode()) % 1024, 0)
 
     _backend = Backend(config)
-    _backend.configure()
+    _backend.post_configure()
     yield _backend
     await _backend.close()
 
