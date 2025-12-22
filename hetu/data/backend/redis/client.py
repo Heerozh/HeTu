@@ -65,12 +65,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
             lua_schema_def.append("indexes = {")
             for field, is_str in comp_cls.indexes_.items():
                 str_flag = "true" if is_str else "false"
-                # 要把int超过53位的，double超64位的，标记为字符串，否则score索引无法实现
+                # 要把int超过53位的标记为字符串，否则score索引无法实现
+                # todo 浮点超过8的要报错
                 dtype = comp_cls.dtype_map_[field]
                 if np.issubdtype(dtype, np.integer) and dtype.itemsize > 6:
                     str_flag = "true"
-                elif np.issubdtype(dtype, np.floating) and dtype.itemsize > 8:
-                    str_flag = "true"
+
                 lua_schema_def.append(f'["{field}"] = {str_flag},')
             lua_schema_def.append("},")
             lua_schema_def.append("},")

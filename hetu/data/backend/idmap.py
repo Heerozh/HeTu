@@ -260,10 +260,11 @@ class IdentityMap:
             dtype, data = kv
             # todo 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
             # todo 要按database_max_integer_size, max_float_size来判断，交给client传入
+            # todo 不对，浮点没办法这么搞，因为浮点无法按byte正确排序
+
             if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
                 return data ^ 0x8000_0000_0000_0000
-            elif np.issubdtype(dtype, np.floating) and dtype.itemsize > max_float_size:
-                return data ^ 0x8000_0000_0000_0000
+
             return str(data)
 
         for table_ref, states in self._row_states.items():
