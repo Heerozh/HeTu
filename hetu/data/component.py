@@ -11,7 +11,7 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, cast
+from typing import TYPE_CHECKING, Any, Callable, cast, overload
 
 import numpy as np
 
@@ -241,6 +241,32 @@ class ComponentDefines(metaclass=Singleton):
         comp_map[component_cls.component_name_] = component_cls
 
 
+@overload
+def define_component(
+    cls: type[BaseComponent],
+    /,
+    *,
+    namespace: str = "default",
+    force: bool = False,
+    permission: Permission = Permission.USER,
+    volatile: bool = False,
+    readonly: bool = False,
+    backend: str = "default",
+    rls_compare: tuple[str, str, str] | None = None,
+) -> type[BaseComponent]: ...
+@overload
+def define_component(
+    cls: None = None,
+    /,
+    *,
+    namespace: str = "default",
+    force: bool = False,
+    permission: Permission = Permission.USER,
+    volatile: bool = False,
+    readonly: bool = False,
+    backend: str = "default",
+    rls_compare: tuple[str, str, str] | None = None,
+) -> Callable[[type[BaseComponent]], type[BaseComponent]]: ...
 def define_component(
     _cls=None,
     /,
@@ -252,7 +278,7 @@ def define_component(
     readonly=False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
-):
+) -> Callable[[type[BaseComponent]], type[BaseComponent]] | type[BaseComponent]:
     """
     定义Component组件的schema模型
 
