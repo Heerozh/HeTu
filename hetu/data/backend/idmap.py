@@ -234,7 +234,9 @@ class IdentityMap:
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
-    def get_dirty_rows(self) -> dict[str, dict[TableReference, list[dict[str, str]]]]:
+    def get_dirty_rows(
+        self, max_integer_size: int = 6, max_float_size: int = 8
+    ) -> dict[str, dict[TableReference, list[dict[str, bytes | str]]]]:
         """
         返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
         既然是提交给数据库用，所以返回的数据都是str类型
@@ -247,11 +249,22 @@ class IdentityMap:
             'delete': [{id: xxx, _version: 0}, ]
         }
         """
-        result: dict[str, dict[TableReference, list[dict[str, str]]]] = {
+        result: dict[str, dict[TableReference, list[dict[str, bytes | str]]]] = {
             "insert": {},
             "update": {},
             "delete": {},
         }
+
+        def serialize_value(kv) -> bytes | str:
+            """将row值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
+            dtype, data = kv
+            # todo 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
+            # todo 要按database_max_integer_size, max_float_size来判断，交给client传入
+            if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
+                return data ^ 0x8000_0000_0000_0000
+            elif np.issubdtype(dtype, np.floating) and dtype.itemsize > max_float_size:
+                return data ^ 0x8000_0000_0000_0000
+            return str(data)
 
         for table_ref, states in self._row_states.items():
             cache = self._row_cache[table_ref]
@@ -271,7 +284,12 @@ class IdentityMap:
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
                 result["insert"][table_ref] = [
-                    dict(zip(row.dtype.names, map(str, row.item())))
+                    dict(
+                        zip(
+                            row.dtype.names,
+                            map(serialize_value, zip(row.dtype, row.item())),
+                        )
+                    )
                     for row in cache[mask]
                 ]
 
