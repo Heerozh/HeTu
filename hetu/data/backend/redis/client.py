@@ -36,10 +36,16 @@ logger = logging.getLogger("HeTu.root")
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
+    @staticmethod
+    def _get_referred_components() -> list[type["BaseComponent"]]:
+        """获取当前app用到的Component列表"""
+        from ....system.definer import SystemClusters
+
+        return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
+
     def _lua_schema_definitions(self) -> str:
         """生成lua脚本里用到的schema定义部分"""
         # todo 不该在这耦合system的东西， lua改成直接stack cmd
-        from ....system.definer import SystemClusters
 
         # 读取namespace下的所有schema定义，然后替换lua脚本里的schema定义
         # ["User:{CLU1}"] = {
@@ -47,7 +53,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         #     indexes = { ["email"] = false, ["age"] = true, ["phone"] = true }
         # }
         lua_schema_def = ["{"]
-        for comp_cls in SystemClusters().get_components().keys():
+        for comp_cls in self._get_referred_components():
             lua_schema_def.append(f'["{comp_cls.component_name_}"] = {{')
             # unique
             lua_schema_def.append("unique = {")

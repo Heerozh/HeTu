@@ -8,26 +8,33 @@ from docker.errors import NotFound
 @pytest.fixture(scope="module")
 async def mod_redis_backend(mod_redis_service):
     from hetu.data.backend import Backend
+    from hetu.data.component import ComponentDefines
 
     backends = {}
 
     # 支持创建多个backend连接
     def _create_redis_backend(key="main", port=23318):
         if key in backends:
-            return backends[key]
+            _backend = backends[key]
+        else:
+            redis_url, replica_url = mod_redis_service(port)
+            config = {
+                "type": "redis",
+                "master": redis_url,
+                "servants": [
+                    replica_url,
+                ],
+            }
 
-        redis_url, replica_url = mod_redis_service(port)
-        config = {
-            "type": "redis",
-            "master": redis_url,
-            "servants": [
-                replica_url,
-            ],
-        }
+            _backend = Backend(config)
+            backends[key] = _backend
 
-        _backend = Backend(config)
-        backends[key] = _backend
-        _backend.configure()
+        # mock redis client
+        def _mock_redis_client_lua():
+            return ComponentDefines().get_all()
+
+        _backend.master._get_referred_components = _mock_redis_client_lua
+        _backend.post_configure()
         return _backend
 
     yield _create_redis_backend
