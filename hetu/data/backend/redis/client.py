@@ -36,112 +36,16 @@ logger = logging.getLogger("HeTu.root")
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
-    # ------类型注解部分------
-    @overload
-    async def get(
-        self,
-        table_ref: TableReference,
-        row_id: int,
-        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
-    ) -> np.record | None: ...
-    @overload
-    async def get(
-        self,
-        table_ref: TableReference,
-        row_id: int,
-        row_format: Literal[RowFormat.RAW] = ...,
-    ) -> dict[str, str] | None: ...
-    @overload
-    async def get(
-        self,
-        table_ref: TableReference,
-        row_id: int,
-        row_format: Literal[RowFormat.TYPED_DICT] = ...,
-    ) -> dict[str, Any] | None: ...
-    @overload
-    async def get(
-        self,
-        table_ref: TableReference,
-        row_id: int,
-        row_format: RowFormat = ...,
-    ) -> np.record | dict[str, str] | dict[str, Any] | None: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
-    ) -> np.recarray: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.RAW] = ...,
-    ) -> list[dict[str, str]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.TYPED_DICT] = ...,
-    ) -> list[dict[str, Any]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.ID_LIST] = ...,
-    ) -> list[int]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: RowFormat = ...,
-    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
+    def _lua_schema_definitions(self) -> str:
+        """生成lua脚本里用到的schema定义部分"""
+        # todo 不该在这耦合system的东西， lua改成直接stack cmd
+        from ....system.definer import SystemClusters
 
-    # ------------
-
-    def load_commit_scripts(self, file: str | Path):
-        assert self._async_ios, "连接已关闭，已调用过close"
-        assert self.is_servant is False, (
-            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
-        )
-        assert len(self._async_ios) == 1, (
-            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
-        )
-        # read file to text
-        with open(file, "r", encoding="utf-8") as f:
-            script_text = f.read()
         # 读取namespace下的所有schema定义，然后替换lua脚本里的schema定义
         # ["User:{CLU1}"] = {
         #     unique = { ["email"] = true, ["phone"] = true },
         #     indexes = { ["email"] = false, ["age"] = true, ["phone"] = true }
         # }
-        # todo 不该在这耦合system的东西， lua改成直接stack cmd
-        from ....system.definer import SystemClusters
-
         lua_schema_def = ["{"]
         for comp_cls in SystemClusters().get_components().keys():
             lua_schema_def.append(f'["{comp_cls.component_name_}"] = {{')
@@ -158,9 +62,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
             lua_schema_def.append("},")
             lua_schema_def.append("},")
         lua_schema_def.append("}")
-        lua_schema_text = "\n".join(lua_schema_def)
+        return "\n".join(lua_schema_def)
+
+    def load_commit_scripts(self, file: str | Path):
+        assert self._async_ios, "连接已关闭，已调用过close"
+        assert self.is_servant is False, (
+            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+        )
+        assert len(self._async_ios) == 1, (
+            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+        )
+        # read file to text
+        with open(file, "r", encoding="utf-8") as f:
+            script_text = f.read()
+
         # replace PLACEHOLDER_SCHEMA_DEFINITIONS in script_text
-        script_text = script_text.replace("PLACEHOLDER_SCHEMA", lua_schema_text)
+        script_text = script_text.replace(
+            "PLACEHOLDER_SCHEMA", self._lua_schema_definitions()
+        )
 
         with open(str(file) + ".debug.lua", "w", encoding="utf-8") as f:
             _ = f.write(script_text)
@@ -350,14 +269,19 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return True
 
     @override
-    def get_worker_keeper(self) -> RedisWorkerKeeper:
+    def get_worker_keeper(self, sequence_id: int) -> RedisWorkerKeeper:
         """
         获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
+
+        Parameters
+        ----------
+        sequence_id: int
+            启动进程的顺序ID，从0开始。
         """
         assert not self.is_servant, "get_worker_keeper"
         from .worker_keeper import RedisWorkerKeeper
 
-        return RedisWorkerKeeper(self.io, self.aio)
+        return RedisWorkerKeeper(sequence_id, self.io, self.aio)
 
     @override
     async def close(self):
@@ -392,6 +316,34 @@ class RedisBackendClient(BackendClient, alias="redis"):
             case _:
                 raise ValueError(f"不可用的行格式: {fmt}")
 
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.record | None: ...
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> dict[str, str] | None: ...
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> dict[str, Any] | None: ...
+    @overload
+    async def get(
+        self,
+        table_ref: TableReference,
+        row_id: int,
+        row_format: RowFormat = ...,
+    ) -> np.record | dict[str, str] | dict[str, Any] | None: ...
     @override
     async def get(
         self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
@@ -461,6 +413,61 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         return left, right
 
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
+    ) -> np.recarray: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.RAW] = ...,
+    ) -> list[dict[str, str]]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.TYPED_DICT] = ...,
+    ) -> list[dict[str, Any]]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: Literal[RowFormat.ID_LIST] = ...,
+    ) -> list[int]: ...
+    @overload
+    async def range(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bool,
+        right: int | float | str | bool | None = None,
+        limit: int = 100,
+        desc: bool = False,
+        row_format: RowFormat = ...,
+    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
     @override
     async def range(
         self,
@@ -605,6 +612,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         keys = [self.row_key(ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
+        assert self.lua_commit is not None, "typing检查, 可忽略"
         resp = await self.lua_commit(keys, [payload_json])
         resp = resp.decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
 

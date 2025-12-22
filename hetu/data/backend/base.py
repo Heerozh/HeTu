@@ -127,10 +127,15 @@ class BackendClient:
         # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
 
-    def get_worker_keeper(self) -> WorkerKeeper | None:
+    def get_worker_keeper(self, sequence_id: int) -> WorkerKeeper | None:
         """
         获取WorkerKeeper实例，用于雪花ID的worker id管理。
         如果不支持worker id管理，可以返回None
+
+        Parameters
+        ----------
+        sequence_id: int
+            启动进程的顺序ID，从0开始。
         """
         raise NotImplementedError
 
@@ -163,6 +168,36 @@ class BackendClient:
         row_id: int,
         row_format: RowFormat = ...,
     ) -> np.record | dict[str, str] | dict[str, Any] | None: ...
+    async def get(
+        self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
+    ) -> np.record | dict[str, Any] | None:
+        """
+        从数据库直接获取单行数据。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。
+        row_id: int
+            row id主键
+        row_format
+            返回数据解码格式，见 "Returns"
+
+        Returns
+        -------
+        row: np.record or dict[str, any] or None
+            如果未查询到匹配数据，则返回 None。
+            否则根据 `row_format` 参数返回以下格式之一：
+
+            - RowFormat.STRUCT - **默认值**
+                返回 np.record (c-struct) 的单行数据
+            - RowFormat.RAW
+                返回无类型的原始数据 (dict[str, str])
+            - RowFormat.TYPED_DICT
+                返回符合Component定义的，有格式的dict类型。
+        """
+        raise NotImplementedError
+
     @overload
     async def range(
         self,
@@ -218,37 +253,6 @@ class BackendClient:
         desc: bool = False,
         row_format: RowFormat = ...,
     ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
-
-    async def get(
-        self, table_ref: TableReference, row_id: int, row_format=RowFormat.STRUCT
-    ) -> np.record | dict[str, Any] | None:
-        """
-        从数据库直接获取单行数据。
-
-        Parameters
-        ----------
-        table_ref: TableReference
-            表信息，指定Component、实例名、分片簇id。
-        row_id: int
-            row id主键
-        row_format
-            返回数据解码格式，见 "Returns"
-
-        Returns
-        -------
-        row: np.record or dict[str, any] or None
-            如果未查询到匹配数据，则返回 None。
-            否则根据 `row_format` 参数返回以下格式之一：
-
-            - RowFormat.STRUCT - **默认值**
-                返回 np.record (c-struct) 的单行数据
-            - RowFormat.RAW
-                返回无类型的原始数据 (dict[str, str])
-            - RowFormat.TYPED_DICT
-                返回符合Component定义的，有格式的dict类型。
-        """
-        raise NotImplementedError
-
     async def range(
         self,
         table_ref: TableReference,
