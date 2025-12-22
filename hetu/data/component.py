@@ -454,7 +454,10 @@ def define_component(
         # 必备索引，调用new_row时会用雪花算法生成uuid，该属性无法修改。加unique索引防止意外
         properties["id"] = Property(0, True, True, np.int64)
         # 增加version属性，该属性只读（只能lua修改）
-        properties["_version"] = Property(0, False, False, np.int32)
+        properties["_version"] = Property(0, False, False, "S19")
+
+        # todo 提醒超过int53的整数类型，超过double的浮点类型，不能作为unique/index索引，因为redis score是53位最高需要转换为string
+        #      如果按human string，开头加0,int64是20位。如果用byte模式，则必须为大端格式（才能和数字排序一样）
 
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
