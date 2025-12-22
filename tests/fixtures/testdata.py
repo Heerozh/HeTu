@@ -56,7 +56,7 @@ def create_ref(model, backend) -> TableReference:
     model_ref = TableReference(model, "pytest", 1)
     table_maint = backend.get_table_maintenance()
     try:
-        table_maint.check_table(model_ref)
+        table_maint.create_table(model_ref)
     except RaceCondition:
         table_maint.flush(model_ref, force=True)
 
@@ -64,14 +64,26 @@ def create_ref(model, backend) -> TableReference:
 
 
 @pytest.fixture(scope="module")
+async def mod_item_model(mod_new_component_env):
+    """定义测试用的Item组件模型，返回模型引用类。不在数据库创建表"""
+    return def_item()
+
+
+@pytest.fixture(scope="module")
+async def mod_rls_test_model(mod_new_component_env):
+    """定义测试用的Item组件模型，返回模型引用类。不在数据库创建表"""
+    return def_rls_test()
+
+
+@pytest.fixture(scope="module")
 async def mod_item_ref(mod_new_component_env, mod_auto_backend) -> TableReference:
-    """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
+    """定义测试用的Item组件模型，在数据库创建空表，返回模型引用类。"""
     return create_ref(def_item(), mod_auto_backend())
 
 
 @pytest.fixture(scope="module")
 async def mod_rls_test_ref(mod_new_component_env, mod_auto_backend) -> TableReference:
-    """定义测试用RLS的组件模型，返回模型类"""
+    """定义测试用RLS的组件模型，在数据库创建空表，返回模型类"""
     return create_ref(def_rls_test(), mod_auto_backend())
 
 
@@ -83,40 +95,11 @@ async def item_ref(new_component_env, mod_auto_backend) -> TableReference:
 
 @pytest.fixture(scope="function")
 async def rls_ref(new_component_env, mod_auto_backend) -> TableReference:
-    """定义测试用RLS的组件模型，返回模型类"""
+    """定义测试用RLS的组件模型，创建空表，返回模型类"""
     return create_ref(def_rls_test(), mod_auto_backend())
 
 
-@pytest.fixture(scope="module")
-async def mod_item_table(mod_auto_backend, mod_item_model) -> RawComponentTable:
-    """"""
-    backend_component_table, get_or_create_backend = mod_auto_backend
-
-    backend = get_or_create_backend("main")
-    test_table = backend_component_table(mod_item_model, "ModItemTestTable", 1, backend)
-    test_table.flush(force=True)
-    test_table.create_or_migrate()
-    return test_table
-
-
-@pytest.fixture(scope="function")
-async def item_select(mod_auto_backend, mod_item_model) -> SessionSelect:
-    get_or_create_backend = mod_auto_backend
-
-    # 返回表格session
-    backend = get_or_create_backend("main")
-    session = Session(backend, "pytest", 1)
-    select = session.select(mod_item_model)
-
-    # 初始化表格
-    table_maint = backend.get_table_maintenance()
-    table_maint.flush(select.ref, force=True)
-    try:
-        table_maint.create_table(select.ref)
-    except RaceCondition:
-        pass
-
-    return select
+# ==========以下以后改====================
 
 
 @pytest.fixture(scope="module")
