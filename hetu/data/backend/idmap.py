@@ -8,7 +8,6 @@
 import logging
 from enum import Enum
 from typing import TYPE_CHECKING, cast
-import struct
 
 import numpy as np
 
@@ -40,7 +39,7 @@ class IdentityMap:
         self._row_cache: dict[TableReference, np.recarray] = {}
 
         # 储存查询到的行数据初始值，用于对比变更
-        self._row_clean: dict[TableReference, np.recarray] = {}
+        self._row_clean: dict[TableReference, dict[int, np.record]] = {}
 
         # {TableReference: {row_id: RowState}} - 存储每行的状态
         self._row_states: dict[TableReference, dict[int, RowState]] = {}
@@ -73,9 +72,7 @@ class IdentityMap:
             self._row_cache[table_ref] = np.rec.array(
                 np.empty(0, dtype=table_ref.comp_cls.dtypes)
             )
-            self._row_clean[table_ref] = np.rec.array(
-                np.empty(0, dtype=table_ref.comp_cls.dtypes)
-            )
+            self._row_clean[table_ref] = {}
             self._row_states[table_ref] = {}
         return (
             self._row_cache[table_ref],
@@ -113,14 +110,16 @@ class IdentityMap:
 
         # 添加新行
         self._row_cache[table_ref] = np.rec.array(np.append(cache, row_s))
-        self._row_clean[table_ref] = np.rec.array(np.append(clean_cache, row_s))
+
         # 标记为CLEAN
         if row_s.ndim == 0:
             # 如果是单行数据，直接添加状态
             row_s = cast(np.record, row_s)
             states[row_s["id"]] = RowState.CLEAN
+            clean_cache[row_s["id"]] = row_s.copy()
         else:
             states.update({key: RowState.CLEAN for key in row_s["id"]})
+            clean_cache.update({row["id"]: row.copy() for row in row_s})
 
     def get(
         self, table_ref: TableReference, row_id: int
@@ -225,7 +224,7 @@ class IdentityMap:
         if table_ref not in self._row_states:
             raise ValueError(f"Component {table_ref} not in cache")
 
-        cache, clean_cache, states = self._cache(table_ref)
+        cache, _, states = self._cache(table_ref)
 
         # 查找行必须已存在
         idx = np.where(cache["id"] == row_id)[0]
@@ -235,9 +234,7 @@ class IdentityMap:
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
-    def get_dirty_rows(
-        self, max_integer_size: int = 6
-    ) -> dict[str, dict[TableReference, list[dict[str, bytes | str]]]]:
+    def get_dirty_rows(self) -> dict[str, dict[TableReference, list[dict[str, str]]]]:
         """
         返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
         既然是提交给数据库用，所以返回的数据都是str类型
@@ -250,33 +247,11 @@ class IdentityMap:
             'delete': [{id: xxx, _version: 0}, ]
         }
         """
-        result: dict[str, dict[TableReference, list[dict[str, bytes | str]]]] = {
+        result: dict[str, dict[TableReference, list[dict[str, str]]]] = {
             "insert": {},
             "update": {},
             "delete": {},
         }
-
-        def serialize_row(row: np.record) -> dict[str, bytes | str]:
-            """将row值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
-            cols, values = row.dtype.fields.items(), row.item()
-
-            # todo 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
-            # todo 要按database_max_integer_size, max_float_size来判断，交给client传入
-            # todo 不对，浮点没办法这么搞，因为浮点无法按byte正确排序
-            def _conv_dtype(tuple_kv):
-                (name, (dtype, _)), data = tuple_kv
-                if (
-                    np.issubdtype(dtype, np.integer)
-                    and dtype.itemsize > max_integer_size
-                ):
-                    if np.issubdtype(dtype, np.signedinteger):
-                        data = data + (1 << 63)
-                    return name, struct.pack(">Q", data)
-                return name, str(data)
-
-            return dict(
-                map(_conv_dtype, zip(cols, values)),
-            )
 
         for table_ref, states in self._row_states.items():
             cache = self._row_cache[table_ref]
@@ -296,17 +271,18 @@ class IdentityMap:
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
                 result["insert"][table_ref] = [
-                    serialize_row(row) for row in cache[mask]
+                    dict(zip(row.dtype.names, map(str, row.item())))
+                    for row in cache[mask]
                 ]
-            # todo 搜索所有np.where方法，看看能不能统一索引
+
             if update_ids:
                 clean_cache = self._row_clean[table_ref]
                 mask = np.isin(cache["id"], update_ids)
                 # 只保存变更的数据
                 result["update"][table_ref] = []
                 for row in cache[mask]:
-                    clean_row = clean_cache[np.where(clean_cache["id"] == row.id)[0][0]]
-                    changed_fields: dict[str, bytes | str] = {}
+                    clean_row = clean_cache[row.id]
+                    changed_fields: dict[str, str] = {}
                     for field in row.dtype.names:
                         if row[field] != clean_row[field]:
                             changed_fields[field] = str(row[field])

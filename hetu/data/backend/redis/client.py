@@ -65,18 +65,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for field, is_str in comp_cls.indexes_.items():
                 str_flag = "true" if is_str else "false"
                 dtype = comp_cls.dtype_map_[field]
-                # 要把int超过53位的标记为字符串，否则score索引无法实现
-                # double -(2^53) +(2^53)，因此6字节无论是否带符号都符合
-                if np.issubdtype(dtype, np.integer) and dtype.itemsize > 6:
-                    str_flag = "true"
-                # 浮点超过8的要报错
-                elif np.issubdtype(dtype, np.floating) and dtype.itemsize > 8:
+                # 索引不支持复数
+                if np.issubdtype(dtype, np.complexfloating):
                     raise ValueError(
                         f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
-                        "使用了超过64位的浮点类型，Redis后端不支持此类型作为索引字段"
+                        "使用了复数，Redis后端不支持此类型作为索引字段"
                     )
                 # 其他类型不支持索引
-                elif not np.issubdtype(dtype, (np.bool, np.character)):
+                elif np.issubdtype(dtype, np.object_):
                     raise ValueError(
                         f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
                         f"使用了不可用的类型 `{dtype}`，此类型不支持索引"
@@ -625,6 +621,30 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # todo 尝试组合成checks/sets命令表，减少lua脚本的复杂度
         #      checks有exists/unique/version
         #      sets有hmset/zadd/zrem/del
+        # todo 在zadd/zrem时，判断索引值是否为int且超过53位，如果是则转换为bytes索引，仅限索引
+        #      不如全部转换为bytes索引算了，测试下来lex和score排序性能是一样的，就是double和int2套转换逻辑
+        #      int和ieee754都是可以大端排序的，所以np的类型基本都可以用字符串排序。
+        # def serialize_field(dtype: np.dtype, data: np.integer) -> bytes | str:
+        #     """将单个字段值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
+        #     if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
+        #         if np.issubdtype(dtype, np.signedinteger):
+        #             data = data + (1 << 63)
+        #         return struct.pack(">Q", data)
+        #     return str(data)
+        #
+        # def serialize_row(row: np.record) -> dict[str, bytes | str]:
+        #     """将row值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
+        #     assert row.dtype.fields  # for type checker
+        #     cols, values = row.dtype.fields.items(), row.item()
+        #
+        #     # 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
+        #     def _conv_dtype(tuple_kv):
+        #         (name, (dtype, _)), data = tuple_kv
+        #         return name, serialize_field(dtype, data)
+        #
+        #     return dict(
+        #         map(_conv_dtype, zip(cols, values)),
+        #     )
         payload = {
             commit_type: {
                 self.cluster_prefix(ref): rows for ref, rows in commit_data.items()
