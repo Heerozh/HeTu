@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
 from msgspec import msgpack
 import numpy as np
-from numpy.matlib import floating, issubdtype
 import redis
 
 from ..base import BackendClient, RaceCondition, RowFormat
@@ -65,11 +64,23 @@ class RedisBackendClient(BackendClient, alias="redis"):
             lua_schema_def.append("indexes = {")
             for field, is_str in comp_cls.indexes_.items():
                 str_flag = "true" if is_str else "false"
-                # 要把int超过53位的标记为字符串，否则score索引无法实现
-                # todo 浮点超过8的要报错
                 dtype = comp_cls.dtype_map_[field]
+                # 要把int超过53位的标记为字符串，否则score索引无法实现
+                # double -(2^53) +(2^53)，因此6字节无论是否带符号都符合
                 if np.issubdtype(dtype, np.integer) and dtype.itemsize > 6:
                     str_flag = "true"
+                # 浮点超过8的要报错
+                elif np.issubdtype(dtype, np.floating) and dtype.itemsize > 8:
+                    raise ValueError(
+                        f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
+                        "使用了超过64位的浮点类型，Redis后端不支持此类型作为索引字段"
+                    )
+                # 其他类型不支持索引
+                elif not np.issubdtype(dtype, (np.bool, np.character)):
+                    raise ValueError(
+                        f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
+                        f"使用了不可用的类型 `{dtype}`，此类型不支持索引"
+                    )
 
                 lua_schema_def.append(f'["{field}"] = {str_flag},')
             lua_schema_def.append("},")
