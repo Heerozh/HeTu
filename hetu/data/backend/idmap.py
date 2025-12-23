@@ -8,6 +8,7 @@
 import logging
 from enum import Enum
 from typing import TYPE_CHECKING, cast
+import struct
 
 import numpy as np
 
@@ -235,7 +236,7 @@ class IdentityMap:
         states[row_id] = RowState.DELETE
 
     def get_dirty_rows(
-        self, max_integer_size: int = 6, max_float_size: int = 8
+        self, max_integer_size: int = 6
     ) -> dict[str, dict[TableReference, list[dict[str, bytes | str]]]]:
         """
         返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
@@ -255,17 +256,27 @@ class IdentityMap:
             "delete": {},
         }
 
-        def serialize_value(kv) -> bytes | str:
+        def serialize_row(row: np.record) -> dict[str, bytes | str]:
             """将row值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
-            dtype, data = kv
+            cols, values = row.dtype.fields.items(), row.item()
+
             # todo 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
             # todo 要按database_max_integer_size, max_float_size来判断，交给client传入
             # todo 不对，浮点没办法这么搞，因为浮点无法按byte正确排序
+            def _conv_dtype(tuple_kv):
+                (name, (dtype, _)), data = tuple_kv
+                if (
+                    np.issubdtype(dtype, np.integer)
+                    and dtype.itemsize > max_integer_size
+                ):
+                    if np.issubdtype(dtype, np.signedinteger):
+                        data = data + (1 << 63)
+                    return name, struct.pack(">Q", data)
+                return name, str(data)
 
-            if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
-                return data ^ 0x8000_0000_0000_0000
-
-            return str(data)
+            return dict(
+                map(_conv_dtype, zip(cols, values)),
+            )
 
         for table_ref, states in self._row_states.items():
             cache = self._row_cache[table_ref]
@@ -285,15 +296,9 @@ class IdentityMap:
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
                 result["insert"][table_ref] = [
-                    dict(
-                        zip(
-                            row.dtype.names,
-                            map(serialize_value, zip(row.dtype, row.item())),
-                        )
-                    )
-                    for row in cache[mask]
+                    serialize_row(row) for row in cache[mask]
                 ]
-
+            # todo 搜索所有np.where方法，看看能不能统一索引
             if update_ids:
                 clean_cache = self._row_clean[table_ref]
                 mask = np.isin(cache["id"], update_ids)
@@ -301,7 +306,7 @@ class IdentityMap:
                 result["update"][table_ref] = []
                 for row in cache[mask]:
                     clean_row = clean_cache[np.where(clean_cache["id"] == row.id)[0][0]]
-                    changed_fields = {}
+                    changed_fields: dict[str, bytes | str] = {}
                     for field in row.dtype.names:
                         if row[field] != clean_row[field]:
                             changed_fields[field] = str(row[field])
