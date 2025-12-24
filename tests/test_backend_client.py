@@ -4,8 +4,10 @@
 #  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 #  @email: heeroz@gmail.com
 #  """
+import msgspec
 import numpy as np
 from typing import cast
+from hetu.data.backend.idmap import IdentityMap
 
 from hetu.data.backend import Backend, RedisBackendClient
 from hetu.common.snowflake_id import SnowflakeID
@@ -13,11 +15,9 @@ from hetu.common.snowflake_id import SnowflakeID
 SnowflakeID().init(1, 0)
 
 
-async def test_redis_serialize_sortable(mod_redis_backend):
+async def test_redis_serialize_sortable():
     """测试sortable字段的序列化和反序列化"""
-    # 启动backend
-    backend: Backend = mod_redis_backend()
-    client: RedisBackendClient = cast(RedisBackendClient, backend.master)
+    client = RedisBackendClient.__new__(RedisBackendClient)
 
     int64_max = 2**63 - 1
     int64_min = -(2**63)
@@ -52,13 +52,81 @@ async def test_redis_serialize_sortable(mod_redis_backend):
     assert b1 > b2
 
 
+async def test_redis_commit_payload(item_ref, rls_ref):
+    # 建立测试数据
+    idmap = IdentityMap()
+
+    # insert
+    row = item_ref.comp_cls.new_row()
+    row.owner = 10
+    row.time = row.owner
+    row.name = f"{row.owner}"
+    idmap.add_insert(item_ref, row)
+    row = item_ref.comp_cls.new_row()
+    row.owner = 11
+    row.time = row.owner
+    row.name = f"{row.owner}"
+    idmap.add_insert(item_ref, row)
+
+    row2 = rls_ref.comp_cls.new_row()
+    row2.owner = 11
+    row2 = rls_ref.comp_cls.new_row()
+    row2.owner = 12
+    idmap.add_insert(rls_ref, row2)
+
+    # update
+    row = item_ref.comp_cls.new_row()
+    row.owner = 20
+    row.time = row.owner
+    row.name = f"{row.owner}"
+    idmap.add_clean(item_ref, row)
+    row.time = 23
+    idmap.update(item_ref, row)
+
+    row = item_ref.comp_cls.new_row()
+    row.owner = 21
+    row.time = row.owner
+    row.name = f"{row.owner}"
+    idmap.add_clean(item_ref, row)
+    row.name = "23"
+    idmap.update(item_ref, row)
+
+    row = item_ref.comp_cls.new_row()
+    row.owner = 22
+    row.time = row.owner
+    row.name = f"{row.owner}"
+    idmap.add_clean(item_ref, row)
+
+    # delete
+    idmap.mark_deleted(item_ref, row.id)
+
+    # commit
+    json = None
+    client = RedisBackendClient.__new__(RedisBackendClient)
+    client.is_servant = False
+
+    def test_lua_commit(self, keys, payload_json):
+        # 反序列化payload_json
+        assert keys[0] == "commit_payload"
+        # 比较idmap和idmap_deser是否相等
+        json_str = payload_json[0]
+        nonlocal json
+        json = msgspec.msgpack.decode(json_str)
+
+    client.lua_commit = test_lua_commit
+    await client.commit(idmap)
+
+    # test
+    checks = []
+    pushes = []
+    assert json == [checks, pushes]
+
+
 async def test_insert(item_ref, rls_ref, mod_auto_backend):
     """测试client的commit(insert)/get"""
     # 启动backend
     backend: Backend = mod_auto_backend()
     client = backend.master
-
-    from hetu.data.backend.idmap import IdentityMap
 
     # 测试client的commit(insert)数据，以及get
     idmap = IdentityMap()

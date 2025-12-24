@@ -617,8 +617,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         assert not self.is_servant, "从节点不允许提交事务"
 
-        dirty_rows = idmap.get_dirty_rows()
-        assert len(dirty_rows) > 0, "没有脏数据需要提交"
+        inserts, updates, deletes = idmap.get_dirty_rows()
+        assert inserts or updates or deletes, "没有脏数据需要提交"
 
         ref = idmap.first_reference()
         assert ref is not None, "typing检查"
@@ -672,8 +672,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _kvs = itertools.chain.from_iterable(_row.items())
                 pushes.append(["HSET", _key, "_version", _ver, *_kvs])
 
-        def _zadd_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
-            """添加zadd的push命令"""
+        def _update_index(
+            _table_ref: TableReference, _rows: list[dict[str, str]], zadd
+        ):
+            """添加zadd/zrem的push命令"""
             _comp_cls = _table_ref.comp_cls
             _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
             for _row in _rows:
@@ -687,35 +689,45 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         _member = (
                             _sortable_value + b":" + str(_row["id"]).encode("ascii")
                         )
-                        # score统一用0，因为我们不需要score排序功能
-                        pushes.append(["ZADD", _idx_key, 0, _member])
+                        if zadd:
+                            # score统一用0，因为我们不需要score排序功能
+                            pushes.append(["ZADD", _idx_key, 0, _member])
+                        else:
+                            pushes.append(["ZREM", _idx_key, _member])
 
-        for insert_ref, insert_rows in dirty_rows.get("insert", {}).items():
+        def _zadd_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
+            """添加zadd的push命令"""
+            _update_index(_table_ref, _rows, zadd=True)
+
+        def _zrem_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
+            """添加zrem的push命令"""
+            _update_index(_table_ref, _rows, zadd=False)
+
+        def _del_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
+            """添加del的push命令"""
+            _prefix = self.cluster_prefix(_table_ref) + ":id:"
+            for _row in _rows:
+                _key = _prefix + str(_row["id"])
+                pushes.append(["DEL", _key])
+
+        for insert_ref, insert_rows in inserts.items():
             _key_must_not_exist(insert_ref, insert_rows)
             _unique_meet(insert_ref, insert_rows)
             _hset_key(insert_ref, insert_rows)
             _zadd_index(insert_ref, insert_rows)
 
-        for update_ref, update_rows in dirty_rows.get("update", {}).items():
-            _version_match(update_ref, update_rows)
-            _unique_meet(update_ref, update_rows)
-            _hset_key(update_ref, update_rows)
-            _zrem_index(update_ref, update_rows)
-            _zadd_index(update_ref, update_rows)
+        for update_ref, (old_rows, new_rows) in updates.items():
+            _version_match(update_ref, old_rows)
+            _unique_meet(update_ref, new_rows)
+            _hset_key(update_ref, new_rows)
+            _zrem_index(update_ref, old_rows)
+            _zadd_index(update_ref, new_rows)
 
-        for delete_ref, delete_rows in dirty_rows.get("delete", {}).items():
+        for delete_ref, delete_rows in deletes.items():
             _version_match(delete_ref, delete_rows)
             _zrem_index(delete_ref, delete_rows)
             _del_key(delete_ref, delete_rows)
 
-        # 转换dirty_rows为纯lua可用的信息格式：
-        # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
-        payload = {
-            commit_type: {
-                self.cluster_prefix(ref): rows for ref, rows in commit_data.items()
-            }
-            for commit_type, commit_data in dirty_rows.items()
-        }
         payload_json = msgpack.encode([checks, pushes])
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
