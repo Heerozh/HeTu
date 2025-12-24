@@ -84,12 +84,12 @@ class Backend:
         while not await self._master.is_synced():
             await asyncio.sleep(0.1)
 
-    def get_worker_keeper(self) -> WorkerKeeper | None:
+    def get_worker_keeper(self, sequence_id: int) -> WorkerKeeper | None:
         """
         获取WorkerKeeper实例，用于雪花ID的worker id管理。
         如果不支持worker id管理，可以返回None
         """
-        return self._master.get_worker_keeper()
+        return self._master.get_worker_keeper(sequence_id)
 
     @property
     def master(self) -> BackendClient:

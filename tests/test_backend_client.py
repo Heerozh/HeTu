@@ -5,11 +5,51 @@
 #  @email: heeroz@gmail.com
 #  """
 import numpy as np
+from typing import cast
 
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RedisBackendClient
 from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
+
+
+async def test_redis_serialize_sortable(mod_redis_backend):
+    """测试sortable字段的序列化和反序列化"""
+    # 启动backend
+    backend: Backend = mod_redis_backend()
+    client: RedisBackendClient = cast(RedisBackendClient, backend.master)
+
+    int64_max = 2**63 - 1
+    int64_min = -(2**63)
+    uint64_max = 2**64 - 1
+    uint64_min = 1
+    double_int_max = 2**53 - 1 + 0.123
+    double_int_min = -(2**53 - 1) + 0.123
+
+    b1 = client.to_sortable_bytes(np.int64(int64_max))
+    b2 = client.to_sortable_bytes(np.int64(int64_min))
+    assert b1 > b2
+    b1 = client.to_sortable_bytes(np.int8(127))
+    b2 = client.to_sortable_bytes(np.int8(-1))
+    assert b1 > b2
+    # test int16 vs int8
+    b1 = client.to_sortable_bytes(np.int16(128))
+    b2 = client.to_sortable_bytes(np.int8(-1))
+    assert b1 > b2
+
+    b1 = client.to_sortable_bytes(np.uint64(uint64_max))
+    b2 = client.to_sortable_bytes(np.uint64(uint64_min))
+    assert b1 > b2
+
+    b1 = client.to_sortable_bytes(np.float64(double_int_max))
+    b2 = client.to_sortable_bytes(np.float64(double_int_min))
+    assert b1 > b2
+    # 123.456 = 405edd2f1a9fbe77, -0.033468749999999936 = bfa122d0e5604180
+    # 405edd2f1a9fbe77 ^ 1 << 63 = c05edd2f1a9fbe77
+    # bfa122d0e5604180 ^ 0xFFFFFFFFFFFFFFFF = 405edd2f1a9fbe7f
+    b1 = client.to_sortable_bytes(np.float64(123.456))
+    b2 = client.to_sortable_bytes(np.float64(-0.033468749999999936))
+    assert b1 > b2
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):

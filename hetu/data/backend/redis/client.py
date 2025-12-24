@@ -8,6 +8,7 @@
 import asyncio
 import logging
 import random
+import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
@@ -37,33 +38,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
 
     @staticmethod
-    def _get_referred_components() -> list[type["BaseComponent"]]:
+    def _get_referred_components() -> list[type[BaseComponent]]:
         """获取当前app用到的Component列表"""
         from ....system.definer import SystemClusters
 
         return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
 
-    def _lua_schema_definitions(self) -> str:
-        """生成lua脚本里用到的schema定义部分"""
-        # todo 不该在这耦合system的东西， lua改成直接stack cmd
-
-        # 读取namespace下的所有schema定义，然后替换lua脚本里的schema定义
-        # ["User:{CLU1}"] = {
-        #     unique = { ["email"] = true, ["phone"] = true },
-        #     indexes = { ["email"] = false, ["age"] = true, ["phone"] = true }
-        # }
-        lua_schema_def = ["{"]
+    def _schema_checking_for_redis(self):
+        """检查Component的schema定义，确保符合Redis的要求"""
         for comp_cls in self._get_referred_components():
-            lua_schema_def.append(f'["{comp_cls.component_name_}"] = {{')
-            # unique
-            lua_schema_def.append("unique = {")
-            for field in comp_cls.uniques_:
-                lua_schema_def.append(f'["{field}"] = true,')
-            lua_schema_def.append("},")
-            # indexes
-            lua_schema_def.append("indexes = {")
-            for field, is_str in comp_cls.indexes_.items():
-                str_flag = "true" if is_str else "false"
+            for field, _ in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 索引不支持复数
                 if np.issubdtype(dtype, np.complexfloating):
@@ -78,12 +62,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         f"使用了不可用的类型 `{dtype}`，此类型不支持索引"
                     )
 
-                lua_schema_def.append(f'["{field}"] = {str_flag},')
-            lua_schema_def.append("},")
-            lua_schema_def.append("},")
-        lua_schema_def.append("}")
-        return "\n".join(lua_schema_def)
-
     def load_commit_scripts(self, file: str | Path):
         assert self._async_ios, "连接已关闭，已调用过close"
         assert self.is_servant is False, (
@@ -95,11 +73,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
-
-        # replace PLACEHOLDER_SCHEMA_DEFINITIONS in script_text
-        script_text = script_text.replace(
-            "PLACEHOLDER_SCHEMA", self._lua_schema_definitions()
-        )
 
         with open(str(file) + ".debug.lua", "w", encoding="utf-8") as f:
             _ = f.write(script_text)
@@ -158,6 +131,36 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 await aio.aclose()  # 未测试
             else:
                 aio.connection_pool.reset()
+
+    @staticmethod
+    def to_sortable_bytes(value: np.generic) -> bytes:
+        """将record类型的值转换为可排序的bytes，用于索引"""
+        dtype = value.dtype
+        if np.issubdtype(dtype, np.signedinteger):
+            data = value.item() + (1 << 63)
+            return struct.pack(">Q", data)
+        elif np.issubdtype(dtype, np.unsignedinteger):
+            return struct.pack(">Q", value)
+        elif np.issubdtype(dtype, np.floating):
+            double = value.item()
+            packed = struct.pack(">d", value)
+            [u64] = struct.unpack(">Q", packed)
+            # IEEE 754 浮点数排序调整
+            if double >= 0:
+                # 正数让符号位变1
+                u64 = u64 | (1 << 63)
+            else:
+                # 负数要全部取反，因为浮点负数是绝对值，变成int那种从0xFF递减
+                u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
+            return struct.pack(">Q", u64)
+        elif np.issubdtype(dtype, np.str_):
+            encoded = value.item().encode("utf-8")
+            return encoded
+        elif np.issubdtype(dtype, np.bytes_):
+            return value.item()
+        elif np.issubdtype(dtype, np.bool_):
+            return b"\x01" if value else b"\x00"
+        assert False, f"不可排序的索引类型: {dtype}"
 
     # ============ 继承自BackendClient的方法 ============
 
@@ -231,6 +234,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self.lua_commit = self.load_commit_scripts(
             Path(__file__).parent.resolve() / "commit.lua"
         )
+        # 提示用户schema定义是否符合redis要求，比如索引类型不能有复数等
+        self._schema_checking_for_redis()
 
     def configure_servant(self) -> None:
         if not self._ios:
@@ -413,6 +418,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if desc:
             left, right = right, left
 
+        # todo 非str类型要encode到big-endian bytes，防止53位整数的问题
         # 对于str类型查询，要用[开始
         if is_str_index:
             left = str(left)
@@ -614,16 +620,66 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert len(dirty_rows) > 0, "没有脏数据需要提交"
 
         ref = idmap.first_reference()
-        assert ref is not None, "不该走到这里，仅用于typing检查"
+        assert ref is not None, "typing检查"
 
-        # 转换dirty_rows为纯lua可用的信息格式：
-        # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
-        # todo 尝试组合成checks/sets命令表，减少lua脚本的复杂度
+        # todo 组合成checks/pushes命令表，减少lua脚本的复杂度
         #      checks有exists/unique/version
-        #      sets有hmset/zadd/zrem/del
+        #      pushes有hmset/zadd/zrem/del
+        checks = []
+        pushes = []
+
+        def _key_must_not_exist(table_ref: TableReference, rows: list[dict[str, str]]):
+            """添加key must not exist的检查"""
+            _prefix = self.cluster_prefix(table_ref) + ":id:"
+            for row in rows:
+                key = _prefix + str(row["id"])
+                checks.append(["NX", key])
+
+        def _version_match(table_ref: TableReference, rows: list[dict[str, str]]):
+            """添加version match的检查"""
+            _prefix = self.cluster_prefix(table_ref) + ":id:"
+            for row in rows:
+                key = _prefix + str(row["id"])
+                checks.append(["VER", key, str(row["_version"])])
+
+        def _unique_meet(table_ref: TableReference, rows: list[dict[str, str]]):
+            """添加unique索引检查"""
+            comp_cls = table_ref.comp_cls
+            _idx_prefix = self.cluster_prefix(table_ref) + ":index:"
+            for index_name in comp_cls.uniques_:
+                if not is_str_index:
+                    continue  # 只检查字符串类型的unique索引
+                if not comp_cls.index_unique_[index_name]:
+                    continue  # 只检查unique索引
+
+                idx_key = _idx_prefix + index_name
+                for row in rows:
+                    index_value = row[index_name]
+                    member_value = f"{index_value}:{row['id']}"
+                    pushes.append(
+                        [
+                            "CHECK_UNIQUE",
+                            idx_key,
+                            member_value,
+                            str(row["id"]),
+                        ]
+                    )
+
+        for insert_ref, insert_rows in dirty_rows.get("insert", {}).items():
+            _key_must_not_exist(insert_ref, insert_rows)
+            _unique_meet(insert_ref, insert_rows)
+
+        for update_ref, update_rows in dirty_rows.get("update", {}).items():
+            _version_match(update_ref, update_rows)
+            _unique_meet(update_ref, update_rows)
+
+        for delete_ref, delete_rows in dirty_rows.get("delete", {}).items():
+            _version_match(delete_ref, delete_rows)
+
         # todo 在zadd/zrem时，判断索引值是否为int且超过53位，如果是则转换为bytes索引，仅限索引
         #      不如全部转换为bytes索引算了，测试下来lex和score排序性能是一样的，就是double和int2套转换逻辑
         #      int和ieee754都是可以大端排序的，所以np的类型基本都可以用字符串排序。
+
         # def serialize_field(dtype: np.dtype, data: np.integer) -> bytes | str:
         #     """将单个字段值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
         #     if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
@@ -645,18 +701,20 @@ class RedisBackendClient(BackendClient, alias="redis"):
         #     return dict(
         #         map(_conv_dtype, zip(cols, values)),
         #     )
+        # 转换dirty_rows为纯lua可用的信息格式：
+        # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
         payload = {
             commit_type: {
                 self.cluster_prefix(ref): rows for ref, rows in commit_data.items()
             }
             for commit_type, commit_data in dirty_rows.items()
         }
-        payload_json = msgpack.encode(payload)
+        payload_json = msgpack.encode([checks, pushes])
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
-        assert self.lua_commit is not None, "typing检查, 可忽略"
+        assert self.lua_commit is not None, "typing检查"
         resp = await self.lua_commit(keys, [payload_json])
         resp = resp.decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
 
