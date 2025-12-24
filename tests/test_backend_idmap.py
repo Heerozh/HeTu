@@ -1,5 +1,4 @@
 import pytest
-import numpy as np
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend.idmap import IdentityMap, RowState
@@ -60,7 +59,7 @@ def test_add_wrong_component(mod_item_model, mod_rls_test_model):
 
 def test_add_insert(mod_item_model):
     """测试添加新插入行"""
-    Item = mod_item_model
+    Item = mod_item_model  # noqa
     item_ref = TableReference(Item, "TestServer", 1)
     id_map = IdentityMap()
 
@@ -94,7 +93,13 @@ def test_add_insert(mod_item_model):
     id_map.add_clean(item_ref, rows)
     # 验证状态
     _, clean_cache, _ = id_map._cache(item_ref)
-    np.testing.assert_array_equal(clean_cache.id, [1, 2, 3, 4, 5])
+    assert list(clean_cache.keys()) == [1, 2, 3, 4, 5]
+
+    # 测试version!=0
+    row_v = Item.new_row()
+    row_v._version = 1
+    with pytest.raises(AssertionError, match="_version"):
+        id_map.add_insert(item_ref, row_v)
 
 
 def test_update_clean_row(mod_item_model):
@@ -165,7 +170,7 @@ def test_update_inserted_row(mod_item_model):
 
 def test_mark_deleted(mod_item_model):
     """测试标记删除"""
-    Item = mod_item_model
+    Item = mod_item_model  # noqa
     item_ref = TableReference(Item, "TestServer", 1)
     id_map = IdentityMap()
 
@@ -194,7 +199,7 @@ def test_mark_deleted(mod_item_model):
 
 def test_exceptions(mod_item_model):
     """测试异常情况"""
-    Item = mod_item_model
+    Item = mod_item_model  # noqa
     item_ref = TableReference(Item, "TestServer", 1)
     id_map = IdentityMap()
 
@@ -228,13 +233,14 @@ def test_exceptions(mod_item_model):
     class OtherComponent(BaseComponent):
         pass
 
+    other_ref = TableReference(OtherComponent, "TestServer", 1)
     with pytest.raises(ValueError, match="not in cache"):
-        id_map.mark_deleted(OtherComponent, 1)
+        id_map.mark_deleted(other_ref, 1)
 
 
 def test_filter(mod_item_model):
     """测试过滤已删除行"""
-    Item = mod_item_model
+    Item = mod_item_model  # noqa
     item_ref = TableReference(Item, "TestServer", 1)
     id_map = IdentityMap()
 

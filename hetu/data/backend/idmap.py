@@ -282,10 +282,11 @@ class IdentityMap:
                 result["update"][table_ref] = []
                 for row in cache[mask]:
                     clean_row = clean_cache[row.id]
-                    changed_fields: dict[str, str] = {}
-                    for field in row.dtype.names:
-                        if row[field] != clean_row[field]:
-                            changed_fields[field] = str(row[field])
+                    changed_fields = {
+                        field: str(row[field])
+                        for field in row.dtype.names
+                        if row[field] != clean_row[field]
+                    }
                     if changed_fields:
                         changed_fields["id"] = str(row["id"])
                         changed_fields["_version"] = str(row["_version"])
