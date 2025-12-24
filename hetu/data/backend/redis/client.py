@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import itertools
 import random
 import struct
 from pathlib import Path
@@ -134,7 +135,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     @staticmethod
     def to_sortable_bytes(value: np.generic) -> bytes:
-        """将record类型的值转换为可排序的bytes，用于索引"""
+        """将np类型的值转换为可排序的bytes，用于索引"""
         dtype = value.dtype
         if np.issubdtype(dtype, np.signedinteger):
             data = value.item() + (1 << 63)
@@ -622,85 +623,91 @@ class RedisBackendClient(BackendClient, alias="redis"):
         ref = idmap.first_reference()
         assert ref is not None, "typing检查"
 
-        # todo 组合成checks/pushes命令表，减少lua脚本的复杂度
-        #      checks有exists/unique/version
-        #      pushes有hmset/zadd/zrem/del
+        # 组合成checks/pushes命令表，减少lua脚本的复杂度
+        # checks有exists/unique/version
+        # pushes有hset/zadd/zrem/del
         checks = []
         pushes = []
 
-        def _key_must_not_exist(table_ref: TableReference, rows: list[dict[str, str]]):
+        def _key_must_not_exist(
+            _table_ref: TableReference, _rows: list[dict[str, str]]
+        ):
             """添加key must not exist的检查"""
-            _prefix = self.cluster_prefix(table_ref) + ":id:"
-            for row in rows:
-                key = _prefix + str(row["id"])
-                checks.append(["NX", key])
+            _prefix = self.cluster_prefix(_table_ref) + ":id:"
+            for _row in _rows:
+                _key = _prefix + str(_row["id"])
+                checks.append(["NX", _key])
 
-        def _version_match(table_ref: TableReference, rows: list[dict[str, str]]):
+        def _version_match(_table_ref: TableReference, _rows: list[dict[str, str]]):
             """添加version match的检查"""
-            _prefix = self.cluster_prefix(table_ref) + ":id:"
-            for row in rows:
-                key = _prefix + str(row["id"])
-                checks.append(["VER", key, str(row["_version"])])
+            _prefix = self.cluster_prefix(_table_ref) + ":id:"
+            for _row in _rows:
+                _key = _prefix + str(_row["id"])
+                checks.append(["VER", _key, str(_row["_version"])])
 
-        def _unique_meet(table_ref: TableReference, rows: list[dict[str, str]]):
+        def _unique_meet(_table_ref: TableReference, _rows: list[dict[str, str]]):
             """添加unique索引检查"""
-            comp_cls = table_ref.comp_cls
-            _idx_prefix = self.cluster_prefix(table_ref) + ":index:"
-            for index_name in comp_cls.uniques_:
-                if not is_str_index:
-                    continue  # 只检查字符串类型的unique索引
-                if not comp_cls.index_unique_[index_name]:
-                    continue  # 只检查unique索引
+            _comp_cls = _table_ref.comp_cls
+            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
+            for _row in _rows:
+                for _field, _value in _row.items():
+                    if _field in _comp_cls.uniques_:
+                        _idx_key = _idx_prefix + _field
+                        _sortable_value = self.to_sortable_bytes(
+                            _comp_cls.dtype_map_[_field].type(_value)
+                        )
+                        _start_val = b"[" + _sortable_value + b":"
+                        _end_val = b"[" + _sortable_value + b";"
+                        pushes.append(["UNIQ", _idx_key, _start_val, _end_val])
 
-                idx_key = _idx_prefix + index_name
-                for row in rows:
-                    index_value = row[index_name]
-                    member_value = f"{index_value}:{row['id']}"
-                    pushes.append(
-                        [
-                            "CHECK_UNIQUE",
-                            idx_key,
-                            member_value,
-                            str(row["id"]),
-                        ]
-                    )
+        def _hset_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
+            """添加hset的push命令"""
+            _prefix = self.cluster_prefix(_table_ref) + ":id:"
+            for _row in _rows:
+                _key = _prefix + str(_row["id"])
+                # 版本+1
+                _ver = int(_row["_version"]) + 1
+                del _row["_version"]
+                # 组合hset
+                _kvs = itertools.chain.from_iterable(_row.items())
+                pushes.append(["HSET", _key, "_version", _ver, *_kvs])
+
+        def _zadd_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
+            """添加zadd的push命令"""
+            _comp_cls = _table_ref.comp_cls
+            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
+            for _row in _rows:
+                for _field, _value in _row.items():
+                    if _field in _comp_cls.indexes_:
+                        _idx_key = _idx_prefix + _field
+                        # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
+                        _sortable_value = self.to_sortable_bytes(
+                            _comp_cls.dtype_map_[_field].type(_value)
+                        )
+                        _member = (
+                            _sortable_value + b":" + str(_row["id"]).encode("ascii")
+                        )
+                        # score统一用0，因为我们不需要score排序功能
+                        pushes.append(["ZADD", _idx_key, 0, _member])
 
         for insert_ref, insert_rows in dirty_rows.get("insert", {}).items():
             _key_must_not_exist(insert_ref, insert_rows)
             _unique_meet(insert_ref, insert_rows)
+            _hset_key(insert_ref, insert_rows)
+            _zadd_index(insert_ref, insert_rows)
 
         for update_ref, update_rows in dirty_rows.get("update", {}).items():
             _version_match(update_ref, update_rows)
             _unique_meet(update_ref, update_rows)
+            _hset_key(update_ref, update_rows)
+            _zrem_index(update_ref, update_rows)
+            _zadd_index(update_ref, update_rows)
 
         for delete_ref, delete_rows in dirty_rows.get("delete", {}).items():
             _version_match(delete_ref, delete_rows)
+            _zrem_index(delete_ref, delete_rows)
+            _del_key(delete_ref, delete_rows)
 
-        # todo 在zadd/zrem时，判断索引值是否为int且超过53位，如果是则转换为bytes索引，仅限索引
-        #      不如全部转换为bytes索引算了，测试下来lex和score排序性能是一样的，就是double和int2套转换逻辑
-        #      int和ieee754都是可以大端排序的，所以np的类型基本都可以用字符串排序。
-
-        # def serialize_field(dtype: np.dtype, data: np.integer) -> bytes | str:
-        #     """将单个字段值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
-        #     if np.issubdtype(dtype, np.integer) and dtype.itemsize > max_integer_size:
-        #         if np.issubdtype(dtype, np.signedinteger):
-        #             data = data + (1 << 63)
-        #         return struct.pack(">Q", data)
-        #     return str(data)
-        #
-        # def serialize_row(row: np.record) -> dict[str, bytes | str]:
-        #     """将row值序列化为字符串，如果是索引值，且大于53位整数，则转换为bytes"""
-        #     assert row.dtype.fields  # for type checker
-        #     cols, values = row.dtype.fields.items(), row.item()
-        #
-        #     # 要把int超过53位的，改成>S8的bytes传输，并标记为字符串，否则score索引无法实现
-        #     def _conv_dtype(tuple_kv):
-        #         (name, (dtype, _)), data = tuple_kv
-        #         return name, serialize_field(dtype, data)
-        #
-        #     return dict(
-        #         map(_conv_dtype, zip(cols, values)),
-        #     )
         # 转换dirty_rows为纯lua可用的信息格式：
         # payload={"insert": {"instance:TableName:{CLU1}": [row_dict, ...]}...}
         payload = {

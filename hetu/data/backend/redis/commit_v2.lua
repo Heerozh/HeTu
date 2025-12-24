@@ -47,11 +47,10 @@ if checks then
             -- 格式: ["UNIQ", index_key, value]
         elseif op == "UNIQ" then
             local idx_key = check[2]
-            local val = check[3]
+            local start_val = check[3]
+            local end_val = check[4]
             -- ZRANGE key [val: [val:\xff BYLEX LIMIT 0 1
-            local min = "[" .. val .. ":"
-            local max = "[" .. val .. ":\255"
-            local res = redis_call("ZRANGE", idx_key, min, max, "BYLEX", "LIMIT", 0, 1)
+            local res = redis_call("ZRANGE", idx_key, start_val, end_val, "BYLEX", "LIMIT", 0, 1)
             if #res > 0 then
                 return "UNIQUE: Constraint violation (str) on " .. idx_key
             end
