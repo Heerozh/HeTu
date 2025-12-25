@@ -259,7 +259,7 @@ class IdentityMap:
 
         for table_ref, states in self._row_states.items():
             # 初始化各状态列表
-            inserts, updates, deletes = [], (), []
+            inserts, updates, deletes = [], ([], []), []
 
             cache = self._row_cache[table_ref]
 

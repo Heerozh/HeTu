@@ -9,7 +9,7 @@ import numpy as np
 from typing import cast
 from hetu.data.backend.idmap import IdentityMap
 
-from hetu.data.backend import Backend, RedisBackendClient
+from hetu.data.backend import Backend, RedisBackendClient, TableReference
 from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
@@ -52,7 +52,9 @@ async def test_redis_serialize_sortable():
     assert b1 > b2
 
 
-async def test_redis_commit_payload(item_ref, rls_ref):
+async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
     client = RedisBackendClient.__new__(RedisBackendClient)
     client.is_servant = False
 
