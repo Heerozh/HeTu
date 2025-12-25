@@ -616,78 +616,56 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         """
 
-        def _key_must_not_exist(_rows: list[dict[str, str]]):
+        def _key_must_not_exist(_key: str):
             """添加key must not exist的检查"""
-            for _row in _rows:
-                _key = id_prefix + str(_row["id"])
-                checks.append(["NX", _key])
+            checks.append(["NX", _key])
 
-        def _version_match(_rows: list[dict[str, str]]):
+        def _version_must_match(_key: str, _old_version):
             """添加version match的检查"""
-            for _row in _rows:
-                _key = id_prefix + str(_row["id"])
-                checks.append(["VER", _key, str(_row["_version"])])
+            checks.append(["VER", _key, _old_version])
 
-        def _unique_meet(_rows: list[dict[str, str]]):
+        def _unique_meet(_unique_fields, _dtype_map, _idx_prefix, _row: dict[str, str]):
             """添加unique索引检查"""
-            _unique = comp_cls.uniques_
-            _dtype_map = comp_cls.dtype_map_
-            for _row in _rows:
-                for _field, _value in _row.items():
-                    if _field in _unique:
-                        _idx_key = idx_prefix + _field
-                        _sortable_value = self.to_sortable_bytes(
-                            _dtype_map[_field].type(_value)
-                        )
-                        _start_val = b"[" + _sortable_value + b":"
-                        _end_val = b"[" + _sortable_value + b";"
-                        checks.append(["UNIQ", _idx_key, _start_val, _end_val])
+            for _field, _value in _row.items():
+                if _field in _unique_fields:
+                    _idx_key = _idx_prefix + _field
+                    _sortable_value = self.to_sortable_bytes(
+                        _dtype_map[_field].type(_value)
+                    )
+                    _start_val = b"[" + _sortable_value + b":"
+                    _end_val = b"[" + _sortable_value + b";"
+                    checks.append(["UNIQ", _idx_key, _start_val, _end_val])
 
-        def _hset_key(
-            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _updates: list[dict[str, str]],  # 要hset的数据，只包含要更新的字段
-        ):
+        def _hset_key(_key, _old_version, _update: dict[str, str]):
             """添加hset的push命令"""
-            for _old, _hset_row in zip(_olds, _updates):
-                # 因为hset_row只包含要更新的字段，所以要用_old的id
-                _key = id_prefix + str(_old["id"])
-                # 版本+1
-                _ver = int(_old["_version"]) + 1
-                _hset_row.pop("_version", None)  # 无视用户传入的_version字段
-                # 组合hset, 别忘记写_version
-                _kvs = itertools.chain.from_iterable(_hset_row.items())
-                pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
+            # 版本+1
+            _ver = int(_old_version) + 1
+            _update.pop("_version", None)  # 无视用户传入的_version字段
+            # 组合hset, 别忘记写_version
+            _kvs = itertools.chain.from_iterable(_update.items())
+            pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
 
-        def _update_index(
-            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _news: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
-            _is_add,
-        ):
-            """添加zadd/zrem的push命令"""
-            _indexes = comp_cls.indexes_
-            _dtype_map = comp_cls.dtype_map_
-            for _old, _new in zip(_olds, _news):
-                _b_row_id = _old["id"].encode("ascii")
-                _values = _new if _is_add else _old
-                for _field in _new.keys():
-                    if _field in _indexes:
-                        _idx_key = idx_prefix + _field
-                        # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                        _sortable_value = self.to_sortable_bytes(
-                            _dtype_map[_field].type(_values[_field])
-                        )
-                        _member = _sortable_value + b":" + _b_row_id
-                        if _is_add:
-                            # score统一用0，因为我们不需要score排序功能
-                            pushes.append(["ZADD", _idx_key, 0, _member])
-                        else:
-                            pushes.append(["ZREM", _idx_key, _member])
+        def _exc_index(_indexes, _dtype_map, _idx_prefix, _old, _new, _add):
+            """exchange index(zadd/zrem)的push命令"""
+            _b_row_id = _old["id"].encode("ascii")
+            _values = _new if _add else _old
+            for _field in _new.keys():
+                if _field in _indexes:
+                    _idx_key = _idx_prefix + _field
+                    # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
+                    _sortable_value = self.to_sortable_bytes(
+                        _dtype_map[_field].type(_values[_field])
+                    )
+                    _member = _sortable_value + b":" + _b_row_id
+                    if _add:
+                        # score统一用0，因为我们不需要score排序功能
+                        pushes.append(["ZADD", _idx_key, 0, _member])
+                    else:
+                        pushes.append(["ZREM", _idx_key, _member])
 
-        def _del_key(_rows: list[dict[str, str]]):
+        def _del_key(_key):
             """添加del的push命令"""
-            for _row in _rows:
-                _key = id_prefix + str(_row["id"])
-                pushes.append(["DEL", _key])
+            pushes.append(["DEL", _key])
 
         assert not self.is_servant, "从节点不允许提交事务"
 
@@ -706,23 +684,36 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
-            comp_cls = ref.comp_cls
             idx_prefix = self.cluster_prefix(ref) + ":index:"
+            comp_cls = ref.comp_cls
+            unique_fields = comp_cls.uniques_
+            indexes = comp_cls.indexes_
+            dtype_map = comp_cls.dtype_map_
             # insert
-            _key_must_not_exist(inserts)
-            _unique_meet(inserts)
-            _hset_key(inserts, inserts)
-            _update_index(inserts, inserts, _is_add=True)
+            for insert in inserts:
+                row_id = insert["id"]
+                key = id_prefix + row_id
+                _key_must_not_exist(key)
+                _unique_meet(unique_fields, dtype_map, idx_prefix, insert)
+                _hset_key(key, 0, insert)
+                _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
             # update
-            _version_match(old_rows)
-            _unique_meet(new_rows)
-            _hset_key(old_rows, new_rows)
-            _update_index(old_rows, new_rows, _is_add=False)
-            _update_index(old_rows, new_rows, _is_add=True)
+            for old_row, new_row in zip(old_rows, new_rows):
+                row_id = old_row["id"]
+                key = id_prefix + row_id
+                old_version = old_row["_version"]
+                _version_must_match(key, old_version)
+                _unique_meet(unique_fields, dtype_map, idx_prefix, new_row)
+                _hset_key(key, old_version, new_row)
+                _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
+                _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
             # delete
-            _version_match(deletes)
-            _update_index(deletes, deletes, _is_add=False)
-            _del_key(deletes)
+            for delete in deletes:
+                key = id_prefix + str(delete["id"])
+                old_version = delete["_version"]
+                _version_must_match(key, old_version)
+                _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
+                _del_key(key)
 
         payload_json = msgpack.encode([checks, pushes])
         # 添加一个带cluster id的key，指明lua脚本执行的集群
