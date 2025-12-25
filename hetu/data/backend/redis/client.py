@@ -730,12 +730,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         assert not self.is_servant, "从节点不允许提交事务"
 
-        inserts, updates, deletes = idmap.get_dirty_rows()
-        if not (inserts or updates or deletes):
+        dirties = idmap.get_dirty_rows()
+        if not dirties:
             raise ValueError("没有脏数据需要提交")
 
-        ref = idmap.first_reference()
-        assert ref is not None, "typing检查"
+        first_ref = idmap.first_reference()
+        assert first_ref is not None, "typing检查"
 
         # 组合成checks/pushes命令表，减少lua脚本的复杂度
         # checks有exists/unique/version
@@ -743,32 +743,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
         checks = []
         pushes = []
 
-        for insert_ref, insert_rows in inserts.items():
-            id_prefix = self.cluster_prefix(insert_ref) + ":id:"
-            comp_cls = insert_ref.comp_cls
-            idx_prefix = self.cluster_prefix(insert_ref) + ":index:"
-            for row in insert_rows:
+        for ref, (inserts, updates, deletes) in dirties.items():
+            id_prefix = self.cluster_prefix(ref) + ":id:"
+            comp_cls = ref.comp_cls
+            idx_prefix = self.cluster_prefix(ref) + ":index:"
+            for row in inserts:
                 _stage_insert(comp_cls, id_prefix, idx_prefix, row, checks, pushes)
 
-        for update_ref, (old_rows, new_rows) in updates.items():
-            id_prefix = self.cluster_prefix(update_ref) + ":id:"
-            comp_cls = update_ref.comp_cls
-            idx_prefix = self.cluster_prefix(update_ref) + ":index:"
-            for old_row, new_row in zip(old_rows, new_rows):
+            for old_row, new_row in zip(*updates):
                 _stage_update(
                     comp_cls, id_prefix, idx_prefix, old_row, new_row, checks, pushes
                 )
 
-        for delete_ref, delete_rows in deletes.items():
-            id_prefix = self.cluster_prefix(delete_ref) + ":id:"
-            comp_cls = delete_ref.comp_cls
-            idx_prefix = self.cluster_prefix(delete_ref) + ":index:"
-            for row in delete_rows:
+            for row in deletes:
                 _stage_delete(comp_cls, id_prefix, idx_prefix, row, checks, pushes)
 
         payload_json = msgpack.encode([checks, pushes])
         # 添加一个带cluster id的key，指明lua脚本执行的集群
-        keys = [self.row_key(ref, 1)]
+        keys = [self.row_key(first_ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
         assert self.lua_commit is not None, "typing检查"

@@ -236,10 +236,13 @@ class IdentityMap:
 
     def get_dirty_rows(
         self,
-    ) -> tuple[
-        dict[TableReference, list[dict[str, str]]],
-        dict[TableReference, tuple[list[dict[str, str]], list[dict[str, str]]]],
-        dict[TableReference, list[dict[str, str]]],
+    ) -> dict[
+        TableReference,
+        tuple[
+            list[dict[str, str]],
+            tuple[list[dict[str, str]], list[dict[str, str]]],
+            list[dict[str, str]],
+        ],
     ]:
         """
         返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
@@ -247,14 +250,17 @@ class IdentityMap:
 
         Returns
         -------
-        (inserts, updates, deletes) 三个字典，格式如下：
-        inserts: {TableReference: [row_dict, ]}
-        updates: {TableReference: ([old_row_dict, ], [changed_fields_dict, ])}  # changed_fields_dict只包含变更的字段
-        deletes: {TableReference: [old_row_dict, ]}
+        {TableReference: (inserts, updates, deletes)} 每个Table各3个修改列表，格式如下：
+        inserts: [row_dict, ]
+        updates: ([old_row_dict, ], [changed_fields_dict, ]}  # changed_fields_dict只包含变更的字段
+        deletes: [old_row_dict, ]
         """
-        inserts, updates, deletes = {}, {}, {}
+        ret = {}
 
         for table_ref, states in self._row_states.items():
+            # 初始化各状态列表
+            inserts, updates, deletes = [], (), []
+
             cache = self._row_cache[table_ref]
 
             # 收集各状态的行ID
@@ -271,7 +277,7 @@ class IdentityMap:
             # 从缓存中获取对应的行数据
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
-                inserts[table_ref] = [
+                inserts = [
                     dict(zip(row.dtype.names, map(str, row.item())))
                     for row in cache[mask]
                 ]
@@ -281,7 +287,7 @@ class IdentityMap:
                 mask = np.isin(cache["id"], update_ids)
                 # 新数据只保存变更的数据
                 old_rows, new_rows = [], []
-                updates[table_ref] = (old_rows, new_rows)
+                updates = (old_rows, new_rows)
                 for row in cache[mask]:
                     old = clean_cache[row.id]
                     changed_fields = {
@@ -297,12 +303,14 @@ class IdentityMap:
             if delete_ids:
                 # DELETE只需要ID列表
                 mask = np.isin(cache["id"], delete_ids)
-                deletes[table_ref] = [
+                deletes = [
                     dict(zip(row.dtype.names, map(str, row.item())))
                     for row in cache[mask]
                 ]
 
-        return inserts, updates, deletes
+            ret[table_ref] = (inserts, updates, deletes)
+
+        return ret
 
     def filter(self, table_ref: TableReference, **kwargs) -> np.recarray:
         """

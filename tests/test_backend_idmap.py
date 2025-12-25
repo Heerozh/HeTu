@@ -81,10 +81,11 @@ def test_add_insert(mod_item_model):
     assert status == RowState.INSERT
 
     # 验证状态
-    inserts, _, _ = id_map.get_dirty_rows()
-    assert item_ref in inserts
-    assert len(inserts[item_ref]) == 1
-    assert int(inserts[item_ref][0]["id"]) == temp_id
+    dirties = id_map.get_dirty_rows()
+    assert item_ref in dirties
+    inserts = dirties[item_ref][0]
+    assert len(inserts) == 1
+    assert int(inserts[0]["id"]) == temp_id
 
     # 测试添加多行干净
     rows = Item.new_rows(5)
@@ -126,12 +127,13 @@ def test_update_clean_row(mod_item_model):
     assert status == RowState.UPDATE
 
     # 验证状态流转为 UPDATE
-    _, updates, _ = id_map.get_dirty_rows()
-    assert item_ref in updates
-    assert len(updates[item_ref][1]) == 1
-    assert updates[item_ref][1][0]["name"] == "Updated"
+    dirties = id_map.get_dirty_rows()
+    assert item_ref in dirties
+    updates = dirties[item_ref][1]
+    assert len(updates[1]) == 1
+    assert updates[1][0]["name"] == "Updated"
     # 只含有更新的字段
-    assert set(updates[item_ref][1][0].keys()) == {"name"}
+    assert set(updates[1][0].keys()) == {"name"}
 
     # 修改_version 字段报错
     row_update._version += 1
@@ -141,7 +143,7 @@ def test_update_clean_row(mod_item_model):
 
 def test_update_inserted_row(mod_item_model):
     """测试更新刚插入的行（状态应保持INSERT）"""
-    Item = mod_item_model
+    Item = mod_item_model  # noqa
     item_ref = TableReference(Item, "TestServer", 1)
     id_map = IdentityMap()
 
@@ -162,10 +164,11 @@ def test_update_inserted_row(mod_item_model):
     assert fetched["name"] == "Updated"
 
     # 验证状态仍为 INSERT，不应出现在 UPDATE 列表中
-    inserts, updates, _ = id_map.get_dirty_rows()
-    assert len(inserts[item_ref]) == 1
-    assert inserts[item_ref][0]["name"] == "Updated"
-    assert item_ref not in updates
+    dirties = id_map.get_dirty_rows()
+    inserts, updates = dirties[item_ref][0], dirties[item_ref][1]
+    assert len(inserts) == 1
+    assert inserts[0]["name"] == "Updated"
+    assert len(updates) == 0
 
 
 def test_mark_deleted(mod_item_model):
@@ -192,9 +195,10 @@ def test_mark_deleted(mod_item_model):
         id_map.update(item_ref, row)
 
     # 验证脏数据列表
-    _, _, deletes = id_map.get_dirty_rows()
-    assert item_ref in deletes
-    assert "300" in [d["id"] for d in deletes[item_ref]]
+    dirties = id_map.get_dirty_rows()
+    assert item_ref in dirties
+    deletes = dirties[item_ref][2]
+    assert "300" in [d["id"] for d in deletes]
 
 
 def test_exceptions(mod_item_model):
