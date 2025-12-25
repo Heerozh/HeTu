@@ -67,24 +67,19 @@ async def test_redis_commit_payload(item_ref, rls_ref):
     row.owner = 10
     row.time = row.owner
     row.name = f"{row.owner}"
+    row.model = 123.31
     idmap.add_insert(item_ref, row)
+    # 插入的payload应该是这些check和push
+    b_rowid = client.to_sortable_bytes(row.id)
     checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:Item:{CLU1}:index:id",
-            b"[" + client.to_sortable_bytes(row.id) + b":",
-            b"[" + client.to_sortable_bytes(row.id) + b";",
-        ]
+        ["UNIQ", "pytest:Item:{CLU1}:index:id"]
+        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
     )
     checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10:", b"[10;"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:Item:{CLU1}:index:time",
-            b"[\x80\x00\x00\x00\x00\x00\x00\n:",  # \n=10
-            b"[\x80\x00\x00\x00\x00\x00\x00\n;",
-        ]
+        ["UNIQ", "pytest:Item:{CLU1}:index:time"]
+        + [b"[\x80\x00\x00\x00\x00\x00\x00\n:", b"[\x80\x00\x00\x00\x00\x00\x00\n;"]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -94,31 +89,51 @@ async def test_redis_commit_payload(item_ref, rls_ref):
             if k != "_version"
             for x in (k, v)
         ]
+    )
+    # insert的索引部分
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:id"]
+        + [0, b_rowid + b":" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:model"]
+        + [0, b"\xc0^\xd3\xd7\x00\x00\x00\x00:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"10:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:owner"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:time"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:used"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
     )
 
     # 插入 item row2
     row = item_ref.comp_cls.new_row()
     row.owner = 11
     row.time = row.owner
+    row.model = -123.31
     row.name = f"{row.owner}"
+    row.used = True
     idmap.add_insert(item_ref, row)
+    # 插入的payload应该是这些check和push
+    b_rowid = client.to_sortable_bytes(row.id)
     checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:Item:{CLU1}:index:id",
-            b"[" + client.to_sortable_bytes(row.id) + b":",
-            b"[" + client.to_sortable_bytes(row.id) + b";",
-        ]
+        ["UNIQ", "pytest:Item:{CLU1}:index:id"]
+        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
     )
     checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11:", b"[11;"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:Item:{CLU1}:index:time",
-            b"[\x80\x00\x00\x00\x00\x00\x00\x0b:",
-            b"[\x80\x00\x00\x00\x00\x00\x00\x0b;",
-        ]
+        ["UNIQ", "pytest:Item:{CLU1}:index:time"]
+        + [b"[\x80\x00\x00\x00\x00\x00\x00\x0b:", b"[\x80\x00\x00\x00\x00\x00\x00\x0b;"]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -129,19 +144,41 @@ async def test_redis_commit_payload(item_ref, rls_ref):
             for x in (k, v)
         ]
     )
+    # insert的索引部分
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:id"]
+        + [0, b_rowid + b":" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:model"]
+        + [0, b"?\xa1,(\xff\xff\xff\xff:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"11:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:owner"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:time"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:used"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x01:" + str(row.id).encode()]
+    )
 
     # 插入 rls row1
     row = rls_ref.comp_cls.new_row()
     row.owner = 11
     idmap.add_insert(rls_ref, row)
+    # 插入的payload应该是这些check和push
+    b_rowid = client.to_sortable_bytes(row.id)
     checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:RLSTest:{CLU1}:index:id",
-            b"[" + client.to_sortable_bytes(row.id) + b":",
-            b"[" + client.to_sortable_bytes(row.id) + b";",
-        ]
+        ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
+        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -151,20 +188,27 @@ async def test_redis_commit_payload(item_ref, rls_ref):
             if k != "_version"
             for x in (k, v)
         ]
+    )
+    # insert的索引部分
+    pushes.append(
+        ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
+        + [0, b_rowid + b":" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
     )
 
     # 插入 rls row2
     row = rls_ref.comp_cls.new_row()
     row.owner = 12
     idmap.add_insert(rls_ref, row)
+    # 插入的payload应该是这些check和push
+    b_rowid = client.to_sortable_bytes(row.id)
     checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:RLSTest:{CLU1}:index:id",
-            b"[" + client.to_sortable_bytes(row.id) + b":",
-            b"[" + client.to_sortable_bytes(row.id) + b";",
-        ]
+        ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
+        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -174,6 +218,15 @@ async def test_redis_commit_payload(item_ref, rls_ref):
             if k != "_version"
             for x in (k, v)
         ]
+    )
+    # insert的索引部分
+    pushes.append(
+        ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
+        + [0, b_rowid + b":" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0c:" + str(row.id).encode()]
     )
 
     # update 1, change time
@@ -185,18 +238,24 @@ async def test_redis_commit_payload(item_ref, rls_ref):
     idmap.add_clean(item_ref, row)
     row.time = 23
     idmap.update(item_ref, row)
+    # 更新的payload应该是这些check和push
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "16"])
     checks.append(
-        [
-            "UNIQ",
-            "pytest:Item:{CLU1}:index:time",
-            b"[\x80\x00\x00\x00\x00\x00\x00\x17:",
-            b"[\x80\x00\x00\x00\x00\x00\x00\x17;",
-        ]
+        ["UNIQ", "pytest:Item:{CLU1}:index:time"]
+        + [b"[\x80\x00\x00\x00\x00\x00\x00\x17:", b"[\x80\x00\x00\x00\x00\x00\x00\x17;"]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "17"]
         + ["time", "23"]
+    )
+    # update的index变更
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:time"]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x14:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:time"]
+        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x17:" + str(row.id).encode()]
     )
 
     # update 2, change name
@@ -208,11 +267,18 @@ async def test_redis_commit_payload(item_ref, rls_ref):
     idmap.add_clean(item_ref, row)
     row.name = "23"
     idmap.update(item_ref, row)
+    # 更新的payload应该是这些check和push
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "233"])
     checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23:", b"[23;"])
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "234"]
         + ["name", "23"]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"23:" + str(row.id).encode()]
     )
 
     # delete
@@ -223,8 +289,34 @@ async def test_redis_commit_payload(item_ref, rls_ref):
     row._version = 9
     idmap.add_clean(item_ref, row)
     idmap.mark_deleted(item_ref, row.id)
+    # 删除的payload应该是这些check和push
+    b_rowid = client.to_sortable_bytes(row.id)
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "9"])
     pushes.append(["DEL", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:id"]
+        + [b_rowid + b":" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:model"]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"22:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:owner"]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:time"]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16:" + str(row.id).encode()]
+    )
+    pushes.append(
+        ["ZREM", "pytest:Item:{CLU1}:index:used"]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+    )
+
     # commit
     json = []
 
@@ -241,11 +333,14 @@ async def test_redis_commit_payload(item_ref, rls_ref):
     await client.commit(idmap)
 
     # test
-    print(json)
     for check in json[0]:
         assert check in checks
     for push in json[1]:
         assert push in pushes
+    for check in checks:
+        assert check in json[0]
+    for push in pushes:
+        assert push in json[1]
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):

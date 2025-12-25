@@ -678,16 +678,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _kvs = itertools.chain.from_iterable(_hset_row.items())
                 pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
 
-        def _update_index(
+        def _zadd_index(
             _table_ref: TableReference,
             _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _affects: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
-            mode: str,
+            _updates: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
         ):
             """添加zadd/zrem的push命令"""
             _comp_cls = _table_ref.comp_cls
             _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
-            for _old, _new in zip(_olds, _affects):
+            for _old, _new in zip(_olds, _updates):
                 for _field, _value in _new.items():
                     if _field in _comp_cls.indexes_:
                         _idx_key = _idx_prefix + _field
@@ -698,19 +697,29 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         _member = (
                             _sortable_value + b":" + str(_old["id"]).encode("ascii")
                         )
-                        if mode == "zadd":
-                            # score统一用0，因为我们不需要score排序功能
-                            pushes.append(["ZADD", _idx_key, 0, _member])
-                        else:
-                            pushes.append(["ZREM", _idx_key, _member])
+                        # score统一用0，因为我们不需要score排序功能
+                        pushes.append(["ZADD", _idx_key, 0, _member])
 
-        def _zadd_index(_table_ref: TableReference, _olds, _affects):
-            """添加zadd的push命令"""
-            _update_index(_table_ref, _olds, _affects, "zadd")
-
-        def _zrem_index(_table_ref: TableReference, _olds, _affects):
-            """添加zrem的push命令"""
-            _update_index(_table_ref, _olds, _affects, "zrem")
+        def _zrem_index(
+            _table_ref: TableReference,
+            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
+            _updates: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
+        ):
+            """添加zadd/zrem的push命令"""
+            _comp_cls = _table_ref.comp_cls
+            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
+            for _old, _new in zip(_olds, _updates):
+                for _field, _ in _new.items():
+                    if _field in _comp_cls.indexes_:
+                        _idx_key = _idx_prefix + _field
+                        # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
+                        _sortable_value = self.to_sortable_bytes(
+                            _comp_cls.dtype_map_[_field].type(_old[_field])
+                        )
+                        _member = (
+                            _sortable_value + b":" + str(_old["id"]).encode("ascii")
+                        )
+                        pushes.append(["ZREM", _idx_key, _member])
 
         def _del_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
             """添加del的push命令"""
@@ -729,7 +738,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             _version_match(update_ref, old_rows)
             _unique_meet(update_ref, new_rows)
             _hset_key(update_ref, old_rows, new_rows)
-            _zrem_index(update_ref, old_rows, old_rows)
+            _zrem_index(update_ref, old_rows, new_rows)
             _zadd_index(update_ref, old_rows, new_rows)
 
         for delete_ref, delete_rows in deletes.items():

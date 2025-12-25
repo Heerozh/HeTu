@@ -20,7 +20,7 @@ def def_item():
     @define_component(namespace="pytest", permission=Permission.OWNER)
     class Item(BaseComponent):
         owner: np.int64 = property_field(0, unique=False, index=True)
-        model: np.int32 = property_field(0, unique=False, index=True)
+        model: np.float32 = property_field(0, unique=False, index=True)
         qty: np.int16 = property_field(1, unique=False, index=False)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
