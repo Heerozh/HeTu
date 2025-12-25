@@ -8,6 +8,7 @@
     "hetu",
     "hgetall",
     "hmset",
+    "hset",
     "idmap",
     "itemsize",
     "Jianhao",

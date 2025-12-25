@@ -53,73 +53,199 @@ async def test_redis_serialize_sortable():
 
 
 async def test_redis_commit_payload(item_ref, rls_ref):
+    client = RedisBackendClient.__new__(RedisBackendClient)
+    client.is_servant = False
+
     # 建立测试数据
     idmap = IdentityMap()
+    checks = []
+    pushes = []
 
     # insert
+    # 插入 item row1
     row = item_ref.comp_cls.new_row()
     row.owner = 10
     row.time = row.owner
     row.name = f"{row.owner}"
     idmap.add_insert(item_ref, row)
+    checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:Item:{CLU1}:index:id",
+            b"[" + client.to_sortable_bytes(row.id) + b":",
+            b"[" + client.to_sortable_bytes(row.id) + b";",
+        ]
+    )
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10:", b"[10;"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:Item:{CLU1}:index:time",
+            b"[\x80\x00\x00\x00\x00\x00\x00\n:",  # \n=10
+            b"[\x80\x00\x00\x00\x00\x00\x00\n;",
+        ]
+    )
+    pushes.append(
+        ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
+        + [
+            x
+            for k, v in zip(row.dtype.names, map(str, row.item()))
+            if k != "_version"
+            for x in (k, v)
+        ]
+    )
+
+    # 插入 item row2
     row = item_ref.comp_cls.new_row()
     row.owner = 11
     row.time = row.owner
     row.name = f"{row.owner}"
     idmap.add_insert(item_ref, row)
+    checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:Item:{CLU1}:index:id",
+            b"[" + client.to_sortable_bytes(row.id) + b":",
+            b"[" + client.to_sortable_bytes(row.id) + b";",
+        ]
+    )
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11:", b"[11;"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:Item:{CLU1}:index:time",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x0b:",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x0b;",
+        ]
+    )
+    pushes.append(
+        ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
+        + [
+            x
+            for k, v in zip(row.dtype.names, map(str, row.item()))
+            if k != "_version"
+            for x in (k, v)
+        ]
+    )
 
-    row2 = rls_ref.comp_cls.new_row()
-    row2.owner = 11
-    row2 = rls_ref.comp_cls.new_row()
-    row2.owner = 12
-    idmap.add_insert(rls_ref, row2)
+    # 插入 rls row1
+    row = rls_ref.comp_cls.new_row()
+    row.owner = 11
+    idmap.add_insert(rls_ref, row)
+    checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:RLSTest:{CLU1}:index:id",
+            b"[" + client.to_sortable_bytes(row.id) + b":",
+            b"[" + client.to_sortable_bytes(row.id) + b";",
+        ]
+    )
+    pushes.append(
+        ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
+        + [
+            x
+            for k, v in zip(row.dtype.names, map(str, row.item()))
+            if k != "_version"
+            for x in (k, v)
+        ]
+    )
 
-    # update
+    # 插入 rls row2
+    row = rls_ref.comp_cls.new_row()
+    row.owner = 12
+    idmap.add_insert(rls_ref, row)
+    checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:RLSTest:{CLU1}:index:id",
+            b"[" + client.to_sortable_bytes(row.id) + b":",
+            b"[" + client.to_sortable_bytes(row.id) + b";",
+        ]
+    )
+    pushes.append(
+        ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
+        + [
+            x
+            for k, v in zip(row.dtype.names, map(str, row.item()))
+            if k != "_version"
+            for x in (k, v)
+        ]
+    )
+
+    # update 1, change time
     row = item_ref.comp_cls.new_row()
     row.owner = 20
     row.time = row.owner
     row.name = f"{row.owner}"
+    row._version = 16
     idmap.add_clean(item_ref, row)
     row.time = 23
     idmap.update(item_ref, row)
+    checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "16"])
+    checks.append(
+        [
+            "UNIQ",
+            "pytest:Item:{CLU1}:index:time",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x17:",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x17;",
+        ]
+    )
+    pushes.append(
+        ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "17"]
+        + ["time", "23"]
+    )
 
+    # update 2, change name
     row = item_ref.comp_cls.new_row()
     row.owner = 21
     row.time = row.owner
     row.name = f"{row.owner}"
+    row._version = 233
     idmap.add_clean(item_ref, row)
     row.name = "23"
     idmap.update(item_ref, row)
+    checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "233"])
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23:", b"[23;"])
+    pushes.append(
+        ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "234"]
+        + ["name", "23"]
+    )
 
+    # delete
     row = item_ref.comp_cls.new_row()
     row.owner = 22
     row.time = row.owner
     row.name = f"{row.owner}"
+    row._version = 9
     idmap.add_clean(item_ref, row)
-
-    # delete
     idmap.mark_deleted(item_ref, row.id)
-
+    checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "9"])
+    pushes.append(["DEL", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     # commit
-    json = None
-    client = RedisBackendClient.__new__(RedisBackendClient)
-    client.is_servant = False
+    json = []
 
-    def test_lua_commit(self, keys, payload_json):
+    async def mock_lua_commit(keys, payload_json):
         # 反序列化payload_json
-        assert keys[0] == "commit_payload"
+        assert keys[0] == "pytest:Item:{CLU1}:id:1"
         # 比较idmap和idmap_deser是否相等
         json_str = payload_json[0]
         nonlocal json
         json = msgspec.msgpack.decode(json_str)
+        return b"committed"
 
-    client.lua_commit = test_lua_commit
+    client.lua_commit = mock_lua_commit
     await client.commit(idmap)
 
     # test
-    checks = []
-    pushes = []
-    assert json == [checks, pushes]
+    print(json)
+    for check in json[0]:
+        assert check in checks
+    for push in json[1]:
+        assert push in pushes
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):

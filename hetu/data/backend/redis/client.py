@@ -233,7 +233,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 加载lua脚本，注意redis-py的pipeline里不能用lua，会反复检测script exists性能极低
         self.lua_commit = self.load_commit_scripts(
-            Path(__file__).parent.resolve() / "commit.lua"
+            Path(__file__).parent.resolve() / "commit_v2.lua"
         )
         # 提示用户schema定义是否符合redis要求，比如索引类型不能有复数等
         self._schema_checking_for_redis()
@@ -618,7 +618,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert not self.is_servant, "从节点不允许提交事务"
 
         inserts, updates, deletes = idmap.get_dirty_rows()
-        assert inserts or updates or deletes, "没有脏数据需要提交"
+        if not (inserts or updates or deletes):
+            raise ValueError("没有脏数据需要提交")
 
         ref = idmap.first_reference()
         assert ref is not None, "typing检查"
@@ -658,28 +659,36 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         )
                         _start_val = b"[" + _sortable_value + b":"
                         _end_val = b"[" + _sortable_value + b";"
-                        pushes.append(["UNIQ", _idx_key, _start_val, _end_val])
+                        checks.append(["UNIQ", _idx_key, _start_val, _end_val])
 
-        def _hset_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
+        def _hset_key(
+            _table_ref: TableReference,
+            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
+            _updates: list[dict[str, str]],  # 要hset的数据，只包含要更新的字段
+        ):
             """添加hset的push命令"""
             _prefix = self.cluster_prefix(_table_ref) + ":id:"
-            for _row in _rows:
-                _key = _prefix + str(_row["id"])
+            for _old, _hset_row in zip(_olds, _updates):
+                # 因为hset_row只包含要更新的字段，所以要用_old的id
+                _key = _prefix + str(_old["id"])
                 # 版本+1
-                _ver = int(_row["_version"]) + 1
-                del _row["_version"]
-                # 组合hset
-                _kvs = itertools.chain.from_iterable(_row.items())
-                pushes.append(["HSET", _key, "_version", _ver, *_kvs])
+                _ver = int(_old["_version"]) + 1
+                _hset_row.pop("_version", None)  # 无视用户传入的_version字段
+                # 组合hset, 别忘记写_version
+                _kvs = itertools.chain.from_iterable(_hset_row.items())
+                pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
 
         def _update_index(
-            _table_ref: TableReference, _rows: list[dict[str, str]], zadd
+            _table_ref: TableReference,
+            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
+            _affects: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
+            mode: str,
         ):
             """添加zadd/zrem的push命令"""
             _comp_cls = _table_ref.comp_cls
             _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
-            for _row in _rows:
-                for _field, _value in _row.items():
+            for _old, _new in zip(_olds, _affects):
+                for _field, _value in _new.items():
                     if _field in _comp_cls.indexes_:
                         _idx_key = _idx_prefix + _field
                         # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
@@ -687,21 +696,21 @@ class RedisBackendClient(BackendClient, alias="redis"):
                             _comp_cls.dtype_map_[_field].type(_value)
                         )
                         _member = (
-                            _sortable_value + b":" + str(_row["id"]).encode("ascii")
+                            _sortable_value + b":" + str(_old["id"]).encode("ascii")
                         )
-                        if zadd:
+                        if mode == "zadd":
                             # score统一用0，因为我们不需要score排序功能
                             pushes.append(["ZADD", _idx_key, 0, _member])
                         else:
                             pushes.append(["ZREM", _idx_key, _member])
 
-        def _zadd_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
+        def _zadd_index(_table_ref: TableReference, _olds, _affects):
             """添加zadd的push命令"""
-            _update_index(_table_ref, _rows, zadd=True)
+            _update_index(_table_ref, _olds, _affects, "zadd")
 
-        def _zrem_index(_table_ref: TableReference, _rows: list[dict[str, str]]):
+        def _zrem_index(_table_ref: TableReference, _olds, _affects):
             """添加zrem的push命令"""
-            _update_index(_table_ref, _rows, zadd=False)
+            _update_index(_table_ref, _olds, _affects, "zrem")
 
         def _del_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
             """添加del的push命令"""
@@ -713,19 +722,19 @@ class RedisBackendClient(BackendClient, alias="redis"):
         for insert_ref, insert_rows in inserts.items():
             _key_must_not_exist(insert_ref, insert_rows)
             _unique_meet(insert_ref, insert_rows)
-            _hset_key(insert_ref, insert_rows)
-            _zadd_index(insert_ref, insert_rows)
+            _hset_key(insert_ref, insert_rows, insert_rows)
+            _zadd_index(insert_ref, insert_rows, insert_rows)
 
         for update_ref, (old_rows, new_rows) in updates.items():
             _version_match(update_ref, old_rows)
             _unique_meet(update_ref, new_rows)
-            _hset_key(update_ref, new_rows)
-            _zrem_index(update_ref, old_rows)
-            _zadd_index(update_ref, new_rows)
+            _hset_key(update_ref, old_rows, new_rows)
+            _zrem_index(update_ref, old_rows, old_rows)
+            _zadd_index(update_ref, old_rows, new_rows)
 
         for delete_ref, delete_rows in deletes.items():
             _version_match(delete_ref, delete_rows)
-            _zrem_index(delete_ref, delete_rows)
+            _zrem_index(delete_ref, delete_rows, delete_rows)
             _del_key(delete_ref, delete_rows)
 
         payload_json = msgpack.encode([checks, pushes])
