@@ -6,8 +6,8 @@
 """
 
 import asyncio
-import logging
 import itertools
+import logging
 import random
 import struct
 from pathlib import Path
@@ -75,9 +75,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
             script_text = f.read()
-
-        with open(str(file) + ".debug.lua", "w", encoding="utf-8") as f:
-            _ = f.write(script_text)
 
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
@@ -407,39 +404,49 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             return None
 
-    @staticmethod
+    @classmethod
     def _range_normalize(
+        cls,
         is_str_index: bool,
+        dtype: np.dtype,
         left: int | float | str | bool,
         right: int | float | str | bool | None,
         desc: bool,
-    ) -> tuple[int | float | str, int | float | str]:
+    ) -> tuple[bytes, bytes]:
         """规范化范围查询的左边界和右边界"""
         if right is None:
             right = left
         if desc:
             left, right = right, left
 
-        # todo 非str类型要encode到big-endian bytes，防止53位整数的问题
-        # 对于str类型查询，要用[开始
         if is_str_index:
-            left = str(left)
-            right = str(right)
-            # 判断type效率太低了，特别是isinstance，取消掉
-            # assert (
-            #     isinstance(left, (str, np.str_)) and isinstance(right, (str, np.str_))
-            # ), f"字符串类型索引`{index_name}`的查询(left={left}, {type(left)})变量类型必须是str"
-            if not left.startswith(("(", "[")):
-                left = f"[{left}"
-            if not right.startswith(("(", "[")):
-                right = f"[{right}"
+            assert isinstance(left, (str, bytes, np.character)) and isinstance(
+                right, (str, bytes, np.character)
+            ), f"字符串类型的查询(left={left}, {type(left)})变量类型必须是str"
 
-            if not left.endswith((":", ";")):
-                left = f"{left}:"  # name:id 形式，所以:作为结尾标识符
-            if not right.endswith((":", ";")):
-                right = f"{right};"  # ';' = 3B, ':' = 3A
+        left, right = str(left), str(right)
 
-        return left, right
+        if left.startswith(("(", "[")):
+            b_left = left[0].encode() + cls.to_sortable_bytes(dtype.type(left[1:]))
+        else:
+            b_left = b"[" + cls.to_sortable_bytes(dtype.type(left))
+
+        if right.startswith(("(", "[")):
+            b_right = right[0].encode() + cls.to_sortable_bytes(dtype.type(right))
+        else:
+            b_right = b"[" + cls.to_sortable_bytes(dtype.type(right))
+
+        if left.endswith((":", ";")):
+            b_left = b_left + left[-1].encode()
+        else:
+            b_left = b_left + b":"
+
+        if right.endswith((":", ";")):
+            b_right = b_right + right[-1].encode()
+        else:
+            b_right = b_right + b";"  # ';' = 3B, ':' = 3A
+
+        return b_left, b_right
 
     @overload
     async def range(
@@ -559,32 +566,27 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
         is_str_index = comp_cls.indexes_[index_name]
-        left, right = self._range_normalize(
+        b_left, b_right = self._range_normalize(
             is_str_index,
+            comp_cls.dtype_map_[index_name],
             left,
             right,
             desc,
         )
 
         # 对于str类型查询，要用bylex
-        by_lex = True if is_str_index else False
         cmds = {
-            "start": left,
-            "end": right,
+            "start": b_left,
+            "end": b_right,
             "desc": desc,
             "offset": 0,
             "num": limit,
-            "bylex": by_lex,
-            "byscore": not by_lex,
+            "bylex": True,
+            "byscore": False,
         }
 
         row_ids = await aio.zrange(name=idx_key, **cmds)
-        if is_str_index:
-            row_ids = [
-                int(vk.decode("utf-8", "ignore").split(":")[-1]) for vk in row_ids
-            ]
-        else:
-            row_ids = list(map(int, row_ids))
+        row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
 
         if row_format == RowFormat.ID_LIST:
             return row_ids

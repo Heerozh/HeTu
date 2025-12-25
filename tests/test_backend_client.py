@@ -6,11 +6,10 @@
 #  """
 import msgspec
 import numpy as np
-from typing import cast
-from hetu.data.backend.idmap import IdentityMap
 
-from hetu.data.backend import Backend, RedisBackendClient, TableReference
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Backend, RedisBackendClient, TableReference
+from hetu.data.backend.idmap import IdentityMap
 
 SnowflakeID().init(1, 0)
 
