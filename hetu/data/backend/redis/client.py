@@ -615,6 +615,119 @@ class RedisBackendClient(BackendClient, alias="redis"):
             当提交数据时，发现数据已被其他事务修改，抛出此异常
 
         """
+
+        def _add_unique_checks(_comp_cls, _idx_prefix, _row, _checks):
+            """添加unique索引检查"""
+            _uniques = _comp_cls.uniques_
+            _dtype_map = _comp_cls.dtype_map_
+            for _field, _value in _row.items():
+                if _field in _uniques:
+                    _idx_key = _idx_prefix + _field
+                    _sortable_value = self.to_sortable_bytes(
+                        _dtype_map[_field].type(_value)
+                    )
+                    _start_val = b"[" + _sortable_value + b":"
+                    _end_val = b"[" + _sortable_value + b";"
+                    _checks.append(["UNIQ", _idx_key, _start_val, _end_val])
+
+        def _add_hset_cmd(_key, _old_version, _update_dict, _pushes):
+            """添加hset的push命令"""
+            # 版本+1
+            _ver = int(_old_version) + 1
+            _update_dict.pop("_version", None)  # 无视用户传入的_version字段
+            # 组合hset, 别忘记写_version
+            _kvs = itertools.chain.from_iterable(_update_dict.items())
+            _pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
+
+        def _add_index_cmd(
+            _comp_cls,
+            _idx_prefix,
+            _row_id,
+            _update_dict,
+            _pushes,
+            is_add,
+            restrict_keys=None,
+        ):
+            """添加zadd/zrem的push命令"""
+            _indexes = _comp_cls.indexes_
+            _dtype_map = _comp_cls.dtype_map_
+            _b_row_id = _row_id.encode("ascii")
+            # 如果指定了 restrict_keys (如update场景)，只处理这些字段
+            _target_fields = (
+                _update_dict.keys() if restrict_keys is None else restrict_keys
+            )
+            for _field in _target_fields:
+                if _field in _indexes:
+                    _idx_key = _idx_prefix + _field
+                    # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
+                    _sortable_value = self.to_sortable_bytes(
+                        _dtype_map[_field].type(_update_dict[_field])
+                    )
+                    _member = _sortable_value + b":" + _b_row_id
+                    # score统一用0，因为我们不需要score排序功能
+                    if is_add:
+                        _pushes.append(["ZADD", _idx_key, 0, _member])
+                    else:
+                        _pushes.append(["ZREM", _idx_key, _member])
+
+        def _stage_insert(_comp_cls, _id_prefix, _idx_prefix, _row, _checks, _pushes):
+            """为单行插入生成指令"""
+            _row_id = _row["id"]
+            _key = _id_prefix + _row_id
+
+            # Check: ID必须不存在
+            checks.append(["NX", _key])
+
+            # Check: Unique索引检查
+            _add_unique_checks(_comp_cls, _idx_prefix, _row, _checks)
+
+            # Push: HSET 数据 (插入时包含所有字段)
+            _add_hset_cmd(_key, 0, _row, _pushes)
+
+            # Push: ZADD 普通索引
+            _add_index_cmd(_comp_cls, _idx_prefix, _row_id, _row, _pushes, is_add=True)
+
+        def _stage_update(
+            _comp_cls, _id_prefix, _idx_prefix, _old, _update_dict, _checks, _pushes
+        ):
+            """为单行更新生成指令"""
+            _row_id = _old["id"]
+            _key = _id_prefix + _row_id
+            _old_version = _old["_version"]
+
+            # Check: 版本号匹配 (乐观锁)
+            checks.append(["VER", _key, _old_version])
+
+            # Check: 新值的 Unique 索引检查
+            _add_unique_checks(_comp_cls, _idx_prefix, _update_dict, _checks)
+
+            # Push: HSET 更新数据
+            _add_hset_cmd(_key, _old_version, _update_dict, _pushes)
+
+            # Push: 更新索引 (先删旧，再加新)
+            _restrict_keys = _update_dict.keys()
+            _add_index_cmd(
+                _comp_cls, _idx_prefix, _row_id, _old, _pushes, False, _restrict_keys
+            )
+            _add_index_cmd(_comp_cls, _idx_prefix, _row_id, _update_dict, _pushes, True)
+
+        def _stage_delete(_comp_cls, _id_prefix, _idx_prefix, _row, _checks, _pushes):
+            """为单行删除生成指令"""
+            _row_id = _row["id"]
+            _key = _id_prefix + _row_id
+            _old_version = _row["_version"]
+
+            # Check: 版本号匹配
+            checks.append(["VER", _key, _old_version])
+
+            # Push: 移除索引
+            _add_index_cmd(_comp_cls, _idx_prefix, _row_id, _row, _pushes, is_add=False)
+
+            # Push: 删除主数据
+            pushes.append(["DEL", _key])
+
+        # ===================================================
+
         assert not self.is_servant, "从节点不允许提交事务"
 
         inserts, updates, deletes = idmap.get_dirty_rows()
@@ -630,121 +743,28 @@ class RedisBackendClient(BackendClient, alias="redis"):
         checks = []
         pushes = []
 
-        def _key_must_not_exist(
-            _table_ref: TableReference, _rows: list[dict[str, str]]
-        ):
-            """添加key must not exist的检查"""
-            _prefix = self.cluster_prefix(_table_ref) + ":id:"
-            for _row in _rows:
-                _key = _prefix + str(_row["id"])
-                checks.append(["NX", _key])
-
-        def _version_match(_table_ref: TableReference, _rows: list[dict[str, str]]):
-            """添加version match的检查"""
-            _prefix = self.cluster_prefix(_table_ref) + ":id:"
-            for _row in _rows:
-                _key = _prefix + str(_row["id"])
-                checks.append(["VER", _key, str(_row["_version"])])
-
-        def _unique_meet(_table_ref: TableReference, _rows: list[dict[str, str]]):
-            """添加unique索引检查"""
-            _comp_cls = _table_ref.comp_cls
-            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
-            for _row in _rows:
-                for _field, _value in _row.items():
-                    if _field in _comp_cls.uniques_:
-                        _idx_key = _idx_prefix + _field
-                        _sortable_value = self.to_sortable_bytes(
-                            _comp_cls.dtype_map_[_field].type(_value)
-                        )
-                        _start_val = b"[" + _sortable_value + b":"
-                        _end_val = b"[" + _sortable_value + b";"
-                        checks.append(["UNIQ", _idx_key, _start_val, _end_val])
-
-        def _hset_key(
-            _table_ref: TableReference,
-            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _updates: list[dict[str, str]],  # 要hset的数据，只包含要更新的字段
-        ):
-            """添加hset的push命令"""
-            _prefix = self.cluster_prefix(_table_ref) + ":id:"
-            for _old, _hset_row in zip(_olds, _updates):
-                # 因为hset_row只包含要更新的字段，所以要用_old的id
-                _key = _prefix + str(_old["id"])
-                # 版本+1
-                _ver = int(_old["_version"]) + 1
-                _hset_row.pop("_version", None)  # 无视用户传入的_version字段
-                # 组合hset, 别忘记写_version
-                _kvs = itertools.chain.from_iterable(_hset_row.items())
-                pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
-
-        def _zadd_index(
-            _table_ref: TableReference,
-            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _updates: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
-        ):
-            """添加zadd/zrem的push命令"""
-            _comp_cls = _table_ref.comp_cls
-            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
-            for _old, _new in zip(_olds, _updates):
-                for _field, _value in _new.items():
-                    if _field in _comp_cls.indexes_:
-                        _idx_key = _idx_prefix + _field
-                        # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                        _sortable_value = self.to_sortable_bytes(
-                            _comp_cls.dtype_map_[_field].type(_value)
-                        )
-                        _member = (
-                            _sortable_value + b":" + str(_old["id"]).encode("ascii")
-                        )
-                        # score统一用0，因为我们不需要score排序功能
-                        pushes.append(["ZADD", _idx_key, 0, _member])
-
-        def _zrem_index(
-            _table_ref: TableReference,
-            _olds: list[dict[str, str]],  # 旧数据，用于获取id和_version
-            _updates: list[dict[str, str]],  # 要更新index的数据，可以只包含部分字段
-        ):
-            """添加zadd/zrem的push命令"""
-            _comp_cls = _table_ref.comp_cls
-            _idx_prefix = self.cluster_prefix(_table_ref) + ":index:"
-            for _old, _new in zip(_olds, _updates):
-                for _field, _ in _new.items():
-                    if _field in _comp_cls.indexes_:
-                        _idx_key = _idx_prefix + _field
-                        # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                        _sortable_value = self.to_sortable_bytes(
-                            _comp_cls.dtype_map_[_field].type(_old[_field])
-                        )
-                        _member = (
-                            _sortable_value + b":" + str(_old["id"]).encode("ascii")
-                        )
-                        pushes.append(["ZREM", _idx_key, _member])
-
-        def _del_key(_table_ref: TableReference, _rows: list[dict[str, str]]):
-            """添加del的push命令"""
-            _prefix = self.cluster_prefix(_table_ref) + ":id:"
-            for _row in _rows:
-                _key = _prefix + str(_row["id"])
-                pushes.append(["DEL", _key])
-
         for insert_ref, insert_rows in inserts.items():
-            _key_must_not_exist(insert_ref, insert_rows)
-            _unique_meet(insert_ref, insert_rows)
-            _hset_key(insert_ref, insert_rows, insert_rows)
-            _zadd_index(insert_ref, insert_rows, insert_rows)
+            id_prefix = self.cluster_prefix(insert_ref) + ":id:"
+            comp_cls = insert_ref.comp_cls
+            idx_prefix = self.cluster_prefix(insert_ref) + ":index:"
+            for row in insert_rows:
+                _stage_insert(comp_cls, id_prefix, idx_prefix, row, checks, pushes)
 
         for update_ref, (old_rows, new_rows) in updates.items():
-            _version_match(update_ref, old_rows)
-            _unique_meet(update_ref, new_rows)
-            _hset_key(update_ref, old_rows, new_rows)
-            _zrem_index(update_ref, old_rows, new_rows)
-            _zadd_index(update_ref, old_rows, new_rows)
+            id_prefix = self.cluster_prefix(update_ref) + ":id:"
+            comp_cls = update_ref.comp_cls
+            idx_prefix = self.cluster_prefix(update_ref) + ":index:"
+            for old_row, new_row in zip(old_rows, new_rows):
+                _stage_update(
+                    comp_cls, id_prefix, idx_prefix, old_row, new_row, checks, pushes
+                )
 
         for delete_ref, delete_rows in deletes.items():
-            _version_match(delete_ref, delete_rows)
-            _zrem_index(delete_ref, delete_rows, delete_rows)
-            _del_key(delete_ref, delete_rows)
+            id_prefix = self.cluster_prefix(delete_ref) + ":id:"
+            comp_cls = delete_ref.comp_cls
+            idx_prefix = self.cluster_prefix(delete_ref) + ":index:"
+            for row in delete_rows:
+                _stage_delete(comp_cls, id_prefix, idx_prefix, row, checks, pushes)
 
         payload_json = msgpack.encode([checks, pushes])
         # 添加一个带cluster id的key，指明lua脚本执行的集群
