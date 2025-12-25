@@ -30,6 +30,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "msgpack>=1.1.2",
     "msgspec>=0.20.0",
     "numpy~=2.3",
     "orjson~=3.11",

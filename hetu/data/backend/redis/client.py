@@ -13,7 +13,8 @@ import struct
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
-from msgspec import msgpack
+# from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
+import msgpack
 import numpy as np
 import redis
 
@@ -715,7 +716,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
 
-        payload_json = msgpack.encode([checks, pushes])
+        payload_json: bytes = msgpack.packb([checks, pushes], use_bin_type=False)  # pyright: ignore[reportAssignmentType]
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 
