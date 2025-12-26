@@ -1,13 +1,10 @@
-import time
-
-import docker
 import pytest
-from docker.errors import NotFound
+from typing import Callable, cast
+from hetu.data.backend import Backend, RedisBackendClient
 
 
 @pytest.fixture(scope="module")
 async def mod_redis_backend(mod_redis_service):
-    from hetu.data.backend import Backend
     from hetu.data.component import ComponentDefines
 
     backends = {}
@@ -33,7 +30,8 @@ async def mod_redis_backend(mod_redis_service):
         def _mock_redis_client_lua():
             return ComponentDefines().get_all()
 
-        _backend.master._get_referred_components = _mock_redis_client_lua
+        _master = cast(RedisBackendClient, _backend.master)
+        _master._get_referred_components = _mock_redis_client_lua
         _backend.post_configure()
         return _backend
 
@@ -45,7 +43,7 @@ async def mod_redis_backend(mod_redis_service):
 
 # 要测试新的backend，请添加backend到params中
 @pytest.fixture(params=["redis"], scope="module")
-def mod_auto_backend(request):
+def mod_auto_backend(request) -> Callable[..., Backend]:
     if request.param == "redis":
         return request.getfixturevalue("mod_redis_backend")
     else:
@@ -54,7 +52,7 @@ def mod_auto_backend(request):
 
 # 要测试新的backend，请添加backend到params中
 @pytest.fixture(params=["redis"], scope="module")
-def auto_backend(request):
+def auto_backend(request) -> Callable[..., Backend]:
     if request.param == "redis":
         return request.getfixturevalue("mod_redis_backend")
     else:

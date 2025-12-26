@@ -115,3 +115,9 @@ class Backend:
         获取表维护对象，根据不同后端类型返回不同的实现。
         """
         return self._master.get_table_maintenance()
+
+    def session(self, instance: str, cluster_id: int) -> Session:
+        """
+        创建一个Session对象，负责缓存数据修改，并最终提交事务到数据库。
+        """
+        return Session(self, instance, cluster_id)

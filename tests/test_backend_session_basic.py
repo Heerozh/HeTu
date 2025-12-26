@@ -8,68 +8,105 @@
 import numpy as np
 import pytest
 
-from hetu.data.backend import UniqueViolation
-from hetu.data.backend.select import SessionSelect
+from hetu.data.backend import UniqueViolation, Backend
+from hetu.data.backend.session import Session
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
+
+# todo 测试开闭区间
 
 
-async def test_table(mod_item_model, item_select: SessionSelect):
+async def test_select_outside(item_ref):
+    """测试SessionSelect在未进入Session上下文时抛出异常。"""
+    backend = Backend.__new__(Backend)
+    backend._master = None  # pyright: ignore[reportAttributeAccessIssue]
+    session = Session(backend, "pytest", 1)
+    async with session as session:
+        item_select = session.select(item_ref.comp_cls)
+
+    with pytest.raises(AssertionError, match="Session"):
+        await item_select.range(limit=10, id=(10, 5))
+
+
+async def test_basic_cru(item_ref, mod_auto_backend):
+    backend = mod_auto_backend()
     # 测试插入数据
-    async with item_select.session as session:
-        row = mod_item_model.new_row()
+    row_ids = []
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
         row.name = "Item1"
         row.owner = 1
         row.time = 1
+        row_ids.append(row.id)
         item_select.insert(row)
 
-        row.id = 0
+        row = item_ref.comp_cls.new_row()
         row.name = "Item2"
         row.owner = 1
         row.time = 2
+        row_ids.append(row.id)
         item_select.insert(row)
 
-        row.id = 0
+        row = item_ref.comp_cls.new_row()
         row.name = "Item3"
         row.owner = 2
         row.time = 3
+        row_ids.append(row.id)
         item_select.insert(row)
+
+        # 测试刚添加的缓存
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[2])).time, 3)
+
         await session.commit()
 
-    async with item_select.session as session:
-        result = await item_select.range(limit=1, id=(-np.inf, +np.inf))
-        np.testing.assert_array_equal(result.id, [1, 2, 3])
-        assert (await item_select.get(id=1)).name == "Item1"
+    # 测试基本的range和get
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        result = await item_select.range(limit=10, id=(-np.inf, +np.inf))
+        np.testing.assert_array_equal(result.id, row_ids)
+        assert (await item_select.get(id=row_ids[0])).name == "Item1"
         # 测试第一行dict select不出来的历史bug
         assert (await item_select.get(name="Item1")).name == "Item1"
         assert type(await item_select.get(name="Item1")) is not np.recarray
 
-    np.testing.assert_array_equal(
-        (await item_table.direct_query("id", -np.inf, +np.inf)).id, [1, 2, 3]
-    )
-
     # 测试update是否正确
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        row = await item_select.get(id=row_ids[0])
         row.qty = 2
-        await tbl.update(1, row)
-    np.testing.assert_array_equal((await item_table.direct_get(1)).qty, 2)
+        item_select.update(row)
+        # 测试刚update的缓存
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)
+    # 测试写入后
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)
 
+
+async def test_insert_unique(mod_item_model, item_table):
     # 测试插入Unique重复数据
     from hetu.data.backend import UniqueViolation
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row.id = 0
+    # 测试缓存中unique违反：
+    async with backend.session("pytest", 1) as session:
+        pass
+
+    # 测试和数据库已有数据unique违反，依然是提交前报错（提交报错属于race范围）
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
         row.name = "Item2"
         row.owner = 2
         row.time = 999
         with pytest.raises(UniqueViolation, match="name"):
-            await tbl.insert(row)
-        row.id = 0
+            await item_select.insert(row)
+        row = item_ref.comp_cls.new_row()
         row.name = "Item4"
         row.time = 2
         with pytest.raises(UniqueViolation, match="time"):
-            await tbl.insert(row)
+            await item_select.insert(row)
 
 
 async def test_upsert(mod_item_model, item_table):

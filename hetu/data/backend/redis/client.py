@@ -420,12 +420,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if desc:
             left, right = right, left
 
-        # str类型的索引不能传入数字
         if dtype.type in (np.str_, np.bytes_):
+            # component字段如果是str/bytes类型的索引，不能查询数字
             assert type(left) in (str, bytes) and type(right) in (str, bytes), (
                 f"字符串类型的查询(left={left}, {type(left)})变量类型必须是str/bytes"
             )
+        else:
+            # component字段如果是数字，则处理inf
+            type_info = np.iinfo(dtype)
 
+            def clamp_inf(x):
+                if type(x) is float and np.isinf(x):
+                    return type_info.max if x > 0 else type_info.min
+                return x
+
+            left = clamp_inf(left)
+            right = clamp_inf(right)
+
+        # 处理范围区间
         def peel(x, default_prefix: bytes, default_suffix: bytes):
             prefix, suffix = default_prefix, default_suffix
 
@@ -446,6 +458,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         lp, left, ls = peel(left, b"[", b":")
         rp, right, rs = peel(right, b"[", b";")
 
+        # 二进制化
         b_left = lp + cls.to_sortable_bytes(dtype.type(left)) + ls
         b_right = rp + cls.to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right

@@ -186,7 +186,7 @@ class SessionSelect:
         else:
             return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
 
-    def insert(self, row: np.record) -> None:
+    async def insert(self, row: np.record) -> None:
         """
         向Session中添加一行待插入数据。
 
@@ -201,7 +201,7 @@ class SessionSelect:
 
         self.session.idmap.add_insert(self.ref, row)
 
-    def update(self, row: np.record) -> None:
+    async def update(self, row: np.record) -> None:
         """
         向Session中添加一行待更新数据。
 
