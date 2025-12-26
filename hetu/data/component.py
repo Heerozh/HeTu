@@ -15,12 +15,11 @@ from typing import TYPE_CHECKING, Any, Callable, cast, overload
 
 import numpy as np
 
+from hetu.data.backend.table import TableReference
+
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
 from ..common.snowflake_id import SnowflakeID
-
-if TYPE_CHECKING:
-    from .backend import RawComponentTable
 
 
 logger = logging.getLogger("HeTu.root")
@@ -59,7 +58,7 @@ class BaseComponent:
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
     default_row: np.recarray  # 默认空数据行
-    hosted_: RawComponentTable | None = None  # 该Component运行时被托管的DOA实例
+    hosted_: TableReference  # 该Component运行时所在的数据库位置
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
     uniques_: set[str]  # 唯一索引的属性名集合
@@ -455,9 +454,6 @@ def define_component(
         properties["id"] = Property(0, True, True, np.int64)
         # 增加version属性，该属性只读（只能lua修改）
         properties["_version"] = Property(0, False, False, np.int32)
-
-        # todo 提醒超过int53的整数类型，超过double的浮点类型，不能作为unique/index索引，因为redis score是53位最高需要转换为string
-        #      如果按human string，开头加0,int64是20位。如果用byte模式，则必须为大端格式（才能和数字排序一样）
 
         # 检查class必须继承于BaseComponent
         assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"

@@ -101,7 +101,7 @@ from hetu.system import elevate
 
 # permission定义为任何人可调用
 @define_system(namespace="ssw", permission=Permission.EVERYBODY,
-               subsystems=(elevate,))
+    subsystems=(elevate,))
 async def login_test(ctx: Context, user_id):
     # 提权以后ctx.caller就是user_id。
     await elevate(ctx, user_id, kick_logged_in=True)
@@ -419,8 +419,8 @@ cd your_app_directory
 conda activate hetu
 # 根据项目pyproject.toml安装依赖，河图应该在其中
 pip install .
-# 启动河图
-hetu start --config=./config.yml --head=True
+# 启动河图，用 `python -O` 方式在生产环境启动，以去掉assert提升性能
+python -O -m hetu start --config=./config.yml --head=True
 ```
 
 > [!NOTE]

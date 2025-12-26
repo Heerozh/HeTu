@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from .base import RowFormat
+from .base import RowFormat, UniqueViolation
 from .table import TableReference
 from .idmap import RowState
 
@@ -40,6 +40,72 @@ class SessionSelect:
         self.ref: TableReference = TableReference(
             comp_cls, session.instance_name, session.cluster_id
         )
+
+    def _local_has_unique_conflicts(self, row: np.record, fields: set) -> bool:
+        """
+        在Session本地缓存中检查Unique索引冲突。
+        """
+        idmap = self.session.idmap
+        for unique_index in fields:
+            value = row[unique_index]
+            rows = idmap.filter(self.ref, **{unique_index: value})
+            if len(rows) > 0:
+                return False
+        return True
+
+    async def _remote_has_unique_conflicts(self, row: np.record, fields: set) -> bool:
+        """
+        在远程数据库中检查Unique索引冲突。
+        """
+        for unique_index in fields:
+            value = row[unique_index]
+            existing_row = await self.session.master_or_servant.range(
+                self.ref, unique_index, value, value, 1, False, RowFormat.ID_LIST
+            )
+            if len(existing_row) > 0:
+                return False
+        return True
+
+    def _get_changed_fields(self, row: np.record):
+        """
+        根据row.id对比缓存，获取修改的字段列表。
+        如果id在修改字段中，表示没有找到旧数据。
+        """
+        idmap = self.session.idmap
+        old_row, row_stat = idmap.get(self.ref, row["id"])
+        assert row.dtype.names  # for type checker, could be removed by python -O
+        if old_row is None or row_stat == RowState.DELETE:
+            return set(row.dtype.names)
+        else:
+            return {key for key in row.dtype.names if old_row[key] != row[key]}
+
+    async def is_unique_valid(self, row: np.record, insert=False) -> bool:
+        """
+        检查一行数据的Unique索引在本地和远程数据库中是否有效。
+
+        Parameters
+        ----------
+        row : np.record
+            待检查的行数据，必须是 `c-struct` 格式。
+        insert : bool
+            如果为True，表示这是一个插入操作，否则是更新操作，要求之前已获取过旧数据。
+        """
+        changed_fields = self._get_changed_fields(row)
+        if not insert:
+            # 如果有id字段，表示没有找到旧数据
+            assert "id" not in changed_fields, "更新操作必须有旧数据。"
+        else:
+            assert "id" in changed_fields, "插入操作必须没有旧数据。"
+
+        changed_fields = changed_fields & self.ref.comp_cls.uniques_
+
+        if self._local_has_unique_conflicts(row, changed_fields):
+            return False
+
+        if await self._remote_has_unique_conflicts(row, changed_fields):
+            return False
+
+        return True
 
     async def get_by_id(self, row_id: Int64) -> np.record | None:
         """
@@ -197,7 +263,9 @@ class SessionSelect:
         """
         assert row["_version"] == 0, "Insert row's _version must be 0."
 
-        # todo unique check
+        # unique check
+        if not await self.is_unique_valid(row, insert=True):
+            raise UniqueViolation("Insert row has unique index conflicts.")
 
         self.session.idmap.add_insert(self.ref, row)
 
@@ -210,11 +278,22 @@ class SessionSelect:
         row : np.record
             待更新的行数据，必须是 `c-struct` 格式。
         """
-        # todo 检查和cache中的_version一致
+        # 检查和cache中的_version一致
+        changed_fields = self._get_changed_fields(row)
+        if "_version" in changed_fields:
+            raise ValueError("Cannot update _version field.")
 
-        # todo 检查有修改的列
+        # 检查row.id在cache中存在
+        if "id" in changed_fields:
+            raise ValueError("Cannot update: row id not found in cache.")
 
-        # TODO unique check
+        # 检查有修改的列
+        if len(changed_fields) == 0:
+            raise ValueError("No fields changed, cannot update.")
+
+        # unique check
+        if not await self.is_unique_valid(row):
+            raise UniqueViolation("Update row has unique index conflicts.")
 
         self.session.idmap.update(self.ref, row)
 
@@ -257,7 +336,9 @@ class SessionSelect:
         row_id : int
             待删除行的主键ID。
         """
-        # todo 检查和cache中的_version一致
+        old_row, row_stat = self.session.idmap.get(self.ref, row_id)
+        if old_row is None or row_stat == RowState.DELETE:
+            raise ValueError("Cannot delete row: not in cache or already deleted.")
 
         self.session.idmap.mark_deleted(self.ref, row_id)
 
@@ -288,6 +369,6 @@ class UpsertContext:
         if exc_type is None:
             assert self.row_data is not None
             if self.insert:
-                self.selected.insert(self.row_data)
+                await self.selected.insert(self.row_data)
             else:
-                self.selected.update(self.row_data)
+                await self.selected.update(self.row_data)
