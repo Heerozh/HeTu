@@ -4,7 +4,7 @@
 #  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 #  @email: heeroz@gmail.com
 #  """
-import msgspec
+import msgpack
 import numpy as np
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -86,7 +86,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
             if k != "_version"
             for x in (k, v)
         ]
@@ -94,26 +94,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + [0, b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b":" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + [0, b"\xc0^\xd3\xd7\x00\x00\x00\x00:" + str(row.id).encode()]
+        + ["0", b"\xc0^\xd3\xd7\x00\x00\x00\x00:" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"10:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"10:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
     )
 
     # 插入 item row2
@@ -140,7 +140,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
             if k != "_version"
             for x in (k, v)
         ]
@@ -148,26 +148,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + [0, b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b":" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + [0, b"?\xa1,(\xff\xff\xff\xff:" + str(row.id).encode()]
+        + ["0", b"?\xa1,(\xff\xff\xff\xff:" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"11:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"11:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x01:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x01:" + str(row.id).encode()]
     )
 
     # 插入 rls row1
@@ -185,7 +185,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
             if k != "_version"
             for x in (k, v)
         ]
@@ -193,11 +193,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + [0, b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b":" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
     )
 
     # 插入 rls row2
@@ -215,7 +215,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
             if k != "_version"
             for x in (k, v)
         ]
@@ -223,11 +223,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + [0, b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b":" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x0c:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0c:" + str(row.id).encode()]
     )
 
     # update 1, change time
@@ -256,7 +256,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + [0, b"\x80\x00\x00\x00\x00\x00\x00\x17:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x17:" + str(row.id).encode()]
     )
 
     # update 2, change name
@@ -279,7 +279,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21:" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + [0, b"23:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"23:" + str(row.id).encode()]
     )
 
     # delete
@@ -327,13 +327,19 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         # 比较idmap和idmap_deser是否相等
         json_str = payload_json[0]
         nonlocal json
-        json = msgspec.msgpack.decode(json_str)
+        json = msgpack.unpackb(json_str, raw=True)
         return b"committed"
 
     client.lua_commit = mock_lua_commit
     await client.commit(idmap)
 
     # test
+    checks = [  # 先全转换为bytes, 因为msgpack解包后str会变bytes
+        [arg.encode() if type(arg) is str else arg for arg in args] for args in checks
+    ]
+    pushes = [
+        [arg.encode() if type(arg) is str else arg for arg in args] for args in pushes
+    ]
     for check in json[0]:
         assert check in checks
     for push in json[1]:

@@ -165,10 +165,10 @@ def test_update_inserted_row(mod_item_model):
 
     # 验证状态仍为 INSERT，不应出现在 UPDATE 列表中
     dirties = id_map.get_dirty_rows()
-    inserts, updates = dirties[item_ref][0], dirties[item_ref][1]
+    inserts, (_, update_new) = dirties[item_ref][0], dirties[item_ref][1]
     assert len(inserts) == 1
     assert inserts[0]["name"] == "Updated"
-    assert len(updates) == 0
+    assert len(update_new) == 0
 
 
 def test_mark_deleted(mod_item_model):
