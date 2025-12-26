@@ -396,6 +396,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回无类型的原始数据 (dict[str, str])
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型。
+                此方法性能低于 `RowFormat.STRUCT` 。
         """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
@@ -407,45 +408,46 @@ class RedisBackendClient(BackendClient, alias="redis"):
     @classmethod
     def _range_normalize(
         cls,
-        is_str_index: bool,
         dtype: np.dtype,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
         desc: bool,
     ) -> tuple[bytes, bytes]:
         """规范化范围查询的左边界和右边界"""
+        # 处理right none, 顺序问题
         if right is None:
             right = left
         if desc:
             left, right = right, left
 
-        if is_str_index:
-            assert isinstance(left, (str, bytes, np.character)) and isinstance(
-                right, (str, bytes, np.character)
-            ), f"字符串类型的查询(left={left}, {type(left)})变量类型必须是str"
+        # str类型的索引不能传入数字
+        if dtype.type in (np.str_, np.bytes_):
+            assert type(left) in (str, bytes) and type(right) in (str, bytes), (
+                f"字符串类型的查询(left={left}, {type(left)})变量类型必须是str/bytes"
+            )
 
-        left, right = str(left), str(right)
+        def peel(x, default_prefix: bytes, default_suffix: bytes):
+            prefix, suffix = default_prefix, default_suffix
 
-        if left.startswith(("(", "[")):
-            b_left = left[0].encode() + cls.to_sortable_bytes(dtype.type(left[1:]))
-        else:
-            b_left = b"[" + cls.to_sortable_bytes(dtype.type(left))
+            if type(x) is str:
+                if x[0] in "([":
+                    prefix, x = x[0].encode(), x[1:]
+                if x[-1] in ":;":
+                    suffix, x = x[-1].encode(), x[:-1]
 
-        if right.startswith(("(", "[")):
-            b_right = right[0].encode() + cls.to_sortable_bytes(dtype.type(right))
-        else:
-            b_right = b"[" + cls.to_sortable_bytes(dtype.type(right))
+            if type(x) is bytes:
+                if x[0] in b"([":
+                    prefix, x = x[:1], x[1:]
+                if x[-1] in b":;":
+                    suffix, x = x[-1:], x[:-1]
 
-        if left.endswith((":", ";")):
-            b_left = b_left + left[-1].encode()
-        else:
-            b_left = b_left + b":"
+            return prefix, x, suffix
 
-        if right.endswith((":", ";")):
-            b_right = b_right + right[-1].encode()
-        else:
-            b_right = b_right + b";"  # ';' = 3B, ':' = 3A
+        lp, left, ls = peel(left, b"[", b":")
+        rp, right, rs = peel(right, b"[", b";")
 
+        b_left = lp + cls.to_sortable_bytes(dtype.type(left)) + ls
+        b_right = rp + cls.to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right
 
     @overload
@@ -453,8 +455,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
@@ -464,8 +466,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
@@ -475,8 +477,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
@@ -486,8 +488,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
@@ -497,8 +499,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: RowFormat = ...,
@@ -508,8 +510,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: int | float | str | bool,
-        right: int | float | str | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
@@ -525,10 +527,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         index_name: str
             查询Component中的哪条索引
         left, right: str or number
-            查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+            查询范围，闭区间。可以在开头加上"["指定闭区间，还是"("开区间。
             如果right不填写，则精确查询等于left的数据。
         limit: int
-            限制返回的行数，越少越快
+            限制返回的行数，方法往数据库查询的次数为 `1 + limit` 次。
         desc: bool
             是否降序排列
         row_format
@@ -536,16 +538,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         Returns
         -------
-        row: np.recarray or list[id] or list[dict]
+        row: np.recarray or list[int] or list[dict]
             根据 `row_format` 参数返回以下格式之一：
 
             - RowFormat.STRUCT - **默认值**
                 返回 `numpy.recarray`，如果没有查询到数据，返回空 `numpy.recarray`。
                 `numpy.recarray` 是一种 c-struct array。
             - RowFormat.RAW
-                返回无类型的原始数据 (dict[str, str]) 列表，如果没有查询到数据，返回空list
+                返回无类型的原始数据 (dict[str, str]) 的列表，如果没有查询到数据，返回空list
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
+                此方法性能低于 `RowFormat.STRUCT` 。
             - RowFormat.ID_LIST
                 返回查询到的 row id 列表，如果没有查询到数据，返回空list
 
@@ -565,9 +568,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
-        is_str_index = comp_cls.indexes_[index_name]
+        assert index_name in comp_cls.indexes_
         b_left, b_right = self._range_normalize(
-            is_str_index,
             comp_cls.dtype_map_[index_name],
             left,
             right,
@@ -662,7 +664,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     _member = _sortable_value + b":" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能
-                        pushes.append(["ZADD", _idx_key, 0, _member])
+                        pushes.append(["ZADD", _idx_key, "0", _member])
                     else:
                         pushes.append(["ZREM", _idx_key, _member])
 
@@ -682,8 +684,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 组合成checks/pushes命令表，减少lua脚本的复杂度
         # checks有exists/unique/version
         # pushes有hset/zadd/zrem/del
-        checks = []
-        pushes = []
+        checks: list[list[str | bytes]] = []
+        pushes: list[list[str | bytes]] = []
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"

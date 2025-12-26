@@ -18,7 +18,17 @@ if TYPE_CHECKING:
 
     from .session import Session
 
-IndexScalar = np.integer | np.floating | np.str_ | np.bool_ | float | str | bool
+IndexScalar = (
+    np.integer
+    | np.floating
+    | np.str_
+    | np.bytes_
+    | np.bool_
+    | float
+    | str
+    | bytes
+    | bool
+)
 Int64 = np.int64 | int
 
 
@@ -56,7 +66,7 @@ class SessionSelect:
     async def get(self, **kwargs: IndexScalar) -> np.record | None:
         """
         从数据库获取单行数据，并放入Session缓存。
-        推荐通过"id"主键查询，这样无须查询索引。否则会执行1-2次查询，先通过索引查询到id，再查询数据行。
+        推荐通过"id"主键查询，这样无须查询索引。否则会执行1-2次查询。
 
         Parameters
         ----------
@@ -114,7 +124,7 @@ class SessionSelect:
         ----------
         kwargs: dict
             查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
-            默认闭区间，如果需要开区间，请转换为字符串并开头指定 `(` 或 `)`。
+            默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
         limit: int
             限制返回的行数，越少越快
         desc: bool
