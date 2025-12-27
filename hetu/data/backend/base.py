@@ -204,7 +204,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
     ) -> np.recarray: ...
@@ -215,7 +215,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
     ) -> list[dict[str, str]]: ...
@@ -226,7 +226,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
     ) -> list[dict[str, Any]]: ...
@@ -237,7 +237,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
     ) -> list[int]: ...
@@ -248,7 +248,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format: RowFormat = ...,
     ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
@@ -258,7 +258,7 @@ class BackendClient:
         index_name: str,
         left: int | float | str | bytes | bool,
         right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
     ):

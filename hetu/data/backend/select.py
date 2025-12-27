@@ -202,7 +202,7 @@ class SessionSelect:
         index_name: str | None = None,
         _left: IndexScalar | None = None,  # 参数前加_防止和用户字段冲突
         _right: IndexScalar | None = None,
-        limit: int = 100,
+        limit: int = 10,
         desc: bool = False,
         **kwargs: tuple[IndexScalar, IndexScalar],
     ) -> np.recarray:

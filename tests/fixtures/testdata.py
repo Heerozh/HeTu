@@ -6,9 +6,7 @@
 #  """
 
 import pytest
-from hetu.data.backend import Session
 from hetu.data.backend import TableReference
-from hetu.data.backend.select import SessionSelect
 
 
 def def_item():

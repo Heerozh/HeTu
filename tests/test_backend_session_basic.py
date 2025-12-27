@@ -255,29 +255,34 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
 async def test_range_number_index(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
 
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(filled_item_ref.comp_cls)
+        ids = (await item_select.range(id=(-np.inf, np.inf), limit=999)).id
+
     # 测试各种query是否正确，表内值参考test_data.py的filled_item_ref夹具
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        # time范围为110-134，共25个，query是[l, r]，但range是[l, r)
+        # time范围为110-134，共25个
         np.testing.assert_array_equal(
             (await item_select.range(time=(110, 115))).time, range(110, 116)
         )
         np.testing.assert_array_equal(
-            (await tbl.query("time", 110, 115, desc=True)).time, range(115, 109, -1)
+            (await item_select.range(time=(110, 115), desc=True)).time,
+            range(115, 109, -1),
         )
-        # query owner单项和limit
-        assert (await tbl.query("owner", 10)).shape[0] == 10
-        assert (await tbl.query("owner", 10, limit=30)).shape[0] == 25
-        assert (await tbl.query("owner", 10, limit=8)).shape[0] == 8
-        assert (await tbl.query("owner", 11)).shape[0] == 0
-        # query id
+        # range owner单项和limit
+        assert (await item_select.range(owner=(10, 10))).shape[0] == 10
+        assert (await item_select.range(owner=(10, 10), limit=30)).shape[0] == 25
+        assert (await item_select.range(owner=(10, 10), limit=8)).shape[0] == 8
+        assert (await item_select.range(owner=(11, 11))).shape[0] == 0
+        # range id
         np.testing.assert_array_equal(
-            (await tbl.query("id", 5, 7, limit=999)).id, [5, 6, 7]
+            (await item_select.range(id=(ids[5], ids[10]), limit=999)).id, ids[5:11]
         )
-        # 测试query的方向反了
+        # 测试range的方向反了
         # AssertionError: right必须大于等于left，你的:
         with pytest.raises(AssertionError, match="right.*left"):
-            await tbl.query("time", 115, 110)
+            await item_select.range(time=(115, 110))
 
 
 async def test_query_string_index(filled_item_table):
@@ -285,7 +290,7 @@ async def test_query_string_index(filled_item_table):
 
     # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         assert (await tbl.query("name", 11)).shape[0] == 0
         # query on str typed unique
         assert (await tbl.query("name", "11")).shape[0] == 0
@@ -305,7 +310,7 @@ async def test_query_bool(filled_item_table):
     backend = filled_item_table.backend
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(5)
         row.used = True
         await tbl.update(row.id, row)
@@ -314,7 +319,7 @@ async def test_query_bool(filled_item_table):
         await tbl.update(row.id, row)
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         assert set((await tbl.query("used", True)).id) == {5, 7}
         assert set((await tbl.query("used", False, limit=99)).id) == set(
             range(1, 26)
@@ -326,12 +331,12 @@ async def test_query_bool(filled_item_table):
 
     # delete
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         await tbl.delete(5)
         await tbl.delete(7)
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         assert set((await tbl.query("used", True)).id) == set()
 
 
@@ -340,13 +345,13 @@ async def test_string_length_cutoff(filled_item_table, mod_item_model):
 
     # 测试插入的字符串超出长度是否截断
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         row = mod_item_model.new_row()
         row.name = "reinsert2"  # 超出U8长度会被截断
         await tbl.insert(row)
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         assert (await tbl.select("reinsert", "name")) is not None, (
             "超出U8长度应该要被截断，这里没索引出来说明没截断"
         )
@@ -359,12 +364,12 @@ async def test_batch_delete(filled_item_table):
     backend = filled_item_table.backend
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         for i in range(20):
             await tbl.delete(24 - i)  # 再删掉
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         np.testing.assert_array_equal(
             (await tbl.query("id", 0, 100, limit=999)).id, [1, 2, 3, 4, 25]
         )
@@ -375,7 +380,7 @@ async def test_batch_delete(filled_item_table):
 
     # 测试is_exist是否正常
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         x = await tbl.is_exist(999, "id")
         assert x[0] == False
         x = await tbl.is_exist(5, "id")
@@ -470,13 +475,13 @@ async def test_redis_empty_index(mod_item_model, filled_item_table):
         pytest.skip("Not a redis backend, skip")
     # 测试更新name后再把所有key删除后index是否正常为空
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(2)
         row.name = f"TST{row.id}"
         await tbl.update(row.id, row)
 
     async with backend.session("pytest", 1) as session:
-        tbl = filled_item_table.attach(session)
+        item_select = session.select(filled_item_ref.comp_cls)
         rows = await tbl.query("id", -np.inf, +np.inf, limit=999)
         for row in rows:
             await tbl.delete(row.id)

@@ -455,6 +455,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 因为member是value:id，所以left="value;"为排除，right="value:"为排除
         ls = b":" if li else b";"
         rs = b";" if ri else b":"
+        if desc:
+            ls, rs = rs, ls
 
         # 二进制化。
         b_left = b"[" + cls.to_sortable_bytes(dtype.type(left)) + ls
@@ -585,6 +587,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             left,
             right,
             desc,
+        )
+        assert (b_left >= b_right) if desc else (b_right >= b_left), (
+            f"left必须大于等于right，你的:right={right}, left={left}"
         )
 
         # 对于str类型查询，要用bylex
