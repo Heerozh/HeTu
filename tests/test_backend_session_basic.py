@@ -363,18 +363,19 @@ async def test_string_length_cutoff(filled_item_ref, mod_auto_backend):
     # 测试插入的字符串超出长度是否截断
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        row = mod_item_model.new_row()
+        row = filled_item_ref.comp_cls.new_row()
         row.name = "reinsert2"  # 超出U8长度会被截断
-        await tbl.insert(row)
+        await item_select.insert(row)
 
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(filled_item_ref.comp_cls)
-        assert (await tbl.select("reinsert", "name")) is not None, (
+        assert (await item_select.get(name="reinsert")) is not None, (
             "超出U8长度应该要被截断，这里没索引出来说明没截断"
         )
 
-        assert (await tbl.select("reinsert", "name")).id == 26
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
+        assert (await item_select.get(name="reinsert")).id == row.id  # type: ignore
+        assert len(await item_select.range("id", -np.inf, +np.inf, limit=999)) == 26
 
 
 async def test_batch_delete(filled_item_ref, mod_auto_backend):
@@ -382,28 +383,27 @@ async def test_batch_delete(filled_item_ref, mod_auto_backend):
 
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        for i in range(20):
-            await tbl.delete(24 - i)  # 再删掉
+        rows = await item_select.range(id=(-np.inf, +np.inf), limit=999)
+        for i in reversed(rows.id[4:-1]):  # 保留前4个和最后一个
+            item_select.delete(i)  # 再删掉
 
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(filled_item_ref.comp_cls)
         np.testing.assert_array_equal(
-            (await tbl.query("id", 0, 100, limit=999)).id, [1, 2, 3, 4, 25]
+            (await item_select.range("id", rows.id[0], rows.id[-1], limit=999)).id,
+            rows.id[:4].tolist() + rows.id[-1:].tolist(),
         )
-        np.testing.assert_array_equal(
-            (await tbl.query("id", 3, 25, limit=999)).id, [3, 4, 25]
-        )
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 5
+        assert len(await item_select.range("id", -np.inf, +np.inf, limit=999)) == 5
 
-    # 测试is_exist是否正常
+    # 测试get=None是否正常
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        x = await tbl.is_exist(999, "id")
-        assert x[0] == False
-        x = await tbl.is_exist(5, "id")
-        assert x[0] == False
-        x = await tbl.is_exist(4, "id")
-        assert x[0] == True
+        x = await item_select.get(id=999)
+        assert x is None
+        # 不再设计is_exist/exist方法，因为这样无法利用缓存和乐观锁
+        x = await item_select.get("id", rows.id[5])
+        assert x is None
 
 
 async def test_unique_table(mod_auto_backend):
