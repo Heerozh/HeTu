@@ -41,19 +41,61 @@ async def mod_redis_backend(mod_redis_service):
         await backend.close()
 
 
+@pytest.fixture(scope="module")
+async def mod_valkey_backend(mod_valkey_service):
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    # 支持创建多个backend连接
+    def _create_valkey_backend(key="main", port=23418):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            redis_url, replica_url = mod_valkey_service(port)
+            config = {
+                "type": "redis",
+                "master": redis_url,
+                "servants": [
+                    replica_url,
+                ],
+            }
+
+            _backend = Backend(config)
+            backends[key] = _backend
+
+        # mock redis client
+        def _mock_redis_client_lua():
+            return ComponentDefines().get_all()
+
+        _master = cast(RedisBackendClient, _backend.master)
+        _master._get_referred_components = _mock_redis_client_lua
+        _backend.post_configure()
+        return _backend
+
+    yield _create_valkey_backend
+
+    for backend in backends.values():
+        await backend.close()
+
+
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(params=["redis"], scope="module")
+@pytest.fixture(params=["redis", "valkey"], scope="module")
 def mod_auto_backend(request) -> Callable[..., Backend]:
     if request.param == "redis":
         return request.getfixturevalue("mod_redis_backend")
+    elif request.param == "valkey":
+        return request.getfixturevalue("mod_valkey_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)
 
 
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(params=["redis"], scope="module")
+@pytest.fixture(params=["redis", "valkey"], scope="module")
 def auto_backend(request) -> Callable[..., Backend]:
     if request.param == "redis":
         return request.getfixturevalue("mod_redis_backend")
+    elif request.param == "valkey":
+        return request.getfixturevalue("mod_valkey_backend")
     else:
         raise ValueError("Unknown db type: %s" % request.param)
