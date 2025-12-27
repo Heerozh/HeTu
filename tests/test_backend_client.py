@@ -86,7 +86,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # type: ignore
             if k != "_version"
             for x in (k, v)
         ]
@@ -140,7 +140,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # type: ignore
             if k != "_version"
             for x in (k, v)
         ]
@@ -185,7 +185,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # type: ignore
             if k != "_version"
             for x in (k, v)
         ]
@@ -215,7 +215,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
         + [
             x
-            for k, v in zip(row.dtype.names, map(str, row.item()))  # pyright: ignore[reportArgumentType]
+            for k, v in zip(row.dtype.names, map(str, row.item()))  # type: ignore
             if k != "_version"
             for x in (k, v)
         ]

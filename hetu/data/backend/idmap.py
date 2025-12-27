@@ -295,7 +295,7 @@ class IdentityMap:
                         for field in row.dtype.names
                         if row[field] != old[field]
                     }
-                    old_dict = dict(zip(old.dtype.names, map(str, old.item())))  # pyright: ignore
+                    old_dict = dict(zip(old.dtype.names, map(str, old.item())))  # type: ignore
                     if changed_fields:
                         old_rows.append(old_dict)
                         new_rows.append(changed_fields)

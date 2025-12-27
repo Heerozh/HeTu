@@ -79,7 +79,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
         # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了
-        return self._async_ios[0].register_script(script_text)  # pyright: ignore[reportAttributeAccessIssue]
+        return self._async_ios[0].register_script(script_text)  # type: ignore
 
     @property
     def io(self) -> redis.Redis | redis.cluster.RedisCluster:
@@ -400,7 +400,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
-        if row := await self.aio.hgetall(key):  # pyright: ignore[reportGeneralTypeIssues]
+        if row := await self.aio.hgetall(key):  # type: ignore
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
@@ -423,7 +423,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if dtype.type in (np.str_, np.bytes_):
             # component字段如果是str/bytes类型的索引，不能查询数字
             assert type(left) in (str, bytes) and type(right) in (str, bytes), (
-                f"字符串类型的查询(left={left}, {type(left)})变量类型必须是str/bytes"
+                f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
+                f"right={type(right)}({right})"
             )
         else:
             # component字段如果是数字，则处理inf
@@ -610,7 +611,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         rows = []
         for _id in row_ids:
             # todo 要么用合批的请求方法，要么用pipeline
-            if row := await aio.hgetall(key_prefix + str(_id)):  # pyright: ignore[reportGeneralTypeIssues]
+            if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
                 rows.append(self._row_decode(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
@@ -733,14 +734,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
 
-        payload_json: bytes = msgpack.packb([checks, pushes], use_bin_type=False)  # pyright: ignore[reportAssignmentType]
+        payload_json: bytes = msgpack.packb([checks, pushes], use_bin_type=False)  # type: ignore
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
         assert self.lua_commit is not None, "typing检查"
         resp = await self.lua_commit(keys, [payload_json])
-        resp = resp.decode("utf-8")  # pyright: ignore[reportAttributeAccessIssue]
+        resp = resp.decode("utf-8")  # type: ignore
 
         if resp != "committed":
             if resp.startswith("RACE"):

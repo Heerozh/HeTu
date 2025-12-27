@@ -25,6 +25,7 @@ class Session:
         self._master = backend.master
         self._idmap = cast(IdentityMap, object())
         self._entered = False
+        self.only_master = False
 
         self.clean()
 
@@ -44,7 +45,10 @@ class Session:
     @property
     def master_or_servant(self) -> BackendClient:
         assert self._entered, "Session must be used in `async with` block"
-        return self._backend.master_or_servant
+        if self.only_master:
+            return self._master
+        else:
+            return self._backend.master_or_servant
 
     @property
     def idmap(self) -> IdentityMap:

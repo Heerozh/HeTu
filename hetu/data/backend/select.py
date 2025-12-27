@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from .base import RowFormat, UniqueViolation
-from .table import TableReference
 from .idmap import RowState
+from .table import TableReference
 
 if TYPE_CHECKING:
     from hetu.data.component import BaseComponent
@@ -50,21 +50,27 @@ class SessionSelect:
             value = row[unique_index]
             rows = idmap.filter(self.ref, **{unique_index: value})
             if len(rows) > 0:
-                return False
-        return True
+                return True
+        return False
 
     async def _remote_has_unique_conflicts(self, row: np.record, fields: set) -> bool:
         """
         在远程数据库中检查Unique索引冲突。
         """
         for unique_index in fields:
-            value = row[unique_index]
+            value: np.generic = row[unique_index]
             existing_row = await self.session.master_or_servant.range(
-                self.ref, unique_index, value, value, 1, False, RowFormat.ID_LIST
+                self.ref,
+                unique_index,
+                value.item(),
+                value.item(),
+                1,
+                False,
+                RowFormat.ID_LIST,
             )
             if len(existing_row) > 0:
-                return False
-        return True
+                return True
+        return False
 
     def _get_changed_fields(self, row: np.record):
         """
@@ -157,18 +163,19 @@ class SessionSelect:
 
         comp_cls = self.ref.comp_cls
 
-        # assert np.isscalar(query_value), (
-        #     f"查询值必须为标量类型(数字，字符串等), 你的:{type(query_value)}, {query_value}"
-        # )
         assert index_name in comp_cls.indexes_, (
             f"{comp_cls.component_name_} 组件没有叫 {index_name} 的索引"
         )
 
-        # if issubclass(type(query_value), np.generic):
-        #     value = query_value.item()
-
         # 如果不是主键，直接用range方法
         if index_name != "id":
+            # 去cache查询
+            idmap = self.session.idmap
+            rows = idmap.filter(self.ref, **{index_name: query_value})
+            if len(rows) > 0:
+                return rows[0]
+
+            # cache未命中，去数据库查询
             rows = await self.range(
                 limit=1, desc=False, **{index_name: (query_value, query_value)}
             )
@@ -285,7 +292,7 @@ class SessionSelect:
 
         # 检查row.id在cache中存在
         if "id" in changed_fields:
-            raise ValueError("Cannot update: row id not found in cache.")
+            raise LookupError("Cannot update: row id not found in cache.")
 
         # 检查有修改的列
         if len(changed_fields) == 0:
@@ -338,7 +345,7 @@ class SessionSelect:
         """
         old_row, row_stat = self.session.idmap.get(self.ref, row_id)
         if old_row is None or row_stat == RowState.DELETE:
-            raise ValueError("Cannot delete row: not in cache or already deleted.")
+            raise LookupError("Row not existing: not in cache or already deleted.")
 
         self.session.idmap.mark_deleted(self.ref, row_id)
 

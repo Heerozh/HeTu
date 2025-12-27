@@ -7,6 +7,7 @@
 
 import numpy as np
 import pytest
+from typing import Callable
 
 from hetu.data.backend import UniqueViolation, Backend
 from hetu.data.backend.session import Session
@@ -20,7 +21,7 @@ SnowflakeID().init(1, 0)
 async def test_select_outside(item_ref):
     """测试SessionSelect在未进入Session上下文时抛出异常。"""
     backend = Backend.__new__(Backend)
-    backend._master = None  # pyright: ignore[reportAttributeAccessIssue]
+    backend._master = None  # type: ignore
     session = Session(backend, "pytest", 1)
     async with session as session:
         item_select = session.select(item_ref.comp_cls)
@@ -29,65 +30,86 @@ async def test_select_outside(item_ref):
         await item_select.range(limit=10, id=(10, 5))
 
 
-async def test_basic_cru(item_ref, mod_auto_backend):
+async def test_basic_crud(item_ref, mod_auto_backend: Callable[..., Backend]):
     backend = mod_auto_backend()
     # 测试插入数据
     row_ids = []
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        # 插入3行数据
         item_select = session.select(item_ref.comp_cls)
         row = item_ref.comp_cls.new_row()
         row.name = "Item1"
         row.owner = 1
         row.time = 1
         row_ids.append(row.id)
-        item_select.insert(row)
+        await item_select.insert(row)
 
         row = item_ref.comp_cls.new_row()
         row.name = "Item2"
         row.owner = 1
         row.time = 2
         row_ids.append(row.id)
-        item_select.insert(row)
+        await item_select.insert(row)
 
         row = item_ref.comp_cls.new_row()
         row.name = "Item3"
         row.owner = 2
         row.time = 3
         row_ids.append(row.id)
-        item_select.insert(row)
+        await item_select.insert(row)
 
         # 测试刚添加的缓存
-        np.testing.assert_array_equal((await item_select.get(id=row_ids[2])).time, 3)
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[2])).time, 3)  # type: ignore
 
         await session.commit()
 
     # 测试基本的range和get
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(item_ref.comp_cls)
         result = await item_select.range(limit=10, id=(-np.inf, +np.inf))
         np.testing.assert_array_equal(result.id, row_ids)
-        assert (await item_select.get(id=row_ids[0])).name == "Item1"
+        assert (await item_select.get(id=row_ids[0])).name == "Item1"  # type: ignore
         # 测试第一行dict select不出来的历史bug
-        assert (await item_select.get(name="Item1")).name == "Item1"
+        assert (await item_select.get(name="Item1")).name == "Item1"  # type: ignore
         assert type(await item_select.get(name="Item1")) is not np.recarray
 
     # 测试update是否正确
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(item_ref.comp_cls)
         row = await item_select.get(id=row_ids[0])
+        assert row
         row.qty = 2
-        item_select.update(row)
+        await item_select.update(row)
         # 测试刚update的缓存
-        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)  # type: ignore
     # 测试写入后
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(item_ref.comp_cls)
-        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)
+        np.testing.assert_array_equal((await item_select.get(id=row_ids[0])).qty, 2)  # type: ignore
+
+    # 测试delete是否正确
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_select = session.select(item_ref.comp_cls)
+        with pytest.raises(LookupError):
+            item_select.delete(row_ids[1])
+
+        await item_select.get(id=row_ids[1])  # 确保缓存中有数据
+        item_select.delete(row_ids[1])
+        # 测试刚delete的缓存
+        result = await item_select.range(limit=10, id=(-np.inf, +np.inf))
+        np.testing.assert_array_equal(result.id, [row_ids[0], row_ids[2]])
 
 
-async def test_insert_unique(mod_item_model, item_table):
+async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend]):
     # 测试插入Unique重复数据
     from hetu.data.backend import UniqueViolation
+
+    backend = mod_auto_backend()
 
     # 测试缓存中unique违反：
     async with backend.session("pytest", 1) as session:
