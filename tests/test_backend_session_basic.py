@@ -478,7 +478,7 @@ async def test_upsert_limit(mod_item_model):
     with pytest.raises(AssertionError, match="unique"):
         async with backend.session("pytest", 1) as session:
             item_select = session.select(mod_item_model)
-            async with item_select.upsert(used=True) as row:
+            async with item_select.upsert(used=True) as _:
                 pass
 
 
@@ -495,10 +495,7 @@ async def test_session_exception(item_ref, mod_auto_backend):
 
             raise Exception("测试异常回滚")
 
-            row = item_ref.comp_cls.new_row()
-            row.owner = 321
-            await item_select.insert(row)
-    except Exception as e:
+    except Exception as _:  # noqa
         pass
 
     # 验证数据没有被提交
@@ -521,6 +518,7 @@ async def test_redis_empty_index(filled_item_ref, mod_redis_backend, backend_nam
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
         row = await item_select.get(time=115)
+        assert row
         row.name = "TST1"
         await item_select.update(row)
 
@@ -532,7 +530,7 @@ async def test_redis_empty_index(filled_item_ref, mod_redis_backend, backend_nam
             item_select.delete(row.id)
 
     # time.sleep(1)  # 等待部分key过期
-    assert backend.master.io.keys("pytest:Item:{CLU*") == []
+    assert backend.master.io.keys("pytest:Item:{CLU*") == []  # type: ignore
 
 
 async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):
