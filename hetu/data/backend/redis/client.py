@@ -442,13 +442,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         def peel(x, default_prefix: bytes, default_suffix: bytes):
             prefix, suffix = default_prefix, default_suffix
 
-            if type(x) is str:
+            if type(x) is str and len(x) >= 1:
                 if x[0] in "([":
                     prefix, x = x[0].encode(), x[1:]
                 if x[-1] in ":;":
                     suffix, x = x[-1].encode(), x[:-1]
 
-            if type(x) is bytes:
+            if type(x) is bytes and len(x) >= 1:
                 if x[0] in b"([":
                     prefix, x = x[:1], x[1:]
                 if x[-1] in b":;":

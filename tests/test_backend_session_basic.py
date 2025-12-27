@@ -173,26 +173,28 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
             await item_select.insert(row)
 
 
-async def test_upsert(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
+    backend = mod_auto_backend()
 
     # 测试能用update_or_insert
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_select = session.select(item_ref.comp_cls)
 
-        async with tbl.update_or_insert("item1", "name") as row:
+        async with item_select.upsert(name="item1") as row:
             row.time = 1
 
-        async with tbl.update_or_insert("items4", "name") as row:
+        async with item_select.upsert(name="items4") as row:
             row.time = 4
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_select = session.select(item_ref.comp_cls)
 
-        async with tbl.update_or_insert("item1", "name") as row:
+        async with item_select.upsert(name="item1") as row:
             assert row.time == 1
 
-        async with tbl.update_or_insert("items4", "name") as row:
+        async with item_select.upsert(name="items4") as row:
             assert row.time == 4
 
 

@@ -385,6 +385,7 @@ class UpsertContext:
     def __init__(
         self, selected: SessionSelect, index_name: str, query_value: IndexScalar
     ) -> None:
+        self.clean_data = None
         self.row_data = None
         self.insert = None
         self.selected = selected
@@ -395,9 +396,11 @@ class UpsertContext:
         existing_row = await self.selected.get(self.index_name, self.query_value)
         if existing_row is not None:
             self.row_data = existing_row
+            self.clean_data = existing_row.copy()
             self.insert = False
         else:
             self.row_data = self.selected.ref.comp_cls.new_row()
+            self.row_data[self.index_name] = self.query_value
             self.insert = True
         return self.row_data
 
@@ -407,4 +410,7 @@ class UpsertContext:
             if self.insert:
                 await self.selected.insert(self.row_data)
             else:
+                if self.row_data == self.clean_data:
+                    # 无修改不更新
+                    return
                 await self.selected.update(self.row_data)
