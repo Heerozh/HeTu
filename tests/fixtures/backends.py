@@ -5,6 +5,7 @@ from hetu.data.backend import Backend, RedisBackendClient
 
 @pytest.fixture(scope="module")
 async def mod_redis_backend(mod_redis_service):
+    """Redis后端工厂，返回创建Redis后端连接的工厂函数"""
     from hetu.data.component import ComponentDefines
 
     backends = {}
@@ -43,6 +44,7 @@ async def mod_redis_backend(mod_redis_service):
 
 @pytest.fixture(scope="module")
 async def mod_valkey_backend(mod_valkey_service):
+    """valkey后端工厂fixture，返回创建valkey后端的工厂函数"""
     from hetu.data.component import ComponentDefines
 
     backends = {}
@@ -79,23 +81,31 @@ async def mod_valkey_backend(mod_valkey_service):
         await backend.close()
 
 
-# 要测试新的backend，请添加backend到params中
 @pytest.fixture(params=["redis", "valkey"], scope="module")
-def mod_auto_backend(request) -> Callable[..., Backend]:
-    if request.param == "redis":
-        return request.getfixturevalue("mod_redis_backend")
-    elif request.param == "valkey":
-        return request.getfixturevalue("mod_valkey_backend")
-    else:
-        raise ValueError("Unknown db type: %s" % request.param)
+def backend_name(request):
+    """后端名称参数化fixture，返回当前的后端名称"""
+    return request.param
 
 
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(params=["redis", "valkey"], scope="module")
-def auto_backend(request) -> Callable[..., Backend]:
-    if request.param == "redis":
+@pytest.fixture(scope="module")
+def mod_auto_backend(request, backend_name) -> Callable[..., Backend]:
+    """后端工厂，根据参数返回不同后端的工厂函数"""
+    if backend_name == "redis":
         return request.getfixturevalue("mod_redis_backend")
-    elif request.param == "valkey":
+    elif backend_name == "valkey":
         return request.getfixturevalue("mod_valkey_backend")
     else:
-        raise ValueError("Unknown db type: %s" % request.param)
+        raise ValueError("Unknown db type: %s" % backend_name)
+
+
+# 要测试新的backend，请添加backend到params中
+@pytest.fixture(scope="function")
+def auto_backend(request, backend_name) -> Callable[..., Backend]:
+    """后端工厂，根据参数返回不同后端的工厂函数"""
+    if backend_name == "redis":
+        return request.getfixturevalue("mod_redis_backend")
+    elif backend_name == "valkey":
+        return request.getfixturevalue("mod_valkey_backend")
+    else:
+        raise ValueError("Unknown db type: %s" % backend_name)
