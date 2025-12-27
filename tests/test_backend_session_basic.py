@@ -285,29 +285,33 @@ async def test_range_number_index(filled_item_ref, mod_auto_backend):
             await item_select.range(time=(115, 110))
 
 
-async def test_query_string_index(filled_item_table):
-    backend = filled_item_table.backend
+async def test_query_string_index(filled_item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
-    # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
+    # 测试各种query是否正确，表内值参考test_data.py的filled_item_ref夹具
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        assert (await tbl.query("name", 11)).shape[0] == 0
-        # query on str typed unique
-        assert (await tbl.query("name", "11")).shape[0] == 0
-        assert (await tbl.query("name", "Itm11")).shape[0] == 1
-        assert (await tbl.query("name", "Itm11")).time == 111
-        assert (await tbl.select("Itm11", where="name")).id == 2
-        assert (await tbl.select("Itm13", where="name")).id == 4
+        # range string with int
+        with pytest.raises(AssertionError, match="str"):
+            assert (await item_select.range(name=(11, 11))).shape[0] == 0
+        # range on str typed unique
+        assert (await item_select.range(name=("11", "11"))).shape[0] == 0
+        assert (row11 := await item_select.range(name=("Itm11", "Itm11"))).shape[0] == 1
+        assert (await item_select.range(name=("Itm11", "Itm11"))).time == 111
+        # get on name index
+        row11_13 = await item_select.range(name=("Itm11", "Itm13"))
+        assert (await item_select.get(name="Itm11")).id == row11.id  # type: ignore
+        assert (await item_select.get(name="Itm13")).id == row11_13.id[-1]  # type: ignore
         np.testing.assert_array_equal(
-            (await tbl.query("name", "Itm11", "Itm12")).time, [111, 112]
+            (await item_select.range(name=("Itm11", "Itm12"))).time, [111, 112]
         )
-        # reverse query one row
-        assert (await tbl.query("time", 111)).name == ["Itm11"]
-        assert len((await tbl.query("time", 111)).name) == 1
+        # reverse range one row
+        assert (await item_select.range(time=(111, 111))).name == ["Itm11"]
+        assert len((await item_select.range(time=(111, 111))).name) == 1
 
 
-async def test_query_bool(filled_item_table):
-    backend = filled_item_table.backend
+async def test_query_bool(filled_item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
@@ -340,8 +344,8 @@ async def test_query_bool(filled_item_table):
         assert set((await tbl.query("used", True)).id) == set()
 
 
-async def test_string_length_cutoff(filled_item_table, mod_item_model):
-    backend = filled_item_table.backend
+async def test_string_length_cutoff(filled_item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     # 测试插入的字符串超出长度是否截断
     async with backend.session("pytest", 1) as session:
@@ -360,8 +364,8 @@ async def test_string_length_cutoff(filled_item_table, mod_item_model):
         assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
 
 
-async def test_batch_delete(filled_item_table):
-    backend = filled_item_table.backend
+async def test_batch_delete(filled_item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
@@ -390,8 +394,7 @@ async def test_batch_delete(filled_item_table):
 
 
 async def test_unique_table(mod_auto_backend):
-    backend_component_table, get_or_create_backend = mod_auto_backend
-    backend = get_or_create_backend()
+    backend: Backend = mod_auto_backend()
 
     from hetu.data import define_component, property_field, BaseComponent
 
@@ -434,8 +437,8 @@ async def test_unique_table(mod_auto_backend):
         assert result.id[0] == 2
 
 
-async def test_upsert_limit(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_upsert_limit(item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     with pytest.raises(ValueError, match="unique"):
         async with backend.session("pytest", 1) as session:
@@ -444,8 +447,9 @@ async def test_upsert_limit(mod_item_model, item_table):
                 pass
 
 
-async def test_session_exception(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_session_exception(item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
+
     try:
         async with backend.session("pytest", 1) as session:
             tbl = item_table.attach(session)
@@ -469,8 +473,9 @@ async def test_session_exception(mod_item_model, item_table):
     assert row is None
 
 
-async def test_redis_empty_index(mod_item_model, filled_item_table):
-    backend = filled_item_table.backend
+async def test_redis_empty_index(filled_item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
+
     if not isinstance(backend, RedisBackend):
         pytest.skip("Not a redis backend, skip")
     # 测试更新name后再把所有key删除后index是否正常为空
@@ -490,8 +495,9 @@ async def test_redis_empty_index(mod_item_model, filled_item_table):
     assert backend.io.keys("test:Item:{CLU*") == []
 
 
-async def test_redis_insert_stack(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_redis_insert_stack(item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
+
     if not isinstance(backend, RedisBackend):
         pytest.skip("Not a redis backend, skip")
 
@@ -517,8 +523,8 @@ async def test_redis_insert_stack(mod_item_model, item_table):
         assert len(session._stack) == 0
 
 
-async def test_unique_batch_add_in_same_session_bug(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     # 同事务中插入多个重复Unique数据应该失败
     with pytest.raises(UniqueViolation, match="name"):
@@ -555,8 +561,8 @@ async def test_unique_batch_add_in_same_session_bug(mod_item_model, item_table):
             await tbl.insert(row)
 
 
-async def test_unique_batch_upsert_in_same_session_bug(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_unique_batch_upsert_in_same_session_bug(item_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
 
     # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环 todo 改成可以顺利执行
     with pytest.raises(UniqueViolation, match="name"):
