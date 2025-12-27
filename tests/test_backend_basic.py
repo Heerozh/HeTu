@@ -7,44 +7,51 @@
 
 import pytest
 import numpy as np
+from hetu.common.snowflake_id import SnowflakeID
 
+SnowflakeID().init(1, 0)
 
-# 当前文件不能有其他地方用mod_auto_backend，否则会冲突
-@pytest.fixture
-def mod_auto_backend():
-    pytest.skip("mod_auto_backend 已在本文件禁用")
+# # 当前文件不能有其他地方用mod_auto_backend，否则会冲突
+# @pytest.fixture
+# def mod_auto_backend():
+#     pytest.skip("mod_auto_backend 已在本文件禁用")
 
 
 async def test_volatile_table_flush(auto_backend):
-    backend_component_table, get_or_create_backend = auto_backend
-
-    backend = get_or_create_backend("save_test")
+    backend = auto_backend("flush_test")
 
     from hetu.data import define_component, property_field, BaseComponent
+    from hetu.data.backend import TableReference, RaceCondition
 
     @define_component(namespace="pytest", volatile=True)
     class TempData(BaseComponent):
         data: np.int64 = property_field(0, unique=True)
 
-    temp_table = backend_component_table(TempData, "test", 1, backend)
-    temp_table.create_or_migrate()
+    temp_table = TableReference(TempData, "test", 1)
+    table_maint = backend.get_table_maintenance()
+    try:
+        table_maint.create_table(temp_table)
+    except RaceCondition:
+        table_maint.flush(temp_table, force=True)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
+    async with backend.session("test", 1) as session:
+        select = session.select(TempData)
         for i in range(25):
             row = TempData.new_row()
-            row.data = i
-            await tbl.insert(row)
+            row.data = i  # type: ignore # noqa
+            await select.insert(row)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 25
+    async with backend.session("test", 1) as session:
+        session.only_master = True  # 由于刚插入，可能replica还没同步
+        select = session.select(TempData)
+        assert len(await select.range("id", -np.inf, +np.inf, limit=999)) == 25
 
-    temp_table.flush()
+    table_maint.flush(temp_table)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 0
+    async with backend.session("test", 1) as session:
+        session.only_master = True  # 可能replica还没同步
+        select = session.select(TempData)
+        assert len(await select.range("id", -np.inf, +np.inf, limit=999)) == 0
 
 
 async def test_reconnect(auto_backend, mod_item_model):
