@@ -141,13 +141,22 @@ class SessionSelect:
             self.session.idmap.add_clean(self.ref, row)
         return row
 
-    async def get(self, **kwargs: IndexScalar) -> np.record | None:
+    async def get(
+        self,
+        index_name: str | None = None,
+        query_value: IndexScalar | None = None,
+        **kwargs: IndexScalar,
+    ) -> np.record | None:
         """
         从数据库获取单行数据，并放入Session缓存。
         推荐通过"id"主键查询，这样无须查询索引。否则会执行1-2次查询。
 
         Parameters
         ----------
+        index_name: str | None
+            辅助参数，如果不便使用kwargs参数时使用。
+        query_value: IndexScalar | None
+            辅助参数，如果不便使用kwargs参数时使用。
         kwargs: dict
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须有索引。
 
@@ -163,9 +172,10 @@ class SessionSelect:
             如果未查询到匹配数据，则返回 None。如果查询到数据，则返回查询到的第一行数据。
             返回 np.record (c-struct) 格式。
         """
-        # 判断kwargs有且只有一个键值对
-        assert len(kwargs) == 1, "Only one field can be queried."
-        index_name, query_value = next(iter(kwargs.items()))
+        if index_name is None or query_value is None:
+            # 判断kwargs有且只有一个键值对
+            assert len(kwargs) == 1, "Only one field can be queried."
+            index_name, query_value = next(iter(kwargs.items()))
 
         comp_cls = self.ref.comp_cls
 
@@ -182,15 +192,16 @@ class SessionSelect:
                 return rows[0]
 
             # cache未命中，去数据库查询
-            rows = await self.range(
-                limit=1, desc=False, **{index_name: (query_value, query_value)}
-            )
+            rows = await self.range(index_name, query_value, limit=1, desc=False)
             return rows[0] if rows.shape[0] > 0 else None
         else:
             return await self.get_by_id(int(query_value))
 
     async def range(
         self,
+        index_name: str | None = None,
+        _left: IndexScalar | None = None,  # 参数前加_防止和用户字段冲突
+        _right: IndexScalar | None = None,
         limit: int = 100,
         desc: bool = False,
         **kwargs: tuple[IndexScalar, IndexScalar],
@@ -201,9 +212,16 @@ class SessionSelect:
 
         Parameters
         ----------
+        index_name: str | None
+            辅助参数，如果不便使用kwargs参数时使用。
+        _left: IndexScalar | None
+            辅助参数，如果不便使用kwargs参数时使用。
+        _right: IndexScalar | None
+            辅助参数，如果不便使用kwargs参数时使用。
         kwargs: dict
             查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
             默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
+            * 如果要查询的字段和参数冲突，请使用辅助参数方式。
         limit: int
             限制返回的行数，越少越快
         desc: bool
@@ -225,9 +243,10 @@ class SessionSelect:
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
-        # 判断kwargs有且只有一个键值对
-        assert len(kwargs) == 1, "Only one field can be queried."
-        index_name, (left, right) = next(iter(kwargs.items()))
+        if index_name is None or _left is None:
+            # 判断kwargs有且只有一个键值对
+            assert len(kwargs) == 1, "Only one field can be queried."
+            index_name, (_left, _right) = next(iter(kwargs.items()))
 
         # assert np.isscalar(left), (
         #     f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
@@ -243,14 +262,14 @@ class SessionSelect:
             f"{comp_cls.component_name_} 组件没有叫 {index_name} 的索引"
         )
 
-        if isinstance(left, np.generic):
-            left = left.item()
-        if isinstance(right, np.generic):
-            right = right.item()
+        if isinstance(_left, np.generic):
+            _left = _left.item()
+        if isinstance(_right, np.generic):
+            _right = _right.item()
 
         # 先查询 id 列表
         row_ids = await self.session.master_or_servant.range(
-            self.ref, index_name, left, right, limit, desc, RowFormat.ID_LIST
+            self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
         )
 
         # 再根据 id 列表查询数据行，可以命中缓存
@@ -373,7 +392,7 @@ class UpsertContext:
         self.query_value = query_value
 
     async def __aenter__(self):
-        existing_row = await self.selected.get(**{self.index_name: self.query_value})
+        existing_row = await self.selected.get(self.index_name, self.query_value)
         if existing_row is not None:
             self.row_data = existing_row
             self.insert = False
