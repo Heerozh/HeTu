@@ -287,6 +287,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
             if key.startswith("slave") or key.startswith("replica"):
+                if type(value) is not dict:  # 可能是 replicas_waiting_psync:0
+                    continue
                 lag_of_offset = master_offset - int(value.get("offset", 0))
                 if lag_of_offset > 0:
                     return False
@@ -439,29 +441,24 @@ class RedisBackendClient(BackendClient, alias="redis"):
             right = clamp_inf(right)
 
         # 处理范围区间
-        def peel(x, default_prefix: bytes, default_suffix: bytes):
-            prefix, suffix = default_prefix, default_suffix
+        def peel(x, _inclusive):
+            if type(x) in (str, bytes) and len(x) >= 1:
+                ch = x[0:1]  # bytes必须用范围切片
+                if ch in ("(", "[") or ch in (b"(", b"["):
+                    _inclusive = ch == "[" or ch == b"["
+                    x = x[1:]
 
-            if type(x) is str and len(x) >= 1:
-                if x[0] in "([":
-                    prefix, x = x[0].encode(), x[1:]
-                if x[-1] in ":;":
-                    suffix, x = x[-1].encode(), x[:-1]
+            return x, _inclusive
 
-            if type(x) is bytes and len(x) >= 1:
-                if x[0] in b"([":
-                    prefix, x = x[:1], x[1:]
-                if x[-1] in b":;":
-                    suffix, x = x[-1:], x[:-1]
+        left, li = peel(left, True)
+        right, ri = peel(right, True)
+        # 因为member是value:id，所以left="value;"为排除，right="value:"为排除
+        ls = b":" if li else b";"
+        rs = b";" if ri else b":"
 
-            return prefix, x, suffix
-
-        lp, left, ls = peel(left, b"[", b":")
-        rp, right, rs = peel(right, b"[", b";")
-
-        # 二进制化
-        b_left = lp + cls.to_sortable_bytes(dtype.type(left)) + ls
-        b_right = rp + cls.to_sortable_bytes(dtype.type(right)) + rs
+        # 二进制化。
+        b_left = b"[" + cls.to_sortable_bytes(dtype.type(left)) + ls
+        b_right = b"[" + cls.to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right
 
     @overload

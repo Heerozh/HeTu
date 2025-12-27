@@ -99,60 +99,40 @@ async def rls_ref(new_component_env, mod_auto_backend) -> TableReference:
     return create_ref(def_rls_test(), mod_auto_backend())
 
 
-# ==========以下以后改====================
-
-
-@pytest.fixture(scope="module")
-async def mod_rls_test_table(mod_auto_backend, mod_rls_test_model) -> RawComponentTable:
-    backend_component_table, get_or_create_backend = mod_auto_backend
-
-    backend = get_or_create_backend("main")
-    test_table = backend_component_table(
-        mod_rls_test_model, "ModRLSTestTable", 1, backend
-    )
-    test_table.flush(force=True)
-    test_table.create_or_migrate()
-    return test_table
-
-
 @pytest.fixture
-async def filled_item_table(mod_item_model, item_table):
-    """填充Item测试数据，返回填充后的表格对象"""
-    backend = item_table.backend
+async def filled_item_ref(item_ref, mod_auto_backend):
+    """填充Item测试数据，返回填充后的表格引用对象"""
+    backend = mod_auto_backend()
 
     # 初始化测试数据
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
         for i in range(25):
-            row = mod_item_model.new_row()
-            row.id = 0
+            row = item_ref.comp_cls.new_row()
             row.name = f"Itm{i + 10}"
             row.owner = 10
             row.time = i + 110
             row.qty = 999
-            await tbl.insert(row)
+            await item_select.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 
-    return item_table
+    return item_ref
 
 
 @pytest.fixture
-async def filled_rls_test_table(mod_rls_test_model, mod_rls_test_table):
-    """填充RLS测试表格的数据，返回填充后的表格对象"""
-    backend = mod_rls_test_table.backend
+async def filled_rls_ref(rls_ref, mod_auto_backend):
+    """填充RLS测试表格的数据，返回填充后的表格引用对象"""
+    backend = mod_auto_backend()
     # 初始化测试数据
-    async with backend.transaction(1) as session:
-        tbl = mod_rls_test_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        rls_select = session.select(rls_ref.comp_cls)
         for i in range(25):
-            row = mod_rls_test_model.new_row()
-            row.id = 0
+            row = rls_ref.comp_cls.new_row()
             row.owner = 10
             row.friend = 11
-            await tbl.insert(row)
+            await rls_select.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 
-    yield mod_rls_test_table
-
-    mod_rls_test_table.flush(force=True)
+    return rls_ref
