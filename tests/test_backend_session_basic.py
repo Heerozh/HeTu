@@ -315,33 +315,46 @@ async def test_query_bool(filled_item_ref, mod_auto_backend):
 
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(5)
-        row.used = True
-        await tbl.update(row.id, row)
-        row = await tbl.select(7)
-        row.used = True
-        await tbl.update(row.id, row)
+        row1 = await item_select.get(time=115)
+        assert row1
+        row1.used = True
+        await item_select.update(row1)
+        row2 = await item_select.get(time=117)
+        assert row2
+        row2.used = True
+        await item_select.update(row2)
 
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(filled_item_ref.comp_cls)
-        assert set((await tbl.query("used", True)).id) == {5, 7}
-        assert set((await tbl.query("used", False, limit=99)).id) == set(
-            range(1, 26)
-        ) - {5, 7}
-        assert set((await tbl.query("used", 0, 1, limit=99)).id) == set(range(1, 26))
-        assert set((await tbl.query("used", False, True, limit=99)).id) == set(
-            range(1, 26)
+        assert set((await item_select.range(used=(True, True))).id) == {
+            row1.id,
+            row2.id,
+        }
+        np.testing.assert_array_equal(
+            (await item_select.range(used=(False, False), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}),
+        )
+        np.testing.assert_array_equal(
+            (await item_select.range(used=(0, 1), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}) + [115, 117],  # 等与1的排后面
+        )
+        np.testing.assert_array_equal(
+            (await item_select.range(used=(False, True), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}) + [115, 117],  # 等与1的排后面
         )
 
     # delete
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
-        await tbl.delete(5)
-        await tbl.delete(7)
+        _ = await item_select.range(used=(True, True))  # 必须get获得乐观锁
+        item_select.delete(row1.id)
+        item_select.delete(row2.id)
 
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(filled_item_ref.comp_cls)
-        assert set((await tbl.query("used", True)).id) == set()
+        assert set((await item_select.range(used=(True, True))).id) == set()
 
 
 async def test_string_length_cutoff(filled_item_ref, mod_auto_backend):

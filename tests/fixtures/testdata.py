@@ -22,7 +22,7 @@ def def_item():
         qty: np.int16 = property_field(1, unique=False, index=False)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
-        name: "U8" = property_field("", unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
         used: bool = property_field(False, unique=False, index=True)
 
     return Item
