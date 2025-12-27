@@ -41,7 +41,7 @@ class SessionSelect:
             comp_cls, session.instance_name, session.cluster_id
         )
 
-    def _local_has_unique_conflicts(self, row: np.record, fields: set) -> bool:
+    def _local_has_unique_conflicts(self, row: np.record, fields: set) -> str | None:
         """
         在Session本地缓存中检查Unique索引冲突。
         """
@@ -50,10 +50,12 @@ class SessionSelect:
             value = row[unique_index]
             rows = idmap.filter(self.ref, **{unique_index: value})
             if len(rows) > 0:
-                return True
-        return False
+                return unique_index
+        return None
 
-    async def _remote_has_unique_conflicts(self, row: np.record, fields: set) -> bool:
+    async def _remote_has_unique_conflicts(
+        self, row: np.record, fields: set
+    ) -> str | None:
         """
         在远程数据库中检查Unique索引冲突。
         """
@@ -69,8 +71,8 @@ class SessionSelect:
                 RowFormat.ID_LIST,
             )
             if len(existing_row) > 0:
-                return True
-        return False
+                return unique_index
+        return None
 
     def _get_changed_fields(self, row: np.record):
         """
@@ -85,9 +87,9 @@ class SessionSelect:
         else:
             return {key for key in row.dtype.names if old_row[key] != row[key]}
 
-    async def is_unique_valid(self, row: np.record, insert=False) -> bool:
+    async def is_unique_conflicts(self, row: np.record, insert=False) -> str | None:
         """
-        检查一行数据的Unique索引在本地和远程数据库中是否有效。
+        检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
         Parameters
         ----------
@@ -99,19 +101,23 @@ class SessionSelect:
         changed_fields = self._get_changed_fields(row)
         if not insert:
             # 如果有id字段，表示没有找到旧数据
-            assert "id" not in changed_fields, "更新操作必须有旧数据。"
+            assert "id" not in changed_fields, (
+                f"row id({row.id})在session中未寻到，更新操作必须有旧数据。"
+            )
         else:
-            assert "id" in changed_fields, "插入操作必须没有旧数据。"
+            assert "id" in changed_fields, (
+                f"session中已存在该row id({row.id})，插入操作必须没有旧数据。"
+            )
 
         changed_fields = changed_fields & self.ref.comp_cls.uniques_
 
-        if self._local_has_unique_conflicts(row, changed_fields):
-            return False
+        if field := self._local_has_unique_conflicts(row, changed_fields):
+            return field
 
-        if await self._remote_has_unique_conflicts(row, changed_fields):
-            return False
+        if field := await self._remote_has_unique_conflicts(row, changed_fields):
+            return field
 
-        return True
+        return None
 
     async def get_by_id(self, row_id: Int64) -> np.record | None:
         """
@@ -271,8 +277,10 @@ class SessionSelect:
         assert row["_version"] == 0, "Insert row's _version must be 0."
 
         # unique check
-        if not await self.is_unique_valid(row, insert=True):
-            raise UniqueViolation("Insert row has unique index conflicts.")
+        if conflict := await self.is_unique_conflicts(row, insert=True):
+            raise UniqueViolation(
+                f"Insert failed: row.{conflict} violates a unique index."
+            )
 
         self.session.idmap.add_insert(self.ref, row)
 
@@ -299,8 +307,10 @@ class SessionSelect:
             raise ValueError("No fields changed, cannot update.")
 
         # unique check
-        if not await self.is_unique_valid(row):
-            raise UniqueViolation("Update row has unique index conflicts.")
+        if conflict := await self.is_unique_conflicts(row):
+            raise UniqueViolation(
+                f"Update failed: row.{conflict} violates a unique index."
+            )
 
         self.session.idmap.update(self.ref, row)
 

@@ -62,8 +62,6 @@ async def test_basic_crud(item_ref, mod_auto_backend: Callable[..., Backend]):
         # 测试刚添加的缓存
         np.testing.assert_array_equal((await item_select.get(id=row_ids[2])).time, 3)  # type: ignore
 
-        await session.commit()
-
     # 测试基本的range和get
     async with backend.session("pytest", 1) as session:
         session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
@@ -110,13 +108,56 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
     from hetu.data.backend import UniqueViolation
 
     backend = mod_auto_backend()
+    row_ids = []
 
-    # 测试缓存中unique违反：
+    # 测试本地缓存中unique违反：
     async with backend.session("pytest", 1) as session:
-        pass
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_select = session.select(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.owner = 1
+        row.time = 1
+        row_ids.append(row.id)
+        await item_select.insert(row)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item2"
+        row.owner = 2
+        row.time = 2
+        row_ids.append(row.id)
+        await item_select.insert(row)
+
+        # 关掉remote unique check，只测本地
+        async def mock_remote_has_unique_conflicts(row, field):
+            assert False, "不应该调用远程unique检查"
+
+        item_select._remote_has_unique_conflicts = mock_remote_has_unique_conflicts  # type: ignore
+
+        # update 重复time
+        row.name = "Item2"
+        row.owner = 2
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_select.update(row)
+
+        # insert 重复name
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.owner = 3
+        row.time = 3
+        with pytest.raises(UniqueViolation, match="name"):
+            await item_select.insert(row)
+        # insert 重复time
+        row.name = "Item3"
+        row.owner = 3
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_select.insert(row)
 
     # 测试和数据库已有数据unique违反，依然是提交前报错（提交报错属于race范围）
     async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(item_ref.comp_cls)
         row = item_ref.comp_cls.new_row()
         row.name = "Item2"
@@ -124,6 +165,7 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
         row.time = 999
         with pytest.raises(UniqueViolation, match="name"):
             await item_select.insert(row)
+
         row = item_ref.comp_cls.new_row()
         row.name = "Item4"
         row.time = 2
