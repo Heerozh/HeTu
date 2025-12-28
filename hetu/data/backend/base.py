@@ -4,48 +4,31 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 
-          后端相关结构
-      ┌────────────────┐
-      │  BackendClient │ 继承此类实现各种BackendClient
-      │数据库连接/事务处理│
-      └────────────────┘
-               ▲
-               ├───────────────────────────┐
-     ┌─────────┴──────────┐      ┌─────────┴─────────┐
-     │      Backend       │      │  TableMaintenance │ 继承此类实现数据维护
-     │   数据库连接管理器    │      │     组件表维护类    │
-     └────────────────────┘      └───────────────────┘
-               ▲
-     ┌─────────┴────────┐
-     │      Session     │
-     │     事务处理类     │
-     └──────────────────┘
-              ▲
-  ┌───────────┴────────────┐
-  │     SessionSelect      │
-  │      组件相关事务操作     │
-  └────────────────────────┘
 
+                               Backend相关结构
+    ┌─────────────────┐      ┌────────────────┐       ┌───────────────────┐
+    │     MQClient    │      │  BackendClient │       │  TableMaintenance │
+    │消息队列连接(每用户)│─────►│  数据库连接/操作 │◄──────┤    组件表维护类     │
+    └─────────────────┘      └────────────────┘       └───────────────────┘
+    继承此类实现各种通知队列      继承此类实现各种数据库         继承此类实现表维护
+            ▲                        ▲                         ▲
+            │                        └───────────┬─────────────┘
+ 数据订阅结构 │                                    │ 数据事务结构
+  ┌─────────┴──────────┐               ┌─────────┴──────────┐
+  │    Subscriptions   │               │      Backend       │
+  │ 接受消息队列消息并分发 │               │  数据库连接管理器    │
+  └────────────────────┘               └────────────────────┘
+            ▲                                    ▲
+  ┌─────────┴──────────┐                ┌────────┴─────────┐
+  │ 用户连接(Websocket) │                │      Session     │
+  │   等待Subs返回消息   │                │     事务处理类     │
+  └────────────────────┘                └──────────────────┘
+                                                 ▲
+                                       ┌─────────┴──────────┐
+                                       │   SessionSelect    │
+                                       │   组件相关事务操作    │
+                                       └────────────────────┘
 
-
-
-        数据订阅结构
-    ┌─────────────────┐
-    │     MQClient    │
-    │消息队列连接(每用户）│  继承此类实现各种backend
-    └─────────────────┘
-            ▲
-            │
-  ┌─────────┴──────────┐
-  │    Subscriptions   │
-  │ 接受消息队列消息并分发 │
-  └────────────────────┘
-            ▲
-            │
-  ┌─────────┴──────────┐
-  │ 用户连接(Websocket) │
-  │   等待Subs返回消息   │
-  └────────────────────┘
 """
 
 import logging
@@ -327,9 +310,9 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    #     def get_mq_client(self) -> MQClient:
-    #         """获取消息队列连接"""
-    #         raise NotImplementedError
+    def get_mq_client(self) -> MQClient:
+        """获取消息队列连接"""
+        raise NotImplementedError
 
 
 class BackendClientFactory:
@@ -444,57 +427,46 @@ class TableMaintenance:
         raise NotImplementedError
 
 
-# # === === === === === === 数据订阅 === === === === === ===
+# === === === === === === 数据订阅 === === === === === ===
 
 
-# class MQClient:
-#     """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
+class MQClient:
+    """连接到消息队列的客户端，每个用户连接一个实例。订阅后端只需要继承此类。"""
 
-#     # todo 加入到config中去，设置服务器的通知tick
-#     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
+    # todo 加入到config中去，设置服务器的通知tick
+    UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
 
-#     async def close(self):
-#         raise NotImplementedError
+    async def close(self):
+        raise NotImplementedError
 
-#     async def pull(self) -> None:
-#         """
-#         从消息队列接收一条消息到本地队列，消息内容为channel名，每行数据，每个Index，都是一个channel。
-#         该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
+    async def pull(self) -> None:
+        """
+        从消息队列接收一条消息到本地队列，消息内容为channel名，每行数据，每个Index，都是一个channel。
+        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
 
-#         消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
-#         此方法需要单独的协程反复调用，防止服务器也消息堆积。
-#         """
-#         # 必须合并消息，因为index更新时大都是2条一起的
-#         raise NotImplementedError
+        消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
+        此方法需要单独的协程反复调用，防止服务器也消息堆积。
+        """
+        # 必须合并消息，因为index更新时大都是2条一起的
+        raise NotImplementedError
 
-#     async def get_message(self) -> set[str]:
-#         """
-#         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
-#         之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
-#         如果没有消息，则堵塞到永远。
-#         """
-#         raise NotImplementedError
+    async def get_message(self) -> set[str]:
+        """
+        pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
+        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        如果没有消息，则堵塞到永远。
+        """
+        raise NotImplementedError
 
-#     async def subscribe(self, channel_name: str) -> None:
-#         """订阅频道"""
-#         raise NotImplementedError
+    async def subscribe(self, channel_name: str) -> None:
+        """订阅频道"""
+        raise NotImplementedError
 
-#     async def unsubscribe(self, channel_name: str) -> None:
-#         """取消订阅频道"""
-#         raise NotImplementedError
+    async def unsubscribe(self, channel_name: str) -> None:
+        """取消订阅频道"""
+        raise NotImplementedError
 
-#     @property
-#     def subscribed_channels(self) -> set[str]:
-#         """返回当前订阅的频道名"""
-#         raise NotImplementedError
-
-
-# class BaseSubscription:
-#     async def get_updated(
-#         self, channel
-#     ) -> tuple[set[str], set[str], dict[str, dict | None]]:
-#         raise NotImplementedError
-
-#     @property
-#     def channels(self) -> set[str]:
-#         raise NotImplementedError
+    @property
+    def subscribed_channels(self) -> set[str]:
+        """返回当前订阅的频道名"""
+        raise NotImplementedError

@@ -11,6 +11,7 @@ from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
 
+
 # 当前文件不能有其他地方用mod_auto_backend，否则会冲突
 @pytest.fixture
 def mod_auto_backend():
@@ -83,7 +84,7 @@ async def test_reconnect(auto_backend, mod_item_model):
     # 测试保存(断开连接）后再读回来
     async with backend.session("test", 1) as session:
         select = session.select(mod_item_model)
-        row = await select.get(row.id)
+        row = await select.get(row.id)  # type: ignore
         await select.delete(row.id)
     async with backend.session("test", 1) as session:
         select = session.select(mod_item_model)

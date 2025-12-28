@@ -5,22 +5,39 @@
 @email: heeroz@gmail.com
 """
 
+#  """
+#  @author: Heerozh (Zhang Jianhao)
+#  @copyright: Copyright 2024, Heerozh. All rights reserved.
+#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+#  @email: heeroz@gmail.com
+#  """
+
 import asyncio
 import logging
 from typing import Any
 
 import numpy as np
 
-from .base import BaseSubscription
-from ..component import Permission
+from hetu.data.component import Permission
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from ...system import Context
-    from .base import RawComponentTable, Backend
+    from hetu.system import Context
+    from hetu.data.backend import TableReference, Backend
 
 logger = logging.getLogger("HeTu.root")
+
+
+class BaseSubscription:
+    async def get_updated(
+        self, channel
+    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
+        raise NotImplementedError
+
+    @property
+    def channels(self) -> set[str]:
+        raise NotImplementedError
 
 
 class RowSubscription(BaseSubscription):

@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import RedisTableMaintenance
+    from .mq import RedisMQClient
     from .worker_keeper import RedisWorkerKeeper
 
 logger = logging.getLogger("HeTu.root")
@@ -761,3 +762,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         from .maint import RedisTableMaintenance
 
         return RedisTableMaintenance(self)
+
+    def get_mq_client(self) -> RedisMQClient:
+        """获取消息队列连接"""
+        return RedisMQClient(self)

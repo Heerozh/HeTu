@@ -5,8 +5,12 @@
 @email: heeroz@gmail.com
 """
 
-from .base import (RawComponentTable, Backend, ComponentTransaction,
-                   RaceCondition, UniqueViolation, HeadLockFailed,
-                   )
-from .sub import Subscriptions
+from .base import (
+    RawComponentTable,
+    Backend,
+    ComponentTransaction,
+    RaceCondition,
+    UniqueViolation,
+    HeadLockFailed,
+)
 from .redis import RedisBackend, RedisRawComponentTable, RedisComponentTransaction

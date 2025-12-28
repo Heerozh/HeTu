@@ -11,6 +11,8 @@ from .base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    MQClient,
+    TableMaintenance,
 )
 from .redis import RedisBackendClient, RedisTableMaintenance
 from .session import Session
@@ -26,6 +28,8 @@ __all__ = [
     "RedisBackendClient",
     "RedisTableMaintenance",
     "TableReference",
+    "MQClient",
+    "TableMaintenance",
 ]
 
 
@@ -110,11 +114,15 @@ class Backend:
         """
         return random.choices(self._all_clients, self._all_weights)[0]
 
-    def get_table_maintenance(self):
+    def get_table_maintenance(self) -> TableMaintenance:
         """
         获取表维护对象，根据不同后端类型返回不同的实现。
         """
         return self._master.get_table_maintenance()
+
+    def get_mq_client(self) -> MQClient:
+        """获取消息队列连接"""
+        return self.servant.get_mq_client()
 
     def session(self, instance: str, cluster_id: int) -> Session:
         """
