@@ -312,14 +312,14 @@ class SessionSelect:
         row : np.record
             待更新的行数据，必须是 `c-struct` 格式。
         """
-        # 检查和cache中的_version一致
         changed_fields = self._get_changed_fields(row)
-        if "_version" in changed_fields:
-            raise ValueError("Cannot update _version field.")
-
         # 检查row.id在cache中存在
         if "id" in changed_fields:
             raise LookupError("Cannot update: row id not found in cache.")
+
+        # 检查和cache中的_version一致
+        if "_version" in changed_fields:
+            raise ValueError("Cannot update _version field.")
 
         # 检查有修改的列
         if len(changed_fields) == 0:

@@ -448,15 +448,17 @@ async def test_unique_table(new_component_env, mod_auto_backend):
         assert type(row) is not np.ndarray
         await ut_select.insert(row)
 
+    await backend.wait_for_synced()
+
     async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         ut_select = session.select(UniqueTest)
         result = await ut_select.range("id", -np.inf, np.inf)
         assert result.shape[0] == 1
 
+    await backend.wait_for_synced()
+
     # 测试可用update_or_insert
     async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         ut_select = session.select(UniqueTest)
         async with ut_select.upsert(name="test") as row:
             assert row.name == "test"
@@ -464,8 +466,9 @@ async def test_unique_table(new_component_env, mod_auto_backend):
         async with ut_select.upsert(name="") as row:
             assert row.id == first_row_id
 
+    await backend.wait_for_synced()
+
     async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         ut_select = session.select(UniqueTest)
         result = await ut_select.range("name", "test", "test")
         assert result.id[0] == last_row_id
@@ -498,9 +501,10 @@ async def test_session_exception(item_ref, mod_auto_backend):
     except Exception as _:  # noqa
         pass
 
+    await backend.wait_for_synced()
+
     # 验证数据没有被提交
     async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(item_ref.comp_cls)
         row = await item_select.range(id=(-np.inf, +np.inf), limit=999)
         assert len(row) == 0
@@ -522,8 +526,9 @@ async def test_redis_empty_index(filled_item_ref, mod_redis_backend, backend_nam
         row.name = "TST1"
         await item_select.update(row)
 
+    await backend.wait_for_synced()
+
     async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
         item_select = session.select(filled_item_ref.comp_cls)
         rows = await item_select.range("id", -np.inf, +np.inf, limit=999)
         for row in rows:

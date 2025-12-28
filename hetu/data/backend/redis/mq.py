@@ -44,6 +44,7 @@ class RedisMQClient(MQClient):
         # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
         self._mq = client.aio.pubsub()  # todo cluster模式的pubsub不支持异步，且调用方法不一样，考虑以后换valkey库试试看
+        #                                                   cluster的api是ssubscribe(channel_names), get_sha
         self.subscribed = set()
         self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
         self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重

@@ -69,7 +69,7 @@ class Session:
             await self._master.commit(self._idmap)
         self.clean()
 
-    async def discard(self) -> None:
+    def discard(self) -> None:
         """放弃Session中的所有数据修改"""
         self.clean()
 
@@ -81,4 +81,4 @@ class Session:
         if exc_type is None:
             await self.commit()
         else:
-            await self.discard()
+            self.discard()
