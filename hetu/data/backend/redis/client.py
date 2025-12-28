@@ -305,6 +305,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         sequence_id: int
             启动进程的顺序ID，从0开始。
         """
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         assert not self.is_servant, "get_worker_keeper"
         from .worker_keeper import RedisWorkerKeeper
 
@@ -759,10 +762,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         获取表维护对象。
         """
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         from .maint import RedisTableMaintenance
 
         return RedisTableMaintenance(self)
 
     def get_mq_client(self) -> RedisMQClient:
         """获取消息队列连接"""
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         return RedisMQClient(self)

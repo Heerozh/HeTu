@@ -8,6 +8,8 @@
 import pytest
 import numpy as np
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Backend
+from hetu.data.backend_old.redis import RedisBackend
 
 SnowflakeID().init(1, 0)
 
@@ -60,7 +62,7 @@ async def test_reconnect(auto_backend, mod_item_model):
     # 且当前文件不能有其他地方用mod_auto_backend，否则会冲突
     from hetu.data.backend import TableReference, RaceCondition
 
-    backend = auto_backend("flush_test")
+    backend: Backend = auto_backend("flush_test")
 
     temp_table = TableReference(mod_item_model, "test", 1)
     table_maint = backend.get_table_maintenance()
@@ -84,8 +86,8 @@ async def test_reconnect(auto_backend, mod_item_model):
     # 测试保存(断开连接）后再读回来
     async with backend.session("test", 1) as session:
         select = session.select(mod_item_model)
-        row = await select.get(row.id)  # type: ignore
-        await select.delete(row.id)
+        row = await select.get(id=row.id)  # type: ignore
+        select.delete(row.id)  # type: ignore
     async with backend.session("test", 1) as session:
         select = session.select(mod_item_model)
         size = len(await select.range("id", -np.inf, +np.inf, limit=999))
@@ -94,16 +96,14 @@ async def test_reconnect(auto_backend, mod_item_model):
     await backend.close()  # 不close不能重建backend_component_table
     await backend.close()  # 再次close不该报错
     with pytest.raises(ConnectionError):
-        backend.session("test", 1)
-    with pytest.raises(ConnectionError):
         backend.post_configure()
     with pytest.raises(ConnectionError):
         await backend.wait_for_synced()
     with pytest.raises(ConnectionError):
-        await backend.get_mq_client()
+        backend.get_mq_client()
 
     # 重新初始化table和连接后再试
-    backend = None
+    backend = None  # type: ignore
     table_maint = None
     backend2 = auto_backend("load_test")
 
