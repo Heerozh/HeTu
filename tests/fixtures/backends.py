@@ -95,6 +95,7 @@ def mod_auto_backend(request, backend_name) -> Callable[..., Backend]:
         return request.getfixturevalue("mod_redis_backend")
     elif backend_name == "valkey":
         return request.getfixturevalue("mod_valkey_backend")
+    # todo 增加一个redis cluster的docker compose，和backend
     else:
         raise ValueError("Unknown db type: %s" % backend_name)
 

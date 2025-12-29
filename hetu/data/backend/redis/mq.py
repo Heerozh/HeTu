@@ -36,7 +36,10 @@ import time
 
 
 class RedisMQClient(MQClient):
-    """连接到消息队列的客户端，每个用户连接一个实例。"""
+    """
+    连接到消息队列的客户端，每个用户连接一个实例。
+    本客户端直接使用redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
+    """
 
     def __init__(self, client: RedisBackendClient):
         # todo 要测试redis cluster是否能正常pub sub
@@ -53,6 +56,7 @@ class RedisMQClient(MQClient):
         return await self._mq.aclose()
 
     async def subscribe(self, channel_name) -> None:
+        """订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
         await self._mq.subscribe(channel_name)
         self.subscribed.add(channel_name)
         if len(self.subscribed) > MAX_SUBSCRIBED:
@@ -62,10 +66,23 @@ class RedisMQClient(MQClient):
             )
 
     async def unsubscribe(self, channel_name) -> None:
+        """取消订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
         await self._mq.unsubscribe(channel_name)
         self.subscribed.remove(channel_name)
 
     async def pull(self) -> None:
+        """
+        从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
+        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
+
+        这是一个阻塞函数，每个用户连接都需要单独运行一个协程来无限循环轮询它，以此来防止服务器消息堆积。
+        消息多时，如果几秒不调用，Redis都会崩。
+
+        Notes
+        -----
+        * pull下来的消息会合批（重复消息合并）
+        * 超过2分钟前的消息会被丢弃，防止堆积
+        """
         mq = self._mq
 
         # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
@@ -94,6 +111,13 @@ class RedisMQClient(MQClient):
                 self.pulled_set.add(channel_name)
 
     async def get_message(self) -> set[str]:
+        """
+        pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
+        留1/UPDATE_FREQUENCY时间是为了消息的合批。
+
+        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        如果没有消息，则堵塞到永远。
+        """
         pulled_deque = self.pulled_deque
 
         interval = 1 / self.UPDATE_FREQUENCY
@@ -112,4 +136,5 @@ class RedisMQClient(MQClient):
 
     @property
     def subscribed_channels(self) -> set[str]:
+        """返回当前订阅的所有频道名"""
         return set(self._mq.channels) - set(self._mq.pending_unsubscribe_channels)

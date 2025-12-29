@@ -1,21 +1,19 @@
 import logging
 import pytest
 import time
-from hetu.data.backend import RawComponentTable
+from hetu.data.backend import Backend
 from hetu.data.backend.sub import RowSubscription
 
 
 @pytest.fixture
 async def sub_mgr(mod_auto_backend):
     """初始化订阅管理器的fixture"""
-    backend_component_table, get_or_create_backend = mod_auto_backend
-
     from hetu.data.backend import Subscriptions
 
     # 初始化订阅器
-    sub_mgr = Subscriptions(get_or_create_backend("main"))
+    sub_mgr = Subscriptions(mod_auto_backend("main"))
     # 清空row订阅缓存
-    RowSubscription._RowSubscription__cache = {}
+    RowSubscription._RowSubscription__cache = {}  # type: ignore
 
     yield sub_mgr
 
@@ -94,19 +92,20 @@ async def user_id11_ctx():
 
 async def test_redis_notify_configuration(mod_redis_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
-    backend_component_table, get_or_create_backend = mod_redis_backend
-    backend = get_or_create_backend()
+    backend: Backend = mod_redis_backend()
+    servant = backend.servant
+    master = backend.master
 
-    from hetu.data.backend import RedisBackend
+    from hetu.data.backend.redis import RedisBackendClient
 
-    assert type(backend) is RedisBackend
+    assert type(master) is RedisBackendClient and type(servant) is RedisBackendClient
 
     # 测试master不应该有通知
     assert (
-        backend.io.config_get("notify-keyspace-events")["notify-keyspace-events"] == ""
+        master.io.config_get("notify-keyspace-events")["notify-keyspace-events"] == ""  # type: ignore
     )
     # 测试replica应该有通知
-    replica_config = await backend.replicas[0].config_get("notify-keyspace-events")
+    replica_config = await servant.aio.config_get("notify-keyspace-events")
     replica_flags = replica_config["notify-keyspace-events"]
     assert all(flag in replica_flags for flag in list("Kghz"))
 
