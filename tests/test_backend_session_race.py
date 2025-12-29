@@ -1,14 +1,17 @@
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Backend
+
+SnowflakeID().init(1, 0)
 
 
-async def test_race(item_ref, mod_auto_backend):
+async def test_version_race(item_ref, mod_auto_backend):
     import asyncio
     from hetu.data.backend import RaceCondition
 
     # 测试竞态，通过2个协程来测试
-    backend = mod_auto_backend()
+    backend: Backend = mod_auto_backend()
 
     # 测试query时，另一个del和update的竞态
     async with backend.session("pytest", 1) as session:
@@ -27,91 +30,80 @@ async def test_race(item_ref, mod_auto_backend):
         row.time += 1
         await item_select.insert(row)
 
-    # 重写item_table的query，延迟n秒
-    def mock_slow_query(_session):
-        org_query = _session._db_query
+    await backend.wait_for_synced()
 
-        async def mock_query(*args, **kwargs):
-            rtn = await org_query(*args, **kwargs)
-            await asyncio.sleep(0.1)
-            return rtn
-
-        _session._db_query = mock_query
-
-    async def query_owner(value):
+    async def read_owner(value):
         async with backend.session("pytest", 1) as _session:
             _item_select = _session.select(item_ref.comp_cls)
-            mock_slow_query(_tbl)
             rows = await _item_select.range("owner", value)
-            print(rows)
+            assert len(rows) > 0
+            await asyncio.sleep(0.2)
 
-    async def select_owner(value):
+    async def del_row(name, sleep):
         async with backend.session("pytest", 1) as _session:
             _item_select = _session.select(item_ref.comp_cls)
-            mock_slow_query(_tbl)
-            rows = await _tbl.select(value, "owner")
-            print(rows)
+            _row = await _item_select.get(name=name)
+            await asyncio.sleep(sleep)
+            _item_select.delete(_row.id)  # type: ignore
 
-    async def del_row(name):
+    async def update_owner(name, sleep):
         async with backend.session("pytest", 1) as _session:
             _item_select = _session.select(item_ref.comp_cls)
-            _row = await _tbl.select(name, "name")
-            await _tbl.delete(_row.id)
+            _row = await _item_select.get(name=name)
+            assert _row
+            _row.owner = _row.owner + 1  # type: ignore
+            await asyncio.sleep(sleep)
+            await _item_select.update(_row)
 
-    async def update_owner(name):
-        async with backend.session("pytest", 1) as _session:
-            _item_select = _session.select(item_ref.comp_cls)
-            _row = await _tbl.select(name, "name")
-            _row.owner = 999
-            await _tbl.update(_row.id, _row)
+    # 测试update_owner和read_only不应该激发RaceCondition
+    task1 = asyncio.create_task(read_owner(65535))
+    task2 = asyncio.create_task(update_owner("Self", 0.2))
+    await asyncio.gather(task1, task2)
 
-    # 测试del和query竞态是否激发race condition
-    task1 = asyncio.create_task(query_owner(65535))
-    task2 = asyncio.create_task(del_row("ForDel"))
-    await asyncio.gather(task2)
+    # 测试update和del竞态是否激发race condition
+    task1 = asyncio.create_task(del_row("ForDel", 0.2))
+    task2 = asyncio.create_task(update_owner("ForDel", 0))
+    await task2
     with pytest.raises(RaceCondition):
         await task1
 
-    # 测试update和query竞态是否激发race condition
-    task1 = asyncio.create_task(query_owner(65535))
-    task2 = asyncio.create_task(update_owner("ForUpdt"))
-    await asyncio.gather(task2)
+    # 测试update和update竞态是否激发race condition
+    task1 = asyncio.create_task(update_owner("ForUpdt", 0.2))
+    task2 = asyncio.create_task(update_owner("ForUpdt", 0.2))
     with pytest.raises(RaceCondition):
-        await task1
+        await asyncio.gather(task1, task2)
 
-    # 测试update和select竞态是否激发race condition
-    task1 = asyncio.create_task(select_owner(65535))
-    task2 = asyncio.create_task(update_owner("Self"))
-    await asyncio.gather(task2)
-    with pytest.raises(RaceCondition):
-        await task1
+    # 测试update和不同行update不应该冲突
+    task1 = asyncio.create_task(update_owner("ForUpdt", 0.2))
+    task2 = asyncio.create_task(update_owner("Self", 0.2))
+    await asyncio.gather(task1, task2)
 
-    # 测试del和select竞态是否激发race condition
-    task1 = asyncio.create_task(select_owner(999))
-    task2 = asyncio.create_task(del_row("Self"))
-    await asyncio.gather(task2)
-    with pytest.raises(RaceCondition):
-        await task1
 
-    # 测试事务提交时unique的RaceCondition, 在end前sleep即可测试
-    async def insert_and_sleep(db, uni_val, sleep):
+async def test_unique_race(item_ref, mod_auto_backend):
+    import asyncio
+    from hetu.data.backend import RaceCondition
+
+    backend: Backend = mod_auto_backend()
+
+    # 测试事务提交时unique的RaceCondition
+    async def insert_and_sleep(uni_val, sleep):
         async with backend.session("pytest", 1) as _session:
             _item_select = _session.select(item_ref.comp_cls)
-            _row = mod_item_model.new_row()
+            _row = item_ref.comp_cls.new_row()
             _row.owner = 874233
             _row.name = str(uni_val)
             _row.time = uni_val
-            await _tbl.insert(_row)
+            await _item_select.insert(_row)
             await asyncio.sleep(sleep)
 
     # 测试insert不同的值应该没有竞态
-    task1 = asyncio.create_task(insert_and_sleep(item_table, 111111, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(item_table, 111112, 0.01))
-    await asyncio.gather(task2)
-    await task1
+    task1 = asyncio.create_task(insert_and_sleep(111111, 0.1))
+    task2 = asyncio.create_task(insert_and_sleep(111112, 0.01))
+    await asyncio.gather(task1, task2)
+
     # 相同的time会竞态
-    task1 = asyncio.create_task(insert_and_sleep(item_table, 222222, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(item_table, 222222, 0.01))
+    task1 = asyncio.create_task(insert_and_sleep(222222, 0.1))
+    task2 = asyncio.create_task(insert_and_sleep(222222, 0.01))
     await asyncio.gather(task2)
     with pytest.raises(RaceCondition):
         await task1
