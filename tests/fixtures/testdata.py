@@ -111,6 +111,7 @@ async def filled_item_ref(item_ref, mod_auto_backend):
             row.owner = 10
             row.time = i + 110
             row.qty = 999
+            row.model = float(i) * 0.1
             await item_select.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()

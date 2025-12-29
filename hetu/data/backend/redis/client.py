@@ -426,23 +426,25 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if desc:
             left, right = right, left
 
-        if dtype.type in (np.str_, np.bytes_):
+        if issubclass(dtype.type, np.character):
             # component字段如果是str/bytes类型的索引，不能查询数字
             assert type(left) in (str, bytes) and type(right) in (str, bytes), (
                 f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
                 f"right={type(right)}({right})"
             )
         else:
-            # component字段如果是数字，则处理inf
-            type_info = np.iinfo(dtype)
+            # component字段如果是int数字，则处理inf
+            # 浮点不用处理，因为浮点的inf是高位的Exponent全FF，大于2**1023最大值，自然永远最大
+            if issubclass(dtype.type, np.integer):
+                type_info = np.iinfo(dtype)
 
-            def clamp_inf(x):
-                if type(x) is float and np.isinf(x):
-                    return type_info.max if x > 0 else type_info.min
-                return x
+                def clamp_inf(x):
+                    if type(x) is float and np.isinf(x):
+                        return type_info.max if x > 0 else type_info.min
+                    return x
 
-            left = clamp_inf(left)
-            right = clamp_inf(right)
+                left = clamp_inf(left)
+                right = clamp_inf(right)
 
         # 处理范围区间
         def peel(x, _inclusive):

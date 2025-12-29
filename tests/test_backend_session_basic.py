@@ -235,7 +235,7 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
 
     # 测试range的区间是否正确，表内值参考test_data.py的filled_item_ref夹具
-    # time范围为110-134，共25个
+    # 测试int索引的inf范围，time范围为110-134，共25个
     async with backend.session("pytest", 1) as session:
         item_select = session.select(filled_item_ref.comp_cls)
         # 左无限右有限
@@ -250,6 +250,14 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
         np.testing.assert_array_equal(
             (await item_select.range(time=(-np.inf, np.inf), limit=100)).time,
             range(110, 135),
+        )
+
+    # 测试float索引的inf范围，model范围为0.0-2.4，共25个
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(filled_item_ref.comp_cls)
+        np.testing.assert_array_almost_equal(
+            (await item_select.range(time=(-np.inf, np.inf), limit=99)).model,
+            np.arange(0, 2.5, 0.1),
         )
 
     # 测试字符串类型的无限不允许
@@ -293,6 +301,11 @@ async def test_range_number_index(filled_item_ref, mod_auto_backend):
         # AssertionError: right必须大于等于left，你的:
         with pytest.raises(AssertionError, match="right.*left"):
             await item_select.range(time=(115, 110))
+        # 测试float类型索引
+        np.testing.assert_array_equal(
+            (await item_select.range(model=(1.1, 2.3), limit=99)).time,
+            range(121, 134),
+        )
 
 
 async def test_query_string_index(filled_item_ref, mod_auto_backend):
