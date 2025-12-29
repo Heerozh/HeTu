@@ -178,6 +178,13 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
         with pytest.raises(UniqueViolation, match="time"):
             await item_select.insert(row)
 
+        # 测试update
+        row = await item_select.get(name="Item2")
+        assert row
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_select.update(row)
+
 
 async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
     """测试upsert操作"""

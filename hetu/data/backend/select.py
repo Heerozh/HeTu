@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-from .base import RowFormat, UniqueViolation
+from .base import RaceCondition, RowFormat, UniqueViolation
 from .idmap import RowState
 from .table import TableReference
 
@@ -407,10 +407,13 @@ class UpsertContext:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if exc_type is None:
             assert self.row_data is not None
-            if self.insert:
-                await self.selected.insert(self.row_data)
-            else:
-                if self.row_data == self.clean_data:
-                    # 无修改不更新
-                    return
-                await self.selected.update(self.row_data)
+            try:
+                if self.insert:
+                    await self.selected.insert(self.row_data)
+                else:
+                    if self.row_data == self.clean_data:
+                        # 无修改不更新
+                        return
+                    await self.selected.update(self.row_data)
+            except UniqueViolation as e:
+                raise RaceCondition from e
