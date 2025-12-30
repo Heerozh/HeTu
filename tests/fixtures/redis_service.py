@@ -73,14 +73,14 @@ def mod_redis_service():
                 time.sleep(1)
                 print(
                     "version:",
-                    r.info()["redis_version"],
+                    r.info()["redis_version"],  # type: ignore
                     r.role(),
                     r.config_get("notify-keyspace-events"),
                 )
                 r.wait(1, 10000)
                 print(
                     "slave version:",
-                    r_slave.info()["redis_version"],
+                    r_slave.info()["redis_version"],  # type: ignore
                     r_slave.role(),
                     r_slave.config_get("notify-keyspace-events"),
                 )
@@ -175,14 +175,14 @@ def mod_valkey_service():
                 time.sleep(1)
                 print(
                     "version:",
-                    r.info()["redis_version"],
+                    r.info()["redis_version"],  # type: ignore
                     r.role(),
                     r.config_get("notify-keyspace-events"),
                 )
                 r.wait(1, 10000)
                 print(
                     "slave version:",
-                    r_slave.info()["redis_version"],
+                    r_slave.info()["redis_version"],  # type: ignore
                     r_slave.role(),
                     r_slave.config_get("notify-keyspace-events"),
                 )
@@ -208,3 +208,149 @@ def mod_valkey_service():
         network.remove()
     except (docker.errors.NotFound, docker.errors.APIError):
         pass
+
+
+@pytest.fixture(scope="module")
+def mod_redis_cluster_service():
+    """
+    启动redis cluster docker服务 (纯docker-py实现)，测试结束后销毁服务
+    """
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    # 配置参数
+    network_name = "hetu_test_cluster_net"
+    base_name = "hetu_test_cluster_node"
+    # 使用 3 个主节点 (最简集群模式)
+    ports = [7000, 7001, 7002]
+    containers = []
+    network = None
+
+    # --- 1. 清理旧环境 (类似 down -v) ---
+    print("ℹ️ 清理旧的 Redis Cluster 容器和网络...")
+    for i in range(len(ports)):
+        try:
+            c = client.containers.get(f"{base_name}_{i}")
+            c.kill()
+            c.remove()
+        except (docker.errors.NotFound, docker.errors.APIError):
+            pass
+    try:
+        client.networks.get(network_name).remove()
+    except (docker.errors.NotFound, docker.errors.APIError):
+        pass
+
+    # --- 2. 启动新环境 ---
+    try:
+        # 创建网络
+        network = client.networks.create(network_name, driver="bridge")
+
+        print("🚀 正在启动 Redis Cluster 节点...")
+        node_internal_ips = []
+
+        for i, port in enumerate(ports):
+            # Redis Cluster 在 Docker NAT 下需要配置 announce-ip 供外部(测试脚本)访问
+            # 同时需要映射 数据端口(port) 和 总线端口(port + 10000)
+            # --cluster-announce-hostname host.docker.internal
+            # --cluster-preferred-endpoint-type hostname
+            # --cluster-announce-port 7000
+            # --cluster-announce-bus-port 17000
+            cmd = [
+                "redis-server",
+                f"--port {port}",
+                "--cluster-enabled yes",
+                "--cluster-config-file nodes.conf",
+                "--cluster-node-timeout 5000",
+                "--appendonly yes",
+                "--cluster-announce-hostname host.docker.internal",
+                "--cluster-preferred-endpoint-type hostname",
+                f"--cluster-announce-port {port}",
+                f"--cluster-announce-bus-port 1{port:04d}",
+            ]
+
+            c = client.containers.run(
+                "redis:latest",
+                command=cmd,
+                detach=True,
+                # 端口映射: 容器端口 -> 宿主机端口
+                ports={f"{port}/tcp": port, f"1{port:04d}/tcp": 10000 + port},
+                name=f"{base_name}_{i}",
+                auto_remove=True,
+                network=network_name,
+                hostname=f"redis-node-{i}",
+            )
+            containers.append(c)
+
+            # 获取容器在 Docker 网络内部的 IP，用于集群节点间握手
+            c.reload()  # 刷新属性以获取 IP
+            internal_ip = c.attrs["NetworkSettings"]["Networks"][network_name][
+                "IPAddress"
+            ]
+            node_internal_ips.append(f"{internal_ip}:{port}")
+
+        # 等待容器完全启动
+        time.sleep(2)
+
+        # --- 3. 创建集群 ---
+        print(f"🔗 初始化集群，内部节点: {node_internal_ips}")
+        # 在第一个节点内部执行 cluster create 命令
+        # 注意：这里必须使用容器间的内部 IP
+        create_cmd = f"redis-cli --cluster create {' '.join(node_internal_ips)} --cluster-replicas 0 --cluster-yes"
+
+        # 尝试执行创建命令
+        exit_code, output = containers[0].exec_run(create_cmd)
+        if exit_code != 0 and b"Cluster is already configured" not in output:
+            raise Exception(f"Redis Cluster 创建失败: {output.decode()}")
+        print(output)
+
+        # --- 4. 验证集群就绪 ---
+        import redis
+        from redis.cluster import RedisCluster
+
+        print("⏳ 等待 Redis Cluster 就绪...")
+        rc = None
+        ready = False
+        for i in range(30):
+            try:
+                # type: ignore 忽略类型检查警告
+                rc = RedisCluster(
+                    host="127.0.0.1",
+                    port=7000,
+                    socket_connect_timeout=1,
+                    socket_timeout=1,
+                )  # type: ignore
+                info = rc.cluster_info()
+                if info.get("cluster_state") == "ok":  # type: ignore
+                    print(f"✅ Redis Cluster 已就绪 (耗时 {i}s)")
+                    ready = True
+                    break
+            except Exception as e:
+                pass
+            time.sleep(1)
+            if rc:
+                try:
+                    rc.close()
+                except:
+                    pass
+
+        if not ready:
+            raise Exception("Redis Cluster 启动超时，无法连接")
+
+        yield "redis://127.0.0.1:7000"
+
+    finally:
+        # --- 5. 清理资源 ---
+        print("ℹ️ 清理 Redis Cluster...")
+        for c in containers:
+            try:
+                c.kill()
+                c.remove()
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass
+        if network:
+            try:
+                network.remove()
+            except (docker.errors.NotFound, docker.errors.APIError):
+                pass

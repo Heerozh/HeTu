@@ -13,7 +13,7 @@ services:
     networks:
       - redis-cluster-compose
     hostname: redis-node-1
-    command: redis-server --cluster-enabled yes
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7000 --cluster-announce-bus-port 17000
 
   redis-node-2:
     image: redis:latest
@@ -23,7 +23,7 @@ services:
     networks:
       - redis-cluster-compose
     hostname: redis-node-2
-    command: redis-server --cluster-enabled yes
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7001 --cluster-announce-bus-port 17001
 
   redis-node-3:
     image: redis:latest
@@ -33,8 +33,7 @@ services:
     networks:
       - redis-cluster-compose
     hostname: redis-node-3
-    command: redis-server --cluster-enabled yes
-
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7002 --cluster-announce-bus-port 17002
 
   redis-cluster-creator:
     image: redis:latest
@@ -42,10 +41,8 @@ services:
       - 6999:6999
     networks:
       - redis-cluster-compose
-    command: redis-cli -p 6379 --cluster create redis-node-1:6379 redis-node-2:6379 redis-node-3:6379  --cluster-yes
+    command: redis-cli -p 7000 --cluster create host.docker.internal:7000 host.docker.internal:7001 host.docker.internal:7002  --cluster-yes
     depends_on:
       - redis-node-1
       - redis-node-2
       - redis-node-3
-
-
