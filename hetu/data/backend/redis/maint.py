@@ -237,6 +237,7 @@ class RedisTableMaintenance(TableMaintenance):
             )
 
             with self.lock:
+                # todo cluster 下keys不能正常工作，只返回当前节点的
                 del_keys = io.keys(self.client.table_prefix(table_ref) + ":*")
                 del_keys = cast(list[str], del_keys)
                 for batch in batched(del_keys, 1000):

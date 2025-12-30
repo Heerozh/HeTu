@@ -20,7 +20,7 @@ def mod_auto_backend():
     pytest.skip("mod_auto_backend 已在本文件禁用")
 
 
-async def test_volatile_table_flush(auto_backend):
+async def test_volatile_table_flush(auto_backend, new_component_env):
     backend = auto_backend("flush_test")
 
     from hetu.data import define_component, property_field, BaseComponent
