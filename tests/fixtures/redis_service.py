@@ -249,6 +249,7 @@ def mod_redis_cluster_service():
 
         print("🚀 正在启动 Redis Cluster 节点...")
         node_internal_ips = []
+        node_external_ips = []
 
         for i, port in enumerate(ports):
             # Redis Cluster 在 Docker NAT 下需要配置 announce-ip 供外部(测试脚本)访问
@@ -265,6 +266,7 @@ def mod_redis_cluster_service():
                 "--cluster-node-timeout 5000",
                 "--appendonly yes",
                 "--cluster-announce-hostname host.docker.internal",
+                "--cluster-announce-ip host.docker.internal",  # 比如设置布告ip，不然redis insight无法识别，实际上用域名也是可以的
                 "--cluster-preferred-endpoint-type hostname",
                 f"--cluster-announce-port {port}",
                 f"--cluster-announce-bus-port 1{port:04d}",
@@ -289,6 +291,7 @@ def mod_redis_cluster_service():
                 "IPAddress"
             ]
             node_internal_ips.append(f"{internal_ip}:{port}")
+            node_external_ips.append(f"host.docker.internal:{port}")
 
         # 等待容器完全启动
         time.sleep(2)
@@ -297,7 +300,7 @@ def mod_redis_cluster_service():
         print(f"🔗 初始化集群，内部节点: {node_internal_ips}")
         # 在第一个节点内部执行 cluster create 命令
         # 注意：这里必须使用容器间的内部 IP
-        create_cmd = f"redis-cli --cluster create {' '.join(node_internal_ips)} --cluster-replicas 0 --cluster-yes"
+        create_cmd = f"redis-cli --cluster create {' '.join(node_external_ips)} --cluster-replicas 0 --cluster-yes"
 
         # 尝试执行创建命令
         exit_code, output = containers[0].exec_run(create_cmd)
