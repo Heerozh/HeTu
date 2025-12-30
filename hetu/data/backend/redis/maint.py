@@ -16,6 +16,8 @@ from .. import RaceCondition
 from ..base import TableMaintenance
 from ..table import TableReference
 
+from redis.cluster import RedisCluster
+
 if TYPE_CHECKING:
     import redis
     import redis.lock
@@ -129,7 +131,10 @@ class RedisTableMaintenance(TableMaintenance):
             new_prefix = f"{self.client.table_prefix(table_ref)}:{new_hash_tag}"
 
             io = self.client.io
-            old_keys = io.keys(old_prefix + ":*")
+            old_keys = io.keys(
+                old_prefix + ":*",
+                target_nodes=RedisCluster.ALL_NODES,
+            )
             old_keys = cast(list[str], old_keys)
             for old_key in old_keys:
                 new_key = new_prefix + old_key[old_prefix_len:]
@@ -187,7 +192,10 @@ class RedisTableMaintenance(TableMaintenance):
 
             # 多出来的列再次报警告，然后忽略
             io = self.client.io
-            keys = io.keys(self.client.cluster_prefix(table_ref) + ":*")
+            keys = io.keys(
+                self.client.cluster_prefix(table_ref) + ":*",
+                target_nodes=RedisCluster.ALL_NODES,
+            )
             keys = cast(list[str], keys)
             props = dict(table_ref.comp_cls.properties_)
             added = 0
@@ -238,7 +246,10 @@ class RedisTableMaintenance(TableMaintenance):
 
             with self.lock:
                 # todo cluster 下keys不能正常工作，只返回当前节点的
-                del_keys = io.keys(self.client.table_prefix(table_ref) + ":*")
+                del_keys = io.keys(
+                    self.client.table_prefix(table_ref) + ":*",
+                    target_nodes=RedisCluster.ALL_NODES,
+                )
                 del_keys = cast(list[str], del_keys)
                 for batch in batched(del_keys, 1000):
                     with io.pipeline() as pipe:
@@ -258,7 +269,10 @@ class RedisTableMaintenance(TableMaintenance):
         logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
         with self.lock:
             io = self.client.io
-            keys = io.keys(self.client.table_prefix(table_ref) + ":*")
+            keys = io.keys(
+                self.client.table_prefix(table_ref) + ":*",
+                target_nodes=RedisCluster.ALL_NODES,
+            )
             keys = cast(list[str], keys)
             if len(keys) == 0:
                 logger.info(
