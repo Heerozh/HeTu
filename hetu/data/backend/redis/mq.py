@@ -8,7 +8,7 @@
 import asyncio
 import logging
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, final, override
 
 import redis
 
@@ -22,27 +22,17 @@ if TYPE_CHECKING:
     import redis.exceptions
 
     from .client import RedisBackendClient
-    from ..table import TableReference
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
 
 
+@final
 class RedisMQClient(MQClient):
     """
     连接到消息队列的客户端，每个用户连接一个实例。
     本客户端直接使用redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
     """
-
-    def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
-        c = self._client
-        return f"__keyspace@{c.dbi}__:{c.index_key(table_ref, index_name)}"
-
-    def row_channel(self, table_ref: TableReference, row_id: int):
-        """返回行数据的频道名。如果行有变动，会通知到该频道"""
-        c = self._client
-        return f"__keyspace@{c.dbi}__:{c.row_key(table_ref, row_id)}"
 
     def __init__(self, client: RedisBackendClient):
         # todo 要测试redis cluster是否能正常pub sub
@@ -63,14 +53,16 @@ class RedisMQClient(MQClient):
         self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
         self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重
 
+    @override
     async def close(self):
         if self.clustering:
             return self._smq.close()
         else:
             return await self._amq.aclose()
 
+    @override
     async def subscribe(self, channel_name) -> None:
-        """订阅频道，频道名通过 mq_client.xxx_channel(table_ref) 获得"""
+        """订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
         if self.clustering:
             self._smq.subscribe(channel_name)
         else:
@@ -82,14 +74,16 @@ class RedisMQClient(MQClient):
                 f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，"
             )
 
+    @override
     async def unsubscribe(self, channel_name) -> None:
-        """取消订阅频道，频道名通过 mq_client.xxx_channel(table_ref) 获得"""
+        """取消订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
         if self.clustering:
             self._smq.unsubscribe(channel_name)
         else:
             await self._amq.unsubscribe(channel_name)
         self.subscribed.remove(channel_name)
 
+    @override
     async def pull(self) -> None:
         """
         从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
@@ -135,6 +129,7 @@ class RedisMQClient(MQClient):
                 self.pulled_deque.add(time.time(), channel_name)
                 self.pulled_set.add(channel_name)
 
+    @override
     async def get_message(self) -> set[str]:
         """
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
@@ -160,6 +155,7 @@ class RedisMQClient(MQClient):
             await asyncio.sleep(interval)
 
     @property
+    @override
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的所有频道名"""
         if self.clustering:

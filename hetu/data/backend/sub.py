@@ -7,11 +7,11 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 import numpy as np
 
-from hetu.data.backend import RowFormat
+from hetu.data.backend import BackendClient, RowFormat
 from hetu.data.component import Permission
 
 if TYPE_CHECKING:
@@ -24,11 +24,16 @@ logger = logging.getLogger("HeTu.root")
 class BaseSubscription:
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+        """
+        channel收到通知后，前来调用此get_updated方法。
+        返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
+        """
         raise NotImplementedError
 
     @property
     def channels(self) -> set[str]:
+        """返回当前订阅关注的频道们"""
         raise NotImplementedError
 
 
@@ -36,9 +41,15 @@ class RowSubscription(BaseSubscription):
     __cache = {}
 
     def __init__(
-        self, table_ref: TableReference, ctx: Context | None, channel: str, row_id: int
+        self,
+        table_ref: TableReference,
+        servant: BackendClient,
+        ctx: Context | None,
+        channel: str,
+        row_id: int,
     ):
         self.table_ref = table_ref
+        self.servant = servant
         if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
         else:
@@ -52,18 +63,22 @@ class RowSubscription(BaseSubscription):
 
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+        """
+        channel收到通知后，前来调用此get_updated方法。
+        返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}
+        """
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
         if (cache := RowSubscription.__cache.get(channel, None)) is not None:
             return set(), set(), cache
 
-        row = await self.table.direct_get(self.row_id, row_format="typed_dict")
+        row = await self.servant.get(self.table_ref, self.row_id, RowFormat.TYPED_DICT)
         if row is None:
             # get_updated主要发给客户端，需要json，所以key直接用str
             rtn = {str(self.row_id): None}
         else:
             ctx = self.rls_ctx
-            if ctx is None or ctx.rls_check(self.table.component_cls, row):
+            if ctx is None or ctx.rls_check(self.table_ref.comp_cls, row):
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
@@ -72,20 +87,23 @@ class RowSubscription(BaseSubscription):
 
     @property
     def channels(self) -> set[str]:
+        """返回当前订阅关注的频道们"""
         return {self.channel}
 
 
 class IndexSubscription(BaseSubscription):
     def __init__(
         self,
-        table: TableReference,
+        table_ref: TableReference,
+        servant: BackendClient,
         ctx: Context,
         index_channel: str,
         last_query,
         query_param: dict,
     ):
-        self.table = table
-        if table.comp_cls.is_rls() and ctx and not ctx.is_admin():
+        self.table_ref = table_ref
+        self.servant = servant
+        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
         else:
             self.rls_ctx = None
@@ -96,15 +114,23 @@ class IndexSubscription(BaseSubscription):
 
     def add_row_subscriber(self, channel, row_id):
         self.row_subs[channel] = RowSubscription(
-            self.table, self.rls_ctx, channel, row_id
+            self.table_ref, self.servant, self.rls_ctx, channel, row_id
         )
 
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], dict[str, dict | None]]:
+    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+        """
+        channel收到通知后，前来调用此get_updated方法。
+        返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
+        """
+        servant = self.servant
+        ref = self.table_ref
         if channel == self.index_channel:
             # 查询index更新，比较row_id是否有变化
-            row_ids = await self.table.direct_query(**self.query_param, row_format="id")
+            row_ids = await servant.range(
+                ref, **self.query_param, row_format=RowFormat.ID_LIST
+            )
             row_ids = set(row_ids)
             inserts = row_ids - self.last_query
             deletes = self.last_query - row_ids
@@ -113,22 +139,22 @@ class IndexSubscription(BaseSubscription):
             rem_chans = set()
             rtn = {}
             for row_id in inserts:
-                row = await self.table.direct_get(row_id, row_format="typed_dict")
+                row = await servant.get(ref, row_id, row_format=RowFormat.TYPED_DICT)
                 if row is None:
                     self.last_query.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
                     ctx = self.rls_ctx
-                    if ctx is None or ctx.rls_check(self.table.component_cls, row):
+                    if ctx is None or ctx.rls_check(ref.comp_cls, row):
                         rtn[str(row_id)] = row
-                    new_chan_name = self.table.channel_name(row_id=row_id)
+                    new_chan_name = servant.row_channel(ref, row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
-                        self.table, ctx, new_chan_name, row_id
+                        ref, servant, ctx, new_chan_name, row_id
                     )
             for row_id in deletes:
                 rtn[str(row_id)] = None
-                rem_chan_name = self.table.channel_name(row_id=row_id)
+                rem_chan_name = servant.row_channel(ref, row_id)
                 rem_chans.add(rem_chan_name)
                 self.row_subs.pop(rem_chan_name)
 
@@ -140,6 +166,7 @@ class IndexSubscription(BaseSubscription):
 
     @property
     def channels(self) -> set[str]:
+        """返回当前订阅关注的频道们"""
         return {self.index_channel, *self.row_subs.keys()}
 
 
@@ -198,7 +225,7 @@ class Subscriptions:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table_ref.comp_cls, row)
 
-    async def subscribe_select(
+    async def subscribe_get(
         self,
         table_ref: TableReference,
         ctx: Context,
@@ -250,14 +277,16 @@ class Subscriptions:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
 
-        channel_name = self._mq_client.row_channel(table_ref, row["id"])
+        channel_name = servant.row_channel(table_ref, row["id"])
         await self._mq_client.subscribe(channel_name)
 
-        self._subs[sub_id] = RowSubscription(table_ref, ctx, channel_name, row["id"])
+        self._subs[sub_id] = RowSubscription(
+            table_ref, servant, ctx, channel_name, row["id"]
+        )
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         return sub_id, row
 
-    async def subscribe_query(
+    async def subscribe_range(
         self,
         table_ref: TableReference,
         ctx: Context,
@@ -326,12 +355,13 @@ class Subscriptions:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, rows
 
-        index_channel = self._mq_client.index_channel(table_ref, index_name)
+        index_channel = servant.index_channel(table_ref, index_name)
         await self._mq_client.subscribe(index_channel)
 
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
             table_ref,
+            servant,
             ctx,
             index_channel,
             row_ids,
@@ -345,7 +375,7 @@ class Subscriptions:
 
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
         for row_id in row_ids:
-            row_channel = self._mq_client.row_channel(table_ref, row_id)
+            row_channel = servant.row_channel(table_ref, row_id)
             await self._mq_client.subscribe(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)

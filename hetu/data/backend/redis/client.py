@@ -123,6 +123,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """获取redis表索引的key名"""
         return f"{cls.cluster_prefix(table_ref)}:index:{index_name}"
 
+    @override
+    def index_channel(self, table_ref: TableReference, index_name: str):
+        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        return f"__keyspace@{self.dbi}__:{self.index_key(table_ref, index_name)}"
+
+    @override
+    def row_channel(self, table_ref: TableReference, row_id: int):
+        """返回行数据的频道名。如果行有变动，会通知到该频道"""
+        return f"__keyspace@{self.dbi}__:{self.row_key(table_ref, row_id)}"
+
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
@@ -162,7 +172,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             return b"\x01" if value else b"\x00"
         assert False, f"不可排序的索引类型: {dtype}"
 
-    # ============ 继承自BackendClient的方法 ============
+    # ============ 主要方法 ============
 
     def __init__(self, endpoint: str | list[str], clustering: bool, is_servant=False):
         super().__init__(endpoint, clustering, is_servant)

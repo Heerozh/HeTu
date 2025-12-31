@@ -73,6 +73,14 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
+    def index_channel(self, table_ref: TableReference, index_name: str):
+        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        raise NotImplementedError
+
+    def row_channel(self, table_ref: TableReference, row_id: int):
+        """返回行数据的频道名。如果行有变动，会通知到该频道"""
+        raise NotImplementedError
+
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
         super().__init_subclass__()
@@ -438,14 +446,6 @@ class MQClient:
 
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
-
-    def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
-        raise NotImplementedError
-
-    def row_channel(self, table_ref: TableReference, row_id: int):
-        """返回行数据的频道名。如果行有变动，会通知到该频道"""
-        raise NotImplementedError
 
     async def close(self):
         raise NotImplementedError
