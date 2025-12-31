@@ -5,26 +5,18 @@
 @email: heeroz@gmail.com
 """
 
-#  """
-#  @author: Heerozh (Zhang Jianhao)
-#  @copyright: Copyright 2024, Heerozh. All rights reserved.
-#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
-#  @email: heeroz@gmail.com
-#  """
-
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from hetu.data.backend import RowFormat
 from hetu.data.component import Permission
 
-from typing import TYPE_CHECKING
-
 if TYPE_CHECKING:
+    from hetu.data.backend import Backend, TableReference
     from hetu.system import Context
-    from hetu.data.backend import TableReference, Backend
 
 logger = logging.getLogger("HeTu.root")
 
@@ -44,10 +36,10 @@ class RowSubscription(BaseSubscription):
     __cache = {}
 
     def __init__(
-        self, table: RawComponentTable, ctx: Context | None, channel: str, row_id: int
+        self, table_ref: TableReference, ctx: Context | None, channel: str, row_id: int
     ):
-        self.table = table
-        if table.component_cls.is_rls() and ctx and not ctx.is_admin():
+        self.table_ref = table_ref
+        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
         else:
             self.rls_ctx = None
@@ -86,14 +78,14 @@ class RowSubscription(BaseSubscription):
 class IndexSubscription(BaseSubscription):
     def __init__(
         self,
-        table: RawComponentTable,
+        table: TableReference,
         ctx: Context,
         index_channel: str,
         last_query,
         query_param: dict,
     ):
         self.table = table
-        if table.component_cls.is_rls() and ctx and not ctx.is_admin():
+        if table.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
         else:
             self.rls_ctx = None
@@ -177,17 +169,17 @@ class Subscriptions:
 
     @classmethod
     def _make_query_str(
-        cls, table: RawComponentTable, index_name: str, left, right, limit, desc
+        cls, table_ref: TableReference, index_name: str, left, right, limit, desc
     ):
         return (
-            f"{table.component_cls.component_name_}.{index_name}"
+            f"{table_ref.comp_name}.{index_name}"
             f"[{left}:{right}:{desc and -1 or 1}][:{limit}]"
         )
 
     @classmethod
-    def _has_table_permission(cls, table: RawComponentTable, ctx: Context) -> bool:
+    def _has_table_permission(cls, table_ref: TableReference, ctx: Context) -> bool:
         """判断caller是否对整个表有权限"""
-        comp_permission = table.component_cls.permission_
+        comp_permission = table_ref.comp_cls.permission_
         # admin和EVERYBODY权限永远返回True
         if comp_permission == Permission.EVERYBODY or ctx.is_admin():
             return True
@@ -201,54 +193,73 @@ class Subscriptions:
 
     @classmethod
     def _has_row_permission(
-        cls, table: RawComponentTable, ctx: Context, row: dict | np.record
+        cls, table_ref: TableReference, ctx: Context, row: dict | np.record
     ) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
-        return ctx.rls_check(table.component_cls, row)
+        return ctx.rls_check(table_ref.comp_cls, row)
 
     async def subscribe_select(
-        self, table: RawComponentTable, ctx: Context, value: Any, where: str = "id"
-    ) -> tuple[str | None, np.record | None]:
+        self,
+        table_ref: TableReference,
+        ctx: Context,
+        index_name: str,
+        query_value: int | float | str,
+    ) -> tuple[str | None, dict[str, Any] | None]:
         """
-        获取并订阅单行数据，返回订阅id(sub_id: str)和单行数据(row: dict)。
-        如果未查询到数据，或rls不符，返回None, None。
+        获取并订阅单行数据。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+
+        Returns
+        --------
+        sub_id: str | None
+            订阅id，后续通过该id获取更新
+        row: dict | None
+            订阅的行数据
+
+        如果未查询到数据，或rls不符，返回None, None。
         """
         # 首先caller要对整个表有权限
-        if not self._has_table_permission(table, ctx):
+        if not self._has_table_permission(table_ref, ctx):
             return None, None
 
-        if where == "id":
-            if (row := await table.direct_get(value, row_format="typed_dict")) is None:
+        servant = self._backend.servant
+
+        if index_name == "id":
+            row = await servant.get(table_ref, int(query_value), RowFormat.TYPED_DICT)
+            if row is None:
                 return None, None
         else:
-            rows = await table.direct_query(
-                where, value, limit=1, row_format="typed_dict"
+            rows = await servant.range(
+                table_ref,
+                index_name,
+                query_value,
+                limit=1,
+                row_format=RowFormat.TYPED_DICT,
             )
             if len(rows) == 0:
                 return None, None
             row = rows[0]
 
         # 再次caller要对该row有权限
-        if not self._has_row_permission(table, ctx, row):
+        if not self._has_row_permission(table_ref, ctx, row):
             return None, None
 
         # 开始订阅
-        sub_id = self._make_query_str(table, "id", row["id"], None, 1, False)
+        sub_id = self._make_query_str(table_ref, "id", row["id"], None, 1, False)
         if sub_id in self._subs:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
 
-        channel_name = table.channel_name(row_id=row["id"])
+        channel_name = self._mq_client.row_channel(table_ref, row["id"])
         await self._mq_client.subscribe(channel_name)
 
-        self._subs[sub_id] = RowSubscription(table, ctx, channel_name, row["id"])
+        self._subs[sub_id] = RowSubscription(table_ref, ctx, channel_name, row["id"])
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         return sub_id, row
 
     async def subscribe_query(
         self,
-        table: RawComponentTable,
+        table_ref: TableReference,
         ctx: Context,
         index_name: str,
         left,
@@ -258,53 +269,69 @@ class Subscriptions:
         force=True,
     ) -> tuple[str | None, list[dict]]:
         """
-        获取并订阅多行数据，返回订阅id(sub_id: str)，和多行数据(rows: list[dict])。
-        如果未查询到数据，返回None, []。
-        但force参数可以强制未查询到数据时也订阅，返回订阅id(sub_id: str)，和[]。
+        获取并订阅多行数据。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
 
         订阅会观察数据的变化/添加/删除，收到对应通知，由get_updates调用时处理。
 
-        时间复杂度是O(log(N)+M)，N是index的条目数；M是查询到的行数。
-        Component权限是RLS时，查询到的行在最后再根据权限值筛选，M为筛选前的行数。
+        时间复杂度是O(log(N)+M)，N是index的总行数；M是limit。
+        Component权限是RLS时，查询后再根据权限筛选，limit为筛选前的行数，可能会获得少于limit行数据。
 
         Notes
         -----
-        目前不会对rls权限获得做出反应，由订阅时的rls权限决定。
-        - 当某行已查询到的数据，失去rls权限时，**会**收到该行被删除的通知
-        - 当某行符合查询条件的数据，之前没权限被剔除，现在新获得rls权限时，**不会**收到该行被添加的通知
+        订阅不会对RLS权限获得做出反应，由订阅时的RLS权限决定。
+        - 当某行已查询到的数据，失去RLS权限时，**会**收到该行被删除的通知
+        - 当某行不符合RLS权限的数据，获得RLS权限时，**不会**收到该行被添加的通知
+
+        RLS权限介绍请看See Also的组件定义。
+
+        Returns
+        --------
+        sub_id: str | None
+            订阅id，后续通过该id获取更新。如果无整表权限，返回None。
+            如果未查询到数据，返回None，除非force参数为True。
+        rows: list[dict[str, Any]]
+            订阅的多行数据，如果未查询到数据，返回空列表。
+
+        See Also
+        --------
+        define_component : 组件定义
 
         """
         # 首先caller要对整个表有权限，不然就算force也不给订阅
-        if not self._has_table_permission(table, ctx):
+        if not self._has_table_permission(table_ref, ctx):
             logger.warning(
-                f"⚠️ [💾Subscription] {table.component_cls.component_name_}无调用权限，"
+                f"⚠️ [💾Subscription] {table_ref.comp_name}无调用权限，"
                 f"检查是否非法调用，caller：{ctx.caller}"
             )
             return None, []
 
-        rows = await table.direct_query(
-            index_name, left, right, limit, desc, row_format="typed_dict"
+        servant = self._backend.servant
+
+        rows = await servant.range(
+            table_ref, index_name, left, right, limit, desc, RowFormat.TYPED_DICT
         )
 
         # 如果是rls权限，需要对每行数据进行权限判断
-        if table.component_cls.is_rls():
-            rows = [row for row in rows if self._has_row_permission(table, ctx, row)]
+        if table_ref.comp_cls.is_rls():
+            rows = [
+                row for row in rows if self._has_row_permission(table_ref, ctx, row)
+            ]
 
         if not force and len(rows) == 0:
             return None, rows
 
-        sub_id = self._make_query_str(table, index_name, left, right, limit, desc)
+        sub_id = self._make_query_str(table_ref, index_name, left, right, limit, desc)
         if sub_id in self._subs:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, rows
 
-        index_channel = table.channel_name(index_name=index_name)
+        index_channel = self._mq_client.index_channel(table_ref, index_name)
         await self._mq_client.subscribe(index_channel)
 
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
-            table,
+            table_ref,
             ctx,
             index_channel,
             row_ids,
@@ -318,7 +345,7 @@ class Subscriptions:
 
         # 还要订阅每行的信息，这样每行数据变更时才能收到消息
         for row_id in row_ids:
-            row_channel = table.channel_name(row_id=row_id)
+            row_channel = self._mq_client.row_channel(table_ref, row_id)
             await self._mq_client.subscribe(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)

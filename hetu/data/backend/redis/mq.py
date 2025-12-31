@@ -21,7 +21,8 @@ if TYPE_CHECKING:
     import redis.cluster
     import redis.exceptions
 
-    from hetu.data.backend.redis.client import RedisBackendClient
+    from .client import RedisBackendClient
+    from ..table import TableReference
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
@@ -33,12 +34,23 @@ class RedisMQClient(MQClient):
     本客户端直接使用redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
     """
 
+    def index_channel(self, table_ref: TableReference, index_name: str):
+        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        c = self._client
+        return f"__keyspace@{c.dbi}__:{c.index_key(table_ref, index_name)}"
+
+    def row_channel(self, table_ref: TableReference, row_id: int):
+        """返回行数据的频道名。如果行有变动，会通知到该频道"""
+        c = self._client
+        return f"__keyspace@{c.dbi}__:{c.row_key(table_ref, row_id)}"
+
     def __init__(self, client: RedisBackendClient):
         # todo 要测试redis cluster是否能正常pub sub
         # 2种模式：
         # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
         # 这里采用a方式
+        self._client = client
         self.clustering = client.clustering
         if self.clustering:
             # redis-py库 cluster模式的pubsub不支持异步，考虑以后换valkey库试试看
@@ -58,7 +70,7 @@ class RedisMQClient(MQClient):
             return await self._amq.aclose()
 
     async def subscribe(self, channel_name) -> None:
-        """订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
+        """订阅频道，频道名通过 mq_client.xxx_channel(table_ref) 获得"""
         if self.clustering:
             self._smq.subscribe(channel_name)
         else:
@@ -71,7 +83,7 @@ class RedisMQClient(MQClient):
             )
 
     async def unsubscribe(self, channel_name) -> None:
-        """取消订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
+        """取消订阅频道，频道名通过 mq_client.xxx_channel(table_ref) 获得"""
         if self.clustering:
             self._smq.unsubscribe(channel_name)
         else:

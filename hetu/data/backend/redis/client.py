@@ -402,7 +402,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回无类型的原始数据 (dict[str, str])
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型。
-                此方法性能低于 `RowFormat.STRUCT` 。
+                此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
         """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
@@ -567,7 +567,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回无类型的原始数据 (dict[str, str]) 的列表，如果没有查询到数据，返回空list
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
-                此方法性能低于 `RowFormat.STRUCT` 。
+                此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
             - RowFormat.ID_LIST
                 返回查询到的 row id 列表，如果没有查询到数据，返回空list
 

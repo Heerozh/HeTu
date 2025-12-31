@@ -15,12 +15,12 @@ from typing import TYPE_CHECKING, Any, Callable, cast, overload
 
 import numpy as np
 
-from hetu.data.backend.table import TableReference
+if TYPE_CHECKING:
+    from .backend.table import TableReference
 
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
 from ..common.snowflake_id import SnowflakeID
-
 
 logger = logging.getLogger("HeTu.root")
 SNOWFLAKE_ID = SnowflakeID()
