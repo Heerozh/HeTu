@@ -133,7 +133,7 @@ class RedisTableMaintenance(TableMaintenance):
             io = self.client.io
             old_keys = io.keys(
                 old_prefix + ":*",
-                target_nodes=RedisCluster.ALL_NODES,
+                target_nodes=RedisCluster.PRIMARIES,
             )
             old_keys = cast(list[str], old_keys)
             for old_key in old_keys:
@@ -194,7 +194,7 @@ class RedisTableMaintenance(TableMaintenance):
             io = self.client.io
             keys = io.keys(
                 self.client.cluster_prefix(table_ref) + ":*",
-                target_nodes=RedisCluster.ALL_NODES,
+                target_nodes=RedisCluster.PRIMARIES,
             )
             keys = cast(list[str], keys)
             props = dict(table_ref.comp_cls.properties_)
@@ -247,7 +247,7 @@ class RedisTableMaintenance(TableMaintenance):
             with self.lock:
                 del_keys = io.keys(
                     self.client.table_prefix(table_ref) + ":*",
-                    target_nodes=RedisCluster.ALL_NODES,
+                    target_nodes=RedisCluster.PRIMARIES,
                 )
                 del_keys = cast(list[str], del_keys)
                 for batch in batched(del_keys, 1000):
@@ -270,7 +270,7 @@ class RedisTableMaintenance(TableMaintenance):
             io = self.client.io
             keys = io.keys(
                 self.client.table_prefix(table_ref) + ":*",
-                target_nodes=RedisCluster.ALL_NODES,
+                target_nodes=RedisCluster.PRIMARIES,
             )
             keys = cast(list[str], keys)
             if len(keys) == 0:

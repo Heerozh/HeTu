@@ -4,9 +4,9 @@ from typing import AsyncGenerator
 
 import pytest
 
+from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, Subscriptions
 from hetu.data.backend.sub import IndexSubscription, RowSubscription
-from hetu.common.snowflake_id import SnowflakeID
 
 SnowflakeID().init(1, 0)
 
@@ -116,8 +116,8 @@ async def test_redis_notify_configuration(mod_redis_backend):
     assert all(flag in replica_flags for flag in list("Kghz"))
 
 
-async def test_subscribe_select(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
-    # 测试select订阅的返回值，和订阅管理器的私有值是否正常
+async def test_subscribe_get(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
+    """测试get订阅的返回值，和订阅管理器的私有值是否正常"""
     sub_id, row = await sub_mgr.subscribe_get(
         filled_item_ref, admin_ctx, "name", "Itm10"
     )
@@ -131,8 +131,8 @@ async def test_subscribe_select(sub_mgr: Subscriptions, filled_item_ref, admin_c
     assert len(sub_mgr._mq_client.subscribed_channels) == 1
 
 
-async def test_subscribe_query(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
-    # 测试query订阅的返回值，和订阅管理器的私有值是否正常
+async def test_subscribe_range(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
+    """测试range订阅的返回值，和订阅管理器的私有值是否正常"""
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
@@ -171,27 +171,30 @@ async def test_subscribe_query(sub_mgr: Subscriptions, filled_item_ref, admin_ct
 
 
 async def test_subscribe_mq_merge_message(
-    sub_mgr, filled_item_table, admin_ctx, background_mq_puller_task
+    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
+    """测试订阅时，mq消息的合批功能"""
     backend = sub_mgr._backend
     mq = sub_mgr._mq_client
 
-    sub_row, _ = await sub_mgr.subscribe_select(
-        filled_item_table, admin_ctx, "Itm10", "name"
+    sub_row, _ = await sub_mgr.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
     )
 
     # 测试mq，2次消息应该只能获得1次合并的
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.qty = 998
-        await tbl.update(1, row)
+        await select.update(row)
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.qty = 997
-        await tbl.update(1, row)
+        await select.update(row)
     await backend.wait_for_synced()
 
     # mq.get_message必须要后台puller任务在跑，否则消息无法获取

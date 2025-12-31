@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 import msgpack
 import numpy as np
 import redis
+from redis.cluster import LoadBalancingStrategy
 
 from ..base import BackendClient, RaceCondition, RowFormat
 
@@ -187,8 +188,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
         ] = []
         for url in self.urls:
             if self.clustering:
-                self._ios.append(redis.cluster.RedisCluster.from_url(url))
-                self._async_ios.append(redis.asyncio.cluster.RedisCluster.from_url(url))
+                load_balancing_strategy = None  # 不从任何replica读取
+                if is_servant:  # 只从replica读取
+                    load_balancing_strategy = LoadBalancingStrategy.ROUND_ROBIN_REPLICAS
+                io = redis.cluster.RedisCluster.from_url(
+                    url, load_balancing_strategy=load_balancing_strategy
+                )
+                aio = redis.asyncio.cluster.RedisCluster.from_url(
+                    url, load_balancing_strategy=load_balancing_strategy
+                )
+                self._ios.append(io)
+                self._async_ios.append(aio)
             else:
                 self._ios.append(redis.Redis.from_url(url))
                 self._async_ios.append(redis.asyncio.Redis.from_url(url))
