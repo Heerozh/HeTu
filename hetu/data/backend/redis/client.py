@@ -785,5 +785,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """获取消息队列连接"""
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
+        from .mq import RedisMQClient
 
         return RedisMQClient(self)

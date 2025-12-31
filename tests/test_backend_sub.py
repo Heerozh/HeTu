@@ -1,12 +1,18 @@
 import logging
-import pytest
 import time
-from hetu.data.backend import Backend
-from hetu.data.backend.sub import RowSubscription
+from typing import AsyncGenerator
+
+import pytest
+
+from hetu.data.backend import Backend, Subscriptions
+from hetu.data.backend.sub import IndexSubscription, RowSubscription
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
 
 
 @pytest.fixture
-async def sub_mgr(mod_auto_backend):
+async def sub_mgr(mod_auto_backend) -> AsyncGenerator[Subscriptions]:
     """初始化订阅管理器的fixture"""
     from hetu.data.backend import Subscriptions
 
@@ -110,44 +116,56 @@ async def test_redis_notify_configuration(mod_redis_backend):
     assert all(flag in replica_flags for flag in list("Kghz"))
 
 
-async def test_subscribe_select(sub_mgr, filled_item_table, admin_ctx):
+async def test_subscribe_select(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
     # 测试select订阅的返回值，和订阅管理器的私有值是否正常
-    sub_id, row = await sub_mgr.subscribe_select(
-        filled_item_table, admin_ctx, "Itm10", "name"
+    sub_id, row = await sub_mgr.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
     )
+    assert row
     assert row["time"] == 110
     assert sub_id, "Item.id[1:None:1][:1]"
-    assert sub_mgr._subs[sub_id].row_id == 1
+
+    row_sub = sub_mgr._subs[sub_id]
+    assert type(row_sub) is RowSubscription
+    assert row_sub.row_id == row["id"]
     assert len(sub_mgr._mq_client.subscribed_channels) == 1
 
 
-async def test_subscribe_query(sub_mgr, filled_item_table, admin_ctx):
+async def test_subscribe_query(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
     # 测试query订阅的返回值，和订阅管理器的私有值是否正常
-    sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, limit=33
+    sub_id, rows = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
     assert len(rows) == 25
     assert sub_id == "Item.owner[10:None:1][:33]"
     assert len(sub_mgr._subs[sub_id].channels) == 25 + 1  # 加1 index channel
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25
-    assert sub_mgr._subs[sub_id].last_query == {i for i in range(1, 26)}
-    first_row_channel = next(iter(sorted(sub_mgr._subs[sub_id].channels)))
-    assert sub_mgr._subs[sub_id].row_subs[first_row_channel].row_id == 1
+
+    idx_sub = sub_mgr._subs[sub_id]
+    assert type(idx_sub) is IndexSubscription
+
+    assert len(idx_sub.row_subs) == 25
+    assert idx_sub.last_range_result == {row["id"] for row in rows}
+    first_row_channel = next(iter(sorted(idx_sub.channels)))
+    assert idx_sub.row_subs[first_row_channel].row_id == rows[0]["id"]
     assert len(sub_mgr._mq_client.subscribed_channels) == 26
 
     # 换个范围测试, owner只有10, 应该能查询到
-    sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, right=11, limit=44
+    sub_id, rows = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
     assert len(rows) == 25
     assert sub_id == "Item.owner[10:11:1][:44]"
 
-    # 查询超出范围的订阅
-    sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 11, right=12, limit=55
+    # 查询超出范围的订阅，因为默认force开，所以依然有sub_id
+    sub_id, rows = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
     assert len(rows) == 0
-    assert len(sub_mgr._subs[sub_id].row_subs) == 0
+    assert sub_id
+    idx_sub = sub_mgr._subs[sub_id]
+    assert type(idx_sub) is IndexSubscription
+
+    assert len(idx_sub.row_subs) == 0
     assert sub_id == "Item.owner[11:12:1][:55]"
     assert len(sub_mgr._mq_client.subscribed_channels) == 26
 

@@ -4,6 +4,7 @@
 #  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 #  @email: heeroz@gmail.com
 #  """
+import asyncio
 import msgpack
 import numpy as np
 
@@ -459,3 +460,41 @@ async def test_update_delete(item_ref, rls_ref, mod_auto_backend):
 
     rows2 = await client.range(rls_ref, "owner", 9, 15)
     np.testing.assert_array_equal(rows2.owner, [])
+
+
+async def test_mq_client(filled_item_ref, mod_auto_backend):
+    """测试mq client的订阅是否有效。这里只做基本的测试，更复杂的在综合测试中"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+
+    # 获取测试行
+    rows = await servant.range(filled_item_ref, "time", 110)
+    row = rows[0]
+    assert row
+
+    # 测试订阅
+    channel_name = servant.row_channel(filled_item_ref, row.id)
+    await mq.subscribe(channel_name)
+
+    # 写入数据库查看通知是否生效
+    idmap = IdentityMap()
+    idmap.add_clean(filled_item_ref, row)
+    row.qty = 9999
+    idmap.update(filled_item_ref, row)
+    await backend.master.commit(idmap)
+
+    # 拉取消息(堵塞直到收到消息)
+    try:
+        async with asyncio.timeout(0.1):
+            # 多拉几次去掉服务器刚启动多余的消息
+            await mq.pull()
+            await mq.pull()
+            await mq.pull()
+    except TimeoutError:
+        pass
+
+    async with asyncio.timeout(0.1):
+        messages = await mq.get_message()
+
+    assert channel_name.encode() in messages

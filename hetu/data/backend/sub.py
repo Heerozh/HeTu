@@ -98,7 +98,7 @@ class IndexSubscription(BaseSubscription):
         servant: BackendClient,
         ctx: Context,
         index_channel: str,
-        last_query,
+        last_range_result,
         query_param: dict,
     ):
         self.table_ref = table_ref
@@ -110,7 +110,7 @@ class IndexSubscription(BaseSubscription):
         self.index_channel = index_channel
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
-        self.last_query = last_query
+        self.last_range_result = last_range_result
 
     def add_row_subscriber(self, channel, row_id):
         self.row_subs[channel] = RowSubscription(
@@ -132,16 +132,16 @@ class IndexSubscription(BaseSubscription):
                 ref, **self.query_param, row_format=RowFormat.ID_LIST
             )
             row_ids = set(row_ids)
-            inserts = row_ids - self.last_query
-            deletes = self.last_query - row_ids
-            self.last_query = row_ids
+            inserts = row_ids - self.last_range_result
+            deletes = self.last_range_result - row_ids
+            self.last_range_result = row_ids
             new_chans = set()
             rem_chans = set()
             rtn = {}
             for row_id in inserts:
                 row = await servant.get(ref, row_id, row_format=RowFormat.TYPED_DICT)
                 if row is None:
-                    self.last_query.remove(row_id)
+                    self.last_range_result.remove(row_id)
                     continue  # 可能是刚添加就删了
                 else:
                     ctx = self.rls_ctx
@@ -318,7 +318,7 @@ class Subscriptions:
         --------
         sub_id: str | None
             订阅id，后续通过该id获取更新。如果无整表权限，返回None。
-            如果未查询到数据，返回None，除非force参数为True。
+            如果force为False，未查询到数据时，也会返回None。
         rows: list[dict[str, Any]]
             订阅的多行数据，如果未查询到数据，返回空列表。
 
