@@ -6,33 +6,25 @@
 #  """
 
 import asyncio
-import itertools
 import logging
-import random
-import struct
-from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
+import time
+from typing import TYPE_CHECKING
 
-# from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
-import msgpack
-import numpy as np
 import redis
 
-
-from ..base import MQClient
 from ....common.multimap import MultiMap
+from ..base import MQClient
 
 if TYPE_CHECKING:
     import redis.asyncio
     import redis.asyncio.cluster
     import redis.cluster
     import redis.exceptions
+
     from hetu.data.backend.redis.client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
-
-import time
 
 
 class RedisMQClient(MQClient):
@@ -46,18 +38,31 @@ class RedisMQClient(MQClient):
         # 2种模式：
         # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
-        self._mq = client.aio.pubsub()  # todo cluster模式的pubsub不支持异步，且调用方法不一样，考虑以后换valkey库试试看
-        #                                                   cluster的api是ssubscribe(channel_names), get_sha
+        # 这里采用a方式
+        self.clustering = client.clustering
+        if self.clustering:
+            # redis-py库 cluster模式的pubsub不支持异步，考虑以后换valkey库试试看
+            self._smq = client.io.pubsub()
+        else:
+            assert isinstance(client.aio, redis.asyncio.Redis)  # for typing check
+            self._amq = client.aio.pubsub()
+
         self.subscribed = set()
         self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
         self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重
 
     async def close(self):
-        return await self._mq.aclose()
+        if self.clustering:
+            return self._smq.close()
+        else:
+            return await self._amq.aclose()
 
     async def subscribe(self, channel_name) -> None:
         """订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
-        await self._mq.subscribe(channel_name)
+        if self.clustering:
+            self._smq.subscribe(channel_name)
+        else:
+            await self._amq.subscribe(channel_name)
         self.subscribed.add(channel_name)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
@@ -67,7 +72,10 @@ class RedisMQClient(MQClient):
 
     async def unsubscribe(self, channel_name) -> None:
         """取消订阅频道，频道名通过 mq_client.channel_name(table_ref) 获得"""
-        await self._mq.unsubscribe(channel_name)
+        if self.clustering:
+            self._smq.unsubscribe(channel_name)
+        else:
+            await self._amq.unsubscribe(channel_name)
         self.subscribed.remove(channel_name)
 
     async def pull(self) -> None:
@@ -83,15 +91,20 @@ class RedisMQClient(MQClient):
         * pull下来的消息会合批（重复消息合并）
         * 超过2分钟前的消息会被丢弃，防止堆积
         """
-        mq = self._mq
 
         # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
-        if mq.connection is None:
+        if self._smq.connection is None:
             await asyncio.sleep(0.5)  # 不写协程就死锁了
             return
 
         # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
-        msg = await mq.get_message(ignore_subscribe_messages=True, timeout=None)
+        if self.clustering:
+            msg = self._smq.get_message(ignore_subscribe_messages=True, timeout=None)  # type: ignore
+        else:
+            msg = await self._amq.get_message(
+                ignore_subscribe_messages=True, timeout=None
+            )
+
         if msg is not None:
             channel_name = msg["channel"]
             logger.debug(f"🔔 [💾Redis] 收到订阅更新通知: {channel_name}")
@@ -137,4 +150,7 @@ class RedisMQClient(MQClient):
     @property
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的所有频道名"""
-        return set(self._mq.channels) - set(self._mq.pending_unsubscribe_channels)
+        if self.clustering:
+            return set(self._smq.channels) - set(self._smq.pending_unsubscribe_channels)
+        else:
+            return set(self._amq.channels) - set(self._amq.pending_unsubscribe_channels)

@@ -245,7 +245,6 @@ class RedisTableMaintenance(TableMaintenance):
             )
 
             with self.lock:
-                # todo cluster 下keys不能正常工作，只返回当前节点的
                 del_keys = io.keys(
                     self.client.table_prefix(table_ref) + ":*",
                     target_nodes=RedisCluster.ALL_NODES,
