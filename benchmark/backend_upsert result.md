@@ -161,36 +161,6 @@ Return Value Distribution Statistics:
 
 ## 阿里云 tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 3读写分离 默认设置
 
-此项压测机ecs.c8a.4xlarge 32核 CPU跑满了，master CPU 28%，2个只读各6%, 未测出最佳性能
-
-Calls Per Minute (CPM) Statistics:
-
-| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
-|:-----------------------|:---------|:----------|:----------|:----------|:----------|:---------|
-| benchmark_redis_upsert | 760,650  | 1,735,729 | 1,735,225 | 1,735,164 | 1,736,298 | 886,241  |
-
-Average CPS (Calls Per Second) per Function:
-
-|                        | CPS       |
-|:-----------------------|:----------|
-| benchmark_redis_upsert | 28,926.55 |
-
-Function Execution Time Statistics:
-
-|                        | Mean |  k50 |   k90 |   k99 | Count     |  Min |    Max | Median |
-|:-----------------------|-----:|-----:|------:|------:|:----------|-----:|-------:|-------:|
-| benchmark_redis_upsert |  6.7 | 7.14 | 11.41 | 16.05 | 8,589,307 | 1.07 | 321.18 |   7.14 |
-
-Return Value Distribution Statistics:
-
-|    | benchmark              | return_value |   count | percentage |
-|---:|:-----------------------|-------------:|--------:|-----------:|
-|  0 | benchmark_redis_upsert |            1 | 8509092 |      99.07 |
-| 11 | benchmark_redis_upsert |            2 |   52618 |       0.61 |
-| 22 | benchmark_redis_upsert |            3 |   11791 |       0.14 |
-| 33 | benchmark_redis_upsert |            4 |    5611 |       0.07 |
-| 42 | benchmark_redis_upsert |            5 |    3155 |       0.04 |
-
 此项压测机ecs.c8a.16xlarge 64核 CPU 36%，master CPU 33%，2个只读各9%
 Running with 128 workers, 1 tasks per worker, for 5 minute(s)
 
