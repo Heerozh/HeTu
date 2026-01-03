@@ -7,10 +7,8 @@
 
 import asyncio
 import logging
-import redis
-from redis.asyncio.cluster import RedisCluster
-from redis.asyncio import Redis
-from redis.exceptions import RedisError, ConnectionError
+from redis.asyncio.cluster import RedisCluster, ClusterNode
+from redis.asyncio.client import Redis, PubSub
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -23,7 +21,7 @@ logger = logging.getLogger(__name__)
 class AsyncKeyspacePubSub:
     """
     由于redis-py对cluster的pubsub支持很差，自行实现一个async的集群pubsub。
-    通过Key的slot，去对应的Node订阅频道，因此不支持pattern订阅。
+    通过Key的slot，去对应的Node订阅频道，不支持pattern订阅。
     * 自动总集所有Node的消息
     * 支持拓扑更新，自动跟随cluster的更改，不过有几秒延迟。
     """
@@ -43,55 +41,25 @@ class AsyncKeyspacePubSub:
         self.is_cluster = isinstance(client, RedisCluster)
 
         # 存储每个节点的独立 Client 和 PubSub
-        # Key: 节点标识 (host:port 或 node_id), Value: {'client': Redis, 'pubsub': PubSub}
+        # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
+        # 上次的集群槽位映射字符串，用于检测变化
+        self.last_cluster_slots = ""
 
         # 统一的消息队列
         self.message_queue = asyncio.Queue()
 
         # 运行状态
-        self._running = False
         self._tasks: list[asyncio.Task] = []
 
-    async def connect(self):
-        """
-        初始化连接：
-        如果是 Cluster，遍历所有 Primary 节点建立独立连接。
-        如果是 Standalone，复用当前连接。
-        """
-        if self.is_cluster:
-            # 获取所有 Primary 节点 (通常通知产生于 Master)
-            # 注意：get_primaries() 返回的是 ClusterNode 对象
-            nodes = self.main_client.get_primaries()
+        self.reset()
 
-            # 获取原始连接参数 (password, encoding, decode_responses etc.)
-            # 以此确保连接子节点时配置一致
-            connection_kwargs = (
-                self.main_client.connection_pool.connection_kwargs.copy()
-            )
+    def reset(self):
+        # 清理连接
+        self.node_resources = {}
 
-            for node in nodes:
-                node_key = f"{node.host}:{node.port}"
-                logger.info(f"Creating standalone connection for node: {node_key}")
-
-                # 为每个节点创建一个 Standalone 的 Redis Client
-                # 覆盖 host 和 port
-                kwargs = connection_kwargs.copy()
-                kwargs.update({"host": node.host, "port": node.port})
-
-                # 如果是 Cluster 模式下的 redis-py，有些参数可能需要清理，比如 'path' 用于 unix socket
-                if "path" in kwargs:
-                    del kwargs["path"]
-
-                r_client = Redis(**kwargs)
-                pubsub = r_client.pubsub()
-
-                self.node_resources[node_key] = {
-                    "client": r_client,
-                    "pubsub": pubsub,
-                    "node_obj": node,  # 保存 ClusterNode 对象用于后续匹配
-                }
-        else:
+        if not self.is_cluster:
+            assert isinstance(self.main_client, Redis)
             # Standalone 模式
             logger.info("Setup standalone PubSub")
             pubsub = self.main_client.pubsub()
@@ -100,51 +68,54 @@ class AsyncKeyspacePubSub:
                 "pubsub": pubsub,
             }
 
+    def cluster_connect(self, node: ClusterNode):
+        """
+        获取cluster node的独立连接和pubsub
+        """
+        node_key = node.name
+        logger.info(f"Creating standalone connection for node: {node_key}")
+
+        node.acquire_connection()
+        # 为每个节点创建一个 Standalone 的 Redis Client
+        connection_kwargs = node.connection_kwargs.copy()
+        # 如果是 Cluster 模式下的 redis-py，有些参数可能需要清理，比如 'path' 用于 unix socket
+        if "path" in connection_kwargs:
+            del connection_kwargs["path"]
+
+        # 这会导致每个mq client拥有自己独立的连接pool，问题不打因为订阅就是每个用户一个连接
+        r_client = Redis(**connection_kwargs)
+        pubsub = r_client.pubsub()
+
+        self.node_resources[node_key] = {
+            "client": r_client,
+            "pubsub": pubsub,
+        }
+
     async def subscribe(self, channel: str):
         """
         精确订阅。根据 Channel 中的 Key 计算 Slot，路由到指定 Node 的 PubSub。
         Channel 格式预期: __keyspace@<db>__:<keyname>
         """
-        if not self.node_resources:
-            raise RuntimeError("Please call connect() before subscribing.")
-
         target_node_key = "standalone"
 
         if self.is_cluster:
-            # 1. 解析 Key
-            # 格式通常是: __keyspace@0__:my_key
-            # 我们需要提取 'my_key' 来计算 slot
-            key_match = re.search(r"__key.*__:(.*)", channel)
-            if not key_match:
-                logger.warning(
-                    f"Could not extract key from channel: {channel}, broadcasting to all (fallback)."
-                )
-                # 如果无法解析 key (比如直接订阅了非 keyspace 频道)，由于无法确定节点，
-                # 这里的策略由你决定：报错 或者 对所有节点订阅。
-                # 针对你的需求，这里假设必须是精确 Keyspace。
-                return
-
-            key = key_match.group(1)
-
-            # 2. 计算 Slot 和目标节点
+            assert isinstance(self.main_client, RedisCluster)
+            # 计算 Slot 和目标节点
             # RedisCluster 内部有 slot 缓存
-            node = self.main_client.get_node_from_key(key)
+            node = self.main_client.get_node_from_key(channel, replica=True)
             if not node:
-                logger.error(f"Could not find node for key: {key}")
+                logger.error(f"Could not find node for channel: {channel}")
                 return
 
-            target_node_key = f"{node.host}:{node.port}"
+            target_node_key = node.name
 
             # 检查我们是否已经建立了到该节点的连接 (处理扩容或重新分片可能需要刷新，这里简化处理)
             if target_node_key not in self.node_resources:
-                # 尝试通过 cluster_nodes 重新刷新或容错，这里简单抛出
-                logger.error(f"Node {target_node_key} not initialized in our pool.")
-                return
+                self.cluster_connect(node)
 
         # 3. 执行订阅
         ps = self.node_resources[target_node_key]["pubsub"]
         await ps.subscribe(channel)
-        logger.debug(f"Subscribed to {channel} on node {target_node_key}")
 
     async def unsubscribe(self, channel: str):
         """
@@ -152,12 +123,10 @@ class AsyncKeyspacePubSub:
         """
         target_node_key = "standalone"
         if self.is_cluster:
-            key_match = re.search(r"__key.*__:(.*)", channel)
-            if key_match:
-                key = key_match.group(1)
-                node = self.main_client.get_node_from_key(key)
-                if node:
-                    target_node_key = f"{node.host}:{node.port}"
+            assert isinstance(self.main_client, RedisCluster)
+            node = self.main_client.get_node_from_key(channel, replica=True)
+            if node:
+                target_node_key = f"{node.host}:{node.port}"
 
         if target_node_key in self.node_resources:
             await self.node_resources[target_node_key]["pubsub"].unsubscribe(channel)
@@ -168,9 +137,8 @@ class AsyncKeyspacePubSub:
         启动针对所有节点的监听循环，并堵塞在这里维持运行。
         """
         if not self.node_resources:
-            await self.connect()
+            self.reset()
 
-        self._running = True
         self._tasks = []
 
         # 为每个 Node 的 PubSub 启动一个后台 Reader
@@ -178,6 +146,8 @@ class AsyncKeyspacePubSub:
             ps = res["pubsub"]
             task = asyncio.create_task(self._node_listener(node_key, ps))
             self._tasks.append(task)
+            # todo 断线则reset重新开始
+            #      每次创建新连接，则需要新增任务
 
         logger.info(f"Started internal listener tasks for {len(self._tasks)} nodes.")
 
@@ -216,7 +186,6 @@ class AsyncKeyspacePubSub:
         """
         清理资源
         """
-        self._running = False
         # 取消所有监听任务
         for t in self._tasks:
             if not t.done():
