@@ -1,9 +1,9 @@
-#  """
-#  @author: Heerozh (Zhang Jianhao)
-#  @copyright: Copyright 2024, Heerozh. All rights reserved.
-#  @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
-#  @email: heeroz@gmail.com
-#  """
+"""
+@author: Heerozh (Zhang Jianhao)
+@copyright: Copyright 2024, Heerozh. All rights reserved.
+@license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+@email: heeroz@gmail.com
+"""
 
 import asyncio
 import logging
@@ -14,6 +14,7 @@ import redis
 
 from ....common.multimap import MultiMap
 from ..base import MQClient
+from .pubsub import AsyncKeyspacePubSub
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -39,15 +40,12 @@ class RedisMQClient(MQClient):
         # 2种模式：
         # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
+        #    且这个方式如果redis维护变更了ip/集群规模等，整个服务会瘫痪，而a方式只要用户重连
         # 这里采用a方式
         self._client = client
         self.clustering = client.clustering
-        if self.clustering:
-            # redis-py库 cluster模式的pubsub不支持异步，考虑以后换valkey库试试看
-            self._smq = client.io.pubsub()
-        else:
-            assert isinstance(client.aio, redis.asyncio.Redis)  # for typing check
-            self._amq = client.aio.pubsub()
+        # redis-py库 cluster模式的pubsub不支持异步，不支持gather消息，用自己写的
+        self._mq = AsyncKeyspacePubSub(client.aio)
 
         self.subscribed = set()
         self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
@@ -55,18 +53,12 @@ class RedisMQClient(MQClient):
 
     @override
     async def close(self):
-        if self.clustering:
-            return self._smq.close()
-        else:
-            return await self._amq.aclose()
+        return self._mq.close()
 
     @override
     async def subscribe(self, channel_name) -> None:
         """订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        if self.clustering:
-            self._smq.subscribe(channel_name)
-        else:
-            await self._amq.subscribe(channel_name)
+        await self._mq.subscribe(channel_name)
         self.subscribed.add(channel_name)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
@@ -77,10 +69,7 @@ class RedisMQClient(MQClient):
     @override
     async def unsubscribe(self, channel_name) -> None:
         """取消订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        if self.clustering:
-            self._smq.unsubscribe(channel_name)
-        else:
-            await self._amq.unsubscribe(channel_name)
+        await self._mq.unsubscribe(channel_name)
         self.subscribed.remove(channel_name)
 
     @override
@@ -99,17 +88,12 @@ class RedisMQClient(MQClient):
         """
 
         # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
-        if self._smq.connection is None:
-            await asyncio.sleep(0.5)  # 不写协程就死锁了
+        if not self._mq.subscribed:
+            await asyncio.sleep(0.25)  # 不写协程就死锁了
             return
 
         # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
-        if self.clustering:
-            msg = self._smq.get_message(ignore_subscribe_messages=True, timeout=None)  # type: ignore
-        else:
-            msg = await self._amq.get_message(
-                ignore_subscribe_messages=True, timeout=None
-            )
+        msg = await self._mq.get_message()
 
         if msg is not None:
             channel_name = msg["channel"]
@@ -158,7 +142,4 @@ class RedisMQClient(MQClient):
     @override
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的所有频道名"""
-        if self.clustering:
-            return set(self._smq.channels) - set(self._smq.pending_unsubscribe_channels)
-        else:
-            return set(self._amq.channels) - set(self._amq.pending_unsubscribe_channels)
+        return self._mq.subscribed

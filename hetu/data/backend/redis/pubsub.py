@@ -51,7 +51,7 @@ class AsyncKeyspacePubSub:
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
         # 上次的集群槽位映射字符串，用于检测变化
-        self.subscribed: set[str] = set()
+        self._subscribed: set[str] = set()
 
         # 统一的消息队列
         self.message_queue: Queue[dict] = asyncio.Queue()
@@ -78,7 +78,7 @@ class AsyncKeyspacePubSub:
         }
 
         # 建立一个射后不管的task监听pubsub消息
-        task = asyncio.create_task(self._node_listener("standalone", pubsub))
+        task = asyncio.create_task(self._node_listener(pubsub))
         task.add_done_callback(partial(self._on_node_listener_done, "standalone"))
         # 如果不保存task，task不会执行会被gc
         self._tasks.add(task)
@@ -108,7 +108,7 @@ class AsyncKeyspacePubSub:
         }
 
         # 建立一个射后不管的task监听pubsub消息
-        task = asyncio.create_task(self._node_listener(node_key, pubsub))
+        task = asyncio.create_task(self._node_listener(pubsub))
         task.add_done_callback(partial(self._on_node_listener_done, node_key))
         # 如果不保存task，task不会执行会被gc
         self._tasks.add(task)
@@ -154,7 +154,10 @@ class AsyncKeyspacePubSub:
         # 3. 执行订阅
         ps = self.node_resources[target_node_key]["pubsub"]
         await ps.subscribe(channel)
-        self.subscribed.add(channel)
+
+        # todo 要等message返回了才能算订阅成功
+
+        self._subscribed.add(channel)
 
     async def unsubscribe(self, channel: str):
         """
@@ -169,18 +172,18 @@ class AsyncKeyspacePubSub:
 
         if target_node_key in self.node_resources:
             await self.node_resources[target_node_key]["pubsub"].unsubscribe(channel)
-        self.subscribed.discard(channel)
+        self._subscribed.discard(channel)
 
     async def resubscribe_all(self):
         """
         重新订阅所有频道，适用于拓扑变化后
         """
-        current_subscriptions = list(self.subscribed)
-        self.subscribed.clear()
+        current_subscriptions = list(self._subscribed)
+        self._subscribed.clear()
         for channel in current_subscriptions:
             await self.subscribe(channel)
 
-    async def _node_listener(self, node_name: str, pubsub: PubSub):
+    async def _node_listener(self, pubsub: PubSub):
         """
         单个节点的监听循环
         """
@@ -194,7 +197,7 @@ class AsyncKeyspacePubSub:
                     await self.message_queue.put(message)
 
             # 走到这里只可能是node没订阅任何频道
-            await asyncio.sleep(0.5)  # 等待订阅建立
+            await asyncio.sleep(0.25)  # 等待订阅建立
 
     def _on_node_listener_done(self, node_key, task):
         # task关闭说明链接断开了，node可能失效，移除资源。一般发生在数据库扩容/容灾。
@@ -219,6 +222,10 @@ class AsyncKeyspacePubSub:
         从内部队列获取消息，如果没有消息则堵塞等待。
         """
         return await self.message_queue.get()
+
+    @property
+    def subscribed(self):
+        return self._subscribed
 
     async def close(self):
         """
