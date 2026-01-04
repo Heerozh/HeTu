@@ -109,10 +109,12 @@ async def test_redis_notify_configuration(mod_auto_backend):
 
     assert type(master) is RedisBackendClient and type(servant) is RedisBackendClient
 
-    # 测试master不应该有通知
-    assert (
-        master.io.config_get("notify-keyspace-events")["notify-keyspace-events"] == ""  # type: ignore
-    )
+    # 测试master不应该有通知（如果有servants时）
+    if master.endpoint != servant.endpoint:
+        assert (
+            master.io.config_get("notify-keyspace-events")["notify-keyspace-events"]  # type: ignore
+            == ""
+        )
     # 测试replica应该有通知
     replica_config = await servant.aio.config_get("notify-keyspace-events")
     replica_flags = replica_config["notify-keyspace-events"]

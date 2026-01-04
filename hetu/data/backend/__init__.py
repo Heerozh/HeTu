@@ -54,12 +54,17 @@ class Backend:
         config为配置BACKENDS[i]内容。
         """
         clustering = config.get("clustering", False)
+        # 如果未填写servants，则将master也作为servant使用(为了api统一)
+        servants_urls = config.get("servants", [])
+        if not servants_urls:
+            servants_urls.append(config["master"])
+        # 连接数据库
         self._master = BackendClientFactory.create(
             config["type"], config["master"], clustering, False
         )
         self._servants = [
             BackendClientFactory.create(config["type"], servant, clustering, True)
-            for servant in config.get("servants", [])
+            for servant in servants_urls
         ]
         # master_weight表示选中的权重，每台副本数据库权重固定为1.0
         #   如果master任务不繁重，理论上提高此值可以降低事务冲突概率，因为从副本读取的值可能落后。
@@ -105,8 +110,6 @@ class Backend:
     @property
     def servant(self) -> BackendClient:
         """返回一个从数据库连接，随机选择。如果没有从数据库，则返回主数据库。"""
-        if not self._servants:
-            return self._master
         return random.choice(self._servants)
 
     @property
