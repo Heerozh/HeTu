@@ -5,11 +5,18 @@
 @email: heeroz@gmail.com
 """
 
+from asyncio.queues import Queue
+
+
 import asyncio
 import logging
-from redis.asyncio.cluster import RedisCluster, ClusterNode
-from redis.asyncio.client import Redis, PubSub
+from functools import partial
 from typing import TYPE_CHECKING
+
+from redis.asyncio.client import PubSub, Redis
+from redis.asyncio.cluster import ClusterNode, RedisCluster
+from redis.cluster import LoadBalancingStrategy
+from redis.exceptions import SlotNotCoveredError
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -44,35 +51,44 @@ class AsyncKeyspacePubSub:
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
         # 上次的集群槽位映射字符串，用于检测变化
-        self.last_cluster_slots = ""
+        self.subscribed: set[str] = set()
 
         # 统一的消息队列
-        self.message_queue = asyncio.Queue()
+        self.message_queue: Queue[dict] = asyncio.Queue()
 
         # 运行状态
-        self._tasks: list[asyncio.Task] = []
+        self._tasks: set[asyncio.Task] = set()
+        self._resubscribe_task = None
 
-        self.reset()
-
-    def reset(self):
-        # 清理连接
         self.node_resources = {}
 
-        if not self.is_cluster:
-            assert isinstance(self.main_client, Redis)
-            # Standalone 模式
-            logger.info("Setup standalone PubSub")
-            pubsub = self.main_client.pubsub()
-            self.node_resources["standalone"] = {
-                "client": self.main_client,
-                "pubsub": pubsub,
-            }
+    def standalone_connect(self):
+        """
+        获取standalone的独立连接和pubsub
+        """
+        assert isinstance(self.main_client, Redis)
+        assert "standalone" not in self.node_resources
+
+        logger.info("Setup standalone PubSub")
+
+        pubsub = self.main_client.pubsub()
+        self.node_resources["standalone"] = {
+            "client": self.main_client,
+            "pubsub": pubsub,
+        }
+
+        # 建立一个射后不管的task监听pubsub消息
+        task = asyncio.create_task(self._node_listener("standalone", pubsub))
+        task.add_done_callback(partial(self._on_node_listener_done, "standalone"))
+        # 如果不保存task，task不会执行会被gc
+        self._tasks.add(task)
 
     def cluster_connect(self, node: ClusterNode):
         """
         获取cluster node的独立连接和pubsub
         """
         node_key = node.name
+        assert node_key not in self.node_resources
         logger.info(f"Creating standalone connection for node: {node_key}")
 
         node.acquire_connection()
@@ -82,7 +98,7 @@ class AsyncKeyspacePubSub:
         if "path" in connection_kwargs:
             del connection_kwargs["path"]
 
-        # 这会导致每个mq client拥有自己独立的连接pool，问题不打因为订阅就是每个用户一个连接
+        # 这会导致每个mq client拥有自己独立的连接pool，问题不大因为订阅就是每个用户一个连接
         r_client = Redis(**connection_kwargs)
         pubsub = r_client.pubsub()
 
@@ -90,6 +106,12 @@ class AsyncKeyspacePubSub:
             "client": r_client,
             "pubsub": pubsub,
         }
+
+        # 建立一个射后不管的task监听pubsub消息
+        task = asyncio.create_task(self._node_listener(node_key, pubsub))
+        task.add_done_callback(partial(self._on_node_listener_done, node_key))
+        # 如果不保存task，task不会执行会被gc
+        self._tasks.add(task)
 
     async def subscribe(self, channel: str):
         """
@@ -100,22 +122,39 @@ class AsyncKeyspacePubSub:
 
         if self.is_cluster:
             assert isinstance(self.main_client, RedisCluster)
-            # 计算 Slot 和目标节点
-            # RedisCluster 内部有 slot 缓存
-            node = self.main_client.get_node_from_key(channel, replica=True)
+            # 计算 Slot 和目标节点，如果找不到，说明node变更了，需要刷新拓扑
+            slot = self.main_client.keyslot(channel)
+            try:
+                node = self.main_client.nodes_manager.get_node_from_slot(
+                    slot,
+                    load_balancing_strategy=LoadBalancingStrategy.ROUND_ROBIN_REPLICAS,
+                )
+            # 加KeyError是因为redis-py库的bug，没捕捉这个
+            except (KeyError, SlotNotCoveredError):
+                # 如果slot不在覆盖范围内，强制刷新一次拓扑
+                await asyncio.sleep(0.25)
+                await self.main_client.nodes_manager.initialize()
+                node = self.main_client.nodes_manager.get_node_from_slot(
+                    slot,
+                    load_balancing_strategy=LoadBalancingStrategy.ROUND_ROBIN_REPLICAS,
+                )
+
             if not node:
-                logger.error(f"Could not find node for channel: {channel}")
-                return
+                raise RuntimeError(f"Could not find node for channel: {channel}")
 
             target_node_key = node.name
 
-            # 检查我们是否已经建立了到该节点的连接 (处理扩容或重新分片可能需要刷新，这里简化处理)
+            # 检查我们是否已经建立了到该节点的连接
             if target_node_key not in self.node_resources:
                 self.cluster_connect(node)
+        else:
+            if target_node_key not in self.node_resources:
+                self.standalone_connect()
 
         # 3. 执行订阅
         ps = self.node_resources[target_node_key]["pubsub"]
         await ps.subscribe(channel)
+        self.subscribed.add(channel)
 
     async def unsubscribe(self, channel: str):
         """
@@ -130,51 +169,50 @@ class AsyncKeyspacePubSub:
 
         if target_node_key in self.node_resources:
             await self.node_resources[target_node_key]["pubsub"].unsubscribe(channel)
+        self.subscribed.discard(channel)
 
-    async def internal_task(self):
+    async def resubscribe_all(self):
         """
-        外部调用的主任务。
-        启动针对所有节点的监听循环，并堵塞在这里维持运行。
+        重新订阅所有频道，适用于拓扑变化后
         """
-        if not self.node_resources:
-            self.reset()
-
-        self._tasks = []
-
-        # 为每个 Node 的 PubSub 启动一个后台 Reader
-        for node_key, res in self.node_resources.items():
-            ps = res["pubsub"]
-            task = asyncio.create_task(self._node_listener(node_key, ps))
-            self._tasks.append(task)
-            # todo 断线则reset重新开始
-            #      每次创建新连接，则需要新增任务
-
-        logger.info(f"Started internal listener tasks for {len(self._tasks)} nodes.")
-
-        try:
-            # 聚合所有任务，只要有一个报错或全部结束才返回
-            await asyncio.gather(*self._tasks)
-        except asyncio.CancelledError:
-            logger.info("Internal task cancelled.")
-        finally:
-            await self.close()
+        current_subscriptions = list(self.subscribed)
+        self.subscribed.clear()
+        for channel in current_subscriptions:
+            await self.subscribe(channel)
 
     async def _node_listener(self, node_name: str, pubsub: PubSub):
         """
         单个节点的监听循环
         """
-        try:
-            # ignore_subscribe_messages=True 可以过滤掉订阅成功的 ack 消息，
-            # 如果你需要确认订阅成功，可以设为 False，然后在 get_message 里处理
+        while True:
             async for message in pubsub.listen():
                 if message:
-                    # 可以在这里注入 node 信息，方便调试
-                    # message['node'] = node_name
+                    # 可以在这里注入任意信息到message
+                    if message["type"] != "message":  # ignore_subscribe_messages
+                        # this is a subscribe/unsubscribe message. ignore
+                        continue
                     await self.message_queue.put(message)
+
+            # 走到这里只可能是node没订阅任何频道
+            await asyncio.sleep(0.5)  # 等待订阅建立
+
+    def _on_node_listener_done(self, node_key, task):
+        # task关闭说明链接断开了，node可能失效，移除资源。一般发生在数据库扩容/容灾。
+        self._tasks.discard(task)
+        try:
+            # 获取结果，如果有异常会在这里重新抛出
+            task.result()
+            return  # 不应该走到这里
+        except asyncio.CancelledError:
+            # 正常取消
+            return
         except Exception as e:
-            logger.error(f"Listener error on node {node_name}: {e}")
-            # 这里可以添加重连逻辑，或者直接让 task 结束触发整体异常
-            raise e
+            logger.error(f"Listener error on node {node_key}: {e}")
+            # 断线处理
+            if node_key in self.node_resources:
+                del self.node_resources[node_key]
+            # 灾难恢复逻辑。如果不保存task，task不会执行会被gc
+            self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
 
     async def get_message(self):
         """
@@ -186,16 +224,18 @@ class AsyncKeyspacePubSub:
         """
         清理资源
         """
-        # 取消所有监听任务
-        for t in self._tasks:
-            if not t.done():
-                t.cancel()
-
-        # 关闭所有 PubSub 和 Client
+        # 先关闭所有 PubSub 和 Client
         for res in self.node_resources.values():
             await res["pubsub"].close()
             # 只有 Cluster 模式下创建了额外的 Client，需要关闭
             if self.is_cluster:
                 await res["client"].aclose()
+
+        # 取消所有监听任务
+        for t in self._tasks:
+            if not t.done():
+                t.cancel()
+
+        self.node_resources = {}
 
         logger.info("Resources closed.")

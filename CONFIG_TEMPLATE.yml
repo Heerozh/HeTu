@@ -82,7 +82,7 @@ BACKENDS:
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
     master: redis://127.0.0.1:6379/0
-    # 指出Redis后端是原生集群模式，不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
+    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
     # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的session定义，计算数据
     # 隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
@@ -92,7 +92,7 @@ BACKENDS:
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。
     # Redis:
     #  - redis下，servant就是只读replica服务器
-    #  - redis原生集群模式下servants可填写一行和master一样的地址，因为原生集群没有单独的replica地址。
+    #  - 开启redis原生集群模式的无需填写此项，可自动生效，因为原生集群会自动加载replica地址
     #  - 开启redis proxy代理层的无法填写此项，因为读写分离已经由proxy负责
     servants: [ ]
     # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库事务读负载
