@@ -8,10 +8,12 @@
 import numpy as np
 import pytest
 from typing import Callable
+from redis.asyncio.cluster import RedisCluster
 
-from hetu.data.backend import UniqueViolation, Backend
+from hetu.data.backend import RedisBackendClient, UniqueViolation, Backend
 from hetu.data.backend.session import Session
 from hetu.common.snowflake_id import SnowflakeID
+from fixtures.backends import use_redis_family_backend_only
 
 SnowflakeID().init(1, 0)
 
@@ -530,13 +532,10 @@ async def test_session_exception(item_ref, mod_auto_backend):
         assert len(row) == 0
 
 
-async def test_redis_empty_index(filled_item_ref, mod_redis_backend, backend_name):
+@use_redis_family_backend_only
+async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name):
     """测试Redis后端删除所有key后，index key应该为空"""
-    backend: Backend = mod_redis_backend()
-
-    # 因为item_ref还是会启动所有backend，所以要跳过下
-    if backend_name != "redis":
-        pytest.skip("Not a redis backend, skip")
+    backend: Backend = mod_auto_backend()
 
     # 测试更新name后再把所有key删除后index是否正常为空
     async with backend.session("pytest", 1) as session:
@@ -555,7 +554,10 @@ async def test_redis_empty_index(filled_item_ref, mod_redis_backend, backend_nam
             item_select.delete(row.id)
 
     # time.sleep(1)  # 等待部分key过期
-    assert backend.master.io.keys("pytest:Item:{CLU*") == []  # type: ignore
+    assert (
+        backend.master.io.keys("pytest:Item:{CLU*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        == []
+    )  # type: ignore
 
 
 async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):

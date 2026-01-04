@@ -1,5 +1,8 @@
 import numpy as np
 import pytest
+import time
+from fixtures.backends import use_redis_family_backend_only
+from redis.asyncio.cluster import RedisCluster
 
 
 def test_multimap():
@@ -104,14 +107,18 @@ async def test_snowflake_id(monkeypatch):
 @pytest.mark.timeout(2)
 async def test_snowflake_id_sleep(monkeypatch):
     """测试sleep"""
-    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.common.snowflake_id import SnowflakeID, TIME_ROLLBACK_TOLERANCE_MS
+
+    # Mock time
+    start_ts = 1766000000.0
+    monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts)
 
     generator = SnowflakeID()
     generator.init(worker_id=1)
 
-    start_ts = 1766000000.0 + 1000.0
+    # 加上启动需要的 TIME_ROLLBACK_TOLERANCE_MS
+    start_ts = 1766000000.0 + TIME_ROLLBACK_TOLERANCE_MS
 
-    monkeypatch.setattr("hetu.common.snowflake_id.time", lambda: start_ts)
     sleep_called = 0
 
     async def mock_sleep(_):
@@ -121,7 +128,7 @@ async def test_snowflake_id_sleep(monkeypatch):
         return
 
     monkeypatch.setattr("asyncio.sleep", mock_sleep)
-    last_id = None
+    last_id = 0
     for _ in range(4099):
         last_id = await generator.next_id_async()
 
@@ -130,18 +137,21 @@ async def test_snowflake_id_sleep(monkeypatch):
     assert last_id & 0xFFF == 2
 
 
-async def test_redis_worker_keeper(mod_redis_backend):
-    redis = mod_redis_backend()
+@use_redis_family_backend_only
+async def test_redis_worker_keeper(mod_auto_backend):
+    redis = mod_auto_backend()
     redis_client = redis.master.aio
 
     # 清空数据
-    keys_to_delete = await redis_client.keys("snowflake:*")
+    keys_to_delete = await redis_client.keys(
+        "snowflake:*", target_nodes=RedisCluster.PRIMARIES
+    )
     if keys_to_delete:
         await redis_client.delete(*keys_to_delete)
 
-    from hetu.common.snowflake_id import RedisWorkerKeeper
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
-    worker_keeper = RedisWorkerKeeper(redis.master.io, redis_client)
+    worker_keeper = RedisWorkerKeeper(0, redis.master.io, redis_client)
 
     # 测试获得id
     worker_id = worker_keeper.get_worker_id()
@@ -152,23 +162,24 @@ async def test_redis_worker_keeper(mod_redis_backend):
     assert worker_id_again == worker_id
 
     # 模拟另一个机器
-    worker_keeper.node_id += 1
-    worker_id_2 = worker_keeper.get_worker_id()
+    worker_keeper2 = RedisWorkerKeeper(1, redis.master.io, redis_client)
+    worker_id_2 = worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
     # 再次获得应该id一样
-    worker_id_again = worker_keeper.get_worker_id()
+    worker_id_again = worker_keeper2.get_worker_id()
     assert worker_id_again == worker_id_2
 
     # 测试续约
     # 手动快过期
     expire = await redis_client.expire(
-        f"{worker_keeper.worker_id_key}:{worker_id_2}", 20
+        f"{worker_keeper2.worker_id_key}:{worker_id_2}", 20
     )
     assert expire <= 20
     # 续约
-    await worker_keeper.keep_alive(123)
-    last_ts = worker_keeper.get_last_timestamp()
-    assert last_ts == 123 + 10000
-    expire = await redis_client.ttl(f"{worker_keeper.worker_id_key}:{worker_id_2}")
+    ts = int(time.time() * 1000) + 1230
+    await worker_keeper2.keep_alive(ts)
+    last_ts = worker_keeper2.get_last_timestamp()
+    assert last_ts == ts
+    expire = await redis_client.ttl(f"{worker_keeper2.worker_id_key}:{worker_id_2}")
     assert expire > 86400 - 1

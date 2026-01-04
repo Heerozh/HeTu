@@ -8,6 +8,8 @@ from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, Subscriptions
 from hetu.data.backend.sub import IndexSubscription, RowSubscription
 
+from fixtures.backends import use_redis_family_backend_only
+
 SnowflakeID().init(1, 0)
 
 
@@ -96,9 +98,10 @@ async def user_id11_ctx():
     )
 
 
-async def test_redis_notify_configuration(mod_redis_backend):
+@use_redis_family_backend_only
+async def test_redis_notify_configuration(mod_auto_backend):
     """测试redis的notify-keyspace-events配置是否正确"""
-    backend: Backend = mod_redis_backend()
+    backend: Backend = mod_auto_backend()
     servant = backend.servant
     master = backend.master
 

@@ -119,35 +119,51 @@ async def mod_redis_cluster_backend(mod_redis_cluster_service):
         await backend.close()
 
 
-@pytest.fixture(params=["redis", "valkey", "redis_cluster"], scope="module")
+REDIS_BACKENDS = ["redis", "redis_cluster"]
+REDIS_FORK_BACKENDS = ["valkey"]
+# SQL_BACKENDS = ["postgres"]
+ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS
+
+
+@pytest.fixture(params=ALL_BACKENDS, scope="module")
 def backend_name(request):
     """后端名称参数化fixture，返回当前的后端名称"""
     return request.param
+
+
+def backend_fixture_by_name(name: str, request):
+    """根据后端名称返回对应的fixture名称"""
+    if name == "redis":
+        return request.getfixturevalue("mod_redis_backend")
+    elif name == "valkey":
+        return request.getfixturevalue("mod_valkey_backend")
+    elif name == "redis_cluster":
+        return request.getfixturevalue("mod_redis_cluster_backend")
+    else:
+        raise ValueError("Unknown db type: %s" % backend_name)
 
 
 # 要测试新的backend，请添加backend到params中
 @pytest.fixture(scope="module")
 def mod_auto_backend(request, backend_name) -> Callable[..., Backend]:
     """后端工厂，根据参数返回不同后端的工厂函数"""
-    if backend_name == "redis":
-        return request.getfixturevalue("mod_redis_backend")
-    elif backend_name == "valkey":
-        return request.getfixturevalue("mod_valkey_backend")
-    elif backend_name == "redis_cluster":
-        return request.getfixturevalue("mod_redis_cluster_backend")
-    else:
-        raise ValueError("Unknown db type: %s" % backend_name)
+    return backend_fixture_by_name(backend_name, request)
 
 
 # 要测试新的backend，请添加backend到params中
 @pytest.fixture(scope="function")
 def auto_backend(request, backend_name) -> Callable[..., Backend]:
     """后端工厂，根据参数返回不同后端的工厂函数"""
-    if backend_name == "redis":
-        return request.getfixturevalue("mod_redis_backend")
-    elif backend_name == "valkey":
-        return request.getfixturevalue("mod_valkey_backend")
-    elif backend_name == "redis_cluster":
-        return request.getfixturevalue("mod_redis_cluster_backend")
-    else:
-        raise ValueError("Unknown db type: %s" % backend_name)
+    return backend_fixture_by_name(backend_name, request)
+
+
+def use_redis_backend_only(func):
+    """自定义装饰器：只使用 Redis社区版 数据库运行测试"""
+    return pytest.mark.parametrize("backend_name", REDIS_BACKENDS, indirect=True)(func)
+
+
+def use_redis_family_backend_only(func):
+    """自定义装饰器：使用 所有Redis兼容 数据库运行测试"""
+    return pytest.mark.parametrize(
+        "backend_name", REDIS_BACKENDS + REDIS_FORK_BACKENDS, indirect=True
+    )(func)
