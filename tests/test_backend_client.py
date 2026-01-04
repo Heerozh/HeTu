@@ -7,6 +7,7 @@
 import asyncio
 import msgpack
 import numpy as np
+import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RedisBackendClient, TableReference
@@ -462,6 +463,7 @@ async def test_update_delete(item_ref, rls_ref, mod_auto_backend):
     np.testing.assert_array_equal(rows2.owner, [])
 
 
+@pytest.mark.timeout(10)
 async def test_mq_client(filled_item_ref, mod_auto_backend):
     """测试mq client的订阅是否有效。这里只做基本的测试，更复杂的在综合测试中"""
     backend: Backend = mod_auto_backend()
