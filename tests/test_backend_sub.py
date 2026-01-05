@@ -317,16 +317,16 @@ async def test_row_subscribe_cache(
 
 
 async def test_cancel_subscribe(sub_mgr, filled_item_ref, admin_ctx):
-    sub_row, _ = await sub_mgr.subscribe_select(
-        filled_item_ref, admin_ctx, "Itm10", "name"
+    sub_row, _ = await sub_mgr.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
     )
-    sub_10, _ = await sub_mgr.subscribe_query(
+    sub_10, _ = await sub_mgr.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_query(
+    sub_10_11, _ = await sub_mgr.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_query(
+    sub_11_12, _ = await sub_mgr.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
@@ -363,14 +363,18 @@ async def test_subscribe_select_rls(
     sub_mgr, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id10_ctx, 1)
+    sub_id, row = await sub_mgr.subscribe_get(
+        filled_item_ref, user_id10_ctx, "time", 110
+    )
     assert sub_id is not None
 
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id11_ctx, 1)
+    sub_id, row = await sub_mgr.subscribe_get(
+        filled_item_ref, user_id11_ctx, "time", 110
+    )
     assert sub_id is None
 
 
-async def test_subscribe_query_rls(sub_mgr, filled_item_ref, user_id10_ctx):
+async def test_subscribe_range_rls(sub_mgr, filled_item_ref, user_id10_ctx):
     # 先改掉一个人的owner值
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
@@ -380,7 +384,7 @@ async def test_subscribe_query_rls(sub_mgr, filled_item_ref, user_id10_ctx):
         await tbl.update(3, row)
 
     # 测试owner query只传输owner相等的数据
-    sub_id, rows = await sub_mgr.subscribe_query(
+    sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert [row["owner"] for row in rows] == [10] * 24
@@ -409,7 +413,7 @@ async def test_query_subscribe_rls_lost(
 ):
     backend = sub_mgr._backend
 
-    sub_id, rows = await sub_mgr.subscribe_query(
+    sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
@@ -443,7 +447,7 @@ async def test_query_subscribe_rls_gain(
         row.owner = 11
         await tbl.update(4, row)
 
-    sub_id, rows = await sub_mgr.subscribe_query(
+    sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
@@ -482,7 +486,7 @@ async def test_query_subscribe_rls_lost_without_index(
     # 默认数据是owner=10, friend=11
     backend = sub_mgr._backend
 
-    sub_id, rows = await sub_mgr.subscribe_query(
+    sub_id, rows = await sub_mgr.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
@@ -527,7 +531,7 @@ async def test_query_subscribe_rls_gain_without_index(
         row.owner = 12
         await select.update(row)
 
-    sub_id, rows = await sub_mgr.subscribe_query(
+    sub_id, rows = await sub_mgr.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
