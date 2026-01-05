@@ -30,8 +30,8 @@ SNOWFLAKE_ID = SnowflakeID()
 class Property:
     default: Any  # 属性的默认值
     unique: bool = False  # 是否是字典索引 (此项优先级高于index，查询速度高)
-    index: bool | None = None  # 是否是排序索引
-    dtype: str | type | None = None  # 数据类型，最好用np的明确定义
+    index: bool = False  # 是否是排序索引
+    dtype: str | type = ""  # 数据类型，最好用np的明确定义
     # todo nullable: bool = False  # 是否允许NULL值，目前不支持
 
 
@@ -40,8 +40,10 @@ def property_field(
     default: Any,
     unique: bool = False,
     index: bool | None = None,
-    dtype: str | type | None = None,
+    dtype: str | type = "",
 ) -> Any:
+    if index is None:
+        index = unique
     return Property(default=default, unique=unique, index=index, dtype=dtype)
 
 
@@ -341,7 +343,7 @@ def define_component(
 
     def _normalize_prop(cname: str, fname: str, anno_type, prop: Property):
         # 如果未设置dtype，则用type hint
-        if prop.dtype is None:
+        if prop.dtype == "":
             prop.dtype = anno_type
         # 判断名称合法性
         if keyword.iskeyword(fname) or fname in ["bool", "int", "float", "str"]:
@@ -360,15 +362,12 @@ def define_component(
             prop.dtype = np.int8
         # 开启unique时，强制index为True
         if prop.unique:
-            if prop.index is False:
+            if not prop.index:
                 logger.warning(
                     f"⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，"
                     f"index不能设置为False。"
                 )
             prop.index = True
-        # 未设置index时，默认False
-        if prop.index is None:
-            prop.index = False
         # 判断default值必须设置
         assert prop.default is not None, (
             f"{cname}.{fname}默认值不能为None。所有属性都要有默认值，"
