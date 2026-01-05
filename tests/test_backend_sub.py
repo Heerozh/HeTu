@@ -379,16 +379,17 @@ async def test_subscribe_range_rls(sub_mgr, filled_item_ref, user_id10_ctx):
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(3)
+        row = await select.get(time=113)
+        assert row
         row.owner = 11
-        await tbl.update(3, row)
+        await select.update(row)
 
     # 测试owner query只传输owner相等的数据
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert [row["owner"] for row in rows] == [10] * 24
-    assert len(sub_mgr._subs[sub_id].row_subs) == 24
+    assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
 
 
 async def test_select_subscribe_rls_update(
@@ -401,9 +402,10 @@ async def test_select_subscribe_rls_update(
     assert row["owner"] == 10
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(3)
+        row = await select.select(time=113)
+        assert row
         row.owner = 11
-        await tbl.update(3, row)
+        await select.update(row)
     updates = await sub_mgr.get_updates()
     assert updates[sub_id]["3"] is None
 
