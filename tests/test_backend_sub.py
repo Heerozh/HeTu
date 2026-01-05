@@ -398,16 +398,19 @@ async def test_select_subscribe_rls_update(
     backend = sub_mgr._backend
 
     # 测试订阅单行，owner改变后要删除
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id10_ctx, 3)
+    sub_id, row = await sub_mgr.subscribe_get(
+        filled_item_ref, user_id10_ctx, "time", 113
+    )
     assert row["owner"] == 10
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await select.select(time=113)
+        row = await select.get(time=113)
         assert row
         row.owner = 11
+        row3_id = str(row.id)
         await select.update(row)
     updates = await sub_mgr.get_updates()
-    assert updates[sub_id]["3"] is None
+    assert updates[sub_id][row3_id] is None
 
 
 async def test_query_subscribe_rls_lost(
@@ -423,12 +426,14 @@ async def test_query_subscribe_rls_lost(
     # 测试更新数值，看query的update是否会删除/添加owner相符的
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(4)
+        row = await select.get(time=114)
+        assert row
         row.owner = 11
-        await tbl.update(4, row)
+        row4_id = str(row.id)
+        await select.update(row)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
-    assert updates[sub_id]["4"] is None
+    assert updates[sub_id][row4_id] is None
 
     # query订阅的原理是只订阅符合rls的行，但如果数值变了导致失去了某行rls并不会管，由行订阅执行处理
     # 所以注册数量25不变。（但是如果获得了新的rls会管）
