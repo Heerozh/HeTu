@@ -2,12 +2,11 @@ import time
 from typing import AsyncGenerator, cast
 
 import pytest
+from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, Subscriptions
 from hetu.data.backend.sub import IndexSubscription, RowSubscription
-
-from fixtures.backends import use_redis_family_backend_only
 
 SnowflakeID().init(1, 0)
 
@@ -513,20 +512,24 @@ async def test_query_subscribe_rls_lost_without_index(
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+    assert sub_id
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 去掉一个
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_rls_ref.comp_cls)
-        row = await select.get(time=114)
+        rows = await select.range(id=(0, float("inf")), limit=4)
+        row = rows[-1]
+        assert row
         row.friend = 12
+        row4_id = str(row.id)
         await select.update(row)
     updates = await sub_mgr.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
-    assert updates[sub_id]["4"] is None
+    assert updates[sub_id][row4_id] is None
 
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
 
 
 @pytest.mark.xfail(reason="目前有已知缺陷，未来也许修也许不修", strict=True)
@@ -546,34 +549,41 @@ async def test_query_subscribe_rls_gain_without_index(
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_rls_ref.comp_cls)
-        row = await select.get(time=114)
-        row.friend = 12
-        await select.update(row)
+        rows = await select.range(id=(0, float("inf")), limit=4)
+        row4 = rows[-1]
+        assert row4
+        row4.friend = 12
+        row4_id = str(row4.id)
+        await select.update(row4)
         # 修改owner不应该影响rls
-        row = await select.get(time=110)
-        assert row
-        row.owner = 12
-        await select.update(row)
+        row1 = rows[0]
+        assert row1
+        row1.owner = 12
+        await select.update(row1)
 
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
-    assert len(sub_mgr._subs[sub_id].row_subs) == 24
+    assert sub_id
+    assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_rls_ref.comp_cls)
-        row = await select.get(time=114)
-        row.friend = 11
-        await select.update(row)
+        rows = await select.range(id=(0, float("inf")), limit=4)
+        row4 = rows[-1]
+        assert row4
+        row4.friend = 11
+        await select.update(row4)
     updates = await sub_mgr.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
-    assert updates[sub_id]["4"]["friend"] == 11
+    assert updates[sub_id][row4_id]["friend"] == 11
 
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25
+    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
 
 
+@pytest.mark.timeout(30)
 async def test_mq_backlog(
     monkeypatch, sub_mgr: Subscriptions, filled_item_ref, mod_item_model, admin_ctx
 ):
@@ -581,12 +591,8 @@ async def test_mq_backlog(
     # 测试mq消息堆积的情况
     backend = sub_mgr._backend
 
-    await sub_mgr.subscribe_select(filled_item_ref, admin_ctx, "Itm10", "name")
-    await sub_mgr.subscribe_select(filled_item_ref, admin_ctx, "Itm11", "name")
-
-    # 预约mq_pull，不然前几次my_pull会没反应
-    await sub_mgr.mq_pull()
-    await sub_mgr.mq_pull()
+    await sub_mgr.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    await sub_mgr.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
 
     # 修改row1，并pull消息
     async with backend.session("pytest", 1) as session:
@@ -611,9 +617,10 @@ async def test_mq_backlog(
 
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(2)
+        rows = await select.range(id=(0, float("inf")), limit=2)
+        row = rows[-1]
         row.qty = 996
-        await tbl.update(2, row)
+        await select.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 
