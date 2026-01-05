@@ -1,6 +1,5 @@
-import logging
 import time
-from typing import AsyncGenerator
+from typing import AsyncGenerator, cast
 
 import pytest
 
@@ -130,8 +129,7 @@ async def test_subscribe_get(sub_mgr: Subscriptions, filled_item_ref, admin_ctx)
     assert row["time"] == 110
     assert sub_id, "Item.id[1:None:1][:1]"
 
-    row_sub = sub_mgr._subs[sub_id]
-    assert type(row_sub) is RowSubscription
+    row_sub = cast(RowSubscription, sub_mgr._subs[sub_id])
     assert row_sub.row_id == row["id"]
     assert len(sub_mgr._mq_client.subscribed_channels) == 1
 
@@ -145,7 +143,7 @@ async def test_subscribe_range(sub_mgr: Subscriptions, filled_item_ref, admin_ct
     assert sub_id == "Item.owner[10:None:1][:33]"
     assert len(sub_mgr._subs[sub_id].channels) == 25 + 1  # 加1 index channel
 
-    idx_sub = sub_mgr._subs[sub_id]
+    idx_sub = cast(IndexSubscription, sub_mgr._subs[sub_id])
     assert type(idx_sub) is IndexSubscription
 
     assert len(idx_sub.row_subs) == 25
@@ -167,7 +165,7 @@ async def test_subscribe_range(sub_mgr: Subscriptions, filled_item_ref, admin_ct
     )
     assert len(rows) == 0
     assert sub_id
-    idx_sub = sub_mgr._subs[sub_id]
+    idx_sub = cast(IndexSubscription, sub_mgr._subs[sub_id])
     assert type(idx_sub) is IndexSubscription
 
     assert len(idx_sub.row_subs) == 0
@@ -212,70 +210,77 @@ async def test_subscribe_mq_merge_message(
 
 
 async def test_subscribe_updates(
-    sub_mgr, filled_item_table, admin_ctx, background_mq_puller_task
+    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
     backend = sub_mgr._backend
 
     # 测试4种范围的订阅是否正常工作
-    sub_row, _ = await sub_mgr.subscribe_select(
-        filled_item_table, admin_ctx, "Itm10", "name"
+    sub_row, _ = await sub_mgr.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
     )
-    sub_10, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, limit=33
+    sub_10, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, right=11, limit=44
+    sub_10_11, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 11, right=12, limit=55
+    sub_11_12, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
+    assert sub_row
+    assert sub_10
+    assert sub_10_11
+    assert sub_11_12
 
     # 初始数据是25行owner = 10
-    assert len(sub_mgr._subs[sub_10].row_subs) == 25
-    assert len(sub_mgr._subs[sub_11_12].row_subs) == 0
+    assert len(sub_mgr._subs[sub_10].row_subs) == 25  # type: ignore
+    assert len(sub_mgr._subs[sub_11_12].row_subs) == 0  # type: ignore
 
     # 更改行1的owner从10到11
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(1)
+    row1_id = ""
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.owner = 11
-        await tbl.update(1, row)
+        row1_id = str(row.id)
+        await select.update(row)
 
     # 测试更新
     updates = await sub_mgr.get_updates()
     assert len(updates) == 4
-    assert updates[sub_row]["1"]["owner"] == 11  # row订阅数据更新
-    assert updates[sub_10]["1"] is None  # query 10删除了1
-    assert updates[sub_10_11]["1"]["owner"] == 11  # query 10-11更新row数据
-    assert updates[sub_11_12]["1"]["owner"] == 11  # query 11-12更新row数据
+    assert updates[sub_row][row1_id]["owner"] == 11  # row订阅数据更新
+    assert updates[sub_10][row1_id] is None  # query 10删除了1
+    assert updates[sub_10_11][row1_id]["owner"] == 11  # query 10-11更新row数据
+    assert updates[sub_11_12][row1_id]["owner"] == 11  # query 11-12更新row数据
 
     # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
-    assert len(sub_mgr._subs[sub_10].row_subs) == 24
-    assert len(sub_mgr._subs[sub_11_12].row_subs) == 1
+    assert len(sub_mgr._subs[sub_10].row_subs) == 24  # type: ignore
+    assert len(sub_mgr._subs[sub_11_12].row_subs) == 1  # type: ignore
 
 
 async def test_row_subscribe_cache(
-    sub_mgr, filled_item_table, admin_ctx, background_mq_puller_task
+    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
     backend = sub_mgr._backend
 
     # row订阅会用全局cache加速相同数据的更新，当一个row更新时，应该cache中有该值
-    sub_row, _ = await sub_mgr.subscribe_select(
-        filled_item_table, admin_ctx, "Itm10", "name"
+    sub_row, _ = await sub_mgr.subscribe_get(
+        filled_item_ref, admin_ctx, "name","Itm10",
     )
-    sub_10, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, limit=33
+    sub_10, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, right=11, limit=44
+    sub_10_11, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 11, right=12, limit=55
+    sub_11_12, _ = await sub_mgr.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
     # 更改行1的owner从10到11
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(1)
         row.owner = 11
         await tbl.update(1, row)
@@ -289,7 +294,7 @@ async def test_row_subscribe_cache(
 
     # 测试第二次更新cache是否清空了
     async with backend.transaction(1) as trx:
-        tbl = filled_item_table.attach(trx)
+        tbl = filled_item_ref.attach(trx)
         row = await tbl.select(1)
         row.owner = 12
         await tbl.update(1, row)
@@ -305,18 +310,18 @@ async def test_row_subscribe_cache(
     assert updates[sub_11_12]["1"]["owner"] == 12  # query 11-12更新row数据
 
 
-async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx):
+async def test_cancel_subscribe(sub_mgr, filled_item_ref, admin_ctx):
     sub_row, _ = await sub_mgr.subscribe_select(
-        filled_item_table, admin_ctx, "Itm10", "name"
+        filled_item_ref, admin_ctx, "Itm10", "name"
     )
     sub_10, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, limit=33
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
     sub_10_11, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 10, right=11, limit=44
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
     sub_11_12, _ = await sub_mgr.subscribe_query(
-        filled_item_table, admin_ctx, "owner", 11, right=12, limit=55
+        filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
     # 测试取消订阅
@@ -349,43 +354,43 @@ async def test_cancel_subscribe(sub_mgr, filled_item_table, admin_ctx):
 
 
 async def test_subscribe_select_rls(
-    sub_mgr, filled_item_table, user_id10_ctx, user_id11_ctx
+    sub_mgr, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 1)
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id10_ctx, 1)
     assert sub_id is not None
 
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id11_ctx, 1)
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id11_ctx, 1)
     assert sub_id is None
 
 
-async def test_subscribe_query_rls(sub_mgr, filled_item_table, user_id10_ctx):
+async def test_subscribe_query_rls(sub_mgr, filled_item_ref, user_id10_ctx):
     # 先改掉一个人的owner值
     backend = sub_mgr._backend
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(3)
         row.owner = 11
         await tbl.update(3, row)
 
     # 测试owner query只传输owner相等的数据
     sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, user_id10_ctx, "owner", 1, right=20, limit=55
+        filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert [row["owner"] for row in rows] == [10] * 24
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
 
 
 async def test_select_subscribe_rls_update(
-    sub_mgr, filled_item_table, user_id10_ctx, background_mq_puller_task
+    sub_mgr, filled_item_ref, user_id10_ctx, background_mq_puller_task
 ):
     backend = sub_mgr._backend
 
     # 测试订阅单行，owner改变后要删除
-    sub_id, row = await sub_mgr.subscribe_select(filled_item_table, user_id10_ctx, 3)
+    sub_id, row = await sub_mgr.subscribe_select(filled_item_ref, user_id10_ctx, 3)
     assert row["owner"] == 10
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(3)
         row.owner = 11
         await tbl.update(3, row)
@@ -394,18 +399,18 @@ async def test_select_subscribe_rls_update(
 
 
 async def test_query_subscribe_rls_lost(
-    sub_mgr, filled_item_table, mod_item_model, user_id10_ctx, background_mq_puller_task
+    sub_mgr, filled_item_ref, mod_item_model, user_id10_ctx, background_mq_puller_task
 ):
     backend = sub_mgr._backend
 
     sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, user_id10_ctx, "owner", 1, right=20, limit=55
+        filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
 
     # 测试更新数值，看query的update是否会删除/添加owner相符的
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(4)
         row.owner = 11
         await tbl.update(4, row)
@@ -419,27 +424,27 @@ async def test_query_subscribe_rls_lost(
 
 
 async def test_query_subscribe_rls_gain(
-    sub_mgr, filled_item_table, mod_item_model, user_id10_ctx, background_mq_puller_task
+    sub_mgr, filled_item_ref, mod_item_model, user_id10_ctx, background_mq_puller_task
 ):
     # query订阅的rls gain处理的原理是，每次index变化都检查所有未注册行的rls
     # 如果中途获得rls，就加入订阅
 
     # 先预先取掉一行rls
     backend = sub_mgr._backend
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(4)
         row.owner = 11
         await tbl.update(4, row)
 
     sub_id, rows = await sub_mgr.subscribe_query(
-        filled_item_table, user_id10_ctx, "owner", 1, right=20, limit=55
+        filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
 
     # 测试改回来是否重新出现
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(4)
         row.owner = 10
         await tbl.update(4, row)
@@ -450,8 +455,8 @@ async def test_query_subscribe_rls_gain(
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
 
     # 测试insert新数据能否得到通知
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         new = mod_item_model.new_row()
         new.owner = 10
         await tbl.insert(new)
@@ -477,7 +482,7 @@ async def test_query_subscribe_rls_lost_without_index(
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
 
     # 去掉一个
-    async with backend.transaction(1) as session:
+    async with backend.session("pytest", 1) as session:
         tbl = filled_rls_test_table.attach(session)
         row = await tbl.select(4)
         row.friend = 12
@@ -505,7 +510,7 @@ async def test_query_subscribe_rls_gain_without_index(
 
     # 先预先取掉一行rls
     backend = sub_mgr._backend
-    async with backend.transaction(1) as session:
+    async with backend.session("pytest", 1) as session:
         tbl = filled_rls_test_table.attach(session)
         row = await tbl.select(4)
         row.friend = 12
@@ -521,7 +526,7 @@ async def test_query_subscribe_rls_gain_without_index(
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
 
     # 测试改回来是否重新出现
-    async with backend.transaction(1) as session:
+    async with backend.session("pytest", 1) as session:
         tbl = filled_rls_test_table.attach(session)
         row = await tbl.select(4)
         row.friend = 11
@@ -535,14 +540,14 @@ async def test_query_subscribe_rls_gain_without_index(
 
 
 async def test_mq_backlog(
-    monkeypatch, sub_mgr, filled_item_table, mod_item_model, admin_ctx
+    monkeypatch, sub_mgr, filled_item_ref, mod_item_model, admin_ctx
 ):
     time_time = time.time
     # 测试mq消息堆积的情况
     backend = sub_mgr._backend
 
-    await sub_mgr.subscribe_select(filled_item_table, admin_ctx, "Itm10", "name")
-    await sub_mgr.subscribe_select(filled_item_table, admin_ctx, "Itm11", "name")
+    await sub_mgr.subscribe_select(filled_item_ref, admin_ctx, "Itm10", "name")
+    await sub_mgr.subscribe_select(filled_item_ref, admin_ctx, "Itm11", "name")
 
     # 预约mq_pull，不然前几次my_pull会没反应
     await sub_mgr.mq_pull()
@@ -550,7 +555,7 @@ async def test_mq_backlog(
 
     # 修改row1，并pull消息
     async with backend.transaction(1) as trx:
-        tbl = filled_item_table.attach(trx)
+        tbl = filled_item_ref.attach(trx)
         row = await tbl.select(1)
         row.qty = 998
         await tbl.update(1, row)
@@ -560,7 +565,7 @@ async def test_mq_backlog(
     # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
     monkeypatch.setattr(time, "time", lambda: time_time() + 200)
     async with backend.transaction(1) as trx:
-        tbl = filled_item_table.attach(trx)
+        tbl = filled_item_ref.attach(trx)
         row = await tbl.select(1)
         row.qty = 997
         await tbl.update(1, row)
@@ -568,7 +573,7 @@ async def test_mq_backlog(
     await sub_mgr.mq_pull()
 
     async with backend.transaction(1) as trx:
-        tbl = filled_item_table.attach(trx)
+        tbl = filled_item_ref.attach(trx)
         row = await tbl.select(2)
         row.qty = 996
         await tbl.update(2, row)
