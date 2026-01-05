@@ -19,7 +19,7 @@ from .definer import define_system, SystemClusters, SYSTEM_NAME_MAX_LEN
 from .execution import ExecutionLock, clean_expired_call_locks
 from .executor import SystemExecutor
 from ..data import BaseComponent, define_component, property_field, Permission
-from ..data.backend_old import RawComponentTable
+from ..data.backend import TableReference
 
 SYSTEM_CLUSTERS = SystemClusters()
 logger = logging.getLogger("HeTu.root")

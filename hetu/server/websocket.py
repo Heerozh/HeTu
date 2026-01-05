@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import asyncio
 import logging
 
@@ -17,8 +18,8 @@ from hetu.web import APP_BLUEPRINT
 from .message import encode_message
 from .receiver import client_receiver, subscription_receiver, mq_puller
 
-logger = logging.getLogger('HeTu.root')
-replay = logging.getLogger('HeTu.replay')
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
 
 
 @APP_BLUEPRINT.websocket("/hetu")  # noqa
@@ -26,7 +27,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
     # 初始化执行器，一个连接一个执行器
     comp_mgr = request.app.ctx.comp_mgr
-    executor = SystemExecutor(request.app.config['NAMESPACE'], comp_mgr)
+    executor = SystemExecutor(request.app.config["NAMESPACE"], comp_mgr)
     await executor.initialize(request.client_ip)
     ctx = executor.context
     logger.info(f"🔗 [📡WSConnect] 新连接：{asyncio.current_task().get_name()}")
@@ -40,18 +41,18 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 传递默认配置参数到ctx
     default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
     ctx.configure(
-        client_limits=request.app.config.get('CLIENT_SEND_LIMITS', default_limits),
-        server_limits=request.app.config.get('SERVER_SEND_LIMITS', default_limits),
-        max_row_sub=request.app.config.get('MAX_ROW_SUBSCRIPTION', 1000),
-        max_index_sub=request.app.config.get('MAX_INDEX_SUBSCRIPTION', 50),
+        client_limits=request.app.config.get("CLIENT_SEND_LIMITS", default_limits),
+        server_limits=request.app.config.get("SERVER_SEND_LIMITS", default_limits),
+        max_row_sub=request.app.config.get("MAX_ROW_SUBSCRIPTION", 1000),
+        max_index_sub=request.app.config.get("MAX_INDEX_SUBSCRIPTION", 50),
     )
 
     # 创建接受客户端消息的协程
-    protocol = dict(compress=request.app.ctx.compress,
-                    crypto=request.app.ctx.crypto)
+    protocol = dict(compress=request.app.ctx.compress, crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, executor, subscriptions, push_queue, flood_checker)
+        ws, protocol, executor, subscriptions, push_queue, flood_checker
+    )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程
@@ -66,7 +67,8 @@ async def websocket_connection(request: Request, ws: Websocket):
     try:
         while True:
             reply = await push_queue.get()
-            if replay.level < logging.ERROR:  # 如果关闭了replay，为了速度不执行下面的字符串序列化
+            # 如果关闭了replay，为了速度不执行下面的字符串序列化
+            if replay.level < logging.ERROR:
                 replay.debug(">>> " + str(reply))
             # print(executor.context, 'got', reply)
             await ws.send(encode_message(reply, protocol))

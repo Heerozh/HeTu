@@ -9,7 +9,6 @@ import pytest
 import numpy as np
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
-from hetu.data.backend_old.redis import RedisBackend
 
 SnowflakeID().init(1, 0)
 

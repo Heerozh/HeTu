@@ -12,7 +12,6 @@ from types import FunctionType
 import numpy as np
 
 from ..data import BaseComponent
-from ..data.backend_old import ComponentTransaction
 
 
 @dataclass

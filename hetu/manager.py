@@ -7,7 +7,7 @@
 
 from typing import ItemsView
 
-from hetu.data.backend_old.base import Backend, RawComponentTable
+from hetu.data.backend import Backend, TableReference
 from hetu.data.component import BaseComponent
 from hetu.system import SystemClusters
 
