@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from .worker_keeper import RedisWorkerKeeper
 
 logger = logging.getLogger("HeTu.root")
+msg_packer = msgpack.Packer(use_bin_type=False)
 
 
 @final
@@ -762,7 +763,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
 
-        payload_json: bytes = msgpack.packb([checks, pushes], use_bin_type=False)  # type: ignore
+        payload_json: bytes = msg_packer.pack([checks, pushes])  # type: ignore
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 
