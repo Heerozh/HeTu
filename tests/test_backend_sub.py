@@ -237,7 +237,6 @@ async def test_subscribe_updates(
     assert len(sub_mgr._subs[sub_11_12].row_subs) == 0  # type: ignore
 
     # 更改行1的owner从10到11
-    row1_id = ""
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
         row = await select.get(time=110)
@@ -266,7 +265,7 @@ async def test_row_subscribe_cache(
 
     # row订阅会用全局cache加速相同数据的更新，当一个row更新时，应该cache中有该值
     sub_row, _ = await sub_mgr.subscribe_get(
-        filled_item_ref, admin_ctx, "name","Itm10",
+        filled_item_ref, admin_ctx, "name", "Itm10"
     )
     sub_10, _ = await sub_mgr.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
@@ -278,36 +277,43 @@ async def test_row_subscribe_cache(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
+    assert sub_row
+    assert sub_10_11
+    assert sub_11_12
+
     # 更改行1的owner从10到11
     async with backend.session("pytest", 1) as session:
         select = session.select(filled_item_ref.comp_cls)
-        row = await tbl.select(1)
+        row = await select.get(time=110)
+        assert row
         row.owner = 11
-        await tbl.update(1, row)
+        row1_id = str(row.id)
+        await select.update(row)
 
     # 检测Row cache
     await sub_mgr.get_updates()
     # 由于不同backend的channel名不一样，使用dict的第一个channel
-    cache = RowSubscription._RowSubscription__cache
+    cache = RowSubscription._RowSubscription__cache  # type: ignore
     first_channel = next(iter(cache.keys()))
-    assert cache[first_channel]["1"]["owner"] == 11
+    assert cache[first_channel][row1_id]["owner"] == 11
 
     # 测试第二次更新cache是否清空了
-    async with backend.transaction(1) as trx:
-        tbl = filled_item_ref.attach(trx)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.owner = 12
-        await tbl.update(1, row)
+        await select.update(row)
 
     updates = await sub_mgr.get_updates()
     # 如果数据正确说明更新了
-    assert cache[first_channel]["1"]["owner"] == 12
+    assert cache[first_channel][row1_id]["owner"] == 12
     # 其他顺带检测
     assert len(updates) == 3
-    assert updates[sub_row]["1"]["owner"] == 12  # row订阅数据更新
+    assert updates[sub_row][row1_id]["owner"] == 12  # row订阅数据更新
     assert sub_10 not in updates
-    assert updates[sub_10_11]["1"] is None  # query 10-11删除了1
-    assert updates[sub_11_12]["1"]["owner"] == 12  # query 11-12更新row数据
+    assert updates[sub_10_11][row1_id] is None  # query 10-11删除了1
+    assert updates[sub_11_12][row1_id]["owner"] == 12  # query 11-12更新row数据
 
 
 async def test_cancel_subscribe(sub_mgr, filled_item_ref, admin_ctx):
@@ -467,23 +473,23 @@ async def test_query_subscribe_rls_gain(
 
 async def test_query_subscribe_rls_lost_without_index(
     sub_mgr,
-    filled_rls_test_table,
+    filled_rls_ref,
     mod_rls_test_model,
     user_id11_ctx,
     background_mq_puller_task,
 ):
-    # filled_rls_test_table的权限是要求ctx.caller == row.friend
+    # filled_rls_ref的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
     backend = sub_mgr._backend
 
     sub_id, rows = await sub_mgr.subscribe_query(
-        filled_rls_test_table, user_id11_ctx, "owner", 1, right=20, limit=55
+        filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 25
 
     # 去掉一个
     async with backend.session("pytest", 1) as session:
-        tbl = filled_rls_test_table.attach(session)
+        select = session.select(filled_rls_ref.comp_cls)
         row = await tbl.select(4)
         row.friend = 12
         await tbl.update(4, row)
@@ -498,12 +504,12 @@ async def test_query_subscribe_rls_lost_without_index(
 @pytest.mark.xfail(reason="目前有已知缺陷，未来也许修也许不修", strict=True)
 async def test_query_subscribe_rls_gain_without_index(
     sub_mgr,
-    filled_rls_test_table,
+    filled_rls_ref,
     mod_rls_test_model,
     user_id11_ctx,
     background_mq_puller_task,
 ):
-    # filled_rls_test_table的权限是要求ctx.caller == row.friend
+    # filled_rls_ref的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
     # todo 目前的设计是，rls获得并不能正确得到insert通知，除非query的正是rls属性（这里是friend）
     #      未来如果有需要，可以专门做个rls属性watch，变化了则通知所有IndexSubscription检查rls
@@ -511,23 +517,24 @@ async def test_query_subscribe_rls_gain_without_index(
     # 先预先取掉一行rls
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
-        tbl = filled_rls_test_table.attach(session)
+        select = session.select(filled_rls_ref.comp_cls)
         row = await tbl.select(4)
         row.friend = 12
         await tbl.update(4, row)
         # 修改owner不应该影响rls
-        row = await tbl.select(1)
+        row = await select.get(time=110)
+        assert row
         row.owner = 12
-        await tbl.update(1, row)
+        await select.update(row)
 
     sub_id, rows = await sub_mgr.subscribe_query(
-        filled_rls_test_table, user_id11_ctx, "owner", 1, right=20, limit=55
+        filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert len(sub_mgr._subs[sub_id].row_subs) == 24
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
-        tbl = filled_rls_test_table.attach(session)
+        select = session.select(filled_rls_ref.comp_cls)
         row = await tbl.select(4)
         row.friend = 11
         await tbl.update(4, row)
@@ -554,26 +561,28 @@ async def test_mq_backlog(
     await sub_mgr.mq_pull()
 
     # 修改row1，并pull消息
-    async with backend.transaction(1) as trx:
-        tbl = filled_item_ref.attach(trx)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.qty = 998
-        await tbl.update(1, row)
+        await select.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 
     # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
     monkeypatch.setattr(time, "time", lambda: time_time() + 200)
-    async with backend.transaction(1) as trx:
-        tbl = filled_item_ref.attach(trx)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
+        row = await select.get(time=110)
+        assert row
         row.qty = 997
-        await tbl.update(1, row)
+        await select.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 
-    async with backend.transaction(1) as trx:
-        tbl = filled_item_ref.attach(trx)
+    async with backend.session("pytest", 1) as session:
+        select = session.select(filled_item_ref.comp_cls)
         row = await tbl.select(2)
         row.qty = 996
         await tbl.update(2, row)
