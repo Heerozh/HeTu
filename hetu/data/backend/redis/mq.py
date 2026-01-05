@@ -10,18 +10,11 @@ import logging
 import time
 from typing import TYPE_CHECKING, final, override
 
-import redis
-
 from ....common.multimap import MultiMap
 from ..base import MQClient
 from .pubsub import AsyncKeyspacePubSub
 
 if TYPE_CHECKING:
-    import redis.asyncio
-    import redis.asyncio.cluster
-    import redis.cluster
-    import redis.exceptions
-
     from .client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")
@@ -32,11 +25,10 @@ MAX_SUBSCRIBED = 5000
 class RedisMQClient(MQClient):
     """
     连接到消息队列的客户端，每个用户连接一个实例。
-    本客户端直接使用redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
+    本客户端使用AsyncKeyspacePubSub，以redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
     """
 
     def __init__(self, client: RedisBackendClient):
-        # todo 要测试redis cluster是否能正常pub sub
         # 2种模式：
         # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
         # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂

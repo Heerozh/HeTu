@@ -5,13 +5,11 @@
 @email: heeroz@gmail.com
 """
 
-import redis
-import redis.cluster
 from typing import cast
-import pytest
-import asyncio
 
+import pytest
 from fixtures.backends import use_redis_family_backend_only
+
 from hetu.data.backend import RedisBackendClient
 
 
@@ -28,8 +26,6 @@ async def test_backend_redis_pubsub(mod_auto_backend):
 
     await pubsub.subscribe("key{1}")
     await pubsub.subscribe("key{2}")
-
-    await asyncio.sleep(1)
 
     redis_client = client.io
     redis_client.publish("key{1}", b"1")

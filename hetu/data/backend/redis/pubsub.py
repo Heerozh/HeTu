@@ -28,21 +28,18 @@ logger = logging.getLogger(__name__)
 class AsyncKeyspacePubSub:
     """
     由于redis-py对cluster的pubsub支持很差，自行实现一个async的集群pubsub。
-    通过Key的slot，去对应的Node订阅频道，不支持pattern订阅。
+    通过channel的slot，去对应的Node订阅频道。
     * 自动总集所有Node的消息
     * 支持拓扑更新，自动跟随cluster的更改，不过有几秒延迟。
+    * 支持任何精确频道，但不支持pattern订阅
     """
 
-    def __init__(
-        self, client: Redis | RedisCluster, topology_refresh_interval: int = 30
-    ):
+    def __init__(self, client: Redis | RedisCluster):
         """
         Parameters
         ----------
         client: redis.asyncio.Redis or redis.asyncio.cluster.RedisCluster
             redis.asyncio.Redis 或 redis.asyncio.cluster.RedisCluster 实例
-        topology_refresh_interval: int
-            检查集群拓扑变化的间隔(秒)
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
@@ -50,8 +47,9 @@ class AsyncKeyspacePubSub:
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
-        # 上次的集群槽位映射字符串，用于检测变化
+        # 已成功订阅的频道
         self._subscribed: set[str] = set()
+        self._pending_subscribe: set[str] = set()
 
         # 统一的消息队列
         self.message_queue: Queue[dict] = asyncio.Queue()
@@ -60,7 +58,8 @@ class AsyncKeyspacePubSub:
         self._tasks: set[asyncio.Task] = set()
         self._resubscribe_task = None
 
-        self.node_resources = {}
+        # 订阅通知
+        self._subscribe_notify = asyncio.Condition()
 
     def standalone_connect(self):
         """
@@ -91,7 +90,6 @@ class AsyncKeyspacePubSub:
         assert node_key not in self.node_resources
         logger.info(f"Creating standalone connection for node: {node_key}")
 
-        node.acquire_connection()
         # 为每个节点创建一个 Standalone 的 Redis Client
         connection_kwargs = node.connection_kwargs.copy()
         # 如果是 Cluster 模式下的 redis-py，有些参数可能需要清理，比如 'path' 用于 unix socket
@@ -154,10 +152,13 @@ class AsyncKeyspacePubSub:
         # 3. 执行订阅
         ps = self.node_resources[target_node_key]["pubsub"]
         await ps.subscribe(channel)
+        self._pending_subscribe.add(channel)
 
-        # todo 要等message返回了才能算订阅成功
-
-        self._subscribed.add(channel)
+        # 等message返回了才能算订阅成功
+        async with self._subscribe_notify:
+            await self._subscribe_notify.wait_for(
+                lambda: channel not in self._pending_subscribe
+            )
 
     async def unsubscribe(self, channel: str):
         """
@@ -180,6 +181,7 @@ class AsyncKeyspacePubSub:
         """
         current_subscriptions = list(self._subscribed)
         self._subscribed.clear()
+        self._pending_subscribe.clear()
         for channel in current_subscriptions:
             await self.subscribe(channel)
 
@@ -191,8 +193,14 @@ class AsyncKeyspacePubSub:
             async for message in pubsub.listen():
                 if message:
                     # 可以在这里注入任意信息到message
-                    if message["type"] != "message":  # ignore_subscribe_messages
-                        # this is a subscribe/unsubscribe message. ignore
+                    mtype = message["type"]
+                    if mtype != "message":  # ignore_subscribe_messages
+                        if mtype == "subscribe":
+                            channel = message["channel"].decode()
+                            self._subscribed.add(channel)
+                            self._pending_subscribe.discard(channel)
+                            async with self._subscribe_notify:
+                                self._subscribe_notify.notify_all()
                         continue
                     await self.message_queue.put(message)
 
@@ -225,7 +233,7 @@ class AsyncKeyspacePubSub:
 
     @property
     def subscribed(self):
-        return self._subscribed
+        return self._subscribed.union(self._pending_subscribe)
 
     async def close(self):
         """
