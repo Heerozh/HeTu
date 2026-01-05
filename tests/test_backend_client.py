@@ -499,4 +499,4 @@ async def test_mq_client(filled_item_ref, mod_auto_backend):
     async with asyncio.timeout(0.1):
         messages = await mq.get_message()
 
-    assert channel_name.encode() in messages
+    assert channel_name in messages

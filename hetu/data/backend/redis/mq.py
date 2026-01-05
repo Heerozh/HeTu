@@ -79,16 +79,11 @@ class RedisMQClient(MQClient):
         * 超过2分钟前的消息会被丢弃，防止堆积
         """
 
-        # 如果没订阅过内容，那么redis mq的connection是None，无需get_message
-        if not self._mq.subscribed:
-            await asyncio.sleep(0.25)  # 不写协程就死锁了
-            return
-
         # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
         msg = await self._mq.get_message()
 
         if msg is not None:
-            channel_name = msg["channel"]
+            channel_name = msg["channel"].decode()
             logger.debug(f"🔔 [💾Redis] 收到订阅更新通知: {channel_name}")
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
