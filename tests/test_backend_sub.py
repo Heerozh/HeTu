@@ -127,6 +127,7 @@ async def test_subscribe_get(sub_mgr: Subscriptions, filled_item_ref, admin_ctx)
     assert row
     assert row["time"] == 110
     assert sub_id, "Item.id[1:None:1][:1]"
+    assert "_version" not in row
 
     row_sub = cast(RowSubscription, sub_mgr._subs[sub_id])
     assert row_sub.row_id == row["id"]
@@ -139,6 +140,7 @@ async def test_subscribe_range(sub_mgr: Subscriptions, filled_item_ref, admin_ct
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
     assert len(rows) == 25
+    assert "_version" not in rows[0]
     assert sub_id == "Item.owner[10:None:1][:33]"
     assert len(sub_mgr._subs[sub_id].channels) == 25 + 1  # 加1 index channel
 

@@ -266,6 +266,7 @@ class Subscriptions:
             if len(rows) == 0:
                 return None, None
             row = rows[0]
+            del row["_version"]
 
         # 再次caller要对该row有权限
         if not self._has_row_permission(table_ref, ctx, row):
@@ -340,6 +341,8 @@ class Subscriptions:
         rows = await servant.range(
             table_ref, index_name, left, right, limit, desc, RowFormat.TYPED_DICT
         )
+        for row in rows:
+            del row["_version"]
 
         # 如果是rls权限，需要对每行数据进行权限判断
         if table_ref.comp_cls.is_rls():
