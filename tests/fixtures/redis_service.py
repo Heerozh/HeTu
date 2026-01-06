@@ -306,7 +306,6 @@ def mod_redis_cluster_service():
         print(output)
 
         # --- 4. 验证集群就绪 ---
-        import redis
         from redis.cluster import RedisCluster
 
         print("⏳ 等待 Redis Cluster 就绪...")
@@ -326,14 +325,11 @@ def mod_redis_cluster_service():
                     print(f"✅ Redis Cluster 已就绪 (耗时 {i}s)")
                     ready = True
                     break
-            except Exception as e:
+            except Exception as _:
                 pass
             time.sleep(1)
             if rc:
-                try:
-                    rc.close()
-                except:
-                    pass
+                rc.close()
 
         if not ready:
             raise Exception("Redis Cluster 启动超时，无法连接")
