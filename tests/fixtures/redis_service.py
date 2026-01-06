@@ -254,10 +254,6 @@ def mod_redis_cluster_service():
         for i, port in enumerate(ports):
             # Redis Cluster 在 Docker NAT 下需要配置 announce-ip 供外部(测试脚本)访问
             # 同时需要映射 数据端口(port) 和 总线端口(port + 10000)
-            # --cluster-announce-hostname host.docker.internal
-            # --cluster-preferred-endpoint-type hostname
-            # --cluster-announce-port 7000
-            # --cluster-announce-bus-port 17000
             cmd = [
                 "redis-server",
                 f"--port {port}",
@@ -282,6 +278,7 @@ def mod_redis_cluster_service():
                 auto_remove=True,
                 network=network_name,
                 hostname=f"redis-node-{i}",
+                extra_hosts={"host.docker.internal": "host-gateway"},
             )
             containers.append(c)
 
