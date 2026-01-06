@@ -303,26 +303,40 @@ def define_system(
     Examples
     --------
     >>> from hetu.data import BaseComponent, define_component, property_field
+    >>> # 定义Component
     >>> @define_component
-    ... class Position(BaseComponent):
-    ...     x: int = property_field(0)
+    ... class Stock(BaseComponent):
+    ...     owner: int = property_field(0)
+    ...     value: int = property_field(0)
     >>> @define_component
-    ... class HP(BaseComponent):
-    ...     hp: int = property_field(0)
-    ...
+    ... class Order(BaseComponent):
+    ...     owner: int = property_field(0)
+    ...     paid: bool = property_field(False)
+    ...     qty: int = property_field(0)
+    >>> @define_component
+    ... class Log(BaseComponent):
+    ...     info: 'U32' = property_field("")
+    >>>
+    >>> # 定义System
     >>> from hetu.system import define_system, Context, ResponseToClient
     >>> @define_system(
-    ...     namespace="ssw",
-    ...     components=(Position, HP),
+    ...     namespace="example",
+    ...     session=((Stock, Order), Log), # 定义2组事务，第一组可操作Stock和Order，第二组只可操作Log
     ... )
-    ... async def system_dash(ctx: Context, entity_self, entity_target, vec):
-    ...     pos_self = await ctx[Position].select(entity_self)
-    ...     pos_self.x += vec.x
-    ...     await ctx[Position].update(entity_self, pos_self)
-    ...     enemy_hp = ctx[HP].query("owner", entity_target)
-    ...     enemy_hp -= 10
-    ...     await ctx[HP].update(entity_target, enemy_hp)
-    ...     return ResponseToClient(['client cmd', 'blah blah'])
+    ... async def pay(ctx: Context, order_id, paid):
+    ...     # 开始事务循环，如果遇到事务冲突，会自动重试。超出重试次数会抛出异常。
+    ...     # 事务内的数据库操作，要么一起成功，要么完全不执行。
+    ...     async for session in ctx.session[0].retry(99):
+    ...         async with session.select(Order).upsert(id=order_id) as order:
+    ...             order.paid = paid
+    ...         async with session.select(Stock).upsert(owner=order.owner) as stock:
+    ...             stock.value += order.qty
+    ...     # 开始第二组事务，注意，这是一个独立的事务，2个事务之间是有可能中断的
+    ...     async for session in ctx.session[1].retry(99):
+    ...         session.select(Log).insert(Log.new_row("Order {order_id} paid={paid}"))
+    ...     # 事务外代码都可能因为服务器宕机等原因中断
+    ...     print(f"Order {order_id} has been paid={paid}")
+    ...     return ResponseToClient(['anything', 'blah blah'])
 
     Parameters
     ----------
@@ -406,28 +420,27 @@ def define_system(
     Cluster分区提升性能，影响未来的扩展性。正常建议通过拆分Component属性来降低簇聚集。
 
     **System副本继承：**
-
+    todo 易丢失的延后调用是不是也要加上？
     代码示例：
-    >>> @define_system(namespace="global", components=(Position, ), )
-    ... async def move(ctx: Context, new_pos):
-    ...     async with ctx[Position].update_or_insert(ctx.caller, 'owner') as pos:
-    ...         pos.x = new_pos.x
-    ...         pos.y = new_pos.y
-    >>> @define_system(namespace="game", subsystems=('move:Map1', ))
-    ... async def move_in_map1(ctx: Context, new_pos):
-    ...     return await ctx['move:Map1'](new_pos)
+    >>> @define_system(namespace="global", sessions=(Order, ), )
+    ... async def remove(ctx: Context, order_id):
+    ...     async for session in ctx.session[0].retry(99):
+    ...         session.select(Order).delete(id=order_id)
+    >>> @define_system(namespace="example", subsystems=('remove:ItemOrder', ))
+    ... async def remove_item(ctx: Context, order_id):
+    ...     return await ctx['remove:ItemOrder'](order_id)
 
-    `subsystems=('move:Map1', )`等同创建一个新的`move` System，但是使用
-    `components=(Position.duplicate(namespace, suffix='Map1'), )` 参数。
+    `subsystems=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
+    `sessions=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
 
-    正常调用`move`(不使用System副本)的话，数据是保存在名为 `Position` 的表中。
-    在这个例子中，`move_in_map1` 调用的 `move` 函数中的数据会储存在名为
-    `Position:Map1`的表中，从而实现同一套System逻辑在不同数据集上的操作。
+    正常调用`remove`(不使用System副本)的话，数据是保存在名为 `Order` 的表中。
+    在这个例子中，`remove_item` 调用的 `remove` 函数中的数据会储存在名为
+    `Order:ItemOrder`的表中，从而实现同一套System逻辑在不同数据集上的操作。
 
     这么做的意义是不同数据集不会事务冲突，可以拆分成不同的Cluster，从而放到不同的数据库节点上，
     提升性能和扩展性。
 
-    比如create_future_call这个内置System就是，它引用了FutureCalls队列组件，如果不使用副本继承，那么
+    比如create_future_call这个内置System，它引用了FutureCalls队列组件，如果不使用副本继承，那么
     所有用到未来调用的System都将在同一个数据库节点上运行，形成一个大簇，影响扩展性。
     因此通过副本继承此方法，可以拆解出一部分System到不同的数据库节点上运行。
     不用担心，未来调用的后台任务在检查调用队列时，会循环检查所有FutureCalls副本组件队列。
