@@ -289,7 +289,6 @@ class SystemClusters(metaclass=Singleton):
 
 def define_system(
     components: tuple[type[BaseComponent], ...] | None = None,
-    non_transactions: tuple[type[BaseComponent], ...] | None = None,
     namespace: str = "default",
     force: bool = False,
     permission=Permission.USER,
@@ -298,7 +297,7 @@ def define_system(
     call_lock=False,
 ):
     """
-    定义System(函数)
+    定义System，System类似数据库的储存过程，主要用于数据CRUD，客户端可以根据权限直接调用。
 
     Examples
     --------
@@ -313,29 +312,16 @@ def define_system(
     ...     owner: int = property_field(0)
     ...     paid: bool = property_field(False)
     ...     qty: int = property_field(0)
-    >>> @define_component
-    ... class Log(BaseComponent):
-    ...     info: 'U32' = property_field("")
     >>>
     >>> # 定义System
     >>> from hetu.system import define_system, Context, ResponseToClient
-    >>> @define_system(
-    ...     namespace="example",
-    ...     session=((Stock, Order), Log), # 定义2组事务，第一组可操作Stock和Order，第二组只可操作Log
-    ... )
+    >>> @define_system(namespace="example", components=(Stock, Order))
     ... async def pay(ctx: Context, order_id, paid):
-    ...     # 开始事务循环，如果遇到事务冲突，会自动重试。超出重试次数会抛出异常。
-    ...     # 事务内的数据库操作，要么一起成功，要么完全不执行。
-    ...     async for session in ctx.session[0].retry(99):
-    ...         async with session.select(Order).upsert(id=order_id) as order:
-    ...             order.paid = paid
-    ...         async with session.select(Stock).upsert(owner=order.owner) as stock:
-    ...             stock.value += order.qty
-    ...     # 开始第二组事务，注意，这是一个独立的事务，2个事务之间是有可能中断的
-    ...     async for session in ctx.session[1].retry(99):
-    ...         session.select(Log).insert(Log.new_row("Order {order_id} paid={paid}"))
-    ...     # 事务外代码都可能因为服务器宕机等原因中断
-    ...     print(f"Order {order_id} has been paid={paid}")
+    ...     async with ctx[Order].upsert(id=order_id) as order:
+    ...        order.paid = paid
+    ...     async with ctx[Order].upsert(owner=order.owner) as stock:
+    ...        stock.value += order.qty
+    ...     # ctx.commit()  # 可以省略，也可以提前提交
     ...     return ResponseToClient(['anything', 'blah blah'])
 
     Parameters
@@ -347,11 +333,6 @@ def define_system(
         引用Component，引用的Component可以在`ctx`中进行相关的事务操作，保证数据一致性。
         所有引用的Components会加入共置簇(Colocation Cluster)中，指放在同一个物理数据库中，
         具体见Notes。
-    non_transactions: list of BaseComponent class
-        直接获得该Component底层类，因此可以绕过事务直接写入，注意不保证数据一致性，请只做原子操作。
-        写入操作不支持打开索引的字符串属性，因为字符串索引无法实现原子操作。
-
-        该引用不会加入共置簇，一般用在Hub Component上，让事务解耦，代价是没有数据一致性保证。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
@@ -420,18 +401,17 @@ def define_system(
     Cluster分区提升性能，影响未来的扩展性。正常建议通过拆分Component属性来降低簇聚集。
 
     **System副本继承：**
-    todo 易丢失的延后调用是不是也要加上？
     代码示例：
-    >>> @define_system(namespace="global", sessions=(Order, ), )
+    >>> @define_system(namespace="global", components=(Order, ), )
     ... async def remove(ctx: Context, order_id):
-    ...     async for session in ctx.session[0].retry(99):
-    ...         session.select(Order).delete(id=order_id)
-    >>> @define_system(namespace="example", subsystems=('remove:ItemOrder', ))
+    ...     ctx[Order].delete(id=order_id)
+    >>>
+    >>> @define_system(namespace="example", depends=('remove:ItemOrder', ))
     ... async def remove_item(ctx: Context, order_id):
     ...     return await ctx['remove:ItemOrder'](order_id)
 
-    `subsystems=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
-    `sessions=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
+    `depends=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
+    `components=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
 
     正常调用`remove`(不使用System副本)的话，数据是保存在名为 `Order` 的表中。
     在这个例子中，`remove_item` 调用的 `remove` 函数中的数据会储存在名为
