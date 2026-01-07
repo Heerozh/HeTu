@@ -534,7 +534,7 @@ async def test_query_subscribe_rls_lost_without_index(
     assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
 
 
-@pytest.mark.xfail(reason="目前有已知缺陷，未来也许修也许不修", strict=True)
+@pytest.mark.xfail(reason="已知缺陷，未来也许修也许不修", strict=True)
 async def test_query_subscribe_rls_gain_without_index(
     sub_mgr: Subscriptions,
     filled_rls_ref,
@@ -544,7 +544,7 @@ async def test_query_subscribe_rls_gain_without_index(
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
-    # todo 目前的设计是，rls获得并不能正确得到insert通知，除非query的正是rls属性（这里是friend）
+    # todo 目前的设计是，rls获得并不能正确得到insert通知，除非订阅的正是rls属性自身（这里是friend）
     #      未来如果有需要，可以专门做个rls属性watch，变化了则通知所有IndexSubscription检查rls
 
     # 先预先取掉一行rls

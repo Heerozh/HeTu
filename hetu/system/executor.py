@@ -159,9 +159,9 @@ class SystemExecutor:
         backend = first_comp and comp_mgr.get_table(first_comp).backend or None
 
         # 复制inherited函数
-        for base_name in sys.full_subsystems:
-            base, _, suffix = base_name.partition(":")
-            context.inherited[base_name] = SYSTEM_CLUSTERS.get_system(base).func
+        for dep_name in sys.full_depends:
+            base, _, _ = dep_name.partition(":")
+            context.inherited[dep_name] = SYSTEM_CLUSTERS.get_system(base).func
 
         # todo 实现non_transactions的引用
 

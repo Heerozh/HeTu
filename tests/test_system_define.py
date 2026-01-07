@@ -73,7 +73,7 @@ def test_direct_func_call_forbid(test_system1):
         transactions={},
         inherited={},
     )
-    with pytest.raises(RuntimeError, match="subsystems"):
+    with pytest.raises(RuntimeError, match="depends"):
         test_system1(ctx, 2, 3)
 
 
@@ -153,14 +153,12 @@ def test_system_inheritance(test_component):
         pass
 
     @define_system(
-        namespace="pytest", components=(comp2, comp3), subsystems=("system_base",)
+        namespace="pytest", components=(comp2, comp3), depends=("system_base",)
     )
     async def system_inherit1(ctx, param1, param2):
         pass
 
-    @define_system(
-        namespace="pytest", components=(comp4,), subsystems=(system_inherit1,)
-    )
+    @define_system(namespace="pytest", components=(comp4,), depends=(system_inherit1,))
     async def system_inherit2(ctx, param1):
         pass
 
@@ -216,7 +214,7 @@ def test_system_inh_backend_consistent(test_component):
         pass
 
     @define_system(
-        namespace="pytest", components=test_component, subsystems=("system_postgresql",)
+        namespace="pytest", components=test_component, depends=("system_postgresql",)
     )
     async def system_diff_inh_backend(ctx, vec, hit):
         pass
@@ -342,7 +340,7 @@ def test_system_copy(test_component):
 
     @define_system(
         namespace="pytest",
-        subsystems=("system1:copy",),
+        depends=("system1:copy",),
     )
     async def system_copy1(
         ctx,

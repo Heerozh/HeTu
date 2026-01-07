@@ -12,6 +12,7 @@ from hetu.data.component import BaseComponent
 from hetu.system import SystemClusters
 
 
+# todo rename ComponentBackendManager
 class ComponentTableManager:
     """
     ComponentTable管理类，负责对每个ComponentTable的初始化和获取。

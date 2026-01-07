@@ -28,10 +28,8 @@ class SystemDefine:
     func: FunctionType
     components: set[type[BaseComponent]]  # 引用的Components
     full_components: set[type[BaseComponent]]  # 完整的引用，包括继承自父System的
-    non_transactions: set[type[BaseComponent]]  # 直接获取的Components，不走事务
-    full_non_trx: set[type[BaseComponent]]  # 完整的无事务引用，包括继承自父System的
-    subsystems: set[str]
-    full_subsystems: set[str]
+    depends: set[str]
+    full_depends: set[str]
     permission: Permission
     max_retry: int
     arg_count: int  # 全部参数个数（含默认参数）
@@ -134,14 +132,14 @@ class SystemClusters(metaclass=Singleton):
                         return True
             return False
 
-        def inherit_components(namespace_, subsystems, req: set, n_trx: set, inh: set):
-            for base_sys in subsystems:
+        def inherit_components(namespace_, depends, req: set, inh: set):
+            for dep_sys in depends:
                 base_name, sys_suffix = (
-                    base_sys.split(":") if ":" in base_sys else (base_sys, "")
+                    dep_sys.split(":") if ":" in dep_sys else (dep_sys, "")
                 )
                 if base_name not in self._system_map[namespace_]:
                     raise RuntimeError(
-                        f"{sys_name} 的 `subsystems` 引用的System {base_name} 不存在"
+                        f"{sys_name} 的 `depends` 引用的System {base_name} 不存在"
                     )
                 base_def = self._system_map[namespace_][base_name]
                 if sys_suffix:
@@ -152,17 +150,10 @@ class SystemClusters(metaclass=Singleton):
                             for comp in base_def.components
                         ]
                     )
-                    n_trx.update(
-                        [
-                            comp.duplicate(namespace_, sys_suffix)
-                            for comp in base_def.non_transactions
-                        ]
-                    )
                 else:
                     req.update(base_def.components)
-                    n_trx.update(base_def.non_transactions)
-                inh.update(base_def.subsystems)
-                inherit_components(namespace_, base_def.subsystems, req, n_trx, inh)
+                inh.update(base_def.depends)
+                inherit_components(namespace_, base_def.depends, req, inh)
 
         non_trx = set()
 
@@ -174,16 +165,13 @@ class SystemClusters(metaclass=Singleton):
             # 首先把所有系统变成独立的簇/并生成完整的请求表
             for sys_name, sys_def in self._system_map[namespace].items():
                 sys_def.full_components = set(sys_def.components)
-                sys_def.full_subsystems = set(sys_def.subsystems)
-                sys_def.full_non_trx = set(sys_def.non_transactions)
+                sys_def.full_depends = set(sys_def.depends)
                 inherit_components(
                     namespace,
-                    sys_def.subsystems,
+                    sys_def.depends,
                     sys_def.full_components,
-                    sys_def.full_non_trx,
-                    sys_def.full_subsystems,
+                    sys_def.full_depends,
                 )
-                non_trx.update(sys_def.full_non_trx)
                 # 检查所有System引用的Component和继承的也是同一个backend
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
                 if len(set(backend_names)) > 1:
@@ -249,10 +237,9 @@ class SystemClusters(metaclass=Singleton):
         namespace,
         func,
         components,
-        non_trx,
         force,
         permission,
-        subsystems,
+        depends,
         max_retry,
     ):
         sub_map = self._system_map.setdefault(namespace, dict())
@@ -261,8 +248,6 @@ class SystemClusters(metaclass=Singleton):
             assert func.__name__ not in sub_map, "System重复定义：" + func.__name__
         if components is None:
             components = set()
-        if non_trx is None:
-            non_trx = set()
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         arg_count = func.__code__.co_argcount
@@ -271,16 +256,14 @@ class SystemClusters(metaclass=Singleton):
         sub_map[func.__name__] = SystemDefine(
             func=func,
             components=components,
-            non_transactions=non_trx,
-            subsystems=subsystems,
+            depends=depends,
             max_retry=max_retry,
             arg_count=arg_count,
             defaults_count=defaults_count,
             cluster_id=-1,
             permission=permission,
             full_components=set(),
-            full_non_trx=set(),
-            full_subsystems=set(),
+            full_depends=set(),
         )
 
         if namespace == "global":
@@ -293,11 +276,13 @@ def define_system(
     force: bool = False,
     permission=Permission.USER,
     retry: int = 9999,
-    subsystems: tuple[str | FunctionType] = tuple(),
+    depends: tuple[str | FunctionType, ...] = tuple(),
     call_lock=False,
 ):
     """
-    定义System，System类似数据库的储存过程，主要用于数据CRUD，客户端可以根据权限直接调用。
+    定义System，System类似数据库的储存过程，主要用于数据CRUD。
+    客户端可以直接调用System，每个System都有个默认的endpoint(供客户端调用的入口)，根据permission设置把关权限。
+    如果需要更多的控制，可以自己写define_endpoint调用System。
 
     Examples
     --------
@@ -336,7 +321,7 @@ def define_system(
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
-        System执行权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
+        供客户端调用时的System执行权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
 
         - everybody: 任何客户端连接都可以调用执行。（不安全）
         - user: 只有已登录客户端连接可以调用
@@ -345,12 +330,12 @@ def define_system(
 
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭
-    subsystems: tuple of (str | FunctionType)
-        定义要调用的其他System，调用时会在同一个事务会话中执行。
+    depends: tuple of (str | FunctionType)
+        定义要事务依赖的其他System，调用时会在同一个事务会话中执行。
         可传入System函数本身，或字符串，如("system1", system2)。
-        可通过`ctx["system1"](ctx, ...)`或直接`system2(ctx, ...)`方式调用定义的函数。
+        可通过`ctx.depend["system1"](ctx, ...)`或直接`system2(ctx, ...)`方式调用定义的函数。
         如果希望使用System副本，可以使用字符串式定义，加':副本名后缀'。具体见Notes。
-        注意: 所有subsystems，将被合并进同一个共置簇中。
+        注意: 所有depends，将被合并进同一个共置簇中。
     call_lock: bool
         是否对此System启用调用锁，启用后在调用时可以通过传入调用UUID来防止System重复执行。
         如果此System需要给未来调用使用，则此项必须为True。
@@ -368,7 +353,7 @@ def define_system(
     其他参数:
         为hetu client SDK调用时传入的参数。
     System返回值:
-        如果调用方是父System（通过`subsystems`调用），则返回值会原样传给调用方；
+        如果调用方是父System（通过`depends`调用），则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
             - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
@@ -379,12 +364,12 @@ def define_system(
             调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
         ctx.retry_count: int
             当前因为事务冲突的重试次数，0表示首次执行。
-        ctx[Component Class]: ComponentTransaction
+        ctx.select[Component Class]: ComponentTransaction
             获取Component事务实例，如 `ctx[Position]`，只能获取定义时在 `components` 中引用的实例。
             类型为 `ComponentTransaction`，可以进行数据库操作，并自动包装为事务在System结束后执行。
             具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
-        ctx['SystemName']: func
-            获取定义时在 `subsystems` 中传入的System函数。
+        ctx.depend['SystemName']: func
+            获取定义时在 `depends` 中传入的System函数。
         ctx.nontrxs[Component Class]: RawComponentTable
             获取non_transactions中引用的Component实例，类型为 `RawComponentTable`，可以direct_get/set数据，
             而不通过事务，因此危险不保证数据一致性，请只做原子操作。
@@ -404,11 +389,11 @@ def define_system(
     代码示例：
     >>> @define_system(namespace="global", components=(Order, ), )
     ... async def remove(ctx: Context, order_id):
-    ...     ctx[Order].delete(id=order_id)
+    ...     ctx.select[Order].delete(id=order_id)
     >>>
     >>> @define_system(namespace="example", depends=('remove:ItemOrder', ))
     ... async def remove_item(ctx: Context, order_id):
-    ...     return await ctx['remove:ItemOrder'](order_id)
+    ...     return await ctx.depend['remove:ItemOrder'](order_id)
 
     `depends=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
     `components=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
@@ -428,9 +413,6 @@ def define_system(
     """
     from .context import Context
 
-    # todo non_transactions名字还是不够好，考虑改名为direct_refs
-    # todo 不用non_transactions，而是允许分割事务，可以传入多组事务，分别执行。
-    #      不然每次客户端的一个命令，会强制都在一个事务，而future_call概念太复杂。
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
 
@@ -472,19 +454,17 @@ def define_system(
             else:
                 _components = [lock_table]
 
-        subsystem_names = [
-            subsystem if type(subsystem) is str else subsystem.__name__
-            for subsystem in subsystems
+        depend_names = [
+            dep if isinstance(dep, str) else dep.__name__ for dep in depends
         ]
 
         SystemClusters().add(
             namespace,
             func,
             _components,
-            non_transactions,
             force,
             permission,
-            subsystem_names,
+            depend_names,
             retry,
         )
 
@@ -501,7 +481,7 @@ def define_system(
                 )
             except KeyError:
                 raise RuntimeError(
-                    "要调用其他System必须在define_system时通过subsystems参数定义"
+                    "要调用其他System必须在define_system时通过depends参数定义"
                 )
             return func(*_args, **__kwargs)
 
