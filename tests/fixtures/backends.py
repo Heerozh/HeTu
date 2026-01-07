@@ -1,5 +1,8 @@
-import pytest
+import os
 from typing import Callable, cast
+
+import pytest
+
 from hetu.data.backend import Backend, RedisBackendClient
 
 
@@ -121,6 +124,15 @@ async def mod_redis_cluster_backend(mod_redis_cluster_service):
 
 REDIS_BACKENDS = ["redis", "redis_cluster"]
 REDIS_FORK_BACKENDS = ["valkey"]
+
+# 允许通过环境变量过滤后端，用于CI/CD优化
+# Allow filtering backends via environment variable for CI/CD optimization
+_env_backends = os.environ.get("HETU_TEST_BACKENDS")
+if _env_backends:
+    _allowed = [b.strip() for b in _env_backends.split(",")]
+    REDIS_BACKENDS = [b for b in REDIS_BACKENDS if b in _allowed]
+    REDIS_FORK_BACKENDS = [b for b in REDIS_FORK_BACKENDS if b in _allowed]
+
 # SQL_BACKENDS = ["postgres"]
 ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS
 
