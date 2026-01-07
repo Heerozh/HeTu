@@ -8,10 +8,10 @@
 from hetu.cli.base import CommandInterface
 
 
-class MigrationCommand(CommandInterface):
+class MigrateCommand(CommandInterface):
     @classmethod
     def name(cls):
-        return "migration"
+        return "migrate"
 
     @classmethod
     def register(cls, subparsers):
