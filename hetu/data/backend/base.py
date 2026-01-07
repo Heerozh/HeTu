@@ -334,6 +334,8 @@ class BackendClientFactory:
     def create(
         alias: str, endpoint: Any, clustering: bool, is_servant=False
     ) -> BackendClient:
+        if alias not in BackendClientFactory._registry:
+            raise NotImplementedError(f"{alias} 后端未实现")
         return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
 
 

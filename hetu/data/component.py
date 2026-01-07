@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Callable, cast, overload
 import numpy as np
 
 if TYPE_CHECKING:
-    from .backend.table import TableReference
+    from .backend.table import Table
 
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
@@ -56,11 +56,11 @@ class BaseComponent:
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
     volatile_: bool = False  # 易失标记，此标记的Component每次维护会清空数据
     readonly_: bool = False  # todo: 只读标记，调用写入会警告
-    backend_: str | None = None  # 该Component由哪个后端(数据库)负责储存和查询
+    backend_: str  # 该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
     default_row: np.recarray  # 默认空数据行
-    hosted_: TableReference  # 该Component运行时所在的数据库位置
+    hosted_: Table  # 该Component运行时所在的数据库位置
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
     uniques_: set[str]  # 唯一索引的属性名集合

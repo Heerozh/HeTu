@@ -6,7 +6,6 @@ Worker进程入口文件
 @email: heeroz@gmail.com
 """
 
-import asyncio
 import importlib.util
 import logging
 import os
@@ -14,17 +13,16 @@ import sys
 
 from sanic import Sanic
 
-import hetu.server.websocket  # noqa: F401 (防止未使用警告)
+import hetu.server.websocket as _  # noqa: F401 (防止未使用警告)
 import hetu.system.connection as connection
 from hetu.common.helper import resolve_import
 from hetu.common.snowflake_id import WorkerKeeper, SnowflakeID
 from hetu.data.backend import Backend
 from hetu.manager import ComponentTableManager
-from hetu.safelogging import handlers as log_handlers
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.system import SystemClusters
 from hetu.system.future import future_call_task
-from hetu.web import APP_BLUEPRINT
+from hetu.web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -33,24 +31,14 @@ replay = logging.getLogger("HeTu.replay")
 def start_backends(app: Sanic):
     # 创建后端连接池
     backends = {}
-    table_constructors = {}
     for name, db_cfg in app.config.BACKENDS.items():
-        if db_cfg["type"] == "Redis":
-            from ..data.backend import RedisBackend, RedisRawComponentTable
+        backend = Backend(db_cfg)
+        backends[name] = backend
+        app.ctx.__setattr__(name, backend)
 
-            backend = RedisBackend(db_cfg)
-            backend.post_configure()  # todo 最后调用
-            backends[name] = backend
-            table_constructors["Redis"] = RedisRawComponentTable
-            app.ctx.__setattr__(name, backend)
-        elif db_cfg["type"] == "PostgreSQL":
-            # import sqlalchemy
-            # app.ctx.__setattr__(name, sqlalchemy.create_engine(db_cfg["addr"]))
-            raise NotImplementedError("PostgreSQL后端未实现")
         # 把config第一个设置为default后端
         if "default" not in backends:
             backends["default"] = backends[name]
-            table_constructors["default"] = table_constructors[db_cfg["type"]]
             app.ctx.__setattr__("default_backend", backends["default"])
 
     # todo: 测试使用redis初始化snowflake的workerKeeper
@@ -63,7 +51,7 @@ def start_backends(app: Sanic):
     if worker_keeper is None:
         raise RuntimeError(
             "没有可用的Backend支持WorkerKeeper管理唯一Worker ID，可用的有："
-            + WorkerKeeper.subclasses
+            + str(WorkerKeeper.subclasses)
         )
     # 初始化雪花id生成器
     worker_id = worker_keeper.get_worker_id()
@@ -76,9 +64,12 @@ def start_backends(app: Sanic):
         app.config["NAMESPACE"],
         app.config["INSTANCE_NAME"],
         backends,
-        table_constructors,
     )
     app.ctx.__setattr__("comp_mgr", comp_mgr)
+
+    # 最后调用 backend config, 以防configure中需要之前初始化的东西
+    for backend in backends.values():
+        backend.post_configure()
 
 
 async def close_backends(app: Sanic):
@@ -115,7 +106,7 @@ async def worker_keeper_renewal(app: Sanic):
     await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
 
 
-def start_webserver(app_name, config, main_pid, head) -> Sanic:
+def start_webserver(app_name, config) -> Sanic:
     """
     此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
     多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
@@ -124,10 +115,11 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
 
     # 加载玩家的app文件
     if (app_file := config.get("APP_FILE", None)) is not None:
-        spec = importlib.util.spec_from_file_location("HeTuApp", app_file)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["HeTuApp"] = module
         try:
+            spec = importlib.util.spec_from_file_location("HeTuApp", app_file)
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["HeTuApp"] = module
             spec.loader.exec_module(module)
         except Exception as e:
             print(
@@ -201,5 +193,5 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
     app.add_task(worker_keeper_renewal(app))
 
     # 启动服务器监听
-    app.blueprint(APP_BLUEPRINT)
+    app.blueprint(HETU_BLUEPRINT)
     return app

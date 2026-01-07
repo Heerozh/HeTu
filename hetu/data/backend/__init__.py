@@ -16,7 +16,7 @@ from .base import (
 )
 from .redis import RedisBackendClient, RedisTableMaintenance
 from .session import Session
-from .table import TableReference
+from .table import TableReference, Table
 from .sub import Subscriptions
 
 __all__ = [
@@ -28,6 +28,7 @@ __all__ = [
     "Session",
     "RedisBackendClient",
     "RedisTableMaintenance",
+    "Table",
     "TableReference",
     "MQClient",
     "TableMaintenance",

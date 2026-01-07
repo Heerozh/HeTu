@@ -5,18 +5,20 @@
 @email: heeroz@gmail.com
 """
 
-from typing import ItemsView
+from typing import ItemsView, TYPE_CHECKING
+from .data.backend import Table
 
-from hetu.data.backend import Backend, TableReference
-from hetu.data.component import BaseComponent
-from hetu.system import SystemClusters
+from .system import SystemClusters
+
+if TYPE_CHECKING:
+    from hetu.data.backend import Backend
+    from hetu.data.component import BaseComponent
 
 
-# todo rename ComponentBackendManager
 class ComponentTableManager:
     """
-    ComponentTable管理类，负责对每个ComponentTable的初始化和获取。
-    此类只能在SystemCluster.build_clusters()后初始化
+    Component Table管理类，负责储存每个Component的Backend和TableReference。
+    此类只能在SystemCluster.build_clusters()后初始化。
     """
 
     @property
@@ -32,21 +34,20 @@ class ComponentTableManager:
         namespace: str,
         instance_name: str,
         backends: dict[str, Backend],
-        table_constructors: dict[str, type[RawComponentTable]],
     ):
-        self._tables = {}
-        self._tables_by_name = {}
-        self._namespace = namespace
-        self._backends = backends
+        self._tables: dict[type[BaseComponent], Table] = {}
+        self._tables_by_name: dict[str, Table] = {}
+        self._namespace: str = namespace
+        self._backends: dict[str, Backend] = backends
 
         clusters = SystemClusters().get_clusters(namespace)
+        assert clusters
         for cluster in clusters:
             for comp in cluster.components:
                 backend = backends.get(comp.backend_)
-                table_constructor = table_constructors.get(comp.backend_)
-                if backend is None or table_constructor is None:
+                if backend is None:
                     raise ValueError(f"Backend {comp.backend_} not found")
-                table = table_constructor(comp, instance_name, cluster.id, backend)
+                table = Table(comp, instance_name, cluster.id, backend)
                 self._tables[comp] = table
                 self._tables_by_name[comp.component_name_] = table
 
@@ -63,16 +64,14 @@ class ComponentTableManager:
 
     def _flush_all(self, force=False):
         """测试用，清空所有数据"""
-        for comp, tbl in self._tables.items():
+        for tbl in self._tables.values():
             tbl.flush(force)
 
-    def get_table(
-        self, component_cls: type[BaseComponent] | str
-    ) -> RawComponentTable | None:
+    def get_table(self, component_cls: type[BaseComponent] | str) -> Table | None:
         if type(component_cls) is str:
             return self._tables_by_name.get(component_cls)
         else:
             return self._tables.get(component_cls)
 
-    def items(self) -> ItemsView[type[BaseComponent], RawComponentTable]:
+    def items(self) -> ItemsView[type[BaseComponent], Table]:
         return self._tables.items()

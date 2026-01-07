@@ -8,8 +8,10 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+
 if TYPE_CHECKING:
     from ..component import BaseComponent
+    from . import Backend
 
 
 @dataclass(frozen=True, eq=True)  # 定义为不可变，且可以作为按内容hash的dict键
@@ -32,3 +34,12 @@ class TableReference:
     @property
     def comp_name(self) -> str:
         return self.comp_cls.component_name_
+
+
+@dataclass(frozen=True, eq=True)
+class Table(TableReference):
+    """
+    Table表的地址信息加上所属的Backend。
+    """
+
+    backend: Backend

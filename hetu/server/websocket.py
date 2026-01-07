@@ -14,7 +14,7 @@ from sanic.exceptions import WebsocketClosed
 import hetu.system.connection as connection
 from hetu.data.backend import Subscriptions
 from hetu.system import SystemExecutor
-from hetu.web import APP_BLUEPRINT
+from hetu.web import HETU_BLUEPRINT
 from .message import encode_message
 from .receiver import client_receiver, subscription_receiver, mq_puller
 
@@ -22,7 +22,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@APP_BLUEPRINT.websocket("/hetu")  # noqa
+@HETU_BLUEPRINT.websocket("/hetu")  # noqa
 async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
     # 初始化执行器，一个连接一个执行器
