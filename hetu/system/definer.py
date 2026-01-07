@@ -232,16 +232,7 @@ class SystemClusters(metaclass=Singleton):
                         )
                     )
 
-    def add(
-        self,
-        namespace,
-        func,
-        components,
-        force,
-        permission,
-        depends,
-        max_retry,
-    ):
+    def add(self, namespace, func, components, force, permission, depends, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -270,6 +261,7 @@ class SystemClusters(metaclass=Singleton):
             self._global_system_map[func.__name__] = sub_map[func.__name__]
 
 
+# todo 改成 @hetu.system()，统一hetu入口
 def define_system(
     components: tuple[type[BaseComponent], ...] | None = None,
     namespace: str = "default",
@@ -423,10 +415,9 @@ def define_system(
             f"System参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
         )
 
-        assert permission not in (
-            permission.OWNER,
-            permission.RLS,
-        ), "System的权限不支持OWNER/RLS"
+        assert permission not in (permission.OWNER, permission.RLS), (
+            "System的权限不支持OWNER/RLS"
+        )
 
         assert len(func.__name__) <= SYSTEM_NAME_MAX_LEN, (
             f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
@@ -459,13 +450,7 @@ def define_system(
         ]
 
         SystemClusters().add(
-            namespace,
-            func,
-            _components,
-            force,
-            permission,
-            depend_names,
-            retry,
+            namespace, func, _components, force, permission, depend_names, retry
         )
 
         # 返回包装的func，因为不允许直接调用，需要检查。
