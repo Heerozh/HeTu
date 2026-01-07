@@ -106,7 +106,7 @@ async def worker_keeper_renewal(app: Sanic):
     await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
 
 
-def start_webserver(app_name, config) -> Sanic:
+def worker_main(app_name, config) -> Sanic:
     """
     此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
     多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。

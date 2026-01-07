@@ -10,7 +10,7 @@ import sanic_testing
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
 from hetu.server.message import encode_message, decode_message
-from hetu.server import start_webserver
+from hetu.server import worker_main
 from hetu.system import SystemClusters
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 
@@ -84,7 +84,7 @@ def test_server(setup_websocket_proxy, mod_redis_service):
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
-    server = start_webserver(
+    server = worker_main(
         "Hetu-test",
         {
             "APP_FILE": app_file,

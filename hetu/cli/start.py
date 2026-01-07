@@ -24,7 +24,7 @@ from sanic.worker.loader import AppLoader
 from hetu.cli.base import CommandInterface
 from hetu.common import yamlloader
 from hetu.safelogging import handlers as log_handlers
-from hetu.server import start_webserver
+from hetu.server import worker_main
 
 logger = logging.getLogger("HeTu.root")
 
@@ -215,9 +215,7 @@ class StartCommand(CommandInterface):
         workers = fast and 1 or config.WORKER_NUM
         # 加载app
         loader = AppLoader(
-            factory=partial(
-                start_webserver, f"Hetu-{config.NAMESPACE}", config_for_factory
-            )
+            factory=partial(worker_main, f"Hetu-{config.NAMESPACE}", config_for_factory)
         )
         app = loader.load()
         # 配置log，上面app.load()会自动调用logging.config.dictConfig(config.LOGGING)
