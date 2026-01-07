@@ -249,9 +249,9 @@ def test_system_clusters(test_component):
     assert clusters.get_system("system5", namespace="pytest").cluster_id == 1  # type: ignore
 
     # bug 测试clusters.append是忘记sys_def.full_components.copy()的bug
-    assert clusters.get_system("system4_a", namespace="pytest").full_components == {
+    assert clusters.get_system("system4_a", namespace="pytest").full_components == {  # type: ignore
         comp3
-    }  # type: ignore
+    }
 
 
 def test_system_copy(test_component):
