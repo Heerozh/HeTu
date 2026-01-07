@@ -22,7 +22,6 @@ from sanic.config import Config
 from sanic.worker.loader import AppLoader
 
 from hetu.cli.base import CommandInterface
-from hetu.cli.unlock import UnlockCommand
 from hetu.common import yamlloader
 from hetu.safelogging import handlers as log_handlers
 from hetu.server import start_webserver
@@ -72,12 +71,12 @@ class StartCommand(CommandInterface):
     def register(cls, subparsers):
         parser_start = subparsers.add_parser("start", help="启动河图服务")
         parser_start.add_argument(  # const意思如果--ind后不带参数，则默认打开
-            "--head",
+            "--no-migrate",
             type=str2bool,
             nargs="?",
-            default=True,
+            default=False,
             const=True,
-            help="是否为Head Node，Head启动时会执行数据库初始化操作，比如清空临时数据，修改数据库表结构",
+            help="关闭启动时的自动数据库Schema迁移。生产环境请关闭，并在CI/CD流水线中使用hetu migrate命令执行迁移",
         )
         parser_start.add_argument(
             "--standalone",
@@ -150,7 +149,7 @@ class StartCommand(CommandInterface):
         # 自动启动Redis部分
         redis_proc = None
         if os.environ.get("HETU_RUN_REDIS", None) and not args.standalone:
-            print(f"💾 正在自动启动Redis...")  # 此时logger还未启动
+            print("💾 正在自动启动Redis...")  # 此时logger还未启动
             os.mkdir("data") if not os.path.exists("data") else None
             import shutil
 
@@ -159,7 +158,6 @@ class StartCommand(CommandInterface):
                     ["redis-server", "--daemonize yes", "--save 60 1", "--dir /data/"]
                 )
                 wait_for_port("127.0.0.1", 6379)
-                UnlockCommand.remove_head_lock("redis://127.0.0.1:6379/0")
             else:
                 print("❌ 未找到redis-server，请手动启动")
 
@@ -202,6 +200,14 @@ class StartCommand(CommandInterface):
                 "PACKET_COMPRESSION_CLASS": "zlib" if args.zlib else None,
             }
             config = Config(config_for_factory)
+
+        # 自动迁移
+        if not args.no_migrate:
+            from hetu.cli.migrate import MigrateCommand
+
+            print("🛠️ 正在自动执行数据库Schema迁移...")
+            MigrateCommand.run(config)
+
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
         # prepare用的配置
@@ -210,11 +216,7 @@ class StartCommand(CommandInterface):
         # 加载app
         loader = AppLoader(
             factory=partial(
-                start_webserver,
-                f"Hetu-{config.NAMESPACE}",
-                config_for_factory,
-                os.getpid(),
-                args.head,
+                start_webserver, f"Hetu-{config.NAMESPACE}", config_for_factory
             )
         )
         app = loader.load()

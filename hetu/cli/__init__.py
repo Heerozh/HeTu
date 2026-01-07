@@ -11,7 +11,6 @@ import gettext
 from .build import BuildCommand
 from .migrate import MigrateCommand
 from .start import StartCommand
-from .unlock import UnlockCommand
 
 args_loc = {
     "usage: ": "用法：",
@@ -24,7 +23,6 @@ COMMANDS = [
     StartCommand,
     MigrateCommand,
     BuildCommand,
-    UnlockCommand,
 ]
 
 
