@@ -13,6 +13,8 @@ from inspect import signature
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
 
+from ..endpoint.definer import EndpointDefine, ENDPOINT_NAME_MAX_LEN
+
 from ..common import Singleton
 from ..common.permission import Permission
 from .execution import ExecutionLock
@@ -20,20 +22,15 @@ from .execution import ExecutionLock
 if TYPE_CHECKING:
     from ..data import BaseComponent
 
-SYSTEM_NAME_MAX_LEN = 32
-
 
 @dataclass
-class SystemDefine:
-    func: FunctionType
+class SystemDefine(EndpointDefine):
     components: set[type[BaseComponent]]  # 引用的Components
     full_components: set[type[BaseComponent]]  # 完整的引用，包括继承自父System的
     depends: set[str]
     full_depends: set[str]
     permission: Permission
     max_retry: int
-    arg_count: int  # 全部参数个数（含默认参数）
-    defaults_count: int  # 默认参数个数
     cluster_id: int
 
 
@@ -266,7 +263,7 @@ def define_system(
     components: tuple[type[BaseComponent], ...] | None = None,
     namespace: str = "default",
     force: bool = False,
-    permission=Permission.USER,
+    permission: Permission | None = Permission.USER,
     retry: int = 9999,
     depends: tuple[str | FunctionType, ...] = tuple(),
     call_lock=False,
@@ -291,9 +288,10 @@ def define_system(
     ...     qty: int = property_field(0)
     >>>
     >>> # 定义System
-    >>> from hetu.system import define_system, Context, ResponseToClient
+    >>> from hetu.system import define_system, SystemContext
+    >>> from hetu.endpoint import ResponseToClient
     >>> @define_system(namespace="example", components=(Stock, Order))
-    ... async def pay(ctx: Context, order_id, paid):
+    ... async def pay(ctx: SystemContext, order_id, paid):
     ...     async with ctx[Order].upsert(id=order_id) as order:
     ...        order.paid = paid
     ...     async with ctx[Order].upsert(owner=order.owner) as stock:
@@ -313,8 +311,7 @@ def define_system(
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
-        供客户端调用时的System执行权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
-
+        设为None时表示客户端SDK不可调用，设置任意权限会创建一个供客户端调用的Endpoint，并检查对应权限。
         - everybody: 任何客户端连接都可以调用执行。（不安全）
         - user: 只有已登录客户端连接可以调用
         - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
@@ -336,12 +333,12 @@ def define_system(
     -----
     **System函数：**
 
-    >>> async def system_dash(ctx: Context, entity_self, entity_target, vec)
+    >>> async def pay(ctx: SystemContext, order_id, paid)
 
     async:
         System必须是异步函数。
-    ctx: Context
-        上下文，具体见下述Context部分
+    ctx: SystemContext
+        System上下文，具体见下述SystemContext部分
     其他参数:
         为hetu client SDK调用时传入的参数。
     System返回值:
@@ -351,7 +348,7 @@ def define_system(
             - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
             - 其他返回值丢弃
 
-    **Context部分：**
+    **SystemContext部分：**
         ctx.caller: int
             调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
         ctx.retry_count: int
@@ -402,8 +399,11 @@ def define_system(
     因此通过副本继承此方法，可以拆解出一部分System到不同的数据库节点上运行。
     不用担心，未来调用的后台任务在检查调用队列时，会循环检查所有FutureCalls副本组件队列。
 
+    See Also
+    --------
+    hetu.system.SystemContext : SystemContext类定义
     """
-    from .context import Context
+    from .context import SystemContext
 
     def warp(func):
         # warp只是在系统里记录下有这么个东西，实际不改变function
@@ -419,8 +419,8 @@ def define_system(
             "System的权限不支持OWNER/RLS"
         )
 
-        assert len(func.__name__) <= SYSTEM_NAME_MAX_LEN, (
-            f"System函数名过长，最大长度为{SYSTEM_NAME_MAX_LEN}个字符"
+        assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, (
+            f"System函数名过长，最大长度为{ENDPOINT_NAME_MAX_LEN}个字符"
         )
 
         assert inspect.iscoroutinefunction(func), (
@@ -458,7 +458,7 @@ def define_system(
         def warp_direct_system_call(*_args, **__kwargs) -> Any:
             # 检查ctx
             ctx = _args[0]
-            assert isinstance(ctx, Context), "第一个参数必须是Context实例"
+            assert isinstance(ctx, SystemContext), "第一个参数必须是SystemContext实例"
             # 检查当前ctx[]
             try:
                 assert ctx[func.__name__] == func, (

@@ -7,7 +7,6 @@ import hetu.system.connection as connection
 
 
 async def test_connect_kick(mod_test_app, comp_mgr):
-
     # 先登录2个连接
     executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1.initialize("")
@@ -54,7 +53,7 @@ async def test_connect_not_kick(mod_test_app, comp_mgr):
     executor1_not_replace = hetu.system.SystemExecutor("pytest", comp_mgr)
     await executor1_not_replace.initialize("")
     # 默认为0, 要设为1防止下面依旧强制踢出。注意目前t是按连接方ctx的imeout值来判断的，此值
-    connection.SYSTEM_CALL_IDLE_TIMEOUT = 1
+    connection.ENDPOINT_CALL_IDLE_TIMEOUT = 1
     ok, app_login_rsp = await executor1_not_replace.exec("login", 1, False)
     assert app_login_rsp.message["id"] is None  # app中定义的返回值
     ok, _ = await executor1.exec("test_rls_comp_value", 102)
@@ -81,7 +80,7 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     # 不强制踢出，但是timeout应该生效
     executor1_timeout_replaced = hetu.system.SystemExecutor("pytest", comp_mgr)
     monkeypatch.setattr(
-        time, "time", lambda: time_time() + connection.SYSTEM_CALL_IDLE_TIMEOUT
+        time, "time", lambda: time_time() + connection.ENDPOINT_CALL_IDLE_TIMEOUT
     )
     await executor1_timeout_replaced.initialize("")
     ok, app_login_rsp = await executor1_timeout_replaced.exec("login", 1, False)

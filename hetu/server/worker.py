@@ -137,7 +137,9 @@ def worker_main(app_name, config) -> Sanic:
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get(
         "MAX_ANONYMOUS_CONNECTION_BY_IP", 0
     )
-    connection.SYSTEM_CALL_IDLE_TIMEOUT = config.get("SYSTEM_CALL_IDLE_TIMEOUT", 60 * 2)
+    connection.ENDPOINT_CALL_IDLE_TIMEOUT = config.get(
+        "ENDPOINT_CALL_IDLE_TIMEOUT", 60 * 2
+    )
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))

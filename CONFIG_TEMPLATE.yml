@@ -43,8 +43,8 @@ WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ] # 0.5MB
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
-# 闲置多少秒未调用System则视为断线
-SYSTEM_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
+# 闲置多少秒未调用System/Endpoint则视为断线
+ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
 # 限制每个IP可以创建多少匿名连接（提权登陆后不受此限制）
 MAX_ANONYMOUS_CONNECTION_BY_IP: 10
 

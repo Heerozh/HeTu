@@ -6,55 +6,36 @@
 """
 
 from dataclasses import dataclass, field
-from typing import Callable
 from types import FunctionType
 
 import numpy as np
+
+from ..endpoint import Context
+from ..data.backend import SessionSelect
 
 from ..data import BaseComponent
 
 
 @dataclass
-class Context:
-    # 通用变量
-    # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
-    caller: int | None
-    connection_id: int  # 调用方的connection id
-    address: str | None  # 调用方的ip
-    group: str | None  # 所属组名，目前只用于判断是否admin
-    user_data: dict  # 当前连接的用户数据，可自由设置，在所有System间共享
+class SystemContext(Context):
     # 事务变量
-    timestamp: int  # 调用时间戳
-    retry_count: int  # 当前事务冲突重试次数
-    transactions: dict[type[BaseComponent], ComponentTransaction]  # 当前事务的Table实例
-    inherited: dict[str, FunctionType]  # 继承的父事务函数
-    # 让system调用其他system还有个办法，在这里可以做一个list存放一些快速延后调用，让外面的executor负责调用，
-    # 但考虑了下作用不大，如果system有写入需求，必定不希望丢失，存放到list很可能就因为断线或服务器宕机，造成调用本身丢失，
-    # 如果没有写入需求，自然可以用一般函数通过direct_get来获取数据，不需要做成system
-    # queued_calls: list[any]   # 延后调用的队列
+    # 当前事务冲突重试次数
+    retry_count: int = 0
+    # 当前事务的Select实例
+    select: dict[type[BaseComponent], SessionSelect] = field(default_factory=dict)
+    # 继承的父事务函数
+    depend: dict[str, FunctionType] = field(default_factory=dict)
     # 限制变量
-    # 客户端消息发送限制（次数）
-    client_limits: list[list[int]] = field(default_factory=list)
-    # 服务端消息发送限制（次数）
-    server_limits: list[list[int]] = field(default_factory=list)
     max_row_sub: int = 0  # 行订阅限制
     max_index_sub: int = 0  # 索引订阅限制
 
-    def __str__(self):
-        return f"[{self.connection_id}|{self.address}|{self.caller}]"
-
-    def __getitem__(
-        self, item: type[BaseComponent] | str
-    ) -> ComponentTransaction | FunctionType:
-        if type(item) is str:
-            return self.inherited[item]
-        else:
-            # 取消，isinstance和issubclass都太慢
-            # assert isinstance(item, type) and issubclass(item, BaseComponent)
-            return self.transactions[item]  # type: ignore
-
-    def is_admin(self):
-        return True if self.group and self.group.startswith("admin") else False
+    def configure(
+        self, client_limits, server_limits, max_row_sub=1000, max_index_sub=50
+    ):
+        """配置System选项"""
+        super().configure(client_limits, server_limits)
+        self.max_row_sub = max_row_sub
+        self.max_index_sub = max_index_sub
 
     def rls_check(
         self,
@@ -68,6 +49,7 @@ class Context:
         # admin组拥有所有权限
         if self.is_admin():
             return True
+        assert component.rls_compare_
         rls_func, comp_attr, ctx_attr = component.rls_compare_
         b = getattr(self, ctx_attr, np.nan)
         a = type(b)(
@@ -76,13 +58,6 @@ class Context:
             else getattr(row, "owner", np.nan)
         )
         return bool(rls_func(a, b))
-
-    def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
-        """配置连接选项"""
-        self.client_limits = client_limits
-        self.server_limits = server_limits
-        self.max_row_sub = max_row_sub
-        self.max_index_sub = max_index_sub
 
     async def end_transaction(self, discard: bool = False):
         """

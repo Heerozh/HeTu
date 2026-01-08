@@ -31,9 +31,7 @@ class Context:
     def is_admin(self):
         return True if self.group and self.group.startswith("admin") else False
 
-    def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
+    def configure(self, client_limits, server_limits):
         """配置连接选项"""
         self.client_limits = client_limits
         self.server_limits = server_limits
-        self.max_row_sub = max_row_sub
-        self.max_index_sub = max_index_sub

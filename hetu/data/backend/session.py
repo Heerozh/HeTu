@@ -35,6 +35,7 @@ class Session:
         self._entered = False
 
     def select(self, comp_cls: type[BaseComponent]):
+        # todo systemsession 重载此类，然后此方法限制只能选取system允许的component
         return SessionSelect(self, comp_cls)
 
     @property
