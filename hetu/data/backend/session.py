@@ -28,6 +28,8 @@ class Session:
         self.only_master = False
 
         self.clean()
+        # todo 要检测是否在session中又开了一个session，如果是，应该报错，毕竟嵌套session没意义
+        #      或者只是在system中不允许开session，因为其他地方他开是明确的，能知道自己嵌套了
 
     def clean(self):
         """清除Session缓存的数据状态"""
@@ -36,6 +38,7 @@ class Session:
 
     def select(self, comp_cls: type[BaseComponent]):
         # todo systemsession 重载此类，然后此方法限制只能选取system允许的component
+        # todo 可能和大部分orm的select命名歧义，这里的select可以update和insert的，不是纯查询，考虑改成crud?
         return SessionSelect(self, comp_cls)
 
     @property

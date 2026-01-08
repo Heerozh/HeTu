@@ -24,6 +24,8 @@ class Context:
     client_limits: list[list[int]] = field(default_factory=list)
     # 服务端消息发送限制（次数）
     server_limits: list[list[int]] = field(default_factory=list)
+    max_row_sub: int = 0  # 行订阅限制
+    max_index_sub: int = 0  # 索引订阅限制
 
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
@@ -31,7 +33,9 @@ class Context:
     def is_admin(self):
         return True if self.group and self.group.startswith("admin") else False
 
-    def configure(self, client_limits, server_limits):
+    def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
         """配置连接选项"""
         self.client_limits = client_limits
         self.server_limits = server_limits
+        self.max_row_sub = max_row_sub
+        self.max_index_sub = max_index_sub

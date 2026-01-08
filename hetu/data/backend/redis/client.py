@@ -737,6 +737,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
+            # todo 应该先传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
             # insert
             for insert in inserts:
                 row_id = insert["id"]

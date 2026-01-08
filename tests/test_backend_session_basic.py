@@ -614,3 +614,30 @@ async def test_unique_batch_upsert_in_same_session_bug(item_ref, mod_auto_backen
         async with item_select.upsert(name="Item1") as row:
             row.time = 2
             assert row.id == last_row_id
+
+
+async def test_unique_remove_then_add_bug(item_ref, mod_auto_backend):
+    """todo 测试删除Unique数据后再插入相同Unique数据是否成功"""
+    backend: Backend = mod_auto_backend()
+
+    # 删除Unique数据后再插入相同Unique数据应该成功
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 1
+        await item_select.insert(row)
+
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        item_select = session.select(item_ref.comp_cls)
+        fetched_row = await item_select.get(name="Item1")
+        assert fetched_row is not None
+        item_select.delete(fetched_row.id)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 2
+        await item_select.insert(row)

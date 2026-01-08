@@ -11,6 +11,8 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
+from hetu.data.backend import RaceCondition
+
 from .context import Context
 from ..data import BaseComponent, define_component, property_field, Permission
 from ..safelogging.filter import ContextFilter
@@ -47,12 +49,11 @@ class Connection(BaseComponent):
 
 async def new_connection(address: str):
     """通过connection component分配自己一个连接id，如果失败，或事务冲突，Raise各种异常"""
-    table = Connection.hosted_
-    async with table.session() as session:
-        connection = session.select(Connection)
+    async with Connection.hosted_.session() as session:
+        repo = session.select(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-            same_ips = await connection.range("address", address, limit=1000)
+            same_ips = await repo.range("address", address, limit=1000)
             same_ip_guests = same_ips[same_ips.owner == 0]
             if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
                 msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
@@ -64,19 +65,20 @@ async def new_connection(address: str):
         row.created = time.time()
         row.last_active = row.created
         row.address = address
-        await connection.insert(row)
+        await repo.insert(row)
 
     return row.id
 
 
-async def del_connection(backend: Backend):
-    try:
-        await ctx[Connection].delete(ctx.connection_id)
-    except KeyError:
-        pass
+async def del_connection(connection_id: int):
+    async with Connection.hosted_.session() as session:
+        repo = session.select(Connection)
+        connection = await repo.get(id=connection_id)
+        if connection is not None:
+            connection.delete(connection_id)
 
 
-async def elevate(backend: Backend, user_id: int, kick_logged_in=True):
+async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     """
     提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
     如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]。
@@ -90,24 +92,36 @@ async def elevate(backend: Backend, user_id: int, kick_logged_in=True):
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
         return False, "CURRENT_CONNECTION_ALREADY_ELEVATED"
-    # 如果此用户已经登录
-    logged_conn = await ctx[Connection].select(user_id, "owner")
-    if logged_conn is not None:
-        now = time.time()
-        # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
-        if kick_logged_in or now - logged_conn.last_active > ENDPOINT_CALL_IDLE_TIMEOUT:
-            logged_conn.owner = 0  # 去掉该连接的owner，当该连接下次执行System时会被关闭
-            await ctx[Connection].update(logged_conn.id, logged_conn)
-        else:
-            return False, "USER_ALREADY_LOGGED_IN"
 
-    # 在数据库中关联connection和user
-    conn = await ctx[Connection].select(ctx.connection_id)
-    conn.owner = user_id
-    await ctx[Connection].update(ctx.connection_id, conn)
+    for _ in range(5):  # todo 改成async for语法
+        try:
+            async with Connection.hosted_.session() as session:
+                repo = session.select(Connection)
+                # 如果此用户已经登录
+                already_logged = await repo.get(owner=user_id)
+                if already_logged is not None:
+                    now = time.time()
+                    # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
+                    if (
+                        kick_logged_in
+                        or now - already_logged.last_active > ENDPOINT_CALL_IDLE_TIMEOUT
+                    ):
+                        # 去掉该连接的owner，当该连接下次执行System时会被关闭
+                        already_logged.owner = 0
+                        await repo.update(already_logged)
+                    else:
+                        return False, "USER_ALREADY_LOGGED_IN"
 
-    # 如果事务成功，则设置ctx.caller (end_transaction事务冲突时会跳过后面代码)
-    await ctx.end_transaction()
+                # 在数据库中关联connection和user
+                conn = await repo.get(id=ctx.connection_id)
+                if not conn:
+                    return False, "CONNECTION_NOT_FOUND"
+                conn.owner = user_id
+                await repo.update(conn)
+        except RaceCondition as _:
+            continue
+
+    # 如果事务成功，则设置ctx.caller (事务冲突时会跳过后面代码)
     ctx.caller = user_id
 
     # 已登录用户扩张限制

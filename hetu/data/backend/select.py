@@ -32,6 +32,7 @@ IndexScalar = (
 Int64 = np.int64 | int
 
 
+# todo 改叫SessionRepository, SessionCRUD?
 class SessionSelect:
     """帮助方法，从数据库查询数据并放入Session缓存。"""
 
@@ -70,6 +71,7 @@ class SessionSelect:
                 False,
                 RowFormat.ID_LIST,
             )
+            # todo 如果existing_row的id存在于mark_deleted中，则不算冲突
             if len(existing_row) > 0:
                 return unique_index
         return None

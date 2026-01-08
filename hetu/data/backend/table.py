@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from ..component import BaseComponent
     from . import Backend
+    from .session import Session
 
 
 @dataclass(frozen=True, eq=True)  # 定义为不可变，且可以作为按内容hash的dict键
@@ -43,3 +44,6 @@ class Table(TableReference):
     """
 
     backend: Backend
+
+    def session(self) -> Session:
+        return self.backend.session(self.instance_name, self.cluster_id)

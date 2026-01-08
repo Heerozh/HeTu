@@ -25,17 +25,6 @@ class SystemContext(Context):
     select: dict[type[BaseComponent], SessionSelect] = field(default_factory=dict)
     # 继承的父事务函数
     depend: dict[str, FunctionType] = field(default_factory=dict)
-    # 限制变量
-    max_row_sub: int = 0  # 行订阅限制
-    max_index_sub: int = 0  # 索引订阅限制
-
-    def configure(
-        self, client_limits, server_limits, max_row_sub=1000, max_index_sub=50
-    ):
-        """配置System选项"""
-        super().configure(client_limits, server_limits)
-        self.max_row_sub = max_row_sub
-        self.max_index_sub = max_index_sub
 
     def rls_check(
         self,
