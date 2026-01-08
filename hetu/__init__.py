@@ -8,12 +8,16 @@
 from . import data
 from . import system
 from . import common
-
-from .manager import ComponentTableManager
-
 from importlib.metadata import version, PackageNotFoundError
+
+component = data.define_component
+system = system.define_system
+
 
 try:
     __version__ = version("hetu")
 except PackageNotFoundError:
     __version__ = "hetu is not installed in a proper way"
+
+
+__all__ = ["data", "system", "common", "component", "system"]

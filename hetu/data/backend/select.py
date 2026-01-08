@@ -36,7 +36,7 @@ class SessionSelect:
     """帮助方法，从数据库查询数据并放入Session缓存。"""
 
     def __init__(self, session: Session, comp_cls: type[BaseComponent]) -> None:
-        self.session = session
+        self._session = session
         self.ref: TableReference = TableReference(
             comp_cls, session.instance_name, session.cluster_id
         )
@@ -45,7 +45,7 @@ class SessionSelect:
         """
         在Session本地缓存中检查Unique索引冲突。
         """
-        idmap = self.session.idmap
+        idmap = self._session.idmap
         for unique_index in fields:
             value = row[unique_index]
             rows = idmap.filter(self.ref, **{unique_index: value})
@@ -61,7 +61,7 @@ class SessionSelect:
         """
         for unique_index in fields:
             value: np.generic = row[unique_index]
-            existing_row = await self.session.master_or_servant.range(
+            existing_row = await self._session.master_or_servant.range(
                 self.ref,
                 unique_index,
                 value.item(),
@@ -79,7 +79,7 @@ class SessionSelect:
         根据row.id对比缓存，获取修改的字段列表。
         如果id在修改字段中，表示没有找到旧数据。
         """
-        idmap = self.session.idmap
+        idmap = self._session.idmap
         old_row, row_stat = idmap.get(self.ref, row["id"])
         assert row.dtype.names  # for type checker, could be removed by python -O
         if old_row is None or row_stat == RowState.DELETE:
@@ -124,9 +124,11 @@ class SessionSelect:
         从数据库获取单行数据，并放入Session缓存。
         本指令如果命中缓存，不会去数据库查询。
         """
+        idmap = self._session.idmap
+        ref = self.ref
         # 主键查询，先查缓存
         row_id = cast(int, row_id)
-        row, row_stat = self.session.idmap.get(self.ref, row_id)
+        row, row_stat = idmap.get(ref, row_id)
         if row_stat is not None:
             if row_stat == RowState.DELETE:
                 return None
@@ -134,11 +136,9 @@ class SessionSelect:
                 return row
 
         # 缓存未命中，查询数据库
-        row = await self.session.master_or_servant.get(
-            self.ref, row_id, RowFormat.STRUCT
-        )
+        row = await self._session.master_or_servant.get(ref, row_id, RowFormat.STRUCT)
         if row is not None:
-            self.session.idmap.add_clean(self.ref, row)
+            idmap.add_clean(ref, row)
         return row
 
     async def get(
@@ -186,7 +186,7 @@ class SessionSelect:
         # 如果不是主键，直接用range方法
         if index_name != "id":
             # 去cache查询
-            idmap = self.session.idmap
+            idmap = self._session.idmap
             rows = idmap.filter(self.ref, **{index_name: query_value})
             if len(rows) > 0:
                 return rows[0]
@@ -268,7 +268,7 @@ class SessionSelect:
             _right = _right.item()
 
         # 先查询 id 列表
-        row_ids = await self.session.master_or_servant.range(
+        row_ids = await self._session.master_or_servant.range(
             self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
         )
 
@@ -301,7 +301,7 @@ class SessionSelect:
                 f"Insert failed: row.{conflict} violates a unique index."
             )
 
-        self.session.idmap.add_insert(self.ref, row)
+        self._session.idmap.add_insert(self.ref, row)
 
     async def update(self, row: np.record) -> None:
         """
@@ -331,7 +331,7 @@ class SessionSelect:
                 f"Update failed: row.{conflict} violates a unique index."
             )
 
-        self.session.idmap.update(self.ref, row)
+        self._session.idmap.update(self.ref, row)
 
     def upsert(self, **kwargs: IndexScalar) -> UpsertContext:
         """
@@ -372,11 +372,11 @@ class SessionSelect:
         row_id : int
             待删除行的主键ID。
         """
-        old_row, row_stat = self.session.idmap.get(self.ref, row_id)
+        old_row, row_stat = self._session.idmap.get(self.ref, row_id)
         if old_row is None or row_stat == RowState.DELETE:
             raise LookupError("Row not existing: not in cache or already deleted.")
 
-        self.session.idmap.mark_deleted(self.ref, row_id)
+        self._session.idmap.mark_deleted(self.ref, row_id)
 
 
 class UpsertContext:

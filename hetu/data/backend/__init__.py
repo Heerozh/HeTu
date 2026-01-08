@@ -16,6 +16,7 @@ from .base import (
 )
 from .redis import RedisBackendClient, RedisTableMaintenance
 from .session import Session
+from .select import SessionSelect
 from .table import TableReference, Table
 from .sub import Subscriptions
 
@@ -26,6 +27,7 @@ __all__ = [
     "BackendClient",
     "Backend",
     "Session",
+    "SessionSelect",
     "RedisBackendClient",
     "RedisTableMaintenance",
     "Table",
