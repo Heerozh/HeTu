@@ -15,7 +15,8 @@ import numpy as np
 import warnings
 
 from .context import Context
-from .definer import define_system, SystemClusters, SYSTEM_NAME_MAX_LEN
+from .definer import define_system, SystemClusters
+from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from .execution import ExecutionLock, clean_expired_call_locks
 from .executor import SystemExecutor
 from ..data import BaseComponent, define_component, property_field, Permission
@@ -30,7 +31,7 @@ replay = logging.getLogger("HeTu.replay")
 class FutureCalls(BaseComponent):
     owner: np.int64 = property_field(0, index=True)  # 创建方
     uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
-    system: str = property_field("", dtype=f"<U{SYSTEM_NAME_MAX_LEN}")  # 目标system名
+    system: str = property_field("", dtype=f"<U{ENDPOINT_NAME_MAX_LEN}")  # 目标system名
     args: str = property_field("", dtype="<U1024")  # 目标system参数
     recurring: bool = property_field(False)  # 是否永不结束重复触发
     created: np.double = property_field(0)  # 创建时间

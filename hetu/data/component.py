@@ -296,7 +296,9 @@ def define_component(
     Parameters
     ----------
     namespace: str
-        你的项目名。不同于System，Component的Namespace主要用在数据库表名，可以任意起名
+        你的项目名，主要为了区分不同项目的同名Component。
+        不同于System，Component的Namespace可以随意填写，只要被System引用了都会加载。
+        todo 如果为"core"，则此Component即使没被任何System引用，也会被默认加载。
     volatile: bool
         是否是易失表，设为True时，每次维护你的数据会被清除，请小心。
         对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。
@@ -467,7 +469,7 @@ def define_component(
         # 生成json格式，并通过json加载到class中
         json_str = BaseComponent.make_json(
             properties,
-            namespace,  # todo 看看组件的namespace能否取消
+            namespace,
             cls.__name__,
             permission,
             volatile,

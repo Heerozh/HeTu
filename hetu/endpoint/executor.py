@@ -11,7 +11,7 @@ import random
 import time
 from dataclasses import dataclass
 
-from .connection import ConnectionAliveChecker
+from .connection import ConnectionAliveChecker, new_connection, del_connection
 from .context import Context
 from .execution import ExecutionLock
 from ..common.slowlog import SlowLog
@@ -19,6 +19,7 @@ from ..data import Permission
 from ..data.backend import RaceCondition
 from ..manager import ComponentTableManager
 from .response import ResponseToClient
+from ..safelogging.filter import ContextFilter
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -54,11 +55,12 @@ class EndpointExecutor:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        sys = SYSTEM_CLUSTERS.get_system("new_connection")
-        assert sys is not None
-        ok, _ = await self.execute_(sys, address)
-        if not ok:
+        conn_id = await new_connection(address)
+        if not conn_id:
             raise RuntimeError("连接初始化失败，new_connection调用失败")
+        self.context.connection_id = conn_id
+        self.context.address = address
+        ContextFilter.set_log_context(str(self.context))
 
     async def terminate(self):
         if self.context.connection_id == 0:

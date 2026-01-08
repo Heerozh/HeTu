@@ -7,17 +7,17 @@
 
 import logging
 import time
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import Backend
-
 from .context import Context
 from ..data import BaseComponent, define_component, property_field, Permission
-from ..manager import ComponentTableManager
 from ..safelogging.filter import ContextFilter
-from ..system import define_system
+
+if TYPE_CHECKING:
+    from ..data.backend import Backend
+    from ..manager import ComponentTableManager
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -26,7 +26,7 @@ MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
 ENDPOINT_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 
 
-@define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
+@define_component(namespace="core", volatile=True, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     owner: np.int64 = property_field(0, index=True)
     address: str = property_field("", dtype="<U32", index=True)  # 连接地址
@@ -37,28 +37,36 @@ class Connection(BaseComponent):
     last_active: np.double = property_field(0)  # 最后活跃时间
 
 
-async def mew_connection(backend: Backend, address: str):
-    # 服务器自己的（future call之类的localhost）连接不应该受IP限制
-    if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-        same_ips = await ctx[Connection].query(
-            "address", address, limit=1000, lock_index=False, lock_rows=False
-        )
-        same_ip_guests = same_ips[same_ips.owner == 0]
-        if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
-            msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
-            logger.warning(msg)
-            raise RuntimeError(msg)
+# todo 所有定义为HeTu命名空间的表，需要强制引用，就按独立隔离的簇引用好了
+#      可以改个名字，比如叫core之类？
+# 必须引用Connection组件，否则不会在数据库中创建此组件的表
+# @define_system(namespace="core", permission=None, components=(Connection,))
+# async def pin_connection_reference(ctx):
+#     pass
 
-    row = Connection.new_row()
-    row.owner = 0
-    row.created = time.time()
-    row.last_active = row.created
-    row.address = address
-    await ctx[Connection].insert(row)
-    row_ids = await ctx.end_transaction()
-    ctx.connection_id = row_ids[0]
-    ctx.address = address
-    ContextFilter.set_log_context(str(ctx))
+
+async def new_connection(address: str):
+    """通过connection component分配自己一个连接id，如果失败，或事务冲突，Raise各种异常"""
+    table = Connection.hosted_
+    async with table.session() as session:
+        connection = session.select(Connection)
+        # 服务器自己的（future call之类的localhost）连接不应该受IP限制
+        if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
+            same_ips = await connection.range("address", address, limit=1000)
+            same_ip_guests = same_ips[same_ips.owner == 0]
+            if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
+                msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+                logger.warning(msg)
+                raise RuntimeError(msg)
+
+        row = Connection.new_row()
+        row.owner = 0
+        row.created = time.time()
+        row.last_active = row.created
+        row.address = address
+        await connection.insert(row)
+
+    return row.id
 
 
 async def del_connection(backend: Backend):
