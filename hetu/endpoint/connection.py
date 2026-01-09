@@ -47,7 +47,7 @@ class Connection(BaseComponent):
 #     pass
 
 
-async def new_connection(address: str):
+async def new_connection(address: str) -> int:
     """通过connection component分配自己一个连接id，如果失败，或事务冲突，Raise各种异常"""
     assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
     async with Connection.hosted_.session() as session:
@@ -71,7 +71,7 @@ async def new_connection(address: str):
     return row.id
 
 
-async def del_connection(connection_id: int):
+async def del_connection(connection_id: int) -> None:
     assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
     async with Connection.hosted_.session() as session:
         repo = session.using(Connection)

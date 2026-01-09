@@ -60,7 +60,7 @@ class BaseComponent:
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
     default_row: np.recarray  # 默认空数据行
-    hosted_: Table | None  # 该Component运行时所在的数据库位置
+    hosted_: Table | None = None  # 服务器启动后ComponentTableManager分配的数据库位置
     prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
     uniques_: set[str]  # 唯一索引的属性名集合
@@ -112,7 +112,7 @@ class BaseComponent:
             data["component_name"] += ":" + suffix
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
-            comp: type[BaseComponent] = type(
+            comp: type[BaseComponent] = type[BaseComponent](
                 data["component_name"], (BaseComponent,), {}
             )
         else:

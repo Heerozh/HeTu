@@ -38,7 +38,7 @@ class BaseSubscription:
 
 
 class RowSubscription(BaseSubscription):
-    __cache = {}
+    __cache = {}  # todo 改成contextvars按Task隔离
 
     def __init__(
         self,

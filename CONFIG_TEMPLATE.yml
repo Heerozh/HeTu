@@ -83,8 +83,8 @@ BACKENDS:
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
     master: redis://127.0.0.1:6379/0
     # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
-    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的session定义，计算数据
-    # 隔离，把隔离的数据分配到不同的分片上，提升写入性能。
+    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
+    # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
     clustering: false  # todo 改成raw clustering更好
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
