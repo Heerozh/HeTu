@@ -75,7 +75,7 @@ class EndpointDefines(metaclass=Singleton):
             self._global_endpoint_map[func.__name__] = sub_map[func.__name__]
 
 
-def endpoint(namespace: str = "default", force: bool = False):
+def endpoint(namespace: str = "global", force: bool = False):
     """
     把一个函数包装成可供客户端远程调用的接口。
 
@@ -99,16 +99,16 @@ def endpoint(namespace: str = "default", force: bool = False):
     Parameters
     ----------
     namespace: str
-        是你的项目名，一个网络地址只能启动一个namespace下的System们。
+        是你的项目名，一个网络地址只能启动一个namespace下的Endpoint们。
         定义为"global"的namespace可以在所有项目下通用。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
 
     Notes
     -----
-    **Endpoint函数要求：**
+    **Endpoint函数要求：** ::
 
-    >>> async def pay(ctx: Context, order_id, paid)
+        async def pay(ctx: Context, order_id, paid)
 
     async:
         Endpoint必须是异步函数。

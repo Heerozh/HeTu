@@ -1,4 +1,6 @@
 """
+Component Table管理类，通过System定义的Component来管理他们所属的数据库位置。
+
 @author: Heerozh (Zhang Jianhao)
 @copyright: Copyright 2024, Heerozh. All rights reserved.
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
@@ -31,7 +33,7 @@ class ComponentTableManager:
 
     def __init__(
         self,
-        namespace: str,
+        namespace: str,  # todo 看看能不能去掉namespace直接启动所有endpoint和system
         instance_name: str,
         backends: dict[str, Backend],
     ):

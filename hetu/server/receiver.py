@@ -14,9 +14,9 @@ from sanic import Websocket
 from sanic.exceptions import WebsocketClosed
 
 import hetu
-import hetu.system.connection as connection
-from hetu.data.backend import Subscriptions
-from hetu.system import SystemExecutor, SystemCall, ResponseToClient
+from ..endpoint import connection
+from ..data.backend import Subscriptions
+from ..endpoint.executor import EndpointExecutor, SystemCall, ResponseToClient
 from .message import decode_message
 
 logger = logging.getLogger("HeTu.root")
@@ -28,7 +28,7 @@ def check_length(name, data: list, left, right):
         raise ValueError(f"Invalid {name} message")
 
 
-async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Queue):
+async def sys_call(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue):
     """处理Client SDK调用System的命令"""
     # print(executor.context, 'sys', data)
     check_length("sys", data, 2, 100)
@@ -43,7 +43,10 @@ async def sys_call(data: list, executor: SystemExecutor, push_queue: asyncio.Que
 
 
 async def sub_call(
-    data: list, executor: SystemExecutor, subs: Subscriptions, push_queue: asyncio.Queue
+    data: list,
+    executor: EndpointExecutor,
+    subs: Subscriptions,
+    push_queue: asyncio.Queue,
 ):
     """处理Client SDK调用订阅的命令"""
     ctx = executor.context
@@ -83,7 +86,7 @@ async def sub_call(
 async def client_receiver(
     ws: Websocket,
     protocol: dict,
-    executor: SystemExecutor,
+    executor: EndpointExecutor,
     subs: Subscriptions,
     push_queue: asyncio.Queue,
     flood_checker: connection.ConnectionFloodChecker,
@@ -129,8 +132,7 @@ async def client_receiver(
         pass
     except RedisConnectionError as e:
         err_msg = (
-            f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: "
-            f"{type(e).__name__}:{e}"
+            f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
         )
         replay.info(err_msg)
         logger.error(err_msg)
@@ -164,8 +166,7 @@ async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(
-            f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常："
-            f"{type(e).__name__}:{e}"
+            f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{type(e).__name__}:{e}"
         )
         return ws.fail_connection()
     finally:

@@ -30,6 +30,7 @@ class Session:
         self.clean()
         # todo 要检测是否在session中又开了一个session，如果是，应该报错，毕竟嵌套session没意义
         #      或者只是在system中不允许开session，因为其他地方他开是明确的，能知道自己嵌套了
+        #      或者允许嵌套，但是内部的必须加上lock防止重复运行。但这也意义不大，2者数据互通还是会很多问题
 
     def clean(self):
         """清除Session缓存的数据状态"""

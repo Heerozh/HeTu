@@ -1,1 +1,1 @@
-from .worker import worker_main
+from .main import worker_main

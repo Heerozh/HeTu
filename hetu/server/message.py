@@ -17,7 +17,7 @@ msg_decoder = msgspec.msgpack.Decoder()
 buffer = bytearray()
 
 
-def decode_message(message: bytes, protocol: dict):
+def decode_message(message: bytes, protocol: dict) -> dict:
     if len(message) > 10240:
         raise ValueError("Message too long，为了防止性能攻击限制长度")
     if crypto := protocol["crypto"]:
@@ -28,10 +28,10 @@ def decode_message(message: bytes, protocol: dict):
     return parsed
 
 
-def encode_message(message: list | dict, protocol: dict):
+def encode_message(message: list | dict, protocol: dict) -> bytes:
     try:
         msg_encoder.encode_into(message, buffer)
-        ret = buffer
+        ret = bytes(buffer)
     except Exception as e:
         logger.exception(
             f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{type(e).__name__}:{e}"

@@ -20,6 +20,7 @@ from ..safelogging.filter import ContextFilter
 if TYPE_CHECKING:
     from ..data.backend import Backend
     from ..manager import ComponentTableManager
+    from ..data.backend.table import Table
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -143,7 +144,9 @@ class ConnectionAliveChecker:
     """
 
     def __init__(self, comp_mgr: ComponentTableManager):
-        self.conn_tbl = comp_mgr.get_table(Connection)
+        table = comp_mgr.get_table(Connection)
+        assert table
+        self.conn_tbl: Table = table
         self.last_active_cache = 0
 
     async def is_illegal(self, ctx: Context, ex_info: Any):

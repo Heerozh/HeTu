@@ -13,16 +13,16 @@ import sys
 
 from sanic import Sanic
 
-import hetu.server.websocket as _  # noqa: F401 (防止未使用警告)
-import hetu.system.connection as connection
-from hetu.common.helper import resolve_import
-from hetu.common.snowflake_id import WorkerKeeper, SnowflakeID
-from hetu.data.backend import Backend
-from hetu.manager import ComponentTableManager
-from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.system import SystemClusters
-from hetu.system.future import future_call_task
-from hetu.web import HETU_BLUEPRINT
+from . import websocket as _  # noqa: F401 (防止未使用警告)
+from ..endpoint import connection
+from ..common.helper import resolve_import
+from ..common.snowflake_id import WorkerKeeper, SnowflakeID
+from ..data.backend import Backend
+from ..manager import ComponentTableManager
+from ..safelogging.default import DEFAULT_LOGGING_CONFIG
+from ..system import SystemClusters
+from ..system.future import future_call_task
+from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")

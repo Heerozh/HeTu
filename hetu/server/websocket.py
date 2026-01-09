@@ -11,10 +11,10 @@ import logging
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
 
-import hetu.system.connection as connection
-from hetu.data.backend import Subscriptions
-from hetu.system import SystemExecutor
-from hetu.web import HETU_BLUEPRINT
+from ..endpoint import connection
+from ..endpoint.executor import EndpointExecutor
+from ..data.backend import Subscriptions
+from .web import HETU_BLUEPRINT
 from .message import encode_message
 from .receiver import client_receiver, subscription_receiver, mq_puller
 
@@ -25,16 +25,23 @@ replay = logging.getLogger("HeTu.replay")
 @HETU_BLUEPRINT.websocket("/hetu")  # noqa
 async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
+    # 获取当前协程任务
+    current_task = asyncio.current_task()
+    assert current_task, "Must be called in an asyncio task"
+
     # 初始化执行器，一个连接一个执行器
     comp_mgr = request.app.ctx.comp_mgr
-    executor = SystemExecutor(request.app.config["NAMESPACE"], comp_mgr)
+    executor = EndpointExecutor(request.app.config["NAMESPACE"], comp_mgr)
     await executor.initialize(request.client_ip)
     ctx = executor.context
-    logger.info(f"🔗 [📡WSConnect] 新连接：{asyncio.current_task().get_name()}")
+    logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
+
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
+
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
+
     # 初始化发送/接受计数器
     flood_checker = connection.ConnectionFloodChecker()
 
@@ -91,7 +98,7 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.exception(err_msg)
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        close_msg = f"⛓️ [📡WSConnect] 连接断开：{asyncio.current_task().get_name()}"
+        close_msg = f"⛓️ [📡WSConnect] 连接断开：{current_task.get_name()}"
         replay.info(close_msg)
         logger.info(close_msg)
         await request.app.cancel_task(recv_task_id, raise_exception=False)

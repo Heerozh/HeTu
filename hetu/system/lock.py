@@ -18,8 +18,8 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
-class EndpointLock(BaseComponent):
+@define_component(namespace="core", volatile=True, permission=None)
+class SystemLock(BaseComponent):
     """带有UUID的SystemCall执行记录，用于锁住防止相同uuid的调用重复执行。调用方用完后要记得删除自己的记录。"""
 
     uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
@@ -30,8 +30,8 @@ class EndpointLock(BaseComponent):
 
 async def clean_expired_call_locks(comp_mgr):
     """清空超过7天的call_lock的已执行uuid数据，只有服务器非正常关闭才可能遗留这些数据，因此只需服务器启动时调用。"""
-    duplicates = EndpointLock.get_duplicates(comp_mgr.namespace).values()
-    for comp in [EndpointLock] + list(duplicates):
+    duplicates = SystemLock.get_duplicates(comp_mgr.namespace).values()
+    for comp in [SystemLock] + list(duplicates):
         tbl = comp_mgr.get_table(comp)
         if tbl is None:  # 说明项目没任何地方引用此Component
             continue

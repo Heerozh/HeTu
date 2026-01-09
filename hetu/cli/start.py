@@ -21,10 +21,10 @@ from sanic import Sanic
 from sanic.config import Config
 from sanic.worker.loader import AppLoader
 
-from hetu.cli.base import CommandInterface
-from hetu.common import yamlloader
-from hetu.safelogging import handlers as log_handlers
-from hetu.server import worker_main
+from .base import CommandInterface
+from ..common import yamlloader
+from ..safelogging import handlers as log_handlers
+from ..server import worker_main
 
 logger = logging.getLogger("HeTu.root")
 

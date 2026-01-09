@@ -178,7 +178,7 @@ class SystemExecutor:
                     context.transactions[master] = tbl.attach(session)
             # 执行system和事务
             try:
-                # 先检查uuid是否执行过了
+                # 先检查uuid是否执行过了 todo 注解endpoint并不需要lock，不会多次执行，system需要因为有重试概念
                 if uuid and (await context[ExecutionLock].is_exist(uuid, "uuid"))[0]:
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
