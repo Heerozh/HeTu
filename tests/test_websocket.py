@@ -77,10 +77,9 @@ def setup_websocket_proxy():
 
 
 @pytest.fixture
-def test_server(setup_websocket_proxy, mod_redis_service):
+def test_server(setup_websocket_proxy, ses_redis_service):
     SystemClusters()._clear()
-    port = 23318
-    mod_redis_service(port)
+    port = ses_redis_service[0].match(r"redis://127\.0\.0\.1:(\d+)/0").group(1)
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG

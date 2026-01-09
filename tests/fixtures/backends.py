@@ -7,7 +7,7 @@ from hetu.data.backend import Backend, RedisBackendClient
 
 
 @pytest.fixture(scope="module")
-async def mod_redis_backend(mod_redis_service):
+async def mod_redis_backend(ses_redis_service):
     """Redis后端工厂，返回创建Redis后端连接的工厂函数"""
     from hetu.data.component import ComponentDefines
 
@@ -18,7 +18,7 @@ async def mod_redis_backend(mod_redis_service):
         if key in backends:
             _backend = backends[key]
         else:
-            redis_url, replica_url = mod_redis_service(port)
+            redis_url, replica_url = ses_redis_service
             config = {
                 "type": "redis",
                 "master": redis_url,
@@ -28,6 +28,8 @@ async def mod_redis_backend(mod_redis_service):
             }
 
             _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
             backends[key] = _backend
 
         # mock redis client
@@ -46,7 +48,7 @@ async def mod_redis_backend(mod_redis_service):
 
 
 @pytest.fixture(scope="module")
-async def mod_valkey_backend(mod_valkey_service):
+async def mod_valkey_backend(ses_valkey_service):
     """valkey后端工厂fixture，返回创建valkey后端的工厂函数"""
     from hetu.data.component import ComponentDefines
 
@@ -57,7 +59,7 @@ async def mod_valkey_backend(mod_valkey_service):
         if key in backends:
             _backend = backends[key]
         else:
-            redis_url, replica_url = mod_valkey_service(port)
+            redis_url, replica_url = ses_valkey_service
             config = {
                 "type": "redis",
                 "master": redis_url,
@@ -67,6 +69,8 @@ async def mod_valkey_backend(mod_valkey_service):
             }
 
             _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
             backends[key] = _backend
 
         # mock redis client
@@ -85,7 +89,7 @@ async def mod_valkey_backend(mod_valkey_service):
 
 
 @pytest.fixture(scope="module")
-async def mod_redis_cluster_backend(mod_redis_cluster_service):
+async def mod_redis_cluster_backend(ses_redis_cluster_service):
     """Redis后端工厂，返回创建Redis后端连接的工厂函数"""
     from hetu.data.component import ComponentDefines
 
@@ -96,7 +100,7 @@ async def mod_redis_cluster_backend(mod_redis_cluster_service):
         if key in backends:
             _backend = backends[key]
         else:
-            redis_url = mod_redis_cluster_service
+            redis_url = ses_redis_cluster_service
             config = {
                 "type": "redis",
                 "master": redis_url,
@@ -105,6 +109,8 @@ async def mod_redis_cluster_backend(mod_redis_cluster_service):
             }
 
             _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
             backends[key] = _backend
 
         # mock redis client

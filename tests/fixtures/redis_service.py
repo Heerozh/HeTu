@@ -6,8 +6,8 @@ import pytest
 from docker.errors import NotFound
 
 
-@pytest.fixture(scope="module")
-def mod_redis_service():
+@pytest.fixture(scope="session")
+def ses_redis_service():
     """
     启动redis docker服务，测试结束后销毁服务
     """
@@ -38,61 +38,59 @@ def mod_redis_service():
     # 启动服务器
     containers = {}
 
-    def run_redis_service(port=23318):
-        if "redis" not in containers:
-            containers["redis"] = client.containers.run(
-                "redis:latest",
-                detach=True,
-                ports={"6379/tcp": port},
-                name="hetu_test_redis",
-                auto_remove=True,
-                network="hetu_test_redis_net",
-                hostname="redis-master",
+    port = 23318
+    if "redis" not in containers:
+        containers["redis"] = client.containers.run(
+            "redis:latest",
+            detach=True,
+            ports={"6379/tcp": port},
+            name="hetu_test_redis",
+            auto_remove=True,
+            network="hetu_test_redis_net",
+            hostname="redis-master",
+        )
+        containers["redis_replica"] = client.containers.run(
+            "redis:latest",
+            detach=True,
+            ports={"6379/tcp": port + 1},
+            name="hetu_test_redis_replica",
+            auto_remove=True,
+            network="hetu_test_redis_net",
+            command=[
+                "redis-server",
+                "--replicaof redis-master 6379",
+                "--replica-read-only yes",
+            ],
+        )
+
+    # 验证docker启动完毕
+    import redis
+
+    r = redis.Redis(host="127.0.0.1", port=port)
+    r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
+    while True:
+        try:
+            time.sleep(1)
+            print(
+                "version:",
+                r.info()["redis_version"],  # type: ignore
+                r.role(),
+                r.config_get("notify-keyspace-events"),
             )
-            containers["redis_replica"] = client.containers.run(
-                "redis:latest",
-                detach=True,
-                ports={"6379/tcp": port + 1},
-                name="hetu_test_redis_replica",
-                auto_remove=True,
-                network="hetu_test_redis_net",
-                command=[
-                    "redis-server",
-                    "--replicaof redis-master 6379",
-                    "--replica-read-only yes",
-                ],
+            r.wait(1, 10000)
+            print(
+                "slave version:",
+                r_slave.info()["redis_version"],  # type: ignore
+                r_slave.role(),
+                r_slave.config_get("notify-keyspace-events"),
             )
+            break
+        except Exception:
+            pass
+    print("⚠️ 已启动redis docker.")
 
-        # 验证docker启动完毕
-        import redis
-
-        r = redis.Redis(host="127.0.0.1", port=port)
-        r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
-        while True:
-            try:
-                time.sleep(1)
-                print(
-                    "version:",
-                    r.info()["redis_version"],  # type: ignore
-                    r.role(),
-                    r.config_get("notify-keyspace-events"),
-                )
-                r.wait(1, 10000)
-                print(
-                    "slave version:",
-                    r_slave.info()["redis_version"],  # type: ignore
-                    r_slave.role(),
-                    r_slave.config_get("notify-keyspace-events"),
-                )
-                break
-            except Exception:
-                pass
-        print("⚠️ 已启动redis docker.")
-
-        # 返回redis地址
-        return f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
-
-    yield run_redis_service
+    # 返回redis地址
+    yield f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
 
     print("ℹ️ 清理redis docker...")
     for container in containers.values():
@@ -108,8 +106,8 @@ def mod_redis_service():
         pass
 
 
-@pytest.fixture(scope="module")
-def mod_valkey_service():
+@pytest.fixture(scope="session")
+def ses_valkey_service():
     """
     启动valkey docker服务，测试结束后销毁服务
     """
@@ -140,61 +138,59 @@ def mod_valkey_service():
     # 启动服务器
     containers = {}
 
-    def run_valkey_service(port=23418):
-        if "valkey" not in containers:
-            containers["valkey"] = client.containers.run(
-                "valkey/valkey:latest",
-                detach=True,
-                ports={"6379/tcp": port},
-                name="hetu_test_valkey",
-                auto_remove=True,
-                network="hetu_test_valkey_net",
-                hostname="valkey-master",
+    port = 23418
+    if "valkey" not in containers:
+        containers["valkey"] = client.containers.run(
+            "valkey/valkey:latest",
+            detach=True,
+            ports={"6379/tcp": port},
+            name="hetu_test_valkey",
+            auto_remove=True,
+            network="hetu_test_valkey_net",
+            hostname="valkey-master",
+        )
+        containers["valkey_replica"] = client.containers.run(
+            "valkey/valkey:latest",
+            detach=True,
+            ports={"6379/tcp": port + 1},
+            name="hetu_test_valkey_replica",
+            auto_remove=True,
+            network="hetu_test_valkey_net",
+            command=[
+                "valkey-server",
+                "--replicaof valkey-master 6379",
+                "--replica-read-only yes",
+            ],
+        )
+
+    # 验证docker启动完毕
+    import redis
+
+    r = redis.Redis(host="127.0.0.1", port=port)
+    r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
+    while True:
+        try:
+            time.sleep(1)
+            print(
+                "version:",
+                r.info()["redis_version"],  # type: ignore
+                r.role(),
+                r.config_get("notify-keyspace-events"),
             )
-            containers["valkey_replica"] = client.containers.run(
-                "valkey/valkey:latest",
-                detach=True,
-                ports={"6379/tcp": port + 1},
-                name="hetu_test_valkey_replica",
-                auto_remove=True,
-                network="hetu_test_valkey_net",
-                command=[
-                    "valkey-server",
-                    "--replicaof valkey-master 6379",
-                    "--replica-read-only yes",
-                ],
+            r.wait(1, 10000)
+            print(
+                "slave version:",
+                r_slave.info()["redis_version"],  # type: ignore
+                r_slave.role(),
+                r_slave.config_get("notify-keyspace-events"),
             )
+            break
+        except Exception:
+            pass
+    print("⚠️ 已启动valkey docker.")
 
-        # 验证docker启动完毕
-        import redis
-
-        r = redis.Redis(host="127.0.0.1", port=port)
-        r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
-        while True:
-            try:
-                time.sleep(1)
-                print(
-                    "version:",
-                    r.info()["redis_version"],  # type: ignore
-                    r.role(),
-                    r.config_get("notify-keyspace-events"),
-                )
-                r.wait(1, 10000)
-                print(
-                    "slave version:",
-                    r_slave.info()["redis_version"],  # type: ignore
-                    r_slave.role(),
-                    r_slave.config_get("notify-keyspace-events"),
-                )
-                break
-            except Exception:
-                pass
-        print("⚠️ 已启动valkey docker.")
-
-        # 返回redis地址
-        return f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
-
-    yield run_valkey_service
+    # 返回redis地址
+    yield f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
 
     print("ℹ️ 清理valkey docker...")
     for container in containers.values():
@@ -210,8 +206,8 @@ def mod_valkey_service():
         pass
 
 
-@pytest.fixture(scope="module")
-def mod_redis_cluster_service():
+@pytest.fixture(scope="session")
+def ses_redis_cluster_service():
     """
     启动redis cluster docker服务 (纯docker-py实现)，测试结束后销毁服务
     """

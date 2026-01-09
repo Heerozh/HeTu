@@ -54,9 +54,6 @@ async def admin_ctx():
         group="admin",
         user_data={},
         timestamp=0,
-        retry_count=0,
-        transactions={},
-        inherited={},
     )
 
 
@@ -72,9 +69,6 @@ async def user_id10_ctx():
         group=None,
         user_data={},
         timestamp=0,
-        retry_count=0,
-        transactions={},
-        inherited={},
     )
 
 
@@ -90,9 +84,6 @@ async def user_id11_ctx():
         group=None,
         user_data={},
         timestamp=0,
-        retry_count=0,
-        transactions={},
-        inherited={},
     )
 
 
