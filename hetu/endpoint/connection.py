@@ -82,12 +82,13 @@ async def del_connection(comp_mgr: ComponentTableManager, connection_id: int) ->
     table = comp_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
-    # todo 可能事务冲突 改成async for语法
-    async with table.session() as session:
-        repo = session.using(Connection)
-        connection = await repo.get(id=connection_id)
-        if connection is not None:
-            connection.delete(connection_id)
+    # todo 下一个任务，完成websocket执行endpoint
+    async for attempt in table.session().retry(5):
+        async with attempt as session:
+            repo = session.using(Connection)
+            connection = await repo.get(id=connection_id)
+            if connection is not None:
+                connection.delete(connection_id)
 
 
 async def elevate(ctx: Context, user_id: int, kick_logged_in=True):

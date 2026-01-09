@@ -153,3 +153,36 @@ async def test_update_or_insert_race(item_ref, mod_auto_backend):
     await task2
     with pytest.raises(RaceCondition):
         await task1
+
+
+async def test_retry_generator(item_ref, mod_auto_backend):
+    import asyncio
+
+    backend = mod_auto_backend()
+    retry = 0
+
+    async def write_task(name, sleep):
+        async for attempt in backend.session("pytest", 1).retry(50):
+            nonlocal retry
+            retry += 1
+            async with attempt as _session:
+                _item_repo = _session.using(item_ref.comp_cls)
+                async with _item_repo.upsert(name=name) as _row:
+                    await asyncio.sleep(sleep)
+                    _row.qty = (_row.qty or 1) + 1
+
+    await asyncio.gather(
+        write_task("a", 0.1),
+        write_task("a", 0.2),
+        write_task("a", 0.3),
+        write_task("a", 0.4),
+    )
+
+    # 检查结果
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+        row = await item_repo.get(name="a")
+        assert row.qty == 5
+
+    print("test_retry_generator retry:", retry)
+    assert retry > 4  # 应该有重试发生
