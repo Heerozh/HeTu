@@ -50,6 +50,7 @@ class ComponentTableManager:
                 table = Table(comp, instance_name, cluster.id, backend)
                 self._tables[comp] = table
                 self._tables_by_name[comp.component_name_] = table
+                comp.hosted_ = table
 
     def create_or_migrate_all(self):
         for comp, tbl in self._tables.items():

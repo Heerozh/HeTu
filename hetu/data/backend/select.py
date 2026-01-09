@@ -41,6 +41,10 @@ class SessionSelect:
         self.ref: TableReference = TableReference(
             comp_cls, session.instance_name, session.cluster_id
         )
+        if comp_cls.hosted_:
+            assert comp_cls.hosted_.is_same_txn_group(self.ref), (
+                "Component 所属的 instance 和 cluster 必须和 Session 一致"
+            )
 
     def _local_has_unique_conflicts(self, row: np.record, fields: set) -> str | None:
         """

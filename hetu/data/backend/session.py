@@ -37,7 +37,6 @@ class Session:
         self._entered = False
 
     def select(self, comp_cls: type[BaseComponent]):
-        # todo systemsession 重载此类，然后此方法限制只能选取system允许的component
         # todo 可能和大部分orm的select命名歧义，这里的select可以update和insert的，不是纯查询，考虑改成crud?
         return SessionSelect(self, comp_cls)
 
