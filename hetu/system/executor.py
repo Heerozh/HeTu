@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 from .connection import ConnectionAliveChecker
 from .context import Context
-from .execution import ExecutionLock
+from .lock import SystemLock
 from ..common.slowlog import SlowLog
 from ..data import Permission
 from ..data.backend import RaceCondition
@@ -179,7 +179,7 @@ class SystemExecutor:
             # 执行system和事务
             try:
                 # 先检查uuid是否执行过了 todo 注解endpoint并不需要lock，不会多次执行，system需要因为有重试概念
-                if uuid and (await context[ExecutionLock].is_exist(uuid, "uuid"))[0]:
+                if uuid and (await context[SystemLock].is_exist(uuid, "uuid"))[0]:
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
                         f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
@@ -189,7 +189,7 @@ class SystemExecutor:
                 rtn = await sys.func(context, *args)
                 # 标记uuid已执行
                 if uuid:
-                    async with context[ExecutionLock].update_or_insert(
+                    async with context[SystemLock].update_or_insert(
                         uuid, "uuid"
                     ) as exe_row:
                         exe_row.caller = context.caller
@@ -258,7 +258,7 @@ class SystemExecutor:
         comp_mgr = self.comp_mgr
 
         for comp in sys.full_components:
-            if comp == ExecutionLock or comp.master_ == ExecutionLock:
+            if comp == SystemLock or comp.master_ == SystemLock:
                 tbl = comp_mgr.get_table(comp)
                 async with tbl.backend.transaction(sys.cluster_id) as session:
                     tbl_trx = tbl.attach(session)

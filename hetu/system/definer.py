@@ -17,7 +17,7 @@ from ..endpoint.definer import EndpointDefine, ENDPOINT_NAME_MAX_LEN
 
 from ..common import Singleton
 from ..common.permission import Permission
-from .execution import ExecutionLock
+from .lock import SystemLock
 
 if TYPE_CHECKING:
     from ..data import BaseComponent
@@ -457,7 +457,7 @@ def define_system(
 
         # 把call lock的表添加到components中
         if call_lock:
-            lock_table = ExecutionLock.duplicate(namespace, func.__name__)
+            lock_table = SystemLock.duplicate(namespace, func.__name__)
             if components is not None and len(components) > 0:
                 lock_table.backend_ = components[0].backend_
                 _components = list(components) + [lock_table]

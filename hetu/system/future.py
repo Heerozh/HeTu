@@ -17,7 +17,7 @@ import warnings
 from .context import Context
 from .definer import define_system, SystemClusters
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
-from .execution import ExecutionLock, clean_expired_call_locks
+from .lock import SystemLock, clean_expired_call_locks
 from .executor import SystemExecutor
 from ..data import BaseComponent, define_component, property_field, Permission
 from ..data.backend import TableReference
@@ -127,8 +127,7 @@ async def create_future_call(
     if not sys:
         raise RuntimeError(f"⚠️ [⚙️Future] [致命错误] 不存在的System {system}")
     lk = any(
-        comp == ExecutionLock or comp.master_ == ExecutionLock
-        for comp in sys.full_components
+        comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
     )
     if not lk:
         raise RuntimeError(

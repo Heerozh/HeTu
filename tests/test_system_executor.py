@@ -206,14 +206,14 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
     await executor.exec("login", 1020)
     ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
     assert ok
-    from hetu.system.execution import ExecutionLock
+    from hetu.system.lock import SystemLock
 
     # call lock每次会按system名复制一份ExecutionLock表
-    ExecutionLock_for_system = ExecutionLock.duplicate("pytest", "add_rls_comp_value")
+    ExecutionLock_for_system = SystemLock.duplicate("pytest", "add_rls_comp_value")
     lock_tbl = comp_mgr.get_table(ExecutionLock_for_system)
     assert lock_tbl
 
-    from hetu.system.execution import clean_expired_call_locks
+    from hetu.system.lock import clean_expired_call_locks
 
     # 未清理
     await clean_expired_call_locks(comp_mgr)
