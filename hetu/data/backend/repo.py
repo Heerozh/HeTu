@@ -32,8 +32,7 @@ IndexScalar = (
 Int64 = np.int64 | int
 
 
-# todo 改叫SessionRepository, SessionCRUD?
-class SessionSelect:
+class SessionRepository:
     """帮助方法，从数据库查询数据并放入Session缓存。"""
 
     def __init__(self, session: Session, comp_cls: type[BaseComponent]) -> None:
@@ -170,7 +169,7 @@ class SessionSelect:
         --------
         ::
 
-            item = await session.select(Item).get(id=1234567890)
+            item = await session.using(Item).get(id=1234567890)
 
         Returns
         -------
@@ -244,7 +243,7 @@ class SessionSelect:
         如何复合条件查询？
         请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
 
-            items = await session.select(Item).range(level=(10, 20), limit=100)
+            items = await session.using(Item).range(level=(10, 20), limit=100)
             few_items = items[items.amount < 10]
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
@@ -348,7 +347,7 @@ class SessionSelect:
         --------
         ::
 
-            async with session.select(Order).upsert(id=1234567890) as order:
+            async with session.using(Order).upsert(id=1234567890) as order:
                 order.status = "completed"
 
         Parameters
@@ -389,7 +388,7 @@ class UpsertContext:
     """用于在事务中执行UpdateOrInsert操作的上下文管理器。"""
 
     def __init__(
-        self, selected: SessionSelect, index_name: str, query_value: IndexScalar
+        self, selected: SessionRepository, index_name: str, query_value: IndexScalar
     ) -> None:
         self.clean_data = None
         self.row_data = None

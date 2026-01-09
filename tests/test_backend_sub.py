@@ -187,18 +187,18 @@ async def test_subscribe_mq_merge_message(
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.qty = 998
-        await select.update(row)
+        await repo.update(row)
 
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.qty = 997
-        await select.update(row)
+        await repo.update(row)
     await backend.wait_for_synced()
 
     # mq.get_message必须要后台puller任务在跑，否则消息无法获取
@@ -239,12 +239,12 @@ async def test_subscribe_updates(
 
     # 更改行1的owner从10到11
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.owner = 11
         row1_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
 
     # 测试更新
     updates = await sub_mgr.get_updates()
@@ -284,12 +284,12 @@ async def test_row_subscribe_cache(
 
     # 更改行1的owner从10到11
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.owner = 11
         row1_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
 
     # 检测Row cache
     await sub_mgr.get_updates()
@@ -300,11 +300,11 @@ async def test_row_subscribe_cache(
 
     # 测试第二次更新cache是否清空了
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.owner = 12
-        await select.update(row)
+        await repo.update(row)
 
     updates = await sub_mgr.get_updates()
     # 如果数据正确说明更新了
@@ -360,7 +360,7 @@ async def test_cancel_subscribe(sub_mgr: Subscriptions, filled_item_ref, admin_c
     assert len(sub_mgr._mq_client.subscribed_channels) == 0
 
 
-async def test_subscribe_select_rls(
+async def test_subscribe_get_rls(
     sub_mgr: Subscriptions, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
@@ -381,11 +381,11 @@ async def test_subscribe_range_rls(
     # 先改掉一个人的owner值
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=113)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=113)
         assert row
         row.owner = 11
-        await select.update(row)
+        await repo.update(row)
 
     # 测试owner query只传输owner相等的数据
     sub_id, rows = await sub_mgr.subscribe_range(
@@ -395,7 +395,7 @@ async def test_subscribe_range_rls(
     assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
 
 
-async def test_select_subscribe_rls_update(
+async def test_subscribe_get_rls_update(
     sub_mgr: Subscriptions, filled_item_ref, user_id10_ctx, background_mq_puller_task
 ):
     backend = sub_mgr._backend
@@ -407,12 +407,12 @@ async def test_select_subscribe_rls_update(
     assert row and sub_id
     assert row["owner"] == 10
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=113)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=113)
         assert row
         row.owner = 11
         row3_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert updates[sub_id][row3_id] is None
 
@@ -434,12 +434,12 @@ async def test_query_subscribe_rls_lost(
 
     # 测试更新数值，看query的update是否会删除/添加owner相符的
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=114)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
         assert row
         row.owner = 11
         row4_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id] is None
@@ -462,11 +462,11 @@ async def test_query_subscribe_rls_gain(
     # 先预先取掉一行rls
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=114)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
         assert row
         row.owner = 11
-        await select.update(row)
+        await repo.update(row)
 
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
@@ -476,12 +476,12 @@ async def test_query_subscribe_rls_gain(
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=114)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
         assert row
         row.owner = 10
         row4_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id]["owner"] == 10
@@ -490,11 +490,11 @@ async def test_query_subscribe_rls_gain(
 
     # 测试insert新数据能否得到通知
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
+        repo = session.using(filled_item_ref.comp_cls)
         new = mod_item_model.new_row()
         new.owner = 10
         new_row_id = str(new.id)
-        await select.insert(new)
+        await repo.insert(new)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][new_row_id]["owner"] == 10
@@ -519,13 +519,13 @@ async def test_query_subscribe_rls_lost_without_index(
 
     # 去掉一个
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_rls_ref.comp_cls)
-        rows = await select.range(id=(0, float("inf")), limit=4)
+        repo = session.using(filled_rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=4)
         row = rows[-1]
         assert row
         row.friend = 12
         row4_id = str(row.id)
-        await select.update(row)
+        await repo.update(row)
     updates = await sub_mgr.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
@@ -550,18 +550,18 @@ async def test_query_subscribe_rls_gain_without_index(
     # 先预先取掉一行rls
     backend = sub_mgr._backend
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_rls_ref.comp_cls)
-        rows = await select.range(id=(0, float("inf")), limit=4)
+        repo = session.using(filled_rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=4)
         row4 = rows[-1]
         assert row4
         row4.friend = 12
         row4_id = str(row4.id)
-        await select.update(row4)
+        await repo.update(row4)
         # 修改owner不应该影响rls
         row1 = rows[0]
         assert row1
         row1.owner = 12
-        await select.update(row1)
+        await repo.update(row1)
 
     sub_id, rows = await sub_mgr.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
@@ -571,12 +571,12 @@ async def test_query_subscribe_rls_gain_without_index(
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_rls_ref.comp_cls)
-        rows = await select.range(id=(0, float("inf")), limit=4)
+        repo = session.using(filled_rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=4)
         row4 = rows[-1]
         assert row4
         row4.friend = 11
-        await select.update(row4)
+        await repo.update(row4)
     updates = await sub_mgr.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
@@ -598,31 +598,31 @@ async def test_mq_backlog(
 
     # 修改row1，并pull消息
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.qty = 998
-        await select.update(row)
+        await repo.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 
     # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
     monkeypatch.setattr(time, "time", lambda: time_time() + 200)
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        row = await select.get(time=110)
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
         assert row
         row.qty = 997
-        await select.update(row)
+        await repo.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 
     async with backend.session("pytest", 1) as session:
-        select = session.select(filled_item_ref.comp_cls)
-        rows = await select.range(id=(0, float("inf")), limit=2)
+        repo = session.using(filled_item_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=2)
         row = rows[-1]
         row.qty = 996
-        await select.update(row)
+        await repo.update(row)
     await backend.wait_for_synced()
     await sub_mgr.mq_pull()
 

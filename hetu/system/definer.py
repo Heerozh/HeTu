@@ -372,10 +372,10 @@ def define_system(
             调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
         ctx.retry_count: int
             当前因为事务冲突的重试次数，0表示首次执行。
-        ctx.select[Component Class]: ComponentTransaction
+        ctx.repo[Component Class]: SessionRepository
             获取Component事务实例，如 `ctx[Position]`，只能获取定义时在 `components` 中引用的实例。
-            类型为 `ComponentTransaction`，可以进行数据库操作，并自动包装为事务在System结束后执行。
-            具体参考 :py:func:`hetu.data.backend.ComponentTransaction` 的文档。
+            类型为 `SessionRepository`，可以进行数据库操作，并自动包装为事务在System结束后执行。
+            具体参考 :py:func:`hetu.data.backend.SessionRepository` 的文档。
         ctx.depend['SystemName']: func
             获取定义时在 `depends` 中传入的System函数。
         ctx.nontrxs[Component Class]: RawComponentTable
@@ -397,7 +397,7 @@ def define_system(
     代码示例：
     >>> @define_system(namespace="global", components=(Order, ), )
     ... async def remove(ctx: Context, order_id):
-    ...     ctx.select[Order].delete(id=order_id)
+    ...     ctx.repo[Order].delete(id=order_id)
     >>>
     >>> @define_system(namespace="example", depends=('remove:ItemOrder', ))
     ... async def remove_item(ctx: Context, order_id):

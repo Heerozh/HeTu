@@ -11,7 +11,7 @@ from types import FunctionType
 import numpy as np
 
 from ..endpoint import Context
-from ..data.backend import SessionSelect
+from ..data.backend import SessionRepository
 
 from ..data import BaseComponent
 
@@ -21,8 +21,8 @@ class SystemContext(Context):
     # 事务变量
     # 当前事务冲突重试次数
     retry_count: int = 0
-    # 当前事务的Select实例
-    select: dict[type[BaseComponent], SessionSelect] = field(default_factory=dict)
+    # 当前事务的repo实例
+    repo: dict[type[BaseComponent], SessionRepository] = field(default_factory=dict)
     # 继承的父事务函数
     depend: dict[str, FunctionType] = field(default_factory=dict)
 

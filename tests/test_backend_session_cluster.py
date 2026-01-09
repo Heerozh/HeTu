@@ -1,6 +1,3 @@
-import numpy as np
-import pytest
-
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 
@@ -16,8 +13,8 @@ async def test_double_cluster(item_ref, mod_auto_backend):
 
     async def upsert_owner(cluster_id, sleep):
         async with backend.session("pytest", cluster_id) as _session:
-            _item_select = _session.select(item_ref.comp_cls)
-            async with _item_select.upsert(name="test") as _row:
+            _item_repo = _session.using(item_ref.comp_cls)
+            async with _item_repo.upsert(name="test") as _row:
                 _row.owner = _row.owner + 1  # type: ignore
             await asyncio.sleep(sleep)
 
@@ -29,13 +26,13 @@ async def test_double_cluster(item_ref, mod_auto_backend):
     # 读取结果
     async with backend.session("pytest", 1) as session:
         session.only_master = True  # 强制读主节点，cluster环境目前没有replica
-        item_select = session.select(item_ref.comp_cls)
-        row = await item_select.get(name="test")
+        item_repo = session.using(item_ref.comp_cls)
+        row = await item_repo.get(name="test")
         assert row
         assert row.owner == 1
     async with backend.session("pytest", 2) as session:
         session.only_master = True  # 强制读主节点，cluster环境目前没有replica
-        item_select = session.select(item_ref.comp_cls)
-        row = await item_select.get(name="test")
+        item_repo = session.using(item_ref.comp_cls)
+        row = await item_repo.get(name="test")
         assert row
         assert row.owner == 1

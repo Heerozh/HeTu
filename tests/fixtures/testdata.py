@@ -104,7 +104,7 @@ async def filled_item_ref(item_ref, mod_auto_backend):
 
     # 初始化测试数据
     async with backend.session("pytest", 1) as session:
-        item_select = session.select(item_ref.comp_cls)
+        item_repo = session.using(item_ref.comp_cls)
         for i in range(25):
             row = item_ref.comp_cls.new_row()
             row.name = f"Itm{i + 10}"
@@ -112,7 +112,7 @@ async def filled_item_ref(item_ref, mod_auto_backend):
             row.time = i + 110
             row.qty = 999
             row.model = float(i) * 0.1
-            await item_select.insert(row)
+            await item_repo.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 
@@ -125,12 +125,12 @@ async def filled_rls_ref(rls_ref, mod_auto_backend):
     backend = mod_auto_backend()
     # 初始化测试数据
     async with backend.session("pytest", 1) as session:
-        rls_select = session.select(rls_ref.comp_cls)
+        rls_repo = session.using(rls_ref.comp_cls)
         for i in range(25):
             row = rls_ref.comp_cls.new_row()
             row.owner = 10
             row.friend = 11
-            await rls_select.insert(row)
+            await rls_repo.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 

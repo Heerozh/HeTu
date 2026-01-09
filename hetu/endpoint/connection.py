@@ -49,8 +49,9 @@ class Connection(BaseComponent):
 
 async def new_connection(address: str):
     """通过connection component分配自己一个连接id，如果失败，或事务冲突，Raise各种异常"""
+    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
     async with Connection.hosted_.session() as session:
-        repo = session.select(Connection)
+        repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
             same_ips = await repo.range("address", address, limit=1000)
@@ -71,8 +72,9 @@ async def new_connection(address: str):
 
 
 async def del_connection(connection_id: int):
+    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
     async with Connection.hosted_.session() as session:
-        repo = session.select(Connection)
+        repo = session.using(Connection)
         connection = await repo.get(id=connection_id)
         if connection is not None:
             connection.delete(connection_id)
@@ -88,6 +90,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
 
     """
     assert ctx.connection_id != 0, "请先初始化连接"
+    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
 
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
@@ -96,7 +99,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     for _ in range(5):  # todo 改成async for语法
         try:
             async with Connection.hosted_.session() as session:
-                repo = session.select(Connection)
+                repo = session.using(Connection)
                 # 如果此用户已经登录
                 already_logged = await repo.get(owner=user_id)
                 if already_logged is not None:

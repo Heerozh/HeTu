@@ -37,23 +37,23 @@ async def test_volatile_table_flush(auto_backend, new_component_env):
         table_maint.flush(temp_table, force=True)
 
     async with backend.session("test", 1) as session:
-        select = session.select(TempData)
+        repo = session.using(TempData)
         for i in range(25):
             row = TempData.new_row()
             row.data = i  # type: ignore # noqa
-            await select.insert(row)
+            await repo.insert(row)
 
     async with backend.session("test", 1) as session:
         session.only_master = True  # 由于刚插入，可能replica还没同步
-        select = session.select(TempData)
-        assert len(await select.range("id", -np.inf, +np.inf, limit=999)) == 25
+        repo = session.using(TempData)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == 25
 
     table_maint.flush(temp_table)
 
     async with backend.session("test", 1) as session:
         session.only_master = True  # 可能replica还没同步
-        select = session.select(TempData)
-        assert len(await select.range("id", -np.inf, +np.inf, limit=999)) == 0
+        repo = session.using(TempData)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == 0
 
 
 async def test_reconnect(auto_backend, mod_item_model):
@@ -73,23 +73,23 @@ async def test_reconnect(auto_backend, mod_item_model):
     # 初始化测试数据
     row = None
     async with backend.session("test", 1) as session:
-        select = session.select(mod_item_model)
+        repo = session.using(mod_item_model)
         for i in range(25):
             row = mod_item_model.new_row()
             row.time = i  # 防止unique冲突
             row.name = f"Item_{i}"  # 防止unique冲突
-            await select.insert(row)
+            await repo.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 
     # 测试保存(断开连接）后再读回来
     async with backend.session("test", 1) as session:
-        select = session.select(mod_item_model)
-        row = await select.get(id=row.id)  # type: ignore
-        select.delete(row.id)  # type: ignore
+        repo = session.using(mod_item_model)
+        row = await repo.get(id=row.id)  # type: ignore
+        repo.delete(row.id)  # type: ignore
     async with backend.session("test", 1) as session:
-        select = session.select(mod_item_model)
-        size = len(await select.range("id", -np.inf, +np.inf, limit=999))
+        repo = session.using(mod_item_model)
+        size = len(await repo.range("id", -np.inf, +np.inf, limit=999))
 
     # 测试连接关闭
     await backend.close()  # 不close不能重建backend_component_table
@@ -113,5 +113,5 @@ async def test_reconnect(auto_backend, mod_item_model):
         pass
 
     async with backend2.session("test", 1) as session:
-        select = session.select(mod_item_model)
-        assert len(await select.range("id", -np.inf, +np.inf, limit=999)) == size
+        repo = session.using(mod_item_model)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == size

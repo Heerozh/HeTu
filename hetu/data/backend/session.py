@@ -8,7 +8,7 @@
 from typing import TYPE_CHECKING, cast
 
 from .idmap import IdentityMap
-from .select import SessionSelect
+from .repo import SessionRepository
 
 if TYPE_CHECKING:
     from . import Backend, BackendClient
@@ -36,9 +36,8 @@ class Session:
         self._idmap = IdentityMap()
         self._entered = False
 
-    def select(self, comp_cls: type[BaseComponent]):
-        # todo 可能和大部分orm的select命名歧义，这里的select可以update和insert的，不是纯查询，考虑改成crud?
-        return SessionSelect(self, comp_cls)
+    def using(self, comp_cls: type[BaseComponent]):
+        return SessionRepository(self, comp_cls)
 
     @property
     def master(self) -> BackendClient:
