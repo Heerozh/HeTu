@@ -7,19 +7,22 @@
 """
 
 import inspect
-from inspect import signature
-from types import FunctionType
 from dataclasses import dataclass
+from types import FunctionType
+from inspect import signature
+from typing import Callable, Awaitable, Any
 
-from hetu.common import Singleton
+from ..common import Singleton
 
 
 ENDPOINT_NAME_MAX_LEN = 32
 
+AsyncHandler = Callable[..., Awaitable[Any]]
+
 
 @dataclass
 class EndpointDefine:
-    func: FunctionType
+    func: AsyncHandler
     arg_count: int  # 全部参数个数（含默认参数）
     defaults_count: int  # 默认参数个数
 
@@ -32,7 +35,7 @@ class EndpointDefines(metaclass=Singleton):
     此类只负责储存定义，调度器通过此类查询Endpoints信息。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         # 所有endpoint定义表，按namespace分类
         self._endpoint_map: dict[str, dict[str, EndpointDefine]] = {}
         # @endpoint(namespace="global") 定义的所有endpoint
@@ -55,13 +58,14 @@ class EndpointDefines(metaclass=Singleton):
     def get_endpoints(self, namespace: str) -> dict[str, EndpointDefine]:
         return self._endpoint_map[namespace]
 
-    def add(self, namespace, func, force):
+    def add(self, namespace, func: AsyncHandler, force):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
         if not force:
             assert func.__name__ not in sub_map, "Endpoint重复定义：" + func.__name__
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
+        assert isinstance(func, FunctionType)
         arg_count = func.__code__.co_argcount
         defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
@@ -135,7 +139,7 @@ def endpoint(namespace: str = "global", force: bool = False):
     hetu.endpoint.Context : Context类定义
     """
 
-    def warp(func):
+    def warp(func: AsyncHandler):
         # warp只是在系统里记录下有这么个东西，实际不改变function
 
         # 严格要求第一个参数命名

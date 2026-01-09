@@ -23,7 +23,7 @@ class Context:
     group: str | None  # 所属组名，目前只用于判断是否admin
     user_data: dict[str, Any]  # 当前连接的用户数据，可自由设置，在所有System间共享
     # 请求变量
-    timestamp: int  # 调用时间戳
+    timestamp: float  # 调用时间戳
     # 限制变量
     # 客户端消息发送限制（次数）
     client_limits: list[list[int]] = field(default_factory=list)

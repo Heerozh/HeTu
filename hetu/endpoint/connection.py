@@ -48,10 +48,16 @@ class Connection(BaseComponent):
 #     pass
 
 
-async def new_connection(address: str) -> int:
-    """通过connection component分配自己一个连接id，如果失败，或事务冲突，Raise各种异常"""
-    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
-    async with Connection.hosted_.session() as session:
+async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
+    """
+    通过connection component分配自己一个连接id，如果失败，Raise各种异常
+    此方法不会事务冲突，因为只插入Connection，且Connection没有Unique属性。
+    """
+    table = comp_mgr.get_table(Connection)
+    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
+
+    # 不会事务冲突只会连接错误
+    async with table.session() as session:
         repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
@@ -72,9 +78,12 @@ async def new_connection(address: str) -> int:
     return row.id
 
 
-async def del_connection(connection_id: int) -> None:
-    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
-    async with Connection.hosted_.session() as session:
+async def del_connection(comp_mgr: ComponentTableManager, connection_id: int) -> None:
+    table = comp_mgr.get_table(Connection)
+    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
+
+    # todo 可能事务冲突 改成async for语法
+    async with table.session() as session:
         repo = session.using(Connection)
         connection = await repo.get(id=connection_id)
         if connection is not None:
@@ -97,7 +106,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     if ctx.caller is not None and ctx.caller > 0:
         return False, "CURRENT_CONNECTION_ALREADY_ELEVATED"
 
-    for _ in range(5):  # todo 改成async for语法
+    for _ in range(5):  # todo 改成async for语法,且去掉hosted_
         try:
             async with Connection.hosted_.session() as session:
                 repo = session.using(Connection)
@@ -149,7 +158,7 @@ class ConnectionAliveChecker:
         self.conn_tbl: Table = table
         self.last_active_cache = 0
 
-    async def is_illegal(self, ctx: Context, ex_info: Any):
+    async def is_illegal(self, ctx: Context, ex_info: str):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         conn_tbl = self.conn_tbl
         caller, conn_id = ctx.caller, ctx.connection_id
