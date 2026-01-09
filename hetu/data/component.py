@@ -221,14 +221,19 @@ class ComponentDefines(metaclass=Singleton):
     """
 
     def __init__(self):
-        self._components = {}
+        self._components: dict[str, dict[str, type[BaseComponent]]] = {}
 
     def clear_(self):
         self._components.clear()
 
-    def get_all(self) -> list[type[BaseComponent]]:
+    def get_all(self, namespace: str | None = None) -> list[type[BaseComponent]]:
         """返回所有Component类，但一般不使用此方法，而是用SystemClusters().get_clusters()获取用到的表"""
-        return [comp for comps in self._components.values() for comp in comps.values()]
+        if namespace:
+            return list(self._components.get(namespace, {}).values())
+        else:
+            return [
+                comp for comps in self._components.values() for comp in comps.values()
+            ]
 
     def get_component(self, namespace: str, component_name: str) -> type[BaseComponent]:
         return self._components[namespace][component_name]
@@ -298,7 +303,7 @@ def define_component(
     namespace: str
         你的项目名，主要为了区分不同项目的同名Component。
         不同于System，Component的Namespace可以随意填写，只要被System引用了都会加载。
-        todo 如果为"core"，则此Component即使没被任何System引用，也会被默认加载。
+        如果为"core"，则此Component即使没被任何System引用，也会被加载。
     volatile: bool
         是否是易失表，设为True时，每次维护你的数据会被清除，请小心。
         对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。

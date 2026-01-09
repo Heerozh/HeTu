@@ -23,6 +23,11 @@ if TYPE_CHECKING:
     from ..data import BaseComponent
 
 
+# 定义一个空System，占位用
+def func_alias(ctx):
+    pass
+
+
 @dataclass
 class SystemDefine(EndpointDefine):
     components: set[type[BaseComponent]]  # 引用的Components
@@ -113,6 +118,22 @@ class SystemClusters(metaclass=Singleton):
         )
         self._main_namespace = main_namespace
 
+        # 首先添加个空的system定义，引用namespace为core的所有component
+        from ..data.component import ComponentDefines
+
+        core_comps = ComponentDefines().get_all("core")
+        for comp in core_comps:
+            func_alias.__name__ = f"__core_pin_system_{comp.__name__}__"
+            SystemClusters().add(
+                "global",
+                func=func_alias,
+                components=(comp,),
+                force=True,
+                permission=None,
+                depends=tuple(),
+                max_retry=0,
+            )
+
         # 按Component交集生成簇，只有启动时运行，不用考虑性能
         def merge_cluster(clusters_: list[SystemClusters.Cluster]):
             """合并2个冲突的簇"""
@@ -151,8 +172,6 @@ class SystemClusters(metaclass=Singleton):
                     req.update(base_def.components)
                 inh.update(base_def.depends)
                 inherit_components(namespace_, base_def.depends, req, inh)
-
-        non_trx = set()
 
         for namespace in self._system_map:
             # 把global的System迁移到当前namespace
