@@ -335,7 +335,7 @@ def define_system(
         - user: 只有已登录客户端连接可以调用
         - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
         - admin: 只有管理员权限客户端连接可以调用
-
+        - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭
     depends: tuple of (str | FunctionType)

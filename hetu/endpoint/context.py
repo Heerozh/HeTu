@@ -5,7 +5,12 @@
 @email: heeroz@gmail.com
 """
 
+import numpy as np
 from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..data.component import BaseComponent
 
 
 @dataclass
@@ -16,7 +21,7 @@ class Context:
     connection_id: int  # 调用方的connection id
     address: str | None  # 调用方的ip
     group: str | None  # 所属组名，目前只用于判断是否admin
-    user_data: dict  # 当前连接的用户数据，可自由设置，在所有System间共享
+    user_data: dict[str, Any]  # 当前连接的用户数据，可自由设置，在所有System间共享
     # 请求变量
     timestamp: int  # 调用时间戳
     # 限制变量
@@ -39,3 +44,27 @@ class Context:
         self.server_limits = server_limits
         self.max_row_sub = max_row_sub
         self.max_index_sub = max_index_sub
+
+    def rls_check(
+        self,
+        component: type[BaseComponent],
+        row: np.record | np.ndarray | np.recarray | dict,
+    ) -> bool:
+        """检查当前用户对某个component的权限"""
+        # 非rls权限通过所有rls检查。要求调用此方法前，首先要由tls(表级权限)检查通过
+        if not component.is_rls():
+            return True
+        # admin组拥有所有权限
+        if self.is_admin():
+            return True
+        assert component.rls_compare_
+        rls_func, comp_attr, ctx_attr = component.rls_compare_
+        b = getattr(self, ctx_attr, np.nan)
+        if np.isnan(b):
+            b = self.user_data.get(ctx_attr, np.nan)
+        a = type(b)(
+            row.get(comp_attr, np.nan)
+            if type(row) is dict
+            else getattr(row, "owner", np.nan)
+        )
+        return bool(rls_func(a, b))

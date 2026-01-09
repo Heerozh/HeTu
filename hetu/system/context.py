@@ -26,28 +26,6 @@ class SystemContext(Context):
     # 继承的父事务函数
     depend: dict[str, FunctionType] = field(default_factory=dict)
 
-    def rls_check(
-        self,
-        component: type[BaseComponent],
-        row: np.record | np.ndarray | np.recarray | dict,
-    ) -> bool:
-        """检查当前用户对某个component的权限"""
-        # 非rls权限通过所有rls检查。要求调用此方法前，首先要由tls(表级权限)检查通过
-        if not component.is_rls():
-            return True
-        # admin组拥有所有权限
-        if self.is_admin():
-            return True
-        assert component.rls_compare_
-        rls_func, comp_attr, ctx_attr = component.rls_compare_
-        b = getattr(self, ctx_attr, np.nan)
-        a = type(b)(
-            row.get(comp_attr, np.nan)
-            if type(row) is dict
-            else getattr(row, "owner", np.nan)
-        )
-        return bool(rls_func(a, b))
-
     async def end_transaction(self, discard: bool = False):
         """
         提前显式结束事务，提交所有写入操作。如果遇到事务冲突，会抛出异常，因此后续的代码行不会执行。

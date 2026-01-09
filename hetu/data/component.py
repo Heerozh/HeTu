@@ -55,8 +55,8 @@ class BaseComponent:
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
     volatile_: bool = False  # 易失标记，此标记的Component每次维护会清空数据
-    readonly_: bool = False  # todo: 只读标记，调用写入会警告
-    backend_: str  # 该Component由哪个后端(数据库)负责储存和查询
+    readonly_: bool = False  # 只读标记，暂无作用
+    backend_: str  # 自定义该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
     default_row: np.recarray  # 默认空数据行
@@ -256,7 +256,7 @@ def define_component(
     force: bool = False,
     permission: Permission = Permission.USER,
     volatile: bool = False,
-    readonly: bool = False,
+    # readonly: bool = False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
 ) -> type[BaseComponent]: ...
@@ -269,7 +269,7 @@ def define_component(
     force: bool = False,
     permission: Permission = Permission.USER,
     volatile: bool = False,
-    readonly: bool = False,
+    # readonly: bool = False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
 ) -> Callable[[type[BaseComponent]], type[BaseComponent]]: ...
@@ -281,7 +281,7 @@ def define_component(
     force: bool = False,
     permission=Permission.USER,
     volatile=False,
-    readonly=False,
+    # readonly=False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
 ) -> Callable[[type[BaseComponent]], type[BaseComponent]] | type[BaseComponent]:
@@ -306,11 +306,8 @@ def define_component(
         如果为"core"，则此Component即使没被任何System引用，也会被加载。
     volatile: bool
         是否是易失表，设为True时，每次维护你的数据会被清除，请小心。
-        对于PostgreSQL，这会表示此表为UNLOGGED表，性能更好。
-    readonly: bool
-        是否只读Component，只读Component不会被加事务保护，增加并行性。
     backend: str
-        指定Component后端，对应配置文件中的backend_name。默认为default，对应配置文件中第一个
+        指定Component后端，对应配置文件中BACKENDS的字典key。默认为default，对应BACKENDS配置中第一个
     permission: Permission
         设置读取权限，只对hetu client sdk连接起作用，服务器端代码不受限制。
 
@@ -319,10 +316,16 @@ def define_component(
         - admin: 只有管理员权限客户端连接可以读
         - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
                  此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
-        - rls: 行级权限，需要配合rls_compare参数使用，定义具体的行级权限逻辑
-    rls_compare:
-        当permission设置为RLS(行级权限)时，定义行级安全的比较函数和属性名，格式为(operator方法名, 表属性名, context属性名)，
-        只有operator.operator方法名(row.表属性名, ctx.context属性名)返回True时允许读取此行。如果属性不存在，按nan处理（无法和任何值比较）。
+        - rls: 行级权限，需要配合`rls_compare`参数使用，定义具体的行级权限逻辑
+
+    rls_compare: tuple[str, str, str] | None
+        当permission设置为RLS(行级权限)时，定义行级安全的比较函数和属性名。
+
+        - rls_compare[0]: operator比较方法字符串，如"lt", "gt"等。参考python operator标准运算符函数模块
+        - rls_compare[1]: 组件属性名字符串
+        - rls_compare[2]: Context属性名字符串，或Context.user_data的key名
+
+        只有operator比较后返回True时允许读取此行。如果属性不存在，按nan处理（无法和任何值比较）。
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class
@@ -466,9 +469,9 @@ def define_component(
 
         # 检查RLS权限各种定义符合要求
         _rls_define_check(cls.__name__, properties)
+        nonlocal rls_compare
         if permission == Permission.OWNER:
             # 修改闭包外的变量rls_compare
-            nonlocal rls_compare
             rls_compare = ("eq", "owner", "caller")
 
         # 生成json格式，并通过json加载到class中
@@ -478,7 +481,7 @@ def define_component(
             cls.__name__,
             permission,
             volatile,
-            readonly,
+            False,
             backend,
             rls_compare,
         )
