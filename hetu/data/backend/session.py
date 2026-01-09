@@ -137,10 +137,10 @@ class Session(AbstractAsyncContextManager):
 
 
 class RetryAttempt(AbstractAsyncContextManager):
-    def __init__(self, session, index: int, is_last: bool):
+    def __init__(self, session, count: int, is_last: bool):
         self.session = session
         self.is_last = is_last
-        self.index: int = index  # 记录重试次数，只有在retry中使用才会增加
+        self.count: int = count  # 记录重试次数，只有在retry中使用才会增加
         self.success = False  # 标记本次尝试是否成功提交
 
     async def __aenter__(self):
@@ -192,7 +192,7 @@ class AsyncSessionRetryGenerator:
             is_last = i == self._times - 1
 
             # 把本次 session 交给用户的循环体
-            attempt = RetryAttempt(session, i, is_last)
+            attempt = RetryAttempt(session, i + 1, is_last)
             yield attempt
 
             if attempt.success:
