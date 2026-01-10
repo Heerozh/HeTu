@@ -11,7 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import RaceCondition
+from hetu.data.backend.base import RowFormat
 
 from .context import Context
 from ..data import BaseComponent, define_component, property_field, Permission
@@ -101,39 +101,35 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
 
     """
     assert ctx.connection_id != 0, "请先初始化连接"
-    assert Connection.hosted_, "未初始化ComponentTableManager，无法使用Connection组件"
+    comp_mgr: ComponentTableManager = ctx.request.app.ctx.comp_mgr
+    table = comp_mgr.get_table(Connection)
+    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
     # 如果当前连接已提权
     if ctx.caller is not None and ctx.caller > 0:
         return False, "CURRENT_CONNECTION_ALREADY_ELEVATED"
 
-    for _ in range(5):  # todo 改成async for语法,且去掉hosted_
-        try:
-            async with Connection.hosted_.session() as session:
-                repo = session.using(Connection)
-                # 如果此用户已经登录
-                already_logged = await repo.get(owner=user_id)
-                if already_logged is not None:
-                    now = time.time()
-                    # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
-                    if (
-                        kick_logged_in
-                        or now - already_logged.last_active > ENDPOINT_CALL_IDLE_TIMEOUT
-                    ):
-                        # 去掉该连接的owner，当该连接下次执行System时会被关闭
-                        already_logged.owner = 0
-                        await repo.update(already_logged)
-                    else:
-                        return False, "USER_ALREADY_LOGGED_IN"
+    async for attempt in table.session().retry(5):
+        async with attempt as session:
+            repo = session.using(Connection)
+            # 如果此用户已经登录
+            already_logged = await repo.get(owner=user_id)
+            if already_logged is not None:
+                idle = time.time() - already_logged.last_active
+                # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
+                if kick_logged_in or idle > ENDPOINT_CALL_IDLE_TIMEOUT:
+                    # 去掉该连接的owner，当该连接下次执行System时会被关闭
+                    already_logged.owner = 0
+                    await repo.update(already_logged)
+                else:
+                    return False, "USER_ALREADY_LOGGED_IN"
 
-                # 在数据库中关联connection和user
-                conn = await repo.get(id=ctx.connection_id)
-                if not conn:
-                    return False, "CONNECTION_NOT_FOUND"
-                conn.owner = user_id
-                await repo.update(conn)
-        except RaceCondition as _:
-            continue
+            # 在数据库中关联connection和user
+            conn = await repo.get(id=ctx.connection_id)
+            if not conn:
+                return False, "CONNECTION_NOT_FOUND"
+            conn.owner = user_id
+            await repo.update(conn)
 
     # 如果事务成功，则设置ctx.caller (事务冲突时会跳过后面代码)
     ctx.caller = user_id
@@ -162,11 +158,12 @@ class ConnectionAliveChecker:
     async def is_illegal(self, ctx: Context, ex_info: str):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         conn_tbl = self.conn_tbl
+        db = conn_tbl.backend.master
         caller, conn_id = ctx.caller, ctx.connection_id
         if caller and caller > 0:
             # 此方法无法通过事务，这里判断通过后可能有其他连接踢了你，等于同时可能有2个连接在执行1个用户的事务，但
             # 问题不大，因为事务是有冲突判断的。不冲突的事务就算一起执行也没啥问题。
-            conn = await conn_tbl.direct_get(conn_id)
+            conn = await db.get(conn_tbl, conn_id, RowFormat.STRUCT)
             if conn is None or conn.owner != caller:
                 err_msg = f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
                 replay.info(err_msg)
@@ -176,7 +173,7 @@ class ConnectionAliveChecker:
         # idle时间内只往数据库写入5次last_active，防止批量操作时频繁更新
         now = time.time()
         if now - self.last_active_cache > (ENDPOINT_CALL_IDLE_TIMEOUT / 5):
-            await conn_tbl.direct_set(ctx.connection_id, last_active=now)
+            await db.direct_set(conn_tbl, conn_id, last_active=str(now))
             self.last_active_cache = now
         return False
 
