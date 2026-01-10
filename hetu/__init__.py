@@ -18,8 +18,8 @@ define_system = system.define_system
 define_component = data.define_component
 elevate = endpoint.elevate
 ResponseToClient = endpoint.ResponseToClient
-# Context = endpoint.Context  Context和Endpoint有关，名字上看不出，不太合适放在顶层
-# SystemContext = system.SystemContext
+EndpointContext = endpoint.Context
+SystemContext = system.SystemContext
 
 
 try:
@@ -39,4 +39,6 @@ __all__ = [
     "define_system",
     "elevate",
     "ResponseToClient",
+    "EndpointContext",
+    "SystemContext",
 ]

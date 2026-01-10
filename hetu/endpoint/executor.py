@@ -9,6 +9,7 @@ import logging
 from time import time as now
 from typing import TYPE_CHECKING
 
+from ..common import Permission
 from .connection import ConnectionAliveChecker, new_connection, del_connection
 from .definer import EndpointDefine, EndpointDefines
 from .context import Context
@@ -70,6 +71,27 @@ class EndpointExecutor:
             replay.info(err_msg)
             logger.warning(err_msg)
             return None
+
+        # 检查权限是否符合
+        match ep.permission:
+            case Permission.USER:
+                if not context.caller:
+                    err_msg = (
+                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"{endpoint}无调用权限，检查是否非法调用：{args}"
+                    )
+                    replay.info(err_msg)
+                    logger.warning(err_msg)
+                    return None
+            case Permission.ADMIN:
+                if not context.is_admin():
+                    err_msg = (
+                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"{endpoint}无调用权限，检查是否非法调用：{args}"
+                    )
+                    replay.info(err_msg)
+                    logger.warning(err_msg)
+                    return None
 
         # 检测args数量是否对得上 todo 为啥要-3来着？
         if len(args) < (ep.arg_count - ep.defaults_count - 3):

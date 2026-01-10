@@ -12,7 +12,7 @@ from types import FunctionType
 from inspect import signature
 from typing import Callable, Awaitable, Any
 
-from ..common import Singleton
+from ..common import Singleton, Permission
 
 
 ENDPOINT_NAME_MAX_LEN = 32
@@ -23,6 +23,7 @@ AsyncHandler = Callable[..., Awaitable[Any]]
 @dataclass
 class EndpointDefine:
     func: AsyncHandler
+    permission: Permission
     arg_count: int  # 全部参数个数（含默认参数）
     defaults_count: int  # 默认参数个数
 
@@ -59,7 +60,13 @@ class EndpointDefines(metaclass=Singleton):
         return self._endpoint_map[namespace]
 
     def add(
-        self, namespace, func: AsyncHandler, force, arg_count=None, defaults_count=None
+        self,
+        namespace,
+        func: AsyncHandler,
+        force,
+        permission,
+        arg_count=None,
+        defaults_count=None,
     ):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
@@ -75,6 +82,7 @@ class EndpointDefines(metaclass=Singleton):
 
         sub_map[func.__name__] = EndpointDefine(
             func=func,
+            permission=permission,
             arg_count=arg_count,
             defaults_count=defaults_count,
         )
@@ -83,7 +91,11 @@ class EndpointDefines(metaclass=Singleton):
             self._global_endpoint_map[func.__name__] = sub_map[func.__name__]
 
 
-def define_endpoint(namespace: str = "global", force: bool = False):
+def define_endpoint(
+    namespace: str = "global",
+    force: bool = False,
+    permission: Permission = Permission.USER,
+):
     """
     把一个函数包装成可供客户端远程调用的接口。
 
@@ -97,12 +109,12 @@ def define_endpoint(namespace: str = "global", force: bool = False):
 
     Examples
     --------
-    >>> from hetu.endpoint import endpoint, Context, ResponseToClient
+    >>> import hetu
     >>>
-    >>> @endpoint(namespace="example")
-    ... async def pay(ctx: Context, order_id, paid):
+    >>> @hetu.define_endpoint(namespace="example", permission=hetu.Permission.EVERYBODY)
+    ... async def pay(ctx: hetu.EndpointContext, order_id, paid):
     ...     await ctx.systems.call("SystemName", order_id, paid)
-    ...     return ResponseToClient(['anything', 'blah blah'])
+    ...     return hetu.ResponseToClient(['anything', 'blah blah'])
 
     Parameters
     ----------
@@ -111,16 +123,23 @@ def define_endpoint(namespace: str = "global", force: bool = False):
         定义为"global"的namespace可以在所有项目下通用。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
+    permission: Permission
+        设置客户端的调用权限，只做些初级检查，具体权限需要自己逻辑中判断。
+        - everybody: 任何客户端连接都可以调用执行。（不安全）
+        - user: 只有已登录客户端连接可以调用
+        - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
+        - admin: 只有管理员权限客户端连接可以调用
+        - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 
     Notes
     -----
     **Endpoint函数要求：** ::
 
-        async def pay(ctx: Context, order_id, paid)
+        async def pay(ctx: hetu.EndpointContext, order_id, paid)
 
     async:
         Endpoint必须是异步函数。
-    ctx: Context
+    ctx: hetu.EndpointContext
         上下文，具体见下述Context部分
     其他参数:
         为hetu client SDK调用时传入的参数。
@@ -161,7 +180,7 @@ def define_endpoint(namespace: str = "global", force: bool = False):
             f"Endpoint {func.__name__} 必须是异步函数(`async def ...`)"
         )
 
-        EndpointDefines().add(namespace, func, force)
+        EndpointDefines().add(namespace, func, force, permission)
 
         return func
 

@@ -242,11 +242,12 @@ class SystemClusters(metaclass=Singleton):
             for sys_name, sys_def in sys_map.items():
                 if sys_def.permission is None:
                     continue
-                func = create_system_endpoint(sys_name, sys_def.permission)
+                func = create_system_endpoint(sys_name)
                 EndpointDefines().add(
                     namespace,
                     func,
                     force=True,
+                    permission=sys_def.permission,
                     arg_count=sys_def.arg_count,
                     defaults_count=sys_def.defaults_count,
                 )
@@ -334,7 +335,9 @@ def define_system(
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission
-        设为None时表示客户端SDK不可调用，设置任意权限会创建一个供客户端调用的Endpoint，并检查对应权限。
+        设置客户端的调用权限，只做些初级检查，具体权限需要自己逻辑中判断。
+        设为None时表示客户端SDK不可调用，设置任意权限会创建一个供客户端调用的Endpoint，
+        然后由此Endpoint调用本System。
         - everybody: 任何客户端连接都可以调用执行。（不安全）
         - user: 只有已登录客户端连接可以调用
         - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查

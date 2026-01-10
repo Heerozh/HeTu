@@ -35,7 +35,6 @@ class Context:
     server_limits: list[list[int]] = field(default_factory=list)
     max_row_sub: int = 0  # 行订阅限制
     max_index_sub: int = 0  # 索引订阅限制
-    # todo 想一下要如何从context中获取或启动session
 
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"

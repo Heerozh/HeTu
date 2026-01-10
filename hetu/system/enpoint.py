@@ -18,30 +18,10 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-def create_system_endpoint(system: str, permission: Permission) -> Callable:
+def create_system_endpoint(system: str) -> Callable:
     """自动生成的直接调用System的Endpoint"""
 
     async def system_endpoint(ctx: SystemContext, *args) -> None | EndpointResponse:
-        # 检查权限是否符合
-        match permission:
-            case Permission.USER:
-                if not ctx.caller:
-                    err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {ctx} | "
-                        f"{system}无调用权限，检查是否非法调用：{args}"
-                    )
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
-            case Permission.ADMIN:
-                if not ctx.is_admin():
-                    err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {ctx} | "
-                        f"{system}无调用权限，检查是否非法调用：{args}"
-                    )
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
         ok, rsp = await ctx.systems.call(system, *args)
         if ok:
             return rsp
