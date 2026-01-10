@@ -6,9 +6,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using JetBrains.Annotations;
 
 namespace HeTu
 {
+    [MustDisposeResource]
     public abstract class MessageProcessLayer : IDisposable
     {
         protected int LayerIndex;
@@ -46,6 +48,7 @@ namespace HeTu
     /// <summary>
     ///     消息流层叠处理类。
     /// </summary>
+    [MustDisposeResource]
     public sealed class MessagePipeline : IDisposable
     {
         private readonly List<bool> _disabled = new();

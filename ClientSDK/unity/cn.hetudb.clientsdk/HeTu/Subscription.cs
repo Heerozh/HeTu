@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using UnityEngine.Scripting;
+using JetBrains.Annotations;
 
 namespace HeTu
 {
@@ -23,38 +24,49 @@ namespace HeTu
         public long id => Convert.ToInt64(this["id"]);
     }
 
-    public abstract class BaseSubscription
+    [MustDisposeResource]
+    public abstract class BaseSubscription : IDisposable
     {
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
         public readonly string ComponentName;
+        private readonly string _creationStack;
 
         protected BaseSubscription(string subscriptID, string componentName,
-            HeTuClientBase client)
+            HeTuClientBase client, string creationStack = null)
         {
             _subscriptID = subscriptID;
             ComponentName = componentName;
             _parentClient = client;
+            _creationStack = creationStack;
         }
 
         public abstract void UpdateRows(JsonObject data);
 
         /// <summary>
-        ///     销毁远端订阅对象。
-        ///     Dispose应该明确调用，虽然gc回收时会调用，但时间不确定，这会导致服务器端该对象销毁不及时。
+        ///     销毁远端订阅对象。Dispose应该明确调用。
         /// </summary>
-        public void Dispose() =>
+        public virtual void Dispose()
+        {
             _parentClient.Unsubscribe(_subscriptID, "Dispose");
+            GC.SuppressFinalize(this);
+        }
 
-        ~BaseSubscription() => _parentClient.Unsubscribe(_subscriptID, "析构");
+        ~BaseSubscription()
+        {
+#pragma warning disable IDISP023 // Don't use reference types in finalizer context
+            Logger.Instance.Error(
+                "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID + "\n创建时的堆栈：\n" + _creationStack);
+#pragma warning restore IDISP023 // Don't use reference types in finalizer context
+        }
     }
 
     /// Select结果的订阅对象
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         public RowSubscription(string subscriptID, string componentName, T row,
-            HeTuClientBase client) :
-            base(subscriptID, componentName, client) =>
+            HeTuClientBase client, string creationStack = null) :
+            base(subscriptID, componentName, client, creationStack) =>
             Data = row;
 
         public T Data { get; private set; }
@@ -90,8 +102,8 @@ namespace HeTu
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
-            HeTuClientBase client) :
-            base(subscriptID, componentName, client) =>
+            HeTuClientBase client, string creationStack = null) :
+            base(subscriptID, componentName, client, creationStack) =>
             Rows = rows.ToDictionary(row => row.id);
 
         public Dictionary<long, T> Rows { get; }

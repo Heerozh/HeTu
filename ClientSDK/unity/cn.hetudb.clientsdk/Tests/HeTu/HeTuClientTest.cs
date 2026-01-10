@@ -101,7 +101,7 @@ namespace Tests.HeTu
             var success = false;
             try
             {
-                await HeTuClient.Instance.Get<RLSComp>("owner", 123);
+                using var _ = await HeTuClient.Instance.Get<RLSComp>("owner", 123);
                 success = true;
             }
             catch (InvalidCastException)
@@ -112,19 +112,10 @@ namespace Tests.HeTu
             Assert.False(success, "没有抛出InvalidCastException");
 
             // unity delay后第二次gc才会回收
-            for (var i = 0; i < 10; i++)
-            {
-                GC.Collect();
-                GC.WaitForPendingFinalizers();
-#if UNITY_6000_0_OR_NEWER
-                await Awaitable.WaitForSecondsAsync(1);
-#else
-                await UniTask.Delay(1);
-#endif
-            }
+            sub.Dispose();
 
             // 测试回收自动反订阅，顺带测试Class类型
-            var typedSub = await HeTuClient.Instance.Get<RLSComp>(
+            using var typedSub = await HeTuClient.Instance.Get<RLSComp>(
                 "owner", 123);
             Assert.AreEqual(lastValue - 3, typedSub.Data.value);
 
@@ -170,7 +161,7 @@ namespace Tests.HeTu
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 234, true).Forget();
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
-            var sub = await HeTuClient.Instance.Range(
+            using var sub = await HeTuClient.Instance.Range(
                 "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
             Assert.AreEqual(1, sub.Rows.Count);
@@ -208,7 +199,7 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
 
             // 测试OnInsert, OnDelete
-            var sub = await HeTuClient.Instance.Range<IndexComp1>(
+            using var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "value", 0, 10, 100);
 
             long? newPlayer = null;

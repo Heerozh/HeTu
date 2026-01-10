@@ -12,13 +12,14 @@ using System;
 using System.Threading;
 using UnityEngine;
 using UnityWebSocket;
+using JetBrains.Annotations;
 
 namespace HeTu
 {
     /// <summary>
     ///     河图Unity专用Client类，把ClientBase封装成Unity友好的异步接口。
     /// </summary>
-    public sealed class HeTuClient : HeTuClientBase, IDisposable
+    public sealed class HeTuClient : HeTuClientBase
     {
         private static readonly Lazy<HeTuClient> s_lazy = new(() =>
         {
@@ -34,8 +35,9 @@ namespace HeTu
         /// <summary>
         ///     对于全局连接(HeTuClient.Instance)，可以不做Dispose。
         /// </summary>
-        public void Dispose()
+        public override void Dispose()
         {
+            base.Dispose();
             _socket?.CloseAsync();
             _socket = null;
             _connectionCancelSource?.Cancel();
@@ -49,10 +51,10 @@ namespace HeTu
             Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
         {
             _socket = new WebSocket(url);
-            _socket.OnOpen += (sender, e) => { onConnected(); };
+            _socket.OnOpen += (_, _) => { onConnected(); };
 
-            _socket.OnMessage += (sender, e) => { onMessage(e.RawData); };
-            _socket.OnClose += (sender, e) =>
+            _socket.OnMessage += (_, e) => { onMessage(e.RawData); };
+            _socket.OnClose += (_, e) =>
             {
                 switch (e.StatusCode)
                 {
@@ -77,7 +79,7 @@ namespace HeTu
                         break;
                 }
             };
-            _socket.OnError += (sender, e) => { onError(e.Message); };
+            _socket.OnError += (_, e) => { onError(e.Message); };
             _socket.ConnectAsync();
         }
 
@@ -193,8 +195,8 @@ namespace HeTu
 
         /// <summary>
         ///     执行System调用。
-        ///     如果不await此方法，调用会在后台异步发送，立即返回。
-        ///     如果await此方法，调用会等待服务器回应，默认返回"ok"，除非有使用ResponseToClient。
+        ///     如果不CallSystem().Forget()此方法，调用会在后台异步发送，立即返回。
+        ///     如果await CallSystem()此方法，调用会等待服务器回应，默认返回"ok"，除非有使用ResponseToClient。
         ///     另可通过`HeTuClient.Instance.SystemLocalCallbacks["system_name"] = (args) => {}`
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
@@ -259,6 +261,7 @@ namespace HeTu
         /// subscription.OnUpdate += (sender, rowID) => {
         ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
         /// }
+        /// subscription.Dispose(); // 反订阅
         /// // --------或者--------
         /// <![CDATA[
         /// Class HP : IBaseComponent {  // Class名必须和服务器一致
@@ -268,8 +271,10 @@ namespace HeTu
         /// }
         /// var subscription = await HeTuClient.Instance.Get<HP>("owner", user_id);
         /// Debug.log("My HP:" + subscription.Data.value);
+        /// subscription.Dispose(); // 反订阅
         /// ]]>
         /// </code>
+        [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<T>> Get<T>(
 #else
@@ -313,6 +318,7 @@ namespace HeTu
             return await tcs.Task;
         }
 
+        [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<DictComponent>> Get(
 #else
@@ -331,6 +337,7 @@ namespace HeTu
         ///     返回`IndexSubscription`对象。
         ///     可通过`IndexSubscription.Rows`获取数据。
         ///     并可以注册`IndexSubscription.OnInsert`和`OnUpdate`，`OnDelete`数据事件。
+        ///     但建议通过响应式`IndexSubscription.ToObservableDictionary()`来处理数据变化，更加方便。
         /// </returns>
         /// <remarks>
         ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, object}`类型。
@@ -349,7 +356,9 @@ namespace HeTu
         /// subscription.OnDelete += (sender, rowID) => {
         ///     Debug.log($"Delete row: {rowID}，之前的数据：{sender.Rows[rowID]["value"]}");
         /// }
+        /// subscription.Dispose(); // 反订阅
         /// </code>
+        [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<IndexSubscription<T>> Range<T>(
 #else
@@ -395,6 +404,7 @@ namespace HeTu
             return await tcs.Task;
         }
 
+        [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<IndexSubscription<DictComponent>> Range(
 #else

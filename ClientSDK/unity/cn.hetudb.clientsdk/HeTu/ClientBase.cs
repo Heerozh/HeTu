@@ -8,6 +8,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using JetBrains.Annotations;
 
 namespace HeTu
 {
@@ -21,7 +22,7 @@ namespace HeTu
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
-    public abstract class HeTuClientBase
+    public abstract class HeTuClientBase: IDisposable
     {
         protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
             OfflineQueue = new();
@@ -38,7 +39,9 @@ namespace HeTu
         protected HeTuClientBase() => SetupPipeline(
             new List<MessageProcessLayer>
             {
+#pragma warning disable IDISP004
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
+#pragma warning restore IDISP004
             });
 
         // 连接成功时的回调
@@ -64,6 +67,11 @@ namespace HeTu
             Pipeline.Clean();
             foreach (var layer in layers)
                 Pipeline.AddLayer(layer);
+        }
+
+        public virtual void Dispose()
+        {
+            Pipeline.Dispose();
         }
 
         // 连接到河图url的Core方法，外部还需要异步包装一下
@@ -215,6 +223,10 @@ namespace HeTu
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
             }
 
+            string creationSource = null;
+#if DEBUG
+            creationSource = Environment.StackTrace;
+#endif
             // 向服务器订阅
             Logger.Instance.Debug(
                 $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
@@ -248,8 +260,11 @@ namespace HeTu
                         else
                         {
                             var data = ((JsonObject)response[2]).To<T>();
+#pragma warning disable IDISP001
+                            // ReSharper disable once NotDisposedResource
                             rowSubscription =
-                                new RowSubscription<T>(subID, componentName, data, this);
+                                new RowSubscription<T>(subID, componentName, data, this, creationSource);
+#pragma warning restore IDISP001
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));
                             Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
@@ -301,9 +316,13 @@ namespace HeTu
                     throw new InvalidCastException(
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
 
+            string creationSource = null;
+#if DEBUG
+            creationSource = Environment.StackTrace;
+#endif
+
             // 发送订阅请求
             Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
-
             var payload = new[]
             {
                 "sub", componentName, "range", index, left, right, limit, desc, force
@@ -338,9 +357,11 @@ namespace HeTu
                         {
                             var rawRows = (JsonObject)response[2];
                             var rows = rawRows.ToList<T>();
+#pragma warning disable IDISP001
+                            // ReSharper disable once NotDisposedResource
                             idxSubscription = new IndexSubscription<T>(
-                                subID, componentName, rows, this);
-
+                                subID, componentName, rows, this, creationSource);
+#pragma warning restore IDISP001
                             Subscriptions.Add(subID,
                                 new WeakReference(idxSubscription, false));
                             Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");

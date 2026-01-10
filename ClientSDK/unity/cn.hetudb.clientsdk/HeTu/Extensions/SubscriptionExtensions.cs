@@ -197,7 +197,7 @@ namespace HeTu.Extensions
             // 公开的 R3 集合
             public ObservableDictionary<long, T> Collection { get; }
 
-            public void Dispose() => _eventSubscription.Dispose(); // 停止监听源事件
+            public virtual void Dispose() => _eventSubscription.Dispose(); // 停止监听源事件
 
             // 实现 IEnumerable 方便直接遍历
             public IEnumerator<KeyValuePair<long, T>> GetEnumerator() =>
