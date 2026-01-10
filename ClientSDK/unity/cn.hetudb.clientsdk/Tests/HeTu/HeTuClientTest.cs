@@ -7,6 +7,10 @@ using MessagePack;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
+using HeTu.Extensions;
+using System.Collections.Generic;
+using R3;
+
 #if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
 #endif
@@ -229,6 +233,50 @@ namespace Tests.HeTu
 
             Assert.False(sub.Rows.ContainsKey(123));
             Debug.Log("TestIndexSubscribeOnInsert结束");
+        }
+
+        //todo unity6测试
+        //todo R3响应式测试
+
+        [UnityTest]
+        public IEnumerator TestRowSubscribeR3()
+        {
+            Debug.Log("TestIndexSubscribeR3开始");
+            yield return RunTask(TestRowSubscribeR3Async());
+        }
+
+        private async Task TestRowSubscribeR3Async()
+        {
+            GameObject go = new GameObject("TestRowSubscribeR3");
+
+            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            using var sub = await HeTuClient.Instance.Get<RLSComp>(
+                 "owner", 456);
+
+            List<int> receivedValues = new();
+            sub.ToReactiveProperty()
+                .Subscribe(x => receivedValues.Add(x.value))
+                .AddTo(go);
+
+            UnityEngine.Object.Destroy(go);
+        }
+
+        [UnityTest]
+        public IEnumerator TestIndexSubscribeR3()
+        {
+            Debug.Log("TestIndexSubscribeR3开始");
+            yield return RunTask(TestIndexSubscribeR3Async());
+        }
+
+        private async Task TestIndexSubscribeR3Async()
+        {
+            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 456, 5).Forget();
+
+            using var sub = await HeTuClient.Instance.Range<IndexComp1>(
+                "value", 0, 10, 100);
+
         }
     }
 }
