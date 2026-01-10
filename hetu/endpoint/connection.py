@@ -150,12 +150,11 @@ class ConnectionAliveChecker:
     async def is_illegal(self, ctx: Context, ex_info: str):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         conn_tbl = self.conn_tbl
-        db = conn_tbl.backend.master
         caller, conn_id = ctx.caller, ctx.connection_id
         if caller:
             # 此方法无法通过事务，这里判断通过后可能有其他连接踢了你，等于同时可能有2个连接在执行1个用户的事务，但
             # 问题不大，因为事务是有冲突判断的。不冲突的事务就算一起执行也没啥问题。
-            conn = await db.get(conn_tbl, conn_id, RowFormat.STRUCT)
+            conn = await conn_tbl.servant_get(conn_id, RowFormat.STRUCT)
             if conn is None or conn.owner != caller:
                 err_msg = f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
                 replay.info(err_msg)
@@ -165,7 +164,7 @@ class ConnectionAliveChecker:
         # idle时间内只往数据库写入5次last_active，防止批量操作时频繁更新
         now = time.time()
         if now - self.last_active_cache > (ENDPOINT_CALL_IDLE_TIMEOUT / 5):
-            await db.direct_set(conn_tbl, conn_id, last_active=str(now))
+            await conn_tbl.direct_set(conn_id, last_active=str(now))
             self.last_active_cache = now
         return False
 

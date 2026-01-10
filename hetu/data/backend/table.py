@@ -7,12 +7,29 @@
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from typing import Callable, Concatenate, ParamSpec, TypeVar
 
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
     from . import Backend
     from .session import Session
+
+
+# 定义泛型变量
+P = ParamSpec("P")
+R = TypeVar("R")
+T = TypeVar("T")
+
+
+# 这是一个类型安全的 partial 辅助函数
+def bind_first_arg_with_typehint(
+    func: Callable[Concatenate[T, P], R], first_arg: T
+) -> Callable[P, R]:
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
+        return func(first_arg, *args, **kwargs)
+
+    return wrapper
 
 
 @dataclass(frozen=True, eq=True)  # 定义为不可变，且可以作为按内容hash的dict键
@@ -47,3 +64,15 @@ class Table(TableReference):
 
     def session(self) -> Session:
         return self.backend.session(self.instance_name, self.cluster_id)
+
+    @property
+    def servant_get(self):
+        return bind_first_arg_with_typehint(self.backend.servant.get, self)
+
+    @property
+    def servant_range(self):
+        return bind_first_arg_with_typehint(self.backend.servant.range, self)
+
+    @property
+    def direct_set(self):
+        return bind_first_arg_with_typehint(self.backend.master.direct_set, self)

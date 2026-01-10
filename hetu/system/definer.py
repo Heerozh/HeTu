@@ -34,7 +34,6 @@ class SystemDefine(EndpointDefine):
     full_components: set[type[BaseComponent]]  # 完整的引用，包括继承自父System的
     depends: set[str]
     full_depends: set[str]
-    permission: Permission | None
     max_retry: int
     cluster_id: int
 

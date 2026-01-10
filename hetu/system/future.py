@@ -9,18 +9,22 @@ import asyncio
 import logging
 import random
 import time
-import uuid
+import warnings
+from typing import TYPE_CHECKING
 
 import numpy as np
-import warnings
 
-from .context import Context
-from .definer import define_system, SystemClusters
+from hetu.data.backend import RowFormat
+
+from ..data import BaseComponent, Permission, define_component, property_field
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
+from .caller import SystemCaller
+from .context import SystemContext
+from .definer import SystemClusters, define_system
 from .lock import SystemLock, clean_expired_call_locks
-from .executor import SystemExecutor
-from ..data import BaseComponent, define_component, property_field, Permission
-from ..data.backend import TableReference
+
+if TYPE_CHECKING:
+    from ..data.backend.table import Table
 
 SYSTEM_CLUSTERS = SystemClusters()
 logger = logging.getLogger("HeTu.root")
@@ -30,7 +34,6 @@ replay = logging.getLogger("HeTu.replay")
 @define_component(namespace="HeTu", permission=Permission.ADMIN)
 class FutureCalls(BaseComponent):
     owner: np.int64 = property_field(0, index=True)  # 创建方
-    uuid: str = property_field("", dtype="<U32", unique=True)  # 唯一标识
     system: str = property_field("", dtype=f"<U{ENDPOINT_NAME_MAX_LEN}")  # 目标system名
     args: str = property_field("", dtype="<U1024")  # 目标system参数
     recurring: bool = property_field(False)  # 是否永不结束重复触发
@@ -41,11 +44,9 @@ class FutureCalls(BaseComponent):
 
 
 # permission设为admin权限阻止客户端调用
-@define_system(
-    namespace="global", permission=Permission.ADMIN, components=(FutureCalls,)
-)
+@define_system(namespace="global", permission=None, components=(FutureCalls,))
 async def create_future_call(
-    ctx: Context,
+    ctx: SystemContext,
     at: float,
     system: str,
     *args,
@@ -56,7 +57,7 @@ async def create_future_call(
     创建一个未来调用任务，到约定时间后会由内部进程执行该System。
     未来调用储存在FutureCalls组件中，服务器重启不会丢失。
     timeout不为0时，则保证目标System事务一定成功，且只执行一次。
-    只执行一次的保证通过call_lock引发的事务冲突实现，要求定义System时开启call_lock。
+    只执行一次的保证通过call_lock引发的事务冲突实现，会强制要求定义System时开启call_lock。
 
     Notes
     -----
@@ -83,25 +84,27 @@ async def create_future_call(
 
         如果timeout再次触发时前一次执行还未完成，会引起事务竞态，其中一个事务会被抛弃。
         如果前一次已经成功执行，call_lock会触发，跳过执行。
-        * 注意：抛弃的只有事务(所有ctx[components]的操作)，修改全局变量、写入文件等操作是永久的
-        * 注意：`ctx.retry_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+        * 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
+        * 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
     recurring: bool
         设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
 
     Returns
     -------
-    返回未来调用的uuid
+    返回未来调用的uuid: int
 
     Examples
     --------
-    >>> @define_system(namespace='test', permission=Permission.ADMIN)
-    ... def test_future_call(ctx: Context, *args):
+    >>> import hetu
+    >>> @hetu.define_system(namespace='test', permission=None)
+    ... def test_future_call(ctx: hetu.SystemContext, *args):
+    ...     # do ctx.repo[...] operations
     ...     print('Future call test', args)
-    >>> @define_system(namespace='test', permission=Permission.ADMIN, subsystems=('create_future_call:test') )
-    ... def test_future_create(ctx: Context):
-    ...     ctx['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
+    >>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test') )
+    ... def test_future_create(ctx: hetu.SystemContext):
+    ...     ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
 
-    示例中，`subsystems`继承使用':'符号创建了`create_future_call`的test副本。
+    示例中，`depends`依赖使用':'符号创建了`create_future_call`的test副本。
     继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
     增加backend的扩展性，具体参考簇相关的文档。
 
@@ -137,35 +140,34 @@ async def create_future_call(
     if sys.permission == Permission.USER:
         warnings.warn(
             f"⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{sys.permission.name}权限，"
-            f"建议设为Admin防止客户端随意调用。"
+            f"建议设为None防止客户端调用。"
             f"且未来调用为后台任务，执行时Context无用户信息"
         )
-    elif sys.permission != Permission.ADMIN:
+    elif sys.permission != Permission.ADMIN and sys.permission is not None:
         warnings.warn(
             f"⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{sys.permission.name}权限，"
-            f"建议设为Admin防止客户端随意调用。"
+            f"建议设为None防止客户端调用。"
         )
 
     # 创建
-    _uuid = uuid.uuid4().hex
-    async with ctx[FutureCalls].upsert(_uuid, "uuid") as row:
-        row.owner = ctx.caller or -1
-        row.system = system
-        row.args = args_str
-        row.recurring = recurring
-        row.created = time.time()
-        row.last_run = 0
-        row.scheduled = at
-        row.timeout = timeout
+    row = FutureCalls.new_row()
+    row.owner = ctx.caller or -1
+    row.system = system
+    row.args = args_str
+    row.recurring = recurring
+    row.created = time.time()
+    row.last_run = 0
+    row.scheduled = at
+    row.timeout = timeout
+    await ctx.repo[FutureCalls].insert(row)
+    return row.id
 
-    return _uuid
 
-
-async def sleep_for_upcoming(tbl: RawComponentTable):
+async def sleep_for_upcoming(tbl: Table):
     """等待下一个即将到期的任务，返回是否有任务"""
     # query limit=1 获得即将到期任务(1秒内）
-    calls = await tbl.direct_query(
-        "scheduled", left=0, right=time.time() + 1, limit=1, row_format="raw"
+    calls = await tbl.servant_range(
+        "scheduled", left=0, right=time.time() + 1, limit=1, row_format=RowFormat.RAW
     )
     # 如果无任务，则sleep并continue
     if not calls:
@@ -178,30 +180,28 @@ async def sleep_for_upcoming(tbl: RawComponentTable):
     return True
 
 
-async def pop_upcoming_call(tbl: RawComponentTable):
+async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
-    async with tbl.backend.transaction(tbl.cluster_id) as session:
-        tbl_trx = tbl.attach(session)
+    async with tbl.session() as session:
+        repo = session.using(FutureCalls)
         # 取出最早到期的任务
         now = time.time()
-        calls = await tbl_trx.query("scheduled", left=0, right=now + 0.1, limit=1)
+        calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
         # 检查可能被其他worker消费了
         if calls.size == 0:
             return None
         call = calls[0]
         # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
         if call.timeout == 0:
-            await tbl_trx.delete(call.id)
+            repo.delete(call.id)
         else:
             call.scheduled = now + call.timeout
             call.last_run = now
-            await tbl_trx.update(call.id, call)
+            await repo.update(call)
     return call
 
 
-async def exec_future_call(
-    call: np.record, executor: SystemExecutor, tbl: RawComponentTable
-):
+async def exec_future_call(call: np.record, executor: SystemCaller, tbl: Table):
     # 准备System
     sys = SYSTEM_CLUSTERS.get_system(call.system)
     if not sys:
@@ -214,19 +214,21 @@ async def exec_future_call(
     req_call_lock = not call.recurring and call.timeout != 0
     # 执行
     if req_call_lock:
-        ok, res = await executor.execute_(sys, *args, uuid=call.uuid)
+        ok, res = await executor.call_(sys, *args, uuid=str(call.id))
     else:
-        ok, res = await executor.execute_(sys, *args)
+        ok, res = await executor.call_(sys, *args)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
-        async with tbl.backend.transaction(tbl.cluster_id) as session:
-            tbl_trx = tbl.attach(session)
-            await tbl_trx.delete(call.id)
+        async with tbl.session() as session:
+            repo = session.using(FutureCalls)
+            get_4_del = await repo.get(id=call.id)
+            if get_4_del:
+                repo.delete(get_4_del.id)
         # 再删除call_lock uuid数据，只有ok的执行才有call lock
-        await executor.remove_call_lock(call.system, call.uuid)
+        await executor.remove_call_lock(call.system, str(call.id))
     return True
 
 
@@ -234,6 +236,11 @@ async def future_call_task(app):
     """
     未来调用的后台task，每个Worker启动时会开一个，执行到期的未来调用。
     """
+    # 获取当前协程任务, 自身算是一个协程1
+    current_task = asyncio.current_task()
+    assert current_task, "Must be called in an asyncio task"
+    logger.info(f"🔗 [⚙️Future] 新Task：{current_task.get_name()}")
+
     comp_mgr = app.ctx.comp_mgr
 
     # 启动时清空超过7天的call_lock的已执行uuid数据
@@ -242,16 +249,28 @@ async def future_call_task(app):
     # 随机sleep一段时间，错开各worker的执行时间
     await asyncio.sleep(random.random())
 
+    # 初始化Context
+    context = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="localhost",
+        group="guest",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+
     # 初始化task的执行器
-    executor = SystemExecutor(app.config["NAMESPACE"], comp_mgr)
-    await executor.initialize("localhost")
-    logger.info(f"🔗 [⚙️Future] 新Task：{asyncio.current_task().get_name()}")
+    executor = SystemCaller(app.config["NAMESPACE"], comp_mgr, context)
+
     # 获取所有未来调用组件
     comp_tables = [comp_mgr.get_table(FutureCalls)]
     if comp_tables[0] is None:  # 可能主组件没人使用
         comp_tables = []
     duplicates = FutureCalls.get_duplicates(comp_mgr.namespace).values()
     comp_tables += [comp_mgr.get_table(comp) for comp in duplicates]
+
     # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，导致部分任务可能卡很久不执行
     # 所以这里使用最基础的，每一段时间循环的方式
     while True:
