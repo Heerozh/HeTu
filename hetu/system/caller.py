@@ -9,7 +9,6 @@ import asyncio
 import logging
 import random
 import time
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from .lock import SystemLock
@@ -30,13 +29,6 @@ SystemClusters = None
 SLOW_LOG = SlowLog()
 
 
-@dataclass
-class SystemCall:
-    system: str  # 目标system名
-    args: tuple  # 目标system参数
-    uuid: str = ""  # 唯一id，如果设置了，则会储存一个标记用于确保不会重复调用
-
-
 class SystemCaller:
     """
     每个连接一个SystemCaller实例。
@@ -49,13 +41,13 @@ class SystemCaller:
         self.comp_mgr = comp_mgr
         self.context = context
 
-    def call_check(self, call: SystemCall) -> SystemDefine | None:
+    def call_check(self, system: str) -> SystemDefine | None:
         """检查调用是否合法"""
         context = self.context
         # 读取保存的system define
-        sys = SYSTEM_CLUSTERS.get_system(call.system)
+        sys = SYSTEM_CLUSTERS.get_system(system)
         if not sys:
-            err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{call}"
+            err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{system}"
             replay.info(err_msg)
             logger.warning(err_msg)
             return None
@@ -80,12 +72,12 @@ class SystemCaller:
         context.repo = {}
         context.depend = {}
 
-        # 获取system引用的第一个component的backend，system只能引用相同backend的组件，所以都一样
+        # 获取system引用的第一个component的session，system只能引用相同session的组件，所以都一样
         comp_mgr = self.comp_mgr
         first_comp = next(iter(sys.full_components), None)
         first_table = first_comp and comp_mgr.get_table(first_comp) or None
         assert first_table, f"for typing。System {sys_name} 没有引用任何Component"
-        backend = first_table.backend
+        session = first_table.session()
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
@@ -98,7 +90,6 @@ class SystemCaller:
         # 调用系统
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
-            session = backend.session(first_table.instance_name, sys.cluster_id)
             await session.__aenter__()
             for comp in sys.full_components:
                 context.repo[comp] = session.using(comp)
@@ -151,40 +142,39 @@ class SystemCaller:
         )
         return False, None
 
-    async def execute(self, call: SystemCall) -> tuple[bool, ResponseToClient | None]:
+    async def call(
+        self, system: str, *args, uuid: str = ""
+    ) -> tuple[bool, ResponseToClient | None]:
         """
         调用System，返回True表示调用成功，
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
         """
         # 检查call参数和call权限
-        sys = self.call_check(call)
+        sys = self.call_check(system)
         if sys is None:
             return False, None
 
-        # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
-        illegal = await self.alive_checker.is_illegal(self.context, call)
-        if illegal:
-            return False, None
-
         # 开始调用
-        return await self.execute_(sys, *call.args, uuid=call.uuid)
-
-    async def exec(self, name: str, *args):
-        """execute的便利调用方法"""
-        return await self.execute(SystemCall(name, args))
+        return await self.call_(sys, *args, uuid=uuid)
 
     async def remove_call_lock(self, system: str, uuid: str):
         """删除call lock"""
         sys = SYSTEM_CLUSTERS.get_system(system)
+        assert sys
 
+        # 找到第一个lock组件
+        def is_lock(_comp):
+            return _comp == SystemLock or _comp.master_ == SystemLock
+
+        comp = next((x for x in sys.full_components if is_lock(x)), None)
+        assert comp
         comp_mgr = self.comp_mgr
+        table = comp_mgr.get_table(comp)
+        assert table
 
-        for comp in sys.full_components:
-            if comp == SystemLock or comp.master_ == SystemLock:
-                tbl = comp_mgr.get_table(comp)
-                async with tbl.backend.transaction(sys.cluster_id) as session:
-                    tbl_trx = tbl.attach(session)
-                    row = await tbl_trx.select(uuid, "uuid")
-                    if row:
-                        await tbl_trx.delete(row.id)
-                break
+        # 删除lock
+        async with table.session() as session:
+            repo = session.using(comp)
+            row = await repo.get(uuid=uuid)
+            if row:
+                row.delete(row.id)
