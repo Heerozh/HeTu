@@ -290,13 +290,14 @@ def define_component(
 
     Examples
     --------
-    >>> from hetu.data import BaseComponent, property_field, define_component, Permission
-    >>> @define_component(namespace="ssw")
-    ... class Position(BaseComponent):
-    ...     x: np.float32 = property_field(default=0)
-    ...     y: np.float32 = property_field(default=0)
-    ...     owner: np.int64 = property_field(default=0, unique=True)
-    ...     name: '<U8' = property_field(default="12345678")
+    >>> import hetu
+    >>> import numpy as np
+    >>> @hetu.define_component(namespace="ssw")
+    ... class Position(hetu.BaseComponent):
+    ...     x: np.float32 = hetu.property_field(default=0)
+    ...     y: np.float32 = hetu.property_field(default=0)
+    ...     owner: np.int64 = hetu.property_field(default=0, unique=True)
+    ...     name: '<U8' = hetu.property_field(default="12345678")
 
     Parameters
     ----------

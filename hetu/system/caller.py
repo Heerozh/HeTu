@@ -76,14 +76,14 @@ class SystemCaller:
         comp_mgr = self.comp_mgr
         first_comp = next(iter(sys.full_components), None)
         first_table = first_comp and comp_mgr.get_table(first_comp) or None
-        assert first_table, f"for typing。System {sys_name} 没有引用任何Component"
+        assert first_table, f"TYPING不该走到: System {sys_name} 没有引用任何Component"
         session = first_table.session()
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
             base, _, _ = dep_name.partition(":")
             dep_sys = SYSTEM_CLUSTERS.get_system(base)
-            assert dep_sys, f"for typing。System {sys_name} 依赖的System {base} 不存在"
+            assert dep_sys, f"TYPING不该走到: System {sys_name} 的依赖 {base} 找不到"
             context.depend[dep_name] = dep_sys.func
 
         start_time = time.perf_counter()

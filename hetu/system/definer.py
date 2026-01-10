@@ -285,7 +285,7 @@ def define_system(
     components: tuple[type[BaseComponent], ...],
     namespace: str = "default",
     force: bool = False,
-    permission: Permission | None = Permission.USER,
+    permission: Permission | None = None,
     retry: int = 9999,
     depends: tuple[str | FunctionType, ...] = tuple(),
     call_lock=False,
@@ -299,29 +299,27 @@ def define_system(
 
     Examples
     --------
-    >>> from hetu.data import BaseComponent, define_component, property_field
+    >>> import hetu
     >>> # 定义Component
-    >>> @define_component
-    ... class Stock(BaseComponent):
-    ...     owner: int = property_field(0)
-    ...     value: int = property_field(0)
-    >>> @define_component
-    ... class Order(BaseComponent):
-    ...     owner: int = property_field(0)
-    ...     paid: bool = property_field(False)
-    ...     qty: int = property_field(0)
+    >>> @hetu.define_component
+    ... class Stock(hetu.BaseComponent):
+    ...     owner: int = hetu.property_field(0)
+    ...     value: int = hetu.property_field(0)
+    >>> @hetu.define_component
+    ... class Order(hetu.BaseComponent):
+    ...     owner: int = hetu.property_field(0)
+    ...     paid: bool = hetu.property_field(False)
+    ...     qty: int = hetu.property_field(0)
     >>>
     >>> # 定义System
-    >>> from hetu.system import define_system, SystemContext
-    >>> from hetu.endpoint import ResponseToClient
-    >>> @define_system(namespace="example", components=(Stock, Order))
-    ... async def pay(ctx: SystemContext, order_id, paid):
-    ...     async with ctx[Order].upsert(id=order_id) as order:
+    >>> @hetu.define_system(namespace="example", components=(Stock, Order), permission=hetu.Permission.USER)
+    ... async def pay(ctx: hetu.SystemContext, order_id, paid):
+    ...     async with ctx.repo[Order].upsert(id=order_id) as order:
     ...        order.paid = paid
-    ...     async with ctx[Order].upsert(owner=order.owner) as stock:
+    ...     async with ctx.repo[Order].upsert(owner=order.owner) as stock:
     ...        stock.value += order.qty
     ...     # ctx.commit()  # 可以省略，也可以提前提交
-    ...     return ResponseToClient(['anything', 'blah blah'])
+    ...     return hetu.ResponseToClient(['anything', 'blah blah'])
 
     Parameters
     ----------
@@ -371,7 +369,7 @@ def define_system(
         如果调用方是父System（通过`depends`调用），则返回值会原样传给调用方；
 
         如果调用方是hetu client SDK：
-            - 返回值是 hetu.system.ResponseToClient(data)时，则把data发送给调用方sdk。
+            - 返回值是 hetu.ResponseToClient(data)时，则把data发送给调用方sdk。
             - 其他返回值丢弃
 
     **SystemContext部分：**
@@ -400,29 +398,34 @@ def define_system(
     大量System都引用的Component称为Hub Component，会导致簇过大，从而数据库无法通过
     Cluster分区提升性能，影响未来的扩展性。正常建议通过拆分Component属性来降低簇聚集。
 
-    **System副本继承：**
+    **System副本依赖：**
     代码示例：
-    >>> @define_system(namespace="global", components=(Order, ), )
-    ... async def remove(ctx: Context, order_id):
-    ...     ctx.repo[Order].delete(id=order_id)
+    >>> @hetu.define_system(namespace="global", components=(Order, ), )
+    ... async def remove(ctx: hetu.SystemContext, order_id):
+    ...     order_ = await ctx.repo[Order].get(id=order_id)
+    ...     if order_:
+    ...         ctx.repo[Order].delete(id=order_.id)
     >>>
-    >>> @define_system(namespace="example", depends=('remove:ItemOrder', ))
-    ... async def remove_item(ctx: Context, order_id):
+    >>> @hetu.define_system(namespace="example", components=(Stock, ), depends=('remove:ItemOrder', ))
+    ... async def remove_item_order(ctx: hetu.SystemContext, order_id, stock_id):
+    ...     stock = await ctx.repo[Stock].get(id=stock_id)
+    ...     if stock:
+    ...         ctx.repo[Stock].delete(id=stock.id)
     ...     return await ctx.depend['remove:ItemOrder'](order_id)
 
     `depends=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
     `components=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
 
-    正常调用`remove`(不使用System副本)的话，数据是保存在名为 `Order` 的表中。
-    在这个例子中，`remove_item` 调用的 `remove` 函数中的数据会储存在名为
-    `Order:ItemOrder`的表中，从而实现同一套System逻辑在不同数据集上的操作。
+    正常调用`remove`(不使用System副本)的话，数据是操作名为 `Order` 的表。
+    在这个例子中，`remove_item_order` 调用的 `remove` 函数会操作名为
+    `Order:ItemOrder`的表，从而实现同一套System逻辑在不同数据集上的操作。
 
-    这么做的意义是不同数据集不会事务冲突，可以拆分成不同的Cluster，从而放到不同的数据库节点上，
+    这么做的意义是垂直分片，不同数据集不会事务冲突，可以拆分成不同的Cluster，从而放到不同的数据库节点上，
     提升性能和扩展性。
 
     比如create_future_call这个内置System，它引用了FutureCalls队列组件，如果不使用副本继承，那么
     所有用到未来调用的System都将在同一个数据库节点上运行，形成一个大簇，影响扩展性。
-    因此通过副本继承此方法，可以拆解出一部分System到不同的数据库节点上运行。
+    因此通过副本依赖此方法，可以拆解出一部分System到不同的数据库节点上运行。
     不用担心，未来调用的后台任务在检查调用队列时，会循环检查所有FutureCalls副本组件队列。
 
     See Also

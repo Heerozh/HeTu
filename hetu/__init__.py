@@ -20,6 +20,8 @@ elevate = endpoint.elevate
 ResponseToClient = endpoint.ResponseToClient
 EndpointContext = endpoint.Context
 SystemContext = system.SystemContext
+BaseComponent = data.BaseComponent
+property_field = data.property_field
 
 
 try:
@@ -34,11 +36,17 @@ __all__ = [
     "common",
     "endpoint",
     "Permission",
+    # ===
     "define_endpoint",
     "define_component",
     "define_system",
+    # ===
     "elevate",
     "ResponseToClient",
+    # ===
     "EndpointContext",
     "SystemContext",
+    # ===
+    "BaseComponent",
+    "property_field",
 ]
