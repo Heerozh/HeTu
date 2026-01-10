@@ -7,13 +7,14 @@
 
 from dataclasses import dataclass, field
 from types import FunctionType
-
-import numpy as np
+from typing import TYPE_CHECKING
 
 from ..endpoint import Context
-from ..data.backend import SessionRepository
 
-from ..data import BaseComponent
+
+if TYPE_CHECKING:
+    from ..data import BaseComponent
+    from ..data.backend import SessionRepository
 
 
 @dataclass
@@ -26,39 +27,28 @@ class SystemContext(Context):
     # 继承的父事务函数
     depend: dict[str, FunctionType] = field(default_factory=dict)
 
-    async def end_transaction(self, discard: bool = False):
+    async def session_commit(self):
         """
         提前显式结束事务，提交所有写入操作。如果遇到事务冲突，会抛出异常，因此后续的代码行不会执行。
-        主要用于获取插入后的row id。
-        注意：调用完 `end_transaction`，`ctx` 将不再能够读写 `components` 。且后续不再属于事务，
+        注意：调用完 `commit`，`ctx` 将不再能够读写 `components` 。且后续不再属于事务，
              也就是说遇到宕机/crash可能导致整个函数执行不完全。
-
-        Parameters
-        ----------
-        discard: bool
-            默认为False，设为True为放弃当前事务，不提交
 
         Returns
         -------
-        insert_ids: None | list[int]
-            如果事务执行成功，返回所有insert的row id列表，按调用顺序。如果没有insert操作，返回空List
-            如果discard或者已经提交过，返回None
-            如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition。
-            异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试。其他任何异常会
-            记录日志并断开客户端连接。
-
-        Examples
-        --------
-        获得插入后的row id：
-        >>> @define_system(components=(Item, ))
-        ... async def create_item(ctx):
-        ...     ctx[Item].insert(...)
-        ...     inserted_ids = await ctx.end_transaction(discard=False)
-        ...     ctx.user_data['my_id'] = inserted_ids[0]  # 如果事务冲突，这句不会执行
-
+        如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition。
+        异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试。
+        其他任何异常会记录日志并断开客户端连接。
         """
         comp_trx = next(iter(self.transactions.values()), None)
         if comp_trx is not None:
             self.transactions = {}
             return await comp_trx.attached.end_transaction(discard)
         return None
+
+    async def session_discard(self):
+        """
+        提前显式结束事务，放弃所有写入操作。
+        注意：调用完 `commit`，`ctx` 将不再能够读写 `components` 。且后续不再属于事务，
+             也就是说遇到宕机/crash可能导致整个函数执行不完全。
+        """
+        pass

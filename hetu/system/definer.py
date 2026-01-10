@@ -34,7 +34,7 @@ class SystemDefine(EndpointDefine):
     full_components: set[type[BaseComponent]]  # 完整的引用，包括继承自父System的
     depends: set[str]
     full_depends: set[str]
-    permission: Permission
+    permission: Permission | None
     max_retry: int
     cluster_id: int
 
@@ -164,8 +164,8 @@ class SystemClusters(metaclass=Singleton):
                     # 复制Component
                     req.update(
                         [
-                            comp.duplicate(namespace_, sys_suffix)
-                            for comp in base_def.components
+                            _comp.duplicate(namespace_, sys_suffix)
+                            for _comp in base_def.components
                         ]
                     )
                 else:
@@ -233,20 +233,17 @@ class SystemClusters(metaclass=Singleton):
 
         self._main_system_map = self._system_map[main_namespace]
 
-        # 检查是否有component被non_transactions引用，但没有任何正常方式引用了它，必须至少有一个标准引用
-        # 加入这个限制的原因是，不被事务引用下，本方法就无法确定该Component应该储存在哪个Cluster中
-        for comp in non_trx:
-            for _, comp_map in self._component_map.items():
-                if comp not in comp_map:
-                    raise RuntimeError(
-                        f"non_transactions 方式为非事务引用(弱引用)，但需要保证该"
-                        f"Component {comp.__name__} 至少有一个正常引用。"
-                        + (
-                            "该Component是副本，每个副本也同样要保证至少有一个正常引用。"
-                            if ":" in comp.__name__
-                            else ""
-                        )
-                    )
+    def build_endpoints(self):
+        """把System定义复制到EndpointDefines中，作为Endpoint使用"""
+        from ..endpoint.definer import EndpointDefines
+
+        for namespace, sys_map in self._system_map.items():
+            for sys_name, sys_def in sys_map.items():
+                # todo
+                if sys_def.permission is None:
+                    continue
+                assert sys_name == sys_def.func.__name__
+                EndpointDefines().add(namespace, sys_def.func, force=True)
 
     def add(self, namespace, func, components, force, permission, depends, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
@@ -289,8 +286,10 @@ def define_system(
 ):
     """
     定义System，System类似数据库的储存过程，主要用于数据CRUD。
-    客户端可以直接调用System，每个System都有个默认的endpoint(供客户端调用的入口)，根据permission设置把关权限。
-    如果需要更多的控制，可以自己写define_endpoint调用System。
+    如果permission不为None，则会自动创建一个Endpoint，让客户端可以直接调用System，
+    并自动判断permission是否符合。
+
+    如果需要更多的控制，可以自己写@endpoint()调用System。
 
     Examples
     --------
@@ -350,9 +349,9 @@ def define_system(
 
     Notes
     -----
-    **System函数：**
+    **System函数：** ::
 
-    >>> async def pay(ctx: SystemContext, order_id, paid)
+        async def pay(ctx: SystemContext, order_id, paid)
 
     async:
         System必须是异步函数。
@@ -421,6 +420,7 @@ def define_system(
     See Also
     --------
     hetu.system.SystemContext : SystemContext类定义
+    hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
     """
     from .context import SystemContext
 
@@ -434,9 +434,10 @@ def define_system(
             f"System参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
         )
 
-        assert permission not in (permission.OWNER, permission.RLS), (
-            "System的权限不支持OWNER/RLS"
-        )
+        if permission:
+            assert permission not in (permission.OWNER, permission.RLS), (
+                "System的权限不支持OWNER/RLS"
+            )
 
         assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, (
             f"System函数名过长，最大长度为{ENDPOINT_NAME_MAX_LEN}个字符"
@@ -480,7 +481,7 @@ def define_system(
             assert isinstance(ctx, SystemContext), "第一个参数必须是SystemContext实例"
             # 检查当前ctx[]
             try:
-                assert ctx[func.__name__] == func, (
+                assert ctx.depend[func.__name__] == func, (
                     f"错误，ctx[{func.__name__}] 返回值不是本函数"
                 )
             except KeyError:

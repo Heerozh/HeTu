@@ -7,13 +7,17 @@
 
 import logging
 from time import time as now
+from typing import TYPE_CHECKING
 
 from .connection import ConnectionAliveChecker, new_connection, del_connection
 from .definer import EndpointDefine, EndpointDefines
 from .context import Context
-from ..manager import ComponentTableManager
-from .response import ResponseToClient
 from ..safelogging.filter import ContextFilter
+
+if TYPE_CHECKING:
+    from sanic import Request
+    from ..manager import ComponentTableManager
+    from .response import ResponseToClient
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -24,10 +28,13 @@ class EndpointExecutor:
     每个连接一个EndpointExecutor实例。
     """
 
-    def __init__(self, namespace: str, comp_mgr: ComponentTableManager) -> None:
+    def __init__(
+        self, namespace: str, comp_mgr: ComponentTableManager, request: Request
+    ) -> None:
         self.namespace = namespace
         self.comp_mgr = comp_mgr
         self.alive_checker = ConnectionAliveChecker(self.comp_mgr)
+        # todo context应该外面生成后传过来
         self.context = Context(
             caller=None,
             connection_id=0,
@@ -35,6 +42,8 @@ class EndpointExecutor:
             group=None,
             user_data={},
             timestamp=0,
+            request=request,
+            systems=None,
         )
 
     async def initialize(self, address: str):
@@ -73,7 +82,7 @@ class EndpointExecutor:
             logger.warning(err_msg)
             return None
 
-        # 检测args数量是否对得上
+        # 检测args数量是否对得上 todo 为啥要-3来着？
         if len(args) < (ep.arg_count - ep.defaults_count - 3):
             err_msg = (
                 f"❌ [📞Executor] [非法操作] {context} | "

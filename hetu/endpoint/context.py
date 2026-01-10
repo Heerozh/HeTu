@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..data.component import BaseComponent
+    from sanic import Request
 
 
 @dataclass
@@ -22,8 +23,10 @@ class Context:
     address: str | None  # 调用方的ip
     group: str | None  # 所属组名，目前只用于判断是否admin
     user_data: dict[str, Any]  # 当前连接的用户数据，可自由设置，在所有System间共享
-    # 请求变量
     timestamp: float  # 调用时间戳
+    # 系统变量
+    request: Request  # framework原始请求对象，unsafe
+    systems: None  # 全局System管理器，unsafe
     # 限制变量
     # 客户端消息发送限制（次数）
     client_limits: list[list[int]] = field(default_factory=list)
@@ -31,6 +34,7 @@ class Context:
     server_limits: list[list[int]] = field(default_factory=list)
     max_row_sub: int = 0  # 行订阅限制
     max_index_sub: int = 0  # 索引订阅限制
+    # todo 想一下要如何从context中获取或启动session
 
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"

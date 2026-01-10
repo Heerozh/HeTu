@@ -97,7 +97,7 @@ def endpoint(namespace: str = "global", force: bool = False):
     >>>
     >>> @endpoint(namespace="example")
     ... async def pay(ctx: Context, order_id, paid):
-    ...     await ctx.connection.excutor.call_system("SystemName", order_id, paid)
+    ...     await ctx.systems.call("SystemName", order_id, paid)
     ...     return ResponseToClient(['anything', 'blah blah'])
 
     Parameters
