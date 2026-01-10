@@ -10,13 +10,18 @@ import logging
 import random
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from .context import SystemContext
 from .lock import SystemLock
 from ..common.slowlog import SlowLog
 from ..data.backend import RaceCondition
-from ..manager import ComponentTableManager
-from ..system import SystemClusters, SystemDefine
+from .definer import SystemClusters, SystemDefine
+
+if TYPE_CHECKING:
+    from ..endpoint.response import ResponseToClient
+    from ..manager import ComponentTableManager
+    from .context import SystemContext
+
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -55,23 +60,10 @@ class SystemCaller:
             logger.warning(err_msg)
             return None
 
-        # 检测args数量是否对得上
-        if len(call.args) < (sys.arg_count - sys.defaults_count - 3):
-            err_msg = (
-                f"❌ [📞Executor] [非法操作] {context} | "
-                f"{call.system}参数数量不对，检查客户端代码。"
-                f"要求{sys.arg_count - sys.defaults_count}个参数, "
-                f"传入了{len(call.args)}个。"
-                f"调用内容：{call}"
-            )
-            replay.info(err_msg)
-            logger.warning(err_msg)
-            return None
-
         return sys
 
-    async def execute_(
-        self, sys: SystemDefine, *args, uuid=""
+    async def call_(
+        self, sys: SystemDefine, *args, uuid: str = ""
     ) -> tuple[bool, ResponseToClient | None]:
         """
         实际调用逻辑，无任何检查
@@ -85,37 +77,35 @@ class SystemCaller:
         # 初始化context值
         context = self.context
         context.retry_count = 0
-        context.timestamp = time.time()
-        context.inherited = {}
-        context.transactions = {}
+        context.repo = {}
+        context.depend = {}
 
         # 获取system引用的第一个component的backend，system只能引用相同backend的组件，所以都一样
         comp_mgr = self.comp_mgr
         first_comp = next(iter(sys.full_components), None)
-        backend = first_comp and comp_mgr.get_table(first_comp).backend or None
+        first_table = first_comp and comp_mgr.get_table(first_comp) or None
+        assert first_table, f"for typing。System {sys_name} 没有引用任何Component"
+        backend = first_table.backend
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
             base, _, _ = dep_name.partition(":")
-            context.inherited[dep_name] = SYSTEM_CLUSTERS.get_system(base).func
-
-        # todo 实现non_transactions的引用
+            dep_sys = SYSTEM_CLUSTERS.get_system(base)
+            assert dep_sys, f"for typing。System {sys_name} 依赖的System {base} 不存在"
+            context.depend[dep_name] = dep_sys.func
 
         start_time = time.perf_counter()
         # 调用系统
         while context.retry_count < sys.max_retry:
             # 开始新的事务，并attach components
-            session = None
-            if len(sys.full_components) > 0:
-                session = backend.transaction(sys.cluster_id)
-                for comp in sys.full_components:
-                    tbl = comp_mgr.get_table(comp)
-                    master = comp.master_ or comp
-                    context.transactions[master] = tbl.attach(session)
+            session = backend.session(first_table.instance_name, sys.cluster_id)
+            await session.__aenter__()
+            for comp in sys.full_components:
+                context.repo[comp] = session.using(comp)
             # 执行system和事务
             try:
-                # 先检查uuid是否执行过了 todo 注解endpoint并不需要lock，不会多次执行，system需要因为有重试概念
-                if uuid and (await context[SystemLock].is_exist(uuid, "uuid"))[0]:
+                # 先检查uuid是否执行过了
+                if uuid and await context.repo[SystemLock].get(uuid=uuid):
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
                         f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
@@ -125,15 +115,12 @@ class SystemCaller:
                 rtn = await sys.func(context, *args)
                 # 标记uuid已执行
                 if uuid:
-                    async with context[SystemLock].update_or_insert(
-                        uuid, "uuid"
-                    ) as exe_row:
-                        exe_row.caller = context.caller
-                        exe_row.called = time.time()
-                        exe_row.name = sys_name
+                    async with context.repo[SystemLock].upsert(uuid=uuid) as lock:
+                        lock.caller = context.caller
+                        lock.called = time.time()
+                        lock.name = sys_name
                 # 执行事务
-                if session is not None:
-                    await session.end_transaction(discard=False)
+                await session.commit()
                 # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
@@ -153,9 +140,8 @@ class SystemCaller:
                 logger.exception(err_msg)
                 return False, None
             finally:
-                if session is not None:
-                    # 上面如果执行过end_transaction了，那么这句不生效的，主要用于保证连接关闭
-                    await session.end_transaction(discard=True)
+                # 上面如果执行过commit了，那么这句也无害
+                session.discard()
                 # 记录时间和重试次数到内存
                 elapsed = time.perf_counter() - start_time
                 SLOW_LOG.log(elapsed, sys_name, context.retry_count)
