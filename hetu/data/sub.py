@@ -181,7 +181,7 @@ class IndexSubscription(BaseSubscription):
         return {self.index_channel, *self.row_subs.keys()}
 
 
-class Subscriptions:
+class SubscriptionBroker:
     """
     Component的数据订阅和查询接口
     """
@@ -411,7 +411,7 @@ class Subscriptions:
 
     async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
         """
-        pop之前Subscriptions.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
+        pop之前SubscriptionBroker.mq_pull()到的数据更新通知，然后通过查询数据库取出最新的值，并返回。
         返回值为dict: key是sub_id；value是更新的行数据，value格式为dict：key是row_id，value是数据库raw值。
         timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
 

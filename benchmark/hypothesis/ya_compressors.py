@@ -9,7 +9,7 @@ from hetu import (
     property_field,
 )
 from hetu.data.backend import TableReference
-from hetu.data.sub import Subscriptions
+from hetu.data.sub import SubscriptionBroker
 from hetu.system import SystemClusters
 from hetu.server import pipeline
 
@@ -55,7 +55,7 @@ def make_rand_sub_message(_comp: type[BaseComponent]):
 
     # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
     ref = TableReference(_comp, "", 0)
-    sub_id = Subscriptions.make_query_id_(
+    sub_id = SubscriptionBroker.make_query_id_(
         ref,
         rng.choice(["id"] + list(row_dict.keys())),
         rng.integers(0, np.iinfo(np.int64).max),

@@ -58,7 +58,7 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
         from ...common import Permission
         from ...data import BaseComponent
         from ...data.backend import TableReference
-        from ...data.sub import Subscriptions
+        from ...data.sub import SubscriptionBroker
         from ...system import SystemClusters
 
         rng = np.random.default_rng()
@@ -77,7 +77,7 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             ref = TableReference(_comp, "", 0)
-            sub_id = Subscriptions.make_query_id_(
+            sub_id = SubscriptionBroker.make_query_id_(
                 ref,
                 rng.choice(["id"] + list(row_dict.keys())),
                 rng.integers(0, np.iinfo(np.int64).max),

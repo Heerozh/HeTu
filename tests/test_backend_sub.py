@@ -7,32 +7,32 @@ from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
-from hetu.data.sub import IndexSubscription, RowSubscription, Subscriptions
+from hetu.data.sub import IndexSubscription, RowSubscription, SubscriptionBroker
 
 SnowflakeID().init(1, 0)
 
 
 @pytest.fixture
-async def sub_mgr(mod_auto_backend) -> AsyncGenerator[Subscriptions]:
+async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
     """初始化订阅管理器的fixture"""
 
     # 初始化订阅器
-    sub_mgr = Subscriptions(mod_auto_backend("main"))
+    broker = SubscriptionBroker(mod_auto_backend("main"))
     # 清空row订阅缓存
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
 
-    yield sub_mgr
+    yield broker
 
-    await sub_mgr.close()
+    await broker.close()
 
 
 @pytest.fixture
-async def background_mq_puller_task(sub_mgr):
+async def background_mq_puller_task(broker):
     """启动一个后台任务不断pull mq消息的fixture"""
 
     async def puller():
         while True:
-            await sub_mgr.mq_pull()
+            await broker.mq_pull()
 
     import asyncio
 
@@ -116,9 +116,9 @@ async def test_redis_notify_configuration(mod_auto_backend):
     assert all(flag in replica_flags for flag in list("Kghz"))
 
 
-async def test_subscribe_get(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
+async def test_subscribe_get(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     """测试get订阅的返回值，和订阅管理器的私有值是否正常"""
-    sub_id, row = await sub_mgr.subscribe_get(
+    sub_id, row = await broker.subscribe_get(
         filled_item_ref, admin_ctx, "name", "Itm10"
     )
     assert row
@@ -126,61 +126,59 @@ async def test_subscribe_get(sub_mgr: Subscriptions, filled_item_ref, admin_ctx)
     assert sub_id, "Item.id[1:None:1][:1]"
     assert "_version" not in row
 
-    row_sub = cast(RowSubscription, sub_mgr._subs[sub_id])
+    row_sub = cast(RowSubscription, broker._subs[sub_id])
     assert row_sub.row_id == row["id"]
-    assert len(sub_mgr._mq_client.subscribed_channels) == 1
+    assert len(broker._mq_client.subscribed_channels) == 1
 
 
-async def test_subscribe_range(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
+async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     """测试range订阅的返回值，和订阅管理器的私有值是否正常"""
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
     assert len(rows) == 25
     assert "_version" not in rows[0]
     assert sub_id == "Item.owner[10:None:1][:33]"
-    assert len(sub_mgr._subs[sub_id].channels) == 25 + 1  # 加1 index channel
+    assert len(broker._subs[sub_id].channels) == 25 + 1  # 加1 index channel
 
-    idx_sub = cast(IndexSubscription, sub_mgr._subs[sub_id])
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
     assert type(idx_sub) is IndexSubscription
 
     assert len(idx_sub.row_subs) == 25
     assert idx_sub.last_range_result == {row["id"] for row in rows}
     first_row_channel = next(iter(sorted(idx_sub.channels)))
     assert idx_sub.row_subs[first_row_channel].row_id == rows[0]["id"]
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+    assert len(broker._mq_client.subscribed_channels) == 26
 
     # 换个范围测试, owner只有10, 应该能查询到
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
     assert len(rows) == 25
     assert sub_id == "Item.owner[10:11:1][:44]"
 
     # 查询超出范围的订阅，因为默认force开，所以依然有sub_id
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
     assert len(rows) == 0
     assert sub_id
-    idx_sub = cast(IndexSubscription, sub_mgr._subs[sub_id])
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
     assert type(idx_sub) is IndexSubscription
 
     assert len(idx_sub.row_subs) == 0
     assert sub_id == "Item.owner[11:12:1][:55]"
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+    assert len(broker._mq_client.subscribed_channels) == 26
 
 
 async def test_subscribe_mq_merge_message(
-    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
     """测试订阅时，mq消息的合批功能"""
-    backend = sub_mgr._backend
-    mq = sub_mgr._mq_client
+    backend = broker._backend
+    mq = broker._mq_client
 
-    sub_row, _ = await sub_mgr.subscribe_get(
-        filled_item_ref, admin_ctx, "name", "Itm10"
-    )
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.session("pytest", 1) as session:
@@ -203,26 +201,24 @@ async def test_subscribe_mq_merge_message(
     assert len(notified_channels) == 1
 
     # 测试更新消息能否获得，因为我get_message取掉了，应该没有了
-    updates = await sub_mgr.get_updates(timeout=0.1)
+    updates = await broker.get_updates(timeout=0.1)
     assert len(updates) == 0
 
 
 async def test_subscribe_updates(
-    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
-    backend = sub_mgr._backend
+    backend = broker._backend
 
     # 测试4种范围的订阅是否正常工作
-    sub_row, _ = await sub_mgr.subscribe_get(
-        filled_item_ref, admin_ctx, "name", "Itm10"
-    )
-    sub_10, _ = await sub_mgr.subscribe_range(
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_range(
+    sub_10_11, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_range(
+    sub_11_12, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
     assert sub_row
@@ -231,8 +227,8 @@ async def test_subscribe_updates(
     assert sub_11_12
 
     # 初始数据是25行owner = 10
-    assert len(sub_mgr._subs[sub_10].row_subs) == 25  # type: ignore
-    assert len(sub_mgr._subs[sub_11_12].row_subs) == 0  # type: ignore
+    assert len(broker._subs[sub_10].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_11_12].row_subs) == 0  # type: ignore
 
     # 更改行1的owner从10到11
     async with backend.session("pytest", 1) as session:
@@ -244,7 +240,7 @@ async def test_subscribe_updates(
         await repo.update(row)
 
     # 测试更新
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     assert len(updates) == 4
     assert updates[sub_row][row1_id]["owner"] == 11  # row订阅数据更新
     assert updates[sub_10][row1_id] is None  # query 10删除了1
@@ -252,26 +248,24 @@ async def test_subscribe_updates(
     assert updates[sub_11_12][row1_id]["owner"] == 11  # query 11-12更新row数据
 
     # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
-    assert len(sub_mgr._subs[sub_10].row_subs) == 24  # type: ignore
-    assert len(sub_mgr._subs[sub_11_12].row_subs) == 1  # type: ignore
+    assert len(broker._subs[sub_10].row_subs) == 24  # type: ignore
+    assert len(broker._subs[sub_11_12].row_subs) == 1  # type: ignore
 
 
 async def test_row_subscribe_cache(
-    sub_mgr: Subscriptions, filled_item_ref, admin_ctx, background_mq_puller_task
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
 ):
-    backend = sub_mgr._backend
+    backend = broker._backend
 
     # row订阅会用全局cache加速相同数据的更新，当一个row更新时，应该cache中有该值
-    sub_row, _ = await sub_mgr.subscribe_get(
-        filled_item_ref, admin_ctx, "name", "Itm10"
-    )
-    sub_10, _ = await sub_mgr.subscribe_range(
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_range(
+    sub_10_11, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_range(
+    sub_11_12, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
@@ -289,7 +283,7 @@ async def test_row_subscribe_cache(
         await repo.update(row)
 
     # 检测Row cache
-    await sub_mgr.get_updates()
+    await broker.get_updates()
     # 由于不同backend的channel名不一样，使用dict的第一个channel
     cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
     first_channel = next(iter(cache.keys()))
@@ -303,7 +297,7 @@ async def test_row_subscribe_cache(
         row.owner = 12
         await repo.update(row)
 
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     # 如果数据正确说明更新了
     assert cache[first_channel][row1_id]["owner"] == 12
     # 其他顺带检测
@@ -314,69 +308,67 @@ async def test_row_subscribe_cache(
     assert updates[sub_11_12][row1_id]["owner"] == 12  # query 11-12更新row数据
 
 
-async def test_cancel_subscribe(sub_mgr: Subscriptions, filled_item_ref, admin_ctx):
-    sub_row, _ = await sub_mgr.subscribe_get(
-        filled_item_ref, admin_ctx, "name", "Itm10"
-    )
-    sub_10, _ = await sub_mgr.subscribe_range(
+async def test_cancel_subscribe(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
     )
-    sub_10_11, _ = await sub_mgr.subscribe_range(
+    sub_10_11, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
     )
-    sub_11_12, _ = await sub_mgr.subscribe_range(
+    sub_11_12, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 11, right=12, limit=55
     )
 
     # 测试取消订阅
-    assert len(sub_mgr._subs) == 4
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26  # 25行+1个index
+    assert len(broker._subs) == 4
+    assert len(broker._mq_client.subscribed_channels) == 26  # 25行+1个index
 
-    await sub_mgr.unsubscribe(sub_10)
-    assert len(sub_mgr._subs) == 3
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26  # 其他sub依旧订阅所有行
+    await broker.unsubscribe(sub_10)
+    assert len(broker._subs) == 3
+    assert len(broker._mq_client.subscribed_channels) == 26  # 其他sub依旧订阅所有行
 
-    await sub_mgr.unsubscribe(sub_row)
-    assert len(sub_mgr._subs) == 2
-    assert len(sub_mgr._channel_subs) == 26  # 10 row还是被sub_10_11订阅着
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+    await broker.unsubscribe(sub_row)
+    assert len(broker._subs) == 2
+    assert len(broker._channel_subs) == 26  # 10 row还是被sub_10_11订阅着
+    assert len(broker._mq_client.subscribed_channels) == 26
     # 测试重复取消订阅没变化
-    await sub_mgr.unsubscribe(sub_row)
-    assert len(sub_mgr._subs) == 2
-    assert len(sub_mgr._channel_subs) == 26
-    assert len(sub_mgr._mq_client.subscribed_channels) == 26
+    await broker.unsubscribe(sub_row)
+    assert len(broker._subs) == 2
+    assert len(broker._channel_subs) == 26
+    assert len(broker._mq_client.subscribed_channels) == 26
 
-    await sub_mgr.unsubscribe(sub_10_11)
-    assert len(sub_mgr._subs) == 1
-    assert len(sub_mgr._channel_subs) == 1
-    assert len(sub_mgr._mq_client.subscribed_channels) == 1
+    await broker.unsubscribe(sub_10_11)
+    assert len(broker._subs) == 1
+    assert len(broker._channel_subs) == 1
+    assert len(broker._mq_client.subscribed_channels) == 1
 
-    await sub_mgr.unsubscribe(sub_11_12)
-    assert len(sub_mgr._subs) == 0
-    assert len(sub_mgr._channel_subs) == 0
-    assert len(sub_mgr._mq_client.subscribed_channels) == 0
+    await broker.unsubscribe(sub_11_12)
+    assert len(broker._subs) == 0
+    assert len(broker._channel_subs) == 0
+    assert len(broker._mq_client.subscribed_channels) == 0
 
 
 async def test_subscribe_get_rls(
-    sub_mgr: Subscriptions, filled_item_ref, user_id10_ctx, user_id11_ctx
+    broker: SubscriptionBroker, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
-    sub_id, row = await sub_mgr.subscribe_get(
+    sub_id, row = await broker.subscribe_get(
         filled_item_ref, user_id10_ctx, "time", 110
     )
     assert sub_id is not None
 
-    sub_id, row = await sub_mgr.subscribe_get(
+    sub_id, row = await broker.subscribe_get(
         filled_item_ref, user_id11_ctx, "time", 110
     )
     assert sub_id is None
 
 
 async def test_subscribe_range_rls(
-    sub_mgr: Subscriptions, filled_item_ref, user_id10_ctx
+    broker: SubscriptionBroker, filled_item_ref, user_id10_ctx
 ):
     # 先改掉一个人的owner值
-    backend = sub_mgr._backend
+    backend = broker._backend
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         row = await repo.get(time=113)
@@ -385,20 +377,23 @@ async def test_subscribe_range_rls(
         await repo.update(row)
 
     # 测试owner query只传输owner相等的数据
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert [row["owner"] for row in rows] == [10] * 24
-    assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
 
 
 async def test_subscribe_get_rls_update(
-    sub_mgr: Subscriptions, filled_item_ref, user_id10_ctx, background_mq_puller_task
+    broker: SubscriptionBroker,
+    filled_item_ref,
+    user_id10_ctx,
+    background_mq_puller_task,
 ):
-    backend = sub_mgr._backend
+    backend = broker._backend
 
     # 测试订阅单行，owner改变后要删除
-    sub_id, row = await sub_mgr.subscribe_get(
+    sub_id, row = await broker.subscribe_get(
         filled_item_ref, user_id10_ctx, "time", 113
     )
     assert row and sub_id
@@ -410,24 +405,24 @@ async def test_subscribe_get_rls_update(
         row.owner = 11
         row3_id = row.id
         await repo.update(row)
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     assert updates[sub_id][row3_id] is None
 
 
 async def test_query_subscribe_rls_lost(
-    sub_mgr: Subscriptions,
+    broker: SubscriptionBroker,
     filled_item_ref,
     mod_item_model,
     user_id10_ctx,
     background_mq_puller_task,
 ):
-    backend = sub_mgr._backend
+    backend = broker._backend
 
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 测试更新数值，看query的update是否会删除/添加owner相符的
     async with backend.session("pytest", 1) as session:
@@ -437,17 +432,17 @@ async def test_query_subscribe_rls_lost(
         row.owner = 11
         row4_id = row.id
         await repo.update(row)
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id] is None
 
     # query订阅的原理是只订阅符合rls的行，但如果数值变了导致失去了某行rls并不会管，由行订阅执行处理
     # 所以注册数量25不变。（但是如果获得了新的rls会管）
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
 async def test_query_subscribe_rls_gain(
-    sub_mgr: Subscriptions,
+    broker: SubscriptionBroker,
     filled_item_ref,
     mod_item_model,
     user_id10_ctx,
@@ -457,7 +452,7 @@ async def test_query_subscribe_rls_gain(
     # 如果中途获得rls，就加入订阅
 
     # 先预先取掉一行rls
-    backend = sub_mgr._backend
+    backend = broker._backend
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         row = await repo.get(time=114)
@@ -465,11 +460,11 @@ async def test_query_subscribe_rls_gain(
         row.owner = 11
         await repo.update(row)
 
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
-    assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
@@ -479,11 +474,11 @@ async def test_query_subscribe_rls_gain(
         row.owner = 10
         row4_id = row.id
         await repo.update(row)
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id]["owner"] == 10
 
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 测试insert新数据能否得到通知
     async with backend.session("pytest", 1) as session:
@@ -492,13 +487,13 @@ async def test_query_subscribe_rls_gain(
         new.owner = 10
         new_row_id = new.id
         await repo.insert(new)
-    updates = await sub_mgr.get_updates()
+    updates = await broker.get_updates()
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][new_row_id]["owner"] == 10
 
 
 async def test_query_subscribe_rls_lost_without_index(
-    sub_mgr: Subscriptions,
+    broker: SubscriptionBroker,
     filled_rls_ref,
     mod_rls_test_model,
     user_id11_ctx,
@@ -506,13 +501,13 @@ async def test_query_subscribe_rls_lost_without_index(
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
-    backend = sub_mgr._backend
+    backend = broker._backend
 
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 去掉一个
     async with backend.session("pytest", 1) as session:
@@ -523,17 +518,17 @@ async def test_query_subscribe_rls_lost_without_index(
         row.friend = 12
         row4_id = row.id
         await repo.update(row)
-    updates = await sub_mgr.get_updates(timeout=5)
+    updates = await broker.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id] is None
 
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
 @pytest.mark.xfail(reason="已知缺陷，未来也许修也许不修", strict=True)
 async def test_query_subscribe_rls_gain_without_index(
-    sub_mgr: Subscriptions,
+    broker: SubscriptionBroker,
     filled_rls_ref,
     mod_rls_test_model,
     user_id11_ctx,
@@ -545,7 +540,7 @@ async def test_query_subscribe_rls_gain_without_index(
     #      未来如果有需要，可以专门做个rls属性watch，变化了则通知所有IndexSubscription检查rls
 
     # 先预先取掉一行rls
-    backend = sub_mgr._backend
+    backend = broker._backend
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_rls_ref.comp_cls)
         rows = await repo.range(id=(0, float("inf")), limit=4)
@@ -560,11 +555,11 @@ async def test_query_subscribe_rls_gain_without_index(
         row1.owner = 12
         await repo.update(row1)
 
-    sub_id, rows = await sub_mgr.subscribe_range(
+    sub_id, rows = await broker.subscribe_range(
         filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
-    assert len(sub_mgr._subs[sub_id].row_subs) == 24  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
@@ -574,24 +569,24 @@ async def test_query_subscribe_rls_gain_without_index(
         assert row4
         row4.friend = 11
         await repo.update(row4)
-    updates = await sub_mgr.get_updates(timeout=5)
+    updates = await broker.get_updates(timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id]["friend"] == 11
 
-    assert len(sub_mgr._subs[sub_id].row_subs) == 25  # type: ignore
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
 @pytest.mark.timeout(30)
 async def test_mq_backlog(
-    monkeypatch, sub_mgr: Subscriptions, filled_item_ref, mod_item_model, admin_ctx
+    monkeypatch, broker: SubscriptionBroker, filled_item_ref, mod_item_model, admin_ctx
 ):
     time_time = time.time
     # 测试mq消息堆积的情况
-    backend = sub_mgr._backend
+    backend = broker._backend
 
-    await sub_mgr.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
-    await sub_mgr.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
+    await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
 
     # 修改row1，并pull消息
     async with backend.session("pytest", 1) as session:
@@ -601,7 +596,7 @@ async def test_mq_backlog(
         row.qty = 998
         await repo.update(row)
     await backend.wait_for_synced()
-    await sub_mgr.mq_pull()
+    await broker.mq_pull()
 
     # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
     monkeypatch.setattr(time, "time", lambda: time_time() + 200)
@@ -612,7 +607,7 @@ async def test_mq_backlog(
         row.qty = 997
         await repo.update(row)
     await backend.wait_for_synced()
-    await sub_mgr.mq_pull()
+    await broker.mq_pull()
 
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
@@ -621,9 +616,9 @@ async def test_mq_backlog(
         row.qty = 996
         await repo.update(row)
     await backend.wait_for_synced()
-    await sub_mgr.mq_pull()
+    await broker.mq_pull()
 
-    mq = sub_mgr._mq_client
+    mq = broker._mq_client
     monkeypatch.setattr(time, "time", lambda: time_time() + 210)
     notified_channels = await mq.get_message()
     assert len(notified_channels) == 2

@@ -105,7 +105,7 @@ class RedisMQClient(MQClient):
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
 
-        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
         pulled_deque = self.pulled_deque

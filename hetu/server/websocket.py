@@ -11,7 +11,7 @@ import logging
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
 
-from ..data.sub import Subscriptions
+from ..data.sub import SubscriptionBroker
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
 from ..system.caller import SystemCaller
@@ -92,7 +92,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     await endpoint_executor.initialize(request.client_ip)
 
     # 初始化订阅管理器，一个连接一个订阅管理器
-    subscriptions = Subscriptions(request.app.ctx.default_backend)
+    broker = SubscriptionBroker(request.app.ctx.default_backend)
 
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
@@ -103,16 +103,16 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 创建接受客户端消息的协程2
     recv_task_id = f"client_handler:{request.id}"
     receiver_task = client_handler(
-        ws, pipe_ctx, endpoint_executor, subscriptions, push_queue, flood_checker
+        ws, pipe_ctx, endpoint_executor, broker, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
     subs_task_id = f"subs_receiver:{request.id}"
-    subscript_task = subscription_handler(ws, subscriptions, push_queue)
+    subscript_task = subscription_handler(ws, broker, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
     puller_task_id = f"mq_puller:{request.id}"
-    puller_task = mq_puller(ws, subscriptions)
+    puller_task = mq_puller(ws, broker)
     _ = request.app.add_task(puller_task, name=puller_task_id)
 
     # 删除当前长连接用不上的临时变量
@@ -154,5 +154,5 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
         await endpoint_executor.terminate()
-        await subscriptions.close()
+        await broker.close()
         request.app.purge_tasks()
