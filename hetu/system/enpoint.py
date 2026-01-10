@@ -32,7 +32,7 @@ def create_system_endpoint(system: str, permission: Permission) -> Callable:
                     )
                     replay.info(err_msg)
                     logger.warning(err_msg)
-                    return
+                    return None
             case Permission.ADMIN:
                 if not ctx.is_admin():
                     err_msg = (
@@ -41,8 +41,12 @@ def create_system_endpoint(system: str, permission: Permission) -> Callable:
                     )
                     replay.info(err_msg)
                     logger.warning(err_msg)
-                    return
-        await ctx.systems.call(system, *args)
+                    return None
+        ok, rsp = await ctx.systems.call(system, *args)
+        if ok:
+            return rsp
+        else:
+            return None
 
     system_endpoint.__name__ = system
     return system_endpoint

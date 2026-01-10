@@ -40,14 +40,6 @@ class Connection(BaseComponent):
     last_active: np.double = property_field(0)  # 最后活跃时间
 
 
-# todo 所有定义为HeTu命名空间的表，需要强制引用，就按独立隔离的簇引用好了
-#      可以改个名字，比如叫core之类？
-# 必须引用Connection组件，否则不会在数据库中创建此组件的表
-# @define_system(namespace="core", permission=None, components=(Connection,))
-# async def pin_connection_reference(ctx):
-#     pass
-
-
 async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
     """
     通过connection component分配自己一个连接id，如果失败，Raise各种异常

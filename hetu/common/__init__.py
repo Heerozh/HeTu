@@ -8,3 +8,13 @@
 from .singleton import (
     Singleton,
 )
+
+from .permission import (
+    Permission,
+)
+
+
+__all__ = [
+    "Singleton",
+    "Permission",
+]

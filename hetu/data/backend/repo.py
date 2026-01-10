@@ -45,6 +45,11 @@ class SessionRepository:
                 "Component 所属的 instance 和 cluster 必须和 Session 一致"
             )
 
+    @property
+    def session(self) -> Session:
+        """获取所属的Session对象。"""
+        return self._session
+
     def _local_has_unique_conflicts(self, row: np.record, fields: set) -> str | None:
         """
         在Session本地缓存中检查Unique索引冲突。

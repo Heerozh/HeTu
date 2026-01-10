@@ -132,6 +132,7 @@ def worker_main(app_name, config) -> Sanic:
 
     # 初始化SystemCluster
     SystemClusters().build_clusters(config["NAMESPACE"])
+    SystemClusters().build_endpoints()
 
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get(

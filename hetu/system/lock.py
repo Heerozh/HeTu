@@ -8,11 +8,16 @@
 import datetime
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+
 from ..common.permission import Permission
 from ..data import BaseComponent, define_component, property_field
+
+if TYPE_CHECKING:
+    from hetu.manager import ComponentTableManager
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -28,27 +33,22 @@ class SystemLock(BaseComponent):
     called: np.double = property_field(0, index=True)  # 执行时间
 
 
-async def clean_expired_call_locks(comp_mgr):
+async def clean_expired_call_locks(comp_mgr: ComponentTableManager):
     """清空超过7天的call_lock的已执行uuid数据，只有服务器非正常关闭才可能遗留这些数据，因此只需服务器启动时调用。"""
+    timestamp_7d_ago = time.time() - datetime.timedelta(days=7).total_seconds()
     duplicates = SystemLock.get_duplicates(comp_mgr.namespace).values()
     for comp in [SystemLock] + list(duplicates):
         tbl = comp_mgr.get_table(comp)
         if tbl is None:  # 说明项目没任何地方引用此Component
             continue
-        backend = tbl.backend
         deleted = 0
         while True:
-            async with backend.transaction(tbl.cluster_id) as session:
-                tbl_trx = tbl.attach(session)
-                rows = await tbl_trx.query(
-                    "called",
-                    left=0,
-                    right=time.time() - datetime.timedelta(days=7).total_seconds(),
-                    limit=1000,
-                )
+            async with tbl.session() as session:
+                repo = session.using(comp)
+                rows = await repo.range(called=(0, timestamp_7d_ago), limit=1000)
                 # 循环每行数据，删除
                 for row in rows:
-                    await tbl_trx.delete(row.id)
+                    repo.delete(row.id)
                 deleted += len(rows)
                 if len(rows) == 0:
                     break

@@ -68,7 +68,7 @@ class SystemCaller:
 
         # 初始化context值
         context = self.context
-        context.retry_count = 0
+        context.race_count = 0
         context.repo = {}
         context.depend = {}
 
@@ -88,7 +88,7 @@ class SystemCaller:
 
         start_time = time.perf_counter()
         # 调用系统
-        while context.retry_count < sys.max_retry:
+        while context.race_count < sys.max_retry:
             # 开始新的事务，并attach components
             await session.__aenter__()
             for comp in sys.full_components:
@@ -115,7 +115,7 @@ class SystemCaller:
                 # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
-                context.retry_count += 1
+                context.race_count += 1
                 # 重试时sleep一段时间，可降低再次冲突率约90%。
                 # delay增加会降低冲突率，但也会增加rtt波动。除1:-94%, 2:-91%, 5: -87%, 10: -85%
                 delay = random.random() / 5
@@ -135,7 +135,7 @@ class SystemCaller:
                 session.discard()
                 # 记录时间和重试次数到内存
                 elapsed = time.perf_counter() - start_time
-                SLOW_LOG.log(elapsed, sys_name, context.retry_count)
+                SLOW_LOG.log(elapsed, sys_name, context.race_count)
 
         logger.debug(
             f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}"

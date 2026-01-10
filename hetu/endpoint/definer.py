@@ -83,7 +83,7 @@ class EndpointDefines(metaclass=Singleton):
             self._global_endpoint_map[func.__name__] = sub_map[func.__name__]
 
 
-def endpoint(namespace: str = "global", force: bool = False):
+def define_endpoint(namespace: str = "global", force: bool = False):
     """
     把一个函数包装成可供客户端远程调用的接口。
 

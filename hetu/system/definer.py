@@ -280,7 +280,6 @@ class SystemClusters(metaclass=Singleton):
             self._global_system_map[func.__name__] = sub_map[func.__name__]
 
 
-# todo 改成 @hetu.system()，统一hetu入口
 def define_system(
     components: tuple[type[BaseComponent], ...],
     namespace: str = "default",
@@ -375,7 +374,7 @@ def define_system(
     **SystemContext部分：**
         ctx.caller: int
             调用者id，由你在登录System中调用 `elevate` 函数赋值，`None` 或 0 表示未登录用户
-        ctx.retry_count: int
+        ctx.race_count: int
             当前因为事务冲突的重试次数，0表示首次执行。
         ctx.repo[Component Class]: SessionRepository
             获取Component事务访问仓库，如 `ctx.repo[Position]`，只能获取定义时在 `components`
