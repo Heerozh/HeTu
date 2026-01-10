@@ -28,7 +28,7 @@ __all__ = [
     "Backend",
     "Session",
     "SessionRepository",
-    "RedisBackendClient",
+    "RedisBackendClient",  # todo 整理下不暴露给用户的类
     "RedisTableMaintenance",
     "Table",
     "TableReference",
