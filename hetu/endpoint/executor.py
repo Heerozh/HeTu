@@ -54,7 +54,7 @@ class EndpointExecutor:
         # 释放connection
         await del_connection(self.comp_mgr, self.context.connection_id)
 
-    def call_check(
+    def execute_check(
         self, namespace: str, endpoint: str, args: tuple
     ) -> EndpointDefine | None:
         """检查调用是否合法"""
@@ -124,7 +124,7 @@ class EndpointExecutor:
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
         """
         # 检查call参数和call权限
-        sys = self.call_check(namespace, endpoint, args)
+        sys = self.execute_check(namespace, endpoint, args)
         if sys is None:
             return False, None
 

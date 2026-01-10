@@ -236,14 +236,20 @@ class SystemClusters(metaclass=Singleton):
     def build_endpoints(self):
         """把System定义复制到EndpointDefines中，作为Endpoint使用"""
         from ..endpoint.definer import EndpointDefines
+        from .enpoint import create_system_endpoint
 
         for namespace, sys_map in self._system_map.items():
             for sys_name, sys_def in sys_map.items():
-                # todo
                 if sys_def.permission is None:
                     continue
-                assert sys_name == sys_def.func.__name__
-                EndpointDefines().add(namespace, sys_def.func, force=True)
+                func = create_system_endpoint(sys_name, sys_def.permission)
+                EndpointDefines().add(
+                    namespace,
+                    func,
+                    force=True,
+                    arg_count=sys_def.arg_count,
+                    defaults_count=sys_def.defaults_count,
+                )
 
     def add(self, namespace, func, components, force, permission, depends, max_retry):
         sub_map = self._system_map.setdefault(namespace, dict())
@@ -276,7 +282,7 @@ class SystemClusters(metaclass=Singleton):
 
 # todo 改成 @hetu.system()，统一hetu入口
 def define_system(
-    components: tuple[type[BaseComponent], ...] | None = None,
+    components: tuple[type[BaseComponent], ...],
     namespace: str = "default",
     force: bool = False,
     permission: Permission | None = Permission.USER,
@@ -372,17 +378,17 @@ def define_system(
         ctx.retry_count: int
             当前因为事务冲突的重试次数，0表示首次执行。
         ctx.repo[Component Class]: SessionRepository
-            获取Component事务实例，如 `ctx[Position]`，只能获取定义时在 `components` 中引用的实例。
-            类型为 `SessionRepository`，可以进行数据库操作，并自动包装为事务在System结束后执行。
+            获取Component事务访问仓库，如 `ctx.repo[Position]`，只能获取定义时在 `components`
+            中引用的实例。可以进行数据库操作，并自动包装为事务在System结束后执行。
             具体参考 :py:func:`hetu.data.backend.SessionRepository` 的文档。
         ctx.depend['SystemName']: func
             获取定义时在 `depends` 中传入的System函数。
-        ctx.nontrxs[Component Class]: RawComponentTable
-            获取non_transactions中引用的Component实例，类型为 `RawComponentTable`，可以direct_get/set数据，
-            而不通过事务，因此危险不保证数据一致性，请只做原子操作。
-        await ctx.end_transaction(discard=False):
-            提前显式结束事务，如果遇到事务冲突，则此行下面的代码不会执行。
-            注意：调用完 `end_transaction`，`ctx` 将不再能够获取 `components` 实列
+        await ctx.session_commit():
+            提前显式提交当前System事务，如果遇到事务冲突，则此行下面的代码不会执行。
+            注意：调用完 `session_commit`，`ctx` 将不再能够获取 `repo`/`depend` 实列
+        ctx.session_discard():
+            提前显式放弃当前System事务，放弃所有写入操作。
+            注意：调用完 `session_discard`，`ctx` 将不再能够获取 `repo`/`depend` 实列
 
     **Component 共置簇**
 
@@ -447,23 +453,21 @@ def define_system(
             f"System {func.__name__} 必须是异步函数(`async def ...`)"
         )
 
-        if components is not None and len(components) > 0:
-            # 检查components是否都是同一个backend
-            backend_names = [comp.backend_ for comp in components]
-            assert len(set(backend_names)) <= 1, (
-                f"System {func.__name__} 引用的Component必须都是同一种backend"
-            )
+        assert len(components) > 0, "System必须引用至少一个Component"
+
+        # 检查components是否都是同一个backend
+        backend_names = [comp.backend_ for comp in components]
+        assert len(set(backend_names)) <= 1, (
+            f"System {func.__name__} 引用的Component必须都是同一种backend"
+        )
 
         _components = components
 
         # 把call lock的表添加到components中
         if call_lock:
             lock_table = SystemLock.duplicate(namespace, func.__name__)
-            if components is not None and len(components) > 0:
-                lock_table.backend_ = components[0].backend_
-                _components = list(components) + [lock_table]
-            else:
-                _components = [lock_table]
+            lock_table.backend_ = components[0].backend_
+            _components = list(components) + [lock_table]
 
         depend_names = [
             dep if isinstance(dep, str) else dep.__name__ for dep in depends

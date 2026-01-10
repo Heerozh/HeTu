@@ -42,6 +42,7 @@ def create_system_endpoint(system: str, permission: Permission) -> Callable:
                     replay.info(err_msg)
                     logger.warning(err_msg)
                     return
-        ctx.systems.call(system, *args)
+        await ctx.systems.call(system, *args)
 
+    system_endpoint.__name__ = system
     return system_endpoint

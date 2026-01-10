@@ -6,8 +6,7 @@
 """
 
 from dataclasses import dataclass, field
-from types import FunctionType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from ..endpoint import Context
 
@@ -25,7 +24,7 @@ class SystemContext(Context):
     # 当前事务的repo实例
     repo: dict[type[BaseComponent], SessionRepository] = field(default_factory=dict)
     # 继承的父事务函数
-    depend: dict[str, FunctionType] = field(default_factory=dict)
+    depend: dict[str, Callable] = field(default_factory=dict)
 
     async def session_commit(self):
         """

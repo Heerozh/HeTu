@@ -58,7 +58,9 @@ class EndpointDefines(metaclass=Singleton):
     def get_endpoints(self, namespace: str) -> dict[str, EndpointDefine]:
         return self._endpoint_map[namespace]
 
-    def add(self, namespace, func: AsyncHandler, force):
+    def add(
+        self, namespace, func: AsyncHandler, force, arg_count=None, defaults_count=None
+    ):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
         if not force:
@@ -66,8 +68,10 @@ class EndpointDefines(metaclass=Singleton):
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         assert isinstance(func, FunctionType)
-        arg_count = func.__code__.co_argcount
-        defaults_count = len(func.__defaults__) if func.__defaults__ else 0
+        if not arg_count:
+            arg_count = func.__code__.co_argcount
+        if not defaults_count:
+            defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
         sub_map[func.__name__] = EndpointDefine(
             func=func,
