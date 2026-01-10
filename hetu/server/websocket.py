@@ -11,12 +11,13 @@ import logging
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
 
+from ..data.backend import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
-from ..data.backend import Subscriptions
-from .web import HETU_BLUEPRINT
+from ..system.executor import SystemContext, SystemExecutor
 from .message import encode_message
-from .receiver import client_receiver, subscription_receiver, mq_puller
+from .receiver import client_receiver, mq_puller, subscription_receiver
+from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -25,16 +26,39 @@ replay = logging.getLogger("HeTu.replay")
 @HETU_BLUEPRINT.websocket("/hetu")  # noqa
 async def websocket_connection(request: Request, ws: Websocket):
     """ws连接处理器，运行在worker主协程下"""
-    # 获取当前协程任务
+    # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
-
-    # 初始化执行器，一个连接一个执行器
-    comp_mgr = request.app.ctx.comp_mgr
-    executor = EndpointExecutor(request.app.config["NAMESPACE"], comp_mgr)
-    await executor.initialize(request.client_ip)
-    ctx = executor.context
     logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
+    comp_mgr = request.app.ctx.comp_mgr
+
+    # 初始化Context，一个连接一个Context
+    context = SystemContext(
+        caller=None,
+        connection_id=0,
+        address="NotSet",
+        group=None,
+        user_data={},
+        timestamp=0,
+        request=request,
+        systems=None,  # type: ignore
+    )
+    default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
+    context.configure(
+        client_limits=request.app.config.get("CLIENT_SEND_LIMITS", default_limits),
+        server_limits=request.app.config.get("SERVER_SEND_LIMITS", default_limits),
+        max_row_sub=request.app.config.get("MAX_ROW_SUBSCRIPTION", 1000),
+        max_index_sub=request.app.config.get("MAX_INDEX_SUBSCRIPTION", 50),
+    )
+
+    # 初始化System执行器，一个连接一个执行器
+    namespace = request.app.config["NAMESPACE"]
+    system_executor = SystemExecutor(namespace, comp_mgr, context)
+    context.systems = system_executor
+
+    # 初始化Endpoint执行器，一个连接一个执行器
+    endpoint_executor = EndpointExecutor(namespace, comp_mgr, context)
+    await endpoint_executor.initialize(request.client_ip)
 
     # 初始化订阅管理器，一个连接一个订阅管理器
     subscriptions = Subscriptions(request.app.ctx.default_backend)
@@ -45,30 +69,25 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 初始化发送/接受计数器
     flood_checker = connection.ConnectionFloodChecker()
 
-    # 传递默认配置参数到ctx
-    default_limits = []  # [[10, 1], [27, 5], [100, 50], [300, 300]]
-    ctx.configure(
-        client_limits=request.app.config.get("CLIENT_SEND_LIMITS", default_limits),
-        server_limits=request.app.config.get("SERVER_SEND_LIMITS", default_limits),
-        max_row_sub=request.app.config.get("MAX_ROW_SUBSCRIPTION", 1000),
-        max_index_sub=request.app.config.get("MAX_INDEX_SUBSCRIPTION", 50),
-    )
-
-    # 创建接受客户端消息的协程
+    # 创建接受客户端消息的协程2
     protocol = dict(compress=request.app.ctx.compress, crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, executor, subscriptions, push_queue, flood_checker
+        ws, protocol, endpoint_executor, subscriptions, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
-    # 创建获得订阅推送通知的协程
+    # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
     subs_task_id = f"subs_receiver:{request.id}"
     subscript_task = subscription_receiver(ws, subscriptions, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
     puller_task_id = f"mq_puller:{request.id}"
     puller_task = mq_puller(ws, subscriptions)
     _ = request.app.add_task(puller_task, name=puller_task_id)
+
+    # 删除当前长连接用不上的临时变量
+    del namespace
+    del default_limits
 
     # 这里循环发送，保证总是第一时间Push
     try:
@@ -81,7 +100,7 @@ async def websocket_connection(request: Request, ws: Websocket):
             await ws.send(encode_message(reply, protocol))
             # 检查发送上限
             flood_checker.sent()
-            if flood_checker.send_limit_reached(ctx, "Coroutines(Websocket.push)"):
+            if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):
                 ws.fail_connection()
                 break
     except asyncio.CancelledError:
@@ -104,6 +123,6 @@ async def websocket_connection(request: Request, ws: Websocket):
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
-        await executor.terminate()
+        await endpoint_executor.terminate()
         await subscriptions.close()
         request.app.purge_tasks()
