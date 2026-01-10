@@ -117,7 +117,12 @@ async def close_backends(app: Sanic):
 
 
 async def worker_start(app: Sanic):
-    start_backends(app)
+    try:
+        start_backends(app)
+    except Exception as e:
+        logger.error(f"❌ 进程[{os.getpid()}] 启动失败: {type(e).__name__}:{e}")
+        app.stop()
+        return
 
     # 打印信息
     from pathlib import Path
