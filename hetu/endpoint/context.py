@@ -19,10 +19,10 @@ if TYPE_CHECKING:
 class Context:
     # 通用变量
     # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
-    caller: int | None
+    caller: int
     connection_id: int  # 调用方的connection id
-    address: str | None  # 调用方的ip
-    group: str | None  # 所属组名，目前只用于判断是否admin
+    address: str  # 调用方的ip
+    group: str  # 所属组名，目前只用于判断是否admin
     user_data: dict[str, Any]  # 当前连接的用户数据，可自由设置，在所有System间共享
     timestamp: float  # 调用时间戳
     # 系统变量
@@ -41,7 +41,7 @@ class Context:
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
     def is_admin(self):
-        return True if self.group and self.group.startswith("admin") else False
+        return True if self.group.startswith("admin") else False
 
     def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
         """配置连接选项"""

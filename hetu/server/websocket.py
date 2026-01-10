@@ -34,10 +34,10 @@ async def websocket_connection(request: Request, ws: Websocket):
 
     # 初始化Context，一个连接一个Context
     context = SystemContext(
-        caller=None,
+        caller=0,
         connection_id=0,
-        address="NotSet",
-        group=None,
+        address=request.client_ip,
+        group="guest",
         user_data={},
         timestamp=0,
         request=request,

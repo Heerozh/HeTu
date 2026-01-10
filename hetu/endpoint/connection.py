@@ -106,7 +106,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
     # 如果当前连接已提权
-    if ctx.caller is not None and ctx.caller > 0:
+    if ctx.caller:
         return False, "CURRENT_CONNECTION_ALREADY_ELEVATED"
 
     async for attempt in table.session().retry(5):
@@ -160,7 +160,7 @@ class ConnectionAliveChecker:
         conn_tbl = self.conn_tbl
         db = conn_tbl.backend.master
         caller, conn_id = ctx.caller, ctx.connection_id
-        if caller and caller > 0:
+        if caller:
             # 此方法无法通过事务，这里判断通过后可能有其他连接踢了你，等于同时可能有2个连接在执行1个用户的事务，但
             # 问题不大，因为事务是有冲突判断的。不冲突的事务就算一起执行也没啥问题。
             conn = await db.get(conn_tbl, conn_id, RowFormat.STRUCT)

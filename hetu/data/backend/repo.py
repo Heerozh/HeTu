@@ -397,7 +397,7 @@ class UpsertContext:
         self.index_name = index_name
         self.query_value = query_value
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> np.record:
         existing_row = await self.selected.get(self.index_name, self.query_value)
         if existing_row is not None:
             self.row_data = existing_row
@@ -409,7 +409,7 @@ class UpsertContext:
             self.insert = True
         return self.row_data
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         if exc_type is None:
             assert self.row_data is not None
             try:

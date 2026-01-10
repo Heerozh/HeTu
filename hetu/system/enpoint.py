@@ -25,7 +25,7 @@ def create_system_endpoint(system: str, permission: Permission) -> Callable:
         # 检查权限是否符合
         match permission:
             case Permission.USER:
-                if ctx.caller is None or ctx.caller == 0:
+                if not ctx.caller:
                     err_msg = (
                         f"⚠️ [📞Executor] [非法操作] {ctx} | "
                         f"{system}无调用权限，检查是否非法调用：{args}"

@@ -214,7 +214,7 @@ class Subscriptions:
             # 其他权限要求至少登陆过
             if comp_permission == Permission.ADMIN:
                 return False
-            if ctx.caller and ctx.caller > 0:
+            if ctx.caller:
                 return True
             return False
 
