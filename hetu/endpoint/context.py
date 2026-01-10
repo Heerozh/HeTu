@@ -12,6 +12,7 @@ from typing import Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from ..data.component import BaseComponent
     from sanic import Request
+    from ..system.caller import SystemCaller
 
 
 @dataclass
@@ -26,7 +27,7 @@ class Context:
     timestamp: float  # 调用时间戳
     # 系统变量
     request: Request  # framework原始请求对象，unsafe
-    systems: None  # 全局System管理器，unsafe
+    systems: SystemCaller  # 全局System管理器，unsafe
     # 限制变量
     # 客户端消息发送限制（次数）
     client_limits: list[list[int]] = field(default_factory=list)

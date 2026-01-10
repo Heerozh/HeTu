@@ -11,11 +11,9 @@ import random
 import time
 from dataclasses import dataclass
 
-from .connection import ConnectionAliveChecker
-from .context import Context
+from .context import SystemContext
 from .lock import SystemLock
 from ..common.slowlog import SlowLog
-from ..data import Permission
 from ..data.backend import RaceCondition
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemDefine
@@ -34,58 +32,17 @@ class SystemCall:
     uuid: str = ""  # 唯一id，如果设置了，则会储存一个标记用于确保不会重复调用
 
 
-class SystemResult:
-    pass
-
-
-class ResponseToClient(SystemResult):
-    """回报message给客户端，注意必须是json可以序列化的数据"""
-
-    def __init__(self, message: list | dict):
-        self.message = message
-
-    def __repr__(self):
-        # 代码格式返回response，未来可用于replay还原
-        return f"ResponseToClient({self.message})"
-
-
-class SystemExecutor:
+class SystemCaller:
     """
-    每个连接一个SystemExecutor实例。
+    每个连接一个SystemCaller实例。
     """
 
-    def __init__(self, namespace: str, comp_mgr: ComponentTableManager):
+    def __init__(
+        self, namespace: str, comp_mgr: ComponentTableManager, context: SystemContext
+    ):
         self.namespace = namespace
         self.comp_mgr = comp_mgr
-        self.alive_checker = ConnectionAliveChecker(self.comp_mgr)
-        self.context = Context(
-            caller=None,
-            connection_id=0,
-            address="NotSet",
-            group=None,
-            user_data={},
-            timestamp=0,
-            retry_count=0,
-            transactions={},
-            inherited={},
-        )
-
-    async def initialize(self, address: str):
-        if self.context.connection_id != 0:
-            return
-        # 通过connection component分配自己一个连接id
-        sys = SYSTEM_CLUSTERS.get_system("new_connection")
-        assert sys is not None
-        ok, _ = await self.execute_(sys, address)
-        if not ok:
-            raise RuntimeError("连接初始化失败，new_connection调用失败")
-
-    async def terminate(self):
-        if self.context.connection_id == 0:
-            return
-        # 释放connection
-        sys = SYSTEM_CLUSTERS.get_system("del_connection")
-        await self.execute_(sys)
+        self.context = context
 
     def call_check(self, call: SystemCall) -> SystemDefine | None:
         """检查调用是否合法"""
@@ -97,27 +54,6 @@ class SystemExecutor:
             replay.info(err_msg)
             logger.warning(err_msg)
             return None
-
-        # 检查权限是否符合
-        match sys.permission:
-            case Permission.USER:
-                if context.caller is None or context.caller == 0:
-                    err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {context} | "
-                        f"{call.system}无调用权限，检查是否非法调用：{call}"
-                    )
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
-            case Permission.ADMIN:
-                if not context.is_admin():
-                    err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {context} | "
-                        f"{call.system}无调用权限，检查是否非法调用：{call}"
-                    )
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
 
         # 检测args数量是否对得上
         if len(call.args) < (sys.arg_count - sys.defaults_count - 3):

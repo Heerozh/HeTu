@@ -11,8 +11,7 @@ from typing import TYPE_CHECKING, Callable
 from ..common.permission import Permission
 
 if TYPE_CHECKING:
-    from hetu.endpoint.response import EndpointResponse
-
+    from ..endpoint.response import EndpointResponse
     from .context import SystemContext
 
 logger = logging.getLogger("HeTu.root")

@@ -14,7 +14,7 @@ from sanic.exceptions import WebsocketClosed
 from ..data.backend import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
-from ..system.executor import SystemContext, SystemExecutor
+from ..system.caller import SystemContext, SystemCaller
 from .message import encode_message
 from .receiver import client_receiver, mq_puller, subscription_receiver
 from .web import HETU_BLUEPRINT
@@ -53,8 +53,8 @@ async def websocket_connection(request: Request, ws: Websocket):
 
     # 初始化System执行器，一个连接一个执行器
     namespace = request.app.config["NAMESPACE"]
-    system_executor = SystemExecutor(namespace, comp_mgr, context)
-    context.systems = system_executor
+    system_caller = SystemCaller(namespace, comp_mgr, context)
+    context.systems = system_caller
 
     # 初始化Endpoint执行器，一个连接一个执行器
     endpoint_executor = EndpointExecutor(namespace, comp_mgr, context)

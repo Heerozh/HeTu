@@ -15,7 +15,6 @@ from .context import Context
 from ..safelogging.filter import ContextFilter
 
 if TYPE_CHECKING:
-    from sanic import Request
     from ..manager import ComponentTableManager
     from .response import ResponseToClient
 
@@ -29,22 +28,12 @@ class EndpointExecutor:
     """
 
     def __init__(
-        self, namespace: str, comp_mgr: ComponentTableManager, request: Request
+        self, namespace: str, comp_mgr: ComponentTableManager, context: Context
     ) -> None:
         self.namespace = namespace
         self.comp_mgr = comp_mgr
         self.alive_checker = ConnectionAliveChecker(self.comp_mgr)
-        # todo context应该外面生成后传过来
-        self.context = Context(
-            caller=None,
-            connection_id=0,
-            address="NotSet",
-            group=None,
-            user_data={},
-            timestamp=0,
-            request=request,
-            systems=None,
-        )
+        self.context = context
 
     async def initialize(self, address: str):
         """初始化连接，分配connection id，如果失败则raise异常"""
