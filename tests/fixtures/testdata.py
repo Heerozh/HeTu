@@ -6,7 +6,7 @@
 #  """
 
 import pytest
-from hetu.data.backend import TableReference
+from hetu.data.backend import TableReference, Table
 
 
 def def_item():
@@ -117,7 +117,9 @@ async def filled_item_ref(item_ref, mod_auto_backend):
     # 等待replica同步
     await backend.wait_for_synced()
 
-    return item_ref
+    return Table(
+        item_ref.comp_cls, item_ref.instance_name, item_ref.cluster_id, backend
+    )
 
 
 @pytest.fixture
@@ -135,4 +137,4 @@ async def filled_rls_ref(rls_ref, mod_auto_backend):
     # 等待replica同步
     await backend.wait_for_synced()
 
-    return rls_ref
+    return Table(rls_ref.comp_cls, rls_ref.instance_name, rls_ref.cluster_id, backend)

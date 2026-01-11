@@ -93,7 +93,7 @@ class RedisTableMaintenance(TableMaintenance):
     def create_table(self, table_ref: TableReference) -> Any:
         """创建组件表。如果已存在，会抛出异常"""
         with self.lock:
-            if self.check_table(table_ref) != "not_exists":
+            if self.check_table(table_ref)[0] != "not_exists":
                 raise RaceCondition(
                     f"[💾Redis][{table_ref.comp_name}组件] 组件表已存在，无法创建。"
                 )
@@ -124,7 +124,7 @@ class RedisTableMaintenance(TableMaintenance):
             f"将尝试迁移cluster数据..."
         )
         with self.lock:
-            if self.check_table(table_ref) != "cluster_mismatch":
+            if self.check_table(table_ref)[0] != "cluster_mismatch":
                 raise RaceCondition(
                     f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过簇id。"
                 )
@@ -140,8 +140,9 @@ class RedisTableMaintenance(TableMaintenance):
                 old_prefix + ":*",
                 target_nodes=RedisCluster.PRIMARIES,
             )
-            old_keys = cast(list[str], old_keys)
+            old_keys = cast(list[bytes], old_keys)
             for old_key in old_keys:
+                old_key = old_key.decode()
                 new_key = new_prefix + old_key[old_prefix_len:]
                 io.rename(old_key, new_key)
             # 更新meta
@@ -216,7 +217,7 @@ class RedisTableMaintenance(TableMaintenance):
                         raise ValueError(msg)
 
         with self.lock:
-            if self.check_table(table_ref) != "schema_mismatch":
+            if self.check_table(table_ref)[0] != "schema_mismatch":
                 raise RaceCondition(
                     f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
                 )
@@ -224,10 +225,10 @@ class RedisTableMaintenance(TableMaintenance):
             # 多出来的列再次报警告，然后忽略
             io = self.client.io
             keys = io.keys(
-                self.client.cluster_prefix(table_ref) + ":*",
+                self.client.cluster_prefix(table_ref) + ":id:*",
                 target_nodes=RedisCluster.PRIMARIES,
             )
-            keys = cast(list[str], keys)
+            keys = cast(list[bytes], keys)
             props = dict(table_ref.comp_cls.properties_)
             added = 0
             for prop_name in new_dtypes.fields:
@@ -245,7 +246,7 @@ class RedisTableMaintenance(TableMaintenance):
                         raise ValueError("迁移失败")
                     pipe = io.pipeline()
                     for key in keys:
-                        pipe.hset(key, prop_name, default)
+                        pipe.hset(key.decode(), prop_name, default)
                     pipe.execute()
                     added += 1
 
@@ -280,7 +281,8 @@ class RedisTableMaintenance(TableMaintenance):
                     self.client.table_prefix(table_ref) + ":*",
                     target_nodes=RedisCluster.PRIMARIES,
                 )
-                del_keys = cast(list[str], del_keys)
+                del_keys = cast(list[bytes], del_keys)
+                del_keys = [key.decode() for key in del_keys]
                 for batch in batched(del_keys, 1000):
                     with io.pipeline() as pipe:
                         list(map(pipe.delete, batch))
@@ -300,10 +302,10 @@ class RedisTableMaintenance(TableMaintenance):
         with self.lock:
             io = self.client.io
             keys = io.keys(
-                self.client.table_prefix(table_ref) + ":*",
+                self.client.cluster_prefix(table_ref) + ":id:*",
                 target_nodes=RedisCluster.PRIMARIES,
             )
-            keys = cast(list[str], keys)
+            keys = cast(list[bytes], keys)
             if len(keys) == 0:
                 logger.info(
                     f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 无数据，无需重建索引。"
@@ -317,10 +319,11 @@ class RedisTableMaintenance(TableMaintenance):
                 # 重建所有索引，不管unique还是index都是sset
                 pipe = io.pipeline()
                 row_ids = []
-                for row in keys:
-                    row_id = row.split(":")[-1]
+                for key in keys:
+                    key = key.decode()
+                    row_id = key.split(":")[-1]
                     row_ids.append(row_id)
-                    pipe.hget(row, idx_name)
+                    pipe.hget(key, idx_name)
                 values = pipe.execute()
                 # 把values按dtype转换下
                 struct = table_ref.comp_cls.new_row()
