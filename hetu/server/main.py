@@ -10,6 +10,7 @@ import importlib.util
 import logging
 import os
 import sys
+import asyncio
 
 from sanic import Sanic
 
@@ -41,18 +42,20 @@ def start_backends(app: Sanic):
             backends["default"] = backends[name]
             app.ctx.__setattr__("default_backend", backends["default"])
 
-    # todo: 测试使用redis初始化snowflake的workerKeeper
+    # 使用redis初始化snowflake的workerKeeper
     worker_keeper = backends["default"].get_worker_keeper()
     if worker_keeper is None:
         for _, backend in backends.items():
             if worker_keeper := backend.get_worker_keeper():
                 break
-    # todo: 测试根据默认backend决定用哪个workerKeeper，如果全部不支持则报错
+
+    # 根据默认backend决定用哪个workerKeeper，如果全部不支持则报错
     if worker_keeper is None:
         raise RuntimeError(
             "没有可用的Backend支持WorkerKeeper管理唯一Worker ID，可用的有："
             + str(WorkerKeeper.subclasses)
         )
+
     # 初始化雪花id生成器
     worker_id = worker_keeper.get_worker_id()
     last_timestamp = worker_keeper.get_last_timestamp()
@@ -102,8 +105,10 @@ async def worker_close(app):
 
 
 async def worker_keeper_renewal(app: Sanic):
-    # todo 要循环每5秒续约一次worker id
-    await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
+    # 循环每5秒续约一次worker id
+    while True:
+        await asyncio.sleep(5)
+        await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
 
 
 def worker_main(app_name, config) -> Sanic:

@@ -43,18 +43,12 @@ class EndpointDefines(metaclass=Singleton):
         self._global_endpoint_map: dict[str, EndpointDefine] = {}
         # 方便快速访问主namespace的endpoint定义
         self._main_namespace: str = ""
-        self._main_endpoint_map: dict[str, EndpointDefine] = {}
 
     def _clear(self):
         self._endpoint_map = {}
 
-    def get_endpoint(
-        self, endpoint_name: str, namespace: str | None = None
-    ) -> EndpointDefine | None:
-        if namespace:
-            return self._endpoint_map[namespace].get(endpoint_name, None)
-        else:
-            return self._main_endpoint_map.get(endpoint_name, None)
+    def get_endpoint(self, namespace: str, endpoint_name: str) -> EndpointDefine | None:
+        return self._endpoint_map[namespace].get(endpoint_name, None)
 
     def get_endpoints(self, namespace: str) -> dict[str, EndpointDefine]:
         return self._endpoint_map[namespace]

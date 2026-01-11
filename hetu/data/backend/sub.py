@@ -16,7 +16,7 @@ from hetu.data.component import Permission
 
 if TYPE_CHECKING:
     from hetu.data.backend import Backend, TableReference
-    from hetu.system import Context
+    from hetu.endpoint import Context
 
 logger = logging.getLogger("HeTu.root")
 
@@ -292,11 +292,11 @@ class Subscriptions:
         table_ref: TableReference,
         ctx: Context,
         index_name: str,
-        left,
-        right=None,
-        limit=10,
-        desc=False,
-        force=True,
+        left: Any,
+        right: Any | None = None,
+        limit: int = 10,
+        desc: bool = False,
+        force: bool = True,
     ) -> tuple[str | None, list[dict]]:
         """
         获取并订阅多行数据。

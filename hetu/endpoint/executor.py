@@ -55,14 +55,13 @@ class EndpointExecutor:
         # 释放connection
         await del_connection(self.comp_mgr, self.context.connection_id)
 
-    def execute_check(
-        self, namespace: str, endpoint: str, args: tuple
-    ) -> EndpointDefine | None:
+    def execute_check(self, endpoint: str, args: tuple) -> EndpointDefine | None:
         """检查调用是否合法"""
         context = self.context
+        namespace = self.namespace
 
         # 读取保存的system define
-        ep = EndpointDefines().get_endpoint(endpoint, namespace)
+        ep = EndpointDefines().get_endpoint(namespace, endpoint)
         if not ep:
             err_msg = (
                 f"⚠️ [📞Executor] [非法操作] {context} | "
@@ -114,7 +113,8 @@ class EndpointExecutor:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，Endpoint返回值
-        遇到异常则记录error日志，并返回False，None，表示内部失败或非法调用，此时需要立即调用terminate断开连接
+        遇到异常则记录error日志，并返回False，None，表示内部失败或非法调用，此时需要立即调用
+        terminate断开连接
         """
         # 开始调用
         ep_name = ep.func.__name__
@@ -131,7 +131,10 @@ class EndpointExecutor:
             # logger.debug(f"✅ [📞Executor] 调用Endpoint成功: {sys_name}")
             return True, rtn
         except Exception as e:
-            err_msg = f"❌ [📞Executor] Endpoint调用异常，调用：{ep_name}{args}，异常：{type(e).__name__}:{e}"
+            err_msg = (
+                f"❌ [📞Executor] Endpoint调用异常，调用：{ep_name}{args}，"
+                f"异常：{type(e).__name__}:{e}"
+            )
             replay.info(err_msg)
             logger.exception(err_msg)
             return False, None
@@ -139,20 +142,20 @@ class EndpointExecutor:
             pass
 
     async def execute(
-        self, namespace: str, endpoint: str, *args
+        self, endpoint: str, *args
     ) -> tuple[bool, ResponseToClient | None]:
         """
         调用Endpoint，返回True表示调用成功，
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
         """
         # 检查call参数和call权限
-        sys = self.execute_check(namespace, endpoint, args)
+        sys = self.execute_check(endpoint, args)
         if sys is None:
             return False, None
 
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         illegal = await self.alive_checker.is_illegal(
-            self.context, f"{namespace}.{endpoint}"
+            self.context, f"{self.namespace}.{endpoint}"
         )
         if illegal:
             return False, None

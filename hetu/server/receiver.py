@@ -7,17 +7,21 @@
 
 import asyncio
 import logging
+from typing import TYPE_CHECKING
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
-from sanic import Websocket
 from sanic.exceptions import WebsocketClosed
 
 import hetu
 from ..endpoint import connection
-from ..data.backend import Subscriptions
-from ..endpoint.executor import EndpointExecutor, SystemCall, ResponseToClient
+from ..endpoint.response import ResponseToClient
 from .message import decode_message
+
+if TYPE_CHECKING:
+    from ..endpoint.executor import EndpointExecutor
+    from ..data.backend import Subscriptions
+    from sanic import Websocket
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -28,15 +32,14 @@ def check_length(name, data: list, left, right):
         raise ValueError(f"Invalid {name} message")
 
 
-async def sys_call(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue):
-    """处理Client SDK调用System的命令"""
-    # print(executor.context, 'sys', data)
-    check_length("sys", data, 2, 100)
-    call = SystemCall(data[1], tuple(data[2:]))
-    ok, res = await executor.execute(call)
+async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue):
+    """处理Client SDK调用Endpoint的命令"""
+    # print(executor.context, 'rpc', data)
+    check_length("rpc", data, 2, 100)
+    ok, res = await executor.execute(data[1], tuple(data[2:]))
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
     if replay.level < logging.ERROR:
-        replay.info(f"[SystemResult][{data[1]}]({ok}, {str(res)})")
+        replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
     if ok and isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
     return ok
@@ -59,20 +62,21 @@ async def sub_call(
         )
 
     sub_id = None
+    sub_data = None
     match data[2]:
-        case "select":
-            check_length("select", data, 5, 5)
-            sub_id, data = await subs.subscribe_select(table, ctx, *data[3:])
-        case "query":
-            check_length("query", data, 5, 8)
-            sub_id, data = await subs.subscribe_query(table, ctx, *data[3:])
+        case "get":
+            check_length("get", data, 5, 5)
+            sub_id, sub_data = await subs.subscribe_get(table, ctx, *data[3:])
+        case "range":
+            check_length("range", data, 5, 8)
+            sub_id, sub_data = await subs.subscribe_range(table, ctx, *data[3:])
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
         case _:
             raise ValueError(f" [非法操作] 未知订阅操作：{data[2]}")
 
-    reply = ["sub", sub_id, data]
+    reply = ["sub", sub_id, sub_data]
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub = subs.count()
@@ -98,6 +102,8 @@ async def client_receiver(
         async for message in ws:
             if not message:
                 break
+            if type(message) is not bytes:
+                break  # if not byte frame, close connection
             # 转换消息到array
             last_data = decode_message(message, protocol)
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
@@ -111,12 +117,12 @@ async def client_receiver(
                 return ws.fail_connection()
             # 执行消息
             match last_data[0]:
-                case "sys":  # sys system_name args ...
-                    sys_ok = await sys_call(last_data, executor, push_queue)
-                    if not sys_ok:
+                case "rpc":  # rpc endpoint_name args ...
+                    rpc_ok = await rpc(last_data, executor, push_queue)
+                    if not rpc_ok:
                         print(executor.context, "call failed, close connection...")
                         return ws.fail_connection()
-                case "sub":  # sub component_name select/query args ...
+                case "sub":  # sub component_name get/range args ...
                     await sub_call(last_data, executor, subs, push_queue)
                 case "unsub":  # unsub sub_id
                     check_length("unsub", last_data, 2, 2)
@@ -177,7 +183,7 @@ async def subscription_receiver(
     ws: Websocket, subscriptions: Subscriptions, push_queue: asyncio.Queue
 ):
     """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
-    last_updates = None
+    last_updates = {}
     try:
         while True:
             last_updates = await subscriptions.get_updates()

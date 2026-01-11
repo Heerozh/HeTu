@@ -17,7 +17,7 @@ msg_decoder = msgspec.msgpack.Decoder()
 buffer = bytearray()
 
 
-def decode_message(message: bytes, protocol: dict) -> dict:
+def decode_message(message: bytes, protocol: dict) -> list:
     if len(message) > 10240:
         raise ValueError("Message too long，为了防止性能攻击限制长度")
     if crypto := protocol["crypto"]:
