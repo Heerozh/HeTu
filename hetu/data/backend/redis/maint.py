@@ -15,13 +15,13 @@ from ....common.helper import batched
 from ...component import BaseComponent
 from .. import RaceCondition
 from ..base import TableMaintenance
-from ..table import TableReference
 
 from redis.cluster import RedisCluster
 
 if TYPE_CHECKING:
     import redis
     import redis.lock
+    from ..table import TableReference
 
     from .client import RedisBackendClient
 
@@ -210,7 +210,7 @@ class RedisTableMaintenance(TableMaintenance):
                     msg = (
                         f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
                         f"属性 {prop_name} 的类型由 {old_type} 变更为 {new_type}，"
-                        f"无法自动转换类型，需要手动迁移，强制执行将丢弃该属性数据。"
+                        f"无法自动转换类型，需要手动迁移，强制执行将截断/丢弃该属性数据。"
                     )
                     logger.warning(msg)
                     if not force:
@@ -231,6 +231,8 @@ class RedisTableMaintenance(TableMaintenance):
             keys = cast(list[bytes], keys)
             props = dict(table_ref.comp_cls.properties_)
             added = 0
+            converted = 0
+            convert_failed = 0
             for prop_name in new_dtypes.fields:
                 if prop_name not in dtypes_in_db.fields:
                     logger.warning(
@@ -249,6 +251,26 @@ class RedisTableMaintenance(TableMaintenance):
                         pipe.hset(key.decode(), prop_name, default)
                     pipe.execute()
                     added += 1
+                elif force:  # 类型转换
+                    old_type = dtypes_in_db.fields[prop_name][0]
+                    new_type = new_dtypes.fields[prop_name][0]
+                    if old_type == new_type:
+                        continue
+                    default = props[prop_name].default
+                    pipe = io.pipeline()
+                    for key in keys:
+                        val = io.hget(key.decode(), prop_name)
+                        if val is None:
+                            continue
+                        try:
+                            casted_val = new_type.type(old_type.type(val))
+                            pipe.hset(key.decode(), prop_name, str(casted_val))
+                            converted += 1
+                        except ValueError as _:
+                            # 强制模式下丢弃该属性
+                            pipe.hset(key.decode(), prop_name, default)
+                            convert_failed += 1
+                    pipe.execute()
 
             # 更新meta
             version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
@@ -257,7 +279,7 @@ class RedisTableMaintenance(TableMaintenance):
 
             logger.warning(
                 f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 新属性增加完成，共处理{len(keys)}行 * "
-                f"{added}个属性。"
+                f"{added}个属性。 转换类型成功{converted}次，失败{convert_failed}次。"
             )
 
     @override
@@ -298,6 +320,8 @@ class RedisTableMaintenance(TableMaintenance):
     @override
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
+        from .client import RedisBackendClient
+
         logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
         with self.lock:
             io = self.client.io
@@ -312,34 +336,38 @@ class RedisTableMaintenance(TableMaintenance):
                 )
                 return
 
-            for idx_name, str_type in table_ref.comp_cls.indexes_.items():
+            for idx_name, _ in table_ref.comp_cls.indexes_.items():
                 idx_key = self.client.index_key(table_ref, idx_name)
                 # 先删除所有_idx_key开头的索引
                 io.delete(idx_key)
                 # 重建所有索引，不管unique还是index都是sset
                 pipe = io.pipeline()
-                row_ids = []
+                b_row_ids: list[bytes] = []
                 for key in keys:
-                    key = key.decode()
-                    row_id = key.split(":")[-1]
-                    row_ids.append(row_id)
-                    pipe.hget(key, idx_name)
-                values = pipe.execute()
+                    row_id = key.split(b":")[-1]
+                    b_row_ids.append(row_id)
+                    pipe.hget(key.decode(), idx_name)
+                values: list[bytes] = pipe.execute()
                 # 把values按dtype转换下
                 struct = table_ref.comp_cls.new_row()
+                scalers: list[np.generic] = [np.str_()] * len(values)
                 for i, v in enumerate(values):
-                    struct[idx_name] = v
-                    values[i] = struct[idx_name].item()
+                    struct[idx_name] = v.decode()
+                    scalers[i] = struct[idx_name]
+
                 # 建立redis索引
-                if str_type:
-                    # 字符串类型要特殊处理，score=0, member='name:1'形式
-                    io.zadd(
-                        idx_key,
-                        {f"{value}:{rid}": 0 for rid, value in zip(row_ids, values)},
-                    )
-                else:
-                    # zadd 会替换掉member相同的值，等于是set
-                    io.zadd(idx_key, dict(zip(row_ids, values)))
+                def get_member(_value: np.generic, _b_row_id) -> bytes:
+                    _sortable_value = RedisBackendClient.to_sortable_bytes(_value)
+                    return _sortable_value + b":" + _b_row_id
+
+                io.zadd(
+                    idx_key,
+                    {
+                        get_member(scaler, b_row_id): 0
+                        for b_row_id, scaler in zip(b_row_ids, scalers)
+                    },
+                )
+
                 # 检测是否有unique违反
                 if idx_name in table_ref.comp_cls.uniques_:
                     if len(values) != len(set(values)):
