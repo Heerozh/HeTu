@@ -45,45 +45,51 @@ async def background_mq_puller_task(sub_mgr):
 @pytest.fixture
 async def admin_ctx():
     """管理员权限的ctx（连接上下文）"""
-    from hetu.system import Context
+    from hetu.system import SystemContext
 
-    return Context(
-        caller=None,
+    return SystemContext(
+        caller=0,
         connection_id=0,
         address="NotSet",
         group="admin",
         user_data={},
         timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
     )
 
 
 @pytest.fixture
 async def user_id10_ctx():
     """用户ID为10的ctx（连接上下文）"""
-    from hetu.system import Context
+    from hetu.system import SystemContext
 
-    return Context(
+    return SystemContext(
         caller=10,
         connection_id=0,
         address="NotSet",
-        group=None,
+        group="",
         user_data={},
         timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
     )
 
 
 @pytest.fixture
 async def user_id11_ctx():
     """用户ID为11的ctx（连接上下文）"""
-    from hetu.system import Context
+    from hetu.system import SystemContext
 
-    return Context(
+    return SystemContext(
         caller=11,
         connection_id=0,
         address="NotSet",
-        group=None,
+        group="",
         user_data={},
         timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
     )
 
 

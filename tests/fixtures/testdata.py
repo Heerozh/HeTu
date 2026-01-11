@@ -37,6 +37,7 @@ def def_rls_test():
     @define_component(
         namespace="pytest",
         permission=Permission.RLS,
+        volatile=True,
         rls_compare=("eq", "friend", "caller"),
     )
     class RLSTest(BaseComponent):

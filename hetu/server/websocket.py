@@ -14,7 +14,8 @@ from sanic.exceptions import WebsocketClosed
 from ..data.backend import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
-from ..system.caller import SystemContext, SystemCaller
+from ..system.context import SystemContext
+from ..system.caller import SystemCaller
 from .message import encode_message
 from .receiver import client_receiver, mq_puller, subscription_receiver
 from .web import HETU_BLUEPRINT

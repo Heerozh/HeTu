@@ -61,7 +61,7 @@ class BaseComponent:
     dtypes: np.dtype  # np structured dtype
     default_row: np.recarray  # 默认空数据行
     hosted_: Table | None = None  # 启动后comp_mgr分配的数据库todo 不建议使用去掉
-    prop_idx_map_: dict[str, int] | None = None  # 属性名->第几个属性（矩阵下标）的映射
+    prop_idx_map_: dict[str, int]  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
     uniques_: set[str]  # 唯一索引的属性名集合
     indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
