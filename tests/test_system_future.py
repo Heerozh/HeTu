@@ -21,7 +21,7 @@ async def test_future_call_create(mod_test_app, comp_mgr, executor):
         fc_uow = fc_tbl.attach(session)
         expire_time = time_time() + 1.1
         rows = await fc_uow.query("scheduled", left=0, right=expire_time, limit=1)
-        assert rows[0].uuid == uuid
+        assert rows[0].id == uuid
         assert rows[0].timeout == 10
         assert rows[0].system == "add_rls_comp_value"
         assert rows[0].recurring == False
@@ -68,7 +68,7 @@ async def test_sleep_for_upcoming(mod_test_app, comp_mgr, executor):
     from hetu.system.future import pop_upcoming_call
 
     call = await pop_upcoming_call(fc_tbl)
-    assert call.uuid == uuid
+    assert call.id == uuid
 
     # 再次调用sleep应该返回无任务False，并睡1秒
     start = time_time()
@@ -98,7 +98,7 @@ async def test_pop_upcoming_call(monkeypatch, mod_test_app, comp_mgr, executor):
     last_time = time_time() + 1
     monkeypatch.setattr(time, "time", lambda: last_time)
     call = await pop_upcoming_call(fc_tbl)
-    assert call.uuid == uuid
+    assert call.id == uuid
 
     # 检测pop的task数据是否修改了
     async with backend.transaction(fc_tbl.cluster_id) as session:

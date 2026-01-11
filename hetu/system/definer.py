@@ -281,7 +281,7 @@ class SystemClusters(metaclass=Singleton):
 
 
 def define_system(
-    components: tuple[type[BaseComponent], ...],
+    components: tuple[type[BaseComponent], ...] | None = None,
     namespace: str = "default",
     force: bool = False,
     permission: Permission | None = None,
@@ -405,11 +405,8 @@ def define_system(
     ...     if order_:
     ...         ctx.repo[Order].delete(id=order_.id)
     >>>
-    >>> @hetu.define_system(namespace="example", components=(Stock, ), depends=('remove:ItemOrder', ))
+    >>> @hetu.define_system(namespace="example", depends=('remove:ItemOrder', ))
     ... async def remove_item_order(ctx: hetu.SystemContext, order_id, stock_id):
-    ...     stock = await ctx.repo[Stock].get(id=stock_id)
-    ...     if stock:
-    ...         ctx.repo[Stock].delete(id=stock.id)
     ...     return await ctx.depend['remove:ItemOrder'](order_id)
 
     `depends=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
@@ -457,21 +454,23 @@ def define_system(
             f"System {func.__name__} 必须是异步函数(`async def ...`)"
         )
 
-        assert len(components) > 0, "System必须引用至少一个Component"
-
-        # 检查components是否都是同一个backend
-        backend_names = [comp.backend_ for comp in components]
-        assert len(set(backend_names)) <= 1, (
-            f"System {func.__name__} 引用的Component必须都是同一种backend"
-        )
+        if components is not None and len(components) > 0:
+            # 检查components是否都是同一个backend
+            backend_names = [comp.backend_ for comp in components]
+            assert len(set(backend_names)) <= 1, (
+                f"System {func.__name__} 引用的Component必须都是同一种backend"
+            )
 
         _components = components
 
         # 把call lock的表添加到components中
         if call_lock:
             lock_table = SystemLock.duplicate(namespace, func.__name__)
-            lock_table.backend_ = components[0].backend_
-            _components = list(components) + [lock_table]
+            if components is not None and len(components) > 0:
+                lock_table.backend_ = components[0].backend_
+                _components = list(components) + [lock_table]
+            else:
+                _components = [lock_table]
 
         depend_names = [
             dep if isinstance(dep, str) else dep.__name__ for dep in depends

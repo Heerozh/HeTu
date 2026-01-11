@@ -3,34 +3,35 @@ import time
 import pytest
 
 import hetu
-import hetu.system.connection as connection
+import hetu.endpoint.connection as connection
+from hetu.endpoint.executor import EndpointExecutor
 
 
-async def test_connect_kick(mod_test_app, comp_mgr):
+async def test_connect_kick(mod_test_app, comp_mgr, new_ctx):
     # 先登录2个连接
-    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1 = EndpointExecutor("pytest", comp_mgr, new_ctx())
     await executor1.initialize("")
-    await executor1.exec("login", 1)
+    await executor1.execute("login", 1)
 
-    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor2 = EndpointExecutor("pytest", comp_mgr, new_ctx())
     await executor2.initialize("")
-    await executor2.exec("login", 2)
+    await executor2.execute("login", 2)
 
-    ok, _ = await executor1.exec("add_rls_comp_value", 1)
+    ok, _ = await executor1.execute("add_rls_comp_value", 1)
     assert ok
-    ok, _ = await executor2.exec("add_rls_comp_value", 10)
+    ok, _ = await executor2.execute("add_rls_comp_value", 10)
     assert ok
 
     # 测试重复登录踢出已登录用户
-    executor1_replaced = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1_replaced = EndpointExecutor("pytest", comp_mgr, new_ctx())
     await executor1_replaced.initialize("")
-    await executor1_replaced.exec("login", 1)
+    await executor1_replaced.execute("login", 1)
 
     # 测试运行第一个连接的system，然后看是否失败
-    ok, _ = await executor1.exec("test_rls_comp_value", 101)
+    ok, _ = await executor1.execute("test_rls_comp_value", 101)
     assert not ok
     # 这个的值应该是之前executor1的
-    ok, _ = await executor1_replaced.exec("test_rls_comp_value", 101)
+    ok, _ = await executor1_replaced.execute("test_rls_comp_value", 101)
     assert ok
 
     # 结束连接
@@ -41,7 +42,7 @@ async def test_connect_kick(mod_test_app, comp_mgr):
 
 async def test_connect_not_kick(mod_test_app, comp_mgr):
     # 初始化第一个连接
-    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1 = EndpointExecutor("pytest", comp_mgr)
     await executor1.initialize("")
     await executor1.exec("login", 1)
     ok, _ = await executor1.exec("add_rls_comp_value", 2)
@@ -50,7 +51,7 @@ async def test_connect_not_kick(mod_test_app, comp_mgr):
     assert ok
 
     # 不强制踢出是否生效
-    executor1_not_replace = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1_not_replace = EndpointExecutor("pytest", comp_mgr)
     await executor1_not_replace.initialize("")
     # 默认为0, 要设为1防止下面依旧强制踢出。注意目前t是按连接方ctx的imeout值来判断的，此值
     connection.ENDPOINT_CALL_IDLE_TIMEOUT = 1
@@ -68,7 +69,7 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
     time_time = time.time
 
     # 初始化第一个连接
-    executor1 = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1 = EndpointExecutor("pytest", comp_mgr)
     await executor1.initialize("")
     await executor1.exec("login", 1)
     ok, _ = await executor1.exec("add_rls_comp_value", 3)
@@ -78,7 +79,7 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, comp_mgr):
 
     # 测试last active超时是否踢出用户
     # 不强制踢出，但是timeout应该生效
-    executor1_timeout_replaced = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor1_timeout_replaced = EndpointExecutor("pytest", comp_mgr)
     monkeypatch.setattr(
         time, "time", lambda: time_time() + connection.ENDPOINT_CALL_IDLE_TIMEOUT
     )
@@ -107,7 +108,7 @@ async def test_flood_detect(mod_test_app, comp_mgr, caplog):
     executors = []
     with pytest.raises(RuntimeError, match="new_connection调用失败"):
         for i in range(5):
-            loc_executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+            loc_executor = EndpointExecutor("pytest", comp_mgr)
             await loc_executor.initialize(f"233.111.111.111")
             executors.append(loc_executor)
 
@@ -125,7 +126,7 @@ async def test_future_call_bypass_flood_detect(mod_test_app, comp_mgr):
     executors = []
     # 以下代码应该成功调用没有报错
     for i in range(5):
-        loc_executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+        loc_executor = EndpointExecutor("pytest", comp_mgr)
         # 使用localhost ip地址让连接flood检测不报错
         await loc_executor.initialize(f"localhost")
         executors.append(loc_executor)

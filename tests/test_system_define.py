@@ -8,7 +8,7 @@
 import pytest
 
 from hetu.data import define_component, property_field, BaseComponent, Permission
-from hetu.system import SystemClusters, define_system, Context
+from hetu.system import SystemClusters, define_system, SystemContext
 
 
 @pytest.fixture
@@ -60,16 +60,18 @@ def test_direct_func_call_forbid(test_system1):
     with pytest.raises(AssertionError, match="Context"):
         test_system1(1, 2, 3)
 
-    ctx = Context(
+    ctx = SystemContext(
         caller=1,
         connection_id=1,
         address="127.0.0.1",
         group="admin",
         timestamp=0,
         user_data={},
-        retry_count=0,
-        transactions={},
-        inherited={},
+        race_count=0,
+        repo={},
+        depend={},
+        request=None,
+        systems=None,
     )
     with pytest.raises(RuntimeError, match="depends"):
         test_system1(ctx, 2, 3)

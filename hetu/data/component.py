@@ -297,7 +297,7 @@ def define_component(
     ...     x: np.float32 = hetu.property_field(default=0)
     ...     y: np.float32 = hetu.property_field(default=0)
     ...     owner: np.int64 = hetu.property_field(default=0, unique=True)
-    ...     name: '<U8' = hetu.property_field(default="12345678")
+    ...     name: str = hetu.property_field(default="12345678", dtype="U8")
 
     Parameters
     ----------
@@ -346,7 +346,7 @@ def define_component(
 
     属性值的类型由type hint决定（如 `: np.float32`），请使用长度明确的np类型。
     字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
-    不想看到"<U8"在IDE里标红语法错误的话，可用 `name = property_field(dtype='<U8')` 方式。
+    不想看到"<U8"在IDE里标红语法错误的话，可用 `name: str = property_field(dtype='<U8')` 方式。
 
     每个Component表都有个默认的主键`id: np.int64 = property_field(default=雪花uuid, unique=True)`，
     是一个uuid，无法修改。

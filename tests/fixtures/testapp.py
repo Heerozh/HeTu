@@ -8,6 +8,7 @@ def mod_test_app():
     import importlib
 
     hetu.data.ComponentDefines().clear_()
+    hetu.endpoint.definer.EndpointDefines()._clear()
     hetu.system.SystemClusters()._clear()
 
     importlib.reload(app)
@@ -18,20 +19,16 @@ def mod_test_app():
 
 
 def comp_mgr_factory(mod_auto_backend):
-    backend_component_table, get_or_create_backend = mod_auto_backend
-
     # 为每个test初始化comp_mgr，因为每个test的线程不同
-    backends = {"default": get_or_create_backend()}
-    comp_tbl_classes = {"default": backend_component_table}
+    backends = {"default": mod_auto_backend()}
 
-    import hetu
+    from hetu.manager import ComponentTableManager
+    from hetu.system.definer import SystemClusters
 
-    if hetu.system.SystemClusters().get_clusters("pytest") is None:
+    if SystemClusters().get_clusters("pytest") is None:
         raise RuntimeError("需要至少含有一个test_app，比如添加mod_test_app夹具")
 
-    comp_mgr = hetu.ComponentTableManager(
-        "pytest", "server1", backends, comp_tbl_classes
-    )
+    comp_mgr = ComponentTableManager("pytest", "server1", backends)
     comp_mgr._flush_all(force=True)
 
     return comp_mgr
@@ -47,11 +44,31 @@ def comp_mgr(mod_auto_backend):
     return comp_mgr_factory(mod_auto_backend)
 
 
-@pytest.fixture(scope="module")
-async def mod_executor(mod_comp_mgr):
-    import hetu
+@pytest.fixture
+async def new_ctx():
+    """SystemContext factory"""
+    from hetu.system import SystemContext
 
-    executor = hetu.system.SystemExecutor("pytest", mod_comp_mgr)
+    def create_ctx() -> SystemContext:
+        return SystemContext(
+            caller=0,
+            connection_id=0,
+            address="NotSet",
+            group="",
+            user_data={},
+            timestamp=0,
+            request=None,  # type: ignore
+            systems=None,  # type: ignore
+        )
+
+    return create_ctx
+
+
+@pytest.fixture(scope="module")
+async def mod_executor(mod_comp_mgr, new_ctx):
+    from hetu.endpoint.executor import EndpointExecutor
+
+    executor = EndpointExecutor("pytest", mod_comp_mgr, new_ctx())
     await executor.initialize("")
     yield executor
 
@@ -60,10 +77,10 @@ async def mod_executor(mod_comp_mgr):
 
 
 @pytest.fixture(scope="function")
-async def executor(comp_mgr):
-    import hetu
+async def executor(comp_mgr, new_ctx):
+    from hetu.endpoint.executor import EndpointExecutor
 
-    executor = hetu.system.SystemExecutor("pytest", comp_mgr)
+    executor = EndpointExecutor("pytest", comp_mgr, new_ctx())
     await executor.initialize("")
     yield executor
 

@@ -10,8 +10,8 @@ import asyncio
 
 import numpy as np
 
-from hetu.data import BaseComponent, property_field, define_component, Permission
-from hetu.system import define_system, Context, ResponseToClient
+import hetu
+
 
 logger = logging.getLogger("HeTu.root")
 
@@ -20,57 +20,58 @@ logger = logging.getLogger("HeTu.root")
 
 
 # 首先定于game_short_name的namespace，让CONFIG_TEMPLATE.yml能启动
-@define_system(namespace="game_short_name")
-async def do_nothing(ctx: Context, sleep):
+@hetu.define_endpoint(namespace="game_short_name")
+async def do_nothing(ctx: hetu.EndpointContext, sleep):
     pass
 
 
 # ============================
 
 
-@define_system(
-    namespace="pytest", permission=Permission.EVERYBODY, depends=("elevate",)
-)
-async def login(ctx: Context, user_id, kick_logged_in=True):
-    await ctx["elevate"](ctx, user_id, kick_logged_in)
-    return ResponseToClient({"id": ctx.caller})
+@hetu.define_endpoint(namespace="pytest", permission=hetu.Permission.EVERYBODY)
+async def login(ctx: hetu.SystemContext, user_id, kick_logged_in=True):
+    await hetu.elevate(ctx, user_id, kick_logged_in)
+    return hetu.ResponseToClient({"id": ctx.caller})
 
 
 # ============================
 
 
-@define_component(namespace="pytest", force=True, permission=Permission.OWNER)
-class RLSComp(BaseComponent):
-    owner: np.int64 = property_field(0, unique=True)
-    value: np.int32 = property_field(100)
+@hetu.define_component(namespace="pytest", force=True, permission=hetu.Permission.OWNER)
+class RLSComp(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    value: np.int32 = hetu.property_field(100)
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     components=(RLSComp,),
-    permission=Permission.USER,
+    permission=hetu.Permission.USER,
     call_lock=True,
 )
-async def add_rls_comp_value(ctx: Context, value):
-    async with ctx[RLSComp].update_or_insert(ctx.caller, "owner") as row:
+async def add_rls_comp_value(ctx: hetu.SystemContext, value):
+    async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
         row.value += value
     return row.value
 
 
-@define_system(namespace="pytest", components=(RLSComp,), permission=Permission.USER)
-async def test_rls_comp_value(ctx: Context, value):
-    row = await ctx[RLSComp].select(ctx.caller, "owner")
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+async def test_rls_comp_value(ctx: hetu.SystemContext, value):
+    row = await ctx.repo[RLSComp].get(owner=ctx.caller)
+    assert row
     print(row, value)
     assert row.value == value
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
-    permission=Permission.EVERYBODY,
+    permission=hetu.Permission.EVERYBODY,
     depends=("create_future_call:copy1",),
 )
-async def add_rls_comp_value_future(ctx: Context, value, recurring):
-    return await ctx["create_future_call:copy1"](
+async def add_rls_comp_value_future(ctx: hetu.SystemContext, value, recurring):
+    return await ctx.depend["create_future_call:copy1"](
         ctx, -1, "add_rls_comp_value", value, timeout=10, recurring=recurring
     )
 
@@ -78,109 +79,111 @@ async def add_rls_comp_value_future(ctx: Context, value, recurring):
 # ---------------------------------
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     depends=("add_rls_comp_value:copy1",),
 )
-async def add_rls_comp_value_copy(ctx: Context, value):
-    return await ctx["add_rls_comp_value:copy1"](ctx, value)
+async def add_rls_comp_value_copy(ctx: hetu.SystemContext, value):
+    return await ctx.depend["add_rls_comp_value:copy1"](ctx, value)
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     depends=("test_rls_comp_value:copy1",),
 )
-async def test_rls_comp_value_copy(ctx: Context, value):
-    return await ctx["test_rls_comp_value:copy1"](ctx, value)
+async def test_rls_comp_value_copy(ctx: hetu.SystemContext, value):
+    return await ctx.depend["test_rls_comp_value:copy1"](ctx, value)
 
 
 # ============================
 
 
-@define_component(namespace="pytest", force=True)
-class IndexComp1(BaseComponent):
-    owner: np.int64 = property_field(0, unique=True)
-    value: float = property_field(0, index=True)
+@hetu.define_component(namespace="pytest", force=True)
+class IndexComp1(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    value: float = hetu.property_field(0, index=True)
 
 
-@define_component(namespace="pytest", force=True)
-class IndexComp2(BaseComponent):
-    owner: np.int64 = property_field(0, unique=True)
-    name: "U8" = property_field("", unique=True)
+@hetu.define_component(namespace="pytest", force=True)
+class IndexComp2(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", unique=True, dtype="U8")
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     components=(IndexComp1, IndexComp2),
 )
-async def create_row(ctx: Context, owner, v1, v2):
+async def create_row(ctx: hetu.SystemContext, owner, v1, v2):
     row1 = IndexComp1.new_row()
     row1.value = v1
     row1.owner = owner
-    await ctx[IndexComp1].insert(row1)
+    await ctx.repo[IndexComp1].insert(row1)
 
-    async with ctx[IndexComp2].update_or_insert(owner, "owner") as row2:
+    async with ctx.repo[IndexComp2].upsert(owner=owner) as row2:
         row2.name = f"User_{v2}"
 
 
 # 测试bug用
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     components=(IndexComp2,),
 )
 async def create_row_2_upsert(ctx, owner, v2):
-    async with ctx[IndexComp2].update_or_insert(owner, "owner") as row:
+    async with ctx[IndexComp2].upsert(owner=owner) as row:
         row.name = f"User_{v2}"
-    async with ctx[IndexComp2].update_or_insert(owner, "owner") as row:
+    async with ctx[IndexComp2].upsert(owner=owner) as row:
         row.name = f"User_{v2}"
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
     components=(RLSComp, IndexComp1, IndexComp2),
     depends=(add_rls_comp_value,),
 )
-async def composer_system(ctx: Context):
+async def composer_system(ctx: hetu.SystemContext):
     rls_comp_value = await add_rls_comp_value(ctx, 10)
 
     await asyncio.sleep(0.1)
 
-    self_comp1 = await ctx[IndexComp1].select(ctx.caller, "owner")
-    self_comp2 = await ctx[IndexComp2].select(ctx.caller, "owner")
+    self_comp1 = await ctx.repo[IndexComp1].get(owner=ctx.caller)
+    self_comp2 = await ctx.repo[IndexComp2].get(owner=-ctx.caller)
+    assert self_comp1 and self_comp2
 
-    targets1 = await ctx[IndexComp1].query(
+    targets1 = await ctx.repo[IndexComp1].range(
         "value", self_comp1.value - 10, self_comp1.value + 10
     )
-    targets2 = await ctx[IndexComp2].query("name", self_comp2.name, "[User_d")
+    targets2 = await ctx.repo[IndexComp2].range("name", self_comp2.name, "[User_d")
     targets_id = set(targets1.owner) & set(targets2.owner)
 
     for target_id in targets_id:
-        target = await ctx[IndexComp2].select(target_id, "owner")
+        target = await ctx.repo[IndexComp2].get(owner=target_id)
+        assert target
         logger.info(f"[{target.name}]")
 
 
 # ============================
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
-    permission=Permission.EVERYBODY,
+    permission=hetu.Permission.EVERYBODY,
     components=(IndexComp1,),
 )
-async def race_select(ctx: Context, sleep):
-    async with ctx[IndexComp1].upsert(3, "owner") as row:
+async def race_select(ctx: hetu.SystemContext, sleep):
+    async with ctx.repo[IndexComp1].upsert(owner=3) as row:
         print(ctx, "selected", row)
         await asyncio.sleep(sleep)
         row.value = sleep
 
 
-@define_system(
+@hetu.define_system(
     namespace="pytest",
-    permission=Permission.EVERYBODY,
+    permission=hetu.Permission.EVERYBODY,
     components=(IndexComp1,),
 )
-async def race_query(ctx: Context, sleep):
-    _rows = await ctx[IndexComp1].query("owner", 3)
+async def race_query(ctx: hetu.SystemContext, sleep):
+    _rows = await ctx.repo[IndexComp1].range(owner=(3, 3))
     await asyncio.sleep(sleep)
     _rows[0].value = sleep
-    await ctx[IndexComp1].update(_rows[0].id, _rows[0])
+    await ctx.repo[IndexComp1].update(_rows[0])
