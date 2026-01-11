@@ -119,8 +119,8 @@ def define_endpoint(
     Parameters
     ----------
     namespace: str
-        是你的项目名，一个网络地址只能启动一个namespace下的Endpoint们。
-        定义为"global"的namespace可以在所有项目下通用。
+        是你的项目名，服务器启动时，一个网络地址只能绑定一个namespace下的Endpoint们。
+        定义为"global"的Endpoint永远会被绑定并启用，用于在项目间通用。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
     permission: Permission

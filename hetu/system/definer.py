@@ -323,8 +323,8 @@ def define_system(
     Parameters
     ----------
     namespace: str
-        是你的项目名，一个网络地址只能启动一个namespace下的System们。
-        定义为"global"的namespace可以在所有项目下通用。
+        是你的项目名，服务器启动时，一个网络地址只能绑定一个namespace下的System们。
+        定义为"global"的System永远会被绑定并启用，用于在项目间通用。
     components: list of BaseComponent class
         引用Component，引用的Component可以在`ctx`中进行相关的事务操作，保证数据一致性。
         所有引用的Components会加入共置簇(Colocation Cluster)中，指放在同一个物理数据库中，

@@ -33,7 +33,7 @@ class ComponentTableManager:
 
     def __init__(
         self,
-        namespace: str,  # todo 看看能不能去掉namespace直接启动所有endpoint和system
+        namespace: str,
         instance_name: str,
         backends: dict[str, Backend],
     ):
