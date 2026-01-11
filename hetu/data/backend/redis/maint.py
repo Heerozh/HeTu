@@ -8,7 +8,8 @@
 import hashlib
 import logging
 import warnings
-from typing import TYPE_CHECKING, cast, final, override
+from typing import TYPE_CHECKING, cast, final, override, Any
+import numpy as np
 
 from ....common.helper import batched
 from ...component import BaseComponent
@@ -51,7 +52,7 @@ class RedisTableMaintenance(TableMaintenance):
         self.lock: redis.lock.Lock = self.client.io.lock(self._lock_key, timeout=60 * 5)
 
     @override
-    def check_table(self, table_ref: TableReference):
+    def check_table(self, table_ref: TableReference) -> tuple[str, Any]:
         """
         检查组件表在数据库中的状态。
         此方法检查各个组件表的meta键值。
@@ -63,6 +64,11 @@ class RedisTableMaintenance(TableMaintenance):
             "ok" - 表存在且状态正常
             "cluster_mismatch" - 表存在但cluster_id不匹配
             "schema_mismatch" - 表存在但schema不匹配
+        meta: dict[bytes, Any]
+            组件表的meta信息，一般含有：
+                - b"version": 组件结构的md5值
+                - b"json": 组件结构的json字符串
+                - b"cluster_id": 组件所属的cluster id
         """
         io = self.client.io
 
@@ -70,21 +76,21 @@ class RedisTableMaintenance(TableMaintenance):
         key = self.meta_key(table_ref)
         meta = cast(dict, io.hgetall(key))
         if not meta:
-            return "not_exists"
+            return "not_exists", None
         else:
             version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
             # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
             if int(meta[b"cluster_id"]) != table_ref.cluster_id:
-                return "cluster_mismatch"
+                return "cluster_mismatch", meta
 
             # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
             if meta[b"version"].decode() != version:
-                return "schema_mismatch"
+                return "schema_mismatch", meta
 
-        return "ok"
+        return "ok", meta
 
     @override
-    def create_table(self, table_ref: TableReference) -> dict:
+    def create_table(self, table_ref: TableReference) -> Any:
         """创建组件表。如果已存在，会抛出异常"""
         with self.lock:
             if self.check_table(table_ref) != "not_exists":
@@ -109,10 +115,9 @@ class RedisTableMaintenance(TableMaintenance):
     # 无需drop_table, 此类操作适合人工删除
 
     @override
-    def migration_cluster_id(
-        self, table_ref: TableReference, old_cluster_id: int
-    ) -> None:
+    def migration_cluster_id(self, table_ref: TableReference, old_meta: Any) -> None:
         """迁移组件表的cluster_id"""
+        old_cluster_id = int(old_meta[b"cluster_id"])
         logger.warning(
             f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
             f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
@@ -147,12 +152,20 @@ class RedisTableMaintenance(TableMaintenance):
 
     @override
     def migration_schema(
-        self, table_ref: TableReference, old_json: str, old_version: str
+        self, table_ref: TableReference, old_meta: Any, force=False
     ) -> None:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
         此方法调用后需要rebuild_index
+
+        本方法将先寻找是否有迁移脚本，如果有则调用脚本进行迁移，否则使用默认迁移逻辑。
+
+        默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
+        force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
+        old_json = old_meta[b"json"].decode()
+        old_version = old_meta[b"version"].decode()
+
         # todo 首先调用手动迁移，完成后再调用自动迁移
         # migration_script = self._load_migration_schema_script(table_ref, old_version)
 
@@ -178,11 +191,29 @@ class RedisTableMaintenance(TableMaintenance):
         assert dtypes_in_db.fields and new_dtypes.fields  # for type checker
         for prop_name in dtypes_in_db.fields:
             if prop_name not in new_dtypes.fields:
-                logger.warning(
+                msg = (
                     f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
                     f"数据库中的属性 {prop_name} 在新的组件定义中不存在，如果改名了需要手动迁移，"
-                    f"默认丢弃该属性数据。"
+                    f"强制执行将丢弃该属性数据。"
                 )
+                logger.warning(msg)
+                if not force:
+                    raise ValueError(msg)
+
+        # 检查是否有属性类型变更且无法自动转换
+        for prop_name in new_dtypes.fields:
+            if prop_name in dtypes_in_db.fields:
+                old_type = dtypes_in_db.fields[prop_name]
+                new_type = new_dtypes.fields[prop_name]
+                if not np.can_cast(old_type[0], new_type[0]):
+                    msg = (
+                        f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
+                        f"属性 {prop_name} 的类型由 {old_type} 变更为 {new_type}，"
+                        f"无法自动转换类型，需要手动迁移，强制执行将丢弃该属性数据。"
+                    )
+                    logger.warning(msg)
+                    if not force:
+                        raise ValueError(msg)
 
         with self.lock:
             if self.check_table(table_ref) != "schema_mismatch":

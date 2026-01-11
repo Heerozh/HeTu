@@ -408,9 +408,10 @@ class TableMaintenance:
         self.client = master
 
     # 检测是否需要维护的方法
-    def check_table(self, table_ref: TableReference):
+    def check_table(self, table_ref: TableReference) -> tuple[str, Any]:
         """
         检查组件表在数据库中的状态。
+        此方法检查各个组件表的meta键值。
 
         Returns
         -------
@@ -419,25 +420,36 @@ class TableMaintenance:
             "ok" - 表存在且状态正常
             "cluster_mismatch" - 表存在但cluster_id不匹配
             "schema_mismatch" - 表存在但schema不匹配
+        meta: Any
+            组件表的meta信息。由各个后端自行定义。直接传给migration_cluster_id和migration_schema
         """
         raise NotImplementedError
 
-    def create_table(self, table_ref: TableReference) -> dict:
-        """创建组件表。如果已存在，会抛出异常"""
+    def create_table(self, table_ref: TableReference) -> Any:
+        """
+        创建组件表。如果已存在，会抛出异常。
+        组件表的meta信息。
+        """
         raise NotImplementedError
 
     # 无需drop_table, 此类操作适合人工删除
 
-    def migration_cluster_id(
-        self, table_ref: TableReference, old_cluster_id: int
-    ) -> None:
+    def migration_cluster_id(self, table_ref: TableReference, old_meta: Any) -> None:
         """迁移组件表的cluster_id"""
         raise NotImplementedError
 
     def migration_schema(
-        self, table_ref: TableReference, old_json: str, old_version: str
+        self, table_ref: TableReference, old_meta: Any, force=False
     ) -> None:
-        """迁移组件表的schema"""
+        """
+        迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
+        此方法调用后需要rebuild_index
+
+        本方法将先寻找是否有迁移脚本，如果有则调用脚本进行迁移，否则使用默认迁移逻辑。
+
+        默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
+        force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
+        """
         raise NotImplementedError
 
     def flush(self, table_ref: TableReference, force=False) -> None:

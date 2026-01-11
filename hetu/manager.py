@@ -55,23 +55,37 @@ class ComponentTableManager:
                 comp.hosted_ = table
 
     def create_or_migrate_all(self):
-        for comp, tbl in self._tables.items():
-            # 非持久化的Component需要cluster迁移，不然数据就永远的留在了数据库中
-            tbl.create_or_migrate(cluster_only=comp.volatile_)
+        """
+        创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则raise异常。
+        此时要么写迁移脚本，要么用cli强制迁移。
+        """
+        for _, tbl in self._tables.items():
+            maint = tbl.backend.get_table_maintenance()
+            tbl_status, old_meta = maint.check_table(tbl)
+            match tbl_status:
+                case "not_exists":
+                    maint.create_table(tbl)
+                case "schema_mismatch":
+                    maint.migration_schema(tbl, old_meta, force=False)
+                case "cluster_mismatch":
+                    # 非持久化的Component也需要cluster迁移，不然数据就永远的留在了数据库中
+                    maint.migration_cluster_id(tbl, old_meta)
 
     def flush_volatile(self):
         """清空所有非持久化数据"""
         for comp, tbl in self._tables.items():
             if comp.volatile_:
-                tbl.flush()
+                maint = tbl.backend.get_table_maintenance()
+                maint.flush(tbl)
 
     def _flush_all(self, force=False):
         """测试用，清空所有数据"""
         for tbl in self._tables.values():
-            tbl.flush(force)
+            maint = tbl.backend.get_table_maintenance()
+            maint.flush(tbl, force)
 
     def get_table(self, component_cls: type[BaseComponent] | str) -> Table | None:
-        if type(component_cls) is str:
+        if isinstance(component_cls, str):
             return self._tables_by_name.get(component_cls)
         else:
             return self._tables.get(component_cls)
