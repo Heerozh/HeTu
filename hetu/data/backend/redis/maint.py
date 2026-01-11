@@ -144,7 +144,9 @@ class RedisTableMaintenance(TableMaintenance):
             for old_key in old_keys:
                 old_key = old_key.decode()
                 new_key = new_prefix + old_key[old_prefix_len:]
-                io.rename(old_key, new_key)
+                io.rename(
+                    old_key, new_key
+                )  # todo cluster 不能跨节点rename，必须create+delete
             # 更新meta
             io.hset(self.meta_key(table_ref), "cluster_id", str(table_ref.cluster_id))
             logger.warning(
@@ -263,7 +265,23 @@ class RedisTableMaintenance(TableMaintenance):
                         if val is None:
                             continue
                         try:
-                            casted_val = new_type.type(old_type.type(val))
+                            val = cast(bytes, cast(object, val))
+                            casted_val = new_type.type(old_type.type(val.decode()))
+
+                            if np.issubdtype(new_type, np.character):
+                                # 字符串类型需要特殊截断处理，不然np会自动延长
+                                def fixed_str_len(dt: np.dtype) -> int:
+                                    dt = np.dtype(dt)
+                                    if dt.kind == "U":
+                                        return dt.itemsize // 4
+                                    if dt.kind == "S":
+                                        return dt.itemsize
+                                    raise TypeError(
+                                        f"not a fixed-length string dtype: {dt!r}"
+                                    )
+
+                                casted_val = casted_val[: fixed_str_len(new_type)]
+
                             pipe.hset(key.decode(), prop_name, str(casted_val))
                             converted += 1
                         except ValueError as _:
