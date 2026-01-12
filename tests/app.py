@@ -112,6 +112,7 @@ class IndexComp2(hetu.BaseComponent):
 
 @hetu.define_system(
     namespace="pytest",
+    permission=hetu.Permission.USER,
     components=(IndexComp1, IndexComp2),
 )
 async def create_row(ctx: hetu.SystemContext, owner, v1, v2):
@@ -127,12 +128,14 @@ async def create_row(ctx: hetu.SystemContext, owner, v1, v2):
 # 测试bug用
 @hetu.define_system(
     namespace="pytest",
+    permission=hetu.Permission.USER,
     components=(IndexComp2,),
 )
 async def create_row_2_upsert(ctx, owner, v2):
-    async with ctx[IndexComp2].upsert(owner=owner) as row:
+    # 连续upsert 2次同样的数据，因为内容相同，第二次不应该违反unique
+    async with ctx.repo[IndexComp2].upsert(owner=owner) as row:
         row.name = f"User_{v2}"
-    async with ctx[IndexComp2].upsert(owner=owner) as row:
+    async with ctx.repo[IndexComp2].upsert(owner=owner) as row:
         row.name = f"User_{v2}"
 
 
@@ -170,9 +173,9 @@ async def composer_system(ctx: hetu.SystemContext):
     permission=hetu.Permission.EVERYBODY,
     components=(IndexComp1,),
 )
-async def race_select(ctx: hetu.SystemContext, sleep):
+async def race_upsert(ctx: hetu.SystemContext, sleep):
     async with ctx.repo[IndexComp1].upsert(owner=3) as row:
-        print(ctx, "selected", row)
+        print(ctx, "race_upsert get", row)
         await asyncio.sleep(sleep)
         row.value = sleep
 

@@ -641,3 +641,23 @@ async def test_unique_remove_then_add_bug(item_ref, mod_auto_backend):
         row.name = "Item1"
         row.time = 2
         await item_repo.insert(row)
+
+
+async def test_session_insert_then_upsert(item_ref, mod_auto_backend):
+    """测试在同一Session中insert后立即upsert同一Unique字段的数据"""
+    backend: Backend = mod_auto_backend()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 1
+        await item_repo.insert(row)
+
+        context = item_repo.upsert(name="Item1")
+
+        async with context as upserted_row:
+            assert upserted_row.id == row.id
+            assert upserted_row.time == 1
+            assert context.insert is False

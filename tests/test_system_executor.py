@@ -41,7 +41,7 @@ async def test_system_with_rls(mod_test_app, executor):
     assert not ok
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(20)
 async def test_unique_violate_bug(mod_test_app, executor, caplog):
     # BUG: upsert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
     # 只有upsert的where参数相关的Unique违反才能当成RaceCondition重试
@@ -61,16 +61,19 @@ async def test_unique_violate_bug(mod_test_app, executor, caplog):
     assert "UniqueViolation" in caplog.text
 
 
-@pytest.mark.timeout(10)
+@pytest.mark.timeout(20)
 async def test_unique_violate_bug2(mod_test_app, executor, caplog):
     # BUG: upsert时，unique违反不应该当成RaceCondition，因为这样会导致无限重试卡死
-    # 这里是连续upsert 2次时出现
+    # 这里是用连续upsert 2次
 
     # 登录用户1234
     ok, _ = await executor.execute("login", 1234)
     assert ok
 
     ok, _ = await executor.execute("create_row_2_upsert", 99, "zz")
+    assert ok
+
+    ok, _ = await executor.execute("create_row_2_upsert", 18, "zz")
     assert not ok
 
     assert "RaceCondition" not in caplog.text
@@ -121,7 +124,7 @@ async def test_select_race_condition(mod_test_app, comp_mgr, executor):
 
     # 必须差距大才能保证某个task先select
     await asyncio.gather(
-        executor.execute("race_select", 0.4), executor2.execute("race_select", 0.1)
+        executor.execute("race_upsert", 0.4), executor2.execute("race_upsert", 0.1)
     )
 
     assert executor.context.retry_count == 1

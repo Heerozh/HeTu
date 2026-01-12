@@ -62,7 +62,7 @@ class SessionRepository:
                 return unique_index
         return None
 
-    async def _remote_has_unique_conflicts(
+    async def remote_has_unique_conflicts_(
         self, row: np.record, fields: set
     ) -> str | None:
         """
@@ -124,7 +124,7 @@ class SessionRepository:
         if field := self._local_has_unique_conflicts(row, changed_fields):
             return field
 
-        if field := await self._remote_has_unique_conflicts(row, changed_fields):
+        if field := await self.remote_has_unique_conflicts_(row, changed_fields):
             return field
 
         return None
@@ -393,23 +393,23 @@ class UpsertContext:
     """用于在事务中执行UpdateOrInsert操作的上下文管理器。"""
 
     def __init__(
-        self, selected: SessionRepository, index_name: str, query_value: IndexScalar
+        self, repo: SessionRepository, index_name: str, query_value: IndexScalar
     ) -> None:
         self.clean_data = None
         self.row_data = None
         self.insert = None
-        self.selected = selected
+        self.repo = repo
         self.index_name = index_name
         self.query_value = query_value
 
     async def __aenter__(self) -> np.record:
-        existing_row = await self.selected.get(self.index_name, self.query_value)
+        existing_row = await self.repo.get(self.index_name, self.query_value)
         if existing_row is not None:
             self.row_data = existing_row
             self.clean_data = existing_row.copy()
             self.insert = False
         else:
-            self.row_data = self.selected.ref.comp_cls.new_row()
+            self.row_data = self.repo.ref.comp_cls.new_row()
             self.row_data[self.index_name] = self.query_value
             self.insert = True
         return self.row_data
@@ -417,13 +417,17 @@ class UpsertContext:
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
         if exc_type is None:
             assert self.row_data is not None
-            try:
-                if self.insert:
-                    await self.selected.insert(self.row_data)
-                else:
-                    if self.row_data == self.clean_data:
-                        # 无修改不更新
-                        return
-                    await self.selected.update(self.row_data)
-            except UniqueViolation as e:
-                raise RaceCondition from e
+            if self.insert:
+                # 如果是insert，检查upsert的锚定字段是否已存在，
+                if await self.repo.remote_has_unique_conflicts_(
+                    self.row_data, {self.index_name}
+                ):
+                    raise RaceCondition(
+                        f"Upsert failed: 锚定的index({self.index_name})存在Unique违反，说明竞态insert"
+                    )
+                await self.repo.insert(self.row_data)
+            else:
+                if self.row_data == self.clean_data:
+                    # 无修改不更新
+                    return
+                await self.repo.update(self.row_data)
