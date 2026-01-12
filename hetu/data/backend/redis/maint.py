@@ -144,9 +144,12 @@ class RedisTableMaintenance(TableMaintenance):
             for old_key in old_keys:
                 old_key = old_key.decode()
                 new_key = new_prefix + old_key[old_prefix_len:]
-                io.rename(
-                    old_key, new_key
-                )  # todo cluster 不能跨节点rename，必须create+delete
+                dump_data = cast(bytes, io.dump(old_key))
+                ttl = cast(float, io.pttl(old_key))
+                if ttl is None or ttl < 0:
+                    ttl = 0  # 0 代表永不过期
+                io.restore(new_key, ttl, dump_data, replace=True)
+                io.delete(old_key)  # cluster 不能跨节点rename，必须create+delete
             # 更新meta
             io.hset(self.meta_key(table_ref), "cluster_id", str(table_ref.cluster_id))
             logger.warning(
