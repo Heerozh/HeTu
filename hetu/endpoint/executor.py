@@ -93,11 +93,11 @@ class EndpointExecutor:
                     return None
 
         # 检测args数量是否对得上
-        if len(args) < (ep.arg_count - ep.defaults_count - 1):
+        if not (ep.arg_count - ep.defaults_count - 1 <= len(args) <= ep.arg_count - 1):
             err_msg = (
                 f"❌ [📞Endpoint] [非法操作] {context} | "
                 f"{namespace}.{endpoint}参数数量不对，检查客户端代码。"
-                f"要求至少{ep.arg_count - ep.defaults_count - 1}个参数, "
+                f"要求{ep.arg_count - ep.defaults_count - 1}-{ep.arg_count - 1}个参数, "
                 f"传入了{len(args)}个。"
                 f"调用内容：{args}"
             )

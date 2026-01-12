@@ -193,3 +193,11 @@ async def race_range(ctx: hetu.SystemContext, sleep):
     await asyncio.sleep(sleep)
     _rows[0].value = sleep
     await ctx.repo[IndexComp1].update(_rows[0])
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(IndexComp1,),
+)
+async def uncallable(ctx: hetu.SystemContext, sleep):
+    assert False

@@ -5,6 +5,7 @@ from typing import cast
 import pytest
 import hetu
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import RowFormat
 from hetu.endpoint.executor import EndpointExecutor
 
 SnowflakeID().init(1, 0)
@@ -20,10 +21,18 @@ async def test_call_not_exist(mod_test_app, mod_executor):
         await mod_executor.context.systems.call("not_exist_system", "any_value")
 
 
-async def test_call_args_error(mod_test_app, mod_executor):
+async def test_call_args_error(mod_test_app, mod_executor, caplog):
     # 测试参数少一个
     ok, _ = await mod_executor.execute("login")
     assert not ok
+
+    # 测试参数多一个
+    ok, _ = await mod_executor.execute("login", 1234, True, "extra_arg")
+    assert not ok
+
+    assert len(caplog.records) == 4  # 因为执行器会记录2份日志(加一份replay)
+    assert "1-2" in caplog.records[0].msg
+    assert "1-2" in caplog.records[2].msg
 
 
 async def test_call_no_permission(mod_test_app, mod_executor):
@@ -35,8 +44,7 @@ async def test_call_no_permission(mod_test_app, mod_executor):
 async def test_call_none_permission(mod_test_app, mod_executor):
     # 测试无endpoint的system，即使admin也不能调用
     mod_executor.context.group = "admin"
-    assert False, "todo"
-    ok, _ = await mod_executor.execute("xxx", 9)
+    ok, _ = await mod_executor.execute("uncallable", 9)
     assert not ok
 
 
@@ -204,7 +212,7 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
         assert row.value == 100 + 9
 
 
-async def test_execute_system_call_lock(mod_test_app, executor):
+async def test_execute_system_call_lock(mod_test_app, executor: EndpointExecutor):
     ok, _ = await executor.execute("login", 1101)
     assert ok
     ok, _ = await executor.execute("add_rls_comp_value", 1)
@@ -213,12 +221,9 @@ async def test_execute_system_call_lock(mod_test_app, executor):
     assert ok
 
     # 测试带uuid的call应该只执行1次
-    from hetu.system import SystemCall
-
-    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "uuid1"))
-    assert ok
-    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (3,), "uuid1"))
-    assert ok
+    systems = executor.context.systems
+    await systems.call("add_rls_comp_value", 2, uuid="uuid1")
+    await systems.call("add_rls_comp_value", 3, uuid="uuid1")
 
     # 去数据库读取内容看是否正确
     ok, _ = await executor.execute("test_rls_comp_value", 100 + 4)
@@ -229,11 +234,10 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
     time_time = time.time
 
     # 测试lock数据过期清理是否正常
-    from hetu.system import SystemCall
 
     await executor.execute("login", 1020)
-    ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
-    assert ok
+    systems = executor.context.systems
+    await systems.call("add_rls_comp_value", 2, uuid="test_uuid")
     from hetu.system.lock import SystemLock
 
     # call lock每次会按system名复制一份ExecutionLock表
@@ -245,8 +249,8 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
 
     # 未清理
     await clean_expired_call_locks(comp_mgr)
-    rows = await lock_tbl.direct_query(
-        "called", left=0, right=time_time(), limit=1, row_format="raw"
+    rows = await lock_tbl.servant_range(
+        "called", left=0, right=time_time(), limit=1, row_format=RowFormat.RAW
     )
     assert len(rows) == 1
 
@@ -257,7 +261,7 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
         time, "time", lambda: time_time() + datetime.timedelta(days=8).total_seconds()
     )
     await clean_expired_call_locks(comp_mgr)
-    rows = await lock_tbl.direct_query(
-        "called", left=0, right=0xFFFFFFFF, limit=1, row_format="raw"
+    rows = await lock_tbl.servant_range(
+        "called", left=0, right=0xFFFFFFFF, limit=1, row_format=RowFormat.RAW
     )
     assert len(rows) == 0
