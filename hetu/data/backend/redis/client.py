@@ -298,7 +298,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
             # pubsub值建议为$剩余内存/预估在线数$
 
     @override
-    async def is_synced(self) -> bool:
+    async def is_synced(self, checkpoint: Any = None) -> tuple[bool, Any]:
+        """
+        在master库上查询待各个savants数据库同步状态，防止后续事务获取不到数据。
+        主要用于关键节点，比如创建新用户连接。
+        checkpoint指数据检查点，如写入日志的行数，检查该点之前的数据是否已同步完成。
+
+        返回是否已完成同步，以及master最新checkpoint（可以用来下一次查询）。
+        """
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
 
@@ -306,15 +313,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         info = await self.aio.info("replication")
         master_offset = int(info.get("master_repl_offset", 0))
+        if checkpoint is None:
+            checkpoint = master_offset
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
             if key.startswith("slave") or key.startswith("replica"):
                 if type(value) is not dict:  # 可能是 replicas_waiting_psync:0
                     continue
-                lag_of_offset = master_offset - int(value.get("offset", 0))
+                lag_of_offset = checkpoint - int(value.get("offset", 0))
                 if lag_of_offset > 0:
-                    return False
-        return True
+                    return False, master_offset
+        return True, master_offset
 
     @override
     def get_worker_keeper(self, sequence_id: int) -> RedisWorkerKeeper:

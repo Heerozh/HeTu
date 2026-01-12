@@ -67,6 +67,8 @@ async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
         row.address = address
         await repo.insert(row)
 
+    # 等待数据同步完成，防止后续操作找不到关键连接数据
+    await table.backend.wait_for_synced()
     return row.id
 
 
@@ -80,7 +82,7 @@ async def del_connection(comp_mgr: ComponentTableManager, connection_id: int) ->
             repo = session.using(Connection)
             connection = await repo.get(id=connection_id)
             if connection is not None:
-                connection.delete(connection_id)
+                repo.delete(connection_id)
 
 
 async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
@@ -93,7 +95,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
 
     """
     assert ctx.connection_id != 0, "请先初始化连接"
-    comp_mgr: ComponentTableManager = ctx.request.app.ctx.comp_mgr
+    comp_mgr: ComponentTableManager = ctx.systems.comp_mgr
     table = comp_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 

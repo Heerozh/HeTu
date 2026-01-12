@@ -201,7 +201,7 @@ async def pop_upcoming_call(tbl: Table):
     return call
 
 
-async def exec_future_call(call: np.record, executor: SystemCaller, tbl: Table):
+async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 准备System
     sys = SYSTEM_CLUSTERS.get_system(call.system)
     if not sys:
@@ -214,9 +214,9 @@ async def exec_future_call(call: np.record, executor: SystemCaller, tbl: Table):
     req_call_lock = not call.recurring and call.timeout != 0
     # 执行
     if req_call_lock:
-        ok, res = await executor.call_(sys, *args, uuid=str(call.id))
+        ok, res = await caller.call_(sys, *args, uuid=str(call.id))
     else:
-        ok, res = await executor.call_(sys, *args)
+        ok, res = await caller.call_(sys, *args)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
@@ -228,7 +228,7 @@ async def exec_future_call(call: np.record, executor: SystemCaller, tbl: Table):
             if get_4_del:
                 repo.delete(get_4_del.id)
         # 再删除call_lock uuid数据，只有ok的执行才有call lock
-        await executor.remove_call_lock(call.system, str(call.id))
+        await caller.remove_call_lock(call.system, str(call.id))
     return True
 
 
@@ -262,7 +262,7 @@ async def future_call_task(app):
     )
 
     # 初始化task的执行器
-    executor = SystemCaller(app.config["NAMESPACE"], comp_mgr, context)
+    caller = SystemCaller(app.config["NAMESPACE"], comp_mgr, context)
 
     # 获取所有未来调用组件
     comp_tables = [comp_mgr.get_table(FutureCalls)]
@@ -286,7 +286,7 @@ async def future_call_task(app):
                 continue
 
             # 执行任务, 此时call已被取出，如果服务器关闭/数据库断线，timeout=0的任务会丢失
-            await exec_future_call(call, executor, tbl)
+            await exec_future_call(call, caller, tbl)
         except asyncio.CancelledError:
             break
         except Exception as e:

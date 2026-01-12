@@ -224,7 +224,10 @@ class ComponentDefines(metaclass=Singleton):
         self._components: dict[str, dict[str, type[BaseComponent]]] = {}
 
     def clear_(self):
+        cores = self._components.get("core", {})
         self._components.clear()
+        # 不清除core组件，因为这些都是系统组件
+        self._components["core"] = cores
 
     def get_all(self, namespace: str | None = None) -> list[type[BaseComponent]]:
         """返回所有Component类，但一般不使用此方法，而是用SystemClusters().get_clusters()获取用到的表"""

@@ -92,11 +92,14 @@ class Backend:
 
     async def wait_for_synced(self) -> None:
         """
-        等待各个savants数据库和master数据库的数据完成同步。
-        主要用于test用例。
+        sleep等待各个savants数据库和master数据库的数据完成数据同步。防止后续事务获取不到数据。
+        只判断调用时间点前的数据，后续新增的数据不做判断，不会出现长时间等待的问题。
+        主要用于性能无关的关键节点，比如创建新用户连接。
         """
-        while not await self._master.is_synced():
+        synced, checkpoint = await self._master.is_synced(None)
+        while not synced:
             await asyncio.sleep(0.1)
+            synced, _ = await self._master.is_synced(checkpoint)
 
     def get_worker_keeper(self, sequence_id: int) -> WorkerKeeper | None:
         """

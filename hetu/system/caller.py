@@ -47,7 +47,7 @@ class SystemCaller:
         # 读取保存的system define
         sys = SYSTEM_CLUSTERS.get_system(system)
         if not sys:
-            err_msg = f"⚠️ [📞Executor] [非法操作] {context} | 不存在的System, 检查是否非法调用：{system}"
+            err_msg = f"⚠️ [📞Caller] [非法操作] {context} | 不存在的System, 检查是否非法调用：{system}"
             replay.info(err_msg)
             logger.warning(err_msg)
             return None
@@ -64,7 +64,7 @@ class SystemCaller:
         """
         # 开始调用
         sys_name = sys.func.__name__
-        # logger.debug(f"⌚ [📞Executor] 调用System: {sys_name}")
+        # logger.debug(f"⌚ [📞Caller] 调用System: {sys_name}")
 
         # 初始化context值
         context = self.context
@@ -99,7 +99,7 @@ class SystemCaller:
                 if uuid and await context.repo[SystemLock].get(uuid=uuid):
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
-                        f"⌚ [📞Executor] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                        f"⌚ [📞Caller] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
                     )
                     return True, None
                 # 执行
@@ -112,7 +112,7 @@ class SystemCaller:
                         lock.name = sys_name
                 # 执行事务
                 await session.commit()
-                # logger.debug(f"✅ [📞Executor] 调用System成功: {sys_name}")
+                # logger.debug(f"✅ [📞Caller] 调用System成功: {sys_name}")
                 return True, rtn
             except RaceCondition:
                 context.race_count += 1
@@ -121,12 +121,12 @@ class SystemCaller:
                 delay = random.random() / 5
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(
-                    f"⌚ [📞Executor] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                    f"⌚ [📞Caller] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
                 )
                 await asyncio.sleep(delay)
                 continue
             except Exception as e:
-                err_msg = f"❌ [📞Executor] 系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
+                err_msg = f"❌ [📞Caller] 系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
                 replay.info(err_msg)
                 logger.exception(err_msg)
                 return False, None
@@ -138,7 +138,7 @@ class SystemCaller:
                 SLOW_LOG.log(elapsed, sys_name, context.race_count)
 
         logger.debug(
-            f"✅ [📞Executor] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}"
+            f"✅ [📞Caller] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}"
         )
         return False, None
 

@@ -30,7 +30,8 @@ async def do_nothing(ctx: hetu.EndpointContext, sleep):
 
 @hetu.define_endpoint(namespace="pytest", permission=hetu.Permission.EVERYBODY)
 async def login(ctx: hetu.SystemContext, user_id, kick_logged_in=True):
-    await hetu.elevate(ctx, user_id, kick_logged_in)
+    ok, reason = await hetu.elevate(ctx, user_id, kick_logged_in)
+    assert ok, reason
     return hetu.ResponseToClient({"id": ctx.caller})
 
 

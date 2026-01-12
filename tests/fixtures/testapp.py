@@ -15,6 +15,7 @@ def mod_test_app():
 
     # 初始化SystemCluster
     hetu.system.SystemClusters().build_clusters("pytest")
+    hetu.system.SystemClusters().build_endpoints()
     return app
 
 
@@ -45,12 +46,13 @@ def comp_mgr(mod_auto_backend):
 
 
 @pytest.fixture
-async def new_ctx():
+async def new_ctx(comp_mgr):
     """SystemContext factory"""
     from hetu.system import SystemContext
+    from hetu.system.caller import SystemCaller
 
     def create_ctx() -> SystemContext:
-        return SystemContext(
+        ctx = SystemContext(
             caller=0,
             connection_id=0,
             address="NotSet",
@@ -60,6 +62,9 @@ async def new_ctx():
             request=None,  # type: ignore
             systems=None,  # type: ignore
         )
+        systems = SystemCaller("pytest", comp_mgr, ctx)
+        ctx.systems = systems
+        return ctx
 
     return create_ctx
 

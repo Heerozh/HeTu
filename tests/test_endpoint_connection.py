@@ -6,6 +6,10 @@ import hetu
 import hetu.endpoint.connection as connection
 from hetu.endpoint.executor import EndpointExecutor
 
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
+
 
 async def test_connect_kick(mod_test_app, comp_mgr, new_ctx):
     # 先登录2个连接

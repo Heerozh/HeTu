@@ -109,10 +109,13 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    async def is_synced(self) -> bool:
+    async def is_synced(self, checkpoint: Any = None) -> tuple[bool, Any]:
         """
-        在主库上查询同步状态，返回是否已完成同步。
-        主要用于test用例。
+        在master库上查询待各个savants数据库同步状态，防止后续事务获取不到数据。
+        主要用于关键节点，比如创建新用户连接。
+        checkpoint指数据检查点，如写入日志的行数，检查该点之前的数据是否已同步完成。
+
+        返回是否已完成同步，以及master最新checkpoint（可以用来下一次查询）。
         """
         # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
