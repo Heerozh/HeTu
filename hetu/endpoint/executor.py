@@ -64,7 +64,7 @@ class EndpointExecutor:
         ep = EndpointDefines().get_endpoint(namespace, endpoint)
         if not ep:
             err_msg = (
-                f"⚠️ [📞Executor] [非法操作] {context} | "
+                f"⚠️ [📞Endpoint] [非法操作] {context} | "
                 f"不存在的Endpoint, 检查是否非法调用：{namespace}.{endpoint}"
             )
             replay.info(err_msg)
@@ -76,7 +76,7 @@ class EndpointExecutor:
             case Permission.USER:
                 if not context.caller:
                     err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"⚠️ [📞Endpoint] [非法操作] {context} | "
                         f"{endpoint}无调用权限，检查是否非法调用：{args}"
                     )
                     replay.info(err_msg)
@@ -85,7 +85,7 @@ class EndpointExecutor:
             case Permission.ADMIN:
                 if not context.is_admin():
                     err_msg = (
-                        f"⚠️ [📞Executor] [非法操作] {context} | "
+                        f"⚠️ [📞Endpoint] [非法操作] {context} | "
                         f"{endpoint}无调用权限，检查是否非法调用：{args}"
                     )
                     replay.info(err_msg)
@@ -95,7 +95,7 @@ class EndpointExecutor:
         # 检测args数量是否对得上 todo 为啥要-3来着？
         if len(args) < (ep.arg_count - ep.defaults_count - 3):
             err_msg = (
-                f"❌ [📞Executor] [非法操作] {context} | "
+                f"❌ [📞Endpoint] [非法操作] {context} | "
                 f"{namespace}.{endpoint}参数数量不对，检查客户端代码。"
                 f"要求{ep.arg_count - ep.defaults_count}个参数, "
                 f"传入了{len(args)}个。"
@@ -118,7 +118,7 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        # logger.debug(f"⌚ [📞Executor] 调用Endpoint: {ep_name}")
+        # logger.debug(f"⌚ [📞Endpoint] 调用Endpoint: {ep_name}")
 
         # 初始化context值
         context = self.context
@@ -128,11 +128,11 @@ class EndpointExecutor:
         try:
             # 执行
             rtn = await ep.func(context, *args)
-            # logger.debug(f"✅ [📞Executor] 调用Endpoint成功: {ep_name}")
+            # logger.debug(f"✅ [📞Endpoint] 调用Endpoint成功: {ep_name}")
             return True, rtn
         except Exception as e:
             err_msg = (
-                f"❌ [📞Executor] Endpoint调用异常，调用：{ep_name}{args}，"
+                f"❌ [📞Endpoint] [调用异常] {context} | {ep_name}{args}，"
                 f"异常：{type(e).__name__}:{e}"
             )
             replay.info(err_msg)

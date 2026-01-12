@@ -70,10 +70,34 @@ async def new_ctx(comp_mgr):
 
 
 @pytest.fixture(scope="module")
-async def mod_executor(mod_comp_mgr, new_ctx):
+async def mod_new_ctx(mod_comp_mgr):
+    """SystemContext factory"""
+    from hetu.system import SystemContext
+    from hetu.system.caller import SystemCaller
+
+    def create_ctx() -> SystemContext:
+        ctx = SystemContext(
+            caller=0,
+            connection_id=0,
+            address="NotSet",
+            group="",
+            user_data={},
+            timestamp=0,
+            request=None,  # type: ignore
+            systems=None,  # type: ignore
+        )
+        systems = SystemCaller("pytest", mod_comp_mgr, ctx)
+        ctx.systems = systems
+        return ctx
+
+    return create_ctx
+
+
+@pytest.fixture(scope="module")
+async def mod_executor(mod_comp_mgr, mod_new_ctx):
     from hetu.endpoint.executor import EndpointExecutor
 
-    executor = EndpointExecutor("pytest", mod_comp_mgr, new_ctx())
+    executor = EndpointExecutor("pytest", mod_comp_mgr, mod_new_ctx())
     await executor.initialize("")
     yield executor
 

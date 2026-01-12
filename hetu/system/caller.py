@@ -41,22 +41,19 @@ class SystemCaller:
         self.comp_mgr = comp_mgr
         self.context = context
 
-    def call_check(self, system: str) -> SystemDefine | None:
+    @classmethod
+    def call_check(cls, system: str) -> SystemDefine:
         """检查调用是否合法"""
-        context = self.context
         # 读取保存的system define
         sys = SYSTEM_CLUSTERS.get_system(system)
         if not sys:
-            err_msg = f"⚠️ [📞Caller] [非法操作] {context} | 不存在的System, 检查是否非法调用：{system}"
-            replay.info(err_msg)
-            logger.warning(err_msg)
-            return None
+            raise ValueError(f"不存在的System, 检查是否非法调用：{system}")
 
         return sys
 
     async def call_(
         self, sys: SystemDefine, *args, uuid: str = ""
-    ) -> tuple[bool, ResponseToClient | None]:
+    ) -> ResponseToClient | None:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，System返回值
@@ -64,7 +61,7 @@ class SystemCaller:
         """
         # 开始调用
         sys_name = sys.func.__name__
-        # logger.debug(f"⌚ [📞Caller] 调用System: {sys_name}")
+        # logger.debug(f"⌚ [📞System] 调用System: {sys_name}")
 
         # 初始化context值
         context = self.context
@@ -99,9 +96,9 @@ class SystemCaller:
                 if uuid and await context.repo[SystemLock].get(uuid=uuid):
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
-                        f"⌚ [📞Caller] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                        f"⌚ [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
                     )
-                    return True, None
+                    return None
                 # 执行
                 rtn = await sys.func(context, *args)
                 # 标记uuid已执行
@@ -112,8 +109,8 @@ class SystemCaller:
                         lock.name = sys_name
                 # 执行事务
                 await session.commit()
-                # logger.debug(f"✅ [📞Caller] 调用System成功: {sys_name}")
-                return True, rtn
+                # logger.debug(f"✅ [📞System] 调用System成功: {sys_name}")
+                return rtn
             except RaceCondition:
                 context.race_count += 1
                 # 重试时sleep一段时间，可降低再次冲突率约90%。
@@ -121,15 +118,13 @@ class SystemCaller:
                 delay = random.random() / 5
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(
-                    f"⌚ [📞Caller] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                    f"⌚ [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
                 )
                 await asyncio.sleep(delay)
                 continue
-            except Exception as e:
-                err_msg = f"❌ [📞Caller] 系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
-                replay.info(err_msg)
-                logger.exception(err_msg)
-                return False, None
+            except Exception as _:
+                # err_msg = f"嵌套系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
+                raise
             finally:
                 # 上面如果执行过commit了，那么这句也无害
                 session.discard()
@@ -137,22 +132,15 @@ class SystemCaller:
                 elapsed = time.perf_counter() - start_time
                 SLOW_LOG.log(elapsed, sys_name, context.race_count)
 
-        logger.debug(
-            f"✅ [📞Caller] 调用System失败, 超过{sys_name}重试次数{sys.max_retry}"
-        )
-        return False, None
+        raise RuntimeError(f"调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
 
-    async def call(
-        self, system: str, *args, uuid: str = ""
-    ) -> tuple[bool, ResponseToClient | None]:
+    async def call(self, system: str, *args, uuid: str = "") -> ResponseToClient | None:
         """
         调用System，返回True表示调用成功，
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
         """
         # 检查call参数和call权限
         sys = self.call_check(system)
-        if sys is None:
-            return False, None
 
         # 开始调用
         return await self.call_(sys, *args, uuid=uuid)

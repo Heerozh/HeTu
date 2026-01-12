@@ -57,7 +57,7 @@ async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
             same_ips = await repo.range("address", address, limit=1000)
             same_ip_guests = same_ips[same_ips.owner == 0]
             if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
-                msg = f"⚠️ [📞Executor] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+                msg = f"⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
                 logger.warning(msg)
                 raise RuntimeError(msg)
 
@@ -172,7 +172,7 @@ class ConnectionAliveChecker:
             # 所以大部分情况是servant还没有从master同步数据过来，如果有些数据库wait sync无效，
             # 这里可以考虑重试几次
             if conn is None or conn.owner != caller:
-                err_msg = f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
+                err_msg = f"⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
@@ -209,7 +209,7 @@ class ConnectionFloodChecker:
         for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
                 err_msg = (
-                    f"⚠️ [📞Executor] [非法操作] "
+                    f"⚠️ [📞Endpoint] [非法操作] "
                     f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
                     f"可能是订阅攻击，将断开连接。调用：{info}"
                 )
@@ -229,7 +229,7 @@ class ConnectionFloodChecker:
         for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
                 err_msg = (
-                    f"⚠️ [📞Executor] [非法操作] "
+                    f"⚠️ [📞Endpoint] [非法操作] "
                     f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
                     f"可能是flood攻击，将断开连接。调用：{info}"
                 )

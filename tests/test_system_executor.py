@@ -2,35 +2,42 @@ import logging
 import time
 import pytest
 import hetu
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
 
 
 async def test_call_not_exist(mod_test_app, mod_executor):
-    # 测试不能存在的system call
-    ok, _ = await mod_executor.exec("not_exist_system", "any_value")
+    # 测试不存在的endpoint call
+    ok, _ = await mod_executor.execute("not_exist_system", "any_value")
     assert not ok
+
+    # 测试不存在的system call
+    with pytest.raises(ValueError, match="不存在"):
+        await mod_executor.context.systems.call("not_exist_system", "any_value")
 
 
 async def test_call_no_permission(mod_test_app, mod_executor):
     # 测试无权限call
-    ok, _ = await mod_executor.exec("add_rls_comp_value", 9)
+    ok, _ = await mod_executor.execute("add_rls_comp_value", 9)
     assert not ok
 
 
 async def test_system_with_rls(mod_test_app, executor):
     # 测试登录
-    ok, _ = await executor.exec("login", 1234)
+    ok, _ = await executor.execute("login", 1234)
     assert ok
 
     # 测试有权限call
-    ok, _ = await executor.exec("add_rls_comp_value", 9)
+    ok, _ = await executor.execute("add_rls_comp_value", 9)
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec("test_rls_comp_value", 100 + 9)
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 9)
     assert ok
 
     # 故意传不正确的值
-    ok, _ = await executor.exec("test_rls_comp_value", 100 + 10)
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 10)
     assert not ok
 
 
@@ -40,14 +47,14 @@ async def test_unique_violate_bug(mod_test_app, executor, caplog):
     # 只有upsert的where参数相关的Unique违反才能当成RaceCondition重试
 
     # 登录用户1234
-    ok, _ = await executor.exec("login", 1234)
+    ok, _ = await executor.execute("login", 1234)
     assert ok
 
-    ok, _ = await executor.exec("create_row", 20, 99, "zz")
+    ok, _ = await executor.execute("create_row", 20, 99, "zz")
     assert ok
 
     # unique违反 应该失败，而不是无限RaceCondition重试
-    ok, _ = await executor.exec("create_row", 21, 99, "zz")
+    ok, _ = await executor.execute("create_row", 21, 99, "zz")
     assert not ok
 
     assert "RaceCondition" not in caplog.text
@@ -60,10 +67,10 @@ async def test_unique_violate_bug2(mod_test_app, executor, caplog):
     # 这里是连续upsert 2次时出现
 
     # 登录用户1234
-    ok, _ = await executor.exec("login", 1234)
+    ok, _ = await executor.execute("login", 1234)
     assert ok
 
-    ok, _ = await executor.exec("create_row_2_upsert", 99, "zz")
+    ok, _ = await executor.execute("create_row_2_upsert", 99, "zz")
     assert not ok
 
     assert "RaceCondition" not in caplog.text
@@ -77,23 +84,23 @@ async def test_slow_log(mod_test_app, executor, caplog):
     hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
 
     # 登录用户1234
-    ok, _ = await executor.exec("login", 1234)
+    ok, _ = await executor.execute("login", 1234)
     assert ok
 
     # 添加3行数据
-    ok, _ = await executor.exec("create_row", executor.context.caller, 10, "b")
+    ok, _ = await executor.execute("create_row", executor.context.caller, 10, "b")
     assert ok
-    ok, _ = await executor.exec("create_row", 3, 0, "a")  # b-d query不符合
+    ok, _ = await executor.execute("create_row", 3, 0, "a")  # b-d query不符合
     assert ok
-    ok, _ = await executor.exec("create_row", 4, 19, "c")
+    ok, _ = await executor.execute("create_row", 4, 19, "c")
     assert ok
-    ok, _ = await executor.exec("create_row", 5, 20, "d")
+    ok, _ = await executor.execute("create_row", 5, 20, "d")
     assert ok
-    ok, _ = await executor.exec("create_row", 6, 21, "e")  # 0-20和b-d query都不符合
+    ok, _ = await executor.execute("create_row", 6, 21, "e")  # 0-20和b-d query都不符合
     assert ok
 
     with caplog.at_level(logging.INFO, logger="HeTu"):
-        ok, _ = await executor.exec("composer_system")
+        ok, _ = await executor.execute("composer_system")
         assert ok
 
     # 检查日志输出
@@ -114,7 +121,7 @@ async def test_select_race_condition(mod_test_app, comp_mgr, executor):
 
     # 必须差距大才能保证某个task先select
     await asyncio.gather(
-        executor.exec("race_select", 0.4), executor2.exec("race_select", 0.1)
+        executor.execute("race_select", 0.4), executor2.execute("race_select", 0.1)
     )
 
     assert executor.context.retry_count == 1
@@ -130,17 +137,17 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
     await executor2.initialize("")
 
     # 登录用户1234
-    ok, _ = await executor.exec("login", 1234)
+    ok, _ = await executor.execute("login", 1234)
     assert ok
     # 先添加一行
-    ok, _ = await executor.exec("create_row", 3, 0, "a")
+    ok, _ = await executor.execute("create_row", 3, 0, "a")
     assert ok
 
     import asyncio
 
     # 必须差距大才能保证某个task先query
     await asyncio.gather(
-        executor.exec("race_query", 0.4), executor2.exec("race_query", 0.1)
+        executor.execute("race_query", 0.4), executor2.execute("race_query", 0.1)
     )
 
     assert executor.context.retry_count == 1
@@ -151,18 +158,18 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 
 
 async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
-    ok, _ = await executor.exec("login", 1001)
+    ok, _ = await executor.execute("login", 1001)
     assert ok
     # 使用copy的system，应该对应的储存空间也是copy的
-    ok, _ = await executor.exec("add_rls_comp_value_copy", 9)
+    ok, _ = await executor.execute("add_rls_comp_value_copy", 9)
     assert ok
-    ok, _ = await executor.exec("add_rls_comp_value", 1)
+    ok, _ = await executor.execute("add_rls_comp_value", 1)
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec("test_rls_comp_value", 100 + 1)
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 1)
     assert ok
-    ok, _ = await executor.exec("test_rls_comp_value_copy", 100 + 9)
+    ok, _ = await executor.execute("test_rls_comp_value_copy", 100 + 9)
     assert ok
 
     # 直接通过Comp读取
@@ -177,11 +184,11 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
 
 
 async def test_execute_system_call_lock(mod_test_app, executor):
-    ok, _ = await executor.exec("login", 1101)
+    ok, _ = await executor.execute("login", 1101)
     assert ok
-    ok, _ = await executor.exec("add_rls_comp_value", 1)
+    ok, _ = await executor.execute("add_rls_comp_value", 1)
     assert ok
-    ok, _ = await executor.exec("add_rls_comp_value", 1)
+    ok, _ = await executor.execute("add_rls_comp_value", 1)
     assert ok
 
     # 测试带uuid的call应该只执行1次
@@ -193,7 +200,7 @@ async def test_execute_system_call_lock(mod_test_app, executor):
     assert ok
 
     # 去数据库读取内容看是否正确
-    ok, _ = await executor.exec("test_rls_comp_value", 100 + 4)
+    ok, _ = await executor.execute("test_rls_comp_value", 100 + 4)
     assert ok
 
 
@@ -203,7 +210,7 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
     # 测试lock数据过期清理是否正常
     from hetu.system import SystemCall
 
-    await executor.exec("login", 1020)
+    await executor.execute("login", 1020)
     ok, _ = await executor.execute(SystemCall("add_rls_comp_value", (2,), "test_uuid"))
     assert ok
     from hetu.system.lock import SystemLock

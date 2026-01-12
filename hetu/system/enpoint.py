@@ -22,11 +22,7 @@ def create_system_endpoint(system: str) -> Callable:
     """自动生成的直接调用System的Endpoint"""
 
     async def system_endpoint(ctx: SystemContext, *args) -> None | EndpointResponse:
-        ok, rsp = await ctx.systems.call(system, *args)
-        if ok:
-            return rsp
-        else:
-            return None
+        return await ctx.systems.call(system, *args)
 
     system_endpoint.__name__ = system
     return system_endpoint
