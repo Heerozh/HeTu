@@ -142,6 +142,7 @@ async def create_row_2_upsert(ctx, owner, v2):
 @hetu.define_system(
     namespace="pytest",
     components=(RLSComp, IndexComp1, IndexComp2),
+    permission=hetu.Permission.USER,
     depends=(add_rls_comp_value,),
 )
 async def composer_system(ctx: hetu.SystemContext):
@@ -150,7 +151,7 @@ async def composer_system(ctx: hetu.SystemContext):
     await asyncio.sleep(0.1)
 
     self_comp1 = await ctx.repo[IndexComp1].get(owner=ctx.caller)
-    self_comp2 = await ctx.repo[IndexComp2].get(owner=-ctx.caller)
+    self_comp2 = await ctx.repo[IndexComp2].get(owner=ctx.caller)
     assert self_comp1 and self_comp2
 
     targets1 = await ctx.repo[IndexComp1].range(

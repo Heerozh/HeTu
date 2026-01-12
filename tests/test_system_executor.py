@@ -17,6 +17,12 @@ async def test_call_not_exist(mod_test_app, mod_executor):
         await mod_executor.context.systems.call("not_exist_system", "any_value")
 
 
+async def test_call_args_error(mod_test_app, mod_executor):
+    # 测试参数少一个
+    ok, _ = await mod_executor.execute("login")
+    assert not ok
+
+
 async def test_call_no_permission(mod_test_app, mod_executor):
     # 测试无权限call
     ok, _ = await mod_executor.execute("add_rls_comp_value", 9)
