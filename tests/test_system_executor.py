@@ -89,8 +89,10 @@ async def test_unique_violate_bug2(mod_test_app, executor, caplog):
 async def test_slow_log(mod_test_app, executor, caplog):
     # 测试慢日志输出
     import hetu.common.slowlog
+    from hetu.system.caller import SLOW_LOG
 
     hetu.common.slowlog.SLOW_LOG_TIME_THRESHOLD = 0.1
+    SLOW_LOG.log_interval = 0  # 每次都打印
 
     # 登录用户1234
     ok, _ = await executor.execute("login", 1234)
