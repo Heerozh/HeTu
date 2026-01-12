@@ -11,6 +11,7 @@ from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
+from hetu.data.backend import RaceCondition
 from hetu.data.backend.base import RowFormat
 
 from .context import Context
@@ -67,7 +68,7 @@ async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
         row.address = address
         await repo.insert(row)
 
-    # 等待数据同步完成，防止后续操作找不到关键连接数据
+    # 等待数据同步完成，防止后续ConnectionAliveChecker.is_illegal操作找不到关键连接数据
     await table.backend.wait_for_synced()
     return row.id
 
@@ -76,7 +77,6 @@ async def del_connection(comp_mgr: ComponentTableManager, connection_id: int) ->
     table = comp_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
-    # todo 下一个任务，完成websocket执行endpoint
     async for attempt in table.session().retry(5):
         async with attempt as session:
             repo = session.using(Connection)
@@ -91,9 +91,17 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]。
 
     kick_logged_in:
-        如果user_id已在其他连接登录，则标记该连接断开并返回True，该连接将在客户端调用任意System时被关闭。
+        如果user_id已在其他连接登录，则标记该连接断开并返回True，该连接将在客户端调用任意Endpoint时被关闭。
+
+    Notes
+    -----
+    本方法是一个独立的事务，如果你在System中(另一个事务中）调用此方法，父事务回退时不会回退此方法的结果。
 
     """
+    # 以下方法可以考虑在system里面再写一套？
+    # 不过这个是endpoint负责的东西，用system写会导致互相耦合。但这里已经用了ctx.systems了。
+    # 另外elevate加到system里需要用depends调用，作为新人教程第一步太复杂了。
+    # 但是现在新人教程也可以用ctx.systems.call("elevate", ...)来调用这个函数了。
     assert ctx.connection_id != 0, "请先初始化连接"
     comp_mgr: ComponentTableManager = ctx.systems.comp_mgr
     table = comp_mgr.get_table(Connection)
@@ -112,7 +120,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
                 idle = time.time() - already_logged.last_active
                 # 如果要求强制踢人，或者该连接last_active时间已经超时（说明服务器强关数据残留了）
                 if kick_logged_in or idle > ENDPOINT_CALL_IDLE_TIMEOUT:
-                    # 去掉该连接的owner，当该连接下次执行System时会被关闭
+                    # 去掉该连接的owner，当该连接下次执行Endpoint时会被关闭
                     already_logged.owner = 0
                     await repo.update(already_logged)
                 else:
@@ -121,7 +129,10 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
             # 在数据库中关联connection和user
             conn = await repo.get(id=ctx.connection_id)
             if not conn:
-                return False, "CONNECTION_NOT_FOUND"
+                # 连接断开时才会找不到conn，但是连接断开时会cancel所有task，不应该到这
+                # 所以大部分情况还是race condition导致，也就是还没读到新建的连接
+                raise RaceCondition("连接数据不存在，可能是写入未同步，重试")
+                # return False, "CONNECTION_NOT_FOUND"
             conn.owner = user_id
             await repo.update(conn)
 
@@ -157,6 +168,9 @@ class ConnectionAliveChecker:
             # 此方法无法通过事务，这里判断通过后可能有其他连接踢了你，等于同时可能有2个连接在执行1个用户的事务，但
             # 问题不大，因为事务是有冲突判断的。不冲突的事务就算一起执行也没啥问题。
             conn = await conn_tbl.servant_get(conn_id, RowFormat.STRUCT)
+            # 连接断开时才会conn is None，但是连接断开时会cancel所有task，不应该到这
+            # 所以大部分情况是servant还没有从master同步数据过来，如果有些数据库wait sync无效，
+            # 这里可以考虑重试几次
             if conn is None or conn.owner != caller:
                 err_msg = f"⚠️ [📞Executor] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
                 replay.info(err_msg)

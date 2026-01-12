@@ -60,7 +60,7 @@ class EndpointExecutor:
         context = self.context
         namespace = self.namespace
 
-        # 读取保存的system define
+        # 读取保存的endpoint define
         ep = EndpointDefines().get_endpoint(namespace, endpoint)
         if not ep:
             err_msg = (
@@ -118,7 +118,7 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        # logger.debug(f"⌚ [📞Executor] 调用Endpoint: {sys_name}")
+        # logger.debug(f"⌚ [📞Executor] 调用Endpoint: {ep_name}")
 
         # 初始化context值
         context = self.context
@@ -128,7 +128,7 @@ class EndpointExecutor:
         try:
             # 执行
             rtn = await ep.func(context, *args)
-            # logger.debug(f"✅ [📞Executor] 调用Endpoint成功: {sys_name}")
+            # logger.debug(f"✅ [📞Executor] 调用Endpoint成功: {ep_name}")
             return True, rtn
         except Exception as e:
             err_msg = (
@@ -149,8 +149,8 @@ class EndpointExecutor:
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
         """
         # 检查call参数和call权限
-        sys = self.execute_check(endpoint, args)
-        if sys is None:
+        ep = self.execute_check(endpoint, args)
+        if ep is None:
             return False, None
 
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
@@ -161,4 +161,4 @@ class EndpointExecutor:
             return False, None
 
         # 开始调用
-        return await self.execute_(sys, *args)
+        return await self.execute_(ep, *args)
