@@ -45,7 +45,7 @@
     "typescript": "~5.8.3",
     "vite": "^7.2.6",
     "vitest": "^4.0.14",
-    "ws": "^8.18.3"
+    "ws": "^8.19.0"
   },
   "dependencies": {
     "@types/ws": "^8.18.1",
