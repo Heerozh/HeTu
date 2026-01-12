@@ -186,7 +186,7 @@ async def race_upsert(ctx: hetu.SystemContext, sleep):
     permission=hetu.Permission.EVERYBODY,
     components=(IndexComp1,),
 )
-async def race_query(ctx: hetu.SystemContext, sleep):
+async def race_range(ctx: hetu.SystemContext, sleep):
     _rows = await ctx.repo[IndexComp1].range(owner=(3, 3))
     await asyncio.sleep(sleep)
     _rows[0].value = sleep

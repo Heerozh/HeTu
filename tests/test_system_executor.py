@@ -1,8 +1,11 @@
 import logging
 import time
+from typing import cast
+
 import pytest
 import hetu
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.endpoint.executor import EndpointExecutor
 
 SnowflakeID().init(1, 0)
 
@@ -123,29 +126,32 @@ async def test_slow_log(mod_test_app, executor, caplog):
     print(caplog.text)
 
 
-async def test_select_race_condition(mod_test_app, comp_mgr, executor):
+async def test_get_race_condition(
+    mod_test_app, comp_mgr, executor: EndpointExecutor, new_ctx
+):
     # 测试race
-    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
-    await executor2.initialize("")
+    from hetu.system.caller import SystemCaller
+    from hetu.system.context import SystemContext
+
+    direct_caller = SystemCaller("pytest", comp_mgr, new_ctx())
 
     import asyncio
 
-    # 必须差距大才能保证某个task先select
+    # 必须差距大才能保证某个task先get
     await asyncio.gather(
-        executor.execute("race_upsert", 0.4), executor2.execute("race_upsert", 0.1)
+        executor.execute("race_upsert", 0.4), direct_caller.call("race_upsert", 0.1)
     )
 
-    assert executor.context.retry_count == 1
-    assert executor2.context.retry_count == 0
-
-    # 结束连接
-    await executor2.terminate()
+    assert cast(SystemContext, executor.context).race_count == 1
+    assert direct_caller.context.race_count == 0
 
 
-async def test_query_race_condition(mod_test_app, comp_mgr, executor):
+async def test_range_race_condition(mod_test_app, comp_mgr, executor, new_ctx):
+    from hetu.system.caller import SystemCaller
+    from hetu.system.context import SystemContext
+
     # 测试race
-    executor2 = hetu.system.SystemExecutor("pytest", comp_mgr)
-    await executor2.initialize("")
+    direct_caller = SystemCaller("pytest", comp_mgr, new_ctx())
 
     # 登录用户1234
     ok, _ = await executor.execute("login", 1234)
@@ -156,16 +162,13 @@ async def test_query_race_condition(mod_test_app, comp_mgr, executor):
 
     import asyncio
 
-    # 必须差距大才能保证某个task先query
+    # 必须差距大才能保证某个task先range
     await asyncio.gather(
-        executor.execute("race_query", 0.4), executor2.execute("race_query", 0.1)
+        executor.execute("race_range", 0.4), direct_caller.call("race_range", 0.1)
     )
 
-    assert executor.context.retry_count == 1
-    assert executor2.context.retry_count == 0
-
-    # 结束连接
-    await executor2.terminate()
+    assert cast(SystemContext, executor.context).race_count == 1
+    assert direct_caller.context.race_count == 0
 
 
 async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
