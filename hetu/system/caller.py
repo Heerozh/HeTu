@@ -89,7 +89,9 @@ class SystemCaller:
             # 开始新的事务，并attach components
             await session.__aenter__()
             for comp in sys.full_components:
-                context.repo[comp] = session.using(comp)
+                repo = session.using(comp)
+                master = comp.master_ or comp
+                context.repo[master] = repo
             # 执行system和事务
             try:
                 # 先检查uuid是否执行过了

@@ -32,6 +32,14 @@ async def test_call_no_permission(mod_test_app, mod_executor):
     assert not ok
 
 
+async def test_call_none_permission(mod_test_app, mod_executor):
+    # 测试无endpoint的system，即使admin也不能调用
+    mod_executor.context.group = "admin"
+    assert False, "todo"
+    ok, _ = await mod_executor.execute("xxx", 9)
+    assert not ok
+
+
 async def test_system_with_rls(mod_test_app, executor):
     # 测试登录
     ok, _ = await executor.execute("login", 1234)
@@ -187,13 +195,12 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     assert ok
 
     # 直接通过Comp读取
-    backend = comp_mgr.backends.get("default")
     RLSComp = hetu.data.ComponentDefines().get_component("pytest", "RLSComp")
     RLSCompCopy = RLSComp.duplicate("pytest", "copy1")
     copied_tbl = comp_mgr.get_table(RLSCompCopy)
-    async with backend.transaction(copied_tbl.cluster_id) as session:
-        tbl = copied_tbl.attach(session)
-        row = await tbl.select(1001, "owner")
+    async with copied_tbl.session() as session:
+        repo = session.using(RLSCompCopy)
+        row = await repo.get(owner=1001)
         assert row.value == 100 + 9
 
 

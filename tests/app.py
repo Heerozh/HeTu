@@ -81,6 +81,7 @@ async def add_rls_comp_value_future(ctx: hetu.SystemContext, value, recurring):
 
 @hetu.define_system(
     namespace="pytest",
+    permission=hetu.Permission.USER,
     depends=("add_rls_comp_value:copy1",),
 )
 async def add_rls_comp_value_copy(ctx: hetu.SystemContext, value):
@@ -89,6 +90,7 @@ async def add_rls_comp_value_copy(ctx: hetu.SystemContext, value):
 
 @hetu.define_system(
     namespace="pytest",
+    permission=hetu.Permission.USER,
     depends=("test_rls_comp_value:copy1",),
 )
 async def test_rls_comp_value_copy(ctx: hetu.SystemContext, value):
