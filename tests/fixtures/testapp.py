@@ -1,4 +1,5 @@
 import pytest
+from hetu.endpoint.executor import EndpointExecutor
 
 
 @pytest.fixture(scope="module")
@@ -107,8 +108,6 @@ async def mod_executor(mod_comp_mgr, mod_new_ctx):
 
 @pytest.fixture(scope="function")
 async def executor(comp_mgr, new_ctx):
-    from hetu.endpoint.executor import EndpointExecutor
-
     executor = EndpointExecutor("pytest", comp_mgr, new_ctx())
     await executor.initialize("")
     yield executor

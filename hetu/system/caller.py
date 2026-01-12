@@ -167,4 +167,4 @@ class SystemCaller:
             repo = session.using(comp)
             row = await repo.get(uuid=uuid)
             if row:
-                row.delete(row.id)
+                repo.delete(row.id)

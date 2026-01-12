@@ -70,6 +70,8 @@ def start_backends(app: Sanic):
     )
     app.ctx.__setattr__("comp_mgr", comp_mgr)
 
+    # todo 检测schema变更，问用户怎么操作
+
     # 最后调用 backend config, 以防configure中需要之前初始化的东西
     for backend in backends.values():
         backend.post_configure()

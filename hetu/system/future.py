@@ -183,7 +183,7 @@ async def sleep_for_upcoming(tbl: Table):
 async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
     async with tbl.session() as session:
-        repo = session.using(FutureCalls)
+        repo = session.using(tbl.comp_cls)
         # 取出最早到期的任务
         now = time.time()
         calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
@@ -213,17 +213,24 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 循环任务和立即删除的任务都不需要lock
     req_call_lock = not call.recurring and call.timeout != 0
     # 执行
-    if req_call_lock:
-        ok, res = await caller.call_(sys, *args, uuid=str(call.id))
-    else:
-        ok, res = await caller.call_(sys, *args)
+    ok = False
+    res = None
+    try:
+        if req_call_lock:
+            res = await caller.call_(sys, *args, uuid=str(call.id))
+        else:
+            res = await caller.call_(sys, *args)
+        ok = True
+    except Exception as e:
+        err_msg = f"❌ [⚙️Future] 未来调用System异常，调用：{call.system}{args}，异常：{type(e).__name__}:{e}"
+        logger.exception(err_msg)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
         async with tbl.session() as session:
-            repo = session.using(FutureCalls)
+            repo = session.using(tbl.comp_cls)
             get_4_del = await repo.get(id=call.id)
             if get_4_del:
                 repo.delete(get_4_del.id)

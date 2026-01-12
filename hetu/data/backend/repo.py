@@ -253,10 +253,13 @@ class SessionRepository:
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
-        if index_name is None or _left is None:
+        if index_name is None and _left is None:
             # 判断kwargs有且只有一个键值对
             assert len(kwargs) == 1, "Only one field can be queried."
             index_name, (_left, _right) = next(iter(kwargs.items()))
+        else:
+            assert index_name, "不使用kwargs形式时，index_name不能为空"
+            assert _left is not None, "不使用kwargs形式时，left不能为空"
 
         # assert np.isscalar(left), (
         #     f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
