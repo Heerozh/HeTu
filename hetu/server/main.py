@@ -31,7 +31,7 @@ replay = logging.getLogger("HeTu.replay")
 
 def start_backends(app: Sanic):
     # 创建后端连接池
-    backends = {}
+    backends: dict[str, Backend] = {}
     for name, db_cfg in app.config.BACKENDS.items():
         backend = Backend(db_cfg)
         backends[name] = backend
