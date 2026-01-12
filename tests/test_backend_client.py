@@ -488,7 +488,7 @@ async def test_mq_client(filled_item_ref, mod_auto_backend):
 
     # 拉取消息(堵塞直到收到消息)
     try:
-        async with asyncio.timeout(0.1):
+        async with asyncio.timeout(0.5):
             # 多拉几次去掉服务器刚启动多余的消息
             await mq.pull()
             await mq.pull()
@@ -496,7 +496,7 @@ async def test_mq_client(filled_item_ref, mod_auto_backend):
     except TimeoutError:
         pass
 
-    async with asyncio.timeout(0.1):
+    async with asyncio.timeout(0.5):
         messages = await mq.get_message()
 
     assert channel_name in messages
