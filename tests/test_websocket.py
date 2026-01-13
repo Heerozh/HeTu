@@ -9,6 +9,7 @@ import logging
 import sanic_testing
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
+from hetu.endpoint.definer import EndpointDefines
 from hetu.server.message import encode_message, decode_message
 from hetu.server import worker_main
 from hetu.system import SystemClusters
@@ -80,6 +81,7 @@ def setup_websocket_proxy():
 @pytest.fixture
 def test_server(setup_websocket_proxy, ses_redis_service):
     SystemClusters()._clear()
+    EndpointDefines()._clear()
     import re
 
     match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])

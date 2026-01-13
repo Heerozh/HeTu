@@ -71,6 +71,24 @@ class ComponentTableManager:
                     # 非持久化的Component也需要cluster迁移，不然数据就永远的留在了数据库中
                     maint.migration_cluster_id(tbl, old_meta)
 
+    def check_and_create_new_tables(self) -> bool:
+        """
+        只在数据库创建所有新表，已存在的表不会调用。
+        返回true表示所有表的状态正常，false表示有表需要迁移。
+        """
+        ret = True
+        for _, tbl in self._tables.items():
+            maint = tbl.backend.get_table_maintenance()
+            tbl_status, old_meta = maint.check_table(tbl)
+            match tbl_status:
+                case "not_exists":
+                    maint.create_table(tbl)
+                case "schema_mismatch":
+                    ret = False
+                case "cluster_mismatch":
+                    ret = False
+        return ret
+
     def flush_volatile(self):
         """清空所有非持久化数据"""
         for comp, tbl in self._tables.items():
