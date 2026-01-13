@@ -20,6 +20,24 @@ def mod_test_app():
     return app
 
 
+@pytest.fixture(scope="function")
+def test_app():
+    import hetu
+    import app
+    import importlib
+
+    hetu.data.ComponentDefines().clear_()
+    hetu.endpoint.definer.EndpointDefines()._clear()
+    hetu.system.SystemClusters()._clear()
+
+    importlib.reload(app)
+
+    # 初始化SystemCluster
+    hetu.system.SystemClusters().build_clusters("pytest")
+    hetu.system.SystemClusters().build_endpoints()
+    return app
+
+
 def comp_mgr_factory(mod_auto_backend):
     # 为每个test初始化comp_mgr，因为每个test的线程不同
     backends = {"default": mod_auto_backend()}

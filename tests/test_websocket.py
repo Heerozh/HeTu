@@ -16,6 +16,7 @@ from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 
 logger = logging.getLogger("HeTu.root")
 logger.setLevel(logging.DEBUG)
+assert logging.lastResort
 logging.lastResort.setLevel(logging.DEBUG)
 
 
@@ -35,7 +36,7 @@ def setup_websocket_proxy():
             async def close(self):
                 [await ws.close() for ws in self.wss]
 
-        ws_proxy = sanic_testing.websocket.WebsocketProxy(ProxyForWebsocketProxy())
+        ws_proxy = sanic_testing.websocket.WebsocketProxy(ProxyForWebsocketProxy())  # type: ignore
 
         async def new_connection():
             ws = await connect(url, *args, **kwargs)
@@ -79,7 +80,12 @@ def setup_websocket_proxy():
 @pytest.fixture
 def test_server(setup_websocket_proxy, ses_redis_service):
     SystemClusters()._clear()
-    port = ses_redis_service[0].match(r"redis://127\.0\.0\.1:(\d+)/0").group(1)
+    import re
+
+    match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])
+    assert match
+    port = match.group(1)
+
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
     logging_cfg = DEFAULT_LOGGING_CONFIG
     logging_cfg["loggers"]["HeTu.replay"]["level"] = logging.DEBUG
@@ -103,8 +109,6 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "WORKER_NUM": 4,
             "ACCESS_LOG": False,
         },
-        os.getpid(),
-        True,
     )
 
     yield server

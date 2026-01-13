@@ -7,7 +7,7 @@ from hetu.endpoint.executor import EndpointExecutor
 SnowflakeID().init(1, 0)
 
 
-async def test_future_call_create(mod_test_app, comp_mgr, executor: EndpointExecutor):
+async def test_future_call_create(test_app, comp_mgr, executor: EndpointExecutor):
     """测试创建未来调用任务是否正确"""
     time_time = time.time
 
@@ -33,7 +33,7 @@ async def test_future_call_create(mod_test_app, comp_mgr, executor: EndpointExec
         assert rows[0].owner == 1020
 
 
-async def test_sleep_for_upcoming(mod_test_app, comp_mgr, executor: EndpointExecutor):
+async def test_sleep_for_upcoming(test_app, comp_mgr, executor: EndpointExecutor):
     """测试sleep_for_upcoming的等待逻辑是否正确"""
     time_time = time.time
 
@@ -84,7 +84,7 @@ async def test_sleep_for_upcoming(mod_test_app, comp_mgr, executor: EndpointExec
 
 
 async def test_pop_upcoming_call(
-    monkeypatch, mod_test_app, comp_mgr, executor: EndpointExecutor
+    monkeypatch, test_app, comp_mgr, executor: EndpointExecutor
 ):
     """测试pop_upcoming_call取出任务逻辑是否正确"""
     time_time = time.time
