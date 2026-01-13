@@ -9,8 +9,10 @@ Worker进程入口文件
 import importlib.util
 import logging
 import os
+import time
 import sys
 import asyncio
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from sanic import Sanic
 
@@ -43,10 +45,10 @@ def start_backends(app: Sanic):
             app.ctx.__setattr__("default_backend", backends["default"])
 
     # 使用redis初始化snowflake的workerKeeper
-    worker_keeper = backends["default"].get_worker_keeper()
+    worker_keeper = backends["default"].get_worker_keeper(os.getpid())
     if worker_keeper is None:
         for _, backend in backends.items():
-            if worker_keeper := backend.get_worker_keeper():
+            if worker_keeper := backend.get_worker_keeper(os.getpid()):
                 break
 
     # 根据默认backend决定用哪个workerKeeper，如果全部不支持则报错
@@ -56,9 +58,20 @@ def start_backends(app: Sanic):
             + str(WorkerKeeper.subclasses)
         )
 
-    # 初始化雪花id生成器
-    worker_id = worker_keeper.get_worker_id()
+    # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
+    while True:
+        try:
+            worker_id = worker_keeper.get_worker_id()
+            break
+        except KeyError as e:
+            logger.error(e)
+            logger.info(
+                "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
+            )
+            time.sleep(1)
     last_timestamp = worker_keeper.get_last_timestamp()
+
+    # 初始化雪花id生成器
     SnowflakeID().init(worker_id, last_timestamp)
     app.ctx.__setattr__("worker_keeper", worker_keeper)
 
@@ -78,6 +91,10 @@ def start_backends(app: Sanic):
 
 
 async def close_backends(app: Sanic):
+    # 释放worker id
+    app.ctx.worker_keeper.release_worker_id()
+
+    # 关闭后端连接池
     for attrib in dir(app.ctx):
         backend = app.ctx.__getattribute__(attrib)
         if isinstance(backend, Backend):
@@ -110,7 +127,11 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
+        try:
+            await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
+        except RedisConnectionError as e:
+            logger.error(f"❌ [📡WorkerKeeper] 续约失败: {type(e).__name__}:{e}")
+            continue
 
 
 def worker_main(app_name, config) -> Sanic:
