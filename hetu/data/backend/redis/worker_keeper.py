@@ -13,25 +13,28 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+# 回收worker id的时间，超时则认为宕机
+WORKER_ID_EXPIRE_SEC = 60
+
 
 @final
 class RedisWorkerKeeper(WorkerKeeper):
     """
     基于 Redis 的 Worker ID 管理器。
     此类的目的是：
-    1. 为了尽可能让worker id在重启后不变，防止不同服务器系统时间不同，每次启动雪花ID要Sleep等待过久。
+    1. 分配空余worker id，并让宕机的worker id会得到释放
     2. 每几秒就储存每台服务器的时间，来减少重启时，发生时间回拨导致ID重复的风险。
-    虽然以上问题都可以通过运维解决，但此类可让此问题透明化，无需运维依赖。
 
     服务器重启回拨(关闭期间发生时间回拨)的情况很少，但通过以下方式：
     1. 保证机器ntp持续工作，回拨不超过10秒，这样限制每次重启等10秒以上可解决重启回拨问题。
     2. 再加上本类的keep_alive持续记录服务器时间戳，保证记录间隔<=10秒。
-    方式2已基本可以99.99%保证重启回拨问题
+    虽然方式1已经可以解决此类问题，但方式2不依赖运维，可以让此问题透明。
 
     通过
-        SET snowflake:worker:{worker_id} {uuid.getnode():启动序列号} NX EX 86400
+        node_id = f"{uuid.getnode()}:{pid}"
+        SET snowflake:worker:{worker_id} {node_id} NX EX WORKER_ID_EXPIRE_SEC
     成功：拿到了 WorkerID = {worker_id}
-    失败：说明 ID 正在被别的机器占用，如果node id不符，循环尝试 ID {worker_id + 1}。
+    失败：说明 ID 正在被别的机器占用，如果node_id不符，循环尝试 ID {worker_id + 1}。
          直到1024次失败报错。
 
     后台设置个5秒的Task持续续约此key
@@ -39,7 +42,7 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     def __init__(
         self,
-        sequence_id: int,
+        pid: int,
         io: redis.Redis | redis.RedisCluster,
         aio: redis.asyncio.Redis | redis.asyncio.RedisCluster,
     ):
@@ -52,8 +55,10 @@ class RedisWorkerKeeper(WorkerKeeper):
         self.worker_id_key = "snowflake:worker"
         self.last_timestamp_key = "snowflake:last_timestamp"
         self.worker_id = -1
-        # getnode返回的机器码，为了让worker id重启不变，sequence_id应该用启动进程的顺序id
-        self.node_id = f"{uuid.getnode()}:{sequence_id}"
+        # 机器码+pid组成的node_id。
+        # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
+        # 比如固定每个容器只启动一个worker，则pid是固定的1
+        self.node_id = f"{uuid.getnode()}:{pid}"
 
     @override
     def get_worker_id(self) -> int:
@@ -63,7 +68,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 查找之前是否已经分配过自己的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
-            # 判断node_id是否相同，相同则说明是重启，直接使用
+            # 判断node_id是否相同，相同则说明是容器重启，直接使用
             existing_node_id = self.io.get(key)
             if existing_node_id is not None:
                 existing_node_id = cast(bytes, existing_node_id)
@@ -78,8 +83,8 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 尝试分配新的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
-            # 尝试设置键，NX 表示仅当键不存在时设置，EX 86400 表示键过期时间为1天
-            result = self.io.set(key, self.node_id, nx=True, ex=86400)
+            # 尝试设置键，NX 表示仅当键不存在时设置，EX 表示键过期时间
+            result = self.io.set(key, self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC)
             if result:
                 logger.info(
                     f"[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {self.node_id}"
@@ -87,12 +92,14 @@ class RedisWorkerKeeper(WorkerKeeper):
                 self.worker_id = worker_id
                 return worker_id
 
-        raise SystemExit("无法获取可用的 Worker ID，所有 ID 均被占用。")
+        raise KeyError(
+            "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+        )
 
     @override
     def release_worker_id(self):
         """
-        释放当前占用的 Worker ID。无需调用，只用于测试。
+        释放当前占用的 Worker ID。
         """
         if self.worker_id == -1:
             return
@@ -127,7 +134,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         worker_id = self.worker_id
         key = f"{self.worker_id_key}:{worker_id}"
         # 刷新键的过期时间
-        resp = await self.aio.expire(key, 86400)
+        resp = await self.aio.expire(key, WORKER_ID_EXPIRE_SEC)
         if resp != 1:
             logger.error(
                 f"[❄️ID] 续约 Worker ID {worker_id} 失败，可能已被其他实例占用。"
@@ -135,5 +142,5 @@ class RedisWorkerKeeper(WorkerKeeper):
             # 关闭Worker todo 需要测试是否有效
             raise SystemExit("Worker ID 续约失败，不该出现的错误，系统退出。")
         # 记录last_timestamp到redis，防止重启回拨
-        key = f"{self.last_timestamp_key}:{self.node_id}"
-        await self.aio.set(key, last_timestamp, ex=86400)
+        ts_key = f"{self.last_timestamp_key}:{self.node_id}"
+        await self.aio.set(ts_key, last_timestamp, ex=86400)

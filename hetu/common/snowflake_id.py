@@ -183,7 +183,7 @@ class WorkerKeeper:
 
     def release_worker_id(self):
         """
-        释放当前占用的 Worker ID。无需调用，只用于测试。
+        释放当前占用的 Worker ID。
         """
         raise NotImplementedError
 

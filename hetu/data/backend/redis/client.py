@@ -326,14 +326,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return True, master_offset
 
     @override
-    def get_worker_keeper(self, sequence_id: int) -> RedisWorkerKeeper:
+    def get_worker_keeper(self, pid: int) -> RedisWorkerKeeper:
         """
         获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
 
         Parameters
         ----------
-        sequence_id: int
-            启动进程的顺序ID，从0开始。
+        pid: int
+            worker的pid。
         """
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
@@ -341,7 +341,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert not self.is_servant, "get_worker_keeper"
         from .worker_keeper import RedisWorkerKeeper
 
-        return RedisWorkerKeeper(sequence_id, self.io, self.aio)
+        return RedisWorkerKeeper(pid, self.io, self.aio)
 
     @override
     async def close(self):

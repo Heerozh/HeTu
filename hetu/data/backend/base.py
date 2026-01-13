@@ -120,15 +120,15 @@ class BackendClient:
         # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
 
-    def get_worker_keeper(self, sequence_id: int) -> WorkerKeeper | None:
+    def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
         """
         获取WorkerKeeper实例，用于雪花ID的worker id管理。
         如果不支持worker id管理，可以返回None
 
         Parameters
         ----------
-        sequence_id: int
-            启动进程的顺序ID，从0开始。
+        pid: int
+            worker的pid。
         """
         raise NotImplementedError
 
