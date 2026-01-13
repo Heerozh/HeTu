@@ -1,12 +1,13 @@
 import asyncio
 import os
 import zlib
-from typing import Callable
+from typing import Callable, cast
 
 import pytest
 import logging
 
 import sanic_testing
+import sanic_testing.testing
 from websockets.exceptions import ConnectionClosedOK, ConnectionClosedError
 
 from hetu.endpoint.definer import EndpointDefines
@@ -52,7 +53,8 @@ def setup_websocket_proxy():
                 await do_send(encode_message(data, protocol))
 
             async def recv():
-                message = decode_message(await do_recv(), protocol)
+                data = cast(bytes, await do_recv())
+                message = decode_message(data, protocol)
                 logger.debug(f"< Received: {message} [{len(repr(message))} bytes]")
                 ws_proxy.client_received.append(message)
                 return message
@@ -62,7 +64,7 @@ def setup_websocket_proxy():
 
             ws.send = send  # type: ignore
             ws.recv = recv  # type: ignore
-            ws.clear_recv = clear_recv
+            ws.clear_recv = clear_recv  # type: ignore
 
             return ws
 
@@ -134,31 +136,31 @@ def test_websocket_call_system(test_server):
     # 测试call和结果
     async def normal_routine(connect):
         client1 = await connect()
-        await client1.send(["sys", "login", 1])
+        await client1.send(["rpc", "login", 1])
         await client1.recv()
 
-        await client1.send(["sub", "RLSComp", "query", "owner", 1, 999])
-        await client1.send(["sub", "IndexComp1", "query", "owner", 1, 999])
+        await client1.send(["sub", "RLSComp", "range", "owner", 1, 999])
+        await client1.send(["sub", "IndexComp1", "range", "owner", 1, 999])
         await client1.recv()
         await client1.recv()
 
-        await client1.send(["sys", "add_rls_comp_value", 1])
+        await client1.send(["rpc", "add_rls_comp_value", 1])
         await client1.recv()  # 首次sub这里会卡至少0.5s等待连接
 
-        await client1.send(["sys", "login", 2])  # 测试重复登录应该无效
+        await client1.send(["rpc", "login", 2])  # 测试重复登录应该无效
         await client1.recv()
 
         # 正式开始接受sub消息
-        await client1.send(["sys", "add_rls_comp_value", 1])
+        await client1.send(["rpc", "add_rls_comp_value", 1])
         await client1.recv()
 
         # 模拟其他用户修改了用户1订阅的数据
         client2 = await connect()
-        await client2.send(["sys", "login", 2])
+        await client2.send(["rpc", "login", 2])
         # 这个是rls数据，client1不会收到
-        await client2.send(["sys", "add_rls_comp_value", 9])
+        await client2.send(["rpc", "add_rls_comp_value", 9])
         # 这个client1应该收到
-        await client2.send(["sys", "create_row", 2, 9, "1"])
+        await client2.send(["rpc", "create_row", 2, 9, "1"])
         await asyncio.sleep(0.1)
 
         await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
@@ -166,39 +168,52 @@ def test_websocket_call_system(test_server):
     _, response1 = test_server.test_client.websocket("/hetu", mimic=normal_routine)
     # print(response1.client_received)
     # 测试add_rls_comp_value调用了2次
-    assert response1.client_received[3][2]["1"] == {"id": 1, "owner": 1, "value": 101}
-    assert response1.client_received[5][2]["1"] == {"id": 1, "owner": 1, "value": 102}
+    id1 = next(iter(response1.client_received[3][2].keys()))
+    assert response1.client_received[3][2][id1] == {
+        "id": int(id1),
+        "owner": 1,
+        "value": 101,
+    }
+    assert response1.client_received[5][2][id1] == {
+        "id": int(id1),
+        "owner": 1,
+        "value": 102,
+    }
 
     # 测试收到连接2的+9
-    assert response1.client_received[6][2]["1"] == {"id": 1, "owner": 2, "value": 9}
+    assert response1.client_received[6][2][id1] == {
+        "id": int(id1),
+        "owner": 2,
+        "value": 9,
+    }
 
 
 def test_websocket_kick_connect(test_server):
     # 测试踢掉别人的连接
     async def kick_routine(connect):
         client1 = await connect()
-        await client1.send(["sys", "login", 1])
-        await client1.send(["sys", "add_rls_comp_value", 1])
+        await client1.send(["rpc", "login", 1])
+        await client1.send(["rpc", "add_rls_comp_value", 1])
         await asyncio.sleep(0.1)
 
         client2 = await connect()
-        await client2.send(["sys", "login", 1])
-        await client2.send(["sys", "add_rls_comp_value", 2])
+        await client2.send(["rpc", "login", 1])
+        await client2.send(["rpc", "add_rls_comp_value", 2])
         await asyncio.sleep(0.1)
 
         # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
         # 需要调用一次system才能发现自己被踢掉了
-        await client1.send(["sys", "add_rls_comp_value", 3])
+        await client1.send(["rpc", "add_rls_comp_value", 3])
 
         # 测试踢出成功
         await asyncio.sleep(0.1)
         with pytest.raises(ConnectionClosedError):
-            await client1.send(["sys", "add_rls_comp_value", 4])
+            await client1.send(["rpc", "add_rls_comp_value", 4])
 
     _, response1 = test_server.test_client.websocket("/hetu", mimic=kick_routine)
     # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
     assert response1.client_sent[-1] == [
-        "sys",
+        "rpc",
         "add_rls_comp_value",
         4,
     ], "最后一行没执行到"
@@ -213,7 +228,7 @@ def test_call_flooding_lv1_normal(test_server):
     async def normal_routine(connect):
         client1 = await connect()
         for i in range(100):
-            await client1.send(["sys", "login", 1])
+            await client1.send(["rpc", "login", 1])
             await client1.recv()
 
     test_server.test_client.websocket("/hetu", mimic=normal_routine)
@@ -227,7 +242,7 @@ def test_call_flooding_lv1_flooding(test_server):
         client1 = await connect()
         with pytest.raises(ConnectionClosedError):
             for i in range(101):
-                await client1.send(["sys", "login", 1])
+                await client1.send(["rpc", "login", 1])
                 await client1.recv()
 
     test_server.test_client.websocket("/hetu", mimic=flooding_routine)
@@ -242,7 +257,7 @@ def test_call_flooding_lv2_normal(test_server):
     async def normal_routine_lv2(connect):
         client1 = await connect()
         for i in range(270):
-            await client1.send(["sys", "login", 1])
+            await client1.send(["rpc", "login", 1])
             await client1.recv()
             if i == 99:
                 await asyncio.sleep(1)
@@ -255,7 +270,7 @@ def test_call_flooding_lv2_flooding(test_server):
         client1 = await connect()
         with pytest.raises(ConnectionClosedError):
             for i in range(271):
-                await client1.send(["sys", "login", 1])
+                await client1.send(["rpc", "login", 1])
                 await client1.recv()
                 if i == 99:
                     await asyncio.sleep(1)

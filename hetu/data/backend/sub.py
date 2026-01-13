@@ -79,6 +79,7 @@ class RowSubscription(BaseSubscription):
         else:
             ctx = self.rls_ctx
             if ctx is None or ctx.rls_check(self.table_ref.comp_cls, row):
+                del row["_version"]
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
@@ -146,6 +147,7 @@ class IndexSubscription(BaseSubscription):
                 else:
                     ctx = self.rls_ctx
                     if ctx is None or ctx.rls_check(ref.comp_cls, row):
+                        del row["_version"]
                         rtn[str(row_id)] = row
                     new_chan_name = servant.row_channel(ref, row_id)
                     new_chans.add(new_chan_name)

@@ -36,7 +36,7 @@ async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue)
     """处理Client SDK调用Endpoint的命令"""
     # print(executor.context, 'rpc', data)
     check_length("rpc", data, 2, 100)
-    ok, res = await executor.execute(data[1], tuple(data[2:]))
+    ok, res = await executor.execute(data[1], *data[2:])
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
