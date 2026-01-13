@@ -84,17 +84,16 @@ def start_backends(app: Sanic):
     app.ctx.__setattr__("comp_mgr", comp_mgr)
 
     # 检测表状态，创建所有不存在的表
-    req_migrate = comp_mgr.check_and_create_new_tables()
+    all_table_ok = comp_mgr.check_and_create_new_tables()
 
     # 如果有迁移需求，则报错退出，让用户用cli migrate命令来迁移
-    if req_migrate:
-        logger.error(
+    if not all_table_ok:
+        msg = (
             "❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令："
             "hetu migrate --config <your_config_file>.yml"
         )
-        # pause cli
-        input("按任意键退出...")
-        sys.exit(1)
+        logger.error(msg)
+        raise RuntimeError(msg)
 
     # 最后调用 backend config, 以防configure中需要之前初始化的东西
     for backend in backends.values():

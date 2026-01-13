@@ -7,6 +7,7 @@ Component Table管理类，通过System定义的Component来管理他们所属�
 @email: heeroz@gmail.com
 """
 
+import logging
 from typing import ItemsView, TYPE_CHECKING
 from .data.backend import Table
 
@@ -15,6 +16,8 @@ from .system import SystemClusters
 if TYPE_CHECKING:
     from hetu.data.backend import Backend
     from hetu.data.component import BaseComponent
+
+logger = logging.getLogger("HeTu.root")
 
 
 class ComponentTableManager:
@@ -86,8 +89,10 @@ class ComponentTableManager:
                 case "not_exists":
                     maint.create_table(tbl)
                 case "schema_mismatch":
+                    logger.warning(f"⚠️  组件 {tbl.comp_name} 的表结构需要迁移Schema。")
                     ret = False
                 case "cluster_mismatch":
+                    logger.warning(f"⚠️  组件 {tbl.comp_name} 的表需要迁移到新集群。")
                     ret = False
         return ret
 

@@ -181,13 +181,6 @@ class StartCommand(CommandInterface):
             }
             config = Config(config_for_factory)
 
-        # 自动迁移
-        if not args.no_migrate:
-            from hetu.cli.migrate import MigrateCommand
-
-            print("🛠️ 正在自动执行数据库Schema迁移...")
-            MigrateCommand.run(config)
-
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
         # prepare用的配置
