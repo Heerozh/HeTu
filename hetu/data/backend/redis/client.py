@@ -738,6 +738,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # pushes有hset/zadd/zrem/del
         checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
+        deleted: dict[str, bool] = {}
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -746,7 +747,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
-            # todo 应该先传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
             # insert
             for insert in inserts:
                 row_id = insert["id"]
@@ -767,13 +767,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
             # delete
             for delete in deletes:
+                # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
+                deleted[str(delete["id"])] = True
                 key = id_prefix + str(delete["id"])
                 old_version = delete["_version"]
                 _version_must_match(key, old_version)
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
 
-        payload_json: bytes = msg_packer.pack([checks, pushes])  # type: ignore
+        payload_json: bytes = msg_packer.pack([checks, pushes, deleted])  # type: ignore
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 

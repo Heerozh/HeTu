@@ -55,9 +55,10 @@ class SessionRepository:
         在Session本地缓存中检查Unique索引冲突。
         """
         idmap = self._session.idmap
+        ref = self.ref
         for unique_index in fields:
             value = row[unique_index]
-            rows = idmap.filter(self.ref, **{unique_index: value})
+            rows = idmap.filter(ref, **{unique_index: value})
             if len(rows) > 0:
                 return unique_index
         return None
@@ -68,10 +69,13 @@ class SessionRepository:
         """
         在远程数据库中检查Unique索引冲突。
         """
+        session = self._session
+        client = session.master_or_servant
+        ref = self.ref
         for unique_index in fields:
             value: np.generic = row[unique_index]
-            existing_row = await self._session.master_or_servant.range(
-                self.ref,
+            existing_row = await client.range(
+                ref,
                 unique_index,
                 value.item(),
                 value.item(),
@@ -79,8 +83,10 @@ class SessionRepository:
                 False,
                 RowFormat.ID_LIST,
             )
-            # todo 如果existing_row的id存在于mark_deleted中，则不算冲突
             if len(existing_row) > 0:
+                # 如果existing_row的id存在于mark_deleted中，则不算冲突
+                if session.idmap.is_deleted(ref, existing_row[0]):
+                    continue
                 return unique_index
         return None
 

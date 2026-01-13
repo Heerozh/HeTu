@@ -234,6 +234,16 @@ class IdentityMap:
         # 标记为DELETE
         states[row_id] = RowState.DELETE
 
+    def is_deleted(self, table_ref: TableReference, row_id: int) -> bool:
+        """
+        检查指定ID的对象是否被标记为删除状态。
+        """
+        if table_ref not in self._row_states:
+            return False
+
+        states = self._row_states[table_ref]
+        return states.get(row_id) == RowState.DELETE
+
     def get_dirty_rows(
         self,
     ) -> dict[

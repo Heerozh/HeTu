@@ -1,6 +1,8 @@
 local cmsgpack = cmsgpack
 local unpack = unpack
 local redis_call = redis.call
+local string_match = string.match
+local next = next
 local ipairs = ipairs
 
 -- ARGV[1] 是 msgpack 序列化的 payload
@@ -8,6 +10,7 @@ local ipairs = ipairs
 local payload = cmsgpack.unpack(ARGV[1])
 local checks = payload[1]
 local pushes = payload[2]
+local deleted = payload[3]
 
 -- ============================================================================
 -- Phase 1: Checks
@@ -52,7 +55,16 @@ if checks then
             -- ZRANGE key [val: [val:\xff BYLEX LIMIT 0 1
             local res = redis_call("ZRANGE", idx_key, start_val, end_val, "BYLEX", "LIMIT", 0, 1)
             if #res > 0 then
-                return "UNIQUE: Constraint violation (str) on " .. idx_key
+                if next(deleted) ~= nil then
+                    local row_key = string_match(res[1], ".*:(.*)$")
+                    if deleted[row_key] then
+                        -- 唯一索引指向的 key 在本次事务中被删除了，则不算冲突
+                    else
+                        return "UNIQUE: Constraint violation (str) on " .. idx_key
+                    end
+                else
+                    return "UNIQUE: Constraint violation (str) on " .. idx_key
+                end
             end
         end
     end
