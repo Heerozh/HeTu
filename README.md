@@ -7,7 +7,8 @@
 
 # 🌌 河图 HeTu
 
-河图是一个分布式游戏服务器引擎。受 supabase 启发，专为网络游戏设计。
+河图是一个分布式游戏服务器引擎，专为网络游戏设计的现代 2-Tier（两层模式）与
+Serverless（无服务器）的 BaaS 架构。
 
 - 高开发效率：透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
 - Python 语言：支持各种数据科学库，拥抱未来。
@@ -16,13 +17,13 @@
 
 具体性能见下方[性能测试](#-性能测试)。
 
-## 实时数据库
+## Schema即API
 
-河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的
-进行 select/query 订阅。
+河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的进行
+get/range 订阅。
 订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
 
-写入操作只能由服务器的逻辑代码执行，客户端通过 RPC 远程调用。类似 BaaS 的储存过程，但更易写。
+写入操作只能由服务器的逻辑代码执行，客户端通过 RPC 远程调用。类似储存过程，但更易写。
 
 ## 开源免费
 
@@ -40,7 +41,7 @@
 
 ```Python
 import numpy as np
-from hetu.data import define_component, property_field, Permission, BaseComponent
+from hetu import define_component, property_field, Permission, BaseComponent
 
 
 # 通过@define_component修饰，表示Position结构是一个组件
@@ -55,7 +56,7 @@ class Position(BaseComponent):
 > 不要创建名叫 Player 的大表，而是把 Player 的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
 > 然后通过`owner`属性关联到 Player 身上。大表会严重影响性能和扩展性。
 
-### 定义 System（逻辑）
+### 定义 System（数据逻辑）
 
 #### move_to 移动逻辑
 
@@ -66,15 +67,17 @@ class Position(BaseComponent):
 `ctx.caller`是登录用户的 id，此 id 稍后登录时会通过`elevate`方法决定。
 
 ```Python
+from hetu import define_system, SystemContext
+
+
 @define_system(
     namespace="ssw",
     components=(Position,),  # 定义System引用的表
     permission=Permission.USER,
 )
-async def move_to(ctx: Context, x, y):
+async def move_to(ctx: SystemContext, x, y):
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    # 注：可简写为ctx[Position].upsert
-    async with ctx.session.select(Position).upsert(ctx.caller, where='owner') as pos:
+    async with ctx.repo(Position).upsert(owner=ctx.caller) as pos:
         pos.x = x
         pos.y = y
         # with结束后会自动提交修改
@@ -86,23 +89,16 @@ async def move_to(ctx: Context, x, y):
 
 我们定义一个`login_test`System，作为客户端登录接口。
 
-河图有个内部 System 叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联
+河图有个内部方法叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联
 `user_id`。
 
-> [!NOTE]
-> 什么是内部 System? 如何调用？
-> 内部 System 为 Admin 权限的 System，用户不可调用。
-> System 都牵涉到数据库事务操作，因此须通过参数`subsystems`链接，让事务连续。
-
 ```Python
-from hetu.system import define_system, Context
-from hetu.system import elevate
+from hetu import elevate
 
 
 # permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY,
-    subsystems=(elevate,))
-async def login_test(ctx: Context, user_id):
+@define_system(namespace="ssw", permission=Permission.EVERYBODY)
+async def login_test(ctx: SystemContext, user_id):
     # 提权以后ctx.caller就是user_id。
     await elevate(ctx, user_id, kick_logged_in=True)
 ```
