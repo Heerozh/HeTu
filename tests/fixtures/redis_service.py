@@ -1,5 +1,6 @@
 import time
-
+import sys
+import socket
 import docker
 import docker.errors
 import pytest
@@ -211,6 +212,21 @@ def ses_redis_cluster_service():
     """
     启动redis cluster docker服务 (纯docker-py实现)，测试结束后销毁服务
     """
+    # 在Linux下(如GitHub Actions)，host.docker.internal默认无法解析
+    # 这里我们通过Monkey Patch让Python也能将其解析为127.0.0.1
+    if sys.platform.startswith("linux"):
+        _getaddrinfo = socket.getaddrinfo
+
+        def new_getaddrinfo(*args, **kwargs):
+            host = args[0]
+            if host == "host.docker.internal":
+                host = "127.0.0.1"
+                l_args = list(args)
+                l_args[0] = host
+                return _getaddrinfo(*l_args, **kwargs)
+            return _getaddrinfo(*args, **kwargs)
+
+        socket.getaddrinfo = new_getaddrinfo
     try:
         client = docker.from_env()
     except docker.errors.DockerException:
