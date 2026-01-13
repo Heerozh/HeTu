@@ -31,7 +31,7 @@ SLOW_LOG = SlowLog()
 
 class SystemCaller:
     """
-    每个连接一个SystemCaller实例。
+    System调用器。该调用器实例每个用户连接独立持有一个。
     """
 
     def __init__(
@@ -43,7 +43,7 @@ class SystemCaller:
 
     @classmethod
     def call_check(cls, system: str) -> SystemDefine:
-        """检查调用是否合法"""
+        """检查system是否存在，并发挥对应的SystemDefine"""
         # 读取保存的system define
         sys = SYSTEM_CLUSTERS.get_system(system)
         if not sys:
@@ -56,8 +56,8 @@ class SystemCaller:
     ) -> ResponseToClient | None:
         """
         实际调用逻辑，无任何检查
-        调用成功返回True，System返回值
-        只有事务冲突超出重试次数时返回False, None
+        调用成功返回System返回值
+        事务冲突超出重试次数时Raise RuntimeError
         """
         # 开始调用
         sys_name = sys.func.__name__
@@ -76,6 +76,16 @@ class SystemCaller:
         assert first_table, f"TYPING不该走到: System {sys_name} 没有引用任何Component"
         session = first_table.session()
 
+        # 设置context.repo
+        for comp in sys.full_components:
+            repo = session.using(comp)
+            master = comp.master_ or comp
+            context.repo[master] = repo
+        if uuid and SystemLock not in context.repo:
+            raise ValueError(
+                f"调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
+            )
+
         # 复制inherited函数
         for dep_name in sys.full_depends:
             base, _, _ = dep_name.partition(":")
@@ -88,10 +98,7 @@ class SystemCaller:
         while context.race_count < sys.max_retry:
             # 开始新的事务，并attach components
             await session.__aenter__()
-            for comp in sys.full_components:
-                repo = session.using(comp)
-                master = comp.master_ or comp
-                context.repo[master] = repo
+
             # 执行system和事务
             try:
                 # 先检查uuid是否执行过了
@@ -138,8 +145,32 @@ class SystemCaller:
 
     async def call(self, system: str, *args, uuid: str = "") -> ResponseToClient | None:
         """
-        调用System，返回True表示调用成功，
-        返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
+        调用一个System。
+        服务器会启动一个数据库事务Session，执行System内的所有数据库操作。
+        如果遇到事务冲突，则会自动重试，直到成功或超过最大重试次数为止。
+
+        Parameters
+        ----------
+        system : str
+            要调用的System名称
+        *args
+            传递给System的参数
+        uuid : str, optional
+            本次调用的唯一标识符，用于防止重复调用（默认不启用）。
+            如果提供了uuid，系统会在调用前检查该uuid是否已经执行过，
+            使用本功能也需要System定义时`call_lock`设为`True`。
+
+            主要用于未来调用的幂等性，或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+
+        Returns
+        -------
+        如果成功则返回System的返回值。
+        抛出异常表示非法调用，或内部失败（代码错误，数据库错误），会自动记录日志。可以不处理扔给
+        上级Endpoint，Endpoint收到异常会立即调用terminate断开客户端SDK的连接。
+
+        See Also
+        --------
+        hetu.system.future.create_future_call : 创建未来调用
         """
         # 检查call参数和call权限
         sys = self.call_check(system)
@@ -148,7 +179,10 @@ class SystemCaller:
         return await self.call_(sys, *args, uuid=uuid)
 
     async def remove_call_lock(self, system: str, uuid: str):
-        """删除call lock"""
+        """
+        删除call lock。此方法开发者无需调用，由系统内部管理。
+        call lock本身是易失表，可以通过维护工具定期清理数据，并不需要特地remove。
+        """
         sys = SYSTEM_CLUSTERS.get_system(system)
         assert sys
 

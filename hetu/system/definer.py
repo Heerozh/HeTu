@@ -352,6 +352,9 @@ def define_system(
         是否对此System启用调用锁，启用后在调用时可以通过传入调用UUID来防止System重复执行。
         如果此System需要给未来调用使用，则此项必须为True。
 
+        客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
+        或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+
     Notes
     -----
     **System函数：** ::
