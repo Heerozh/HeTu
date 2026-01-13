@@ -1,7 +1,8 @@
-from fixtures.backends import *
+from fixtures.redis_service import *
 from fixtures.testdata import *
 from fixtures.defines import *
 from fixtures.testapp import *
+from fixtures.backends import *
 
 
 import logging

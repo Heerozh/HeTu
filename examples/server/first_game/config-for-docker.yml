@@ -41,8 +41,8 @@ WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ]  # 0.5MB
 # WEBSOCKET_PING_INTERVAL = 20
 # WEBSOCKET_PING_TIMEOUT = 20
 
-# 闲置多少秒未调用System则视为断线
-SYSTEM_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
+# 闲置多少秒未调用System/Endpoint则视为断线
+ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
 # 限制每个IP可以创建多少匿名连接（提权登陆后不受此限制）
 MAX_ANONYMOUS_CONNECTION_BY_IP: 10
 
@@ -91,26 +91,26 @@ LOGGING:
   loggers:
     root: # 根日志记录器，所有未被过滤掉的日志都会经过这里
       level: DEBUG  # 接受日志级别，生产用INFO
-      handlers:    # 输出目标，这里输出到进程安全的log_queue，这样可以把多进程的日志合并到一起
+      handlers: # 输出目标，这里输出到进程安全的log_queue，这样可以把多进程的日志合并到一起
         - log_queue
-    HeTu.root:     # 河图的日志记录器
+    HeTu.root: # 河图的日志记录器
       level: DEBUG
-    HeTu.replay:   # replay日志记录器，用于回放复现BUG，level为DEBUG起效，设为ERROR完全关闭。
+    HeTu.replay: # replay日志记录器，用于回放复现BUG，level为DEBUG起效，设为ERROR完全关闭。
       level: DEBUG
       propagate: false  # 不向上级传递，不然会传递给root
       handlers:
         - replay_queue
 
   filters:
-    add_context:  # 生成ctx信息的filter
+    add_context: # 生成ctx信息的filter
       (): hetu.safelogging.filter.ContextFilter
 
-  handlers:  # 处理器创建，用来决定日志的输出方式
-    console:  # 控制台输出
+  handlers: # 处理器创建，用来决定日志的输出方式
+    console: # 控制台输出
       class: logging.StreamHandler
       formatter: colour
       stream: ext://sys.stdout
-    log_to_file:  # 输出到按日期切割的文件，不可直接输入到这里，因为不是进程安全的
+    log_to_file: # 输出到按日期切割的文件，不可直接输入到这里，因为不是进程安全的
       class: logging.handlers.TimedRotatingFileHandler
       formatter: generic
       filename: logs/hetu.log
@@ -119,7 +119,7 @@ LOGGING:
       when: D
       interval: 1
       backupCount: 30
-    replay_to_file:  # 输出到按大小切割的文件，不可直接输入到这里，因为不是进程安全的
+    replay_to_file: # 输出到按大小切割的文件，不可直接输入到这里，因为不是进程安全的
       class: logging.handlers.RotatingFileHandler
       formatter: generic
       filename: logs/replay.log
@@ -127,11 +127,11 @@ LOGGING:
       delay: true
       maxBytes: !eval [ 2 ** 28 ]  # 256MB
       backupCount: 20  # 20 * 256MB = 5GB
-#    syslog:  # 也可以用syslog输出
-#      class: logging.handlers.SysLogHandler
-#      formatter: generic
-#      address: /dev/log
-#      facility: local0
+    #    syslog:  # 也可以用syslog输出
+    #      class: logging.handlers.SysLogHandler
+    #      formatter: generic
+    #      address: /dev/log
+    #      facility: local0
     log_queue: # 进程安全的queue
       class: logging.handlers.QueueHandler
       filters: # 如果要生成ctx信息(formatters里%(ctx))，需要加这个filter。只能加在QueueHandler上
@@ -151,8 +151,8 @@ LOGGING:
         - replay_to_file
 
   formatters:
-    colour:   # 彩色格式
+    colour: # 彩色格式
       class: sanic.logging.formatter.AutoFormatter
-    generic:  # 文本格式
+    generic: # 文本格式
       format: '%(ident)s %(asctime)s %(levelname)-8s %(name)-12s %(ctx)-27s %(message)s'
       datefmt: '%Y-%m-%d %H:%M:%S %z'

@@ -1,30 +1,34 @@
-import numpy as np
+import pytest
+
+from hetu.data.backend import Backend
+from hetu.common.snowflake_id import SnowflakeID
+
+SnowflakeID().init(1, 0)
 
 
-async def test_table_direct_get_set(filled_item_table):
-    # 测试direct get/set
-    np.testing.assert_array_equal((await filled_item_table.direct_get(1)).qty, 999)
-    await filled_item_table.direct_set(1, qty=911)
-    np.testing.assert_array_equal((await filled_item_table.direct_get(1)).qty, 911)
-    # 测试direct set index and direct query index
-    await filled_item_table.direct_set(1, owner=911)
-    np.testing.assert_array_equal((await filled_item_table.direct_get(1)).owner, 911)
-    np.testing.assert_array_equal(
-        (await filled_item_table.direct_query('owner', 911)).owner, 911)
+async def test_table_direct_set(filled_rls_ref, mod_auto_backend):
+    backend: Backend = mod_auto_backend()
+    # 测试direct set
+    async with backend.session(
+        filled_rls_ref.instance_name, filled_rls_ref.cluster_id
+    ) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(owner=10)
+        assert row
 
+    assert row.friend == 11
 
-async def test_table_direct_insert_delete(filled_item_table):
-    # 测试direct insert and direct delete
-    row_ids = await filled_item_table.direct_insert(owner=912, time=912)
-    np.testing.assert_array_equal(
-        (await filled_item_table.direct_get(row_ids[0])).owner, 912)
-    np.testing.assert_array_equal(
-        (await filled_item_table.direct_query('owner', 912)).owner, 912)
-    await filled_item_table.direct_delete(row_ids[0])
+    await backend.master.direct_set(filled_rls_ref, row.id, friend="9")
 
+    async with backend.session(
+        filled_rls_ref.instance_name, filled_rls_ref.cluster_id
+    ) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(owner=10)
+        assert row
 
-async def test_table_direct_query(filled_item_table):
-    # test direct query
-    np.testing.assert_array_equal(
-        (await filled_item_table.direct_query('name', 'Itm11', 'Itm12')).time,
-        [111, 112])
+    assert row.friend == 9
+
+    # 测试写入不存在的行
+    with pytest.raises(ValueError, match="aaa"):
+        await backend.master.direct_set(filled_rls_ref, row.id, aaa="11")

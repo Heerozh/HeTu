@@ -13,5 +13,6 @@ WORKDIR /
 
 EXPOSE 2466/tcp
 
-ENTRYPOINT ["hetu"]
+ENTRYPOINT ["python -m hetu"]
+#ENTRYPOINT ["python -O -m hetu"]  项目成熟后再开-O
 CMD ["start", "--config /app/config.yml"]

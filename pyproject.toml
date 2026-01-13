@@ -30,6 +30,8 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
+    "msgpack>=1.1.2",
+    "msgspec>=0.20.0",
     "numpy~=2.3",
     "orjson~=3.11",
     "pyyaml~=6.0",
@@ -50,19 +52,24 @@ hetu = "hetu.__main__:main"
 [dependency-groups]
 dev = [
     "aiohttp>=3.13.1",
+    "austin-dist>=4.0.0",
+    "basedpyright>=1.36.1",
     "docker>=7.1.0",
     "ipykernel>=7.1.0",
     "matplotlib>=3.10.7",
     "mypy>=1.19.0",
     "pandas>=2.3.3",
+    "py-spy>=0.4.1",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.3.0",
+    "pytest-benchmark>=5.2.3",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
     "ruff>=0.14.6",
     "sanic-testing>=24.6.0",
     "tqdm>=4.67.1",
     "trustme>=1.2.1",
+    "ya",
 ]
 
 [tool.setuptools_scm]
@@ -87,3 +94,19 @@ line-length = 88
 
 [tool.ruff]
 line-length = 88
+
+[tool.uv.sources]
+ya = { git = "https://github.com/Heerozh/ya.git" }
+
+[tool.pyright]
+typeCheckingMode = "standard"
+# reportUnknownVariableType = false
+# reportUnknownMemberType = false
+
+# [[tool.pyright.executionEnvironments]]
+# root = "tests"  # 这会导致项目根目录改为tests
+# extraPaths = ["src"]  # 添加src到搜索路径
+# 把“可选值使用不安全”的报告降级（或关闭）
+#reportOptionalMemberAccess = "none"
+#reportOptionalSubscript = "none"
+#reportOptionalIterable = "none"

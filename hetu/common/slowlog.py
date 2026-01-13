@@ -4,13 +4,14 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 import logging
 import random
 import time
 
 from tabulate import tabulate
 
-logger = logging.getLogger('HeTu.root')
+logger = logging.getLogger("HeTu.root")
 SLOW_LOG_TIME_THRESHOLD = 1
 SLOW_LOG_RETRY_THRESHOLD = 5
 
@@ -33,11 +34,11 @@ class InplaceAverage:
 
 
 class SlowLog:
-
     def __init__(self):
         self._time_averages = {}
         self._retry_averages = {}
         self._logged = {}
+        # 每个进程都会打印相同内容，所以随机下间隔
         self.log_interval = random.randint(60, 600)
         self._last_clean = time.time()
 
@@ -65,16 +66,27 @@ class SlowLog:
         if elapsed > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD:
             if now - self._logged.get(name, 0) > self.log_interval:
                 logger.warning(
-                    f"⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed:.3f}秒，事务冲突次数 {retry}，"
-                    f"平均时间 {time_avg.value:.3f}秒\n{self}")
+                    f"⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed:.3f}秒，"
+                    f"事务冲突次数 {retry}，平均时间 {time_avg.value:.3f}秒\n{self}"
+                )
                 self._logged[name] = now
 
     def __str__(self):
-        slow20 = sorted(self._time_averages.items(), key=lambda x: x[1].value, reverse=True)[:20]
-        retry20 = sorted(self._retry_averages.items(), key=lambda x: x[1].value, reverse=True)[:20]
+        slow20 = sorted(
+            self._time_averages.items(), key=lambda x: x[1].value, reverse=True
+        )[:20]
+        retry20 = sorted(
+            self._retry_averages.items(), key=lambda x: x[1].value, reverse=True
+        )[:20]
         tops = [name for name, avg in slow20]
         tops.extend(name for name, avg in retry20 if name not in tops)
-        rows = [(name, self._time_averages[name].value, self._time_averages[name].value)
-                for name in tops]
-        return tabulate(rows, headers=['系统', '平均时间', '平均冲突次数'],
-                        tablefmt='github', floatfmt=".2f")
+        rows = [
+            (name, self._time_averages[name].value, self._time_averages[name].value)
+            for name in tops
+        ]
+        return tabulate(
+            rows,
+            headers=["系统", "平均时间", "平均冲突次数"],
+            tablefmt="github",
+            floatfmt=".2f",
+        )

@@ -13,4 +13,12 @@ from .component import (
     define_component,
     property_field,
 )
-from .idmap import IdentityMap
+
+__all__ = [
+    "backend",
+    "BaseComponent",
+    "ComponentDefines",
+    "Permission",
+    "define_component",
+    "property_field",
+]

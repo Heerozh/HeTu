@@ -7,414 +7,657 @@
 
 import numpy as np
 import pytest
+from typing import Callable
+from redis.asyncio.cluster import RedisCluster
 
-from hetu.data.backend import UniqueViolation, RedisBackend
+from hetu.data.backend import UniqueViolation, Backend
+from hetu.data.backend.session import Session
+from hetu.common.snowflake_id import SnowflakeID
+from fixtures.backends import use_redis_family_backend_only
+
+SnowflakeID().init(1, 0)
 
 
-async def test_table(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_repo_outside(mod_item_model):
+    """测试SessionRepo在未进入Session上下文时抛出异常。"""
+    backend = Backend.__new__(Backend)
+    backend._master = None  # type: ignore
+    session = Session(backend, "pytest", 1)
+    async with session as session:
+        item_repo = session.using(mod_item_model)
 
+    with pytest.raises(AssertionError, match="Session"):
+        await item_repo.range(limit=10, id=(10, 5))
+
+
+async def test_basic_crud(item_ref, mod_auto_backend: Callable[..., Backend]):
+    """测试基本的CRUD操作。"""
+    backend = mod_auto_backend()
     # 测试插入数据
-    async with backend.transaction(1) as session:
-        # todo 语法改成：
-        #   row = mod_item_model.new_row()
-        #   session.select(mod_item_model).insert(row)
-        #   session.select(mod_item_model).get(id=id)
-        #   session.select(mod_item_model).range(index=(left, right))
-        #   session.select(mod_item_model).update(id, row)
-        #   session.select(mod_item_model).delete(id)
-        #   session.select(mod_item_model).upsert(index=row.index, row)
-        tbl = item_table.attach(session)
-        row = mod_item_model.new_row()
+    row_ids = []
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        # 插入3行数据
+        item_repo = session.using(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
         row.name = "Item1"
         row.owner = 1
         row.time = 1
-        await tbl.insert(row)
+        row_ids.append(row.id)
+        await item_repo.insert(row)
 
-        row.id = 0
+        row = item_ref.comp_cls.new_row()
         row.name = "Item2"
         row.owner = 1
         row.time = 2
-        await tbl.insert(row)
+        row_ids.append(row.id)
+        await item_repo.insert(row)
 
-        row.id = 0
+        row = item_ref.comp_cls.new_row()
         row.name = "Item3"
         row.owner = 2
         row.time = 3
-        await tbl.insert(row)
-        row_ids = await session.end_transaction(False)
-    assert row_ids, [1, 2 == 3]
+        row_ids.append(row.id)
+        await item_repo.insert(row)
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        result = await tbl.query("id", -np.inf, +np.inf)
-        np.testing.assert_array_equal(result.id, [1, 2, 3])
-        assert (await tbl.select(1)).name == "Item1"
-        # 测试第一行dict select不出来的历史bug
-        assert (await tbl.select("Item1", "name")).name == "Item1"
-        assert type(await tbl.select("Item1", "name")) is not np.recarray
+        # 测试刚添加的缓存
+        np.testing.assert_array_equal((await item_repo.get(id=row_ids[2])).time, 3)  # type: ignore
 
-    np.testing.assert_array_equal(
-        (await item_table.direct_query("id", -np.inf, +np.inf)).id, [1, 2, 3]
-    )
+        # 测试提前commit
+        await session.commit()
+
+        # 测试Session退出后的repo报错
+        with pytest.raises(AssertionError, match="Session"):
+            await item_repo.range(limit=10, id=(10, 5))
+
+    # 测试基本的range和get
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        result = await item_repo.range(limit=10, id=(-np.inf, +np.inf))
+        np.testing.assert_array_equal(result.id, row_ids)
+        assert (await item_repo.get(id=row_ids[0])).name == "Item1"  # type: ignore
+        # 测试第一行dict get不出来的历史bug
+        assert (await item_repo.get(name="Item1")).name == "Item1"  # type: ignore
+        assert type(await item_repo.get(name="Item1")) is not np.recarray
 
     # 测试update是否正确
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row = await tbl.select(1)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        row = await item_repo.get(id=row_ids[0])
+        assert row
         row.qty = 2
-        await tbl.update(1, row)
-    np.testing.assert_array_equal((await item_table.direct_get(1)).qty, 2)
+        await item_repo.update(row)
+        # 测试刚update的缓存
+        np.testing.assert_array_equal((await item_repo.get(id=row_ids[0])).qty, 2)  # type: ignore
+    # 测试写入后
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        np.testing.assert_array_equal((await item_repo.get(id=row_ids[0])).qty, 2)  # type: ignore
 
-    # 测试插入Unique重复数据
+    # 测试delete是否正确
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        with pytest.raises(LookupError):
+            item_repo.delete(row_ids[1])
+
+        await item_repo.get(id=row_ids[1])  # 确保缓存中有数据
+        item_repo.delete(row_ids[1])
+        # 测试刚delete的缓存
+        result = await item_repo.range(limit=10, id=(-np.inf, +np.inf))
+        np.testing.assert_array_equal(result.id, [row_ids[0], row_ids[2]])
+
+
+async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend]):
+    """测试插入Unique重复数据"""
     from hetu.data.backend import UniqueViolation
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row.id = 0
+    backend = mod_auto_backend()
+    row_ids = []
+
+    # 测试本地缓存中unique违反：
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.owner = 1
+        row.time = 1
+        row_ids.append(row.id)
+        await item_repo.insert(row)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item2"
+        row.owner = 2
+        row.time = 2
+        row_ids.append(row.id)
+        await item_repo.insert(row)
+
+        # 关掉remote unique check，只测本地
+        async def mock_remote_has_unique_conflicts(row, field):
+            assert False, "不应该调用远程unique检查"
+
+        item_repo._remote_has_unique_conflicts = mock_remote_has_unique_conflicts  # type: ignore
+
+        # update 重复time
+        row.name = "Item2"
+        row.owner = 2
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_repo.update(row)
+
+        # insert 重复name
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.owner = 3
+        row.time = 3
+        with pytest.raises(UniqueViolation, match="name"):
+            await item_repo.insert(row)
+        # insert 重复time
+        row.name = "Item3"
+        row.owner = 3
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_repo.insert(row)
+
+    # 测试和数据库已有数据unique违反，依然是提交前报错（提交报错属于race范围）
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
         row.name = "Item2"
         row.owner = 2
         row.time = 999
         with pytest.raises(UniqueViolation, match="name"):
-            await tbl.insert(row)
-        row.id = 0
+            await item_repo.insert(row)
+
+        row = item_ref.comp_cls.new_row()
         row.name = "Item4"
         row.time = 2
         with pytest.raises(UniqueViolation, match="time"):
-            await tbl.insert(row)
+            await item_repo.insert(row)
+
+        # 测试update
+        row = await item_repo.get(name="Item2")
+        assert row
+        row.time = 1
+        with pytest.raises(UniqueViolation, match="time"):
+            await item_repo.update(row)
 
 
-async def test_upsert(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
+    """测试upsert操作"""
+    backend = mod_auto_backend()
 
-    # 测试能用update_or_insert
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
 
-        async with tbl.update_or_insert("item1", "name") as row:
+        async with item_repo.upsert(name="item1") as row:
             row.time = 1
 
-        async with tbl.update_or_insert("items4", "name") as row:
+        async with item_repo.upsert(name="items4") as row:
             row.time = 4
 
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(item_ref.comp_cls)
 
-        async with tbl.update_or_insert("item1", "name") as row:
+        async with item_repo.upsert(name="item1") as row:
             assert row.time == 1
 
-        async with tbl.update_or_insert("items4", "name") as row:
+        async with item_repo.upsert(name="items4") as row:
             assert row.time == 4
 
 
-async def test_query_number_index(filled_item_table):
-    backend = filled_item_table.backend
+async def test_range_interval(filled_item_ref, mod_auto_backend):
+    """测试开闭区间"""
+    backend: Backend = mod_auto_backend()
 
-    # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        # time范围为110-134，共25个，query是[l, r]，但range是[l, r)
+    # 测试range的区间是否正确，表内值参考test_data.py的filled_item_ref夹具
+    # time范围为110-134，共25个
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        # 默认查询区间检测
         np.testing.assert_array_equal(
-            (await tbl.query("time", 110, 115)).time, range(110, 116)
+            (await item_repo.range(time=(110, 115))).time, range(110, 116)
+        )
+        # 左闭右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("[110", "(115"))).time, range(110, 115)
+        )
+        # 左开右闭
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "[115"))).time, range(111, 116)
+        )
+        # 左开右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "(115"))).time, range(111, 115)
+        )
+
+
+async def test_range_infinite(filled_item_ref, mod_auto_backend):
+    """测试np.inf作为范围值"""
+    backend: Backend = mod_auto_backend()
+
+    # 测试range的区间是否正确，表内值参考test_data.py的filled_item_ref夹具
+    # 测试int索引的inf范围，time范围为110-134，共25个
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        # 左无限右有限
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(-np.inf, 115))).time, range(110, 116)
+        )
+        # 左有限右无限
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(120, np.inf))).time, range(120, 130)
+        )
+        # 左无限右无限
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(-np.inf, np.inf), limit=100)).time,
+            range(110, 135),
+        )
+
+    # 测试float索引的inf范围，model范围为0.0-2.4，共25个
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(time=(-np.inf, np.inf), limit=99)).model,
+            np.arange(0, 2.5, 0.1),
+        )
+
+    # 测试字符串类型的无限不允许
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        with pytest.raises(AssertionError, match="str"):
+            np.testing.assert_array_equal(
+                (await item_repo.range(name=(-np.inf, "Itm15"))).time, range(110, 116)
+            )
+
+
+async def test_range_number_index(filled_item_ref, mod_auto_backend):
+    """测试number类型索引的各种range查询"""
+    backend: Backend = mod_auto_backend()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        ids = (await item_repo.range(id=(-np.inf, np.inf), limit=999)).id
+
+    # 测试各种query是否正确，表内值参考test_data.py的filled_item_ref夹具
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        # time范围为110-134，共25个
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(110, 115))).time, range(110, 116)
         )
         np.testing.assert_array_equal(
-            (await tbl.query("time", 110, 115, desc=True)).time, range(115, 109, -1)
+            (await item_repo.range(time=(110, 115), desc=True)).time,
+            range(115, 109, -1),
         )
-        # query owner单项和limit
-        assert (await tbl.query("owner", 10)).shape[0] == 10
-        assert (await tbl.query("owner", 10, limit=30)).shape[0] == 25
-        assert (await tbl.query("owner", 10, limit=8)).shape[0] == 8
-        assert (await tbl.query("owner", 11)).shape[0] == 0
-        # query id
+        # range owner单项和limit
+        assert (await item_repo.range(owner=(10, 10))).shape[0] == 10
+        assert (await item_repo.range(owner=(10, 10), limit=30)).shape[0] == 25
+        assert (await item_repo.range(owner=(10, 10), limit=8)).shape[0] == 8
+        assert (await item_repo.range(owner=(11, 11))).shape[0] == 0
+        # range id
         np.testing.assert_array_equal(
-            (await tbl.query("id", 5, 7, limit=999)).id, [5, 6, 7]
+            (await item_repo.range(id=(ids[5], ids[10]), limit=999)).id, ids[5:11]
         )
-        # 测试query的方向反了
+        # 测试range的方向反了
         # AssertionError: right必须大于等于left，你的:
         with pytest.raises(AssertionError, match="right.*left"):
-            await tbl.query("time", 115, 110)
-
-
-async def test_query_string_index(filled_item_table):
-    backend = filled_item_table.backend
-
-    # 测试各种query是否正确，表内值参考test_data.py的filled_item_table夹具
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        assert (await tbl.query("name", 11)).shape[0] == 0
-        # query on str typed unique
-        assert (await tbl.query("name", "11")).shape[0] == 0
-        assert (await tbl.query("name", "Itm11")).shape[0] == 1
-        assert (await tbl.query("name", "Itm11")).time == 111
-        assert (await tbl.select("Itm11", where="name")).id == 2
-        assert (await tbl.select("Itm13", where="name")).id == 4
+            await item_repo.range(time=(115, 110))
+        # 测试float类型索引
         np.testing.assert_array_equal(
-            (await tbl.query("name", "Itm11", "Itm12")).time, [111, 112]
+            (await item_repo.range(model=(1.1, 2.3), limit=99)).time,
+            range(121, 134),
         )
-        # reverse query one row
-        assert (await tbl.query("time", 111)).name == ["Itm11"]
-        assert len((await tbl.query("time", 111)).name) == 1
 
 
-async def test_query_bool(filled_item_table):
-    backend = filled_item_table.backend
+async def test_query_string_index(filled_item_ref, mod_auto_backend):
+    """测试string类型索引的各种query查询"""
+    backend: Backend = mod_auto_backend()
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(5)
-        row.used = True
-        await tbl.update(row.id, row)
-        row = await tbl.select(7)
-        row.used = True
-        await tbl.update(row.id, row)
+    # 测试各种query是否正确，表内值参考test_data.py的filled_item_ref夹具
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        # range string with int
+        with pytest.raises(AssertionError, match="str"):
+            assert (await item_repo.range(name=(11, 11))).shape[0] == 0
+        # range on str typed unique
+        assert (await item_repo.range(name=("11", "11"))).shape[0] == 0
+        assert (row11 := await item_repo.range(name=("Itm11", "Itm11"))).shape[0] == 1
+        assert (await item_repo.range(name=("Itm11", "Itm11"))).time == 111
+        # get on name index
+        row11_13 = await item_repo.range(name=("Itm11", "Itm13"))
+        assert (await item_repo.get(name="Itm11")).id == row11.id  # type: ignore
+        assert (await item_repo.get(name="Itm13")).id == row11_13.id[-1]  # type: ignore
+        np.testing.assert_array_equal(
+            (await item_repo.range(name=("Itm11", "Itm12"))).time, [111, 112]
+        )
+        # reverse range one row
+        assert (await item_repo.range(time=(111, 111))).name == ["Itm11"]
+        assert len((await item_repo.range(time=(111, 111))).name) == 1
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        assert set((await tbl.query("used", True)).id) == {5, 7}
-        assert set((await tbl.query("used", False, limit=99)).id) == set(
-            range(1, 26)
-        ) - {5, 7}
-        assert set((await tbl.query("used", 0, 1, limit=99)).id) == set(range(1, 26))
-        assert set((await tbl.query("used", False, True, limit=99)).id) == set(
-            range(1, 26)
+
+async def test_query_bool(filled_item_ref, mod_auto_backend):
+    """测试bool类型索引的各种query查询"""
+    backend: Backend = mod_auto_backend()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        row1 = await item_repo.get(time=115)
+        assert row1
+        row1.used = True
+        await item_repo.update(row1)
+        row2 = await item_repo.get(time=117)
+        assert row2
+        row2.used = True
+        await item_repo.update(row2)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(filled_item_ref.comp_cls)
+        assert set((await item_repo.range(used=(True, True))).id) == {
+            row1.id,
+            row2.id,
+        }
+        np.testing.assert_array_equal(
+            (await item_repo.range(used=(False, False), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}),
+        )
+        np.testing.assert_array_equal(
+            (await item_repo.range(used=(0, 1), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}) + [115, 117],  # 等与1的排后面
+        )
+        np.testing.assert_array_equal(
+            (await item_repo.range(used=(False, True), limit=99)).time,
+            sorted(set(range(110, 135)) - {115, 117}) + [115, 117],  # 等与1的排后面
         )
 
     # delete
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        await tbl.delete(5)
-        await tbl.delete(7)
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        _ = await item_repo.range(used=(True, True))  # 必须get获得乐观锁
+        item_repo.delete(row1.id)
+        item_repo.delete(row2.id)
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        assert set((await tbl.query("used", True)).id) == set()
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(filled_item_ref.comp_cls)
+        assert set((await item_repo.range(used=(True, True))).id) == set()
 
 
-async def test_string_length_cutoff(filled_item_table, mod_item_model):
-    backend = filled_item_table.backend
+async def test_string_length_cutoff(filled_item_ref, mod_auto_backend):
+    """测试字符串长度截断功能"""
+    backend: Backend = mod_auto_backend()
 
     # 测试插入的字符串超出长度是否截断
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = mod_item_model.new_row()
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        row = filled_item_ref.comp_cls.new_row()
         row.name = "reinsert2"  # 超出U8长度会被截断
-        await tbl.insert(row)
+        await item_repo.insert(row)
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        assert (await tbl.select("reinsert", "name")) is not None, (
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(filled_item_ref.comp_cls)
+        assert (await item_repo.get(name="reinsert")) is not None, (
             "超出U8长度应该要被截断，这里没索引出来说明没截断"
         )
 
-        assert (await tbl.select("reinsert", "name")).id == 26
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 26
+        assert (await item_repo.get(name="reinsert")).id == row.id  # type: ignore
+        assert len(await item_repo.range("id", -np.inf, +np.inf, limit=999)) == 26
 
 
-async def test_batch_delete(filled_item_table):
-    backend = filled_item_table.backend
+async def test_batch_delete(filled_item_ref, mod_auto_backend):
+    """测试批量删除功能"""
+    backend: Backend = mod_auto_backend()
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        for i in range(20):
-            await tbl.delete(24 - i)  # 再删掉
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        rows = await item_repo.range(id=(-np.inf, +np.inf), limit=999)
+        for i in reversed(rows.id[4:-1]):  # 保留前4个和最后一个
+            item_repo.delete(i)  # 再删掉
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
+        item_repo = session.using(filled_item_ref.comp_cls)
         np.testing.assert_array_equal(
-            (await tbl.query("id", 0, 100, limit=999)).id, [1, 2, 3, 4, 25]
+            (await item_repo.range("id", rows.id[0], rows.id[-1], limit=999)).id,
+            rows.id[:4].tolist() + rows.id[-1:].tolist(),
         )
-        np.testing.assert_array_equal(
-            (await tbl.query("id", 3, 25, limit=999)).id, [3, 4, 25]
-        )
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 5
+        assert len(await item_repo.range("id", -np.inf, +np.inf, limit=999)) == 5
 
-    # 测试is_exist是否正常
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        x = await tbl.is_exist(999, "id")
-        assert x[0] == False
-        x = await tbl.is_exist(5, "id")
-        assert x[0] == False
-        x = await tbl.is_exist(4, "id")
-        assert x[0] == True
+    # 测试get=None是否正常
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        x = await item_repo.get(id=999)
+        assert x is None
+        # 不再设计is_exist/exist方法，因为这样无法利用缓存和乐观锁
+        x = await item_repo.get("id", rows.id[5])
+        assert x is None
 
 
-async def test_unique_table(mod_auto_backend):
-    backend_component_table, get_or_create_backend = mod_auto_backend
-    backend = get_or_create_backend()
+async def test_unique_table(new_component_env, mod_auto_backend):
+    """另一个unique table测试， 忘记测试啥了"""
+    backend: Backend = mod_auto_backend()
 
     from hetu.data import define_component, property_field, BaseComponent
+    from hetu.data.backend import TableReference, RaceCondition
 
     @define_component(namespace="pytest")
     class UniqueTest(BaseComponent):
-        name: "U8" = property_field("", unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True)  # noqa # type: ignore
         timestamp: float = property_field(0, unique=False, index=True)
 
     # 测试连接数据库并创建表
-    unique_test_table = backend_component_table(UniqueTest, "UniqueTest", 1, backend)
-    unique_test_table.create_or_migrate()
+    model_ref = TableReference(UniqueTest, "pytest", 1)
+    table_maint = backend.get_table_maintenance()
+    try:
+        table_maint.create_table(model_ref)
+    except RaceCondition:
+        table_maint.flush(model_ref, force=True)
 
     # 测试insert是否正确
-    async with backend.transaction(1) as session:
-        tbl = unique_test_table.attach(session)
+    async with backend.session("pytest", 1) as session:
+        ut_repo = session.using(UniqueTest)
         row = UniqueTest.new_row()
+        first_row_id = row.id
         assert type(row) is not np.ndarray
-        await tbl.insert(row)
-        row_ids = await session.end_transaction(False)
-    assert row_ids == [1]
+        await ut_repo.insert(row)
 
-    async with backend.transaction(1) as session:
-        tbl = unique_test_table.attach(session)
-        result = await tbl.query("id", 0, 2)
-        assert type(result) is np.recarray
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        ut_repo = session.using(UniqueTest)
+        result = await ut_repo.range("id", -np.inf, np.inf)
+        assert result.shape[0] == 1
+
+    await backend.wait_for_synced()
 
     # 测试可用update_or_insert
-    async with backend.transaction(1) as session:
-        tbl = unique_test_table.attach(session)
-        async with tbl.update_or_insert("test", "name") as row:
+    async with backend.session("pytest", 1) as session:
+        ut_repo = session.using(UniqueTest)
+        async with ut_repo.upsert(name="test") as row:
             assert row.name == "test"
-        async with tbl.update_or_insert("", "name") as row:
-            assert row.id == 1
-        row_ids = await session.end_transaction(False)
-    assert row_ids == [2]
+            last_row_id = row.id
+        async with ut_repo.upsert(name="") as row:
+            assert row.id == first_row_id
 
-    async with backend.transaction(1) as session:
-        tbl = unique_test_table.attach(session)
-        result = await tbl.query("name", "test")
-        assert result.id[0] == 2
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        ut_repo = session.using(UniqueTest)
+        result = await ut_repo.range("name", "test", "test")
+        assert result.id[0] == last_row_id
 
 
-async def test_upsert_limit(mod_item_model, item_table):
-    backend = item_table.backend
-
-    with pytest.raises(ValueError, match="unique"):
-        async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
-            async with tbl.update_or_insert(True, "used") as row:
+async def test_upsert_limit(mod_item_model):
+    """测试upsert不能用于非unique字段"""
+    backend = Backend.__new__(Backend)
+    backend._master = None  # type: ignore
+    with pytest.raises(AssertionError, match="unique"):
+        async with backend.session("pytest", 1) as session:
+            item_repo = session.using(mod_item_model)
+            async with item_repo.upsert(used=True) as _:
                 pass
 
 
-async def test_session_exception(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_session_exception(item_ref, mod_auto_backend):
+    """测试Session中途抛出异常时回滚"""
+    backend: Backend = mod_auto_backend()
+
     try:
-        async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
-            row = mod_item_model.new_row()
+        async with backend.session("pytest", 1) as session:
+            item_repo = session.using(item_ref.comp_cls)
+            row = item_ref.comp_cls.new_row()
             row.owner = 123
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
             raise Exception("测试异常回滚")
 
-            row = defined_item_component.new_row()
-            row.owner = 321
-            await tbl.insert(row)
-    except Exception as e:
+    except Exception as _:  # noqa
         pass
 
+    await backend.wait_for_synced()
+
     # 验证数据没有被提交
-    row = await item_table.direct_get(0)
-    assert row is None
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+        row = await item_repo.range(id=(-np.inf, +np.inf), limit=999)
+        assert len(row) == 0
 
-    row = await item_table.direct_get(1)
-    assert row is None
 
+@use_redis_family_backend_only
+async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name):
+    """测试Redis后端删除所有key后，index key应该为空"""
+    backend: Backend = mod_auto_backend()
 
-async def test_redis_empty_index(mod_item_model, filled_item_table):
-    backend = filled_item_table.backend
-    if not isinstance(backend, RedisBackend):
-        pytest.skip("Not a redis backend, skip")
     # 测试更新name后再把所有key删除后index是否正常为空
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        row = await tbl.select(2)
-        row.name = f"TST{row.id}"
-        await tbl.update(row.id, row)
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        row = await item_repo.get(time=115)
+        assert row
+        row.name = "TST1"
+        await item_repo.update(row)
 
-    async with backend.transaction(1) as session:
-        tbl = filled_item_table.attach(session)
-        rows = await tbl.query("id", -np.inf, +np.inf, limit=999)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        rows = await item_repo.range("id", -np.inf, +np.inf, limit=999)
         for row in rows:
-            await tbl.delete(row.id)
+            item_repo.delete(row.id)
 
     # time.sleep(1)  # 等待部分key过期
-    assert backend.io.keys("test:Item:{CLU*") == []
+    assert (
+        backend.master.io.keys("pytest:Item:{CLU*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        == []
+    )  # type: ignore
 
 
-async def test_redis_insert_stack(mod_item_model, item_table):
-    backend = item_table.backend
-    if not isinstance(backend, RedisBackend):
-        pytest.skip("Not a redis backend, skip")
-
-    # 检测插入2行数据是否有2个stack
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row = mod_item_model.new_row()
-        row.time = 12345
-        row.name = "Stack1"
-        await tbl.insert(row)
-        row = mod_item_model.new_row()
-        row.time = 22345
-        row.name = "Stack2"
-        await tbl.insert(row)
-        assert len(session._stack) > 0
-
-    # 检测update没有变化时没有stacked命令
-    async with backend.transaction(1) as session:
-        tbl = item_table.attach(session)
-        row = await tbl.select(2)
-        row.time = 22345
-        await tbl.update(2, row)
-        assert len(session._stack) == 0
-
-
-async def test_unique_batch_add_in_same_session_bug(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):
+    """测试同事务中插入多个重复Unique数据应该报错（和test_unique重复了，但这是最早版本的bug）"""
+    backend: Backend = mod_auto_backend()
 
     # 同事务中插入多个重复Unique数据应该失败
     with pytest.raises(UniqueViolation, match="name"):
-        async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
+        async with backend.session("pytest", 1) as session:
+            item_repo = session.using(item_ref.comp_cls)
 
-            row = mod_item_model.new_row()
+            row = item_ref.comp_cls.new_row()
             row.name = "Item1"
             row.time = 1
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
-            row = mod_item_model.new_row()
+            row = item_ref.comp_cls.new_row()
             row.name = "Item1"
             row.time = 2
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
     with pytest.raises(UniqueViolation, match="time"):
-        async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
+        async with backend.session("pytest", 1) as session:
+            item_repo = session.using(item_ref.comp_cls)
 
-            row = mod_item_model.new_row()
+            row = item_ref.comp_cls.new_row()
             row.name = "Item1"
             row.time = 1
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
-            row = mod_item_model.new_row()
+            row = item_ref.comp_cls.new_row()
             row.name = "Item2"
             row.time = 2
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
-            row = mod_item_model.new_row()
+            row = item_ref.comp_cls.new_row()
             row.name = "Item3"
             row.time = 2
-            await tbl.insert(row)
+            await item_repo.insert(row)
 
 
-async def test_unique_batch_upsert_in_same_session_bug(mod_item_model, item_table):
-    backend = item_table.backend
+async def test_unique_batch_upsert_in_same_session_bug(item_ref, mod_auto_backend):
+    """测试同事务中upsert多个重复Unique数据应该报错的bug"""
+    backend: Backend = mod_auto_backend()
 
-    # 同事务中upsert多个重复Unique数据时，应该失败，不能跳RaceCondition死循环 todo 改成可以顺利执行
-    with pytest.raises(UniqueViolation, match="name"):
-        async with backend.transaction(1) as session:
-            tbl = item_table.attach(session)
+    # 同事务中upsert多个重复Unique数据时，应该成功
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
 
-            async with tbl.upsert("Item1", "name") as row:
-                row.time = 1
+        async with item_repo.upsert(name="Item1") as row:
+            row.time = 1
+            last_row_id = row.id
 
-            async with tbl.upsert("Item1", "name") as row:
-                row.time = 2
+        async with item_repo.upsert(name="Item1") as row:
+            row.time = 2
+            assert row.id == last_row_id
+
+
+async def test_unique_remove_then_add_bug(item_ref, mod_auto_backend):
+    """todo 测试删除Unique数据后再插入相同Unique数据是否成功"""
+    backend: Backend = mod_auto_backend()
+
+    # 删除Unique数据后再插入相同Unique数据应该成功
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 1
+        await item_repo.insert(row)
+
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+        fetched_row = await item_repo.get(name="Item1")
+        assert fetched_row is not None
+        item_repo.delete(fetched_row.id)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 2
+        await item_repo.insert(row)
+
+
+async def test_session_insert_then_upsert(item_ref, mod_auto_backend):
+    """测试在同一Session中insert后立即upsert同一Unique字段的数据"""
+    backend: Backend = mod_auto_backend()
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+
+        row = item_ref.comp_cls.new_row()
+        row.name = "Item1"
+        row.time = 1
+        await item_repo.insert(row)
+
+        context = item_repo.upsert(name="Item1")
+
+        async with context as upserted_row:
+            assert upserted_row.id == row.id
+            assert upserted_row.time == 1
+            assert context.insert is False

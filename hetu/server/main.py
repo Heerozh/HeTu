@@ -6,24 +6,26 @@ Worker进程入口文件
 @email: heeroz@gmail.com
 """
 
-import asyncio
 import importlib.util
 import logging
 import os
+import time
 import sys
+import asyncio
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from sanic import Sanic
 
-import hetu.server.websocket  # noqa: F401 (防止未使用警告)
-import hetu.system.connection as connection
-from hetu.common.helper import resolve_import
-from hetu.data.backend import Backend, HeadLockFailed
-from hetu.manager import ComponentTableManager
-from hetu.safelogging import handlers as log_handlers
-from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.system import SystemClusters
-from hetu.system.future import future_call_task
-from hetu.web import APP_BLUEPRINT
+from . import websocket as _  # noqa: F401 (防止未使用警告)
+from ..endpoint import connection
+from ..common.helper import resolve_import
+from ..common.snowflake_id import WorkerKeeper, SnowflakeID
+from ..data.backend import Backend
+from ..manager import ComponentTableManager
+from ..safelogging.default import DEFAULT_LOGGING_CONFIG
+from ..system import SystemClusters
+from ..system.future import future_call_task
+from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -31,38 +33,78 @@ replay = logging.getLogger("HeTu.replay")
 
 def start_backends(app: Sanic):
     # 创建后端连接池
-    backends = {}
-    table_constructors = {}
+    backends: dict[str, Backend] = {}
     for name, db_cfg in app.config.BACKENDS.items():
-        if db_cfg["type"] == "Redis":
-            from ..data.backend import RedisBackend, RedisRawComponentTable
+        backend = Backend(db_cfg)
+        backends[name] = backend
+        app.ctx.__setattr__(name, backend)
 
-            backend = RedisBackend(db_cfg)
-            backend.configure()
-            backends[name] = backend
-            table_constructors["Redis"] = RedisRawComponentTable
-            app.ctx.__setattr__(name, backend)
-        elif db_cfg["type"] == "PostgreSQL":
-            # import sqlalchemy
-            # app.ctx.__setattr__(name, sqlalchemy.create_engine(db_cfg["addr"]))
-            raise NotImplementedError("PostgreSQL后端未实现")
         # 把config第一个设置为default后端
         if "default" not in backends:
             backends["default"] = backends[name]
-            table_constructors["default"] = table_constructors[db_cfg["type"]]
             app.ctx.__setattr__("default_backend", backends["default"])
+
+    # 使用redis初始化snowflake的workerKeeper
+    worker_keeper = backends["default"].get_worker_keeper(os.getpid())
+    if worker_keeper is None:
+        for _, backend in backends.items():
+            if worker_keeper := backend.get_worker_keeper(os.getpid()):
+                break
+
+    # 根据默认backend决定用哪个workerKeeper，如果全部不支持则报错
+    if worker_keeper is None:
+        raise RuntimeError(
+            "没有可用的Backend支持WorkerKeeper管理唯一Worker ID，可用的有："
+            + str(WorkerKeeper.subclasses)
+        )
+
+    # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
+    while True:
+        try:
+            worker_id = worker_keeper.get_worker_id()
+            break
+        except KeyError as e:
+            logger.error(e)
+            logger.info(
+                "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
+            )
+            time.sleep(1)
+    last_timestamp = worker_keeper.get_last_timestamp()
+
+    # 初始化雪花id生成器
+    SnowflakeID().init(worker_id, last_timestamp)
+    app.ctx.__setattr__("worker_keeper", worker_keeper)
 
     # 初始化所有ComponentTable
     comp_mgr = ComponentTableManager(
         app.config["NAMESPACE"],
         app.config["INSTANCE_NAME"],
         backends,
-        table_constructors,
     )
     app.ctx.__setattr__("comp_mgr", comp_mgr)
 
+    # 检测表状态，创建所有不存在的表
+    all_table_ok = comp_mgr.check_and_create_new_tables()
+
+    # 如果有迁移需求，则报错退出，让用户用cli migrate命令来迁移
+    if not all_table_ok:
+        msg = (
+            "❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令："
+            "hetu migrate --config <your_config_file>.yml"
+        )
+        logger.error(msg)
+        raise RuntimeError(msg)
+
+    # 最后调用 backend config, 以防configure中需要之前初始化的东西
+    for backend in backends.values():
+        backend.post_configure()
+
 
 async def close_backends(app: Sanic):
+    # 释放worker id
+    app.ctx.worker_keeper.release_worker_id()
+
+    # 关闭后端连接池
     for attrib in dir(app.ctx):
         backend = app.ctx.__getattribute__(attrib)
         if isinstance(backend, Backend):
@@ -91,7 +133,18 @@ async def worker_close(app):
     await close_backends(app)
 
 
-def start_webserver(app_name, config, main_pid, head) -> Sanic:
+async def worker_keeper_renewal(app: Sanic):
+    # 循环每5秒续约一次worker id
+    while True:
+        await asyncio.sleep(5)
+        try:
+            await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
+        except RedisConnectionError as e:
+            logger.error(f"❌ [📡WorkerKeeper] 续约失败: {type(e).__name__}:{e}")
+            continue
+
+
+def worker_main(app_name, config) -> Sanic:
     """
     此函数会执行 workers+1 次。但如果是单worker，则只会执行1次。
     多worker时，第一次是Main函数的进程，负责管理workers，执行完不会启动任何app.add_task或者注册的listener。
@@ -100,10 +153,11 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
 
     # 加载玩家的app文件
     if (app_file := config.get("APP_FILE", None)) is not None:
-        spec = importlib.util.spec_from_file_location("HeTuApp", app_file)
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["HeTuApp"] = module
         try:
+            spec = importlib.util.spec_from_file_location("HeTuApp", app_file)
+            assert spec and spec.loader
+            module = importlib.util.module_from_spec(spec)
+            sys.modules["HeTuApp"] = module
             spec.loader.exec_module(module)
         except Exception as e:
             print(
@@ -116,12 +170,15 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
 
     # 初始化SystemCluster
     SystemClusters().build_clusters(config["NAMESPACE"])
+    SystemClusters().build_endpoints()
 
     # 传递配置
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = config.get(
         "MAX_ANONYMOUS_CONNECTION_BY_IP", 0
     )
-    connection.SYSTEM_CALL_IDLE_TIMEOUT = config.get("SYSTEM_CALL_IDLE_TIMEOUT", 60 * 2)
+    connection.ENDPOINT_CALL_IDLE_TIMEOUT = config.get(
+        "ENDPOINT_CALL_IDLE_TIMEOUT", 60 * 2
+    )
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
@@ -164,38 +221,6 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
             raise ValueError(f"该加密模块没有实现 {missing} 方法：{crypto}")
         app.ctx.crypto = crypto_module
 
-    # 如果本app是Head Node，且本进程为main进程（非worker)，则额外启动一次backend清空非持久化表
-    # 注意如果是单worker模式，则main进程也是worker进程，因此worker_start里会再次执行start_backends
-    if head and os.getpid() == main_pid:
-        start_backends(app)
-        # 主进程+Head启动时执行检查schema, 清空所有非持久化表
-        try:
-            # is_worker = os.environ.get('SANIC_WORKER_IDENTIFIER').startswith('Srv ')
-            logger.warning(
-                "⚠️ [📡Server] 启动为Head node，开始检查schema并清空非持久化表..."
-            )
-            app.ctx.comp_mgr.create_or_migrate_all()
-            app.ctx.comp_mgr.flush_volatile()
-        except HeadLockFailed as e:
-            message = (
-                f"检测有其他head=True的node正在运行，只能启动一台head node。"
-                f"如果上次Head服务器宕机了，可运行 "
-                f"hetu unlock --db=redis://host:6379/0 "
-                f"来强制删除此标记。"
-            )
-            logger.exception("❌ [📡Server] " + message)
-            # 退出logger进程(主要是logger的Queue)，不然直接调用此函数的地方会卡死
-            log_handlers.stop_all_logging_handlers()
-            raise HeadLockFailed(message)
-        finally:
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                asyncio.run(close_backends(app))
-            else:
-                loop.run_until_complete(close_backends(app))
-                loop.close()
-
     # 服务器main进程setup/teardown回调
     # app.main_process_start()
     # app.main_process_stop()
@@ -205,7 +230,9 @@ def start_webserver(app_name, config, main_pid, head) -> Sanic:
 
     # 启动未来调用worker
     app.add_task(future_call_task(app))
+    # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
+    app.add_task(worker_keeper_renewal(app))
 
     # 启动服务器监听
-    app.blueprint(APP_BLUEPRINT)
+    app.blueprint(HETU_BLUEPRINT)
     return app

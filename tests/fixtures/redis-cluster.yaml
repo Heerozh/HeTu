@@ -1,0 +1,48 @@
+# redis-cluster的docker-compose配置文件
+
+networks:
+  redis-cluster-compose:
+    driver: bridge
+
+services:
+  redis-node-1:
+    image: redis:latest
+    ports:
+      - 7000:6379
+      - 17000:16379
+    networks:
+      - redis-cluster-compose
+    hostname: redis-node-1
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7000 --cluster-announce-bus-port 17000
+
+  redis-node-2:
+    image: redis:latest
+    ports:
+      - 7001:6379
+      - 17001:16379
+    networks:
+      - redis-cluster-compose
+    hostname: redis-node-2
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7001 --cluster-announce-bus-port 17001
+
+  redis-node-3:
+    image: redis:latest
+    ports:
+      - 7002:6379
+      - 17002:16379
+    networks:
+      - redis-cluster-compose
+    hostname: redis-node-3
+    command: redis-server --cluster-enabled yes --cluster-announce-hostname host.docker.internal --cluster-preferred-endpoint-type hostname --cluster-announce-port 7002 --cluster-announce-bus-port 17002
+
+  redis-cluster-creator:
+    image: redis:latest
+    ports:
+      - 6999:6999
+    networks:
+      - redis-cluster-compose
+    command: redis-cli -p 7000 --cluster create host.docker.internal:7000 host.docker.internal:7001 host.docker.internal:7002  --cluster-yes
+    depends_on:
+      - redis-node-1
+      - redis-node-2
+      - redis-node-3

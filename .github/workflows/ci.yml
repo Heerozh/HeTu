@@ -2,26 +2,25 @@ name: Workflow for Codecov python
 on:
   push:
     paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'uv.lock'
-      - '.github/workflows/ci.yml'
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/ci.yml"
   pull_request:
     paths:
-      - '**.py'
-      - 'pyproject.toml'
-      - 'uv.lock'
+      - "**.py"
+      - "pyproject.toml"
+      - "uv.lock"
 
 concurrency:
   # github.ref = refs/heads/branch_name or refs/tags/tag_name
   # github.workflow = top-level workflow name
-  group: ${{ github.workflow }}-${{ github.ref }}  # branch上只同时运行一个
+  group: ${{ github.workflow }}-${{ github.ref }} # branch上只同时运行一个
   cancel-in-progress: true
-
 
 jobs:
   run:
-    timeout-minutes: 10
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -31,12 +30,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.14'
+          python-version: "3.14"
       - name: Install dependencies
         run: pip install -e .
       - name: Install pytest
         run: pip install --group dev
       - name: Run tests and collect coverage
+        env:
+          HETU_TEST_BACKENDS: ${{ github.event_name == 'push' && 'redis' || '' }}
         run: |
           PWD=$(pwd)
           export PYTHONPATH=$PWD/:$PYTHONPATH
@@ -47,6 +48,6 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           verbose: true
-          flags: unittests 
+          flags: unittests
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}

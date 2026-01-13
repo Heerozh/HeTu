@@ -7,6 +7,10 @@
 
 import pytest
 import numpy as np
+from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Backend
+
+SnowflakeID().init(1, 0)
 
 
 # 当前文件不能有其他地方用mod_auto_backend，否则会冲突
@@ -15,95 +19,99 @@ def mod_auto_backend():
     pytest.skip("mod_auto_backend 已在本文件禁用")
 
 
-async def test_volatile_table_flush(auto_backend):
-    backend_component_table, get_or_create_backend = auto_backend
-
-    backend = get_or_create_backend("save_test")
+async def test_volatile_table_flush(auto_backend, new_component_env):
+    backend = auto_backend("flush_test")
 
     from hetu.data import define_component, property_field, BaseComponent
+    from hetu.data.backend import TableReference, RaceCondition
 
-    @define_component(namespace="pytest", persist=False)
+    @define_component(namespace="pytest", volatile=True)
     class TempData(BaseComponent):
         data: np.int64 = property_field(0, unique=True)
 
-    temp_table = backend_component_table(TempData, "test", 1, backend)
-    temp_table.create_or_migrate()
+    temp_table = TableReference(TempData, "test", 1)
+    table_maint = backend.get_table_maintenance()
+    try:
+        table_maint.create_table(temp_table)
+    except RaceCondition:
+        table_maint.flush(temp_table, force=True)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
+    async with backend.session("test", 1) as session:
+        repo = session.using(TempData)
         for i in range(25):
             row = TempData.new_row()
-            row.data = i
-            await tbl.insert(row)
+            row.data = i  # type: ignore # noqa
+            await repo.insert(row)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 25
+    async with backend.session("test", 1) as session:
+        session.only_master = True  # 由于刚插入，可能replica还没同步
+        repo = session.using(TempData)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == 25
 
-    temp_table.flush()
+    table_maint.flush(temp_table)
 
-    async with backend.transaction(1) as session:
-        tbl = temp_table.attach(session)
-        assert len(await tbl.query("id", -np.inf, +np.inf, limit=999)) == 0
+    async with backend.session("test", 1) as session:
+        session.only_master = True  # 可能replica还没同步
+        repo = session.using(TempData)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == 0
 
 
 async def test_reconnect(auto_backend, mod_item_model):
     # 因为要用不同的连接flush，所以只能用function scope的auto_backend
     # 且当前文件不能有其他地方用mod_auto_backend，否则会冲突
-    backend_component_table, get_or_create_backend = auto_backend
+    from hetu.data.backend import TableReference, RaceCondition
 
-    backend = get_or_create_backend("save_test")
-    loc_item_table = backend_component_table(
-        mod_item_model, "ItemSaveTestTable", 1, backend
-    )
-    loc_item_table.flush(force=True)
-    loc_item_table.create_or_migrate()
+    backend: Backend = auto_backend("flush_test")
+
+    temp_table = TableReference(mod_item_model, "test", 1)
+    table_maint = backend.get_table_maintenance()
+    try:
+        table_maint.create_table(temp_table)
+    except RaceCondition:
+        table_maint.flush(temp_table, force=True)
 
     # 初始化测试数据
-    async with backend.transaction(1) as session:
-        tbl = loc_item_table.attach(session)
+    row = None
+    async with backend.session("test", 1) as session:
+        repo = session.using(mod_item_model)
         for i in range(25):
             row = mod_item_model.new_row()
             row.time = i  # 防止unique冲突
             row.name = f"Item_{i}"  # 防止unique冲突
-            await tbl.insert(row)
+            await repo.insert(row)
     # 等待replica同步
     await backend.wait_for_synced()
 
     # 测试保存(断开连接）后再读回来
-    async with backend.transaction(1) as session:
-        tbl = loc_item_table.attach(session)
-        await tbl.delete(1)
-        await tbl.delete(9)
-    async with backend.transaction(1) as session:
-        tbl = loc_item_table.attach(session)
-        size = len(await tbl.query("id", -np.inf, +np.inf, limit=999))
+    async with backend.session("test", 1) as session:
+        repo = session.using(mod_item_model)
+        row = await repo.get(id=row.id)  # type: ignore
+        repo.delete(row.id)  # type: ignore
+    async with backend.session("test", 1) as session:
+        repo = session.using(mod_item_model)
+        size = len(await repo.range("id", -np.inf, +np.inf, limit=999))
 
     # 测试连接关闭
     await backend.close()  # 不close不能重建backend_component_table
     await backend.close()  # 再次close不该报错
     with pytest.raises(ConnectionError):
-        backend.transaction(1)
-    with pytest.raises(ConnectionError):
-        backend.configure()
+        backend.post_configure()
     with pytest.raises(ConnectionError):
         await backend.wait_for_synced()
     with pytest.raises(ConnectionError):
-        await backend.requires_head_lock()
-    with pytest.raises(ConnectionError):
-        await backend.get_mq_client()
+        backend.get_mq_client()
 
     # 重新初始化table和连接后再试
-    backend = None
-    loc_item_table = None
-    backend2 = get_or_create_backend("load_test")
+    backend = None  # type: ignore
+    table_maint = None
+    backend2 = auto_backend("load_test")
 
-    loc_item_table2 = backend_component_table(
-        mod_item_model, "ItemSaveTestTable", 1, backend2
-    )
-    loc_item_table2.create_or_migrate()
-    async with backend2.transaction(1) as session:
-        tbl = loc_item_table2.attach(session)
-        assert len(await tbl.query('id', -np.inf, +np.inf, limit=999)) == size
+    table_maint2 = backend2.get_table_maintenance()
+    try:
+        table_maint2.create_table(temp_table)
+    except RaceCondition:
+        pass
 
-
+    async with backend2.session("test", 1) as session:
+        repo = session.using(mod_item_model)
+        assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == size

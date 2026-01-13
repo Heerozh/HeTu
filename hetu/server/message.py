@@ -7,31 +7,38 @@
 
 import logging
 
-import orjson
+import msgspec
 
-logger = logging.getLogger('HeTu.root')
-replay = logging.getLogger('HeTu.replay')
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
+
+msg_encoder = msgspec.msgpack.Encoder()
+msg_decoder = msgspec.msgpack.Decoder()
+buffer = bytearray()
 
 
-def decode_message(message: bytes, protocol: dict):
+def decode_message(message: bytes, protocol: dict) -> list:
     if len(message) > 10240:
         raise ValueError("Message too long，为了防止性能攻击限制长度")
-    if crypto := protocol['crypto']:
+    if crypto := protocol["crypto"]:
         message = crypto.decrypt(message)
-    if compress := protocol['compress']:
+    if compress := protocol["compress"]:
         message = compress.decompress(message)
-    json_parsed = orjson.loads(message)
-    return json_parsed
+    parsed = msg_decoder.decode(message)
+    return parsed
 
 
-def encode_message(message: list | dict, protocol: dict):
+def encode_message(message: list | dict, protocol: dict) -> bytes:
     try:
-        message = orjson.dumps(message)
+        msg_encoder.encode_into(message, buffer)
+        ret = bytes(buffer)
     except Exception as e:
-        logger.exception(f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{type(e).__name__}:{e}")
+        logger.exception(
+            f"❌ [📡WSSender] JSON序列化失败，消息：{message}，异常：{type(e).__name__}:{e}"
+        )
         raise
-    if compress := protocol['compress']:
-        message = compress.compress(message)
-    if crypto := protocol['crypto']:
-        message = crypto.encrypt(message)
-    return message
+    if compress := protocol["compress"]:
+        ret = compress.compress(ret)
+    if crypto := protocol["crypto"]:
+        ret = crypto.encrypt(ret)
+    return ret

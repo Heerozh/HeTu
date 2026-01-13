@@ -1,169 +1,187 @@
-import time
+import os
+from typing import Callable, cast
 
-import docker
 import pytest
-from docker.errors import NotFound
+
+from hetu.data.backend import Backend, RedisBackendClient
 
 
 @pytest.fixture(scope="module")
-def mod_redis_service():
-    from hetu.data.backend.redis import RedisBackend
-
-    # redis服务器设置了不会保存lua脚本，redis服务销毁/重建时，需要清理全局lua缓存标记，
-    # 此标记用来加速redis客户端请求速度，不然客户端每次都有逻辑需要保证脚本存在
-    # 这里强制清理下
-    RedisBackend.lua_check_and_run = None
-
-    try:
-        client = docker.from_env()
-    except docker.errors.DockerException:
-        return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
-
-    # 先删除已启动的
-    try:
-        client.containers.get("hetu_test_redis").kill()
-        client.containers.get("hetu_test_redis").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
-        pass
-    try:
-        client.containers.get("hetu_test_redis_replica").kill()
-        client.containers.get("hetu_test_redis_replica").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
-        pass
-    try:
-        client.networks.get("hetu_test_net").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
-        pass
-
-    # 启动交换机
-    network = client.networks.create("hetu_test_net", driver="bridge")
-
-    # 启动服务器
-    containers = {}
-
-    def run_redis_service(port=23318):
-        if "redis" not in containers:
-            containers["redis"] = client.containers.run(
-                "redis:latest",
-                detach=True,
-                ports={"6379/tcp": port},
-                name="hetu_test_redis",
-                auto_remove=True,
-                network="hetu_test_net",
-                hostname="redis-master",
-            )
-            containers["redis_replica"] = client.containers.run(
-                "redis:latest",
-                detach=True,
-                ports={"6379/tcp": port + 1},
-                name="hetu_test_redis_replica",
-                auto_remove=True,
-                network="hetu_test_net",
-                command=[
-                    "redis-server",
-                    "--replicaof redis-master 6379",
-                    "--replica-read-only yes",
-                ],
-            )
-
-        # 验证docker启动完毕
-        import redis
-
-        r = redis.Redis(host="127.0.0.1", port=port)
-        r_slave = redis.Redis(host="127.0.0.1", port=port + 1)
-        while True:
-            try:
-                time.sleep(1)
-                print(
-                    "version:",
-                    r.info()["redis_version"],
-                    r.role(),
-                    r.config_get("notify-keyspace-events"),
-                )
-                r.wait(1, 10000)
-                print(
-                    "slave version:",
-                    r_slave.info()["redis_version"],
-                    r_slave.role(),
-                    r_slave.config_get("notify-keyspace-events"),
-                )
-                break
-            except Exception:
-                pass
-        print("⚠️ 已启动redis docker.")
-
-        # 返回redis地址
-        return f"redis://127.0.0.1:{port}/0", f"redis://127.0.0.1:{port + 1}/0"
-
-    yield run_redis_service
-
-    print("ℹ️ 清理docker...")
-    for container in containers.values():
-        try:
-            container.stop()
-            container.wait()
-        except (NotFound, ImportError, docker.errors.APIError):
-            pass
-    print("ℹ️ 清理交换机")
-    try:
-        network.remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
-        pass
-
-
-@pytest.fixture(scope="module")
-async def mod_redis_backend(mod_redis_service):
-    from hetu.data.backend import RedisRawComponentTable, RedisBackend
+async def mod_redis_backend(ses_redis_service):
+    """Redis后端工厂，返回创建Redis后端连接的工厂函数"""
+    from hetu.data.component import ComponentDefines
 
     backends = {}
 
     # 支持创建多个backend连接
     def _create_redis_backend(key="main", port=23318):
         if key in backends:
-            return backends[key]
+            _backend = backends[key]
+        else:
+            redis_url, replica_url = ses_redis_service
+            config = {
+                "type": "redis",
+                "master": redis_url,
+                "servants": [
+                    replica_url,
+                ],
+            }
 
-        redis_url, replica_url = mod_redis_service(port)
-        config = {
-            "master": redis_url,
-            "servants": [
-                replica_url,
-            ],
-        }
+            _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
+            backends[key] = _backend
 
-        _backend = RedisBackend(config)
-        backends[key] = _backend
-        _backend.configure()
+        # mock redis client
+        def _mock_redis_client_lua():
+            return ComponentDefines().get_all()
+
+        _master = cast(RedisBackendClient, _backend.master)
+        _master._get_referred_components = _mock_redis_client_lua
+        _backend.post_configure()
         return _backend
 
-    yield RedisRawComponentTable, _create_redis_backend
+    yield _create_redis_backend
 
     for backend in backends.values():
         await backend.close()
 
 
-# 要测试新的backend，请添加backend到params中
-@pytest.fixture(
-    params=[
-        "redis",
-    ],
-    scope="module",
-)
-def mod_auto_backend(request):
-    if request.param == "redis":
+@pytest.fixture(scope="module")
+async def mod_valkey_backend(ses_valkey_service):
+    """valkey后端工厂fixture，返回创建valkey后端的工厂函数"""
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    # 支持创建多个backend连接
+    def _create_valkey_backend(key="main", port=23418):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            redis_url, replica_url = ses_valkey_service
+            config = {
+                "type": "redis",
+                "master": redis_url,
+                "servants": [
+                    replica_url,
+                ],
+            }
+
+            _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
+            backends[key] = _backend
+
+        # mock redis client
+        def _mock_redis_client_lua():
+            return ComponentDefines().get_all()
+
+        _master = cast(RedisBackendClient, _backend.master)
+        _master._get_referred_components = _mock_redis_client_lua
+        _backend.post_configure()
+        return _backend
+
+    yield _create_valkey_backend
+
+    for backend in backends.values():
+        await backend.close()
+
+
+@pytest.fixture(scope="module")
+async def mod_redis_cluster_backend(ses_redis_cluster_service):
+    """Redis后端工厂，返回创建Redis后端连接的工厂函数"""
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    # 支持创建多个backend连接
+    def _create_redis_backend(key="main", port=23318):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            redis_url = ses_redis_cluster_service
+            config = {
+                "type": "redis",
+                "master": redis_url,
+                "clustering": True,
+                "servants": [],
+            }
+
+            _backend = Backend(config)
+            # io = cast(RedisBackendClient, _backend.master).io
+            # io.flushall()
+            backends[key] = _backend
+
+        # mock redis client
+        def _mock_redis_client_lua():
+            return ComponentDefines().get_all()
+
+        _master = cast(RedisBackendClient, _backend.master)
+        _master._get_referred_components = _mock_redis_client_lua
+        _backend.post_configure()
+        return _backend
+
+    yield _create_redis_backend
+
+    for backend in backends.values():
+        await backend.close()
+
+
+REDIS_BACKENDS = ["redis", "redis_cluster"]
+REDIS_FORK_BACKENDS = ["valkey"]
+
+# 允许通过环境变量过滤后端，用于CI/CD优化
+# Allow filtering backends via environment variable for CI/CD optimization
+_env_backends = os.environ.get("HETU_TEST_BACKENDS")
+if _env_backends:
+    _allowed = [b.strip() for b in _env_backends.split(",")]
+    REDIS_BACKENDS = [b for b in REDIS_BACKENDS if b in _allowed]
+    REDIS_FORK_BACKENDS = [b for b in REDIS_FORK_BACKENDS if b in _allowed]
+
+# SQL_BACKENDS = ["postgres"]
+ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS
+
+
+@pytest.fixture(params=ALL_BACKENDS, scope="module")
+def backend_name(request):
+    """后端名称参数化fixture，返回当前的后端名称"""
+    return request.param
+
+
+def backend_fixture_by_name(name: str, request):
+    """根据后端名称返回对应的fixture名称"""
+    if name == "redis":
         return request.getfixturevalue("mod_redis_backend")
+    elif name == "valkey":
+        return request.getfixturevalue("mod_valkey_backend")
+    elif name == "redis_cluster":
+        return request.getfixturevalue("mod_redis_cluster_backend")
     else:
-        raise ValueError("Unknown db type: %s" % request.param)
+        raise ValueError("Unknown db type: %s" % backend_name)
 
 
 # 要测试新的backend，请添加backend到params中
-@pytest.fixture(
-    params=[
-        "redis",
-    ],
-    scope="module",
-)
-def auto_backend(request):
-    if request.param == "redis":
-        return request.getfixturevalue("mod_redis_backend")
-    else:
-        raise ValueError("Unknown db type: %s" % request.param)
+@pytest.fixture(scope="module")
+def mod_auto_backend(request, backend_name) -> Callable[..., Backend]:
+    """后端工厂，根据参数返回不同后端的工厂函数"""
+    return backend_fixture_by_name(backend_name, request)
+
+
+# 要测试新的backend，请添加backend到params中
+@pytest.fixture(scope="function")
+def auto_backend(request, backend_name) -> Callable[..., Backend]:
+    """后端工厂，根据参数返回不同后端的工厂函数"""
+    return backend_fixture_by_name(backend_name, request)
+
+
+def use_redis_backend_only(func):
+    """自定义装饰器：只使用 Redis社区版 数据库运行测试"""
+    return pytest.mark.parametrize("backend_name", REDIS_BACKENDS, indirect=True)(func)
+
+
+def use_redis_family_backend_only(func):
+    """自定义装饰器：使用 所有Redis兼容 数据库运行测试"""
+    return pytest.mark.parametrize(
+        "backend_name", REDIS_BACKENDS + REDIS_FORK_BACKENDS, indirect=True
+    )(func)
