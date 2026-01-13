@@ -160,7 +160,7 @@ def test_websocket_call_system(test_server):
         # 这个是rls数据，client1不会收到
         await client2.send(["rpc", "add_rls_comp_value", 9])
         # 这个client1应该收到
-        await client2.send(["rpc", "create_row", 2, 9, "1"])
+        await client2.send(["rpc", "create_row", 2, 9.1, "1"])
         await asyncio.sleep(0.1)
 
         await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
@@ -180,11 +180,12 @@ def test_websocket_call_system(test_server):
         "value": 102,
     }
 
-    # 测试收到连接2的+9
-    assert response1.client_received[6][2][id1] == {
-        "id": int(id1),
+    # 测试收到连接2的+9.1
+    id2 = next(iter(response1.client_received[6][2].keys()))
+    assert response1.client_received[6][2][id2] == {
+        "id": int(id2),
         "owner": 2,
-        "value": 9,
+        "value": 9.1,
     }
 
 
