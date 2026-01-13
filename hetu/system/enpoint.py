@@ -8,7 +8,6 @@
 import logging
 from typing import TYPE_CHECKING, Callable
 
-from ..common.permission import Permission
 
 if TYPE_CHECKING:
     from ..endpoint.response import EndpointResponse

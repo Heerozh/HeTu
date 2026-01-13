@@ -331,7 +331,7 @@ def define_system(
         具体见Notes。
     force: bool
         遇到重复定义是否强制覆盖前一个, 单元测试用
-    permission: Permission
+    permission: Permission or None
         设置客户端的调用权限，只做些初级检查，具体权限需要自己逻辑中判断。
         设为None时表示客户端SDK不可调用，设置任意权限会创建一个供客户端调用的Endpoint，
         然后由此Endpoint调用本System。

@@ -167,7 +167,7 @@ class SessionRepository:
             辅助参数，如果不便使用kwargs参数时使用。
         query_value: IndexScalar | None
             辅助参数，如果不便使用kwargs参数时使用。
-        kwargs: dict
+        kwargs: IndexScalar
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须有索引。
 
         Examples
@@ -228,7 +228,7 @@ class SessionRepository:
             辅助参数，如果不便使用kwargs参数时使用。
         _right: IndexScalar | None
             辅助参数，如果不便使用kwargs参数时使用。
-        kwargs: dict
+        kwargs: IndexScalar
             查询字段和区间，例如 `level=(1, 10)`。只能查询一个字段，且该字段必须有索引。
             默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
             * 如果要查询的字段和参数冲突，请使用辅助参数方式。
@@ -360,7 +360,7 @@ class SessionRepository:
 
         Parameters
         ----------
-        kwargs: dict
+        kwargs: IndexScalar
             查询字段和值，例如 `id=1234567890`。只能查询一个字段，且该字段必须为unique索引。
         """
         # 判断kwargs有且只有一个键值对

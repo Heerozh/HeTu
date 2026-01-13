@@ -7,7 +7,7 @@
 
 import logging
 import time
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -19,7 +19,6 @@ from ..data import BaseComponent, define_component, property_field, Permission
 from ..safelogging.filter import ContextFilter
 
 if TYPE_CHECKING:
-    from ..data.backend import Backend
     from ..manager import ComponentTableManager
     from ..data.backend.table import Table
 
