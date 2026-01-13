@@ -8,22 +8,22 @@
 import numpy as np
 import pytest
 
-from hetu.data.backend import Table
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.data.backend import Table
 
 SnowflakeID().init(1, 0)
 
 
-async def test_migration_unique_violation(filled_item_ref):
+async def test_migration_unique_violation(filled_item_ref, caplog):
     # 测试自动迁移
     backend = filled_item_ref.backend
 
     # 重新定义新的属性
     from hetu.data import (
-        define_component,
-        property_field,
         BaseComponent,
         ComponentDefines,
+        define_component,
+        property_field,
     )
 
     ComponentDefines().clear_()
@@ -57,8 +57,9 @@ async def test_migration_unique_violation(filled_item_ref):
     assert tbl_status == "schema_mismatch"
 
     # 有qty删除，不能迁移
-    with pytest.raises(ValueError, match="丢弃"):
-        maint.migration_schema(new_table, old_meta)
+    caplog.clear()
+    assert not maint.migration_schema(new_table, old_meta)
+    assert "丢弃" in caplog.text
 
     # item.name是U4截断，导致unique违反，不能迁移
     with pytest.raises(RuntimeError, match="unique"):
@@ -72,10 +73,10 @@ async def test_auto_migration(filled_item_ref, caplog):
 
     # 重新定义新的属性
     from hetu.data import (
-        define_component,
-        property_field,
         BaseComponent,
         ComponentDefines,
+        define_component,
+        property_field,
     )
 
     ComponentDefines().clear_()

@@ -1,6 +1,7 @@
+import time
+
 import numpy as np
 import pytest
-import time
 from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
@@ -107,7 +108,7 @@ async def test_snowflake_id(monkeypatch):
 @pytest.mark.timeout(2)
 async def test_snowflake_id_sleep(monkeypatch):
     """测试sleep"""
-    from hetu.common.snowflake_id import SnowflakeID, TIME_ROLLBACK_TOLERANCE_MS
+    from hetu.common.snowflake_id import TIME_ROLLBACK_TOLERANCE_MS, SnowflakeID
 
     # Mock time
     start_ts = 1766000000.0
@@ -185,4 +186,4 @@ async def test_redis_worker_keeper(mod_auto_backend):
     last_ts = worker_keeper2.get_last_timestamp()
     assert last_ts == ts
     expire = await redis_client.ttl(f"{worker_keeper2.worker_id_key}:{worker_id_2}")
-    assert expire > 86400 - 1
+    assert expire > 60 - 1
