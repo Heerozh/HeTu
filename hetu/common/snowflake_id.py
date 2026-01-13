@@ -181,6 +181,12 @@ class WorkerKeeper:
         # 初始化方法，不能async
         raise NotImplementedError
 
+    def release_worker_id(self):
+        """
+        释放当前占用的 Worker ID。无需调用，只用于测试。
+        """
+        raise NotImplementedError
+
     def get_last_timestamp(self) -> int:
         # 初始化方法，不能async
         raise NotImplementedError

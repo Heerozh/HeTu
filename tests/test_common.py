@@ -166,6 +166,9 @@ async def test_redis_worker_keeper(mod_auto_backend):
     worker_id_2 = worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
+    # 删除第一个机器的key，模拟key值过期释放worker id
+    worker_keeper.release_worker_id()
+
     # 再次获得应该id一样
     worker_id_again = worker_keeper2.get_worker_id()
     assert worker_id_again == worker_id_2
