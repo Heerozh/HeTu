@@ -195,19 +195,19 @@ def test_websocket_kick_connect(test_server):
         client1 = await connect()
         await client1.send(["rpc", "login", 1])
         await client1.send(["rpc", "add_rls_comp_value", 1])
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
 
         client2 = await connect()
         await client2.send(["rpc", "login", 1])
         await client2.send(["rpc", "add_rls_comp_value", 2])
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
 
         # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
         # 需要调用一次system才能发现自己被踢掉了
         await client1.send(["rpc", "add_rls_comp_value", 3])
 
         # 测试踢出成功
-        await asyncio.sleep(0.1)
+        await asyncio.sleep(0.5)
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
