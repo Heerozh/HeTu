@@ -159,7 +159,7 @@ class RedisTableMaintenance(TableMaintenance):
     @override
     def migration_schema(
         self, table_ref: TableReference, old_meta: Any, force=False
-    ) -> None:
+    ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
         此方法调用后需要rebuild_index
@@ -182,7 +182,7 @@ class RedisTableMaintenance(TableMaintenance):
         dtypes_in_db = old_comp_cls.dtypes
         new_dtypes = table_ref.comp_cls.dtypes
         if dtypes_in_db == new_dtypes:
-            return
+            return True
 
         logger.warning(
             f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] 代码定义的Schema与已存的不一致，"
@@ -204,7 +204,7 @@ class RedisTableMaintenance(TableMaintenance):
                 )
                 logger.warning(msg)
                 if not force:
-                    raise ValueError(msg)
+                    return False
 
         # 检查是否有属性类型变更且无法自动转换
         for prop_name in new_dtypes.fields:
@@ -219,7 +219,7 @@ class RedisTableMaintenance(TableMaintenance):
                     )
                     logger.warning(msg)
                     if not force:
-                        raise ValueError(msg)
+                        return False
 
         with self.lock:
             if self.check_table(table_ref)[0] != "schema_mismatch":
@@ -302,6 +302,7 @@ class RedisTableMaintenance(TableMaintenance):
                 f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 新属性增加完成，共处理{len(keys)}行 * "
                 f"{added}个属性。 转换类型成功{converted}次，失败{convert_failed}次。"
             )
+            return True
 
     @override
     def flush(self, table_ref: TableReference, force=False) -> None:

@@ -5,7 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-import argparse
 import logging
 import logging.handlers
 import os
@@ -21,7 +20,7 @@ from sanic import Sanic
 from sanic.config import Config
 from sanic.worker.loader import AppLoader
 
-from .base import CommandInterface
+from .base import CommandInterface, str2bool
 from ..common import yamlloader
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
@@ -37,17 +36,6 @@ FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  █        █   \033[0m █ █▄▄▄▄▄█ █
 \033[38;2;25;170;255m  █     ▀▀▄█   \033[0m █▀▀▀▀▀▀▀▀▀█
 """
-
-
-def str2bool(v):
-    if isinstance(v, bool):
-        return v
-    if v.lower() in ("yes", "true", "t", "y", "1"):
-        return True
-    elif v.lower() in ("no", "false", "f", "n", "0", "None"):
-        return False
-    else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
 
 
 def wait_for_port(host, port, timeout=30):
@@ -70,14 +58,6 @@ class StartCommand(CommandInterface):
     @classmethod
     def register(cls, subparsers):
         parser_start = subparsers.add_parser("start", help="启动河图服务")
-        parser_start.add_argument(  # const意思如果--ind后不带参数，则默认打开
-            "--no-migrate",
-            type=str2bool,
-            nargs="?",
-            default=False,
-            const=True,
-            help="关闭启动时的自动数据库Schema迁移。生产环境请关闭，并在CI/CD流水线中使用hetu migrate命令执行迁移",
-        )
         parser_start.add_argument(
             "--standalone",
             type=str2bool,

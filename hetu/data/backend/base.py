@@ -444,7 +444,7 @@ class TableMaintenance:
 
     def migration_schema(
         self, table_ref: TableReference, old_meta: Any, force=False
-    ) -> None:
+    ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
         此方法调用后需要rebuild_index
