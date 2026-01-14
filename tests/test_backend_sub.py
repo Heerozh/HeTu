@@ -1,4 +1,5 @@
 import time
+from contextvars import ContextVar
 from typing import AsyncGenerator, cast
 
 import pytest
@@ -19,7 +20,7 @@ async def sub_mgr(mod_auto_backend) -> AsyncGenerator[Subscriptions]:
     # 初始化订阅器
     sub_mgr = Subscriptions(mod_auto_backend("main"))
     # 清空row订阅缓存
-    RowSubscription._RowSubscription__cache = {}  # type: ignore
+    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
 
     yield sub_mgr
 
@@ -291,7 +292,7 @@ async def test_row_subscribe_cache(
     # 检测Row cache
     await sub_mgr.get_updates()
     # 由于不同backend的channel名不一样，使用dict的第一个channel
-    cache = RowSubscription._RowSubscription__cache  # type: ignore
+    cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
     first_channel = next(iter(cache.keys()))
     assert cache[first_channel][row1_id]["owner"] == 11
 

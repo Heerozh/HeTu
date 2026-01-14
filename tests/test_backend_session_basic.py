@@ -5,15 +5,16 @@
 #  @email: heeroz@gmail.com
 #  """
 
+from typing import Callable
+
 import numpy as np
 import pytest
-from typing import Callable
+from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
-from hetu.data.backend import UniqueViolation, Backend
-from hetu.data.backend.session import Session
 from hetu.common.snowflake_id import SnowflakeID
-from fixtures.backends import use_redis_family_backend_only
+from hetu.data.backend import Backend, UniqueViolation
+from hetu.data.backend.session import Session
 
 SnowflakeID().init(1, 0)
 
@@ -446,8 +447,8 @@ async def test_unique_table(new_component_env, mod_auto_backend):
     """另一个unique table测试， 忘记测试啥了"""
     backend: Backend = mod_auto_backend()
 
-    from hetu.data import define_component, property_field, BaseComponent
-    from hetu.data.backend import TableReference, RaceCondition
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.data.backend import RaceCondition, TableReference
 
     @define_component(namespace="pytest")
     class UniqueTest(BaseComponent):
@@ -617,7 +618,7 @@ async def test_unique_batch_upsert_in_same_session_bug(item_ref, mod_auto_backen
 
 
 async def test_unique_remove_then_add_bug(item_ref, mod_auto_backend):
-    """todo 测试删除Unique数据后再插入相同Unique数据是否成功"""
+    """测试删除Unique数据后再插入相同Unique数据是否成功"""
     backend: Backend = mod_auto_backend()
 
     # 删除Unique数据后再插入相同Unique数据应该成功

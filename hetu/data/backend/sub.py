@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from typing import TYPE_CHECKING, Any, Mapping
-
+from contextvars import ContextVar
 import numpy as np
 
 from hetu.data.backend import BackendClient, RowFormat
@@ -38,7 +38,10 @@ class BaseSubscription:
 
 
 class RowSubscription(BaseSubscription):
-    __cache = {}  # todo 改成contextvars按Task隔离
+    # 这是get_updates的cache，每次get_updates执行会开始记录cache，
+    # 让内部的get_updated重复调用时能免去重复查询，
+    # 但get_updated是async的，可能会切换走，所以要用ContextVar隔离
+    __cache: ContextVar[dict] = ContextVar("user_row_cache")
 
     def __init__(
         self,
@@ -56,10 +59,16 @@ class RowSubscription(BaseSubscription):
             self.rls_ctx = None
         self.channel = channel
         self.row_id = row_id
+        if RowSubscription.__cache.get(None) is None:
+            RowSubscription.__cache.set({})
 
     @classmethod
     def clear_cache(cls, channel):
-        cls.__cache.pop(channel, None)
+        cache = cls.__cache.get(None)
+        if cache:
+            cache.pop(channel, None)
+        else:
+            cls.__cache.set({})
 
     async def get_updated(
         self, channel
@@ -69,8 +78,9 @@ class RowSubscription(BaseSubscription):
         返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}
         """
         # 如果订阅有交叉，这里会重复被调用，需要一个class级别的cache，但外部每次收到channel消息时要清空该cache
-        if (cache := RowSubscription.__cache.get(channel, None)) is not None:
-            return set(), set(), cache
+        cache = RowSubscription.__cache.get()
+        if (cached := cache.get(channel, None)) is not None:
+            return set(), set(), cached
 
         row = await self.servant.get(self.table_ref, self.row_id, RowFormat.TYPED_DICT)
         if row is None:
@@ -83,7 +93,7 @@ class RowSubscription(BaseSubscription):
                 rtn = {str(self.row_id): row}
             else:
                 rtn = {str(self.row_id): None}
-        RowSubscription.__cache[channel] = rtn
+        cache[channel] = rtn
         return set(), set(), rtn
 
     @property
