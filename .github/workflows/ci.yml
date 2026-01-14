@@ -45,9 +45,9 @@ jobs:
           mkdir -p ./logs
           pytest --cov=hetu tests/ ${{ env.CODECOV_ATS_TESTS }}
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v5
         with:
           verbose: true
-          flags: unittests
+          flags: pytest
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
