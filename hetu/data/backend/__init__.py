@@ -18,6 +18,7 @@ from .repo import SessionRepository
 from .session import Session
 from .sub import Subscriptions
 from .table import Table, TableReference
+from . import redis as _  # 注册redis后端，但不导出
 
 __all__ = [
     "RaceCondition",

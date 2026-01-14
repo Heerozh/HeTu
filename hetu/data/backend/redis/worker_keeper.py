@@ -141,11 +141,11 @@ class RedisWorkerKeeper(WorkerKeeper):
         if resp != 1:
             logger.error(
                 f"[❄️ID] 续约 Worker ID {worker_id} 失败: "
-                f"redis.expire({key}, {WORKER_ID_EXPIRE_SEC}) == {resp}，"
-                f"可能已被其他实例占用。"
+                f"expire({key}, {WORKER_ID_EXPIRE_SEC}) == {resp}，"
+                f"可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
             )
             # 关闭Worker
-            raise RuntimeError("Worker ID 续约失败，不该出现的错误，系统退出。")
+            raise SystemExit("Worker ID 续约失败，重启Worker...")
         # 记录last_timestamp到redis，防止重启回拨
         ts_key = f"{self.last_timestamp_key}:{self.node_id}"
         await self.aio.set(ts_key, last_timestamp, ex=86400)

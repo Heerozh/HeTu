@@ -143,6 +143,8 @@ async def worker_keeper_renewal(app: Sanic):
         except RedisConnectionError as e:
             logger.error(f"❌ [📡WorkerKeeper] 续约失败: {type(e).__name__}:{e}")
             continue
+        except SystemExit:
+            app.m.restart()
 
 
 def worker_main(app_name, config) -> Sanic:
