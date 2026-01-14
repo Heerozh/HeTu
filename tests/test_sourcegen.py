@@ -6,8 +6,9 @@
 #  """
 
 import numpy as np
-from hetu.sourcegen.csharp import dtype_to_csharp, generate_component
-from hetu.data import BaseComponent, property_field, define_component, Permission
+
+from hetu.data import BaseComponent, Permission, define_component, property_field
+from hetu.sourcegen.csharp import generate_component
 
 
 def test_component_csharp_gen():
@@ -41,5 +42,3 @@ class TestComponent: IBaseComponent
 }
 """
     assert code == expect
-
-

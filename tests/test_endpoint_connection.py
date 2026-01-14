@@ -2,11 +2,9 @@ import time
 
 import pytest
 
-import hetu
 import hetu.endpoint.connection as connection
-from hetu.endpoint.executor import EndpointExecutor
-
 from hetu.common.snowflake_id import SnowflakeID
+from hetu.endpoint.executor import EndpointExecutor
 
 SnowflakeID().init(1, 0)
 

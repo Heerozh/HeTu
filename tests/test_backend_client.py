@@ -5,13 +5,15 @@
 #  @email: heeroz@gmail.com
 #  """
 import asyncio
+
 import msgpack
 import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RedisBackendClient, TableReference
+from hetu.data.backend import Backend, TableReference
 from hetu.data.backend.idmap import IdentityMap
+from hetu.data.backend.redis import RedisBackendClient
 
 SnowflakeID().init(1, 0)
 

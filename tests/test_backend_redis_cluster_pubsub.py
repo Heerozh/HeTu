@@ -10,7 +10,7 @@ from typing import cast
 import pytest
 from fixtures.backends import use_redis_family_backend_only
 
-from hetu.data.backend import RedisBackendClient
+from hetu.data.backend.redis import RedisBackendClient
 
 
 @use_redis_family_backend_only

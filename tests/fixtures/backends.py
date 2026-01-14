@@ -3,7 +3,8 @@ from typing import Callable, cast
 
 import pytest
 
-from hetu.data.backend import Backend, RedisBackendClient
+from hetu.data.backend import Backend
+from hetu.data.backend.redis import RedisBackendClient
 
 
 @pytest.fixture(scope="module")

@@ -6,7 +6,6 @@ SnowflakeID().init(1, 0)
 
 async def test_double_cluster(item_ref, mod_auto_backend):
     import asyncio
-    from hetu.data.backend import RaceCondition
 
     # 测试在2个cluster_id环境下的同时写入和读取，只测试结果是否正常，具体的各个node数据是否正确不做测试
     backend: Backend = mod_auto_backend()

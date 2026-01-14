@@ -8,17 +8,16 @@
 from .base import (
     BackendClient,
     BackendClientFactory,
+    MQClient,
     RaceCondition,
     RowFormat,
-    UniqueViolation,
-    MQClient,
     TableMaintenance,
+    UniqueViolation,
 )
-from .redis import RedisBackendClient, RedisTableMaintenance
-from .session import Session
 from .repo import SessionRepository
-from .table import TableReference, Table
+from .session import Session
 from .sub import Subscriptions
+from .table import Table, TableReference
 
 __all__ = [
     "RaceCondition",
@@ -28,12 +27,9 @@ __all__ = [
     "Backend",
     "Session",
     "SessionRepository",
-    "RedisBackendClient",  # todo 整理下不暴露给用户的类
-    "RedisTableMaintenance",
     "Table",
     "TableReference",
     "MQClient",
-    "TableMaintenance",
     "Subscriptions",
 ]
 
