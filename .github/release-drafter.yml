@@ -8,6 +8,8 @@ categories:
     labels:
       - 'feature'
       - 'enhancement'
+    exclude-labels:
+      - 'major'
   - title: '🐛 Bug Fixes'
     labels:
       - 'fix'
