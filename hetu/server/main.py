@@ -130,6 +130,7 @@ async def worker_start(app: Sanic):
 
 
 async def worker_close(app):
+    # ctrl+c并不会触发此函数，sanic会直接退出进程
     await close_backends(app)
 
 

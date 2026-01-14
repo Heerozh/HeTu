@@ -56,7 +56,7 @@ async def exchange_data(ctx: hetu.SystemContext, name, number):
 
 @hetu.define_endpoint(namespace="bench", permission=hetu.Permission.EVERYBODY)
 async def hello_world(ctx: hetu.SystemContext):
-    return hetu.ResponseToClient(["世界只有一个！但是河图可以模拟很多个！"])
+    return hetu.ResponseToClient(["世界收到"])
 
 
 @hetu.define_endpoint(

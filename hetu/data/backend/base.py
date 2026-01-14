@@ -431,7 +431,7 @@ class TableMaintenance:
 
     def create_table(self, table_ref: TableReference) -> Any:
         """
-        创建组件表。如果已存在，会抛出异常。
+        创建组件表。如果已存在，会抛出RaceCondition异常。
         组件表的meta信息。
         """
         raise NotImplementedError

@@ -45,7 +45,7 @@ class RedisMQClient(MQClient):
 
     @override
     async def close(self):
-        return self._mq.close()
+        return await self._mq.close()
 
     @override
     async def subscribe(self, channel_name) -> None:

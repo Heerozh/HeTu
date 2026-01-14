@@ -91,7 +91,7 @@ class RedisTableMaintenance(TableMaintenance):
 
     @override
     def create_table(self, table_ref: TableReference) -> Any:
-        """创建组件表。如果已存在，会抛出异常"""
+        """创建组件表。如果已存在，会抛出RaceCondition异常"""
         with self.lock:
             if self.check_table(table_ref)[0] != "not_exists":
                 raise RaceCondition(

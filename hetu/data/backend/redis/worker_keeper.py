@@ -69,16 +69,19 @@ class RedisWorkerKeeper(WorkerKeeper):
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
             # 判断node_id是否相同，相同则说明是容器重启，直接使用
-            existing_node_id = self.io.get(key)
-            if existing_node_id is not None:
-                existing_node_id = cast(bytes, existing_node_id)
-                if existing_node_id.decode("ascii") == self.node_id:
-                    logger.info(
-                        f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
-                        f"(通过相同进程码 {self.node_id} )"
-                    )
-                    self.worker_id = worker_id
-                    return worker_id
+            if existing_node_id := self.io.get(key) is None:
+                continue
+            existing_node_id = cast(bytes, existing_node_id)
+            if existing_node_id.decode("ascii") != self.node_id:
+                continue
+            if self.io.expire(key, WORKER_ID_EXPIRE_SEC) != 1:
+                continue
+            logger.info(
+                f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
+                f"(通过相同进程码 {self.node_id} )"
+            )
+            self.worker_id = worker_id
+            return worker_id
 
         # 尝试分配新的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
@@ -137,10 +140,12 @@ class RedisWorkerKeeper(WorkerKeeper):
         resp = await self.aio.expire(key, WORKER_ID_EXPIRE_SEC)
         if resp != 1:
             logger.error(
-                f"[❄️ID] 续约 Worker ID {worker_id} 失败，可能已被其他实例占用。"
+                f"[❄️ID] 续约 Worker ID {worker_id} 失败: "
+                f"redis.expire({key}, {WORKER_ID_EXPIRE_SEC}) == {resp}，"
+                f"可能已被其他实例占用。"
             )
-            # 关闭Worker todo 需要测试是否有效
-            raise SystemExit("Worker ID 续约失败，不该出现的错误，系统退出。")
+            # 关闭Worker
+            raise RuntimeError("Worker ID 续约失败，不该出现的错误，系统退出。")
         # 记录last_timestamp到redis，防止重启回拨
         ts_key = f"{self.last_timestamp_key}:{self.node_id}"
         await self.aio.set(ts_key, last_timestamp, ex=86400)

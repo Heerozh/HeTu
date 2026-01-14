@@ -9,7 +9,7 @@ Component Table管理类，通过System定义的Component来管理他们所属�
 
 import logging
 from typing import ItemsView, TYPE_CHECKING
-from .data.backend import Table
+from .data.backend import Table, RaceCondition
 
 from .system import SystemClusters
 
@@ -87,7 +87,10 @@ class ComponentTableManager:
             tbl_status, old_meta = maint.check_table(tbl)
             match tbl_status:
                 case "not_exists":
-                    maint.create_table(tbl)
+                    try:
+                        maint.create_table(tbl)
+                    except RaceCondition as _:
+                        pass
                 case "schema_mismatch":
                     logger.warning(f"⚠️  组件 {tbl.comp_name} 的表结构需要迁移Schema。")
                     ret = False

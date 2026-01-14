@@ -10,7 +10,7 @@ buffer = bytearray()
 
 # Configuration
 # 可以通过环境变量配置Redis连接
-HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466")
+HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466/hetu")
 
 
 # Data Scale
@@ -35,9 +35,9 @@ def encode_message(message: list | dict) -> bytes:
 
 
 async def websocket():
-    ws = websockets.connect(HETU_URL)
+    ws = await websockets.connect(HETU_URL)
     yield ws
-    await ws.connection.close()
+    await ws.close()
 
 
 async def rpc(websocket, message):
@@ -47,23 +47,28 @@ async def rpc(websocket, message):
     received = await websocket.recv()
     # received = zlib.decompress(received)
     received = decode_message(received)
-    return received
+    return received[1]
 
 
 # === 基准测试 ===
 
 
 async def benchmark_hello_world(websocket: websockets.connect):
-    received = rpc(websocket, ["rpc", "hello_world"])
-    return received
+    received = await rpc(websocket, ["rpc", "hello_world"])
+    return received[0]
 
 
+# bash
 """
+cd benchmark/
 
-export HETU_HOST=ws://localhost:2466
+export REDIS_URL=redis://:@localhost:6379/0
+hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
+
+export HETU_HOST=ws://localhost:2466/hetu
 
 # 启动 200 个并发用户
-cd benchmark/
+
 ya ya_hetu.py -n 200 -t 5
 
 
