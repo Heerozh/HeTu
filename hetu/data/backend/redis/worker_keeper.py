@@ -69,7 +69,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
             # 判断node_id是否相同，相同则说明是容器重启，直接使用
-            if existing_node_id := self.io.get(key) is None:
+            if (existing_node_id := self.io.get(key)) is None:
                 continue
             existing_node_id = cast(bytes, existing_node_id)
             if existing_node_id.decode("ascii") != self.node_id:
