@@ -5,7 +5,6 @@
 import os
 import random
 import string
-import uuid
 
 import numpy as np
 
@@ -26,17 +25,19 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", None)
 # 预设数据规模，例如10000个用户
 ACC_ID_RANGE = 30000
 
+# === 组件定义 ===
 
-@hetu.data.define_component(
-    namespace="bench", volatile=True, permission=hetu.data.Permission.EVERYBODY
+
+@hetu.define_component(
+    namespace="bench", volatile=True, permission=hetu.Permission.EVERYBODY
 )
-class IntTable(hetu.data.BaseComponent):
-    number: np.int32 = hetu.data.property_field(0, unique=True)
-    name: "<U16" = hetu.data.property_field("Unnamed")
+class IntTable(hetu.BaseComponent):
+    number: np.int32 = hetu.property_field(0, unique=True)
+    name: "<U16" = hetu.property_field("Unnamed")
 
 
 # 需要定义System以确保Component被注册，不然Component schema不会加入到lua脚本中
-@hetu.system.define_system(namespace="bench", components=(IntTable,))
+@hetu.define_system(namespace="bench", components=(IntTable,))
 async def ref_components(ctx):
     pass
 
@@ -44,6 +45,8 @@ async def ref_components(ctx):
 # 初始化instance & clusters
 hetu.system.SystemClusters().build_clusters("bench")
 item_ref = TableReference(IntTable, "bench", 1)
+
+# === 夹具 ===
 
 
 async def redis_backend():
@@ -56,12 +59,15 @@ async def redis_backend():
         "master": url,
     }
 
-    SnowflakeID().init(hash(uuid.getnode()) % 1024, 0)
+    SnowflakeID().init(hash(os.getpid()) % 1024, 0)
 
     _backend = Backend(config)
     _backend.post_configure()
     yield _backend
     await _backend.close()
+
+
+# === 基准测试 ===
 
 
 async def benchmark_redis_upsert(redis_backend: Backend):
@@ -71,9 +77,9 @@ async def benchmark_redis_upsert(redis_backend: Backend):
         id_map = IdentityMap()
 
         rand_number = random.randint(0, ACC_ID_RANGE)
-        row = await client.range(item_ref, "number", rand_number, limit=1)
-        if row.size > 0:
-            row = row[0]
+        rows = await client.range(item_ref, "number", rand_number, limit=1)
+        if rows.size > 0:
+            row = rows[0]
             id_map.add_clean(item_ref, row)
             row.name = "".join(
                 random.choices(string.ascii_uppercase + string.digits, k=3)

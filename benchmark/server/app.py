@@ -12,23 +12,23 @@ import string
 
 
 @hetu.define_component(namespace="bench", volatile=True)
-class StrTable(hetu.data.BaseComponent):
-    name: "<U16" = hetu.data.property_field("", unique=True)
-    number: np.int32 = hetu.data.property_field(0)
+class StrTable(hetu.BaseComponent):
+    name: "<U16" = hetu.property_field("", unique=True)
+    number: np.int32 = hetu.property_field(0)
 
 
 @hetu.define_component(
     namespace="bench", volatile=True, permission=hetu.Permission.EVERYBODY
 )
-class IntTable(hetu.data.BaseComponent):
-    number: np.int32 = hetu.data.property_field(0, unique=True)
-    name: "<U16" = hetu.data.property_field("Unnamed")
+class IntTable(hetu.BaseComponent):
+    number: np.int32 = hetu.property_field(0, unique=True)
+    name: "<U16" = hetu.property_field("Unnamed")
 
 
 @hetu.define_system(
     namespace="bench", components=(IntTable,), permission=hetu.Permission.EVERYBODY
 )
-async def just_select(ctx: hetu.system.SystemContext, number):
+async def just_get(ctx: hetu.SystemContext, number):
     row = await ctx.repo[IntTable].get(id=number)
     return hetu.ResponseToClient([ctx.race_count])
 
@@ -36,7 +36,7 @@ async def just_select(ctx: hetu.system.SystemContext, number):
 @hetu.define_system(
     namespace="bench", components=(IntTable,), permission=hetu.Permission.EVERYBODY
 )
-async def select_and_update(ctx: hetu.system.SystemContext, number):
+async def upsert(ctx: hetu.SystemContext, number):
     async with ctx.repo[IntTable].upsert(number=number) as row:
         row.name = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
     return hetu.ResponseToClient([ctx.race_count])
@@ -45,9 +45,9 @@ async def select_and_update(ctx: hetu.system.SystemContext, number):
 @hetu.define_system(
     namespace="bench",
     components=(StrTable, IntTable),
-    permission=hetu.data.Permission.EVERYBODY,
+    permission=hetu.Permission.EVERYBODY,
 )
-async def exchange_data(ctx: hetu.system.SystemContext, name, number):
+async def exchange_data(ctx: hetu.SystemContext, name, number):
     async with ctx.repo[StrTable].upsert(name=name) as name_row:
         async with ctx.repo[IntTable].upsert(number=number) as number_row:
             name_row.number, number_row.name = number, name
@@ -55,7 +55,7 @@ async def exchange_data(ctx: hetu.system.SystemContext, name, number):
 
 
 @hetu.define_endpoint(namespace="bench", permission=hetu.Permission.EVERYBODY)
-async def hello_world(ctx: hetu.system.SystemContext):
+async def hello_world(ctx: hetu.SystemContext):
     return hetu.ResponseToClient(["世界只有一个！但是河图可以模拟很多个！"])
 
 
@@ -63,6 +63,6 @@ async def hello_world(ctx: hetu.system.SystemContext):
     namespace="bench",
     permission=hetu.Permission.EVERYBODY,
 )
-async def login_test(ctx: hetu.endpoint.Context, user_id):
+async def login_test(ctx: hetu.EndpointContext, user_id):
     await hetu.elevate(ctx, user_id, kick_logged_in=True)
     return hetu.ResponseToClient([0])
