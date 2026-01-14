@@ -3,6 +3,8 @@
 import os
 import websockets
 import msgspec
+import random
+import string
 
 msg_encoder = msgspec.msgpack.Encoder()
 msg_decoder = msgspec.msgpack.Decoder()
@@ -15,7 +17,7 @@ HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466/hetu")
 
 # Data Scale
 # 预设数据规模，例如10000个用户
-ACC_ID_RANGE = 30000
+BENCH_ID_RANGE = 30000
 
 
 # === 工具函数 ===
@@ -58,6 +60,25 @@ async def benchmark_hello_world(websocket: websockets.connect):
     return received[0]
 
 
+async def benchmark_ge(websocket: websockets.connect):
+    row_id = random.randint(1, BENCH_ID_RANGE)
+    received = await rpc(websocket, ["rpc", "just_get", row_id])
+    return received[0]
+
+
+async def benchmark_get_then_update(websocket: websockets.connect):
+    row_id = random.randint(1, BENCH_ID_RANGE)
+    received = await rpc(websocket, ["rpc", "upsert", row_id])
+    return received[0]
+
+
+async def benchmark_get2_update2(websocket: websockets.connect):
+    rnd_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+    row_id = random.randint(1, BENCH_ID_RANGE)
+    received = await rpc(websocket, ["rpc", "exchange_data", rnd_str, row_id])
+    return received[0]
+
+
 # bash
 """
 cd benchmark/
@@ -69,7 +90,7 @@ export HETU_HOST=ws://localhost:2466/hetu
 
 # 启动 200 个并发用户
 
-ya ya_hetu.py -n 200 -t 5
+ya ya_hetu_rpc.py -n 200 -t 5
 
 
 """
