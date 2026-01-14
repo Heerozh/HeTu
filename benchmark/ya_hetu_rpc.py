@@ -60,7 +60,7 @@ async def benchmark_hello_world(websocket: websockets.connect):
     return received[0]
 
 
-async def benchmark_ge(websocket: websockets.connect):
+async def benchmark_get(websocket: websockets.connect):
     row_id = random.randint(1, BENCH_ID_RANGE)
     received = await rpc(websocket, ["rpc", "just_get", row_id])
     return received[0]

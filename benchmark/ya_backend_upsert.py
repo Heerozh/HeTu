@@ -33,7 +33,7 @@ ACC_ID_RANGE = 30000
 )
 class IntTable(hetu.BaseComponent):
     number: np.int32 = hetu.property_field(0, unique=True)
-    name: "<U16" = hetu.property_field("Unnamed")
+    name: str = hetu.property_field("Unnamed", dtype="<U16")
 
 
 # 需要定义System以确保Component被注册，不然Component schema不会加入到lua脚本中

@@ -1,7 +1,5 @@
 # HeTu Backend Upsert Benchmark Results
 
-结论：新结构读取部分可以降低30%左右的负载，但是lua部分性能开销还是大，效率反而下降了
-
 ## 运行命令
 
 ```
@@ -19,25 +17,31 @@ Calls Per Minute (CPM) Statistics:
 
 | benchmark              | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
 |:-----------------------|:---------|:---------|:---------|:---------|:---------|:---------|
-| benchmark_redis_upsert | 472,651  | 701,571  | 722,767  | 725,927  | 735,374  | 189,512  |
+| benchmark_redis_upsert | 594,926  | 874,644  | 880,139  | 882,439  | 891,644  | 290,084  |
 
 Average CPS (Calls Per Second) per Function:
 
 |                        | CPS       |
 |:-----------------------|:----------|
-| benchmark_redis_upsert | 11,997.34 |
+| benchmark_redis_upsert | 14,729.91 |
 
 Function Execution Time Statistics:
 
-|                        |  Mean |   k50 |   k90 |   k99 | Count     |  Min |     Max | Median |
-|:-----------------------|------:|------:|------:|------:|:----------|-----:|--------:|-------:|
-| benchmark_redis_upsert | 16.23 | 15.22 | 22.33 | 34.64 | 3,547,802 | 1.19 | 1331.16 |  15.22 |
+|                        |  Mean |   k50 |   k90 |   k99 | Count     |  Min |    Max | Median |
+|:-----------------------|------:|------:|------:|------:|:----------|-----:|-------:|-------:|
+| benchmark_redis_upsert | 13.05 | 12.43 | 17.56 | 31.07 | 4,413,876 | 1.09 | 508.61 |  12.43 |
 
 Return Value Distribution Statistics:
 
 |   | benchmark              | return_value |   count | percentage |
 |--:|:-----------------------|-------------:|--------:|-----------:|
-| 0 | benchmark_redis_upsert |            1 | 3547802 |        100 |
+| 0 | benchmark_redis_upsert |            1 | 4262349 |      96.57 |
+| 3 | benchmark_redis_upsert |            2 |  123015 |       2.79 |
+| 4 | benchmark_redis_upsert |            3 |   22643 |       0.51 |
+| 5 | benchmark_redis_upsert |            4 |    4615 |        0.1 |
+| 6 | benchmark_redis_upsert |            5 |     953 |       0.02 |
+
+================================================================================
 
 ## 本机 9950x3D Redis-8.4.0-Windows-x64-msys2 默认配置➕io-thread=8
 
