@@ -2,9 +2,10 @@
 branch = True
 source = hetu
 omit =
-    site-packages
-    hetu/cli
-    hetu/safelogging
+    */site-packages/*
+    site-packages/*
+    hetu/cli/*
+    hetu/safelogging/*
 
 [html]
 directory = coverage
