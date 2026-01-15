@@ -1,33 +1,42 @@
-# 这是一个增加Redis请求吞吐量的类，通过缓存，以及合批，减少与Redis服务器的交互次数。
+"""
+@author: Heerozh (Zhang Jianhao)
+@copyright: Copyright 2024, Heerozh. All rights reserved.
+@license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
+@email: heeroz@gmail.com
+"""
 
-# 首先我们的项目只用到了如下2个redis请求，aio就是redis-py的异步客户端：
-# await aio.hgetall(key)
-# await aio.zrange(name=idx_key, **cmds)
-#
-# 所以我们可以包装一个类，实现这2个异步请求，但是增加缓存和合批功能。
-#
-# 缓存：
-# 缓存用cachetools.TTLCache，采取短 TTL + 随机抖动，我们只需要缓存0.5秒的数据，减少短期的重复请求。
-# 由于TTL较短，所以不需要考虑缓存一致性问题。
-#
-# 合批：
-# 合批采取时间窗口合批的方式，将同一时间窗口内的请求通过pipeline合并成一个请求发送给Redis服务器。
-# 用户在调用await aio.hgetall/zrange时，是往一个队列里放future请求，然后等待结果返回。
-# 消费者则堵塞在队列get上，直到有任何消息放入，这样没消息时消费者不工作。
-# get成功后先看自己的队列里的请求是否超过设定水位，如果超过则立即循环get发送请求，否则等待一个时间窗口（比如10ms），
-# 然后无论水位多少立即发送请求。
+from asyncio.queues import Queue
+
 
 import asyncio
 from typing import Any
 from cachetools import TTLCache
-from redis.asyncio import Redis
+from redis.asyncio import Redis, RedisCluster
 
 
-class RedisCache:
-    def __init__(self, redis: Redis, batch_limit: int = 100, wait_time: float = 0.01):
+class RedisBatchedClient:
+    """
+    这是一个增加Redis请求吞吐量的类，通过缓存，以及合批，减少与Redis服务器的交互次数。
+
+    短 TTL 缓存：
+    采取短 TTL（最好再加个随机抖动），我们只需要缓存0.1秒的数据，减少短期的重复请求。
+    由于TTL较短，所以不需要考虑缓存失效通知。0.2秒是System重试的典型时间窗口，事务冲突时缓存已失效。
+    后期可以实验调平不同的值，实现cache命中和事务冲突的平衡。
+
+    合批：
+    将同一时间窗口内的请求通过pipeline合并成一个请求发送给Redis服务器，如果超过水位则立即发送请求。
+    """
+
+    def __init__(
+        self,
+        redis: Redis | RedisCluster,
+        batch_limit: int = 10,
+        wait_time: float = 0.1,
+        cache_ttl: float = 0.1,
+    ):
         self._redis = redis
-        self._queue = asyncio.Queue()
-        self._cache = TTLCache(maxsize=10000, ttl=0.5)
+        self._queue: Queue[tuple] = asyncio.Queue()
+        self._cache = TTLCache(maxsize=10000, ttl=cache_ttl)
         self._batch_limit = batch_limit
         self._wait_time = wait_time
         asyncio.create_task(self._worker())
