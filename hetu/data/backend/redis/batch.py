@@ -9,7 +9,7 @@ from asyncio.queues import Queue
 
 
 import asyncio
-from typing import Any
+from typing import Any, Callable
 from cachetools import TTLCache
 from redis.asyncio import Redis, RedisCluster
 
@@ -29,9 +29,9 @@ class RedisBatchedClient:
 
     def __init__(
         self,
-        redis: Redis | RedisCluster,
+        redis: Callable[[], Redis | RedisCluster],
         batch_limit: int = 10,
-        wait_time: float = 0.1,
+        wait_time: float = 0.01,
         cache_ttl: float = 0.1,
     ):
         self._redis = redis
@@ -79,7 +79,7 @@ class RedisBatchedClient:
                 continue
 
             try:
-                pipe = self._redis.pipeline()
+                pipe = self._redis().pipeline()
                 for cmd, key, kwargs, _, _ in batch:
                     if cmd == "hgetall":
                         pipe.hgetall(key)

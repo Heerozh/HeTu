@@ -20,6 +20,7 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ..base import BackendClient, RaceCondition, RowFormat
+from .batch import RedisBatchedClient
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -203,6 +204,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             else:
                 self._ios.append(redis.Redis.from_url(url))
                 self._async_ios.append(redis.asyncio.Redis.from_url(url))
+
+        self._batched_aio = RedisBatchedClient(lambda: self.aio)
 
         # 测试连接是否正常
         for i, io in enumerate(self._ios):
@@ -436,7 +439,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
-        if row := await self.aio.hgetall(key):  # type: ignore
+        if row := await self._batched_aio.hgetall(key):  # type: ignore
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
@@ -613,7 +616,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         # todo 所有get query要合批
         idx_key = self.index_key(table_ref, index_name)
-        aio = self.aio  # 保存随机选中的aio连接
+        batched_aio = self._batched_aio
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
@@ -639,7 +642,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             "byscore": False,
         }
 
-        row_ids = await aio.zrange(name=idx_key, **cmds)
+        row_ids = await batched_aio.zrange(name=idx_key, **cmds)
         row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
 
         if row_format == RowFormat.ID_LIST:
@@ -649,7 +652,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         rows = []
         for _id in row_ids:
             # todo 要么用合批的请求方法，要么用pipeline
-            if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
+            if row := await batched_aio.hgetall(key_prefix + str(_id)):  # type: ignore
                 rows.append(self._row_decode(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:

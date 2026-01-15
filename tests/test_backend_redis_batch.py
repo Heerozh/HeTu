@@ -26,7 +26,7 @@ async def test_redis_cache_basic(mod_auto_backend):
     # Initialize Cache
     # Use small wait_time for faster tests
     cache = RedisBatchedClient(
-        redis_client, batch_limit=5, wait_time=0.1, cache_ttl=0.5
+        lambda: redis_client, batch_limit=5, wait_time=0.1, cache_ttl=0.5
     )
 
     # 1. Test hgetall
