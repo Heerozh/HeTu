@@ -83,14 +83,17 @@ async def benchmark_get2_update2(websocket: websockets.connect):
 """
 cd benchmark/
 
-export REDIS_URL=redis://:@localhost:6379/0
-hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
+export REDIS_URL='redis://:@localhost:6379/0'
+uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
 
 export HETU_HOST=ws://localhost:2466/hetu
 
 # 启动 200 个并发用户
 
-ya ya_hetu_rpc.py -n 200 -t 5
+uv run ya ya_hetu_rpc.py -n 1800 -t 2
 
+# 测试ttl
+
+uv run ya ya_hetu_rpc.py -n 1 -p 1 -t 2
 
 """

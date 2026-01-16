@@ -221,21 +221,23 @@ public class FirstGame : MonoBehaviour
 |          |                 服务器 型号 |                               设置 |
 |:---------|-----------------------:|---------------------------------:|
 | 河图       |       ecs.c8a.16xlarge | 32 核 64 线程，默认配置，参数: --workers=76 |
-| Redis7.0 | redis.shard.small.2.ce |         单可用区，双机热备，非 Cluster，内网直连 |
+| Redis7.0 | redis.shard.small.2.ce |    最低配, 单可用区，双机热备，非 Cluster，内网直连 |
 | 跑分程序     |                     本地 |      参数： --clients=1000 --time=5 |
 
 ### 压测结果：
 
 - hello world 测试：序列化并返回 hello world。
-- select + update：单 Component，随机单行读写，表 3W 行。
+- get + update：单 Component，随机单行读写，表 3W 行。
+- get*2 + update*2：同上，只是做2次
+- get：单 Component，随机单行读，表 3W 行。
 
 CPS(每秒调用次数)测试结果为：
 
-| Time     | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
-|:---------|-------------------:|-----------------------:|---------------------------:|--------------:|
-| Avg(每秒)  |            404,670 |               39,530.3 |                   20,458.3 |       102,799 |
-| CPU 负载   |                99% |                    34% |                        26% |           65% |
-| Redis 负载 |                 0% |                    99% |                        99% |           99% |
+| Time     | hello world(Calls) | get + update(Calls) | get*2 + update*2(Calls) | get(Calls) |
+|:---------|-------------------:|--------------------:|------------------------:|-----------:|
+| Avg(每秒)  |            436,540 |              48,184 |                  29,801 |    229,941 |
+| CPU 负载   |                99% |                 76% |                     73% |        52% |
+| Redis 负载 |                 0% |                 99% |                     99% |        99% |
 
 - _以上测试为单 Component，多个 Component 有机会（要低耦合度）通过 Redis Cluster 扩展。_
 - _在 Docker 中压测，hello world 结果为 314,241（需要关闭 bridge 网络--net=host），
@@ -408,7 +410,6 @@ python -O -m hetu start --config=./config.yml
 > export ALL_PROXY=$SOCKS_PROXY
 > curl -LsSf https://astral.sh/uv/install.sh | sh
 > source $HOME/.local/bin/env
->
 > ```
 
 ### Redis 部署
