@@ -205,7 +205,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 self._ios.append(redis.Redis.from_url(url))
                 self._async_ios.append(redis.asyncio.Redis.from_url(url))
 
-        self._batched_aio = RedisBatchedClient(lambda: self.aio)
+        self._batched_aio = RedisBatchedClient(self._async_ios)
 
         # 测试连接是否正常
         for i, io in enumerate(self._ios):
@@ -437,9 +437,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回符合Component定义的，有格式的dict类型。
                 此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
         """
-        # todo 所有get query要合批
         key = self.row_key(table_ref, row_id)
-        if row := await self._batched_aio.hgetall(key):  # type: ignore
+        aio = self._batched_aio
+        if row := await aio.hgetall(key):  # type: ignore
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
@@ -614,9 +614,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
-        # todo 所有get query要合批
         idx_key = self.index_key(table_ref, index_name)
-        batched_aio = self._batched_aio
+        aio = self._batched_aio
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
@@ -642,7 +641,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             "byscore": False,
         }
 
-        row_ids = await batched_aio.zrange(name=idx_key, **cmds)
+        row_ids = await aio.zrange(name=idx_key, **cmds)
         row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
 
         if row_format == RowFormat.ID_LIST:
@@ -651,8 +650,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
-            # todo 要么用合批的请求方法，要么用pipeline
-            if row := await batched_aio.hgetall(key_prefix + str(_id)):  # type: ignore
+            if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
                 rows.append(self._row_decode(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
@@ -788,6 +786,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         resp = resp.decode("utf-8")  # type: ignore
 
         if resp != "committed":
+            # 把事务相关的key满门抄斩
+            self._batched_aio.invalidate_cache(idmap.get_clean_row_keys())
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):

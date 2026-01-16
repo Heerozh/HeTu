@@ -7,7 +7,7 @@
 
 # 🌌 河图 HeTu
 
-河图是一个分布式游戏服务器引擎，专为网络游戏设计的现代 2-Tier（两层模式）与
+河图是一个分布式游戏服务器引擎，专为网络游戏设计的现代极简 2-Tier（两层模式）与
 Serverless（无服务器）的 BaaS 架构。
 
 - 高开发效率：透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
@@ -30,6 +30,8 @@ get/range 订阅。
 欢迎贡献代码。商业使用只需在 Credits 中注明即可。
 
 ## 🔰 快速示例（30 行）
+
+[//]: # (todo 详细内容移到文档去，这里只展示客户端和服务器的一行代码和效果gif。)
 
 一个登录，并在地图上移动的简单示例。
 
@@ -222,25 +224,7 @@ public class FirstGame : MonoBehaviour
 | Redis7.0 | redis.shard.small.2.ce |         单可用区，双机热备，非 Cluster，内网直连 |
 | 跑分程序     |                     本地 |      参数： --clients=1000 --time=5 |
 
-### Redis 对照：
-
-先压测 Redis，看看 Redis 的性能上限作为对照，这指令序列等价于之后的"select + update"
-测试项目：
-
-```redis
-ZRANGE, WATCH, HGETALL, MULTI, HSET, EXEC
-```
-
-CPS(每秒调用次数)结果为：
-
-| Time\Calls | ZRANG...EXEC |
-|:-----------|-------------:|
-| Avg(每秒)    |     30,345.2 |
-
-- ARM 版的 Redis 性能，hset/get 性能一致，但牵涉 zrange 和 multi 指令后性能低 40%，不建议
-- 各种兼容 Redis 指令的数据库，并非 Redis，不可使用，可能有奇怪 BUG
-
-### 测试河图性能：
+### 压测结果：
 
 - hello world 测试：序列化并返回 hello world。
 - select + update：单 Component，随机单行读写，表 3W 行。
@@ -259,7 +243,7 @@ CPS(每秒调用次数)测试结果为：
 
 ### 单连接性能：
 
-测试程序使用`--clients=1`参数测试，单线程同步堵塞模式，主要测试 RTT：
+测试程序使用`-n=1`参数测试，单线程同步堵塞模式，主要测试 RTT：
 
 | Time    | hello world(Calls) | select + update(Calls) | select*2 + update*2(Calls) | select(Calls) |
 |:--------|-------------------:|-----------------------:|---------------------------:|--------------:|
@@ -288,13 +272,12 @@ ffi.cdef("""
 c_lib = ffi.dlopen('lib.dll')
 
 # 获取Array of Position
-rows = await ctx[Position].query('x', pos.x - 10, pos.x + 10)
+rows = await ctx.repo[Position].range('x', pos.x - 10, pos.x + 10)
 c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
-await ctx[Position].update_rows(rows)
+await ctx.range[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD
-更快：
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD 更快：
 `rows.x[rows.x >= 10] -= 10`
 
 ## ⚙️ 安装
@@ -302,7 +285,7 @@ await ctx[Position].update_rows(rows)
 开发环境建议用 uv 包管理安装。 Windows 可在命令行执行：
 
 ```bash
-winget install --id=astral-sh.uv  -e
+winget install --id=astral-sh.uv -e
 ```
 
 新建你的项目目录，在目录中初始化 uv（最低版本需求 `3.13`）：
@@ -380,13 +363,11 @@ ENTRYPOINT ["hetu", "start", "--config=./config.yml"]
 # 编译你的应用镜像
 docker build -t app_image_name .
 # 启动你的应用
-docker run -it --rm -p 2466:2466 --name server_name app_image_name --head=True
+docker run -it --rm -p 2466:2466 --name server_name app_image_name
 ```
 
 使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用
 9 折的抢占服务器，然后用反向代理对连接进行负载均衡。
-
-后续启动的服务器需要把`--head`参数设为`False`，以防进行数据库初始化工作（重建索引，删除临时数据）。
 
 ### pip 原生部署
 
@@ -416,7 +397,7 @@ conda activate hetu
 # 根据项目pyproject.toml安装依赖，河图应该在其中
 pip install .
 # 启动河图，用 `python -O` 方式在生产环境启动，以去掉assert提升性能
-python -O -m hetu start --config=./config.yml --head=True
+python -O -m hetu start --config=./config.yml
 ```
 
 > [!NOTE]
@@ -435,21 +416,19 @@ python -O -m hetu start --config=./config.yml --head=True
 Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到
 replica，大幅降低 master 负载。
 
-> [!NOTE]
->
-> - 不要使用兼容 Redis
-> - 不要使用非直连的 Redis
+Redis只使用了基础特性，因此支持各种Fork，比如ValKey，阿里云Tair等。
+同时还支持Redis Proxy，Redis Cluster。
 
 ### 负载均衡
 
-生产环境下，对河图还要建议设立一层反向代理，并进行负载均衡。
+生产环境下，对河图还要设立一层反向代理，并进行负载均衡。
 
 反向代理选择：
 
 - Caddy: 自动 https 证书，自动反代头设置和合法验证，可通过 api 调用动态配置负载均衡
     - 命令行：
       `caddy reverse-proxy --from 你的域名.com --to hetu服务器1_ip:8000 --to hetu服务器2_ip:8000`
-- Nginx: 老了，配置复杂，且歧义多，不推荐
+- Nginx: 老了，配置复杂歧义多，不推荐
 
 ## ⚙️ 客户端 SDK 安装
 

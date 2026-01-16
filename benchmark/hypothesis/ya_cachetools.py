@@ -34,8 +34,8 @@ async def benchmark_dict(dict):
 
 
 """
-|                 | CPS        |
-|:----------------|:-----------|
-| benchmark_cache | 147,412.47 |
-| benchmark_dict  | 640,951.84 |
+|                 | CPS          |
+|:----------------|:-------------|
+| benchmark_cache | 293,077.77   |
+| benchmark_dict  | 1,159,489.53 |
 """
