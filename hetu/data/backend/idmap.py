@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
-
 if TYPE_CHECKING:
     from .table import TableReference
 

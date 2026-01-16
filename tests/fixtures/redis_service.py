@@ -328,7 +328,7 @@ def ses_redis_cluster_service():
                 # type: ignore 忽略类型检查警告
                 rc = RedisCluster(
                     host="127.0.0.1",
-                    port=7000,
+                    port=ports[0],
                     socket_connect_timeout=1,
                     socket_timeout=1,
                 )  # type: ignore
@@ -346,7 +346,7 @@ def ses_redis_cluster_service():
         if not ready:
             raise Exception("Redis Cluster 启动超时，无法连接")
 
-        yield "redis://127.0.0.1:7000"
+        yield f"redis://127.0.0.1:{ports[0]}"
 
     finally:
         # --- 5. 清理资源 ---

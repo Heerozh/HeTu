@@ -351,6 +351,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if not self._ios:
             return
 
+        # print("Batch量:次数 统计：")
+        # print(sorted(self._batched_aio._log.items()))
+        # ya_backend_upsert结果：
+        # [(1, 844), (2, 781), (3, 796), (4, 720), (5, 616), (6, 468), (7, 291), (8, 185), (9, 1)]
+
         for io in self._ios:
             io.close()
         self._ios = []

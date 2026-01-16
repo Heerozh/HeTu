@@ -42,6 +42,7 @@ class RedisBatchedClient:
         self._pipe = []
         self._queue: Queue[tuple] = asyncio.Queue()
         self._worker_task = None
+        self._log = {}
 
     @classmethod
     def invalidate_cache(cls, keys: set[str]):
@@ -90,6 +91,7 @@ class RedisBatchedClient:
                 continue
 
             try:
+                # self._log[len(batch)] = self._log.get(len(batch), 0) + 1
                 pipe = random.choice(self._replicas).pipeline()
                 for cmd, key, kwargs, _, _ in batch:
                     if cmd == "hgetall":
@@ -100,7 +102,7 @@ class RedisBatchedClient:
                 results = await pipe.execute()
 
                 for i, res in enumerate(results):
-                    _, _, _, fut, ckey = batch[i]
+                    _, _, _, fut, _ = batch[i]
                     if not fut.done():
                         # if ckey:
                         #     self._global_cache[ckey] = res

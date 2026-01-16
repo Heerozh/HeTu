@@ -18,22 +18,17 @@ async def test_redis_cache_basic(mod_auto_backend):
     key = "test:cache:hash"
     field = "foo"
     value = "bar"
-    await redis_client.hset(key, mapping={field: value})
+    await redis_client.hset(key, mapping={field: value})  # type: ignore
 
     zkey = "test:cache:zset"
     await redis_client.zadd(zkey, {"m1": 1, "m2": 2})
 
     # Initialize Cache
     # Use small wait_time for faster tests
-    cache = RedisBatchedClient(
-        lambda: redis_client, batch_limit=5, wait_time=0.1, cache_ttl=0.5
-    )
+    cache = RedisBatchedClient([redis_client])
 
     # 1. Test hgetall
-    start_time = time.time()
     res = await cache.hgetall(key)
-    end_time = time.time()
-    assert end_time - start_time >= 0.1  # waited for batching window
     assert res == {field.encode(): value.encode()}
 
     # 2. Test zrange
@@ -43,26 +38,14 @@ async def test_redis_cache_basic(mod_auto_backend):
     assert len(res_z) == 2
     assert res_z[0][0] == b"m1"
 
-    # 3. Test Cache Hit (TTL 0.5s)
+    # 3. Test Batching
     # Modify backend directly
-    await redis_client.hset(key, mapping={"foo": "new_bar"})
+    await redis_client.hset(key, mapping={"foo": "new_bar"})  # type: ignore
 
-    # helper to fetch from cache immediately
-    res_cached = await cache.hgetall(key)
-
-    # Should still be old value because of cache
-    assert res_cached == {field.encode(): value.encode()}
-
-    # 4. Test Cache Expiry
-    await asyncio.sleep(0.6)  # Wait for TTL expiry
-    res_fresh = await cache.hgetall(key)
-    assert res_fresh == {field.encode(): b"new_bar"}
-
-    # 5. Test Batching
     # Launch multiple requests concurrently
     tasks = []
     start_time = time.time()
-    for i in range(5):
+    for _ in range(5):
         # 必须不await而用task，让worker暂时不执行，让队列先满
         tasks.append(cache.hgetall(key))
 

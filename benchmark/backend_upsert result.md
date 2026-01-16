@@ -5,41 +5,41 @@
 ```
 export REDIS_HOST=127.0.0.1
 export REDIS_PASSWORD=
-uv run ya ./benchmark/ya_backend_upsert.py
+uv run ya ./benchmark/ya_backend_upsert.py -n 600
 ```
 
 Found 1 benchmark(s): benchmark_redis_upsert
-Running with 32 workers, 6 tasks per worker, for 5 minute(s)
+Running with 64 workers, 9 tasks per worker, for 5 minute(s)
 
 ## 本机 9950x3D redis:8.0 Windows Docker 默认设置
 
 Calls Per Minute (CPM) Statistics:
 
-| benchmark              | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
-|:-----------------------|:---------|:---------|:---------|:---------|:---------|:---------|
-| benchmark_redis_upsert | 594,926  | 874,644  | 880,139  | 882,439  | 891,644  | 290,084  |
+| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
+|:-----------------------|:---------|:----------|:----------|:----------|:----------|:---------|
+| benchmark_redis_upsert | 998,232  | 1,103,828 | 1,087,547 | 1,117,409 | 1,125,254 | 91,951   |
 
 Average CPS (Calls Per Second) per Function:
 
 |                        | CPS       |
 |:-----------------------|:----------|
-| benchmark_redis_upsert | 14,729.91 |
+| benchmark_redis_upsert | 18,607.72 |
 
 Function Execution Time Statistics:
 
 |                        |  Mean |   k50 |   k90 |   k99 | Count     |  Min |    Max | Median |
 |:-----------------------|------:|------:|------:|------:|:----------|-----:|-------:|-------:|
-| benchmark_redis_upsert | 13.05 | 12.43 | 17.56 | 31.07 | 4,413,876 | 1.09 | 508.61 |  12.43 |
+| benchmark_redis_upsert | 31.28 | 30.03 | 39.99 | 66.55 | 5,524,221 | 2.33 | 374.02 |  30.03 |
 
 Return Value Distribution Statistics:
 
 |   | benchmark              | return_value |   count | percentage |
 |--:|:-----------------------|-------------:|--------:|-----------:|
-| 0 | benchmark_redis_upsert |            1 | 4262349 |      96.57 |
-| 3 | benchmark_redis_upsert |            2 |  123015 |       2.79 |
-| 4 | benchmark_redis_upsert |            3 |   22643 |       0.51 |
-| 5 | benchmark_redis_upsert |            4 |    4615 |        0.1 |
-| 6 | benchmark_redis_upsert |            5 |     953 |       0.02 |
+| 0 | benchmark_redis_upsert |            1 | 5400129 |      97.75 |
+| 2 | benchmark_redis_upsert |            2 |  104161 |       1.89 |
+| 3 | benchmark_redis_upsert |            3 |   16532 |        0.3 |
+| 4 | benchmark_redis_upsert |            4 |    2777 |       0.05 |
+| 5 | benchmark_redis_upsert |            5 |     498 |       0.01 |
 
 ================================================================================
 

@@ -1,5 +1,7 @@
 # HeTu RPC Benchmark Results
 
+结论：使用batch后200%提升
+
 ## 运行命令
 
 ```
@@ -17,32 +19,33 @@ Using multiprocessing with 64 workers
 
 |                           | CPS        |
 |:--------------------------|:-----------|
-| benchmark_get             | 29,434.73  |
-| benchmark_get2_update2    | 6,204.35   |
-| benchmark_get_then_update | 9,387.89   |
-| benchmark_hello_world     | 130,359.08 |
+| benchmark_get             | 63,378.76  |
+| benchmark_get2_update2    | 11,769.40  |
+| benchmark_get_then_update | 16,587.53  |
+| benchmark_hello_world     | 140,217.49 |
 
 Function Execution Time Statistics:
 
 |                           |  Mean |   k50 |   k90 |   k99 | Count     |  Min |    Max | Median |
 |:--------------------------|------:|------:|------:|------:|:----------|-----:|-------:|-------:|
-| benchmark_get             |  6.53 |  5.44 | 11.02 | 24.62 | 1,764,621 | 0.61 | 174.83 |   5.44 |
-| benchmark_get2_update2    | 30.82 | 29.21 | 41.63 | 60.86 | 373,829   | 2.84 | 400.88 |  29.21 |
-| benchmark_get_then_update | 20.35 | 19.16 | 29.37 | 43.03 | 566,188   |  1.9 | 271.78 |  19.16 |
-| benchmark_hello_world     |  1.46 |  0.63 |  0.96 | 11.43 | 7,878,632 |  0.1 |  735.2 |   0.63 |
+| benchmark_get             |  9.03 |  8.35 | 12.42 | 25.38 | 3,825,994 | 0.67 | 533.36 |   8.35 |
+| benchmark_get2_update2    | 48.94 | 47.21 | 57.49 | 84.12 | 706,339   | 4.04 | 534.17 |  47.21 |
+| benchmark_get_then_update | 34.51 | 33.48 | 42.31 |  54.8 | 1,001,488 | 2.46 |  466.7 |  33.48 |
+| benchmark_hello_world     |  4.09 |  1.77 |  3.24 | 76.75 | 8,448,389 | 0.14 | 1270.4 |   1.77 |
 
 Return Value Distribution Statistics:
 
 |   | benchmark                 | return_value |   count | percentage |
 |--:|:--------------------------|:-------------|--------:|-----------:|
-| 0 | benchmark_get             | 0            | 1764621 |        100 |
-| 1 | benchmark_get2_update2    | 0            |  372430 |      99.63 |
-| 2 | benchmark_get2_update2    | 1            |    1394 |       0.37 |
-| 3 | benchmark_get2_update2    | 2            |       5 |          0 |
-| 4 | benchmark_get_then_update | 0            |  565041 |       99.8 |
-| 5 | benchmark_get_then_update | 1            |    1146 |        0.2 |
-| 6 | benchmark_get_then_update | 2            |       1 |          0 |
-| 7 | benchmark_hello_world     | 世界收到         | 7878632 |        100 |
+| 0 | benchmark_get             | 0            | 3825994 |        100 |
+| 1 | benchmark_get2_update2    | 0            |  699697 |      99.06 |
+| 2 | benchmark_get2_update2    | 1            |    6572 |       0.93 |
+| 3 | benchmark_get2_update2    | 2            |      69 |       0.01 |
+| 4 | benchmark_get2_update2    | 3            |       1 |          0 |
+| 5 | benchmark_get_then_update | 0            |  996974 |      99.55 |
+| 6 | benchmark_get_then_update | 1            |    4493 |       0.45 |
+| 7 | benchmark_get_then_update | 2            |      21 |          0 |
+| 8 | benchmark_hello_world     | 世界收到         | 8448389 |        100 |
 
 ================================================================================
 
