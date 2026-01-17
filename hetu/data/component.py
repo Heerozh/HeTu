@@ -173,15 +173,15 @@ class BaseComponent:
         return cast(np.recarray, rows)
 
     @classmethod
-    def dict_to_row(cls, data: dict) -> np.record:  # todo rename to dict_to_struct_row
+    def dict_to_struct(cls, data: dict) -> np.record:
         """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
         row = cls.new_row()
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
 
-    @classmethod  # todo rename struct_row_to_dict
-    def row_to_dict(cls, data: np.record) -> dict[str, Any]:
+    @classmethod
+    def struct_to_dict(cls, data: np.record) -> dict[str, Any]:
         """从c-struct like的行数据转换为typed dict"""
         assert data.dtype.names
         return dict(zip(data.dtype.names, data.item()))

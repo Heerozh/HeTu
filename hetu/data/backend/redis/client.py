@@ -378,10 +378,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
             case RowFormat.RAW:
                 return row_decoded
             case RowFormat.STRUCT:
-                return comp_cls.dict_to_row(row_decoded)
+                return comp_cls.dict_to_struct(row_decoded)
             case RowFormat.TYPED_DICT:
-                struct_row = comp_cls.dict_to_row(row_decoded)
-                return comp_cls.row_to_dict(struct_row)
+                struct_row = comp_cls.dict_to_struct(row_decoded)
+                return comp_cls.struct_to_dict(struct_row)
             case _:
                 raise ValueError(f"不可用的行格式: {fmt}")
 

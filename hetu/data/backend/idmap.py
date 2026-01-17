@@ -172,6 +172,7 @@ class IdentityMap:
 
         # 添加到缓存
         cache, _, states = self._cache(table_ref)
+        # todo np.append可能有性能问题，等py3.15的旁路trace工具再sampling一下优化看看
         self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
 
         # 标记为INSERT
@@ -306,6 +307,7 @@ class IdentityMap:
 
             if update_ids:
                 clean_cache = self._row_clean[table_ref]
+                # todo isin可能有性能问题，等py3.15的旁路trace再sampling一下优化看看
                 mask = np.isin(cache["id"], update_ids)
                 # 新数据只保存变更的数据
                 old_rows, new_rows = [], []
