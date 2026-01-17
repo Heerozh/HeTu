@@ -74,6 +74,11 @@ async def redis_backend():
 # === 基准测试 ===
 
 
+async def benchmark_ping(redis_backend):
+    client = redis_backend.master
+    await client.ping()
+
+
 async def benchmark_redis_upsert(redis_backend: Backend):
     client = redis_backend.master
     count = 0
