@@ -1,16 +1,14 @@
 # HeTu RPC Benchmark Results
 
-结论：使用batch后200%提升
-
 ## 运行命令
 
 ```
-uv run ya ya_hetu_rpc.py -n 1800 -t 2
+uv run ya ya_hetu_rpc.py -n 1200 -t 1.1
 ```
 
 Found 4 benchmark(s): benchmark_get, benchmark_get2_update2, benchmark_get_then_update,
 benchmark_hello_world
-Running with 64 workers, 3 tasks per worker, for 1.0 minute(s)
+Running with 64 workers, 3 tasks per worker, for 1.1 minute(s)
 
 Running benchmark: benchmark_ge
 Using multiprocessing with 64 workers
@@ -86,98 +84,124 @@ Return Value Distribution Statistics:
 | 8 | benchmark_get_then_update | 3            |        6 |          0 |
 | 9 | benchmark_hello_world     | 世界收到         | 26113439 |        100 |
 
-## debian13 ecs.c8a.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
 
 |                           | 手动记录CPU                 |
 |:--------------------------|:------------------------|
-| benchmark_get             | 河图CPU 99% Redis CPU 52% |
-| benchmark_get2_update2    | 河图CPU 73% Redis CPU 96% |
-| benchmark_get_then_update | 河图CPU 76% Redis CPU 97% |
-| benchmark_hello_world     | 河图CPU 98% Redis CPU 0%  |
+| benchmark_get             | 河图CPU 40% Redis CPU 95% |
+| benchmark_get2_update2    | 河图CPU 29% Redis CPU 98% |
+| benchmark_get_then_update | 河图CPU 30% Redis CPU 98% |
+| benchmark_hello_world     | 河图CPU 72% Redis CPU 0%  |
 
 Average CPS (Calls Per Second) per Function:
 
 |                           | CPS        |
 |:--------------------------|:-----------|
-| benchmark_get             | 229,941.26 |
-| benchmark_get2_update2    | 29,801.20  |
-| benchmark_get_then_update | 48,184.06  |
-| benchmark_hello_world     | 436,540.38 |
+| benchmark_get             | 223,432.15 |
+| benchmark_get2_update2    | 23,018.14  |
+| benchmark_get_then_update | 39,561.04  |
+| benchmark_hello_world     | 889,321.68 |
+
+Function Execution Time Statistics:
+
+|                           | Mean |  k50 |  k90 |  k99 | Count       |  Min |    Max | Median |
+|:--------------------------|-----:|-----:|-----:|-----:|:------------|-----:|-------:|-------:|
+| benchmark_get             | 0.57 | 0.54 | 0.79 | 1.16 | 26,815,494  | 0.17 |  42.02 |   0.54 |
+| benchmark_get2_update2    | 3.42 | 2.81 |  5.1 | 8.03 | 2,707,471   | 1.08 | 351.92 |   2.81 |
+| benchmark_get_then_update | 3.23 | 2.85 | 4.25 | 5.39 | 4,750,612   | 0.64 | 307.63 |   2.85 |
+| benchmark_hello_world     | 0.14 | 0.08 | 0.37 |  0.6 | 106,786,682 | 0.03 |  17.27 |   0.08 |
+
+Return Value Distribution Statistics:
+
+|   | benchmark                 | return_value |     count | percentage |
+|--:|:--------------------------|:-------------|----------:|-----------:|
+| 0 | benchmark_get             | 0            |  26815494 |        100 |
+| 1 | benchmark_get2_update2    | 0            |   2703196 |      99.84 |
+| 2 | benchmark_get2_update2    | 1            |      4269 |       0.16 |
+| 3 | benchmark_get2_update2    | 2            |         6 |          0 |
+| 4 | benchmark_get_then_update | 0            |   4742876 |      99.84 |
+| 5 | benchmark_get_then_update | 1            |      7728 |       0.16 |
+| 6 | benchmark_get_then_update | 2            |         8 |          0 |
+| 7 | benchmark_hello_world     | 世界收到         | 106786682 |        100 |
+
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis读写分离: redis.shard.with.proxy.small.ce 7.0.2.6 云原生 4节点 读写分离代理 默认设置
+
+|                           | 手动记录CPU                               |
+|:--------------------------|:--------------------------------------|
+| benchmark_get             | 河图CPU 98% Redis主节点CPU 41% 只读节点CPU 48% |
+| benchmark_get2_update2    | 河图CPU 78% Redis主节点CPU 90% 只读节点CPU 60% |
+| benchmark_get_then_update | 河图CPU 88% Redis主节点CPU 97% 只读节点CPU 52% |
+| benchmark_hello_world     | 河图CPU 98% Redis主节点CPU 0%              |
+
+Average CPS (Calls Per Second) per Function:
+
+|                           | CPS          |
+|:--------------------------|:-------------|
+| benchmark_get             | 422,817.37   |
+| benchmark_get2_update2    | 54,260.74    |
+| benchmark_get_then_update | 90,776.78    |
+| benchmark_hello_world     | 1,200,929.39 |
 
 Function Execution Time Statistics:
 
 |                           |  Mean |   k50 |   k90 |    k99 | Count      |  Min |    Max | Median |
 |:--------------------------|------:|------:|------:|-------:|:-----------|-----:|-------:|-------:|
-| benchmark_get             |  7.79 |  7.22 |  12.1 |  18.15 | 27,608,276 |  0.5 |  253.4 |   7.22 |
-| benchmark_get2_update2    | 60.19 | 55.88 | 69.31 | 242.52 | 3,573,604  | 2.96 | 816.96 |  55.88 |
-| benchmark_get_then_update | 37.22 | 35.14 | 43.88 | 126.08 | 5,779,052  | 1.98 | 681.32 |  35.14 |
-| benchmark_hello_world     |   4.1 |  3.18 |  8.68 |  15.23 | 52,402,675 | 0.08 |  307.9 |   3.18 |
+| benchmark_get             |   2.7 |  2.31 |  4.77 |    8.4 | 12,814,848 | 0.23 | 123.94 |   2.31 |
+| benchmark_get2_update2    | 21.28 | 17.73 | 27.67 | 160.82 | 1,624,608  | 1.49 | 698.39 |  17.73 |
+| benchmark_get_then_update | 12.69 | 10.42 | 17.04 |  95.47 | 2,725,078  | 0.94 | 477.27 |  10.42 |
+| benchmark_hello_world     |  0.96 |  0.49 |  2.22 |    6.8 | 36,007,652 | 0.03 | 129.85 |   0.49 |
 
 Return Value Distribution Statistics:
 
 |    | benchmark                 | return_value |    count | percentage |
 |---:|:--------------------------|:-------------|---------:|-----------:|
-|  0 | benchmark_get             | 0            | 27608276 |        100 |
-|  1 | benchmark_get2_update2    | 0            |  3475239 |      97.25 |
-|  2 | benchmark_get2_update2    | 1            |    95468 |       2.67 |
-|  3 | benchmark_get2_update2    | 2            |     2801 |       0.08 |
-|  4 | benchmark_get2_update2    | 3            |       94 |          0 |
-|  5 | benchmark_get2_update2    | 4            |        2 |          0 |
-|  6 | benchmark_get_then_update | 0            |  5699930 |      98.63 |
-|  7 | benchmark_get_then_update | 1            |    78017 |       1.35 |
-|  8 | benchmark_get_then_update | 2            |     1091 |       0.02 |
-|  9 | benchmark_get_then_update | 3            |       14 |          0 |
-| 10 | benchmark_hello_world     | 世界收到         | 52402675 |        100 |
+|  0 | benchmark_get             | 0            | 12814848 |        100 |
+|  1 | benchmark_get2_update2    | 0            |  1583158 |      97.45 |
+|  2 | benchmark_get2_update2    | 1            |    40311 |       2.48 |
+|  3 | benchmark_get2_update2    | 2            |     1102 |       0.07 |
+|  4 | benchmark_get2_update2    | 3            |       33 |          0 |
+|  5 | benchmark_get2_update2    | 4            |        4 |          0 |
+|  6 | benchmark_get_then_update | 0            |  2682567 |      98.44 |
+|  7 | benchmark_get_then_update | 1            |    41842 |       1.54 |
+|  8 | benchmark_get_then_update | 2            |      659 |       0.02 |
+|  9 | benchmark_get_then_update | 3            |       10 |          0 |
+| 10 | benchmark_hello_world     | 世界收到         | 36007652 |        100 |
 
-## debian13 ecs.c8a.16xlarge 64核 + 阿里云Tair读写分离：tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 4节点读写分离 默认设置
+## debian13 ecs.c8a.16xlarge 64核 + 阿里云Tair读写分离：tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 4节点 读写分离代理 默认设置
 
-需要检查下为什么在读写分离下性能更低，可能是因为batch或者proxy的原因？比如可以读写分离下不开batch
-
-|                           | 手动记录CPU                 |
-|:--------------------------|:------------------------|
-| benchmark_get             | 河图CPU 99% Redis CPU 50% |
-| benchmark_get2_update2    | 河图CPU 41% Redis CPU 59% |
-| benchmark_get_then_update | 河图CPU 34% Redis CPU 44% |
-| benchmark_hello_world     | 河图CPU 99% Redis CPU 0%  |
+感觉不如原版？单机版Tair表现似乎更好。
 
 Average CPS (Calls Per Second) per Function:
 
-|                           | CPS        |
-|:--------------------------|:-----------|
-| benchmark_get             | 216,623.78 |
-| benchmark_get2_update2    | 13,276.11  |
-| benchmark_get_then_update | 23,502.38  |
-| benchmark_hello_world     | 434,622.08 |
-
-关闭batch写入有明显提升，而get却降低了，有必要思考下为什么：
-| | CPS |
-|:--------------------------|:-----------|
-| benchmark_get | 173,575.43 |
-| benchmark_get2_update2 | 19,620.35 |
-| benchmark_get_then_update | 30,915.50 |
-| benchmark_hello_world | 434,660.60 |
+|                           | CPS          |
+|:--------------------------|:-------------|
+| benchmark_get             | 423,691.78   |
+| benchmark_get2_update2    | 37,755.38    |
+| benchmark_get_then_update | 58,131.90    |
+| benchmark_hello_world     | 1,194,362.75 |
 
 Function Execution Time Statistics:
 
-|                           |   Mean |   k50 |    k90 |    k99 | Count      |  Min |     Max | Median |
-|:--------------------------|-------:|------:|-------:|-------:|:-----------|-----:|--------:|-------:|
-| benchmark_get             |   8.26 |  7.68 |  12.41 |  18.66 | 26,022,987 |  0.5 |  242.93 |   7.68 |
-| benchmark_get2_update2    | 121.87 | 118.5 | 190.55 | 395.85 | 1,587,435  | 2.74 | 1617.91 |  118.5 |
-| benchmark_get_then_update |  76.58 | 76.74 | 105.13 | 210.75 | 2,808,847  |  1.6 |  778.09 |  76.74 |
-| benchmark_hello_world     |   4.12 |  3.24 |   8.57 |  14.91 | 52,195,617 | 0.09 |  385.51 |   3.24 |
+|                           |  Mean |   k50 |   k90 |    k99 | Count      |  Min |    Max | Median |
+|:--------------------------|------:|------:|------:|-------:|:-----------|-----:|-------:|-------:|
+| benchmark_get             |   2.7 |   2.2 |  4.95 |   9.28 | 12,808,155 | 0.23 | 220.17 |    2.2 |
+| benchmark_get2_update2    | 25.51 |  19.8 |  43.2 | 165.77 | 1,060,136  | 1.49 | 591.47 |   19.8 |
+| benchmark_get_then_update | 19.78 | 15.67 | 33.81 | 128.21 | 1,748,140  | 0.93 | 605.67 |  15.67 |
+| benchmark_hello_world     |  0.97 |   0.5 |  2.25 |    6.9 | 35,728,092 | 0.03 | 124.35 |    0.5 |
 
 Return Value Distribution Statistics:
 
 |    | benchmark                 | return_value |    count | percentage |
 |---:|:--------------------------|:-------------|---------:|-----------:|
-|  0 | benchmark_get             | 0            | 26022987 |        100 |
-|  1 | benchmark_get2_update2    | 0            |  1548935 |      97.57 |
-|  2 | benchmark_get2_update2    | 1            |    37433 |       2.36 |
-|  3 | benchmark_get2_update2    | 2            |     1034 |       0.07 |
-|  4 | benchmark_get2_update2    | 3            |       30 |          0 |
-|  5 | benchmark_get2_update2    | 4            |        3 |          0 |
-|  6 | benchmark_get_then_update | 0            |  2770002 |      98.62 |
-|  7 | benchmark_get_then_update | 1            |    38296 |       1.36 |
-|  8 | benchmark_get_then_update | 2            |      542 |       0.02 |
-|  9 | benchmark_get_then_update | 3            |        7 |          0 |
-| 10 | benchmark_hello_world     | 世界收到         | 52195617 |        100 |
+|  0 | benchmark_get             | 0            | 12808155 |        100 |
+|  1 | benchmark_get2_update2    | 0            |  1037065 |      97.82 |
+|  2 | benchmark_get2_update2    | 1            |    22534 |       2.13 |
+|  3 | benchmark_get2_update2    | 2            |      523 |       0.05 |
+|  4 | benchmark_get2_update2    | 3            |       14 |          0 |
+|  5 | benchmark_get_then_update | 0            |  1716777 |      98.21 |
+|  6 | benchmark_get_then_update | 1            |    30760 |       1.76 |
+|  7 | benchmark_get_then_update | 2            |      589 |       0.03 |
+|  8 | benchmark_get_then_update | 3            |       13 |          0 |
+|  9 | benchmark_get_then_update | 4            |        1 |          0 |
+| 10 | benchmark_hello_world     | 世界收到         | 35728092 |        100 |
+

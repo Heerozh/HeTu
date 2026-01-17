@@ -137,31 +137,32 @@ Return Value Distribution Statistics:
 
 Calls Per Minute (CPM) Statistics:
 
-| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
-|:-----------------------|:---------|:----------|:----------|:----------|:----------|:---------|
-| benchmark_redis_upsert | 640,610  | 1,580,831 | 1,562,021 | 1,562,169 | 1,582,375 | 846,201  |
+|   | benchmark              | execution_time            | execution_count |
+|--:|:-----------------------|:--------------------------|:----------------|
+| 0 | benchmark_redis_upsert | 2026-01-17 16:27:00+08:00 | 2,479,586       |
+| 1 | benchmark_redis_upsert | 2026-01-17 16:28:00+08:00 | 157,682         |
 
 Average CPS (Calls Per Second) per Function:
 
 |                        | CPS       |
 |:-----------------------|:----------|
-| benchmark_redis_upsert | 26,185.09 |
+| benchmark_redis_upsert | 44,336.88 |
 
 Function Execution Time Statistics:
 
-|                        | Mean | k50 |  k90 |   k99 | Count     |  Min |    Max | Median |
-|:-----------------------|-----:|----:|-----:|------:|:----------|-----:|-------:|-------:|
-| benchmark_redis_upsert | 7.41 | 7.2 | 9.64 | 12.72 | 7,774,207 | 0.75 | 357.66 |    7.2 |
+|                        |  Mean | k50 |  k90 |   k99 | Count     |  Min |    Max | Median |
+|:-----------------------|------:|----:|-----:|------:|:----------|-----:|-------:|-------:|
+| benchmark_redis_upsert | 40.78 |  37 | 47.2 | 81.69 | 2,637,268 | 2.28 | 357.62 |     37 |
 
 Return Value Distribution Statistics:
 
-|    | benchmark              | return_value |   count | percentage |
-|---:|:-----------------------|-------------:|--------:|-----------:|
-|  0 | benchmark_redis_upsert |            1 | 7702541 |      99.08 |
-| 11 | benchmark_redis_upsert |            2 |   46251 |       0.59 |
-| 22 | benchmark_redis_upsert |            3 |   10671 |       0.14 |
-| 33 | benchmark_redis_upsert |            4 |    5119 |       0.07 |
-| 42 | benchmark_redis_upsert |            5 |    2961 |       0.04 |
+|   | benchmark              | return_value |   count | percentage |
+|--:|:-----------------------|-------------:|--------:|-----------:|
+| 0 | benchmark_redis_upsert |            1 | 2575841 |      97.67 |
+| 1 | benchmark_redis_upsert |            2 |   59804 |       2.27 |
+| 2 | benchmark_redis_upsert |            3 |    1570 |       0.06 |
+| 3 | benchmark_redis_upsert |            4 |      47 |          0 |
+| 4 | benchmark_redis_upsert |            5 |       6 |          0 |
 
 ## 阿里云 tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 3读写分离 默认设置
 
