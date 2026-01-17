@@ -75,7 +75,7 @@ async def redis_backend():
 
 
 async def benchmark_ping(redis_backend):
-    client = redis_backend.master
+    client = redis_backend.master.aio
     await client.ping()
 
 
