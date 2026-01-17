@@ -19,6 +19,7 @@ from redis.asyncio import Redis, RedisCluster
 class RedisBatchedClient:
     """
     这是一个增加Redis请求吞吐量的类，通过缓存，以及合批，减少与Redis服务器的交互次数。
+    取消❌，原因见下：
 
     短 TTL 的 LRU 缓存：
     采取短 TTL，减少短期的重复请求。如果遇到事务冲突，则通知缓存把事务相关的key满门抄斩。
@@ -28,6 +29,7 @@ class RedisBatchedClient:
     合批：
     如果前一个请求未完成，后续累积请求都将通过pipeline合并成一个请求发送给Redis服务器。
     如果请求没有累积，则不会合批而是立即执行。
+    取消❌，合批确实会增加单节点Redis吞吐量，但会大幅升高RTT，对读写分离+自动分流代理模式下反而吞吐量下降
     """
 
     # _global_cache = TTLCache(maxsize=10000, ttl=10)
@@ -68,6 +70,7 @@ class RedisBatchedClient:
         # Cache Miss
         # Start worker if not running
         if self._worker_task is None:
+            # 单worker可能会增加RTT，但测试加了几个也没明显提升吞吐量
             self._worker_task = asyncio.create_task(self._worker())
 
         # Enqueue request

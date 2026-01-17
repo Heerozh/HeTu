@@ -288,15 +288,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
                 )
                 logger.warning(msg)
-            # 检查是否是replica模式
-            db_replica = cast(dict, io.config_get("replica-read-only"))
-            if db_replica.get("replica-read-only") != "yes":
-                msg = (
-                    "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
-                    f"{self.urls[i]} 未设置replica-read-only=yes"
-                )
-                logger.warning(msg)
-                # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
+            # 检查是否是replica模式(目前是把master也当servent的，这个检查不行，对只有master的配置会报错）
+            # db_replica = cast(dict, io.config_get("replica-read-only"))
+            # if db_replica.get("replica-read-only") != "yes":
+            #     msg = (
+            #         "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
+            #         f"{self.urls[i]} 未设置replica-read-only=yes"
+            #     )
+            #     logger.warning(msg)
+            # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
@@ -442,6 +442,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回符合Component定义的，有格式的dict类型。
                 此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
         """
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
         key = self.row_key(table_ref, row_id)
         aio = self._batched_aio
         if row := await aio.hgetall(key):  # type: ignore
@@ -619,6 +621,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         idx_key = self.index_key(table_ref, index_name)
         aio = self._batched_aio
 
