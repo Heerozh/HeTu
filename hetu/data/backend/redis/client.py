@@ -20,7 +20,7 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ..base import BackendClient, RaceCondition, RowFormat
-from .batch import RedisBatchedClient
+# from .batch import RedisBatchedClient
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -205,7 +205,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 self._ios.append(redis.Redis.from_url(url))
                 self._async_ios.append(redis.asyncio.Redis.from_url(url))
 
-        self._batched_aio = RedisBatchedClient(self._async_ios)
+        # 取消，只在单机模式下有所增长
+        # self._batched_aio = RedisBatchedClient(self._async_ios)
 
         # 测试连接是否正常
         for i, io in enumerate(self._ios):
@@ -445,7 +446,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
         key = self.row_key(table_ref, row_id)
-        aio = self._batched_aio
+        aio = self.aio  # self._batched_aio
         if row := await aio.hgetall(key):  # type: ignore
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
@@ -625,7 +626,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             raise ConnectionError("连接已关闭，已调用过close")
 
         idx_key = self.index_key(table_ref, index_name)
-        aio = self._batched_aio
+        aio = self.aio  # self._batched_aio
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
@@ -797,7 +798,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         if resp != "committed":
             # 把事务相关的key满门抄斩
-            self._batched_aio.invalidate_cache(idmap.get_clean_row_keys())
+            # self._batched_aio.invalidate_cache(idmap.get_clean_row_keys())
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):
