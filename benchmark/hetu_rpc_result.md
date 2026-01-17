@@ -49,80 +49,148 @@ Return Value Distribution Statistics:
 
 ================================================================================
 
-## debian13 ecs.c8a.16xlarge 64核 + 本地 Redis-8.4.0 默认设置➕io-thread=8
+## debian13 ecs.c9ae.16xlarge 64核 + 本地 Redis-8.4.0 默认设置
 
 Average CPS (Calls Per Second) per Function:
 
-|                           | CPS        |
-|:--------------------------|:-----------|
-| benchmark_get             | 232,257.75 |
-| benchmark_get2_update2    | 17,853.76  |
-| benchmark_get_then_update | 27,464.93  |
-| benchmark_hello_world     | 434,857.21 |
+|                           | CPS          |
+|:--------------------------|:-------------|
+| benchmark_get             | 137,278.00   |
+| benchmark_get2_update2    | 18,773.19    |
+| benchmark_get_then_update | 32,659.98    |
+| benchmark_hello_world     | 1,238,494.10 |
 
 Function Execution Time Statistics:
 
 |                           |  Mean |   k50 |   k90 |    k99 | Count      |  Min |    Max | Median |
 |:--------------------------|------:|------:|------:|-------:|:-----------|-----:|-------:|-------:|
-| benchmark_get             |  7.72 |  6.47 | 13.35 |  26.53 | 13,922,101 | 0.21 | 344.64 |   6.47 |
-| benchmark_get2_update2    | 67.83 | 62.97 | 75.36 | 243.43 | 1,052,346  | 1.25 | 810.44 |  62.97 |
-| benchmark_get_then_update |  65.2 | 63.17 | 74.58 | 188.21 | 1,650,167  |  2.7 | 620.28 |  63.17 |
-| benchmark_hello_world     |  4.12 |  3.19 |  8.62 |  15.16 | 26,113,439 | 0.07 | 277.02 |   3.19 |
+| benchmark_get             |  8.39 |  7.94 | 12.14 |  16.42 | 4,118,789  | 0.09 |  99.54 |   7.94 |
+| benchmark_get2_update2    | 61.44 | 54.27 | 73.82 | 227.49 | 563,082    | 0.66 | 608.53 |  54.27 |
+| benchmark_get_then_update | 35.17 | 29.42 | 47.55 | 108.08 | 983,139    | 0.45 | 505.27 |  29.42 |
+| benchmark_hello_world     |  0.94 |  0.49 |  2.12 |   6.72 | 36,835,753 | 0.03 | 122.15 |   0.49 |
 
 Return Value Distribution Statistics:
 
 |   | benchmark                 | return_value |    count | percentage |
 |--:|:--------------------------|:-------------|---------:|-----------:|
-| 0 | benchmark_get             | 0            | 13922101 |        100 |
-| 1 | benchmark_get2_update2    | 0            |  1031322 |         98 |
-| 2 | benchmark_get2_update2    | 1            |    20590 |       1.96 |
-| 3 | benchmark_get2_update2    | 2            |      424 |       0.04 |
-| 4 | benchmark_get2_update2    | 3            |       10 |          0 |
-| 5 | benchmark_get_then_update | 0            |  1625825 |      98.52 |
-| 6 | benchmark_get_then_update | 1            |    23950 |       1.45 |
-| 7 | benchmark_get_then_update | 2            |      386 |       0.02 |
-| 8 | benchmark_get_then_update | 3            |        6 |          0 |
-| 9 | benchmark_hello_world     | 世界收到         | 26113439 |        100 |
+| 0 | benchmark_get             | 0            |  4118789 |        100 |
+| 1 | benchmark_get2_update2    | 0            |   551040 |      97.86 |
+| 2 | benchmark_get2_update2    | 1            |    11800 |        2.1 |
+| 3 | benchmark_get2_update2    | 2            |      236 |       0.04 |
+| 4 | benchmark_get2_update2    | 3            |        6 |          0 |
+| 5 | benchmark_get_then_update | 0            |   970938 |      98.76 |
+| 6 | benchmark_get_then_update | 1            |    12057 |       1.23 |
+| 7 | benchmark_get_then_update | 2            |      143 |       0.01 |
+| 8 | benchmark_get_then_update | 3            |        1 |          0 |
+| 9 | benchmark_hello_world     | 世界收到         | 36835753 |        100 |
 
-## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云Arm倚天Redis: redis.shard.small.2.ce 7.0.2.6 云原生 双节点高可用 默认设置
+
+Average CPS (Calls Per Second) per Function:
+
+|                           | CPS          |
+|:--------------------------|:-------------|
+| benchmark_get             | 141,058.53   |
+| benchmark_get2_update2    | 9,001.79     |
+| benchmark_get_then_update | 16,340.51    |
+| benchmark_hello_world     | 1,202,890.77 |
+
+Function Execution Time Statistics:
+
+|                           |   Mean |    k50 |    k90 |    k99 | Count      |   Min |     Max | Median |
+|:--------------------------|-------:|-------:|-------:|-------:|:-----------|------:|--------:|-------:|
+| benchmark_get             |   8.21 |   7.32 |  12.36 |   17.5 | 4,208,701  |  0.58 |  214.73 |   7.32 |
+| benchmark_get2_update2    | 128.96 | 122.07 | 147.88 | 366.49 | 268,622    | 33.17 | 1191.56 | 122.07 |
+| benchmark_get_then_update |  70.44 |  66.55 |  86.05 | 184.04 | 491,259    |  6.06 |  773.76 |  66.55 |
+| benchmark_hello_world     |   0.97 |   0.52 |    2.2 |   6.72 | 35,780,956 |  0.03 |  121.52 |   0.52 |
+
+Return Value Distribution Statistics:
+
+|   | benchmark                 | return_value |    count | percentage |
+|--:|:--------------------------|:-------------|---------:|-----------:|
+| 0 | benchmark_get             | 0            |  4208701 |        100 |
+| 1 | benchmark_get2_update2    | 0            |   262880 |      97.86 |
+| 2 | benchmark_get2_update2    | 1            |     5611 |       2.09 |
+| 3 | benchmark_get2_update2    | 2            |      125 |       0.05 |
+| 4 | benchmark_get2_update2    | 3            |        6 |          0 |
+| 5 | benchmark_get_then_update | 0            |   485549 |      98.84 |
+| 6 | benchmark_get_then_update | 1            |     5616 |       1.14 |
+| 7 | benchmark_get_then_update | 2            |       92 |       0.02 |
+| 8 | benchmark_get_then_update | 3            |        2 |          0 |
+| 9 | benchmark_hello_world     | 世界收到         | 35780956 |        100 |
+
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 默认设置
 
 |                           | 手动记录CPU                 |
 |:--------------------------|:------------------------|
 | benchmark_get             | 河图CPU 40% Redis CPU 95% |
-| benchmark_get2_update2    | 河图CPU 29% Redis CPU 98% |
-| benchmark_get_then_update | 河图CPU 30% Redis CPU 98% |
-| benchmark_hello_world     | 河图CPU 72% Redis CPU 0%  |
+| benchmark_get2_update2    | 河图CPU 32% Redis CPU 98% |
+| benchmark_get_then_update | 河图CPU 42% Redis CPU 98% |
+| benchmark_hello_world     | 河图CPU 99% Redis CPU 0%  |
 
 Average CPS (Calls Per Second) per Function:
 
-|                           | CPS        |
-|:--------------------------|:-----------|
-| benchmark_get             | 223,432.15 |
-| benchmark_get2_update2    | 23,018.14  |
-| benchmark_get_then_update | 39,561.04  |
-| benchmark_hello_world     | 889,321.68 |
+|                           | CPS          |
+|:--------------------------|:-------------|
+| benchmark_get             | 195,030.89   |
+| benchmark_get2_update2    | 20,315.22    |
+| benchmark_get_then_update | 35,678.84    |
+| benchmark_hello_world     | 1,205,377.44 |
 
 Function Execution Time Statistics:
 
-|                           | Mean |  k50 |  k90 |  k99 | Count       |  Min |    Max | Median |
-|:--------------------------|-----:|-----:|-----:|-----:|:------------|-----:|-------:|-------:|
-| benchmark_get             | 0.57 | 0.54 | 0.79 | 1.16 | 26,815,494  | 0.17 |  42.02 |   0.54 |
-| benchmark_get2_update2    | 3.42 | 2.81 |  5.1 | 8.03 | 2,707,471   | 1.08 | 351.92 |   2.81 |
-| benchmark_get_then_update | 3.23 | 2.85 | 4.25 | 5.39 | 4,750,612   | 0.64 | 307.63 |   2.85 |
-| benchmark_hello_world     | 0.14 | 0.08 | 0.37 |  0.6 | 106,786,682 | 0.03 |  17.27 |   0.08 |
+|                           |  Mean |   k50 |   k90 |    k99 | Count      |  Min |    Max | Median |
+|:--------------------------|------:|------:|------:|-------:|:-----------|-----:|-------:|-------:|
+| benchmark_get             |  5.93 |  6.03 |  7.36 |   8.67 | 12,831,693 | 0.18 | 192.61 |   6.03 |
+| benchmark_get2_update2    | 56.71 |  56.6 | 59.71 |  214.6 | 1,341,201  | 2.13 | 726.92 |   56.6 |
+| benchmark_get_then_update | 32.29 | 32.74 | 34.49 | 109.94 | 2,355,115  | 0.72 | 586.39 |  32.74 |
+| benchmark_hello_world     |  0.96 |  0.49 |  2.25 |   6.96 | 79,135,563 | 0.03 | 161.48 |   0.49 |
 
 Return Value Distribution Statistics:
 
-|   | benchmark                 | return_value |     count | percentage |
-|--:|:--------------------------|:-------------|----------:|-----------:|
-| 0 | benchmark_get             | 0            |  26815494 |        100 |
-| 1 | benchmark_get2_update2    | 0            |   2703196 |      99.84 |
-| 2 | benchmark_get2_update2    | 1            |      4269 |       0.16 |
-| 3 | benchmark_get2_update2    | 2            |         6 |          0 |
-| 4 | benchmark_get_then_update | 0            |   4742876 |      99.84 |
-| 5 | benchmark_get_then_update | 1            |      7728 |       0.16 |
-| 6 | benchmark_get_then_update | 2            |         8 |          0 |
-| 7 | benchmark_hello_world     | 世界收到         | 106786682 |        100 |
+|   | benchmark                 | return_value |    count | percentage |
+|--:|:--------------------------|:-------------|---------:|-----------:|
+| 0 | benchmark_get             | 0            | 12831693 |        100 |
+| 1 | benchmark_get2_update2    | 0            |  1311527 |      97.79 |
+| 2 | benchmark_get2_update2    | 1            |    28987 |       2.16 |
+| 3 | benchmark_get2_update2    | 2            |      672 |       0.05 |
+| 4 | benchmark_get2_update2    | 3            |       15 |          0 |
+| 5 | benchmark_get_then_update | 0            |  2323616 |      98.66 |
+| 6 | benchmark_get_then_update | 1            |    31126 |       1.32 |
+| 7 | benchmark_get_then_update | 2            |      365 |       0.02 |
+| 8 | benchmark_get_then_update | 3            |        8 |          0 |
+| 9 | benchmark_hello_world     | 世界收到         | 79135563 |        100 |
+
+测试TTL `-n 1 -p 1`:
+
+Average CPS (Calls Per Second) per Function:
+
+|                           | CPS       |
+|:--------------------------|:----------|
+| benchmark_get             | 5,704.82  |
+| benchmark_get2_update2    | 827.62    |
+| benchmark_get_then_update | 1,498.41  |
+| benchmark_hello_world     | 29,921.00 |
+
+Function Execution Time Statistics:
+
+|                           | Mean |  k50 |  k90 |  k99 | Count     |  Min |    Max | Median |
+|:--------------------------|-----:|-----:|-----:|-----:|:----------|-----:|-------:|-------:|
+| benchmark_get             | 0.18 | 0.17 | 0.18 | 0.21 | 375,917   | 0.15 |   14.8 |   0.17 |
+| benchmark_get2_update2    | 1.21 | 1.22 | 1.33 | 1.42 | 54,337    | 0.99 | 207.36 |   1.22 |
+| benchmark_get_then_update | 0.67 | 0.66 | 0.69 | 0.83 | 98,766    | 0.43 |   2.97 |   0.66 |
+| benchmark_hello_world     | 0.03 | 0.03 | 0.03 | 0.04 | 1,974,514 | 0.03 |   3.77 |   0.03 |
+
+Return Value Distribution Statistics:
+
+|   | benchmark                 | return_value |   count | percentage |
+|--:|:--------------------------|:-------------|--------:|-----------:|
+| 0 | benchmark_get             | 0            |  375917 |        100 |
+| 1 | benchmark_get2_update2    | 0            |   54337 |        100 |
+| 2 | benchmark_get_then_update | 0            |   98766 |        100 |
+| 3 | benchmark_hello_world     | 世界收到         | 1974514 |        100 |
+
+================================================================================
 
 ## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis读写分离: redis.shard.with.proxy.small.ce 7.0.2.6 云原生 4节点 读写分离代理 默认设置
 
