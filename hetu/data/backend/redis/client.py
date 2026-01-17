@@ -20,6 +20,7 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ..base import BackendClient, RaceCondition, RowFormat
+# from .batch import RedisBatchedClient
 
 if TYPE_CHECKING:
     import redis.asyncio
@@ -204,6 +205,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 self._ios.append(redis.Redis.from_url(url))
                 self._async_ios.append(redis.asyncio.Redis.from_url(url))
 
+        # 取消，只在单机模式下有所增长
+        # self._batched_aio = RedisBatchedClient(self._async_ios)
+
         # 测试连接是否正常
         for i, io in enumerate(self._ios):
             try:
@@ -285,15 +289,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
                 )
                 logger.warning(msg)
-            # 检查是否是replica模式
-            db_replica = cast(dict, io.config_get("replica-read-only"))
-            if db_replica.get("replica-read-only") != "yes":
-                msg = (
-                    "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
-                    f"{self.urls[i]} 未设置replica-read-only=yes"
-                )
-                logger.warning(msg)
-                # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
+            # 检查是否是replica模式(目前是把master也当servent的，这个检查不行，对只有master的配置会报错）
+            # db_replica = cast(dict, io.config_get("replica-read-only"))
+            # if db_replica.get("replica-read-only") != "yes":
+            #     msg = (
+            #         "⚠️ [💾Redis] servant必须是Read Only Replica模式。"
+            #         f"{self.urls[i]} 未设置replica-read-only=yes"
+            #     )
+            #     logger.warning(msg)
+            # 不检查replicaof master地址，因为replicaof的可能是其他replica地址
             # 考虑可以检查pubsub client buff设置，看看能否redis崩了提醒下
             # pubsub值建议为$剩余内存/预估在线数$
 
@@ -347,6 +351,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
     async def close(self):
         if not self._ios:
             return
+
+        # print("Batch量:次数 统计：")
+        # print(sorted(self._batched_aio._log.items()))
+        # ya_backend_upsert结果：
+        # [(1, 844), (2, 781), (3, 796), (4, 720), (5, 616), (6, 468), (7, 291), (8, 185), (9, 1)]
 
         for io in self._ios:
             io.close()
@@ -434,9 +443,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 返回符合Component定义的，有格式的dict类型。
                 此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
         """
-        # todo 所有get query要合批
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
         key = self.row_key(table_ref, row_id)
-        if row := await self.aio.hgetall(key):  # type: ignore
+        aio = self.aio  # self._batched_aio
+        if row := await aio.hgetall(key):  # type: ignore
             return self._row_decode(table_ref.comp_cls, row, row_format)
         else:
             return None
@@ -611,9 +622,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
-        # todo 所有get query要合批
+        if not self._ios:
+            raise ConnectionError("连接已关闭，已调用过close")
+
         idx_key = self.index_key(table_ref, index_name)
-        aio = self.aio  # 保存随机选中的aio连接
+        aio = self.aio  # self._batched_aio
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
@@ -648,7 +661,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         rows = []
         for _id in row_ids:
-            # todo 要么用合批的请求方法，要么用pipeline
             if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
                 rows.append(self._row_decode(comp_cls, row, row_format))
 
@@ -785,6 +797,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         resp = resp.decode("utf-8")  # type: ignore
 
         if resp != "committed":
+            # 把事务相关的key满门抄斩
+            # self._batched_aio.invalidate_cache(idmap.get_clean_row_keys())
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):

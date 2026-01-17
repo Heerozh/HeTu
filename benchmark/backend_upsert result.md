@@ -5,41 +5,41 @@
 ```
 export REDIS_HOST=127.0.0.1
 export REDIS_PASSWORD=
-uv run ya ./benchmark/ya_backend_upsert.py
+uv run ya ./benchmark/ya_backend_upsert.py -n 1200 -t 1.1
 ```
 
 Found 1 benchmark(s): benchmark_redis_upsert
-Running with 32 workers, 6 tasks per worker, for 5 minute(s)
+Running with 64 workers, 9 tasks per worker, for 5 minute(s)
 
 ## 本机 9950x3D redis:8.0 Windows Docker 默认设置
 
 Calls Per Minute (CPM) Statistics:
 
-| benchmark              | 00:01:00 | 00:02:00 | 00:03:00 | 00:04:00 | 00:05:00 | 00:06:00 |
-|:-----------------------|:---------|:---------|:---------|:---------|:---------|:---------|
-| benchmark_redis_upsert | 594,926  | 874,644  | 880,139  | 882,439  | 891,644  | 290,084  |
+| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
+|:-----------------------|:---------|:----------|:----------|:----------|:----------|:---------|
+| benchmark_redis_upsert | 998,232  | 1,103,828 | 1,087,547 | 1,117,409 | 1,125,254 | 91,951   |
 
 Average CPS (Calls Per Second) per Function:
 
 |                        | CPS       |
 |:-----------------------|:----------|
-| benchmark_redis_upsert | 14,729.91 |
+| benchmark_redis_upsert | 18,607.72 |
 
 Function Execution Time Statistics:
 
 |                        |  Mean |   k50 |   k90 |   k99 | Count     |  Min |    Max | Median |
 |:-----------------------|------:|------:|------:|------:|:----------|-----:|-------:|-------:|
-| benchmark_redis_upsert | 13.05 | 12.43 | 17.56 | 31.07 | 4,413,876 | 1.09 | 508.61 |  12.43 |
+| benchmark_redis_upsert | 31.28 | 30.03 | 39.99 | 66.55 | 5,524,221 | 2.33 | 374.02 |  30.03 |
 
 Return Value Distribution Statistics:
 
 |   | benchmark              | return_value |   count | percentage |
 |--:|:-----------------------|-------------:|--------:|-----------:|
-| 0 | benchmark_redis_upsert |            1 | 4262349 |      96.57 |
-| 3 | benchmark_redis_upsert |            2 |  123015 |       2.79 |
-| 4 | benchmark_redis_upsert |            3 |   22643 |       0.51 |
-| 5 | benchmark_redis_upsert |            4 |    4615 |        0.1 |
-| 6 | benchmark_redis_upsert |            5 |     953 |       0.02 |
+| 0 | benchmark_redis_upsert |            1 | 5400129 |      97.75 |
+| 2 | benchmark_redis_upsert |            2 |  104161 |       1.89 |
+| 3 | benchmark_redis_upsert |            3 |   16532 |        0.3 |
+| 4 | benchmark_redis_upsert |            4 |    2777 |       0.05 |
+| 5 | benchmark_redis_upsert |            5 |     498 |       0.01 |
 
 ================================================================================
 
@@ -99,99 +99,134 @@ Return Value Distribution Statistics:
 | 32 | benchmark_redis_upsert |            4 |    4941 |       0.13 |
 | 37 | benchmark_redis_upsert |            5 |    2766 |       0.07 |
 
-## 服务器本地 ecs.c8a.16xlarge debian13 Redis-8.4.0 默认设置➕io-thread=8
-
-CPU 50%
-
-Running with 128 workers, 1 tasks per worker, for 5 minute(s)
-
-Calls Per Minute (CPM) Statistics:
-
-| benchmark              | 00:01:00  | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
-|:-----------------------|:----------|:----------|:----------|:----------|:----------|:---------|
-| benchmark_redis_upsert | 1,334,646 | 2,618,999 | 2,624,694 | 2,634,956 | 2,614,081 | 849,144  |
+## debian13 ecs.c9ae.16xlarge 64核 + 本地 Redis-8.4.0 默认设置
 
 Average CPS (Calls Per Second) per Function:
 
-|                        | CPS       |
-|:-----------------------|:----------|
-| benchmark_redis_upsert | 43,730.67 |
+|                        | CPS        |
+|:-----------------------|:-----------|
+| benchmark_ping         | 240,301.77 |
+| benchmark_redis_upsert | 30,705.70  |
 
 Function Execution Time Statistics:
 
-|                        | Mean | k50 |  k90 |  k99 | Count      |  Min |    Max | Median |
-|:-----------------------|-----:|----:|-----:|-----:|:-----------|-----:|-------:|-------:|
-| benchmark_redis_upsert | 3.03 | 2.9 | 4.02 | 6.62 | 12,676,520 | 0.42 | 362.83 |    2.9 |
+|                        |  Mean |   k50 |   k90 |   k99 | Count      |  Min |    Max | Median |
+|:-----------------------|------:|------:|------:|------:|:-----------|-----:|-------:|-------:|
+| benchmark_ping         |  4.79 |  4.74 |     5 |  8.85 | 15,864,114 | 0.09 |  74.96 |   4.74 |
+| benchmark_redis_upsert | 36.72 | 36.47 | 38.86 | 73.98 | 2,070,622  | 1.21 | 334.39 |  36.47 |
 
 Return Value Distribution Statistics:
 
-|    | benchmark              | return_value |    count | percentage |
-|---:|:-----------------------|-------------:|---------:|-----------:|
-|  0 | benchmark_redis_upsert |            1 | 12401941 |      97.83 |
-| 54 | benchmark_redis_upsert |            2 |   143939 |       1.14 |
-| 65 | benchmark_redis_upsert |            3 |    50865 |        0.4 |
-| 76 | benchmark_redis_upsert |            4 |    26090 |       0.21 |
-| 87 | benchmark_redis_upsert |            5 |    14874 |       0.12 |
+|   | benchmark              | return_value |    count | percentage |
+|--:|:-----------------------|-------------:|---------:|-----------:|
+| 0 | benchmark_ping         |          nan | 15864114 |        100 |
+| 1 | benchmark_redis_upsert |            1 |  2044339 |      98.73 |
+| 2 | benchmark_redis_upsert |            2 |    25959 |       1.25 |
+| 3 | benchmark_redis_upsert |            3 |      321 |       0.02 |
+| 4 | benchmark_redis_upsert |            4 |        3 |          0 |
 
-## 阿里云 redis.shard.small.2.ce 7.0.2.6 云原生 单节点 读写分离未开启 默认设置
-
-Calls Per Minute (CPM) Statistics:
-
-| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00 |
-|:-----------------------|:---------|:----------|:----------|:----------|:----------|:---------|
-| benchmark_redis_upsert | 640,610  | 1,580,831 | 1,562,021 | 1,562,169 | 1,582,375 | 846,201  |
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云Arm倚天Redis: redis.shard.small.y.ee 7.0(26.1.0.0) 云原生 双节点高可用 默认设置
 
 Average CPS (Calls Per Second) per Function:
 
-|                        | CPS       |
-|:-----------------------|:----------|
-| benchmark_redis_upsert | 26,185.09 |
+|                        | CPS        |
+|:-----------------------|:-----------|
+| benchmark_ping         | 220,716.70 |
+| benchmark_redis_upsert | 17,614.16  |
 
 Function Execution Time Statistics:
 
-|                        | Mean | k50 |  k90 |   k99 | Count     |  Min |    Max | Median |
-|:-----------------------|-----:|----:|-----:|------:|:----------|-----:|-------:|-------:|
-| benchmark_redis_upsert | 7.41 | 7.2 | 9.64 | 12.72 | 7,774,207 | 0.75 | 357.66 |    7.2 |
+|                        | Mean |   k50 |   k90 |    k99 | Count      |  Min |    Max | Median |
+|:-----------------------|-----:|------:|------:|-------:|:-----------|-----:|-------:|-------:|
+| benchmark_ping         | 5.24 |  5.18 |  5.45 |   5.85 | 14,522,070 | 0.15 |  132.8 |   5.18 |
+| benchmark_redis_upsert | 66.5 | 63.91 | 75.66 | 126.57 | 1,143,577  | 1.62 | 674.09 |  63.91 |
 
 Return Value Distribution Statistics:
 
-|    | benchmark              | return_value |   count | percentage |
-|---:|:-----------------------|-------------:|--------:|-----------:|
-|  0 | benchmark_redis_upsert |            1 | 7702541 |      99.08 |
-| 11 | benchmark_redis_upsert |            2 |   46251 |       0.59 |
-| 22 | benchmark_redis_upsert |            3 |   10671 |       0.14 |
-| 33 | benchmark_redis_upsert |            4 |    5119 |       0.07 |
-| 42 | benchmark_redis_upsert |            5 |    2961 |       0.04 |
+|   | benchmark              | return_value |    count | percentage |
+|--:|:-----------------------|-------------:|---------:|-----------:|
+| 0 | benchmark_ping         |          nan | 14522070 |        100 |
+| 1 | benchmark_redis_upsert |            1 |  1129100 |      98.73 |
+| 2 | benchmark_redis_upsert |            2 |    14276 |       1.25 |
+| 3 | benchmark_redis_upsert |            3 |      200 |       0.02 |
+| 4 | benchmark_redis_upsert |            4 |        1 |          0 |
 
-## 阿里云 tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 3读写分离 默认设置
-
-此项压测机ecs.c8a.16xlarge 64核 CPU 36%，master CPU 33%，2个只读各9%
-Running with 128 workers, 1 tasks per worker, for 5 minute(s)
-
-Calls Per Minute (CPM) Statistics:
-
-| benchmark              | 00:01:00 | 00:02:00  | 00:03:00  | 00:04:00  | 00:05:00  | 00:06:00  |
-|:-----------------------|:---------|:----------|:----------|:----------|:----------|:----------|
-| benchmark_redis_upsert | 790,878  | 2,415,764 | 2,415,706 | 2,415,117 | 2,414,766 | 1,146,030 |
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 默认设置
 
 Average CPS (Calls Per Second) per Function:
 
-|                        | CPS       |
-|:-----------------------|:----------|
-| benchmark_redis_upsert | 40,261.86 |
+|                        | CPS        |
+|:-----------------------|:-----------|
+| benchmark_ping         | 211,169.26 |
+| benchmark_redis_upsert | 36,752.57  |
 
 Function Execution Time Statistics:
 
-|                        | Mean |  k50 |  k90 |  k99 | Count      | Min |    Max | Median |
-|:-----------------------|-----:|-----:|-----:|-----:|:-----------|----:|-------:|-------:|
-| benchmark_redis_upsert | 3.31 | 2.86 | 4.81 | 7.92 | 11,598,261 | 0.7 | 519.42 |   2.86 |
+|                        |  Mean |   k50 |  k90 |   k99 | Count      |  Min |    Max | Median |
+|:-----------------------|------:|------:|-----:|------:|:-----------|-----:|-------:|-------:|
+| benchmark_ping         |  5.45 |  5.25 | 5.38 | 10.58 | 13,952,760 | 0.13 |  55.49 |   5.25 |
+| benchmark_redis_upsert | 31.32 | 28.23 | 38.4 | 56.41 | 2,428,027  | 1.51 | 236.81 |  28.23 |
 
 Return Value Distribution Statistics:
 
-|    | benchmark              | return_value |    count | percentage |
-|---:|:-----------------------|-------------:|---------:|-----------:|
-|  0 | benchmark_redis_upsert |            1 | 11323332 |      97.63 |
-| 55 | benchmark_redis_upsert |            2 |   143549 |       1.24 |
-| 71 | benchmark_redis_upsert |            3 |    49521 |       0.43 |
-| 82 | benchmark_redis_upsert |            4 |    25700 |       0.22 |
-| 93 | benchmark_redis_upsert |            5 |    15106 |       0.13 |
+|   | benchmark              | return_value |    count | percentage |
+|--:|:-----------------------|-------------:|---------:|-----------:|
+| 0 | benchmark_ping         |          nan | 13952760 |        100 |
+| 1 | benchmark_redis_upsert |            1 |  2395379 |      98.66 |
+| 2 | benchmark_redis_upsert |            2 |    32242 |       1.33 |
+| 3 | benchmark_redis_upsert |            3 |      400 |       0.02 |
+| 4 | benchmark_redis_upsert |            4 |        6 |          0 |
+
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis读写分离: redis.shard.with.proxy.small.ce 7.0.2.6 云原生 4节点 读写分离代理 默认设置
+
+Average CPS (Calls Per Second) per Function:
+
+|                        | CPS          |
+|:-----------------------|:-------------|
+| benchmark_ping         | 2,105,264.67 |
+| benchmark_redis_upsert | 99,913.67    |
+
+Function Execution Time Statistics:
+
+|                        |  Mean |  k50 |  k90 |  k99 | Count      |  Min |   Max | Median |
+|:-----------------------|------:|-----:|-----:|-----:|:-----------|-----:|------:|-------:|
+| benchmark_ping         |  0.54 | 0.27 | 0.34 | 5.09 | 25,367,085 | 0.11 |  31.7 |   0.27 |
+| benchmark_redis_upsert | 11.43 | 9.39 | 17.6 | 26.3 | 1,210,091  | 1.14 | 62.07 |   9.39 |
+
+Return Value Distribution Statistics:
+
+|   | benchmark              | return_value |    count | percentage |
+|--:|:-----------------------|-------------:|---------:|-----------:|
+| 0 | benchmark_ping         |          nan | 25367085 |        100 |
+| 1 | benchmark_redis_upsert |            1 |  1185387 |      97.96 |
+| 2 | benchmark_redis_upsert |            2 |    24136 |       1.99 |
+| 3 | benchmark_redis_upsert |            3 |      560 |       0.05 |
+| 4 | benchmark_redis_upsert |            4 |        8 |          0 |
+
+## debian13 ecs.c9ae.16xlarge 64核 + 阿里云 tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 3读写分离 默认设置
+
+Average CPS (Calls Per Second) per Function:
+
+|                        | CPS          |
+|:-----------------------|:-------------|
+| benchmark_ping         | 2,107,972.95 |
+| benchmark_redis_upsert | 87,688.87    |
+
+Function Execution Time Statistics:
+
+|                        |  Mean |   k50 |   k90 |   k99 | Count       |  Min |    Max | Median |
+|:-----------------------|------:|------:|------:|------:|:------------|-----:|-------:|-------:|
+| benchmark_ping         |  0.55 |  0.27 |  0.35 |   5.3 | 139,188,783 | 0.11 | 213.52 |   0.27 |
+| benchmark_redis_upsert | 13.15 | 11.34 | 20.95 | 30.91 | 5,783,948   | 2.39 |   93.1 |  11.34 |
+
+Return Value Distribution Statistics:
+
+|   | benchmark              | return_value |     count | percentage |
+|--:|:-----------------------|-------------:|----------:|-----------:|
+| 0 | benchmark_ping         |          nan | 139188783 |        100 |
+| 1 | benchmark_redis_upsert |            1 |   5667252 |      97.98 |
+| 2 | benchmark_redis_upsert |            2 |    114388 |       1.98 |
+| 3 | benchmark_redis_upsert |            3 |      2259 |       0.04 |
+| 4 | benchmark_redis_upsert |            4 |        48 |          0 |
+| 5 | benchmark_redis_upsert |            5 |         1 |          0 |
+

@@ -103,7 +103,9 @@ class SessionRepository:
         else:
             return {key for key in row.dtype.names if old_row[key] != row[key]}
 
-    async def is_unique_conflicts(self, row: np.record, insert=False) -> str | None:
+    async def is_unique_conflicts(
+        self, row: np.record, insert=False, ignore: str | None = None
+    ) -> str | None:
         """
         检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
@@ -113,6 +115,8 @@ class SessionRepository:
             待检查的行数据，必须是 `c-struct` 格式。
         insert : bool
             如果为True，表示这是一个插入操作，否则是更新操作，要求之前已获取过旧数据。
+        ignore : str | None
+            排除检查远程数据库中的某列冲突。用于upsert，因为upsert会先自己检查。
         """
         changed_fields = self._get_changed_fields(row)
         if not insert:
@@ -130,6 +134,8 @@ class SessionRepository:
         if field := self._local_has_unique_conflicts(row, changed_fields):
             return field
 
+        if ignore:
+            changed_fields.discard(ignore)
         if field := await self.remote_has_unique_conflicts_(row, changed_fields):
             return field
 
@@ -303,7 +309,7 @@ class SessionRepository:
         else:
             return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
 
-    async def insert(self, row: np.record) -> None:
+    async def insert(self, row: np.record, ignore: str | None = None) -> None:
         """
         向Session中添加一行待插入数据。
 
@@ -311,11 +317,13 @@ class SessionRepository:
         ----------
         row: np.record
             待插入的行数据，必须是 `c-struct` 格式。
+        ignore
+            排除remote检测Unique冲突的index，内部使用，请勿设置。
         """
         assert row["_version"] == 0, "Insert row's _version must be 0."
 
         # unique check
-        if conflict := await self.is_unique_conflicts(row, insert=True):
+        if conflict := await self.is_unique_conflicts(row, insert=True, ignore=ignore):
             raise UniqueViolation(
                 f"Insert failed: row.{conflict} violates a unique index."
             )
@@ -434,7 +442,9 @@ class UpsertContext:
                     raise RaceCondition(
                         f"Upsert failed: 锚定的index({self.index_name})存在Unique违反，说明竞态insert"
                     )
-                await self.repo.insert(self.row_data)
+                # 因为上面remote已经检查过了，所以ignore self.index_name
+                # 不然如果中间有别的session插入，还是会报UniqueViolation错误而不是Race
+                await self.repo.insert(self.row_data, ignore=self.index_name)
             else:
                 if self.row_data == self.clean_data:
                     # 无修改不更新

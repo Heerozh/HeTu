@@ -47,27 +47,36 @@ hetu.system.SystemClusters().build_clusters("bench")
 item_ref = TableReference(IntTable, "bench", 1)
 
 # === 夹具 ===
+if REDIS_PASSWORD:
+    url = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+else:
+    url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+config = {
+    "type": "redis",
+    "master": url,
+}
+
+# backend作为全局变量，避免每个task都初始化，导致无法batch
+_backend = Backend(config)
+_backend.post_configure()
 
 
-async def redis_backend():
-    if REDIS_PASSWORD:
-        url = f"redis://:{REDIS_PASSWORD}@{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    else:
-        url = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    config = {
-        "type": "redis",
-        "master": url,
-    }
-
-    SnowflakeID().init(hash(os.getpid()) % 1024, 0)
-
-    _backend = Backend(config)
-    _backend.post_configure()
-    yield _backend
+async def task_teardown():
     await _backend.close()
 
 
+async def redis_backend():
+    SnowflakeID().init(hash(os.getpid()) % 1024, 0)
+
+    yield _backend
+
+
 # === 基准测试 ===
+
+
+async def benchmark_ping(redis_backend):
+    client = redis_backend.master.aio
+    await client.ping()
 
 
 async def benchmark_redis_upsert(redis_backend: Backend):

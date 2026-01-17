@@ -244,6 +244,18 @@ class IdentityMap:
         states = self._row_states[table_ref]
         return states.get(row_id) == RowState.DELETE
 
+    def get_clean_row_keys(self) -> set[str]:
+        """
+        获取所有源干净行数据。如果遇到事务冲突，能知道是哪些干净数据其实已经失效了。
+        """
+        from hetu.data.backend.redis.client import RedisBackendClient
+
+        return {
+            RedisBackendClient.row_key(ref, row_id)
+            for ref, dat in self._row_clean.items()
+            for row_id in dat.keys()
+        }
+
     def get_dirty_rows(
         self,
     ) -> dict[
