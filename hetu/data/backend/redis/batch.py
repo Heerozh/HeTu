@@ -25,11 +25,15 @@ class RedisBatchedClient:
     采取短 TTL，减少短期的重复请求。如果遇到事务冲突，则通知缓存把事务相关的key满门抄斩。
     取消❌，缓存会导致客户端收到订阅更新时，获得的还是老数据，而让订阅通知和缓存失效绑定太不灵活。
     读取其实是小事，河图可以用读写分离无损扩容，无非是浪费点内网带宽罢了。
+    未来尝试：让每个服务器worker收到订阅时，失效对应key，如果没人订阅，那么这个key短期旧数据也无所谓
+    这样range也可以通过index来缓存？range还是不缓存了，上面方案可以让key缓存不再需要ttl了。
 
     合批：
     如果前一个请求未完成，后续累积请求都将通过pipeline合并成一个请求发送给Redis服务器。
     如果请求没有累积，则不会合批而是立即执行。
     取消❌，合批确实会增加单节点Redis吞吐量，但会大幅升高RTT，对读写分离+自动分流代理模式下反而吞吐量下降
+    合批的问题是，由于worker固定，对突发的大量流量响应速度不够
+    未来尝试：增加动态worker池，流量大时增加worker数量，流量小时减少worker数量
     """
 
     # _global_cache = TTLCache(maxsize=10000, ttl=10)
@@ -39,11 +43,15 @@ class RedisBatchedClient:
         # cls._global_cache = TTLCache(maxsize=maxsize, ttl=ttl)
         pass
 
-    def __init__(self, replicas: list[Redis | RedisCluster]):
+    def __init__(
+        self, replicas: list[Redis | RedisCluster], max_batch=10, max_connect=5000
+    ):
         self._replicas = replicas
         self._pipe = []
         self._queue: Queue[tuple] = asyncio.Queue()
-        self._worker_task = None
+        self._worker_tasks = []
+        self._max_batch = max_batch  # 如果超过_max_batch则会新增worker
+        self._max_connect = max_connect
         self._log = {}
 
     @classmethod
@@ -68,10 +76,12 @@ class RedisBatchedClient:
         #         return res
 
         # Cache Miss
-        # Start worker if not running
-        if self._worker_task is None:
-            # 单worker可能会增加RTT，但测试加了几个也没明显提升吞吐量
-            self._worker_task = asyncio.create_task(self._worker())
+        # Start worker if queue size exceeds limit
+        if (
+            self._queue.qsize() > self._max_batch
+            and len(self._worker_tasks) < self._max_connect
+        ):
+            self._worker_tasks.append(asyncio.create_task(self._worker()))
 
         # Enqueue request
         future = asyncio.get_running_loop().create_future()
@@ -95,14 +105,23 @@ class RedisBatchedClient:
 
             try:
                 # self._log[len(batch)] = self._log.get(len(batch), 0) + 1
-                pipe = random.choice(self._replicas).pipeline()
-                for cmd, key, kwargs, _, _ in batch:
-                    if cmd == "hgetall":
-                        pipe.hgetall(key)
-                    elif cmd == "zrange":
-                        pipe.zrange(name=key, **kwargs)
+                if len(batch) == 1:
+                    r = random.choice(self._replicas)
+                    results = []
+                    for cmd, key, kwargs, _, _ in batch:
+                        if cmd == "hgetall":
+                            results = [await r.hgetall(key)]  # type: ignore
+                        elif cmd == "zrange":
+                            results = [await r.zrange(name=key, **kwargs)]
+                else:
+                    pipe = random.choice(self._replicas).pipeline()
+                    for cmd, key, kwargs, _, _ in batch:
+                        if cmd == "hgetall":
+                            pipe.hgetall(key)
+                        elif cmd == "zrange":
+                            pipe.zrange(name=key, **kwargs)
 
-                results = await pipe.execute()
+                    results = await pipe.execute()
 
                 for i, res in enumerate(results):
                     _, _, _, fut, _ = batch[i]
