@@ -27,7 +27,9 @@ class MigrateCommand(CommandInterface):
     @classmethod
     def register(cls, subparsers):
         parser_migrate = subparsers.add_parser(
-            "migrate", help="在数据库执行Schema迁移，应该在CI/CD流程中自动执行。"
+            "migrate",
+            help="在数据库执行迁移（如果有的话），并进行临时表的清空。"
+            "应该在CI/CD流程中，每次启动服务器前执行一次。",
         )
         parser_migrate.add_argument(
             "--db",

@@ -251,11 +251,9 @@ class Subscriptions:
         Returns
         --------
         sub_id: str | None
-            订阅id，后续通过该id获取更新
+            订阅id，后续通过该id获取更新。如果未查询到数据，或rls不符，返回None。
         row: dict | None
-            订阅的行数据
-
-        如果未查询到数据，或rls不符，返回None, None。
+            订阅的行数据。如果未查询到数据，或rls不符，返回None。
         """
         # 首先caller要对整个表有权限
         if not self._has_table_permission(table_ref, ctx):

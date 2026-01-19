@@ -8,21 +8,21 @@
 import hashlib
 import logging
 import warnings
-from typing import TYPE_CHECKING, cast, final, override, Any
+from typing import TYPE_CHECKING, cast, final, override
+
 import numpy as np
+from redis.cluster import RedisCluster
 
 from ....common.helper import batched
 from ...component import BaseComponent
 from .. import RaceCondition
 from ..base import TableMaintenance
 
-from redis.cluster import RedisCluster
-
 if TYPE_CHECKING:
     import redis
     import redis.lock
-    from ..table import TableReference
 
+    from ..table import TableReference
     from .client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")
@@ -47,50 +47,36 @@ class RedisTableMaintenance(TableMaintenance):
 
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
 
+    @override
+    def _read_meta(
+        self, instance_name: str, comp_cls: type[BaseComponent]
+    ) -> TableMaintenance.TableMeta | None:
+        """读取组件表的meta信息"""
+        key = self.meta_key(
+            TableReference(
+                comp_cls=comp_cls,
+                instance_name=instance_name,
+                cluster_id=0,  # cluster_id不影响meta读取
+            )
+        )
+
+        io = self.client.io
+        meta = cast(dict, io.hgetall(key))
+        if not meta:
+            return None
+        return TableMaintenance.TableMeta(
+            version=meta[b"version"].decode(),
+            json=meta[b"json"].decode(),
+            cluster_id=int(meta[b"cluster_id"]),
+            extra={},
+        )
+
     def __init__(self, master: RedisBackendClient):
         super().__init__(master)
         self.lock: redis.lock.Lock = self.client.io.lock(self._lock_key, timeout=60 * 5)
 
     @override
-    def check_table(self, table_ref: TableReference) -> tuple[str, Any]:
-        """
-        检查组件表在数据库中的状态。
-        此方法检查各个组件表的meta键值。
-
-        Returns
-        -------
-        status: str
-            "not_exists" - 表不存在
-            "ok" - 表存在且状态正常
-            "cluster_mismatch" - 表存在但cluster_id不匹配
-            "schema_mismatch" - 表存在但schema不匹配
-        meta: dict[bytes, Any]
-            组件表的meta信息，一般含有：
-                - b"version": 组件结构的md5值
-                - b"json": 组件结构的json字符串
-                - b"cluster_id": 组件所属的cluster id
-        """
-        io = self.client.io
-
-        # 获取redis已存的组件信息
-        key = self.meta_key(table_ref)
-        meta = cast(dict, io.hgetall(key))
-        if not meta:
-            return "not_exists", None
-        else:
-            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
-            # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
-            if int(meta[b"cluster_id"]) != table_ref.cluster_id:
-                return "cluster_mismatch", meta
-
-            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
-            if meta[b"version"].decode() != version:
-                return "schema_mismatch", meta
-
-        return "ok", meta
-
-    @override
-    def create_table(self, table_ref: TableReference) -> Any:
+    def create_table(self, table_ref: TableReference) -> TableMaintenance.TableMeta:
         """创建组件表。如果已存在，会抛出RaceCondition异常"""
         with self.lock:
             if self.check_table(table_ref)[0] != "not_exists":
@@ -110,14 +96,18 @@ class RedisTableMaintenance(TableMaintenance):
             }
             self.client.io.hset(self.meta_key(table_ref), mapping=meta)
             logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
-            return meta
+            meta_recon = self._read_meta(table_ref.instance_name, table_ref.comp_cls)
+            assert meta_recon
+            return meta_recon
 
     # 无需drop_table, 此类操作适合人工删除
 
     @override
-    def migration_cluster_id(self, table_ref: TableReference, old_meta: Any) -> None:
+    def migration_cluster_id(
+        self, table_ref: TableReference, old_meta: TableMaintenance.TableMeta
+    ) -> None:
         """迁移组件表的cluster_id"""
-        old_cluster_id = int(old_meta[b"cluster_id"])
+        old_cluster_id = old_meta.cluster_id
         logger.warning(
             f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
             f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
@@ -158,7 +148,10 @@ class RedisTableMaintenance(TableMaintenance):
 
     @override
     def migration_schema(
-        self, table_ref: TableReference, old_meta: Any, force=False
+        self,
+        table_ref: TableReference,
+        old_meta: TableMaintenance.TableMeta,
+        force=False,
     ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
@@ -169,8 +162,8 @@ class RedisTableMaintenance(TableMaintenance):
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
-        old_json = old_meta[b"json"].decode()
-        old_version = old_meta[b"version"].decode()
+        old_json = old_meta.json
+        old_version = old_meta.version
 
         # todo 首先调用手动迁移，完成后再调用自动迁移
         # migration_script = self._load_migration_schema_script(table_ref, old_version)

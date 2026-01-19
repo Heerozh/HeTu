@@ -31,14 +31,17 @@
 
 """
 
+import hashlib
 import logging
+from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Literal, overload
+from typing import TYPE_CHECKING, Any, Callable, Literal, final, overload
 
 import numpy as np
 
 if TYPE_CHECKING:
     from ...common.snowflake_id import WorkerKeeper
+    from ..component import BaseComponent
     from .idmap import IdentityMap
     from .table import TableReference
 
@@ -364,6 +367,15 @@ class TableMaintenance:
     继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
     """
 
+    @dataclass
+    class TableMeta:
+        """组件表的meta信息结构"""
+
+        cluster_id: int
+        version: str
+        json: str
+        extra: dict
+
     @staticmethod
     def _load_migration_schema_script(
         table_ref: TableReference, old_version: str
@@ -407,15 +419,27 @@ class TableMaintenance:
         )
         return None
 
+    def _read_meta(
+        self, instance_name: str, comp_cls: type[BaseComponent]
+    ) -> TableMeta | None:
+        """读取组件表在数据库中的meta信息，如果不存在则返回None"""
+        raise NotImplementedError
+
     def __init__(self, master: BackendClient):
         """传入master连接的BackendClient实例"""
         self.client = master
 
-    # 检测是否需要维护的方法
-    def check_table(self, table_ref: TableReference) -> tuple[str, Any]:
+    @final
+    def check_table(self, table_ref: TableReference) -> tuple[str, TableMeta | None]:
         """
         检查组件表在数据库中的状态。
         此方法检查各个组件表的meta键值。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            传入当前版本的组件表引用，也就是最新的Component定义，最新的Cluster id。
+            这些最新引用一般通过ComponentManager获得。
 
         Returns
         -------
@@ -424,26 +448,42 @@ class TableMaintenance:
             "ok" - 表存在且状态正常
             "cluster_mismatch" - 表存在但cluster_id不匹配
             "schema_mismatch" - 表存在但schema不匹配
-        meta: Any
-            组件表的meta信息。由各个后端自行定义。直接传给migration_cluster_id和migration_schema
+        meta: TableMeta or None
+            组件表的meta信息。用于直接传给migration_cluster_id和migration_schema
         """
-        raise NotImplementedError
+        # 从数据库获取已存的组件信息
+        meta = self._read_meta(table_ref.instance_name, table_ref.comp_cls)
+        if not meta:
+            return "not_exists", None
+        else:
+            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+            # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
+            if meta.cluster_id != table_ref.cluster_id:
+                return "cluster_mismatch", meta
 
-    def create_table(self, table_ref: TableReference) -> Any:
+            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+            if meta.version != version:
+                return "schema_mismatch", meta
+
+        return "ok", meta
+
+    def create_table(self, table_ref: TableReference) -> TableMeta:
         """
         创建组件表。如果已存在，会抛出RaceCondition异常。
-        组件表的meta信息。
+        返回组件表的meta信息。
         """
         raise NotImplementedError
 
     # 无需drop_table, 此类操作适合人工删除
 
-    def migration_cluster_id(self, table_ref: TableReference, old_meta: Any) -> None:
+    def migration_cluster_id(
+        self, table_ref: TableReference, old_meta: TableMeta
+    ) -> None:
         """迁移组件表的cluster_id"""
         raise NotImplementedError
 
     def migration_schema(
-        self, table_ref: TableReference, old_meta: Any, force=False
+        self, table_ref: TableReference, old_meta: TableMeta, force=False
     ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
