@@ -20,7 +20,7 @@ from .message import decode_message
 
 if TYPE_CHECKING:
     from ..endpoint.executor import EndpointExecutor
-    from ..data.backend import Subscriptions
+    from ..data.sub import Subscriptions
     from sanic import Websocket
 
 logger = logging.getLogger("HeTu.root")

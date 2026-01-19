@@ -17,12 +17,12 @@ from ....common.helper import batched
 from ...component import BaseComponent
 from .. import RaceCondition
 from ..base import TableMaintenance
+from ..table import TableReference
 
 if TYPE_CHECKING:
     import redis
     import redis.lock
 
-    from ..table import TableReference
     from .client import RedisBackendClient
 
 logger = logging.getLogger("HeTu.root")

@@ -11,7 +11,7 @@ import logging
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
 
-from ..data.backend import Subscriptions
+from ..data.sub import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
 from ..system.context import SystemContext
