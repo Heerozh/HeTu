@@ -33,6 +33,7 @@
 
 import hashlib
 import logging
+import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, final, overload
@@ -273,7 +274,7 @@ class BackendClient:
             查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
             如果right不填写，则精确查询等于left的数据。
         limit: int
-            限制返回的行数，越少越快
+            限制返回的行数，越少越快。负数表示不限制行数。
         desc: bool
             是否降序排列
         row_format
@@ -363,8 +364,11 @@ class BackendClientFactory:
 
 class TableMaintenance:
     """
-    提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
-    继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
+    组件表维护类，继承此类实现具体的维护逻辑。
+
+    服务器启动时会用check_table检查各个组件表的状态，并会调用create_table创建新表。
+
+    其他方法仅在CLI相关命令时才会启用。其中MaintenanceClient是专门给Schema迁移脚本使用的数据库直接操作客户端。
     """
 
     @dataclass
@@ -375,6 +379,48 @@ class TableMaintenance:
         version: str
         json: str
         extra: dict
+
+    class MaintenanceClient:
+        """
+        只给Schema迁移脚本使用的增删改客户端，直接操作数据库，无需考虑事务和index更新。
+        参考hetu/data/default_migration.py中的用法。
+        """
+
+        def __init__(self, master: BackendClient):
+            super().__init__()
+            self.client = master
+
+        def get(self, ref: TableReference, row_id: int) -> np.record | None:
+            """获取指定表的指定行数据"""
+            return asyncio.run(
+                self.client.get(ref, row_id, row_format=RowFormat.STRUCT)
+            )
+
+        def range(
+            self, ref: TableReference, index_name: str, left: Any, right: Any = None
+        ) -> np.recarray:
+            """按索引范围查询指定表的数据"""
+            return asyncio.run(
+                self.client.range(
+                    ref, index_name, left, right, -1, False, RowFormat.STRUCT
+                )
+            )
+
+        def alter(self, ref: TableReference, old_model: type[BaseComponent]):
+            """修改表结构，比如增加/删除列等"""
+            raise NotImplementedError()
+
+        def delete(self, ref: TableReference, row_id: int):
+            """删除指定表的指定行数据"""
+            raise NotImplementedError()
+
+        def insert(self, ref: TableReference, row_data: np.record):
+            """向指定表插入一行数据"""
+            raise NotImplementedError()
+
+        def update(self, ref: TableReference, row_data: np.record):
+            """更新指定表的一行数据"""
+            raise NotImplementedError()
 
     def _read_meta(
         self, instance_name: str, comp_cls: type[BaseComponent]

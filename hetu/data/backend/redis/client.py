@@ -590,7 +590,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             查询范围，闭区间。可以在开头加上"["指定闭区间，还是"("开区间。
             如果right不填写，则精确查询等于left的数据。
         limit: int
-            限制返回的行数，方法往数据库查询的次数为 `1 + limit` 次。
+            限制返回的行数，本方法至少请求数据库 `1 + limit` 次。
+            负数表示不限制行数。
         desc: bool
             是否降序排列
         row_format

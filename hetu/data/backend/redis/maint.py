@@ -37,6 +37,40 @@ class RedisTableMaintenance(TableMaintenance):
     继承此类实现具体的维护逻辑，此类除了check_table/create_table，其他方法仅在CLI相关命令时才会启用。
     """
 
+    class RedisCUDClient(TableMaintenance.MaintenanceClient):
+        """
+        只给Schema迁移脚本使用的增删改客户端，直接操作数据库，无需考虑事务和index更新。
+        参考hetu/data/default_migration.py中的用法。
+        """
+
+        def __init__(self, master: RedisBackendClient):
+            super().__init__(master)
+            self.client = master
+            self.io = master.io
+
+        def alter(self, ref: TableReference, old_model: type[BaseComponent]):
+            """修改表结构，比如增加/删除列等"""
+            # redis不需要
+            pass
+
+        def delete(self, ref: TableReference, row_id: int):
+            """删除指定表的指定行数据"""
+            key = self.client.row_key(ref, row_id)
+            self.io.delete(key)
+
+        def insert(self, ref: TableReference, row_data: np.record):
+            """向指定表插入一行数据"""
+            key = self.client.row_key(ref, row_data.id)
+            mapping = ref.comp_cls.struct_to_dict(row_data)
+            self.io.hset(key, mapping=mapping)
+
+        def update(self, ref: TableReference, row_data: np.record):
+            """更新指定表的一行数据"""
+            key = self.client.row_key(ref, row_data.id)
+            self.io.delete(key)
+            mapping = ref.comp_cls.struct_to_dict(row_data)
+            self.io.hset(key, mapping=mapping)
+
     _lock_key = "maintenance:lock"
     client: RedisBackendClient
 
@@ -149,6 +183,7 @@ class RedisTableMaintenance(TableMaintenance):
     @override
     def migration_schema(
         self,
+        app_file: str,
         table_ref: TableReference,
         old_meta: TableMaintenance.TableMeta,
         force=False,
@@ -162,11 +197,38 @@ class RedisTableMaintenance(TableMaintenance):
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
+        from ...migration import MigrationScript
+
+        migrator = MigrationScript(app_file, table_ref, old_meta)
+        maint_client = self.RedisCUDClient(self.client)
+
+        with self.lock:
+            if self.check_table(table_ref)[0] != "schema_mismatch":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
+                )
+
+            # 准备和检测
+            status = migrator.prepare()
+            if status == "lossy":
+                if not force:
+                    return False
+            elif status == "skip":
+                return True
+
+            # 获取所有row id
+            io = self.client.io
+            keys = io.keys(
+                self.client.cluster_prefix(table_ref) + ":id:*",
+                target_nodes=RedisCluster.PRIMARIES,
+            )
+            # 执行迁移脚本函数
+            keys = cast(list[bytes], keys)
+            row_ids = [int(key.decode().split(":")[-1]) for key in keys]
+            migrator.upgrade(row_ids, maint_client)
+
         old_json = old_meta.json
         old_version = old_meta.version
-
-        # todo 首先调用手动迁移，完成后再调用自动迁移
-        # migration_script = self._load_migration_schema_script(table_ref, old_version)
 
         # 加载老的组件
         old_comp_cls = BaseComponent.load_json(old_json)
@@ -215,11 +277,6 @@ class RedisTableMaintenance(TableMaintenance):
                         return False
 
         with self.lock:
-            if self.check_table(table_ref)[0] != "schema_mismatch":
-                raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
-                )
-
             # 多出来的列再次报警告，然后忽略
             io = self.client.io
             keys = io.keys(
