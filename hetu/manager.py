@@ -57,7 +57,7 @@ class ComponentTableManager:
                 self._tables_by_name[comp.component_name_] = table
                 comp.hosted_ = table
 
-    def create_or_migrate_all(self, force=False) -> bool:
+    def create_or_migrate_all(self, app_file: str, force=False) -> bool:
         """
         创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则raise异常。
         此时要么写迁移脚本，要么用cli强制迁移。
@@ -69,9 +69,11 @@ class ComponentTableManager:
                 case "not_exists":
                     maint.create_table(tbl)
                 case "schema_mismatch":
-                    if not maint.migration_schema(tbl, old_meta, force=force):
+                    assert old_meta
+                    if not maint.migration_schema(app_file, tbl, old_meta, force=force):
                         return False
                 case "cluster_mismatch":
+                    assert old_meta
                     # 非持久化的Component也需要cluster迁移，不然数据就永远的留在了数据库中
                     maint.migration_cluster_id(tbl, old_meta)
         return True

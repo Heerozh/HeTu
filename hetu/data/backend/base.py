@@ -440,7 +440,7 @@ class TableMaintenance:
         raise NotImplementedError
 
     def migration_schema(
-        self, table_ref: TableReference, old_meta: TableMeta, force=False
+        self, app_file: str, table_ref: TableReference, old_meta: TableMeta, force=False
     ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。

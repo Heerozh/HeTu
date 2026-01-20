@@ -22,13 +22,13 @@ logging.lastResort.setLevel(logging.DEBUG)
 class MigrateCommand(CommandInterface):
     @classmethod
     def name(cls):
-        return "migrate"
+        return "upgrade"
 
     @classmethod
     def register(cls, subparsers):
         parser_migrate = subparsers.add_parser(
-            "migrate",
-            help="在数据库执行迁移（如果有的话），并进行临时表的清空。"
+            "upgrade",
+            help="在数据库执行Schema升级脚本,如果没有则创建，如果无变更则跳过。同时还会进行临时表的清空。"
             "应该在CI/CD流程中，每次启动服务器前执行一次。",
         )
         parser_migrate.add_argument(
@@ -63,7 +63,7 @@ class MigrateCommand(CommandInterface):
             "--drop-data",
             action="store_true",
             default=False,
-            help="强制执行迁移，丢弃无法迁移的数据。请勿在生产环境使用此选项！",
+            help="强制执行升级迁移，丢弃无法迁移的数据。请勿在生产环境使用此选项！",
         )
 
         pass
@@ -102,15 +102,15 @@ class MigrateCommand(CommandInterface):
         if not yes:
             # cli提示用户先备份数据，按y继续
             user_input = input(
-                "⚠️  迁移数据库表结构可能会导致数据丢失，请确保已备份数据。"
+                "⚠️  升级数据库表结构可能会导致数据丢失，请确保已备份数据。"
                 "确认继续请输 y ，取消请输其他键然后回车："
             )
             if user_input.lower() != "y":
-                print("❌  迁移已取消。")
+                print("❌  升级迁移已取消。")
                 return
 
         # 先尝试普通迁移
-        if not comp_mgr.create_or_migrate_all():
+        if not comp_mgr.create_or_migrate_all(config["APP_FILE"]):
             print(
                 "❗ Component有数据删除或类型变更，需要迁移脚本但未找到。"
                 "请添加对应的迁移脚本后重试。"
@@ -119,16 +119,16 @@ class MigrateCommand(CommandInterface):
                 return
             user_input = input("⚠️  确认强制迁移请输 y ，取消请输其他键然后回车：")
             if user_input.lower() != "y":
-                print("❌  迁移已取消。")
+                print("❌  升级迁移已取消。")
                 return
             print("⚠️  正在强制迁移所有表结构，可能会丢失数据...")
-            comp_mgr.create_or_migrate_all(force=True)
+            comp_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
 
         # 清除易失数据
         print("🧹 正在清除易失数据...")
         comp_mgr.flush_volatile()
 
-        print("✅  迁移完成！")
+        print("✅  升级迁移完成！")
         pass
 
     @classmethod

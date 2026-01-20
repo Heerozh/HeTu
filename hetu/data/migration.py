@@ -9,8 +9,9 @@ import logging
 import hashlib
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
+import importlib.util
+import sys
 
-import numpy as np
 
 if TYPE_CHECKING:
     from .backend.table import TableReference
@@ -23,64 +24,79 @@ class MigrationScript:
     """
     迁移脚本类。
 
-    首先是migration_schema时初始化此类，如果加载到了脚本，则执行脚本中的迁移方法。
+    使用方法(使用前需要全局锁)：
+    with db.lock_all_tables():
+        old_meta = db.read_table_meta(table_ref)
 
-    否则执行类中的自动迁移方法。
-
-    方法会给脚本传递old row，要求返回new row。
-    同时会传递给你所有已知的old版本的Table的引用，方便你读取。所以此方法必须在cluster id变更后进行，
-    不然会找不到key，不对meta里有old cluster id
-    首先协议化meta内容到base里，然后规范化create table流程
-
-
-    对于删除的component怎么办？可以返回所有meta内容
-
+        migrator = MigrationScript(app_file, table_ref, old_meta)
+        status = migrator.prepare()
+        if status == "skip":
+            return
+        migrator.upgrade()
     """
 
     @staticmethod
-    def _load_script(file) -> Callable:
+    def _load_schema_migration_script(table_ref, file):
         logger.warning(
             f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
-            f"发现自定义迁移脚本 {script_path}，将调用脚本进行迁移..."
+            f"发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
         )
-        module_name = f"Migration_{table_ref.comp_name}_{old_version}_to_{new_version}"
-        spec = importlib.util.spec_from_file_location(module_name, script_path)
-        assert spec and spec.loader, "Could not load script:" + str(script_path)
+        module_name = file
+        spec = importlib.util.spec_from_file_location(module_name, file)
+        assert spec and spec.loader, "Could not load script:" + str(file)
         module = importlib.util.module_from_spec(spec)
         sys.modules[module_name] = module
         spec.loader.exec_module(module)
 
-        migration_func = getattr(module, "do_migration", None)
-        assert migration_func, "Migration script must define do_migration function"
-
-        # todo 这个方法应该是，首先用老的comp_cls，把所有rows读取
-        #      然后传给do_migration，返回新的rows，然后再用hmset写回去
-        #      或者直接用commit，都不用写专门代码了
-        # todo 层叠升级检测
-        return migration_func
+        return module
 
     @staticmethod
-    def _load_schema_migration_script(
-        table_ref: TableReference, old_version: str
-    ) -> Callable:
-        """加载组件模型的的用户迁移脚本"""
-        # todo test
-        import hashlib
-        from pathlib import Path
+    def _find_script(app_root: Path, old_version):
+        # 文件名格式是 任意前缀_oldversion_to_newversion.py
+        # 查找oldversion符合的文件，并返回newversion
+        migration_dir = app_root / "maint" / "migration"
+        for file in migration_dir.glob(f"*_v{old_version}_to_v*.py"):
+            parts = file.stem.split("_to_v")
+            if len(parts) != 2:
+                continue
+            target_version = parts[1]
+            return file, target_version
+        return None, None
 
-        migration_file = f"{table_ref.comp_name}_{old_version}_to_{new_version}.py"
-        # 组合app目录 + maint/migration/目录 + 迁移文件名
-        script_path = Path.cwd() / "maint" / "migration" / migration_file
-        script_path = script_path.absolute()
-        if not script_path.exists():
-            logger.warning(
-                f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
-                f"未发现自定义迁移脚本 {script_path}，将使用默认迁移逻辑..."
-            )
-            # 读取当前目录下的默认迁移脚本
-            script_path = Path(__file__).parent / "default_migration.py"
+    @staticmethod
+    def _generate_default_migration_script(
+        app_root: Path, table_ref, old_version, new_version
+    ):
+        # 在app_root/maint/migration/目录下，把默认迁移脚本写进去
+        migration_dir = app_root / "maint" / "migration"
+        migration_dir.mkdir(parents=True, exist_ok=True)
+        migration_file = f"{table_ref.comp_name}_v{old_version}_to_v{new_version}.py"
+        script_path = migration_dir / migration_file
+        if script_path.exists():
+            return script_path
+        # 读取__file__.parent / default_migration.py模板
+        template_path = Path(__file__).parent / "default_migration.py"
+        with open(template_path, "r", encoding="utf-8") as f:
+            template = f.read()
+        # 替换模板中的占位符
+        template = template.replace(
+            "<TARGET_JSON>",
+            f'r"{table_ref.comp_cls.json_}"',
+        )
+        # 写入新脚本
+        with open(script_path, "w", encoding="utf-8") as f:
+            f.write(template)
+        logger.warning(
+            f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
+            f"缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
+        )
+        return script_path
 
-        return MigrationScript._load_script(script_path)
+    def _load_scripts(self):
+        return [
+            self._load_schema_migration_script(self.ref, file)
+            for file in self.upgrade_stack
+        ]
 
     def __init__(
         self,
@@ -89,6 +105,8 @@ class MigrationScript:
         old_meta: TableMaintenance.TableMeta,
     ):
         self.upgrade_stack = []
+        self.ref = table_ref
+        self.loaded_upgrade_stack = []
         # 读取table迁移脚本
         # 首先看old_meta里的版本号，然后搜索该版本号开头的文件
         old_version = old_meta.version
@@ -98,17 +116,51 @@ class MigrationScript:
         target_version = ""
         while target_version != new_version:
             script_file, target_version = self._find_script(app_root, old_version)
+            if not script_file:
+                break
             self.upgrade_stack.append(script_file)
             old_version = target_version
         # 如果最后一个版本号没找到，则尝试生成默认迁移脚本，如果是有损的，则看force
         if target_version != new_version:
             script_file = self._generate_default_migration_script(
-                table_ref, old_version, new_version
+                app_root, table_ref, old_version, new_version
             )
             self.upgrade_stack.append(script_file)
 
-    def up(self, row: np.record) -> np.record:
-        """执行迁移操作"""
-        # todo 先执行自动迁移逻辑，然后再执行迁移脚本
-        #      或者执行层叠迁移，自动迁移永远叠在每层脚本之上
-        return migration_func(row)
+    async def prepare(self):
+        self.loaded_upgrade_stack = self._load_scripts()
+        ret = "skip"
+        for module in self.loaded_upgrade_stack:
+            prepare_func = getattr(module, "prepare", None)
+            assert prepare_func, (
+                f"Migration script {module} must define prepare function"
+            )
+            status = await prepare_func(self.ref)
+            if status == "skip":
+                pass
+            elif status == "ok":
+                ret = "ok"
+            elif status == "lossy":
+                return "lossy"
+            else:
+                raise RuntimeError(
+                    f"Migration script {module} prepare function returned invalid status {status}"
+                )
+        return ret
+
+    async def upgrade(self, row_ids: list[int]):
+        """执行迁移操作，注意执行前需要锁定整个数据库，防止多个worker同时执行。"""
+        # 加载所有脚本
+        for module in self.loaded_upgrade_stack:
+            prepare_func = getattr(module, "prepare", None)
+            upgrade_func = getattr(module, "upgrade", None)
+            assert prepare_func and upgrade_func, (
+                f"Migration script {module} must define prepare/upgrade function"
+            )
+            status = await prepare_func(self.ref)
+            if status == "skip":
+                continue
+            logger.info(
+                f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
+            )
+            await upgrade_func(self.ref, row_ids)
