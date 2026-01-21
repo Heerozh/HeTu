@@ -210,7 +210,7 @@ class RedisTableMaintenance(TableMaintenance):
 
             # 准备和检测
             status = migrator.prepare()
-            if status == "lossy":
+            if status == "unsafe":
                 if not force:
                     return False
             elif status == "skip":

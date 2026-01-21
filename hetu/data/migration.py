@@ -8,7 +8,7 @@
 import logging
 import hashlib
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 import importlib.util
 import sys
 
@@ -127,7 +127,7 @@ class MigrationScript:
             )
             self.upgrade_stack.append(script_file)
 
-    async def prepare(self):
+    def prepare(self):
         self.loaded_upgrade_stack = self._load_scripts()
         ret = "skip"
         for module in self.loaded_upgrade_stack:
@@ -135,21 +135,30 @@ class MigrationScript:
             assert prepare_func, (
                 f"Migration script {module} must define prepare function"
             )
-            status = await prepare_func(self.ref)
+            status = prepare_func(self.ref)
             if status == "skip":
                 pass
             elif status == "ok":
                 ret = "ok"
-            elif status == "lossy":
-                return "lossy"
+            elif status == "unsafe":
+                return "unsafe"
             else:
                 raise RuntimeError(
                     f"Migration script {module} prepare function returned invalid status {status}"
                 )
         return ret
 
-    async def upgrade(self, row_ids: list[int]):
+    def upgrade(self, row_ids: list[int], client: TableMaintenance.MaintenanceClient):
         """执行迁移操作，注意执行前需要锁定整个数据库，防止多个worker同时执行。"""
+        from ..system import SystemClusters
+
+        # 加载所有Model在数据库中的版本
+        from_models = {}
+        for comp in SystemClusters().get_components().keys():
+            # 从数据库读取老版本
+            xxx
+            from_models[comp.component_name_] = comp
+
         # 加载所有脚本
         for module in self.loaded_upgrade_stack:
             prepare_func = getattr(module, "prepare", None)
@@ -157,10 +166,19 @@ class MigrationScript:
             assert prepare_func and upgrade_func, (
                 f"Migration script {module} must define prepare/upgrade function"
             )
-            status = await prepare_func(self.ref)
+            target_model = getattr(module, "TARGET_MODEL", None)
+            assert target_model, f"Migration script {module} must define TARGET_MODEL"
+
+            status = prepare_func(self.ref)
             if status == "skip":
                 continue
             logger.info(
                 f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
             )
-            await upgrade_func(self.ref, row_ids)
+            target_ref = TableReference(
+                comp_cls=target_model,
+                instance_name=self.ref.instance_name,
+                cluster_id=self.ref.cluster_id,  # 因为是先迁移的cluster_id，所以到这都一样
+            )
+            upgrade_func(from_models[self.ref.comp_name], target_ref, row_ids, client)
+            from_models[self.ref.comp_name] = target_model
