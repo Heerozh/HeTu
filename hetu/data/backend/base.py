@@ -422,7 +422,7 @@ class TableMaintenance:
             """更新指定表的一行数据"""
             raise NotImplementedError()
 
-    def _read_meta(
+    def read_meta(
         self, instance_name: str, comp_cls: type[BaseComponent]
     ) -> TableMeta | None:
         """读取组件表在数据库中的meta信息，如果不存在则返回None"""
@@ -455,7 +455,7 @@ class TableMaintenance:
             组件表的meta信息。用于直接传给migration_cluster_id和migration_schema
         """
         # 从数据库获取已存的组件信息
-        meta = self._read_meta(table_ref.instance_name, table_ref.comp_cls)
+        meta = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
         if not meta:
             return "not_exists", None
         else:

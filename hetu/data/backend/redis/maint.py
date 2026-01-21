@@ -82,7 +82,7 @@ class RedisTableMaintenance(TableMaintenance):
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
 
     @override
-    def _read_meta(
+    def read_meta(
         self, instance_name: str, comp_cls: type[BaseComponent]
     ) -> TableMaintenance.TableMeta | None:
         """读取组件表的meta信息"""
@@ -130,7 +130,7 @@ class RedisTableMaintenance(TableMaintenance):
             }
             self.client.io.hset(self.meta_key(table_ref), mapping=meta)
             logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
-            meta_recon = self._read_meta(table_ref.instance_name, table_ref.comp_cls)
+            meta_recon = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
             assert meta_recon
             return meta_recon
 
