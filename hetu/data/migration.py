@@ -12,6 +12,8 @@ from typing import TYPE_CHECKING
 import importlib.util
 import sys
 
+from hetu.data import BaseComponent
+
 
 if TYPE_CHECKING:
     from .backend.table import TableReference
@@ -65,12 +67,14 @@ class MigrationScript:
 
     @staticmethod
     def _generate_default_migration_script(
-        app_root: Path, table_ref, old_version, new_version
+        app_root: Path, target_model, down_model_json, old_version, new_version
     ):
         # 在app_root/maint/migration/目录下，把默认迁移脚本写进去
         migration_dir = app_root / "maint" / "migration"
         migration_dir.mkdir(parents=True, exist_ok=True)
-        migration_file = f"{table_ref.comp_name}_v{old_version}_to_v{new_version}.py"
+        migration_file = (
+            f"{target_model.component_name_}_v{old_version}_to_v{new_version}.py"
+        )
         script_path = migration_dir / migration_file
         if script_path.exists():
             return script_path
@@ -79,15 +83,13 @@ class MigrationScript:
         with open(template_path, "r", encoding="utf-8") as f:
             template = f.read()
         # 替换模板中的占位符
-        template = template.replace(
-            "<TARGET_JSON>",
-            f'r"{table_ref.comp_cls.json_}"',
-        )
+        template = template.replace("<TARGET_JSON>", f"{target_model.json_}")
+        template = template.replace("<DOWN_JSON>", down_model_json)
         # 写入新脚本
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(template)
         logger.warning(
-            f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
+            f"  ➖ [💾Redis][{target_model.component_name_}组件] "
             f"缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
         )
         return script_path
@@ -123,7 +125,7 @@ class MigrationScript:
         # 如果最后一个版本号没找到，则尝试生成默认迁移脚本，如果是有损的，则看force
         if target_version != new_version:
             script_file = self._generate_default_migration_script(
-                app_root, table_ref, old_version, new_version
+                app_root, table_ref.comp_cls, old_meta.json, old_version, new_version
             )
             self.upgrade_stack.append(script_file)
 
@@ -135,7 +137,7 @@ class MigrationScript:
             assert prepare_func, (
                 f"Migration script {module} must define prepare function"
             )
-            status = prepare_func(self.ref)
+            status = prepare_func()
             if status == "skip":
                 pass
             elif status == "ok":
@@ -148,16 +150,24 @@ class MigrationScript:
                 )
         return ret
 
-    def upgrade(self, row_ids: list[int], client: TableMaintenance.MaintenanceClient):
+    def upgrade(self, row_ids: list[int], maint: TableMaintenance):
         """执行迁移操作，注意执行前需要锁定整个数据库，防止多个worker同时执行。"""
         from ..system import SystemClusters
 
         # 加载所有Model在数据库中的版本
-        from_models = {}
-        for comp in SystemClusters().get_components().keys():
+        down_models = {}
+        for comp, cluster_id in SystemClusters().get_components().items():
             # 从数据库读取老版本
-            xxx
-            from_models[comp.component_name_] = comp
+            down_meta = maint.read_meta(self.ref.instance_name, comp)
+            assert down_meta, (
+                f"Component {comp} meta not found in instance {self.ref.instance_name}"
+            )
+            down_comp = BaseComponent.load_json(down_meta.json)
+            if comp == self.ref.comp_name:
+                continue
+            down_models[down_comp] = TableReference(
+                down_comp, self.ref.instance_name, cluster_id
+            )
 
         # 加载所有脚本
         for module in self.loaded_upgrade_stack:
@@ -167,18 +177,24 @@ class MigrationScript:
                 f"Migration script {module} must define prepare/upgrade function"
             )
             target_model = getattr(module, "TARGET_MODEL", None)
-            assert target_model, f"Migration script {module} must define TARGET_MODEL"
+            down_model = getattr(module, "DOWN_MODEL", None)
+            assert target_model and down_model, (
+                f"Migration script {module} must define TARGET_MODEL/DOWN_MODEL"
+            )
 
-            status = prepare_func(self.ref)
+            down_models[down_model] = TableReference(
+                down_model, self.ref.instance_name, self.ref.cluster_id
+            )
+
+            status = prepare_func()
             if status == "skip":
                 continue
             logger.info(
                 f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
             )
-            target_ref = TableReference(
-                comp_cls=target_model,
-                instance_name=self.ref.instance_name,
-                cluster_id=self.ref.cluster_id,  # 因为是先迁移的cluster_id，所以到这都一样
+            upgrade_func(row_ids, down_models, maint.get_client())
+
+            del down_models[down_model]
+            down_models[target_model] = TableReference(
+                target_model, self.ref.instance_name, self.ref.cluster_id
             )
-            upgrade_func(from_models[self.ref.comp_name], target_ref, row_ids, client)
-            from_models[self.ref.comp_name] = target_model
