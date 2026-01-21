@@ -382,13 +382,21 @@ class TableMaintenance:
 
     class MaintenanceClient:
         """
-        只给Schema迁移脚本使用的增删改客户端，直接操作数据库，无需考虑事务和index更新。
+        只给Schema迁移脚本使用的客户端，直接操作数据库，无需考虑事务和index更新。
         参考hetu/data/default_migration.py中的用法。
         """
 
         def __init__(self, master: BackendClient):
             super().__init__()
             self.client = master
+
+        def rename_table(self, ref: TableReference) -> TableReference:
+            """重命名指定表，返回新的表引用"""
+            raise NotImplementedError()
+
+        def drop_table(self, ref: TableReference):
+            """删除指定表，一般用来删除上面rename_table返回的表"""
+            raise NotImplementedError()
 
         def get(self, ref: TableReference, row_id: int) -> np.record | None:
             """获取指定表的指定行数据"""
@@ -406,21 +414,17 @@ class TableMaintenance:
                 )
             )
 
-        def alter(self, ref: TableReference, old_model: type[BaseComponent]):
-            """修改表结构，比如增加/删除列等"""
-            raise NotImplementedError()
-
         def delete(self, ref: TableReference, row_id: int):
             """删除指定表的指定行数据"""
             raise NotImplementedError()
 
-        def insert(self, ref: TableReference, row_data: np.record):
-            """向指定表插入一行数据"""
+        def upsert(self, ref: TableReference, row_data: np.record):
+            """更新指定表的一行数据，如果不存在就属于插入"""
             raise NotImplementedError()
 
-        def update(self, ref: TableReference, row_data: np.record):
-            """更新指定表的一行数据"""
-            raise NotImplementedError()
+    def get_maintenance_client(self) -> MaintenanceClient:
+        """获取专门给迁移脚本使用的MaintenanceClient实例"""
+        raise NotImplementedError
 
     def read_meta(
         self, instance_name: str, comp_cls: type[BaseComponent]

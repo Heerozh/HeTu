@@ -158,6 +158,11 @@ class BaseComponent:
         return comp
 
     @classmethod
+    def empty_row_(cls) -> np.record:
+        """返回全空数据行，内部使用"""
+        return cast(np.record, cls.default_row[0].copy())
+
+    @classmethod
     def new_row(cls) -> np.record:
         """返回空数据行，id生成uuid，用于insert"""
         row = cast(np.record, cls.default_row[0].copy())

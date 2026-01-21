@@ -117,36 +117,43 @@ def upgrade(
     assert from_dtypes.fields and target_dtypes.fields  # for type checker
 
     # 开始schema迁移
-    # 迁移删除的列
-    for col in remove_columns:
-        client.remove_column(table_refs[DOWN_MODEL], col)
-    # 迁移增加的列
-    for col in add_columns:
-        client.add_column(table_refs[DOWN_MODEL], col, target_columns[col].dtype)
-    # 迁移类型变更的列
-    for col in type_convert_columns:
-        client.add_column(
-            table_refs[DOWN_MODEL], col + "__temp__", target_columns[col].dtype
-        )
+    # 修改down的table名, 读取并写入到新的table
+    rnamed_table_ref = client.rename_table(table_refs[DOWN_MODEL])
 
-    added = 0
-    converted = 0
-    convert_failed = 0
     for row_id in row_ids:
-        up_row = client.get(table_refs[DOWN_MODEL], row_id)
-        assert up_row
+        down_row = client.get(rnamed_table_ref, row_id)
+        assert down_row
 
-        # 如果有新增列，需要update整个row(comp自动带默认值)
-        # 如果有删除列，也update整个row(client自动del then update)
-        # 如果有类型变更，也update整个row(client在get时已自动类型更新了)
-        client.update(table_refs[DOWN_MODEL], up_row)
-        # 迁移删除的列
+        up_row = TARGET_MODEL.empty_row_()
+
+        # 如果有新增列
+        for col in add_columns:
+            default = target_columns[col].default
+            up_row[col] = default
+
+        # 复制原有列
+        for col in target_columns:
+            up_row[col] = down_row[col]
+
+        # 如果有删除列，不用管，up_row已经不包含了
+        # 如果有类型变更，也不用管，前面在复制原有列时自动完成了
+
+        client.upsert(table_refs[DOWN_MODEL], up_row)
 
     # 删除类型变更的临时列
-    for col in type_convert_columns:
-        client.remove_column(table_refs[DOWN_MODEL], col + "__temp__")
-    ###########################################
+    client.drop_table(rnamed_table_ref)
 
+    # 更新meta
+    # version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+    # io.hset(self.meta_key(table_ref), "version", version)
+    # io.hset(self.meta_key(table_ref), "json", table_ref.comp_cls.json_)
+
+    logger.warning(
+        f"  ✔️ [💾Redis][{TARGET_MODEL.component_name_}组件] 新属性增加完成，共处理{len(row_ids)}行"
+    )
+
+
+"""
     for prop_name in target_dtypes.fields:
         # todo 删除的属性目前会遗留在redis中
         if prop_name not in from_dtypes.fields:
@@ -191,13 +198,5 @@ def upgrade(
                     convert_failed += 1
             pipe.execute()
 
-    # 更新meta
-    version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
-    io.hset(self.meta_key(table_ref), "version", version)
-    io.hset(self.meta_key(table_ref), "json", table_ref.comp_cls.json_)
-
-    logger.warning(
-        f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 新属性增加完成，共处理{len(keys)}行 * "
-        f"{added}个属性。 转换类型成功{converted}次，失败{convert_failed}次。"
-    )
     return True
+"""
