@@ -153,9 +153,10 @@ class MigrationScript:
         for comp, cluster_id in SystemClusters().get_components().items():
             # 从数据库读取老版本
             down_meta = maint.read_meta(self.ref.instance_name, comp)
-            assert down_meta, (
-                f"Component {comp} meta not found in instance {self.ref.instance_name}"
-            )
+            if not down_meta:
+                # 说明该组件是新加的，还没create table
+                continue
+
             down_comp = BaseComponent.load_json(down_meta.json)
             if comp == self.ref.comp_name:
                 continue
