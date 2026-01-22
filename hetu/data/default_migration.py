@@ -23,7 +23,8 @@ type_convert_columns = []
 
 def prepare() -> str:
     """
-    迁移前的预检查，此方法会在upgrade前多次调用，必须幂等。
+    迁移前的预检查，如果不能迁移在这报错。
+    此方法会在upgrade前多次调用，必须幂等。
 
     Returns
     -------
@@ -107,41 +108,39 @@ def prepare() -> str:
 
 def upgrade(
     row_ids: list[int],
-    table_refs: dict[type[BaseComponent], TableReference],
+    down_tables: dict[str, TableReference],
+    target_table: TableReference,
     client: TableMaintenance.MaintenanceClient,  # 负责直接写入数据的，专供迁移使用的客户端
 ) -> None:
+    """实际执行升级迁移的操作，本操作不可失败。"""
     # 一些属性信息
-    from_dtypes = DOWN_MODEL.dtypes
-    target_dtypes = TARGET_MODEL.dtypes
+    assert DOWN_MODEL.component_name_ == TARGET_MODEL.component_name_
+    table_name = DOWN_MODEL.component_name_
     target_columns = dict(TARGET_MODEL.properties_)
-    assert from_dtypes.fields and target_dtypes.fields  # for type checker
 
-    # 开始schema迁移
-    # 修改down的table名, 读取并写入到新的table
-    rnamed_table_ref = client.rename_table(table_refs[DOWN_MODEL])
+    # 修改老的table名, 老的表读完后就删除
+    renamed_down_tbl = client.rename_table(down_tables[table_name])
+    # 创建表，开始schema迁移
+    client.create_table(target_table)
 
     for row_id in row_ids:
-        down_row = client.get(rnamed_table_ref, row_id)
+        down_row = client.get(renamed_down_tbl, row_id)
         assert down_row
 
         up_row = TARGET_MODEL.empty_row_()
-
-        # 如果有新增列
-        for col in add_columns:
-            default = target_columns[col].default
-            up_row[col] = default
 
         # 复制原有列
         for col in target_columns:
             up_row[col] = down_row[col]
 
+        # 如果有新增列，不用管，empty_row_已经自动填充了默认值
         # 如果有删除列，不用管，up_row已经不包含了
         # 如果有类型变更，也不用管，前面在复制原有列时自动完成了
 
-        client.upsert(table_refs[DOWN_MODEL], up_row)
+        client.upsert(down_tables[table_name], up_row)
 
     # 删除类型变更的临时列
-    client.drop_table(rnamed_table_ref)
+    client.drop_table(renamed_down_tbl)
 
     # 更新meta
     # version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()

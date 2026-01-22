@@ -155,7 +155,7 @@ class MigrationScript:
         from ..system import SystemClusters
 
         # 加载所有Model在数据库中的版本
-        down_models = {}
+        down_tables = {}
         for comp, cluster_id in SystemClusters().get_components().items():
             # 从数据库读取老版本
             down_meta = maint.read_meta(self.ref.instance_name, comp)
@@ -165,12 +165,13 @@ class MigrationScript:
             down_comp = BaseComponent.load_json(down_meta.json)
             if comp == self.ref.comp_name:
                 continue
-            down_models[down_comp] = TableReference(
+            down_tables[down_comp.component_name_] = TableReference(
                 down_comp, self.ref.instance_name, cluster_id
             )
 
-        # 加载所有脚本
+        # 运行所有升级stack
         for module in self.loaded_upgrade_stack:
+            # 前置检查
             prepare_func = getattr(module, "prepare", None)
             upgrade_func = getattr(module, "upgrade", None)
             assert prepare_func and upgrade_func, (
@@ -182,19 +183,23 @@ class MigrationScript:
                 f"Migration script {module} must define TARGET_MODEL/DOWN_MODEL"
             )
 
-            down_models[down_model] = TableReference(
+            # 切换model到脚本中指定的版本，因为每个stack model都会升一级
+            down_tables[down_model.component_name_] = TableReference(
                 down_model, self.ref.instance_name, self.ref.cluster_id
             )
+            target_table = TableReference(
+                target_model, self.ref.instance_name, self.ref.cluster_id
+            )
 
+            # 再次执行检查看是否跳过
             status = prepare_func()
             if status == "skip":
                 continue
+
+            # 开始迁移
             logger.info(
                 f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
             )
-            upgrade_func(row_ids, down_models, maint.get_client())
-
-            del down_models[down_model]
-            down_models[target_model] = TableReference(
-                target_model, self.ref.instance_name, self.ref.cluster_id
+            upgrade_func(
+                row_ids, down_tables, target_table, maint.get_maintenance_client()
             )

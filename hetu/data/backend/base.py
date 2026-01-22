@@ -386,16 +386,20 @@ class TableMaintenance:
         参考hetu/data/default_migration.py中的用法。
         """
 
-        def __init__(self, master: BackendClient):
-            super().__init__()
-            self.client = master
+        def __init__(self, parent: TableMaintenance):
+            self.parent = parent
+            self.client = parent.client
 
         def rename_table(self, ref: TableReference) -> TableReference:
-            """重命名指定表，返回新的表引用"""
+            """在数据库中重命名指定表，返回改名后的表引用"""
             raise NotImplementedError()
 
+        def create_table(self, ref: TableReference):
+            """在数据库中创建指定表的schema"""
+            self.parent.create_table(ref)
+
         def drop_table(self, ref: TableReference):
-            """删除指定表，一般用来删除上面rename_table返回的表"""
+            """在数据库中删除指定表，一般用来删除上面rename_table返回的表"""
             raise NotImplementedError()
 
         def get(self, ref: TableReference, row_id: int) -> np.record | None:
@@ -419,7 +423,7 @@ class TableMaintenance:
             raise NotImplementedError()
 
         def upsert(self, ref: TableReference, row_data: np.record):
-            """更新指定表的一行数据，如果不存在就属于插入"""
+            """更新指定表的一行数据，如果不存在就插入"""
             raise NotImplementedError()
 
     def get_maintenance_client(self) -> MaintenanceClient:
