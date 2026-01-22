@@ -31,14 +31,18 @@
 
 """
 
+import hashlib
 import logging
+import warnings
+from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable, Literal, overload
+from typing import TYPE_CHECKING, Any, Literal, final, overload
 
 import numpy as np
 
 if TYPE_CHECKING:
     from ...common.snowflake_id import WorkerKeeper
+    from ..component import BaseComponent
     from .idmap import IdentityMap
     from .table import TableReference
 
@@ -270,7 +274,7 @@ class BackendClient:
             查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
             如果right不填写，则精确查询等于left的数据。
         limit: int
-            限制返回的行数，越少越快
+            限制返回的行数，越少越快。负数表示不限制行数。
         desc: bool
             是否降序排列
         row_format
@@ -360,62 +364,87 @@ class BackendClientFactory:
 
 class TableMaintenance:
     """
-    提供给CLI命令使用的组件表维护类。当有新表，或需要迁移时使用。
-    继承此类实现具体的维护逻辑，此类仅在CLI相关命令时才会启用。
+    组件表维护类，继承此类实现具体的维护逻辑。
+
+    服务器启动时会用check_table检查各个组件表的状态，并会调用create_table创建新表。
+
+    其他方法仅在CLI相关命令时才会启用。
     """
 
-    @staticmethod
-    def _load_migration_schema_script(
-        table_ref: TableReference, old_version: str
-    ) -> Callable | None:
-        """加载组件模型的的用户迁移脚本"""
-        # todo test
-        import hashlib
-        import importlib.util
-        import sys
-        from pathlib import Path
+    @dataclass
+    class TableMeta:
+        """组件表的meta信息结构"""
 
-        new_version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
-        migration_file = f"{table_ref.comp_name}_{old_version}_to_{new_version}.py"
-        # 组合当前目录 + maint/migration/目录 + 迁移文件名
-        script_path = Path.cwd() / "maint" / "migration" / migration_file
-        script_path = script_path.absolute()
-        if script_path.exists():
-            logger.warning(
-                f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
-                f"发现自定义迁移脚本 {script_path}，将调用脚本进行迁移..."
-            )
-            module_name = (
-                f"Migration_{table_ref.comp_name}_{old_version}_to_{new_version}"
-            )
-            spec = importlib.util.spec_from_file_location(module_name, script_path)
-            assert spec and spec.loader, "Could not load script:" + str(script_path)
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+        cluster_id: int
+        version: str
+        json: str
+        extra: dict
 
-            migration_func = getattr(module, "do_migration", None)
-            assert migration_func, "Migration script must define do_migration function"
+    def get(self, ref: TableReference, row_id: int) -> np.record | None:
+        """获取指定表的指定行数据"""
+        raise NotImplementedError
 
-            # todo 这个方法应该是，首先用老的comp_cls，把所有rows读取
-            #      然后传给do_migration，返回新的rows，然后再用hmset写回去
-            #      或者直接用commit，都不用写专门代码了
-            return migration_func
-        logger.warning(
-            f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
-            f"未发现自定义迁移脚本 {script_path}，将使用默认迁移逻辑..."
-        )
-        return None
+    def range(
+        self, ref: TableReference, index_name: str, left: Any, right: Any = None
+    ) -> list[int]:
+        """按索引范围查询指定表的数据"""
+        raise NotImplementedError
+
+    def get_all_row_id(self, ref: TableReference) -> list[int]:
+        """获取指定表的所有row id"""
+        raise NotImplementedError
+
+    def delete_row(self, ref: TableReference, row_id: int):
+        """删除指定表的指定行数据"""
+        raise NotImplementedError()
+
+    def upsert_row(self, ref: TableReference, row_data: np.record):
+        """更新指定表的一行数据，如果不存在就插入"""
+        raise NotImplementedError()
+
+    def read_meta(
+        self, instance_name: str, comp_cls: type[BaseComponent]
+    ) -> TableMeta | None:
+        """读取组件表在数据库中的meta信息，如果不存在则返回None"""
+        raise NotImplementedError
+
+    def get_lock(self):
+        """获得一个可以锁整个数据库的with锁"""
+        raise NotImplementedError
+
+    def do_create_table_(self, table_ref: TableReference) -> TableMeta:
+        """实际创建组件表的逻辑实现，返回创建后的TableMeta"""
+        raise NotImplementedError
+
+    def do_rename_table_(self, from_: TableReference, to_: TableReference) -> None:
+        """修改表名的实现，迁移组件表cluster_id用的就是这个，因为水平分片根据表名决定"""
+        raise NotImplementedError
+
+    def do_drop_table_(self, table_ref: TableReference) -> int:
+        """实际drop组件表数据的逻辑实现，返回删除的行数"""
+        raise NotImplementedError
+
+    def do_rebuild_index_(self, table_ref: TableReference) -> int:
+        """实际重建组件表索引的逻辑实现，返回重建的行数"""
+        raise NotImplementedError
+
+    # === === ===
 
     def __init__(self, master: BackendClient):
         """传入master连接的BackendClient实例"""
         self.client = master
 
-    # 检测是否需要维护的方法
-    def check_table(self, table_ref: TableReference) -> tuple[str, Any]:
+    @final
+    def check_table(self, table_ref: TableReference) -> tuple[str, TableMeta | None]:
         """
         检查组件表在数据库中的状态。
         此方法检查各个组件表的meta键值。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            传入当前版本的组件表引用，也就是最新的Component定义，最新的Cluster id。
+            这些最新引用一般通过ComponentManager获得。
 
         Returns
         -------
@@ -424,26 +453,78 @@ class TableMaintenance:
             "ok" - 表存在且状态正常
             "cluster_mismatch" - 表存在但cluster_id不匹配
             "schema_mismatch" - 表存在但schema不匹配
-        meta: Any
-            组件表的meta信息。由各个后端自行定义。直接传给migration_cluster_id和migration_schema
+        meta: TableMeta or None
+            组件表的meta信息。用于直接传给migration_cluster_id和migration_schema
         """
-        raise NotImplementedError
+        # 从数据库获取已存的组件信息
+        meta = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
+        if not meta:
+            return "not_exists", None
+        else:
+            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
+            # 如果cluster_id改变，则迁移改key名，必须先检查cluster_id
+            if meta.cluster_id != table_ref.cluster_id:
+                return "cluster_mismatch", meta
 
-    def create_table(self, table_ref: TableReference) -> Any:
+            # 如果版本不一致，组件结构可能有变化，也可能只是改权限，总之调用迁移代码
+            if meta.version != version:
+                return "schema_mismatch", meta
+
+        return "ok", meta
+
+    def create_table(self, table_ref: TableReference) -> TableMeta:
         """
         创建组件表。如果已存在，会抛出RaceCondition异常。
-        组件表的meta信息。
+        返回组件表的meta信息。
         """
-        raise NotImplementedError
+        with self.get_lock():
+            if (status := self.check_table(table_ref)[0]) != "not_exists":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
+                )
+            # 创建表
+            logger.info(
+                f"  ➖ [💾Redis][{table_ref.comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+            )
+            ret = self.do_create_table_(table_ref)
+            logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
+            return ret
 
     # 无需drop_table, 此类操作适合人工删除
 
-    def migration_cluster_id(self, table_ref: TableReference, old_meta: Any) -> None:
+    def migration_cluster_id(
+        self, table_ref: TableReference, old_meta: TableMeta
+    ) -> None:
         """迁移组件表的cluster_id"""
-        raise NotImplementedError
+        from .table import TableReference
+        from ..component import BaseComponent
+
+        with self.get_lock():
+            if (status := self.check_table(table_ref)[0]) != "cluster_mismatch":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
+                )
+            old_cluster_id = old_meta.cluster_id
+            logger.warning(
+                f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
+                f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
+                f"将尝试迁移cluster数据..."
+            )
+            # 只修改cluster_id
+            from_ref = TableReference(
+                comp_cls=BaseComponent.load_json(old_meta.json),
+                instance_name=table_ref.instance_name,
+                cluster_id=old_cluster_id,
+            )
+            to_ref = TableReference(
+                comp_cls=from_ref.comp_cls,
+                instance_name=from_ref.instance_name,
+                cluster_id=table_ref.cluster_id,
+            )
+            return self.do_rename_table_(from_ref, to_ref)
 
     def migration_schema(
-        self, table_ref: TableReference, old_meta: Any, force=False
+        self, app_file: str, table_ref: TableReference, old_meta: TableMeta, force=False
     ) -> bool:
         """
         迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
@@ -454,18 +535,64 @@ class TableMaintenance:
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
-        raise NotImplementedError
+        with self.get_lock():
+            if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
+                )
+            from ..migration import MigrationScript
+
+            migrator = MigrationScript(app_file, table_ref, old_meta)
+
+            # 准备和检测
+            status = migrator.prepare()
+            if status == "unsafe":
+                if not force:
+                    return False
+            elif status == "skip":
+                return True
+
+            # 获取所有row id
+            row_ids = self.get_all_row_id(table_ref)
+            migrator.upgrade(row_ids, self)
+            return True
 
     def flush(self, table_ref: TableReference, force=False) -> None:
         """
         清空易失性组件表数据，force为True时强制清空任意组件表。
         注意：此操作会删除所有数据！
         """
-        raise NotImplementedError
+        if force:
+            warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
+
+        # 如果非持久化组件，则允许调用flush主动清空数据
+        if table_ref.comp_cls.volatile_ or force:
+            logger.info(
+                f"⌚ [💾Redis][{table_ref.comp_name}组件] 对非持久化组件flush清空数据中..."
+            )
+
+            with self.get_lock():
+                count = self.do_drop_table_(table_ref)
+                self.do_create_table_(table_ref)
+
+            logger.info(f"✅ [💾Redis][{table_ref.comp_name}组件] 已删除{count}个键值")
+        else:
+            raise ValueError(f"{table_ref.comp_name}是持久化组件，不允许flush操作")
 
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
-        raise NotImplementedError
+        logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
+        with self.get_lock():
+            count = self.do_rebuild_index_(table_ref)
+            if count == 0:
+                logger.info(
+                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 无数据，无需重建索引。"
+                )
+            else:
+                logger.info(
+                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 索引重建完成, "
+                    f"{count}行 * {len(table_ref.comp_cls.indexes_)}个索引。"
+                )
 
 
 # === === === === === === 数据订阅 === === === === === ===

@@ -30,4 +30,6 @@ class ContextFilter(logging.Filter):
         # todo 使用 sentence-transformers 库中的轻量级模型（如 all-MiniLM-L6-v2）
         #      通过向量对照寻找对应的翻译对照表翻译
         #      并cache结果，如果向量差距过大，显示警告对照表改变。
+        #      对于文本中的变量如路径这类，可以考虑用语义对齐，把原文和对照翻译做单词对齐，
+        #      然后用对齐表直接替换输出，找不到的词往往就是变量不用翻译。
         return True

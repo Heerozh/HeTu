@@ -6,8 +6,8 @@ import pytest
 from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, Subscriptions
-from hetu.data.backend.sub import IndexSubscription, RowSubscription
+from hetu.data.backend import Backend
+from hetu.data.sub import IndexSubscription, RowSubscription, Subscriptions
 
 SnowflakeID().init(1, 0)
 
@@ -15,7 +15,6 @@ SnowflakeID().init(1, 0)
 @pytest.fixture
 async def sub_mgr(mod_auto_backend) -> AsyncGenerator[Subscriptions]:
     """初始化订阅管理器的fixture"""
-    from hetu.data.backend import Subscriptions
 
     # 初始化订阅器
     sub_mgr = Subscriptions(mod_auto_backend("main"))

@@ -90,7 +90,7 @@ def start_backends(app: Sanic):
     if not all_table_ok:
         msg = (
             "❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令："
-            "hetu migrate --config <your_config_file>.yml"
+            "hetu upgrade --config <your_config_file>.yml"
         )
         logger.error(msg)
         raise RuntimeError(msg)

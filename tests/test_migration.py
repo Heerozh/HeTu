@@ -7,6 +7,7 @@
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -15,6 +16,13 @@ SnowflakeID().init(1, 0)
 
 
 async def test_migration_unique_violation(filled_item_ref, caplog):
+    # 假app文件
+    import shutil
+
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    # 清理logs目录下所有maint文件
+    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+
     # 测试自动迁移
     backend = filled_item_ref.backend
 
@@ -58,16 +66,24 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
 
     # 有qty删除，不能迁移
     caplog.clear()
-    assert not maint.migration_schema(new_table, old_meta)
+
+    assert not maint.migration_schema(test_app_file, new_table, old_meta)
     assert "丢弃" in caplog.text
 
     # item.name是U4截断，导致unique违反，不能迁移
     with pytest.raises(RuntimeError, match="unique"):
-        maint.migration_schema(new_table, old_meta, force=True)
+        maint.migration_schema(test_app_file, new_table, old_meta, force=True)
         maint.rebuild_index(new_table)
 
 
 async def test_auto_migration(filled_item_ref, caplog):
+    # 假app文件
+    import shutil
+
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    # 清理logs目录下所有maint文件
+    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+
     # 测试自动迁移
     backend = filled_item_ref.backend
 
@@ -85,7 +101,7 @@ async def test_auto_migration(filled_item_ref, caplog):
     class ItemNew(BaseComponent):
         owner: np.int64 = property_field(0, unique=False, index=True)
         model: np.int32 = property_field(0, unique=False, index=True)
-        qty_new: np.int16 = property_field(111, unique=False, index=False)
+        qty_new: np.int16 = property_field(111, unique=False, index=True)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
         name: "U4" = property_field("", unique=False, index=True)
@@ -110,12 +126,11 @@ async def test_auto_migration(filled_item_ref, caplog):
     assert tbl_status == "cluster_mismatch" or tbl_status == "schema_mismatch"
 
     maint.migration_cluster_id(new_table, old_meta)
-    maint.migration_schema(new_table, old_meta, force=True)
-    maint.rebuild_index(new_table)
+    maint.migration_schema(test_app_file, new_table, old_meta, force=True)
 
     assert "qty 在新的组件定义中不存在" in caplog.text
     assert "多出属性 qty_new" in caplog.text
-    assert "25行 * 1个属性" in caplog.text
+    assert "25行" in caplog.text
 
     # 检测跨cluster报错
     renamed_new_item_cls.hosted_ = new_table
@@ -128,6 +143,8 @@ async def test_auto_migration(filled_item_ref, caplog):
         assert (await repo.get(time=111)).name == "Itm1"
         assert (await repo.get(time=111)).qty_new == 111
         assert (await repo.get(time=111)).qty_new == 111
+
+        assert (await repo.range(qty_new=(111, 112), limit=99)).shape[0] == 25
 
         assert (await repo.get(name="Itm3")).name == "Itm3"
         # 截断后有重复值了

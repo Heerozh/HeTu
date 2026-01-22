@@ -32,7 +32,10 @@ class Property:
     unique: bool = False  # 是否是字典索引 (此项优先级高于index，查询速度高)
     index: bool = False  # 是否是排序索引
     dtype: str | type = ""  # 数据类型，最好用np的明确定义
-    # todo nullable: bool = False  # 是否允许NULL值，目前不支持
+    # nullable说明：
+    # Component表现为c-struct like的数据，因此值不能为null，也无法判断值是否有被设置过
+    # 因此nullable是无法实现的。hetu本身的理念是细化Component，所以如果有nullable需求的
+    # 列，可以单独拆分成一个Component来存储，然后用owner来关联。
 
 
 # 辅助函数，过滤类型检查器报错
@@ -51,7 +54,7 @@ class BaseComponent:
     # -------------------------------定义部分-------------------------------
     properties_: list[tuple[str, Property]] = []  # Ordered属性列表
     component_name_: str
-    namespace_: str | None = None
+    namespace_: str
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
     volatile_: bool = False  # 易失标记，此标记的Component每次维护会清空数据
@@ -158,10 +161,13 @@ class BaseComponent:
         return comp
 
     @classmethod
-    def new_row(cls) -> np.record:
+    def new_row(cls, id_=None) -> np.record:
         """返回空数据行，id生成uuid，用于insert"""
         row = cast(np.record, cls.default_row[0].copy())
-        row.id = SNOWFLAKE_ID.next_id()
+        if id_:
+            row.id = id_
+        else:
+            row.id = SNOWFLAKE_ID.next_id()
         return row
 
     @classmethod
