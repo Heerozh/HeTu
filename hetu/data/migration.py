@@ -5,18 +5,18 @@
 @email: heeroz@gmail.com
 """
 
-import logging
 import hashlib
+import importlib.util
+import logging
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
-import importlib.util
-import sys
 
 from hetu.data import BaseComponent
 
+from .backend.table import TableReference
 
 if TYPE_CHECKING:
-    from .backend.table import TableReference
     from .backend.base import TableMaintenance
 
 logger = logging.getLogger("HeTu.root")
@@ -24,26 +24,19 @@ logger = logging.getLogger("HeTu.root")
 
 class MigrationScript:
     """
-    迁移脚本类。
+    迁移脚本版本管理类，自动读取Schema升级脚本，从低版本一层层升级上来。
+    如果未找到迁移脚本，则会生成默认迁移脚本，管理员可以根据需要修改脚本内容后再执行迁移操作。
 
-    使用方法(使用前需要全局锁)：
-    with db.lock_all_tables():
-        old_meta = db.read_table_meta(table_ref)
-
-        migrator = MigrationScript(app_file, table_ref, old_meta)
-        status = migrator.prepare()
-        if status == "skip":
-            return
-        migrator.upgrade()
     """
 
     @staticmethod
-    def _load_schema_migration_script(table_ref, file):
+    def _load_schema_migration_script(table_ref, file: Path):
+        """import script.py"""
         logger.warning(
             f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
             f"发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
         )
-        module_name = file
+        module_name = str(file)
         spec = importlib.util.spec_from_file_location(module_name, file)
         assert spec and spec.loader, "Could not load script:" + str(file)
         module = importlib.util.module_from_spec(spec)
@@ -83,8 +76,8 @@ class MigrationScript:
         with open(template_path, "r", encoding="utf-8") as f:
             template = f.read()
         # 替换模板中的占位符
-        template = template.replace("<TARGET_JSON>", f"{target_model.json_}")
-        template = template.replace("<DOWN_JSON>", down_model_json)
+        template = template.replace('<"TARGET_JSON">', f"{target_model.json_}")
+        template = template.replace('<"DOWN_JSON">', down_model_json)
         # 写入新脚本
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(template)
@@ -200,6 +193,4 @@ class MigrationScript:
             logger.info(
                 f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
             )
-            upgrade_func(
-                row_ids, down_tables, target_table, maint.get_maintenance_client()
-            )
+            upgrade_func(row_ids, down_tables, target_table, maint)

@@ -366,7 +366,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self._async_ios = []
 
     @staticmethod
-    def _row_decode(
+    def row_decode_(
         comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         """将redis获取的行byte数据解码为指定格式"""
@@ -448,12 +448,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key = self.row_key(table_ref, row_id)
         aio = self.aio  # self._batched_aio
         if row := await aio.hgetall(key):  # type: ignore
-            return self._row_decode(table_ref.comp_cls, row, row_format)
+            return self.row_decode_(table_ref.comp_cls, row, row_format)
         else:
             return None
 
     @classmethod
-    def _range_normalize(
+    def range_normalize_(
         cls,
         dtype: np.dtype,
         left: int | float | str | bytes | bool,
@@ -509,6 +509,18 @@ class RedisBackendClient(BackendClient, alias="redis"):
         b_left = b"[" + cls.to_sortable_bytes(dtype.type(left)) + ls
         b_right = b"[" + cls.to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right
+
+    @staticmethod
+    def make_zrange_cmd_(b_left, b_right, desc, limit):
+        return {
+            "start": b_left,
+            "end": b_right,
+            "desc": desc,
+            "offset": 0,
+            "num": limit,
+            "bylex": True,
+            "byscore": False,
+        }
 
     @overload
     async def range(
@@ -632,28 +644,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
         assert index_name in comp_cls.indexes_
-        b_left, b_right = self._range_normalize(
-            comp_cls.dtype_map_[index_name],
-            left,
-            right,
-            desc,
+        b_left, b_right = self.range_normalize_(
+            comp_cls.dtype_map_[index_name], left, right, desc
         )
         assert (b_left >= b_right) if desc else (b_right >= b_left), (
             f"left必须大于等于right，你的:right={right}, left={left}"
         )
 
-        # 对于str类型查询，要用bylex
-        cmds = {
-            "start": b_left,
-            "end": b_right,
-            "desc": desc,
-            "offset": 0,
-            "num": limit,
-            "bylex": True,
-            "byscore": False,
-        }
-
-        row_ids = await aio.zrange(name=idx_key, **cmds)
+        row_ids = await aio.zrange(
+            name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
+        )
         row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
 
         if row_format == RowFormat.ID_LIST:
@@ -663,7 +663,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         rows = []
         for _id in row_ids:
             if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
-                rows.append(self._row_decode(comp_cls, row, row_format))
+                rows.append(self.row_decode_(comp_cls, row, row_format))
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
             return cast(list[dict[str, Any]], rows)

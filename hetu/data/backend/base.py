@@ -33,11 +33,10 @@
 
 import hashlib
 import logging
-import asyncio
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, final, overload
-import warnings
 
 import numpy as np
 
@@ -383,15 +382,13 @@ class TableMaintenance:
 
     def get(self, ref: TableReference, row_id: int) -> np.record | None:
         """获取指定表的指定行数据"""
-        return asyncio.run(self.client.get(ref, row_id, row_format=RowFormat.STRUCT))
+        raise NotImplementedError
 
     def range(
         self, ref: TableReference, index_name: str, left: Any, right: Any = None
-    ) -> np.recarray:
+    ) -> list[int]:
         """按索引范围查询指定表的数据"""
-        return asyncio.run(
-            self.client.range(ref, index_name, left, right, -1, False, RowFormat.STRUCT)
-        )
+        raise NotImplementedError
 
     def get_all_row_id(self, ref: TableReference) -> list[int]:
         """获取指定表的所有row id"""

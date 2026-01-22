@@ -1,14 +1,15 @@
-import numpy as np
-from hetu import BaseComponent
 import logging
 
+import numpy as np
+
+from hetu import BaseComponent
 from hetu.data.backend import TableReference
 from hetu.data.backend.base import TableMaintenance
 
 logger = logging.getLogger("HeTu.root")
 
-down_model_json = r"<DOWN_JSON>"
-target_model_json = r"<TARGET_JSON>"
+down_model_json = r'<"DOWN_JSON">'
+target_model_json = r'<"TARGET_JSON">'
 # 设置导出模块变量，表示迁移的源和目标模型
 TARGET_MODEL = BaseComponent.load_json(target_model_json)
 DOWN_MODEL = BaseComponent.load_json(down_model_json)
@@ -110,18 +111,23 @@ def upgrade(
     row_ids: list[int],
     down_tables: dict[str, TableReference],
     target_table: TableReference,
-    client: TableMaintenance.MaintenanceClient,  # 负责直接写入数据的，专供迁移使用的客户端
+    client: TableMaintenance,  # 负责直接写入数据的，专供迁移使用的客户端
 ) -> None:
     """实际执行升级迁移的操作，本操作不可失败。"""
     # 一些属性信息
     assert DOWN_MODEL.component_name_ == TARGET_MODEL.component_name_
     table_name = DOWN_MODEL.component_name_
     target_columns = dict(TARGET_MODEL.properties_)
+    down_table = down_tables[table_name]
 
     # 修改老的table名, 老的表读完后就删除
-    renamed_down_tbl = client.rename_table(down_tables[table_name])
+    renamed_down_model = DOWN_MODEL.duplicate(DOWN_MODEL.namespace_, "__temp__")
+    renamed_down_tbl = TableReference(
+        renamed_down_model, down_table.instance_name, down_table.cluster_id
+    )
+    client.do_rename_table_(down_table, renamed_down_tbl)
     # 创建表，开始schema迁移
-    client.create_table(target_table)
+    client.do_create_table_(target_table)
 
     for row_id in row_ids:
         down_row = client.get(renamed_down_tbl, row_id)
@@ -137,65 +143,11 @@ def upgrade(
         # 如果有删除列，不用管，up_row已经不包含了
         # 如果有类型变更，也不用管，前面在复制原有列时自动完成了
 
-        client.upsert(down_tables[table_name], up_row)
+        client.upsert_row(target_table, up_row)
 
-    # 删除类型变更的临时列
-    client.drop_table(renamed_down_tbl)
-
-    # 更新meta
-    # version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
-    # io.hset(self.meta_key(table_ref), "version", version)
-    # io.hset(self.meta_key(table_ref), "json", table_ref.comp_cls.json_)
+    # 删除老的表
+    client.do_drop_table_(renamed_down_tbl)
 
     logger.warning(
         f"  ✔️ [💾Redis][{TARGET_MODEL.component_name_}组件] 新属性增加完成，共处理{len(row_ids)}行"
     )
-
-
-"""
-    for prop_name in target_dtypes.fields:
-        # todo 删除的属性目前会遗留在redis中
-        if prop_name not in from_dtypes.fields:
-            default = target_props[prop_name].default
-            pipe = io.pipeline()
-            for key in keys:
-                pipe.hset(key.decode(), prop_name, default)
-            pipe.execute()
-            added += 1
-        elif force:  # 类型转换
-            old_type = from_dtypes.fields[prop_name][0]
-            new_type = target_dtypes.fields[prop_name][0]
-            if old_type == new_type:
-                continue
-            default = props[prop_name].default
-            pipe = io.pipeline()
-            for key in keys:
-                val = io.hget(key.decode(), prop_name)
-                if val is None:
-                    continue
-                try:
-                    val = cast(bytes, cast(object, val))
-                    casted_val = new_type.type(old_type.type(val.decode()))
-
-                    if np.issubdtype(new_type, np.character):
-                        # 字符串类型需要特殊截断处理，不然np会自动延长
-                        def fixed_str_len(dt: np.dtype) -> int:
-                            dt = np.dtype(dt)
-                            if dt.kind == "U":
-                                return dt.itemsize // 4
-                            if dt.kind == "S":
-                                return dt.itemsize
-                            raise TypeError(f"not a fixed-length string dtype: {dt!r}")
-
-                        casted_val = casted_val[: fixed_str_len(new_type)]
-
-                    pipe.hset(key.decode(), prop_name, str(casted_val))
-                    converted += 1
-                except ValueError as _:
-                    # 强制模式下丢弃该属性
-                    pipe.hset(key.decode(), prop_name, default)
-                    convert_failed += 1
-            pipe.execute()
-
-    return True
-"""

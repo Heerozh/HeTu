@@ -7,6 +7,7 @@
 
 import numpy as np
 import pytest
+from pathlib import Path
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -58,12 +59,18 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
 
     # 有qty删除，不能迁移
     caplog.clear()
-    assert not maint.migration_schema(new_table, old_meta)
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    # 清理logs目录下所有maint文件
+    import shutil
+
+    shutil.rmtree(test_app_file.parent / "maint")
+
+    assert not maint.migration_schema(test_app_file, new_table, old_meta)
     assert "丢弃" in caplog.text
 
     # item.name是U4截断，导致unique违反，不能迁移
     with pytest.raises(RuntimeError, match="unique"):
-        maint.migration_schema(new_table, old_meta, force=True)
+        maint.migration_schema(test_app_file, new_table, old_meta, force=True)
         maint.rebuild_index(new_table)
 
 

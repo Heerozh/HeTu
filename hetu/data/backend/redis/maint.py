@@ -7,15 +7,14 @@
 
 import hashlib
 import logging
-import warnings
-from typing import TYPE_CHECKING, cast, final, override
+from typing import TYPE_CHECKING, cast, final, override, Any
 
 import numpy as np
 from redis.cluster import RedisCluster
 
 from ....common.helper import batched
 from ...component import BaseComponent
-from ..base import TableMaintenance
+from ..base import RowFormat, TableMaintenance
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -45,6 +44,39 @@ class RedisTableMaintenance(TableMaintenance):
         from .client import RedisBackendClient
 
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
+
+    def get(self, ref: TableReference, row_id: int) -> np.record | None:
+        """获取指定表的指定行数据"""
+        key = self.client.row_key(ref, row_id)
+        io = self.client.io
+        if row := io.hgetall(key):  # type: ignore
+            return self.client.row_decode_(ref.comp_cls, row, RowFormat.STRUCT)
+        return None
+
+    def range(
+        self,
+        ref: TableReference,
+        index_name: str,
+        left: Any,
+        right: Any = None,
+        limit: int = 10,
+    ) -> list[int]:
+        """按索引范围查询指定表的数据"""
+        idx_key = self.client.index_key(ref, index_name)
+        io = self.client.io
+
+        # 生成zrange命令
+        comp_cls = ref.comp_cls
+        assert index_name in comp_cls.indexes_
+        b_left, b_right = self.client.range_normalize_(
+            comp_cls.dtype_map_[index_name], left, right, False
+        )
+
+        row_ids = io.zrange(
+            name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
+        )
+        row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
+        return row_ids
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -96,6 +128,11 @@ class RedisTableMaintenance(TableMaintenance):
             cluster_id=int(meta[b"cluster_id"]),
             extra={},
         )
+
+    @override
+    def get_lock(self):
+        """获得一个可以锁整个数据库的with锁"""
+        return self.lock
 
     def __init__(self, master: RedisBackendClient):
         super().__init__(master)
