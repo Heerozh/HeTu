@@ -6,6 +6,7 @@ omit =
     site-packages/*
     hetu/cli/*
     hetu/safelogging/*
+    hetu/data/default_migration.py
 
 [html]
 directory = coverage
