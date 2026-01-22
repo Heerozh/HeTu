@@ -137,14 +137,14 @@ def upgrade(
         down_row = client.get(renamed_down_tbl, row_id)
         assert down_row
 
-        up_row = TARGET_COMPONENT_MODEL.empty_row_()
+        up_row = TARGET_COMPONENT_MODEL.new_row(down_row.id)
 
         # 复制共有列
         for col in target_columns:
             if col in down_columns:
                 up_row[col] = down_row[col]
 
-        # 如果有新增列，不用管，empty_row_已经自动填充了默认值
+        # 如果有新增列，不用管，new_row已经自动填充了默认值
         # 如果有删除列，不用管，up_row已经不包含了
         # 如果有类型变更，也不用管，前面在复制共有列时自动完成了
 
