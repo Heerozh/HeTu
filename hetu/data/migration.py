@@ -148,7 +148,7 @@ class MigrationScript:
         """执行迁移操作，注意执行前需要锁定整个数据库，防止多个worker同时执行。"""
         from ..system import SystemClusters
 
-        # 加载所有Model在数据库中的版本
+        # 加载所有component在数据库中的版本
         down_tables = {}
         for comp, cluster_id in SystemClusters().get_components().items():
             # 从数据库读取老版本
@@ -171,10 +171,11 @@ class MigrationScript:
             assert prepare_func and upgrade_func, (
                 f"Migration script {module} must define prepare/upgrade function"
             )
-            target_model = getattr(module, "TARGET_MODEL", None)
-            down_model = getattr(module, "DOWN_MODEL", None)
+            target_model = getattr(module, "TARGET_COMPONENT_MODEL", None)
+            down_model = getattr(module, "DOWN_COMPONENT_MODEL", None)
             assert target_model and down_model, (
-                f"Migration script {module} must define TARGET_MODEL/DOWN_MODEL"
+                f"Migration script {module} must define "
+                f"TARGET_COMPONENT_MODEL/DOWN_COMPONENT_MODEL"
             )
 
             # 切换model到脚本中指定的版本，因为每个stack model都会升一级

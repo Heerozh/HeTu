@@ -8,11 +8,11 @@ from hetu.data.backend.base import TableMaintenance
 
 logger = logging.getLogger("HeTu.root")
 
-down_model_json = r'<"DOWN_JSON">'
-target_model_json = r'<"TARGET_JSON">'
+down_component_json = r'<"DOWN_JSON">'
+target_component_json = r'<"TARGET_JSON">'
 # 设置导出模块变量，表示迁移的源和目标模型
-TARGET_MODEL = BaseComponent.load_json(target_model_json)
-DOWN_MODEL = BaseComponent.load_json(down_model_json)
+TARGET_COMPONENT_MODEL = BaseComponent.load_json(target_component_json)
+DOWN_COMPONENT_MODEL = BaseComponent.load_json(down_component_json)
 
 
 # 默认迁移脚本用变量
@@ -34,10 +34,10 @@ def prepare() -> str:
         - "unsafe": 本迁移代码是有损迁移，需要用force指令手动迁移。
         - "ok": 可以安全迁移。
     """
-    name = TARGET_MODEL.component_name_
+    name = TARGET_COMPONENT_MODEL.component_name_
     # 检查是否无变更
-    down_dtypes = DOWN_MODEL.dtypes
-    target_dtypes = TARGET_MODEL.dtypes
+    down_dtypes = DOWN_COMPONENT_MODEL.dtypes
+    target_dtypes = TARGET_COMPONENT_MODEL.dtypes
     if down_dtypes == target_dtypes:
         return "skip"
 
@@ -84,7 +84,7 @@ def prepare() -> str:
 
     # 检查新增的属性是否有默认值
     # todo nullable属性的处理
-    target_props = dict(TARGET_MODEL.properties_)
+    target_props = dict(TARGET_COMPONENT_MODEL.properties_)
     for target_column in target_columns:
         if target_column not in down_columns:
             add_columns.append(target_column)
@@ -115,16 +115,20 @@ def upgrade(
 ) -> None:
     """实际执行升级迁移的操作，本操作不可失败。"""
     # 一些属性信息
-    assert DOWN_MODEL.component_name_ == TARGET_MODEL.component_name_
-    table_name = DOWN_MODEL.component_name_
-    target_columns = dict(TARGET_MODEL.properties_)
-    down_columns = dict(DOWN_MODEL.properties_)
+    assert (
+        DOWN_COMPONENT_MODEL.component_name_ == TARGET_COMPONENT_MODEL.component_name_
+    )
+    table_name = DOWN_COMPONENT_MODEL.component_name_
+    target_columns = dict(TARGET_COMPONENT_MODEL.properties_)
+    down_columns = dict(DOWN_COMPONENT_MODEL.properties_)
     down_table = down_tables[table_name]
 
     # 修改老的table名, 老的表读完后就删除
-    renamed_down_model = DOWN_MODEL.duplicate(DOWN_MODEL.namespace_, "__temp__")
+    renamed_down_component = DOWN_COMPONENT_MODEL.duplicate(
+        DOWN_COMPONENT_MODEL.namespace_, "__temp__"
+    )
     renamed_down_tbl = TableReference(
-        renamed_down_model, down_table.instance_name, down_table.cluster_id
+        renamed_down_component, down_table.instance_name, down_table.cluster_id
     )
     client.do_rename_table_(down_table, renamed_down_tbl)
     # 创建表，开始schema迁移
@@ -134,7 +138,7 @@ def upgrade(
         down_row = client.get(renamed_down_tbl, row_id)
         assert down_row
 
-        up_row = TARGET_MODEL.empty_row_()
+        up_row = TARGET_COMPONENT_MODEL.empty_row_()
 
         # 复制共有列
         for col in target_columns:
