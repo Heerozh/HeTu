@@ -101,7 +101,7 @@ async def test_auto_migration(filled_item_ref, caplog):
     class ItemNew(BaseComponent):
         owner: np.int64 = property_field(0, unique=False, index=True)
         model: np.int32 = property_field(0, unique=False, index=True)
-        qty_new: np.int16 = property_field(111, unique=False, index=False)
+        qty_new: np.int16 = property_field(111, unique=False, index=True)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
         name: "U4" = property_field("", unique=False, index=True)
@@ -127,7 +127,6 @@ async def test_auto_migration(filled_item_ref, caplog):
 
     maint.migration_cluster_id(new_table, old_meta)
     maint.migration_schema(test_app_file, new_table, old_meta, force=True)
-    maint.rebuild_index(new_table)
 
     assert "qty 在新的组件定义中不存在" in caplog.text
     assert "多出属性 qty_new" in caplog.text
@@ -144,6 +143,8 @@ async def test_auto_migration(filled_item_ref, caplog):
         assert (await repo.get(time=111)).name == "Itm1"
         assert (await repo.get(time=111)).qty_new == 111
         assert (await repo.get(time=111)).qty_new == 111
+
+        assert (await repo.range(qty_new=(111, 112), limit=99)).shape[0] == 25
 
         assert (await repo.get(name="Itm3")).name == "Itm3"
         # 截断后有重复值了

@@ -198,3 +198,5 @@ class MigrationScript:
             logger.warning(
                 f"  ✔️ [💾Redis][{self.ref.comp_name}组件] Schema升级迁移完成，共处理{len(row_ids)}行"
             )
+            maint.do_rebuild_index_(target_table)
+            logger.warning(f"  ✔️ [💾Redis][{self.ref.comp_name}组件] 已重建Index")
