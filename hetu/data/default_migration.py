@@ -118,6 +118,7 @@ def upgrade(
     assert DOWN_MODEL.component_name_ == TARGET_MODEL.component_name_
     table_name = DOWN_MODEL.component_name_
     target_columns = dict(TARGET_MODEL.properties_)
+    down_columns = dict(DOWN_MODEL.properties_)
     down_table = down_tables[table_name]
 
     # 修改老的table名, 老的表读完后就删除
@@ -135,9 +136,10 @@ def upgrade(
 
         up_row = TARGET_MODEL.empty_row_()
 
-        # 复制原有列
+        # 复制共有列
         for col in target_columns:
-            up_row[col] = down_row[col]
+            if col in down_columns:
+                up_row[col] = down_row[col]
 
         # 如果有新增列，不用管，empty_row_已经自动填充了默认值
         # 如果有删除列，不用管，up_row已经不包含了
@@ -147,7 +149,3 @@ def upgrade(
 
     # 删除老的表
     client.do_drop_table_(renamed_down_tbl)
-
-    logger.warning(
-        f"  ✔️ [💾Redis][{TARGET_MODEL.component_name_}组件] 新属性增加完成，共处理{len(row_ids)}行"
-    )

@@ -10,6 +10,7 @@ import importlib.util
 import logging
 import sys
 from pathlib import Path
+from types import ModuleType
 from typing import TYPE_CHECKING
 
 from hetu.data import BaseComponent
@@ -87,7 +88,7 @@ class MigrationScript:
         )
         return script_path
 
-    def _load_scripts(self):
+    def _load_scripts(self) -> list[ModuleType]:
         return [
             self._load_schema_migration_script(self.ref, file)
             for file in self.upgrade_stack
@@ -101,7 +102,7 @@ class MigrationScript:
     ):
         self.upgrade_stack = []
         self.ref = table_ref
-        self.loaded_upgrade_stack = []
+        self.loaded_upgrade_stack: list[ModuleType] = []
         # 读取table迁移脚本
         # 首先看old_meta里的版本号，然后搜索该版本号开头的文件
         old_version = old_meta.version
@@ -194,3 +195,6 @@ class MigrationScript:
                 f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
             )
             upgrade_func(row_ids, down_tables, target_table, maint)
+            logger.warning(
+                f"  ✔️ [💾Redis][{self.ref.comp_name}组件] Schema升级迁移完成，共处理{len(row_ids)}行"
+            )

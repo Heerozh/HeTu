@@ -166,12 +166,12 @@ class RedisTableMaintenance(TableMaintenance):
 
         io = self.client.io
         from_keys = io.keys(
-            from_prefix + ":*",
+            from_prefix + "*",
             target_nodes=RedisCluster.PRIMARIES,
         )
         from_keys = cast(list[bytes], from_keys)
-        for from_key in from_keys:
-            from_key = from_key.decode()
+        for b_from_key in from_keys:
+            from_key = b_from_key.decode()
             to_key = to_prefix + from_key[from_prefix_len:]
             dump_data = cast(bytes, io.dump(from_key))
             ttl = cast(float, io.pttl(from_key))
