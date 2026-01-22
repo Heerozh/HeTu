@@ -478,9 +478,9 @@ class TableMaintenance:
         返回组件表的meta信息。
         """
         with self.get_lock():
-            if self.check_table(table_ref)[0] != "not_exists":
+            if (status := self.check_table(table_ref)[0]) != "not_exists":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已存在，无法创建。"
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
                 )
             # 创建表
             logger.info(
@@ -496,10 +496,13 @@ class TableMaintenance:
         self, table_ref: TableReference, old_meta: TableMeta
     ) -> None:
         """迁移组件表的cluster_id"""
+        from .table import TableReference
+        from ..component import BaseComponent
+
         with self.get_lock():
-            if self.check_table(table_ref)[0] != "cluster_mismatch":
+            if (status := self.check_table(table_ref)[0]) != "cluster_mismatch":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过簇id。"
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
                 )
             old_cluster_id = old_meta.cluster_id
             logger.warning(
@@ -507,12 +510,18 @@ class TableMaintenance:
                 f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
                 f"将尝试迁移cluster数据..."
             )
+            # 只修改cluster_id
             from_ref = TableReference(
-                comp_cls=table_ref.comp_cls,
+                comp_cls=BaseComponent.load_json(old_meta.json),
                 instance_name=table_ref.instance_name,
                 cluster_id=old_cluster_id,
             )
-            return self.do_rename_table_(from_ref, table_ref)
+            to_ref = TableReference(
+                comp_cls=from_ref.comp_cls,
+                instance_name=from_ref.instance_name,
+                cluster_id=table_ref.cluster_id,
+            )
+            return self.do_rename_table_(from_ref, to_ref)
 
     def migration_schema(
         self, app_file: str, table_ref: TableReference, old_meta: TableMeta, force=False
@@ -527,9 +536,9 @@ class TableMaintenance:
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
         with self.get_lock():
-            if self.check_table(table_ref)[0] != "schema_mismatch":
+            if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
+                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
                 )
             from ..migration import MigrationScript
 

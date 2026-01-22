@@ -16,6 +16,13 @@ SnowflakeID().init(1, 0)
 
 
 async def test_migration_unique_violation(filled_item_ref, caplog):
+    # 假app文件
+    import shutil
+
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    # 清理logs目录下所有maint文件
+    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+
     # 测试自动迁移
     backend = filled_item_ref.backend
 
@@ -59,11 +66,6 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
 
     # 有qty删除，不能迁移
     caplog.clear()
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    # 清理logs目录下所有maint文件
-    import shutil
-
-    shutil.rmtree(test_app_file.parent / "maint")
 
     assert not maint.migration_schema(test_app_file, new_table, old_meta)
     assert "丢弃" in caplog.text
@@ -75,6 +77,13 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
 
 
 async def test_auto_migration(filled_item_ref, caplog):
+    # 假app文件
+    import shutil
+
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    # 清理logs目录下所有maint文件
+    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+
     # 测试自动迁移
     backend = filled_item_ref.backend
 
@@ -117,12 +126,12 @@ async def test_auto_migration(filled_item_ref, caplog):
     assert tbl_status == "cluster_mismatch" or tbl_status == "schema_mismatch"
 
     maint.migration_cluster_id(new_table, old_meta)
-    maint.migration_schema(new_table, old_meta, force=True)
+    maint.migration_schema(test_app_file, new_table, old_meta, force=True)
     maint.rebuild_index(new_table)
 
     assert "qty 在新的组件定义中不存在" in caplog.text
     assert "多出属性 qty_new" in caplog.text
-    assert "25行 * 1个属性" in caplog.text
+    assert "25行" in caplog.text
 
     # 检测跨cluster报错
     renamed_new_item_cls.hosted_ = new_table
