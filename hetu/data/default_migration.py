@@ -83,7 +83,6 @@ def prepare() -> str:
                     unsafe_convert_columns.append(target_column)
 
     # 检查新增的属性是否有默认值
-    # todo nullable属性的处理
     target_props = dict(TARGET_COMPONENT_MODEL.properties_)
     for target_column in target_columns:
         if target_column not in down_columns:
