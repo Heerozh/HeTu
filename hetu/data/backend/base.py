@@ -37,6 +37,7 @@ import asyncio
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, final, overload
+import warnings
 
 import numpy as np
 
@@ -368,7 +369,7 @@ class TableMaintenance:
 
     服务器启动时会用check_table检查各个组件表的状态，并会调用create_table创建新表。
 
-    其他方法仅在CLI相关命令时才会启用。其中MaintenanceClient是专门给Schema迁移脚本使用的数据库直接操作客户端。
+    其他方法仅在CLI相关命令时才会启用。
     """
 
     @dataclass
@@ -380,61 +381,57 @@ class TableMaintenance:
         json: str
         extra: dict
 
-    class MaintenanceClient:
-        """
-        只给Schema迁移脚本使用的客户端，直接操作数据库，无需考虑事务和index更新。
-        参考hetu/data/default_migration.py中的用法。
-        """
+    def get(self, ref: TableReference, row_id: int) -> np.record | None:
+        """获取指定表的指定行数据"""
+        return asyncio.run(self.client.get(ref, row_id, row_format=RowFormat.STRUCT))
 
-        def __init__(self, parent: TableMaintenance):
-            self.parent = parent
-            self.client = parent.client
+    def range(
+        self, ref: TableReference, index_name: str, left: Any, right: Any = None
+    ) -> np.recarray:
+        """按索引范围查询指定表的数据"""
+        return asyncio.run(
+            self.client.range(ref, index_name, left, right, -1, False, RowFormat.STRUCT)
+        )
 
-        def rename_table(self, ref: TableReference) -> TableReference:
-            """在数据库中重命名指定表，返回改名后的表引用"""
-            raise NotImplementedError()
-
-        def create_table(self, ref: TableReference):
-            """在数据库中创建指定表的schema"""
-            self.parent.create_table(ref)
-
-        def drop_table(self, ref: TableReference):
-            """在数据库中删除指定表，一般用来删除上面rename_table返回的表"""
-            raise NotImplementedError()
-
-        def get(self, ref: TableReference, row_id: int) -> np.record | None:
-            """获取指定表的指定行数据"""
-            return asyncio.run(
-                self.client.get(ref, row_id, row_format=RowFormat.STRUCT)
-            )
-
-        def range(
-            self, ref: TableReference, index_name: str, left: Any, right: Any = None
-        ) -> np.recarray:
-            """按索引范围查询指定表的数据"""
-            return asyncio.run(
-                self.client.range(
-                    ref, index_name, left, right, -1, False, RowFormat.STRUCT
-                )
-            )
-
-        def delete(self, ref: TableReference, row_id: int):
-            """删除指定表的指定行数据"""
-            raise NotImplementedError()
-
-        def upsert(self, ref: TableReference, row_data: np.record):
-            """更新指定表的一行数据，如果不存在就插入"""
-            raise NotImplementedError()
-
-    def get_maintenance_client(self) -> MaintenanceClient:
-        """获取专门给迁移脚本使用的MaintenanceClient实例"""
+    def get_all_row_id(self, ref: TableReference) -> list[int]:
+        """获取指定表的所有row id"""
         raise NotImplementedError
+
+    def delete_row(self, ref: TableReference, row_id: int):
+        """删除指定表的指定行数据"""
+        raise NotImplementedError()
+
+    def upsert_row(self, ref: TableReference, row_data: np.record):
+        """更新指定表的一行数据，如果不存在就插入"""
+        raise NotImplementedError()
 
     def read_meta(
         self, instance_name: str, comp_cls: type[BaseComponent]
     ) -> TableMeta | None:
         """读取组件表在数据库中的meta信息，如果不存在则返回None"""
         raise NotImplementedError
+
+    def get_lock(self):
+        """获得一个可以锁整个数据库的with锁"""
+        raise NotImplementedError
+
+    def do_create_table_(self, table_ref: TableReference) -> TableMeta:
+        """实际创建组件表的逻辑实现，返回创建后的TableMeta"""
+        raise NotImplementedError
+
+    def do_rename_table_(self, from_: TableReference, to_: TableReference) -> None:
+        """修改表名的实现，迁移组件表cluster_id用的就是这个，因为水平分片根据表名决定"""
+        raise NotImplementedError
+
+    def do_drop_table_(self, table_ref: TableReference) -> int:
+        """实际drop组件表数据的逻辑实现，返回删除的行数"""
+        raise NotImplementedError
+
+    def do_rebuild_index_(self, table_ref: TableReference) -> int:
+        """实际重建组件表索引的逻辑实现，返回重建的行数"""
+        raise NotImplementedError
+
+    # === === ===
 
     def __init__(self, master: BackendClient):
         """传入master连接的BackendClient实例"""
@@ -483,7 +480,18 @@ class TableMaintenance:
         创建组件表。如果已存在，会抛出RaceCondition异常。
         返回组件表的meta信息。
         """
-        raise NotImplementedError
+        with self.get_lock():
+            if self.check_table(table_ref)[0] != "not_exists":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已存在，无法创建。"
+                )
+            # 创建表
+            logger.info(
+                f"  ➖ [💾Redis][{table_ref.comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+            )
+            ret = self.do_create_table_(table_ref)
+            logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
+            return ret
 
     # 无需drop_table, 此类操作适合人工删除
 
@@ -491,7 +499,23 @@ class TableMaintenance:
         self, table_ref: TableReference, old_meta: TableMeta
     ) -> None:
         """迁移组件表的cluster_id"""
-        raise NotImplementedError
+        with self.get_lock():
+            if self.check_table(table_ref)[0] != "cluster_mismatch":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过簇id。"
+                )
+            old_cluster_id = old_meta.cluster_id
+            logger.warning(
+                f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
+                f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
+                f"将尝试迁移cluster数据..."
+            )
+            from_ref = TableReference(
+                comp_cls=table_ref.comp_cls,
+                instance_name=table_ref.instance_name,
+                cluster_id=old_cluster_id,
+            )
+            return self.do_rename_table_(from_ref, table_ref)
 
     def migration_schema(
         self, app_file: str, table_ref: TableReference, old_meta: TableMeta, force=False
@@ -505,18 +529,64 @@ class TableMaintenance:
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
         """
-        raise NotImplementedError
+        with self.get_lock():
+            if self.check_table(table_ref)[0] != "schema_mismatch":
+                raise RaceCondition(
+                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
+                )
+            from ..migration import MigrationScript
+
+            migrator = MigrationScript(app_file, table_ref, old_meta)
+
+            # 准备和检测
+            status = migrator.prepare()
+            if status == "unsafe":
+                if not force:
+                    return False
+            elif status == "skip":
+                return True
+
+            # 获取所有row id
+            row_ids = self.get_all_row_id(table_ref)
+            migrator.upgrade(row_ids, self)
+            return True
 
     def flush(self, table_ref: TableReference, force=False) -> None:
         """
         清空易失性组件表数据，force为True时强制清空任意组件表。
         注意：此操作会删除所有数据！
         """
-        raise NotImplementedError
+        if force:
+            warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
+
+        # 如果非持久化组件，则允许调用flush主动清空数据
+        if table_ref.comp_cls.volatile_ or force:
+            logger.info(
+                f"⌚ [💾Redis][{table_ref.comp_name}组件] 对非持久化组件flush清空数据中..."
+            )
+
+            with self.get_lock():
+                count = self.do_drop_table_(table_ref)
+                self.do_create_table_(table_ref)
+
+            logger.info(f"✅ [💾Redis][{table_ref.comp_name}组件] 已删除{count}个键值")
+        else:
+            raise ValueError(f"{table_ref.comp_name}是持久化组件，不允许flush操作")
 
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
-        raise NotImplementedError
+        logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
+        with self.get_lock():
+            count = self.do_rebuild_index_(table_ref)
+            if count == 0:
+                logger.info(
+                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 无数据，无需重建索引。"
+                )
+            else:
+                logger.info(
+                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 索引重建完成, "
+                    f"{count}行 * {len(table_ref.comp_cls.indexes_)}个索引。"
+                )
 
 
 # === === === === === === 数据订阅 === === === === === ===

@@ -15,7 +15,6 @@ from redis.cluster import RedisCluster
 
 from ....common.helper import batched
 from ...component import BaseComponent
-from .. import RaceCondition
 from ..base import TableMaintenance
 from ..table import TableReference
 
@@ -37,40 +36,6 @@ class RedisTableMaintenance(TableMaintenance):
     继承此类实现具体的维护逻辑，此类除了check_table/create_table，其他方法仅在CLI相关命令时才会启用。
     """
 
-    class RedisCUDClient(TableMaintenance.MaintenanceClient):
-        """
-        只给Schema迁移脚本使用的增删改客户端，直接操作数据库，无需考虑事务和index更新。
-        参考hetu/data/default_migration.py中的用法。
-        """
-
-        def __init__(self, master: RedisBackendClient):
-            super().__init__(master)
-            self.client = master
-            self.io = master.io
-
-        def alter(self, ref: TableReference, old_model: type[BaseComponent]):
-            """修改表结构，比如增加/删除列等"""
-            # redis不需要
-            pass
-
-        def delete(self, ref: TableReference, row_id: int):
-            """删除指定表的指定行数据"""
-            key = self.client.row_key(ref, row_id)
-            self.io.delete(key)
-
-        def insert(self, ref: TableReference, row_data: np.record):
-            """向指定表插入一行数据"""
-            key = self.client.row_key(ref, row_data.id)
-            mapping = ref.comp_cls.struct_to_dict(row_data)
-            self.io.hset(key, mapping=mapping)
-
-        def update(self, ref: TableReference, row_data: np.record):
-            """更新指定表的一行数据"""
-            key = self.client.row_key(ref, row_data.id)
-            self.io.delete(key)
-            mapping = ref.comp_cls.struct_to_dict(row_data)
-            self.io.hset(key, mapping=mapping)
-
     _lock_key = "maintenance:lock"
     client: RedisBackendClient
 
@@ -80,6 +45,33 @@ class RedisTableMaintenance(TableMaintenance):
         from .client import RedisBackendClient
 
         return f"{RedisBackendClient.table_prefix(table_ref)}:meta"
+
+    @override
+    def get_all_row_id(self, ref: TableReference) -> list[int]:
+        # 获取所有row id
+        io = self.client.io
+        keys = io.keys(
+            self.client.cluster_prefix(ref) + ":id:*",
+            target_nodes=RedisCluster.PRIMARIES,
+        )
+        # 执行迁移脚本函数
+        keys = cast(list[bytes], keys)
+        return [int(key.split(b":")[-1]) for key in keys]
+
+    @override
+    def delete_row(self, ref: TableReference, row_id: int):
+        """删除指定表的指定行数据"""
+        key = self.client.row_key(ref, row_id)
+        self.client.io.delete(key)
+
+    @override
+    def upsert_row(self, ref: TableReference, row_data: np.record):
+        """更新指定表的一行数据，如果不存在就插入"""
+        io = self.client.io
+        key = self.client.row_key(ref, row_data.id)
+        io.delete(key)
+        mapping = ref.comp_cls.struct_to_dict(row_data)
+        io.hset(key, mapping=mapping)
 
     @override
     def read_meta(
@@ -110,345 +102,135 @@ class RedisTableMaintenance(TableMaintenance):
         self.lock: redis.lock.Lock = self.client.io.lock(self._lock_key, timeout=60 * 5)
 
     @override
-    def create_table(self, table_ref: TableReference) -> TableMaintenance.TableMeta:
+    def do_create_table_(self, table_ref: TableReference) -> TableMaintenance.TableMeta:
         """创建组件表。如果已存在，会抛出RaceCondition异常"""
-        with self.lock:
-            if self.check_table(table_ref)[0] != "not_exists":
-                raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已存在，无法创建。"
-                )
-            logger.info(
-                f"  ➖ [💾Redis][{table_ref.comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
-            )
-            # 只需要写入meta，其他的_rebuild_index会创建
-            meta = {
-                "json": table_ref.comp_cls.json_,
-                "version": hashlib.md5(
-                    table_ref.comp_cls.json_.encode("utf-8")
-                ).hexdigest(),
-                "cluster_id": table_ref.cluster_id,
-            }
-            self.client.io.hset(self.meta_key(table_ref), mapping=meta)
-            logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
-            meta_recon = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
-            assert meta_recon
-            return meta_recon
+        # 只需要写入meta，其他的_rebuild_index会创建
+        meta = {
+            "json": table_ref.comp_cls.json_,
+            "version": hashlib.md5(
+                table_ref.comp_cls.json_.encode("utf-8")
+            ).hexdigest(),
+            "cluster_id": table_ref.cluster_id,
+        }
+        assert not self.client.io.exists(self.meta_key(table_ref))
+        self.client.io.hset(self.meta_key(table_ref), mapping=meta)
+        meta_recon = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
+        assert meta_recon
+        return meta_recon
 
     # 无需drop_table, 此类操作适合人工删除
 
-    @override
-    def migration_cluster_id(
-        self, table_ref: TableReference, old_meta: TableMaintenance.TableMeta
-    ) -> None:
-        """迁移组件表的cluster_id"""
-        old_cluster_id = old_meta.cluster_id
-        logger.warning(
-            f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-            f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
-            f"将尝试迁移cluster数据..."
+    def do_rename_table_(self, from_: TableReference, to_: TableReference):
+        """重命名组件表"""
+        # 重命名key
+        from_prefix = f"{self.client.cluster_prefix(from_)}:"
+        from_prefix_len = len(from_prefix)
+        to_prefix = f"{self.client.cluster_prefix(to_)}:"
+
+        io = self.client.io
+        from_keys = io.keys(
+            from_prefix + ":*",
+            target_nodes=RedisCluster.PRIMARIES,
         )
-        with self.lock:
-            if self.check_table(table_ref)[0] != "cluster_mismatch":
-                raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过簇id。"
-                )
-            # 重命名key
-            old_hash_tag = f"{{CLU{old_cluster_id}}}"
-            new_hash_tag = f"{{CLU{table_ref.cluster_id}}}"
-            old_prefix = f"{self.client.table_prefix(table_ref)}:{old_hash_tag}"
-            old_prefix_len = len(old_prefix)
-            new_prefix = f"{self.client.table_prefix(table_ref)}:{new_hash_tag}"
+        from_keys = cast(list[bytes], from_keys)
+        for from_key in from_keys:
+            from_key = from_key.decode()
+            to_key = to_prefix + from_key[from_prefix_len:]
+            dump_data = cast(bytes, io.dump(from_key))
+            ttl = cast(float, io.pttl(from_key))
+            if ttl is None or ttl < 0:
+                ttl = 0  # 0 代表永不过期
+            io.restore(to_key, ttl, dump_data, replace=True)
+            io.delete(from_key)  # cluster 不能跨节点rename，必须create+delete
 
-            io = self.client.io
-            old_keys = io.keys(
-                old_prefix + ":*",
-                target_nodes=RedisCluster.PRIMARIES,
-            )
-            old_keys = cast(list[bytes], old_keys)
-            for old_key in old_keys:
-                old_key = old_key.decode()
-                new_key = new_prefix + old_key[old_prefix_len:]
-                dump_data = cast(bytes, io.dump(old_key))
-                ttl = cast(float, io.pttl(old_key))
-                if ttl is None or ttl < 0:
-                    ttl = 0  # 0 代表永不过期
-                io.restore(new_key, ttl, dump_data, replace=True)
-                io.delete(old_key)  # cluster 不能跨节点rename，必须create+delete
-            # 更新meta
-            io.hset(self.meta_key(table_ref), "cluster_id", str(table_ref.cluster_id))
-            logger.warning(
-                f"  ✔️ [💾Redis][{table_ref.comp_name}组件] cluster 迁移完成，共迁移{len(old_keys)}个键值。"
-            )
-
-    @override
-    def migration_schema(
-        self,
-        app_file: str,
-        table_ref: TableReference,
-        old_meta: TableMaintenance.TableMeta,
-        force=False,
-    ) -> bool:
-        """
-        迁移组件表的schema，本方法必须在migration_cluster_id之后执行。
-        此方法调用后需要rebuild_index
-
-        本方法将先寻找是否有迁移脚本，如果有则调用脚本进行迁移，否则使用默认迁移逻辑。
-
-        默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
-        force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
-        """
-        from ...migration import MigrationScript
-
-        migrator = MigrationScript(app_file, table_ref, old_meta)
-        maint_client = self.RedisCUDClient(self.client)
-
-        with self.lock:
-            if self.check_table(table_ref)[0] != "schema_mismatch":
-                raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 组件表已迁移过schema。"
-                )
-
-            # 准备和检测
-            status = migrator.prepare()
-            if status == "unsafe":
-                if not force:
-                    return False
-            elif status == "skip":
-                return True
-
-            # 获取所有row id
-            io = self.client.io
-            keys = io.keys(
-                self.client.cluster_prefix(table_ref) + ":id:*",
-                target_nodes=RedisCluster.PRIMARIES,
-            )
-            # 执行迁移脚本函数
-            keys = cast(list[bytes], keys)
-            row_ids = [int(key.decode().split(":")[-1]) for key in keys]
-            migrator.upgrade(row_ids, maint_client)
-
-        old_json = old_meta.json
-        old_version = old_meta.version
-
-        # 加载老的组件
-        old_comp_cls = BaseComponent.load_json(old_json)
-
-        # 只有properties名字和类型变更才迁移
-        dtypes_in_db = old_comp_cls.dtypes
-        new_dtypes = table_ref.comp_cls.dtypes
-        if dtypes_in_db == new_dtypes:
-            return True
+        # 更新meta，重命名会导致json/version变化的（除非只是cluster id变更）），所以都要写
+        from_meta_key = self.meta_key(from_)
+        to_meta_key = self.meta_key(to_)
+        io.delete(from_meta_key)
+        meta = {
+            "json": to_.comp_cls.json_,
+            "version": hashlib.md5(to_.comp_cls.json_.encode("utf-8")).hexdigest(),
+            "cluster_id": to_.cluster_id,
+        }
+        self.client.io.hset(to_meta_key, mapping=meta)
 
         logger.warning(
-            f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] 代码定义的Schema与已存的不一致，"
-            f"数据库中：\n"
-            f"{dtypes_in_db}\n"
-            f"代码定义的：\n"
-            f"{new_dtypes}\n "
-            f"将尝试数据迁移（只处理新属性，不处理类型变更，改名等等情况）："
+            f"  ✔️ [💾Redis][{to_.comp_name}组件] rename完成，共改名{len(from_keys)}个键值。"
         )
 
-        # 检查是否有属性被删除
-        assert dtypes_in_db.fields and new_dtypes.fields  # for type checker
-        for prop_name in dtypes_in_db.fields:
-            if prop_name not in new_dtypes.fields:
-                msg = (
-                    f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-                    f"数据库中的属性 {prop_name} 在新的组件定义中不存在，如果改名了需要手动迁移，"
-                    f"强制执行将丢弃该属性数据。"
-                )
-                logger.warning(msg)
-                if not force:
-                    return False
-
-        # 检查是否有属性类型变更且无法自动转换
-        for prop_name in new_dtypes.fields:
-            if prop_name in dtypes_in_db.fields:
-                old_type = dtypes_in_db.fields[prop_name]
-                new_type = new_dtypes.fields[prop_name]
-                if not np.can_cast(old_type[0], new_type[0]):
-                    msg = (
-                        f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-                        f"属性 {prop_name} 的类型由 {old_type} 变更为 {new_type}，"
-                        f"无法自动转换类型，需要手动迁移，强制执行将截断/丢弃该属性数据。"
-                    )
-                    logger.warning(msg)
-                    if not force:
-                        return False
-
-        with self.lock:
-            # 多出来的列再次报警告，然后忽略
-            io = self.client.io
-            keys = io.keys(
-                self.client.cluster_prefix(table_ref) + ":id:*",
-                target_nodes=RedisCluster.PRIMARIES,
-            )
-            keys = cast(list[bytes], keys)
-            props = dict(table_ref.comp_cls.properties_)
-            added = 0
-            converted = 0
-            convert_failed = 0
-            for prop_name in new_dtypes.fields:
-                if prop_name not in dtypes_in_db.fields:
-                    logger.warning(
-                        f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-                        f"新的代码定义中多出属性 {prop_name}，将使用默认值填充。"
-                    )
-                    default = props[prop_name].default
-                    if default is None:
-                        logger.error(
-                            f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-                            f"迁移时尝试新增 {prop_name} 属性失败，该属性没有默认值，无法新增。"
-                        )
-                        raise ValueError("迁移失败")
-                    pipe = io.pipeline()
-                    for key in keys:
-                        pipe.hset(key.decode(), prop_name, default)
-                    pipe.execute()
-                    added += 1
-                elif force:  # 类型转换
-                    old_type = dtypes_in_db.fields[prop_name][0]
-                    new_type = new_dtypes.fields[prop_name][0]
-                    if old_type == new_type:
-                        continue
-                    default = props[prop_name].default
-                    pipe = io.pipeline()
-                    for key in keys:
-                        val = io.hget(key.decode(), prop_name)
-                        if val is None:
-                            continue
-                        try:
-                            val = cast(bytes, cast(object, val))
-                            casted_val = new_type.type(old_type.type(val.decode()))
-
-                            if np.issubdtype(new_type, np.character):
-                                # 字符串类型需要特殊截断处理，不然np会自动延长
-                                def fixed_str_len(dt: np.dtype) -> int:
-                                    dt = np.dtype(dt)
-                                    if dt.kind == "U":
-                                        return dt.itemsize // 4
-                                    if dt.kind == "S":
-                                        return dt.itemsize
-                                    raise TypeError(
-                                        f"not a fixed-length string dtype: {dt!r}"
-                                    )
-
-                                casted_val = casted_val[: fixed_str_len(new_type)]
-
-                            pipe.hset(key.decode(), prop_name, str(casted_val))
-                            converted += 1
-                        except ValueError as _:
-                            # 强制模式下丢弃该属性
-                            pipe.hset(key.decode(), prop_name, default)
-                            convert_failed += 1
-                    pipe.execute()
-
-            # 更新meta
-            version = hashlib.md5(table_ref.comp_cls.json_.encode("utf-8")).hexdigest()
-            io.hset(self.meta_key(table_ref), "version", version)
-            io.hset(self.meta_key(table_ref), "json", table_ref.comp_cls.json_)
-
-            logger.warning(
-                f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 新属性增加完成，共处理{len(keys)}行 * "
-                f"{added}个属性。 转换类型成功{converted}次，失败{convert_failed}次。"
-            )
-            return True
-
     @override
-    def flush(self, table_ref: TableReference, force=False) -> None:
+    def do_drop_table_(self, table_ref: TableReference) -> int:
         """
         清空易失性组件表数据，force为True时强制清空任意组件表。
         注意：此操作会删除所有数据！
         """
-        if force:
-            warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
-
-        # 如果非持久化组件，则允许调用flush主动清空数据
-        if table_ref.comp_cls.volatile_ or force:
-            io = self.client.io
-            logger.info(
-                f"⌚ [💾Redis][{table_ref.comp_name}组件] 对非持久化组件flush清空数据中..."
-            )
-
-            with self.lock:
-                del_keys = io.keys(
-                    self.client.table_prefix(table_ref) + ":*",
-                    target_nodes=RedisCluster.PRIMARIES,
-                )
-                del_keys = cast(list[bytes], del_keys)
-                del_keys = [key.decode() for key in del_keys]
-                for batch in batched(del_keys, 1000):
-                    with io.pipeline() as pipe:
-                        list(map(pipe.delete, batch))
-                        pipe.execute()
-
-            logger.info(
-                f"✅ [💾Redis][{table_ref.comp_name}组件] 已删除{len(del_keys)}个键值"
-            )
-            self.create_table(table_ref)
-        else:
-            raise ValueError(f"{table_ref.comp_name}是持久化组件，不允许flush操作")
+        io = self.client.io
+        # 删除数据
+        del_keys = io.keys(
+            self.client.table_prefix(table_ref) + ":*",
+            target_nodes=RedisCluster.PRIMARIES,
+        )
+        del_keys = cast(list[bytes], del_keys)
+        del_keys = [key.decode() for key in del_keys]
+        for batch in batched(del_keys, 1000):
+            with io.pipeline() as pipe:
+                list(map(pipe.delete, batch))
+                pipe.execute()
+        # 删除meta
+        io.delete(self.meta_key(table_ref))
+        return len(del_keys)
 
     @override
-    def rebuild_index(self, table_ref: TableReference) -> None:
+    def do_rebuild_index_(self, table_ref: TableReference) -> int:
         """重建组件表的索引数据"""
         from .client import RedisBackendClient
 
-        logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
-        with self.lock:
-            io = self.client.io
-            keys = io.keys(
-                self.client.cluster_prefix(table_ref) + ":id:*",
-                target_nodes=RedisCluster.PRIMARIES,
+        io = self.client.io
+        keys = io.keys(
+            self.client.cluster_prefix(table_ref) + ":id:*",
+            target_nodes=RedisCluster.PRIMARIES,
+        )
+        keys = cast(list[bytes], keys)
+        if len(keys) == 0:
+            return 0
+
+        for idx_name, _ in table_ref.comp_cls.indexes_.items():
+            idx_key = self.client.index_key(table_ref, idx_name)
+            # 先删除所有_idx_key开头的索引
+            io.delete(idx_key)
+            # 重建所有索引，不管unique还是index都是sset
+            pipe = io.pipeline()
+            b_row_ids: list[bytes] = []
+            for key in keys:
+                row_id = key.split(b":")[-1]
+                b_row_ids.append(row_id)
+                pipe.hget(key.decode(), idx_name)
+            values: list[bytes] = pipe.execute()
+            # 把values按dtype转换下
+            struct = table_ref.comp_cls.new_row()
+            scalers: list[np.generic] = [np.str_()] * len(values)
+            for i, v in enumerate(values):
+                struct[idx_name] = v.decode()
+                scalers[i] = struct[idx_name]
+
+            # 建立redis索引
+            def get_member(_value: np.generic, _b_row_id) -> bytes:
+                _sortable_value = RedisBackendClient.to_sortable_bytes(_value)
+                return _sortable_value + b":" + _b_row_id
+
+            io.zadd(
+                idx_key,
+                {
+                    get_member(scaler, b_row_id): 0
+                    for b_row_id, scaler in zip(b_row_ids, scalers)
+                },
             )
-            keys = cast(list[bytes], keys)
-            if len(keys) == 0:
-                logger.info(
-                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 无数据，无需重建索引。"
-                )
-                return
 
-            for idx_name, _ in table_ref.comp_cls.indexes_.items():
-                idx_key = self.client.index_key(table_ref, idx_name)
-                # 先删除所有_idx_key开头的索引
-                io.delete(idx_key)
-                # 重建所有索引，不管unique还是index都是sset
-                pipe = io.pipeline()
-                b_row_ids: list[bytes] = []
-                for key in keys:
-                    row_id = key.split(b":")[-1]
-                    b_row_ids.append(row_id)
-                    pipe.hget(key.decode(), idx_name)
-                values: list[bytes] = pipe.execute()
-                # 把values按dtype转换下
-                struct = table_ref.comp_cls.new_row()
-                scalers: list[np.generic] = [np.str_()] * len(values)
-                for i, v in enumerate(values):
-                    struct[idx_name] = v.decode()
-                    scalers[i] = struct[idx_name]
-
-                # 建立redis索引
-                def get_member(_value: np.generic, _b_row_id) -> bytes:
-                    _sortable_value = RedisBackendClient.to_sortable_bytes(_value)
-                    return _sortable_value + b":" + _b_row_id
-
-                io.zadd(
-                    idx_key,
-                    {
-                        get_member(scaler, b_row_id): 0
-                        for b_row_id, scaler in zip(b_row_ids, scalers)
-                    },
-                )
-
-                # 检测是否有unique违反
-                if idx_name in table_ref.comp_cls.uniques_:
-                    if len(values) != len(set(values)):
-                        raise RuntimeError(
-                            f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时发现违反unique约束，"
-                            f"可能是迁移时缩短了值类型、或新增了Unique标记导致。"
-                        )
-
-            logger.info(
-                f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 索引重建完成, "
-                f"{len(keys)}行 * {len(table_ref.comp_cls.indexes_)}个索引。"
-            )
+            # 检测是否有unique违反
+            if idx_name in table_ref.comp_cls.uniques_:
+                if len(values) != len(set(values)):
+                    raise RuntimeError(
+                        f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时发现违反unique约束，"
+                        f"可能是迁移时缩短了值类型、或新增了Unique标记导致。"
+                    )
+        return len(keys)
