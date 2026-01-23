@@ -5,13 +5,16 @@
 @email: heeroz@gmail.com
 """
 
-import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
+import logging
+from typing import Any, override
 
+import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
 import numpy as np
 
-
 from .pipeline import MessageProcessLayer, MsgType
-from typing import Any, override
+
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
 
 
 class ZstdCompressorLayer(MessageProcessLayer):
@@ -35,11 +38,11 @@ class ZstdCompressorLayer(MessageProcessLayer):
         使用所有非Admin的组件，创建一行默认值数据，然后用pipeline在本层之前进行预处理，
         然后用它们作为样本。
         """
-        from ...system import SystemClusters
         from ...common import Permission
-        from ...data.sub import Subscriptions
-        from ...data.backend import TableReference
         from ...data import BaseComponent
+        from ...data.backend import TableReference
+        from ...data.sub import Subscriptions
+        from ...system import SystemClusters
 
         rng = np.random.default_rng()
 
@@ -130,4 +133,7 @@ class ZstdCompressorLayer(MessageProcessLayer):
             return self.decompressor.decompress(message)
         except Exception as e:
             # 解压失败处理
-            raise RuntimeError(f"Decompression error: {e}") from e
+            logger.exception(
+                f"❌ [📡Pipeline] [Zstd层] 解压失败，异常：{type(e).__name__}:{e}"
+            )
+            raise
