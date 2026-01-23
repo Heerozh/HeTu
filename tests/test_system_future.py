@@ -171,7 +171,7 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     assert len(future_ns1) == len(future_ns2) == 1
     # Component的namespace并不会变
     assert future_ns1[0].namespace_ == future_ns2[0].namespace_ == "HeTu"
-    assert future_ns1[0].component_name_ == future_ns2[0].component_name_
+    assert future_ns1[0].name_ == future_ns2[0].name_
 
     # 检查component table manager是否正确隔离
     backend = mod_auto_backend()

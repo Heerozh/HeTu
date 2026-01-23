@@ -202,7 +202,7 @@ class SessionRepository:
         comp_cls = self.ref.comp_cls
 
         assert index_name in comp_cls.indexes_, (
-            f"{comp_cls.component_name_} 组件没有叫 {index_name} 的索引"
+            f"{comp_cls.name_} 组件没有叫 {index_name} 的索引"
         )
 
         # 如果不是主键，直接用range方法
@@ -284,7 +284,7 @@ class SessionRepository:
 
         # 判断index_name存在
         assert index_name in comp_cls.indexes_, (
-            f"{comp_cls.component_name_} 组件没有叫 {index_name} 的索引"
+            f"{comp_cls.name_} 组件没有叫 {index_name} 的索引"
         )
 
         if isinstance(_left, np.generic):
@@ -385,7 +385,7 @@ class SessionRepository:
         comp_cls = self.ref.comp_cls
         assert index_name in comp_cls.uniques_, (
             "upsert只能用于unique索引，"
-            f"{comp_cls.component_name_}组件的{index_name}不是unique索引"
+            f"{comp_cls.name_}组件的{index_name}不是unique索引"
         )
 
         return UpsertContext(self, index_name, query_value)

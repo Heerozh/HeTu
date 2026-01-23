@@ -58,13 +58,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 # 索引不支持复数
                 if np.issubdtype(dtype, np.complexfloating):
                     raise ValueError(
-                        f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
+                        f"Component `{comp_cls.name_}` 的索引字段`{field}`"
                         "使用了复数，Redis后端不支持此类型作为索引字段"
                     )
                 # 其他类型不支持索引
                 elif np.issubdtype(dtype, np.object_):
                     raise ValueError(
-                        f"Component `{comp_cls.component_name_}` 的索引字段`{field}`"
+                        f"Component `{comp_cls.name_}` 的索引字段`{field}`"
                         f"使用了不可用的类型 `{dtype}`，此类型不支持索引"
                     )
 
@@ -106,13 +106,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
     @staticmethod
     def table_prefix(table_ref: TableReference) -> str:
         """获取redis表名前缀"""
-        return f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}"
+        return f"{table_ref.instance_name}:{table_ref.comp_cls.name_}"
 
     @staticmethod
     def cluster_prefix(table_ref: TableReference) -> str:
         """获取redis表名前缀"""
         return (
-            f"{table_ref.instance_name}:{table_ref.comp_cls.component_name_}:"
+            f"{table_ref.instance_name}:{table_ref.comp_cls.name_}:"
             f"{{CLU{table_ref.cluster_id}}}"
         )
 

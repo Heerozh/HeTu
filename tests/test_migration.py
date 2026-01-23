@@ -50,7 +50,7 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
     import json
 
     define = json.loads(ItemNew.json_)
-    define["component_name"] = "Item"
+    define["name"] = "Item"
     renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
     new_table = Table(
         renamed_new_item_cls,
@@ -111,7 +111,7 @@ async def test_auto_migration(filled_item_ref, caplog):
     import json
 
     define = json.loads(ItemNew.json_)
-    define["component_name"] = "Item"
+    define["name"] = "Item"
     renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
     new_table = Table(
         renamed_new_item_cls,

@@ -34,7 +34,7 @@ def prepare() -> str:
         - "unsafe": 本迁移代码是有损迁移，需要用force指令手动迁移。
         - "ok": 可以安全迁移。
     """
-    name = TARGET_COMPONENT_MODEL.component_name_
+    name = TARGET_COMPONENT_MODEL.name_
     # 检查是否无变更
     down_dtypes = DOWN_COMPONENT_MODEL.dtypes
     target_dtypes = TARGET_COMPONENT_MODEL.dtypes
@@ -114,10 +114,8 @@ def upgrade(
 ) -> None:
     """实际执行升级迁移的操作，本操作不可失败。"""
     # 一些属性信息
-    assert (
-        DOWN_COMPONENT_MODEL.component_name_ == TARGET_COMPONENT_MODEL.component_name_
-    )
-    table_name = DOWN_COMPONENT_MODEL.component_name_
+    assert DOWN_COMPONENT_MODEL.name_ == TARGET_COMPONENT_MODEL.name_
+    table_name = DOWN_COMPONENT_MODEL.name_
     target_columns = dict(TARGET_COMPONENT_MODEL.properties_)
     down_columns = dict(DOWN_COMPONENT_MODEL.properties_)
     down_table = down_tables[table_name]

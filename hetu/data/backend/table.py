@@ -51,7 +51,7 @@ class TableReference:
 
     @property
     def comp_name(self) -> str:
-        return self.comp_cls.component_name_
+        return self.comp_cls.name_
 
 
 @dataclass(frozen=True, eq=True)

@@ -191,7 +191,7 @@ class SystemClusters(metaclass=Singleton):
                 backend_names = [comp.backend_ for comp in sys_def.full_components]
                 if len(set(backend_names)) > 1:
                     refs = [
-                        f"{comp.component_name_}:{comp.backend_}"
+                        f"{comp.name_}:{comp.backend_}"
                         for comp in sys_def.full_components
                     ]
                     raise AssertionError(
