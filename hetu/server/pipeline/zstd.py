@@ -6,18 +6,15 @@
 """
 
 import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
-import random
 
 import numpy as np
-
-from hetu import BaseComponent
 
 
 from .pipeline import MessageProcessLayer, MsgType
 from typing import Any, override
 
 
-class ZstdCompressor(MessageProcessLayer):
+class ZstdCompressorLayer(MessageProcessLayer):
     """
     使用python 3.14内置的 compression/zstd 模块进行消息的压缩和解压缩。
     """
@@ -42,22 +39,23 @@ class ZstdCompressor(MessageProcessLayer):
         from ...common import Permission
         from ...data.sub import Subscriptions
         from ...data.backend import TableReference
+        from ...data import BaseComponent
 
         rng = np.random.default_rng()
 
-        def make_rand_sub_message(comp: type[BaseComponent]):
+        def make_rand_sub_message(_comp: type[BaseComponent]):
             """生成一个随机的订阅更新消息用于样本数据"""
-            default_row: np.record = comp.new_row(id_=0)
+            default_row: np.record = _comp.new_row(id_=0)
 
             # 对随机属性进行随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             dt = default_row.dtype
             raw = bytearray(default_row.tobytes())  # 拷贝为可变 bytes
             raw[:] = rng.integers(0, 256, size=len(raw), dtype=np.uint8).tobytes()
             default_row = np.frombuffer(raw, dtype=dt, count=1)[0]  # 结构化标量
-            row_dict = comp.struct_to_dict(default_row)
+            row_dict = _comp.struct_to_dict(default_row)
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
-            ref = TableReference(comp, "", 0)
+            ref = TableReference(_comp, "", 0)
             sub_id = Subscriptions.make_query_id_(
                 ref,
                 "id",
@@ -112,11 +110,8 @@ class ZstdCompressor(MessageProcessLayer):
         # 2. FLUSH_BLOCK:
         #    这会强制输出当前块的数据，确保接收端能立即收到并解压。
         #    同时不会结束当前帧 (Frame)，保留了历史参考信息（流式压缩的核心优势）。
-        compressor = self.compressor
-        chunk = compressor.compress(message, mode=ZstdCompressor.FLUSH_BLOCK)
-        chunk += compressor.flush(zstd.FLUSH_BLOCK) FLUSH_FRAME的区别是啥？
-
-        return compressed_data
+        chunk = self.compressor.compress(message, mode=zstd.ZstdCompressor.FLUSH_BLOCK)
+        return chunk
 
     @override
     def decode(self, layer_ctx: Any, message: MsgType) -> MsgType:
@@ -129,16 +124,10 @@ class ZstdCompressor(MessageProcessLayer):
 
         assert type(message) is bytes, "ZstdDecompressor只能解压bytes类型的消息"
 
-        # 反之，使用字典解压
-        if not isinstance(message, bytes):
-            # 防御性编程：如果传入的不是bytes，可能已经是解压后的或者是错误类型
-            return message
-
+        # 反之，使用字典流式解压
+        # zstd 模块会自动处理跨包的数据缓冲
         try:
-            decompressed_bytes = zstd.decompress(message, zstd_dict=self.zstd_dict)
-            # 解压后尝试恢复为结构化对象 (dict/list)
-            return self._from_bytes(decompressed_bytes)
+            return self.decompressor.decompress(message)
         except Exception as e:
-            # 解压失败处理，视业务逻辑而定，这里打印错误并返回原始值
-            print(f"Decompression error: {e}")
-            return message
+            # 解压失败处理
+            raise RuntimeError(f"Decompression error: {e}") from e

@@ -65,29 +65,29 @@ class MessagePipeline:
         通过客户端发来的握手消息，完成所有层的握手工作。
         返回每一层的上下文，以及要发送给客户端的握手消息。
         """
-        layer_ctxs = []
+        layers_ctx = []
         layer_messages = []
         for i, layer in enumerate(self._layers):
             ctx, reply = layer.handshake(handshake_messages[i])
-            layer_ctxs.append(ctx)
+            layers_ctx.append(ctx)
             layer_messages.append(reply)
-        return layer_ctxs, layer_messages
+        return layers_ctx, layer_messages
 
-    def encode(self, layer_ctxs: list[Any], message: MsgType, until=-1) -> MsgType:
+    def encode(self, layers_ctx: list[Any], message: MsgType, until=-1) -> MsgType:
         """
         对消息进行正向处理，可以传入until参数表示只处理到哪层
         """
         for i, layer in enumerate(self._layers):
             if 0 < until < i:
                 break
-            message = layer.encode(layer_ctxs[i], message)
+            message = layer.encode(layers_ctx[i], message)
         return message
 
-    def decode(self, layer_ctxs: list[Any], message: MsgType) -> MsgType:
+    def decode(self, layers_ctx: list[Any], message: MsgType) -> MsgType:
         """
         对消息进行逆向处理
         """
         for i, layer in enumerate(reversed(self._layers)):
-            original_index = len(layer_ctxs) - 1 - i
-            message = layer.decode(layer_ctxs[original_index], message)
+            original_index = len(layers_ctx) - 1 - i
+            message = layer.decode(layers_ctx[original_index], message)
         return message
