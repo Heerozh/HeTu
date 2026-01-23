@@ -19,9 +19,10 @@ class MessageProcessLayer:
         self._parent = parent
         self._layer_idx = layer_idx
 
-    def prepare(self) -> Any:
+    def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
         """
-        连接前准备工作，例如协商参数等。返回需要发送给对端的准备消息（如果有的话）。
+        连接前握手工作，例如协商参数等。
+        返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
         """
         raise NotImplementedError()
 
@@ -53,21 +54,24 @@ class MessagePipeline:
     def add_layer(self, layer: MessageProcessLayer):
         """
         添加一层流处理组件，例如压缩或加密组件。
-        此方法是全局的。
         """
         self._layers.append(layer)
         layer.on_attach(self, len(self._layers) - 1)
 
-    def prepare(self) -> list[Any]:
+    def handshake(
+        self, handshake_messages: list[MsgType]
+    ) -> tuple[list[Any], list[MsgType]]:
         """
-        准备所有层，例如初始化密钥等。
-        返回每一层的准备上下文。
+        通过客户端发来的握手消息，完成所有层的握手工作。
+        返回每一层的上下文，以及要发送给客户端的握手消息。
         """
         layer_ctxs = []
-        for layer in self._layers:
-            ctx = layer.prepare()
+        layer_messages = []
+        for i, layer in enumerate(self._layers):
+            ctx, reply = layer.handshake(handshake_messages[i])
             layer_ctxs.append(ctx)
-        return layer_ctxs
+            layer_messages.append(reply)
+        return layer_ctxs, layer_messages
 
     def encode(self, layer_ctxs: list[Any], message: MsgType, until=-1) -> MsgType:
         """
