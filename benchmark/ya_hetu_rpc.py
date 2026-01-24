@@ -1,10 +1,13 @@
 # 测试河图的性能
 
+from typing import cast
 import os
 import websockets
 import msgspec
 import random
 import string
+from nacl.public import PrivateKey
+from hetu.server import pipeline
 
 msg_encoder = msgspec.msgpack.Encoder()
 msg_decoder = msgspec.msgpack.Decoder()
@@ -36,45 +39,70 @@ def encode_message(message: list | dict) -> bytes:
 # === 夹具 ===
 
 
-async def websocket():
+async def connection():
     ws = await websockets.connect(HETU_URL)
-    yield ws
+
+    # 设置管道
+    client_pipe = pipeline.MessagePipeline()
+    client_pipe.add_layer(pipeline.LimitCheckerLayer())
+    client_pipe.add_layer(pipeline.JSONBinaryLayer())
+    client_pipe.add_layer(pipeline.ZstdLayer())
+    crypto_layer = pipeline.CryptoLayer()
+    client_pipe.add_layer(crypto_layer)
+    pipe_ctx = None
+    # 生成密钥对
+    private_key = PrivateKey.generate()
+    public_key = private_key.public_key
+    handshake_msg = [b""] * 4
+    handshake_msg[-1] = public_key.encode()
+    # 握手
+    await ws.send(client_pipe.encode(None, handshake_msg))
+    data = cast(bytes, await ws.recv())
+    peer_handshake = client_pipe.decode(None, data)
+    assert type(peer_handshake) is list
+    ctx, _ = client_pipe.handshake(peer_handshake)
+    ctx[-1] = crypto_layer.client_handshake(private_key.encode(), peer_handshake[-1])
+
+    pipe_ctx = ctx
+
+    yield ws, client_pipe, pipe_ctx
     await ws.close()
 
 
-async def rpc(websocket, message):
+async def rpc(connection, message):
+    websocket, client_pipe, pipe_ctx = connection
     # 为了测试准确的性能，采用call-response模式
-    await websocket.send(encode_message(message))
+    await websocket.send(client_pipe.encode(pipe_ctx, message))
     # 统计事务冲突率
     received = await websocket.recv()
-    received = decode_message(received)
+    received = client_pipe.decode(pipe_ctx, received)
     return received[1]
 
 
 # === 基准测试 ===
 
 
-async def benchmark_hello_world(websocket: websockets.connect):
-    received = await rpc(websocket, ["rpc", "hello_world"])
+async def benchmark_hello_world(connection):
+    received = await rpc(connection, ["rpc", "hello_world"])
     return received[0]
 
 
-async def benchmark_get(websocket: websockets.connect):
+async def benchmark_get(connection):
     row_id = random.randint(1, BENCH_ID_RANGE)
-    received = await rpc(websocket, ["rpc", "just_get", row_id])
+    received = await rpc(connection, ["rpc", "just_get", row_id])
     return received[0]
 
 
-async def benchmark_get_then_update(websocket: websockets.connect):
+async def benchmark_get_then_update(connection):
     row_id = random.randint(1, BENCH_ID_RANGE)
-    received = await rpc(websocket, ["rpc", "upsert", row_id])
+    received = await rpc(connection, ["rpc", "upsert", row_id])
     return received[0]
 
 
-async def benchmark_get2_update2(websocket: websockets.connect):
+async def benchmark_get2_update2(connection):
     rnd_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
     row_id = random.randint(1, BENCH_ID_RANGE)
-    received = await rpc(websocket, ["rpc", "exchange_data", rnd_str, row_id])
+    received = await rpc(connection, ["rpc", "exchange_data", rnd_str, row_id])
     return received[0]
 
 

@@ -89,7 +89,7 @@ class MessagePipeline:
         通过客户端发来的握手消息，完成所有层的握手工作。
         返回握手后的上下文；以及要发送给客户端的握手消息。
         """
-        logger.info(f"🔧 [📡Pipeline] 握手开始 {client_messages} ")
+        # logger.info(f"🔧 [📡Pipeline] 握手开始 {client_messages} ")
         pipe_ctx = []
         reply_messages = []
         for i, layer in enumerate(self._layers):
@@ -100,6 +100,7 @@ class MessagePipeline:
             ctx, reply = layer.handshake(client_messages[i])
             pipe_ctx.append(ctx)
             reply_messages.append(reply)
+        logger.info(f"🔧 [📡Pipeline] 握手完成 {pipe_ctx}")
         return pipe_ctx, self.encode(None, reply_messages)
 
     def encode(
