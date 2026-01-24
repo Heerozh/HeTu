@@ -54,13 +54,21 @@ class MessagePipeline:
 
     def __init__(self):
         self._layers: list[MessageProcessLayer] = []
+        self._disabled: list[bool] = []
 
     def add_layer(self, layer: MessageProcessLayer):
         """
         添加一层流处理组件，例如压缩或加密组件。
         """
         self._layers.append(layer)
+        self._disabled.append(False)
         layer.on_attach(self, len(self._layers) - 1)
+
+    def disable_layer(self, idx: int):
+        """
+        禁用指定索引的层
+        """
+        self._disabled[idx] = True
 
     def clean(self):
         """
@@ -80,6 +88,10 @@ class MessagePipeline:
         pipe_ctx = []
         reply_messages = []
         for i, layer in enumerate(self._layers):
+            if self._disabled[i]:
+                pipe_ctx.append(None)
+                reply_messages.append(b"")
+                continue
             ctx, reply = layer.handshake(client_messages[i])
             pipe_ctx.append(ctx)
             reply_messages.append(reply)
@@ -94,6 +106,8 @@ class MessagePipeline:
         ctx = None
         encoded: JSONType | bytes = message
         for i, layer in enumerate(self._layers):
+            if self._disabled[i]:
+                continue
             if 0 < until < i:
                 break
             if pipe_ctx is not None:
@@ -109,6 +123,8 @@ class MessagePipeline:
         ctx = None
         decoded: JSONType | bytes = message
         for i, layer in enumerate(reversed(self._layers)):
+            if self._disabled[i]:
+                continue
             if pipe_ctx is not None:
                 original_index = len(pipe_ctx) - 1 - i
                 ctx = pipe_ctx[original_index]

@@ -5,7 +5,7 @@
 @email: heeroz@gmail.com
 """
 
-from .ecdh import CryptoLayer
+from .crypto import CryptoLayer
 from .jsonb import JSONBinaryLayer
 from .limit import LimitCheckerLayer
 from .pipeline import MessagePipeline, ServerMessagePipeline

@@ -5,7 +5,7 @@ from hetu.system import SystemClusters, define_system, SystemContext
 
 
 @pytest.fixture()
-def zstd_layer(mod_item_model, mod_rls_test_model):
+def zstd_layer(mod_item_model, mod_rls_test_model, new_clusters_env):
     @define_component(namespace="pytest", force=True)
     class Comp1(BaseComponent):
         index1: float = property_field(0, True)
