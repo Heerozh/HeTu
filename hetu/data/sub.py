@@ -207,7 +207,7 @@ class Subscriptions:
         return len(self._subs) - self._index_sub_count, self._index_sub_count
 
     @classmethod
-    def _make_query_str(
+    def make_query_id_(
         cls, table_ref: TableReference, index_name: str, left, right, limit, desc
     ):
         return (
@@ -283,7 +283,7 @@ class Subscriptions:
             return None, None
 
         # 开始订阅
-        sub_id = self._make_query_str(table_ref, "id", row["id"], None, 1, False)
+        sub_id = self.make_query_id_(table_ref, "id", row["id"], None, 1, False)
         if sub_id in self._subs:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
@@ -363,7 +363,7 @@ class Subscriptions:
         if not force and len(rows) == 0:
             return None, rows
 
-        sub_id = self._make_query_str(table_ref, index_name, left, right, limit, desc)
+        sub_id = self.make_query_id_(table_ref, index_name, left, right, limit, desc)
         if sub_id in self._subs:
             logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, rows

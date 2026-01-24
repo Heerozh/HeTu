@@ -14,10 +14,10 @@ from sanic.exceptions import WebsocketClosed
 from ..data.sub import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
-from ..system.context import SystemContext
 from ..system.caller import SystemCaller
-from .message import encode_message
-from .receiver import client_receiver, mq_puller, subscription_receiver
+from ..system.context import SystemContext
+from .pipeline import ServerMessagePipeline
+from .receiver import client_handler, mq_puller, subscription_handler
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -32,6 +32,18 @@ async def websocket_connection(request: Request, ws: Websocket):
     assert current_task, "Must be called in an asyncio task"
     logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
     comp_mgr = request.app.ctx.comp_mgr
+
+    # 获得客户端握手消息
+    msg_pipe = ServerMessagePipeline()
+    handshake_msg = await ws.recv()
+    if not isinstance(handshake_msg, (bytes, bytearray)):
+        raise ValueError("Invalid handshake message type")
+    handshake_msg = msg_pipe.decode(None, handshake_msg)
+    if not isinstance(handshake_msg, list):
+        raise ValueError("Invalid handshake message format")
+    # 进行握手处理，获得连接上下文
+    pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
+    await ws.send(reply)
 
     # 初始化Context，一个连接一个Context
     context = SystemContext(
@@ -71,16 +83,15 @@ async def websocket_connection(request: Request, ws: Websocket):
     flood_checker = connection.ConnectionFloodChecker()
 
     # 创建接受客户端消息的协程2
-    protocol = dict(compress=request.app.ctx.compress, crypto=request.app.ctx.crypto)
-    recv_task_id = f"client_receiver:{request.id}"
-    receiver_task = client_receiver(
-        ws, protocol, endpoint_executor, subscriptions, push_queue, flood_checker
+    recv_task_id = f"client_handler:{request.id}"
+    receiver_task = client_handler(
+        ws, pipe_ctx, endpoint_executor, subscriptions, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
     subs_task_id = f"subs_receiver:{request.id}"
-    subscript_task = subscription_receiver(ws, subscriptions, push_queue)
+    subscript_task = subscription_handler(ws, subscriptions, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
     puller_task_id = f"mq_puller:{request.id}"
     puller_task = mq_puller(ws, subscriptions)
@@ -98,7 +109,7 @@ async def websocket_connection(request: Request, ws: Websocket):
             if replay.level < logging.ERROR:
                 replay.debug(">>> " + str(reply))
             # print(executor.context, 'got', reply)
-            await ws.send(encode_message(reply, protocol))
+            await ws.send(msg_pipe.encode(pipe_ctx, reply))
             # 检查发送上限
             flood_checker.sent()
             if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):

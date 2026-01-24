@@ -52,6 +52,4 @@ async def clean_expired_call_locks(comp_mgr: ComponentTableManager):
                 deleted += len(rows)
                 if len(rows) == 0:
                     break
-        logger.info(
-            f"🔗 [⚙️Future] 释放了 {comp.component_name_} 的 {deleted} 条过期数据"
-        )
+        logger.info(f"🔗 [⚙️Future] 释放了 {comp.name_} 的 {deleted} 条过期数据")

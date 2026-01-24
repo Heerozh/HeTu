@@ -53,7 +53,7 @@ def property_field(
 class BaseComponent:
     # -------------------------------定义部分-------------------------------
     properties_: list[tuple[str, Property]] = []  # Ordered属性列表
-    component_name_: str
+    name_: str
     namespace_: str
     permission_: Permission = Permission.USER
     rls_compare_: tuple[Callable[[Any, Any], bool], str, str] | None = None
@@ -76,7 +76,7 @@ class BaseComponent:
     def make_json(
         properties,
         namespace,
-        component_name,
+        name,
         permission,
         volatile,
         readonly,
@@ -86,7 +86,7 @@ class BaseComponent:
         return json.dumps(
             {
                 "namespace": str(namespace),
-                "component_name": str(component_name),
+                "name": str(name),
                 "permission": permission.name,
                 "rls_compare": rls_compare,
                 "volatile": bool(volatile),
@@ -112,16 +112,14 @@ class BaseComponent:
     def load_json(cls, json_str: str, suffix: str = "") -> type[BaseComponent]:
         data = json.loads(json_str)
         if suffix:
-            data["component_name"] += ":" + suffix
+            data["name"] += ":" + suffix
         # 如果是直接调用的BaseComponent.load_json，则创建一个新的类
         if cls is BaseComponent:
-            comp: type[BaseComponent] = type[BaseComponent](
-                data["component_name"], (BaseComponent,), {}
-            )
+            comp: type[BaseComponent] = type(data["name"], (BaseComponent,), {})
         else:
             comp = cls
         comp.namespace_ = str(data["namespace"])
-        comp.component_name_ = str(data["component_name"])
+        comp.name_ = str(data["name"])
         comp.permission_ = Permission[data["permission"]]
         comp.volatile_ = bool(data["volatile"])
         comp.readonly_ = bool(data["readonly"])
@@ -164,7 +162,7 @@ class BaseComponent:
     def new_row(cls, id_=None) -> np.record:
         """返回空数据行，id生成uuid，用于insert"""
         row = cast(np.record, cls.default_row[0].copy())
-        if id_:
+        if id_ is not None:
             row.id = id_
         else:
             row.id = SNOWFLAKE_ID.next_id()
@@ -252,8 +250,8 @@ class ComponentDefines(metaclass=Singleton):
     ):
         comp_map = self._components.setdefault(namespace, dict())
         if not force:
-            assert component_cls.component_name_ not in comp_map, "Component重复定义"
-        comp_map[component_cls.component_name_] = component_cls
+            assert component_cls.name_ not in comp_map, "Component重复定义"
+        comp_map[component_cls.name_] = component_cls
 
 
 @overload

@@ -66,9 +66,7 @@ class MigrationScript:
         # 在app_root/maint/migration/目录下，把默认迁移脚本写进去
         migration_dir = app_root / "maint" / "migration"
         migration_dir.mkdir(parents=True, exist_ok=True)
-        migration_file = (
-            f"{target_model.component_name_}_v{old_version}_to_v{new_version}.py"
-        )
+        migration_file = f"{target_model.name_}_v{old_version}_to_v{new_version}.py"
         script_path = migration_dir / migration_file
         if script_path.exists():
             return script_path
@@ -83,7 +81,7 @@ class MigrationScript:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(template)
         logger.warning(
-            f"  ➖ [💾Redis][{target_model.component_name_}组件] "
+            f"  ➖ [💾Redis][{target_model.name_}组件] "
             f"缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
         )
         return script_path
@@ -160,7 +158,7 @@ class MigrationScript:
             down_comp = BaseComponent.load_json(down_meta.json)
             if comp == self.ref.comp_name:
                 continue
-            down_tables[down_comp.component_name_] = TableReference(
+            down_tables[down_comp.name_] = TableReference(
                 down_comp, self.ref.instance_name, cluster_id
             )
 
@@ -180,7 +178,7 @@ class MigrationScript:
             )
 
             # 切换model到脚本中指定的版本，因为每个stack model都会升一级
-            down_tables[down_model.component_name_] = TableReference(
+            down_tables[down_model.name_] = TableReference(
                 down_model, self.ref.instance_name, self.ref.cluster_id
             )
             target_table = TableReference(

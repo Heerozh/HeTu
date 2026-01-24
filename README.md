@@ -76,10 +76,11 @@ from hetu import define_system, SystemContext
     namespace="ssw",
     components=(Position,),  # 定义System引用的表
     permission=Permission.USER,
+    retry=999,  # 遇到事务冲突时重试次数
 )
 async def move_to(ctx: SystemContext, x, y):
     # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    async with ctx.repo(Position).upsert(owner=ctx.caller) as pos:
+    async with ctx.repo[Position].upsert(owner=ctx.caller) as pos:
         pos.x = x
         pos.y = y
         # with结束后会自动提交修改

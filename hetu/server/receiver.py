@@ -13,15 +13,17 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
 from sanic.exceptions import WebsocketClosed
 
-import hetu
+import hetu  # for obtaining __version__
+
 from ..endpoint import connection
 from ..endpoint.response import ResponseToClient
-from .message import decode_message
+from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
 if TYPE_CHECKING:
-    from ..endpoint.executor import EndpointExecutor
-    from ..data.sub import Subscriptions
     from sanic import Websocket
+
+    from ..data.sub import Subscriptions
+    from ..endpoint.executor import EndpointExecutor
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -87,15 +89,16 @@ async def sub_call(
         )
 
 
-async def client_receiver(
+async def client_handler(
     ws: Websocket,
-    protocol: dict,
+    pipe_ctx: PipeContext,
     executor: EndpointExecutor,
     subs: Subscriptions,
     push_queue: asyncio.Queue,
     flood_checker: connection.ConnectionFloodChecker,
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
+    pipe = ServerMessagePipeline()
     ctx = executor.context
     last_data = None
     try:
@@ -105,14 +108,16 @@ async def client_receiver(
             if type(message) is not bytes:
                 break  # if not byte frame, close connection
             # 转换消息到array
-            last_data = decode_message(message, protocol)
+            last_data = pipe.decode(pipe_ctx, message)
+            if type(last_data) is not list:
+                raise ValueError("Invalid message format")
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
             if replay.level < logging.ERROR:
                 replay.debug("<<< " + str(last_data))
             # 检查接受上限
             flood_checker.received()
             if flood_checker.recv_limit_reached(
-                ctx, "Coroutines(Websocket.client_receiver)"
+                ctx, "Coroutines(Websocket.client_handler)"
             ):
                 return ws.fail_connection()
             # 执行消息
@@ -132,7 +137,7 @@ async def client_receiver(
                 case _:
                     raise ValueError(f" [非法操作] 未知消息类型：{last_data[0]}")
     except asyncio.CancelledError:
-        # print(ctx, 'client_receiver normal canceled')
+        # print(ctx, 'client_handler normal canceled')
         pass
     except WebsocketClosed:
         pass
@@ -152,7 +157,7 @@ async def client_receiver(
         logger.exception(err_msg)
         ws.fail_connection()
     finally:
-        # print(ctx, 'client_receiver closed')
+        # print(ctx, 'client_handler closed')
         pass
 
 
@@ -179,7 +184,7 @@ async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
         pass
 
 
-async def subscription_receiver(
+async def subscription_handler(
     ws: Websocket, subscriptions: Subscriptions, push_queue: asyncio.Queue
 ):
     """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
@@ -191,7 +196,7 @@ async def subscription_receiver(
                 reply = ["updt", sub_id, data]
                 await push_queue.put(reply)
     except asyncio.CancelledError:
-        # print('subscription_receiver normal canceled')
+        # print('subscription_handler normal canceled')
         pass
     except RedisConnectionError as e:
         logger.error(
@@ -206,5 +211,5 @@ async def subscription_receiver(
         )
         return ws.fail_connection()
     finally:
-        # print('subscription_receiver closed')
+        # print('subscription_handler closed')
         pass

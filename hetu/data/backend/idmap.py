@@ -94,7 +94,7 @@ class IdentityMap:
         # 检测comp_cls和row格式是否一致
         assert row_s.dtype == table_ref.comp_cls.dtypes, (
             f"row dtype({row_s.dtype}) does not match component class "
-            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
+            f"({table_ref.comp_cls.name_}, {table_ref.comp_cls.dtypes})"
         )
 
         # 初始化该component的缓存
@@ -163,7 +163,7 @@ class IdentityMap:
         # 检测comp_cls和row格式是否一致
         assert row.dtype == table_ref.comp_cls.dtypes, (
             f"row dtype({row.dtype}) does not match component class "
-            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
+            f"({table_ref.comp_cls.name_}, {table_ref.comp_cls.dtypes})"
         )
 
         assert row["_version"] == 0, f"不得修改_version字段，{row['_version']}"
@@ -190,7 +190,7 @@ class IdentityMap:
         # 检测comp_cls和row格式是否一致
         assert row.dtype == table_ref.comp_cls.dtypes, (
             f"row dtype({row.dtype}) does not match component class "
-            f"({table_ref.comp_cls.component_name_}, {table_ref.comp_cls.dtypes})"
+            f"({table_ref.comp_cls.name_}, {table_ref.comp_cls.dtypes})"
         )
 
         if table_ref not in self._row_cache:

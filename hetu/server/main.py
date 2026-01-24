@@ -6,25 +6,25 @@ Worker进程入口文件
 @email: heeroz@gmail.com
 """
 
+import asyncio
 import importlib.util
 import logging
 import os
-import time
 import sys
-import asyncio
-from redis.exceptions import ConnectionError as RedisConnectionError
+import time
 
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Sanic
 
-from . import websocket as _  # noqa: F401 (防止未使用警告)
-from ..endpoint import connection
-from ..common.helper import resolve_import
-from ..common.snowflake_id import WorkerKeeper, SnowflakeID
+from ..common.snowflake_id import SnowflakeID, WorkerKeeper
 from ..data.backend import Backend
+from ..endpoint import connection
 from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
 from ..system.future import future_call_task
+from . import pipeline
+from . import websocket as _  # noqa: F401 (防止未使用警告)
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -195,34 +195,17 @@ def worker_main(app_name, config) -> Sanic:
         logging.getLogger().setLevel(logging.DEBUG)
         root_logger.setLevel(logging.DEBUG)
 
-    # 加载协议
-    app.ctx.compress, app.ctx.crypto = None, None
-    compress = config.get("PACKET_COMPRESSION_CLASS")
-    crypto = config.get("PACKET_CRYPTOGRAPHY_CLASS")
-    if compress is not None:
-        try:
-            compress_module = resolve_import(compress)
-        except ValueError as e:
-            raise ValueError(
-                f"该压缩模块无法解析，请使用可被import的字符串：{compress}"
-            ) from e
-        required = ("compress", "decompress")
-        missing = [attr for attr in required if not hasattr(compress_module, attr)]
-        if missing:
-            raise ValueError(f"该压缩模块没有实现 {missing} 方法：{compress}")
-        app.ctx.compress = compress_module
-    if crypto is not None:
-        try:
-            crypto_module = resolve_import(crypto)
-        except ValueError as e:
-            raise ValueError(
-                f"该加密模块无法解析，请使用可被import的字符串：{crypto}"
-            ) from e
-        required = ("encrypt", "decrypt")
-        missing = [attr for attr in required if not hasattr(crypto_module, attr)]
-        if missing:
-            raise ValueError(f"该加密模块没有实现 {missing} 方法：{crypto}")
-        app.ctx.crypto = crypto_module
+    # 加载协议, 初始化消息处理流水线
+    cipher = config.get("PACKET_CIPHER")
+    msg_pipe = pipeline.ServerMessagePipeline()
+    msg_pipe.clean()  # 防止test用例中多次调用worker_main导致重复添加layer
+    msg_pipe.add_layer(pipeline.LimitCheckerLayer())
+    msg_pipe.add_layer(pipeline.JSONBinaryLayer())
+    msg_pipe.add_layer(pipeline.ZstdLayer())
+    msg_pipe.add_layer(pipeline.CryptoLayer())
+    if cipher == "None":
+        logger.warning("⚠️ [📡Pipeline] 未配置PACKET_CIPHER，通信不加密！")
+        msg_pipe.disable_layer(3)
 
     # 服务器main进程setup/teardown回调
     # app.main_process_start()

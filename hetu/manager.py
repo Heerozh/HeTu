@@ -54,7 +54,7 @@ class ComponentTableManager:
                     raise ValueError(f"Backend {comp.backend_} not found")
                 table = Table(comp, instance_name, cluster.id, backend)
                 self._tables[comp] = table
-                self._tables_by_name[comp.component_name_] = table
+                self._tables_by_name[comp.name_] = table
                 comp.hosted_ = table
 
     def create_or_migrate_all(self, app_file: str, force=False) -> bool:

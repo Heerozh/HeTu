@@ -1,5 +1,5 @@
-from sanic import Blueprint
-from sanic import Request, text
+from sanic import Blueprint, Request, text
+
 import hetu
 
 HETU_BLUEPRINT = Blueprint("HeTuDB")

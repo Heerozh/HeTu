@@ -141,7 +141,7 @@ def test_instance_define(new_component_env, new_clusters_env):
     # 测试system和instance是否正确定义
     sys_def = SystemClusters().get_system("test_hp", "pytest")
     assert Health.get_duplicates("pytest")["copy"] == next(iter(sys_def.components))
-    assert Health.get_duplicates("pytest")["copy"].component_name_ == "Health:copy"
+    assert Health.get_duplicates("pytest")["copy"].name_ == "Health:copy"
     assert Health.get_duplicates("pytest")["copy"].properties_ == Health.properties_
 
     # 测试instance的instances属性应该为空

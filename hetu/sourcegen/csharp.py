@@ -46,7 +46,7 @@ def generate_component(component_cls: type[BaseComponent]):
 
     lines = [
         "",
-        f"class {component_cls.component_name_}: IBaseComponent",
+        f"class {component_cls.name_}: IBaseComponent",
         "{",
         "    public long id { get; set; }",
         *attributes,
