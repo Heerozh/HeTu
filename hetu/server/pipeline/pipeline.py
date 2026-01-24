@@ -6,8 +6,12 @@
 """
 
 from typing import Any
+import logging
 
 from ...common.singleton import Singleton
+
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
 
 JSONType = dict[str, Any] | list[Any]
 PipeContext = list[Any]
@@ -85,6 +89,7 @@ class MessagePipeline:
         通过客户端发来的握手消息，完成所有层的握手工作。
         返回握手后的上下文；以及要发送给客户端的握手消息。
         """
+        logger.info(f"🔧 [📡Pipeline] 握手开始 {client_messages} ")
         pipe_ctx = []
         reply_messages = []
         for i, layer in enumerate(self._layers):

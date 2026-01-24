@@ -89,7 +89,7 @@ async def sub_call(
         )
 
 
-async def client_receiver(
+async def client_handler(
     ws: Websocket,
     pipe_ctx: PipeContext,
     executor: EndpointExecutor,
@@ -117,7 +117,7 @@ async def client_receiver(
             # 检查接受上限
             flood_checker.received()
             if flood_checker.recv_limit_reached(
-                ctx, "Coroutines(Websocket.client_receiver)"
+                ctx, "Coroutines(Websocket.client_handler)"
             ):
                 return ws.fail_connection()
             # 执行消息
@@ -137,7 +137,7 @@ async def client_receiver(
                 case _:
                     raise ValueError(f" [非法操作] 未知消息类型：{last_data[0]}")
     except asyncio.CancelledError:
-        # print(ctx, 'client_receiver normal canceled')
+        # print(ctx, 'client_handler normal canceled')
         pass
     except WebsocketClosed:
         pass
@@ -157,7 +157,7 @@ async def client_receiver(
         logger.exception(err_msg)
         ws.fail_connection()
     finally:
-        # print(ctx, 'client_receiver closed')
+        # print(ctx, 'client_handler closed')
         pass
 
 
@@ -184,7 +184,7 @@ async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
         pass
 
 
-async def subscription_receiver(
+async def subscription_handler(
     ws: Websocket, subscriptions: Subscriptions, push_queue: asyncio.Queue
 ):
     """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
@@ -196,7 +196,7 @@ async def subscription_receiver(
                 reply = ["updt", sub_id, data]
                 await push_queue.put(reply)
     except asyncio.CancelledError:
-        # print('subscription_receiver normal canceled')
+        # print('subscription_handler normal canceled')
         pass
     except RedisConnectionError as e:
         logger.error(
@@ -211,5 +211,5 @@ async def subscription_receiver(
         )
         return ws.fail_connection()
     finally:
-        # print('subscription_receiver closed')
+        # print('subscription_handler closed')
         pass

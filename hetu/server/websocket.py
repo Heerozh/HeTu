@@ -17,7 +17,7 @@ from ..endpoint.executor import EndpointExecutor
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import client_receiver, mq_puller, subscription_receiver
+from .receiver import client_handler, mq_puller, subscription_handler
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -83,15 +83,15 @@ async def websocket_connection(request: Request, ws: Websocket):
     flood_checker = connection.ConnectionFloodChecker()
 
     # 创建接受客户端消息的协程2
-    recv_task_id = f"client_receiver:{request.id}"
-    receiver_task = client_receiver(
+    recv_task_id = f"client_handler:{request.id}"
+    receiver_task = client_handler(
         ws, pipe_ctx, endpoint_executor, subscriptions, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
     subs_task_id = f"subs_receiver:{request.id}"
-    subscript_task = subscription_receiver(ws, subscriptions, push_queue)
+    subscript_task = subscription_handler(ws, subscriptions, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
     puller_task_id = f"mq_puller:{request.id}"
     puller_task = mq_puller(ws, subscriptions)
