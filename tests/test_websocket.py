@@ -2,6 +2,7 @@ import asyncio
 import logging
 import os
 from typing import Callable, cast
+from nacl.public import PrivateKey
 
 import pytest
 import sanic_testing
@@ -48,18 +49,29 @@ def setup_websocket_proxy():
             client_pipe.add_layer(pipeline.LimitCheckerLayer())
             client_pipe.add_layer(pipeline.JSONBinaryLayer())
             client_pipe.add_layer(pipeline.ZstdLayer())
-            client_pipe.add_layer(pipeline.CryptoLayer())
+            crypto_layer = pipeline.CryptoLayer()
+            client_pipe.add_layer(crypto_layer)
             pipe_ctx = None
+            print("客户端pipe", id(crypto_layer))
 
             async def handshake():
                 nonlocal pipe_ctx
-                await do_send(client_pipe.encode(None, [b""] * 4))
+                # 生成密钥对
+                private_key = PrivateKey.generate()
+                public_key = private_key.public_key
+                handshake_msg = [b""] * 4
+                handshake_msg[-1] = public_key.encode()
+                # 握手
+                await do_send(client_pipe.encode(None, handshake_msg))
                 data = cast(bytes, await do_recv())
                 message = client_pipe.decode(None, data)
                 assert type(message) is list
                 ctx, msg = client_pipe.handshake(message)
+                ctx[-1] = crypto_layer.client_handshake(
+                    private_key.encode(), message[-1]
+                )
+
                 pipe_ctx = ctx
-                logger.debug(f"> Handshake sent [{len(repr(msg))} bytes]")
 
             async def send(data):
                 logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")

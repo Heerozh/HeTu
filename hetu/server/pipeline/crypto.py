@@ -40,8 +40,9 @@ class CryptoLayer(MessageProcessLayer):
     @dataclass
     class CryptoContext:
         session_key: bytes
-        nonce: int
-        private_key: PrivateKey | None = None
+        server_side: bool
+        send_nonce: int
+        recv_nonce: int
 
     def __init__(self):
         super().__init__()
@@ -69,7 +70,7 @@ class CryptoLayer(MessageProcessLayer):
         )
 
         # 返回 Session Key 作为 Context，以及服务端的公钥给客户端
-        ctx = self.CryptoContext(session_key, 0)
+        ctx = self.CryptoContext(session_key, False, 0, 0)
         return ctx
 
     @override
@@ -112,7 +113,7 @@ class CryptoLayer(MessageProcessLayer):
             )
 
             # 返回 Session Key 作为 Context，以及服务端的公钥给客户端
-            ctx = self.CryptoContext(session_key, 0)
+            ctx = self.CryptoContext(session_key, True, 0, 0)
             return ctx, public_key.encode()
 
         except Exception as e:
@@ -139,9 +140,12 @@ class CryptoLayer(MessageProcessLayer):
         # 这里使用随机 Nonce。对于12字节Nonce，随机碰撞概率极低，足以应付长连接。
         # nonce = nacl.utils.random(self.NONCE_SIZE)
         # 这里用简单的递增 Nonce，避免随机碰撞风险
-        layer_ctx.nonce += 1
-        nonce = layer_ctx.nonce.to_bytes(self.NONCE_SIZE, byteorder="little")
-        print(id(self), f"encode 使用的nonce: {layer_ctx.nonce}")
+        layer_ctx.send_nonce += 1
+        sign = b"\x00" if layer_ctx.server_side else b"\xff"
+        nonce = sign + layer_ctx.send_nonce.to_bytes(
+            self.NONCE_SIZE - 1, byteorder="big"
+        )
+        # print(id(self), f"encode 使用的nonce: {sign} + {layer_ctx.send_nonce}")
         # 2. 加密 (ChaCha20-Poly1305-IETF)
         # 结果包含 Ciphertext 和 Poly1305 MAC Tag
         encrypted = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
@@ -172,7 +176,9 @@ class CryptoLayer(MessageProcessLayer):
 
         # 检查最小长度: Nonce(12) + Tag(16) = 28 bytes
         # 实际上空消息加密后也有 Tag，所以长度至少是 NONCE_SIZE + 16
-        min_len = self.NONCE_SIZE + 16
+        # min_len = self.NONCE_SIZE + 16
+        # 去掉NONCE SIZE
+        min_len = 16
         if len(message) < min_len:
             err_msg = (
                 f"解密失败：数据长度不足 (len={len(message)})，可能非加密数据或截断"
@@ -184,9 +190,12 @@ class CryptoLayer(MessageProcessLayer):
         # nonce = message[: self.NONCE_SIZE]
         # ciphertext = message[self.NONCE_SIZE :]
         # 这里用简单的递增 Nonce，避免随机碰撞风险
-        layer_ctx.nonce += 1
-        nonce = layer_ctx.nonce.to_bytes(self.NONCE_SIZE, byteorder="little")
-        print(id(self), f"decode 使用的nonce: {layer_ctx.nonce}")
+        layer_ctx.recv_nonce += 1
+        sign = b"\xff" if layer_ctx.server_side else b"\x00"
+        nonce = sign + layer_ctx.recv_nonce.to_bytes(
+            self.NONCE_SIZE - 1, byteorder="big"
+        )
+        # print(id(self), f"decode 使用的nonce: {sign} + {layer_ctx.recv_nonce}")
         try:
             # 2. 解密 & 验证
             # 如果 Tag 验证失败，这里会抛出 nacl.exceptions.CryptoError
