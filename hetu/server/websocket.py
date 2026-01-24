@@ -33,6 +33,18 @@ async def websocket_connection(request: Request, ws: Websocket):
     logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
     comp_mgr = request.app.ctx.comp_mgr
 
+    # 获得客户端握手消息
+    msg_pipe = MessagePipeline()
+    handshake_msg = await ws.recv()
+    if not isinstance(handshake_msg, (bytes, bytearray)):
+        raise ValueError("Invalid handshake message type")
+    handshake_msg = msg_pipe.decode(None, handshake_msg)
+    if not isinstance(handshake_msg, list):
+        raise ValueError("Invalid handshake message format")
+    # 进行握手处理，获得连接上下文
+    pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
+    await ws.send(reply)
+
     # 初始化Context，一个连接一个Context
     context = SystemContext(
         caller=0,
@@ -71,10 +83,9 @@ async def websocket_connection(request: Request, ws: Websocket):
     flood_checker = connection.ConnectionFloodChecker()
 
     # 创建接受客户端消息的协程2
-    protocol = dict(compress=request.app.ctx.compress, crypto=request.app.ctx.crypto)
     recv_task_id = f"client_receiver:{request.id}"
     receiver_task = client_receiver(
-        ws, protocol, endpoint_executor, subscriptions, push_queue, flood_checker
+        ws, pipe_ctx, endpoint_executor, subscriptions, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
@@ -98,7 +109,7 @@ async def websocket_connection(request: Request, ws: Websocket):
             if replay.level < logging.ERROR:
                 replay.debug(">>> " + str(reply))
             # print(executor.context, 'got', reply)
-            await ws.send(encode_message(reply, protocol))
+            await ws.send(msg_pipe.encode(pipe_ctx, reply))
             # 检查发送上限
             flood_checker.sent()
             if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):

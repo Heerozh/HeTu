@@ -109,15 +109,6 @@ class StartCommand(CommandInterface):
             "填入auto会生成自签https证书。",
             default="",
         )
-        cli_group.add_argument(
-            "--zlib",
-            type=str2bool,
-            nargs="?",
-            const=True,
-            help="消息启用zlib压缩，默认不启用。",
-            default=False,
-            metavar="False",
-        )
 
         cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
         cfg_group.add_argument(
@@ -177,7 +168,6 @@ class StartCommand(CommandInterface):
                 "CERT_CHAIN": args.cert,
                 "DEBUG": args.debug,
                 "ACCESS_LOG": False,
-                "PACKET_COMPRESSION_CLASS": "zlib" if args.zlib else None,
             }
             config = Config(config_for_factory)
 
@@ -214,10 +204,7 @@ class StartCommand(CommandInterface):
         )
         logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
         logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
-        logger.info(
-            f"ℹ️ 消息协议：压缩模块：{config.get('PACKET_COMPRESSION_CLASS')}, "
-            f"加密模块：{config.get('PACKET_CRYPTOGRAPHY_CLASS')}"
-        )
+        logger.info(f"ℹ️ 消息协议：加密模块：{config.get('PACKET_CIPHER')}")
 
         if config.DEBUG:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")

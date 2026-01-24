@@ -66,9 +66,8 @@ MAX_ROW_SUBSCRIPTION: 10
 MAX_INDEX_SUBSCRIPTION: 1
 
 
-# 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
-PACKET_COMPRESSION_CLASS: null     # 通过该class的compress和decompress静态方法进行压缩和解压缩
-PACKET_CRYPTOGRAPHY_CLASS: null    # 通过该class的encrypt和decrypt静态方法进行加密和解密
+# 消息加密方式
+PACKET_CIPHER: ChaCha20-Poly1305
 
 # ！！ 注意 ！！
 # 如果从容器启动standalone模式河图，redis的地址不能用127.0.0.1，因为这是容器内部地址

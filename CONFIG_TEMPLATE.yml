@@ -67,9 +67,8 @@ MAX_ROW_SUBSCRIPTION: 10
 # 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.Query)。每次Query订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
 
-# 消息协议，可以在app代码中自己包装class，在内部实现自定义协议
-PACKET_COMPRESSION_CLASS: null # 通过该class的compress和decompress静态方法进行压缩和解压缩
-PACKET_CRYPTOGRAPHY_CLASS: null # 通过该class的encrypt和decrypt静态方法进行加密和解密
+# 消息加密方式，可选 None、ChaCha20-Poly1305
+PACKET_CIPHER: ChaCha20-Poly1305
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS:

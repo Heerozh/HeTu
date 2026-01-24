@@ -9,7 +9,7 @@ import logging
 from typing import Any, override
 
 
-from .pipeline import MessageProcessLayer, MsgType
+from .pipeline import MessageProcessLayer, JSONType
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -24,7 +24,7 @@ class LimitCheckerLayer(MessageProcessLayer):
         super().__init__()
 
     @override
-    def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
+    def handshake(self, message: bytes) -> tuple[Any, bytes]:
         """
         连接前握手工作，例如协商参数等。
         返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
@@ -33,7 +33,7 @@ class LimitCheckerLayer(MessageProcessLayer):
         return None, b""
 
     @override
-    def encode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def encode(self, layer_ctx: Any, message: JSONType | bytes) -> JSONType | bytes:
         """
         对消息进行正向处理
         """
@@ -41,7 +41,7 @@ class LimitCheckerLayer(MessageProcessLayer):
         return message
 
     @override
-    def decode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def decode(self, layer_ctx: Any, message: JSONType | bytes) -> JSONType | bytes:
         """
         对消息进行逆向处理
         """

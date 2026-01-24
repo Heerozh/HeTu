@@ -16,7 +16,7 @@ from sanic.exceptions import WebsocketClosed
 import hetu
 from ..endpoint import connection
 from ..endpoint.response import ResponseToClient
-from .pipeline import MessagePipeline
+from .pipeline.pipeline import PipeContext, MessagePipeline
 
 if TYPE_CHECKING:
     from ..endpoint.executor import EndpointExecutor
@@ -89,13 +89,14 @@ async def sub_call(
 
 async def client_receiver(
     ws: Websocket,
-    protocol: dict,
+    pipe_ctx: PipeContext,
     executor: EndpointExecutor,
     subs: Subscriptions,
     push_queue: asyncio.Queue,
     flood_checker: connection.ConnectionFloodChecker,
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
+    pipe = MessagePipeline()
     ctx = executor.context
     last_data = None
     try:
@@ -105,7 +106,9 @@ async def client_receiver(
             if type(message) is not bytes:
                 break  # if not byte frame, close connection
             # 转换消息到array
-            last_data = decode_message(message, protocol)
+            last_data = pipe.decode(pipe_ctx, message)
+            if type(last_data) is not list:
+                raise ValueError("Invalid message format")
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
             if replay.level < logging.ERROR:
                 replay.debug("<<< " + str(last_data))

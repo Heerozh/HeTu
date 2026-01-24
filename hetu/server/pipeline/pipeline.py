@@ -6,8 +6,9 @@
 """
 
 from typing import Any
+from ...common.singleton import Singleton
 
-MsgType = list | dict | bytes
+JSONType = dict[str, Any] | list[Any]
 PipeContext = list[Any]
 
 
@@ -20,7 +21,7 @@ class MessageProcessLayer:
         self._parent = parent
         self._layer_idx = layer_idx
 
-    def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
+    def handshake(self, message: bytes) -> tuple[Any, bytes]:
         """
         连接前握手工作，例如协商参数等。
         返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
@@ -28,20 +29,20 @@ class MessageProcessLayer:
         """
         raise NotImplementedError()
 
-    def encode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def encode(self, layer_ctx: Any, message: JSONType | bytes) -> JSONType | bytes:
         """
         对消息进行正向处理
         """
         raise NotImplementedError()
 
-    def decode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def decode(self, layer_ctx: Any, message: JSONType | bytes) -> JSONType | bytes:
         """
         对消息进行逆向处理
         """
         raise NotImplementedError()
 
 
-class MessagePipeline:
+class MessagePipeline(metaclass=Singleton):
     """
     消息流层叠处理类。
 
@@ -60,9 +61,11 @@ class MessagePipeline:
         self._layers.append(layer)
         layer.on_attach(self, len(self._layers) - 1)
 
-    def handshake(
-        self, client_messages: list[MsgType]
-    ) -> tuple[PipeContext, list[MsgType]]:
+    @property
+    def num_layers(self) -> int:
+        return len(self._layers)
+
+    def handshake(self, client_messages: list[bytes]) -> tuple[PipeContext, bytes]:
         """
         通过客户端发来的握手消息，完成所有层的握手工作。
         返回握手后的上下文；以及要发送给客户端的握手消息。
@@ -73,23 +76,35 @@ class MessagePipeline:
             ctx, reply = layer.handshake(client_messages[i])
             pipe_ctx.append(ctx)
             reply_messages.append(reply)
-        return pipe_ctx, reply_messages
+        return pipe_ctx, self.encode(None, reply_messages)
 
-    def encode(self, pipe_ctx: PipeContext, message: MsgType, until=-1) -> MsgType:
+    def encode(
+        self, pipe_ctx: PipeContext | None, message: JSONType, until=-1
+    ) -> bytes:
         """
         对消息进行正向处理，可以传入until参数表示只处理到哪层
         """
+        ctx = None
+        encoded: JSONType | bytes = message
         for i, layer in enumerate(self._layers):
             if 0 < until < i:
                 break
-            message = layer.encode(pipe_ctx[i], message)
-        return message
+            if pipe_ctx is not None:
+                ctx = pipe_ctx[i]
+            encoded = layer.encode(ctx, encoded)
+        assert type(encoded) is bytes
+        return encoded
 
-    def decode(self, pipe_ctx: PipeContext, message: MsgType) -> MsgType:
+    def decode(self, pipe_ctx: PipeContext | None, message: bytes) -> JSONType:
         """
         对消息进行逆向处理
         """
+        ctx = None
+        decoded: JSONType | bytes = message
         for i, layer in enumerate(reversed(self._layers)):
-            original_index = len(pipe_ctx) - 1 - i
-            message = layer.decode(pipe_ctx[original_index], message)
-        return message
+            if pipe_ctx is not None:
+                original_index = len(pipe_ctx) - 1 - i
+                ctx = pipe_ctx[original_index]
+            decoded = layer.decode(ctx, decoded)
+        assert isinstance(decoded, (dict, list))
+        return decoded

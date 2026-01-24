@@ -47,7 +47,6 @@ async def rpc(websocket, message):
     await websocket.send(encode_message(message))
     # 统计事务冲突率
     received = await websocket.recv()
-    # received = zlib.decompress(received)
     received = decode_message(received)
     return received[1]
 
