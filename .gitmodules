@@ -2,7 +2,3 @@
 	path = ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket
 	url = https://github.com/psygames/UnityWebSocket.git
 	branch = upm
-[submodule "ClientSDK/unity/UniTask"]
-	path = ClientSDK/unity/UniTask
-	url = https://github.com/Cysharp/UniTask.git
-	branch = master
