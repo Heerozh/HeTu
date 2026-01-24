@@ -5,8 +5,8 @@
 @email: heeroz@gmail.com
 """
 
-from typing import Any
 import logging
+from typing import Any
 
 from ...common.singleton import Singleton
 

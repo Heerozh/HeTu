@@ -2,18 +2,17 @@ import asyncio
 import logging
 import os
 from typing import Callable, cast
-from nacl.public import PrivateKey
 
 import pytest
 import sanic_testing
 import sanic_testing.testing
+from nacl.public import PrivateKey
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
-from hetu.server import worker_main
+from hetu.server import pipeline, worker_main
 from hetu.system import SystemClusters
-from hetu.server import pipeline
 
 logger = logging.getLogger("HeTu.root")
 logger.setLevel(logging.DEBUG)
