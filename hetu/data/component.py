@@ -162,7 +162,7 @@ class BaseComponent:
     def new_row(cls, id_=None) -> np.record:
         """返回空数据行，id生成uuid，用于insert"""
         row = cast(np.record, cls.default_row[0].copy())
-        if id_:
+        if id_ is not None:
             row.id = id_
         else:
             row.id = SNOWFLAKE_ID.next_id()

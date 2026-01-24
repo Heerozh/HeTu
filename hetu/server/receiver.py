@@ -16,7 +16,7 @@ from sanic.exceptions import WebsocketClosed
 import hetu
 from ..endpoint import connection
 from ..endpoint.response import ResponseToClient
-from .message import decode_message
+from .pipeline import MessagePipeline
 
 if TYPE_CHECKING:
     from ..endpoint.executor import EndpointExecutor

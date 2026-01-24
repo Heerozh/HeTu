@@ -15,7 +15,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class LimitChecker(MessageProcessLayer):
+class LimitCheckerLayer(MessageProcessLayer):
     """
     检查消息合法性的类
     """

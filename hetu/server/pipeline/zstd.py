@@ -17,7 +17,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class ZstdCompressorLayer(MessageProcessLayer):
+class ZstdLayer(MessageProcessLayer):
     """
     使用python 3.14内置的 compression/zstd 模块进行消息的压缩和解压缩。
     """
@@ -25,12 +25,10 @@ class ZstdCompressorLayer(MessageProcessLayer):
     def __init__(self, level: int = 3):
         super().__init__()
         self.level = level
-        self.zstd_dict = self.train_dict()
-        self.dict_message = self.zstd_dict.dict_content
-        self.compressor = zstd.ZstdCompressor(
-            level=self.level, zstd_dict=self.zstd_dict
-        )
-        self.decompressor = zstd.ZstdDecompressor(zstd_dict=self.zstd_dict)
+        self.zstd_dict: zstd.ZstdDict | None = None
+        self.dict_message: bytes | None = None
+        self.compressor: zstd.ZstdCompressor | None = None
+        self.decompressor: zstd.ZstdDecompressor | None = None
 
     def train_dict(self) -> zstd.ZstdDict:
         """
@@ -56,12 +54,13 @@ class ZstdCompressorLayer(MessageProcessLayer):
             raw[:] = rng.integers(0, 256, size=len(raw), dtype=np.uint8).tobytes()
             default_row = np.frombuffer(raw, dtype=dt, count=1)[0]  # 结构化标量
             row_dict = _comp.struct_to_dict(default_row)
+            del row_dict["_version"]  # 删除版本字段
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             ref = TableReference(_comp, "", 0)
             sub_id = Subscriptions.make_query_id_(
                 ref,
-                "id",
+                rng.choice(["id"] + list(row_dict.keys())),
                 rng.integers(0, np.iinfo(np.int64).max),
                 rng.integers(0, np.iinfo(np.int64).max),
                 rng.integers(1, 100),
@@ -86,7 +85,8 @@ class ZstdCompressorLayer(MessageProcessLayer):
                 samples.append(encoded_message)
 
         # 训练Zstd字典
-        dict_size = sum(len(s) for s in samples) // 10  # 目标字典大小为样本总大小的10%
+        dict_size = sum(len(s) for s in samples) // 100  # 目标字典大小为样本总大小的1%
+        dict_size = max(256, min(112640, dict_size))  # 限制在0.2KB到110KB之间
         return zstd.train_dict(samples, dict_size)
 
     @override
@@ -95,6 +95,14 @@ class ZstdCompressorLayer(MessageProcessLayer):
         连接前握手工作，例如协商参数等。
         返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
         """
+        if self.zstd_dict is None:
+            self.zstd_dict = self.train_dict()
+            self.dict_message = self.zstd_dict.dict_content
+            self.compressor = zstd.ZstdCompressor(
+                level=self.level, zstd_dict=self.zstd_dict
+            )
+            self.decompressor = zstd.ZstdDecompressor(zstd_dict=self.zstd_dict)
+        assert self.dict_message
         return None, self.dict_message
 
     @override
@@ -107,6 +115,7 @@ class ZstdCompressorLayer(MessageProcessLayer):
             return message
 
         assert type(message) is bytes, "ZstdCompressor只能压缩bytes类型的消息"
+        assert self.compressor is not None, "ZstdCompressor未初始化"
 
         # 使用预训练的字典进行压缩
         # 1. 写入数据到流
@@ -126,6 +135,7 @@ class ZstdCompressorLayer(MessageProcessLayer):
             return message
 
         assert type(message) is bytes, "ZstdDecompressor只能解压bytes类型的消息"
+        assert self.decompressor is not None, "ZstdDecompressor未初始化"
 
         # 反之，使用字典流式解压
         # zstd 模块会自动处理跨包的数据缓冲

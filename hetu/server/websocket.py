@@ -16,7 +16,7 @@ from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
 from ..system.context import SystemContext
 from ..system.caller import SystemCaller
-from .message import encode_message
+from .pipeline import MessagePipeline
 from .receiver import client_receiver, mq_puller, subscription_receiver
 from .web import HETU_BLUEPRINT
 

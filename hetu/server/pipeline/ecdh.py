@@ -10,4 +10,44 @@ Python 端使用 nacl (PyNaCl) 库，Unity 端使用 Sodium 的 C# 绑定（libs
             虽然 IL2CPP 很难读，但此时函数名、类名还在 global-metadata.dat 里。
             使用工具（如 Il2CppDumper 的对抗工具，或者商业混淆插件如 BeeByte）混淆代码结构，把 DecryptData() 这种函数名变成 A() 或者乱码。
 """
+
 # todo 实现标准河图加密解密
+import logging
+from typing import Any, override
+
+
+from .pipeline import MessageProcessLayer, MsgType
+
+logger = logging.getLogger("HeTu.root")
+replay = logging.getLogger("HeTu.replay")
+
+
+class CryptoLayer(MessageProcessLayer):
+    """
+    检查消息合法性的类
+    """
+
+    def __init__(self):
+        super().__init__()
+
+    @override
+    def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
+        """
+        连接前握手工作，例如协商参数等。
+        返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
+        """
+        return None, b""
+
+    @override
+    def encode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+        """
+        对消息进行正向处理
+        """
+        return message
+
+    @override
+    def decode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+        """
+        对消息进行逆向处理
+        """
+        return message
