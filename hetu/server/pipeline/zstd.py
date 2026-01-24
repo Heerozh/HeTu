@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+import time
 from dataclasses import dataclass
 import logging
 from typing import Any, override
@@ -47,6 +48,8 @@ class ZstdLayer(MessageProcessLayer):
         self.zstd_dict: zstd.ZstdDict | None = None
         self.dict_message: bytes | None = None
         self.last_trained_at: float = 0.0
+        self.encode_count = 0
+        self.encode_ratio = 0.0
 
     def initial_samples(self) -> list[bytes]:
         """
@@ -91,8 +94,8 @@ class ZstdLayer(MessageProcessLayer):
             if comp.permission_ == Permission.ADMIN:
                 continue
 
-            # 倍增样本数量以获得更好的字典
-            for _ in range(50):
+            # zstd算法(COVER)需要统计显著性，需要识别重复模式而非记住完整内容
+            for _ in range(200):
                 sub_message = make_rand_sub_message(comp)
                 # 把订阅更新消息编码到压缩前
                 encoded_message = self._parent.encode(
@@ -126,10 +129,11 @@ class ZstdLayer(MessageProcessLayer):
         # 如果没有训练过字典，用初始样本训练
         if self.zstd_dict is None:
             self.zstd_dict = self.train_dict()
+            self.last_trained_at = time.time()
             self.dict_message = self.zstd_dict.dict_content
         else:
             # 反之定期的更新字典
-            # todo 如果上次训练时间超过1小时，重新训练字典
+            # todo 如果上次训练时间超过24小时，重新训练字典
             pass
 
         assert self.dict_message
@@ -155,6 +159,8 @@ class ZstdLayer(MessageProcessLayer):
             return message
 
         assert type(message) is bytes, "ZstdCompressor只能压缩bytes类型的消息"
+
+        # todo 如果self.samples长度不足，说明被清空了，收集样本数据以便后续训练字典
         # todo， 记录实际压缩比率，和压缩耗时，对应level和dict_size参数，以便后续调优
 
         # 使用预训练的字典进行压缩
@@ -165,6 +171,9 @@ class ZstdLayer(MessageProcessLayer):
         chunk = layer_ctx.compressor.compress(
             message, mode=zstd.ZstdCompressor.FLUSH_BLOCK
         )
+        ratio = len(chunk) / len(message)
+        self.encode_count += 1
+        self.encode_ratio += (ratio - self.encode_ratio) / self.encode_count
         return chunk
 
     @override

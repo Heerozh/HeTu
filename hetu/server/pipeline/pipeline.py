@@ -8,6 +8,7 @@
 from typing import Any
 
 MsgType = list | dict | bytes
+PipeContext = list[Any]
 
 
 class MessageProcessLayer:
@@ -60,37 +61,35 @@ class MessagePipeline:
         layer.on_attach(self, len(self._layers) - 1)
 
     def handshake(
-        self, handshake_messages: list[MsgType]
-    ) -> tuple[list[Any], list[MsgType]]:
+        self, client_messages: list[MsgType]
+    ) -> tuple[PipeContext, list[MsgType]]:
         """
         通过客户端发来的握手消息，完成所有层的握手工作。
         返回握手后的上下文；以及要发送给客户端的握手消息。
         """
-        handshake_ctx = []
-        handshake_messages = []
+        pipe_ctx = []
+        reply_messages = []
         for i, layer in enumerate(self._layers):
-            ctx, reply = layer.handshake(handshake_messages[i])
-            handshake_ctx.append(ctx)
-            handshake_messages.append(reply)
-        return handshake_ctx, handshake_messages
+            ctx, reply = layer.handshake(client_messages[i])
+            pipe_ctx.append(ctx)
+            reply_messages.append(reply)
+        return pipe_ctx, reply_messages
 
-    def encode(
-        self, layers_handshake_ctx: list[Any], message: MsgType, until=-1
-    ) -> MsgType:
+    def encode(self, pipe_ctx: PipeContext, message: MsgType, until=-1) -> MsgType:
         """
         对消息进行正向处理，可以传入until参数表示只处理到哪层
         """
         for i, layer in enumerate(self._layers):
             if 0 < until < i:
                 break
-            message = layer.encode(layers_handshake_ctx[i], message)
+            message = layer.encode(pipe_ctx[i], message)
         return message
 
-    def decode(self, layers_handshake_ctx: list[Any], message: MsgType) -> MsgType:
+    def decode(self, pipe_ctx: PipeContext, message: MsgType) -> MsgType:
         """
         对消息进行逆向处理
         """
         for i, layer in enumerate(reversed(self._layers)):
-            original_index = len(layers_handshake_ctx) - 1 - i
-            message = layer.decode(layers_handshake_ctx[original_index], message)
+            original_index = len(pipe_ctx) - 1 - i
+            message = layer.decode(pipe_ctx[original_index], message)
         return message
