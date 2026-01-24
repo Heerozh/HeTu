@@ -6,27 +6,26 @@ Worker进程入口文件
 @email: heeroz@gmail.com
 """
 
+import asyncio
 import importlib.util
 import logging
 import os
-import time
 import sys
-import asyncio
-from redis.exceptions import ConnectionError as RedisConnectionError
+import time
 
+from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Sanic
 
-from . import websocket as _  # noqa: F401 (防止未使用警告)
-from ..endpoint import connection
-from ..common.helper import resolve_import
-from ..common.snowflake_id import WorkerKeeper, SnowflakeID
+from ..common.snowflake_id import SnowflakeID, WorkerKeeper
 from ..data.backend import Backend
+from ..endpoint import connection
 from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
 from ..system.future import future_call_task
-from .web import HETU_BLUEPRINT
 from . import pipeline
+from . import websocket as _  # noqa: F401 (防止未使用警告)
+from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -198,7 +197,8 @@ def worker_main(app_name, config) -> Sanic:
 
     # 加载协议, 初始化消息处理流水线
     cipher = config.get("PACKET_CIPHER")  # todo
-    msg_pipe = pipeline.MessagePipeline()
+    msg_pipe = pipeline.ServerMessagePipeline()
+    msg_pipe.clean()  # 防止test用例中多次调用worker_main导致重复添加layer
     msg_pipe.add_layer(pipeline.LimitCheckerLayer())
     msg_pipe.add_layer(pipeline.JSONBinaryLayer())
     msg_pipe.add_layer(pipeline.ZstdLayer())

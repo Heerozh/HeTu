@@ -8,8 +8,7 @@
 import logging
 from typing import Any, override
 
-
-from .pipeline import MessageProcessLayer, JSONType
+from .pipeline import JSONType, MessageProcessLayer
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")

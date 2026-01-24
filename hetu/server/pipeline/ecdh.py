@@ -15,8 +15,7 @@ Python 端使用 nacl (PyNaCl) 库，Unity 端使用 Sodium 的 C# 绑定（libs
 import logging
 from typing import Any, override
 
-
-from .pipeline import MessageProcessLayer, JSONType
+from .pipeline import JSONType, MessageProcessLayer
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")

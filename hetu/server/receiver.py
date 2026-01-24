@@ -13,15 +13,17 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
 from sanic.exceptions import WebsocketClosed
 
-import hetu
+import hetu  # for obtaining __version__
+
 from ..endpoint import connection
 from ..endpoint.response import ResponseToClient
-from .pipeline.pipeline import PipeContext, MessagePipeline
+from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
 if TYPE_CHECKING:
-    from ..endpoint.executor import EndpointExecutor
-    from ..data.sub import Subscriptions
     from sanic import Websocket
+
+    from ..data.sub import Subscriptions
+    from ..endpoint.executor import EndpointExecutor
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -96,7 +98,7 @@ async def client_receiver(
     flood_checker: connection.ConnectionFloodChecker,
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
-    pipe = MessagePipeline()
+    pipe = ServerMessagePipeline()
     ctx = executor.context
     last_data = None
     try:

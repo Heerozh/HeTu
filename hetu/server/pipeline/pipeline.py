@@ -6,6 +6,7 @@
 """
 
 from typing import Any
+
 from ...common.singleton import Singleton
 
 JSONType = dict[str, Any] | list[Any]
@@ -42,7 +43,7 @@ class MessageProcessLayer:
         raise NotImplementedError()
 
 
-class MessagePipeline(metaclass=Singleton):
+class MessagePipeline:
     """
     消息流层叠处理类。
 
@@ -60,6 +61,12 @@ class MessagePipeline(metaclass=Singleton):
         """
         self._layers.append(layer)
         layer.on_attach(self, len(self._layers) - 1)
+
+    def clean(self):
+        """
+        清除所有层，重置管道
+        """
+        self._layers.clear()
 
     @property
     def num_layers(self) -> int:
@@ -108,3 +115,11 @@ class MessagePipeline(metaclass=Singleton):
             decoded = layer.decode(ctx, decoded)
         assert isinstance(decoded, (dict, list))
         return decoded
+
+
+class ServerMessagePipeline(MessagePipeline, metaclass=Singleton):
+    """
+    服务器端的消息流层叠处理类，单例模式。
+    """
+
+    pass

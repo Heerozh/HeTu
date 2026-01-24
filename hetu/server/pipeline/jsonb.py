@@ -10,7 +10,7 @@ from typing import Any, override
 
 import msgspec
 
-from .pipeline import MessageProcessLayer, JSONType
+from .pipeline import JSONType, MessageProcessLayer
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")

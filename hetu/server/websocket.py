@@ -14,9 +14,9 @@ from sanic.exceptions import WebsocketClosed
 from ..data.sub import Subscriptions
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
-from ..system.context import SystemContext
 from ..system.caller import SystemCaller
-from .pipeline import MessagePipeline
+from ..system.context import SystemContext
+from .pipeline import ServerMessagePipeline
 from .receiver import client_receiver, mq_puller, subscription_receiver
 from .web import HETU_BLUEPRINT
 
@@ -34,7 +34,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     comp_mgr = request.app.ctx.comp_mgr
 
     # 获得客户端握手消息
-    msg_pipe = MessagePipeline()
+    msg_pipe = ServerMessagePipeline()
     handshake_msg = await ws.recv()
     if not isinstance(handshake_msg, (bytes, bytearray)):
         raise ValueError("Invalid handshake message type")

@@ -5,15 +5,15 @@
 @email: heeroz@gmail.com
 """
 
+import logging
 import time
 from dataclasses import dataclass
-import logging
 from typing import Any, override
 
 import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
 import numpy as np
 
-from .pipeline import MessageProcessLayer, JSONType
+from .pipeline import JSONType, MessageProcessLayer
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -102,6 +102,12 @@ class ZstdLayer(MessageProcessLayer):
                     [None] * (self._layer_idx + 1), sub_message, self._layer_idx
                 )
                 samples.append(encoded_message)
+
+        if len(samples) == 0:
+            # 兜底，防止没有样本
+            for _ in range(1000):
+                samples.append(b"updt FutureCall id")
+
         return samples
 
     def train_dict(self) -> zstd.ZstdDict:
@@ -126,15 +132,20 @@ class ZstdLayer(MessageProcessLayer):
         返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
         返回的第二个值会发送给对端。
         """
-        # 如果没有训练过字典，用初始样本训练
-        if self.zstd_dict is None:
-            self.zstd_dict = self.train_dict()
-            self.last_trained_at = time.time()
-            self.dict_message = self.zstd_dict.dict_content
+        if len(message) == 0:
+            # 如果没有训练过字典，用初始样本训练
+            if self.zstd_dict is None:
+                self.zstd_dict = self.train_dict()
+                self.last_trained_at = time.time()
+                self.dict_message = self.zstd_dict.dict_content
+            else:
+                # 反之定期的更新字典
+                # todo 如果上次训练时间超过24小时，重新训练字典
+                pass
         else:
-            # 反之定期的更新字典
-            # todo 如果上次训练时间超过24小时，重新训练字典
-            pass
+            # 如果对端发送了字典数据，使用对端的字典
+            self.zstd_dict = zstd.ZstdDict(message)
+            self.dict_message = self.zstd_dict.dict_content
 
         assert self.dict_message
 

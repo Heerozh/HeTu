@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import zlib
 from typing import Callable, cast
 
 import pytest
@@ -12,8 +11,8 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import worker_main
-from hetu.server.message import decode_message, encode_message
 from hetu.system import SystemClusters
+from hetu.server import pipeline
 
 logger = logging.getLogger("HeTu.root")
 logger.setLevel(logging.DEBUG)
@@ -24,7 +23,6 @@ logging.lastResort.setLevel(logging.DEBUG)
 @pytest.fixture
 def setup_websocket_proxy():
     # 设置ws测试routine方法
-    protocol = dict(compress=zlib, crypto=None)
 
     async def websocket_proxy(url, *args, **kwargs):
         mimic = kwargs.pop("mimic", None)
@@ -46,20 +44,39 @@ def setup_websocket_proxy():
             do_send = ws.send
             do_recv = ws.recv
 
+            client_pipe = pipeline.MessagePipeline()
+            client_pipe.add_layer(pipeline.LimitCheckerLayer())
+            client_pipe.add_layer(pipeline.JSONBinaryLayer())
+            client_pipe.add_layer(pipeline.ZstdLayer())
+            client_pipe.add_layer(pipeline.CryptoLayer())
+            pipe_ctx = None
+
+            async def handshake():
+                nonlocal pipe_ctx
+                await do_send(client_pipe.encode(None, [b""] * 4))
+                data = cast(bytes, await do_recv())
+                message = client_pipe.decode(None, data)
+                assert type(message) is list
+                ctx, msg = client_pipe.handshake(message)
+                pipe_ctx = ctx
+                logger.debug(f"> Handshake sent [{len(repr(msg))} bytes]")
+
             async def send(data):
                 logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
                 ws_proxy.client_sent.append(data)
-                await do_send(encode_message(data, protocol))
+                await do_send(client_pipe.encode(pipe_ctx, data))
 
             async def recv():
                 data = cast(bytes, await do_recv())
-                message = decode_message(data, protocol)
+                message = client_pipe.decode(pipe_ctx, data)
                 logger.debug(f"< Received: {message} [{len(repr(message))} bytes]")
                 ws_proxy.client_received.append(message)
                 return message
 
             def clear_recv():
                 ws_proxy.client_received.clear()
+
+            await handshake()
 
             ws.send = send  # type: ignore
             ws.recv = recv  # type: ignore
@@ -99,7 +116,6 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "NAMESPACE": "pytest",
             "INSTANCE_NAME": "pytest_1",
             "LISTEN": f"0.0.0.0:874",
-            "PACKET_COMPRESSION_CLASS": "zlib",
             "BACKENDS": {
                 "Redis": {
                     "type": "Redis",
