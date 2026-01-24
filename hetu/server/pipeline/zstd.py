@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+from dataclasses import dataclass
 import logging
 from typing import Any, override
 
@@ -22,19 +23,34 @@ class ZstdLayer(MessageProcessLayer):
     使用python 3.14内置的 compression/zstd 模块进行消息的压缩和解压缩。
     """
 
-    def __init__(self, level: int = 3):
+    @dataclass
+    class ZstdContext:
+        compressor: zstd.ZstdCompressor
+        decompressor: zstd.ZstdDecompressor
+
+    def __init__(self, level: int = 3, dict_size: int = 1024):
+        """
+
+        Parameters
+        ----------
+        level
+            Zstd压缩级别，范围从1（最快，压缩率最低）到22（最慢，压缩率最高）。
+            一般推荐使用3，之后的速度会非常慢，但压缩率提升有限。
+        dict_size
+            Zstd字典的大小，单位为字节。字典保存常用字符串，比如Component的属性名，极大增加压缩率。
+            较大的字典会增加连接时的网络开销，一般推荐使用1024字节（1KB）。
+        """
         super().__init__()
         self.level = level
+        self.dict_size = dict_size
+        self.samples = []
         self.zstd_dict: zstd.ZstdDict | None = None
         self.dict_message: bytes | None = None
-        self.compressor: zstd.ZstdCompressor | None = None
-        self.decompressor: zstd.ZstdDecompressor | None = None
+        self.last_trained_at: float = 0.0
 
-    def train_dict(self) -> zstd.ZstdDict:
+    def initial_samples(self) -> list[bytes]:
         """
-        训练Zstd字典以提高压缩效率。
-        使用所有非Admin的组件，创建一行默认值数据，然后用pipeline在本层之前进行预处理，
-        然后用它们作为样本。
+        返回用于训练Zstd字典的随机生成的样本数据。在没有真实数据的情况下使用这个。
         """
         from ...common import Permission
         from ...data import BaseComponent
@@ -83,30 +99,54 @@ class ZstdLayer(MessageProcessLayer):
                     [None] * (self._layer_idx + 1), sub_message, self._layer_idx
                 )
                 samples.append(encoded_message)
+        return samples
 
+    def train_dict(self) -> zstd.ZstdDict:
+        """
+        训练Zstd字典以提高压缩效率。
+        使用所有非Admin的组件，创建一行默认值数据，然后用pipeline在本层之前进行预处理，
+        然后用它们作为样本。
+        """
+        # 如果有运行期间收集的数据，用它们训练
+        if len(self.samples) > 1000:
+            samples = self.samples
+        else:
+            # 否则使用初始样本
+            samples = self.initial_samples()
         # 训练Zstd字典
-        dict_size = sum(len(s) for s in samples) // 100  # 目标字典大小为样本总大小的1%
-        dict_size = max(256, min(112640, dict_size))  # 限制在0.2KB到110KB之间
-        return zstd.train_dict(samples, dict_size)
+        return zstd.train_dict(samples, self.dict_size)
 
     @override
     def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
         """
         连接前握手工作，例如协商参数等。
-        返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
+        返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
+        返回的第二个值会发送给对端。
         """
+        # 如果没有训练过字典，用初始样本训练
         if self.zstd_dict is None:
             self.zstd_dict = self.train_dict()
             self.dict_message = self.zstd_dict.dict_content
-            self.compressor = zstd.ZstdCompressor(
-                level=self.level, zstd_dict=self.zstd_dict
-            )
-            self.decompressor = zstd.ZstdDecompressor(zstd_dict=self.zstd_dict)
+        else:
+            # 反之定期的更新字典
+            # todo 如果上次训练时间超过1小时，重新训练字典
+            pass
+
         assert self.dict_message
-        return None, self.dict_message
+
+        ctx = self.ZstdContext(
+            compressor=zstd.ZstdCompressor(
+                level=self.level,
+                # as_digested_dict会在self.zstd_dict内部建立已消化字典的cache，让下次加载更快
+                # 但是部分压缩参数会有被字典的参数覆盖，这里没用到那些参数所以无妨
+                zstd_dict=self.zstd_dict.as_digested_dict,
+            ),
+            decompressor=zstd.ZstdDecompressor(zstd_dict=self.zstd_dict),
+        )
+        return ctx, self.dict_message
 
     @override
-    def encode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def encode(self, layer_ctx: ZstdContext | None, message: MsgType) -> MsgType:
         """
         对消息进行正向处理（流式压缩）
         """
@@ -115,18 +155,20 @@ class ZstdLayer(MessageProcessLayer):
             return message
 
         assert type(message) is bytes, "ZstdCompressor只能压缩bytes类型的消息"
-        assert self.compressor is not None, "ZstdCompressor未初始化"
+        # todo， 记录实际压缩比率，和压缩耗时，对应level和dict_size参数，以便后续调优
 
         # 使用预训练的字典进行压缩
         # 1. 写入数据到流
         # 2. FLUSH_BLOCK:
         #    这会强制输出当前块的数据，确保接收端能立即收到并解压。
         #    同时不会结束当前帧 (Frame)，保留了历史参考信息（流式压缩的核心优势）。
-        chunk = self.compressor.compress(message, mode=zstd.ZstdCompressor.FLUSH_BLOCK)
+        chunk = layer_ctx.compressor.compress(
+            message, mode=zstd.ZstdCompressor.FLUSH_BLOCK
+        )
         return chunk
 
     @override
-    def decode(self, layer_ctx: Any, message: MsgType) -> MsgType:
+    def decode(self, layer_ctx: ZstdContext | None, message: MsgType) -> MsgType:
         """
         对消息进行逆向处理（流式解压）
         """
@@ -135,12 +177,11 @@ class ZstdLayer(MessageProcessLayer):
             return message
 
         assert type(message) is bytes, "ZstdDecompressor只能解压bytes类型的消息"
-        assert self.decompressor is not None, "ZstdDecompressor未初始化"
 
         # 反之，使用字典流式解压
         # zstd 模块会自动处理跨包的数据缓冲
         try:
-            return self.decompressor.decompress(message)
+            return layer_ctx.decompressor.decompress(message)
         except Exception as e:
             # 解压失败处理
             logger.exception(

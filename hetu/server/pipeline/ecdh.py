@@ -34,7 +34,8 @@ class CryptoLayer(MessageProcessLayer):
     def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
         """
         连接前握手工作，例如协商参数等。
-        返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
+        返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
+        返回的第二个值会发送给对端。
         """
         return None, b""
 

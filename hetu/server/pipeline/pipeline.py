@@ -22,7 +22,8 @@ class MessageProcessLayer:
     def handshake(self, message: MsgType) -> tuple[Any, MsgType]:
         """
         连接前握手工作，例如协商参数等。
-        返回之后的encode/decode的context，以及需要发送给对端的准备消息（如果有的话）。
+        返回的第一个值会保存在连接中，贯穿之后的encode/decode调用。
+        返回的第二个值会发送给对端。
         """
         raise NotImplementedError()
 
@@ -63,31 +64,33 @@ class MessagePipeline:
     ) -> tuple[list[Any], list[MsgType]]:
         """
         通过客户端发来的握手消息，完成所有层的握手工作。
-        返回每一层的上下文，以及要发送给客户端的握手消息。
+        返回握手后的上下文；以及要发送给客户端的握手消息。
         """
-        layers_ctx = []
-        layer_messages = []
+        handshake_ctx = []
+        handshake_messages = []
         for i, layer in enumerate(self._layers):
             ctx, reply = layer.handshake(handshake_messages[i])
-            layers_ctx.append(ctx)
-            layer_messages.append(reply)
-        return layers_ctx, layer_messages
+            handshake_ctx.append(ctx)
+            handshake_messages.append(reply)
+        return handshake_ctx, handshake_messages
 
-    def encode(self, layers_ctx: list[Any], message: MsgType, until=-1) -> MsgType:
+    def encode(
+        self, layers_handshake_ctx: list[Any], message: MsgType, until=-1
+    ) -> MsgType:
         """
         对消息进行正向处理，可以传入until参数表示只处理到哪层
         """
         for i, layer in enumerate(self._layers):
             if 0 < until < i:
                 break
-            message = layer.encode(layers_ctx[i], message)
+            message = layer.encode(layers_handshake_ctx[i], message)
         return message
 
-    def decode(self, layers_ctx: list[Any], message: MsgType) -> MsgType:
+    def decode(self, layers_handshake_ctx: list[Any], message: MsgType) -> MsgType:
         """
         对消息进行逆向处理
         """
         for i, layer in enumerate(reversed(self._layers)):
-            original_index = len(layers_ctx) - 1 - i
-            message = layer.decode(layers_ctx[original_index], message)
+            original_index = len(layers_handshake_ctx) - 1 - i
+            message = layer.decode(layers_handshake_ctx[original_index], message)
         return message
