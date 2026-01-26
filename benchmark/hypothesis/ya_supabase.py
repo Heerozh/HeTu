@@ -1,1 +1,69 @@
-# todo 建立相似的结构压测下supabase
+import random
+import os
+import asyncio
+from typing import Any, cast
+from supabase import create_async_client, AsyncClient
+
+
+url: str = os.environ.get("SUPABASE_URL", "https://xxx.supabase.co")
+key: str = os.environ.get("SUPABASE_KEY", "sb_publishable__-xxx")
+
+BENCH_ID_RANGE = 30000
+
+
+# 初始化任务
+async def init() -> None:
+    # 初始化表和数据
+    client: AsyncClient = await create_async_client(url, key)
+    batch_size = 1000  # 建议每批 1000-5000 条，取决于数据大小
+    # ... 初始化代码 ...
+    # 1. 准备数据
+    print(f"正在生成 {BENCH_ID_RANGE} 条数据...")
+    all_data = [{"number": i} for i in range(BENCH_ID_RANGE)]
+    # 注意：id 列是自动生成的，所以不需要在数据中包含 id
+
+    # 2. 分批插入
+    print("开始插入...")
+    for i in range(0, BENCH_ID_RANGE, batch_size):
+        batch = all_data[i : i + batch_size]
+
+        try:
+            # 执行插入
+            _ = await client.table("BenchTable").insert(batch).execute()
+            print(f"已插入批次 {i} - {i + batch_size}")
+        except Exception as e:
+            print(f"批次 {i} 插入失败: {e}")
+            # 这里可以添加重试逻辑
+
+    print("完成！")
+
+
+# 夹具
+async def supabase_client():
+    supabase = await create_async_client(url, key)
+    yield supabase
+    # close client if needed
+
+
+# 压测函数
+async def benchmark_supabase_get(supabase_client: AsyncClient):
+    row_id = random.randint(1, BENCH_ID_RANGE)
+    response = (
+        await supabase_client.table("BenchTable").select("*").eq("id", row_id).execute()
+    )
+    records = cast(list[dict[str, Any]], response.data)
+    return records[0].get("number", None)
+
+
+async def benchmark_supabase_upsert(supabase_client: AsyncClient):
+    # 这个不是事务，是数据库直接的原子操作，只能作为参考，不能对比hetu的upsert事务性能
+    row_id = random.randint(1, BENCH_ID_RANGE)
+    new_value = random.randint(0, BENCH_ID_RANGE)
+    upsert_data = {"id": row_id, "number": new_value}
+    response = await supabase_client.table("BenchTable").upsert(upsert_data).execute()
+    records = cast(list[dict[str, Any]], response.data)
+    return records[0].get("number", None)
+
+
+if __name__ == "__main__":
+    asyncio.run(init())
