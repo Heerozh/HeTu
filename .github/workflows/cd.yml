@@ -5,8 +5,8 @@ on:
     tags:
       - v**
   pull_request:
-    tags:
-      - v**
+    branches:
+      - main
   schedule:
     - cron: '0 20 * * *' # 每天 北京时间 04:00 运行一次 nightly 构建（如果有新提交才会 push）
   workflow_dispatch:  # 空workflow_dispatch触发器，表示额外允许手动执行此工作流，方便调试
@@ -104,7 +104,11 @@ jobs:
             heerozh/hetu:latest
             registry.cn-shanghai.aliyuncs.com/heerozh/hetu:${{ steps.ver.outputs.norm }}
             registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
-
+          # 开启可验证的构建供应链安全签名
+          provenance: mode=max
+          # 附带 SBOM attestation
+          sbom: true
+          
 #      - name: Generate release notes with git-cliff
 #        uses: orhun/git-cliff-action@v4
 #        with:
@@ -187,7 +191,10 @@ jobs:
           tags: |
             heerozh/hetu:latest-nightly
             registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest-nightly
-
+          # 开启可验证的构建供应链安全签名
+          provenance: mode=max
+          # 附带 SBOM attestation
+          sbom: true
       - name: Skip info
         if: steps.check.outputs.should_build != 'true'
         run: echo "No new commits in last 24h. Skipping nightly build."
