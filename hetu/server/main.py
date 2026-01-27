@@ -76,18 +76,18 @@ def start_backends(app: Sanic):
     app.ctx.__setattr__("worker_keeper", worker_keeper)
 
     # 初始化所有ComponentTable
-    comp_mgr: dict[str, ComponentTableManager] = {}
-    app.ctx.__setattr__("comp_mgr", comp_mgr)
+    table_managers: dict[str, ComponentTableManager] = {}
+    app.ctx.__setattr__("table_managers", table_managers)
 
     for instance_name in app.config.INSTANCES:
-        comp_mgr[instance_name] = ComponentTableManager(
+        table_managers[instance_name] = ComponentTableManager(
             app.config["NAMESPACE"],
             instance_name,
             backends,
         )
 
         # 检测表状态，创建所有不存在的表
-        all_table_ok = comp_mgr[instance_name].check_and_create_new_tables()
+        all_table_ok = table_managers[instance_name].check_and_create_new_tables()
 
         # 如果有迁移需求，则报错退出，让用户用cli migrate命令来迁移
         if not all_table_ok:

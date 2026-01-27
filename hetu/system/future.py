@@ -248,10 +248,9 @@ async def future_call_task(app):
     assert current_task, "Must be called in an asyncio task"
     logger.info(f"🔗 [⚙️Future] 新Task：{current_task.get_name()}")
 
-    comp_mgr = app.ctx.comp_mgr
-
     # 启动时清空超过7天的call_lock的已执行uuid数据
-    await clean_expired_call_locks(comp_mgr)
+    for tbl_mgr in app.ctx.table_managers.values():
+        await clean_expired_call_locks(tbl_mgr)
 
     # 随机sleep一段时间，错开各worker的执行时间
     await asyncio.sleep(random.random())
@@ -269,20 +268,31 @@ async def future_call_task(app):
     )
 
     # 初始化task的执行器
-    caller = SystemCaller(app.config["NAMESPACE"], comp_mgr, context)
+    callers = {
+        instance: SystemCaller(app.config["NAMESPACE"], tbl_mgr, context)
+        for instance, tbl_mgr in app.ctx.table_managers.items()
+    }
 
     # 获取所有未来调用组件
-    comp_tables = [comp_mgr.get_table(FutureCalls)]
-    if comp_tables[0] is None:  # 可能主组件没人使用
-        comp_tables = []
-    duplicates = FutureCalls.get_duplicates(comp_mgr.namespace).values()
-    comp_tables += [comp_mgr.get_table(comp) for comp in duplicates]
+    future_call_tables: list[Table] = []
+    for tbl_mgr in app.ctx.table_managers.values():
+        main_table = tbl_mgr.get_table(FutureCalls)
+        if main_table is not None:  # 可能主组件没人使用
+            future_call_tables.append(main_table)
+        duplicates = FutureCalls.get_duplicates(tbl_mgr.namespace).values()
+        future_call_tables += [
+            tbl_mgr.get_table(comp)
+            for comp in duplicates
+            if tbl_mgr.get_table(comp) is not None
+        ]
 
     # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，导致部分任务可能卡很久不执行
     # 所以这里使用最基础的，每一段时间循环的方式
+    # 如果有很多个instance，可能worker个task来不及处理这么多future表?
+    # 应该不会，如果堆积，sleep_for_upcoming并不会sleep，会循环到处理完的
     while True:
         # 随机选一个未来调用组件
-        tbl = random.choice(comp_tables)
+        tbl = random.choice(future_call_tables)
         try:
             # 等待0-1秒直到下一个即将到期的任务，如果没有任务则重新循环
             if not await sleep_for_upcoming(tbl):
@@ -293,7 +303,7 @@ async def future_call_task(app):
                 continue
 
             # 执行任务, 此时call已被取出，如果服务器关闭/数据库断线，timeout=0的任务会丢失
-            await exec_future_call(call, caller, tbl)
+            await exec_future_call(call, callers[tbl.instance_name], tbl)
         except asyncio.CancelledError:
             break
         except Exception as e:
