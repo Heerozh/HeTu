@@ -116,8 +116,8 @@ class MigrateCommand(CommandInterface):
             if not comp_mgr.create_or_migrate_all(config["APP_FILE"]):
                 if not silence:
                     print(
-                        "❗ Component有数据删除或类型变更，需要迁移脚本但未找到。"
-                        "请添加对应的迁移脚本后重试。"
+                        "❗ Component有数据删除或类型变更，请修改自动生成的迁移脚本，手动处理这些属性。"
+                        "或使用--drop-data参数直接丢弃这些属性。"
                     )
                     if not drop_data:
                         return

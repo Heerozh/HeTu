@@ -34,6 +34,7 @@
 import hashlib
 import logging
 import warnings
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, final, overload
@@ -408,7 +409,7 @@ class TableMaintenance:
         """读取组件表在数据库中的meta信息，如果不存在则返回None"""
         raise NotImplementedError
 
-    def get_lock(self):
+    def get_lock(self) -> AbstractContextManager:
         """获得一个可以锁整个数据库的with锁"""
         raise NotImplementedError
 
@@ -496,8 +497,8 @@ class TableMaintenance:
         self, table_ref: TableReference, old_meta: TableMeta
     ) -> None:
         """迁移组件表的cluster_id"""
-        from .table import TableReference
         from ..component import BaseComponent
+        from .table import TableReference
 
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "cluster_mismatch":
