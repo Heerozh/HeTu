@@ -143,13 +143,13 @@ async def test_slow_log(mod_test_app, executor, caplog):
 
 
 async def test_get_race_condition(
-    mod_test_app, comp_mgr, executor: EndpointExecutor, new_ctx
+    mod_test_app, tbl_mgr, executor: EndpointExecutor, new_ctx
 ):
     # 测试race
     from hetu.system.caller import SystemCaller
     from hetu.system.context import SystemContext
 
-    direct_caller = SystemCaller("pytest", comp_mgr, new_ctx())
+    direct_caller = SystemCaller("pytest", tbl_mgr, new_ctx())
 
     import asyncio
 
@@ -162,12 +162,12 @@ async def test_get_race_condition(
     assert direct_caller.context.race_count == 0
 
 
-async def test_range_race_condition(mod_test_app, comp_mgr, executor, new_ctx):
+async def test_range_race_condition(mod_test_app, tbl_mgr, executor, new_ctx):
     from hetu.system.caller import SystemCaller
     from hetu.system.context import SystemContext
 
     # 测试race
-    direct_caller = SystemCaller("pytest", comp_mgr, new_ctx())
+    direct_caller = SystemCaller("pytest", tbl_mgr, new_ctx())
 
     # 登录用户1234
     ok, _ = await executor.execute("login", 1234)
@@ -187,7 +187,7 @@ async def test_range_race_condition(mod_test_app, comp_mgr, executor, new_ctx):
     assert direct_caller.context.race_count == 0
 
 
-async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
+async def test_execute_system_copy(mod_test_app, tbl_mgr, executor):
     ok, _ = await executor.execute("login", 1001)
     assert ok
     # 使用copy的system，应该对应的储存空间也是copy的
@@ -205,7 +205,7 @@ async def test_execute_system_copy(mod_test_app, comp_mgr, executor):
     # 直接通过Comp读取
     RLSComp = hetu.data.ComponentDefines().get_component("pytest", "RLSComp")
     RLSCompCopy = RLSComp.duplicate("pytest", "copy1")
-    copied_tbl = comp_mgr.get_table(RLSCompCopy)
+    copied_tbl = tbl_mgr.get_table(RLSCompCopy)
     async with copied_tbl.session() as session:
         repo = session.using(RLSCompCopy)
         row = await repo.get(owner=1001)
@@ -230,7 +230,7 @@ async def test_execute_system_call_lock(mod_test_app, executor: EndpointExecutor
     assert ok
 
 
-async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, executor):
+async def test_clean_expired_call_locks(monkeypatch, mod_test_app, tbl_mgr, executor):
     time_time = time.time
 
     # 测试lock数据过期清理是否正常
@@ -242,13 +242,13 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
 
     # call lock每次会按system名复制一份ExecutionLock表
     ExecutionLock_for_system = SystemLock.duplicate("pytest", "add_rls_comp_value")
-    lock_tbl = comp_mgr.get_table(ExecutionLock_for_system)
+    lock_tbl = tbl_mgr.get_table(ExecutionLock_for_system)
     assert lock_tbl
 
     from hetu.system.lock import clean_expired_call_locks
 
     # 未清理
-    await clean_expired_call_locks(comp_mgr)
+    await clean_expired_call_locks(tbl_mgr)
     rows = await lock_tbl.servant_range(
         "called", left=0, right=time_time(), limit=1, row_format=RowFormat.RAW
     )
@@ -260,7 +260,7 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, comp_mgr, exe
     monkeypatch.setattr(
         time, "time", lambda: time_time() + datetime.timedelta(days=8).total_seconds()
     )
-    await clean_expired_call_locks(comp_mgr)
+    await clean_expired_call_locks(tbl_mgr)
     rows = await lock_tbl.servant_range(
         "called", left=0, right=0xFFFFFFFF, limit=1, row_format=RowFormat.RAW
     )

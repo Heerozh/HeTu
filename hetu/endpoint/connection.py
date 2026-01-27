@@ -40,12 +40,12 @@ class Connection(BaseComponent):
     last_active: np.double = property_field(0)  # 最后活跃时间
 
 
-async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
+async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
     """
     通过connection component分配自己一个连接id，如果失败，Raise各种异常
     此方法不会事务冲突，因为只插入Connection，且Connection没有Unique属性。
     """
-    table = comp_mgr.get_table(Connection)
+    table = tbl_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
     # 不会事务冲突只会连接错误
@@ -72,8 +72,8 @@ async def new_connection(comp_mgr: ComponentTableManager, address: str) -> int:
     return row.id
 
 
-async def del_connection(comp_mgr: ComponentTableManager, connection_id: int) -> None:
-    table = comp_mgr.get_table(Connection)
+async def del_connection(tbl_mgr: ComponentTableManager, connection_id: int) -> None:
+    table = tbl_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
     async for attempt in table.session().retry(5):
@@ -102,8 +102,8 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     # 另外elevate加到system里需要用depends调用，作为新人教程第一步太复杂了。
     # 但是现在新人教程也可以用ctx.systems.call("elevate", ...)来调用这个函数了。
     assert ctx.connection_id != 0, "请先初始化连接"
-    comp_mgr: ComponentTableManager = ctx.systems.comp_mgr
-    table = comp_mgr.get_table(Connection)
+    tbl_mgr: ComponentTableManager = ctx.systems.tbl_mgr
+    table = tbl_mgr.get_table(Connection)
     assert table, "未初始化ComponentTableManager，无法使用Connection组件"
 
     # 如果当前连接已提权
@@ -153,8 +153,8 @@ class ConnectionAliveChecker:
     连接合规性检查，主要检查连接是否存活
     """
 
-    def __init__(self, comp_mgr: ComponentTableManager):
-        table = comp_mgr.get_table(Connection)
+    def __init__(self, tbl_mgr: ComponentTableManager):
+        table = tbl_mgr.get_table(Connection)
         assert table
         self.conn_tbl: Table = table
         self.last_active_cache = 0

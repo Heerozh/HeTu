@@ -29,11 +29,11 @@ class EndpointExecutor:
     """
 
     def __init__(
-        self, namespace: str, comp_mgr: ComponentTableManager, context: Context
+        self, namespace: str, tbl_mgr: ComponentTableManager, context: Context
     ) -> None:
         self.namespace = namespace
-        self.comp_mgr = comp_mgr
-        self.alive_checker = ConnectionAliveChecker(self.comp_mgr)
+        self.tbl_mgr = tbl_mgr
+        self.alive_checker = ConnectionAliveChecker(self.tbl_mgr)
         self.context = context
 
     async def initialize(self, address: str):
@@ -41,7 +41,7 @@ class EndpointExecutor:
         if self.context.connection_id != 0:
             return
         # 通过connection component分配自己一个连接id
-        conn_id = await new_connection(self.comp_mgr, address)
+        conn_id = await new_connection(self.tbl_mgr, address)
         if not conn_id:
             raise RuntimeError("连接初始化失败，new_connection调用失败")
         self.context.connection_id = conn_id
@@ -53,7 +53,7 @@ class EndpointExecutor:
         if self.context.connection_id == 0:
             return
         # 释放connection
-        await del_connection(self.comp_mgr, self.context.connection_id)
+        await del_connection(self.tbl_mgr, self.context.connection_id)
 
     def execute_check(self, endpoint: str, args: tuple) -> EndpointDefine | None:
         """检查调用是否合法"""

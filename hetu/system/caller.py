@@ -35,10 +35,10 @@ class SystemCaller:
     """
 
     def __init__(
-        self, namespace: str, comp_mgr: ComponentTableManager, context: SystemContext
+        self, namespace: str, tbl_mgr: ComponentTableManager, context: SystemContext
     ):
         self.namespace = namespace
-        self.comp_mgr = comp_mgr
+        self.tbl_mgr = tbl_mgr
         self.context = context
 
     @classmethod
@@ -70,9 +70,9 @@ class SystemCaller:
         context.depend = {}
 
         # 获取system引用的第一个component的session，system只能引用相同session的组件，所以都一样
-        comp_mgr = self.comp_mgr
+        tbl_mgr = self.tbl_mgr
         first_comp = next(iter(sys.full_components), None)
-        first_table = comp_mgr.get_table(first_comp) if first_comp else None
+        first_table = tbl_mgr.get_table(first_comp) if first_comp else None
         assert first_table, f"TYPING不该走到: System {sys_name} 没有引用任何Component"
         session = first_table.session()
 
@@ -192,8 +192,8 @@ class SystemCaller:
 
         comp = next((x for x in sys.full_components if is_lock(x)), None)
         assert comp
-        comp_mgr = self.comp_mgr
-        table = comp_mgr.get_table(comp)
+        tbl_mgr = self.tbl_mgr
+        table = tbl_mgr.get_table(comp)
         assert table
 
         # 删除lock

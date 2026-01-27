@@ -33,12 +33,12 @@ class SystemLock(BaseComponent):
     called: np.double = property_field(0, index=True)  # 执行时间
 
 
-async def clean_expired_call_locks(comp_mgr: ComponentTableManager):
+async def clean_expired_call_locks(tbl_mgr: ComponentTableManager):
     """清空超过7天的call_lock的已执行uuid数据，只有服务器非正常关闭才可能遗留这些数据，因此只需服务器启动时调用。"""
     timestamp_7d_ago = time.time() - datetime.timedelta(days=7).total_seconds()
-    duplicates = SystemLock.get_duplicates(comp_mgr.namespace).values()
+    duplicates = SystemLock.get_duplicates(tbl_mgr.namespace).values()
     for comp in [SystemLock] + list(duplicates):
-        tbl = comp_mgr.get_table(comp)
+        tbl = tbl_mgr.get_table(comp)
         if tbl is None:  # 说明项目没任何地方引用此Component
             continue
         deleted = 0

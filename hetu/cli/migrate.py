@@ -106,14 +106,14 @@ class MigrateCommand(CommandInterface):
         silence = False
 
         for instance_name in config["INSTANCES"]:
-            comp_mgr = ComponentTableManager(
+            tbl_mgr = ComponentTableManager(
                 config["NAMESPACE"],
                 instance_name,
                 backends,
             )
 
             # 先尝试普通迁移
-            if not comp_mgr.create_or_migrate_all(config["APP_FILE"]):
+            if not tbl_mgr.create_or_migrate_all(config["APP_FILE"]):
                 if not silence:
                     print(
                         "❗ Component有数据删除或类型变更，请修改自动生成的迁移脚本，手动处理这些属性。"
@@ -131,11 +131,11 @@ class MigrateCommand(CommandInterface):
                         f"⚠️  正在强制迁移 {instance_name} 服所有表结构，可能会丢失数据..."
                     )
                     silence = True
-                comp_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
+                tbl_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
 
             # 清除易失数据
             print(f"🧹 正在清除 {instance_name} 服易失数据...")
-            comp_mgr.flush_volatile()
+            tbl_mgr.flush_volatile()
 
             print(f"✅  {instance_name} 服升级迁移完成！")
         print("🎉  恭喜！所有数据库表结构均已升级完成！")

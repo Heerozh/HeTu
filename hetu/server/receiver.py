@@ -57,7 +57,7 @@ async def sub_call(
     ctx = executor.context
     # print(executor.context, 'sub', data)
     check_length("sub", data, 4, 100)
-    table = executor.comp_mgr.get_table(data[1])
+    table = executor.tbl_mgr.get_table(data[1])
     if table is None:
         raise ValueError(
             f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}"
