@@ -125,7 +125,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
         {
             "APP_FILE": app_file,
             "NAMESPACE": "pytest",
-            "INSTANCE_NAME": "pytest_1",
+            "INSTANCES": ["pytest_1"],
             "LISTEN": f"0.0.0.0:874",
             "BACKENDS": {
                 "Redis": {

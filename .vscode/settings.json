@@ -1,5 +1,7 @@
 {
   "cSpell.words": [
+    "aliyuncs",
+    "Buildx",
     "bylex",
     "byscore",
     "caplog",
@@ -17,9 +19,14 @@
     "Kghz",
     "lshztxed",
     "maint",
+    "orhun",
+    "pipefail",
+    "pypa",
+    "pypi",
     "recarray",
     "recarry",
     "replicaof",
+    "softprops",
     "Valkey",
     "zadd",
     "Zhang",
@@ -30,5 +37,7 @@
   "python.testing.pytestArgs": ["tests"],
   "python.testing.unittestEnabled": false,
   "python.testing.pytestEnabled": true,
-  "python.analysis.typeCheckingMode": "off"
+  "python.analysis.typeCheckingMode": "off",
+  "python-envs.defaultEnvManager": "ms-python.python:system",
+  "python-envs.pythonProjects": []
 }

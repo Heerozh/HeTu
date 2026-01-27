@@ -156,7 +156,7 @@ class StartCommand(CommandInterface):
             config_for_factory = {
                 "APP_FILE": args.app_file,
                 "NAMESPACE": args.namespace,
-                "INSTANCE_NAME": args.instance,
+                "INSTANCES": [args.instance],
                 "LISTEN": f"0.0.0.0:{args.port}",
                 "BACKENDS": {
                     "Redis": {
