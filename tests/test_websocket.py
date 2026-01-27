@@ -72,6 +72,9 @@ def setup_websocket_proxy():
 
                 pipe_ctx = ctx
 
+                # use db
+                await do_send(client_pipe.encode(pipe_ctx, ["use", "pytest_1"]))
+
             async def send(data):
                 logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
                 ws_proxy.client_sent.append(data)
