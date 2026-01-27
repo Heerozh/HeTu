@@ -1,11 +1,11 @@
 import logging
-import uuid
 from datetime import datetime
 from time import time
 from typing import TYPE_CHECKING, cast, final, override
 
 import redis.asyncio
 
+from ....common.helper import get_machine_id
 from ....common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ class RedisWorkerKeeper(WorkerKeeper):
     虽然方式1已经可以解决此类问题，但方式2不依赖运维，可以让此问题透明。
 
     通过
-        node_id = f"{uuid.getnode()}:{pid}"
+        node_id = f"{get_machine_id()}:{pid}"
         SET snowflake:worker:{worker_id} {node_id} NX EX WORKER_ID_EXPIRE_SEC
     成功：拿到了 WorkerID = {worker_id}
     失败：说明 ID 正在被别的机器占用，如果node_id不符，循环尝试 ID {worker_id + 1}。
@@ -58,7 +58,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 机器码+pid组成的node_id。
         # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
         # 比如固定每个容器只启动一个worker，则pid是固定的1
-        self.node_id = f"{uuid.getnode()}:{pid}"
+        self.node_id = f"{get_machine_id()}:{pid}"
 
     @override
     def get_worker_id(self) -> int:

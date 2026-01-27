@@ -72,7 +72,7 @@ class SystemCaller:
         # 获取system引用的第一个component的session，system只能引用相同session的组件，所以都一样
         comp_mgr = self.comp_mgr
         first_comp = next(iter(sys.full_components), None)
-        first_table = first_comp and comp_mgr.get_table(first_comp) or None
+        first_table = comp_mgr.get_table(first_comp) if first_comp else None
         assert first_table, f"TYPING不该走到: System {sys_name} 没有引用任何Component"
         session = first_table.session()
 

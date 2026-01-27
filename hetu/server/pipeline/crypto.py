@@ -25,7 +25,6 @@ class CryptoLayer(MessageProcessLayer):
     """
     加密层
     使用 ECDH (Curve25519) 协商密钥，使用 ChaCha20-Poly1305-IETF 进行加密通讯。
-    依赖库: PyNaCl (pip install pynacl)
     """
 
     # ChaCha20-Poly1305-IETF 用 96-bit (12 bytes) nonce
@@ -88,7 +87,7 @@ class CryptoLayer(MessageProcessLayer):
             # 1. 解析客户端公钥
             peer_public_key = PublicKey(message)
 
-            # 生成服务端临时密钥对 (Ephemeral Key Pair)
+            # 2. 生成服务端临时密钥对 (Ephemeral Key Pair)
             private_key = PrivateKey.generate()
             public_key = private_key.public_key
 
