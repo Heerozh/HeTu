@@ -1,8 +1,8 @@
 {
   "name": "cn.hetudb.clientsdk",
   "version": "0.2.0",
-  "displayName": "\u6cb3\u56feClientSDK",
-  "description": "\u6cb3\u56fe\u662f\u4e00\u4e2a\u5206\u5e03\u5f0f\u6e38\u620f\u670d\u52a1\u5668\u5f15\u64ce\uff0c\u4e13\u4e3a\u7f51\u7edc\u6e38\u620f\u8bbe\u8ba1\u7684\u73b0\u4ee3\u6781\u7b80\u67b6\u6784\u3002\u9ad8\u5f00\u53d1\u6548\u7387\uff0c\u76f4\u63a5\u5199\u903b\u8f91\uff0c\u65e0\u9700\u5173\u5fc3\u6570\u636e\u5e93\uff0c\u4e8b\u52a1/\u7ebf\u7a0b\u51b2\u7a81\u7b49\u95ee\u9898\u3002\n\n\u6b64\u5305\u662f\u6cb3\u56fe\u7684\u5ba2\u6237\u7aefSDK\uff0c\u7528\u4e8e\u8fde\u63a5\u6cb3\u56fe",
+  "displayName": "HeTu ClientSDK",
+  "description": "Client SDK For HeTu.\n\nHeTu is the backend platform for Logic-Heavy apps. \nBuilt for Game Servers, Real-time Simulations, \nand AI Agents that need persistent memory context.",
   "unity": "2022.3",
   "documentationUrl": "https://hetudb.cn/",
   "changelogUrl": "https://hetudb.cn/changelog.html",

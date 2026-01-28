@@ -1,0 +1,19 @@
+{
+  "name": "HeTu.ClientSDK",
+  "rootNamespace": "",
+  "references": [
+    "UnityWebSocket.Runtime",
+    "UniTask",
+    "R3.Unity",
+    "MessagePack.Unity"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
