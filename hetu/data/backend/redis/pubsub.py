@@ -5,22 +5,15 @@
 @email: heeroz@gmail.com
 """
 
-from asyncio.queues import Queue
-
-
 import asyncio
 import logging
+from asyncio.queues import Queue
 from functools import partial
-from typing import TYPE_CHECKING
 
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
 from redis.cluster import LoadBalancingStrategy
 from redis.exceptions import SlotNotCoveredError
-
-if TYPE_CHECKING:
-    import redis.asyncio
-
 
 logger = logging.getLogger(__name__)
 

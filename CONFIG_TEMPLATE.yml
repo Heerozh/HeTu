@@ -6,8 +6,11 @@ APP_FILE: app.py
 # 项目名称，也代表加载app_file中的哪个namespace
 NAMESPACE: game_short_name
 
-# 服务器实例名称，每个实例是一个副本
-INSTANCE_NAME: game_name_region1234
+# 服务器实例名称，每个实例是一个副本，同一台服务器上可启动多个副本。
+# 客户端SDK可以选择登录哪个副本。
+INSTANCES:
+  - nanjing-server1
+  - nanjing-server2
 
 # 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
 DEBUG: false

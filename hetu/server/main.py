@@ -76,24 +76,28 @@ def start_backends(app: Sanic):
     app.ctx.__setattr__("worker_keeper", worker_keeper)
 
     # 初始化所有ComponentTable
-    comp_mgr = ComponentTableManager(
-        app.config["NAMESPACE"],
-        app.config["INSTANCE_NAME"],
-        backends,
-    )
-    app.ctx.__setattr__("comp_mgr", comp_mgr)
+    table_managers: dict[str, ComponentTableManager] = {}
+    app.ctx.__setattr__("table_managers", table_managers)
 
-    # 检测表状态，创建所有不存在的表
-    all_table_ok = comp_mgr.check_and_create_new_tables()
-
-    # 如果有迁移需求，则报错退出，让用户用cli migrate命令来迁移
-    if not all_table_ok:
-        msg = (
-            "❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令："
-            "hetu upgrade --config <your_config_file>.yml"
+    for instance_name in app.config.INSTANCES:
+        table_managers[instance_name] = ComponentTableManager(
+            app.config["NAMESPACE"],
+            instance_name,
+            backends,
         )
-        logger.error(msg)
-        raise RuntimeError(msg)
+
+        # 检测表状态，创建所有不存在的表
+        all_table_ok = table_managers[instance_name].check_and_create_new_tables()
+
+        # 如果有迁移需求，则报错退出，让用户用cli migrate命令来迁移
+        if not all_table_ok:
+            msg = (
+                "❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令："
+                "hetu upgrade --config <your_config_file>.yml"
+            )
+            logger.error(msg)
+            app.stop()
+            raise RuntimeError(msg)
 
     # 最后调用 backend config, 以防configure中需要之前初始化的东西
     for backend in backends.values():
@@ -124,8 +128,8 @@ async def worker_start(app: Sanic):
     )
     logger.info(
         f"ℹ️ 进程[{os.getpid()}] "
-        f"已启动 {app.config['NAMESPACE']} 应用 "
-        f"{app.config['INSTANCE_NAME']} 服"
+        f"已启动 {app.config['NAMESPACE']} 应用的"
+        f" {app.config['INSTANCES']} 服"
     )
 
 
@@ -141,7 +145,9 @@ async def worker_keeper_renewal(app: Sanic):
         try:
             await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
         except RedisConnectionError as e:
-            logger.error(f"❌ [📡WorkerKeeper] 续约失败: {type(e).__name__}:{e}")
+            logger.error(
+                f"❌ [📡WorkerKeeper] 续约失败，将重试: {type(e).__name__}:{e}"
+            )
             continue
         except SystemExit:
             app.m.restart()

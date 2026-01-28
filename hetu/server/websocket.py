@@ -31,7 +31,6 @@ async def websocket_connection(request: Request, ws: Websocket):
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
     logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
-    comp_mgr = request.app.ctx.comp_mgr
 
     # 获得客户端握手消息
     msg_pipe = ServerMessagePipeline()
@@ -44,6 +43,18 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 进行握手处理，获得连接上下文
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
+
+    # 获得客户端的use database命令，确定哪一个instance
+    use_db = await ws.recv()
+    if not isinstance(use_db, (bytes, bytearray)):
+        raise ValueError("Invalid use_db message type")
+    use_db = msg_pipe.decode(pipe_ctx, use_db)
+    if not isinstance(use_db, list) or use_db[0] != "use" or len(use_db) != 2:
+        raise ValueError("Invalid use_db message format")
+    instance = use_db[1]
+    if instance not in request.app.ctx.table_managers:
+        raise ValueError(f"Invalid instance name: {instance}")
+    tbl_mgr = request.app.ctx.table_managers[instance]
 
     # 初始化Context，一个连接一个Context
     context = SystemContext(
@@ -66,11 +77,11 @@ async def websocket_connection(request: Request, ws: Websocket):
 
     # 初始化System执行器，一个连接一个执行器
     namespace = request.app.config["NAMESPACE"]
-    system_caller = SystemCaller(namespace, comp_mgr, context)
+    system_caller = SystemCaller(namespace, tbl_mgr, context)
     context.systems = system_caller
 
     # 初始化Endpoint执行器，一个连接一个执行器
-    endpoint_executor = EndpointExecutor(namespace, comp_mgr, context)
+    endpoint_executor = EndpointExecutor(namespace, tbl_mgr, context)
     await endpoint_executor.initialize(request.client_ip)
 
     # 初始化订阅管理器，一个连接一个订阅管理器

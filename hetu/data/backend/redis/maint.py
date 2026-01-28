@@ -7,7 +7,8 @@
 
 import hashlib
 import logging
-from typing import TYPE_CHECKING, cast, final, override, Any
+from contextlib import AbstractContextManager
+from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
 from redis.cluster import RedisCluster
@@ -49,7 +50,8 @@ class RedisTableMaintenance(TableMaintenance):
         """获取指定表的指定行数据"""
         key = self.client.row_key(ref, row_id)
         io = self.client.io
-        if row := io.hgetall(key):  # type: ignore
+        if row := io.hgetall(key):
+            row = cast(dict, row)
             return self.client.row_decode_(ref.comp_cls, row, RowFormat.STRUCT)
         return None
 
@@ -75,6 +77,7 @@ class RedisTableMaintenance(TableMaintenance):
         row_ids = io.zrange(
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
+        row_ids = cast(list[bytes], row_ids)
         row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
         return row_ids
 
@@ -130,7 +133,7 @@ class RedisTableMaintenance(TableMaintenance):
         )
 
     @override
-    def get_lock(self):
+    def get_lock(self) -> AbstractContextManager:
         """获得一个可以锁整个数据库的with锁"""
         return self.lock
 

@@ -93,12 +93,6 @@ class MigrateCommand(CommandInterface):
 
         SystemClusters().build_clusters(config["NAMESPACE"])
 
-        comp_mgr = ComponentTableManager(
-            config["NAMESPACE"],
-            config["INSTANCE_NAME"],
-            backends,
-        )
-
         if not yes:
             # cli提示用户先备份数据，按y继续
             user_input = input(
@@ -109,26 +103,42 @@ class MigrateCommand(CommandInterface):
                 print("❌  升级迁移已取消。")
                 return
 
-        # 先尝试普通迁移
-        if not comp_mgr.create_or_migrate_all(config["APP_FILE"]):
-            print(
-                "❗ Component有数据删除或类型变更，需要迁移脚本但未找到。"
-                "请添加对应的迁移脚本后重试。"
+        silence = False
+
+        for instance_name in config["INSTANCES"]:
+            tbl_mgr = ComponentTableManager(
+                config["NAMESPACE"],
+                instance_name,
+                backends,
             )
-            if not drop_data:
-                return
-            user_input = input("⚠️  确认强制迁移请输 y ，取消请输其他键然后回车：")
-            if user_input.lower() != "y":
-                print("❌  升级迁移已取消。")
-                return
-            print("⚠️  正在强制迁移所有表结构，可能会丢失数据...")
-            comp_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
 
-        # 清除易失数据
-        print("🧹 正在清除易失数据...")
-        comp_mgr.flush_volatile()
+            # 先尝试普通迁移
+            if not tbl_mgr.create_or_migrate_all(config["APP_FILE"]):
+                if not silence:
+                    print(
+                        "❗ Component有数据删除或类型变更，请修改自动生成的迁移脚本，手动处理这些属性。"
+                        "或使用--drop-data参数直接丢弃这些属性。"
+                    )
+                    if not drop_data:
+                        return
+                    user_input = input(
+                        "⚠️  确认强制迁移请输 y ，取消请输其他键然后回车："
+                    )
+                    if user_input.lower() != "y":
+                        print("❌  升级迁移已取消。")
+                        return
+                    print(
+                        f"⚠️  正在强制迁移 {instance_name} 服所有表结构，可能会丢失数据..."
+                    )
+                    silence = True
+                tbl_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
 
-        print("✅  升级迁移完成！")
+            # 清除易失数据
+            print(f"🧹 正在清除 {instance_name} 服易失数据...")
+            tbl_mgr.flush_volatile()
+
+            print(f"✅  {instance_name} 服升级迁移完成！")
+        print("🎉  恭喜！所有数据库表结构均已升级完成！")
         pass
 
     @classmethod
@@ -142,7 +152,7 @@ class MigrateCommand(CommandInterface):
             config = {
                 "APP_FILE": args.app_file,
                 "NAMESPACE": args.namespace,
-                "INSTANCE_NAME": args.instance,
+                "INSTANCES": [args.instance],
                 "BACKENDS": {
                     "Redis": {
                         "type": "Redis",

@@ -7,7 +7,7 @@ from hetu.endpoint.executor import EndpointExecutor
 SnowflakeID().init(1, 0)
 
 
-async def test_future_call_create(test_app, comp_mgr, executor: EndpointExecutor):
+async def test_future_call_create(test_app, tbl_mgr, executor: EndpointExecutor):
     """测试创建未来调用任务是否正确"""
     time_time = time.time
 
@@ -17,7 +17,7 @@ async def test_future_call_create(test_app, comp_mgr, executor: EndpointExecutor
     await executor.execute("login", 1020)
 
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
-    fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
 
     ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
 
@@ -33,7 +33,7 @@ async def test_future_call_create(test_app, comp_mgr, executor: EndpointExecutor
         assert rows[0].owner == 1020
 
 
-async def test_sleep_for_upcoming(test_app, comp_mgr, executor: EndpointExecutor):
+async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor):
     """测试sleep_for_upcoming的等待逻辑是否正确"""
     time_time = time.time
 
@@ -43,7 +43,7 @@ async def test_sleep_for_upcoming(test_app, comp_mgr, executor: EndpointExecutor
     await executor.execute("login", 1020)
 
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
-    fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
 
     ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
 
@@ -84,7 +84,7 @@ async def test_sleep_for_upcoming(test_app, comp_mgr, executor: EndpointExecutor
 
 
 async def test_pop_upcoming_call(
-    monkeypatch, test_app, comp_mgr, executor: EndpointExecutor
+    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
 ):
     """测试pop_upcoming_call取出任务逻辑是否正确"""
     time_time = time.time
@@ -95,7 +95,7 @@ async def test_pop_upcoming_call(
     await executor.execute("login", 1020)
 
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
-    fc_tbl = comp_mgr.get_table(FutureCallsTableCopy1)
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
 
     ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
 
@@ -179,7 +179,7 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
 
     from hetu.manager import ComponentTableManager
 
-    comp_mgr = ComponentTableManager("ns1", "server1", backends)
+    tbl_mgr = ComponentTableManager("ns1", "server1", backends)
 
-    assert comp_mgr.get_table(future_ns1[0]) is not None
-    assert comp_mgr.get_table(future_ns2[0]) is None
+    assert tbl_mgr.get_table(future_ns1[0]) is not None
+    assert tbl_mgr.get_table(future_ns2[0]) is None

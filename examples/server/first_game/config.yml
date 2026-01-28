@@ -7,7 +7,8 @@ APP_FILE: ./src/app.py
 NAMESPACE: ssw
 
 # 服务器实例名称，每个实例是一个副本
-INSTANCE_NAME: walking
+INSTANCES:
+  - server1
 
 # 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
 DEBUG: false

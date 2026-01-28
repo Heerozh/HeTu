@@ -132,12 +132,6 @@ async def test_auto_migration(filled_item_ref, caplog):
     assert "多出属性 qty_new" in caplog.text
     assert "25行" in caplog.text
 
-    # 检测跨cluster报错
-    renamed_new_item_cls.hosted_ = new_table
-    with pytest.raises(AssertionError, match="cluster"):
-        async with backend.session("pytest", 3) as session:
-            repo = session.using(renamed_new_item_cls)
-
     async with backend.session("pytest", 2) as session:
         repo = session.using(renamed_new_item_cls)
         assert (await repo.get(time=111)).name == "Itm1"

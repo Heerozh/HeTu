@@ -11,7 +11,7 @@ import logging
 import random
 import struct
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
+from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
 # from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
 import msgpack
@@ -20,6 +20,7 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ..base import BackendClient, RaceCondition, RowFormat
+
 # from .batch import RedisBatchedClient
 
 if TYPE_CHECKING:
@@ -365,6 +366,27 @@ class RedisBackendClient(BackendClient, alias="redis"):
             await aio.aclose()
         self._async_ios = []
 
+    @overload
+    @staticmethod
+    def row_decode_(
+        comp_cls: type[BaseComponent],
+        row: dict[bytes, bytes],
+        fmt: Literal[RowFormat.STRUCT],
+    ) -> np.record: ...
+    @overload
+    @staticmethod
+    def row_decode_(
+        comp_cls: type[BaseComponent],
+        row: dict[bytes, bytes],
+        fmt: Literal[RowFormat.RAW, RowFormat.TYPED_DICT],
+    ) -> dict[str, Any]: ...
+    @overload
+    @staticmethod
+    def row_decode_(
+        comp_cls: type[BaseComponent],
+        row: dict[bytes, bytes],
+        fmt: Literal[RowFormat.ID_LIST],
+    ) -> Never: ...
     @staticmethod
     def row_decode_(
         comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
