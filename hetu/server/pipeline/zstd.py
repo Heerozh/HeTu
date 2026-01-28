@@ -98,9 +98,12 @@ class ZstdLayer(MessageProcessLayer):
             for _ in range(200):
                 sub_message = make_rand_sub_message(comp)
                 # 把订阅更新消息编码到压缩前
-                encoded_message = self._parent.encode(
-                    [None] * (self._layer_idx + 1), sub_message, self._layer_idx
-                )
+                if self._parent:
+                    encoded_message = self._parent.encode(
+                        [None] * (self._layer_idx + 1), sub_message, self._layer_idx
+                    )
+                else:
+                    encoded_message = str(sub_message).encode("utf-8")
                 samples.append(encoded_message)
 
         if len(samples) == 0:
