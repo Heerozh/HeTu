@@ -50,11 +50,12 @@ class ZlibLayer(MessageProcessLayer):
         from ...common import Permission
         from ...system import SystemClusters
 
-        keys: set[str] = set()
+        keys: set[str] = set("updt")
         for comp, _ in SystemClusters().get_components().items():
             if comp.permission_ == Permission.ADMIN:
                 continue
             keys.update(comp.dtype_map_.keys())
+            keys.add(comp.__name__)
 
         if not keys:
             return b""

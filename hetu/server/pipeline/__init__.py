@@ -11,6 +11,7 @@ from .limit import LimitCheckerLayer
 from .pipeline import MessagePipeline, ServerMessagePipeline
 from .zstd import ZstdLayer
 from .zlib import ZlibLayer
+from .brotli import BrotliLayer
 
 __all__ = [
     "MessagePipeline",
@@ -20,4 +21,5 @@ __all__ = [
     "LimitCheckerLayer",
     "CryptoLayer",
     "ZlibLayer",
+    "BrotliLayer",
 ]

@@ -1,3 +1,4 @@
+from hetu.server.pipeline.brotli import BrotliLayer
 from typing import Any
 import pytest
 from hetu.server import pipeline
@@ -104,16 +105,48 @@ def test_zlib_encode_decode_roundtrip(base_pipeline, mod_item_model):
 
     # 初始压缩比也就那样0.8~1.3之间
     assert 1.3 > zlib_layer.encode_ratio > 0.5
-    print(f"Initial zstd encode ratio: {zlib_layer.encode_ratio}")
+    print(f"Initial zlib encode ratio: {zlib_layer.encode_ratio}")
 
     for i in range(50):
         row = mod_item_model.new_row(id_=123 + i)
         payload: dict[str, Any] = BaseComponent.struct_to_dict(row)
         encoded = base_pipeline.encode(ctx, payload)
-        print(f"Zstd encode ratio after {i + 1} messages: {zlib_layer.encode_ratio}")
+        print(f"zlib encode ratio after {i + 1} messages: {zlib_layer.encode_ratio}")
 
     # 流式压缩应该会随着滑动窗口的建立，压缩比越来越好
     assert 0.5 > zlib_layer.encode_ratio > 0.1
+
+
+def test_brotli_encode_decode_roundtrip(base_pipeline, mod_item_model):
+    brotli_layer: BrotliLayer = pipeline.BrotliLayer(quality=4)
+    base_pipeline.add_layer(brotli_layer)
+
+    ctx, msg = base_pipeline.handshake([None, None, b""])
+    row = mod_item_model.new_row(id_=123)
+
+    # 压缩
+    payload = BaseComponent.struct_to_dict(row)
+    encoded = base_pipeline.encode(ctx, payload)
+    assert isinstance(encoded, (bytes, bytearray))
+
+    # 解压
+    decoded = base_pipeline.decode(ctx, encoded)
+    assert decoded == payload
+
+    # 初始压缩比也就那样0.8~1.3之间
+    assert 1.3 > brotli_layer.encode_ratio > 0.5
+    print(f"Initial zstd encode ratio: {brotli_layer.encode_ratio}")
+
+    for i in range(50):
+        row = mod_item_model.new_row(id_=123 + i)
+        payload: dict[str, Any] = BaseComponent.struct_to_dict(row)
+        encoded = base_pipeline.encode(ctx, payload)
+        print(
+            f"Brotli encode ratio after {i + 1} messages: {brotli_layer.encode_ratio}"
+        )
+
+    # 流式压缩应该会随着滑动窗口的建立，压缩比越来越好
+    assert 0.5 > brotli_layer.encode_ratio > 0.1
 
 
 def test_passthrough_without_ctx(base_pipeline):
