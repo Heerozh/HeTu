@@ -44,9 +44,9 @@ class ZstdLayer(MessageProcessLayer):
         super().__init__()
         self.level = level
         self.dict_size = dict_size
-        self.samples = []
+        self.samples: list[Any] = []
         self.zstd_dict: zstd.ZstdDict | None = None
-        self.dict_message: bytes | None = None
+        self.dict_message: bytes = b""
         self.last_trained_at: float = 0.0
         self.encode_count = 0
         self.encode_ratio = 0.0

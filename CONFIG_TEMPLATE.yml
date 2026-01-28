@@ -72,6 +72,8 @@ MAX_INDEX_SUBSCRIPTION: 1
 
 # 消息加密方式，可选 None、ChaCha20-Poly1305
 PACKET_CIPHER: ChaCha20-Poly1305
+# 消息压缩方式，可选 None、zlib、zstd。
+PACKET_COMPRESSION: zlib
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS:

@@ -10,6 +10,7 @@ from .jsonb import JSONBinaryLayer
 from .limit import LimitCheckerLayer
 from .pipeline import MessagePipeline, ServerMessagePipeline
 from .zstd import ZstdLayer
+from .zlib import ZlibLayer
 
 __all__ = [
     "MessagePipeline",
@@ -18,4 +19,5 @@ __all__ = [
     "JSONBinaryLayer",
     "LimitCheckerLayer",
     "CryptoLayer",
+    "ZlibLayer",
 ]
