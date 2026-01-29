@@ -72,10 +72,10 @@ MAX_INDEX_SUBSCRIPTION: 1
 
 # 消息加密方式，可选 None、ChaCha20-Poly1305
 PACKET_CIPHER: ChaCha20-Poly1305
-# 开启消息流式压缩, 可选 None、zlib、zstd、brotli
+# 开启消息流式压缩, 可选 None、zlib
 # 速度：zstd 422k/s > zlib 357k/s > brotli 100k/s
 # 压缩率 zlib 25% > brotli 25% > zstd 23%
-# 注意，zstd和OpenZL不支持WebGL。zstd实际压缩率可能最高，因为它会采样训练。
+# 目前只支持zlib，因为unity 全平台支持。
 # todo OpenZL
 # todo 客户端记得要关闭permessage-deflate
 PACKET_COMPRESSION: zlib

@@ -16,5 +16,8 @@
     "name": "Heerozh",
     "email": "heeroz@gmail.com",
     "url": "https://www.heerozh.com"
+  },
+  "dependencies": {
+    "com.unity.sharp-zip-lib": "1.4.0"
   }
 }

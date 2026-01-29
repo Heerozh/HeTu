@@ -1,19 +1,22 @@
 {
-  "name": "HeTu.ClientSDK",
-  "rootNamespace": "",
-  "references": [
-    "UnityWebSocket.Runtime",
-    "UniTask",
-    "R3.Unity",
-    "MessagePack.Unity"
-  ],
-  "includePlatforms": [],
-  "excludePlatforms": [],
-  "allowUnsafeCode": false,
-  "overrideReferences": false,
-  "precompiledReferences": [],
-  "autoReferenced": true,
-  "defineConstraints": [],
-  "versionDefines": [],
-  "noEngineReferences": false
+    "name": "HeTu.ClientSDK",
+    "rootNamespace": "",
+    "references": [
+        "UnityWebSocket.Runtime",
+        "UniTask",
+        "R3.Unity",
+        "MessagePack.Unity"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "BouncyCastle.Cryptography.dll",
+        "Unity.SharpZipLib.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
 }
