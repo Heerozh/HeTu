@@ -65,70 +65,110 @@ def make_rand_sub_message(_comp: type[BaseComponent]):
     return str(["updt", sub_id, row_dict]).encode("utf-8")
 
 
-data = [make_rand_sub_message(Item) for _ in range(1000)]
+data = [make_rand_sub_message(Item) for _ in range(10000)]
 
 
 layers = {}
 
 
 async def zstd():
-    layer = pipeline.ZstdLayer(level=3)
-    ctx, _ = layer.handshake(b"")
-    layers["zstd"] = layer
-    return layer, ctx
+    def _create_layer(lv):
+        key = f"zstd_lv{lv}"
+        if key in layers:
+            return layers[key]
+        layer = pipeline.ZstdLayer(level=lv)
+        ctx, _ = layer.handshake(b"")
+        layers[key] = (layer, ctx)
+        return layer, ctx
+
+    return _create_layer
 
 
 async def zlib():
-    layer = pipeline.ZlibLayer(level=3)
-    ctx, _ = layer.handshake(b"")
-    layers["zlib"] = layer
-    return layer, ctx
+    def _create_layer(lv):
+        key = f"zlib_lv{lv}"
+        if key in layers:
+            return layers[key]
+        layer = pipeline.ZlibLayer(level=lv)
+        ctx, _ = layer.handshake(b"")
+        layers[key] = (layer, ctx)
+        return layer, ctx
+
+    return _create_layer
 
 
 async def brotli():
-    layer = pipeline.BrotliLayer(quality=4)
-    ctx, _ = layer.handshake(b"")
-    layers["brotli"] = layer
-    return layer, ctx
+    def _create_layer(lv):
+        key = f"brotli_lv{lv}"
+        if key in layers:
+            return layers[key]
+        layer = pipeline.BrotliLayer(quality=lv)
+        ctx, _ = layer.handshake(b"")
+        layers[key] = (layer, ctx)
+        return layer, ctx
+
+    return _create_layer
+
+
+def bench(layer, ctx):
+    for message in random.sample(data, k=1000):
+        payload = layer.encode(ctx, message)
+        _ = layer.decode(ctx, payload)
 
 
 async def benchmark_zstd_level3(zstd):
-    layer, ctx = zstd
-    for message in random.sample(data, k=100):
-        payload = layer.encode(ctx, message)
-        _ = layer.decode(ctx, payload)
+    bench(*zstd(3))
+
+
+async def benchmark_zstd_level12(zstd):
+    bench(*zstd(12))
 
 
 async def benchmark_zlib_level3(zlib):
-    layer, ctx = zlib
-    for message in random.sample(data, k=100):
-        payload = layer.encode(ctx, message)
-        _ = layer.decode(ctx, payload)
+    bench(*zlib(3))
+
+
+async def benchmark_zlib_level6(zlib):
+    bench(*zlib(6))
 
 
 async def benchmark_brotli_level4(brotli):
-    layer, ctx = brotli
-    for message in random.sample(data, k=100):
-        payload = layer.encode(ctx, message)
-        _ = layer.decode(ctx, payload)
+    bench(*brotli(4))
+
+
+async def benchmark_brotli_level2(brotli):
+    bench(*brotli(2))
+
+
+async def benchmark_brotli_level12(brotli):
+    bench(*brotli(12))
 
 
 async def task_teardown():
     for name, layer in layers.items():
-        print(f"{name} encode ratio: {layer.encode_ratio}")
+        print(f"{name} encode ratio: {layer[0].encode_ratio}")
 
 
 """
 cd hypothesis
-uv run ya ya_compressors.py -t 0.1
+uv run ya ya_compressors.py -t 0.5 -n 1 -p 1
 
-|                         | CPS      |
-|:------------------------|:---------|
-| benchmark_brotli_level4 | 677.02   |
-| benchmark_zlib_level3   | 513.25   |
-| benchmark_zstd_level3   | 1,575.95 |
+9950x3d
 
-brotli encode ratio: 0.06424025265774627
-zlib encode ratio: 0.5043165878223276
-zstd encode ratio: 0.47444256218709674
+|                         | CPS(k) | 
+|:------------------------|-------:|
+| benchmark_brotli_level2 | 105.97 |
+| benchmark_brotli_level4 |  81.15 |
+| benchmark_zlib_level3   | 105.23 |
+| benchmark_zlib_level6   |  95.16 |
+| benchmark_zstd_level12  |  46.73 |
+| benchmark_zstd_level3   | 320.07 |
+
+
+brotli_lv2 encode ratio: 0.5130168870441364
+brotli_lv4 encode ratio: 0.41133826102906607
+zlib_lv3 encode ratio: 0.5270212956117553
+zlib_lv6 encode ratio: 0.5130293087527766
+zstd_lv12 encode ratio: 0.46475224872383347
+zstd_lv3 encode ratio: 0.4995372332256953
 """

@@ -72,7 +72,11 @@ MAX_INDEX_SUBSCRIPTION: 1
 
 # 消息加密方式，可选 None、ChaCha20-Poly1305
 PACKET_CIPHER: ChaCha20-Poly1305
-# 消息压缩方式，可选 None、zlib、zstd。
+# 开启消息流式压缩, 可选 None、zlib、zstd、brotli
+# 压缩率都近似在40%-50%，zstd速度是其他2种的3，但不支持WebGL客户端
+# 同等压缩率下brotli和zlib速度一样，但zlib需要每次连接传递几K的字典
+# todo OpenZL
+# todo 客户端记得要关闭permessage-deflate
 PACKET_COMPRESSION: zlib
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端

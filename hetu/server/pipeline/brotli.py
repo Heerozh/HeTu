@@ -32,7 +32,7 @@ class BrotliLayer(MessageProcessLayer):
 
     def __init__(
         self,
-        quality: int = 4,
+        quality: int = 2,
         lgwin: int = 22,
         lgblock: int = 0,
         mode: int = brotli.MODE_GENERIC,
