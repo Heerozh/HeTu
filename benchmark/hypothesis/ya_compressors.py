@@ -38,6 +38,8 @@ async def do_nothing(ctx):
 
 SystemClusters().build_clusters("pytest")
 
+jsonb = pipeline.JSONBinaryLayer()
+
 
 def make_rand_sub_message(_comp: type[BaseComponent]):
     """生成一个随机的订阅更新消息用于样本数据"""
@@ -62,7 +64,7 @@ def make_rand_sub_message(_comp: type[BaseComponent]):
         rng.choice([True, False]),
     )
 
-    return str(["updt", sub_id, row_dict]).encode("utf-8")
+    return jsonb.encode(None, ["updt", sub_id, row_dict])
 
 
 data = [make_rand_sub_message(Item) for _ in range(10000)]
@@ -136,8 +138,8 @@ async def benchmark_brotli_level4(brotli):
     bench(*brotli(4))
 
 
-async def benchmark_brotli_level2(brotli):
-    bench(*brotli(2))
+async def benchmark_brotli_level3(brotli):
+    bench(*brotli(3))
 
 
 async def benchmark_brotli_level12(brotli):
@@ -157,18 +159,18 @@ uv run ya ya_compressors.py -t 0.5 -n 1 -p 1
 
 |                         | CPS(k) | 
 |:------------------------|-------:|
-| benchmark_brotli_level2 | 105.97 |
-| benchmark_brotli_level4 |  81.15 |
-| benchmark_zlib_level3   | 105.23 |
-| benchmark_zlib_level6   |  95.16 |
-| benchmark_zstd_level12  |  46.73 |
-| benchmark_zstd_level3   | 320.07 |
+| benchmark_brotli_level3 |  92.05 |
+| benchmark_brotli_level4 |  87.04 |
+| benchmark_zlib_level3   | 116.18 |
+| benchmark_zlib_level6   | 105.41 |
+| benchmark_zstd_level12  |  73.68 |
+| benchmark_zstd_level3   | 442.76 |
 
 
-brotli_lv2 encode ratio: 0.5130168870441364
-brotli_lv4 encode ratio: 0.41133826102906607
-zlib_lv3 encode ratio: 0.5270212956117553
-zlib_lv6 encode ratio: 0.5130293087527766
-zstd_lv12 encode ratio: 0.46475224872383347
-zstd_lv3 encode ratio: 0.4995372332256953
+brotli_lv3 encode ratio: 0.7534961938307967
+brotli_lv4 encode ratio: 0.5799906913090168
+zlib_lv3 encode ratio: 0.7207111787807501
+zlib_lv6 encode ratio: 0.7021223569930083
+zstd_lv12 encode ratio: 0.7088246839633067
+zstd_lv3 encode ratio: 0.7751032480679005
 """
