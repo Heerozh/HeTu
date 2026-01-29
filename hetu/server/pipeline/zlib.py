@@ -29,7 +29,7 @@ class ZlibLayer(MessageProcessLayer):
         compressor: zlib._Compress
         decompressor: zlib._Decompress
 
-    def __init__(self, level: int = 3, wbits: int = zlib.MAX_WBITS):
+    def __init__(self, level: int = 1, wbits: int = zlib.MAX_WBITS):
         """
         Parameters
         ----------
@@ -55,7 +55,7 @@ class ZlibLayer(MessageProcessLayer):
             if comp.permission_ == Permission.ADMIN:
                 continue
             keys.update(comp.dtype_map_.keys())
-            keys.add(comp.__name__)
+            keys.add(comp.name_)
 
         if not keys:
             return b""

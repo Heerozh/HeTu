@@ -126,6 +126,10 @@ async def benchmark_zstd_level12(zstd):
     bench(*zstd(12))
 
 
+async def benchmark_zlib_level1(zlib):
+    bench(*zlib(1))
+
+
 async def benchmark_zlib_level3(zlib):
     bench(*zlib(3))
 
@@ -142,8 +146,8 @@ async def benchmark_brotli_level3(brotli):
     bench(*brotli(3))
 
 
-async def benchmark_brotli_level12(brotli):
-    bench(*brotli(12))
+async def benchmark_brotli_level11(brotli):
+    bench(*brotli(11))
 
 
 async def task_teardown():
@@ -159,18 +163,22 @@ uv run ya ya_compressors.py -t 0.5 -n 1 -p 1
 
 |                         | CPS(k) | 
 |:------------------------|-------:|
-| benchmark_brotli_level3 |  92.05 |
-| benchmark_brotli_level4 |  87.04 |
-| benchmark_zlib_level3   | 116.18 |
-| benchmark_zlib_level6   | 105.41 |
-| benchmark_zstd_level12  |  73.68 |
-| benchmark_zstd_level3   | 442.76 |
+| benchmark_brotli_level11 |   3.52 |
+| benchmark_brotli_level3  | 100.07 |
+| benchmark_brotli_level4  |  91.97 |
+| benchmark_zlib_level1    | 357.95 |
+| benchmark_zlib_level3    | 117.45 |
+| benchmark_zlib_level6    | 105.94 |
+| benchmark_zstd_level12   |  74.23 |
+| benchmark_zstd_level3    | 422.68 |
 
 
-brotli_lv3 encode ratio: 0.7534961938307967
-brotli_lv4 encode ratio: 0.5799906913090168
-zlib_lv3 encode ratio: 0.7207111787807501
-zlib_lv6 encode ratio: 0.7021223569930083
-zstd_lv12 encode ratio: 0.7088246839633067
-zstd_lv3 encode ratio: 0.7751032480679005
+brotli_lv11 encode ratio: 0.18228850988596576  实际0.7左右，这里0.18是因为样本重复lv11直接记住了
+brotli_lv3 encode ratio: 0.7537968913347576
+brotli_lv4 encode ratio: 0.5803370526568643
+zlib_lv1 encode ratio: 0.7532336953320236
+zlib_lv3 encode ratio: 0.7205987715822018
+zlib_lv6 encode ratio: 0.7020613673963046
+zstd_lv12 encode ratio: 0.7088479506505305
+zstd_lv3 encode ratio: 0.7748750249081476
 """

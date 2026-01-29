@@ -20,9 +20,6 @@ replay = logging.getLogger("HeTu.replay")
 class BrotliLayer(MessageProcessLayer):
     """
     使用 Brotli 进行消息的流式压缩和解压缩。
-
-    注意：Brotli 的 Python 包当前不支持自定义字典训练/协商，
-    这里仅在握手时附带所有 key 字典，供对端感知或未来扩展。
     """
 
     @dataclass
