@@ -21,23 +21,22 @@ namespace HeTu
     {
         public const int NonceSize = 12;
 
-        class CryptoContext
-        {
-            public byte[] SessionKey;
-            public bool ServerSide;
-            public ulong SendNonce;
-            public ulong RecvNonce;
-        }
+
+        public byte[] _sessionKey;
+        public bool _serverSide;
+        public ulong _sendNonce;
+        public ulong _recvNonce;
+
 
         readonly bool _serverMode;
-        readonly SecureRandom _random = new SecureRandom();
-        readonly X25519PrivateKeyParameters _clientPrivateKey;
-        readonly X25519PublicKeyParameters _clientPublicKey;
+        // readonly SecureRandom _random = new SecureRandom();
+        // readonly X25519PrivateKeyParameters _clientPrivateKey;
+        // readonly X25519PublicKeyParameters _clientPublicKey;
 
         /// <summary>
         /// 默认客户端模式，会生成一对临时密钥。
         /// </summary>
-        public CryptoLayer() : this(false, null)
+        public CryptoLayer() : this(false)
         {
         }
 
@@ -45,26 +44,26 @@ namespace HeTu
         /// serverMode 为 true 时，用于服务端握手；否则为客户端握手。
         /// clientPrivateKey 仅客户端模式使用，传入32字节私钥可固定身份。
         /// </summary>
-        public CryptoLayer(bool serverMode, byte[] clientPrivateKey)
+        public CryptoLayer(bool serverMode)
         {
             _serverMode = serverMode;
-            if (!_serverMode)
-            {
-                _clientPrivateKey = clientPrivateKey != null
-                    ? new X25519PrivateKeyParameters(clientPrivateKey, 0)
-                    : new X25519PrivateKeyParameters(_random);
-                _clientPublicKey = _clientPrivateKey.GeneratePublicKey();
-            }
+            // if (!_serverMode)
+            // {
+            //     _clientPrivateKey = clientPrivateKey != null
+            //         ? new X25519PrivateKeyParameters(clientPrivateKey, 0)
+            //         : new X25519PrivateKeyParameters(_random);
+            //     _clientPublicKey = _clientPrivateKey.GeneratePublicKey();
+            // }
         }
 
-        /// <summary>客户端要发送给服务端的公钥（32字节）</summary>
-        public byte[] ClientPublicKey => _clientPublicKey?.GetEncoded();
+        // /// <summary>客户端要发送给服务端的公钥（32字节）</summary>
+        // public byte[] ClientPublicKey => _clientPublicKey?.GetEncoded();
 
         /// <summary>
         /// 客户端握手辅助函数。
         /// 输入服务端公钥（32字节），返回上下文。
         /// </summary>
-        public object ClientHandshake(byte[] serverPublicKey)
+        public byte[] ClientHandshake(byte[] serverPublicKey)
         {
             if (_serverMode)
                 throw new InvalidOperationException("ClientHandshake 不能在 serverMode 下调用");
@@ -72,58 +71,56 @@ namespace HeTu
                 throw new ArgumentException("服务端公钥长度错误，预期32字节", nameof(serverPublicKey));
 
             var peerPublicKey = new X25519PublicKeyParameters(serverPublicKey, 0);
-            var sessionKey = DeriveSessionKey(_clientPrivateKey, peerPublicKey);
-            return new CryptoContext
-            {
-                SessionKey = sessionKey,
-                ServerSide = false,
-                SendNonce = 0,
-                RecvNonce = 0
-            };
+            var random = new SecureRandom();
+            var clientPrivateKey = new X25519PrivateKeyParameters(random);
+            var sessionKey = DeriveSessionKey(clientPrivateKey, peerPublicKey);
+
+            _sessionKey = sessionKey;
+            _serverSide = false;
+            _sendNonce = 0;
+            _recvNonce = 0;
+            return clientPrivateKey.GeneratePublicKey().GetEncoded();
         }
 
-        public override LayerHandshakeResult Handshake(byte[] message)
+        public override byte[] Handshake(byte[] message)
         {
             if (_serverMode)
                 return ServerHandshake(message);
 
-            var ctx = ClientHandshake(message) as CryptoContext;
-            return new LayerHandshakeResult(ctx, Array.Empty<byte>());
+            return ClientHandshake(message);
         }
 
-        LayerHandshakeResult ServerHandshake(byte[] message)
+        byte[] ServerHandshake(byte[] message)
         {
             if (message == null || message.Length != 32)
                 throw new ArgumentException("客户端公钥长度错误，预期32字节", nameof(message));
 
             var peerPublicKey = new X25519PublicKeyParameters(message, 0);
-            var serverPrivateKey = new X25519PrivateKeyParameters(_random);
+            var random = new SecureRandom();
+            var serverPrivateKey = new X25519PrivateKeyParameters(random);
             var serverPublicKey = serverPrivateKey.GeneratePublicKey();
 
             var sessionKey = DeriveSessionKey(serverPrivateKey, peerPublicKey);
-            var ctx = new CryptoContext
-            {
-                SessionKey = sessionKey,
-                ServerSide = true,
-                SendNonce = 0,
-                RecvNonce = 0
-            };
 
-            return new LayerHandshakeResult(ctx, serverPublicKey.GetEncoded());
+            _sessionKey = sessionKey;
+            _serverSide = true;
+            _sendNonce = 0;
+            _recvNonce = 0;
+
+            return serverPublicKey.GetEncoded();
         }
 
-        public override object Encode(object layerCtx, object message)
+        public override object Encode(object message)
         {
-            if (layerCtx == null) return message;
+            if (_sessionKey == null) return message;
             if (message is not byte[] bytes)
                 throw new InvalidOperationException("CryptoLayer只能加密 byte[] 类型数据");
 
-            var ctx = (CryptoContext)layerCtx;
-            ctx.SendNonce++;
-            var nonce = BuildNonce(ctx.ServerSide ? (byte)0x00 : (byte)0xFF, ctx.SendNonce);
+            _sendNonce++;
+            var nonce = BuildNonce(_serverSide ? (byte)0x00 : (byte)0xFF, _sendNonce);
 
             var cipher = new ChaCha20Poly1305();
-            var parameters = new AeadParameters(new KeyParameter(ctx.SessionKey), 128, nonce);
+            var parameters = new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(true, parameters);
 
             var output = new byte[cipher.GetOutputSize(bytes.Length)];
@@ -132,21 +129,20 @@ namespace HeTu
             return output;
         }
 
-        public override object Decode(object layerCtx, object message)
+        public override object Decode(object message)
         {
-            if (layerCtx == null) return message;
+            if (_sessionKey == null) return message;
             if (message is not byte[] bytes)
                 throw new InvalidOperationException("CryptoLayer只能解密 byte[] 类型数据");
 
             if (bytes.Length < 16)
                 throw new InvalidOperationException("解密失败：数据长度不足，可能非加密数据或截断");
 
-            var ctx = (CryptoContext)layerCtx;
-            ctx.RecvNonce++;
-            var nonce = BuildNonce(ctx.ServerSide ? (byte)0xFF : (byte)0x00, ctx.RecvNonce);
+            _recvNonce++;
+            var nonce = BuildNonce(_serverSide ? (byte)0xFF : (byte)0x00, _recvNonce);
 
             var cipher = new ChaCha20Poly1305();
-            var parameters = new AeadParameters(new KeyParameter(ctx.SessionKey), 128, nonce);
+            var parameters = new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(false, parameters);
 
             var output = new byte[cipher.GetOutputSize(bytes.Length)];
