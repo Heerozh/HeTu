@@ -6,14 +6,12 @@
 using System;
 using System.Collections.Generic;
 
-
 namespace HeTu
 {
-
     public abstract class MessageProcessLayer
     {
-        protected MessagePipeline Parent;
         protected int LayerIndex;
+        protected MessagePipeline Parent;
 
         public virtual void OnAttach(MessagePipeline parent, int layerIdx)
         {
@@ -22,9 +20,9 @@ namespace HeTu
         }
 
         /// <summary>
-        /// 连接前握手工作，例如协商参数等。
-        /// 返回的Context会保存在连接中，贯穿之后的Encode/Decode调用。
-        /// Reply将发送给对端。
+        ///     连接前握手工作，例如协商参数等。
+        ///     返回的Context会保存在连接中，贯穿之后的Encode/Decode调用。
+        ///     Reply将发送给对端。
         /// </summary>
         public abstract byte[] Handshake(byte[] message);
 
@@ -36,12 +34,14 @@ namespace HeTu
     }
 
     /// <summary>
-    /// 消息流层叠处理类。
+    ///     消息流层叠处理类。
     /// </summary>
     public class MessagePipeline
     {
-        readonly List<MessageProcessLayer> _layers = new();
-        readonly List<bool> _disabled = new();
+        private readonly List<bool> _disabled = new();
+        private readonly List<MessageProcessLayer> _layers = new();
+
+        public int NumLayers => _layers.Count;
 
         public void AddLayer(MessageProcessLayer layer)
         {
@@ -50,10 +50,7 @@ namespace HeTu
             layer.OnAttach(this, _layers.Count - 1);
         }
 
-        public void DisableLayer(int idx)
-        {
-            _disabled[idx] = true;
-        }
+        public void DisableLayer(int idx) => _disabled[idx] = true;
 
         public void Clean()
         {
@@ -61,11 +58,9 @@ namespace HeTu
             _disabled.Clear();
         }
 
-        public int NumLayers => _layers.Count;
-
         /// <summary>
-        /// 通过对端发来的握手消息，完成所有层的握手工作。
-        /// 返回握手后的上下文；以及要发送给对端的握手消息。
+        ///     通过对端发来的握手消息，完成所有层的握手工作。
+        ///     返回握手后的上下文；以及要发送给对端的握手消息。
         /// </summary>
         public byte[] Handshake(IList<byte[]> peerMessages)
         {
@@ -79,7 +74,7 @@ namespace HeTu
                     continue;
                 }
 
-                var msg = (peerMessages != null && i < peerMessages.Count)
+                var msg = peerMessages != null && i < peerMessages.Count
                     ? peerMessages[i]
                     : Array.Empty<byte>();
 
@@ -92,7 +87,7 @@ namespace HeTu
         }
 
         /// <summary>
-        /// 对消息进行正向处理，可以传入until参数表示只处理到哪层
+        ///     对消息进行正向处理，可以传入until参数表示只处理到哪层
         /// </summary>
         public object Encode(object message, int until = -1)
         {
@@ -109,7 +104,7 @@ namespace HeTu
         }
 
         /// <summary>
-        /// 对消息进行逆向处理
+        ///     对消息进行逆向处理
         /// </summary>
         public object Decode(object message)
         {
@@ -125,6 +120,4 @@ namespace HeTu
             return decoded;
         }
     }
-
-
 }

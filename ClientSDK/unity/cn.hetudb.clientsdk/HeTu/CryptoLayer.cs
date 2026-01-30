@@ -14,56 +14,47 @@ using Org.BouncyCastle.Security;
 namespace HeTu
 {
     /// <summary>
-    /// 加密层
-    /// 使用 ECDH (X25519) 协商密钥，使用 ChaCha20-Poly1305-IETF 进行加密通讯。
+    ///     加密层
+    ///     使用 ECDH (X25519) 协商密钥，使用 ChaCha20-Poly1305-IETF 进行加密通讯。
     /// </summary>
     public class CryptoLayer : MessageProcessLayer
     {
-        public const int NonceSize = 12;
+        private const int NonceSize = 12;
 
+        private readonly bool _serverMode;
+        private ulong _recvNonce;
+        private ulong _sendNonce;
+        private bool _serverSide;
 
-        public byte[] _sessionKey;
-        public bool _serverSide;
-        public ulong _sendNonce;
-        public ulong _recvNonce;
-
-
-        readonly bool _serverMode;
-        // readonly SecureRandom _random = new SecureRandom();
-        // readonly X25519PrivateKeyParameters _clientPrivateKey;
-        // readonly X25519PublicKeyParameters _clientPublicKey;
+        private byte[] _sessionKey;
 
         /// <summary>
-        /// 默认客户端模式，会生成一对临时密钥。
+        ///     默认客户端模式，会生成一对临时密钥。
         /// </summary>
         public CryptoLayer() : this(false)
         {
         }
 
         /// <summary>
-        /// serverMode 为 true 时，用于服务端握手；否则为客户端握手。
-        /// clientPrivateKey 仅客户端模式使用，传入32字节私钥可固定身份。
+        ///     serverMode 为 true 时，用于服务端握手；否则为客户端握手。
+        ///     clientPrivateKey 仅客户端模式使用，传入32字节私钥可固定身份。
         /// </summary>
-        public CryptoLayer(bool serverMode)
-        {
-            _serverMode = serverMode;
-            // if (!_serverMode)
-            // {
-            //     _clientPrivateKey = clientPrivateKey != null
-            //         ? new X25519PrivateKeyParameters(clientPrivateKey, 0)
-            //         : new X25519PrivateKeyParameters(_random);
-            //     _clientPublicKey = _clientPrivateKey.GeneratePublicKey();
-            // }
-        }
-
+        public CryptoLayer(bool serverMode) => _serverMode = serverMode;
+        // if (!_serverMode)
+        // {
+        //     _clientPrivateKey = clientPrivateKey != null
+        //         ? new X25519PrivateKeyParameters(clientPrivateKey, 0)
+        //         : new X25519PrivateKeyParameters(_random);
+        //     _clientPublicKey = _clientPrivateKey.GeneratePublicKey();
+        // }
         // /// <summary>客户端要发送给服务端的公钥（32字节）</summary>
         // public byte[] ClientPublicKey => _clientPublicKey?.GetEncoded();
 
         /// <summary>
-        /// 客户端握手辅助函数。
-        /// 输入服务端公钥（32字节），返回上下文。
+        ///     客户端握手辅助函数。
+        ///     输入服务端公钥（32字节），返回上下文。
         /// </summary>
-        public byte[] ClientHandshake(byte[] serverPublicKey)
+        private byte[] ClientHandshake(byte[] serverPublicKey)
         {
             if (_serverMode)
                 throw new InvalidOperationException("ClientHandshake 不能在 serverMode 下调用");
@@ -82,17 +73,13 @@ namespace HeTu
             return clientPrivateKey.GeneratePublicKey().GetEncoded();
         }
 
-        public override byte[] Handshake(byte[] message)
-        {
-            if (_serverMode)
-                return ServerHandshake(message);
+        public override byte[] Handshake(byte[] message) => _serverMode
+            ? ServerHandshake(message)
+            : ClientHandshake(message);
 
-            return ClientHandshake(message);
-        }
-
-        byte[] ServerHandshake(byte[] message)
+        private byte[] ServerHandshake(byte[] message)
         {
-            if (message == null || message.Length != 32)
+            if (message is not { Length: 32 })
                 throw new ArgumentException("客户端公钥长度错误，预期32字节", nameof(message));
 
             var peerPublicKey = new X25519PublicKeyParameters(message, 0);
@@ -120,7 +107,8 @@ namespace HeTu
             var nonce = BuildNonce(_serverSide ? (byte)0x00 : (byte)0xFF, _sendNonce);
 
             var cipher = new ChaCha20Poly1305();
-            var parameters = new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
+            var parameters =
+                new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(true, parameters);
 
             var output = new byte[cipher.GetOutputSize(bytes.Length)];
@@ -142,7 +130,8 @@ namespace HeTu
             var nonce = BuildNonce(_serverSide ? (byte)0xFF : (byte)0x00, _recvNonce);
 
             var cipher = new ChaCha20Poly1305();
-            var parameters = new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
+            var parameters =
+                new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(false, parameters);
 
             var output = new byte[cipher.GetOutputSize(bytes.Length)];
@@ -158,7 +147,8 @@ namespace HeTu
             }
         }
 
-        static byte[] DeriveSessionKey(X25519PrivateKeyParameters privateKey, X25519PublicKeyParameters publicKey)
+        private static byte[] DeriveSessionKey(X25519PrivateKeyParameters privateKey,
+            X25519PublicKeyParameters publicKey)
         {
             var agreement = new X25519Agreement();
             agreement.Init(privateKey);
@@ -172,7 +162,7 @@ namespace HeTu
             return sessionKey;
         }
 
-        static byte[] BuildNonce(byte sign, ulong counter)
+        private static byte[] BuildNonce(byte sign, ulong counter)
         {
             var nonce = new byte[NonceSize];
             nonce[0] = sign;
@@ -181,6 +171,7 @@ namespace HeTu
                 nonce[i] = (byte)(counter & 0xFF);
                 counter >>= 8;
             }
+
             return nonce;
         }
     }

@@ -2,27 +2,26 @@
 // Copyright 2024, Heerozh. All rights reserved.
 // </copyright>
 // <summary>河图客户端SDK的Unity消息管道</summary>
+
 using System;
+using System.IO;
 using Unity.SharpZipLib.Zip.Compression;
 using Unity.SharpZipLib.Zip.Compression.Streams;
-using System.IO;
 
 namespace HeTu
 {
     /// <summary>
-    /// 使用 zlib 进行消息的流式压缩和解压缩。
+    ///     使用 zlib 进行消息的流式压缩和解压缩。
     /// </summary>
     public class ZlibLayer : MessageProcessLayer
     {
+        private readonly int _level;
+        private readonly byte[] _presetDict;
+        private MemoryStream _deflateBuffer;
 
-        public Deflater _deflater;
-        public Inflater _inflater;
-        public MemoryStream _deflateBuffer;
-        public DeflaterOutputStream _deflateStream;
-        public byte[] _dict;
-
-        readonly int _level;
-        readonly byte[] _presetDict;
+        private Deflater _deflater;
+        private DeflaterOutputStream _deflateStream;
+        private Inflater _inflater;
 
         public ZlibLayer(int level = 1, byte[] presetDictionary = null)
         {
@@ -33,7 +32,7 @@ namespace HeTu
 
         public override byte[] Handshake(byte[] message)
         {
-            var dict = (message != null && message.Length > 0) ? message : _presetDict;
+            var dict = message is { Length: > 0 } ? message : _presetDict;
 
             var deflater = new Deflater(_level, false);
             var inflater = new Inflater(false);
@@ -55,7 +54,6 @@ namespace HeTu
             _inflater = inflater;
             _deflateBuffer = deflateBuffer;
             _deflateStream = deflateStream;
-            _dict = dict;
             return Array.Empty<byte>();
         }
 
@@ -76,17 +74,10 @@ namespace HeTu
             if (message is not byte[] bytes)
                 throw new InvalidOperationException("ZlibLayer 只能解压 byte[] 类型的消息");
 
-            try
-            {
-                return Inflate(bytes);
-            }
-            catch (Exception)
-            {
-                throw;
-            }
+            return Inflate(bytes);
         }
 
-        byte[] Deflate(byte[] input)
+        private byte[] Deflate(byte[] input)
         {
             _deflateBuffer.SetLength(0);
             _deflateBuffer.Position = 0;
@@ -95,13 +86,14 @@ namespace HeTu
             return _deflateBuffer.ToArray();
         }
 
-        byte[] Inflate(byte[] input)
+        private byte[] Inflate(byte[] input)
         {
             using var inputStream = new MemoryStream(input);
-            using var inflateStream = new InflaterInputStream(inputStream, _inflater, 4096)
-            {
-                IsStreamOwner = false
-            };
+            using var inflateStream =
+                new InflaterInputStream(inputStream, _inflater, 4096)
+                {
+                    IsStreamOwner = false
+                };
             using var output = new MemoryStream();
             inflateStream.CopyTo(output);
             return output.ToArray();
