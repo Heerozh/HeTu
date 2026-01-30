@@ -13,7 +13,8 @@
     "overrideReferences": true,
     "precompiledReferences": [
         "BouncyCastle.Cryptography.dll",
-        "Unity.SharpZipLib.dll"
+        "Unity.SharpZipLib.dll",
+        "MessagePack.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],
