@@ -42,9 +42,17 @@ async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue)
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
-    if ok and isinstance(res, ResponseToClient):
+
+    if not ok:
+        # 关闭连接
+        return False
+
+    if isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
-    return ok
+    else:
+        # 无视返回值，直接返回ok，如果不返回，Request无法对应
+        await push_queue.put(["rsp", "ok"])
+    return True
 
 
 async def sub_call(
