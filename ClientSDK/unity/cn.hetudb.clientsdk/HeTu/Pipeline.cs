@@ -83,13 +83,13 @@ namespace HeTu
             }
 
             var reply = Encode(replyMessages);
-            return reply as byte[] ?? Array.Empty<byte>();
+            return reply ?? Array.Empty<byte>();
         }
 
         /// <summary>
         ///     对消息进行正向处理，可以传入until参数表示只处理到哪层
         /// </summary>
-        public object Encode(object message, int until = -1)
+        public byte[] Encode(object message, int until = -1)
         {
             var encoded = message;
             for (var i = 0; i < _layers.Count; i++)
@@ -100,15 +100,15 @@ namespace HeTu
                 encoded = _layers[i].Encode(encoded);
             }
 
-            return encoded;
+            return encoded as byte[];
         }
 
         /// <summary>
         ///     对消息进行逆向处理
         /// </summary>
-        public object Decode(object message)
+        public object Decode(byte[] message)
         {
-            var decoded = message;
+            object decoded = message;
             for (var i = 0; i < _layers.Count; i++)
             {
                 var originalIndex = _layers.Count - 1 - i;

@@ -109,7 +109,7 @@ namespace HeTu
         }
     }
 
-    public class Subscriptions
+    public class SubscriptionManager
     {
         private readonly Dictionary<string, WeakReference> _subscriptions = new();
 
