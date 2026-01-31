@@ -56,6 +56,21 @@ namespace HeTu
             return MessagePackSerializer.Deserialize<Dictionary<string, object>>(
                 _rawData, options);
         }
+
+        /// <summary>
+        ///     转换为列表 (当没有定义Class时使用)
+        /// </summary>
+        public List<object> ToList()
+        {
+            if (_rawData == null || _rawData.Length == 0) return null;
+
+            // 使用 PrimitiveObjectResolver 允许解析 object 类型
+            var options =
+                MessagePackSerializerOptions.Standard.WithResolver(
+                    PrimitiveObjectResolver.Instance);
+            return MessagePackSerializer.Deserialize<List<object>>(
+                _rawData, options);
+        }
     }
 
     public class JsonbLayer : MessageProcessLayer

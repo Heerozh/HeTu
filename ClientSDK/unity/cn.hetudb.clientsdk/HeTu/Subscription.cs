@@ -108,4 +108,11 @@ namespace HeTu
             }
         }
     }
+
+    public class Subscriptions
+    {
+        private readonly Dictionary<string, WeakReference> _subscriptions = new();
+
+        public void Clean() => _subscriptions.Clear();
+    }
 }
