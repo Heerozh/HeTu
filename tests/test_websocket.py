@@ -175,12 +175,14 @@ def test_websocket_call_system(test_server):
 
         await client1.send(["rpc", "add_rls_comp_value", 1])
         await client1.recv()  # 首次sub这里会卡至少0.5s等待连接
+        await client1.recv()
 
         await client1.send(["rpc", "login", 2])  # 测试重复登录应该无效
         await client1.recv()
 
         # 正式开始接受sub消息
         await client1.send(["rpc", "add_rls_comp_value", 1])
+        await client1.recv()
         await client1.recv()
 
         # 模拟其他用户修改了用户1订阅的数据
@@ -197,21 +199,21 @@ def test_websocket_call_system(test_server):
     _, response1 = test_server.test_client.websocket("/hetu", mimic=normal_routine)
     # print(response1.client_received)
     # 测试add_rls_comp_value调用了2次
-    id1 = next(iter(response1.client_received[3][2].keys()))
-    assert response1.client_received[3][2][id1] == {
+    id1 = next(iter(response1.client_received[4][2].keys()))
+    assert response1.client_received[4][2][id1] == {
         "id": int(id1),
         "owner": 1,
         "value": 101,
     }
-    assert response1.client_received[5][2][id1] == {
+    assert response1.client_received[7][2][id1] == {
         "id": int(id1),
         "owner": 1,
         "value": 102,
     }
 
     # 测试收到连接2的+9.1
-    id2 = next(iter(response1.client_received[6][2].keys()))
-    assert response1.client_received[6][2][id2] == {
+    id2 = next(iter(response1.client_received[8][2].keys()))
+    assert response1.client_received[8][2][id2] == {
         "id": int(id2),
         "owner": 2,
         "value": 9.1,
