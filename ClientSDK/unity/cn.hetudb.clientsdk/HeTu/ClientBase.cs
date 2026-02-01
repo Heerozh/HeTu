@@ -309,12 +309,10 @@ namespace HeTu
                 case "updt":
                     // 这个是主动推送，需要根据subID找到对应的订阅对象
                     var subID = (string)structuredMsg[1];
-                    if (!Subscriptions.TryGet(subID, out var pSubscribed))
+                    if (!Subscriptions.TryGet(subID, out var subscribed))
                         break;
-                    var row = ((JsonObject)structuredMsg[2]).ToDict<long, >
-                        .ToObject<Dictionary<long, JObject>>();
-                    foreach (var (rowID, data) in rows)
-                        subscribed.Update(rowID, data);
+                    var rows = (JsonObject)structuredMsg[2];
+                    subscribed.UpdateRows(rows);
                     break;
             }
         }

@@ -34,7 +34,7 @@ namespace HeTu
             ComponentName = componentName;
         }
 
-        public abstract void Update(long rowID, JsonObject data);
+        public abstract void UpdateRows(JsonObject data);
 
         /// <summary>
         ///     销毁远端订阅对象。
@@ -58,7 +58,7 @@ namespace HeTu
         public event Action<RowSubscription<T>> OnUpdate;
         public event Action<RowSubscription<T>> OnDelete;
 
-        public override void Update(long rowID, JsonObject data)
+        public void Update(T data)
         {
             if (data is null)
             {
@@ -67,8 +67,20 @@ namespace HeTu
             }
             else
             {
-                Data = data.To<T>();
+                Data = data;
                 OnUpdate?.Invoke(this);
+            }
+        }
+
+        public override void UpdateRows(JsonObject data)
+        {
+            var rows = data.ToDict<long, T>();
+            foreach (var (rowID, rowData) in rows)
+            {
+                if (rowID == Data.id)
+                {
+                    Update(rowData);
+                }
             }
         }
     }
@@ -86,7 +98,7 @@ namespace HeTu
         public event Action<IndexSubscription<T>, long> OnDelete;
         public event Action<IndexSubscription<T>, long> OnInsert;
 
-        public override void Update(long rowID, JsonObject data)
+        public void Update(long rowID, T data)
         {
             var exist = Rows.ContainsKey(rowID);
             var delete = data is null;
@@ -99,12 +111,20 @@ namespace HeTu
             }
             else
             {
-                var tData = data.To<T>();
-                Rows[rowID] = tData;
+                Rows[rowID] = data;
                 if (exist)
                     OnUpdate?.Invoke(this, rowID);
                 else
                     OnInsert?.Invoke(this, rowID);
+            }
+        }
+
+        public override void UpdateRows(JsonObject data)
+        {
+            var rows = data.ToDict<long, T>();
+            foreach (var (rowID, rowData) in rows)
+            {
+                Update(rowID, rowData);
             }
         }
     }
