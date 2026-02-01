@@ -26,12 +26,14 @@ namespace HeTu
     public abstract class BaseSubscription
     {
         private readonly string _subscriptID;
+        private readonly HeTuClientBase _parentClient;
         public readonly string ComponentName;
 
-        protected BaseSubscription(string subscriptID, string componentName)
+        protected BaseSubscription(string subscriptID, string componentName, HeTuClientBase client)
         {
             _subscriptID = subscriptID;
             ComponentName = componentName;
+            _parentClient = client;
         }
 
         public abstract void UpdateRows(JsonObject data);
@@ -41,16 +43,16 @@ namespace HeTu
         ///     Dispose应该明确调用，虽然gc回收时会调用，但时间不确定，这会导致服务器端该对象销毁不及时。
         /// </summary>
         public void Dispose() =>
-            HeTuClient.Instance._unsubscribe(_subscriptID, "Dispose");
+            _parentClient.Unsubscribe(_subscriptID, "Dispose");
 
-        ~BaseSubscription() => HeTuClient.Instance._unsubscribe(_subscriptID, "析构");
+        ~BaseSubscription() => _parentClient.Unsubscribe(_subscriptID, "析构");
     }
 
     /// Select结果的订阅对象
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
-        public RowSubscription(string subscriptID, string componentName, T row) :
-            base(subscriptID, componentName) =>
+        public RowSubscription(string subscriptID, string componentName, T row, HeTuClientBase client) :
+            base(subscriptID, componentName, client) =>
             Data = row;
 
         public T Data { get; private set; }
@@ -88,8 +90,8 @@ namespace HeTu
     /// Query结果的订阅对象
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
-        public IndexSubscription(string subscriptID, string componentName, List<T> rows) :
-            base(subscriptID, componentName) =>
+        public IndexSubscription(string subscriptID, string componentName, List<T> rows, HeTuClientBase client) :
+            base(subscriptID, componentName, client) =>
             Rows = rows.ToDictionary(row => row.id);
 
         public Dictionary<long, T> Rows { get; }

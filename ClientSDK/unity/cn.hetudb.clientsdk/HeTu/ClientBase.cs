@@ -207,7 +207,7 @@ namespace HeTu
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型");
 
                 var data = ((JsonObject)response[2]).To<T>();
-                var newSub = new RowSubscription<T>(subID, componentName, data);
+                var newSub = new RowSubscription<T>(subID, componentName, data, this);
                 Subscriptions.Add(subID, new WeakReference(newSub, false));
                 Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
                 onResponse(newSub);
@@ -271,7 +271,7 @@ namespace HeTu
 
                 var rawRows = (JsonObject)response[2];
                 var rows = rawRows.ToList<T>();
-                var newSub = new IndexSubscription<T>(subID, componentName, rows);
+                var newSub = new IndexSubscription<T>(subID, componentName, rows, this);
 
                 Subscriptions.Add(subID, new WeakReference(newSub, false));
                 Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
