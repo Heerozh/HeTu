@@ -34,7 +34,13 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     转换为强类型 Struct/Class
+        ///     转换为c#变量。
+        /// - 如果值是Hetu的组件，建议使用“hetu build”命令生成的客户端强类型Struct，比如To<Item>()。
+        ///   如果没有生成强类型，可使用通用的DictComponent类型。
+        /// - 如果是列表类型，可以使用To<List<DictComponent>>()，或使用简写ToList<DictComponent>()。
+        /// - 如果是Map类型，服务器端传过来的键必须为同一类型，然后可以使用
+        ///   To<Dictionary<string, DictComponent>>()，或是用简写：ToDict<string, DictComponent>()。
+        /// - 如果是混合类型，使用To<object>()可转换为动态类型，之后通过强制转换为具体类型。
         /// </summary>
         public T To<T>()
         {
@@ -43,36 +49,16 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     转换为DictComponent (当没有定义Class时使用)
-        /// </summary>
-        public DictComponent To()
-        {
-            if (_rawData == null || _rawData.Length == 0) return null;
-
-            // 使用 PrimitiveObjectResolver 允许解析 object 类型
-            var options =
-                MessagePackSerializerOptions.Standard.WithResolver(
-                    PrimitiveObjectResolver.Instance);
-            return MessagePackSerializer.Deserialize<DictComponent>(_rawData, options);
-        }
-
-        /// <summary>
         ///     转换为Dict
         /// </summary>
         public Dictionary<T1, T2> ToDict<T1, T2>()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
-
-            // 使用 PrimitiveObjectResolver 允许解析 object 类型
-            var options =
-                MessagePackSerializerOptions.Standard.WithResolver(
-                    PrimitiveObjectResolver.Instance);
-            return MessagePackSerializer.Deserialize<Dictionary<T1, T2>>(_rawData,
-                options);
+            return MessagePackSerializer.Deserialize<Dictionary<T1, T2>>(_rawData);
         }
 
         /// <summary>
-        ///     转换为列表 (当没有定义Class时使用)
+        ///     转换为列表
         /// </summary>
         public List<T> ToList<T>()
         {
@@ -80,20 +66,6 @@ namespace HeTu
             return MessagePackSerializer.Deserialize<List<T>>(_rawData);
         }
 
-        /// <summary>
-        ///     转换为列表 (当没有定义Class时使用)
-        /// </summary>
-        public List<object> ToList()
-        {
-            if (_rawData == null || _rawData.Length == 0) return null;
-
-            // 使用 PrimitiveObjectResolver 允许解析 object 类型
-            var options =
-                MessagePackSerializerOptions.Standard.WithResolver(
-                    PrimitiveObjectResolver.Instance);
-            return MessagePackSerializer.Deserialize<List<object>>(
-                _rawData, options);
-        }
     }
 
     public class JsonbLayer : MessageProcessLayer
@@ -104,7 +76,7 @@ namespace HeTu
         {
             if (message is not byte[] bytes)
                 throw new InvalidOperationException("CryptoLayer只能加密 byte[] 类型数据");
-
+            // todo，应该写到decode里
             var reader = new MessagePackReader(new ReadOnlyMemory<byte>(bytes));
             // 1. 读取数组长度 (对应 Python 的 list 长度)
             var count = reader.ReadArrayHeader();
@@ -122,8 +94,8 @@ namespace HeTu
                         var jsonData = new JsonObject(reader, bytes);
                         return new object[] { cmd, jsonData };
                     }
-                case "sub": // dict[str, Any] | list[dict]
-                case "updt":// dict[str, dict]
+                case "sub": // dict[str, Any] | list[dict[str, Any]]
+                case "updt":// dict[str, dict[str, Any]]
                     {
                         var subId = reader.ReadString();
                         var jsonData = new JsonObject(reader, bytes);

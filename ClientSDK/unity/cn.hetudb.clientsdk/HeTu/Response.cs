@@ -12,9 +12,10 @@ namespace HeTu
 {
     public class ResponseManager
     {
-        private readonly ConcurrentQueue<Action<List<object>>> _requestCallbacks = new();
+        public delegate void Callback(List<object> args);
+        private readonly ConcurrentQueue<Callback> _requestCallbacks = new();
 
-        public void EnqueueCallback(Action<List<object>> cb) =>
+        public void EnqueueCallback(Callback cb) =>
             _requestCallbacks.Enqueue(cb);
 
         public void CompleteNext(List<object> response)
@@ -25,6 +26,7 @@ namespace HeTu
 
         public void CancelAll(string reason)
         {
+            if (_requestCallbacks.IsEmpty) return;
             Logger.Instance.Info($"[HeTuClient] {reason}, 取消所有等待任务...");
             // foreach (var cb in _requestCallbacks)
             //     cb(null);

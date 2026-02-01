@@ -16,7 +16,7 @@ namespace HeTu
     /// </summary>
     public abstract class HeTuClientBase
     {
-        protected readonly ConcurrentQueue<byte[]> OfflineQueue = new();
+        protected readonly ConcurrentQueue<ValueTuple<byte[], ResponseManager.Callback>> OfflineQueue = new();
         protected readonly MessagePipeline Pipeline = new();
         protected readonly ResponseManager ResponseQueue = new();
 
@@ -82,6 +82,7 @@ namespace HeTu
             // 前置清理
             Logger.Instance.Info($"[HeTuClient] 正在连接到：{url}...");
             Subscriptions.Clean();
+            ResponseQueue.CancelAll("重新连接");
 
             // 初始化WebSocket以及事件
             State = "ReadyForConnect";
@@ -90,15 +91,18 @@ namespace HeTu
                     Logger.Instance.Info("[HeTuClient] 连接成功。");
                     State = "Connected";
                     OnConnected?.Invoke();
-                    foreach (var data in OfflineQueue)
+                    foreach (var (data, callback) in OfflineQueue)
+                    {
                         _send(data);
+                        if (callback != null)
+                            ResponseQueue.EnqueueCallback(callback);
+                    }
                     OfflineQueue.Clear();
                 },
                 _OnReceived,
                 () =>
                 {
                     State = "Disconnected";
-                    ResponseQueue.CancelAll("连接断开");
                     Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
                 }, errMsg =>
                 {
@@ -123,18 +127,20 @@ namespace HeTu
             _close();
         }
 
-        protected void _SendSync(object payload)
+        protected void _doRequest(object payload, ResponseManager.Callback callback)
         {
             var buffer = Pipeline.Encode(payload);
 
             if (State == "Connected")
             {
                 _send(buffer); // 后台线程发送
+                if (callback != null)
+                    ResponseQueue.EnqueueCallback(callback);
             }
             else
             {
                 Logger.Instance.Info("尝试发送数据但连接未建立，将加入队列在建立后发送。");
-                OfflineQueue.Enqueue(buffer);
+                OfflineQueue.Enqueue((buffer, callback));
             }
         }
 
@@ -143,8 +149,7 @@ namespace HeTu
             Action<JsonObject> onResponse)
         {
             var payload = new object[] { "sys", systemName }.Concat(args);
-            _SendSync(payload);
-            ResponseQueue.EnqueueCallback(response =>
+            _doRequest(payload, response =>
             {
                 onResponse((JsonObject)response[1]);
             });
@@ -177,13 +182,10 @@ namespace HeTu
             }
 
             // 向服务器订阅
-            var payload = new[] { "sub", componentName, "get", index, value };
-            _SendSync(payload);
             Logger.Instance.Debug(
                 $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
-
-            // 等待服务器结果
-            ResponseQueue.EnqueueCallback(response =>
+            var payload = new[] { "sub", componentName, "get", index, value };
+            _doRequest(payload, response =>
             {
                 var subID = (string)response[1];
                 // 如果没有查询到值
@@ -240,15 +242,13 @@ namespace HeTu
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
 
             // 发送订阅请求
+            Logger.Instance.Debug($"[HeTuClient] 发送Query订阅: {predictID}");
+
             var payload = new[]
             {
                 "sub", componentName, "range", index, left, right, limit, desc, force
             };
-            _SendSync(payload);
-            Logger.Instance.Debug($"[HeTuClient] 发送Query订阅: {predictID}");
-
-            // 等待服务器结果
-            ResponseQueue.EnqueueCallback(response =>
+            _doRequest(payload, response =>
             {
                 var subID = (string)response[1];
                 // 如果没有查询到值
@@ -290,7 +290,7 @@ namespace HeTu
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
-            _SendSync(payload);
+            _doRequest(payload, null);
             Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
