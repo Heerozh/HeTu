@@ -17,10 +17,10 @@ namespace HeTu
     }
 
     [Preserve]
-    public class DictComponent : Dictionary<string, string>, IBaseComponent
+    public class DictComponent : Dictionary<string, object>, IBaseComponent
     {
         [Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
-        public long id => long.Parse(this["id"]);
+        public long id => (int)this["id"];
     }
 
     public abstract class BaseSubscription
@@ -114,5 +114,18 @@ namespace HeTu
         private readonly Dictionary<string, WeakReference> _subscriptions = new();
 
         public void Clean() => _subscriptions.Clear();
+
+        public bool TryGet(string subID, out BaseSubscription subscription)
+        {
+            subscription = null;
+            if (!_subscriptions.TryGetValue(subID, out var weakRef))
+                return false;
+            if (weakRef.Target is not BaseSubscription casted) return false;
+            subscription = casted;
+            return true;
+        }
+
+        public void Add(string subID, WeakReference subscription) =>
+            _subscriptions[subID] = subscription;
     }
 }

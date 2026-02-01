@@ -45,7 +45,7 @@ namespace HeTu
         /// <summary>
         ///     转换为字典 (当没有定义Class时使用)
         /// </summary>
-        public Dictionary<string, object> ToDict()
+        public DictComponent To()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
 
@@ -53,8 +53,7 @@ namespace HeTu
             var options =
                 MessagePackSerializerOptions.Standard.WithResolver(
                     PrimitiveObjectResolver.Instance);
-            return MessagePackSerializer.Deserialize<Dictionary<string, object>>(
-                _rawData, options);
+            return MessagePackSerializer.Deserialize<DictComponent>(_rawData, options);
         }
 
         /// <summary>

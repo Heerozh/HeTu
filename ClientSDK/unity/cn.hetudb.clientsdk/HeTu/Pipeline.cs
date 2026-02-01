@@ -106,7 +106,7 @@ namespace HeTu
         /// <summary>
         ///     对消息进行逆向处理
         /// </summary>
-        public object Decode(byte[] message)
+        public List<object> Decode(byte[] message)
         {
             object decoded = message;
             for (var i = 0; i < _layers.Count; i++)
@@ -117,7 +117,7 @@ namespace HeTu
                 decoded = _layers[originalIndex].Decode(decoded);
             }
 
-            return decoded;
+            return decoded as List<object>;
         }
     }
 }

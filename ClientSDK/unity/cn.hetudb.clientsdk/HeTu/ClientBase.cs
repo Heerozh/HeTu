@@ -8,7 +8,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using System.Text;
 
 namespace HeTu
 {
@@ -19,7 +18,7 @@ namespace HeTu
     {
         protected readonly ConcurrentQueue<byte[]> OfflineQueue = new();
         protected readonly MessagePipeline Pipeline = new();
-        protected readonly RequestManager Requests = new();
+        protected readonly ResponseManager ResponseQueue = new();
 
         protected readonly SubscriptionManager Subscriptions = new();
         protected string State = "Disconnected";
@@ -95,11 +94,11 @@ namespace HeTu
                         _send(data);
                     OfflineQueue.Clear();
                 },
-                msg => { _OnReceived(msg); },
+                _OnReceived,
                 () =>
                 {
                     State = "Disconnected";
-                    Requests.CancelAll("连接断开");
+                    ResponseQueue.CancelAll("连接断开");
                     Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
                 }, errMsg =>
                 {
@@ -120,7 +119,7 @@ namespace HeTu
         public virtual void Close()
         {
             Logger.Instance.Info("[HeTuClient] 主动调用了Close");
-            Requests.CancelAll("主动调用了Close");
+            ResponseQueue.CancelAll("主动调用了Close");
             _close();
         }
 
@@ -141,16 +140,26 @@ namespace HeTu
 
         // 调用System方法，但是不处理返回值
         protected void CallSystemSync(string systemName, object[] args,
-            Action<object>[] onResponse)
+            Action<JsonObject> onResponse)
         {
             var payload = new object[] { "sys", systemName }.Concat(args);
             _SendSync(payload);
+            ResponseQueue.EnqueueCallback(response =>
+            {
+                onResponse((JsonObject)response[1]);
+            });
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
 
-        public RowSubscription<T> GetSync<T>(
-            string index, object value, string componentName = null)
+        private static string _makeSubID(string table, string index, object left,
+            object right,
+            int limit, bool desc) =>
+            $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
+
+        public void GetSync<T>(
+            string index, object value, Action<RowSubscription<T>> onResponse,
+            string componentName = null)
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
@@ -159,79 +168,69 @@ namespace HeTu
             {
                 var predictID = _makeSubID(
                     componentName, "id", value, null, 1, false);
-                if (_subscriptions.TryGetValue(predictID, out var subscribed))
-                    if (subscribed.Target is RowSubscription<T> casted)
-                        return casted;
+                if (Subscriptions.TryGet(predictID, out var subscribed))
+                    if (subscribed is RowSubscription<T> casted)
+                        onResponse(casted);
                     else
                         throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
             }
 
             // 向服务器订阅
-            var payload = new[] { "sub", componentName, "select", value, where };
-            _Send(payload);
-            _logDebug?.Invoke(
-                $"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
+            var payload = new[] { "sub", componentName, "get", index, value };
+            _SendSync(payload);
+            Logger.Instance.Debug(
+                $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
 
             // 等待服务器结果
-#if UNITY_6000_0_OR_NEWER
-            var tcs = new TaskCompletionSource<List<object>>();
-#else
-            var tcs = new UniTaskCompletionSource<List<object>>();
-#endif
-            _waitingSubTasks.Enqueue(tcs);
-            List<object> subMsg;
-            try
+            ResponseQueue.EnqueueCallback(response =>
             {
-                // await UniTask会调用task.GetResult()，如果cancel了，会抛出异常
-                subMsg = await tcs.Task;
-            }
-            catch (OperationCanceledException e)
-            {
-                // NUnit不把取消信号视为错误，所以这里要LogError一下让测试不通过
-                _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
-                throw;
-            }
+                var subID = (string)response[1];
+                // 如果没有查询到值
+                if (subID is null)
+                {
+                    onResponse(null);
+                    return;
+                }
 
-            var subID = (string)subMsg[1];
-            // 如果没有查询到值
-            if (subID is null) return null;
-            // 如果依然是重复订阅，直接返回副本
-            if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
-                if (stillSubscribed.Target is RowSubscription<T> casted)
-                    return casted;
-                else
-                    throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
+                // 如果依然是重复订阅，直接返回副本
+                if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                    if (stillSubscribed is RowSubscription<T> casted)
+                    {
+                        onResponse(casted);
+                        return;
+                    }
+                    else
+                        throw new InvalidCastException(
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型");
 
-            var data = ((JObject)subMsg[2]).ToObject<T>();
-            var newSub = new RowSubscription<T>(subID, componentName, data);
-            _subscriptions[subID] = new WeakReference(newSub, false);
-            _logInfo?.Invoke($"[HeTuClient] 成功订阅了 {subID}");
-            return newSub;
+                var data = ((JsonObject)response[2]).To<T>();
+                var newSub = new RowSubscription<T>(subID, componentName, data);
+                Subscriptions.Add(subID, new WeakReference(newSub, false));
+                Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
+                onResponse(newSub);
+            });
         }
+
+        public void GetSync(
+            string index, object value, Action<RowSubscription<DictComponent>> onResponse,
+            string componentName = null) =>
+            GetSync<DictComponent>(index, value, onResponse, componentName);
 
         protected virtual void _OnReceived(byte[] buffer)
         {
             // 解码消息
-            buffer = _protocol?.Decrypt(buffer) ?? buffer;
-            buffer = _protocol?.Decompress(buffer) ?? buffer;
-            var decoded = Encoding.UTF8.GetString(buffer);
-            // 处理消息
             // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
-            var structuredMsg = JsonConvert.DeserializeObject<List<object>>(decoded);
-            if (structuredMsg is null) return;
+            var structuredMsg = Pipeline.Decode(buffer);
             switch (structuredMsg[0])
             {
                 case "rsp":
-                    OnResponse?.Invoke((JObject)structuredMsg[1]);
-                    break;
                 case "sub":
-                    if (!_waitingSubTasks.TryDequeue(out var tcs))
-                        break;
-                    tcs.TrySetResult(structuredMsg);
+                    // 这2个都是round trip响应，所以有对应的请求等待队列
+                    ResponseQueue.CompleteNext(structuredMsg);
                     break;
                 case "updt":
+                    // 这个是主动推送，需要根据subID找到对应的订阅对象
                     var subID = (string)structuredMsg[1];
                     if (!_subscriptions.TryGetValue(subID, out var pSubscribed))
                         break;
