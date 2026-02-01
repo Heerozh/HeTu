@@ -7,7 +7,7 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
@@ -72,7 +72,7 @@ async def sub_call(
         )
 
     sub_id = None
-    sub_data = None
+    sub_data: dict[str, Any] | list[dict] | None = None
     match data[2]:
         case "get":
             check_length("get", data, 5, 5)

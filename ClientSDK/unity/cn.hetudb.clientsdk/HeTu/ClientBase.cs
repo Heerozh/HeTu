@@ -285,13 +285,13 @@ namespace HeTu
             bool desc = false, bool force = true) =>
             Range(index, left, right, limit, onResponse, desc, force, componentName);
 
-        internal void _unsubscribe(string subID, string from)
+        public void Unsubscribe(string subID, string from)
         {
-            if (!_subscriptions.ContainsKey(subID)) return;
-            _subscriptions.Remove(subID);
+            if (!Subscriptions.Contains(subID)) return;
+            Subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };
-            _Send(payload);
-            _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
+            _SendSync(payload);
+            Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
         protected virtual void _OnReceived(byte[] buffer)
@@ -309,11 +309,9 @@ namespace HeTu
                 case "updt":
                     // 这个是主动推送，需要根据subID找到对应的订阅对象
                     var subID = (string)structuredMsg[1];
-                    if (!_subscriptions.TryGetValue(subID, out var pSubscribed))
+                    if (!Subscriptions.TryGet(subID, out var pSubscribed))
                         break;
-                    if (pSubscribed.Target is not BaseSubscription subscribed)
-                        break;
-                    var rows = ((JObject)structuredMsg[2])
+                    var row = ((JsonObject)structuredMsg[2]).ToDict<long, >
                         .ToObject<Dictionary<long, JObject>>();
                     foreach (var (rowID, data) in rows)
                         subscribed.Update(rowID, data);

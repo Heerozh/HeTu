@@ -127,5 +127,9 @@ namespace HeTu
 
         public void Add(string subID, WeakReference subscription) =>
             _subscriptions[subID] = subscription;
+
+        public void Remove(string subID) => _subscriptions.Remove(subID);
+
+        public bool Contains(string subID) => _subscriptions.ContainsKey(subID);
     }
 }

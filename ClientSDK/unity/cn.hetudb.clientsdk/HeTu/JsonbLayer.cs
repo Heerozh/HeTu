@@ -43,7 +43,7 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     转换为字典 (当没有定义Class时使用)
+        ///     转换为DictComponent (当没有定义Class时使用)
         /// </summary>
         public DictComponent To()
         {
@@ -54,6 +54,21 @@ namespace HeTu
                 MessagePackSerializerOptions.Standard.WithResolver(
                     PrimitiveObjectResolver.Instance);
             return MessagePackSerializer.Deserialize<DictComponent>(_rawData, options);
+        }
+
+        /// <summary>
+        ///     转换为Dict
+        /// </summary>
+        public Dictionary<T1, T2> ToDict<T1, T2>()
+        {
+            if (_rawData == null || _rawData.Length == 0) return null;
+
+            // 使用 PrimitiveObjectResolver 允许解析 object 类型
+            var options =
+                MessagePackSerializerOptions.Standard.WithResolver(
+                    PrimitiveObjectResolver.Instance);
+            return MessagePackSerializer.Deserialize<Dictionary<T1, T2>>(_rawData,
+                options);
         }
 
         /// <summary>
@@ -98,17 +113,17 @@ namespace HeTu
             var cmd = reader.ReadString();
             // 现在服务器反馈的消息只有rsp，sub, updt
             // ["rsp", json_data]
-            // ["sub", sub_id, struct_data]
-            // ["updt", sub_id, struct_data]
+            // ["sub", sub_id, struct_data | list[struct_data]]
+            // ["updt", sub_id, dict[id, struct_data]]
             switch (cmd)
             {
-                case "rsp":
+                case "rsp": // list[Any] | dict[Any, Any]
                     {
                         var jsonData = new JsonObject(reader, bytes);
                         return new object[] { cmd, jsonData };
                     }
-                case "sub":
-                case "updt":
+                case "sub": // dict[str, Any] | list[dict]
+                case "updt":// dict[str, dict]
                     {
                         var subId = reader.ReadString();
                         var jsonData = new JsonObject(reader, bytes);
