@@ -217,6 +217,83 @@ namespace HeTu
             string componentName = null) =>
             GetSync<DictComponent>(index, value, onResponse, componentName);
 
+        public void Range<T>(
+            string index, object left, object right, int limit,
+            Action<IndexSubscription<T>> onResponse,
+            bool desc = false, bool force = true,
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            componentName ??= typeof(T).Name;
+
+            // 先要组合sub_id看看是否已订阅过
+            var predictID = _makeSubID(
+                componentName, index, left, right, limit, desc);
+            if (Subscriptions.TryGet(predictID, out var subscribed))
+                if (subscribed is IndexSubscription<T> casted)
+                {
+                    onResponse(casted);
+                    return;
+                }
+                else
+                    throw new InvalidCastException(
+                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
+
+            // 发送订阅请求
+            var payload = new[]
+            {
+                "sub", componentName, "range", index, left, right, limit, desc, force
+            };
+            _SendSync(payload);
+            Logger.Instance.Debug($"[HeTuClient] 发送Query订阅: {predictID}");
+
+            // 等待服务器结果
+            ResponseQueue.EnqueueCallback(response =>
+            {
+                var subID = (string)response[1];
+                // 如果没有查询到值
+                if (subID is null)
+                {
+                    onResponse(null);
+                    return;
+                }
+
+                // 如果依然是重复订阅，直接返回副本
+                if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                    if (stillSubscribed is IndexSubscription<T> casted)
+                    {
+                        onResponse(casted);
+                        return;
+                    }
+                    else
+                        throw new InvalidCastException(
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型");
+
+                var rawRows = (JsonObject)response[2];
+                var rows = rawRows.ToList<T>();
+                var newSub = new IndexSubscription<T>(subID, componentName, rows);
+
+                Subscriptions.Add(subID, new WeakReference(newSub, false));
+                Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
+                onResponse(newSub);
+            });
+        }
+
+        public void Range(
+            string componentName, string index, object left, object right, int limit,
+            Action<IndexSubscription<DictComponent>> onResponse,
+            bool desc = false, bool force = true) =>
+            Range(index, left, right, limit, onResponse, desc, force, componentName);
+
+        internal void _unsubscribe(string subID, string from)
+        {
+            if (!_subscriptions.ContainsKey(subID)) return;
+            _subscriptions.Remove(subID);
+            var payload = new object[] { "unsub", subID };
+            _Send(payload);
+            _logInfo?.Invoke($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
+        }
+
         protected virtual void _OnReceived(byte[] buffer)
         {
             // 解码消息

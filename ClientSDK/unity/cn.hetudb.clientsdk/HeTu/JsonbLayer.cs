@@ -59,6 +59,15 @@ namespace HeTu
         /// <summary>
         ///     转换为列表 (当没有定义Class时使用)
         /// </summary>
+        public List<T> ToList<T>()
+        {
+            if (_rawData == null || _rawData.Length == 0) return null;
+            return MessagePackSerializer.Deserialize<List<T>>(_rawData);
+        }
+
+        /// <summary>
+        ///     转换为列表 (当没有定义Class时使用)
+        /// </summary>
         public List<object> ToList()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
