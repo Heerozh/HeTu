@@ -41,6 +41,7 @@ namespace HeTu
         // 实际往ws发送数据的方法
         protected abstract void _send(byte[] data);
 
+        // 设置封包的编码/解码协议，协议要和你的河图服务器中的配置一致
         public void SetupPipeline(string compressor, string cipher)
         {
             if (!string.IsNullOrEmpty(compressor))
