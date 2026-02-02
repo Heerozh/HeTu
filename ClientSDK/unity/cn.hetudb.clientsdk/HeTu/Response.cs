@@ -4,6 +4,7 @@
 // <summary>河图客户端SDK的请求管理库</summary>.
 
 
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 
@@ -11,7 +12,7 @@ namespace HeTu
 {
     public class ResponseManager
     {
-        public delegate void Callback(List<object> args);
+        public delegate void Callback(List<object> args, bool cancel = false);
 
         private readonly ConcurrentQueue<Callback> _requestCallbacks = new();
 
@@ -28,8 +29,8 @@ namespace HeTu
         {
             if (_requestCallbacks.IsEmpty) return;
             Logger.Instance.Info($"[HeTuClient] {reason}, 取消所有等待任务...");
-            // foreach (var cb in _requestCallbacks)
-            //     cb(null);
+            foreach (var cb in _requestCallbacks)
+                cb(null, true);
             _requestCallbacks.Clear();
         }
     }

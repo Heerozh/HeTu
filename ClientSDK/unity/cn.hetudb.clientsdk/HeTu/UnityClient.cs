@@ -135,7 +135,7 @@ namespace HeTu
 
             // 连接并等待
 #if UNITY_6000_0_OR_NEWER
-            var tcs = new TaskCompletionSource<Exception>();
+            var tcs = new AwaitableCompletionSource<Exception>();
 #else
             var tcs = new UniTaskCompletionSource<Exception>();
 #endif
@@ -167,7 +167,7 @@ namespace HeTu
         /// <summary>
         ///     执行System调用。
         ///     如果不await此方法，调用会在后台异步发送，立即返回。
-        ///     如果await此方法，调用会等待服务器回应。
+        ///     如果await此方法，调用会等待服务器回应，默认返回"ok"，除非有使用ResponseToClient。
         ///
         ///     另可通过`HeTuClient.Instance.SystemLocalCallbacks["system_name"] = (args) => {}`
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
@@ -179,38 +179,45 @@ namespace HeTu
 #endif
         {
 #if UNITY_6000_0_OR_NEWER
-            var tcs = new TaskCompletionSource<JsonObject>();
+            var tcs = new AwaitableCompletionSource<JsonObject>();
 #else
             var tcs = new UniTaskCompletionSource<JsonObject>();
 #endif
 
-            CallSystemSync(systemName, args, (response) =>
+            CallSystemSync(systemName, args, (response, cancel) =>
             {
-                tcs.TrySetResult(response);
+                if (cancel)
+                {
+                    Logger.Instance.Error($"[HeTuClient] CallSystem过程中遇到取消信号");
+                    tcs.TrySetCanceled();
+                }
+                else
+                    tcs.TrySetResult(response);
             });
 
             return await tcs.Task;
         }
 
         /// <summary>
-        ///     订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。
-        ///     `Select`只对“单行”订阅，如果没有查询到行，会返回`null`。
-        ///     如果想要订阅不存在的行，请用`Query`订阅索引。
+        ///     订阅组件的行数据。订阅`index`属性值==`value`的第一行数据。
+        ///     `Get`只对“单行”订阅，如果没有查询到行，会返回`null`。
+        ///     如果想要订阅不存在的行，请用`Range`订阅索引。
         /// </summary>
         /// <returns>
         ///     返回`null`如果没查询到行，否则返回`RowSubscription`对象。
         ///     可通过`RowSubscription.Data`获取数据。
         ///     可以注册`RowSubscription.OnUpdate`和`OnDelete`事件处理数据更新。
+        ///     但建议通过响应式`RowSubscription.ToObserveable()`来处理数据变化，更加方便。
         /// </returns>
         /// <remarks>
-        ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, string}`类型。
+        ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, object}`类型。
         ///     使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
-        ///     使用默认的Dictionary更自由灵活，但都是字符串类型需要自行转换。
+        ///     使用默认的Dictionary更自由灵活，但类型需要自行转换。
         /// </remarks>
         /// <code>
         /// // 使用示例
         /// // 假设HP组件有owner属性，表示属于哪个玩家，value属性表示hp值。
-        /// var subscription = await HeTuClient.Instance.Select("HP", user_id, "owner");
+        /// var subscription = await HeTuClient.Instance.Get("HP", "owner", user_id);
         /// Debug.log("My HP:" + int.Parse(subscription.Data["value"]));
         /// subscription.OnUpdate += (sender, rowID) => {
         ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
@@ -221,83 +228,48 @@ namespace HeTu
         ///     public long owner;
         ///     public int value;
         /// }
-        /// var subscription = await HeTuClient.Instance.Select{HP}(user_id, "owner");
+        /// var subscription = await HeTuClient.Instance.Get<HP>("owner", user_id);
         /// Debug.log("My HP:" + subscription.Data.value);
         /// </code>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<T>> Select<T>(
+        public async Awaitable<RowSubscription<T>> Get<T>(
 #else
-        public async UniTask<RowSubscription<T>> Select<T>(
+        public async UniTask<RowSubscription<T>> Get<T>(
 #endif
-            object value, string where = "id", string componentName = null)
+            string index, object value, string componentName = null)
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
-            // 如果where是id，我们可以事先判断是否已经订阅过
-            if (where == "id")
-            {
-                var predictID = _makeSubID(
-                    componentName, "id", value, null, 1, false);
-                if (_subscriptions.TryGetValue(predictID, out var subscribed))
-                    if (subscribed.Target is RowSubscription<T> casted)
-                        return casted;
-                    else
-                        throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
-            }
 
-            // 向服务器订阅
-            var payload = new[] { "sub", componentName, "select", value, where };
-            _Send(payload);
-            _logDebug?.Invoke(
-                $"[HeTuClient] 发送Select订阅: {componentName}.{where}[{value}:]");
-
-            // 等待服务器结果
 #if UNITY_6000_0_OR_NEWER
-            var tcs = new TaskCompletionSource<List<object>>();
+            var tcs = new AwaitableCompletionSource<RowSubscription<T>>();
 #else
-            var tcs = new UniTaskCompletionSource<List<object>>();
+            var tcs = new UniTaskCompletionSource<RowSubscription<T>>();
 #endif
-            _waitingSubTasks.Enqueue(tcs);
-            List<object> subMsg;
-            try
-            {
-                // await UniTask会调用task.GetResult()，如果cancel了，会抛出异常
-                subMsg = await tcs.Task;
-            }
-            catch (OperationCanceledException e)
-            {
-                // NUnit不把取消信号视为错误，所以这里要LogError一下让测试不通过
-                _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
-                throw;
-            }
 
-            var subID = (string)subMsg[1];
-            // 如果没有查询到值
-            if (subID is null) return null;
-            // 如果依然是重复订阅，直接返回副本
-            if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
-                if (stillSubscribed.Target is RowSubscription<T> casted)
-                    return casted;
+            // 如果index是id，我们可以事先判断是否已经订阅过
+            GetSync<T>(index, value, (rowSub, cancel) =>
+            {
+                if (cancel)
+                {
+                    Logger.Instance.Error($"[HeTuClient] 订阅数据过程中遇到取消信号");
+                    tcs.TrySetCanceled();
+                }
                 else
-                    throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
+                    tcs.TrySetResult(rowSub);
+            }, componentName);
 
-            var data = ((JObject)subMsg[2]).ToObject<T>();
-            var newSub = new RowSubscription<T>(subID, componentName, data);
-            _subscriptions[subID] = new WeakReference(newSub, false);
-            _logInfo?.Invoke($"[HeTuClient] 成功订阅了 {subID}");
-            return newSub;
+            return await tcs.Task;
         }
 
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<DictComponent>> Select(
+        public async Awaitable<RowSubscription<DictComponent>> Get(
 #else
-        public async UniTask<RowSubscription<DictComponent>> Select(
+        public async UniTask<RowSubscription<DictComponent>> Get(
 #endif
-            string componentName, object value, string where = "id")
+            string componentName, string index, object value)
         {
-            return await Select<DictComponent>(value, where, componentName);
+            return await Get<DictComponent>(index, value, componentName);
         }
 
         /// <summary>
@@ -310,9 +282,9 @@ namespace HeTu
         ///     并可以注册`IndexSubscription.OnInsert`和`OnUpdate`，`OnDelete`数据事件。
         /// </returns>
         /// <remarks>
-        ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, string}`类型。
+        ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, object}`类型。
         ///     使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
-        ///     使用默认的Dictionary更自由灵活，但都是字符串类型需要自行转换。
+        ///     使用默认的Dictionary更自由灵活，但类型需要自行转换。
         ///     如果目标组件权限为Owner，则只能查询到`owner`属性==自己的行。
         /// </remarks>
         /// <code>
@@ -328,9 +300,9 @@ namespace HeTu
         /// }
         /// </code>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<IndexSubscription<T>> Query<T>(
+        public async Awaitable<IndexSubscription<T>> Range<T>(
 #else
-        public async UniTask<IndexSubscription<T>> Query<T>(
+        public async UniTask<IndexSubscription<T>> Range<T>(
 #endif
             string index, object left, object right, int limit,
             bool desc = false, bool force = true, string componentName = null)
@@ -338,70 +310,36 @@ namespace HeTu
         {
             componentName ??= typeof(T).Name;
 
-            // 先要组合sub_id看看是否已订阅过
-            var predictID = _makeSubID(
-                componentName, index, left, right, limit, desc);
-            if (_subscriptions.TryGetValue(predictID, out var subscribed))
-                if (subscribed.Target is IndexSubscription<T> casted)
-                    return casted;
-                else
-                    throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
-
-            // 发送订阅请求
-            var payload = new[]
-            {
-                "sub", componentName, "query", index, left, right, limit, desc, force
-            };
-            _Send(payload);
-            _logDebug?.Invoke($"[HeTuClient] 发送Query订阅: {predictID}");
-
-            // 等待服务器结果
 #if UNITY_6000_0_OR_NEWER
-            var tcs = new TaskCompletionSource<List<object>>();
+            var tcs = new AwaitableCompletionSource<IndexSubscription<T>>();
 #else
-            var tcs = new UniTaskCompletionSource<List<object>>();
+            var tcs = new UniTaskCompletionSource<IndexSubscription<T>>();
 #endif
-            _waitingSubTasks.Enqueue(tcs);
-            List<object> subMsg;
-            try
-            {
-                subMsg = await tcs.Task;
-            }
-            catch (OperationCanceledException e)
-            {
-                // NUnit不把取消信号视为错误，所以这里要LogError一下让测试不通过
-                _logError?.Invoke($"[HeTuClient] 订阅数据过程中遇到取消信号: {e}");
-                throw;
-            }
 
-            var subID = (string)subMsg[1];
-            // 如果没有查询到值
-            if (subID is null) return null;
-            // 如果依然是重复订阅，直接返回副本
-            if (_subscriptions.TryGetValue(subID, out var stillSubscribed))
-                if (stillSubscribed.Target is IndexSubscription<T> casted)
-                    return casted;
-                else
-                    throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{typeof(T)}类型");
-
-            var rows = ((JArray)subMsg[2]).ToObject<List<T>>();
-            var newSub = new IndexSubscription<T>(subID, componentName, rows);
-            _subscriptions[subID] = new WeakReference(newSub, false);
-            _logInfo?.Invoke($"[HeTuClient] 成功订阅了 {subID}");
-            return newSub;
+            RangeSync<T>(
+                index, left, right, limit,
+                (idxSub, cancel) =>
+                {
+                    if (cancel)
+                    {
+                        Logger.Instance.Error($"[HeTuClient] 订阅数据过程中遇到取消信号");
+                        tcs.TrySetCanceled();
+                    }
+                    else
+                        tcs.TrySetResult(idxSub);
+                }, desc, force, componentName);
+            return await tcs.Task;
         }
 
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<IndexSubscription<DictComponent>> Query(
+        public async Awaitable<IndexSubscription<DictComponent>> Range(
 #else
-        public async UniTask<IndexSubscription<DictComponent>> Query(
+        public async UniTask<IndexSubscription<DictComponent>> Range(
 #endif
             string componentName, string index, object left, object right, int limit,
             bool desc = false, bool force = true)
         {
-            return await Query<DictComponent>(index, left, right, limit, desc, force,
+            return await Range<DictComponent>(index, left, right, limit, desc, force,
                 componentName);
         }
     }

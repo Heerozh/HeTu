@@ -157,10 +157,16 @@ namespace HeTu
 
         // 调用System方法，但是不处理返回值
         protected void CallSystemSync(string systemName, object[] args,
-            Action<JsonObject> onResponse)
+            Action<JsonObject, bool> onResponse)
         {
             var payload = new object[] { "sys", systemName }.Concat(args);
-            _doRequest(payload, response => { onResponse((JsonObject)response[1]); });
+            _doRequest(payload, (response, cancel) =>
+            {
+                if (cancel)
+                    onResponse(null, true);
+                else
+                    onResponse((JsonObject)response[1], false);
+            });
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
@@ -171,7 +177,7 @@ namespace HeTu
             $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
 
         public void GetSync<T>(
-            string index, object value, Action<RowSubscription<T>> onResponse,
+            string index, object value, Action<RowSubscription<T>, bool> onResponse,
             string componentName = null)
             where T : IBaseComponent
         {
@@ -183,7 +189,7 @@ namespace HeTu
                     componentName, "id", value, null, 1, false);
                 if (Subscriptions.TryGet(predictID, out var subscribed))
                     if (subscribed is RowSubscription<T> casted)
-                        onResponse(casted);
+                        onResponse(casted, false);
                     else
                         throw new InvalidCastException(
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
@@ -193,13 +199,18 @@ namespace HeTu
             Logger.Instance.Debug(
                 $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
             var payload = new[] { "sub", componentName, "get", index, value };
-            _doRequest(payload, response =>
+            _doRequest(payload, (response, cancel) =>
             {
+                if (cancel)
+                {
+                    onResponse(null, true);
+                    return;
+                }
                 var subID = (string)response[1];
                 // 如果没有查询到值
                 if (subID is null)
                 {
-                    onResponse(null);
+                    onResponse(null, false);
                     return;
                 }
 
@@ -207,7 +218,7 @@ namespace HeTu
                 if (Subscriptions.TryGet(subID, out var stillSubscribed))
                     if (stillSubscribed is RowSubscription<T> casted)
                     {
-                        onResponse(casted);
+                        onResponse(casted, false);
                         return;
                     }
                     else
@@ -218,18 +229,18 @@ namespace HeTu
                 var newSub = new RowSubscription<T>(subID, componentName, data, this);
                 Subscriptions.Add(subID, new WeakReference(newSub, false));
                 Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
-                onResponse(newSub);
+                onResponse(newSub, false);
             });
         }
 
         public void GetSync(
-            string index, object value, Action<RowSubscription<DictComponent>> onResponse,
+            string index, object value, Action<RowSubscription<DictComponent>, bool> onResponse,
             string componentName = null) =>
             GetSync<DictComponent>(index, value, onResponse, componentName);
 
-        public void Range<T>(
+        public void RangeSync<T>(
             string index, object left, object right, int limit,
-            Action<IndexSubscription<T>> onResponse,
+            Action<IndexSubscription<T>, bool> onResponse,
             bool desc = false, bool force = true,
             string componentName = null)
             where T : IBaseComponent
@@ -242,7 +253,7 @@ namespace HeTu
             if (Subscriptions.TryGet(predictID, out var subscribed))
                 if (subscribed is IndexSubscription<T> casted)
                 {
-                    onResponse(casted);
+                    onResponse(casted, false);
                     return;
                 }
                 else
@@ -250,19 +261,25 @@ namespace HeTu
                         $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
 
             // 发送订阅请求
-            Logger.Instance.Debug($"[HeTuClient] 发送Query订阅: {predictID}");
+            Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
 
             var payload = new[]
             {
                 "sub", componentName, "range", index, left, right, limit, desc, force
             };
-            _doRequest(payload, response =>
+            _doRequest(payload, (response, cancel) =>
             {
+                if (cancel)
+                {
+                    onResponse(null, true);
+                    return;
+                }
+
                 var subID = (string)response[1];
                 // 如果没有查询到值
                 if (subID is null)
                 {
-                    onResponse(null);
+                    onResponse(null, false);
                     return;
                 }
 
@@ -270,7 +287,7 @@ namespace HeTu
                 if (Subscriptions.TryGet(subID, out var stillSubscribed))
                     if (stillSubscribed is IndexSubscription<T> casted)
                     {
-                        onResponse(casted);
+                        onResponse(casted, false);
                         return;
                     }
                     else
@@ -283,16 +300,15 @@ namespace HeTu
 
                 Subscriptions.Add(subID, new WeakReference(newSub, false));
                 Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
-                onResponse(newSub);
+                onResponse(newSub, false);
             });
         }
 
-        public void Range(
+        public void RangeSync(
             string componentName, string index, object left, object right, int limit,
-            Action<IndexSubscription<DictComponent>> onResponse,
+            Action<IndexSubscription<DictComponent>, bool> onResponse,
             bool desc = false, bool force = true) =>
-            Range(index, left, right, limit, onResponse, desc, force, componentName);
-
+            RangeSync(index, left, right, limit, onResponse, desc, force, componentName);
         public void Unsubscribe(string subID, string from)
         {
             if (!Subscriptions.Contains(subID)) return;
