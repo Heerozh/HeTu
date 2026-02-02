@@ -11,6 +11,7 @@ using System.Linq;
 
 namespace HeTu
 {
+
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
@@ -25,11 +26,13 @@ namespace HeTu
         protected readonly SubscriptionManager Subscriptions = new();
         protected string State = "Disconnected";
 
-        // 本地调用System时的回调。调用时立即就会回调，是否成功调用未知。
+        // 调用System时的本地回调，也就是System对应的客户端逻辑
         public Dictionary<string, Action<object[]>> SystemLocalCallbacks = new();
 
         // 连接成功时的回调
         public event Action OnConnected;
+        // 连接关闭时的回调，如果string不为null，表示异常关闭
+        public event Action<string> OnClosed;
 
         // 实际Websocket连接方法
         protected abstract void _connect(string url, Action onConnected,
@@ -89,6 +92,7 @@ namespace HeTu
 
             // 初始化WebSocket以及事件
             State = "ReadyForConnect";
+            string closeErrMsg = null;
             _connect(url, () =>
                 {
                     Logger.Instance.Info("[HeTuClient] 连接成功。");
@@ -107,9 +111,12 @@ namespace HeTu
                 () =>
                 {
                     State = "Disconnected";
-                    Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
+                    if (closeErrMsg == null)
+                        Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
+                    OnClosed?.Invoke(closeErrMsg);
                 }, errMsg =>
                 {
+                    closeErrMsg = errMsg ?? "未知错误";
                     switch (State)
                     {
                         case "ReadyForConnect":

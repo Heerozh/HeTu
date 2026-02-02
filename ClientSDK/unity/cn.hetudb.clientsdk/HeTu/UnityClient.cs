@@ -21,20 +21,13 @@ namespace HeTu
     /// <summary>
     ///     河图Unity专用Client类，把ClientBase封装成Unity友好的异步接口。
     /// </summary>
-    public class HeTuUnityClient : HeTuClientBase
+    public class HeTuClient : HeTuClientBase
     {
-        private static readonly Lazy<HeTuUnityClient> Lazy = new(() =>
-            new HeTuUnityClient());
+        private static readonly Lazy<HeTuClient> Lazy = new(() =>
+            new HeTuClient());
 
-        public static HeTuUnityClient Instance => Lazy.Value;
+        public static HeTuClient Instance => Lazy.Value;
 
-#if UNITY_6000_0_OR_NEWER
-        readonly ConcurrentQueue<TaskCompletionSource<List<object>>> _waitingSubTasks =
- new();
-#else
-        private readonly ConcurrentQueue<UniTaskCompletionSource<List<object>>>
-            _waitingSubTasks = new();
-#endif
         private IWebSocket _socket;
 
         // 实际Websocket连接方法
@@ -47,12 +40,10 @@ namespace HeTu
             _socket.OnMessage += (sender, e) => { onMessage(e.RawData); };
             _socket.OnClose += (sender, e) =>
             {
-                _StopAllTcs();
                 switch (e.StatusCode)
                 {
                     case CloseStatusCode.Normal:
-                        _logInfo?.Invoke("[HeTuClient] 连接断开，收到了服务器Close消息。");
-                        tcs.TrySetResult(null);
+                        onClose();
                         break;
                     case CloseStatusCode.Unknown:
                     case CloseStatusCode.Away:
@@ -68,21 +59,14 @@ namespace HeTu
                     case CloseStatusCode.ServerError:
                     case CloseStatusCode.TlsHandshakeFailure:
                     default:
-                        tcs.TrySetResult(new Exception(e.Reason));
+                        onError(e.Reason);
+                        onClose();
                         break;
                 }
             };
             _socket.OnError += (sender, e) =>
             {
-                switch (lastState)
-                {
-                    case "ReadyForConnect":
-                        _logError?.Invoke($"[HeTuClient] 连接失败: {e.Message}");
-                        break;
-                    case "Connected":
-                        _logError?.Invoke($"[HeTuClient] 接受消息时发生异常: {e.Message}");
-                        break;
-                }
+                onError(e.Message);
             };
             _socket.ConnectAsync();
         }
@@ -97,21 +81,12 @@ namespace HeTu
         {
         }
 
-        private void _StopAllTcs()
-        {
-            _logInfo?.Invoke("[HeTuClient] 取消所有等待任务...");
-            foreach (var tcs in _waitingSubTasks)
-                tcs.TrySetCanceled();
-            _waitingSubTasks.Clear();
-        }
         // -----------------------------------
 
 
         // 连接成功时的回调
 
-        // 收到System返回的`ResponseToClient`时的回调，根据你服务器发送的是什么数据类型来转换
-        // 比如服务器发送的是字典，可以用JObject.ToObject<Dictionary<string, object>>();
-        public event Action<JObject> OnResponse;
+
 
 
         /// <summary>
@@ -128,9 +103,6 @@ namespace HeTu
         ///     //UnityEngine使用示例：
         ///     public class YourNetworkManager : MonoBehaviour {
         ///         async void Start() {
-        ///             HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError);
-        ///             // 服务器端默认是使用zlib的压缩消息
-        ///             HeTuClient.Instance.SetProtocol(new ZlibProtocol());
         ///             HeTuClient.Instance.OnConnected += () => {
         ///                 HeTuClient.Instance.CallSystem("login", "userToken");
         ///             };
@@ -143,7 +115,8 @@ namespace HeTu
         ///                     break;
         ///                 else
         ///                     Debug.LogError("连接断开, 将继续重连：" + e.Message);
-        ///                 await Task.Delay(1000);
+        ///                 await Awaitable.WaitForSecondsAsync(1); // Unity 6000+
+        ///                 // Unity 2022+: await UniTask.Delay(1000);
         ///     }}}
         /// </code>
 #if UNITY_6000_0_OR_NEWER
@@ -156,13 +129,9 @@ namespace HeTu
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
             if (state != WebSocketState.Closed)
             {
-                _logError?.Invoke("[HeTuClient] Connect前请先Close Socket。");
+                Logger.Instance.Error("[HeTuClient] Connect前请先Close Socket。");
                 return null;
             }
-
-            // 前置清理
-            _logInfo?.Invoke($"[HeTuClient] 正在连接到：{url}...");
-            _subscriptions = new Dictionary<string, WeakReference>();
 
             // 连接并等待
 #if UNITY_6000_0_OR_NEWER
@@ -170,15 +139,23 @@ namespace HeTu
 #else
             var tcs = new UniTaskCompletionSource<Exception>();
 #endif
-            var lastState = "ReadyForConnect";
+
             ConnectSync(url);
+
+            OnClosed += (errMsg) =>
+            {
+                if (errMsg is null)
+                    tcs.TrySetResult(null);
+                else
+                    tcs.TrySetResult(new Exception(errMsg));
+            };
 
             // token可取消等待
             token?.Register(() =>
             {
-                _logInfo?.Invoke("[HeTuClient] 连接断开，收到了CancellationToken取消请求.");
-                _socket.CloseAsync();
-                _StopAllTcs();
+                Logger.Instance.Info("[HeTuClient] 连接断开，收到了CancellationToken取消请求.");
+                ResponseQueue.CancelAll("收到了CancellationToken取消请求");
+                _close();
                 tcs.TrySetResult(new OperationCanceledException());
             });
 
@@ -186,28 +163,34 @@ namespace HeTu
             return await tcs.Task;
         }
 
-        // 关闭河图连接
-        public void Close()
-        {
-            _logInfo?.Invoke("[HeTuClient] 主动调用了Close");
-            _StopAllTcs();
-            _socket.CloseAsync();
-        }
 
         /// <summary>
-        ///     后台发送System调用，此方法立即返回。
-        ///     可通过`HeTuClient.Instance.SystemCallbacks["system_name"] = (args) => {}`
-        ///     注册客户端调用回调（非服务器端回调）。
+        ///     执行System调用。
+        ///     如果不await此方法，调用会在后台异步发送，立即返回。
+        ///     如果await此方法，调用会等待服务器回应。
+        ///
+        ///     另可通过`HeTuClient.Instance.SystemLocalCallbacks["system_name"] = (args) => {}`
+        ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
-        public void CallSystem(string systemName, params object[] args)
+#if UNITY_6000_0_OR_NEWER
+        public async Awaitable<JsonObject> CallSystem(string systemName, params object[] args)
+#else
+        public async UniTask<JsonObject> CallSystem(string systemName, params object[] args)
+#endif
         {
-            var payload = new object[] { "sys", systemName }.Concat(args);
-            _Send(payload); // 后台线程发送，这里无论成功立即返回
-            SystemCallbacks.TryGetValue(systemName, out var callbacks);
-            callbacks?.Invoke(args);
-        }
+#if UNITY_6000_0_OR_NEWER
+            var tcs = new TaskCompletionSource<JsonObject>();
+#else
+            var tcs = new UniTaskCompletionSource<JsonObject>();
+#endif
 
-        // todo 异步堵塞的CallSystem，会等待并返回服务器回应，外加CancellationToken，不要一直等
+            CallSystemSync(systemName, args, (response) =>
+            {
+                tcs.TrySetResult(response);
+            });
+
+            return await tcs.Task;
+        }
 
         /// <summary>
         ///     订阅组件的行数据。订阅`where`属性值==`value`的第一行数据。

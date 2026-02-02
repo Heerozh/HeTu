@@ -72,12 +72,13 @@ MAX_INDEX_SUBSCRIPTION: 1
 
 # 消息加密方式，可选 None、ChaCha20-Poly1305
 PACKET_CIPHER: ChaCha20-Poly1305
+# todo 服务器密钥，客户端必须有相同密钥才能登录
 # 开启消息流式压缩, 可选 None、zlib
 # 速度：zstd 422k/s > zlib 357k/s > brotli 100k/s
 # 压缩率 zlib 25% > brotli 25% > zstd 23%
-# 目前只支持zlib，因为unity 全平台支持。
+# 因为hetu可以预编字典，所以zlib压缩率很高，使得其他压缩算法优势不明显。
+# 目前只支持zlib，因为其他的在 unity 上只能跑支持native插件的平台。
 # todo OpenZL
-# todo 客户端记得要关闭permessage-deflate
 PACKET_COMPRESSION: zlib
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
