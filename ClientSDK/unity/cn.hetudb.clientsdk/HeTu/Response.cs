@@ -4,7 +4,6 @@
 // <summary>河图客户端SDK的请求管理库</summary>.
 
 
-using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 
@@ -13,6 +12,7 @@ namespace HeTu
     public class ResponseManager
     {
         public delegate void Callback(List<object> args);
+
         private readonly ConcurrentQueue<Callback> _requestCallbacks = new();
 
         public void EnqueueCallback(Callback cb) =>

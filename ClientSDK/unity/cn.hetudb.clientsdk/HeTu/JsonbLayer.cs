@@ -6,7 +6,6 @@
 using System;
 using System.Collections.Generic;
 using MessagePack;
-using MessagePack.Resolvers;
 
 namespace HeTu
 {
@@ -34,13 +33,16 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     转换为c#变量。
-        /// - 如果值是Hetu的组件，建议使用“hetu build”命令生成的客户端强类型Struct，比如To<Item>()。
-        ///   如果没有生成强类型，可使用通用的DictComponent类型。
-        /// - 如果是列表类型，可以使用To<List<DictComponent>>()，或使用简写ToList<DictComponent>()。
-        /// - 如果是Map类型，服务器端传过来的键必须为同一类型，然后可以使用
-        ///   To<Dictionary<string, DictComponent>>()，或是用简写：ToDict<string, DictComponent>()。
-        /// - 如果是混合类型，使用To<object>()可转换为动态类型，之后通过强制转换为具体类型。
+        ///     <![CDATA[
+        /// 转换为c#变量。
+        ///
+        ///  - 如果值是Hetu的组件，建议使用“hetu build”命令生成的客户端强类型Struct，比如To<Item>()。
+        ///    如果没有生成强类型，可使用通用的DictComponent类型。
+        ///  - 如果是列表类型，可以使用`To<List<DictComponent>>()`，或使用简写`ToList<DictComponent>()`。
+        ///  - 如果是Map类型，服务器端传过来的键必须为同一类型，然后可以使用
+        ///    `To<Dictionary<string, DictComponent>>()`，或是用简写：`ToDict<string, DictComponent>()`。
+        ///  - 如果是混合类型，使用`To<object>()`可转换为动态类型，之后通过强制转换为具体类型。
+        ///  ]]>
         /// </summary>
         public T To<T>()
         {
@@ -65,7 +67,6 @@ namespace HeTu
             if (_rawData == null || _rawData.Length == 0) return null;
             return MessagePackSerializer.Deserialize<List<T>>(_rawData);
         }
-
     }
 
     public class JsonbLayer : MessageProcessLayer
@@ -95,7 +96,7 @@ namespace HeTu
                         return new object[] { cmd, jsonData };
                     }
                 case "sub": // dict[str, Any] | list[dict[str, Any]]
-                case "updt":// dict[str, dict[str, Any]]
+                case "updt": // dict[str, dict[str, Any]]
                     {
                         var subId = reader.ReadString();
                         var jsonData = new JsonObject(reader, bytes);

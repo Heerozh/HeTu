@@ -25,11 +25,12 @@ namespace HeTu
 
     public abstract class BaseSubscription
     {
-        private readonly string _subscriptID;
         private readonly HeTuClientBase _parentClient;
+        private readonly string _subscriptID;
         public readonly string ComponentName;
 
-        protected BaseSubscription(string subscriptID, string componentName, HeTuClientBase client)
+        protected BaseSubscription(string subscriptID, string componentName,
+            HeTuClientBase client)
         {
             _subscriptID = subscriptID;
             ComponentName = componentName;
@@ -51,7 +52,8 @@ namespace HeTu
     /// Select结果的订阅对象
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
-        public RowSubscription(string subscriptID, string componentName, T row, HeTuClientBase client) :
+        public RowSubscription(string subscriptID, string componentName, T row,
+            HeTuClientBase client) :
             base(subscriptID, componentName, client) =>
             Data = row;
 
@@ -90,7 +92,8 @@ namespace HeTu
     /// Query结果的订阅对象
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
-        public IndexSubscription(string subscriptID, string componentName, List<T> rows, HeTuClientBase client) :
+        public IndexSubscription(string subscriptID, string componentName, List<T> rows,
+            HeTuClientBase client) :
             base(subscriptID, componentName, client) =>
             Rows = rows.ToDictionary(row => row.id);
 

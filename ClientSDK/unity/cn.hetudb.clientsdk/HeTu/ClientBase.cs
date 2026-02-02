@@ -16,7 +16,9 @@ namespace HeTu
     /// </summary>
     public abstract class HeTuClientBase
     {
-        protected readonly ConcurrentQueue<ValueTuple<byte[], ResponseManager.Callback>> OfflineQueue = new();
+        protected readonly ConcurrentQueue<ValueTuple<byte[], ResponseManager.Callback>>
+            OfflineQueue = new();
+
         protected readonly MessagePipeline Pipeline = new();
         protected readonly ResponseManager ResponseQueue = new();
 
@@ -97,6 +99,7 @@ namespace HeTu
                         if (callback != null)
                             ResponseQueue.EnqueueCallback(callback);
                     }
+
                     OfflineQueue.Clear();
                 },
                 _OnReceived,
@@ -149,10 +152,7 @@ namespace HeTu
             Action<JsonObject> onResponse)
         {
             var payload = new object[] { "sys", systemName }.Concat(args);
-            _doRequest(payload, response =>
-            {
-                onResponse((JsonObject)response[1]);
-            });
+            _doRequest(payload, response => { onResponse((JsonObject)response[1]); });
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
