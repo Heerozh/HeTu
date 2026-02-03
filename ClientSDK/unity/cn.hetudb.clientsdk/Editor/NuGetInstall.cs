@@ -6,17 +6,12 @@ using System.Linq;
 
 namespace HeTu.Editor
 {
-    [InitializeOnLoad]
     public static class NuGetDependenciesInstaller
     {
-        static NuGetDependenciesInstaller()
-        {
-            // 避免在脚本重载/进编辑器的同一帧里做太多事
-            EditorApplication.delayCall += EnsurePackageInstalled;
-        }
+
 
         [MenuItem("Tools/NuGetForUnity/Ensure Package (Example)")]
-        private static void EnsurePackageInstalled()
+        public static bool EnsurePackageInstalled()
         {
             // 定义 NuGet 依赖
             var dependencies = new[]
@@ -24,7 +19,7 @@ namespace HeTu.Editor
                 ("BouncyCastle.Cryptography", "2.6.2"),
                 ("MessagePack", "3.1.4"),
             };
-
+            var ret = true;
             foreach (var (packageId, minVersion) in dependencies)
             {
                 var required = new NugetForUnity.Models.NugetPackageIdentifier(packageId, minVersion)
@@ -60,9 +55,11 @@ namespace HeTu.Editor
                 }
                 else
                 {
+                    ret = false;
                     Debug.LogError($"[NuGetForUnity] Failed to install: {packageId} >= {minVersion} (请打开 NuGetForUnity 窗口查看日志/源配置)");
                 }
             }
+            return ret;
         }
     }
 }

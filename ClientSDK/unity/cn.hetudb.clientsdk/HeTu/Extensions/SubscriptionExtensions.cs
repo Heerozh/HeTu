@@ -2,6 +2,7 @@
 // Copyright 2024, Heerozh. All rights reserved.
 // </copyright>
 // <summary>河图客户端SDK的订阅响应式库</summary>
+#if R3_INSTALLED
 
 using System;
 using System.Collections.Generic;
@@ -207,3 +208,4 @@ namespace HeTu.Extensions
     }
 
 }
+#endif
