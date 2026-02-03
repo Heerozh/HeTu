@@ -81,10 +81,7 @@ namespace HeTu
             var rows = data.ToDict<long, T>();
             foreach (var (rowID, rowData) in rows)
             {
-                if (rowID == Data.id)
-                {
-                    Update(rowData);
-                }
+                Update(rowData);
             }
         }
     }
