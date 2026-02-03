@@ -11,7 +11,6 @@ using System.Linq;
 
 namespace HeTu
 {
-
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
@@ -31,6 +30,7 @@ namespace HeTu
 
         // 连接成功时的回调
         public event Action OnConnected;
+
         // 连接关闭时的回调，如果string不为null，表示异常关闭
         public event Action<string> OnClosed;
 
@@ -206,6 +206,7 @@ namespace HeTu
                     onResponse(null, true);
                     return;
                 }
+
                 var subID = (string)response[1];
                 // 如果没有查询到值
                 if (subID is null)
@@ -234,7 +235,8 @@ namespace HeTu
         }
 
         public void GetSync(
-            string index, object value, Action<RowSubscription<DictComponent>, bool> onResponse,
+            string index, object value,
+            Action<RowSubscription<DictComponent>, bool> onResponse,
             string componentName = null) =>
             GetSync<DictComponent>(index, value, onResponse, componentName);
 
@@ -309,6 +311,7 @@ namespace HeTu
             Action<IndexSubscription<DictComponent>, bool> onResponse,
             bool desc = false, bool force = true) =>
             RangeSync(index, left, right, limit, onResponse, desc, force, componentName);
+
         public void Unsubscribe(string subID, string from)
         {
             if (!Subscriptions.Contains(subID)) return;

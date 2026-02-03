@@ -10,9 +10,6 @@ using UnityEngine;
 using Cysharp.Threading.Tasks;
 #endif
 using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Threading;
 using UnityWebSocket;
 
@@ -64,29 +61,17 @@ namespace HeTu
                         break;
                 }
             };
-            _socket.OnError += (sender, e) =>
-            {
-                onError(e.Message);
-            };
+            _socket.OnError += (sender, e) => { onError(e.Message); };
             _socket.ConnectAsync();
         }
 
         // 实际关闭ws连接的方法
-        protected override void _close()
-        {
-        }
+        protected override void _close() => _socket.CloseAsync();
 
         // 实际往ws发送数据的方法
-        protected override void _send(byte[] data)
-        {
-        }
+        protected override void _send(byte[] data) => _socket.SendAsync(data);
 
         // -----------------------------------
-
-
-        // 连接成功时的回调
-
-
 
 
         /// <summary>
@@ -142,7 +127,7 @@ namespace HeTu
 
             ConnectSync(url);
 
-            OnClosed += (errMsg) =>
+            OnClosed += errMsg =>
             {
                 if (errMsg is null)
                     tcs.TrySetResult(null);
@@ -168,14 +153,14 @@ namespace HeTu
         ///     执行System调用。
         ///     如果不await此方法，调用会在后台异步发送，立即返回。
         ///     如果await此方法，调用会等待服务器回应，默认返回"ok"，除非有使用ResponseToClient。
-        ///
         ///     另可通过`HeTuClient.Instance.SystemLocalCallbacks["system_name"] = (args) => {}`
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<JsonObject> CallSystem(string systemName, params object[] args)
 #else
-        public async UniTask<JsonObject> CallSystem(string systemName, params object[] args)
+        public async UniTask<JsonObject> CallSystem(string systemName,
+            params object[] args)
 #endif
         {
 #if UNITY_6000_0_OR_NEWER
@@ -188,7 +173,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error($"[HeTuClient] CallSystem过程中遇到取消信号");
+                    Logger.Instance.Error("[HeTuClient] CallSystem过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else
@@ -223,6 +208,7 @@ namespace HeTu
         ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
         /// }
         /// // --------或者--------
+        /// <![CDATA[
         /// Class HP : IBaseComponent {  // Class名必须和服务器一致
         ///     public long id {get; set;}  // 就id这一项必须定义get set
         ///     public long owner;
@@ -230,6 +216,7 @@ namespace HeTu
         /// }
         /// var subscription = await HeTuClient.Instance.Get<HP>("owner", user_id);
         /// Debug.log("My HP:" + subscription.Data.value);
+        /// ]]>
         /// </code>
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<T>> Get<T>(
@@ -252,7 +239,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error($"[HeTuClient] 订阅数据过程中遇到取消信号");
+                    Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else
@@ -322,7 +309,7 @@ namespace HeTu
                 {
                     if (cancel)
                     {
-                        Logger.Instance.Error($"[HeTuClient] 订阅数据过程中遇到取消信号");
+                        Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
                         tcs.TrySetCanceled();
                     }
                     else

@@ -4,7 +4,6 @@
 // <summary>河图客户端SDK的请求管理库</summary>.
 
 
-using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 
