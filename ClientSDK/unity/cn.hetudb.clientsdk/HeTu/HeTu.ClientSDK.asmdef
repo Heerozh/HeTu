@@ -14,7 +14,9 @@
     "precompiledReferences": [
         "BouncyCastle.Cryptography.dll",
         "Unity.SharpZipLib.dll",
-        "MessagePack.dll"
+        "MessagePack.dll",
+        "ObservableCollections.dll",
+        "R3.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [],

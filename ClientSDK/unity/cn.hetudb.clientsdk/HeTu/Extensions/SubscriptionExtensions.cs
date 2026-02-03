@@ -20,28 +20,41 @@ namespace HeTu.Extensions
         /// <summary>
         /// 将 RowSubscription 转换为 R3 的 ReadOnlyReactiveProperty。
         /// 自动处理 OnUpdate 和 OnDelete 事件。
+        /// 用法：
+        /// <code>
+        /// // 原始对象
+        /// RowSubscription<HP> hpSub = client.Get<HP>("owner", 123);
+        ///
+        /// // 转换成 ReactiveProperty
+        /// // 只有当 hpSub 被回收时，或者你手动 dispose rp 时，才会停止监听
+        /// var hpRp = hpSub.ToReactiveProperty();
+        ///
+        /// // 逻辑：当 hpRp 变化 -> 转换成字符串 -> 赋值给 Text 组件
+        /// hpRp.Select(hp => hp != null ? $"HP: {hp.value}" : "Dead")
+        ///     .SubscribeToText(hpText) // R3 特有的 Unity 扩展，自动处理赋值
+        ///     .AddTo(this);        // 放入垃圾袋，随组件销毁而销毁
         /// </summary>
-        public static ReadOnlyReactiveProperty<T?> ToReactiveProperty<T>(this RowSubscription<T> subscription)
-            where T : IBaseComponent
+        public static ReadOnlyReactiveProperty<T> ToReactiveProperty<T>(this RowSubscription<T> subscription)
+            where T : class, IBaseComponent
         {
             // 获取初始值
             var initialValue = subscription.Data;
 
             // 创建一个 Observable 来监听源对象的变化
-            var observable = Observable.Create<T?>(observer =>
+            var observable = Observable.Create<T>(observer =>
             {
                 // 定义事件处理函数
-                Action<RowSubscription<T>> onUpdate = sub =>
+                void onUpdate(RowSubscription<T> sub)
                 {
                     // 当 Update 发生时，发射新数据
                     observer.OnNext(sub.Data);
-                };
+                }
 
-                Action<RowSubscription<T>> onDelete = sub =>
+                void onDelete(RowSubscription<T> sub)
                 {
                     // 当 Delete 发生时，发射 null (或 default)
-                    observer.OnNext(default);
-                };
+                    observer.OnNext(null);
+                }
 
                 // 订阅原始事件
                 subscription.OnUpdate += onUpdate;
@@ -65,20 +78,37 @@ namespace HeTu.Extensions
 
         /// <summary>
         /// 监听新增事件 (返回 id 和数据)
+        /// 用法：
+        /// IndexSubscription<HP> indexSub = client.Range<HP>(...);
+        /// // 监听插入
+        /// indexSub.ObserveInsert()
+        ///     .Subscribe(x => Console.WriteLine($"插入 ID: {x.id}, Val: {x.data.value}"));
+        ///     .AddTo(this);        // 放入垃圾袋，随组件销毁而销毁
+        ///
+        /// // 监听更新 (过滤特定条件)
+        /// indexSub.ObserveUpdate()
+        ///     .Where(x => x.data.value < 50) // 只关心血量低于50的更新
+        ///     .Subscribe(x => Console.WriteLine($"ID {x.id} 血量危急!"));
+        ///     .AddTo(this);
+        ///
+        /// // 监听删除
+        /// indexSub.ObserveDelete()
+        ///     .Subscribe(id => Console.WriteLine($"ID {id} 已移除"));
+        ///     .AddTo(this);
         /// </summary>
         public static Observable<(long id, T data)> ObserveInsert<T>(this IndexSubscription<T> subscription)
             where T : IBaseComponent
         {
             return Observable.Create<(long, T)>(observer =>
             {
-                Action<IndexSubscription<T>, long> handler = (sub, id) =>
+                void handler(IndexSubscription<T> sub, long id)
                 {
                     // 从 Rows 中获取刚插入的数据
                     if (sub.Rows.TryGetValue(id, out var data))
                     {
                         observer.OnNext((id, data));
                     }
-                };
+                }
                 subscription.OnInsert += handler;
                 return Disposable.Create(() => subscription.OnInsert -= handler);
             });
@@ -92,13 +122,13 @@ namespace HeTu.Extensions
         {
             return Observable.Create<(long, T)>(observer =>
             {
-                Action<IndexSubscription<T>, long> handler = (sub, id) =>
+                void handler(IndexSubscription<T> sub, long id)
                 {
                     if (sub.Rows.TryGetValue(id, out var data))
                     {
                         observer.OnNext((id, data));
                     }
-                };
+                }
                 subscription.OnUpdate += handler;
                 return Disposable.Create(() => subscription.OnUpdate -= handler);
             });
@@ -112,7 +142,7 @@ namespace HeTu.Extensions
         {
             return Observable.Create<long>(observer =>
             {
-                Action<IndexSubscription<T>, long> handler = (sub, id) => observer.OnNext(id);
+                void handler(IndexSubscription<T> sub, long id) => observer.OnNext(id);
                 subscription.OnDelete += handler;
                 return Disposable.Create(() => subscription.OnDelete -= handler);
             });
@@ -125,6 +155,15 @@ namespace HeTu.Extensions
         /// <summary>
         /// 创建一个与 Subscription 保持同步的 ObservableDictionary。
         /// 注意：返回的对象需要 Dispose 以停止同步。
+        /// 用法：
+        /// IndexSubscription<HP> indexSub = client.Range<HP>(...);
+        /// // 创建同步字典
+        /// // 注意：这个 syncDict 需要被 Dispose，否则会一直监听 indexSub 的事件
+        /// using var syncDict = indexSub.ToObservableDictionary();
+        /// // 现在你拥有了完整的 ObservableCollection 能力
+        /// syncDict.Collection.ObserveCountChanged()
+        ///     .Subscribe(c => Console.WriteLine($"总数: {c}"));
+        ///     .AddTo(this);
         /// </summary>
         public static SynchronizedObservableDictionary<T> ToObservableDictionary<T>(this IndexSubscription<T> subscription)
             where T : IBaseComponent
@@ -159,7 +198,6 @@ namespace HeTu.Extensions
             public void Dispose()
             {
                 _eventSubscription.Dispose(); // 停止监听源事件
-                Collection.Dispose();         // 清理集合
             }
 
             // 实现 IEnumerable 方便直接遍历
