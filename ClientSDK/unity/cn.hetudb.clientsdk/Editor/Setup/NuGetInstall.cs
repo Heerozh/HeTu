@@ -1,4 +1,3 @@
-#if NUGET_INSTALLED
 using UnityEditor;
 using UnityEngine;
 using NugetForUnity;
@@ -8,19 +7,42 @@ namespace HeTu.Editor
 {
     public static class NuGetDependenciesInstaller
     {
-
-
-        [MenuItem("Tools/NuGetForUnity/Ensure Package (Example)")]
-        public static bool EnsurePackageInstalled()
+        private readonly static (string, string)[] s_dependencies = new[]
         {
-            // 定义 NuGet 依赖
-            var dependencies = new[]
+            ("BouncyCastle.Cryptography", "2.6.2"),
+            ("MessagePack", "3.1.4"),
+        };
+
+#if NUGET_INSTALLED
+
+        public static bool IsAllDependenciesInstalled()
+        {
+            foreach (var (packageId, minVersion) in s_dependencies)
             {
-                ("BouncyCastle.Cryptography", "2.6.2"),
-                ("MessagePack", "3.1.4"),
-            };
-            var ret = true;
-            foreach (var (packageId, minVersion) in dependencies)
+                // 1) 已安装且版本满足 >= MinVersion -> 不处理
+                if (IsInstalled(packageId, minVersion))
+                {
+                    continue;
+                }
+                return false;
+            }
+            return true;
+        }
+
+        public static bool IsInstalled(string packageId, string minVersion)
+        {
+            var installed = InstalledPackagesManager.InstalledPackages
+                .FirstOrDefault(p => string.Equals(p.Id, packageId, System.StringComparison.OrdinalIgnoreCase));
+            if (installed != null && installed.PackageVersion >= new NugetForUnity.Models.NugetPackageVersion(minVersion))
+            {
+                return true;
+            }
+            return false;
+        }
+
+        public static void InstallAllDependencies()
+        {
+            foreach (var (packageId, minVersion) in s_dependencies)
             {
                 var required = new NugetForUnity.Models.NugetPackageIdentifier(packageId, minVersion)
                 {
@@ -29,11 +51,9 @@ namespace HeTu.Editor
                 };
 
                 // 1) 已安装且版本满足 >= MinVersion -> 不处理
-                var installed = InstalledPackagesManager.InstalledPackages
-                    .FirstOrDefault(p => string.Equals(p.Id, packageId, System.StringComparison.OrdinalIgnoreCase));
-                if (installed != null && installed.PackageVersion >= new NugetForUnity.Models.NugetPackageVersion(minVersion))
+                if (IsInstalled(packageId, minVersion))
                 {
-                    Debug.Log($"[NuGetForUnity] OK: {packageId} >= {minVersion} 已安装。");
+                    Debug.Log($"[NuGetForUnity] Already installed: {packageId} >= {minVersion}");
                     continue;
                 }
 
@@ -55,12 +75,23 @@ namespace HeTu.Editor
                 }
                 else
                 {
-                    ret = false;
                     Debug.LogError($"[NuGetForUnity] Failed to install: {packageId} >= {minVersion} (请打开 NuGetForUnity 窗口查看日志/源配置)");
                 }
             }
-            return ret;
         }
+#else
+        public static bool IsAllDependenciesInstalled()
+        {
+            return false;
+        }
+
+        public static void InstallAllDependencies()
+        {
+            var (nuget, url) = ("com.github-glitchenzo.nugetforunity",
+            "https://github.com/GlitchEnzo/NuGetForUnity.git?path=/src/NuGetForUnity");
+            UPMDependenciesInstaller.InstallUPMPackage(nuget, url);
+        }
+#endif
+
     }
 }
-#endif
