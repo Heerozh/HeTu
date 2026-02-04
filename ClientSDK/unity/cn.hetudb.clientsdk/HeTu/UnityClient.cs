@@ -29,14 +29,8 @@ namespace HeTu
         public static HeTuClient Instance => s_lazy.Value;
 
         private IWebSocket _socket;
-        private readonly CancellationTokenSource _connectionCancelSource =
-            new();
+        private CancellationTokenSource _connectionCancelSource = null;
 
-        ~HeTuClient()
-        {
-            _connectionCancelSource.Cancel();
-            _connectionCancelSource.Dispose();
-        }
 
         // 实际Websocket连接方法
         protected override void _connect(string url, Action onConnected,
@@ -79,8 +73,10 @@ namespace HeTu
         protected override void _close()
         {
             _socket.CloseAsync(); // 并不一定会激发onclose事件。
+            // 已知问题，如果场景没挂WebsocketManager，会导致close不掉socket的task
+            // 在test runner里常见此问题
             _socket = null;
-            _connectionCancelSource.Cancel();
+            _connectionCancelSource?.Cancel();
         }
 
         // 实际往ws发送数据的方法
@@ -156,19 +152,23 @@ namespace HeTu
             };
 
             // 必须在退出时保证cancel, 不然会卡死unity
+            _connectionCancelSource = new CancellationTokenSource();
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
                 UnityEngine.Application.exitCancellationToken
             );
 
             // token可取消等待
-            var reg = linkedCts.Token.Register(() =>
+            await using var reg = linkedCts.Token.Register(() =>
             {
                 Logger.Instance.Info("[HeTuClient] 连接断开，收到了Cancel取消请求.");
                 ResponseQueue.CancelAll("收到了Cancel取消请求");
-                _close();
                 tcs.TrySetResult("Canceled");
+                _close();
             });
+
+            _connectionCancelSource.Dispose();
+            _connectionCancelSource = null;
 
             // 等待连接断开
             return await tcs.Task;
