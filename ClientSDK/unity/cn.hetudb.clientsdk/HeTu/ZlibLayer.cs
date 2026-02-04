@@ -1,7 +1,7 @@
 // <copyright>
 // Copyright 2024, Heerozh. All rights reserved.
 // </copyright>
-// <summary>河图客户端SDK的Unity消息管道</summary>
+// <summary>河图客户端SDK的Unity消息压缩</summary>
 
 using System;
 using System.IO;

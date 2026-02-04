@@ -14,10 +14,25 @@
     "precompiledReferences": [
         "BouncyCastle.Cryptography.dll",
         "Unity.SharpZipLib.dll",
-        "MessagePack.dll"
+        "MessagePack.dll",
+        "ObservableCollections.dll",
+        "R3.dll"
     ],
     "autoReferenced": true,
-    "defineConstraints": [],
-    "versionDefines": [],
+    "defineConstraints": [
+        "MSGPACK_INSTALLED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.cysharp.r3",
+            "expression": "",
+            "define": "R3_INSTALLED"
+        },
+        {
+            "name": "com.github.messagepack-csharp",
+            "expression": "",
+            "define": "MSGPACK_INSTALLED"
+        }
+    ],
     "noEngineReferences": false
 }

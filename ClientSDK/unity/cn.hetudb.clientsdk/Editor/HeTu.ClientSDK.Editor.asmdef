@@ -1,0 +1,22 @@
+{
+    "name": "HeTu.ClientSDK.Editor",
+    "rootNamespace": "",
+    "references": [
+        "NuGetForUnity"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": false,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.github-glitchenzo.nugetforunity",
+            "expression": "",
+            "define": "NUGET_INSTALLED"
+        }
+    ],
+    "noEngineReferences": false
+}
