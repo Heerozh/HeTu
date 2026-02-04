@@ -47,6 +47,7 @@ namespace HeTu
         // 设置封包的编码/解码协议，协议要和你的河图服务器中的配置一致
         public void SetupPipeline(string compressor, string cipher)
         {
+            Pipeline.Clean();
             if (!string.IsNullOrEmpty(compressor))
             {
                 switch (compressor)

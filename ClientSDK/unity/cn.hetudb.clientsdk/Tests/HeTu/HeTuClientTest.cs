@@ -1,13 +1,12 @@
 ﻿using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-#if !UNITY_6000_0_OR_NEWER
-using Cysharp.Threading.Tasks;
-#endif
 using HeTu;
 using NUnit.Framework;
 using UnityEngine;
+#if !UNITY_6000_0_OR_NEWER
+using Cysharp.Threading.Tasks;
+#endif
 
 namespace Tests.HeTu
 {
@@ -18,8 +17,7 @@ namespace Tests.HeTu
         public void Init()
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
-            HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError);
-            HeTuClient.Instance.SetProtocol(new ZlibProtocol());
+            HeTuClient.Instance.SetupPipeline("zlib", "ChaCha20-Poly1305");
             HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
                 null); //.Forget();
         }
@@ -31,14 +29,14 @@ namespace Tests.HeTu
             HeTuClient.Instance.Close();
         }
 
-        class HP : IBaseComponent
+        private class HP : IBaseComponent
         {
             public long owner;
             public int value;
             public long id { get; set; }
         }
 
-        class Position : IBaseComponent
+        private class Position : IBaseComponent
         {
             public long owner;
             public float x;
@@ -53,30 +51,30 @@ namespace Tests.HeTu
             Debug.Log("test RowSubscribe开始");
 
             // 测试订阅失败
-            var sub = await HeTuClient.Instance.Select(
-                "HP", 123, "owner");
+            var sub = await HeTuClient.Instance.Get(
+                "HP", "owner", 123);
             Assert.AreEqual(sub, null);
 
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 123, true);
             HeTuClient.Instance.CallSystem("use_hp", 1);
-            sub = await HeTuClient.Instance.Select(
-                "HP", 123, "owner");
-            var lastValue = int.Parse(sub.Data["value"]);
+            sub = await HeTuClient.Instance.Get(
+                "HP", "owner", 123);
+            var lastValue = (int)sub.Data["value"];
 
             // 测试订阅事件
             int? newValue = null;
             sub.OnUpdate += sender =>
             {
                 Debug.Log("收到了更新...");
-                newValue = int.Parse(sender.Data["value"]);
+                newValue = (int)sender.Data["value"];
             };
             HeTuClient.Instance.CallSystem("use_hp", 2);
-            #if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
-            #else
+#else
             await UniTask.Delay(1000);
-            #endif
+#endif
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
@@ -85,7 +83,7 @@ namespace Tests.HeTu
             var success = false;
             try
             {
-                await HeTuClient.Instance.Select<HP>(123, "owner");
+                await HeTuClient.Instance.Get<HP>("owner", 123);
                 success = true;
             }
             catch (InvalidCastException)
@@ -100,16 +98,16 @@ namespace Tests.HeTu
             {
                 GC.Collect();
                 GC.WaitForPendingFinalizers();
-                #if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_0_OR_NEWER
                 await Awaitable.WaitForSecondsAsync(1);
-                #else
+#else
                 await UniTask.Delay(1);
-                #endif
+#endif
             }
 
             // 测试回收自动反订阅，顺带测试Class类型
-            var typedSub = await HeTuClient.Instance.Select<HP>(
-                123, "owner");
+            var typedSub = await HeTuClient.Instance.Get<HP>(
+                "owner", 123);
             Assert.AreEqual(lastValue - 3, typedSub.Data.value);
 
             Debug.Log("TestRowSubscribe结束");
@@ -121,23 +119,14 @@ namespace Tests.HeTu
         {
             Debug.Log("TestSystemCall开始");
 
-            long responseID = 0;
-            HeTuClient.Instance.OnResponse += jsonData =>
-            {
-                var data = jsonData.ToObject<Dictionary<string, object>>();
-                responseID = (long)data["id"];
-            };
-
             var callbackCalled = false;
-            var a = HeTuClient.Instance.SystemCallbacks["login"] =
+            var a = HeTuClient.Instance.SystemLocalCallbacks["login"] =
                 args => { callbackCalled = true; };
 
-            HeTuClient.Instance.CallSystem("login", 123, true);
-            #if UNITY_6000_0_OR_NEWER
-            await Awaitable.WaitForSecondsAsync(1);
-            #else
-            await UniTask.Delay(300);
-            #endif
+            var resp = await HeTuClient.Instance.CallSystem("login", 123, true);
+            var data = resp.ToDict<string, object>();
+            var responseID = (long)data["id"];
+
             Assert.AreEqual(123, responseID);
 
             Assert.True(callbackCalled);
@@ -153,24 +142,24 @@ namespace Tests.HeTu
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 234, true);
             HeTuClient.Instance.CallSystem("use_hp", 1);
-            var sub = await HeTuClient.Instance.Query(
+            var sub = await HeTuClient.Instance.Range(
                 "HP", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
             Assert.AreEqual(1, sub.Rows.Count);
-            var lastValue = int.Parse(sub.Rows.Values.First()["value"]);
+            var lastValue = (int)sub.Rows.Values.First()["value"];
 
             // 测试订阅事件
             int? newValue = null;
             sub.OnUpdate += (sender, rowID) =>
             {
-                newValue = int.Parse(sender.Rows[rowID]["value"]);
+                newValue = (int)sender.Rows[rowID]["value"];
             };
             HeTuClient.Instance.CallSystem("use_hp", 2);
-            #if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
-            #else
+#else
             await UniTask.Delay(1000);
-            #endif
+#endif
             Assert.AreEqual(newValue, lastValue - 2);
 
             Debug.Log("TestIndexSubscribeOnUpdate结束");
@@ -187,28 +176,31 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("move_user", 345, 10, 10);
 
             // 测试OnInsert, OnDelete
-            var sub = await HeTuClient.Instance.Query<Position>(
+            var sub = await HeTuClient.Instance.Range<Position>(
                 "x", 0, 10, 100);
 
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].owner; };
             HeTuClient.Instance.CallSystem("move_user", 123, 2, -10);
-            #if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
-            #else
+#else
             await UniTask.Delay(1000);
-            #endif
+#endif
             Assert.AreEqual(newPlayer, 123);
 
             // OnDelete
             long? removedPlayer = null;
-            sub.OnDelete += (sender, rowID) => { removedPlayer = sender.Rows[rowID].owner; };
+            sub.OnDelete += (sender, rowID) =>
+            {
+                removedPlayer = sender.Rows[rowID].owner;
+            };
             HeTuClient.Instance.CallSystem("move_user", 123, 11, -10);
-            #if UNITY_6000_0_OR_NEWER
+#if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
-            #else
+#else
             await UniTask.Delay(1000);
-            #endif
+#endif
             Assert.AreEqual(removedPlayer, 123);
 
             Assert.False(sub.Rows.ContainsKey(123));
