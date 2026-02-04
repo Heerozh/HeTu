@@ -29,10 +29,18 @@ namespace HeTu
         public static HeTuClient Instance => s_lazy.Value;
 
         private IWebSocket _socket;
+        private readonly CancellationTokenSource _connectionCancelSource =
+            new();
+
+        ~HeTuClient()
+        {
+            _connectionCancelSource.Cancel();
+            _connectionCancelSource.Dispose();
+        }
 
         // 实际Websocket连接方法
         protected override void _connect(string url, Action onConnected,
-            Action<byte[]> onMessage, Action onClose, Action<string> onError)
+            Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
         {
             _socket = new WebSocket(url);
             _socket.OnOpen += (sender, e) => { onConnected(); };
@@ -43,7 +51,7 @@ namespace HeTu
                 switch (e.StatusCode)
                 {
                     case CloseStatusCode.Normal:
-                        onClose();
+                        onClose(null);
                         break;
                     case CloseStatusCode.Unknown:
                     case CloseStatusCode.Away:
@@ -59,8 +67,7 @@ namespace HeTu
                     case CloseStatusCode.ServerError:
                     case CloseStatusCode.TlsHandshakeFailure:
                     default:
-                        onError(e.Reason);
-                        onClose();
+                        onClose(e.Reason);
                         break;
                 }
             };
@@ -69,7 +76,12 @@ namespace HeTu
         }
 
         // 实际关闭ws连接的方法
-        protected override void _close() => _socket.CloseAsync();
+        protected override void _close()
+        {
+            _socket.CloseAsync(); // 并不一定会激发onclose事件。
+            _socket = null;
+            _connectionCancelSource.Cancel();
+        }
 
         // 实际往ws发送数据的方法
         protected override void _send(byte[] data) => _socket.SendAsync(data);
@@ -82,10 +94,10 @@ namespace HeTu
         ///     此方法为async/await异步堵塞，在连接断开前不会结束。
         /// </summary>
         /// <returns>
-        ///     返回异常（而不是抛出异常）。
-        ///     - 连接异常断开返回Exception；
-        ///     - 正常断开返回null。
-        ///     - 如果CancellationToken触发，则返回OperationCanceledException。
+        ///     返回null或错误信息。
+        ///     - 正常断开返回null或"Canceled"。
+        ///       其中Canceled在游戏退出，或手动调用Close时返回。
+        ///     - 连接异常断开返回错误信息；
         /// </returns>
         /// <code>
         ///     //UnityEngine使用示例：
@@ -96,21 +108,20 @@ namespace HeTu
         ///             };
         ///             // 手游可以放入while循环，实现断线自动重连
         ///             while (true) {
-        ///                 var e = await HeTuClient.Instance.Connect("wss://host:port/hetu",
-        ///                                 UnityEngine.Application.exitCancellationToken);
+        ///                 var e = await HeTuClient.Instance.Connect("wss://host:port/hetu");
         ///                 // 断线处理...是否重连等等
-        ///                 if (e is null || e is OperationCanceledException)
+        ///                 if (e is null || e == "Canceled")
         ///                     break;
         ///                 else
-        ///                     Debug.LogError("连接断开, 将继续重连：" + e.Message);
+        ///                     Debug.LogError("连接断开, 将继续重连：" + e);
         ///                 await Awaitable.WaitForSecondsAsync(1); // Unity 6000+
         ///                 // Unity 2022+: await UniTask.Delay(1000);
         ///     }}}
         /// </code>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<Exception> Connect(string url, CancellationToken? token)
+        public async Awaitable<string> Connect(string url)
 #else
-        public async UniTask<Exception> Connect(string url, CancellationToken? token)
+        public async UniTask<string> Connect(string url)
 #endif
         {
             // 检查连接状态(应该不会遇到，但ReadyState经常为Closing状态）
@@ -123,9 +134,9 @@ namespace HeTu
 
             // 连接并等待
 #if UNITY_6000_0_OR_NEWER
-            var tcs = new AwaitableCompletionSource<Exception>();
+            var tcs = new AwaitableCompletionSource<string>();
 #else
-            var tcs = new UniTaskCompletionSource<Exception>();
+            var tcs = new UniTaskCompletionSource<string>();
 #endif
 
             ConnectSync(url);
@@ -140,17 +151,23 @@ namespace HeTu
                 else
                 {
                     Logger.Instance.Info($"[HeTuClient] 连接断开，{errMsg}.");
-                    tcs.TrySetResult(new Exception(errMsg));
+                    tcs.TrySetResult(errMsg);
                 }
             };
 
+            // 必须在退出时保证cancel, 不然会卡死unity
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _connectionCancelSource.Token,
+                UnityEngine.Application.exitCancellationToken
+            );
+
             // token可取消等待
-            token?.Register(() =>
+            var reg = linkedCts.Token.Register(() =>
             {
-                Logger.Instance.Info("[HeTuClient] 连接断开，收到了CancellationToken取消请求.");
-                ResponseQueue.CancelAll("收到了CancellationToken取消请求");
+                Logger.Instance.Info("[HeTuClient] 连接断开，收到了Cancel取消请求.");
+                ResponseQueue.CancelAll("收到了Cancel取消请求");
                 _close();
-                tcs.TrySetResult(new OperationCanceledException());
+                tcs.TrySetResult("Canceled");
             });
 
             // 等待连接断开

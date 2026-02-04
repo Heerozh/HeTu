@@ -18,8 +18,7 @@ namespace Tests.HeTu
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
             HeTuClient.Instance.SetupPipeline("zlib", "ChaCha20-Poly1305");
-            HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
-                null); //.Forget();
+            HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu").Forget();
         }
 
         [OneTimeTearDown]

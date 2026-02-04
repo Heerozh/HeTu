@@ -32,12 +32,12 @@ namespace HeTu
         public event Action OnConnected;
 
         // 连接关闭时的回调，如果string不为null，表示异常关闭。
-        // 连接失败时也会回调，即使连接未建立。
+        // 如果连接未建立，本方法不会被调用。
         public event Action<string> OnClosed;
 
         // 实际Websocket连接方法
         protected abstract void _connect(string url, Action onConnected,
-            Action<byte[]> onMessage, Action onClose, Action<string> onError);
+            Action<byte[]> onMessage, Action<string> onClose, Action<string> onError);
 
         // 实际关闭ws连接的方法
         protected abstract void _close();
@@ -94,7 +94,6 @@ namespace HeTu
 
             // 初始化WebSocket以及事件
             State = "ReadyForConnect";
-            string closeErrMsg = null;
             _connect(url, () =>
                 {
                     Logger.Instance.Info("[HeTuClient] 连接成功。");
@@ -110,20 +109,18 @@ namespace HeTu
                     OfflineQueue.Clear();
                 },
                 _OnReceived,
-                () =>
+                (errMsg) =>
                 {
                     State = "Disconnected";
-                    if (closeErrMsg == null)
+                    if (errMsg == null)
                         Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
-                    OnClosed?.Invoke(closeErrMsg);
+                    OnClosed?.Invoke(errMsg);
                 }, errMsg =>
                 {
-                    closeErrMsg = errMsg ?? "未知错误";
                     switch (State)
                     {
                         case "ReadyForConnect":
                             Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
-                            OnClosed?.Invoke(errMsg);
                             break;
                         case "Connected":
                             Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");
