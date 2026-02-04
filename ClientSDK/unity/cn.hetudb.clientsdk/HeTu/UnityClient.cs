@@ -5,10 +5,10 @@
 
 #if UNITY_6000_0_OR_NEWER
 using System.Threading.Tasks;
-using UnityEngine;
 #else
 using Cysharp.Threading.Tasks;
 #endif
+using UnityEngine;
 using System;
 using System.Threading;
 using UnityWebSocket;
@@ -20,10 +20,13 @@ namespace HeTu
     /// </summary>
     public class HeTuClient : HeTuClientBase
     {
-        private static readonly Lazy<HeTuClient> Lazy = new(() =>
-            new HeTuClient());
+        private static readonly Lazy<HeTuClient> s_lazy = new(() =>
+            {
+                Logger.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.LogWarning);
+                return new HeTuClient();
+            });
 
-        public static HeTuClient Instance => Lazy.Value;
+        public static HeTuClient Instance => s_lazy.Value;
 
         private IWebSocket _socket;
 
@@ -110,11 +113,11 @@ namespace HeTu
         public async UniTask<Exception> Connect(string url, CancellationToken? token)
 #endif
         {
-            // 检查连接状态(应该不会遇到）
+            // 检查连接状态(应该不会遇到，但ReadyState经常为Closing状态）
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
             if (state != WebSocketState.Closed)
             {
-                Logger.Instance.Error("[HeTuClient] Connect前请先Close Socket。");
+                Logger.Instance.Error($"[HeTuClient] Connect前请先Close Socket, socket state:{_socket?.ReadyState}");
                 return null;
             }
 
@@ -130,9 +133,15 @@ namespace HeTu
             OnClosed += errMsg =>
             {
                 if (errMsg is null)
+                {
+                    Logger.Instance.Info("[HeTuClient] 连接已断开.");
                     tcs.TrySetResult(null);
+                }
                 else
+                {
+                    Logger.Instance.Info($"[HeTuClient] 连接断开，{errMsg}.");
                     tcs.TrySetResult(new Exception(errMsg));
+                }
             };
 
             // token可取消等待

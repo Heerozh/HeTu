@@ -34,26 +34,32 @@ async def websocket_connection(request: Request, ws: Websocket):
 
     # 获得客户端握手消息
     msg_pipe = ServerMessagePipeline()
-    handshake_msg = await ws.recv()
+    handshake_msg = await ws.recv(timeout=10)
     if not isinstance(handshake_msg, (bytes, bytearray)):
-        raise ValueError("Invalid handshake message type")
+        logger.info("New Connect Error: Invalid handshake message type")
+        return ws.fail_connection()
     handshake_msg = msg_pipe.decode(None, handshake_msg)
     if not isinstance(handshake_msg, list):
-        raise ValueError("Invalid handshake message format")
+        logger.info("New Connect Error: Invalid handshake message format")
+        return ws.fail_connection()
     # 进行握手处理，获得连接上下文
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
 
     # 获得客户端的use database命令，确定哪一个instance
-    use_db = await ws.recv()
+    use_db = await ws.recv(timeout=10)
     if not isinstance(use_db, (bytes, bytearray)):
-        raise ValueError("Invalid use_db message type")
+        logger.info("New Connect Error: Invalid use_db message type")
+        return ws.fail_connection()
+
     use_db = msg_pipe.decode(pipe_ctx, use_db)
     if not isinstance(use_db, list) or use_db[0] != "use" or len(use_db) != 2:
-        raise ValueError("Invalid use_db message format")
+        logger.info("New Connect Error: Invalid use_db message format")
+        return ws.fail_connection()
     instance = use_db[1]
     if instance not in request.app.ctx.table_managers:
-        raise ValueError(f"Invalid instance name: {instance}")
+        logger.info(f"New Connect Error: Invalid instance name: {instance}")
+        return ws.fail_connection()
     tbl_mgr = request.app.ctx.table_managers[instance]
 
     # 初始化Context，一个连接一个Context

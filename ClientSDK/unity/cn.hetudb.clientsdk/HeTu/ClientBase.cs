@@ -31,7 +31,8 @@ namespace HeTu
         // 连接成功时的回调
         public event Action OnConnected;
 
-        // 连接关闭时的回调，如果string不为null，表示异常关闭
+        // 连接关闭时的回调，如果string不为null，表示异常关闭。
+        // 连接失败时也会回调，即使连接未建立。
         public event Action<string> OnClosed;
 
         // 实际Websocket连接方法
@@ -122,6 +123,7 @@ namespace HeTu
                     {
                         case "ReadyForConnect":
                             Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
+                            OnClosed?.Invoke(errMsg);
                             break;
                         case "Connected":
                             Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");

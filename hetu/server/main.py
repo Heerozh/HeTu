@@ -142,6 +142,8 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
+        logger.info("⌚ [📡WorkerKeeper] 续约中... ")
+        # todo sanic bug: 来新连接时，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
         except RedisConnectionError as e:
