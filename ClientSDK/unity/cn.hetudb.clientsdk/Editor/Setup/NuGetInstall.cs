@@ -1,21 +1,23 @@
-using UnityEditor;
-using UnityEngine;
+using System;
 using System.Linq;
+using UnityEngine;
+#if NUGET_INSTALLED
+using NugetForUnity;
+using NugetForUnity.Models;
+#endif
 
 namespace HeTu.Editor
 {
     public static class NuGetDependenciesInstaller
     {
-        private static readonly (string, string)[] s_dependencies = new[]
+        private static readonly (string, string)[] s_dependencies =
         {
-            ("BouncyCastle.Cryptography", "2.6.2"),
-            ("MessagePack", "3.1.4"),
+            ("BouncyCastle.Cryptography", "2.6.2"), ("MessagePack", "3.1.4")
         };
 
-        private static readonly (string, string)[] s_optionalDependencies = new[]
+        private static readonly (string, string)[] s_optionalDependencies =
         {
-            ("R3", "1.3.0"),
-            ("ObservableCollections", "3.3.4"),
+            ("R3", "1.3.0"), ("ObservableCollections", "3.3.4")
         };
 #if NUGET_INSTALLED
 
@@ -25,11 +27,10 @@ namespace HeTu.Editor
             {
                 // 已安装且版本满足 >= MinVersion -> 不处理
                 if (IsInstalled(packageId, minVersion))
-                {
                     continue;
-                }
                 return false;
             }
+
             return true;
         }
 
@@ -38,37 +39,35 @@ namespace HeTu.Editor
             foreach (var (packageId, minVersion) in s_optionalDependencies)
             {
                 if (IsInstalled(packageId, minVersion))
-                {
                     continue;
-                }
                 return false;
             }
+
             return true;
         }
 
-        public static bool IsInstalled(string packageId, string minVersion)
+        private static bool IsInstalled(string packageId, string minVersion)
         {
-            var installed = NugetForUnity.InstalledPackagesManager.InstalledPackages
-                .FirstOrDefault(p => string.Equals(p.Id, packageId, System.StringComparison.OrdinalIgnoreCase));
-            if (installed != null && installed.PackageVersion >= new NugetForUnity.Models.NugetPackageVersion(minVersion))
-            {
-                return true;
-            }
-            return false;
+            var installed = InstalledPackagesManager.InstalledPackages
+                .FirstOrDefault(p =>
+                    string.Equals(p.Id, packageId, StringComparison.OrdinalIgnoreCase));
+            return installed != null &&
+                   installed.PackageVersion >= new NugetPackageVersion(minVersion);
         }
 
-        static void InstallPackage(string packageId, string minVersion)
+        private static void InstallPackage(string packageId, string minVersion)
         {
-            var required = new NugetForUnity.Models.NugetPackageIdentifier(packageId, minVersion)
+            var required = new NugetPackageIdentifier(packageId, minVersion)
             {
                 // 表示这是显式安装的（会写入 packages.config，并且一般更符合“我要求它必须有”的语义）
-                IsManuallyInstalled = true,
+                IsManuallyInstalled = true
             };
 
             // 1) 已安装且版本满足 >= MinVersion -> 不处理
             if (IsInstalled(packageId, minVersion))
             {
-                Debug.Log($"[NuGetForUnity] Already installed: {packageId} >= {minVersion}");
+                Debug.Log(
+                    $"[NuGetForUnity] Already installed: {packageId} >= {minVersion}");
                 return;
             }
 
@@ -78,37 +77,27 @@ namespace HeTu.Editor
             // refreshAssets=true 会触发 AssetDatabase.Refresh，安装后马上生效，但可能会比较慢
             // isSlimRestoreInstall=false 表示会安装依赖（更符合常规“确保可用”）
             // allowUpdateForExplicitlyInstalled=true 表示如果已经显式安装了旧版本，允许升级
-            var ok = NugetForUnity.NugetPackageInstaller.InstallIdentifier(
-                required,
-                refreshAssets: true,
-                isSlimRestoreInstall: false,
-                allowUpdateForExplicitlyInstalled: true);
+            var ok = NugetPackageInstaller.InstallIdentifier(
+                required);
 
             if (ok)
-            {
                 Debug.Log($"[NuGetForUnity] Installed: {packageId} >= {minVersion}");
-            }
             else
-            {
-                Debug.LogError($"[NuGetForUnity] Failed to install: {packageId} >= {minVersion} (请打开 NuGetForUnity 窗口查看日志/源配置)");
-            }
+                Debug.LogError(
+                    $"[NuGetForUnity] Failed to install: {packageId} >= {minVersion} (请打开 NuGetForUnity 窗口查看日志/源配置)");
         }
 
         public static void InstallAllDependencies()
         {
             foreach (var (packageId, minVersion) in s_dependencies)
-            {
                 InstallPackage(packageId, minVersion);
-            }
         }
 
         public static bool InstallAllOptional()
         {
             foreach (var (packageId, minVersion) in s_optionalDependencies)
-            {
                 InstallPackage(packageId, minVersion);
 
-            }
             return true;
         }
 #else
@@ -122,6 +111,5 @@ namespace HeTu.Editor
 
         }
 #endif
-
     }
 }

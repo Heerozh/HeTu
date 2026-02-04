@@ -1,6 +1,6 @@
 {
     "name": "HeTu.ClientSDK.Editor",
-    "rootNamespace": "",
+    "rootNamespace": "HeTu.Editor",
     "references": [
         "NuGetForUnity"
     ],
