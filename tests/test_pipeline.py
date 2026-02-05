@@ -57,7 +57,7 @@ def test_zstd_encode_decode_roundtrip(base_pipeline, mod_item_model):
     base_pipeline.add_layer(zstd_layer)
 
     pipeline.ZstdLayer(level=3)
-    ctx, msg = base_pipeline.handshake([None, None, b""])
+    ctx, msg = base_pipeline.handshake([b""])
 
     # 只能接受dict
     row = mod_item_model.new_row(id_=123)
@@ -91,7 +91,7 @@ def test_zlib_encode_decode_roundtrip(base_pipeline, mod_item_model):
     zlib_layer = pipeline.ZlibLayer(level=6)
     base_pipeline.add_layer(zlib_layer)
 
-    ctx, msg = base_pipeline.handshake([None, None, b""])
+    ctx, msg = base_pipeline.handshake([b""])
     row = mod_item_model.new_row(id_=123)
 
     # 压缩
@@ -121,7 +121,7 @@ def test_brotli_encode_decode_roundtrip(base_pipeline, mod_item_model):
     brotli_layer: BrotliLayer = pipeline.BrotliLayer(quality=4)
     base_pipeline.add_layer(brotli_layer)
 
-    ctx, msg = base_pipeline.handshake([None, None, b""])
+    ctx, msg = base_pipeline.handshake([b""])
     row = mod_item_model.new_row(id_=123)
 
     # 压缩
