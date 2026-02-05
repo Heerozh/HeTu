@@ -73,6 +73,9 @@ namespace HeTu
     {
         public override void Dispose() { }
         public override byte[] ClientHello() => Array.Empty<byte>();
+
+        public override bool IsHandshakeRequired() => false;
+
         public override void Handshake(byte[] message) { }
 
         public override object Encode(object message)

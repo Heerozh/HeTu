@@ -19,6 +19,8 @@ namespace HeTu
             LayerIndex = layerIdx;
         }
 
+        public virtual bool IsHandshakeRequired() => true;
+
         /// <summary>
         /// 客户端先发送hello消息，然后服务器才发送握手消息
         /// </summary>
@@ -84,11 +86,8 @@ namespace HeTu
 
             for (var i = 0; i < _layers.Count; i++)
             {
-                if (_disabled[i])
-                {
-                    replyMessages.Add(Array.Empty<byte>());
+                if (_disabled[i] || !_layers[i].IsHandshakeRequired())
                     continue;
-                }
 
                 var result = _layers[i].ClientHello();
                 replyMessages.Add(result ?? Array.Empty<byte>());
@@ -106,10 +105,8 @@ namespace HeTu
         {
             for (var i = 0; i < _layers.Count; i++)
             {
-                if (_disabled[i])
-                {
+                if (_disabled[i] || !_layers[i].IsHandshakeRequired())
                     continue;
-                }
 
                 var msg = peerMessages != null && i < peerMessages.Count
                     ? peerMessages[i]
