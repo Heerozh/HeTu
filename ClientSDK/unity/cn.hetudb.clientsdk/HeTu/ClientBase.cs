@@ -11,6 +11,12 @@ using System.Linq;
 
 namespace HeTu
 {
+    public enum ConnectionState
+    {
+        Disconnected,
+        ReadyForConnect,
+        Connected
+    }
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
@@ -23,7 +29,7 @@ namespace HeTu
         protected readonly ResponseManager ResponseQueue = new();
 
         protected readonly SubscriptionManager Subscriptions = new();
-        protected string State = "Disconnected";
+        protected ConnectionState State = ConnectionState.Disconnected;
 
         // 调用System时的本地回调，也就是System对应的客户端逻辑
         public Dictionary<string, Action<object[]>> SystemLocalCallbacks = new();
@@ -93,25 +99,45 @@ namespace HeTu
             ResponseQueue.CancelAll("重新连接");
 
             // 初始化WebSocket以及事件
-            State = "ReadyForConnect";
+            State = ConnectionState.ReadyForConnect;
+            var handshaked = false;
             _connect(url, () =>
                 {
-                    Logger.Instance.Info("[HeTuClient] 连接成功。");
-                    State = "Connected";
-                    OnConnected?.Invoke();
-                    foreach (var (data, callback) in OfflineQueue)
+                    // 握手
+                    var helloMsg = Pipeline.ClientHello();
+                    _send(helloMsg);
+                },
+                (msg) =>
+                {
+                    if (handshaked)
                     {
-                        _send(data);
-                        if (callback != null)
-                            ResponseQueue.EnqueueCallback(callback);
+                        _OnReceived(msg);
+                    }
+                    else
+                    {
+                        var serverHandshake = Pipeline.Decode(msg)
+                            .Cast<byte[]>()
+                            .ToList();
+                        Pipeline.Handshake(serverHandshake);
+
+                        Logger.Instance.Info("[HeTuClient] 连接成功。");
+                        State = ConnectionState.Connected;
+
+                        // 连接完成开始发送离线消息队列中的消息
+                        OnConnected?.Invoke();
+                        foreach (var (data, callback) in OfflineQueue)
+                        {
+                            _send(data);
+                            if (callback != null)
+                                ResponseQueue.EnqueueCallback(callback);
+                        }
+                        OfflineQueue.Clear();
                     }
 
-                    OfflineQueue.Clear();
                 },
-                _OnReceived,
                 (errMsg) =>
                 {
-                    State = "Disconnected";
+                    State = ConnectionState.Disconnected;
                     if (errMsg == null)
                         Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
                     OnClosed?.Invoke(errMsg);
@@ -119,10 +145,10 @@ namespace HeTu
                 {
                     switch (State)
                     {
-                        case "ReadyForConnect":
+                        case ConnectionState.ReadyForConnect:
                             Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
                             break;
-                        case "Connected":
+                        case ConnectionState.Connected:
                             Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");
                             break;
                     }
@@ -142,7 +168,7 @@ namespace HeTu
         {
             var buffer = Pipeline.Encode(payload);
 
-            if (State == "Connected")
+            if (State == ConnectionState.Connected)
             {
                 _send(buffer); // 后台线程发送
                 if (callback != null)
@@ -159,6 +185,13 @@ namespace HeTu
         protected void CallSystemSync(string systemName, object[] args,
             Action<JsonObject, bool> onResponse)
         {
+            if (State == ConnectionState.Disconnected)
+            {
+                Logger.Instance.Error("[HeTuClient] CallSystem失败，请先调用Connect");
+                onResponse(null, true);
+                return;
+            }
+
             var payload = new object[] { "sys", systemName }.Concat(args);
             _doRequest(payload, (response, cancel) =>
             {
@@ -181,6 +214,13 @@ namespace HeTu
             string componentName = null)
             where T : IBaseComponent
         {
+            if (State == ConnectionState.Disconnected)
+            {
+                Logger.Instance.Error("[HeTuClient] Get失败，请先调用Connect");
+                onResponse(null, true);
+                return;
+            }
+
             componentName ??= typeof(T).Name;
             // 如果index是id，我们可以事先判断是否已经订阅过
             if (index == "id")
@@ -247,6 +287,12 @@ namespace HeTu
             string componentName = null)
             where T : IBaseComponent
         {
+            if (State == ConnectionState.Disconnected)
+            {
+                Logger.Instance.Error("[HeTuClient] Range失败，请先调用Connect");
+                onResponse(null, true);
+                return;
+            }
             componentName ??= typeof(T).Name;
 
             // 先要组合sub_id看看是否已订阅过

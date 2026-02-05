@@ -18,7 +18,7 @@ namespace HeTu
     /// <summary>
     ///     河图Unity专用Client类，把ClientBase封装成Unity友好的异步接口。
     /// </summary>
-    public class HeTuClient : HeTuClientBase
+    public sealed class HeTuClient : HeTuClientBase, IDisposable
     {
         private static readonly Lazy<HeTuClient> s_lazy = new(() =>
             {
@@ -31,6 +31,18 @@ namespace HeTu
         private IWebSocket _socket;
         private CancellationTokenSource _connectionCancelSource = null;
 
+        /// <summary>
+        /// 对于全局连接(HeTuClient.Instance)，可以不做Dispose。
+        /// </summary>
+        public void Dispose()
+        {
+            _socket?.CloseAsync();
+            _socket = null;
+            _connectionCancelSource?.Cancel();
+            _connectionCancelSource?.Dispose();
+            _connectionCancelSource = null;
+            Pipeline.Dispose();
+        }
 
         // 实际Websocket连接方法
         protected override void _connect(string url, Action onConnected,
@@ -77,6 +89,8 @@ namespace HeTu
             // 在test runner里常见此问题
             _socket = null;
             _connectionCancelSource?.Cancel();
+            _connectionCancelSource?.Dispose();
+            _connectionCancelSource = null;
         }
 
         // 实际往ws发送数据的方法
@@ -152,6 +166,8 @@ namespace HeTu
             };
 
             // 必须在退出时保证cancel, 不然会卡死unity
+            _connectionCancelSource?.Cancel();
+            _connectionCancelSource?.Dispose();
             _connectionCancelSource = new CancellationTokenSource();
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
@@ -166,9 +182,6 @@ namespace HeTu
                 tcs.TrySetResult("Canceled");
                 _close();
             });
-
-            _connectionCancelSource.Dispose();
-            _connectionCancelSource = null;
 
             // 等待连接断开
             return await tcs.Task;
@@ -204,6 +217,16 @@ namespace HeTu
                 }
                 else
                     tcs.TrySetResult(response);
+            });
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _connectionCancelSource.Token,
+                UnityEngine.Application.exitCancellationToken
+            );
+            await using var reg = linkedCts.Token.Register(() =>
+            {
+                tcs.TrySetCanceled();
+                _close();
             });
 
             return await tcs.Task;
@@ -271,6 +294,16 @@ namespace HeTu
                 else
                     tcs.TrySetResult(rowSub);
             }, componentName);
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _connectionCancelSource.Token,
+                UnityEngine.Application.exitCancellationToken
+            );
+            await using var reg = linkedCts.Token.Register(() =>
+            {
+                tcs.TrySetCanceled();
+                _close();
+            });
 
             return await tcs.Task;
         }
@@ -340,7 +373,18 @@ namespace HeTu
                     }
                     else
                         tcs.TrySetResult(idxSub);
-                }, desc, force, componentName);
+                }, desc, force, componentName
+                );
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _connectionCancelSource.Token,
+                UnityEngine.Application.exitCancellationToken
+            );
+            await using var reg = linkedCts.Token.Register(() =>
+            {
+                tcs.TrySetCanceled();
+                _close();
+            });
             return await tcs.Task;
         }
 

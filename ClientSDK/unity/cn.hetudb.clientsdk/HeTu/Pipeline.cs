@@ -102,7 +102,7 @@ namespace HeTu
         ///     通过对端发来的握手消息，完成所有层的握手工作。
         ///     返回握手后的上下文；以及要发送给对端的握手消息。
         /// </summary>
-        public void Handshake(IList<byte[]> peerMessages)
+        public void Handshake(List<byte[]> peerMessages)
         {
             for (var i = 0; i < _layers.Count; i++)
             {
