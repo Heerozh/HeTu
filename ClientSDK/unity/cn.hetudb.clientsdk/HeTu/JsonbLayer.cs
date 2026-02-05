@@ -71,7 +71,9 @@ namespace HeTu
 
     public class JsonbLayer : MessageProcessLayer
     {
-        public override byte[] Handshake(byte[] message) => Array.Empty<byte>();
+        public override void Dispose() { }
+        public override byte[] ClientHello() => Array.Empty<byte>();
+        public override void Handshake(byte[] message) { }
 
         public override object Encode(object message)
         {

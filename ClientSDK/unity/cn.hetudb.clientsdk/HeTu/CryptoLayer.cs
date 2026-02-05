@@ -24,8 +24,8 @@ namespace HeTu
         private readonly bool _serverMode;
         private ulong _recvNonce;
         private ulong _sendNonce;
-        private bool _serverSide;
 
+        private X25519PrivateKeyParameters _privateKey;
         private byte[] _sessionKey;
 
         /// <summary>
@@ -50,51 +50,32 @@ namespace HeTu
         // /// <summary>客户端要发送给服务端的公钥（32字节）</summary>
         // public byte[] ClientPublicKey => _clientPublicKey?.GetEncoded();
 
-        /// <summary>
-        ///     客户端握手辅助函数。
-        ///     输入服务端公钥（32字节），返回上下文。
-        /// </summary>
-        private byte[] ClientHandshake(byte[] serverPublicKey)
+        public override void Dispose() { }
+
+        public override byte[] ClientHello()
         {
             if (_serverMode)
-                throw new InvalidOperationException("ClientHandshake 不能在 serverMode 下调用");
-            if (serverPublicKey == null || serverPublicKey.Length != 32)
-                throw new ArgumentException("服务端公钥长度错误，预期32字节", nameof(serverPublicKey));
+                throw new InvalidOperationException("ClientHello 不能在 serverMode 下调用");
 
-            var peerPublicKey = new X25519PublicKeyParameters(serverPublicKey, 0);
             var random = new SecureRandom();
-            var clientPrivateKey = new X25519PrivateKeyParameters(random);
-            var sessionKey = DeriveSessionKey(clientPrivateKey, peerPublicKey);
+            _privateKey = new X25519PrivateKeyParameters(random);
 
-            _sessionKey = sessionKey;
-            _serverSide = false;
-            _sendNonce = 0;
-            _recvNonce = 0;
-            return clientPrivateKey.GeneratePublicKey().GetEncoded();
+            return _privateKey.GeneratePublicKey().GetEncoded();
         }
 
-        public override byte[] Handshake(byte[] message) => _serverMode
-            ? ServerHandshake(message)
-            : ClientHandshake(message);
-
-        private byte[] ServerHandshake(byte[] message)
+        public override void Handshake(byte[] message)
         {
-            if (message is not { Length: 32 })
-                throw new ArgumentException("客户端公钥长度错误，预期32字节", nameof(message));
+            if (message == null || message.Length != 32)
+                throw new ArgumentException("对端公钥长度错误，预期32字节", nameof(message));
 
             var peerPublicKey = new X25519PublicKeyParameters(message, 0);
-            var random = new SecureRandom();
-            var serverPrivateKey = new X25519PrivateKeyParameters(random);
-            var serverPublicKey = serverPrivateKey.GeneratePublicKey();
-
-            var sessionKey = DeriveSessionKey(serverPrivateKey, peerPublicKey);
+            var sessionKey = DeriveSessionKey(_privateKey, peerPublicKey);
 
             _sessionKey = sessionKey;
-            _serverSide = true;
             _sendNonce = 0;
             _recvNonce = 0;
 
-            return serverPublicKey.GetEncoded();
+            _privateKey = null;
         }
 
         public override object Encode(object message)
@@ -104,7 +85,7 @@ namespace HeTu
                 throw new InvalidOperationException("CryptoLayer只能加密 byte[] 类型数据");
 
             _sendNonce++;
-            var nonce = BuildNonce(_serverSide ? (byte)0x00 : (byte)0xFF, _sendNonce);
+            var nonce = BuildNonce(_serverMode ? (byte)0x00 : (byte)0xFF, _sendNonce);
 
             var cipher = new ChaCha20Poly1305();
             var parameters =
@@ -127,7 +108,7 @@ namespace HeTu
                 throw new InvalidOperationException("解密失败：数据长度不足，可能非加密数据或截断");
 
             _recvNonce++;
-            var nonce = BuildNonce(_serverSide ? (byte)0xFF : (byte)0x00, _recvNonce);
+            var nonce = BuildNonce(_serverMode ? (byte)0xFF : (byte)0x00, _recvNonce);
 
             var cipher = new ChaCha20Poly1305();
             var parameters =
