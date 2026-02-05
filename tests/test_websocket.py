@@ -58,7 +58,7 @@ def setup_websocket_proxy():
                 # 生成密钥对
                 private_key = PrivateKey.generate()
                 public_key = private_key.public_key
-                handshake_msg = [b""] * 4
+                handshake_msg = [b""] * client_pipe.num_handshake_layers
                 handshake_msg[-1] = public_key.encode()
                 # 握手
                 await do_send(client_pipe.encode(None, handshake_msg))

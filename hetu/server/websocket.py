@@ -43,6 +43,12 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str):
         logger.info("New Connect Error: Invalid handshake message format")
         return ws.fail_connection()
     # 进行握手处理，获得连接上下文
+    if len(handshake_msg) != msg_pipe.num_handshake_layers:
+        logger.info(
+            "New Connect Error: client pipeline layers count "
+            "does not match server pipeline"
+        )
+        return ws.fail_connection()
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
 
