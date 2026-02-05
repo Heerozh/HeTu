@@ -1,9 +1,11 @@
 ﻿using System;
+using System.Collections;
 using System.Linq;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 #if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
 #endif
@@ -43,11 +45,28 @@ namespace Tests.HeTu
             public long id { get; set; }
         }
 
-        [Test]
+        private IEnumerator RunTask(Task task)
+        {
+            while (!task.IsCompleted)
+            {
+                yield return null;
+            }
+            if (task.IsFaulted)
+            {
+                throw task.Exception;
+            }
+        }
+
+        [UnityTest]
         [Order(1)] // 必须未调用过login测试才会通过
-        public async Task TestRowSubscribe()
+        public IEnumerator TestRowSubscribe()
         {
             Debug.Log("test RowSubscribe开始");
+            yield return RunTask(TestRowSubscribeAsync());
+        }
+
+        private async Task TestRowSubscribeAsync()
+        {
 
             // 测试订阅失败
             var sub = await HeTuClient.Instance.Get(
@@ -112,11 +131,16 @@ namespace Tests.HeTu
             Debug.Log("TestRowSubscribe结束");
         }
 
-        [Test]
+        [UnityTest]
         [Order(2)]
-        public async Task TestSystemCall()
+        public IEnumerator TestSystemCall()
         {
             Debug.Log("TestSystemCall开始");
+            yield return RunTask(TestSystemCallAsync());
+        }
+
+        private async Task TestSystemCallAsync()
+        {
 
             var callbackCalled = false;
             var a = HeTuClient.Instance.SystemLocalCallbacks["login"] =
@@ -133,10 +157,15 @@ namespace Tests.HeTu
             Debug.Log("TestSystemCall结束");
         }
 
-        [Test]
-        public async Task TestIndexSubscribeOnUpdate()
+        [UnityTest]
+        public IEnumerator TestIndexSubscribeOnUpdate()
         {
             Debug.Log("TestIndexSubscribeOnUpdate开始");
+            yield return RunTask(TestIndexSubscribeOnUpdateAsync());
+        }
+
+        private async Task TestIndexSubscribeOnUpdateAsync()
+        {
 
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 234, true);
@@ -164,10 +193,15 @@ namespace Tests.HeTu
             Debug.Log("TestIndexSubscribeOnUpdate结束");
         }
 
-        [Test]
-        public async Task TestIndexSubscribeOnInsert()
+        [UnityTest]
+        public IEnumerator TestIndexSubscribeOnInsert()
         {
             Debug.Log("TestIndexSubscribeOnInsert开始");
+            yield return RunTask(TestIndexSubscribeOnInsertAsync());
+        }
+
+        private async Task TestIndexSubscribeOnInsertAsync()
+        {
 
             HeTuClient.Instance.CallSystem("login", 345, true);
             HeTuClient.Instance.CallSystem("move_user", 123, -10, -10);
