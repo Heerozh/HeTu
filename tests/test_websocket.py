@@ -69,11 +69,7 @@ def setup_websocket_proxy():
                 ctx[-1] = crypto_layer.client_handshake(
                     private_key.encode(), message[-1]
                 )
-
                 pipe_ctx = ctx
-
-                # use db
-                await do_send(client_pipe.encode(pipe_ctx, ["use", "pytest_1"]))
 
             async def send(data):
                 logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
@@ -196,7 +192,9 @@ def test_websocket_call_system(test_server):
 
         await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
 
-    _, response1 = test_server.test_client.websocket("/hetu", mimic=normal_routine)
+    _, response1 = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=normal_routine
+    )
     # print(response1.client_received)
     # 测试add_rls_comp_value调用了2次
     id1 = next(iter(response1.client_received[4][2].keys()))
@@ -242,7 +240,9 @@ def test_websocket_kick_connect(test_server):
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
-    _, response1 = test_server.test_client.websocket("/hetu", mimic=kick_routine)
+    _, response1 = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=kick_routine
+    )
     # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
     assert response1.client_sent[-1] == [
         "rpc",
@@ -263,7 +263,7 @@ def test_call_flooding_lv1_normal(test_server):
             await client1.send(["rpc", "login", 1])
             await client1.recv()
 
-    test_server.test_client.websocket("/hetu", mimic=normal_routine)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine)
 
 
 def test_call_flooding_lv1_flooding(test_server):
@@ -277,7 +277,7 @@ def test_call_flooding_lv1_flooding(test_server):
                 await client1.send(["rpc", "login", 1])
                 await client1.recv()
 
-    test_server.test_client.websocket("/hetu", mimic=flooding_routine)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine)
 
 
 def test_call_flooding_lv2_normal(test_server):
@@ -294,7 +294,7 @@ def test_call_flooding_lv2_normal(test_server):
             if i == 99:
                 await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu", mimic=normal_routine_lv2)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine_lv2)
 
 
 def test_call_flooding_lv2_flooding(test_server):
@@ -307,4 +307,4 @@ def test_call_flooding_lv2_flooding(test_server):
                 if i == 99:
                     await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)
