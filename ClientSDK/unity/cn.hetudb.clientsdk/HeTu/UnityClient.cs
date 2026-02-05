@@ -22,7 +22,7 @@ namespace HeTu
     {
         private static readonly Lazy<HeTuClient> s_lazy = new(() =>
             {
-                Logger.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.LogWarning);
+                Logger.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
                 return new HeTuClient();
             });
 
