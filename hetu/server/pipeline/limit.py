@@ -22,6 +22,12 @@ class LimitCheckerLayer(MessageProcessLayer):
     def __init__(self):
         super().__init__()
 
+    def is_handshake_required(self) -> bool:
+        """
+        是否需要在连接时进行握手
+        """
+        return False
+
     @override
     def handshake(self, message: bytes) -> tuple[Any, bytes]:
         """

@@ -24,13 +24,13 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@HETU_BLUEPRINT.websocket("/hetu")  # noqa
-async def websocket_connection(request: Request, ws: Websocket):
+@HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
+async def websocket_connection(request: Request, ws: Websocket, db_name: str):
     """ws连接处理器，运行在worker主协程下"""
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
-    logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
+    logger.info(f"🔗 [📡WSConnect] 新连接：{db_name}: {current_task.get_name()}")
 
     # 获得客户端握手消息
     msg_pipe = ServerMessagePipeline()
@@ -43,20 +43,17 @@ async def websocket_connection(request: Request, ws: Websocket):
         logger.info("New Connect Error: Invalid handshake message format")
         return ws.fail_connection()
     # 进行握手处理，获得连接上下文
+    if len(handshake_msg) != msg_pipe.num_handshake_layers:
+        logger.info(
+            "New Connect Error: client pipeline layers count "
+            "does not match server pipeline"
+        )
+        return ws.fail_connection()
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
 
-    # 获得客户端的use database命令，确定哪一个instance
-    use_db = await ws.recv(timeout=10)
-    if not isinstance(use_db, (bytes, bytearray)):
-        logger.info("New Connect Error: Invalid use_db message type")
-        return ws.fail_connection()
-
-    use_db = msg_pipe.decode(pipe_ctx, use_db)
-    if not isinstance(use_db, list) or use_db[0] != "use" or len(use_db) != 2:
-        logger.info("New Connect Error: Invalid use_db message format")
-        return ws.fail_connection()
-    instance = use_db[1]
+    # 检查实例是否存在
+    instance = db_name
     if instance not in request.app.ctx.table_managers:
         logger.info(f"New Connect Error: Invalid instance name: {instance}")
         return ws.fail_connection()

@@ -8,7 +8,7 @@ using System.Collections.Generic;
 
 namespace HeTu
 {
-    public abstract class MessageProcessLayer
+    public abstract class MessageProcessLayer : IDisposable
     {
         protected int LayerIndex;
         protected MessagePipeline Parent;
@@ -19,24 +19,33 @@ namespace HeTu
             LayerIndex = layerIdx;
         }
 
+        public virtual bool IsHandshakeRequired() => true;
+
+        /// <summary>
+        /// 客户端先发送hello消息，然后服务器才发送握手消息
+        /// </summary>
+        public abstract byte[] ClientHello();
+
         /// <summary>
         ///     连接前握手工作，例如协商参数等。
         ///     返回的Context会保存在连接中，贯穿之后的Encode/Decode调用。
         ///     Reply将发送给对端。
         /// </summary>
-        public abstract byte[] Handshake(byte[] message);
+        public abstract void Handshake(byte[] message);
 
         /// <summary>对消息进行正向处理</summary>
         public abstract object Encode(object message);
 
         /// <summary>对消息进行逆向处理</summary>
         public abstract object Decode(object message);
+
+        public abstract void Dispose();
     }
 
     /// <summary>
     ///     消息流层叠处理类。
     /// </summary>
-    public class MessagePipeline
+    public sealed class MessagePipeline : IDisposable
     {
         private readonly List<bool> _disabled = new();
         private readonly List<MessageProcessLayer> _layers = new();
@@ -54,36 +63,57 @@ namespace HeTu
 
         public void Clean()
         {
+            Dispose();
+
             _layers.Clear();
             _disabled.Clear();
+        }
+
+        public void Dispose()
+        {
+            foreach (var layer in _layers)
+            {
+                layer.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// 客户端先发送hello消息，然后服务器才发送握手消息
+        /// </summary>
+        public byte[] ClientHello()
+        {
+            var replyMessages = new List<byte[]>(_layers.Count);
+
+            for (var i = 0; i < _layers.Count; i++)
+            {
+                if (_disabled[i] || !_layers[i].IsHandshakeRequired())
+                    continue;
+
+                var result = _layers[i].ClientHello();
+                replyMessages.Add(result ?? Array.Empty<byte>());
+            }
+
+            var reply = Encode(replyMessages);
+            return reply ?? Array.Empty<byte>();
         }
 
         /// <summary>
         ///     通过对端发来的握手消息，完成所有层的握手工作。
         ///     返回握手后的上下文；以及要发送给对端的握手消息。
         /// </summary>
-        public byte[] Handshake(IList<byte[]> peerMessages)
+        public void Handshake(List<byte[]> peerMessages)
         {
-            var replyMessages = new List<byte[]>(_layers.Count);
-
             for (var i = 0; i < _layers.Count; i++)
             {
-                if (_disabled[i])
-                {
-                    replyMessages.Add(Array.Empty<byte>());
+                if (_disabled[i] || !_layers[i].IsHandshakeRequired())
                     continue;
-                }
 
                 var msg = peerMessages != null && i < peerMessages.Count
                     ? peerMessages[i]
                     : Array.Empty<byte>();
 
-                var result = _layers[i].Handshake(msg);
-                replyMessages.Add(result ?? Array.Empty<byte>());
+                _layers[i].Handshake(msg);
             }
-
-            var reply = Encode(replyMessages);
-            return reply ?? Array.Empty<byte>();
         }
 
         /// <summary>

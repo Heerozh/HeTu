@@ -71,13 +71,23 @@ namespace HeTu
 
     public class JsonbLayer : MessageProcessLayer
     {
-        public override byte[] Handshake(byte[] message) => Array.Empty<byte>();
+        public override void Dispose() { }
+        public override byte[] ClientHello() => Array.Empty<byte>();
+
+        public override bool IsHandshakeRequired() => false;
+
+        public override void Handshake(byte[] message) { }
 
         public override object Encode(object message)
         {
+            return MessagePackSerializer.Serialize(message);
+        }
+
+        public override object Decode(object message)
+        {
             if (message is not byte[] bytes)
-                throw new InvalidOperationException("CryptoLayer只能加密 byte[] 类型数据");
-            // todo，应该写到decode里
+                throw new InvalidOperationException("JsonbLayer只能Decode byte[] 类型数据");
+
             var reader = new MessagePackReader(new ReadOnlyMemory<byte>(bytes));
             // 1. 读取数组长度 (对应 Python 的 list 长度)
             var count = reader.ReadArrayHeader();
@@ -106,9 +116,5 @@ namespace HeTu
                     throw new Exception($"未知的命令类型: {cmd}");
             }
         }
-
-        public override object Decode(object message) =>
-            // todo
-            null;
     }
 }

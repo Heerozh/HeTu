@@ -13,7 +13,7 @@ namespace HeTu
     /// <summary>
     ///     使用 zlib 进行消息的流式压缩和解压缩。
     /// </summary>
-    public class ZlibLayer : MessageProcessLayer
+    public sealed class ZlibLayer : MessageProcessLayer
     {
         private readonly int _level;
         private readonly byte[] _presetDict;
@@ -29,8 +29,16 @@ namespace HeTu
             _presetDict = presetDictionary ?? Array.Empty<byte>();
         }
 
+        public override void Dispose()
+        {
+            _deflateStream?.Dispose();
+            _deflateBuffer?.Dispose();
+        }
 
-        public override byte[] Handshake(byte[] message)
+        public override byte[] ClientHello() => Array.Empty<byte>();
+
+
+        public override void Handshake(byte[] message)
         {
             var dict = message is { Length: > 0 } ? message : _presetDict;
 
@@ -49,12 +57,12 @@ namespace HeTu
                 IsStreamOwner = false
             };
 
-
             _deflater = deflater;
             _inflater = inflater;
+            _deflateBuffer?.Dispose();
             _deflateBuffer = deflateBuffer;
+            _deflateStream?.Dispose();
             _deflateStream = deflateStream;
-            return Array.Empty<byte>();
         }
 
         public override object Encode(object message)
