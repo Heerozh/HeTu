@@ -5,20 +5,19 @@
 
 
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 
 namespace HeTu
 {
     public class ResponseManager
     {
-        public delegate void Callback(List<object> args, bool cancel = false);
+        public delegate void Callback(object[] args, bool cancel = false);
 
         private readonly ConcurrentQueue<Callback> _requestCallbacks = new();
 
         public void EnqueueCallback(Callback cb) =>
             _requestCallbacks.Enqueue(cb);
 
-        public void CompleteNext(List<object> response)
+        public void CompleteNext(object[] response)
         {
             if (_requestCallbacks.TryDequeue(out var cb))
                 cb(response);

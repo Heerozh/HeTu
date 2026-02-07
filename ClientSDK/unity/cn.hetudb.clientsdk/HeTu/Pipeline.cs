@@ -5,6 +5,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace HeTu
 {
@@ -12,6 +13,8 @@ namespace HeTu
     {
         protected int LayerIndex;
         protected MessagePipeline Parent;
+
+        public abstract void Dispose();
 
         public virtual void OnAttach(MessagePipeline parent, int layerIdx)
         {
@@ -22,7 +25,7 @@ namespace HeTu
         public virtual bool IsHandshakeRequired() => true;
 
         /// <summary>
-        /// 客户端先发送hello消息，然后服务器才发送握手消息
+        ///     客户端先发送hello消息，然后服务器才发送握手消息
         /// </summary>
         public abstract byte[] ClientHello();
 
@@ -38,8 +41,6 @@ namespace HeTu
 
         /// <summary>对消息进行逆向处理</summary>
         public abstract object Decode(object message);
-
-        public abstract void Dispose();
     }
 
     /// <summary>
@@ -51,6 +52,12 @@ namespace HeTu
         private readonly List<MessageProcessLayer> _layers = new();
 
         public int NumLayers => _layers.Count;
+
+        public void Dispose()
+        {
+            foreach (var layer in _layers)
+                layer.Dispose();
+        }
 
         public void AddLayer(MessageProcessLayer layer)
         {
@@ -69,16 +76,8 @@ namespace HeTu
             _disabled.Clear();
         }
 
-        public void Dispose()
-        {
-            foreach (var layer in _layers)
-            {
-                layer.Dispose();
-            }
-        }
-
         /// <summary>
-        /// 客户端先发送hello消息，然后服务器才发送握手消息
+        ///     客户端先发送hello消息，然后服务器才发送握手消息
         /// </summary>
         public byte[] ClientHello()
         {
@@ -101,19 +100,24 @@ namespace HeTu
         ///     通过对端发来的握手消息，完成所有层的握手工作。
         ///     返回握手后的上下文；以及要发送给对端的握手消息。
         /// </summary>
-        public void Handshake(List<byte[]> peerMessages)
+        public void Handshake(byte[][] peerMessages)
         {
+            var j = 0;
             for (var i = 0; i < _layers.Count; i++)
             {
                 if (_disabled[i] || !_layers[i].IsHandshakeRequired())
                     continue;
 
-                var msg = peerMessages != null && i < peerMessages.Count
-                    ? peerMessages[i]
+                var msg = peerMessages != null && j < peerMessages.Length
+                    ? peerMessages[j]
                     : Array.Empty<byte>();
 
                 _layers[i].Handshake(msg);
+                j++;
             }
+
+            Logger.Instance.Info(
+                $"客户端握手完成，握手消息总长度：{peerMessages?.Sum(m => m.Length) ?? 0}字节");
         }
 
         /// <summary>
@@ -136,7 +140,7 @@ namespace HeTu
         /// <summary>
         ///     对消息进行逆向处理
         /// </summary>
-        public List<object> Decode(byte[] message)
+        public object Decode(byte[] message)
         {
             object decoded = message;
             for (var i = 0; i < _layers.Count; i++)
@@ -147,7 +151,7 @@ namespace HeTu
                 decoded = _layers[originalIndex].Decode(decoded);
             }
 
-            return decoded as List<object>;
+            return decoded;
         }
     }
 }

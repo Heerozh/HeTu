@@ -5,6 +5,7 @@
 
 using System;
 using System.IO;
+using Unity.SharpZipLib.Zip;
 using Unity.SharpZipLib.Zip.Compression;
 using Unity.SharpZipLib.Zip.Compression.Streams;
 
@@ -21,6 +22,7 @@ namespace HeTu
 
         private Deflater _deflater;
         private DeflaterOutputStream _deflateStream;
+        private byte[] _dict;
         private Inflater _inflater;
 
         public ZlibLayer(int level = 1, byte[] presetDictionary = null)
@@ -40,15 +42,14 @@ namespace HeTu
 
         public override void Handshake(byte[] message)
         {
-            var dict = message is { Length: > 0 } ? message : _presetDict;
+            _dict = message is { Length: > 0 } ? message : _presetDict;
 
             var deflater = new Deflater(_level, false);
             var inflater = new Inflater(false);
 
-            if (dict.Length > 0)
+            if (_dict.Length > 0)
             {
-                deflater.SetDictionary(dict);
-                inflater.SetDictionary(dict);
+                deflater.SetDictionary(_dict);
             }
 
             var deflateBuffer = new MemoryStream();
@@ -103,7 +104,45 @@ namespace HeTu
                     IsStreamOwner = false
                 };
             using var output = new MemoryStream();
-            inflateStream.CopyTo(output);
+
+            // 准备一个缓冲区
+            var buffer = new byte[4096];
+
+            while (true)
+            {
+                int count;
+                try
+                {
+                    // 尝试从解压流读取
+                    count = inflateStream.Read(buffer, 0, buffer.Length);
+                }
+                catch (ZipException)
+                {
+                    // SharpZipLib 在读到 header 发现需要字典时，通常会抛出 ZipException
+                    // 或者是 Read 返回 0 但 IsNeedingDictionary 为 true
+                    if (!_inflater.IsNeedingDictionary) throw;
+                    _inflater.SetDictionary(_dict);
+                    // 此时解压器已经有了字典，就能继续解压后面的数据了
+                    continue;
+                }
+
+                // 处理 Read 返回 0 的情况（有些版本可能不报错只返回 0）
+                if (count == 0)
+                {
+                    if (_inflater.IsNeedingDictionary)
+                    {
+                        _inflater.SetDictionary(_dict);
+                        continue;
+                    }
+
+                    // 真的读完了（EOF）
+                    break;
+                }
+
+                // 将读到的解压数据写入输出流
+                output.Write(buffer, 0, count);
+            }
+
             return output.ToArray();
         }
     }

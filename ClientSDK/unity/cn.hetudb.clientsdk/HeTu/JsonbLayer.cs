@@ -71,30 +71,30 @@ namespace HeTu
 
     public class JsonbLayer : MessageProcessLayer
     {
-        public override void Dispose() { }
+        public override void Dispose()
+        {
+        }
+
         public override byte[] ClientHello() => Array.Empty<byte>();
 
         public override bool IsHandshakeRequired() => false;
 
-        public override void Handshake(byte[] message) { }
-
-        public override object Encode(object message)
+        public override void Handshake(byte[] message)
         {
-            return MessagePackSerializer.Serialize(message);
         }
 
-        public override object Decode(object message)
-        {
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("JsonbLayer只能Decode byte[] 类型数据");
+        public override object Encode(object message) =>
+            MessagePackSerializer.Serialize(message);
 
+        public object TryDecodeStandardMessage(byte[] bytes)
+        {
             var reader = new MessagePackReader(new ReadOnlyMemory<byte>(bytes));
             // 1. 读取数组长度 (对应 Python 的 list 长度)
             var count = reader.ReadArrayHeader();
             if (count < 2) throw new Exception("数据包格式错误，长度不足2");
             // 2. 读取 Cmd (int)
             var cmd = reader.ReadString();
-            // 现在服务器反馈的消息只有rsp，sub, updt
+            // 现在服务器标准消息只有rsp，sub, updt
             // ["rsp", json_data]
             // ["sub", sub_id, struct_data | list[struct_data]]
             // ["updt", sub_id, dict[id, struct_data]]
@@ -114,6 +114,21 @@ namespace HeTu
                     }
                 default:
                     throw new Exception($"未知的命令类型: {cmd}");
+            }
+        }
+
+        public override object Decode(object message)
+        {
+            if (message is not byte[] bytes)
+                throw new InvalidOperationException("JsonbLayer只能Decode byte[] 类型数据");
+
+            try
+            {
+                return TryDecodeStandardMessage(bytes);
+            }
+            catch (Exception ex)
+            {
+                return MessagePackSerializer.Deserialize<object>(bytes);
             }
         }
     }

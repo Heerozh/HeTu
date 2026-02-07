@@ -84,7 +84,7 @@ namespace HeTu
         // 实际关闭ws连接的方法
         protected override void _close()
         {
-            _socket.CloseAsync(); // 并不一定会激发onclose事件。
+            _socket?.CloseAsync(); // 并不一定会激发onclose事件。
             // 如果场景没挂WebsocketManager，会导致close不掉socket的task
             // 这是正常的，如果运行test套件，确保不在editor mode里，而是在player mode里运行
             _socket = null;

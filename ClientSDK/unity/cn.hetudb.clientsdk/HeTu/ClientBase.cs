@@ -95,13 +95,12 @@ namespace HeTu
                     }
                     else
                     {
-                        var serverHandshake = Pipeline.Decode(msg)
-                            .Cast<byte[]>()
-                            .ToList();
-                        Pipeline.Handshake(serverHandshake);
+                        var serverHandshake = Pipeline.Decode(msg) as object[];
+                        Pipeline.Handshake(serverHandshake?.Cast<byte[]>().ToArray());
 
                         Logger.Instance.Info("[HeTuClient] 连接成功。");
                         State = ConnectionState.Connected;
+                        handshaked = true;
 
                         // 连接完成开始发送离线消息队列中的消息
                         OnConnected?.Invoke();
@@ -144,7 +143,7 @@ namespace HeTu
             _close();
         }
 
-        protected void _doRequest(object payload, ResponseManager.Callback callback)
+        private void _doRequest(object payload, ResponseManager.Callback callback)
         {
             var buffer = Pipeline.Encode(payload);
 
@@ -352,8 +351,8 @@ namespace HeTu
         {
             // 解码消息
             // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
-            var structuredMsg = Pipeline.Decode(buffer);
-            switch (structuredMsg[0])
+            var structuredMsg = Pipeline.Decode(buffer) as object[];
+            switch (structuredMsg?[0])
             {
                 case "rsp":
                 case "sub":
