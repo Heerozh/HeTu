@@ -35,7 +35,6 @@ class RedisMQClient(MQClient):
         #    且这个方式如果redis维护变更了ip/集群规模等，整个服务会瘫痪，而a方式只要用户重连
         # 这里采用a方式
         self._client = client
-        self.clustering = client.clustering
         # redis-py库 cluster模式的pubsub不支持异步，不支持gather消息，用自己写的
         self._mq = AsyncKeyspacePubSub(client.aio)
 

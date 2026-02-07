@@ -51,19 +51,27 @@ class Backend:
         从配置字典初始化Backend，创建master和servants连接。
         config为配置BACKENDS[i]内容。
         """
-        clustering = config.get("clustering", False)
+        # 除去特定key以外的配置
+        extra_config = {
+            k: v
+            for k, v in config.items()
+            if k not in {"type", "master", "servants", "master_weight"}
+        }
+
         # 如果未填写servants，则将master也作为servant使用(为了api统一)
         servants_urls = config.get("servants", [])
         if not servants_urls:
             servants_urls.append(config["master"])
+
         # 连接数据库
         self._master = BackendClientFactory.create(
-            config["type"], config["master"], clustering, False
+            config["type"], config["master"], False, extra_config
         )
         self._servants = [
-            BackendClientFactory.create(config["type"], servant, clustering, True)
+            BackendClientFactory.create(config["type"], servant, True, extra_config)
             for servant in servants_urls
         ]
+
         # master_weight表示选中的权重，每台副本数据库权重固定为1.0
         #   如果master任务不繁重，理论上提高此值可以降低事务冲突概率，因为从副本读取的值可能落后。
         #   反之降低此值减少主数据库读取负载，但提高冲突概率，也许反而会增加master负载。

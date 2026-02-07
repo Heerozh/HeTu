@@ -105,7 +105,7 @@ async def mod_redis_cluster_backend(ses_redis_cluster_service):
             config = {
                 "type": "redis",
                 "master": redis_url,
-                "clustering": True,
+                "raw_clustering": True,
                 "servants": [],
             }
 

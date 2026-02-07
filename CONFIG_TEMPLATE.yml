@@ -92,11 +92,6 @@ BACKENDS:
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
     master: redis://127.0.0.1:6379/0
-    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
-    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
-    # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
-    # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
-    clustering: false  # todo 改成raw clustering更好
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。
@@ -108,6 +103,11 @@ BACKENDS:
     # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库事务读负载
     # 只在填写了servants时有效，每台servant的读权重固定为1，
     master_weight: 1.0
+    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
+    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
+    # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
+    # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
+    raw_clustering: false
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:
