@@ -23,7 +23,7 @@ namespace HeTu
     /// </summary>
     public abstract class HeTuClientBase
     {
-        protected readonly ConcurrentQueue<ValueTuple<byte[], ResponseManager.Callback>>
+        protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
             OfflineQueue = new();
 
         protected readonly MessagePipeline Pipeline = new();
@@ -104,9 +104,11 @@ namespace HeTu
 
                         // 连接完成开始发送离线消息队列中的消息
                         OnConnected?.Invoke();
-                        foreach (var (data, callback) in OfflineQueue)
+                        foreach (var (payload, callback) in OfflineQueue)
                         {
-                            _send(data);
+                            // 连接后Pipeline才可用
+                            var buffer = Pipeline.Encode(payload);
+                            _send(buffer);
                             if (callback != null)
                                 ResponseQueue.EnqueueCallback(callback);
                         }
@@ -145,10 +147,9 @@ namespace HeTu
 
         private void _doRequest(object payload, ResponseManager.Callback callback)
         {
-            var buffer = Pipeline.Encode(payload);
-
             if (State == ConnectionState.Connected)
             {
+                var buffer = Pipeline.Encode(payload);
                 _send(buffer); // 后台线程发送
                 if (callback != null)
                     ResponseQueue.EnqueueCallback(callback);
@@ -156,7 +157,7 @@ namespace HeTu
             else
             {
                 Logger.Instance.Info("尝试发送数据但连接未建立，将加入队列在建立后发送。");
-                OfflineQueue.Enqueue((buffer, callback));
+                OfflineQueue.Enqueue((payload, callback));
             }
         }
 
