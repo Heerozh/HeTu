@@ -105,6 +105,7 @@ namespace Tests.HeTu
             }
             catch (InvalidCastException)
             {
+                Debug.Log("正常收到InvalidCastException异常");
             }
 
             Assert.False(success, "没有抛出InvalidCastException");

@@ -284,7 +284,6 @@ namespace HeTu
             var tcs = new UniTaskCompletionSource<RowSubscription<T>>();
 #endif
 
-            // 如果index是id，我们可以事先判断是否已经订阅过
             GetSync<T>(index, value, (rowSub, cancel) =>
             {
                 if (cancel)

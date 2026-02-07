@@ -212,7 +212,7 @@ namespace HeTu
                         onResponse(casted, false);
                     else
                         throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
             }
 
             // 向服务器订阅
@@ -244,7 +244,7 @@ namespace HeTu
                     }
                     else
                         throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型");
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
 
                 var data = ((JsonObject)response[2]).To<T>();
                 var newSub = new RowSubscription<T>(subID, componentName, data, this);
@@ -287,7 +287,7 @@ namespace HeTu
                 }
                 else
                     throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型");
+                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
 
             // 发送订阅请求
             Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
@@ -321,7 +321,7 @@ namespace HeTu
                     }
                     else
                         throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型");
+                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
 
                 var rawRows = (JsonObject)response[2];
                 var rows = rawRows.ToList<T>();
