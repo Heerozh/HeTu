@@ -125,6 +125,11 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "NAMESPACE": "pytest",
             "INSTANCES": ["pytest_1"],
             "LISTEN": f"0.0.0.0:874",
+            "PACKET_LAYERS": [
+                {"type": "jsonb"},
+                {"type": "zlib"},
+                {"type": "crypto"},
+            ],
             "BACKENDS": {
                 "Redis": {
                     "type": "Redis",
