@@ -77,14 +77,14 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             sub = await HeTuClient.Instance.Get(
                 "RLSComp", "owner", 123);
-            var lastValue = (int)sub.Data["value"];
+            var lastValue = Convert.ToInt32(sub.Data["value"]);
 
             // 测试订阅事件
             int? newValue = null;
             sub.OnUpdate += sender =>
             {
                 Debug.Log("收到了更新...");
-                newValue = (int)sender.Data["value"];
+                newValue = Convert.ToInt32(sender.Data["value"]);
             };
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 #if UNITY_6000_0_OR_NEWER
@@ -146,7 +146,7 @@ namespace Tests.HeTu
 
             var resp = await HeTuClient.Instance.CallSystem("login", 123, true);
             var data = resp.ToDict<string, object>();
-            var responseID = (long)data["id"];
+            var responseID = Convert.ToInt64(data["id"]);
 
             Assert.AreEqual(123, responseID);
 
@@ -171,13 +171,13 @@ namespace Tests.HeTu
                 "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
             Assert.AreEqual(1, sub.Rows.Count);
-            var lastValue = (int)sub.Rows.Values.First()["value"];
+            var lastValue = Convert.ToInt32(sub.Rows.Values.First()["value"]);
 
             // 测试订阅事件
             int? newValue = null;
             sub.OnUpdate += (sender, rowID) =>
             {
-                newValue = (int)sender.Rows[rowID]["value"];
+                newValue = Convert.ToInt32(sender.Rows[rowID]["value"]);
             };
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 #if UNITY_6000_0_OR_NEWER

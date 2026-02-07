@@ -80,7 +80,7 @@ namespace HeTu
 
             // 初始化WebSocket以及事件
             State = ConnectionState.ReadyForConnect;
-            var handshaked = false;
+            var handshakeDone = false;
             _connect(url, () =>
                 {
                     // 握手
@@ -89,7 +89,7 @@ namespace HeTu
                 },
                 msg =>
                 {
-                    if (handshaked)
+                    if (handshakeDone)
                     {
                         _OnReceived(msg);
                     }
@@ -100,7 +100,7 @@ namespace HeTu
 
                         Logger.Instance.Info("[HeTuClient] 连接成功。");
                         State = ConnectionState.Connected;
-                        handshaked = true;
+                        handshakeDone = true;
 
                         // 连接完成开始发送离线消息队列中的消息
                         OnConnected?.Invoke();
@@ -341,6 +341,8 @@ namespace HeTu
 
         public void Unsubscribe(string subID, string from)
         {
+            if (State == ConnectionState.Disconnected)
+                return;
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
             var payload = new object[] { "unsub", subID };

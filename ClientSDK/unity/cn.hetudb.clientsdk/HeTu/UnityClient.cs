@@ -91,6 +91,7 @@ namespace HeTu
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = null;
+            State = ConnectionState.Disconnected;
         }
 
         // 实际往ws发送数据的方法
