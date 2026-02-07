@@ -17,7 +17,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class BrotliLayer(MessageProcessLayer):
+class BrotliLayer(MessageProcessLayer, alias="brotli"):
     """
     使用 Brotli 进行消息的流式压缩和解压缩。
     """

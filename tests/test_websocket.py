@@ -45,9 +45,8 @@ def setup_websocket_proxy():
             do_recv = ws.recv
 
             client_pipe = pipeline.MessagePipeline()
-            client_pipe.add_layer(pipeline.LimitCheckerLayer())
             client_pipe.add_layer(pipeline.JSONBinaryLayer())
-            client_pipe.add_layer(pipeline.ZstdLayer())
+            client_pipe.add_layer(pipeline.ZlibLayer())
             crypto_layer = pipeline.CryptoLayer()
             client_pipe.add_layer(crypto_layer)
             pipe_ctx = None

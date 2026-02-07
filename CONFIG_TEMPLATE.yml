@@ -70,16 +70,23 @@ MAX_ROW_SUBSCRIPTION: 10
 # 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.range)。每次range订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
 
-# 消息加密方式，可选 None、ChaCha20-Poly1305
-PACKET_CIPHER: ChaCha20-Poly1305
-# todo 服务器密钥，客户端必须有相同密钥才能登录
-# 开启消息流式压缩, 可选 None、zlib
-# 速度：zstd 422k/s > zlib 357k/s > brotli 100k/s
-# 压缩率 zlib 25% > brotli 25% > zstd 23%
-# 因为hetu可以预编字典，所以zlib压缩率很高，使得其他压缩算法优势不明显。
-# 目前只支持zlib，因为其他的在 unity 上只能跑支持native插件的平台。
-# todo OpenZL
-PACKET_COMPRESSION: zlib
+# 消息流处理层，可以设置多层，按照顺序处理。
+# 如需自定义层，只要继承自hetu.server.pipeline.MessageProcessLayer，并定义alias，即可在这添加
+PACKET_LAYERS:
+  # 添加消息json to bytes序列化层
+  - type: jsonb
+  # 开启消息zlib流式压缩
+  # 速度：zstd_lv3 422k/s > zlib_lv1 357k/s > brotli_lv3 100k/s
+  # 压缩率 zlib_lv1 25% > brotli_lv3 25% > zstd_lv3 23%
+  # 因为hetu zlib可以预编字典，所以压缩率很高，使得其他压缩算法优势不明显。
+  # 目前只支持zlib，因为其他的在 unity 上只能跑支持native插件的平台。
+  # todo OpenZL
+  - type: zlib
+    level: 1  # 因为有字典，级别1以上压缩率无明显提升
+  # 消息加密层，使用ChaCha20-Poly1305算法
+  - type: crypto
+    password: your_password_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器
+
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS:

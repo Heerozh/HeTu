@@ -204,16 +204,12 @@ def worker_main(app_name, config) -> Sanic:
         root_logger.setLevel(logging.DEBUG)
 
     # 加载协议, 初始化消息处理流水线
-    cipher = config.get("PACKET_CIPHER")
     msg_pipe = pipeline.ServerMessagePipeline()
-    msg_pipe.clean()  # 防止test用例中多次调用worker_main导致重复添加layer
-    msg_pipe.add_layer(pipeline.LimitCheckerLayer())
-    msg_pipe.add_layer(pipeline.JSONBinaryLayer())
-    msg_pipe.add_layer(pipeline.ZstdLayer())
-    msg_pipe.add_layer(pipeline.CryptoLayer())
-    if cipher == "None":
-        logger.warning("⚠️ [📡Pipeline] 未配置PACKET_CIPHER，通信不加密！")
-        msg_pipe.disable_layer(3)
+    msg_pipe.clean()  # msg_pipe是单件，防止test用例中多次调用worker_main导致重复添加layer
+    default_layers = [{"type": "jsonb"}, {"type": "zlib"}, {"type": "crypto"}]
+    for layer_cfg in config.get("PACKET_LAYERS", default_layers):
+        layer = pipeline.MessageProcessLayerFactory.create(**layer_cfg)
+        msg_pipe.add_layer(layer)
 
     # 服务器main进程setup/teardown回调
     # app.main_process_start()

@@ -17,7 +17,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class ZlibLayer(MessageProcessLayer):
+class ZlibLayer(MessageProcessLayer, alias="zlib"):
     """
     使用 zlib 进行消息的流式压缩和解压缩。
 

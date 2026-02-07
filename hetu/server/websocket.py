@@ -25,7 +25,7 @@ replay = logging.getLogger("HeTu.replay")
 
 
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
-async def websocket_connection(request: Request, ws: Websocket, db_name: str):
+async def websocket_connection(request: Request, ws: Websocket, db_name: str) -> None:
     """ws连接处理器，运行在worker主协程下"""
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
@@ -37,18 +37,21 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str):
     handshake_msg = await ws.recv(timeout=10)
     if not isinstance(handshake_msg, (bytes, bytearray)):
         logger.info("New Connect Error: Invalid handshake message type")
-        return ws.fail_connection()
+        ws.fail_connection()
+        return
     handshake_msg = msg_pipe.decode(None, handshake_msg)
     if not isinstance(handshake_msg, list):
         logger.info("New Connect Error: Invalid handshake message format")
-        return ws.fail_connection()
+        ws.fail_connection()
+        return
     # 进行握手处理，获得连接上下文
     if len(handshake_msg) != msg_pipe.num_handshake_layers:
         logger.info(
             "New Connect Error: client pipeline layers count "
             "does not match server pipeline"
         )
-        return ws.fail_connection()
+        ws.fail_connection()
+        return
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
 
@@ -56,7 +59,8 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str):
     instance = db_name
     if instance not in request.app.ctx.table_managers:
         logger.info(f"New Connect Error: Invalid instance name: {instance}")
-        return ws.fail_connection()
+        ws.fail_connection()
+        return
     tbl_mgr = request.app.ctx.table_managers[instance]
 
     # 初始化Context，一个连接一个Context

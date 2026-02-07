@@ -37,7 +37,6 @@ def base_pipeline(mod_item_model, mod_rls_test_model, new_clusters_env):
     SystemClusters().build_clusters("pytest")
 
     pipe = pipeline.MessagePipeline()
-    pipe.add_layer(pipeline.LimitCheckerLayer())
     pipe.add_layer(pipeline.JSONBinaryLayer())
     return pipe
 

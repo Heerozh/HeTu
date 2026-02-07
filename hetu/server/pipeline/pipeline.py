@@ -17,8 +17,31 @@ JSONType = dict[str, Any] | list[Any]
 PipeContext = list[Any]
 
 
+class MessageProcessLayerFactory:
+    _registry: dict[str, type[MessageProcessLayer]] = {}
+
+    @staticmethod
+    def register(alias: str, client_cls: type[MessageProcessLayer]) -> None:
+        MessageProcessLayerFactory._registry[alias.lower()] = client_cls
+
+    @staticmethod
+    def create(**kwargs) -> MessageProcessLayer:
+        alias = kwargs.pop("type").lower()
+        if alias not in MessageProcessLayerFactory._registry:
+            raise NotImplementedError(f"{alias} MessageProcessLayer未实现")
+        return MessageProcessLayerFactory._registry[alias](**kwargs)
+
+
 class MessageProcessLayer:
-    def __init__(self):
+    def __init_subclass__(cls, **kwargs):
+        """让继承子类自动注册alias"""
+        super().__init_subclass__()
+        assert "alias" in kwargs, (
+            f"{cls.__name__} MessageProcessLayer子类必须指定alias参数"
+        )
+        MessageProcessLayerFactory.register(kwargs["alias"], cls)
+
+    def __init__(self, **kwargs: Any):
         self._parent: MessagePipeline = None  # type: ignore
         self._layer_idx = -1
 

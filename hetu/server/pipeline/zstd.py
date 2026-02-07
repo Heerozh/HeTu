@@ -19,7 +19,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class ZstdLayer(MessageProcessLayer):
+class ZstdLayer(MessageProcessLayer, alias="zstd"):
     """
     使用python 3.14内置的 compression/zstd 模块进行消息的压缩和解压缩。
     """

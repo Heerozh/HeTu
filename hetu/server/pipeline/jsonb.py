@@ -16,7 +16,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class JSONBinaryLayer(MessageProcessLayer):
+class JSONBinaryLayer(MessageProcessLayer, alias="jsonb"):
     """
     把list/dict转换为byte的类
     """
