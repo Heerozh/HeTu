@@ -171,6 +171,14 @@ class StartCommand(CommandInterface):
             }
             config = Config(config_for_factory)
 
+        # 默认消息协议
+        if "PACKET_LAYERS" not in config:
+            config["PACKET_LAYERS"] = [
+                {"type": "jsonb"},
+                {"type": "zlib"},
+                {"type": "crypto"},
+            ]
+
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
         # prepare用的配置
@@ -205,7 +213,7 @@ class StartCommand(CommandInterface):
         logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
         logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
         layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
-        logger.info(f"ℹ️ 消息协议：{layer_types}")
+        logger.info(f"ℹ️ 消息流协议：json -> {' -> '.join(layer_types)} -> Network")
 
         if config.DEBUG:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")

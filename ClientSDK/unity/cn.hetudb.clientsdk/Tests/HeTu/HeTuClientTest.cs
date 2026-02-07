@@ -19,8 +19,7 @@ namespace Tests.HeTu
         public void Init()
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
-            HeTuClient.Instance.SetupPipeline("zlib", "ChaCha20-Poly1305");
-            HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu").Forget();
+            HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest").Forget();
         }
 
         [OneTimeTearDown]
@@ -51,6 +50,7 @@ namespace Tests.HeTu
             {
                 yield return null;
             }
+
             if (task.IsFaulted)
             {
                 throw task.Exception;
@@ -67,7 +67,6 @@ namespace Tests.HeTu
 
         private async Task TestRowSubscribeAsync()
         {
-
             // 测试订阅失败
             var sub = await HeTuClient.Instance.Get(
                 "HP", "owner", 123);
@@ -141,7 +140,6 @@ namespace Tests.HeTu
 
         private async Task TestSystemCallAsync()
         {
-
             var callbackCalled = false;
             var a = HeTuClient.Instance.SystemLocalCallbacks["login"] =
                 args => { callbackCalled = true; };
@@ -166,7 +164,6 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeOnUpdateAsync()
         {
-
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 234, true);
             HeTuClient.Instance.CallSystem("use_hp", 1);
@@ -202,7 +199,6 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeOnInsertAsync()
         {
-
             HeTuClient.Instance.CallSystem("login", 345, true);
             HeTuClient.Instance.CallSystem("move_user", 123, -10, -10);
             HeTuClient.Instance.CallSystem("move_user", 234, 0, 0);

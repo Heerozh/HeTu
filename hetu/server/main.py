@@ -206,8 +206,7 @@ def worker_main(app_name, config) -> Sanic:
     # 加载协议, 初始化消息处理流水线
     msg_pipe = pipeline.ServerMessagePipeline()
     msg_pipe.clean()  # msg_pipe是单件，防止test用例中多次调用worker_main导致重复添加layer
-    default_layers = [{"type": "jsonb"}, {"type": "zlib"}, {"type": "crypto"}]
-    for layer_cfg in config.get("PACKET_LAYERS", default_layers):
+    for layer_cfg in config.get("PACKET_LAYERS", []):
         layer = pipeline.MessageProcessLayerFactory.create(**layer_cfg)
         msg_pipe.add_layer(layer)
 

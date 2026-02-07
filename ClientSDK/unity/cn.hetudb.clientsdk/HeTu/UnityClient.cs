@@ -8,9 +8,9 @@ using System.Threading.Tasks;
 #else
 using Cysharp.Threading.Tasks;
 #endif
-using UnityEngine;
 using System;
 using System.Threading;
+using UnityEngine;
 using UnityWebSocket;
 
 namespace HeTu
@@ -21,18 +21,18 @@ namespace HeTu
     public sealed class HeTuClient : HeTuClientBase, IDisposable
     {
         private static readonly Lazy<HeTuClient> s_lazy = new(() =>
-            {
-                Logger.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
-                return new HeTuClient();
-            });
+        {
+            Logger.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
+            return new HeTuClient();
+        });
 
         public static HeTuClient Instance => s_lazy.Value;
 
         private IWebSocket _socket;
-        private CancellationTokenSource _connectionCancelSource = null;
+        private CancellationTokenSource _connectionCancelSource;
 
         /// <summary>
-        /// 对于全局连接(HeTuClient.Instance)，可以不做Dispose。
+        ///     对于全局连接(HeTuClient.Instance)，可以不做Dispose。
         /// </summary>
         public void Dispose()
         {
@@ -85,8 +85,8 @@ namespace HeTu
         protected override void _close()
         {
             _socket.CloseAsync(); // 并不一定会激发onclose事件。
-            // 已知问题，如果场景没挂WebsocketManager，会导致close不掉socket的task
-            // 在test runner里常见此问题
+            // 如果场景没挂WebsocketManager，会导致close不掉socket的task
+            // 这是正常的，如果运行test套件，确保不在editor mode里，而是在player mode里运行
             _socket = null;
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
@@ -105,8 +105,7 @@ namespace HeTu
         /// </summary>
         /// <returns>
         ///     返回null或错误信息。
-        ///     - 正常断开返回null或"Canceled"。
-        ///       其中Canceled在游戏退出，或手动调用Close时返回。
+        ///     - 正常断开返回null或"Canceled"。其中Canceled在游戏退出，或手动调用Close时返回。
         ///     - 连接异常断开返回错误信息；
         /// </returns>
         /// <code>
@@ -138,7 +137,8 @@ namespace HeTu
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
             if (state != WebSocketState.Closed)
             {
-                Logger.Instance.Error($"[HeTuClient] Connect前请先Close Socket, socket state:{_socket?.ReadyState}");
+                Logger.Instance.Error(
+                    $"[HeTuClient] Connect前请先Close Socket, socket state:{_socket?.ReadyState}");
                 return null;
             }
 
@@ -171,7 +171,7 @@ namespace HeTu
             _connectionCancelSource = new CancellationTokenSource();
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
-                UnityEngine.Application.exitCancellationToken
+                Application.exitCancellationToken
             );
 
             // token可取消等待
@@ -221,7 +221,7 @@ namespace HeTu
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
-                UnityEngine.Application.exitCancellationToken
+                Application.exitCancellationToken
             );
             await using var reg = linkedCts.Token.Register(() =>
             {
@@ -297,7 +297,7 @@ namespace HeTu
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
-                UnityEngine.Application.exitCancellationToken
+                Application.exitCancellationToken
             );
             await using var reg = linkedCts.Token.Register(() =>
             {
@@ -374,11 +374,11 @@ namespace HeTu
                     else
                         tcs.TrySetResult(idxSub);
                 }, desc, force, componentName
-                );
+            );
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
-                UnityEngine.Application.exitCancellationToken
+                Application.exitCancellationToken
             );
             await using var reg = linkedCts.Token.Register(() =>
             {

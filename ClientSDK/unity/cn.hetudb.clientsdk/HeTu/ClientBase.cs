@@ -17,6 +17,7 @@ namespace HeTu
         ReadyForConnect,
         Connected
     }
+
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
@@ -33,6 +34,12 @@ namespace HeTu
 
         // 调用System时的本地回调，也就是System对应的客户端逻辑
         public Dictionary<string, Action<object[]>> SystemLocalCallbacks = new();
+
+        protected HeTuClientBase() => SetupPipeline(
+            new List<MessageProcessLayer>
+            {
+                new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
+            });
 
         // 连接成功时的回调
         public event Action OnConnected;
@@ -52,38 +59,11 @@ namespace HeTu
         protected abstract void _send(byte[] data);
 
         // 设置封包的编码/解码协议，协议要和你的河图服务器中的配置一致
-        public void SetupPipeline(string compressor, string cipher)
+        public void SetupPipeline(List<MessageProcessLayer> layers)
         {
             Pipeline.Clean();
-            if (!string.IsNullOrEmpty(compressor))
-            {
-                switch (compressor)
-                {
-                    case "zlib":
-                        Pipeline.AddLayer(new ZlibLayer());
-                        Logger.Instance.Info("[HeTuClient] 已启用Zlib压缩层。");
-                        break;
-                    default:
-                        Logger.Instance.Error(
-                            $"[HeTuClient] 未知的压缩算法：{compressor}，将不启用压缩层。");
-                        break;
-                }
-            }
-
-            if (!string.IsNullOrEmpty(cipher))
-            {
-                switch (cipher)
-                {
-                    case "ChaCha20-Poly1305":
-                        Pipeline.AddLayer(new CryptoLayer());
-                        break;
-                    default:
-                        Logger.Instance.Error($"[HeTuClient] 未知的加密算法：{cipher}，将不启用加密层。");
-                        break;
-                }
-            }
-
-            Pipeline.AddLayer(new JsonbLayer());
+            foreach (var layer in layers)
+                Pipeline.AddLayer(layer);
         }
 
         // 连接到河图url的Core方法，外部还需要异步包装一下
@@ -107,7 +87,7 @@ namespace HeTu
                     var helloMsg = Pipeline.ClientHello();
                     _send(helloMsg);
                 },
-                (msg) =>
+                msg =>
                 {
                     if (handshaked)
                     {
@@ -131,11 +111,11 @@ namespace HeTu
                             if (callback != null)
                                 ResponseQueue.EnqueueCallback(callback);
                         }
+
                         OfflineQueue.Clear();
                     }
-
                 },
-                (errMsg) =>
+                errMsg =>
                 {
                     State = ConnectionState.Disconnected;
                     if (errMsg == null)
@@ -293,6 +273,7 @@ namespace HeTu
                 onResponse(null, true);
                 return;
             }
+
             componentName ??= typeof(T).Name;
 
             // 先要组合sub_id看看是否已订阅过
