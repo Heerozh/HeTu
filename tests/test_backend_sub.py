@@ -240,7 +240,7 @@ async def test_subscribe_updates(
         row = await repo.get(time=110)
         assert row
         row.owner = 11
-        row1_id = str(row.id)
+        row1_id = row.id
         await repo.update(row)
 
     # 测试更新
@@ -285,7 +285,7 @@ async def test_row_subscribe_cache(
         row = await repo.get(time=110)
         assert row
         row.owner = 11
-        row1_id = str(row.id)
+        row1_id = row.id
         await repo.update(row)
 
     # 检测Row cache
@@ -408,7 +408,7 @@ async def test_subscribe_get_rls_update(
         row = await repo.get(time=113)
         assert row
         row.owner = 11
-        row3_id = str(row.id)
+        row3_id = row.id
         await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert updates[sub_id][row3_id] is None
@@ -435,7 +435,7 @@ async def test_query_subscribe_rls_lost(
         row = await repo.get(time=114)
         assert row
         row.owner = 11
-        row4_id = str(row.id)
+        row4_id = row.id
         await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
@@ -477,7 +477,7 @@ async def test_query_subscribe_rls_gain(
         row = await repo.get(time=114)
         assert row
         row.owner = 10
-        row4_id = str(row.id)
+        row4_id = row.id
         await repo.update(row)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
@@ -490,7 +490,7 @@ async def test_query_subscribe_rls_gain(
         repo = session.using(filled_item_ref.comp_cls)
         new = mod_item_model.new_row()
         new.owner = 10
-        new_row_id = str(new.id)
+        new_row_id = new.id
         await repo.insert(new)
     updates = await sub_mgr.get_updates()
     assert len(updates[sub_id]) == 1
@@ -521,7 +521,7 @@ async def test_query_subscribe_rls_lost_without_index(
         row = rows[-1]
         assert row
         row.friend = 12
-        row4_id = str(row.id)
+        row4_id = row.id
         await repo.update(row)
     updates = await sub_mgr.get_updates(timeout=5)
     assert len(updates) == 1
@@ -552,7 +552,7 @@ async def test_query_subscribe_rls_gain_without_index(
         row4 = rows[-1]
         assert row4
         row4.friend = 12
-        row4_id = str(row4.id)
+        row4_id = row4.id
         await repo.update(row4)
         # 修改owner不应该影响rls
         row1 = rows[0]

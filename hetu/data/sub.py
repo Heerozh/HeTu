@@ -24,7 +24,7 @@ logger = logging.getLogger("HeTu.root")
 class BaseSubscription:
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
@@ -72,7 +72,7 @@ class RowSubscription(BaseSubscription):
 
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
         返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}
@@ -84,15 +84,14 @@ class RowSubscription(BaseSubscription):
 
         row = await self.servant.get(self.table_ref, self.row_id, RowFormat.TYPED_DICT)
         if row is None:
-            # get_updated主要发给客户端，需要json，所以key直接用str
-            rtn = {str(self.row_id): None}
+            rtn = {self.row_id: None}
         else:
             ctx = self.rls_ctx
             if ctx is None or ctx.rls_check(self.table_ref.comp_cls, row):
                 del row["_version"]
-                rtn = {str(self.row_id): row}
+                rtn = {self.row_id: row}
             else:
-                rtn = {str(self.row_id): None}
+                rtn = {self.row_id: None}
         cache[channel] = rtn
         return set(), set(), rtn
 
@@ -130,7 +129,7 @@ class IndexSubscription(BaseSubscription):
 
     async def get_updated(
         self, channel
-    ) -> tuple[set[str], set[str], Mapping[str, dict[str, Any] | None]]:
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
@@ -148,7 +147,7 @@ class IndexSubscription(BaseSubscription):
             self.last_range_result = row_ids
             new_chans = set()
             rem_chans = set()
-            rtn = {}
+            rtn: dict[int, dict[str, Any] | None] = {}
             for row_id in inserts:
                 row = await servant.get(ref, row_id, row_format=RowFormat.TYPED_DICT)
                 if row is None:
@@ -158,14 +157,14 @@ class IndexSubscription(BaseSubscription):
                     ctx = self.rls_ctx
                     if ctx is None or ctx.rls_check(ref.comp_cls, row):
                         del row["_version"]
-                        rtn[str(row_id)] = row
+                        rtn[row_id] = row
                     new_chan_name = servant.row_channel(ref, row_id)
                     new_chans.add(new_chan_name)
                     self.row_subs[new_chan_name] = RowSubscription(
                         ref, servant, ctx, new_chan_name, row_id
                     )
             for row_id in deletes:
-                rtn[str(row_id)] = None
+                rtn[row_id] = None
                 rem_chan_name = servant.row_channel(ref, row_id)
                 rem_chans.add(rem_chan_name)
                 self.row_subs.pop(rem_chan_name)
