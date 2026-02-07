@@ -29,7 +29,7 @@ namespace Tests.HeTu
             HeTuClient.Instance.Close();
         }
 
-        private class HP : IBaseComponent
+        private class RLSComp : IBaseComponent
         {
             public long owner;
             public int value;
@@ -69,14 +69,14 @@ namespace Tests.HeTu
         {
             // 测试订阅失败
             var sub = await HeTuClient.Instance.Get(
-                "HP", "owner", 123);
+                "RLSComp", "owner", 123);
             Assert.AreEqual(sub, null);
 
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 123, true);
-            HeTuClient.Instance.CallSystem("use_hp", 1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             sub = await HeTuClient.Instance.Get(
-                "HP", "owner", 123);
+                "RLSComp", "owner", 123);
             var lastValue = (int)sub.Data["value"];
 
             // 测试订阅事件
@@ -86,7 +86,7 @@ namespace Tests.HeTu
                 Debug.Log("收到了更新...");
                 newValue = (int)sender.Data["value"];
             };
-            HeTuClient.Instance.CallSystem("use_hp", 2);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
@@ -95,12 +95,12 @@ namespace Tests.HeTu
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
-            HeTuClient.Instance.CallSystem("use_hp", 1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
             // Assert.ThrowsAsync 用的是当前协程Wait，会卡死
             var success = false;
             try
             {
-                await HeTuClient.Instance.Get<HP>("owner", 123);
+                await HeTuClient.Instance.Get<RLSComp>("owner", 123);
                 success = true;
             }
             catch (InvalidCastException)
@@ -123,7 +123,7 @@ namespace Tests.HeTu
             }
 
             // 测试回收自动反订阅，顺带测试Class类型
-            var typedSub = await HeTuClient.Instance.Get<HP>(
+            var typedSub = await HeTuClient.Instance.Get<RLSComp>(
                 "owner", 123);
             Assert.AreEqual(lastValue - 3, typedSub.Data.value);
 
@@ -166,9 +166,9 @@ namespace Tests.HeTu
         {
             // 测试订阅
             HeTuClient.Instance.CallSystem("login", 234, true);
-            HeTuClient.Instance.CallSystem("use_hp", 1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
             var sub = await HeTuClient.Instance.Range(
-                "HP", "owner", 0, 300, 100);
+                "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
             Assert.AreEqual(1, sub.Rows.Count);
             var lastValue = (int)sub.Rows.Values.First()["value"];
@@ -179,7 +179,7 @@ namespace Tests.HeTu
             {
                 newValue = (int)sender.Rows[rowID]["value"];
             };
-            HeTuClient.Instance.CallSystem("use_hp", 2);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else

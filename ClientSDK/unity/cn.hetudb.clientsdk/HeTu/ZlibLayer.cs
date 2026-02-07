@@ -4,8 +4,8 @@
 // <summary>河图客户端SDK的Unity消息压缩</summary>
 
 using System;
+using System.Buffers;
 using System.IO;
-using Unity.SharpZipLib.Zip;
 using Unity.SharpZipLib.Zip.Compression;
 using Unity.SharpZipLib.Zip.Compression.Streams;
 
@@ -97,53 +97,49 @@ namespace HeTu
 
         private byte[] Inflate(byte[] input)
         {
-            using var inputStream = new MemoryStream(input);
-            using var inflateStream =
-                new InflaterInputStream(inputStream, _inflater, 4096)
-                {
-                    IsStreamOwner = false
-                };
-            using var output = new MemoryStream();
+            _inflater.SetInput(input);
 
-            // 准备一个缓冲区
-            var buffer = new byte[4096];
+            // 预估一个大小，避免频繁扩容
+            using var outputStream = new MemoryStream(input.Length * 2);
+            var buffer = ArrayPool<byte>.Shared.Rent(4096); // 临时缓存
 
-            while (true)
+            while (!_inflater.IsFinished)
             {
-                int count;
-                try
-                {
-                    // 尝试从解压流读取
-                    count = inflateStream.Read(buffer, 0, buffer.Length);
-                }
-                catch (ZipException)
-                {
-                    // SharpZipLib 在读到 header 发现需要字典时，通常会抛出 ZipException
-                    // 或者是 Read 返回 0 但 IsNeedingDictionary 为 true
-                    if (!_inflater.IsNeedingDictionary) throw;
-                    _inflater.SetDictionary(_dict);
-                    // 此时解压器已经有了字典，就能继续解压后面的数据了
-                    continue;
-                }
+                // 执行解压
+                var count = _inflater.Inflate(buffer);
 
-                // 处理 Read 返回 0 的情况（有些版本可能不报错只返回 0）
-                if (count == 0)
+                // 解压出数据了，写入输出流
+                if (count > 0)
                 {
+                    outputStream.Write(buffer, 0, count);
+                }
+                else
+                {
+                    // 没解压出数据，检查是否需要字典
                     if (_inflater.IsNeedingDictionary)
                     {
+                        if (_dict == null)
+                            throw new Exception("Need dictionary but none set!");
                         _inflater.SetDictionary(_dict);
+                        // 设置完字典，无需其他操作，直接进入下一次循环再次 Inflate 即可
                         continue;
                     }
 
-                    // 真的读完了（EOF）
-                    break;
-                }
+                    // 既没数据，也不需要字典，那可能是数据读完了或者出错了
+                    if (_inflater.IsNeedingInput)
+                    {
+                        // 输入数据(input)已经被完全消耗完了，
+                        // 且 Z_SYNC_FLUSH 保证了当前数据段已完整输出。
+                        // 我们可以安全退出，等待服务器发下一个包。
+                        break;
+                    }
 
-                // 将读到的解压数据写入输出流
-                output.Write(buffer, 0, count);
+                    // 理论上不应该走到这里，除非数据损坏
+                    throw new Exception("Unknown inflater state");
+                }
             }
 
-            return output.ToArray();
+            return outputStream.ToArray();
         }
     }
 }

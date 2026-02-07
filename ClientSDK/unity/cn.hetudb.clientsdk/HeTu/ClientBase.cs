@@ -172,7 +172,7 @@ namespace HeTu
                 return;
             }
 
-            var payload = new object[] { "sys", systemName }.Concat(args);
+            var payload = new object[] { "rpc", systemName }.Concat(args).ToArray();
             _doRequest(payload, (response, cancel) =>
             {
                 if (cancel)

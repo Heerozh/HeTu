@@ -29,6 +29,9 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
         compressor: zlib._Compress
         decompressor: zlib._Decompress
 
+        def __repr__(self) -> str:
+            return "ZlibContext()"
+
     def __init__(self, level: int = 1, wbits: int = zlib.MAX_WBITS):
         """
         Parameters
@@ -50,7 +53,7 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
         from ...common import Permission
         from ...system import SystemClusters
 
-        keys: set[str] = set("updt")
+        keys: set[str] = {"updt"}
         for comp, _ in SystemClusters().get_components().items():
             if comp.permission_ == Permission.ADMIN:
                 continue
@@ -62,6 +65,9 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
 
         # 用分隔符拼接形成字典内容，重复模式更易被 zlib 利用
         joined = "\n".join(sorted(keys))
+        print(
+            f"生成 zlib 字典，包含 {len(keys)} 个词，总尺寸 {len(joined) / 1024:.2f} KB"
+        )
         return joined.encode("utf-8")
 
     @override

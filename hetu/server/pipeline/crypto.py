@@ -37,6 +37,9 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         send_nonce: int
         recv_nonce: int
 
+        def __repr__(self) -> str:
+            return f"CryptoContext('{self.session_key.hex()[:8]}...')"
+
     def __init__(self):
         super().__init__()
 
