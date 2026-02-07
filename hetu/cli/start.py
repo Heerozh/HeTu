@@ -158,6 +158,11 @@ class StartCommand(CommandInterface):
                 "NAMESPACE": args.namespace,
                 "INSTANCES": [args.instance],
                 "LISTEN": f"0.0.0.0:{args.port}",
+                "PACKET_LAYERS": [
+                    {"type": "jsonb"},
+                    {"type": "zlib"},
+                    {"type": "crypto"},
+                ],
                 "BACKENDS": {
                     "Redis": {
                         "type": "Redis",
@@ -170,14 +175,6 @@ class StartCommand(CommandInterface):
                 "ACCESS_LOG": False,
             }
             config = Config(config_for_factory)
-
-        # 默认消息协议
-        if "PACKET_LAYERS" not in config:
-            config["PACKET_LAYERS"] = [
-                {"type": "jsonb"},
-                {"type": "zlib"},
-                {"type": "crypto"},
-            ]
 
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None

@@ -176,7 +176,9 @@ class MessagePipeline:
                 original_index = len(pipe_ctx) - 1 - i
                 ctx = pipe_ctx[original_index]
             decoded = layer.decode(ctx, decoded)
-        assert isinstance(decoded, (dict, list))
+        assert isinstance(decoded, (dict, list)), (
+            "最终解码结果必须是JSON类型, 但实际得到: " + str(decoded)
+        )
         return decoded
 
 
