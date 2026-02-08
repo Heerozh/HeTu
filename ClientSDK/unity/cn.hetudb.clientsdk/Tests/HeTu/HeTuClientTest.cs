@@ -43,7 +43,7 @@ namespace Tests.HeTu
         {
             [Key("owner")] public long Owner;
 
-            [Key("value")] public int Value;
+            [Key("value")] public double Value;
 
             [Key("id")] public long id { get; set; }
         }
@@ -227,7 +227,7 @@ namespace Tests.HeTu
             {
                 removedPlayer = sender.Rows[rowID].Owner;
             };
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11, -1)
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11)
                 .Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
