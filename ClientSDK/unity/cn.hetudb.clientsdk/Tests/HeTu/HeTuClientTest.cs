@@ -203,17 +203,17 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnInsertAsync()
         {
             HeTuClient.Instance.CallSystem("login", 345, true).Forget();
-            HeTuClient.Instance.CallSystem("create_row", 123, -10, -10).Forget();
-            HeTuClient.Instance.CallSystem("create_row", 234, 0, 0).Forget();
-            HeTuClient.Instance.CallSystem("create_row", 345, 10, 10).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
 
             // 测试OnInsert, OnDelete
             var sub = await HeTuClient.Instance.Range<IndexComp1>(
-                "x", 0, 10, 100);
+                "value", 0, 10, 100);
 
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
-            HeTuClient.Instance.CallSystem("move_user", 123, 2, -10).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2).Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
@@ -227,7 +227,8 @@ namespace Tests.HeTu
             {
                 removedPlayer = sender.Rows[rowID].Owner;
             };
-            HeTuClient.Instance.CallSystem("move_user", 123, 11, -10).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11, -1)
+                .Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else

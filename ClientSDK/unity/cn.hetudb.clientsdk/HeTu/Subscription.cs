@@ -20,7 +20,7 @@ namespace HeTu
     public class DictComponent : Dictionary<string, object>, IBaseComponent
     {
         [Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
-        public long id => (int)this["id"];
+        public long id => Convert.ToInt64(this["id"]);
     }
 
     public abstract class BaseSubscription

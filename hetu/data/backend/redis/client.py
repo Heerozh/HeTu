@@ -668,7 +668,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
-        assert index_name in comp_cls.indexes_
+        assert index_name in comp_cls.indexes_, (
+            f"Component `{comp_cls.name_}` 没有索引 `{index_name}`"
+        )
         b_left, b_right = self.range_normalize_(
             comp_cls.dtype_map_[index_name], left, right, desc
         )

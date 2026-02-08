@@ -164,6 +164,8 @@ namespace HeTu
                     Logger.Instance.Info($"[HeTuClient] 连接断开，{errMsg}.");
                     tcs.TrySetResult(errMsg);
                 }
+
+                _close();
             };
 
             // 必须在退出时保证cancel, 不然会卡死unity
