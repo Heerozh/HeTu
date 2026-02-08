@@ -3,6 +3,7 @@ using System.Collections;
 using System.Linq;
 using System.Threading.Tasks;
 using HeTu;
+using MessagePack;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -29,19 +30,22 @@ namespace Tests.HeTu
             HeTuClient.Instance.Close();
         }
 
-        private class RLSComp : IBaseComponent
+        [MessagePackObject(true)]
+        internal class RLSComp : IBaseComponent
         {
             public long owner;
             public int value;
             public long id { get; set; }
         }
 
-        private class Position : IBaseComponent
+        [MessagePackObject]
+        internal class IndexComp1 : IBaseComponent
         {
-            public long owner;
-            public float x;
-            public float y;
-            public long id { get; set; }
+            [Key("owner")] public long owner;
+
+            [Key("value")] public int value;
+
+            [Key("id")] public long id { get; set; }
         }
 
         private IEnumerator RunTask(Task task)
@@ -73,8 +77,8 @@ namespace Tests.HeTu
             Assert.AreEqual(sub, null);
 
             // 测试订阅
-            HeTuClient.Instance.CallSystem("login", 123, true);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
+            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
             sub = await HeTuClient.Instance.Get(
                 "RLSComp", "owner", 123);
             var lastValue = Convert.ToInt32(sub.Data["value"]);
@@ -86,7 +90,7 @@ namespace Tests.HeTu
                 Debug.Log("收到了更新...");
                 newValue = Convert.ToInt32(sender.Data["value"]);
             };
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
@@ -95,7 +99,7 @@ namespace Tests.HeTu
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
             // Assert.ThrowsAsync 用的是当前协程Wait，会卡死
             var success = false;
             try
@@ -201,12 +205,12 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnInsertAsync()
         {
             HeTuClient.Instance.CallSystem("login", 345, true);
-            HeTuClient.Instance.CallSystem("move_user", 123, -10, -10);
-            HeTuClient.Instance.CallSystem("move_user", 234, 0, 0);
-            HeTuClient.Instance.CallSystem("move_user", 345, 10, 10);
+            HeTuClient.Instance.CallSystem("create_row", 123, -10, -10);
+            HeTuClient.Instance.CallSystem("create_row", 234, 0, 0);
+            HeTuClient.Instance.CallSystem("create_row", 345, 10, 10);
 
             // 测试OnInsert, OnDelete
-            var sub = await HeTuClient.Instance.Range<Position>(
+            var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "x", 0, 10, 100);
 
             long? newPlayer = null;

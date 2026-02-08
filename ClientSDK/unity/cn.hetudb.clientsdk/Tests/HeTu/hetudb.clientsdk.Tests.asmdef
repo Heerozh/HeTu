@@ -5,7 +5,8 @@
         "GUID:e4aa3c779c5c37f45a22b7160eb9a992",
         "GUID:27619889b8ba8c24980f49ee34dbb44a",
         "GUID:0acc523941302664db1f4e527237feb3",
-        "GUID:f51ebe6a0ceec4240a699833d6309b23"
+        "GUID:f51ebe6a0ceec4240a699833d6309b23",
+        "GUID:034c977408447714e91237bd5f97c1ff"
     ],
     "includePlatforms": [],
     "excludePlatforms": [
@@ -33,7 +34,9 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "nunit.framework.dll"
+        "nunit.framework.dll",
+        "MessagePack.dll",
+        "MessagePack.Annotations.dll"
     ],
     "autoReferenced": false,
     "defineConstraints": [
