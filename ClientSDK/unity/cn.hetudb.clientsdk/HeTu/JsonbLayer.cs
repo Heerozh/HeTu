@@ -126,7 +126,7 @@ namespace HeTu
             {
                 return TryDecodeStandardMessage(bytes);
             }
-            catch (Exception ex)
+            catch (Exception)
             {
                 return MessagePackSerializer.Deserialize<object>(bytes);
             }

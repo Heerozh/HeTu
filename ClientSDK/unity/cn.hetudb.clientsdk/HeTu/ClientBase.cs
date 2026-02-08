@@ -70,8 +70,7 @@ namespace HeTu
         protected void ConnectSync(string url)
         {
             if (Pipeline.NumLayers == 0)
-                throw new InvalidOperationException(
-                    "Pipeline未设置，请先调用SetupPipeline");
+                Logger.Instance.Debug("Pipeline为空，可能是忘了调用SetupPipeline");
 
             // 前置清理
             Logger.Instance.Info($"[HeTuClient] 正在连接到：{url}...");
@@ -190,14 +189,15 @@ namespace HeTu
             $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
 
         public void GetSync<T>(
-            string index, object value, Action<RowSubscription<T>, bool> onResponse,
+            string index, object value,
+            Action<RowSubscription<T>, bool, Exception> onResponse,
             string componentName = null)
             where T : IBaseComponent
         {
             if (State == ConnectionState.Disconnected)
             {
                 Logger.Instance.Error("[HeTuClient] Get失败，请先调用Connect");
-                onResponse(null, true);
+                onResponse(null, true, null);
                 return;
             }
 
@@ -209,7 +209,7 @@ namespace HeTu
                     componentName, "id", value, null, 1, false);
                 if (Subscriptions.TryGet(predictID, out var subscribed))
                     if (subscribed is RowSubscription<T> casted)
-                        onResponse(casted, false);
+                        onResponse(casted, false, null);
                     else
                         throw new InvalidCastException(
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
@@ -223,46 +223,58 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    onResponse(null, true);
+                    onResponse(null, true, null);
                     return;
                 }
 
-                var subID = (string)response[1];
-                // 如果没有查询到值
-                if (subID is null)
+                RowSubscription<T> rowSubscription = null;
+                try
                 {
-                    onResponse(null, false);
+                    var subID = (string)response[1];
+                    // 如果查询到值
+                    if (subID != null)
+                    {
+                        // 如果依然是重复订阅，直接返回副本
+                        if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                        {
+                            if (stillSubscribed is RowSubscription<T> casted)
+                            {
+                                rowSubscription = casted;
+                            }
+                            else
+                                throw new InvalidCastException(
+                                    $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+                        }
+                        else
+                        {
+                            var data = ((JsonObject)response[2]).To<T>();
+                            rowSubscription =
+                                new RowSubscription<T>(subID, componentName, data, this);
+                            Subscriptions.Add(subID,
+                                new WeakReference(rowSubscription, false));
+                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    onResponse(null, false, ex);
                     return;
                 }
 
-                // 如果依然是重复订阅，直接返回副本
-                if (Subscriptions.TryGet(subID, out var stillSubscribed))
-                    if (stillSubscribed is RowSubscription<T> casted)
-                    {
-                        onResponse(casted, false);
-                        return;
-                    }
-                    else
-                        throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
-
-                var data = ((JsonObject)response[2]).To<T>();
-                var newSub = new RowSubscription<T>(subID, componentName, data, this);
-                Subscriptions.Add(subID, new WeakReference(newSub, false));
-                Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
-                onResponse(newSub, false);
+                onResponse(rowSubscription, false, null);
             });
         }
 
         public void GetSync(
             string index, object value,
-            Action<RowSubscription<DictComponent>, bool> onResponse,
+            Action<RowSubscription<DictComponent>, bool, Exception> onResponse,
             string componentName = null) =>
             GetSync<DictComponent>(index, value, onResponse, componentName);
 
         public void RangeSync<T>(
             string index, object left, object right, int limit,
-            Action<IndexSubscription<T>, bool> onResponse,
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
             string componentName = null)
             where T : IBaseComponent
@@ -270,7 +282,7 @@ namespace HeTu
             if (State == ConnectionState.Disconnected)
             {
                 Logger.Instance.Error("[HeTuClient] Range失败，请先调用Connect");
-                onResponse(null, true);
+                onResponse(null, true, null);
                 return;
             }
 
@@ -282,7 +294,7 @@ namespace HeTu
             if (Subscriptions.TryGet(predictID, out var subscribed))
                 if (subscribed is IndexSubscription<T> casted)
                 {
-                    onResponse(casted, false);
+                    onResponse(casted, false, null);
                     return;
                 }
                 else
@@ -300,42 +312,55 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    onResponse(null, true);
+                    onResponse(null, true, null);
                     return;
                 }
 
-                var subID = (string)response[1];
-                // 如果没有查询到值
-                if (subID is null)
+                IndexSubscription<T> idxSubscription = null;
+                try
                 {
-                    onResponse(null, false);
+                    var subID = (string)response[1];
+                    // 如果查询到值
+                    if (subID != null)
+                    {
+                        // 如果依然是重复订阅，直接返回副本
+                        if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                        {
+                            if (stillSubscribed is IndexSubscription<T> casted)
+                            {
+                                idxSubscription = casted;
+                            }
+                            else
+                                throw new InvalidCastException(
+                                    $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+                        }
+                        else
+                        {
+                            var rawRows = (JsonObject)response[2];
+                            var rows = rawRows.ToList<T>();
+                            idxSubscription = new IndexSubscription<T>(
+                                subID, componentName, rows, this);
+
+                            Subscriptions.Add(subID,
+                                new WeakReference(idxSubscription, false));
+                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
+                            onResponse(idxSubscription, false, null);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    onResponse(null, false, ex);
                     return;
                 }
 
-                // 如果依然是重复订阅，直接返回副本
-                if (Subscriptions.TryGet(subID, out var stillSubscribed))
-                    if (stillSubscribed is IndexSubscription<T> casted)
-                    {
-                        onResponse(casted, false);
-                        return;
-                    }
-                    else
-                        throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
-
-                var rawRows = (JsonObject)response[2];
-                var rows = rawRows.ToList<T>();
-                var newSub = new IndexSubscription<T>(subID, componentName, rows, this);
-
-                Subscriptions.Add(subID, new WeakReference(newSub, false));
-                Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
-                onResponse(newSub, false);
+                onResponse(idxSubscription, false, null);
             });
         }
 
         public void RangeSync(
             string componentName, string index, object left, object right, int limit,
-            Action<IndexSubscription<DictComponent>, bool> onResponse,
+            Action<IndexSubscription<DictComponent>, bool, Exception> onResponse,
             bool desc = false, bool force = true) =>
             RangeSync(index, left, right, limit, onResponse, desc, force, componentName);
 

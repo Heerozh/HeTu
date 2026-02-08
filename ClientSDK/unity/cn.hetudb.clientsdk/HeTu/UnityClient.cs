@@ -284,13 +284,15 @@ namespace HeTu
             var tcs = new UniTaskCompletionSource<RowSubscription<T>>();
 #endif
 
-            GetSync<T>(index, value, (rowSub, cancel) =>
+            GetSync<T>(index, value, (rowSub, cancel, ex) =>
             {
                 if (cancel)
                 {
                     Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
+                else if (ex != null)
+                    tcs.TrySetException(ex);
                 else
                     tcs.TrySetResult(rowSub);
             }, componentName);
@@ -364,13 +366,15 @@ namespace HeTu
 
             RangeSync<T>(
                 index, left, right, limit,
-                (idxSub, cancel) =>
+                (idxSub, cancel, ex) =>
                 {
                     if (cancel)
                     {
                         Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
                         tcs.TrySetCanceled();
                     }
+                    else if (ex != null)
+                        tcs.TrySetException(ex);
                     else
                         tcs.TrySetResult(idxSub);
                 }, desc, force, componentName
