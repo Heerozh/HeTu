@@ -31,7 +31,7 @@ namespace Tests.HeTu
         }
 
         [MessagePackObject(true)]
-        internal class RLSComp : IBaseComponent
+        public class RLSComp : IBaseComponent
         {
             public long owner;
             public int value;
@@ -39,11 +39,11 @@ namespace Tests.HeTu
         }
 
         [MessagePackObject]
-        internal class IndexComp1 : IBaseComponent
+        public class IndexComp1 : IBaseComponent
         {
-            [Key("owner")] public long owner;
+            [Key("owner")] public long Owner;
 
-            [Key("value")] public int value;
+            [Key("value")] public int Value;
 
             [Key("id")] public long id { get; set; }
         }
@@ -55,10 +55,7 @@ namespace Tests.HeTu
                 yield return null;
             }
 
-            if (task.IsFaulted)
-            {
-                throw task.Exception;
-            }
+            if (task.Exception != null) throw task.Exception;
         }
 
         [UnityTest]
@@ -114,7 +111,6 @@ namespace Tests.HeTu
 
             Assert.False(success, "没有抛出InvalidCastException");
 
-            sub = null;
             // unity delay后第二次gc才会回收
             for (var i = 0; i < 10; i++)
             {
@@ -146,8 +142,10 @@ namespace Tests.HeTu
         private async Task TestSystemCallAsync()
         {
             var callbackCalled = false;
-            var a = HeTuClient.Instance.SystemLocalCallbacks["login"] =
-                args => { callbackCalled = true; };
+            HeTuClient.Instance.SystemLocalCallbacks["login"] = _ =>
+            {
+                callbackCalled = true;
+            };
 
             var resp = await HeTuClient.Instance.CallSystem("login", 123, true);
             var data = resp.ToDict<string, object>();
@@ -170,8 +168,8 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnUpdateAsync()
         {
             // 测试订阅
-            HeTuClient.Instance.CallSystem("login", 234, true);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
+            HeTuClient.Instance.CallSystem("login", 234, true).Forget();
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
             var sub = await HeTuClient.Instance.Range(
                 "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
@@ -184,7 +182,7 @@ namespace Tests.HeTu
             {
                 newValue = Convert.ToInt32(sender.Rows[rowID]["value"]);
             };
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
@@ -204,18 +202,18 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeOnInsertAsync()
         {
-            HeTuClient.Instance.CallSystem("login", 345, true);
-            HeTuClient.Instance.CallSystem("create_row", 123, -10, -10);
-            HeTuClient.Instance.CallSystem("create_row", 234, 0, 0);
-            HeTuClient.Instance.CallSystem("create_row", 345, 10, 10);
+            HeTuClient.Instance.CallSystem("login", 345, true).Forget();
+            HeTuClient.Instance.CallSystem("create_row", 123, -10, -10).Forget();
+            HeTuClient.Instance.CallSystem("create_row", 234, 0, 0).Forget();
+            HeTuClient.Instance.CallSystem("create_row", 345, 10, 10).Forget();
 
             // 测试OnInsert, OnDelete
             var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "x", 0, 10, 100);
 
             long? newPlayer = null;
-            sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].owner; };
-            HeTuClient.Instance.CallSystem("move_user", 123, 2, -10);
+            sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
+            HeTuClient.Instance.CallSystem("move_user", 123, 2, -10).Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
@@ -227,9 +225,9 @@ namespace Tests.HeTu
             long? removedPlayer = null;
             sub.OnDelete += (sender, rowID) =>
             {
-                removedPlayer = sender.Rows[rowID].owner;
+                removedPlayer = sender.Rows[rowID].Owner;
             };
-            HeTuClient.Instance.CallSystem("move_user", 123, 11, -10);
+            HeTuClient.Instance.CallSystem("move_user", 123, 11, -10).Forget();
 #if UNITY_6000_0_OR_NEWER
             await Awaitable.WaitForSecondsAsync(1);
 #else
