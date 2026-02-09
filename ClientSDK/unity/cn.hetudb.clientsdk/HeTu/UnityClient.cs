@@ -273,6 +273,8 @@ namespace HeTu
         /// var subscription = await HeTuClient.Instance.Get<HP>("owner", user_id);
         /// Debug.log("My HP:" + subscription.Data.value);
         /// subscription.Dispose(); // 反订阅
+        /// // 或使用AddTo和gameObject生命周期绑定
+        /// // subscription.AddTo(gameObject);
         /// ]]>
         /// </code>
         [MustDisposeResource]
@@ -417,5 +419,36 @@ namespace HeTu
             return await Range<DictComponent>(index, left, right, limit, desc, force,
                 componentName);
         }
+    }
+
+    public static class HeTuUnityExtensions
+    {
+#if R3_INSTALLED
+        /// <summary>
+        /// 把HeTu数据订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对数据订阅Dispose。
+        /// Dispose中会去HeTu服务器反订阅，并清理后续的所有R3响应式Subscribe。
+        /// 注：任意IDisposable对象都可以使用AddTo方法。本方法只是为了告知Rider，
+        /// 使用后不在需要警告未Dispose的资源泄漏问题。
+        /// </summary>
+        [HandlesResourceDisposal]
+        public static RowSubscription<T> AddTo<T>(this RowSubscription<T> disposable, GameObject gameObject)
+            where T : IBaseComponent
+        {
+            return R3.MonoBehaviourExtensions.AddTo(disposable, gameObject);
+        }
+
+        /// <summary>
+        /// 把订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对订阅Dispose。
+        /// Dispose中会去服务器反订阅，并清理后续的所有R3订阅。
+        /// 注：任意IDisposable对象都可以使用AddTo方法。本方法只是为了告知Rider，
+        /// 使用后不在需要警告未Dispose的资源泄漏问题。
+        /// </summary>
+        [HandlesResourceDisposal]
+        public static IndexSubscription<T> AddTo<T>(this IndexSubscription<T> disposable, GameObject gameObject)
+            where T : IBaseComponent
+        {
+            return R3.MonoBehaviourExtensions.AddTo(disposable, gameObject);
+        }
+#endif
     }
 }

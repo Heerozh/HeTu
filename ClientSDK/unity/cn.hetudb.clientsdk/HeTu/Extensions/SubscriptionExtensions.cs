@@ -15,6 +15,7 @@ namespace HeTu.Extensions
 {
     public static class SubscriptionExtensions
     {
+
         // ========================================================================
         // RowSubscription 扩展
         // ========================================================================
@@ -25,15 +26,18 @@ namespace HeTu.Extensions
         ///     用法：
         ///     // 原始对象
         ///     <![CDATA[
-        /// RowSubscription<HP> hpSub = client.Get<HP>("owner", 123);
-        /// ]]>
+        ///     RowSubscription<HP> hpSub = client.Get<HP>("owner", 123);
+        ///     // 在gameObject销毁时反订阅，以及Dispose所有R3相关对象。
+        ///     // 或手动调用hpSub.Dispose()，不然服务器永远发送订阅消息。
+        ///     hpSub.AddTo(gameObject);
+        ///     ]]>
         ///     // 转换成 ReactiveProperty
-        ///     // 只有当 hpSub 被回收时，或者你手动 dispose rp 时，才会停止监听
-        ///     var hpRp = hpSub.ToReactiveProperty();
-        ///     // 逻辑：当 hpRp 变化 -> 转换成字符串 -> 赋值给 Text 组件
-        ///     hpRp.Select(hp => hp != null ? $"HP: {hp.value}" : "Dead")
-        ///     .SubscribeToText(hpText) // R3 特有的 Unity 扩展，自动处理赋值
-        ///     .AddTo(this);        // 放入垃圾袋，随组件销毁而销毁
+        ///     var hp = hpSub.ToReactiveProperty();
+        ///     // 逻辑：当 hp 变化 -> 转换成字符串 -> 赋值给 Text 组件
+        ///     hp.Select(x => x != null ? $"HP: {x.value}" : "Dead")
+        ///     .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
+        ///     // 通常R3的订阅.Subscribe后需要跟.AddTo一个垃圾袋负责销毁，
+        ///     // 但这里源头的hpSub会负责销毁所有子订阅
         /// </summary>
         public static ReadOnlyReactiveProperty<T> ToReactiveProperty<T>(
             this RowSubscription<T> subscription)

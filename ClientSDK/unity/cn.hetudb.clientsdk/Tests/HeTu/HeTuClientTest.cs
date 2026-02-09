@@ -251,13 +251,14 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
             var sub = await HeTuClient.Instance.Get<RLSComp>(
                 "owner", 456);
+            sub.AddTo(go);
             var initValue = sub.Data.value;
 
             List<int> receivedValues = new();
             var observer = sub.ToReactiveProperty()
                 .Subscribe(x => receivedValues.Add(x.value));
             // todo 考虑是否让SubscribeCore的订阅，全部关注到sub里，不需要外面dispose两个
-            Disposable.Combine(sub, observer).AddTo(go);
+            // Disposable.Combine(sub, observer).AddTo(go);
 
 
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
