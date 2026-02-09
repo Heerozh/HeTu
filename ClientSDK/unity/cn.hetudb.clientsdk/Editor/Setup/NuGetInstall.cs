@@ -17,7 +17,7 @@ namespace HeTu.Editor
 
         private static readonly (string, string)[] s_optionalDependencies =
         {
-            ("R3", "1.3.0"), ("ObservableCollections", "3.3.4")
+            ("R3", "1.3.0"),
         };
 #if NUGET_INSTALLED
 

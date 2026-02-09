@@ -15,12 +15,12 @@
         "BouncyCastle.Cryptography.dll",
         "Unity.SharpZipLib.dll",
         "MessagePack.dll",
-        "ObservableCollections.dll",
         "R3.dll"
     ],
     "autoReferenced": true,
     "defineConstraints": [
-        "MSGPACK_INSTALLED"
+        "MSGPACK_INSTALLED",
+        "R3_INSTALLED"
     ],
     "versionDefines": [
         {

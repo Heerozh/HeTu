@@ -38,9 +38,7 @@ namespace HeTu
         protected HeTuClientBase() => SetupPipeline(
             new List<MessageProcessLayer>
             {
-#pragma warning disable IDISP004
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
-#pragma warning restore IDISP004
             });
 
         public virtual void Dispose() => Pipeline.Dispose();

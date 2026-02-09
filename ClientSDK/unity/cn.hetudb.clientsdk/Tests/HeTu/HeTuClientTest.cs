@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using HeTu;
 using HeTu.Extensions;
@@ -247,20 +248,26 @@ namespace Tests.HeTu
         {
             var go = new GameObject("TestRowSubscribeR3");
 
+            // 初始化数据
             HeTuClient.Instance.CallSystem("login", 456, true).Forget();
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            // 订阅
             var sub = await HeTuClient.Instance.Get<RLSComp>(
                 "owner", 456);
             sub.AddTo(go);
             var initValue = sub.Data.value;
 
+            // 订阅响应
             List<int> receivedValues = new();
-            var observer = sub.ToReactiveProperty()
+            sub.ToReactiveProperty()
                 .Subscribe(x => receivedValues.Add(x.value));
-            // todo 考虑是否让SubscribeCore的订阅，全部关注到sub里，不需要外面dispose两个
-            // Disposable.Combine(sub, observer).AddTo(go);
 
+            // 测试是否已经加入到了DisposeBag
+            var countField = typeof(R3.DisposableBag)
+                .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
 
+            // 发送更新，等待变更
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
             await Sleep(1);
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -3).Forget();
@@ -268,11 +275,18 @@ namespace Tests.HeTu
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
             await Sleep(1);
 
+            // 检查收到的值
             Assert.AreEqual(
                 new List<int> { initValue, initValue + 2, initValue - 1, initValue },
                 receivedValues);
 
+            // 检查DisposeBag是否已Dispose
             Object.Destroy(go);
+            await Sleep(1);
+
+            var isDisposed = typeof(DisposableBag)
+                .GetField("isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsTrue((bool)isDisposed.GetValue(sub.DisposeBag));
             Debug.Log("TestRowSubscribeR3结束");
         }
 
@@ -285,11 +299,53 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeR3Async()
         {
-            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 456, 5).Forget();
+            var go = new GameObject("TestRowSubscribeR3");
 
-            using var sub = await HeTuClient.Instance.Range<IndexComp1>(
+            // 初始化数据
+            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
+
+            // 订阅
+            var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "value", 0, 10, 100);
+            sub.AddTo(go);
+            var initValue = sub.Data.value;
+
+            // 订阅响应
+            List<int> receivedValues = new();
+            var observeable = sub.ToObservableDictionary();
+            observeable.Collection.
+                .Subscribe(x => receivedValues.Add(x.value));
+
+            // 测试是否已经加入到了DisposeBag
+            var countField = typeof(R3.DisposableBag)
+                .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
+
+            // 发送更新，等待变更
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
+            await Sleep(1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -3).Forget();
+            await Sleep(1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            await Sleep(1);
+
+            // 检查收到的值
+            Assert.AreEqual(
+                new List<int> { initValue, initValue + 2, initValue - 1, initValue },
+                receivedValues);
+
+            // 检查DisposeBag是否已Dispose
+            Object.Destroy(go);
+            await Sleep(1);
+
+            var isDisposed = typeof(DisposableBag)
+                .GetField("isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsTrue((bool)isDisposed.GetValue(sub.DisposeBag));
+            Debug.Log("TestRowSubscribeR3结束");
+
         }
     }
 }

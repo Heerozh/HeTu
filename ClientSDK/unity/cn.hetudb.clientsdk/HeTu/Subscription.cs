@@ -9,6 +9,7 @@ using System.Collections.Generic;
 using System.Linq;
 using JetBrains.Annotations;
 using UnityEngine.Scripting;
+using R3;
 
 namespace HeTu
 {
@@ -31,6 +32,7 @@ namespace HeTu
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
         public readonly string ComponentName;
+        public DisposableBag DisposeBag;
 
         protected BaseSubscription(string subscriptID, string componentName,
             HeTuClientBase client, string creationStack = null)
@@ -47,6 +49,7 @@ namespace HeTu
         public virtual void Dispose()
         {
             _parentClient.Unsubscribe(_subscriptID, "Dispose");
+            DisposeBag.Dispose();
             GC.SuppressFinalize(this);
         }
 
@@ -54,11 +57,9 @@ namespace HeTu
 
         ~BaseSubscription()
         {
-#pragma warning disable IDISP023 // Don't use reference types in finalizer context
             Logger.Instance.Error(
                 "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID +
                 "\n创建时的堆栈：\n" + _creationStack);
-#pragma warning restore IDISP023 // Don't use reference types in finalizer context
         }
     }
 

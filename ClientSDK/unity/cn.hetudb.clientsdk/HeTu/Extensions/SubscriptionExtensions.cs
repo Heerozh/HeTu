@@ -8,7 +8,6 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using ObservableCollections;
 using R3;
 
 namespace HeTu.Extensions
@@ -35,7 +34,8 @@ namespace HeTu.Extensions
         ///     var hp = hpSub.ToReactiveProperty();
         ///     // 逻辑：当 hp 变化 -> 转换成字符串 -> 赋值给 Text 组件
         ///     hp.Select(x => x != null ? $"HP: {x.value}" : "Dead")
-        ///     .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
+        ///         .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
+        ///     // todo 第一个值怎么处理？
         ///     // 通常R3的订阅.Subscribe后需要跟.AddTo一个垃圾袋负责销毁，
         ///     // 但这里源头的hpSub会负责销毁所有子订阅
         /// </summary>
@@ -59,7 +59,7 @@ namespace HeTu.Extensions
                 {
                     subscription.OnUpdate -= OnUpdate;
                     subscription.OnDelete -= OnDelete;
-                });
+                }).AddTo(ref subscription.DisposeBag);
 
                 void OnDelete(RowSubscription<T> sub) =>
                     // 当 Delete 发生时，发射 null (或 default)
@@ -84,31 +84,33 @@ namespace HeTu.Extensions
         ///     用法：
         ///     <![CDATA[
         ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
+        ///     indexSub.AddTo(gameObject);
         ///
-        ///     // 监听插入
-        ///     indexSub.ObserveInsert()
-        ///         .Subscribe(x => Console.WriteLine($"插入 ID: {x.id}, Val: {x.data.value}"));
-        ///         .AddTo(this);        // 放入垃圾袋，随组件销毁而销毁
+        ///     // 订阅所有数据
+        ///     indexSub.ObserveStream()
+        ///         .Subscribe(added => {
+        ///             Console.WriteLine($"插入 ID: {added.id}, Val: {added.value}");
+        ///             var rowId = added.id;
         ///
-        ///     // 监听更新 (过滤特定条件)
-        ///     indexSub.ObserveUpdate()
-        ///         .Where(x => x.data.value < 50) // 只关心血量低于50的更新
-        ///         .Subscribe(x => Console.WriteLine($"ID {x.id} 血量危急!"));
-        ///         .AddTo(this);
+        ///             // 监听更新，数据删除时不会触发，值永远不为null
+        ///             added.ObserveReplace()
+        ///                 .Subscribe(x => Console.WriteLine($"ID {rowId} 血量: { x.value }"));
         ///
-        ///     // 监听删除
-        ///     indexSub.ObserveDelete()
-        ///         .Subscribe(id => Console.WriteLine($"ID {id} 已移除"));
-        ///         .AddTo(this);
+        ///             // 监听删除
+        ///             added.ObserveRemove()
+        ///                 .Subscribe(id => Console.WriteLine($"ID {id} 已移除"));
+        ///         });
         ///     ]]>
         /// </summary>
-        public static Observable<(long id, T data)> ObserveInsert<T>(
+        public static Observable<(long id, T data)> ObserveAdd<T>(
             this IndexSubscription<T> subscription)
             where T : IBaseComponent =>
             Observable.Create<(long, T)>(observer =>
             {
                 subscription.OnInsert += Handler;
-                return Disposable.Create(() => subscription.OnInsert -= Handler);
+                return Disposable
+                    .Create(() => subscription.OnInsert -= Handler)
+                    .AddTo(ref subscription.DisposeBag);
 
                 void Handler(IndexSubscription<T> sub, long id)
                 {
@@ -123,13 +125,15 @@ namespace HeTu.Extensions
         /// <summary>
         ///     监听更新事件 (返回 id 和数据)
         /// </summary>
-        public static Observable<(long id, T data)> ObserveUpdate<T>(
+        public static Observable<(long id, T data)> ObserveReplace<T>(
             this IndexSubscription<T> subscription)
             where T : IBaseComponent =>
             Observable.Create<(long, T)>(observer =>
             {
                 subscription.OnUpdate += Handler;
-                return Disposable.Create(() => subscription.OnUpdate -= Handler);
+                return Disposable
+                    .Create(() => subscription.OnUpdate -= Handler)
+                    .AddTo(ref subscription.DisposeBag);
 
                 void Handler(IndexSubscription<T> sub, long id)
                 {
@@ -143,73 +147,20 @@ namespace HeTu.Extensions
         /// <summary>
         ///     监听删除事件 (只返回 id，因为数据可能已经没了或不重要)
         /// </summary>
-        public static Observable<long> ObserveDelete<T>(
+        public static Observable<long> ObserveRemove<T>(
             this IndexSubscription<T> subscription)
             where T : IBaseComponent =>
             Observable.Create<long>(observer =>
             {
                 subscription.OnDelete += Handler;
-                return Disposable.Create(() => subscription.OnDelete -= Handler);
+                return Disposable
+                    .Create(() => subscription.OnDelete -= Handler)
+                    .AddTo(ref subscription.DisposeBag);
+
                 void Handler(IndexSubscription<T> sub, long id) => observer.OnNext(id);
             });
 
-        // ========================================================================
-        // IndexSubscription 扩展 (高级：同步到 ObservableDictionary)
-        // ========================================================================
 
-        /// <summary>
-        ///     创建一个与 Subscription 保持同步的 ObservableDictionary。
-        ///     注意：返回的对象需要 Dispose 以停止同步。
-        ///     用法：
-        ///     <![CDATA[
-        ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
-        ///     ]]>
-        ///     // 创建同步字典
-        ///     // 注意：这个 syncDict 需要被 Dispose，否则会一直监听 indexSub 的事件
-        ///     using var syncDict = indexSub.ToObservableDictionary();
-        ///     // 现在你拥有了完整的 ObservableCollection 能力
-        ///     syncDict.Collection.ObserveCountChanged()
-        ///     .Subscribe(c => Console.WriteLine($"总数: {c}"));
-        ///     .AddTo(this);
-        /// </summary>
-        public static SynchronizedObservableDictionary<T> ToObservableDictionary<T>(
-            this IndexSubscription<T> subscription)
-            where T : IBaseComponent =>
-            new(subscription);
-
-        // 辅助类：用于管理 ObservableDictionary 的同步生命周期
-        public sealed class SynchronizedObservableDictionary<T> : IDisposable,
-            IEnumerable<KeyValuePair<long, T>>
-            where T : IBaseComponent
-        {
-            private readonly IDisposable _eventSubscription;
-            private readonly IndexSubscription<T> _source;
-
-            public SynchronizedObservableDictionary(IndexSubscription<T> source)
-            {
-                _source = source;
-                // 初始化集合
-                Collection = new ObservableDictionary<long, T>(source.Rows);
-
-                // 组合所有事件订阅
-                var d1 = source.ObserveInsert().Subscribe(x => Collection[x.id] = x.data);
-                var d2 = source.ObserveUpdate().Subscribe(x => Collection[x.id] = x.data);
-                var d3 = source.ObserveDelete().Subscribe(id => Collection.Remove(id));
-
-                _eventSubscription = Disposable.Combine(d1, d2, d3);
-            }
-
-            // 公开的 R3 集合
-            public ObservableDictionary<long, T> Collection { get; }
-
-            public void Dispose() => _eventSubscription.Dispose(); // 停止监听源事件
-
-            // 实现 IEnumerable 方便直接遍历
-            public IEnumerator<KeyValuePair<long, T>> GetEnumerator() =>
-                Collection.GetEnumerator();
-
-            IEnumerator IEnumerable.GetEnumerator() => Collection.GetEnumerator();
-        }
     }
 }
 #endif
