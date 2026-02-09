@@ -42,28 +42,29 @@ namespace HeTu.Extensions
             // 获取初始值
             var initialValue = subscription.Data;
 
-            // 创建一个 Observable 来监听源对象的变化
+            // 创建一个 Observable 来监听源对象的变化, 第一个参数是SubscribeCore回调
+            // 每次 observable.Subscribe 时都会调用这个回调
             var observable = Observable.Create<T>(observer =>
             {
-                // 定义事件处理函数
-                void onUpdate(RowSubscription<T> sub) =>
-                    // 当 Update 发生时，发射新数据
-                    observer.OnNext(sub.Data);
-
-                void onDelete(RowSubscription<T> sub) =>
-                    // 当 Delete 发生时，发射 null (或 default)
-                    observer.OnNext(null);
-
                 // 订阅原始事件
-                subscription.OnUpdate += onUpdate;
-                subscription.OnDelete += onDelete;
+                subscription.OnUpdate += OnUpdate;
+                subscription.OnDelete += OnDelete;
 
                 // 当 Observable 被 Dispose 时，取消订阅原始事件
                 return Disposable.Create(() =>
                 {
-                    subscription.OnUpdate -= onUpdate;
-                    subscription.OnDelete -= onDelete;
+                    subscription.OnUpdate -= OnUpdate;
+                    subscription.OnDelete -= OnDelete;
                 });
+
+                void OnDelete(RowSubscription<T> sub) =>
+                    // 当 Delete 发生时，发射 null (或 default)
+                    observer.OnNext(null);
+
+                // 定义事件处理函数
+                void OnUpdate(RowSubscription<T> sub) =>
+                    // 当 Update 发生时，发射新数据
+                    observer.OnNext(sub.Data);
             });
 
             // 转换为 ReactiveProperty，这样它就有了 "当前值" 的概念，并且线程安全
@@ -102,7 +103,10 @@ namespace HeTu.Extensions
             where T : IBaseComponent =>
             Observable.Create<(long, T)>(observer =>
             {
-                void handler(IndexSubscription<T> sub, long id)
+                subscription.OnInsert += Handler;
+                return Disposable.Create(() => subscription.OnInsert -= Handler);
+
+                void Handler(IndexSubscription<T> sub, long id)
                 {
                     // 从 Rows 中获取刚插入的数据
                     if (sub.Rows.TryGetValue(id, out var data))
@@ -110,9 +114,6 @@ namespace HeTu.Extensions
                         observer.OnNext((id, data));
                     }
                 }
-
-                subscription.OnInsert += handler;
-                return Disposable.Create(() => subscription.OnInsert -= handler);
             });
 
         /// <summary>
@@ -123,16 +124,16 @@ namespace HeTu.Extensions
             where T : IBaseComponent =>
             Observable.Create<(long, T)>(observer =>
             {
-                void handler(IndexSubscription<T> sub, long id)
+                subscription.OnUpdate += Handler;
+                return Disposable.Create(() => subscription.OnUpdate -= Handler);
+
+                void Handler(IndexSubscription<T> sub, long id)
                 {
                     if (sub.Rows.TryGetValue(id, out var data))
                     {
                         observer.OnNext((id, data));
                     }
                 }
-
-                subscription.OnUpdate += handler;
-                return Disposable.Create(() => subscription.OnUpdate -= handler);
             });
 
         /// <summary>
@@ -143,9 +144,9 @@ namespace HeTu.Extensions
             where T : IBaseComponent =>
             Observable.Create<long>(observer =>
             {
-                void handler(IndexSubscription<T> sub, long id) => observer.OnNext(id);
-                subscription.OnDelete += handler;
-                return Disposable.Create(() => subscription.OnDelete -= handler);
+                subscription.OnDelete += Handler;
+                return Disposable.Create(() => subscription.OnDelete -= Handler);
+                void Handler(IndexSubscription<T> sub, long id) => observer.OnNext(id);
             });
 
         // ========================================================================
@@ -173,7 +174,7 @@ namespace HeTu.Extensions
             new(subscription);
 
         // 辅助类：用于管理 ObservableDictionary 的同步生命周期
-        public class SynchronizedObservableDictionary<T> : IDisposable,
+        public sealed class SynchronizedObservableDictionary<T> : IDisposable,
             IEnumerable<KeyValuePair<long, T>>
             where T : IBaseComponent
         {
@@ -197,7 +198,7 @@ namespace HeTu.Extensions
             // 公开的 R3 集合
             public ObservableDictionary<long, T> Collection { get; }
 
-            public virtual void Dispose() => _eventSubscription.Dispose(); // 停止监听源事件
+            public void Dispose() => _eventSubscription.Dispose(); // 停止监听源事件
 
             // 实现 IEnumerable 方便直接遍历
             public IEnumerator<KeyValuePair<long, T>> GetEnumerator() =>

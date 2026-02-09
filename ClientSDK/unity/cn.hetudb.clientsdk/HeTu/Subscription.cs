@@ -7,8 +7,8 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using UnityEngine.Scripting;
 using JetBrains.Annotations;
+using UnityEngine.Scripting;
 
 namespace HeTu
 {
@@ -27,10 +27,10 @@ namespace HeTu
     [MustDisposeResource]
     public abstract class BaseSubscription : IDisposable
     {
+        private readonly string _creationStack;
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
         public readonly string ComponentName;
-        private readonly string _creationStack;
 
         protected BaseSubscription(string subscriptID, string componentName,
             HeTuClientBase client, string creationStack = null)
@@ -41,8 +41,6 @@ namespace HeTu
             _creationStack = creationStack;
         }
 
-        public abstract void UpdateRows(JsonObject data);
-
         /// <summary>
         ///     销毁远端订阅对象。Dispose应该明确调用。
         /// </summary>
@@ -52,11 +50,14 @@ namespace HeTu
             GC.SuppressFinalize(this);
         }
 
+        public abstract void UpdateRows(JsonObject data);
+
         ~BaseSubscription()
         {
 #pragma warning disable IDISP023 // Don't use reference types in finalizer context
             Logger.Instance.Error(
-                "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID + "\n创建时的堆栈：\n" + _creationStack);
+                "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID +
+                "\n创建时的堆栈：\n" + _creationStack);
 #pragma warning restore IDISP023 // Don't use reference types in finalizer context
         }
     }

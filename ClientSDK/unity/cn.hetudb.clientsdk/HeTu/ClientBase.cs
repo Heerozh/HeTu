@@ -8,7 +8,6 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
-using JetBrains.Annotations;
 
 namespace HeTu
 {
@@ -22,7 +21,7 @@ namespace HeTu
     /// <summary>
     ///     河图Client基础类，不包含网络和平台相关操作
     /// </summary>
-    public abstract class HeTuClientBase: IDisposable
+    public abstract class HeTuClientBase : IDisposable
     {
         protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
             OfflineQueue = new();
@@ -43,6 +42,8 @@ namespace HeTu
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
 #pragma warning restore IDISP004
             });
+
+        public virtual void Dispose() => Pipeline.Dispose();
 
         // 连接成功时的回调
         public event Action OnConnected;
@@ -67,11 +68,6 @@ namespace HeTu
             Pipeline.Clean();
             foreach (var layer in layers)
                 Pipeline.AddLayer(layer);
-        }
-
-        public virtual void Dispose()
-        {
-            Pipeline.Dispose();
         }
 
         // 连接到河图url的Core方法，外部还需要异步包装一下
@@ -262,8 +258,8 @@ namespace HeTu
                             var data = ((JsonObject)response[2]).To<T>();
 #pragma warning disable IDISP001
                             // ReSharper disable once NotDisposedResource
-                            rowSubscription =
-                                new RowSubscription<T>(subID, componentName, data, this, creationSource);
+                            rowSubscription = new RowSubscription<T>(
+                                subID, componentName, data, this, creationSource);
 #pragma warning restore IDISP001
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));

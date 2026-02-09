@@ -10,9 +10,9 @@ using Cysharp.Threading.Tasks;
 #endif
 using System;
 using System.Threading;
+using JetBrains.Annotations;
 using UnityEngine;
 using UnityWebSocket;
-using JetBrains.Annotations;
 
 namespace HeTu
 {
@@ -27,10 +27,11 @@ namespace HeTu
             return new HeTuClient();
         });
 
-        public static HeTuClient Instance => s_lazy.Value;
+        private CancellationTokenSource _connectionCancelSource;
 
         private IWebSocket _socket;
-        private CancellationTokenSource _connectionCancelSource;
+
+        public static HeTuClient Instance => s_lazy.Value;
 
         /// <summary>
         ///     对于全局连接(HeTuClient.Instance)，可以不做Dispose。
