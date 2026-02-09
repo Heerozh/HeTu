@@ -1,16 +1,16 @@
 ﻿using System;
 using System.Collections;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
 using HeTu;
+using HeTu.Extensions;
 using MessagePack;
 using NUnit.Framework;
+using R3;
 using UnityEngine;
 using UnityEngine.TestTools;
-using HeTu.Extensions;
-using System.Collections.Generic;
-using R3;
-
+using Object = UnityEngine.Object;
 #if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
 #endif
@@ -62,6 +62,16 @@ namespace Tests.HeTu
             if (task.Exception != null) throw task.Exception;
         }
 
+#if UNITY_6000_0_OR_NEWER
+        private static async Awaitable Sleep(int seconds)
+        {
+            await Awaitable.WaitForSecondsAsync(seconds);
+        }
+#else
+        private static async UniTask Sleep(int seconds) =>
+            await UniTask.Delay(seconds * 1000);
+#endif
+
         [UnityTest]
         [Order(1)] // 必须未调用过login测试才会通过
         public IEnumerator TestRowSubscribe()
@@ -92,11 +102,8 @@ namespace Tests.HeTu
                 newValue = Convert.ToInt32(sender.Data["value"]);
             };
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
-#if UNITY_6000_0_OR_NEWER
-            await Awaitable.WaitForSecondsAsync(1);
-#else
-            await UniTask.Delay(1000);
-#endif
+
+            await Sleep(1);
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
@@ -178,11 +185,8 @@ namespace Tests.HeTu
                 newValue = Convert.ToInt32(sender.Rows[rowID]["value"]);
             };
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
-#if UNITY_6000_0_OR_NEWER
-            await Awaitable.WaitForSecondsAsync(1);
-#else
-            await UniTask.Delay(1000);
-#endif
+
+            await Sleep(1);
             Assert.AreEqual(newValue, lastValue - 2);
 
             Debug.Log("TestIndexSubscribeOnUpdate结束");
@@ -209,11 +213,8 @@ namespace Tests.HeTu
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2).Forget();
-#if UNITY_6000_0_OR_NEWER
-            await Awaitable.WaitForSecondsAsync(1);
-#else
-            await UniTask.Delay(1000);
-#endif
+
+            await Sleep(1);
             Assert.AreEqual(newPlayer, 123);
 
             // OnDelete
@@ -224,11 +225,8 @@ namespace Tests.HeTu
             };
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11)
                 .Forget();
-#if UNITY_6000_0_OR_NEWER
-            await Awaitable.WaitForSecondsAsync(1);
-#else
-            await UniTask.Delay(1000);
-#endif
+
+            await Sleep(1);
             Assert.AreEqual(removedPlayer, 123);
 
             Assert.False(sub.Rows.ContainsKey(123));
@@ -247,19 +245,34 @@ namespace Tests.HeTu
 
         private async Task TestRowSubscribeR3Async()
         {
-            GameObject go = new GameObject("TestRowSubscribeR3");
+            var go = new GameObject("TestRowSubscribeR3");
 
             HeTuClient.Instance.CallSystem("login", 456, true).Forget();
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
-            using var sub = await HeTuClient.Instance.Get<RLSComp>(
-                 "owner", 456);
+            var sub = await HeTuClient.Instance.Get<RLSComp>(
+                "owner", 456);
+            var initValue = sub.Data.value;
 
             List<int> receivedValues = new();
-            sub.ToReactiveProperty()
-                .Subscribe(x => receivedValues.Add(x.value))
-                .AddTo(go);
+            var observer = sub.ToReactiveProperty()
+                .Subscribe(x => receivedValues.Add(x.value));
+            // todo 考虑是否让SubscribeCore的订阅，全部关注到sub里，不需要外面dispose两个
+            Disposable.Combine(sub, observer).AddTo(go);
 
-            UnityEngine.Object.Destroy(go);
+
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
+            await Sleep(1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", -3).Forget();
+            await Sleep(1);
+            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            await Sleep(1);
+
+            Assert.AreEqual(
+                new List<int> { initValue, initValue + 2, initValue - 1, initValue },
+                receivedValues);
+
+            Object.Destroy(go);
+            Debug.Log("TestRowSubscribeR3结束");
         }
 
         [UnityTest]
@@ -276,7 +289,6 @@ namespace Tests.HeTu
 
             using var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "value", 0, 10, 100);
-
         }
     }
 }
