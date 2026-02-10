@@ -312,7 +312,10 @@ namespace Tests.HeTu
             var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "value", 0, 10, 100);
             sub.AddTo(go);
+            // 应该查询到2个值
             var initValues = sub.Rows.Values.Select(x => x.Value).ToList();
+            var initIDs = sub.Rows.Keys.ToList();
+            Assert.AreEqual(2, initValues.Count);
 
             // 订阅响应
             List<double> receivedValues = new();
@@ -332,7 +335,9 @@ namespace Tests.HeTu
             // 测试是否已经加入到了DisposeBag
             var countField = typeof(DisposableBag)
                 .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
-            Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
+            Assert.IsNotNull(countField);
+            // 1 add subject， 2查询到的值到replaceSubject, 1 sub自身, 在加上2查询到的值.Subscribe,和1 add.Subscribe
+            Assert.True((int)countField.GetValue(sub.DisposeBag) == 6);
 
             // 发送更新，等待变更
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1).Forget();
@@ -346,7 +351,11 @@ namespace Tests.HeTu
             Assert.AreEqual(
                 new List<double>
                 {
-                    initValues[0], initValues[0] + 1, initValues[0] + 1, initValues[0]
+                    initValues[0],
+                    initValues[1],
+                    1,
+                    2,
+                    initIDs[0]
                 },
                 receivedValues);
 
@@ -356,8 +365,9 @@ namespace Tests.HeTu
 
             var isDisposed = typeof(DisposableBag)
                 .GetField("isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(isDisposed);
             Assert.IsTrue((bool)isDisposed.GetValue(sub.DisposeBag));
-            Debug.Log("TestRowSubscribeR3结束");
+            Debug.Log("TestIndexSubscribeR3结束");
         }
     }
 }

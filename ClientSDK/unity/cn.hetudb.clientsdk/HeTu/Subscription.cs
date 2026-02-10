@@ -236,11 +236,10 @@ namespace HeTu
         ///     ]]>
         /// </summary>
         public Observable<T> ObserveAdd() =>
-            // Concat会把EnumerableToObservable中的OnCompleted屏蔽然后自动切换下一个订阅
+            // Concat会把前一个订阅源中的OnCompleted事件屏蔽然后自动切换下一个订阅
             Observable.Defer(() => Rows.Values.ToObservable().Concat(_addSubject));
 
-        public Observable<T> ObserveReplace(long rowID) =>
-            _replaceSubjects[rowID].Prepend(Rows[rowID]);
+        public Observable<T> ObserveReplace(long rowID) => _replaceSubjects[rowID];
     }
 
     public class SubscriptionManager
