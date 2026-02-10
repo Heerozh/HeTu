@@ -81,23 +81,22 @@ namespace HeTu
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _subject;
-        public readonly long RowID;
+        public long LastRowID;
 
         public RowSubscription(string subscriptID, string componentName, T row,
             HeTuClientBase client, string creationStack = null) :
             base(subscriptID, componentName, client, creationStack)
         {
             Data = row;
-            RowID = row.ID;
+            LastRowID = row.ID;
             _subject = new Subject<T>();
             DisposeBag.Add(_subject);
         }
 
         public T Data { get; private set; }
-        public bool IsDeleted => RowID != Data.ID;
 
         /// <summary>
-        ///     获得 RowSubscription 的 Subject 热源，自动处理 OnUpdate 和 OnDelete 事件。
+        ///     获得 RowSubscription 的 Subject 响应式热源，自动处理 OnUpdate 和 OnDelete 事件。
         ///     用法：
         ///     // HeTu数据订阅
         ///     <![CDATA[
@@ -108,7 +107,7 @@ namespace HeTu
         ///     // 逻辑：当 hp 变化 -> 转换成字符串 -> 赋值给 Text 组件
         ///     hpSub.Subject.Select(x => x.ID != 0 ? $"HP: {x.value}" : "Dead")
         ///     .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
-        ///     .AddTo(hpSub.DisposeBag); // .Subscribe的生命周期和订阅源头绑定
+        ///     .AddTo(ref hpSub.DisposeBag); // .Subscribe的生命周期和订阅源头绑定
         ///     // 虽然.Subscribe返回的Observer对象都有AutoDisposeOnCompleted标记
         ///     // 当热源hpSub Dispose时，会调用OnCompleted，自动Dispose所有订阅Node
         ///     // 但.Subscribe后自己负责Dispose是最佳实践
@@ -124,10 +123,14 @@ namespace HeTu
             {
                 OnDelete?.Invoke(this);
                 Data = default;
+                // 不应该_subject.OnCompleted，如果订阅的查询条件不是RowId，那么数据可能会重新出现
+                // 如果是订阅RowId，那么数据不会重新出现，所以可以OnCompleted
+                // 但为了统一，我们始终不调用OnCompleted
             }
             else
             {
                 Data = data;
+                LastRowID = data.ID;
                 OnUpdate?.Invoke(this);
             }
 
@@ -147,10 +150,20 @@ namespace HeTu
     /// Query结果的订阅对象
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
+        private readonly Subject<T> _addSubject;
+        private readonly Dictionary<long, Subject<T>> _replaceSubjects;
+
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
             HeTuClientBase client, string creationStack = null) :
-            base(subscriptID, componentName, client, creationStack) =>
+            base(subscriptID, componentName, client, creationStack)
+        {
             Rows = rows.ToDictionary(row => row.ID);
+            _addSubject = new Subject<T>();
+            _replaceSubjects = new Dictionary<long, Subject<T>>();
+            DisposeBag.Add(_addSubject);
+            foreach (var (id, row) in Rows)
+                DisposeBag.Add(_replaceSubjects[id] = new Subject<T>());
+        }
 
         public Dictionary<long, T> Rows { get; }
 
@@ -167,15 +180,24 @@ namespace HeTu
             {
                 if (!exist) return;
                 OnDelete?.Invoke(this, rowID);
+                _replaceSubjects[rowID].OnCompleted();
                 Rows.Remove(rowID);
+                _replaceSubjects.Remove(rowID);
             }
             else
             {
                 Rows[rowID] = data;
                 if (exist)
+                {
                     OnUpdate?.Invoke(this, rowID);
+                    _replaceSubjects[rowID].OnNext(data);
+                }
                 else
+                {
                     OnInsert?.Invoke(this, rowID);
+                    DisposeBag.Add(_replaceSubjects[rowID] = new Subject<T>());
+                    _addSubject.OnNext(data);
+                }
             }
         }
 
@@ -187,6 +209,38 @@ namespace HeTu
                 Update(rowID, rowData);
             }
         }
+
+        /// <summary>
+        ///     获得范围订阅的响应式热源，自动处理 OnInsert、OnUpdate 和 OnDelete 事件。
+        ///     用法：
+        ///     <![CDATA[
+        ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
+        ///     indexSub.AddTo(gameObject);
+        ///
+        ///     // 订阅所有数据，初始数据也会触发此事件
+        ///     indexSub.ObserveAdd()
+        ///         .Subscribe(added => {
+        ///             var go = new GameObject($"ID: {added.id}");
+        ///             var hpText = go.AddComponent<TMP_Text>();
+        ///
+        ///             // 监听更新，和删除
+        ///             indexSub.ObserveReplace(added.id)
+        ///                 .Select(x => $"{x.value}")
+        ///                 .Subscribe(
+        ///                     value => hpText.text = value, // OnNext事件
+        ///                     result => Object.Destroy(go)  // OnCompleted事件
+        ///                 )
+        ///                 .AddTo(go);
+        ///         })
+        ///         .AddTo(ref indexSub.DisposeBag);
+        ///     ]]>
+        /// </summary>
+        public Observable<T> ObserveAdd() =>
+            // Concat会把EnumerableToObservable中的OnCompleted屏蔽然后自动切换下一个订阅
+            Observable.Defer(() => Rows.Values.ToObservable().Concat(_addSubject));
+
+        public Observable<T> ObserveReplace(long rowID) =>
+            _replaceSubjects[rowID].Prepend(Rows[rowID]);
     }
 
     public class SubscriptionManager

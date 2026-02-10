@@ -300,7 +300,6 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeR3Async()
         {
-            /*
             var go = new GameObject("TestRowSubscribeR3");
 
             // 初始化数据
@@ -313,30 +312,42 @@ namespace Tests.HeTu
             var sub = await HeTuClient.Instance.Range<IndexComp1>(
                 "value", 0, 10, 100);
             sub.AddTo(go);
-            var initValue = sub.Data.value;
+            var initValues = sub.Rows.Values.Select(x => x.Value).ToList();
 
             // 订阅响应
-            List<int> receivedValues = new();
-            var observeable = sub.ToObservableDictionary();
-            observeable.Collection.
-                .Subscribe(x => receivedValues.Add(x.value));
+            List<double> receivedValues = new();
+            sub.ObserveAdd()
+                .Subscribe(added =>
+                    {
+                        receivedValues.Add(added.Value);
+
+                        sub.ObserveReplace(added.ID)
+                            .Subscribe(
+                                replaced => { receivedValues.Add(replaced.Value); },
+                                result => receivedValues.Add(added.ID)
+                            ).AddTo(ref sub.DisposeBag);
+                    }
+                ).AddTo(ref sub.DisposeBag);
 
             // 测试是否已经加入到了DisposeBag
-            var countField = typeof(R3.DisposableBag)
+            var countField = typeof(DisposableBag)
                 .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
 
             // 发送更新，等待变更
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1).Forget();
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -3).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 2).Forget();
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, -1).Forget();
             await Sleep(1);
 
             // 检查收到的值
             Assert.AreEqual(
-                new List<int> { initValue, initValue + 2, initValue - 1, initValue },
+                new List<double>
+                {
+                    initValues[0], initValues[0] + 1, initValues[0] + 1, initValues[0]
+                },
                 receivedValues);
 
             // 检查DisposeBag是否已Dispose
@@ -347,7 +358,6 @@ namespace Tests.HeTu
                 .GetField("isDisposed", BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.IsTrue((bool)isDisposed.GetValue(sub.DisposeBag));
             Debug.Log("TestRowSubscribeR3结束");
-*/
         }
     }
 }
