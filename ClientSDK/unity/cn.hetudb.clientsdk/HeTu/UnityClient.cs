@@ -155,7 +155,7 @@ namespace HeTu
 
             ConnectSync(url);
 
-            OnClosed += errMsg =>
+            Action<string> onClose = errMsg =>
             {
                 if (errMsg is null)
                 {
@@ -170,6 +170,7 @@ namespace HeTu
 
                 _close();
             };
+            OnClosed += onClose;
 
             // 必须在退出时保证cancel, 不然会卡死unity
             _connectionCancelSource?.Cancel();
@@ -190,7 +191,9 @@ namespace HeTu
             });
 
             // 等待连接断开
-            return await tcs.Task;
+            var result = await tcs.Task;
+            OnClosed -= onClose;
+            return result;
         }
 
 
@@ -420,5 +423,4 @@ namespace HeTu
                 componentName);
         }
     }
-
 }
