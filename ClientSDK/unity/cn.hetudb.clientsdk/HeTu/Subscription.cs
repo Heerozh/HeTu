@@ -8,7 +8,6 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using JetBrains.Annotations;
-using UnityEngine.Scripting;
 using R3;
 
 namespace HeTu
@@ -18,10 +17,11 @@ namespace HeTu
         public long id { get; }
     }
 
-    [Preserve]
     public class DictComponent : Dictionary<string, object>, IBaseComponent
     {
-        [Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
+#if UNITY_2022_3_OR_NEWER
+        [UnityEngine.Scripting.Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
+#endif
         public long id => Convert.ToInt64(this["id"]);
     }
 
@@ -43,6 +43,19 @@ namespace HeTu
             _creationStack = creationStack;
         }
 
+#if UNITY_2022_3_OR_NEWER
+        /// <summary>
+        /// 把HeTu数据订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对数据订阅Dispose。
+        /// Dispose负责去HeTu服务器反订阅，并清理后续的所有R3响应式Subscribe。
+        /// 注：任意IDisposable对象都可以使用AddTo方法。本方法只是为了告知Rider，
+        /// 使用后不再需要警告未Dispose的资源泄漏问题。
+        /// </summary>
+        [HandlesResourceDisposal]
+        public BaseSubscription AddTo(UnityEngine.GameObject gameObject)
+        {
+            return R3.MonoBehaviourExtensions.AddTo(this, gameObject);
+        }
+#endif
         /// <summary>
         ///     销毁远端订阅对象。Dispose应该明确调用。
         /// </summary>

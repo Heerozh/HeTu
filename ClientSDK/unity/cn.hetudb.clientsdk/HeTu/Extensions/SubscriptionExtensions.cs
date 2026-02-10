@@ -35,7 +35,6 @@ namespace HeTu.Extensions
         ///     // 逻辑：当 hp 变化 -> 转换成字符串 -> 赋值给 Text 组件
         ///     hp.Select(x => x != null ? $"HP: {x.value}" : "Dead")
         ///         .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
-        ///     // todo 第一个值怎么处理？
         ///     // 通常R3的订阅.Subscribe后需要跟.AddTo一个垃圾袋负责销毁，
         ///     // 但这里源头的hpSub会负责销毁所有子订阅
         /// </summary>
@@ -86,8 +85,8 @@ namespace HeTu.Extensions
         ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
         ///     indexSub.AddTo(gameObject);
         ///
-        ///     // 订阅所有数据
-        ///     indexSub.ObserveStream()
+        ///     // 订阅所有数据，初始数据也会触发此事件
+        ///     indexSub.ObserveAdd()
         ///         .Subscribe(added => {
         ///             Console.WriteLine($"插入 ID: {added.id}, Val: {added.value}");
         ///             var rowId = added.id;
@@ -109,7 +108,12 @@ namespace HeTu.Extensions
             {
                 subscription.OnInsert += Handler;
                 return Disposable
-                    .Create(() => subscription.OnInsert -= Handler)
+                    .Create(() =>
+                    {
+                        // raise latest value on subscribe(before add observer to list)
+                        // observer.OnNext(initialValue);
+                        subscription.OnInsert -= Handler;
+                    })
                     .AddTo(ref subscription.DisposeBag);
 
                 void Handler(IndexSubscription<T> sub, long id)
