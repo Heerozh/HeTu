@@ -9,20 +9,24 @@ using System.Collections.Generic;
 using System.Linq;
 using JetBrains.Annotations;
 using R3;
+#if UNITY_2022_3_OR_NEWER
+using UnityEngine;
+using UnityEngine.Scripting;
+#endif
 
 namespace HeTu
 {
     public interface IBaseComponent
     {
-        public long id { get; }
+        public long ID { get; }
     }
 
     public class DictComponent : Dictionary<string, object>, IBaseComponent
     {
 #if UNITY_2022_3_OR_NEWER
-        [UnityEngine.Scripting.Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
+        [Preserve] // strip会导致Unable to find a default constructor to use for type [0].id
 #endif
-        public long id => Convert.ToInt64(this["id"]);
+        public long ID => Convert.ToInt64(this["id"]);
     }
 
     [MustDisposeResource]
@@ -43,19 +47,6 @@ namespace HeTu
             _creationStack = creationStack;
         }
 
-#if UNITY_2022_3_OR_NEWER
-        /// <summary>
-        /// 把HeTu数据订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对数据订阅Dispose。
-        /// Dispose负责去HeTu服务器反订阅，并清理后续的所有R3响应式Subscribe。
-        /// 注：任意IDisposable对象都可以使用AddTo方法。本方法只是为了告知Rider，
-        /// 使用后不再需要警告未Dispose的资源泄漏问题。
-        /// </summary>
-        [HandlesResourceDisposal]
-        public BaseSubscription AddTo(UnityEngine.GameObject gameObject)
-        {
-            return R3.MonoBehaviourExtensions.AddTo(this, gameObject);
-        }
-#endif
         /// <summary>
         ///     销毁远端订阅对象。Dispose应该明确调用。
         /// </summary>
@@ -66,25 +57,63 @@ namespace HeTu
             GC.SuppressFinalize(this);
         }
 
+#if UNITY_2022_3_OR_NEWER
+        /// <summary>
+        ///     把HeTu数据订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对数据订阅Dispose。
+        ///     Dispose负责去HeTu服务器反订阅，并清理后续的所有R3响应式Subscribe。
+        ///     注：任意IDisposable对象都可以使用AddTo方法。本方法只是为了告知Rider，
+        ///     使用后不再需要警告未Dispose的资源泄漏问题。
+        /// </summary>
+        [HandlesResourceDisposal]
+        public BaseSubscription AddTo(GameObject gameObject) =>
+            MonoBehaviourExtensions.AddTo(this, gameObject);
+#endif
+
         public abstract void UpdateRows(JsonObject data);
 
-        ~BaseSubscription()
-        {
+        ~BaseSubscription() =>
             Logger.Instance.Error(
                 "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID +
                 "\n创建时的堆栈：\n" + _creationStack);
-        }
     }
 
     /// Select结果的订阅对象
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
+        private readonly Subject<T> _subject;
+        public readonly long RowID;
+
         public RowSubscription(string subscriptID, string componentName, T row,
             HeTuClientBase client, string creationStack = null) :
-            base(subscriptID, componentName, client, creationStack) =>
+            base(subscriptID, componentName, client, creationStack)
+        {
             Data = row;
+            RowID = row.ID;
+            _subject = new Subject<T>();
+            DisposeBag.Add(_subject);
+        }
 
         public T Data { get; private set; }
+        public bool IsDeleted => RowID != Data.ID;
+
+        /// <summary>
+        ///     获得 RowSubscription 的 Subject 热源，自动处理 OnUpdate 和 OnDelete 事件。
+        ///     用法：
+        ///     // HeTu数据订阅
+        ///     <![CDATA[
+        ///     RowSubscription<HP> hpSub = client.Get<HP>("owner", 123);
+        ///     // 在gameObject销毁时反订阅HeTu数据，或手动调用hpSub.Dispose()，不然服务器永远发送订阅消息。
+        ///     hpSub.AddTo(gameObject);
+        ///     ]]>
+        ///     // 逻辑：当 hp 变化 -> 转换成字符串 -> 赋值给 Text 组件
+        ///     hpSub.Subject.Select(x => x.ID != 0 ? $"HP: {x.value}" : "Dead")
+        ///     .SubscribeToText(textBox) // R3 特有的 Unity 扩展，自动处理赋值
+        ///     .AddTo(hpSub.DisposeBag); // .Subscribe的生命周期和订阅源头绑定
+        ///     // 虽然.Subscribe返回的Observer对象都有AutoDisposeOnCompleted标记
+        ///     // 当热源hpSub Dispose时，会调用OnCompleted，自动Dispose所有订阅Node
+        ///     // 但.Subscribe后自己负责Dispose是最佳实践
+        /// </summary>
+        public Observable<T> Subject => _subject.Prepend(Data);
 
         public event Action<RowSubscription<T>> OnUpdate;
         public event Action<RowSubscription<T>> OnDelete;
@@ -101,6 +130,8 @@ namespace HeTu
                 Data = data;
                 OnUpdate?.Invoke(this);
             }
+
+            _subject.OnNext(Data);
         }
 
         public override void UpdateRows(JsonObject data)
@@ -119,7 +150,7 @@ namespace HeTu
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
             HeTuClientBase client, string creationStack = null) :
             base(subscriptID, componentName, client, creationStack) =>
-            Rows = rows.ToDictionary(row => row.id);
+            Rows = rows.ToDictionary(row => row.ID);
 
         public Dictionary<long, T> Rows { get; }
 

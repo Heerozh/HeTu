@@ -5,7 +5,6 @@ using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
 using HeTu;
-using HeTu.Extensions;
 using MessagePack;
 using NUnit.Framework;
 using R3;
@@ -40,7 +39,7 @@ namespace Tests.HeTu
         {
             public long owner;
             public int value;
-            public long id { get; set; }
+            public long ID { get; set; }
         }
 
         [MessagePackObject]
@@ -50,7 +49,7 @@ namespace Tests.HeTu
 
             [Key("value")] public double Value;
 
-            [Key("id")] public long id { get; set; }
+            [Key("id")] public long ID { get; set; }
         }
 
         private IEnumerator RunTask(Task task)
@@ -259,11 +258,11 @@ namespace Tests.HeTu
 
             // 订阅响应
             List<int> receivedValues = new();
-            sub.ToReactiveProperty()
+            sub.Subject
                 .Subscribe(x => receivedValues.Add(x.value));
 
             // 测试是否已经加入到了DisposeBag
-            var countField = typeof(R3.DisposableBag)
+            var countField = typeof(DisposableBag)
                 .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.IsNotNull(countField);
             Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
