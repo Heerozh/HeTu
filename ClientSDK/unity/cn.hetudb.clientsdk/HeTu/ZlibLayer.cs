@@ -99,6 +99,7 @@ namespace HeTu
             _deflateBuffer.Position = 0;
             _deflateStream.Write(input, 0, input.Length);
             _deflateStream.Flush();
+            // todo 0gc
             return _deflateBuffer.ToArray();
         }
 
@@ -146,6 +147,8 @@ namespace HeTu
                 }
             }
 
+            ArrayPool<byte>.Shared.Return(buffer);
+            // todo 0gc
             return outputStream.ToArray();
         }
     }

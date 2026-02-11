@@ -44,7 +44,6 @@ namespace HeTu
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = null;
-            Pipeline.Dispose();
         }
 
         // 实际Websocket连接方法
