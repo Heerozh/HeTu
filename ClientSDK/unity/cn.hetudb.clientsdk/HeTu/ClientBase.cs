@@ -64,14 +64,14 @@ namespace HeTu
         public event Action<string> OnClosed;
 
         // 实际Websocket连接方法
-        protected abstract void _connect(string url, Action onConnected,
+        protected abstract void ConnectCore(string url, Action onConnected,
             Action<byte[]> onMessage, Action<string> onClose, Action<string> onError);
 
         // 实际关闭ws连接的方法
-        protected abstract void _close();
+        protected abstract void CloseCore();
 
         // 实际往ws发送数据的方法
-        protected abstract void _send(byte[] data);
+        protected abstract void SendCore(byte[] data);
 
         // 设置封包的编码/解码协议，协议要和你的河图服务器中的配置一致
         public void SetupPipeline(List<MessageProcessLayer> layers)
@@ -95,7 +95,7 @@ namespace HeTu
             // 初始化WebSocket以及事件
             State = ConnectionState.ReadyForConnect;
             var handshakeDone = false;
-            _connect(url,
+            ConnectCore(url,
                 SendClientHandshake,
                 msg =>
                 {
@@ -115,7 +115,7 @@ namespace HeTu
         private void SendClientHandshake()
         {
             var helloMsg = Pipeline.ClientHello();
-            _send(helloMsg);
+            SendCore(helloMsg);
         }
 
         private void HandleHandshakeMessage(byte[] msg)
@@ -137,7 +137,7 @@ namespace HeTu
             foreach (var (payload, callback) in OfflineQueue)
             {
                 var buffer = Pipeline.Encode(payload);
-                _send(buffer);
+                SendCore(buffer);
                 if (callback != null)
                     ResponseQueue.EnqueueCallback(callback);
             }
@@ -171,7 +171,7 @@ namespace HeTu
         {
             Logger.Instance.Info("[HeTuClient] 主动调用了Close");
             ResponseQueue.CancelAll("主动调用了Close");
-            _close();
+            CloseCore();
         }
 
         private void SendOrQueueRequest(object payload, ResponseManager.Callback callback)
@@ -179,7 +179,7 @@ namespace HeTu
             if (State == ConnectionState.Connected)
             {
                 var buffer = Pipeline.Encode(payload);
-                _send(buffer); // 后台线程发送
+                SendCore(buffer); // 后台线程发送
                 if (callback != null)
                     ResponseQueue.EnqueueCallback(callback);
             }
@@ -239,7 +239,8 @@ namespace HeTu
                 return casted;
 
             throw new InvalidCastException(
-                BuildSubscriptionTypeMismatchMessage(subscribed.GetType(), typeof(TComponent)));
+                BuildSubscriptionTypeMismatchMessage(subscribed.GetType(),
+                    typeof(TComponent)));
         }
 
         private bool TryGetExistingSubscription<TSubscription, TComponent>(string subId,
@@ -375,7 +376,8 @@ namespace HeTu
             Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
             var payload = new[]
             {
-                CommandSub, componentName, QueryRange, index, left, right, limit, desc, force
+                CommandSub, componentName, QueryRange, index, left, right, limit,
+                desc, force
             };
             SendOrQueueRequest(payload, (response, cancel) =>
             {
@@ -442,8 +444,8 @@ namespace HeTu
         {
             // 解码消息
             // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
-            var structuredMsg = Pipeline.Decode(buffer) as object[];
-            if (structuredMsg == null || structuredMsg.Length == 0)
+            if (Pipeline.Decode(buffer) is not object[] structuredMsg ||
+                structuredMsg.Length == 0)
                 return;
 
             var messageType = structuredMsg[0] as string;
