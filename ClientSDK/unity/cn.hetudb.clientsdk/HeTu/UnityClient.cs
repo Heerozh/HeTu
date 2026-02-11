@@ -27,10 +27,19 @@ namespace HeTu
             return new HeTuClient();
         });
 
+#if UNITY_6000_0_OR_NEWER
+        private static AwaitableCompletionSource<T> NewCompletionSource<T>() => new();
+#else
+        private static UniTaskCompletionSource<T> NewCompletionSource<T>() => new();
+#endif
+
         private CancellationTokenSource _connectionCancelSource;
 
         private IWebSocket _socket;
 
+        /// <summary>
+        ///     全局单例客户端实例。
+        /// </summary>
         public static HeTuClient Instance => s_lazy.Value;
 
         /// <summary>
@@ -146,11 +155,7 @@ namespace HeTu
             }
 
             // 连接并等待
-#if UNITY_6000_0_OR_NEWER
-            var tcs = new AwaitableCompletionSource<string>();
-#else
-            var tcs = new UniTaskCompletionSource<string>();
-#endif
+            var tcs = NewCompletionSource<string>();
 
             ConnectSync(url);
 
@@ -216,11 +221,7 @@ namespace HeTu
                     "CallSystem前请先Connect Socket");
             }
 
-#if UNITY_6000_0_OR_NEWER
-            var tcs = new AwaitableCompletionSource<JsonObject>();
-#else
-            var tcs = new UniTaskCompletionSource<JsonObject>();
-#endif
+            var tcs = NewCompletionSource<JsonObject>();
 
             CallSystemSync(systemName, args, (response, cancel) =>
             {
@@ -301,11 +302,7 @@ namespace HeTu
                     "CallSystem前请先Connect Socket");
             }
 
-#if UNITY_6000_0_OR_NEWER
-            var tcs = new AwaitableCompletionSource<RowSubscription<T>>();
-#else
-            var tcs = new UniTaskCompletionSource<RowSubscription<T>>();
-#endif
+            var tcs = NewCompletionSource<RowSubscription<T>>();
             // todo 做一个network inspector，记录每次订阅的index和value，方便调试
             // todo 做一个postman类似的工具驿栈，直接发送请求，查看服务器响应，也可以新建订阅，方便调试
             GetSync<T>(index, value, (rowSub, cancel, ex) =>
@@ -335,6 +332,13 @@ namespace HeTu
         }
 
         [MustDisposeResource]
+        /// <summary>
+        ///     订阅单行数据（字典版本）。
+        /// </summary>
+        /// <param name="componentName">组件名。</param>
+        /// <param name="index">索引字段名。</param>
+        /// <param name="value">索引值。</param>
+        /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null"/>。</returns>
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<DictComponent>> Get(
 #else
@@ -390,11 +394,8 @@ namespace HeTu
                 throw new InvalidOperationException(
                     "CallSystem前请先Connect Socket");
             }
-#if UNITY_6000_0_OR_NEWER
-            var tcs = new AwaitableCompletionSource<IndexSubscription<T>>();
-#else
-            var tcs = new UniTaskCompletionSource<IndexSubscription<T>>();
-#endif
+
+            var tcs = NewCompletionSource<IndexSubscription<T>>();
 
             RangeSync<T>(
                 index, left, right, limit,
@@ -424,6 +425,17 @@ namespace HeTu
             return await tcs.Task;
         }
 
+        /// <summary>
+        ///     订阅索引范围数据（字典版本）。
+        /// </summary>
+        /// <param name="componentName">组件名。</param>
+        /// <param name="index">索引字段名。</param>
+        /// <param name="left">范围左边界。</param>
+        /// <param name="right">范围右边界。</param>
+        /// <param name="limit">返回条数上限。</param>
+        /// <param name="desc">是否降序。</param>
+        /// <param name="force">未命中时是否保持订阅。</param>
+        /// <returns>范围订阅对象。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<IndexSubscription<DictComponent>> Range(

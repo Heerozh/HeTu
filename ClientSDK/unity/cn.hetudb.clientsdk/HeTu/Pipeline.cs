@@ -13,17 +13,35 @@ namespace HeTu
     [MustDisposeResource]
     public abstract class MessageProcessLayer : IDisposable
     {
+        /// <summary>
+        ///     当前层在管道中的索引。
+        /// </summary>
         protected int LayerIndex;
+
+        /// <summary>
+        ///     所属的消息管道。
+        /// </summary>
         protected MessagePipeline Parent;
 
+        /// <summary>
+        ///     释放层内资源。
+        /// </summary>
         public abstract void Dispose();
 
+        /// <summary>
+        ///     附加到消息管道时回调。
+        /// </summary>
+        /// <param name="parent">所属管道。</param>
+        /// <param name="layerIdx">当前层索引。</param>
         public virtual void OnAttach(MessagePipeline parent, int layerIdx)
         {
             Parent = parent;
             LayerIndex = layerIdx;
         }
 
+        /// <summary>
+        ///     是否需要握手流程。
+        /// </summary>
         public virtual bool IsHandshakeRequired() => true;
 
         /// <summary>
@@ -54,6 +72,9 @@ namespace HeTu
         private readonly List<bool> _disabled = new();
         private readonly List<MessageProcessLayer> _layers = new();
 
+        /// <summary>
+        ///     当前已注册的处理层数量。
+        /// </summary>
         public int NumLayers => _layers.Count;
 
         public void Dispose()
@@ -62,6 +83,10 @@ namespace HeTu
                 layer.Dispose();
         }
 
+        /// <summary>
+        ///     添加一层消息处理层。
+        /// </summary>
+        /// <param name="layer">处理层实例。</param>
         public void AddLayer(MessageProcessLayer layer)
         {
             _layers.Add(layer);
@@ -69,8 +94,15 @@ namespace HeTu
             layer.OnAttach(this, _layers.Count - 1);
         }
 
+        /// <summary>
+        ///     禁用指定索引的处理层。
+        /// </summary>
+        /// <param name="idx">层索引。</param>
         public void DisableLayer(int idx) => _disabled[idx] = true;
 
+        /// <summary>
+        ///     清空管道并释放所有层资源。
+        /// </summary>
         public void Clean()
         {
             Dispose();

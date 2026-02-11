@@ -6,6 +6,22 @@ namespace HeTu.Editor.Setup
 {
     public class HeTuPackageSetupWizard : EditorWindow
     {
+        private void OnEnable()
+        {
+            EditorApplication.update += OnEditorUpdate;
+        }
+
+        private void OnDisable()
+        {
+            EditorApplication.update -= OnEditorUpdate;
+        }
+
+        private void OnEditorUpdate()
+        {
+            if (UPMDependenciesInstaller.IsInstallInProgress)
+                Repaint();
+        }
+
         private void OnGUI()
         {
             GUILayout.Space(8);
@@ -18,80 +34,18 @@ namespace HeTu.Editor.Setup
 
             GUILayout.Space(8);
 
-            var btnText = "Install";
-
-            DrawInstallRow(
-                "1. NuGet Dependencies",
-                "需要首先安装 NuGet 相关依赖。\n" +
-                "First, ensure NuGet and dependencies are installed in your project.\n\n" +
-                "MessagePack 依赖用于高效的序列化和反序列化。\n" +
-                "MessagePack is used for efficient serialization and deserialization.\n\n" +
-                "BouncyCastle 依赖用于加密操作。\n" +
-                "BouncyCastle is used for cryptographic operations.",
-                NuGetDependenciesInstaller.IsAllDependenciesInstalled(),
-                btnText,
-                () =>
-                {
-                    if (!UPMDependenciesInstaller.IsUPMPackageInstalled(
-                            "com.github-glitchenzo.nugetforunity"))
-                    {
-                        var (nuget, url) = ("com.github-glitchenzo.nugetforunity",
-                            "https://github.com/GlitchEnzo/NuGetForUnity.git?path=/src/NuGetForUnity");
-                        UPMDependenciesInstaller.InstallUPMPackage(nuget, url);
-                        EditorUtility.DisplayDialog("Setup Info",
-                            "正在安装 NuGet 包管理器，请完成后重新点击安装 NuGet 依赖。\n\n" +
-                            "NuGet Package Manager is being installed. Please click to install NuGet dependencies again after completion.",
-                            "OK");
-                        return;
-                    }
-
-                    NuGetDependenciesInstaller.InstallAllDependencies();
-                });
+            DrawNuGetSection();
 
             GUILayout.Space(6);
 
-            DrawInstallRow(
-                "2. UPM Dependencies",
-                "然后安装UPM依赖。\nThen install UPM dependencies.\n\n" +
-                "UniTask 依赖用于异步编程支持（Unity6不安装）。\n" +
-                "UniTask is used for async programming support (Unity 6 will not install this).\n\n" +
-                "MessagePack-CSharp 依赖用于 MessagePack 的 Unity 集成。\n" +
-                "MessagePack-CSharp is used for MessagePack Unity integration.",
-                UPMDependenciesInstaller.IsAllDependenciesInstalled(),
-                btnText,
-                () =>
-                {
-                    if (!NuGetDependenciesInstaller.IsAllDependenciesInstalled())
-                    {
-                        EditorUtility.DisplayDialog("Setup Failed",
-                            "Please install NuGet dependencies first.", "OK");
-                        return;
-                    }
-
-                    UPMDependenciesInstaller.InstallAllDependencies();
-                });
+            DrawUPMSection();
 
             GUILayout.Space(6);
 
-            DrawInstallRow(
-                "Optional. ",
-                "R3 用于数据订阅的响应式编程支持（推荐）(可选）。\n" +
-                "R3  is used for reactive programming support for data subscriptions (recommended) (optional).",
-                UPMDependenciesInstaller.IsAllOptionalInstalled() &&
-                NuGetDependenciesInstaller.IsAllOptionalInstalled(),
-                btnText,
-                () =>
-                {
-                    if (!NuGetDependenciesInstaller.IsAllDependenciesInstalled())
-                    {
-                        EditorUtility.DisplayDialog("Setup Failed",
-                            "Please install NuGet dependencies first.", "OK");
-                        return;
-                    }
+            // DrawInstallRow(
+            //     "R3 用于数据订阅的响应式编程支持。\n" +
+            //     "R3  is used for reactive programming support for data subscriptions.",
 
-                    NuGetDependenciesInstaller.InstallAllOptional();
-                    UPMDependenciesInstaller.InstallAllOptional();
-                });
 
             GUILayout.FlexibleSpace();
 
@@ -103,6 +57,142 @@ namespace HeTu.Editor.Setup
             }
 
             GUILayout.Space(8);
+        }
+
+        private static void DrawNuGetSection()
+        {
+            using (new EditorGUILayout.VerticalScope("box"))
+            {
+                EditorGUILayout.LabelField("1. NuGet Dependencies",
+                    EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(
+                    "需要首先安装 NuGet 相关依赖。\nFirst, ensure NuGet and dependencies are installed in your project.",
+                    EditorStyles.wordWrappedMiniLabel);
+
+                GUILayout.Space(4);
+
+                foreach (var dep in NuGetDependenciesInstaller.Dependencies)
+                {
+                    DrawPackageInstallItem(
+                        $"{dep.packageId} (>= {dep.minVersion})",
+                        GetNuGetDescription(dep.packageId),
+                        NuGetDependenciesInstaller.IsDependencyInstalled(
+                            dep.packageId),
+                        () =>
+                        {
+                            if (!EnsureNuGetForUnityInstalled())
+                                return;
+
+                            NuGetDependenciesInstaller.InstallDependency(
+                                dep.packageId);
+                        });
+                }
+            }
+        }
+
+        private static void DrawUPMSection()
+        {
+            using (new EditorGUILayout.VerticalScope("box"))
+            {
+                EditorGUILayout.LabelField("2. UPM Dependencies",
+                    EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(
+                    "然后安装UPM依赖。\nThen install UPM dependencies.",
+                    EditorStyles.wordWrappedMiniLabel);
+
+                GUILayout.Space(4);
+
+                var canInstallUPM = NuGetDependenciesInstaller
+                    .IsAllDependenciesInstalled();
+                var upmInstalling = UPMDependenciesInstaller.IsInstallInProgress;
+
+                if (upmInstalling)
+                {
+                    var current = UPMDependenciesInstaller.CurrentInstallingPackageId;
+                    EditorGUILayout.HelpBox(
+                        $"Installing package in background: {current}\nPlease wait until it completes.",
+                        MessageType.Info);
+
+                    var progress = Mathf.PingPong(
+                        (float)EditorApplication.timeSinceStartup * 0.6f, 1f);
+                    var rect = GUILayoutUtility.GetRect(18, 18,
+                        GUILayout.ExpandWidth(true));
+                    EditorGUI.ProgressBar(rect, progress,
+                        "Installing...");
+                    GUILayout.Space(4);
+                }
+
+                foreach (var dep in UPMDependenciesInstaller.Dependencies)
+                {
+                    var installed =
+                        UPMDependenciesInstaller.IsDependencyInstalled(dep.packageId);
+                    var installing =
+                        UPMDependenciesInstaller.IsDependencyInstalling(dep.packageId);
+
+                    DrawPackageInstallItem(
+                        dep.packageId,
+                        GetUPMDescription(dep.packageId),
+                        installed,
+                        () =>
+                        {
+                            if (!canInstallUPM)
+                            {
+                                EditorUtility.DisplayDialog("Setup Failed",
+                                    "Please install NuGet dependencies first.",
+                                    "OK");
+                                return;
+                            }
+
+                            UPMDependenciesInstaller.InstallDependency(dep.packageId);
+                        },
+                        !canInstallUPM || upmInstalling,
+                        installing);
+                }
+            }
+        }
+
+        private static bool EnsureNuGetForUnityInstalled()
+        {
+            if (UPMDependenciesInstaller.IsUPMPackageInstalled(
+                    "com.github-glitchenzo.nugetforunity"))
+                return true;
+
+            var (nuget, url) = ("com.github-glitchenzo.nugetforunity",
+                "https://github.com/GlitchEnzo/NuGetForUnity.git?path=/src/NuGetForUnity");
+            UPMDependenciesInstaller.InstallUPMPackage(nuget, url);
+            EditorUtility.DisplayDialog("Setup Info",
+                "正在安装 NuGet 包管理器，请完成后重新点击安装 NuGet 依赖。\n\n" +
+                "NuGet Package Manager is being installed. Please click to install NuGet dependencies again after completion.",
+                "OK");
+            return false;
+        }
+
+        private static string GetNuGetDescription(string packageId)
+        {
+            switch (packageId)
+            {
+                case "MessagePack":
+                    return "用于高效的序列化和反序列化 / Efficient serialization and deserialization.";
+                case "BouncyCastle.Cryptography":
+                    return "用于加密操作 / Cryptographic operations.";
+                case "R3":
+                    return "用于响应式编程支持 / Reactive programming support.";
+                default:
+                    return "NuGet dependency.";
+            }
+        }
+
+        private static string GetUPMDescription(string packageId)
+        {
+            switch (packageId)
+            {
+                case "com.cysharp.unitask":
+                    return "用于异步编程支持（Unity 6 不安装）/ Async programming support (not installed on Unity 6).";
+                case "com.github.messagepack-csharp":
+                    return "用于 MessagePack 的 Unity 集成 / MessagePack Unity integration.";
+                default:
+                    return "UPM dependency.";
+            }
         }
 
         [MenuItem("HeTu/Setup Wizard...")]
@@ -132,12 +222,13 @@ namespace HeTu.Editor.Setup
                 Open();
             };
 
-        private static void DrawInstallRow(string title, string description,
-            bool installed, string btnText, Action installAction)
+        private static void DrawPackageInstallItem(string title, string description,
+            bool installed, Action installAction, bool disableByPrerequisite = false,
+            bool installing = false)
         {
-            using (new EditorGUILayout.VerticalScope("box"))
+            using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
             {
-                EditorGUILayout.LabelField(title, EditorStyles.boldLabel);
+                EditorGUILayout.LabelField(title, EditorStyles.miniBoldLabel);
                 EditorGUILayout.LabelField(description,
                     EditorStyles.wordWrappedMiniLabel);
 
@@ -147,9 +238,12 @@ namespace HeTu.Editor.Setup
                 {
                     GUILayout.FlexibleSpace();
 
-                    using (new EditorGUI.DisabledScope(installed))
+                    using (new EditorGUI.DisabledScope(
+                               installed || disableByPrerequisite || installing))
                     {
-                        var buttonText = installed ? "Installed" : btnText;
+                        var buttonText = installed
+                            ? "Installed"
+                            : installing ? "Installing..." : "Install";
                         if (GUILayout.Button(buttonText, GUILayout.Width(120)))
                         {
                             try

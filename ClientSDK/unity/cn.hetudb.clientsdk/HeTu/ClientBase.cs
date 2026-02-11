@@ -11,10 +11,24 @@ using System.Linq;
 
 namespace HeTu
 {
+    /// <summary>
+    ///     客户端连接状态。
+    /// </summary>
     public enum ConnectionState
     {
+        /// <summary>
+        ///     未连接。
+        /// </summary>
         Disconnected,
+
+        /// <summary>
+        ///     连接已建立但尚未完成握手。
+        /// </summary>
         ReadyForConnect,
+
+        /// <summary>
+        ///     已连接并完成握手。
+        /// </summary>
         Connected
     }
 
@@ -23,14 +37,15 @@ namespace HeTu
     /// </summary>
     public abstract class HeTuClientBase : IDisposable
     {
-        private const string CommandRpc = "rpc";
-        private const string CommandSub = "sub";
-        private const string CommandUnsub = "unsub";
-        private const string QueryGet = "get";
-        private const string QueryRange = "range";
-        private const string MessageResponse = "rsp";
-        private const string MessageUpdate = "updt";
-        private const string IndexId = "id";
+        internal const string CommandRpc = "rpc";
+        internal const string CommandSub = "sub";
+        internal const string CommandUnsub = "unsub";
+        internal const string QueryGet = "get";
+        internal const string QueryRange = "range";
+        internal const string MessageResponse = "rsp";
+        internal const string MessageUpdate = "updt";
+        internal const string MessageSubed = "sub";
+        internal const string IndexId = "id";
 
         protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
             OfflineQueue = new();
@@ -41,7 +56,10 @@ namespace HeTu
         protected readonly SubscriptionManager Subscriptions = new();
         protected ConnectionState State = ConnectionState.Disconnected;
 
-        // 调用System时的本地回调，也就是System对应的客户端逻辑
+        /// <summary>
+        ///     System 调用的本地回调表。也就是System对应的客户端逻辑。
+        ///     Key 为系统名，Value 为调用时同步触发的回调。
+        /// </summary>
         public Dictionary<string, Action<object[]>> SystemLocalCallbacks = new();
 
         protected HeTuClientBase() => SetupPipeline(
@@ -56,11 +74,17 @@ namespace HeTu
             GC.SuppressFinalize(this);
         }
 
-        // 连接成功时的回调
+        /// <summary>
+        ///     握手完成并可收发业务消息时触发。
+        /// </summary>
         public event Action OnConnected;
 
-        // 连接关闭时的回调，如果string不为null，表示异常关闭。
-        // 如果连接未建立，本方法不会被调用。
+        /// <summary>
+        ///     连接关闭时触发。如果连接未建立，本方法不会被调用。
+        /// </summary>
+        /// <remarks>
+        ///     参数为 <see langword="null" /> 表示正常关闭；否则为错误信息。
+        /// </remarks>
         public event Action<string> OnClosed;
 
         // 实际Websocket连接方法
@@ -73,7 +97,10 @@ namespace HeTu
         // 实际往ws发送数据的方法
         protected abstract void SendCore(byte[] data);
 
-        // 设置封包的编码/解码协议，协议要和你的河图服务器中的配置一致
+        /// <summary>
+        ///     配置消息处理管道。要和你的河图服务器中的配置一致
+        /// </summary>
+        /// <param name="layers">处理层列表（按顺序执行）。</param>
         public void SetupPipeline(List<MessageProcessLayer> layers)
         {
             Pipeline.Clean();
@@ -166,7 +193,9 @@ namespace HeTu
             }
         }
 
-        // 关闭河图连接
+        /// <summary>
+        ///     主动关闭连接，并取消所有等待中的响应。
+        /// </summary>
         public virtual void Close()
         {
             Logger.Instance.Info("[HeTuClient] 主动调用了Close");
@@ -199,7 +228,12 @@ namespace HeTu
             return false;
         }
 
-        // 调用System方法，但是不处理返回值
+        /// <summary>
+        ///     发起 System RPC 调用。
+        /// </summary>
+        /// <param name="systemName">系统名。</param>
+        /// <param name="args">参数列表。</param>
+        /// <param name="onResponse">响应回调，第二参数为是否取消。</param>
         protected void CallSystemSync(string systemName, object[] args,
             Action<JsonObject, bool> onResponse)
         {
@@ -265,6 +299,14 @@ namespace HeTu
             return creationSource;
         }
 
+        /// <summary>
+        ///     发起单行订阅（Get）。
+        /// </summary>
+        /// <typeparam name="T">组件类型。</typeparam>
+        /// <param name="index">索引字段名。</param>
+        /// <param name="value">索引值。</param>
+        /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
+        /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
         public void GetSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
@@ -339,12 +381,27 @@ namespace HeTu
             });
         }
 
+        /// <summary>
+        ///     发起字典组件单行订阅（Get）。
+        /// </summary>
         public void GetSync(
             string index, object value,
             Action<RowSubscription<DictComponent>, bool, Exception> onResponse,
             string componentName = null) =>
             GetSync<DictComponent>(index, value, onResponse, componentName);
 
+        /// <summary>
+        ///     发起范围订阅（Range）。
+        /// </summary>
+        /// <typeparam name="T">组件类型。</typeparam>
+        /// <param name="index">索引字段名。</param>
+        /// <param name="left">范围左边界。</param>
+        /// <param name="right">范围右边界。</param>
+        /// <param name="limit">最大返回条数。</param>
+        /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
+        /// <param name="desc">是否降序。</param>
+        /// <param name="force">无数据时是否仍保持订阅。</param>
+        /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
         public void RangeSync<T>(
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
@@ -423,12 +480,20 @@ namespace HeTu
             });
         }
 
+        /// <summary>
+        ///     发起字典组件范围订阅（Range）。
+        /// </summary>
         public void RangeSync(
             string componentName, string index, object left, object right, int limit,
             Action<IndexSubscription<DictComponent>, bool, Exception> onResponse,
             bool desc = false, bool force = true) =>
             RangeSync(index, left, right, limit, onResponse, desc, force, componentName);
 
+        /// <summary>
+        ///     取消指定订阅。
+        /// </summary>
+        /// <param name="subID">订阅 ID。</param>
+        /// <param name="from">取消来源说明（用于日志）。</param>
         public void Unsubscribe(string subID, string from)
         {
             if (State == ConnectionState.Disconnected)
@@ -452,7 +517,7 @@ namespace HeTu
             switch (messageType)
             {
                 case MessageResponse:
-                case CommandSub:
+                case MessageSubed:
                     // 这2个都是round trip响应，所以有对应的请求等待队列
                     ResponseQueue.CompleteNext(structuredMsg);
                     break;

@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 #if NUGET_INSTALLED
@@ -10,23 +11,22 @@ namespace HeTu.Editor
 {
     public static class NuGetDependenciesInstaller
     {
-        private static readonly (string, string)[] s_dependencies =
+        private static readonly (string packageId, string minVersion)[] s_dependencies =
         {
-            ("BouncyCastle.Cryptography", "2.6.2"), ("MessagePack", "3.1.4")
+            ("BouncyCastle.Cryptography", "2.6.2"), ("MessagePack", "3.1.4"), ("R3", "1.3.0")
         };
 
-        private static readonly (string, string)[] s_optionalDependencies =
-        {
-            ("R3", "1.3.0"),
-        };
+        public static IReadOnlyList<(string packageId, string minVersion)> Dependencies =>
+            s_dependencies;
+
 #if NUGET_INSTALLED
 
         public static bool IsAllDependenciesInstalled()
         {
-            foreach (var (packageId, minVersion) in s_dependencies)
+            foreach (var dep in s_dependencies)
             {
                 // 已安装且版本满足 >= MinVersion -> 不处理
-                if (IsInstalled(packageId, minVersion))
+                if (IsInstalled(dep.packageId, dep.minVersion))
                     continue;
                 return false;
             }
@@ -34,16 +34,15 @@ namespace HeTu.Editor
             return true;
         }
 
-        public static bool IsAllOptionalInstalled()
+        public static bool IsDependencyInstalled(string packageId)
         {
-            foreach (var (packageId, minVersion) in s_optionalDependencies)
-            {
-                if (IsInstalled(packageId, minVersion))
-                    continue;
+            var dep = s_dependencies.FirstOrDefault(d =>
+                string.Equals(d.packageId, packageId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrEmpty(dep.packageId))
                 return false;
-            }
 
-            return true;
+            return IsInstalled(dep.packageId, dep.minVersion);
         }
 
         private static bool IsInstalled(string packageId, string minVersion)
@@ -93,20 +92,36 @@ namespace HeTu.Editor
                 InstallPackage(packageId, minVersion);
         }
 
-        public static bool InstallAllOptional()
+        public static void InstallDependency(string packageId)
         {
-            foreach (var (packageId, minVersion) in s_optionalDependencies)
-                InstallPackage(packageId, minVersion);
+            var dep = s_dependencies.FirstOrDefault(d =>
+                string.Equals(d.packageId, packageId,
+                    StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrEmpty(dep.packageId))
+                throw new ArgumentException($"Unknown NuGet dependency: {packageId}",
+                    nameof(packageId));
 
-            return true;
+            InstallPackage(dep.packageId, dep.minVersion);
         }
+
+
 #else
         public static bool IsAllDependenciesInstalled()
         {
             return false;
         }
 
+        public static bool IsDependencyInstalled(string packageId)
+        {
+            return false;
+        }
+
         public static void InstallAllDependencies()
+        {
+
+        }
+
+        public static void InstallDependency(string packageId)
         {
 
         }

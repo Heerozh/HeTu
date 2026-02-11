@@ -25,6 +25,11 @@ namespace HeTu
         private byte[] _dict;
         private Inflater _inflater;
 
+        /// <summary>
+        ///     创建 zlib 压缩层。
+        /// </summary>
+        /// <param name="level">压缩级别（1-9）。</param>
+        /// <param name="presetDictionary">预置字典，可选。</param>
         public ZlibLayer(int level = 1, byte[] presetDictionary = null)
         {
             _level = level;
@@ -41,6 +46,9 @@ namespace HeTu
             _inflater = null;
         }
 
+        /// <summary>
+        ///     初始化压缩/解压状态并返回握手消息。
+        /// </summary>
         public override byte[] ClientHello()
         {
             Dispose();
@@ -48,6 +56,10 @@ namespace HeTu
         }
 
 
+        /// <summary>
+        ///     根据服务端握手结果初始化压缩字典与状态机。
+        /// </summary>
+        /// <param name="message">服务端返回的压缩字典。</param>
         public override void Handshake(byte[] message)
         {
             Dispose();

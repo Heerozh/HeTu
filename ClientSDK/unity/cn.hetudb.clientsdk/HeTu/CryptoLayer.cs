@@ -39,6 +39,7 @@ namespace HeTu
         ///     serverMode 为 true 时，用于服务端握手；否则为客户端握手。
         ///     clientPrivateKey 仅客户端模式使用，传入32字节私钥可固定身份。
         /// </summary>
+        /// <param name="serverMode">是否为服务端模式。</param>
         public CryptoLayer(bool serverMode) => _serverMode = serverMode;
         // if (!_serverMode)
         // {
@@ -54,6 +55,9 @@ namespace HeTu
         {
         }
 
+        /// <summary>
+        ///     发送客户端握手消息（X25519 公钥）。
+        /// </summary>
         public override byte[] ClientHello()
         {
             if (_serverMode)
@@ -66,6 +70,10 @@ namespace HeTu
             return _privateKey.GeneratePublicKey().GetEncoded();
         }
 
+        /// <summary>
+        ///     接收对端公钥并建立会话密钥。
+        /// </summary>
+        /// <param name="message">对端 X25519 公钥（32 字节）。</param>
         public override void Handshake(byte[] message)
         {
             if (message is not { Length: 32 })

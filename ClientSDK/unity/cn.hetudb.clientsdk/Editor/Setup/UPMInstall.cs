@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
 using UnityEditor;
@@ -10,7 +12,7 @@ namespace HeTu.Editor
     public class UPMDependenciesInstaller
     {
         // 定义 Git 依赖
-        private static readonly (string, string)[] s_dependencies =
+        private static readonly (string packageId, string packageUrl)[] s_dependencies =
         {
 #if !UNITY_6000_0_OR_NEWER
             ("com.cysharp.unitask",
@@ -20,6 +22,9 @@ namespace HeTu.Editor
                 "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git?path=src/MessagePack.UnityClient/Assets/Scripts/MessagePack")
         };
 
+        public static IReadOnlyList<(string packageId, string packageUrl)> Dependencies =>
+            s_dependencies;
+
         private static readonly (string, string)[] s_optionalDependencies =
         {
             ("com.cysharp.r3",
@@ -27,12 +32,31 @@ namespace HeTu.Editor
         };
 
         private static AddRequest s_lastRequest;
+        private static string s_currentInstallingPackageId;
+
+        public static bool IsInstallInProgress
+        {
+            get
+            {
+                UpdateRequestState();
+                return s_lastRequest != null && !s_lastRequest.IsCompleted;
+            }
+        }
+
+        public static string CurrentInstallingPackageId
+        {
+            get
+            {
+                UpdateRequestState();
+                return s_currentInstallingPackageId;
+            }
+        }
 
         public static bool IsAllDependenciesInstalled()
         {
-            foreach (var (name, depUrl) in s_dependencies)
+            foreach (var dep in s_dependencies)
             {
-                if (!IsUPMPackageInstalled(name))
+                if (!IsUPMPackageInstalled(dep.packageId))
                     return false;
             }
 
@@ -41,8 +65,36 @@ namespace HeTu.Editor
 
         public static void InstallAllDependencies()
         {
-            foreach (var (name, depUrl) in s_dependencies)
-                InstallUPMPackage(name, depUrl);
+            foreach (var dep in s_dependencies)
+                InstallUPMPackage(dep.packageId, dep.packageUrl);
+        }
+
+        public static bool IsDependencyInstalled(string packageID)
+        {
+            return IsUPMPackageInstalled(packageID);
+        }
+
+        public static bool IsDependencyInstalling(string packageID)
+        {
+            return IsInstallInProgress &&
+                   string.Equals(s_currentInstallingPackageId, packageID,
+                       StringComparison.OrdinalIgnoreCase);
+        }
+
+        public static void InstallDependency(string packageID)
+        {
+            foreach (var dep in s_dependencies)
+            {
+                if (!string.Equals(dep.packageId, packageID,
+                        StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                InstallUPMPackage(dep.packageId, dep.packageUrl);
+                return;
+            }
+
+            throw new ArgumentException($"Unknown UPM dependency: {packageID}",
+                nameof(packageID));
         }
 
         public static bool IsAllOptionalInstalled()
@@ -76,15 +128,32 @@ namespace HeTu.Editor
 
         public static async void InstallUPMPackage(string packageID, string packageUrl)
         {
-            if (!IsUPMPackageInstalled(packageID))
-            {
-                while (s_lastRequest != null && !s_lastRequest.IsCompleted)
-                    await Task.Delay(100);
+            if (IsUPMPackageInstalled(packageID))
+                return;
 
-                Debug.Log($"[Installer] Installing dependency: {packageUrl}");
-                s_lastRequest = Client.Add(packageUrl);
-                AssetDatabase.Refresh();
-            }
+            while (IsInstallInProgress)
+                await Task.Delay(100);
+
+            Debug.Log($"[Installer] Installing dependency: {packageUrl}");
+            s_currentInstallingPackageId = packageID;
+            s_lastRequest = Client.Add(packageUrl);
+        }
+
+        private static void UpdateRequestState()
+        {
+            if (s_lastRequest == null || !s_lastRequest.IsCompleted)
+                return;
+
+            if (s_lastRequest.Status == StatusCode.Failure)
+                Debug.LogError(
+                    $"[Installer] Failed to install dependency {s_currentInstallingPackageId}: {s_lastRequest.Error?.message}");
+            else
+                Debug.Log(
+                    $"[Installer] Installed dependency: {s_currentInstallingPackageId}");
+
+            s_lastRequest = null;
+            s_currentInstallingPackageId = null;
+            AssetDatabase.Refresh();
         }
     }
 }

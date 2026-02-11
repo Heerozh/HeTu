@@ -16,11 +16,20 @@ using UnityEngine.Scripting;
 
 namespace HeTu
 {
+    /// <summary>
+    ///     组件数据的基础接口。
+    /// </summary>
     public interface IBaseComponent
     {
+        /// <summary>
+        ///     行主键 ID。
+        /// </summary>
         public long ID { get; }
     }
 
+    /// <summary>
+    ///     动态字典组件类型。
+    /// </summary>
     public class DictComponent : Dictionary<string, object>, IBaseComponent
     {
 #if UNITY_2022_3_OR_NEWER
@@ -29,13 +38,23 @@ namespace HeTu
         public long ID => Convert.ToInt64(this["id"]);
     }
 
+    /// <summary>
+    ///     订阅基类，封装反订阅与资源释放逻辑。
+    /// </summary>
     [MustDisposeResource]
     public abstract class BaseSubscription : IDisposable
     {
         private readonly string _creationStack;
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
+        /// <summary>
+        ///     对应的组件名。
+        /// </summary>
         public readonly string ComponentName;
+
+        /// <summary>
+        ///     该订阅关联的 R3 资源袋。
+        /// </summary>
         public DisposableBag DisposeBag;
 
         protected BaseSubscription(string subscriptID, string componentName,
@@ -69,6 +88,10 @@ namespace HeTu
             MonoBehaviourExtensions.AddTo(this, gameObject);
 #endif
 
+        /// <summary>
+        ///     应用服务器推送的行更新。
+        /// </summary>
+        /// <param name="data">更新数据。</param>
         public abstract void UpdateRows(JsonObject data);
 
         ~BaseSubscription() =>
@@ -77,7 +100,10 @@ namespace HeTu
                 "\n创建时的堆栈：\n" + _creationStack);
     }
 
-    /// Select结果的订阅对象
+    /// <summary>
+    ///     单行订阅对象（Get 结果）。
+    /// </summary>
+    /// <typeparam name="T">组件类型。</typeparam>
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _subject;
@@ -93,6 +119,9 @@ namespace HeTu
             DisposeBag.Add(_subject);
         }
 
+        /// <summary>
+        ///     当前缓存的行数据。
+        /// </summary>
         public T Data { get; private set; }
 
         /// <summary>
@@ -114,9 +143,20 @@ namespace HeTu
         /// </summary>
         public Observable<T> Subject => _subject.Prepend(Data);
 
+        /// <summary>
+        ///     行更新事件。
+        /// </summary>
         public event Action<RowSubscription<T>> OnUpdate;
+
+        /// <summary>
+        ///     行删除事件。
+        /// </summary>
         public event Action<RowSubscription<T>> OnDelete;
 
+        /// <summary>
+        ///     更新当前行数据并触发相关事件。
+        /// </summary>
+        /// <param name="data">新数据；为 <see langword="null"/> 表示删除。</param>
         public void Update(T data)
         {
             if (data is null)
@@ -147,7 +187,10 @@ namespace HeTu
         }
     }
 
-    /// Query结果的订阅对象
+    /// <summary>
+    ///     范围订阅对象（Range 结果）。
+    /// </summary>
+    /// <typeparam name="T">组件类型。</typeparam>
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _addSubject;
@@ -165,12 +208,31 @@ namespace HeTu
                 DisposeBag.Add(_replaceSubjects[id] = new Subject<T>());
         }
 
+        /// <summary>
+        ///     当前订阅范围内的行集合（key 为行 ID）。
+        /// </summary>
         public Dictionary<long, T> Rows { get; }
 
+        /// <summary>
+        ///     行更新事件。
+        /// </summary>
         public event Action<IndexSubscription<T>, long> OnUpdate;
+
+        /// <summary>
+        ///     行删除事件。
+        /// </summary>
         public event Action<IndexSubscription<T>, long> OnDelete;
+
+        /// <summary>
+        ///     行新增事件。
+        /// </summary>
         public event Action<IndexSubscription<T>, long> OnInsert;
 
+        /// <summary>
+        ///     对指定行应用新增/更新/删除变更。
+        /// </summary>
+        /// <param name="rowID">目标行 ID。</param>
+        /// <param name="data">新数据；为 <see langword="null"/> 表示删除。</param>
         public void Update(long rowID, T data)
         {
             var exist = Rows.ContainsKey(rowID);
@@ -239,15 +301,32 @@ namespace HeTu
             // Concat会把前一个订阅源中的OnCompleted事件屏蔽然后自动切换下一个订阅
             Observable.Defer(() => Rows.Values.ToObservable().Concat(_addSubject));
 
+        /// <summary>
+        ///     监听指定行的替换更新流。
+        /// </summary>
+        /// <param name="rowID">目标行 ID。</param>
+        /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>
         public Observable<T> ObserveReplace(long rowID) => _replaceSubjects[rowID];
     }
 
+    /// <summary>
+    ///     订阅对象弱引用管理器。
+    /// </summary>
     public class SubscriptionManager
     {
         private readonly Dictionary<string, WeakReference> _subscriptions = new();
 
+        /// <summary>
+        ///     清空缓存。
+        /// </summary>
         public void Clean() => _subscriptions.Clear();
 
+        /// <summary>
+        ///     按订阅 ID 获取订阅对象。
+        /// </summary>
+        /// <param name="subID">订阅 ID。</param>
+        /// <param name="subscription">输出订阅对象。</param>
+        /// <returns>是否获取成功。</returns>
         public bool TryGet(string subID, out BaseSubscription subscription)
         {
             subscription = null;
@@ -258,11 +337,24 @@ namespace HeTu
             return true;
         }
 
+        /// <summary>
+        ///     添加或覆盖订阅引用。
+        /// </summary>
+        /// <param name="subID">订阅 ID。</param>
+        /// <param name="subscription">订阅弱引用。</param>
         public void Add(string subID, WeakReference subscription) =>
             _subscriptions[subID] = subscription;
 
+        /// <summary>
+        ///     移除订阅引用。
+        /// </summary>
+        /// <param name="subID">订阅 ID。</param>
         public void Remove(string subID) => _subscriptions.Remove(subID);
 
+        /// <summary>
+        ///     判断是否包含指定订阅。
+        /// </summary>
+        /// <param name="subID">订阅 ID。</param>
         public bool Contains(string subID) => _subscriptions.ContainsKey(subID);
     }
 }
