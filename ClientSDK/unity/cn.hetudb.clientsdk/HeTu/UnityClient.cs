@@ -211,6 +211,12 @@ namespace HeTu
             params object[] args)
 #endif
         {
+            if (_connectionCancelSource == null)
+            {
+                throw new InvalidOperationException(
+                    "CallSystem前请先Connect Socket");
+            }
+
 #if UNITY_6000_0_OR_NEWER
             var tcs = new AwaitableCompletionSource<JsonObject>();
 #else
@@ -290,6 +296,11 @@ namespace HeTu
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
+            if (_connectionCancelSource == null)
+            {
+                throw new InvalidOperationException(
+                    "CallSystem前请先Connect Socket");
+            }
 
 #if UNITY_6000_0_OR_NEWER
             var tcs = new AwaitableCompletionSource<RowSubscription<T>>();
@@ -375,7 +386,11 @@ namespace HeTu
             where T : IBaseComponent
         {
             componentName ??= typeof(T).Name;
-
+            if (_connectionCancelSource == null)
+            {
+                throw new InvalidOperationException(
+                    "CallSystem前请先Connect Socket");
+            }
 #if UNITY_6000_0_OR_NEWER
             var tcs = new AwaitableCompletionSource<IndexSubscription<T>>();
 #else
