@@ -257,11 +257,9 @@ namespace HeTu
                         else
                         {
                             var data = ((JsonObject)response[2]).To<T>();
-#pragma warning disable IDISP001
                             // ReSharper disable once NotDisposedResource
                             rowSubscription = new RowSubscription<T>(
                                 subID, componentName, data, this, creationSource);
-#pragma warning restore IDISP001
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));
                             Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
@@ -354,15 +352,12 @@ namespace HeTu
                         {
                             var rawRows = (JsonObject)response[2];
                             var rows = rawRows.ToList<T>();
-#pragma warning disable IDISP001
                             // ReSharper disable once NotDisposedResource
                             idxSubscription = new IndexSubscription<T>(
                                 subID, componentName, rows, this, creationSource);
-#pragma warning restore IDISP001
                             Subscriptions.Add(subID,
                                 new WeakReference(idxSubscription, false));
                             Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
-                            onResponse(idxSubscription, false, null);
                         }
                     }
                 }
