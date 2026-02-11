@@ -211,7 +211,10 @@ namespace HeTu
                     componentName, "id", value, null, 1, false);
                 if (Subscriptions.TryGet(predictID, out var subscribed))
                     if (subscribed is RowSubscription<T> casted)
+                    {
                         onResponse(casted, false, null);
+                        return;
+                    }
                     else
                         throw new InvalidCastException(
                             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
