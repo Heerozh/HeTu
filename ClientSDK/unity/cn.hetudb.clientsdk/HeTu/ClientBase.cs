@@ -23,6 +23,15 @@ namespace HeTu
     /// </summary>
     public abstract class HeTuClientBase : IDisposable
     {
+        private const string CommandRpc = "rpc";
+        private const string CommandSub = "sub";
+        private const string CommandUnsub = "unsub";
+        private const string QueryGet = "get";
+        private const string QueryRange = "range";
+        private const string MessageResponse = "rsp";
+        private const string MessageUpdate = "updt";
+        private const string IndexId = "id";
+
         protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
             OfflineQueue = new();
 
@@ -41,7 +50,11 @@ namespace HeTu
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
             });
 
-        public virtual void Dispose() => Pipeline.Dispose();
+        public virtual void Dispose()
+        {
+            Pipeline.Dispose();
+            GC.SuppressFinalize(this);
+        }
 
         // 连接成功时的回调
         public event Action OnConnected;
@@ -82,60 +95,75 @@ namespace HeTu
             // 初始化WebSocket以及事件
             State = ConnectionState.ReadyForConnect;
             var handshakeDone = false;
-            _connect(url, () =>
-                {
-                    // 握手
-                    var helloMsg = Pipeline.ClientHello();
-                    _send(helloMsg);
-                },
+            _connect(url,
+                SendClientHandshake,
                 msg =>
                 {
                     if (handshakeDone)
                     {
-                        _OnReceived(msg);
+                        OnReceived(msg);
+                        return;
                     }
-                    else
-                    {
-                        var serverHandshake = Pipeline.Decode(msg) as object[];
-                        Pipeline.Handshake(serverHandshake?.Cast<byte[]>().ToArray());
 
-                        Logger.Instance.Info("[HeTuClient] 连接成功。");
-                        State = ConnectionState.Connected;
-                        handshakeDone = true;
-
-                        // 连接完成开始发送离线消息队列中的消息
-                        OnConnected?.Invoke();
-                        foreach (var (payload, callback) in OfflineQueue)
-                        {
-                            // 连接后Pipeline才可用
-                            var buffer = Pipeline.Encode(payload);
-                            _send(buffer);
-                            if (callback != null)
-                                ResponseQueue.EnqueueCallback(callback);
-                        }
-
-                        OfflineQueue.Clear();
-                    }
+                    HandleHandshakeMessage(msg);
+                    handshakeDone = true;
                 },
-                errMsg =>
-                {
-                    State = ConnectionState.Disconnected;
-                    if (errMsg == null)
-                        Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
-                    OnClosed?.Invoke(errMsg);
-                }, errMsg =>
-                {
-                    switch (State)
-                    {
-                        case ConnectionState.ReadyForConnect:
-                            Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
-                            break;
-                        case ConnectionState.Connected:
-                            Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");
-                            break;
-                    }
-                }
-            );
+                HandleClosed,
+                HandleError);
+        }
+
+        private void SendClientHandshake()
+        {
+            var helloMsg = Pipeline.ClientHello();
+            _send(helloMsg);
+        }
+
+        private void HandleHandshakeMessage(byte[] msg)
+        {
+            var serverHandshake = Pipeline.Decode(msg) as object[];
+            Pipeline.Handshake(serverHandshake?.Cast<byte[]>().ToArray());
+
+            Logger.Instance.Info("[HeTuClient] 连接成功。");
+            State = ConnectionState.Connected;
+
+            // 连接完成开始发送离线消息队列中的消息
+            OnConnected?.Invoke();
+            // OnConnected后Pipeline才可用
+            FlushOfflineQueue();
+        }
+
+        private void FlushOfflineQueue()
+        {
+            foreach (var (payload, callback) in OfflineQueue)
+            {
+                var buffer = Pipeline.Encode(payload);
+                _send(buffer);
+                if (callback != null)
+                    ResponseQueue.EnqueueCallback(callback);
+            }
+
+            OfflineQueue.Clear();
+        }
+
+        private void HandleClosed(string errMsg)
+        {
+            State = ConnectionState.Disconnected;
+            if (errMsg == null)
+                Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
+            OnClosed?.Invoke(errMsg);
+        }
+
+        private void HandleError(string errMsg)
+        {
+            switch (State)
+            {
+                case ConnectionState.ReadyForConnect:
+                    Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
+                    break;
+                case ConnectionState.Connected:
+                    Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");
+                    break;
+            }
         }
 
         // 关闭河图连接
@@ -146,7 +174,7 @@ namespace HeTu
             _close();
         }
 
-        private void _doRequest(object payload, ResponseManager.Callback callback)
+        private void SendOrQueueRequest(object payload, ResponseManager.Callback callback)
         {
             if (State == ConnectionState.Connected)
             {
@@ -162,19 +190,27 @@ namespace HeTu
             }
         }
 
+        private bool EnsureConnected(string operationName)
+        {
+            if (State != ConnectionState.Disconnected)
+                return true;
+
+            Logger.Instance.Error($"[HeTuClient] {operationName}失败，请先调用Connect");
+            return false;
+        }
+
         // 调用System方法，但是不处理返回值
         protected void CallSystemSync(string systemName, object[] args,
             Action<JsonObject, bool> onResponse)
         {
-            if (State == ConnectionState.Disconnected)
+            if (!EnsureConnected("CallSystem"))
             {
-                Logger.Instance.Error("[HeTuClient] CallSystem失败，请先调用Connect");
                 onResponse(null, true);
                 return;
             }
 
-            var payload = new object[] { "rpc", systemName }.Concat(args).ToArray();
-            _doRequest(payload, (response, cancel) =>
+            var payload = new object[] { CommandRpc, systemName }.Concat(args).ToArray();
+            SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                     onResponse(null, true);
@@ -185,10 +221,48 @@ namespace HeTu
             callbacks?.Invoke(args);
         }
 
-        private static string _makeSubID(string table, string index, object left,
+        private static string MakeSubId(string table, string index, object left,
             object right,
             int limit, bool desc) =>
             $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
+
+        private static string BuildSubscriptionTypeMismatchMessage(Type actualType,
+            Type expectedComponentType) =>
+            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{actualType}类型，你不能再用{expectedComponentType}类型订阅了";
+
+        private static TSubscription CastSubscriptionOrThrow<TSubscription, TComponent>(
+            BaseSubscription subscribed)
+            where TSubscription : BaseSubscription
+            where TComponent : IBaseComponent
+        {
+            if (subscribed is TSubscription casted)
+                return casted;
+
+            throw new InvalidCastException(
+                BuildSubscriptionTypeMismatchMessage(subscribed.GetType(), typeof(TComponent)));
+        }
+
+        private bool TryGetExistingSubscription<TSubscription, TComponent>(string subId,
+            out TSubscription subscription)
+            where TSubscription : BaseSubscription
+            where TComponent : IBaseComponent
+        {
+            subscription = null;
+            if (!Subscriptions.TryGet(subId, out var existing))
+                return false;
+
+            subscription = CastSubscriptionOrThrow<TSubscription, TComponent>(existing);
+            return true;
+        }
+
+        private static string CaptureCreationSource()
+        {
+            string creationSource = null;
+#if DEBUG
+            creationSource = Environment.StackTrace;
+#endif
+            return creationSource;
+        }
 
         public void GetSync<T>(
             string index, object value,
@@ -196,39 +270,32 @@ namespace HeTu
             string componentName = null)
             where T : IBaseComponent
         {
-            if (State == ConnectionState.Disconnected)
+            if (!EnsureConnected("Get"))
             {
-                Logger.Instance.Error("[HeTuClient] Get失败，请先调用Connect");
                 onResponse(null, true, null);
                 return;
             }
 
             componentName ??= typeof(T).Name;
             // 如果index是id，我们可以事先判断是否已经订阅过
-            if (index == "id")
+            if (index == IndexId)
             {
-                var predictID = _makeSubID(
-                    componentName, "id", value, null, 1, false);
-                if (Subscriptions.TryGet(predictID, out var subscribed))
-                    if (subscribed is RowSubscription<T> casted)
-                    {
-                        onResponse(casted, false, null);
-                        return;
-                    }
-                    else
-                        throw new InvalidCastException(
-                            $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+                var predictID = MakeSubId(componentName, IndexId, value, null, 1, false);
+                if (TryGetExistingSubscription<RowSubscription<T>, T>(predictID,
+                        out var existingRowSubscription))
+                {
+                    onResponse(existingRowSubscription, false, null);
+                    return;
+                }
             }
 
-            string creationSource = null;
-#if DEBUG
-            creationSource = Environment.StackTrace;
-#endif
+            var creationSource = CaptureCreationSource();
+
             // 向服务器订阅
             Logger.Instance.Debug(
                 $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
-            var payload = new[] { "sub", componentName, "get", index, value };
-            _doRequest(payload, (response, cancel) =>
+            var payload = new[] { CommandSub, componentName, QueryGet, index, value };
+            SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -244,15 +311,10 @@ namespace HeTu
                     if (subID != null)
                     {
                         // 如果依然是重复订阅，直接返回副本
-                        if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                        if (TryGetExistingSubscription<RowSubscription<T>, T>(subID,
+                                out var existingSubscription))
                         {
-                            if (stillSubscribed is RowSubscription<T> casted)
-                            {
-                                rowSubscription = casted;
-                            }
-                            else
-                                throw new InvalidCastException(
-                                    $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+                            rowSubscription = existingSubscription;
                         }
                         else
                         {
@@ -289,9 +351,8 @@ namespace HeTu
             string componentName = null)
             where T : IBaseComponent
         {
-            if (State == ConnectionState.Disconnected)
+            if (!EnsureConnected("Range"))
             {
-                Logger.Instance.Error("[HeTuClient] Range失败，请先调用Connect");
                 onResponse(null, true, null);
                 return;
             }
@@ -299,30 +360,24 @@ namespace HeTu
             componentName ??= typeof(T).Name;
 
             // 先要组合sub_id看看是否已订阅过
-            var predictID = _makeSubID(
+            var predictID = MakeSubId(
                 componentName, index, left, right, limit, desc);
-            if (Subscriptions.TryGet(predictID, out var subscribed))
-                if (subscribed is IndexSubscription<T> casted)
-                {
-                    onResponse(casted, false, null);
-                    return;
-                }
-                else
-                    throw new InvalidCastException(
-                        $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{subscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+            if (TryGetExistingSubscription<IndexSubscription<T>, T>(predictID,
+                    out var existingIndexSubscription))
+            {
+                onResponse(existingIndexSubscription, false, null);
+                return;
+            }
 
-            string creationSource = null;
-#if DEBUG
-            creationSource = Environment.StackTrace;
-#endif
+            var creationSource = CaptureCreationSource();
 
             // 发送订阅请求
             Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
             var payload = new[]
             {
-                "sub", componentName, "range", index, left, right, limit, desc, force
+                CommandSub, componentName, QueryRange, index, left, right, limit, desc, force
             };
-            _doRequest(payload, (response, cancel) =>
+            SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -338,15 +393,10 @@ namespace HeTu
                     if (subID != null)
                     {
                         // 如果依然是重复订阅，直接返回副本
-                        if (Subscriptions.TryGet(subID, out var stillSubscribed))
+                        if (TryGetExistingSubscription<IndexSubscription<T>, T>(subID,
+                                out var existingSubscription))
                         {
-                            if (stillSubscribed is IndexSubscription<T> casted)
-                            {
-                                idxSubscription = casted;
-                            }
-                            else
-                                throw new InvalidCastException(
-                                    $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{stillSubscribed.GetType()}类型，你不能再用{typeof(T)}类型订阅了");
+                            idxSubscription = existingSubscription;
                         }
                         else
                         {
@@ -383,24 +433,28 @@ namespace HeTu
                 return;
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
-            var payload = new object[] { "unsub", subID };
-            _doRequest(payload, null);
+            var payload = new object[] { CommandUnsub, subID };
+            SendOrQueueRequest(payload, null);
             Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
-        protected virtual void _OnReceived(byte[] buffer)
+        protected virtual void OnReceived(byte[] buffer)
         {
             // 解码消息
             // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
             var structuredMsg = Pipeline.Decode(buffer) as object[];
-            switch (structuredMsg?[0])
+            if (structuredMsg == null || structuredMsg.Length == 0)
+                return;
+
+            var messageType = structuredMsg[0] as string;
+            switch (messageType)
             {
-                case "rsp":
-                case "sub":
+                case MessageResponse:
+                case CommandSub:
                     // 这2个都是round trip响应，所以有对应的请求等待队列
                     ResponseQueue.CompleteNext(structuredMsg);
                     break;
-                case "updt":
+                case MessageUpdate:
                     // 这个是主动推送，需要根据subID找到对应的订阅对象
                     var subID = (string)structuredMsg[1];
                     if (!Subscriptions.TryGet(subID, out var subscribed))
