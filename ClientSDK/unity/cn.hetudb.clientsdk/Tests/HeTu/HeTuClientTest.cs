@@ -170,7 +170,7 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnUpdateAsync()
         {
             // 测试订阅
-            HeTuClient.Instance.CallSystem("login", 234, true).Forget();
+            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
             HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
             using var sub = await HeTuClient.Instance.Range(
                 "RLSComp", "owner", 0, 300, 100);
@@ -201,7 +201,7 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeOnInsertAsync()
         {
-            HeTuClient.Instance.CallSystem("login", 345, true).Forget();
+            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
@@ -248,11 +248,12 @@ namespace Tests.HeTu
             var go = new GameObject("TestRowSubscribeR3");
 
             // 初始化数据
-            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
+            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
             HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
             // 订阅
             var sub = await HeTuClient.Instance.Get<RLSComp>(
-                "owner", 456);
+                "owner", 123);
+            Assert.IsNotNull(sub);
             sub.AddTo(go);
             var initValue = sub.Data.value;
 
@@ -303,7 +304,7 @@ namespace Tests.HeTu
             var go = new GameObject("TestRowSubscribeR3");
 
             // 初始化数据
-            HeTuClient.Instance.CallSystem("login", 456, true).Forget();
+            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
             HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
