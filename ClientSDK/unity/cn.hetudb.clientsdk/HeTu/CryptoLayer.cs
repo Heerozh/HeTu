@@ -22,10 +22,10 @@ namespace HeTu
         private const int NonceSize = 12;
 
         private readonly bool _serverMode;
-        private ulong _recvNonce;
-        private ulong _sendNonce;
 
         private X25519PrivateKeyParameters _privateKey;
+        private ulong _recvNonce;
+        private ulong _sendNonce;
         private byte[] _sessionKey;
 
         /// <summary>
@@ -50,7 +50,9 @@ namespace HeTu
         // /// <summary>客户端要发送给服务端的公钥（32字节）</summary>
         // public byte[] ClientPublicKey => _clientPublicKey?.GetEncoded();
 
-        public override void Dispose() { }
+        public override void Dispose()
+        {
+        }
 
         public override byte[] ClientHello()
         {
@@ -59,13 +61,14 @@ namespace HeTu
 
             var random = new SecureRandom();
             _privateKey = new X25519PrivateKeyParameters(random);
+            _sessionKey = null;
 
             return _privateKey.GeneratePublicKey().GetEncoded();
         }
 
         public override void Handshake(byte[] message)
         {
-            if (message == null || message.Length != 32)
+            if (message is not { Length: 32 })
                 throw new ArgumentException("对端公钥长度错误，预期32字节", nameof(message));
 
             var peerPublicKey = new X25519PublicKeyParameters(message, 0);

@@ -35,13 +35,22 @@ namespace HeTu
         {
             _deflateStream?.Dispose();
             _deflateBuffer?.Dispose();
+            _deflateStream = null;
+            _deflateBuffer = null;
+            _deflater = null;
+            _inflater = null;
         }
 
-        public override byte[] ClientHello() => Array.Empty<byte>();
+        public override byte[] ClientHello()
+        {
+            Dispose();
+            return Array.Empty<byte>();
+        }
 
 
         public override void Handshake(byte[] message)
         {
+            Dispose();
             _dict = message is { Length: > 0 } ? message : _presetDict;
 
             var deflater = new Deflater(_level, false);
@@ -60,9 +69,7 @@ namespace HeTu
 
             _deflater = deflater;
             _inflater = inflater;
-            _deflateBuffer?.Dispose();
             _deflateBuffer = deflateBuffer;
-            _deflateStream?.Dispose();
             _deflateStream = deflateStream;
         }
 
