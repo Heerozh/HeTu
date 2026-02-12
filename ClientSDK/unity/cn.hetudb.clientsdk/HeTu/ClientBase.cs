@@ -289,8 +289,12 @@ namespace HeTu
                 }
                 else
                 {
-                    InspectorCollector.CompleteRequest(traceId, "completed");
-                    onResponse((JsonObject)response[1], false);
+                    var responsePayload = response != null && response.Length > 1
+                        ? response[1]
+                        : null;
+                    InspectorCollector.CompleteRequest(traceId, "completed",
+                        responsePayload);
+                    onResponse((JsonObject)responsePayload, false);
                 }
             }, traceId);
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
@@ -418,12 +422,14 @@ namespace HeTu
                 }
                 catch (Exception ex)
                 {
-                    InspectorCollector.CompleteRequest(traceId, "failed");
+                    InspectorCollector.CompleteRequest(traceId, "failed", ex.Message);
                     onResponse(null, false, ex);
                     return;
                 }
 
-                InspectorCollector.CompleteRequest(traceId, "completed");
+                var responsePayload = response.Length > 2 ? response[2] : null;
+                InspectorCollector.CompleteRequest(traceId, "completed",
+                    responsePayload);
                 onResponse(rowSubscription, false, null);
             }, traceId);
         }
@@ -522,12 +528,14 @@ namespace HeTu
                 }
                 catch (Exception ex)
                 {
-                    InspectorCollector.CompleteRequest(traceId, "failed");
+                    InspectorCollector.CompleteRequest(traceId, "failed", ex.Message);
                     onResponse(null, false, ex);
                     return;
                 }
 
-                InspectorCollector.CompleteRequest(traceId, "completed");
+                var responsePayload = response.Length > 2 ? response[2] : null;
+                InspectorCollector.CompleteRequest(traceId, "completed",
+                    responsePayload);
                 onResponse(idxSubscription, false, null);
             }, traceId);
         }

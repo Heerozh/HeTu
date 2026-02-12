@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEngine;
 
@@ -20,8 +21,9 @@ namespace HeTu.Editor
             110f, // Target
             86f, // Status
             95f, // Size
-            82f // Duration
-            // Payload 占用剩余宽度
+            82f, // Duration
+            220f // Payload
+            // Response 占用剩余宽度
         };
 
         private readonly List<InspectorTraceEvent> _rows = new();
@@ -175,7 +177,8 @@ namespace HeTu.Editor
             var cells = BuildColumnRects(rect);
             var headers = new[]
             {
-                "Time", "Type", "Target", "Status", "Size", "Duration", "Payload"
+                "Time", "Type", "Target", "Status", "Size/Transport", "Duration",
+                "Payload", "Response"
             };
 
             for (var i = 0; i < headers.Length; i++)
@@ -211,13 +214,14 @@ namespace HeTu.Editor
             EditorGUI.LabelField(cells[4], row.Size, _cellStyle);
             EditorGUI.LabelField(cells[5], row.CallDuration, _cellStyle);
             EditorGUI.LabelField(cells[6], row.Payload, _cellStyle);
+            EditorGUI.LabelField(cells[7], row.Response, _cellStyle);
 
             DrawVerticalSeparators(cells, rect.yMin, rect.yMax);
         }
 
         private Rect[] BuildColumnRects(Rect rowRect)
         {
-            var result = new Rect[7];
+            var result = new Rect[8];
             var x = rowRect.xMin;
 
             for (var i = 0; i < _columnWidths.Length; i++)
@@ -227,7 +231,7 @@ namespace HeTu.Editor
                 x += w;
             }
 
-            result[6] = new Rect(x, rowRect.yMin,
+            result[7] = new Rect(x, rowRect.yMin,
                 Mathf.Max(80f, rowRect.xMax - x), rowRect.height);
             return result;
         }
@@ -247,34 +251,33 @@ namespace HeTu.Editor
 
                 EditorGUIUtility.AddCursorRect(handleRect, MouseCursor.ResizeHorizontal);
 
-                if (evt.type == EventType.MouseDown && evt.button == 0 &&
-                    handleRect.Contains(evt.mousePosition))
-                {
-                    _isResizingColumn = true;
-                    _resizingColumnIndex = i;
-                    _resizeStartMouseX = evt.mousePosition.x;
-                    _resizeStartWidth = _columnWidths[i];
-                    evt.Use();
-                    return;
-                }
-            }
-
-            if (_isResizingColumn && evt.type == EventType.MouseDrag)
-            {
-                var delta = evt.mousePosition.x - _resizeStartMouseX;
-                _columnWidths[_resizingColumnIndex] = Mathf.Max(MinColumnWidth,
-                    _resizeStartWidth + delta);
-                Repaint();
+                if (evt.type != EventType.MouseDown || evt.button != 0 ||
+                    !handleRect.Contains(evt.mousePosition)) continue;
+                _isResizingColumn = true;
+                _resizingColumnIndex = i;
+                _resizeStartMouseX = evt.mousePosition.x;
+                _resizeStartWidth = _columnWidths[i];
                 evt.Use();
                 return;
             }
 
-            if (_isResizingColumn &&
-                (evt.type == EventType.MouseUp || evt.rawType == EventType.MouseUp))
+            switch (_isResizingColumn)
             {
-                _isResizingColumn = false;
-                _resizingColumnIndex = -1;
-                evt.Use();
+                case true when evt.type == EventType.MouseDrag:
+                    {
+                        var delta = evt.mousePosition.x - _resizeStartMouseX;
+                        _columnWidths[_resizingColumnIndex] = Mathf.Max(MinColumnWidth,
+                            _resizeStartWidth + delta);
+                        Repaint();
+                        evt.Use();
+                        return;
+                    }
+                case true when
+                    (evt.type == EventType.MouseUp || evt.rawType == EventType.MouseUp):
+                    _isResizingColumn = false;
+                    _resizingColumnIndex = -1;
+                    evt.Use();
+                    break;
             }
         }
 
@@ -304,9 +307,8 @@ namespace HeTu.Editor
             {
                 "pending" => new Color(1f, 0.66f, 0.2f),
                 "completed" => new Color(0.45f, 0.85f, 0.45f),
-                "failed" => new Color(1f, 0.45f, 0.45f),
                 "canceled" => new Color(0.72f, 0.72f, 0.72f),
-                _ => GUI.color
+                _ => new Color(1f, 0.45f, 0.45f),
             };
         }
 
@@ -319,20 +321,19 @@ namespace HeTu.Editor
             if (!rect.Contains(evt.mousePosition))
                 return;
 
-            if (evt.type == EventType.MouseDown && evt.button == 0)
+            switch (evt.type)
             {
-                _selectedTraceId = row.TraceId;
-                Repaint();
-                evt.Use();
-                return;
-            }
-
-            if (evt.type == EventType.ContextClick)
-            {
-                _selectedTraceId = row.TraceId;
-                ShowContextMenu(row);
-                Repaint();
-                evt.Use();
+                case EventType.MouseDown when evt.button == 0:
+                    _selectedTraceId = row.TraceId;
+                    Repaint();
+                    evt.Use();
+                    return;
+                case EventType.ContextClick:
+                    _selectedTraceId = row.TraceId;
+                    ShowContextMenu(row);
+                    Repaint();
+                    evt.Use();
+                    break;
             }
         }
 
@@ -348,22 +349,13 @@ namespace HeTu.Editor
             var keyword = _filterKeyword.Trim();
             return ContainsIgnoreCase(row.Type, keyword) ||
                    ContainsIgnoreCase(row.Target, keyword) ||
-                   ContainsIgnoreCase(row.Payload, keyword);
+                   ContainsIgnoreCase(row.Payload, keyword) ||
+                   ContainsIgnoreCase(row.Response, keyword);
         }
 
         private int GetFilteredCount()
         {
-            if (string.IsNullOrWhiteSpace(_filterKeyword))
-                return _rows.Count;
-
-            var count = 0;
-            for (var i = 0; i < _rows.Count; i++)
-            {
-                if (IsRowMatched(_rows[i]))
-                    count++;
-            }
-
-            return count;
+            return string.IsNullOrWhiteSpace(_filterKeyword) ? _rows.Count : _rows.Count(IsRowMatched);
         }
 
         private static bool ContainsIgnoreCase(string source, string keyword)
@@ -377,7 +369,7 @@ namespace HeTu.Editor
         {
             var time = row.StartTimeUtc.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss.fff");
             return
-                $"{time}\t{row.Type}\t{row.Target}\t{row.Status}\t{row.Size}\t{row.CallDuration}\t{row.Payload}";
+                $"{time}\t{row.Type}\t{row.Target}\t{row.Status}\t{row.Size}\t{row.CallDuration}\t{row.Payload}\t{row.Response}";
         }
 
         private static void ShowContextMenu(InspectorTraceEvent row)
@@ -449,12 +441,10 @@ namespace HeTu.Editor
                 changed = true;
             }
 
-            if (changed)
-            {
-                if (_autoScrollToBottom)
-                    _scroll.y = float.MaxValue;
-                Repaint();
-            }
+            if (!changed) return;
+            if (_autoScrollToBottom)
+                _scroll.y = float.MaxValue;
+            Repaint();
         }
 
         private void UpsertRow(InspectorTraceEvent traceEvent)
@@ -477,13 +467,11 @@ namespace HeTu.Editor
             _rows.RemoveAt(0);
             RebuildIndex();
 
-            if (!string.IsNullOrEmpty(removed.TraceId))
-            {
-                if (string.Equals(_selectedTraceId, removed.TraceId,
-                        StringComparison.Ordinal))
-                    _selectedTraceId = null;
-                _indexByTraceId.Remove(removed.TraceId);
-            }
+            if (string.IsNullOrEmpty(removed.TraceId)) return;
+            if (string.Equals(_selectedTraceId, removed.TraceId,
+                    StringComparison.Ordinal))
+                _selectedTraceId = null;
+            _indexByTraceId.Remove(removed.TraceId);
         }
 
         private void RebuildIndex()

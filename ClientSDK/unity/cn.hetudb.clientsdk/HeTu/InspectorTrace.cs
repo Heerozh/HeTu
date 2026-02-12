@@ -37,7 +37,8 @@ namespace HeTu
                 $"| {traceEvent.Status}" +
                 $"| {traceEvent.Size}" +
                 $"| {traceEvent.CallDuration} +" +
-                $"| {traceEvent.Payload}" );
+                $"| {traceEvent.Payload}" +
+                $"| {traceEvent.Response}");
 
         }
     }
@@ -56,6 +57,8 @@ namespace HeTu
         public string Target { get; set; }
 
         public string Payload { get; set; }
+
+        public string Response { get; set; }
 
         public string CallerStack { get; set; }
 
@@ -82,6 +85,7 @@ namespace HeTu
                 Type = Type,
                 Target = Target,
                 Payload = Payload,
+                Response = Response,
                 CallerStack = CallerStack,
                 Size = Size,
                 CallDuration = CallDuration,
@@ -94,7 +98,7 @@ namespace HeTu
     /// </summary>
     public sealed class InspectorTraceCollector
     {
-        private const string NotAvailable = "不可用";
+        private const string NotAvailable = "-";
 
         private readonly Dictionary<string, Stopwatch> _pendingStopwatches = new();
         private readonly Dictionary<string, InspectorTraceEvent> _pendingTraces = new();
@@ -151,7 +155,7 @@ namespace HeTu
         {
             lock (_syncRoot)
             {
-                if (!_enabled )
+                if (!_enabled)
                     return null;
 
                 var traceId = Guid.NewGuid().ToString("N");
@@ -162,6 +166,7 @@ namespace HeTu
                     Type = type,
                     Target = target,
                     Payload = InspectorTraceStringify.Stringify(payload),
+                    Response = NotAvailable,
                     CallerStack = CaptureStackOrUnavailable(),
                     Size = NotAvailable,
                     CallDuration = "Pending",
@@ -197,7 +202,8 @@ namespace HeTu
         /// <summary>
         ///     完成请求并分发最终状态。
         /// </summary>
-        public void CompleteRequest(string traceId, string status)
+        public void CompleteRequest(string traceId, string status,
+            object responsePayload = null)
         {
             if (traceId == null) return;
             lock (_syncRoot)
@@ -212,6 +218,8 @@ namespace HeTu
                 }
 
                 trace.Status = status;
+                if (responsePayload != null)
+                    trace.Response = InspectorTraceStringify.Stringify(responsePayload);
                 DispatchInternal(trace);
 
                 _pendingTraces.Remove(traceId);
@@ -237,6 +245,7 @@ namespace HeTu
                     Type = HeTuClientBase.MessageUpdate,
                     Target = target,
                     Payload = InspectorTraceStringify.Stringify(payload),
+                    Response = NotAvailable,
                     CallerStack = NotAvailable,
                     Size = BuildSize(sourceSizeBytes, transportSizeBytes),
                     CallDuration = NotAvailable,
