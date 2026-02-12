@@ -29,8 +29,10 @@ namespace HeTu
 
 #if UNITY_6000_0_OR_NEWER
         private static AwaitableCompletionSource<T> NewCompletionSource<T>() => new();
+        private static Awaitable<T> AwaitFrom<T>(AwaitableCompletionSource<T> tcs) => tcs.Awaitable;
 #else
         private static UniTaskCompletionSource<T> NewCompletionSource<T>() => new();
+        private static UniTask<T> AwaitFrom<T>(UniTaskCompletionSource<T> tcs) => tcs.Task;
 #endif
 
         private CancellationTokenSource _connectionCancelSource;
@@ -195,7 +197,7 @@ namespace HeTu
             });
 
             // 等待连接断开
-            var result = await tcs.Task;
+            var result = await AwaitFrom(tcs);
             OnClosed -= onClose;
             return result;
         }
@@ -244,7 +246,7 @@ namespace HeTu
                 CloseCore();
             });
 
-            return await tcs.Task;
+            return await AwaitFrom(tcs);
         }
 
         /// <summary>
@@ -328,10 +330,9 @@ namespace HeTu
                 CloseCore();
             });
 
-            return await tcs.Task;
+            return await AwaitFrom(tcs);
         }
 
-        [MustDisposeResource]
         /// <summary>
         ///     订阅单行数据（字典版本）。
         /// </summary>
@@ -339,6 +340,7 @@ namespace HeTu
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
         /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null"/>。</returns>
+        [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<DictComponent>> Get(
 #else
@@ -422,7 +424,7 @@ namespace HeTu
                 tcs.TrySetCanceled();
                 CloseCore();
             });
-            return await tcs.Task;
+            return await AwaitFrom(tcs);
         }
 
         /// <summary>

@@ -24,7 +24,7 @@ namespace Tests.HeTu
         public void Init()
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
-            HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest").Forget();
+            _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest");
         }
 
         [OneTimeTearDown]
@@ -63,10 +63,8 @@ namespace Tests.HeTu
         }
 
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable Sleep(int seconds)
-        {
+        private static async Awaitable Sleep(int seconds) =>
             await Awaitable.WaitForSecondsAsync(seconds);
-        }
 #else
         private static async UniTask Sleep(int seconds) =>
             await UniTask.Delay(seconds * 1000);
@@ -88,8 +86,8 @@ namespace Tests.HeTu
             Assert.AreEqual(sub, null);
 
             // 测试订阅
-            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            _ = HeTuClient.Instance.CallSystem("login", 123, true);
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             sub = await HeTuClient.Instance.Get(
                 "RLSComp", "owner", 123);
             var lastValue = Convert.ToInt32(sub.Data["value"]);
@@ -101,13 +99,13 @@ namespace Tests.HeTu
                 Debug.Log("收到了更新...");
                 newValue = Convert.ToInt32(sender.Data["value"]);
             };
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 
             await Sleep(1);
             Assert.AreEqual(lastValue - 2, newValue);
 
             // 测试重复订阅，但换一个类型，应该报错
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
             // Assert.ThrowsAsync 用的是当前协程Wait，会卡死
             var success = false;
             try
@@ -170,8 +168,8 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnUpdateAsync()
         {
             // 测试订阅
-            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -1).Forget();
+            _ = HeTuClient.Instance.CallSystem("login", 123, true);
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
             using var sub = await HeTuClient.Instance.Range(
                 "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
@@ -184,7 +182,7 @@ namespace Tests.HeTu
             {
                 newValue = Convert.ToInt32(sender.Rows[rowID]["value"]);
             };
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -2).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -2);
 
             await Sleep(1);
             Assert.AreEqual(newValue, lastValue - 2);
@@ -201,10 +199,10 @@ namespace Tests.HeTu
 
         private async Task TestIndexSubscribeOnInsertAsync()
         {
-            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
+            _ = HeTuClient.Instance.CallSystem("login", 123, true);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10);
 
             // 测试OnInsert, OnDelete
             using var sub = await HeTuClient.Instance.Range<IndexComp1>(
@@ -212,7 +210,7 @@ namespace Tests.HeTu
 
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2).Forget();
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2);
 
             await Sleep(1);
             Assert.AreEqual(newPlayer, 123);
@@ -223,8 +221,7 @@ namespace Tests.HeTu
             {
                 removedPlayer = sender.Rows[rowID].Owner;
             };
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11)
-                .Forget();
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11);
 
             await Sleep(1);
             Assert.AreEqual(removedPlayer, 123);
@@ -248,8 +245,8 @@ namespace Tests.HeTu
             var go = new GameObject("TestRowSubscribeR3");
 
             // 初始化数据
-            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            _ = HeTuClient.Instance.CallSystem("login", 123, true);
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             // 订阅
             var sub = await HeTuClient.Instance.Get<RLSComp>(
                 "owner", 123);
@@ -269,11 +266,11 @@ namespace Tests.HeTu
             Assert.True((int)countField.GetValue(sub.DisposeBag) == 1);
 
             // 发送更新，等待变更
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 2).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 2);
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", -3).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -3);
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("add_rls_comp_value", 1).Forget();
+            _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             await Sleep(1);
 
             // 检查收到的值
@@ -304,10 +301,10 @@ namespace Tests.HeTu
             var go = new GameObject("TestRowSubscribeR3");
 
             // 初始化数据
-            HeTuClient.Instance.CallSystem("login", 123, true).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0).Forget();
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10).Forget();
+            _ = HeTuClient.Instance.CallSystem("login", 123, true);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10);
 
             // 订阅
             var sub = await HeTuClient.Instance.Range<IndexComp1>(
@@ -341,11 +338,11 @@ namespace Tests.HeTu
             Assert.True((int)countField.GetValue(sub.DisposeBag) == 6);
 
             // 发送更新，等待变更
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1).Forget();
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1);
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 2).Forget();
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 2);
             await Sleep(1);
-            HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, -1).Forget();
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, -1);
             await Sleep(1);
 
             // 检查收到的值
