@@ -11,6 +11,7 @@ namespace HeTu.Editor
         private const int MaxRows = 2000;
         private const float RowHeight = 22f;
         private const float HeaderHeight = 24f;
+        private const float DetailPanelHeight = 220f;
         private const float MinColumnWidth = 60f;
         private const float ResizeHandleHalfWidth = 3f;
 
@@ -46,6 +47,10 @@ namespace HeTu.Editor
         private float _resizeStartWidth;
         private string _filterKeyword = string.Empty;
         private bool _autoScrollToBottom = true;
+        private bool _showPayloadDetail = true;
+        private bool _showResponseDetail = true;
+        private Vector2 _payloadDetailScroll;
+        private Vector2 _responseDetailScroll;
 
         private void OnEnable()
         {
@@ -98,6 +103,7 @@ namespace HeTu.Editor
             EnsureStyles();
             DrawToolbar();
             DrawList();
+            DrawDetailPanel();
         }
 
         private void DrawToolbar()
@@ -325,6 +331,8 @@ namespace HeTu.Editor
             {
                 case EventType.MouseDown when evt.button == 0:
                     _selectedTraceId = row.TraceId;
+                    _showPayloadDetail = true;
+                    _showResponseDetail = true;
                     Repaint();
                     evt.Use();
                     return;
@@ -335,6 +343,166 @@ namespace HeTu.Editor
                     evt.Use();
                     break;
             }
+        }
+
+        private void DrawDetailPanel()
+        {
+            if (!TryGetSelectedRow(out var selectedRow))
+                return;
+            if (!_showPayloadDetail && !_showResponseDetail)
+                return;
+
+            GUILayout.Space(6);
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (_showPayloadDetail)
+                    DrawDetailBox("Payload", selectedRow.Payload,
+                        ref _showPayloadDetail, ref _payloadDetailScroll);
+
+                if (_showResponseDetail)
+                    DrawDetailBox("Response", selectedRow.Response,
+                        ref _showResponseDetail, ref _responseDetailScroll);
+            }
+        }
+
+        private static void DrawDetailBox(string title, string content,
+            ref bool visible, ref Vector2 contentScroll)
+        {
+            using (new EditorGUILayout.VerticalScope("box", GUILayout.ExpandWidth(true),
+                       GUILayout.Height(DetailPanelHeight)))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    GUILayout.Label(title, EditorStyles.boldLabel);
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("x", EditorStyles.miniButton,
+                            GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        visible = false;
+                        return;
+                    }
+                }
+
+                var formatted = TryFormatJsonLike(content);
+                contentScroll = EditorGUILayout.BeginScrollView(contentScroll,
+                    GUILayout.ExpandHeight(true));
+                EditorGUILayout.TextArea(formatted,
+                    EditorStyles.textArea,
+                    GUILayout.ExpandHeight(true));
+                EditorGUILayout.EndScrollView();
+            }
+        }
+
+        private bool TryGetSelectedRow(out InspectorTraceEvent row)
+        {
+            row = null;
+            if (string.IsNullOrEmpty(_selectedTraceId))
+                return false;
+            if (!_indexByTraceId.TryGetValue(_selectedTraceId, out var idx))
+                return false;
+            if (idx < 0 || idx >= _rows.Count)
+                return false;
+
+            row = _rows[idx];
+            return true;
+        }
+
+        private static string TryFormatJsonLike(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw))
+                return "-";
+
+            var text = raw.Trim();
+            if (!text.Contains("{") && !text.Contains("["))
+                return text;
+
+            try
+            {
+                return PrettyPrintJsonLike(text);
+            }
+            catch
+            {
+                return text;
+            }
+        }
+
+        private static string PrettyPrintJsonLike(string json)
+        {
+            var indent = 0;
+            var inQuotes = false;
+            var escaped = false;
+            var sb = new System.Text.StringBuilder(json.Length * 2);
+
+            for (var i = 0; i < json.Length; i++)
+            {
+                var ch = json[i];
+
+                if (escaped)
+                {
+                    sb.Append(ch);
+                    escaped = false;
+                    continue;
+                }
+
+                if (ch == '\\')
+                {
+                    sb.Append(ch);
+                    if (inQuotes)
+                        escaped = true;
+                    continue;
+                }
+
+                if (ch == '"')
+                {
+                    inQuotes = !inQuotes;
+                    sb.Append(ch);
+                    continue;
+                }
+
+                if (inQuotes)
+                {
+                    sb.Append(ch);
+                    continue;
+                }
+
+                switch (ch)
+                {
+                    case '{':
+                    case '[':
+                        sb.Append(ch);
+                        sb.Append('\n');
+                        indent++;
+                        AppendIndent(sb, indent);
+                        break;
+                    case '}':
+                    case ']':
+                        sb.Append('\n');
+                        indent = Math.Max(0, indent - 1);
+                        AppendIndent(sb, indent);
+                        sb.Append(ch);
+                        break;
+                    case ',':
+                        sb.Append(ch);
+                        sb.Append('\n');
+                        AppendIndent(sb, indent);
+                        break;
+                    case ':':
+                        sb.Append(": ");
+                        break;
+                    default:
+                        sb.Append(ch);
+                        break;
+                }
+            }
+
+            return sb.ToString();
+        }
+
+        private static void AppendIndent(System.Text.StringBuilder sb, int indent)
+        {
+            for (var i = 0; i < indent; i++)
+                sb.Append("  ");
         }
 
         private bool IsSelected(InspectorTraceEvent row) =>
