@@ -19,20 +19,17 @@ namespace HeTu.Editor
                 "https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask"),
 #endif
             ("com.github.messagepack-csharp",
-                "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git?path=src/MessagePack.UnityClient/Assets/Scripts/MessagePack")
-        };
-
-        public static IReadOnlyList<(string packageId, string packageUrl)> Dependencies =>
-            s_dependencies;
-
-        private static readonly (string, string)[] s_optionalDependencies =
-        {
+                "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git?path=src/MessagePack.UnityClient/Assets/Scripts/MessagePack"),
             ("com.cysharp.r3",
                 "https://github.com/Cysharp/R3.git?path=src/R3.Unity/Assets/R3.Unity")
         };
 
+
         private static AddRequest s_lastRequest;
         private static string s_currentInstallingPackageId;
+
+        public static IReadOnlyList<(string packageId, string packageUrl)> Dependencies =>
+            s_dependencies;
 
         public static bool IsInstallInProgress
         {
@@ -69,17 +66,13 @@ namespace HeTu.Editor
                 InstallUPMPackage(dep.packageId, dep.packageUrl);
         }
 
-        public static bool IsDependencyInstalled(string packageID)
-        {
-            return IsUPMPackageInstalled(packageID);
-        }
+        public static bool IsDependencyInstalled(string packageID) =>
+            IsUPMPackageInstalled(packageID);
 
-        public static bool IsDependencyInstalling(string packageID)
-        {
-            return IsInstallInProgress &&
-                   string.Equals(s_currentInstallingPackageId, packageID,
-                       StringComparison.OrdinalIgnoreCase);
-        }
+        public static bool IsDependencyInstalling(string packageID) =>
+            IsInstallInProgress &&
+            string.Equals(s_currentInstallingPackageId, packageID,
+                StringComparison.OrdinalIgnoreCase);
 
         public static void InstallDependency(string packageID)
         {
@@ -95,23 +88,6 @@ namespace HeTu.Editor
 
             throw new ArgumentException($"Unknown UPM dependency: {packageID}",
                 nameof(packageID));
-        }
-
-        public static bool IsAllOptionalInstalled()
-        {
-            foreach (var (name, depUrl) in s_optionalDependencies)
-            {
-                if (!IsUPMPackageInstalled(name))
-                    return false;
-            }
-
-            return true;
-        }
-
-        public static void InstallAllOptional()
-        {
-            foreach (var (name, depUrl) in s_optionalDependencies)
-                InstallUPMPackage(name, depUrl);
         }
 
         public static bool IsUPMPackageInstalled(string packageID)

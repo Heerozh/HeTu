@@ -6,21 +6,9 @@ namespace HeTu.Editor.Setup
 {
     public class HeTuPackageSetupWizard : EditorWindow
     {
-        private void OnEnable()
-        {
-            EditorApplication.update += OnEditorUpdate;
-        }
+        private void OnEnable() => EditorApplication.update += OnEditorUpdate;
 
-        private void OnDisable()
-        {
-            EditorApplication.update -= OnEditorUpdate;
-        }
-
-        private void OnEditorUpdate()
-        {
-            if (UPMDependenciesInstaller.IsInstallInProgress)
-                Repaint();
-        }
+        private void OnDisable() => EditorApplication.update -= OnEditorUpdate;
 
         private void OnGUI()
         {
@@ -57,6 +45,12 @@ namespace HeTu.Editor.Setup
             }
 
             GUILayout.Space(8);
+        }
+
+        private void OnEditorUpdate()
+        {
+            if (UPMDependenciesInstaller.IsInstallInProgress)
+                Repaint();
         }
 
         private static void DrawNuGetSection()
@@ -182,18 +176,16 @@ namespace HeTu.Editor.Setup
             }
         }
 
-        private static string GetUPMDescription(string packageId)
-        {
-            switch (packageId)
+        private static string GetUPMDescription(string packageId) =>
+            packageId switch
             {
-                case "com.cysharp.unitask":
-                    return "用于异步编程支持（Unity 6 不安装）/ Async programming support (not installed on Unity 6).";
-                case "com.github.messagepack-csharp":
-                    return "用于 MessagePack 的 Unity 集成 / MessagePack Unity integration.";
-                default:
-                    return "UPM dependency.";
-            }
-        }
+                "com.cysharp.unitask" =>
+                    "用于异步编程支持（Unity 6 不安装）/ Async programming support (not installed on Unity 6).",
+                "com.github.messagepack-csharp" =>
+                    "用于 MessagePack 的 Unity 集成 / MessagePack Unity integration.",
+                "com.cysharp.r3" => "响应式编程Unity扩展 / Reactive programming Unity support.",
+                _ => "UPM dependency."
+            };
 
         [MenuItem("HeTu/Setup Wizard...")]
         public static void Open()
@@ -243,7 +235,9 @@ namespace HeTu.Editor.Setup
                     {
                         var buttonText = installed
                             ? "Installed"
-                            : installing ? "Installing..." : "Install";
+                            : installing
+                                ? "Installing..."
+                                : "Install";
                         if (GUILayout.Button(buttonText, GUILayout.Width(120)))
                         {
                             try
