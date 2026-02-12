@@ -46,8 +46,10 @@ namespace HeTu
         internal const string MessageUpdate = "updt";
         internal const string MessageSubed = "sub";
         internal const string IndexId = "id";
+        protected readonly InspectorTraceCollector InspectorCollector = new();
 
-        protected readonly ConcurrentQueue<ValueTuple<object, ResponseManager.Callback>>
+        protected readonly ConcurrentQueue<
+                ValueTuple<object, ResponseManager.Callback, string>>
             OfflineQueue = new();
 
         protected readonly MessagePipeline Pipeline = new();
@@ -68,11 +70,36 @@ namespace HeTu
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
             });
 
+        /// <summary>
+        ///     动态开关：是否启用 Inspector 拦截。
+        /// </summary>
+        public bool InspectorEnabled => InspectorCollector.Enabled;
+
+
         public virtual void Dispose()
         {
             Pipeline.Dispose();
             GC.SuppressFinalize(this);
         }
+
+        /// <summary>
+        ///     配置 Inspector 拦截开关与采样率。
+        ///     默认关闭，采样率默认 1。
+        /// </summary>
+        public void ConfigureInspector(bool enabled) =>
+            InspectorCollector.Configure(enabled);
+
+        /// <summary>
+        ///     注册 Inspector 事件分发器。
+        /// </summary>
+        public void AddInspectorDispatcher(IInspectorTraceDispatcher dispatcher) =>
+            InspectorCollector.AddDispatcher(dispatcher);
+
+        /// <summary>
+        ///     移除 Inspector 事件分发器。
+        /// </summary>
+        public void RemoveInspectorDispatcher(IInspectorTraceDispatcher dispatcher) =>
+            InspectorCollector.RemoveDispatcher(dispatcher);
 
         /// <summary>
         ///     握手完成并可收发业务消息时触发。
@@ -161,12 +188,15 @@ namespace HeTu
 
         private void FlushOfflineQueue()
         {
-            foreach (var (payload, callback) in OfflineQueue)
+            foreach (var (payload, callback, traceId) in OfflineQueue)
             {
-                var buffer = Pipeline.Encode(payload);
+                var buffer = Pipeline.Encode(payload, out var metrics);
+                InspectorCollector.UpdateRequestSize(traceId,
+                    metrics.SourceSizeBytes,
+                    metrics.TransportSizeBytes);
                 SendCore(buffer);
                 if (callback != null)
-                    ResponseQueue.EnqueueCallback(callback);
+                    ResponseQueue.EnqueueCallback(callback, traceId);
             }
 
             OfflineQueue.Clear();
@@ -203,19 +233,23 @@ namespace HeTu
             CloseCore();
         }
 
-        private void SendOrQueueRequest(object payload, ResponseManager.Callback callback)
+        private void SendOrQueueRequest(object payload, ResponseManager.Callback callback,
+            string traceId = null)
         {
             if (State == ConnectionState.Connected)
             {
-                var buffer = Pipeline.Encode(payload);
+                var buffer = Pipeline.Encode(payload, out var metrics);
+                InspectorCollector.UpdateRequestSize(traceId,
+                    metrics.SourceSizeBytes,
+                    metrics.TransportSizeBytes);
                 SendCore(buffer); // 后台线程发送
                 if (callback != null)
-                    ResponseQueue.EnqueueCallback(callback);
+                    ResponseQueue.EnqueueCallback(callback, traceId);
             }
             else
             {
                 Logger.Instance.Info("尝试发送数据但连接未建立，将加入队列在建立后发送。");
-                OfflineQueue.Enqueue((payload, callback));
+                OfflineQueue.Enqueue((payload, callback, traceId));
             }
         }
 
@@ -244,13 +278,21 @@ namespace HeTu
             }
 
             var payload = new object[] { CommandRpc, systemName }.Concat(args).ToArray();
+            var traceId = InspectorCollector.InterceptRequest("callsystem", systemName,
+                payload);
             SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
+                {
+                    InspectorCollector.CompleteRequest(traceId, "canceled");
                     onResponse(null, true);
+                }
                 else
+                {
+                    InspectorCollector.CompleteRequest(traceId, "completed");
                     onResponse((JsonObject)response[1], false);
-            });
+                }
+            }, traceId);
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
@@ -338,10 +380,13 @@ namespace HeTu
             Logger.Instance.Debug(
                 $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
+            var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
+                payload);
             SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
+                    InspectorCollector.CompleteRequest(traceId, "canceled");
                     onResponse(null, true, null);
                     return;
                 }
@@ -373,12 +418,14 @@ namespace HeTu
                 }
                 catch (Exception ex)
                 {
+                    InspectorCollector.CompleteRequest(traceId, "failed");
                     onResponse(null, false, ex);
                     return;
                 }
 
+                InspectorCollector.CompleteRequest(traceId, "completed");
                 onResponse(rowSubscription, false, null);
-            });
+            }, traceId);
         }
 
         /// <summary>
@@ -436,10 +483,13 @@ namespace HeTu
                 CommandSub, componentName, QueryRange, index, left, right, limit,
                 desc, force
             };
+            var traceId = InspectorCollector.InterceptRequest(QueryRange,
+                componentName, payload);
             SendOrQueueRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
+                    InspectorCollector.CompleteRequest(traceId, "canceled");
                     onResponse(null, true, null);
                     return;
                 }
@@ -472,12 +522,14 @@ namespace HeTu
                 }
                 catch (Exception ex)
                 {
+                    InspectorCollector.CompleteRequest(traceId, "failed");
                     onResponse(null, false, ex);
                     return;
                 }
 
+                InspectorCollector.CompleteRequest(traceId, "completed");
                 onResponse(idxSubscription, false, null);
-            });
+            }, traceId);
         }
 
         /// <summary>
@@ -509,7 +561,8 @@ namespace HeTu
         {
             // 解码消息
             // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
-            if (Pipeline.Decode(buffer) is not object[] structuredMsg ||
+            if (Pipeline.Decode(buffer, out var decodeMetrics) is not object[]
+                    structuredMsg ||
                 structuredMsg.Length == 0)
                 return;
 
@@ -527,6 +580,10 @@ namespace HeTu
                     if (!Subscriptions.TryGet(subID, out var subscribed))
                         break;
                     var rows = (JsonObject)structuredMsg[2];
+                    var target = subID?.Split('.')[0] ?? "unknown";
+                    InspectorCollector.InterceptMessageUpdate(target, rows,
+                        decodeMetrics.SourceSizeBytes,
+                        decodeMetrics.TransportSizeBytes);
                     subscribed.UpdateRows(rows);
                     break;
             }

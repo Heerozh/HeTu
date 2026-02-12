@@ -10,6 +10,22 @@ using JetBrains.Annotations;
 
 namespace HeTu
 {
+    /// <summary>
+    ///     管道编解码尺寸指标。
+    /// </summary>
+    public sealed class PipelineMetrics
+    {
+        /// <summary>
+        ///     源数据尺寸（通常为业务层原始字节）。
+        /// </summary>
+        public int SourceSizeBytes { get; set; } = -1;
+
+        /// <summary>
+        ///     传输尺寸（实际网络收发字节）。
+        /// </summary>
+        public int TransportSizeBytes { get; set; } = -1;
+    }
+
     [MustDisposeResource]
     public abstract class MessageProcessLayer : IDisposable
     {
@@ -160,6 +176,17 @@ namespace HeTu
         /// </summary>
         public byte[] Encode(object message, int until = -1)
         {
+            var encoded = Encode(message, out _, until);
+            return encoded;
+        }
+
+        /// <summary>
+        ///     对消息进行正向处理并采集尺寸指标。
+        /// </summary>
+        public byte[] Encode(object message, out PipelineMetrics metrics,
+            int until = -1)
+        {
+            metrics = new PipelineMetrics();
             var encoded = message;
             for (var i = 0; i < _layers.Count; i++)
             {
@@ -167,9 +194,14 @@ namespace HeTu
                 if (0 < until && until < i) break;
 
                 encoded = _layers[i].Encode(encoded);
+                if (metrics.SourceSizeBytes < 0 && encoded is byte[] sourceBytes)
+                    metrics.SourceSizeBytes = sourceBytes.Length;
             }
 
-            return encoded as byte[];
+            var transport = encoded as byte[];
+            if (transport != null)
+                metrics.TransportSizeBytes = transport.Length;
+            return transport;
         }
 
         /// <summary>
@@ -177,6 +209,19 @@ namespace HeTu
         /// </summary>
         public object Decode(byte[] message)
         {
+            return Decode(message, out _);
+        }
+
+        /// <summary>
+        ///     对消息进行逆向处理并采集尺寸指标。
+        /// </summary>
+        public object Decode(byte[] message, out PipelineMetrics metrics)
+        {
+            metrics = new PipelineMetrics
+            {
+                TransportSizeBytes = message?.Length ?? -1
+            };
+
             object decoded = message;
             for (var i = 0; i < _layers.Count; i++)
             {
@@ -184,6 +229,9 @@ namespace HeTu
                 if (_disabled[originalIndex]) continue;
 
                 decoded = _layers[originalIndex].Decode(decoded);
+
+                if (decoded is byte[] sourceBytes)
+                    metrics.SourceSizeBytes = sourceBytes.Length;
             }
 
             return decoded;

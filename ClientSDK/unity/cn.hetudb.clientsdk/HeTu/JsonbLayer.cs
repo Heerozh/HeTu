@@ -18,6 +18,11 @@ namespace HeTu
         private readonly byte[] _rawData;
 
         /// <summary>
+        ///     原始 MessagePack 片段字节长度。
+        /// </summary>
+        public int RawSize => _rawData?.Length ?? 0;
+
+        /// <summary>
         ///     从当前 reader 所在位置截取一个完整 MessagePack 节点的数据。
         /// </summary>
         /// <param name="reader">MessagePack 读取器。</param>
@@ -82,6 +87,16 @@ namespace HeTu
         {
             if (_rawData == null || _rawData.Length == 0) return null;
             return MessagePackSerializer.Deserialize<List<T>>(_rawData);
+        }
+
+        /// <summary>
+        ///     转换为动态对象（Dictionary/List/基础类型）。
+        /// </summary>
+        /// <returns>反序列化对象；若数据为空返回 <see langword="null"/>。</returns>
+        public object ToUntyped()
+        {
+            if (_rawData == null || _rawData.Length == 0) return null;
+            return MessagePackSerializer.Deserialize<object>(_rawData);
         }
     }
 
