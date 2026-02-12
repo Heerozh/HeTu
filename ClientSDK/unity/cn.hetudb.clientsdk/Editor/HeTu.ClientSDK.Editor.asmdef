@@ -2,7 +2,8 @@
     "name": "HeTu.ClientSDK.Editor",
     "rootNamespace": "HeTu.Editor",
     "references": [
-        "NuGetForUnity"
+        "NuGetForUnity",
+        "HeTu.ClientSDK"
     ],
     "includePlatforms": [
         "Editor"
