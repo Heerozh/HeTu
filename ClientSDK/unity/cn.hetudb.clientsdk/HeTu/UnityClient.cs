@@ -3,16 +3,16 @@
 // </copyright>
 // <summary>河图客户端SDK的Unity库</summary>
 
-#if UNITY_6000_0_OR_NEWER
-using System.Threading.Tasks;
-#else
-using Cysharp.Threading.Tasks;
-#endif
-using System;
+
 using System.Threading;
 using JetBrains.Annotations;
 using UnityEngine;
 using UnityWebSocket;
+#if UNITY_6000_0_OR_NEWER
+using System;
+#else
+using Cysharp.Threading.Tasks;
+#endif
 
 namespace HeTu
 {
@@ -29,7 +29,8 @@ namespace HeTu
 
 #if UNITY_6000_0_OR_NEWER
         private static AwaitableCompletionSource<T> NewCompletionSource<T>() => new();
-        private static Awaitable<T> AwaitFrom<T>(AwaitableCompletionSource<T> tcs) => tcs.Awaitable;
+        private static Awaitable<T> AwaitFrom<T>(AwaitableCompletionSource<T> tcs) =>
+            tcs.Awaitable;
 #else
         private static UniTaskCompletionSource<T> NewCompletionSource<T>() => new();
         private static UniTask<T> AwaitFrom<T>(UniTaskCompletionSource<T> tcs) => tcs.Task;
@@ -212,7 +213,8 @@ namespace HeTu
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<JsonObject> CallSystem(string systemName, params object[] args)
+        public async Awaitable<JsonObject> CallSystem(string systemName,
+            params object[] args)
 #else
         public async UniTask<JsonObject> CallSystem(string systemName,
             params object[] args)
@@ -306,7 +308,6 @@ namespace HeTu
             }
 
             var tcs = NewCompletionSource<RowSubscription<T>>();
-            // todo 做一个postman类似的工具驿栈，直接发送请求，查看服务器响应，也可以新建订阅，方便调试
             GetSync<T>(index, value, (rowSub, cancel, ex) =>
             {
                 if (cancel)
@@ -339,7 +340,7 @@ namespace HeTu
         /// <param name="componentName">组件名。</param>
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
-        /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null"/>。</returns>
+        /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null" />。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
         public async Awaitable<RowSubscription<DictComponent>> Get(

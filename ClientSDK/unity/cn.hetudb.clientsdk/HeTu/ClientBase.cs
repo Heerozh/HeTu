@@ -70,6 +70,8 @@ namespace HeTu
                 new JsonbLayer(), new ZlibLayer(), new CryptoLayer()
             });
 
+        public bool IsConnected => State == ConnectionState.Connected;
+
         /// <summary>
         ///     动态开关：是否启用 Inspector 拦截。
         /// </summary>
