@@ -306,7 +306,6 @@ namespace HeTu
             }
 
             var tcs = NewCompletionSource<RowSubscription<T>>();
-            // todo 做一个network inspector，记录每次订阅的index和value，方便调试
             // todo 做一个postman类似的工具驿栈，直接发送请求，查看服务器响应，也可以新建订阅，方便调试
             GetSync<T>(index, value, (rowSub, cancel, ex) =>
             {
