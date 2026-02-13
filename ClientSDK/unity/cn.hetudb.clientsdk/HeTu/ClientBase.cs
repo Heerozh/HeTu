@@ -383,8 +383,6 @@ namespace HeTu
             var creationSource = CaptureCreationSource();
 
             // 向服务器订阅
-            Logger.Instance.Debug(
-                $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
@@ -418,7 +416,6 @@ namespace HeTu
                                 subID, componentName, data, this, creationSource);
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));
-                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
                         }
                     }
                 }
@@ -485,7 +482,6 @@ namespace HeTu
             var creationSource = CaptureCreationSource();
 
             // 发送订阅请求
-            Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
             var payload = new[]
             {
                 CommandSub, componentName, QueryRange, index, left, right, limit,
@@ -524,7 +520,6 @@ namespace HeTu
                                 subID, componentName, rows, this, creationSource);
                             Subscriptions.Add(subID,
                                 new WeakReference(idxSubscription, false));
-                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
                         }
                     }
                 }
