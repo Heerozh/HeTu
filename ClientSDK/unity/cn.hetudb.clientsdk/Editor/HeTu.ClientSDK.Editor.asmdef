@@ -3,7 +3,8 @@
     "rootNamespace": "HeTu.Editor",
     "references": [
         "NuGetForUnity",
-        "HeTu.ClientSDK"
+        "HeTu.ClientSDK",
+        "UniTask"
     ],
     "includePlatforms": [
         "Editor"

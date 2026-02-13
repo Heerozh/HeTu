@@ -27,8 +27,7 @@ namespace HeTu
     /// </summary>
     public class LoggerInspectorTraceDispatcher : IInspectorTraceDispatcher
     {
-        public void Dispatch(InspectorTraceEvent traceEvent)
-        {
+        public void Dispatch(InspectorTraceEvent traceEvent) =>
             // 将InspectorTraceEvent打印到控制台，注意时间用本地时间
             Logger.Instance.Info(
                 $"Inspector: {traceEvent.StartTimeUtc.ToLocalTime()} " +
@@ -39,8 +38,6 @@ namespace HeTu
                 $"| {traceEvent.CallDuration} +" +
                 $"| {traceEvent.Payload}" +
                 $"| {traceEvent.Response}");
-
-        }
     }
 
     /// <summary>
@@ -99,10 +96,10 @@ namespace HeTu
     public sealed class InspectorTraceCollector
     {
         private const string NotAvailable = "-";
+        private readonly List<IInspectorTraceDispatcher> _dispatchers = new();
 
         private readonly Dictionary<string, Stopwatch> _pendingStopwatches = new();
         private readonly Dictionary<string, InspectorTraceEvent> _pendingTraces = new();
-        private readonly List<IInspectorTraceDispatcher> _dispatchers = new();
         private readonly object _syncRoot = new();
 
         private bool _enabled;
@@ -270,7 +267,8 @@ namespace HeTu
             return source switch
             {
                 // 尺寸根据实际大小自动转换为b/kb/mb。源/传输
-                >= 1024 * 1024 => $"{source / (1024 * 1024)}MB/{transport / (1024 * 1024)}MB",
+                >= 1024 * 1024 =>
+                    $"{source / (1024 * 1024)}MB/{transport / (1024 * 1024)}MB",
                 >= 1024 => $"{source / 1024}KB/{transport / 1024}KB",
                 _ => $"{source}B/{transport}B"
             };

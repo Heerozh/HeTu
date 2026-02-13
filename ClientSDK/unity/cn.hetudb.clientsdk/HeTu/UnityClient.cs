@@ -4,15 +4,17 @@
 // <summary>河图客户端SDK的Unity库</summary>
 
 
+#if UNITY_6000_0_OR_NEWER
+using System.Threading.Tasks;
+#else
+using Cysharp.Threading.Tasks;
+#endif
+using System;
 using System.Threading;
 using JetBrains.Annotations;
 using UnityEngine;
 using UnityWebSocket;
-#if UNITY_6000_0_OR_NEWER
-using System;
-#else
-using Cysharp.Threading.Tasks;
-#endif
+
 
 namespace HeTu
 {
@@ -33,7 +35,8 @@ namespace HeTu
             tcs.Awaitable;
 #else
         private static UniTaskCompletionSource<T> NewCompletionSource<T>() => new();
-        private static UniTask<T> AwaitFrom<T>(UniTaskCompletionSource<T> tcs) => tcs.Task;
+        private static UniTask<T> AwaitFrom<T>(UniTaskCompletionSource<T> tcs) =>
+            tcs.Task;
 #endif
 
         private CancellationTokenSource _connectionCancelSource;

@@ -1,10 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using UnityEditor;
 using UnityEngine;
 
-namespace HeTu.Editor
+namespace HeTu.Editor.Inspector
 {
     public class HeTuInspectorWindow : EditorWindow
     {
@@ -15,7 +16,7 @@ namespace HeTu.Editor
         private const float MinColumnWidth = 60f;
         private const float ResizeHandleHalfWidth = 3f;
 
-        private static readonly float[] DefaultColumnWidths =
+        private static readonly float[] s_defaultColumnWidths =
         {
             105f, // Time
             82f, // Type
@@ -27,30 +28,31 @@ namespace HeTu.Editor
             // Response 占用剩余宽度
         };
 
-        private readonly List<InspectorTraceEvent> _rows = new();
+        private readonly float[] _columnWidths = (float[])s_defaultColumnWidths.Clone();
         private readonly Dictionary<string, int> _indexByTraceId = new();
         private readonly Queue<InspectorTraceEvent> _pendingEvents = new();
         private readonly object _queueLock = new();
-        private readonly float[] _columnWidths = (float[])DefaultColumnWidths.Clone();
+
+        private readonly List<InspectorTraceEvent> _rows = new();
+        private bool _autoScrollToBottom = true;
+        private GUIStyle _cellStyle;
 
         private HeTuInspectorDispatcher _dispatcher;
-        private Vector2 _scroll;
+        private string _filterKeyword = string.Empty;
         private GUIStyle _headerStyle;
-        private GUIStyle _cellStyle;
-        private GUIStyle _rowStyle;
         private bool _isRecording;
-        private bool _samplerWasEnabledBeforeRecording;
-        private string _selectedTraceId;
         private bool _isResizingColumn;
-        private int _resizingColumnIndex = -1;
+        private Vector2 _payloadDetailScroll;
         private float _resizeStartMouseX;
         private float _resizeStartWidth;
-        private string _filterKeyword = string.Empty;
-        private bool _autoScrollToBottom = true;
+        private int _resizingColumnIndex = -1;
+        private Vector2 _responseDetailScroll;
+        private GUIStyle _rowStyle;
+        private bool _samplerWasEnabledBeforeRecording;
+        private Vector2 _scroll;
+        private string _selectedTraceId;
         private bool _showPayloadDetail = true;
         private bool _showResponseDetail = true;
-        private Vector2 _payloadDetailScroll;
-        private Vector2 _responseDetailScroll;
 
         private void OnEnable()
         {
@@ -65,10 +67,15 @@ namespace HeTu.Editor
             StopRecording();
         }
 
-        private void OnEditorUpdate()
+        private void OnGUI()
         {
-            FlushPendingEvents();
+            EnsureStyles();
+            DrawToolbar();
+            DrawList();
+            DrawDetailPanel();
         }
+
+        private void OnEditorUpdate() => FlushPendingEvents();
 
         private void EnsureStyles()
         {
@@ -98,19 +105,13 @@ namespace HeTu.Editor
             };
         }
 
-        private void OnGUI()
-        {
-            EnsureStyles();
-            DrawToolbar();
-            DrawList();
-            DrawDetailPanel();
-        }
-
         private void DrawToolbar()
         {
             using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
             {
-                var recordLabel = _isRecording ? "⏸" : "🔴";
+                var recordLabel = _isRecording
+                    ? EditorGUIUtility.IconContent("PauseButton")
+                    : EditorGUIUtility.IconContent("Animation.Record");
                 if (GUILayout.Button(recordLabel, EditorStyles.toolbarButton,
                         GUILayout.Width(30)))
                 {
@@ -120,12 +121,14 @@ namespace HeTu.Editor
                         StartRecording();
                 }
 
-                if (GUILayout.Button("🗑️", EditorStyles.toolbarButton,
+                if (GUILayout.Button(EditorGUIUtility.IconContent("TreeEditor.Trash"),
+                        EditorStyles.toolbarButton,
                         GUILayout.Width(30)))
                     ClearRows();
 
                 GUILayout.Space(8);
-                GUILayout.Label("🔍", EditorStyles.miniLabel, GUILayout.Width(30));
+                GUILayout.Label(EditorGUIUtility.IconContent("FilterByLabel"),
+                    EditorStyles.miniLabel, GUILayout.Width(30));
                 var nextFilter = GUILayout.TextField(_filterKeyword,
                     EditorStyles.toolbarTextField,
                     GUILayout.MinWidth(140), GUILayout.MaxWidth(360));
@@ -137,7 +140,8 @@ namespace HeTu.Editor
                 }
 
                 _autoScrollToBottom = GUILayout.Toggle(_autoScrollToBottom,
-                    "⬇️", EditorStyles.toolbarButton, GUILayout.Width(30));
+                    EditorGUIUtility.IconContent("InspectorLock"),
+                    EditorStyles.toolbarButton, GUILayout.Width(30));
 
                 GUILayout.FlexibleSpace();
                 GUILayout.Label($"Count: {GetFilteredCount()}/{_rows.Count}",
@@ -279,7 +283,7 @@ namespace HeTu.Editor
                         return;
                     }
                 case true when
-                    (evt.type == EventType.MouseUp || evt.rawType == EventType.MouseUp):
+                    evt.type == EventType.MouseUp || evt.rawType == EventType.MouseUp:
                     _isResizingColumn = false;
                     _resizingColumnIndex = -1;
                     evt.Use();
@@ -290,7 +294,8 @@ namespace HeTu.Editor
         private static void DrawHorizontalBorder(Rect rowRect)
         {
             var border = new Color(0.25f, 0.25f, 0.25f, 1f);
-            EditorGUI.DrawRect(new Rect(rowRect.xMin, rowRect.yMax - 1f, rowRect.width, 1f),
+            EditorGUI.DrawRect(
+                new Rect(rowRect.xMin, rowRect.yMax - 1f, rowRect.width, 1f),
                 border);
             EditorGUI.DrawRect(new Rect(rowRect.xMin, rowRect.yMin, rowRect.width, 1f),
                 border);
@@ -307,18 +312,17 @@ namespace HeTu.Editor
             }
         }
 
-        private static Color GetStatusColor(string status)
-        {
-            return status switch
+        private static Color GetStatusColor(string status) =>
+            status switch
             {
                 "pending" => new Color(1f, 0.66f, 0.2f),
                 "completed" => new Color(0.45f, 0.85f, 0.45f),
                 "canceled" => new Color(0.72f, 0.72f, 0.72f),
-                _ => new Color(1f, 0.45f, 0.45f),
+                _ => new Color(1f, 0.45f, 0.45f)
             };
-        }
 
-        private void HandleRowInteraction(Rect rect, int rowIndex, InspectorTraceEvent row)
+        private void HandleRowInteraction(Rect rect, int rowIndex,
+            InspectorTraceEvent row)
         {
             if (_isResizingColumn)
                 return;
@@ -432,7 +436,7 @@ namespace HeTu.Editor
             var indent = 0;
             var inQuotes = false;
             var escaped = false;
-            var sb = new System.Text.StringBuilder(json.Length * 2);
+            var sb = new StringBuilder(json.Length * 2);
 
             for (var i = 0; i < json.Length; i++)
             {
@@ -499,7 +503,7 @@ namespace HeTu.Editor
             return sb.ToString();
         }
 
-        private static void AppendIndent(System.Text.StringBuilder sb, int indent)
+        private static void AppendIndent(StringBuilder sb, int indent)
         {
             for (var i = 0; i < indent; i++)
                 sb.Append("  ");
@@ -521,10 +525,9 @@ namespace HeTu.Editor
                    ContainsIgnoreCase(row.Response, keyword);
         }
 
-        private int GetFilteredCount()
-        {
-            return string.IsNullOrWhiteSpace(_filterKeyword) ? _rows.Count : _rows.Count(IsRowMatched);
-        }
+        private int GetFilteredCount() => string.IsNullOrWhiteSpace(_filterKeyword)
+            ? _rows.Count
+            : _rows.Count(IsRowMatched);
 
         private static bool ContainsIgnoreCase(string source, string keyword)
         {
@@ -543,10 +546,8 @@ namespace HeTu.Editor
         private static void ShowContextMenu(InspectorTraceEvent row)
         {
             var menu = new GenericMenu();
-            menu.AddItem(new GUIContent("Copy"), false, () =>
-            {
-                EditorGUIUtility.systemCopyBuffer = BuildCopyText(row);
-            });
+            menu.AddItem(new GUIContent("Copy"), false,
+                () => { EditorGUIUtility.systemCopyBuffer = BuildCopyText(row); });
             menu.ShowAsContext();
         }
 
@@ -665,15 +666,10 @@ namespace HeTu.Editor
         {
             private readonly HeTuInspectorWindow _owner;
 
-            public HeTuInspectorDispatcher(HeTuInspectorWindow owner)
-            {
-                _owner = owner;
-            }
+            public HeTuInspectorDispatcher(HeTuInspectorWindow owner) => _owner = owner;
 
-            public void Dispatch(InspectorTraceEvent traceEvent)
-            {
+            public void Dispatch(InspectorTraceEvent traceEvent) =>
                 _owner.EnqueueTrace(traceEvent);
-            }
         }
     }
 }
