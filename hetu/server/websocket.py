@@ -11,7 +11,7 @@ import logging
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
 
-from ..data.sub import Subscriptions
+from ..data.sub import SubscriptionBroker
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
 from ..system.caller import SystemCaller
@@ -24,36 +24,43 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-@HETU_BLUEPRINT.websocket("/hetu")  # noqa
-async def websocket_connection(request: Request, ws: Websocket):
+@HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
+async def websocket_connection(request: Request, ws: Websocket, db_name: str) -> None:
     """ws连接处理器，运行在worker主协程下"""
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
-    logger.info(f"🔗 [📡WSConnect] 新连接：{current_task.get_name()}")
+    logger.info(f"🔗 [📡WSConnect] 新连接：{db_name}: {current_task.get_name()}")
 
     # 获得客户端握手消息
     msg_pipe = ServerMessagePipeline()
-    handshake_msg = await ws.recv()
+    handshake_msg = await ws.recv(timeout=10)
     if not isinstance(handshake_msg, (bytes, bytearray)):
-        raise ValueError("Invalid handshake message type")
+        logger.info("New Connect Error: Invalid handshake message type")
+        ws.fail_connection()
+        return
     handshake_msg = msg_pipe.decode(None, handshake_msg)
     if not isinstance(handshake_msg, list):
-        raise ValueError("Invalid handshake message format")
+        logger.info("New Connect Error: Invalid handshake message format")
+        ws.fail_connection()
+        return
     # 进行握手处理，获得连接上下文
+    if len(handshake_msg) != msg_pipe.num_handshake_layers:
+        logger.info(
+            "New Connect Error: client pipeline layers count "
+            "does not match server pipeline"
+        )
+        ws.fail_connection()
+        return
     pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
     await ws.send(reply)
 
-    # 获得客户端的use database命令，确定哪一个instance
-    use_db = await ws.recv()
-    if not isinstance(use_db, (bytes, bytearray)):
-        raise ValueError("Invalid use_db message type")
-    use_db = msg_pipe.decode(pipe_ctx, use_db)
-    if not isinstance(use_db, list) or use_db[0] != "use" or len(use_db) != 2:
-        raise ValueError("Invalid use_db message format")
-    instance = use_db[1]
+    # 检查实例是否存在
+    instance = db_name
     if instance not in request.app.ctx.table_managers:
-        raise ValueError(f"Invalid instance name: {instance}")
+        logger.info(f"New Connect Error: Invalid instance name: {instance}")
+        ws.fail_connection()
+        return
     tbl_mgr = request.app.ctx.table_managers[instance]
 
     # 初始化Context，一个连接一个Context
@@ -85,7 +92,7 @@ async def websocket_connection(request: Request, ws: Websocket):
     await endpoint_executor.initialize(request.client_ip)
 
     # 初始化订阅管理器，一个连接一个订阅管理器
-    subscriptions = Subscriptions(request.app.ctx.default_backend)
+    broker = SubscriptionBroker(request.app.ctx.default_backend)
 
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
@@ -96,16 +103,16 @@ async def websocket_connection(request: Request, ws: Websocket):
     # 创建接受客户端消息的协程2
     recv_task_id = f"client_handler:{request.id}"
     receiver_task = client_handler(
-        ws, pipe_ctx, endpoint_executor, subscriptions, push_queue, flood_checker
+        ws, pipe_ctx, endpoint_executor, broker, push_queue, flood_checker
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
     # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
     subs_task_id = f"subs_receiver:{request.id}"
-    subscript_task = subscription_handler(ws, subscriptions, push_queue)
+    subscript_task = subscription_handler(ws, broker, push_queue)
     _ = request.app.add_task(subscript_task, name=subs_task_id)
     puller_task_id = f"mq_puller:{request.id}"
-    puller_task = mq_puller(ws, subscriptions)
+    puller_task = mq_puller(ws, broker)
     _ = request.app.add_task(puller_task, name=puller_task_id)
 
     # 删除当前长连接用不上的临时变量
@@ -147,5 +154,5 @@ async def websocket_connection(request: Request, ws: Websocket):
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
         await endpoint_executor.terminate()
-        await subscriptions.close()
+        await broker.close()
         request.app.purge_tasks()

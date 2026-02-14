@@ -21,7 +21,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class CryptoLayer(MessageProcessLayer):
+class CryptoLayer(MessageProcessLayer, alias="crypto"):
     """
     加密层
     使用 ECDH (Curve25519) 协商密钥，使用 ChaCha20-Poly1305-IETF 进行加密通讯。
@@ -36,6 +36,9 @@ class CryptoLayer(MessageProcessLayer):
         server_side: bool
         send_nonce: int
         recv_nonce: int
+
+        def __repr__(self) -> str:
+            return f"CryptoContext('{self.session_key.hex()[:8]}...')"
 
     def __init__(self):
         super().__init__()

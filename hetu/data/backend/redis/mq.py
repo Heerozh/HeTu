@@ -35,7 +35,6 @@ class RedisMQClient(MQClient):
         #    且这个方式如果redis维护变更了ip/集群规模等，整个服务会瘫痪，而a方式只要用户重连
         # 这里采用a方式
         self._client = client
-        self.clustering = client.clustering
         # redis-py库 cluster模式的pubsub不支持异步，不支持gather消息，用自己写的
         self._mq = AsyncKeyspacePubSub(client.aio)
 
@@ -106,7 +105,7 @@ class RedisMQClient(MQClient):
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
 
-        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
         pulled_deque = self.pulled_deque

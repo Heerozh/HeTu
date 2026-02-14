@@ -16,7 +16,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class JSONBinaryLayer(MessageProcessLayer):
+class JSONBinaryLayer(MessageProcessLayer, alias="jsonb"):
     """
     把list/dict转换为byte的类
     """
@@ -26,6 +26,12 @@ class JSONBinaryLayer(MessageProcessLayer):
         self.msg_encoder = msgspec.msgpack.Encoder()
         self.msg_decoder = msgspec.msgpack.Decoder()
         self.buffer = bytearray()
+
+    def is_handshake_required(self) -> bool:
+        """
+        是否需要在连接时进行握手
+        """
+        return False
 
     @override
     def handshake(self, message: bytes) -> tuple[Any, bytes]:

@@ -117,7 +117,12 @@ async def close_backends(app: Sanic):
 
 
 async def worker_start(app: Sanic):
-    start_backends(app)
+    try:
+        start_backends(app)
+    except Exception as e:
+        logger.error(f"❌ 进程[{os.getpid()}] 启动失败: {type(e).__name__}:{e}")
+        app.stop()
+        return
 
     # 打印信息
     from pathlib import Path
@@ -142,6 +147,8 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
+        logger.info("⌚ [📡WorkerKeeper] 续约中... ")
+        # todo sanic bug: 来新连接时，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
         except RedisConnectionError as e:
@@ -202,16 +209,11 @@ def worker_main(app_name, config) -> Sanic:
         root_logger.setLevel(logging.DEBUG)
 
     # 加载协议, 初始化消息处理流水线
-    cipher = config.get("PACKET_CIPHER")
     msg_pipe = pipeline.ServerMessagePipeline()
-    msg_pipe.clean()  # 防止test用例中多次调用worker_main导致重复添加layer
-    msg_pipe.add_layer(pipeline.LimitCheckerLayer())
-    msg_pipe.add_layer(pipeline.JSONBinaryLayer())
-    msg_pipe.add_layer(pipeline.ZstdLayer())
-    msg_pipe.add_layer(pipeline.CryptoLayer())
-    if cipher == "None":
-        logger.warning("⚠️ [📡Pipeline] 未配置PACKET_CIPHER，通信不加密！")
-        msg_pipe.disable_layer(3)
+    msg_pipe.clean()  # msg_pipe是单件，防止test用例中多次调用worker_main导致重复添加layer
+    for layer_cfg in config.get("PACKET_LAYERS", []):
+        layer = pipeline.MessageProcessLayerFactory.create(**layer_cfg)
+        msg_pipe.add_layer(layer)
 
     # 服务器main进程setup/teardown回调
     # app.main_process_start()

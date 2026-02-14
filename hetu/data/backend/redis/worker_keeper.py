@@ -141,8 +141,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         if resp != 1:
             logger.error(
                 f"[❄️ID] 续约 Worker ID {worker_id} 失败: "
-                f"expire({key}, {WORKER_ID_EXPIRE_SEC}) == {resp}，"
-                f"可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
+                + "可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
             )
             # 关闭Worker
             raise SystemExit("Worker ID 续约失败，重启Worker...")

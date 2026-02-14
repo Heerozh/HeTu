@@ -1,0 +1,38 @@
+{
+    "name": "HeTu.ClientSDK",
+    "rootNamespace": "",
+    "references": [
+        "UnityWebSocket.Runtime",
+        "UniTask",
+        "R3.Unity",
+        "MessagePack.Unity"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": true,
+    "precompiledReferences": [
+        "BouncyCastle.Cryptography.dll",
+        "Unity.SharpZipLib.dll",
+        "MessagePack.dll",
+        "R3.dll"
+    ],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "MSGPACK_INSTALLED",
+        "R3_INSTALLED"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.cysharp.r3",
+            "expression": "",
+            "define": "R3_INSTALLED"
+        },
+        {
+            "name": "com.github.messagepack-csharp",
+            "expression": "",
+            "define": "MSGPACK_INSTALLED"
+        }
+    ],
+    "noEngineReferences": false
+}

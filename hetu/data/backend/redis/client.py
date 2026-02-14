@@ -178,8 +178,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     # ============ 主要方法 ============
 
-    def __init__(self, endpoint: str | list[str], clustering: bool, is_servant=False):
-        super().__init__(endpoint, clustering, is_servant)
+    def __init__(
+        self, endpoint: str | list[str], is_servant, raw_clustering: bool = False
+    ):
+        super().__init__(endpoint, is_servant)
+        self.raw_clustering = raw_clustering
         # redis的endpoint配置为url, 或list of url
         self.urls = [endpoint] if type(endpoint) is str else endpoint
         assert len(self.urls) > 0, "必须至少指定一个数据库连接URL"
@@ -190,7 +193,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             redis.asyncio.Redis | redis.asyncio.cluster.RedisCluster
         ] = []
         for url in self.urls:
-            if self.clustering:
+            if self.raw_clustering:
                 load_balancing_strategy = None  # 不从任何replica读取
                 if is_servant:  # 只从replica读取
                     load_balancing_strategy = LoadBalancingStrategy.ROUND_ROBIN_REPLICAS
@@ -217,7 +220,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 raise ConnectionError(f"无法连接到Redis数据库：{self.urls[i]}") from e
 
         # 获得db index
-        if self.clustering:
+        if self.raw_clustering:
             self.dbi = 0  # 集群模式没有db的概念，默认0
         else:
             io = self._ios[0]
@@ -665,7 +668,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
-        assert index_name in comp_cls.indexes_
+        assert index_name in comp_cls.indexes_, (
+            f"Component `{comp_cls.name_}` 没有索引 `{index_name}`"
+        )
         b_left, b_right = self.range_normalize_(
             comp_cls.dtype_map_[index_name], left, right, desc
         )

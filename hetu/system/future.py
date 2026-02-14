@@ -286,8 +286,8 @@ async def future_call_task(app):
             if tbl_mgr.get_table(comp) is not None
         ]
 
-    # 不能通过subscriptions订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，导致部分任务可能卡很久不执行
-    # 所以这里使用最基础的，每一段时间循环的方式
+    # 不能通过SubscriptionBroker订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，
+    # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式
     # 如果有很多个instance，可能worker个task来不及处理这么多future表?
     # 应该不会，如果堆积，sleep_for_upcoming并不会sleep，会循环到处理完的
     while True:

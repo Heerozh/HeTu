@@ -15,7 +15,7 @@
             │                        └───────────┬─────────────┘
  数据订阅结构 │                                    │ 数据事务结构
   ┌─────────┴──────────┐               ┌─────────┴──────────┐
-  │    Subscriptions   │               │      Backend       │
+  │ SubscriptionBroker │               │      Backend       │
   │ 每连接一个的消息管理器 │               │  数据库连接管理器    │ 每个进程一个Backend
   └────────────────────┘               └────────────────────┘
             ▲                                    ▲
@@ -91,16 +91,13 @@ class BackendClient:
         super().__init_subclass__()
         BackendClientFactory.register(kwargs["alias"], cls)
 
-    def __init__(self, endpoint: Any, clustering: bool, is_servant=False):
+    def __init__(self, endpoint: Any, is_servant, **kwargs):
         """
         建立数据库连接。
         endpoint为config中master，或者servants的内容。
-        clustering表示数据库是一个垂直分片（按Component分片）的集群，每个Component的
-        所属集群cluster_id可以通过SystemClusters获得，发生变更时也要Client负责迁移。
         is_servant指定endpoint是否为从节点，从节点只读。
         """
         self.endpoint = endpoint
-        self.clustering = clustering
         self.is_servant = is_servant
 
     async def close(self):
@@ -351,16 +348,16 @@ class BackendClientFactory:
 
     @staticmethod
     def register(alias: str, client_cls: type[BackendClient]) -> None:
-        BackendClientFactory._registry[alias] = client_cls
+        BackendClientFactory._registry[alias.lower()] = client_cls
 
     @staticmethod
     def create(
-        alias: str, endpoint: Any, clustering: bool, is_servant=False
+        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
     ) -> BackendClient:
         alias = alias.lower()
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(f"{alias} 后端未实现")
-        return BackendClientFactory._registry[alias](endpoint, clustering, is_servant)
+        return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
 
 
 class TableMaintenance:
@@ -627,7 +624,7 @@ class MQClient:
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
 
-        之后Subscriptions会对该消息进行分析，并重新读取数据库获数据。
+        之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
         raise NotImplementedError

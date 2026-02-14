@@ -52,7 +52,7 @@ ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
 MAX_ANONYMOUS_CONNECTION_BY_IP: 10
 
 # 限制未登录客户端发送消息的频率，可以设置多个指标，格式为[最大数量，统计时间（秒）]，默认值意思是限制每秒1条消息
-# 登录提权后限制次数*10，或自己在login逻辑中修改ctx.client_send_limits值来实现
+# elevate(登录提权)会把此限制次数*10，如需自定义，可在任意System中修改 ctx.client_limits 值
 CLIENT_SEND_LIMITS:
   - [ 10, 1 ]
   - [ 27, 5 ]
@@ -64,14 +64,29 @@ SERVER_SEND_LIMITS:
   - [ 27, 5 ]
   - [ 100, 50 ]
   - [ 300, 300 ]
-# 限制未登录客户端最大允许订阅的行数。每次HeTuClientSDK.Select算1行，每次HeTuClientSDK.Query后根据返回的行数计入。
-# elevate会把限制数*50，可在elevate后修改ctx.max_row_sub值来自定义登陆后的限制，不宜超过1000
+# 限制未登录客户端最大允许订阅的行数。每次 HeTuClientSDK.get 算1行；HeTuClientSDK.range 按返回的行数计入。
+# elevate(登录提权)会把此限制次数*50，或自己在任意System中修改 ctx.max_row_sub 值，不宜超过1000
 MAX_ROW_SUBSCRIPTION: 10
-# 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.Query)。每次Query订阅+1。
+# 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.range)。每次range订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
 
-# 消息加密方式，可选 None、ChaCha20-Poly1305
-PACKET_CIPHER: ChaCha20-Poly1305
+# 消息流处理层，可以设置多层，按照顺序处理。
+# 如需自定义层，只要继承自hetu.server.pipeline.MessageProcessLayer，并定义alias，即可在这添加
+PACKET_LAYERS:
+  # 添加消息json to bytes序列化层
+  - type: jsonb
+  # 开启消息zlib流式压缩
+  # 速度：zstd_lv3 422k/s > zlib_lv1 357k/s > brotli_lv3 100k/s
+  # 压缩率 zlib_lv1 25% > brotli_lv3 25% > zstd_lv3 23%
+  # 因为hetu zlib可以预编字典，所以压缩率很高，使得其他压缩算法优势不明显。
+  # 目前只支持zlib，因为其他的在 unity 上只能跑支持native插件的平台。
+  # todo OpenZL
+  - type: zlib
+    level: 1  # 因为有字典，级别1以上压缩率无明显提升
+  # 消息加密层，使用ChaCha20-Poly1305算法
+  - type: crypto
+    password: your_password_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器
+
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
 BACKENDS:
@@ -84,11 +99,6 @@ BACKENDS:
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
     master: redis://127.0.0.1:6379/0
-    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
-    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
-    # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
-    # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
-    clustering: false  # todo 改成raw clustering更好
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。
@@ -100,6 +110,11 @@ BACKENDS:
     # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库事务读负载
     # 只在填写了servants时有效，每台servant的读权重固定为1，
     master_weight: 1.0
+    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
+    # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
+    # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
+    # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
+    raw_clustering: false
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:

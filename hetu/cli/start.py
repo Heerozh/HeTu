@@ -45,7 +45,7 @@ def wait_for_port(host, port, timeout=30):
         try:
             with socket.create_connection((host, port), timeout=1):
                 return True
-        except (socket.timeout, ConnectionRefusedError):
+        except socket.timeout, ConnectionRefusedError:
             time.sleep(0.5)
     return False
 
@@ -158,6 +158,11 @@ class StartCommand(CommandInterface):
                 "NAMESPACE": args.namespace,
                 "INSTANCES": [args.instance],
                 "LISTEN": f"0.0.0.0:{args.port}",
+                "PACKET_LAYERS": [
+                    {"type": "jsonb"},
+                    {"type": "zlib"},
+                    {"type": "crypto"},
+                ],
                 "BACKENDS": {
                     "Redis": {
                         "type": "Redis",
@@ -204,7 +209,8 @@ class StartCommand(CommandInterface):
         )
         logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
         logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
-        logger.info(f"ℹ️ 消息协议：加密模块：{config.get('PACKET_CIPHER')}")
+        layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
+        logger.info(f"ℹ️ 消息流协议：json -> {' -> '.join(layer_types)} -> Network")
 
         if config.DEBUG:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")

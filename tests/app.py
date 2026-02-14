@@ -127,6 +127,16 @@ async def create_row(ctx: hetu.SystemContext, owner, v1, v2):
         row2.name = f"User_{v2}"
 
 
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.USER,
+    components=(IndexComp1,),
+)
+async def client_index_upsert_test(ctx: hetu.SystemContext, owner, v1):
+    async with ctx.repo[IndexComp1].upsert(owner=owner) as row:
+        row.value = v1
+
+
 # 测试bug用
 @hetu.define_system(
     namespace="pytest",

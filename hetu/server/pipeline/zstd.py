@@ -19,7 +19,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-class ZstdLayer(MessageProcessLayer):
+class ZstdLayer(MessageProcessLayer, alias="zstd"):
     """
     使用python 3.14内置的 compression/zstd 模块进行消息的压缩和解压缩。
     """
@@ -44,9 +44,9 @@ class ZstdLayer(MessageProcessLayer):
         super().__init__()
         self.level = level
         self.dict_size = dict_size
-        self.samples = []
+        self.samples: list[Any] = []
         self.zstd_dict: zstd.ZstdDict | None = None
-        self.dict_message: bytes | None = None
+        self.dict_message: bytes = b""
         self.last_trained_at: float = 0.0
         self.encode_count = 0
         self.encode_ratio = 0.0
@@ -58,7 +58,7 @@ class ZstdLayer(MessageProcessLayer):
         from ...common import Permission
         from ...data import BaseComponent
         from ...data.backend import TableReference
-        from ...data.sub import Subscriptions
+        from ...data.sub import SubscriptionBroker
         from ...system import SystemClusters
 
         rng = np.random.default_rng()
@@ -77,7 +77,7 @@ class ZstdLayer(MessageProcessLayer):
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             ref = TableReference(_comp, "", 0)
-            sub_id = Subscriptions.make_query_id_(
+            sub_id = SubscriptionBroker.make_query_id_(
                 ref,
                 rng.choice(["id"] + list(row_dict.keys())),
                 rng.integers(0, np.iinfo(np.int64).max),
@@ -98,9 +98,12 @@ class ZstdLayer(MessageProcessLayer):
             for _ in range(200):
                 sub_message = make_rand_sub_message(comp)
                 # 把订阅更新消息编码到压缩前
-                encoded_message = self._parent.encode(
-                    [None] * (self._layer_idx + 1), sub_message, self._layer_idx
-                )
+                if self._parent:
+                    encoded_message = self._parent.encode(
+                        [None] * (self._layer_idx + 1), sub_message, self._layer_idx
+                    )
+                else:
+                    encoded_message = str(sub_message).encode("utf-8")
                 samples.append(encoded_message)
 
         if len(samples) == 0:

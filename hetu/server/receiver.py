@@ -7,7 +7,7 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
@@ -22,7 +22,7 @@ from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 if TYPE_CHECKING:
     from sanic import Websocket
 
-    from ..data.sub import Subscriptions
+    from ..data.sub import SubscriptionBroker
     from ..endpoint.executor import EndpointExecutor
 
 logger = logging.getLogger("HeTu.root")
@@ -42,15 +42,23 @@ async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue)
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
     if replay.level < logging.ERROR:
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
-    if ok and isinstance(res, ResponseToClient):
+
+    if not ok:
+        # 关闭连接
+        return False
+
+    if isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
-    return ok
+    else:
+        # 无视返回值，直接返回ok，如果不返回，Request无法对应
+        await push_queue.put(["rsp", "ok"])
+    return True
 
 
 async def sub_call(
     data: list,
     executor: EndpointExecutor,
-    subs: Subscriptions,
+    broker: SubscriptionBroker,
     push_queue: asyncio.Queue,
 ):
     """处理Client SDK调用订阅的命令"""
@@ -64,14 +72,14 @@ async def sub_call(
         )
 
     sub_id = None
-    sub_data = None
+    sub_data: dict[str, Any] | list[dict] | None = None
     match data[2]:
         case "get":
             check_length("get", data, 5, 5)
-            sub_id, sub_data = await subs.subscribe_get(table, ctx, *data[3:])
+            sub_id, sub_data = await broker.subscribe_get(table, ctx, *data[3:])
         case "range":
             check_length("range", data, 5, 8)
-            sub_id, sub_data = await subs.subscribe_range(table, ctx, *data[3:])
+            sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
@@ -81,7 +89,7 @@ async def sub_call(
     reply = ["sub", sub_id, sub_data]
     await push_queue.put(reply)
 
-    num_row_sub, num_idx_sub = subs.count()
+    num_row_sub, num_idx_sub = broker.count()
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
         raise ValueError(
             f" [非法操作] 订阅数超过限制："
@@ -93,7 +101,7 @@ async def client_handler(
     ws: Websocket,
     pipe_ctx: PipeContext,
     executor: EndpointExecutor,
-    subs: Subscriptions,
+    broker: SubscriptionBroker,
     push_queue: asyncio.Queue,
     flood_checker: connection.ConnectionFloodChecker,
 ):
@@ -128,10 +136,10 @@ async def client_handler(
                         print(executor.context, "call failed, close connection...")
                         return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...
-                    await sub_call(last_data, executor, subs, push_queue)
+                    await sub_call(last_data, executor, broker, push_queue)
                 case "unsub":  # unsub sub_id
                     check_length("unsub", last_data, 2, 2)
-                    await subs.unsubscribe(last_data[1])
+                    await broker.unsubscribe(last_data[1])
                 case "motd":
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
@@ -161,11 +169,11 @@ async def client_handler(
         pass
 
 
-async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
+async def mq_puller(ws: Websocket, broker: SubscriptionBroker):
     """消息队列拉取器，需要持续拉取，防止消息在队列服务器中积压"""
     try:
         while True:
-            await subscriptions.mq_pull()
+            await broker.mq_pull()
     except asyncio.CancelledError:
         pass
     except RedisConnectionError as e:
@@ -185,13 +193,13 @@ async def mq_puller(ws: Websocket, subscriptions: Subscriptions):
 
 
 async def subscription_handler(
-    ws: Websocket, subscriptions: Subscriptions, push_queue: asyncio.Queue
+    ws: Websocket, broker: SubscriptionBroker, push_queue: asyncio.Queue
 ):
     """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     last_updates = {}
     try:
         while True:
-            last_updates = await subscriptions.get_updates()
+            last_updates = await broker.get_updates()
             for sub_id, data in last_updates.items():
                 reply = ["updt", sub_id, data]
                 await push_queue.put(reply)

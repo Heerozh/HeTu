@@ -45,9 +45,8 @@ def setup_websocket_proxy():
             do_recv = ws.recv
 
             client_pipe = pipeline.MessagePipeline()
-            client_pipe.add_layer(pipeline.LimitCheckerLayer())
             client_pipe.add_layer(pipeline.JSONBinaryLayer())
-            client_pipe.add_layer(pipeline.ZstdLayer())
+            client_pipe.add_layer(pipeline.ZlibLayer())
             crypto_layer = pipeline.CryptoLayer()
             client_pipe.add_layer(crypto_layer)
             pipe_ctx = None
@@ -58,7 +57,7 @@ def setup_websocket_proxy():
                 # 生成密钥对
                 private_key = PrivateKey.generate()
                 public_key = private_key.public_key
-                handshake_msg = [b""] * 4
+                handshake_msg = [b""] * client_pipe.num_handshake_layers
                 handshake_msg[-1] = public_key.encode()
                 # 握手
                 await do_send(client_pipe.encode(None, handshake_msg))
@@ -69,11 +68,7 @@ def setup_websocket_proxy():
                 ctx[-1] = crypto_layer.client_handshake(
                     private_key.encode(), message[-1]
                 )
-
                 pipe_ctx = ctx
-
-                # use db
-                await do_send(client_pipe.encode(pipe_ctx, ["use", "pytest_1"]))
 
             async def send(data):
                 logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
@@ -130,6 +125,11 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "NAMESPACE": "pytest",
             "INSTANCES": ["pytest_1"],
             "LISTEN": f"0.0.0.0:874",
+            "PACKET_LAYERS": [
+                {"type": "jsonb"},
+                {"type": "zlib"},
+                {"type": "crypto"},
+            ],
             "BACKENDS": {
                 "Redis": {
                     "type": "Redis",
@@ -175,12 +175,14 @@ def test_websocket_call_system(test_server):
 
         await client1.send(["rpc", "add_rls_comp_value", 1])
         await client1.recv()  # 首次sub这里会卡至少0.5s等待连接
+        await client1.recv()
 
         await client1.send(["rpc", "login", 2])  # 测试重复登录应该无效
         await client1.recv()
 
         # 正式开始接受sub消息
         await client1.send(["rpc", "add_rls_comp_value", 1])
+        await client1.recv()
         await client1.recv()
 
         # 模拟其他用户修改了用户1订阅的数据
@@ -194,24 +196,26 @@ def test_websocket_call_system(test_server):
 
         await client1.recv()  # 因为客户端2并没订阅，测试用户1是否收到
 
-    _, response1 = test_server.test_client.websocket("/hetu", mimic=normal_routine)
+    _, response1 = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=normal_routine
+    )
     # print(response1.client_received)
     # 测试add_rls_comp_value调用了2次
-    id1 = next(iter(response1.client_received[3][2].keys()))
-    assert response1.client_received[3][2][id1] == {
+    id1 = next(iter(response1.client_received[4][2].keys()))
+    assert response1.client_received[4][2][id1] == {
         "id": int(id1),
         "owner": 1,
         "value": 101,
     }
-    assert response1.client_received[5][2][id1] == {
+    assert response1.client_received[7][2][id1] == {
         "id": int(id1),
         "owner": 1,
         "value": 102,
     }
 
     # 测试收到连接2的+9.1
-    id2 = next(iter(response1.client_received[6][2].keys()))
-    assert response1.client_received[6][2][id2] == {
+    id2 = next(iter(response1.client_received[8][2].keys()))
+    assert response1.client_received[8][2][id2] == {
         "id": int(id2),
         "owner": 2,
         "value": 9.1,
@@ -240,7 +244,9 @@ def test_websocket_kick_connect(test_server):
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
-    _, response1 = test_server.test_client.websocket("/hetu", mimic=kick_routine)
+    _, response1 = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=kick_routine
+    )
     # 用来确定最后一行执行到了，不然在中途报错会被webserver catch跳过，导致test通过
     assert response1.client_sent[-1] == [
         "rpc",
@@ -261,7 +267,7 @@ def test_call_flooding_lv1_normal(test_server):
             await client1.send(["rpc", "login", 1])
             await client1.recv()
 
-    test_server.test_client.websocket("/hetu", mimic=normal_routine)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine)
 
 
 def test_call_flooding_lv1_flooding(test_server):
@@ -275,7 +281,7 @@ def test_call_flooding_lv1_flooding(test_server):
                 await client1.send(["rpc", "login", 1])
                 await client1.recv()
 
-    test_server.test_client.websocket("/hetu", mimic=flooding_routine)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine)
 
 
 def test_call_flooding_lv2_normal(test_server):
@@ -292,7 +298,7 @@ def test_call_flooding_lv2_normal(test_server):
             if i == 99:
                 await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu", mimic=normal_routine_lv2)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=normal_routine_lv2)
 
 
 def test_call_flooding_lv2_flooding(test_server):
@@ -305,4 +311,4 @@ def test_call_flooding_lv2_flooding(test_server):
                 if i == 99:
                     await asyncio.sleep(1)
 
-    test_server.test_client.websocket("/hetu", mimic=flooding_routine_lv2)
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)

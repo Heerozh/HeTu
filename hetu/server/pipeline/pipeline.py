@@ -17,14 +17,43 @@ JSONType = dict[str, Any] | list[Any]
 PipeContext = list[Any]
 
 
+class MessageProcessLayerFactory:
+    _registry: dict[str, type[MessageProcessLayer]] = {}
+
+    @staticmethod
+    def register(alias: str, client_cls: type[MessageProcessLayer]) -> None:
+        MessageProcessLayerFactory._registry[alias.lower()] = client_cls
+
+    @staticmethod
+    def create(**kwargs) -> MessageProcessLayer:
+        alias = kwargs.pop("type").lower()
+        if alias not in MessageProcessLayerFactory._registry:
+            raise NotImplementedError(f"{alias} MessageProcessLayer未实现")
+        return MessageProcessLayerFactory._registry[alias](**kwargs)
+
+
 class MessageProcessLayer:
-    def __init__(self):
+    def __init_subclass__(cls, **kwargs):
+        """让继承子类自动注册alias"""
+        super().__init_subclass__()
+        assert "alias" in kwargs, (
+            f"{cls.__name__} MessageProcessLayer子类必须指定alias参数"
+        )
+        MessageProcessLayerFactory.register(kwargs["alias"], cls)
+
+    def __init__(self, **kwargs: Any):
         self._parent: MessagePipeline = None  # type: ignore
         self._layer_idx = -1
 
     def on_attach(self, parent: MessagePipeline, layer_idx: int):
         self._parent = parent
         self._layer_idx = layer_idx
+
+    def is_handshake_required(self) -> bool:
+        """
+        是否需要在连接时进行握手
+        """
+        return True
 
     def handshake(self, message: bytes) -> tuple[Any, bytes]:
         """
@@ -56,9 +85,10 @@ class MessagePipeline:
     ecdh的密钥交换是连接初始化
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._layers: list[MessageProcessLayer] = []
         self._disabled: list[bool] = []
+        self._handshake_layers_count = 0
 
     def add_layer(self, layer: MessageProcessLayer):
         """
@@ -67,6 +97,8 @@ class MessagePipeline:
         self._layers.append(layer)
         self._disabled.append(False)
         layer.on_attach(self, len(self._layers) - 1)
+        if layer.is_handshake_required():
+            self._handshake_layers_count += 1
 
     def disable_layer(self, idx: int):
         """
@@ -79,10 +111,15 @@ class MessagePipeline:
         清除所有层，重置管道
         """
         self._layers.clear()
+        self._handshake_layers_count = 0
 
     @property
     def num_layers(self) -> int:
         return len(self._layers)
+
+    @property
+    def num_handshake_layers(self) -> int:
+        return self._handshake_layers_count
 
     def handshake(self, client_messages: list[bytes]) -> tuple[PipeContext, bytes]:
         """
@@ -90,16 +127,20 @@ class MessagePipeline:
         返回握手后的上下文；以及要发送给客户端的握手消息。
         """
         # logger.info(f"🔧 [📡Pipeline] 握手开始 {client_messages} ")
-        pipe_ctx = []
+        pipe_ctx: PipeContext = []
         reply_messages = []
+        handshake_index = 0
         for i, layer in enumerate(self._layers):
             if self._disabled[i]:
-                pipe_ctx.append(None)
-                reply_messages.append(b"")
                 continue
-            ctx, reply = layer.handshake(client_messages[i])
-            pipe_ctx.append(ctx)
-            reply_messages.append(reply)
+            if layer.is_handshake_required():
+                ctx, reply = layer.handshake(client_messages[handshake_index])
+                pipe_ctx.append(ctx)
+                reply_messages.append(reply)
+                handshake_index += 1
+            else:
+                pipe_ctx.append(None)
+
         logger.info(f"🔧 [📡Pipeline] 握手完成 {pipe_ctx}")
         return pipe_ctx, self.encode(None, reply_messages)
 
@@ -135,7 +176,9 @@ class MessagePipeline:
                 original_index = len(pipe_ctx) - 1 - i
                 ctx = pipe_ctx[original_index]
             decoded = layer.decode(ctx, decoded)
-        assert isinstance(decoded, (dict, list))
+        assert isinstance(decoded, (dict, list)), (
+            "最终解码结果必须是JSON类型, 但实际得到: " + str(decoded)
+        )
         return decoded
 
 

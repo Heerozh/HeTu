@@ -7,12 +7,13 @@
 
 # 🌌 河图 HeTu
 
-河图是一个分布式游戏服务器引擎，专为网络游戏设计的现代极简 2-Tier（两层模式）与
-Serverless（无服务器）的 BaaS 架构。
+河图是一个可自动伸缩的高性能游戏服务器引擎，采用现代极简 BaaS 后端平台设计。
+重高频 RPC 和内存计算，让你的算法和数据一样持久在线。
 
-- 高开发效率：透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
+- 高开发效率：2-Tier（两层模式），透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
 - Python 语言：支持各种数据科学库，拥抱未来。
 - 高性能：高并发异步架构 + Redis 后端，数据库操作性能约 10x 倍于 supabase 等。
+- Stateful：不同于其他同类平台只专注数据，河图专注有状态的长连接计算，以及高性能NoSql数据。
 - Unity 客户端 SDK：支持 C# Reactive，调用简单，基于服务器推送的天然响应式，视图与业务解耦。
 
 具体性能见下方[性能测试](#-性能测试)。
@@ -151,13 +152,12 @@ public class FirstGame : MonoBehaviour
     public long SelfID = 1;  // 不同客户端要登录不同ID
     async void Start()
     {
-        HeTuClient.Instance.SetLogger(Debug.Log, Debug.LogError, Debug.Log);
         // 连接河图，这其实是异步函数，我们没await，实际效果类似射后不管
         HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu",
             this.GetCancellationTokenOnDestroy());
 
         // 调用登录System，连接成功后会在后台发送
-        HeTuClient.Instance.CallSystem("login_test", SelfID);
+        HeTuClient.Instance.CallSystem("login", SelfID);
 
         await SubscribeOthersPositions();
     }
@@ -240,8 +240,8 @@ CPS(每秒调用次数)测试结果为：
 | CPU 负载   |                98% |                 88% |                     78% |        98% |
 | Redis 负载 |                 0% |                 97% |                     90% |        41% |
 
-- _以上测试为单 Component，受限于Master写入io。多个 Component 有机会（要低耦合度）通过 Redis
-  Cluster 扩展。_
+- _以上测试为单 Component，受限于Master写入io。多个 Component 有机会（要低耦合度）通过
+  Redis Cluster 扩展。_
 
 ### 单连接性能：
 
@@ -279,7 +279,8 @@ c_lib.process(ffi.from_buffer("float[]", rows))  # 无拷贝，传递指针
 await ctx.range[Position].update_rows(rows)
 ```
 
-注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD 更快：
+注意，你的 C 代码不一定比 NumPy 自带的方法更优，类似这种二次索引在 Python 下支持 SIMD
+更快：
 `rows.x[rows.x >= 10] -= 10`
 
 ## ⚙️ 安装
