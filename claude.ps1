@@ -1,0 +1,4 @@
+
+$env:ENABLE_TOOL_SEARCH = "true"
+
+claude
