@@ -6,10 +6,9 @@ using System.Text;
 using UnityEditor;
 using UnityEngine;
 #if !UNITY_6000_0_OR_NEWER
-using Cysharp.Threading.Tasks;
 #endif
 
-namespace HeTu.Editor
+namespace HeTu.Editor.PostStation
 {
     public class HeTuPostStationWindow : EditorWindow
     {
@@ -19,7 +18,7 @@ namespace HeTu.Editor
 
         private string _rangeComponentName = string.Empty;
         private bool _rangeDesc;
-        private string _rangeIndex = "id";
+        private string _rangeIndex = "owner";
         private string _rangeLeft = "0";
         private string _rangeLimit = "10";
         private string _rangeRight = "null";
@@ -214,7 +213,7 @@ namespace HeTu.Editor
                     right,
                     limit,
                     _rangeDesc
-                    );
+                );
 #endif
 
                 if (sub == null)
@@ -296,7 +295,7 @@ namespace HeTu.Editor
                     case IDictionary dict:
                         WriteDict(sb, dict, indent);
                         return;
-                    case IEnumerable enumerable when value is not string:
+                    case IEnumerable enumerable and not string:
                         WriteList(sb, enumerable, indent);
                         return;
                     default:

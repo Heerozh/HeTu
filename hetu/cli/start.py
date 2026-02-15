@@ -20,10 +20,10 @@ from sanic import Sanic
 from sanic.config import Config
 from sanic.worker.loader import AppLoader
 
-from .base import CommandInterface, str2bool
 from ..common import yamlloader
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
+from .base import CommandInterface, str2bool
 
 logger = logging.getLogger("HeTu.root")
 
@@ -109,6 +109,12 @@ class StartCommand(CommandInterface):
             "填入auto会生成自签https证书。",
             default="",
         )
+        cli_group.add_argument(
+            "--authkey",
+            metavar="your-auth-key",
+            help="默认crypto层的auth_key，用于握手签名校验。留空则不启用。",
+            default="",
+        )
 
         cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
         cfg_group.add_argument(
@@ -161,7 +167,7 @@ class StartCommand(CommandInterface):
                 "PACKET_LAYERS": [
                     {"type": "jsonb"},
                     {"type": "zlib"},
-                    {"type": "crypto"},
+                    {"type": "crypto", "auth_key": args.authkey},
                 ],
                 "BACKENDS": {
                     "Redis": {

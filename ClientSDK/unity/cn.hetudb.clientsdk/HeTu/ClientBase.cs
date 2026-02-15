@@ -137,6 +137,18 @@ namespace HeTu
                 Pipeline.AddLayer(layer);
         }
 
+        /// <summary>
+        ///     设置加密层握手认证 key。为空则使用 legacy 握手。
+        /// </summary>
+        protected void ConfigureCryptoAuthKey(string authKey)
+        {
+            foreach (var layer in Pipeline.Layers)
+            {
+                if (layer is CryptoLayer crypto)
+                    crypto.SetAuthKey(authKey);
+            }
+        }
+
         // 连接到河图url的Core方法，外部还需要异步包装一下
         protected void ConnectSync(string url)
         {
@@ -383,8 +395,6 @@ namespace HeTu
             var creationSource = CaptureCreationSource();
 
             // 向服务器订阅
-            Logger.Instance.Debug(
-                $"[HeTuClient] 发送Get订阅: {componentName}.{index}[{value}:]");
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
@@ -418,7 +428,6 @@ namespace HeTu
                                 subID, componentName, data, this, creationSource);
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));
-                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
                         }
                     }
                 }
@@ -485,7 +494,6 @@ namespace HeTu
             var creationSource = CaptureCreationSource();
 
             // 发送订阅请求
-            Logger.Instance.Debug($"[HeTuClient] 发送Range订阅: {predictID}");
             var payload = new[]
             {
                 CommandSub, componentName, QueryRange, index, left, right, limit,
@@ -524,7 +532,6 @@ namespace HeTu
                                 subID, componentName, rows, this, creationSource);
                             Subscriptions.Add(subID,
                                 new WeakReference(idxSubscription, false));
-                            Logger.Instance.Info($"[HeTuClient] 成功订阅了 {subID}");
                         }
                     }
                 }

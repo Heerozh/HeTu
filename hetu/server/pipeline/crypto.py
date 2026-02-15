@@ -5,6 +5,8 @@
 @email: heeroz@gmail.com
 """
 
+import hashlib
+import hmac
 import logging
 from dataclasses import dataclass
 from typing import Any, override
@@ -29,6 +31,9 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
 
     # ChaCha20-Poly1305-IETF 用 96-bit (12 bytes) nonce
     NONCE_SIZE = 12
+    LEGACY_HELLO_SIZE = 32
+    SIGNED_HELLO_MAGIC = b"H2A1"
+    SIGNED_HELLO_SIZE = 92
 
     @dataclass
     class CryptoContext:
@@ -40,8 +45,32 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         def __repr__(self) -> str:
             return f"CryptoContext('{self.session_key.hex()[:8]}...')"
 
-    def __init__(self):
+    def __init__(self, auth_key: str | bytes | None = None):
         super().__init__()
+        if isinstance(auth_key, str):
+            auth_key = auth_key.encode("utf-8")
+        self._auth_key = auth_key or None
+
+    def _parse_client_public_key(self, message: bytes) -> bytes:
+        if len(message) == self.LEGACY_HELLO_SIZE:
+            if self._auth_key is not None:
+                raise ValueError("unknown protocol")
+            return message
+
+        if (
+            len(message) == self.SIGNED_HELLO_SIZE
+            and message[:4] == self.SIGNED_HELLO_MAGIC
+        ):
+            payload = message[:-32]
+            signature = message[-32:]
+            client_public_key = message[4:36]
+            if self._auth_key is not None:
+                expected = hmac.new(self._auth_key, payload, hashlib.sha256).digest()
+                if not hmac.compare_digest(signature, expected):
+                    raise ValueError("unknown protocol")
+            return client_public_key
+
+        raise ValueError("unknown protocol")
 
     def client_handshake(self, client_pvt: bytes, server_pub: bytes) -> CryptoContext:
         """
@@ -78,17 +107,13 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         返回的第二个值(ServerPublicKey)会发送给客户端。
         """
         try:
-            # 客户端连接后，应当首先发送它的 Curve25519 Link Public Key
-            if not message or len(message) != 32:
-                # 长度不对，或者为空，视为非法握手
-                # 注意：如果 message 为空且您希望支持服务端先发送 PubKey 模式，需修改此处逻辑。
-                # 但根据通常 ECDH 流程及 "协商出 Session Key" 描述，假设 Client 先发。
-                raise ValueError(
-                    f"握手失败：客户端公钥长度错误，预期32字节，实际收到 {len(message) if message else 0} 字节"
-                )
+            if not message:
+                raise ValueError("unknown protocol")
+
+            client_public_key = self._parse_client_public_key(message)
 
             # 1. 解析客户端公钥
-            peer_public_key = PublicKey(message)
+            peer_public_key = PublicKey(client_public_key)
 
             # 2. 生成服务端临时密钥对 (Ephemeral Key Pair)
             private_key = PrivateKey.generate()

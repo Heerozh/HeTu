@@ -85,7 +85,7 @@ PACKET_LAYERS:
     level: 1  # 因为有字典，级别1以上压缩率无明显提升
   # 消息加密层，使用ChaCha20-Poly1305算法
   - type: crypto
-    password: your_password_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器
+    auth_key: your_auth_key_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器
 
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端

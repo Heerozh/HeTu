@@ -88,6 +88,8 @@ namespace HeTu
         private readonly List<bool> _disabled = new();
         private readonly List<MessageProcessLayer> _layers = new();
 
+        public IEnumerable<MessageProcessLayer> Layers => _layers;
+
         /// <summary>
         ///     当前已注册的处理层数量。
         /// </summary>
