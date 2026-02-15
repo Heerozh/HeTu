@@ -137,6 +137,18 @@ namespace HeTu
                 Pipeline.AddLayer(layer);
         }
 
+        /// <summary>
+        ///     设置加密层握手认证 key。为空则使用 legacy 握手。
+        /// </summary>
+        protected void ConfigureCryptoAuthKey(string authKey)
+        {
+            foreach (var layer in Pipeline.Layers)
+            {
+                if (layer is CryptoLayer crypto)
+                    crypto.SetAuthKey(authKey);
+            }
+        }
+
         // 连接到河图url的Core方法，外部还需要异步包装一下
         protected void ConnectSync(string url)
         {

@@ -206,6 +206,19 @@ namespace HeTu
             return result;
         }
 
+        /// <summary>
+        ///     连接到河图url，并在握手中携带 authKey 签名。
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+            public async Awaitable<string> Connect(string url, string authKey)
+#else
+        public async UniTask<string> Connect(string url, string authKey)
+#endif
+        {
+            ConfigureCryptoAuthKey(authKey);
+            return await Connect(url);
+        }
+
 
         /// <summary>
         ///     执行System调用。

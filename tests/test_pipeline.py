@@ -1,9 +1,14 @@
-from hetu.server.pipeline.brotli import BrotliLayer
+import hashlib
+import hmac
 from typing import Any
+
 import pytest
+from nacl.public import PrivateKey
+
+from hetu.data import BaseComponent, Permission, define_component, property_field
 from hetu.server import pipeline
-from hetu.data import define_component, property_field, BaseComponent, Permission
-from hetu.system import SystemClusters, define_system, SystemContext
+from hetu.server.pipeline.brotli import BrotliLayer
+from hetu.system import SystemClusters, SystemContext, define_system
 
 
 @pytest.fixture()
@@ -168,3 +173,55 @@ def test_decode_requires_bytes(base_pipeline):
 
     with pytest.raises(AssertionError):
         zstd_layer.decode(object(), [1, 2, 3])
+
+
+def _build_signed_hello(public_key: bytes, auth_key: bytes) -> bytes:
+    magic = b"H2A1"
+    timestamp = (0).to_bytes(8, byteorder="big")
+    nonce = b"\x01" * 16
+    payload = magic + public_key + timestamp + nonce
+    signature = hmac.new(auth_key, payload, hashlib.sha256).digest()
+    return payload + signature
+
+
+def test_crypto_handshake_accepts_signed_when_auth_key_matches():
+    layer = pipeline.CryptoLayer(auth_key="secret")
+    client_private = PrivateKey.generate()
+    client_public = client_private.public_key.encode()
+    hello = _build_signed_hello(client_public, b"secret")
+
+    ctx, server_pub = layer.handshake(hello)
+    assert isinstance(ctx, pipeline.CryptoLayer.CryptoContext)
+    assert isinstance(server_pub, bytes)
+    assert len(server_pub) == 32
+
+
+def test_crypto_handshake_rejects_signed_when_auth_key_mismatch():
+    layer = pipeline.CryptoLayer(auth_key="secret")
+    client_private = PrivateKey.generate()
+    client_public = client_private.public_key.encode()
+    hello = _build_signed_hello(client_public, b"wrong-secret")
+
+    with pytest.raises(ValueError, match="unknown protocol"):
+        layer.handshake(hello)
+
+
+def test_crypto_handshake_accepts_legacy_when_auth_key_not_configured():
+    layer = pipeline.CryptoLayer()
+    client_private = PrivateKey.generate()
+    client_public = client_private.public_key.encode()
+
+    ctx, server_pub = layer.handshake(client_public)
+    assert isinstance(ctx, pipeline.CryptoLayer.CryptoContext)
+    assert len(server_pub) == 32
+
+
+def test_crypto_handshake_ignores_signed_key_when_server_has_no_auth_key():
+    layer = pipeline.CryptoLayer()
+    client_private = PrivateKey.generate()
+    client_public = client_private.public_key.encode()
+    hello = _build_signed_hello(client_public, b"not-used")
+
+    ctx, server_pub = layer.handshake(hello)
+    assert isinstance(ctx, pipeline.CryptoLayer.CryptoContext)
+    assert len(server_pub) == 32

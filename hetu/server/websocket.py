@@ -52,8 +52,16 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         ws.fail_connection()
         return
-    pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
-    await ws.send(reply)
+    try:
+        pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
+        await ws.send(reply)
+    except Exception as e:
+        logger.info(f"New Connect Error: handshake failed: {e}")
+        try:
+            await ws.send(msg_pipe.encode(None, []))
+        finally:
+            ws.fail_connection()
+        return
 
     # 检查实例是否存在
     instance = db_name
