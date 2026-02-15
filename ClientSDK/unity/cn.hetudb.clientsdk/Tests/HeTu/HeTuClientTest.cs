@@ -25,8 +25,9 @@ namespace Tests.HeTu
         {
             Debug.Log("测试前请启动河图服务器的tests/app.py");
             HeTuClient.Instance.ConfigureInspector(true);
-            HeTuClient.Instance.AddInspectorDispatcher(new LoggerInspectorTraceDispatcher());
-            _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest");
+            HeTuClient.Instance.AddInspectorDispatcher(
+                new LoggerInspectorTraceDispatcher());
+            _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest", "pytest");
         }
 
         [OneTimeTearDown]

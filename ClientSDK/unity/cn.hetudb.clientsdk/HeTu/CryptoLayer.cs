@@ -4,6 +4,7 @@
 // <summary>河图客户端SDK的Unity加密层</summary>
 
 using System;
+using System.Text;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Agreement;
 using Org.BouncyCastle.Crypto.Digests;
@@ -11,7 +12,6 @@ using Org.BouncyCastle.Crypto.Macs;
 using Org.BouncyCastle.Crypto.Modes;
 using Org.BouncyCastle.Crypto.Parameters;
 using Org.BouncyCastle.Security;
-using Org.BouncyCastle.Utilities.Encoders;
 
 namespace HeTu
 {
@@ -22,7 +22,9 @@ namespace HeTu
     public class CryptoLayer : MessageProcessLayer
     {
         private const int NonceSize = 12;
-        private static readonly byte[] SignedHelloMagic = { 0x48, 0x32, 0x41, 0x31 }; // H2A1
+
+        private static readonly byte[]
+            SignedHelloMagic = { 0x48, 0x32, 0x41, 0x31 }; // H2A1
 
         private readonly bool _serverMode;
         private byte[] _authKey;
@@ -70,7 +72,7 @@ namespace HeTu
                 return;
             }
 
-            _authKey = System.Text.Encoding.UTF8.GetBytes(authKey);
+            _authKey = Encoding.UTF8.GetBytes(authKey);
         }
 
         /// <summary>
@@ -85,10 +87,7 @@ namespace HeTu
             _privateKey = new X25519PrivateKeyParameters(random);
             _sessionKey = null;
             var publicKey = _privateKey.GeneratePublicKey().GetEncoded();
-            if (_authKey == null)
-                return publicKey;
-
-            return BuildSignedHello(publicKey, _authKey);
+            return _authKey == null ? publicKey : BuildSignedHello(publicKey, _authKey);
         }
 
         /// <summary>
@@ -194,11 +193,16 @@ namespace HeTu
             var nonce = new byte[16];
             new SecureRandom().NextBytes(nonce);
 
-            var payload = new byte[SignedHelloMagic.Length + publicKey.Length + timestamp.Length + nonce.Length];
+            var payload = new byte[SignedHelloMagic.Length + publicKey.Length +
+                                   timestamp.Length + nonce.Length];
             Buffer.BlockCopy(SignedHelloMagic, 0, payload, 0, SignedHelloMagic.Length);
-            Buffer.BlockCopy(publicKey, 0, payload, SignedHelloMagic.Length, publicKey.Length);
-            Buffer.BlockCopy(timestamp, 0, payload, SignedHelloMagic.Length + publicKey.Length, timestamp.Length);
-            Buffer.BlockCopy(nonce, 0, payload, SignedHelloMagic.Length + publicKey.Length + timestamp.Length, nonce.Length);
+            Buffer.BlockCopy(publicKey, 0, payload, SignedHelloMagic.Length,
+                publicKey.Length);
+            Buffer.BlockCopy(timestamp, 0, payload,
+                SignedHelloMagic.Length + publicKey.Length, timestamp.Length);
+            Buffer.BlockCopy(nonce, 0, payload,
+                SignedHelloMagic.Length + publicKey.Length + timestamp.Length,
+                nonce.Length);
 
             var hmac = new HMac(new Sha256Digest());
             hmac.Init(new KeyParameter(authKey));
