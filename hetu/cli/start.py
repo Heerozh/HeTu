@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 from functools import partial
+from urllib.parse import urlparse
 
 import redis
 import yaml
@@ -36,6 +37,21 @@ FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  █        █   \033[0m █ █▄▄▄▄▄█ █
 \033[38;2;25;170;255m  █     ▀▀▄█   \033[0m █▀▀▀▀▀▀▀▀▀█
 """
+
+
+def infer_backend_type_from_db_url(db_url: str) -> str:
+    """根据db url推断后端类型。"""
+    scheme = urlparse(db_url).scheme.lower()
+    if scheme in {"redis", "rediss", "valkey", "valkeys"}:
+        return "redis"
+    if scheme in {"postgres", "postgresql"}:
+        return "postgres"
+    if scheme in {"file"}:
+        return "sharedmemory"
+    raise ValueError(
+        f"不支持的数据库URL scheme: '{scheme}'。"
+        "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql"
+    )
 
 
 def wait_for_port(host, port, timeout=30):
@@ -159,6 +175,9 @@ class StartCommand(CommandInterface):
                     "--instance是必须参数，或者用--config"
                 ) if not args.instance else None
                 sys.exit(2)
+            backend_type = infer_backend_type_from_db_url(args.db)
+            backend_name = backend_type.capitalize()
+
             config_for_factory = {
                 "APP_FILE": args.app_file,
                 "NAMESPACE": args.namespace,
@@ -170,16 +189,24 @@ class StartCommand(CommandInterface):
                     {"type": "crypto", "auth_key": args.authkey},
                 ],
                 "BACKENDS": {
-                    "Redis": {
-                        "type": "Redis",
+                    backend_name: {
+                        "type": backend_type,
                         "master": args.db,
-                    }
+                    },
                 },
                 "WORKER_NUM": args.workers,
                 "CERT_CHAIN": args.cert,
                 "DEBUG": args.debug,
                 "ACCESS_LOG": False,
             }
+            # 如果该backend没有worker keeper支持，则自动添加一个redis后端用于启动worker keeper
+            from ..data.backend.base import BackendClientFactory
+
+            if not BackendClientFactory.support_worker_keeper(backend_type):
+                config_for_factory["BACKENDS"]["redis"] = {
+                    "type": "redis",
+                    "master": "redis://127.0.0.1:6379/0",
+                }
             config = Config(config_for_factory)
 
         # 生成log目录
