@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-HeTu (河图) 是一个高性能、可自动扩缩容的 game server engine，基于 ECS
+HeTu (河图) 是一个高性能、多进程分布式的 game server engine，基于 ECS
 (Entity-Component-System) architecture，并使用 Redis 作为 backend。它通过
 WebSocket 暴露类似 database 的接口，client 可订阅数据变更并通过 RPC 调用
 server-side logic。
@@ -104,19 +104,19 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Module Map
 
-| Module                   | Role                                        |
-|--------------------------|---------------------------------------------|
-| `hetu/data/component.py` | `@define_component`, `BaseComponent`, `property_field` |
-| `hetu/system/definer.py` | `@define_system`, `SystemClusters`（cluster grouping） |
-| `hetu/system/caller.py`  | `SystemCaller` —— 执行 System 并支持 transaction retry |
-| `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context |
+| Module                   | Role                                                           |
+|--------------------------|----------------------------------------------------------------|
+| `hetu/data/component.py` | `@define_component`, `BaseComponent`, `property_field`         |
+| `hetu/system/definer.py` | `@define_system`, `SystemClusters`（cluster grouping）           |
+| `hetu/system/caller.py`  | `SystemCaller` —— 执行 System 并支持 transaction retry              |
+| `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context         |
 | `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor` |
-| `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table` |
-| `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription` |
-| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline |
-| `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables |
-| `hetu/cli/`              | CLI commands：`start`、`migrate`、`build` |
-| `hetu/sourcegen/`        | Client SDK code generation（C#） |
+| `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`             |
+| `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription`   |
+| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline               |
+| `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables     |
+| `hetu/cli/`              | CLI commands：`start`、`migrate`、`build`                         |
+| `hetu/sourcegen/`        | Client SDK code generation（C#）                                 |
 
 ## Conventions
 

@@ -40,24 +40,24 @@ $ARGUMENTS
 
    a. 先拉取所有远端分支，确保信息最新：
 
-      ```bash
-      git fetch --all --prune
-      ```
+   ```bash
+   git fetch --all --prune
+   ```
 
    b. 跨全部来源查找该 short-name 的最大 feature 编号：
-      - 远端分支：`git ls-remote --heads origin | grep -E 'refs/heads/[0-9]+-<short-name>$'`
-      - 本地分支：`git branch | grep -E '^[* ]*[0-9]+-<short-name>$'`
-      - specs 目录：匹配 `specs/[0-9]+-<short-name>`
+   - 远端分支：`git ls-remote --heads origin | grep -E 'refs/heads/[0-9]+-<short-name>$'`
+   - 本地分支：`git branch | grep -E '^[* ]*[0-9]+-<short-name>$'`
+   - specs 目录：匹配 `specs/[0-9]+-<short-name>`
 
    c. 计算下一个可用编号：
-      - 从三个来源提取全部编号
-      - 取最大值 N
-      - 新编号使用 N+1
+   - 从三个来源提取全部编号
+   - 取最大值 N
+   - 新编号使用 N+1
 
    d. 运行脚本 `.specify/scripts/powershell/create-new-feature.ps1 -Json "$ARGUMENTS"`，并传入计算得到的编号与 short-name：
-      - 传递 `--number N+1` 与 `--short-name "your-short-name"` 以及 feature 描述
-      - Bash 示例：`.specify/scripts/powershell/create-new-feature.ps1 -Json "$ARGUMENTS" --json --number 5 --short-name "user-auth" "Add user authentication"`
-      - PowerShell 示例：`.specify/scripts/powershell/create-new-feature.ps1 -Json "$ARGUMENTS" -Json -Number 5 -ShortName "user-auth" "Add user authentication"`
+   - 传递 `--number N+1` 与 `--short-name "your-short-name"` 以及 feature 描述
+   - Bash 示例：`.specify/scripts/powershell/create-new-feature.ps1 -Json "$ARGUMENTS" --json --number 5 --short-name "user-auth" "Add user authentication"`
+   - PowerShell 示例：`.specify/scripts/powershell/create-new-feature.ps1 -Json "$ARGUMENTS" -Json -Number 5 -ShortName "user-auth" "Add user authentication"`
 
    **重要（IMPORTANT）**：
    - 必须检查三类来源（remote branches、local branches、specs directories）
@@ -71,30 +71,29 @@ $ARGUMENTS
 3. 加载 `.specify/templates/spec-template.md`，理解必需章节结构。
 
 4. 按以下流程执行：
-
-    1. 从输入解析用户描述
-       若为空：`ERROR "No feature description provided"`
-    2. 提取关键概念
-       识别：actors、actions、data、constraints
-    3. 对不清晰项：
-       - 基于上下文与行业惯例做合理推断
-       - 仅在以下情况下用 `[NEEDS CLARIFICATION: specific question]` 标注：
-         - 该选择显著影响 feature scope 或 user experience
-         - 存在多种合理解释且影响不同
-         - 不存在合理默认值
-       - **限制：最多 3 个 `[NEEDS CLARIFICATION]`**
-       - 按影响优先级：scope > security/privacy > user experience > technical details
-    4. 填写 User Scenarios & Testing 章节
-       若无法明确用户流：`ERROR "Cannot determine user scenarios"`
-    5. 生成功能需求（Functional Requirements）
-       每条需求必须可测试
-       对未指定细节采用合理默认，并在 Assumptions 章节记录
-    6. 定义 Success Criteria
-       产出可度量、技术无关的结果
-       同时包含量化指标（时间、性能、容量）与定性指标（满意度、完成率）
-       每条标准必须不依赖实现细节即可验证
-    7. 识别 Key Entities（若涉及数据）
-    8. 返回：`SUCCESS`（spec 可进入 planning）
+   1. 从输入解析用户描述
+      若为空：`ERROR "No feature description provided"`
+   2. 提取关键概念
+      识别：actors、actions、data、constraints
+   3. 对不清晰项：
+      - 基于上下文与行业惯例做合理推断
+      - 仅在以下情况下用 `[NEEDS CLARIFICATION: specific question]` 标注：
+        - 该选择显著影响 feature scope 或 user experience
+        - 存在多种合理解释且影响不同
+        - 不存在合理默认值
+      - **限制：最多 3 个 `[NEEDS CLARIFICATION]`**
+      - 按影响优先级：scope > security/privacy > user experience > technical details
+   4. 填写 User Scenarios & Testing 章节
+      若无法明确用户流：`ERROR "Cannot determine user scenarios"`
+   5. 生成功能需求（Functional Requirements）
+      每条需求必须可测试
+      对未指定细节采用合理默认，并在 Assumptions 章节记录
+   6. 定义 Success Criteria
+      产出可度量、技术无关的结果
+      同时包含量化指标（时间、性能、容量）与定性指标（满意度、完成率）
+      每条标准必须不依赖实现细节即可验证
+   7. 识别 Key Entities（若涉及数据）
+   8. 返回：`SUCCESS`（spec 可进入 planning）
 
 5. 按模板结构将 specification 写入 `SPEC_FILE`：用 feature 描述（arguments）推导出的具体内容替换占位符，保持章节顺序与标题不变。
 
@@ -102,91 +101,90 @@ $ARGUMENTS
 
    a. **创建 Spec 质量 Checklist**：在 `FEATURE_DIR/checklists/requirements.md` 生成 checklist（使用 checklist 模板结构），包含以下项：
 
-      ```markdown
-      # Specification Quality Checklist: [FEATURE NAME]
+   ```markdown
+   # 规格质量检查清单：[FEATURE NAME]
 
-      **Purpose**: Validate specification completeness and quality before proceeding to planning
-      **Created**: [DATE]
-      **Feature**: [Link to spec.md]
+   **Purpose**: 在进入规划前，校验规格的完整性与质量
+   **Created**: [DATE]
+   **Feature**: [链接到 spec.md]
 
-      ## Content Quality
+   ## 内容质量
 
-      - [ ] No implementation details (languages, frameworks, APIs)
-      - [ ] Focused on user value and business needs
-      - [ ] Written for non-technical stakeholders
-      - [ ] All mandatory sections completed
+   - [ ] 不包含实现细节（语言、框架、API）
+   - [ ] 聚焦用户价值与业务需求
+   - [ ] 面向非技术干系人书写
+   - [ ] 所有必填章节均已完成
 
-      ## Requirement Completeness
+   ## 需求完整性
 
-      - [ ] No [NEEDS CLARIFICATION] markers remain
-      - [ ] Requirements are testable and unambiguous
-      - [ ] Success criteria are measurable
-      - [ ] Success criteria are technology-agnostic (no implementation details)
-      - [ ] All acceptance scenarios are defined
-      - [ ] Edge cases are identified
-      - [ ] Scope is clearly bounded
-      - [ ] Dependencies and assumptions identified
+   - [ ] 不存在 [NEEDS CLARIFICATION] 标记
+   - [ ] 需求可测试且无歧义
+   - [ ] 成功标准可度量
+   - [ ] 成功标准与技术实现无关（无实现细节）
+   - [ ] 所有验收场景均已定义
+   - [ ] 已识别边界情况
+   - [ ] 范围边界清晰
+   - [ ] 依赖与假设已识别
 
-      ## Feature Readiness
+   ## 功能就绪性
 
-      - [ ] All functional requirements have clear acceptance criteria
-      - [ ] User scenarios cover primary flows
-      - [ ] Feature meets measurable outcomes defined in Success Criteria
-      - [ ] No implementation details leak into specification
+   - [ ] 所有功能性需求均有清晰验收标准
+   - [ ] 用户场景覆盖主流程
+   - [ ] 功能满足成功标准中定义的可度量结果
+   - [ ] 规格中未泄露实现细节
 
-      ## Notes
+   ## 备注
 
-      - Items marked incomplete require spec updates before `/speckit.clarify` or `/speckit.plan`
-      ```
+   - 标记为未完成的项，必须先更新 spec，之后才能执行 `/speckit.clarify` 或 `/speckit.plan`
+   ```
 
    b. **运行校验检查**：逐项检查 spec：
-      - 判定每项 pass/fail
-      - 记录具体问题（引用相应 spec 片段）
+   - 判定每项 pass/fail
+   - 记录具体问题（引用相应 spec 片段）
 
    c. **处理校验结果**：
+   - **若全部通过**：标记 checklist 完成并进入步骤 6
 
-      - **若全部通过**：标记 checklist 完成并进入步骤 6
+   - **若存在失败项（不含 `[NEEDS CLARIFICATION]`）**：
+     1. 列出失败项与具体问题
+     2. 更新 spec 修复问题
+     3. 重新校验直至全部通过（最多 3 轮）
+     4. 若 3 轮后仍失败，在 checklist notes 中记录剩余问题并提示用户
 
-      - **若存在失败项（不含 `[NEEDS CLARIFICATION]`）**：
-        1. 列出失败项与具体问题
-        2. 更新 spec 修复问题
-        3. 重新校验直至全部通过（最多 3 轮）
-        4. 若 3 轮后仍失败，在 checklist notes 中记录剩余问题并提示用户
+   - **若仍有 `[NEEDS CLARIFICATION]`**：
+     1. 提取 spec 中所有 `[NEEDS CLARIFICATION: ...]`
+     2. **上限检查**：若超过 3 个，仅保留最关键 3 个（按 scope/security/UX 影响），其余用合理默认推断
+     3. 对每个澄清项（最多 3），按以下格式向用户提供选项：
 
-      - **若仍有 `[NEEDS CLARIFICATION]`**：
-        1. 提取 spec 中所有 `[NEEDS CLARIFICATION: ...]`
-        2. **上限检查**：若超过 3 个，仅保留最关键 3 个（按 scope/security/UX 影响），其余用合理默认推断
-        3. 对每个澄清项（最多 3），按以下格式向用户提供选项：
+        ```markdown
+        ## 问题 [N]：[主题]
 
-           ```markdown
-           ## Question [N]: [Topic]
+        **Context**: [引用相关 spec 片段]
 
-           **Context**: [Quote relevant spec section]
+        **What we need to know**: [来自 NEEDS CLARIFICATION 标记的具体问题]
 
-           **What we need to know**: [Specific question from NEEDS CLARIFICATION marker]
+        **Suggested Answers**:
 
-           **Suggested Answers**:
+        | Option | Answer           | Implications             |
+        | ------ | ---------------- | ------------------------ |
+        | A      | [第一个建议答案] | [对该功能意味着什么]     |
+        | B      | [第二个建议答案] | [对该功能意味着什么]     |
+        | C      | [第三个建议答案] | [对该功能意味着什么]     |
+        | Custom | 提供你自己的答案 | [说明如何提供自定义输入] |
 
-           | Option | Answer | Implications |
-           |--------|--------|--------------|
-           | A      | [First suggested answer] | [What this means for the feature] |
-           | B      | [Second suggested answer] | [What this means for the feature] |
-           | C      | [Third suggested answer] | [What this means for the feature] |
-           | Custom | Provide your own answer | [Explain how to provide custom input] |
+        **Your choice**: _[等待用户回复]_
+        ```
 
-           **Your choice**: _[Wait for user response]_
-           ```
-
-        4. **关键（CRITICAL）- 表格格式**：确保 Markdown 表格正确渲染：
-           - 使用一致的管道与间距
-           - 单元格内容两侧留空格：`| Content |`，不要 `|Content|`
-           - 表头分隔至少 3 个短横线：`|--------|`
-           - 在 markdown 预览中检查渲染
-        5. 问题按顺序编号（Q1、Q2、Q3，最多 3 个）
-        6. 一次性展示全部问题后再等待回复
-        7. 等待用户一次性回复所有问题（如："Q1: A, Q2: Custom - [details], Q3: B"）
-        8. 用用户选择/输入替换对应 `[NEEDS CLARIFICATION]`
-        9. 澄清完成后重新执行质量校验
+     4. **关键（CRITICAL）- 表格格式**：确保 Markdown 表格正确渲染：
+        - 使用一致的管道与间距
+        - 单元格内容两侧留空格：`| Content |`，不要 `|Content|`
+        - 表头分隔至少 3 个短横线：`|--------|`
+        - 在 markdown 预览中检查渲染
+     5. 问题按顺序编号（Q1、Q2、Q3，最多 3 个）
+     6. 一次性展示全部问题后再等待回复
+     7. 等待用户一次性回复所有问题（如："Q1: A, Q2: Custom - [details], Q3: B"）
+     8. 用用户选择/输入替换对应 `[NEEDS CLARIFICATION]`
+     9. 澄清完成后重新执行质量校验
 
    d. **更新 Checklist**：每轮校验后，更新 checklist 文件中的当前 pass/fail 状态
 

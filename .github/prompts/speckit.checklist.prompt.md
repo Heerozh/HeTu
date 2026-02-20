@@ -265,21 +265,21 @@ $ARGUMENTS
 **❌ 错误——这是在测实现，不是测需求：**
 
 ```markdown
-- [ ] CHK001 - Verify landing page displays 3 episode cards [Spec §FR-001]
-- [ ] CHK002 - Test hover states work correctly on desktop [Spec §FR-003]
-- [ ] CHK003 - Confirm logo click navigates to home page [Spec §FR-010]
-- [ ] CHK004 - Check that related episodes section shows 3-5 items [Spec §FR-005]
+- [ ] CHK001 - 验证落地页展示 3 个剧集卡片 [Spec §FR-001]
+- [ ] CHK002 - 测试桌面端悬停状态是否正确 [Spec §FR-003]
+- [ ] CHK003 - 确认点击 Logo 会跳转到首页 [Spec §FR-010]
+- [ ] CHK004 - 检查相关推荐剧集区域是否显示 3-5 项 [Spec §FR-005]
 ```
 
 **✅ 正确——这是在测需求质量：**
 
 ```markdown
-- [ ] CHK001 - Are the number and layout of featured episodes explicitly specified? [Completeness, Spec §FR-001]
-- [ ] CHK002 - Are hover state requirements consistently defined for all interactive elements? [Consistency, Spec §FR-003]
-- [ ] CHK003 - Are navigation requirements clear for all clickable brand elements? [Clarity, Spec §FR-010]
-- [ ] CHK004 - Is the selection criteria for related episodes documented? [Gap, Spec §FR-005]
-- [ ] CHK005 - Are loading state requirements defined for asynchronous episode data? [Gap]
-- [ ] CHK006 - Can "visual hierarchy" requirements be objectively measured? [Measurability, Spec §FR-001]
+- [ ] CHK001 - 是否明确规定了推荐剧集的数量与布局？[Completeness, Spec §FR-001]
+- [ ] CHK002 - 是否为所有可交互元素一致地定义了悬停状态需求？[Consistency, Spec §FR-003]
+- [ ] CHK003 - 是否为所有可点击品牌元素清晰定义了导航需求？[Clarity, Spec §FR-010]
+- [ ] CHK004 - 是否记录了相关推荐剧集的选择标准？[Gap, Spec §FR-005]
+- [ ] CHK005 - 是否定义了异步剧集数据的加载状态需求？[Gap]
+- [ ] CHK006 - “视觉层级”需求是否可以被客观度量？[Measurability, Spec §FR-001]
 ```
 
 **关键差异：**
