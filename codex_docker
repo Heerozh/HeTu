@@ -1,0 +1,50 @@
+# 1. 使用 Astral 官方的 uv 镜像作为基础
+# 选择 bookworm-slim 版本，因为它基于 Debian，安装 Node.js 更容易
+FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
+
+# 设置环境变量，防止交互式提示
+ENV DEBIAN_FRONTEND=noninteractive
+
+# 2. 安装 Node.js 和 npm
+# 因为 uv 基础镜像是最小化的，我们需要手动添加 NodeSource 源来安装较新的 Node 版本 (例如 v20 LTS)
+RUN apt-get update && apt-get install -y \
+    nodejs npm
+
+RUN apt-get install -y \
+       bzr=2.7.* \
+        curl \
+        dnsutils \
+        fd-find \
+        gettext \
+        git \
+        git-lfs \
+        inotify-tools \
+        iputils-ping \
+        jq \
+        moreutils \
+        netcat-openbsd \
+        openssh-client \
+        ripgrep \
+        rsync \
+        sqlite3 \
+        tzdata \
+        unzip \
+        uuid-dev \
+        wget \
+        xz-utils \
+        zip
+
+
+# 3. 通过 npm 全局安装 codex
+RUN npm i -g @openai/codex
+
+# 定义容器内的 HOME 目录，通常 root 用户是 /root
+ENV HOME=/root
+
+# 4. 设置工作目录的基础路径
+WORKDIR /workspace
+
+# 5. 入口点
+# 默认直接执行 codex 命令，这样你可以直接像使用本地命令一样传参
+ENTRYPOINT ["codex"]
+

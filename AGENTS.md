@@ -126,3 +126,8 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - public APIs 使用中英双语 docstrings
 - 测试文件：`test_*.py`，fixtures 在 `tests/fixtures/`
 - pytest 配置中使用 `asyncio_mode = "auto"`；fixture/test 的 loop scope 为 `module`
+
+## Rule
+
+- Always use Context7 MCP when I need library/API documentation, code generation, setup
+  or configuration steps without me having to explicitly ask.

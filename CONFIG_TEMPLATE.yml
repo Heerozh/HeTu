@@ -98,6 +98,9 @@ BACKENDS:
     # 如果河图在容器内启动，访问宿主机ip可用host.docker.internal
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
+    # Postgres: postgresql://user:pass@localhost:5432/dbname
+    # SQLite:   sqlite:///./data/hetu.sqlite3
+    # MariaDB:  mysql://user:pass@localhost:3306/dbname
     master: redis://127.0.0.1:6379/0
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，

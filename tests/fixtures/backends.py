@@ -5,6 +5,7 @@ import pytest
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.sql import SQLBackendClient
 
 
 @pytest.fixture(scope="module")
@@ -129,8 +130,114 @@ async def mod_redis_cluster_backend(ses_redis_cluster_service):
         await backend.close()
 
 
+@pytest.fixture(scope="module")
+async def mod_postgres_backend(ses_postgres_service):
+    """PostgreSQL后端工厂fixture，返回创建postgres后端的工厂函数"""
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    def _create_postgres_backend(key="main"):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            dsn = ses_postgres_service
+            config = {
+                "type": "sql",
+                "master": dsn,
+                "servants": [],
+            }
+
+            _backend = Backend(config)
+            backends[key] = _backend
+
+        # mock _get_referred_components
+        def _mock_get_referred():
+            return ComponentDefines().get_all()
+
+        _master = cast(SQLBackendClient, _backend.master)
+        _master._get_referred_components = _mock_get_referred
+        _backend.post_configure()
+        return _backend
+
+    yield _create_postgres_backend
+
+    for backend in backends.values():
+        await backend.close()
+
+
+@pytest.fixture(scope="module")
+async def mod_sqlite_backend(ses_sqlite_service):
+    """SQLite后端工厂fixture，返回创建sqlite后端的工厂函数"""
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    def _create_sqlite_backend(key="main"):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            dsn = ses_sqlite_service
+            config = {
+                "type": "sql",
+                "master": dsn,
+                "servants": [],
+            }
+
+            _backend = Backend(config)
+            backends[key] = _backend
+
+        def _mock_get_referred():
+            return ComponentDefines().get_all()
+
+        _master = cast(SQLBackendClient, _backend.master)
+        _master._get_referred_components = _mock_get_referred
+        _backend.post_configure()
+        return _backend
+
+    yield _create_sqlite_backend
+
+    for backend in backends.values():
+        await backend.close()
+
+
+@pytest.fixture(scope="module")
+async def mod_mariadb_backend(ses_mariadb_service):
+    """MariaDB后端工厂fixture，返回创建mariadb后端的工厂函数"""
+    from hetu.data.component import ComponentDefines
+
+    backends = {}
+
+    def _create_mariadb_backend(key="main"):
+        if key in backends:
+            _backend = backends[key]
+        else:
+            dsn = ses_mariadb_service
+            config = {
+                "type": "sql",
+                "master": dsn,
+                "servants": [],
+            }
+
+            _backend = Backend(config)
+            backends[key] = _backend
+
+        def _mock_get_referred():
+            return ComponentDefines().get_all()
+
+        _master = cast(SQLBackendClient, _backend.master)
+        _master._get_referred_components = _mock_get_referred
+        _backend.post_configure()
+        return _backend
+
+    yield _create_mariadb_backend
+
+    for backend in backends.values():
+        await backend.close()
+
 REDIS_BACKENDS = ["redis", "redis_cluster"]
 REDIS_FORK_BACKENDS = ["valkey"]
+SQL_BACKENDS = ["postgres", "sqlite", "mariadb"]
 
 # 允许通过环境变量过滤后端，用于CI/CD优化
 # Allow filtering backends via environment variable for CI/CD optimization
@@ -139,9 +246,9 @@ if _env_backends:
     _allowed = [b.strip() for b in _env_backends.split(",")]
     REDIS_BACKENDS = [b for b in REDIS_BACKENDS if b in _allowed]
     REDIS_FORK_BACKENDS = [b for b in REDIS_FORK_BACKENDS if b in _allowed]
+    SQL_BACKENDS = [b for b in SQL_BACKENDS if b in _allowed]
 
-# SQL_BACKENDS = ["postgres"]
-ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS
+ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS + SQL_BACKENDS
 
 
 @pytest.fixture(params=ALL_BACKENDS, scope="module")
@@ -158,6 +265,12 @@ def backend_fixture_by_name(name: str, request):
         return request.getfixturevalue("mod_valkey_backend")
     elif name == "redis_cluster":
         return request.getfixturevalue("mod_redis_cluster_backend")
+    elif name == "postgres":
+        return request.getfixturevalue("mod_postgres_backend")
+    elif name == "sqlite":
+        return request.getfixturevalue("mod_sqlite_backend")
+    elif name == "mariadb":
+        return request.getfixturevalue("mod_mariadb_backend")
     else:
         raise ValueError("Unknown db type: %s" % backend_name)
 

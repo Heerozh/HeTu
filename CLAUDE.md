@@ -5,46 +5,44 @@ this repository.
 
 ## Project Overview
 
-HeTu (河图) is a high-performance, auto-scaling game server engine built on an ECS (
-Entity-Component-System) architecture with Redis as the backend. It exposes a
-database-like interface over WebSocket, where clients subscribe to data changes and call
-server-side logic via RPC.
-
-## Commands
+HeTu (河图) 是一个高性能、多进程分布式的 game server engine，基于 ECS
+(Entity-Component-System) architecture，并使用 Redis 作为 backend。它通过
+WebSocket 暴露类似 database 的接口，client 可订阅数据变更并通过 RPC 调用
+server-side logic。
 
 ```bash
-uv sync --group dev          # Install dependencies
-uv run ruff check .          # Lint
-uv run ruff format .         # Format
-uv run basedpyright          # Type check
-uv run pytest tests/         # Run all tests
-uv run pytest tests/test_backend_basic.py  # Run single test file
-uv run pytest tests/test_backend_basic.py::test_name  # Run single test
-uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # Coverage
+uv sync --group dev          # 安装依赖
+uv run ruff check .          # 代码检查（Lint）
+uv run ruff format .         # 代码格式化
+uv run basedpyright          # 类型检查
+uv run pytest tests/         # 运行全部测试
+uv run pytest tests/test_backend_basic.py  # 运行单个测试文件
+uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
+uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 ```
 
-Python 3.14 required. Tests need Docker (Redis). Set `HETU_TEST_BACKENDS=redis` for CI
-parity.
+需要 Python 3.14。测试依赖 Docker (Redis)。为保持与 CI 一致，请设置
+`HETU_TEST_BACKENDS=redis`。
 
 ## Architecture
 
 ### Core ECS Pattern
 
-The three core abstractions mirror ECS, defined via decorators:
+三个核心抽象对应 ECS，通过 decorators 定义：
 
-- **Component** (`@define_component`): Data schema backed by NumPy structured arrays (
-  C-struct-like rows). Defined in user app code, stored in Redis. Each component is a
-  table with typed columns via `property_field()`. Supports `unique`/`index` on fields.
-  Permission levels: `EVERYBODY`, `USER`, `OWNER`/`RLS`, `ADMIN`.
+- **Component** (`@define_component`)：数据 schema 由 NumPy structured arrays
+  支撑（类似 C struct 的 row）。定义在用户 app 代码中，存储在 Redis。每个
+  component 都是一张 table，通过 `property_field()` 定义带类型的 columns。
+  支持字段 `unique`/`index`。权限级别：`EVERYBODY`、`USER`、`OWNER`/`RLS`、
+  `ADMIN`。
 
-- **System** (`@define_system`): Server-side logic functions that operate on Components
-  within transactions. Systems declare which Components they reference; the engine
-  groups Systems with overlapping Components into "co-location clusters" (
-  `SystemClusters`) for transaction isolation. Transactions auto-retry on
-  `RaceCondition`.
+- **System** (`@define_system`)：在 transaction 中操作 Components 的
+  server-side logic function。System 声明其引用的 Components；engine 会将引用
+  Component 重叠的 Systems 归为“co-location clusters”（`SystemClusters`），用于
+  transaction isolation。遇到 `RaceCondition` 时 transaction 会自动重试。
 
-- **Endpoint** (`@define_endpoint`): Lower-level connection handlers. Systems are
-  actually a specialized form of Endpoint with transaction support.
+- **Endpoint** (`@define_endpoint`)：更底层的连接处理器。System 本质上是
+  Endpoint 的特化形式，并带有 transaction 支持。
 
 ### Data Flow
 
@@ -61,73 +59,78 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
                                         Redis ◄──────────┘
 ```
 
-1. Clients connect via WebSocket to `/hetu/<db_name>`, go through a message pipeline (
-   jsonb → zlib → crypto).
-2. RPC calls (`callSystem`) route through `EndpointExecutor` → `SystemCaller`, which
-   opens a `Session` (transaction), creates `SessionRepository` per Component, executes
-   the System function, and commits.
-3. Data subscriptions (`select`/`query`) create `RowSubscription`/`IndexSubscription`
-   objects managed by `SubscriptionBroker`, which listens to Redis pub/sub for change
-   notifications and pushes updates to clients.
+1. Client 通过 WebSocket 连接到 `/hetu/<db_name>`，并经过 message pipeline
+   （jsonb → zlib → crypto）。
+2. RPC 调用（`callSystem`）经由 `EndpointExecutor` → `SystemCaller` 路由，后者会
+   打开 `Session`（transaction）、为每个 Component 创建 `SessionRepository`、执行
+   System function 并 commit。
+3. 数据订阅（`select`/`query`）会创建 `RowSubscription`/`IndexSubscription` 对象，
+   由 `SubscriptionBroker` 管理；其监听 Redis pub/sub 的变更通知并将更新推送给
+   client。
 
 ### Backend Layer (`hetu/data/backend/`)
 
-- `Backend`: Manages master + servant (read replica) connections with weighted random
-  selection.
-- `BackendClient` / `BackendClientFactory`: Abstract DB client; Redis implementation in
-  `backend/redis/`.
-- `Session`: Transaction manager with optimistic concurrency (detects conflicts via
-  `IdentityMap`, raises `RaceCondition`).
-- `SessionRepository`: Per-Component CRUD within a Session (`get`, `range`, `upsert`,
-  `insert`, `delete`, `update_rows`).
-- `Table` / `TableReference`: Component-to-backend mapping, managed by
-  `ComponentTableManager`.
-- `MQClient`: Per-connection message queue for subscription notifications.
+- `Backend`：管理 master + servant（read replica）连接，使用 weighted random
+  selection。
+- `BackendClient` / `BackendClientFactory`：抽象 DB client；Redis 实现在
+  `backend/redis/`。
+- `Session`：transaction manager，使用 optimistic concurrency（通过
+  `IdentityMap` 检测冲突并抛出 `RaceCondition`）。
+- `SessionRepository`：Session 内按 Component 进行 CRUD（`get`、`range`、
+  `upsert`、`insert`、`delete`、`update_rows`）。
+- `Table` / `TableReference`：Component 到 backend 的映射，由
+  `ComponentTableManager` 管理。
+- `MQClient`：每个连接一个 message queue，用于 subscription notification。
 
 ### Server Layer (`hetu/server/`)
 
-- Built on Sanic (async web framework). Each worker process runs independently.
-- `main.py`: Worker entry — initializes backends, SnowflakeID, ComponentTableManagers,
-  SystemClusters.
-- `websocket.py`: WebSocket handler — creates per-connection `EndpointExecutor`,
-  `SystemCaller`, `SubscriptionBroker`.
-- `receiver.py`: Message dispatcher — routes `rpc`, `sub`, `unsub`, `sel` commands.
-- `pipeline/`: Layered message processing (jsonb serialization, zlib/brotli/zstd
-  compression, ChaCha20 encryption). Layers register via `__init_subclass__` with
-  `alias`.
+- 基于 Sanic（async web framework）。每个 worker process 独立运行。
+- `main.py`：worker 入口 —— 初始化 backends、SnowflakeID、
+  ComponentTableManagers、SystemClusters。
+- `websocket.py`：WebSocket handler —— 为每个连接创建 `EndpointExecutor`、
+  `SystemCaller`、`SubscriptionBroker`。
+- `receiver.py`：message dispatcher —— 路由 `rpc`、`sub`、`unsub`、`sel` 命令。
+- `pipeline/`：分层 message processing（jsonb serialization、zlib/brotli/zstd
+  compression、ChaCha20 encryption）。各层通过带 `alias` 的
+  `__init_subclass__` 自动注册。
 
 ### Key Patterns
 
-- **Singleton metaclass** (`common/singleton.py`): Used by `SystemClusters`,
-  `ComponentDefines`, `SnowflakeID`.
-- **Factory pattern with auto-registration**: `BackendClientFactory`,
-  `MessageProcessLayerFactory` — subclasses register themselves automatically.
-- **SnowflakeID**: Distributed unique ID generation with `WorkerKeeper` managing worker
-  IDs via Redis.
-- **FutureCalls**: Built-in scheduled/recurring System calls, stored as a Component in
-  the `HeTu` namespace.
+- **Singleton metaclass** (`common/singleton.py`)：用于 `SystemClusters`、
+  `ComponentDefines`、`SnowflakeID`。
+- **Factory pattern with auto-registration**：`BackendClientFactory`、
+  `MessageProcessLayerFactory` —— subclass 会自动注册。
+- **SnowflakeID**：分布式唯一 ID 生成，通过 `WorkerKeeper` 基于 Redis 管理
+  worker IDs。
+- **FutureCalls**：内置的定时/周期性 System 调用，作为 Component 存储在
+  `HeTu` namespace。
 
 ## Module Map
 
 | Module                   | Role                                                           |
 |--------------------------|----------------------------------------------------------------|
 | `hetu/data/component.py` | `@define_component`, `BaseComponent`, `property_field`         |
-| `hetu/system/definer.py` | `@define_system`, `SystemClusters` (cluster grouping)          |
-| `hetu/system/caller.py`  | `SystemCaller` — executes Systems with transaction retry       |
-| `hetu/system/context.py` | `SystemContext` — transaction context with `repo` dict         |
+| `hetu/system/definer.py` | `@define_system`, `SystemClusters`（cluster grouping）           |
+| `hetu/system/caller.py`  | `SystemCaller` —— 执行 System 并支持 transaction retry              |
+| `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context         |
 | `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor` |
 | `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`             |
 | `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription`   |
-| `hetu/server/`           | Sanic workers, WebSocket handler, message pipeline             |
-| `hetu/manager.py`        | `ComponentTableManager` — maps Components to backend Tables    |
-| `hetu/cli/`              | CLI commands: `start`, `migrate`, `build`                      |
-| `hetu/sourcegen/`        | Client SDK code generation (C#)                                |
+| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline               |
+| `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables     |
+| `hetu/cli/`              | CLI commands：`start`、`migrate`、`build`                         |
+| `hetu/sourcegen/`        | Client SDK code generation（C#）                                 |
 
 ## Conventions
 
-- Commit prefixes: `ENH:`, `BUG:`, `MAINT:`
-- 4-space indent, line length 88 (Ruff)
-- `snake_case` functions, `PascalCase` classes, `UPPER_SNAKE_CASE` constants
-- Bilingual (Chinese/English) docstrings for public APIs
-- Test files: `test_*.py`, fixtures in `tests/fixtures/`
-- `asyncio_mode = "auto"` in pytest config; fixture/test loop scope is `module`
+- Commit 前缀：`ENH:`、`BUG:`、`MAINT:`
+- 4 空格缩进，行长 88（Ruff）
+- `snake_case` functions、`PascalCase` classes、`UPPER_SNAKE_CASE` constants
+- public APIs 使用中英双语 docstrings
+- 测试文件：`test_*.py`，fixtures 在 `tests/fixtures/`
+- pytest 配置中使用 `asyncio_mode = "auto"`；fixture/test 的 loop scope 为 `module`
+
+## Rule
+
+- Always use Context7 MCP when I need library/API documentation, code generation, setup
+  or configuration steps without me having to explicitly ask.
