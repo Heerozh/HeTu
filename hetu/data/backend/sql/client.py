@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, ov
 import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import exc as sa_exc
-from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ..base import BackendClient, RaceCondition, RowFormat
 
@@ -488,7 +488,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
         table = self.component_table(table_ref)
         stmt = sa.select(table).where(table.c.id == int(row_id)).limit(1)
         async with self.aio.connect() as conn:
-            row = (await conn.execute(stmt)).mappings().first()
+            try:
+                row = (await conn.execute(stmt)).mappings().first()
+            except sa_exc.DBAPIError as exc:
+                if self._is_table_missing_error(exc):
+                    return None
+                raise
         if row is None:
             return None
         return self.row_decode_(table_ref.comp_cls, dict(row), row_format)
@@ -573,6 +578,40 @@ class SQLBackendClient(BackendClient, alias="sql"):
             "duplicate entry",
         )
         return any(marker in message for marker in markers)
+
+    @staticmethod
+    def _is_table_missing_error(exc: BaseException) -> bool:
+        if not isinstance(exc, sa_exc.DBAPIError):
+            return False
+
+        message = str(exc).lower()
+        if any(
+            marker in message
+            for marker in (
+                "no such table",
+                "does not exist",
+                "doesn't exist",
+                "undefined table",
+                "unknown table",
+            )
+        ):
+            return True
+
+        orig = getattr(exc, "orig", None)
+        sqlstate = getattr(orig, "sqlstate", None) or getattr(orig, "pgcode", None)
+        return sqlstate == "42P01"
+
+    def _create_related_tables_sync(self, refs: list[TableReference]) -> None:
+        """
+        使用同步IO创建commit事务相关表（组件表 + 支撑表）。
+        """
+        for io in self._ios:
+            meta = sa.MetaData()
+            self.meta_table(meta)
+            self.notify_table(meta)
+            for ref in refs:
+                self.component_table(ref, meta)
+            meta.create_all(io, checkfirst=True)
 
     @overload
     async def range(
@@ -673,14 +712,25 @@ class SQLBackendClient(BackendClient, alias="sql"):
             if limit >= 0:
                 stmt = stmt.limit(limit)
             async with self.aio.connect() as conn:
-                rows = (await conn.execute(stmt)).scalars().all()
+                try:
+                    rows = (await conn.execute(stmt)).scalars().all()
+                except sa_exc.DBAPIError as exc:
+                    if self._is_table_missing_error(exc):
+                        return []
+                    raise
             return [int(x) for x in rows]
 
         stmt = sa.select(table).where(cond_left, cond_right).order_by(*order_by)
         if limit >= 0:
             stmt = stmt.limit(limit)
         async with self.aio.connect() as conn:
-            rows = (await conn.execute(stmt)).mappings().all()
+            try:
+                rows = (await conn.execute(stmt)).mappings().all()
+            except sa_exc.DBAPIError as exc:
+                if self._is_table_missing_error(exc):
+                    rows = []
+                else:
+                    raise
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
             return [
@@ -726,100 +776,130 @@ class SQLBackendClient(BackendClient, alias="sql"):
         if not dirties:
             raise ValueError("没有脏数据需要提交")
 
-        channels: set[str] = set()
         notify_table = self.notify_table()
         now = time.time()
         cleanup_due = now >= self._next_notify_cleanup_at
+        refs = list(dirties.keys())
+        for attempt in range(2):
+            channels: set[str] = set()
+            try:
+                async with self.aio.begin() as conn:
+                    # 先删除，避免insert/update遇到本事务中将被删除数据导致unique冲突。
+                    for ref, (
+                        _inserts,
+                        (_old_rows, _new_rows),
+                        deletes,
+                    ) in dirties.items():
+                        table = self.component_table(ref)
+                        for old_row in deletes:
+                            row_id = int(old_row["id"])
+                            old_version = int(old_row["_version"])
+                            stmt = sa.delete(table).where(
+                                table.c.id == row_id, table.c._version == old_version
+                            )
+                            result = await conn.execute(stmt)
+                            if result.rowcount != 1:
+                                raise RaceCondition(
+                                    f"Version mismatch when deleting row id={row_id}"
+                                )
+                            channels.add(self.row_channel(ref, row_id))
+                            for index_name in ref.comp_cls.indexes_:
+                                channels.add(self.index_channel(ref, index_name))
 
-        async with self.aio.begin() as conn:
-            for ref in dirties:
-                table = self.component_table(ref)
-                await conn.run_sync(
-                    lambda sync_conn, tbl=table: tbl.create(sync_conn, checkfirst=True)
-                )
+                    for ref, (
+                        _inserts,
+                        (old_rows, new_rows),
+                        _deletes,
+                    ) in dirties.items():
+                        table = self.component_table(ref)
+                        indexes = ref.comp_cls.indexes_
+                        for old_row, changed_row in zip(old_rows, new_rows):
+                            row_id = int(old_row["id"])
+                            old_version = int(old_row["_version"])
+                            updates = self._dirty_to_typed_update(
+                                ref.comp_cls, changed_row
+                            )
+                            if len(updates) == 0:
+                                continue
+                            updates["_version"] = old_version + 1
+                            stmt = (
+                                sa.update(table)
+                                .where(
+                                    table.c.id == row_id,
+                                    table.c._version == old_version,
+                                )
+                                .values(**updates)
+                            )
+                            try:
+                                result = await conn.execute(stmt)
+                            except sa_exc.IntegrityError as exc:
+                                if self._is_unique_violation(exc):
+                                    raise RaceCondition(
+                                        f"UNIQUE violation: {exc}"
+                                    ) from exc
+                                raise
+                            if result.rowcount != 1:
+                                raise RaceCondition(
+                                    f"Version mismatch when updating row id={row_id}"
+                                )
+                            channels.add(self.row_channel(ref, row_id))
+                            for index_name in updates:
+                                if index_name in indexes:
+                                    channels.add(self.index_channel(ref, index_name))
 
-            # 先删除，避免insert/update遇到本事务中将被删除数据导致unique冲突。
-            for ref, (_inserts, (_old_rows, _new_rows), deletes) in dirties.items():
-                table = self.component_table(ref)
-                for old_row in deletes:
-                    row_id = int(old_row["id"])
-                    old_version = int(old_row["_version"])
-                    stmt = sa.delete(table).where(
-                        table.c.id == row_id, table.c._version == old_version
-                    )
-                    result = await conn.execute(stmt)
-                    if result.rowcount != 1:
-                        raise RaceCondition(
-                            f"Version mismatch when deleting row id={row_id}"
+                    for ref, (
+                        inserts,
+                        (_old_rows, _new_rows),
+                        _deletes,
+                    ) in dirties.items():
+                        table = self.component_table(ref)
+                        for row in inserts:
+                            typed_row = self._dirty_to_typed_insert(ref.comp_cls, row)
+                            row_id = int(typed_row["id"])
+                            try:
+                                await conn.execute(sa.insert(table).values(**typed_row))
+                            except sa_exc.IntegrityError as exc:
+                                if self._is_unique_violation(exc):
+                                    raise RaceCondition(
+                                        f"UNIQUE violation: {exc}"
+                                    ) from exc
+                                raise
+                            channels.add(self.row_channel(ref, row_id))
+                            for index_name in ref.comp_cls.indexes_:
+                                channels.add(self.index_channel(ref, index_name))
+
+                    if channels:
+                        await conn.execute(
+                            sa.insert(notify_table),
+                            [
+                                {"channel": channel, "created_at": now}
+                                for channel in sorted(channels)
+                            ],
                         )
-                    channels.add(self.row_channel(ref, row_id))
-                    for index_name in ref.comp_cls.indexes_:
-                        channels.add(self.index_channel(ref, index_name))
 
-            for ref, (_inserts, (old_rows, new_rows), _deletes) in dirties.items():
-                table = self.component_table(ref)
-                indexes = ref.comp_cls.indexes_
-                for old_row, changed_row in zip(old_rows, new_rows):
-                    row_id = int(old_row["id"])
-                    old_version = int(old_row["_version"])
-                    updates = self._dirty_to_typed_update(ref.comp_cls, changed_row)
-                    if len(updates) == 0:
-                        continue
-                    updates["_version"] = old_version + 1
-                    stmt = (
-                        sa.update(table)
-                        .where(table.c.id == row_id, table.c._version == old_version)
-                        .values(**updates)
-                    )
-                    try:
-                        result = await conn.execute(stmt)
-                    except sa_exc.IntegrityError as exc:
-                        if self._is_unique_violation(exc):
-                            raise RaceCondition(f"UNIQUE violation: {exc}") from exc
-                        raise
-                    if result.rowcount != 1:
-                        raise RaceCondition(
-                            f"Version mismatch when updating row id={row_id}"
+                    if cleanup_due:
+                        expire_at = now - self.NOTIFY_TTL_SECONDS
+                        await conn.execute(
+                            sa.delete(notify_table).where(
+                                notify_table.c.created_at < expire_at
+                            )
                         )
-                    channels.add(self.row_channel(ref, row_id))
-                    for index_name in updates:
-                        if index_name in indexes:
-                            channels.add(self.index_channel(ref, index_name))
-
-            for ref, (inserts, (_old_rows, _new_rows), _deletes) in dirties.items():
-                table = self.component_table(ref)
-                for row in inserts:
-                    typed_row = self._dirty_to_typed_insert(ref.comp_cls, row)
-                    row_id = int(typed_row["id"])
-                    try:
-                        await conn.execute(sa.insert(table).values(**typed_row))
-                    except sa_exc.IntegrityError as exc:
-                        if self._is_unique_violation(exc):
-                            raise RaceCondition(f"UNIQUE violation: {exc}") from exc
-                        raise
-                    channels.add(self.row_channel(ref, row_id))
-                    for index_name in ref.comp_cls.indexes_:
-                        channels.add(self.index_channel(ref, index_name))
-
-            if channels:
-                await conn.execute(
-                    sa.insert(notify_table),
-                    [
-                        {"channel": channel, "created_at": now}
-                        for channel in sorted(channels)
-                    ],
-                )
-
-            if cleanup_due:
-                expire_at = now - self.NOTIFY_TTL_SECONDS
-                await conn.execute(
-                    sa.delete(notify_table).where(notify_table.c.created_at < expire_at)
-                )
-                self._next_notify_cleanup_at = (
-                    now
-                    + self.NOTIFY_CLEANUP_INTERVAL
-                    + random.uniform(0.0, self.NOTIFY_CLEANUP_JITTER)
-                )
+                        self._next_notify_cleanup_at = (
+                            now
+                            + self.NOTIFY_CLEANUP_INTERVAL
+                            + random.uniform(0.0, self.NOTIFY_CLEANUP_JITTER)
+                        )
+                return
+            except sa_exc.DBAPIError as exc:
+                # 目前缺表创建逻辑主要用于tests，因为hetu正式启动时会创建所有引用的表
+                # 但是tests很多表是单元中动态创建，每次都写create又不清晰，暂时放这里创建，以后再想想
+                if attempt == 0 and self._is_table_missing_error(exc):
+                    logger.warning(
+                        "⚠️ [💾SQL] commit时发现缺失表，正在用同步IO创建相关表并重试事务..."
+                    )
+                    self._create_related_tables_sync(refs)
+                    continue
+                raise
 
     @override
     async def direct_set(
