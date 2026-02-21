@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
+PULL_BATCH_SIZE = 256
+# 避免SQLite等数据库在IN参数过多时触发参数上限/编译开销问题。
+MAX_CHANNELS_IN_FILTER = 500
 
 
 @final
@@ -35,6 +38,7 @@ class SQLMQClient(MQClient):
         self.pulled_deque = MultiMap()
         self.pulled_set = set()
         self._last_notify_id = self._get_current_notify_id_sync()
+        self._large_sub_warned = False
 
     def _get_current_notify_id_sync(self) -> int:
         table = self._client.notify_table()
@@ -49,7 +53,9 @@ class SQLMQClient(MQClient):
         table = self._client.notify_table()
         try:
             async with self._client.aio.connect() as conn:
-                latest = (await conn.execute(sa.select(sa.func.max(table.c.id)))).scalar()
+                latest = (
+                    await conn.execute(sa.select(sa.func.max(table.c.id)))
+                ).scalar()
         except Exception:
             return self._last_notify_id
         return int(latest or 0)
@@ -82,18 +88,22 @@ class SQLMQClient(MQClient):
 
         notify = self._client.notify_table()
         channels = list(self.subscribed)
+        use_channel_filter = self._should_use_channel_in_filter(len(channels))
+        if not use_channel_filter and not self._large_sub_warned:
+            logger.warning(
+                "⚠️ [💾SQL] 订阅频道过多，pull切换为按id扫描后本地过滤模式，"
+                f"当前订阅数={len(channels)}，阈值={MAX_CHANNELS_IN_FILTER}"
+            )
+            self._large_sub_warned = True
 
         while True:
             async with self._client.aio.connect() as conn:
-                stmt = (
-                    sa.select(notify.c.id, notify.c.channel)
-                    .where(
-                        notify.c.id > self._last_notify_id,
-                        notify.c.channel.in_(channels),
-                    )
-                    .order_by(notify.c.id.asc())
-                    .limit(256)
+                stmt = sa.select(notify.c.id, notify.c.channel).where(
+                    notify.c.id > self._last_notify_id
                 )
+                if use_channel_filter:
+                    stmt = stmt.where(notify.c.channel.in_(channels))
+                stmt = stmt.order_by(notify.c.id.asc()).limit(PULL_BATCH_SIZE)
                 rows = (await conn.execute(stmt)).mappings().all()
 
             if rows:
@@ -105,6 +115,8 @@ class SQLMQClient(MQClient):
             if msg_id > self._last_notify_id:
                 self._last_notify_id = msg_id
             channel_name = str(row["channel"])
+            if channel_name not in self.subscribed:
+                continue
             logger.debug(f"🔔 [💾SQL] 收到订阅更新通知: {channel_name}")
 
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
@@ -118,6 +130,10 @@ class SQLMQClient(MQClient):
             if channel_name not in self.pulled_set:
                 self.pulled_deque.add(time.time(), channel_name)
                 self.pulled_set.add(channel_name)
+
+    @staticmethod
+    def _should_use_channel_in_filter(subscribed_count: int) -> bool:
+        return subscribed_count <= MAX_CHANNELS_IN_FILTER
 
     @override
     async def get_message(self) -> set[str]:
