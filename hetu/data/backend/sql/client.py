@@ -8,6 +8,7 @@
 import hashlib
 import logging
 import random
+from datetime import UTC, datetime, timedelta
 import time
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -223,7 +224,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 autoincrement=True,
             ),
             sa.Column("channel", sa.String(length=256), nullable=False, index=True),
-            sa.Column("created_at", sa.Float(), nullable=False, index=True),
+            sa.Column("created_at", sa.TIMESTAMP(), nullable=False, index=True),
         )
 
     @override
@@ -740,8 +741,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             raise ValueError("没有脏数据需要提交")
 
         notify_table = self.notify_table()
-        now = time.time()
-        cleanup_due = now >= self._next_notify_cleanup_at
+        now_ts = time.time()
+        now_dt = datetime.now(UTC).replace(tzinfo=None)
+        cleanup_due = now_ts >= self._next_notify_cleanup_at
         refs = list(dirties.keys())
         for attempt in range(2):
             channels: set[str] = set()
@@ -835,20 +837,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
                         await conn.execute(
                             sa.insert(notify_table),
                             [
-                                {"channel": channel, "created_at": now}
+                                {"channel": channel, "created_at": now_dt}
                                 for channel in sorted(channels)
                             ],
                         )
 
                     if cleanup_due:
-                        expire_at = now - self.NOTIFY_TTL_SECONDS
+                        expire_at = now_dt - timedelta(seconds=self.NOTIFY_TTL_SECONDS)
                         await conn.execute(
                             sa.delete(notify_table).where(
                                 notify_table.c.created_at < expire_at
                             )
                         )
                         self._next_notify_cleanup_at = (
-                            now
+                            now_ts
                             + self.NOTIFY_CLEANUP_INTERVAL
                             + random.uniform(0.0, self.NOTIFY_CLEANUP_JITTER)
                         )
