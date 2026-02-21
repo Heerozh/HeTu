@@ -191,9 +191,18 @@ class SQLBackendClient(BackendClient, alias="sql"):
         instance = _sanitize_identifier(table_ref.instance_name)
         comp = _sanitize_identifier(table_ref.comp_cls.name_)
         base = f"ht_{instance}_{comp}_c{table_ref.cluster_id}"
-        if len(base) > 48:
-            base = base[:48]
-        return f"{base}_{digest}"
+        # 如果超过各sql最小长度限制，截断base部分，保留hash摘要
+        # - PostgreSQL: 默认最多 63 bytes（NAMEDATALEN=64，取 -1）
+        # - MySQL: 表名最多 64 characters
+        # - MariaDB: 表名最多 64 characters
+        # - SQL Server: 标识符（含表名）1~128 characters
+        # - Oracle:
+        #     - COMPATIBLE >= 12.2：1~128 bytes
+        #     - COMPATIBLE < 12.2：1~30 bytes
+        # - SQLite: 无
+        if len(base.encode("utf-8")) > 63:
+            base = f"{base[:63]}_{digest}"
+        return base
 
     @classmethod
     def component_table(

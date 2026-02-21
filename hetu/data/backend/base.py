@@ -357,7 +357,7 @@ class BackendClientFactory:
             raise NotImplementedError(f"{alias} 后端未实现")
         return (
             BackendClientFactory._registry[alias.lower()].get_worker_keeper
-            != BackendClient.get_worker_keeper
+            is not BackendClient.get_worker_keeper
         )
 
     @staticmethod

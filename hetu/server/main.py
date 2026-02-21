@@ -51,7 +51,6 @@ def start_backends(app: Sanic):
             if worker_keeper := backend.get_worker_keeper(os.getpid()):
                 break
 
-    # 根据默认backend决定用哪个workerKeeper，如果全部不支持则报错
     if worker_keeper is None:
         raise RuntimeError(
             "没有可用的Backend支持WorkerKeeper管理唯一Worker ID，可用的有："
@@ -120,7 +119,7 @@ async def worker_start(app: Sanic):
     try:
         start_backends(app)
     except Exception as e:
-        logger.error(f"❌ 进程[{os.getpid()}] 启动失败: {type(e).__name__}:{e}")
+        logger.exception(f"❌ 进程[{os.getpid()}] 启动失败: {type(e).__name__}:{e}")
         app.stop()
         return
 
