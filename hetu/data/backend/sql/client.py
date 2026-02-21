@@ -153,8 +153,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
         #     - COMPATIBLE >= 12.2：1~128 bytes
         #     - COMPATIBLE < 12.2：1~30 bytes
         # - SQLite: 无
-        if len(base.encode("utf-8")) > 63:
-            base = f"{base[:50]}_{digest}"
+        encoded = base.encode("utf-8")
+        if len(encoded) > 63:
+            max_prefix_bytes = 63 - 1 - len(digest)  # 1 for underscore
+            prefix = encoded[:max_prefix_bytes].decode("utf-8", "ignore")
+            base = f"{prefix}_{digest}"
         return base
 
     @classmethod
@@ -163,7 +166,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
     ):
         if metadata is None:
             metadata = sa.MetaData()
-        assert metadata is not None
         table_name = cls.component_table_name(table_ref)
         if table_name in metadata.tables:
             return metadata.tables[table_name]
@@ -192,7 +194,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def meta_table(cls, metadata: sa.MetaData | None = None):
         if metadata is None:
             metadata = sa.MetaData()
-        assert metadata is not None
         if cls.META_TABLE_NAME in metadata.tables:
             return metadata.tables[cls.META_TABLE_NAME]
         return sa.Table(
@@ -210,7 +211,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def notify_table(cls, metadata: sa.MetaData | None = None):
         if metadata is None:
             metadata = sa.MetaData()
-        assert metadata is not None
         if cls.NOTIFY_TABLE_NAME in metadata.tables:
             return metadata.tables[cls.NOTIFY_TABLE_NAME]
         return sa.Table(
@@ -888,12 +888,14 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 sa.update(table).where(table.c.id == int(id_)).values(**values)
             )
 
+    @override
     def get_table_maintenance(self) -> SQLTableMaintenance:
         self._ensure_open()
         from .maint import SQLTableMaintenance
 
         return SQLTableMaintenance(self)
 
+    @override
     def get_mq_client(self) -> SQLMQClient:
         self._ensure_open()
         from .mq import SQLMQClient
