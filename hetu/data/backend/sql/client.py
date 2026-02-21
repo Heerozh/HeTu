@@ -327,7 +327,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
     @override
     def post_configure(self) -> None:
         self._ensure_open()
-        self._ensure_support_tables_sync()
+        if not self.is_servant:
+            self._ensure_support_tables_sync()
         # 提示用户schema定义是否符合sql要求
         self._schema_checking_for_sql()
 

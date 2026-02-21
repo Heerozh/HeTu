@@ -107,29 +107,36 @@ class SQLMQClient(MQClient):
                 rows = (await conn.execute(stmt)).mappings().all()
 
             if rows:
-                break
-            await asyncio.sleep(interval / 2)
+                has_subscribed_updates = False
+                for row in rows:
+                    msg_id = int(row["id"])
+                    if msg_id > self._last_notify_id:
+                        self._last_notify_id = msg_id
+                    channel_name = str(row["channel"])
+                    if channel_name not in self.subscribed:
+                        continue
+                    has_subscribed_updates = True
+                    logger.debug(f"🔔 [💾SQL] 收到订阅更新通知: {channel_name}")
 
-        for row in rows:
-            msg_id = int(row["id"])
-            if msg_id > self._last_notify_id:
-                self._last_notify_id = msg_id
-            channel_name = str(row["channel"])
-            if channel_name not in self.subscribed:
+                    dropped = set(self.pulled_deque.pop(0, time.time() - 120))
+                    if dropped:
+                        self.pulled_set -= dropped
+                        logger.warning(
+                            f"⚠️ [💾SQL] 订阅更新通知来不及处理，"
+                            f"丢弃了2分钟前的消息共{len(dropped)}条"
+                        )
+
+                    if channel_name not in self.pulled_set:
+                        self.pulled_deque.add(time.time(), channel_name)
+                        self.pulled_set.add(channel_name)
+
+                if has_subscribed_updates:
+                    break
+
+                # fallback模式可能读到无关频道，短暂等待避免在高写入流量下空转热循环。
+                await asyncio.sleep(interval / 2)
                 continue
-            logger.debug(f"🔔 [💾SQL] 收到订阅更新通知: {channel_name}")
-
-            dropped = set(self.pulled_deque.pop(0, time.time() - 120))
-            if dropped:
-                self.pulled_set -= dropped
-                logger.warning(
-                    f"⚠️ [💾SQL] 订阅更新通知来不及处理，"
-                    f"丢弃了2分钟前的消息共{len(dropped)}条"
-                )
-
-            if channel_name not in self.pulled_set:
-                self.pulled_deque.add(time.time(), channel_name)
-                self.pulled_set.add(channel_name)
+            await asyncio.sleep(interval / 2)
 
     @staticmethod
     def _should_use_channel_in_filter(subscribed_count: int) -> bool:
