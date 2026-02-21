@@ -44,13 +44,13 @@ def infer_backend_type_from_db_url(db_url: str) -> str:
     scheme = urlparse(db_url).scheme.lower()
     if scheme in {"redis", "rediss", "valkey", "valkeys"}:
         return "redis"
-    if scheme in {"postgres", "postgresql"}:
-        return "postgres"
+    if scheme in {"postgres", "postgresql", "sqlite", "mariadb", "mysql"}:
+        return "sql"
     if scheme in {"file"}:
         return "sharedmemory"
     raise ValueError(
         f"不支持的数据库URL scheme: '{scheme}'。"
-        "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql"
+        "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
     )
 
 

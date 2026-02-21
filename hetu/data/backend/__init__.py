@@ -17,7 +17,8 @@ from .base import (
 from .repo import SessionRepository
 from .session import Session
 from .table import Table, TableReference
-from . import redis as _  # 注册redis后端，但不导出
+from . import redis as _  # noqa: F401,F811 注册redis后端，但不导出
+from . import sql as _  # noqa: F401,F811 注册sql后端，但不导出
 
 __all__ = [
     "RaceCondition",
@@ -102,13 +103,15 @@ class Backend:
         synced, checkpoint = await self._master.is_synced(None)
         while not synced:
             await asyncio.sleep(0.1)
-            synced, _ = await self._master.is_synced(checkpoint)
+            synced, __ = await self._master.is_synced(checkpoint)
 
     def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
         """
         获取WorkerKeeper实例，用于雪花ID的worker id管理。
-        如果不支持worker id管理，可以返回None
+        如果不支持worker id管理，不要继承父类的默认实现
         """
+        if self._master.__class__.get_worker_keeper is BackendClient.get_worker_keeper:
+            return None
         return self._master.get_worker_keeper(pid)
 
     @property
