@@ -44,7 +44,6 @@
 import hashlib
 import logging
 import random
-import re
 import time
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -63,14 +62,6 @@ if TYPE_CHECKING:
     from .mq import SQLMQClient
 
 logger = logging.getLogger("HeTu.root")
-
-
-def _sanitize_identifier(raw: str) -> str:
-    safe = re.sub(r"[^0-9a-zA-Z_]", "_", raw)
-    safe = safe.strip("_")
-    if not safe:
-        return "x"
-    return safe.lower()
 
 
 def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
@@ -103,8 +94,8 @@ def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
 class SQLBackendClient(BackendClient, alias="sql"):
     """SQL后端连接与读写实现（SQLAlchemy Core）。"""
 
-    META_TABLE_NAME = "_hetu_component_meta"
-    NOTIFY_TABLE_NAME = "_hetu_notify"
+    META_TABLE_NAME = "_HeTu_Component_Meta"
+    NOTIFY_TABLE_NAME = "_Hetu_Notify"
     NOTIFY_TTL_SECONDS = 60 * 60
     NOTIFY_CLEANUP_INTERVAL = 60 * 15
     NOTIFY_CLEANUP_JITTER = 90.0
@@ -188,9 +179,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             f"{table_ref.comp_cls.name_}:{table_ref.cluster_id}"
         )
         digest = hashlib.md5(raw.encode("utf-8")).hexdigest()[:10]
-        instance = _sanitize_identifier(table_ref.instance_name)
-        comp = _sanitize_identifier(table_ref.comp_cls.name_)
-        base = f"ht_{instance}_{comp}_c{table_ref.cluster_id}"
+        base = raw
         # 如果超过各sql最小长度限制，截断base部分，保留hash摘要
         # - PostgreSQL: 默认最多 63 bytes（NAMEDATALEN=64，取 -1）
         # - MySQL: 表名最多 64 characters
@@ -201,7 +190,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         #     - COMPATIBLE < 12.2：1~30 bytes
         # - SQLite: 无
         if len(base.encode("utf-8")) > 63:
-            base = f"{base[:63]}_{digest}"
+            base = f"{base[:50]}_{digest}"
         return base
 
     @classmethod
