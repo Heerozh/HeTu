@@ -133,9 +133,9 @@ class BackendClient:
         pid: int
             worker的pid。
         """
-        from .worker_keeper import SingleMachineWorkerKeeper
+        from .local_worker_keeper import LocalWorkerKeeper
 
-        return SingleMachineWorkerKeeper(pid)
+        return LocalWorkerKeeper(pid)
 
     # 类型注解部分
     @overload

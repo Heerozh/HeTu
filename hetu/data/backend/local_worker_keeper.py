@@ -6,11 +6,11 @@
 """
 
 import logging
-from contextlib import contextmanager
 from pathlib import Path
-from threading import Lock
 from time import time
 from typing import final, override
+
+from filelock import FileLock
 
 from ...common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 
@@ -19,38 +19,11 @@ logger = logging.getLogger("HeTu.root")
 _COUNTER_FILE = ".hetu_worker_counter.txt"
 _LOCK_FILE = ".hetu_worker_counter.lock"
 _TIMESTAMP_FILE_PREFIX = ".hetu_worker_last_timestamp_"
-_IN_PROCESS_LOCK = Lock()
-
-try:
-    import fcntl
-except ImportError:  # pragma: no cover
-    fcntl = None
-
-
-@contextmanager
-def _counter_lock():
-    """
-    跨进程锁（优先用fcntl，其他平台回退为进程内锁）
-
-    Cross-process lock for worker ID counter.
-    """
-    if fcntl is None:
-        with _IN_PROCESS_LOCK:
-            yield
-        return
-
-    lock_path = Path.cwd() / _LOCK_FILE
-    lock_path.touch(exist_ok=True)
-    with lock_path.open("r+", encoding="ascii") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+_PID_TO_WORKER_ID: dict[int, int] = {}
 
 
 @final
-class SingleMachineWorkerKeeper(WorkerKeeper):
+class LocalWorkerKeeper(WorkerKeeper):
     """
     单机模式的WorkerKeeper默认实现。
 
@@ -82,7 +55,12 @@ class SingleMachineWorkerKeeper(WorkerKeeper):
         if self.worker_id >= 0:
             return self.worker_id
 
-        with _counter_lock():
+        lock_path = Path.cwd() / _LOCK_FILE
+        with FileLock(str(lock_path), timeout=-1):
+            if self.pid in _PID_TO_WORKER_ID:
+                self.worker_id = _PID_TO_WORKER_ID[self.pid]
+                return self.worker_id
+
             counter_path = self._counter_path()
             if counter_path.exists():
                 counter = int(counter_path.read_text(encoding="ascii").strip() or "-1")
@@ -97,6 +75,7 @@ class SingleMachineWorkerKeeper(WorkerKeeper):
                 )
 
             counter_path.write_text(str(next_worker_id), encoding="ascii")
+            _PID_TO_WORKER_ID[self.pid] = next_worker_id
 
         self.worker_id = next_worker_id
         logger.info(f"[❄️ID] [SingleMachine] 分配 Worker ID: {self.worker_id}")
