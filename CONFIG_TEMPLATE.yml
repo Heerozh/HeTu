@@ -98,6 +98,7 @@ BACKENDS:
     # 如果河图在容器内启动，访问宿主机ip可用host.docker.internal
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
+    # 不建议生产环境使用关系数据库，因为订阅表性能不够，如果要提高性能还是要借助Redis或ZMQ等消息服务。
     # Postgres: postgresql://user:pass@localhost:5432/dbname
     # SQLite:   sqlite:///./data/hetu.sqlite3
     # MariaDB:  mysql://user:pass@localhost:3306/dbname
