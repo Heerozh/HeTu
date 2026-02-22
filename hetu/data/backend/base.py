@@ -125,14 +125,17 @@ class BackendClient:
     def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
         """
         获取WorkerKeeper实例，用于雪花ID的worker id管理。
-        此功能是可选的，如果不支持worker id管理，请不要override此方法，保持原样。
+        默认返回单机版 SingleMachineWorkerKeeper。
+        后端可按需override成更强的分布式实现（例如Redis）。
 
         Parameters
         ----------
         pid: int
             worker的pid。
         """
-        raise NotImplementedError
+        from .worker_keeper import SingleMachineWorkerKeeper
+
+        return SingleMachineWorkerKeeper(pid)
 
     # 类型注解部分
     @overload
@@ -349,16 +352,6 @@ class BackendClientFactory:
     @staticmethod
     def register(alias: str, client_cls: type[BackendClient]) -> None:
         BackendClientFactory._registry[alias.lower()] = client_cls
-
-    @staticmethod
-    def support_worker_keeper(alias: str):
-        """判断某个后端是否支持WorkerKeeper"""
-        if alias.lower() not in BackendClientFactory._registry:
-            raise NotImplementedError(f"{alias} 后端未实现")
-        return (
-            BackendClientFactory._registry[alias.lower()].get_worker_keeper
-            is not BackendClient.get_worker_keeper
-        )
 
     @staticmethod
     def create(
