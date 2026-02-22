@@ -178,7 +178,7 @@ class BaseComponent:
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:
         """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
-        row = cls.new_row()
+        row = cls.new_row(id_=data["id"])
         for i, (name, _) in enumerate(cls.properties_):
             row[i] = data[name]
         return row
