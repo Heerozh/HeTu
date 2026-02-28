@@ -8,22 +8,7 @@ using UnityEngine.UIElements;
 
 namespace HeTu.Examples.Chat
 {
-    [MessagePackObject]
-    public sealed class OnlineUser : IBaseComponent
-    {
-        [Key("owner")] public long Owner;
-        [Key("name")] public string Name;
-        [Key("id")] public long ID { get; set; }
-    }
-
-    [MessagePackObject]
-    public sealed class ChatMessage : IBaseComponent
-    {
-        [Key("owner")] public long Owner;
-        [Key("name")] public string Name;
-        [Key("text")] public string Text;
-        [Key("id")] public long ID { get; set; }
-    }
+  
 
     [RequireComponent(typeof(UIDocument))]
     public sealed class ChatClient : MonoBehaviour

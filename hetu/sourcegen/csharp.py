@@ -5,9 +5,11 @@
 @email: heeroz@gmail.com
 """
 
-import numpy as np
 import re
 
+import numpy as np
+
+from hetu import Permission
 from hetu.data import BaseComponent
 from hetu.system import SystemClusters
 
@@ -81,7 +83,7 @@ def generate_all_components(namespace: str, output: str):
     visited: set[type[BaseComponent]] = set()
     for cluster in clusters:
         for comp in cluster.components:
-            if comp in visited:
+            if comp in visited or comp.permission_ == Permission.ADMIN:
                 continue
             components.append(comp)
             visited.add(comp)
