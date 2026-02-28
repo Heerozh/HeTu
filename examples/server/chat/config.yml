@@ -1,0 +1,15 @@
+APP_FILE: ./src/app.py
+NAMESPACE: chat
+INSTANCES: [chat-room-1]
+LISTEN: 0.0.0.0:2466
+WORKER_NUM: 1
+DEBUG: false
+ACCESS_LOG: false
+
+PACKET_LAYERS:
+  - type: jsonb
+
+BACKENDS:
+  Redis:
+    type: Redis
+    master: redis://127.0.0.1:6379/0
