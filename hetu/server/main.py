@@ -31,7 +31,7 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-def start_backends(app: Sanic):
+async def start_backends(app: Sanic):
     # 创建后端连接池
     backends: dict[str, Backend] = {}
     for name, db_cfg in app.config.BACKENDS.items():
@@ -60,15 +60,15 @@ def start_backends(app: Sanic):
     # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
     while True:
         try:
-            worker_id = worker_keeper.get_worker_id()
+            worker_id = await worker_keeper.get_worker_id()
             break
         except KeyError as e:
             logger.error(e)
             logger.info(
                 "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
             )
-            time.sleep(1)
-    last_timestamp = worker_keeper.get_last_timestamp()
+            await asyncio.sleep(1)
+    last_timestamp = await worker_keeper.get_last_timestamp()
 
     # 初始化雪花id生成器
     SnowflakeID().init(worker_id, last_timestamp)
@@ -105,7 +105,7 @@ def start_backends(app: Sanic):
 
 async def close_backends(app: Sanic):
     # 释放worker id
-    app.ctx.worker_keeper.release_worker_id()
+    await app.ctx.worker_keeper.release_worker_id()
 
     # 关闭后端连接池
     for attrib in dir(app.ctx):
@@ -117,7 +117,7 @@ async def close_backends(app: Sanic):
 
 async def worker_start(app: Sanic):
     try:
-        start_backends(app)
+        await start_backends(app)
     except Exception as e:
         logger.exception(f"❌ 进程[{os.getpid()}] 启动失败: {type(e).__name__}:{e}")
         app.stop()

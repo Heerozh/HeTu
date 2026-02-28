@@ -43,14 +43,12 @@ class RedisWorkerKeeper(WorkerKeeper):
     def __init__(
         self,
         pid: int,
-        io: redis.Redis | redis.RedisCluster,
         aio: redis.asyncio.Redis | redis.asyncio.RedisCluster,
     ):
         """
         初始化 RedisWorkerKeeper。
         """
         super().__init__()
-        self.io = io
         self.aio = aio
         self.worker_id_key = "snowflake:worker"
         self.last_timestamp_key = "snowflake:last_timestamp"
@@ -61,7 +59,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         self.node_id = f"{get_machine_id()}:{pid}"
 
     @override
-    def get_worker_id(self) -> int:
+    async def get_worker_id(self) -> int:
         """
         从Redis中获取一个可用的 Worker ID。
         """
@@ -69,12 +67,12 @@ class RedisWorkerKeeper(WorkerKeeper):
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
             # 判断node_id是否相同，相同则说明是容器重启，直接使用
-            if (existing_node_id := self.io.get(key)) is None:
+            if (existing_node_id := await self.aio.get(key)) is None:
                 continue
             existing_node_id = cast(bytes, existing_node_id)
             if existing_node_id.decode("ascii") != self.node_id:
                 continue
-            if self.io.expire(key, WORKER_ID_EXPIRE_SEC) != 1:
+            if await self.aio.expire(key, WORKER_ID_EXPIRE_SEC) != 1:
                 continue
             logger.info(
                 f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
@@ -87,7 +85,9 @@ class RedisWorkerKeeper(WorkerKeeper):
         for worker_id in range(0, MAX_WORKER_ID + 1):
             key = f"{self.worker_id_key}:{worker_id}"
             # 尝试设置键，NX 表示仅当键不存在时设置，EX 表示键过期时间
-            result = self.io.set(key, self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC)
+            result = await self.aio.set(
+                key, self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
+            )
             if result:
                 logger.info(
                     f"[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {self.node_id}"
@@ -100,23 +100,23 @@ class RedisWorkerKeeper(WorkerKeeper):
         )
 
     @override
-    def release_worker_id(self):
+    async def release_worker_id(self):
         """
         释放当前占用的 Worker ID。
         """
         if self.worker_id == -1:
             return
         key = f"{self.worker_id_key}:{self.worker_id}"
-        self.io.delete(key)
+        await self.aio.delete(key)
         logger.info(f"[❄️ID] 释放 Worker ID: {self.worker_id}")
 
     @override
-    def get_last_timestamp(self) -> int:
+    async def get_last_timestamp(self) -> int:
         """
         从 Redis 中获取上次生成 ID 的时间戳。
         """
         key = f"{self.last_timestamp_key}:{self.node_id}"
-        last_timestamp = cast(bytes, self.io.get(key))
+        last_timestamp = cast(bytes, await self.aio.get(key))
         if last_timestamp is not None:
             logger.info(
                 f"[❄️ID] 成功获取 {self.node_id} 持久化的 last_timestamp: "

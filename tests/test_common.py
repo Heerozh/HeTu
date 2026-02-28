@@ -152,26 +152,26 @@ async def test_redis_worker_keeper(mod_auto_backend):
 
     from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
-    worker_keeper = RedisWorkerKeeper(0, redis.master.io, redis_client)
+    worker_keeper = RedisWorkerKeeper(0, redis_client)
 
     # 测试获得id
-    worker_id = worker_keeper.get_worker_id()
+    worker_id = await worker_keeper.get_worker_id()
     assert worker_id == 0
 
     # 再次获得应该id一样
-    worker_id_again = worker_keeper.get_worker_id()
+    worker_id_again = await worker_keeper.get_worker_id()
     assert worker_id_again == worker_id
 
     # 模拟另一个机器
-    worker_keeper2 = RedisWorkerKeeper(1, redis.master.io, redis_client)
-    worker_id_2 = worker_keeper2.get_worker_id()
+    worker_keeper2 = RedisWorkerKeeper(1, redis_client)
+    worker_id_2 = await worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
     # 删除第一个机器的key，模拟key值过期释放worker id
-    worker_keeper.release_worker_id()
+    await worker_keeper.release_worker_id()
 
     # 再次获得应该id一样
-    worker_id_again = worker_keeper2.get_worker_id()
+    worker_id_again = await worker_keeper2.get_worker_id()
     assert worker_id_again == worker_id_2
 
     # 测试续约
@@ -183,31 +183,32 @@ async def test_redis_worker_keeper(mod_auto_backend):
     # 续约
     ts = int(time.time() * 1000) + 1230
     await worker_keeper2.keep_alive(ts)
-    last_ts = worker_keeper2.get_last_timestamp()
+    last_ts = await worker_keeper2.get_last_timestamp()
     assert last_ts == ts
     expire = await redis_client.ttl(f"{worker_keeper2.worker_id_key}:{worker_id_2}")
     assert expire > 60 - 1
 
 
-async def test_single_machine_worker_keeper_default(mod_sqlite_backend, monkeypatch, tmp_path):
+async def test_single_machine_worker_keeper_default(
+    mod_sqlite_backend, monkeypatch, tmp_path
+):
     monkeypatch.chdir(tmp_path)
     backend = mod_sqlite_backend()
 
     worker_keeper = backend.get_worker_keeper(101)
     assert worker_keeper is not None
-    worker_id = worker_keeper.get_worker_id()
+    worker_id = await worker_keeper.get_worker_id()
     assert worker_id == 0
-    assert worker_keeper.get_worker_id() == worker_id
+    assert await worker_keeper.get_worker_id() == worker_id
     worker_keeper_again = backend.get_worker_keeper(101)
-    assert worker_keeper_again.get_worker_id() == worker_id
-
+    assert await worker_keeper_again.get_worker_id() == worker_id
 
     worker_keeper2 = backend.get_worker_keeper(102)
-    worker_id_2 = worker_keeper2.get_worker_id()
+    worker_id_2 = await worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
     ts = int(time.time() * 1000) + 1230
     await worker_keeper2.keep_alive(ts)
-    last_ts = worker_keeper2.get_last_timestamp()
+    last_ts = await worker_keeper2.get_last_timestamp()
     assert last_ts == ts
     assert (tmp_path / f".hetu_worker_last_timestamp_{worker_id_2}.txt").exists()

@@ -349,7 +349,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert not self.is_servant, "get_worker_keeper"
         from .worker_keeper import RedisWorkerKeeper
 
-        return RedisWorkerKeeper(pid, self.io, self.aio)
+        return RedisWorkerKeeper(pid, self.aio)
 
     @override
     async def close(self):

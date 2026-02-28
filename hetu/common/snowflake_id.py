@@ -177,18 +177,16 @@ class WorkerKeeper:
     def __init__(self):
         pass
 
-    def get_worker_id(self) -> int:
-        # 初始化方法，不能async
+    async def get_worker_id(self) -> int:
         raise NotImplementedError
 
-    def release_worker_id(self):
+    async def release_worker_id(self):
         """
         释放当前占用的 Worker ID。
         """
         raise NotImplementedError
 
-    def get_last_timestamp(self) -> int:
-        # 初始化方法，不能async
+    async def get_last_timestamp(self) -> int:
         raise NotImplementedError
 
     async def keep_alive(self, last_timestamp: int) -> None:
