@@ -33,15 +33,15 @@ def test_component_csharp_gen():
 public class TestComponent : IBaseComponent
 {
     [Key("id")] public long ID { get; set; }
-    [Key("bool_")] public sbyte bool_;
-    [Key("float16")] public float float16;
-    [Key("float64")] public double float64;
-    [Key("int16")] public short int16;
-    [Key("int64b")] public long int64b;
-    [Key("int64l")] public long int64l;
-    [Key("str7")] public string str7;
-    [Key("uint64")] public ulong uint64;
-    [Key("uint8")] public byte uint8;
+    [Key("bool_")] public sbyte Bool;
+    [Key("float16")] public float Float16;
+    [Key("float64")] public double Float64;
+    [Key("int16")] public short Int16;
+    [Key("int64b")] public long Int64b;
+    [Key("int64l")] public long Int64l;
+    [Key("str7")] public string Str7;
+    [Key("uint64")] public ulong Uint64;
+    [Key("uint8")] public byte Uint8;
 }
 """
     assert code == expect

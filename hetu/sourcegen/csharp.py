@@ -6,6 +6,7 @@
 """
 
 import numpy as np
+import re
 
 from hetu.data import BaseComponent
 from hetu.system import SystemClusters
@@ -37,9 +38,17 @@ def dtype_to_csharp(dtype: str | type):
         return "string"
 
 
+def to_csharp_property_name(name: str) -> str:
+    parts = [p for p in re.split(r"_+", name.strip("_")) if p]
+    if not parts:
+        return "Field"
+    return "".join(part[:1].upper() + part[1:] for part in parts)
+
+
 def generate_component(component_cls: type[BaseComponent]):
     attributes = [
-        f'    [Key("{name}")] public {dtype_to_csharp(prop.dtype)} {name};'
+        f'    [Key("{name}")] public {dtype_to_csharp(prop.dtype)} '
+        f"{to_csharp_property_name(name)};"
         for name, prop in component_cls.properties_
         if name not in {"id", "_version"}
     ]
