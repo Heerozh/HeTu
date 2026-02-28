@@ -6,7 +6,7 @@ from hetu.system.context import SystemContext
 
 
 def _load_chat_app():
-    app_path = Path(__file__).resolve().parents[1] / "examples/server/chat/src/app.py"
+    app_path = Path(__file__).resolve().parents[1] / "examples/chat/server/src/app.py"
     spec = importlib.util.spec_from_file_location("chat_example_app", app_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
