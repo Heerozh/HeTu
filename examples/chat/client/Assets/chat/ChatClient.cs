@@ -6,7 +6,7 @@ using R3;
 using UnityEngine;
 using UnityEngine.UIElements;
 
-namespace HeTu.Examples.Chat
+namespace Chat
 {
   
 
