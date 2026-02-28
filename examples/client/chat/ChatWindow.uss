@@ -1,0 +1,217 @@
+.chat-root {
+    flex-grow: 1;
+    background-color: rgb(7, 10, 25);
+}
+
+.bg-orb {
+    position: absolute;
+    border-radius: 999px;
+}
+
+.orb-a {
+    left: -90px;
+    top: -120px;
+    width: 320px;
+    height: 320px;
+    background-color: rgba(81, 220, 255, 0.25);
+}
+
+.orb-b {
+    right: -100px;
+    top: 40px;
+    width: 260px;
+    height: 260px;
+    background-color: rgba(255, 74, 198, 0.25);
+}
+
+.orb-c {
+    left: 40%;
+    bottom: -120px;
+    width: 340px;
+    height: 340px;
+    background-color: rgba(116, 255, 157, 0.22);
+}
+
+.shell {
+    flex-grow: 1;
+    padding-left: 18px;
+    padding-right: 18px;
+    padding-top: 14px;
+    padding-bottom: 14px;
+}
+
+.header {
+    flex-direction: row;
+    align-items: center;
+    margin-bottom: 10px;
+}
+
+.title {
+    font-size: 24px;
+    color: rgb(246, 248, 255);
+    -unity-font-style: bold;
+    margin-right: 14px;
+}
+
+.status {
+    color: rgb(125, 255, 163);
+    margin-right: 12px;
+}
+
+.me {
+    color: rgb(198, 209, 255);
+}
+
+.body {
+    flex-direction: row;
+    flex-grow: 1;
+    margin-bottom: 10px;
+}
+
+.card {
+    background-color: rgba(19, 24, 48, 0.86);
+    border-top-left-radius: 14px;
+    border-top-right-radius: 14px;
+    border-bottom-left-radius: 14px;
+    border-bottom-right-radius: 14px;
+    border-left-color: rgba(255, 255, 255, 0.16);
+    border-top-color: rgba(255, 255, 255, 0.16);
+    border-right-color: rgba(255, 255, 255, 0.16);
+    border-bottom-color: rgba(255, 255, 255, 0.16);
+    border-left-width: 1px;
+    border-top-width: 1px;
+    border-right-width: 1px;
+    border-bottom-width: 1px;
+}
+
+.left-panel {
+    width: 34%;
+    margin-right: 10px;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+.right-panel {
+    flex-grow: 1;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+.panel-title {
+    color: rgb(196, 205, 255);
+    font-size: 12px;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+}
+
+.name-input {
+    margin-bottom: 8px;
+}
+
+.name-input .unity-base-field__label {
+    color: rgb(156, 170, 255);
+}
+
+.name-input .unity-base-field__input {
+    background-color: rgba(255, 255, 255, 0.06);
+    color: rgb(250, 250, 255);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+.online-list {
+    flex-grow: 1;
+}
+
+.user-chip {
+    color: rgb(223, 232, 255);
+    margin-bottom: 6px;
+    padding-left: 8px;
+    padding-right: 8px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
+.user-chip--me {
+    color: rgb(22, 30, 48);
+    background-color: rgb(131, 255, 175);
+}
+
+.message-list {
+    flex-grow: 1;
+}
+
+.bubble {
+    max-width: 84%;
+    margin-bottom: 8px;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 7px;
+    padding-bottom: 7px;
+    color: rgb(241, 246, 255);
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    border-bottom-left-radius: 10px;
+    border-bottom-right-radius: 10px;
+}
+
+.bubble--me {
+    align-self: flex-end;
+    background-color: rgb(36, 196, 255);
+    color: rgb(16, 28, 49);
+}
+
+.bubble--other {
+    align-self: flex-start;
+    background-color: rgba(255, 255, 255, 0.12);
+}
+
+.composer {
+    flex-direction: row;
+    height: 58px;
+    align-items: center;
+    padding-left: 10px;
+    padding-right: 10px;
+    padding-top: 8px;
+    padding-bottom: 8px;
+}
+
+.message-input {
+    flex-grow: 1;
+    margin-right: 8px;
+}
+
+.message-input .unity-base-field__input {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: rgb(248, 250, 255);
+    border-top-left-radius: 8px;
+    border-top-right-radius: 8px;
+    border-bottom-left-radius: 8px;
+    border-bottom-right-radius: 8px;
+}
+
+.send-button {
+    width: 100px;
+    color: rgb(17, 24, 42);
+    background-color: rgb(133, 237, 255);
+    border-top-left-radius: 9px;
+    border-top-right-radius: 9px;
+    border-bottom-left-radius: 9px;
+    border-bottom-right-radius: 9px;
+    -unity-font-style: bold;
+}
+
+.send-button:hover {
+    background-color: rgb(166, 247, 255);
+}

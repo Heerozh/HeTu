@@ -1,0 +1,33 @@
+<UXML xmlns="UnityEngine.UIElements">
+    <VisualElement class="chat-root">
+        <VisualElement class="bg-orb orb-a" />
+        <VisualElement class="bg-orb orb-b" />
+        <VisualElement class="bg-orb orb-c" />
+
+        <VisualElement class="shell">
+            <VisualElement class="header">
+                <Label text="HeTu Chat" class="title" />
+                <Label name="status-label" text="offline" class="status" />
+                <Label name="me-label" text="ME: -" class="me" />
+            </VisualElement>
+
+            <VisualElement class="body">
+                <VisualElement class="left-panel card">
+                    <Label text="ONLINE" class="panel-title" />
+                    <TextField name="name-input" label="Name" class="name-input" />
+                    <ScrollView name="online-list" class="online-list" />
+                </VisualElement>
+
+                <VisualElement class="right-panel card">
+                    <Label text="CHAT" class="panel-title" />
+                    <ScrollView name="message-list" class="message-list" />
+                </VisualElement>
+            </VisualElement>
+
+            <VisualElement class="composer card">
+                <TextField name="message-input" class="message-input" />
+                <Button name="send-button" text="SEND" class="send-button" />
+            </VisualElement>
+        </VisualElement>
+    </VisualElement>
+</UXML>
