@@ -189,21 +189,24 @@ async def test_redis_worker_keeper(mod_auto_backend):
     assert expire > 60 - 1
 
 
-async def test_single_machine_worker_keeper_default(
-    mod_sqlite_backend, monkeypatch, tmp_path
-):
+async def test_general_worker_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     backend = mod_sqlite_backend()
 
-    worker_keeper = backend.get_worker_keeper(101)
+    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+    from hetu.data.backend.table import Table
+
+    table = Table(WorkerLease, "pytest", 1, backend)
+
+    worker_keeper = GeneralWorkerKeeper(101, table)
     assert worker_keeper is not None
     worker_id = await worker_keeper.get_worker_id()
     assert worker_id == 0
     assert await worker_keeper.get_worker_id() == worker_id
-    worker_keeper_again = backend.get_worker_keeper(101)
+    worker_keeper_again = GeneralWorkerKeeper(101, table)
     assert await worker_keeper_again.get_worker_id() == worker_id
 
-    worker_keeper2 = backend.get_worker_keeper(102)
+    worker_keeper2 = GeneralWorkerKeeper(102, table)
     worker_id_2 = await worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
@@ -211,4 +214,3 @@ async def test_single_machine_worker_keeper_default(
     await worker_keeper2.keep_alive(ts)
     last_ts = await worker_keeper2.get_last_timestamp()
     assert last_ts == ts
-    assert (tmp_path / f".hetu_worker_last_timestamp_{worker_id_2}.txt").exists()

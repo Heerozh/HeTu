@@ -11,7 +11,6 @@ import importlib.util
 import logging
 import os
 import sys
-import time
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Sanic
@@ -23,6 +22,7 @@ from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
 from ..system.future import future_call_task
+from ..data.backend.worker_keeper import WorkerLease, GeneralWorkerKeeper
 from . import pipeline
 from . import websocket as _  # noqa: F401 (防止未使用警告)
 from .web import HETU_BLUEPRINT
@@ -43,36 +43,6 @@ async def start_backends(app: Sanic):
         if "default" not in backends:
             backends["default"] = backends[name]
             app.ctx.__setattr__("default_backend", backends["default"])
-
-    # 使用redis初始化snowflake的workerKeeper
-    worker_keeper = backends["default"].get_worker_keeper(os.getpid())
-    if worker_keeper is None:
-        for _, backend in backends.items():
-            if worker_keeper := backend.get_worker_keeper(os.getpid()):
-                break
-
-    if worker_keeper is None:
-        raise RuntimeError(
-            "没有可用的Backend支持WorkerKeeper管理唯一Worker ID，可用的有："
-            + str(WorkerKeeper.subclasses)
-        )
-
-    # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
-    while True:
-        try:
-            worker_id = await worker_keeper.get_worker_id()
-            break
-        except KeyError as e:
-            logger.error(e)
-            logger.info(
-                "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
-            )
-            await asyncio.sleep(1)
-    last_timestamp = await worker_keeper.get_last_timestamp()
-
-    # 初始化雪花id生成器
-    SnowflakeID().init(worker_id, last_timestamp)
-    app.ctx.__setattr__("worker_keeper", worker_keeper)
 
     # 初始化所有ComponentTable
     table_managers: dict[str, ComponentTableManager] = {}
@@ -101,6 +71,27 @@ async def start_backends(app: Sanic):
     # 最后调用 backend config, 以防configure中需要之前初始化的东西
     for backend in backends.values():
         backend.post_configure()
+
+    # 在backend初始化完毕后，启动WorkerKeeper，分配Worker ID，并把Worker ID和上次时间戳传给雪花ID生成器
+    lease_tbl = table_managers[app.config.INSTANCES[0]].get_table(WorkerLease)
+    worker_keeper = GeneralWorkerKeeper(os.getpid(), lease_tbl)
+
+    # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
+    while True:
+        try:
+            worker_id = await worker_keeper.get_worker_id()
+            break
+        except KeyError as e:
+            logger.error(e)
+            logger.info(
+                "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
+            )
+            await asyncio.sleep(1)
+    last_timestamp = await worker_keeper.get_last_timestamp()
+
+    # 初始化雪花id生成器
+    SnowflakeID().init(worker_id, last_timestamp)
+    app.ctx.__setattr__("worker_keeper", worker_keeper)
 
 
 async def close_backends(app: Sanic):

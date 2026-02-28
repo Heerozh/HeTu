@@ -42,7 +42,6 @@ from typing import TYPE_CHECKING, Any, Literal, final, overload
 import numpy as np
 
 if TYPE_CHECKING:
-    from ...common.snowflake_id import WorkerKeeper
     from ..component import BaseComponent
     from .idmap import IdentityMap
     from .table import TableReference
@@ -121,21 +120,6 @@ class BackendClient:
         """
         # assert not self.is_servant, "is_synced只能在master上调用"
         raise NotImplementedError
-
-    def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
-        """
-        获取WorkerKeeper实例，用于雪花ID的worker id管理。
-        默认返回单机版 SingleMachineWorkerKeeper。
-        后端可按需override成更强的分布式实现（例如Redis）。
-
-        Parameters
-        ----------
-        pid: int
-            worker的pid。
-        """
-        from .local_worker_keeper import LocalWorkerKeeper
-
-        return LocalWorkerKeeper(pid)
 
     # 类型注解部分
     @overload

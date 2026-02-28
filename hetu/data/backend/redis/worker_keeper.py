@@ -20,7 +20,7 @@ WORKER_ID_EXPIRE_SEC = 60
 @final
 class RedisWorkerKeeper(WorkerKeeper):
     """
-    基于 Redis 的 Worker ID 管理器。
+    基于 Redis 的 Worker ID 管理器，目前有通用的，未使用此类。
     此类的目的是：
     1. 分配空余worker id，并让宕机的worker id会得到释放
     2. 每几秒就储存每台服务器的时间，来减少重启时，发生时间回拨导致ID重复的风险。
