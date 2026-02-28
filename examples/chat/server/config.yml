@@ -1,5 +1,5 @@
 APP_FILE: ./src/app.py
-NAMESPACE: chat
+NAMESPACE: Chat
 INSTANCES: [ chat-room-1 ]
 LISTEN: 0.0.0.0:2466
 WORKER_NUM: 1

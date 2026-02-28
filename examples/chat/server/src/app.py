@@ -3,17 +3,13 @@ import numpy as np
 import hetu
 
 
-@hetu.define_component(
-    namespace="chat", permission=hetu.Permission.EVERYBODY
-)
+@hetu.define_component(namespace="Chat", permission=hetu.Permission.EVERYBODY)
 class OnlineUser(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
     name: str = hetu.property_field("", unique=True, dtype="U32")
 
 
-@hetu.define_component(
-    namespace="chat", permission=hetu.Permission.EVERYBODY
-)
+@hetu.define_component(namespace="Chat", permission=hetu.Permission.EVERYBODY)
 class ChatMessage(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
     name: str = hetu.property_field("", dtype="U32")
@@ -21,7 +17,7 @@ class ChatMessage(hetu.BaseComponent):
 
 
 @hetu.define_system(
-    namespace="chat", components=(OnlineUser,), permission=hetu.Permission.EVERYBODY
+    namespace="Chat", components=(OnlineUser,), permission=hetu.Permission.EVERYBODY
 )
 async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
     await hetu.elevate(ctx, int(user_id), kick_logged_in=True)
@@ -30,7 +26,7 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
 
 
 @hetu.define_system(
-    namespace="chat", components=(OnlineUser,), permission=hetu.Permission.USER
+    namespace="Chat", components=(OnlineUser,), permission=hetu.Permission.USER
 )
 async def user_quit(ctx: hetu.SystemContext):
     if row := await ctx.repo[OnlineUser].get(owner=ctx.caller):
@@ -38,7 +34,7 @@ async def user_quit(ctx: hetu.SystemContext):
 
 
 @hetu.define_system(
-    namespace="chat",
+    namespace="Chat",
     components=(OnlineUser, ChatMessage),
     permission=hetu.Permission.USER,
 )
@@ -51,7 +47,7 @@ async def user_chat(ctx: hetu.SystemContext, text: str):
 
 
 @hetu.define_system(
-    namespace="chat",
+    namespace="Chat",
     components=(OnlineUser,),
     depends=("user_quit",),
     permission=None,

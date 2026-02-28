@@ -1,7 +1,7 @@
 using HeTu;
 using MessagePack;
 
-namespace chat
+namespace Chat
 {
     
     [MessagePackObject]
