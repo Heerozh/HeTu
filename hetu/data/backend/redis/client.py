@@ -334,24 +334,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return True, master_offset
 
     @override
-    def get_worker_keeper(self, pid: int) -> RedisWorkerKeeper:
-        """
-        获取RedisWorkerKeeper实例，用于雪花ID的worker id管理。
-
-        Parameters
-        ----------
-        pid: int
-            worker的pid。
-        """
-        if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
-
-        assert not self.is_servant, "get_worker_keeper"
-        from .worker_keeper import RedisWorkerKeeper
-
-        return RedisWorkerKeeper(pid, self.io, self.aio)
-
-    @override
     async def close(self):
         if not self._ios:
             return
@@ -820,7 +802,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         keys = [self.row_key(first_ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
-        assert self.lua_commit is not None, "typing检查"
+        assert self.lua_commit is not None, (
+            "lua_commit脚本没有初始化，请先调用 post_configure"
+        )
         resp = await self.lua_commit(keys, [payload_json])
         resp = resp.decode("utf-8")  # type: ignore
 
