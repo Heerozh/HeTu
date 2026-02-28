@@ -59,7 +59,7 @@ namespace HeTu.Examples.Chat
 
             HeTuClient.Instance.OnConnected += HandleConnected;
             HeTuClient.Instance.OnClosed += HandleClosed;
-            _ = HeTuClient.Instance.Connect(serverUrl);
+            _ = HeTuClient.Instance.Connect(serverUrl, "password123");
         }
 
         private void OnDisable()

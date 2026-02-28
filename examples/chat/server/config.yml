@@ -8,6 +8,9 @@ ACCESS_LOG: false
 
 PACKET_LAYERS:
   - type: jsonb
+  - type: zlib
+  - type: crypto
+    auth_key: password123
 
 BACKENDS:
   test_db:
