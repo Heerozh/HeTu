@@ -34,6 +34,7 @@ RUN apt-get install -y \
         xz-utils \
         zip
 
+ADD https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags /tmp/version-cache-buster.json
 
 # 3. 通过 npm 全局安装 codex
 RUN npm i -g @openai/codex
