@@ -173,14 +173,6 @@ class StartCommand(CommandInterface):
                 "DEBUG": args.debug,
                 "ACCESS_LOG": False,
             }
-            # 如果该backend没有worker keeper支持，则自动添加一个redis后端用于启动worker keeper
-            from ..data.backend.base import BackendClientFactory
-
-            if not BackendClientFactory.support_worker_keeper(backend_type):
-                config_for_factory["BACKENDS"]["redis"] = {
-                    "type": "redis",
-                    "master": "redis://127.0.0.1:6379/0",
-                }
             config = Config(config_for_factory)
 
         # 生成log目录

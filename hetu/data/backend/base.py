@@ -42,7 +42,6 @@ from typing import TYPE_CHECKING, Any, Literal, final, overload
 import numpy as np
 
 if TYPE_CHECKING:
-    from ...common.snowflake_id import WorkerKeeper
     from ..component import BaseComponent
     from .idmap import IdentityMap
     from .table import TableReference
@@ -120,18 +119,6 @@ class BackendClient:
         返回是否已完成同步，以及master最新checkpoint（可以用来下一次查询）。
         """
         # assert not self.is_servant, "is_synced只能在master上调用"
-        raise NotImplementedError
-
-    def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
-        """
-        获取WorkerKeeper实例，用于雪花ID的worker id管理。
-        此功能是可选的，如果不支持worker id管理，请不要override此方法，保持原样。
-
-        Parameters
-        ----------
-        pid: int
-            worker的pid。
-        """
         raise NotImplementedError
 
     # 类型注解部分
@@ -349,16 +336,6 @@ class BackendClientFactory:
     @staticmethod
     def register(alias: str, client_cls: type[BackendClient]) -> None:
         BackendClientFactory._registry[alias.lower()] = client_cls
-
-    @staticmethod
-    def support_worker_keeper(alias: str):
-        """判断某个后端是否支持WorkerKeeper"""
-        if alias.lower() not in BackendClientFactory._registry:
-            raise NotImplementedError(f"{alias} 后端未实现")
-        return (
-            BackendClientFactory._registry[alias.lower()].get_worker_keeper
-            is not BackendClient.get_worker_keeper
-        )
 
     @staticmethod
     def create(

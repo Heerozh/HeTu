@@ -105,15 +105,6 @@ class Backend:
             await asyncio.sleep(0.1)
             synced, __ = await self._master.is_synced(checkpoint)
 
-    def get_worker_keeper(self, pid: int) -> WorkerKeeper | None:
-        """
-        获取WorkerKeeper实例，用于雪花ID的worker id管理。
-        如果不支持worker id管理，不要继承父类的默认实现
-        """
-        if self._master.__class__.get_worker_keeper is BackendClient.get_worker_keeper:
-            return None
-        return self._master.get_worker_keeper(pid)
-
     @property
     def master(self) -> BackendClient:
         """返回主数据库连接"""
