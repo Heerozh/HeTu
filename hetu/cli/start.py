@@ -9,13 +9,11 @@ import logging
 import logging.handlers
 import os
 import socket
-import subprocess
 import sys
 import time
 from functools import partial
 from urllib.parse import urlparse
 
-import redis
 import yaml
 from sanic import Sanic
 from sanic.config import Config
@@ -74,15 +72,6 @@ class StartCommand(CommandInterface):
     @classmethod
     def register(cls, subparsers):
         parser_start = subparsers.add_parser("start", help="启动河图服务")
-        parser_start.add_argument(
-            "--standalone",
-            type=str2bool,
-            nargs="?",
-            const=True,
-            help="如果ENV设置了HETU_RUN_REDIS，河图启动时会自动启动Redis。此项设为True可以关闭该行为",
-            default=False,
-            metavar="False",
-        )
 
         cli_group = parser_start.add_argument_group("通过命令行启动参数")
         cli_group.add_argument(
@@ -139,21 +128,6 @@ class StartCommand(CommandInterface):
 
     @classmethod
     def execute(cls, args):
-        # 自动启动Redis部分
-        redis_proc = None
-        if os.environ.get("HETU_RUN_REDIS", None) and not args.standalone:
-            print("💾 正在自动启动Redis...")  # 此时logger还未启动
-            os.mkdir("data") if not os.path.exists("data") else None
-            import shutil
-
-            if shutil.which("redis-server"):
-                redis_proc = subprocess.Popen(
-                    ["redis-server", "--daemonize yes", "--save 60 1", "--dir /data/"]
-                )
-                wait_for_port("127.0.0.1", 6379)
-            else:
-                print("❌ 未找到redis-server，请手动启动")
-
         # 命令行转配置文件
         if args.config:
             config = Config()
@@ -270,14 +244,6 @@ class StartCommand(CommandInterface):
             Sanic.serve_single(primary=app)
         else:
             Sanic.serve(primary=app, app_loader=loader)
-
-        # 保存管理的redis
-        if redis_proc:
-            logger.info("💾 正在关闭Redis...")
-            r = redis.Redis(host="127.0.0.1", port=6379)
-            r.save()
-            r.close()
-            redis_proc.terminate()
 
         # 退出log listener
         log_handlers.stop_all_logging_handlers()
