@@ -5,47 +5,60 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 # 设置环境变量，防止交互式提示
 ENV DEBIAN_FRONTEND=noninteractive
 
-# 2. 安装 Node.js 和 npm
-# 因为 uv 基础镜像是最小化的，我们需要手动添加 NodeSource 源来安装较新的 Node 版本 (例如 v20 LTS)
-RUN apt-get update && apt-get install -y \
-    nodejs npm
+# 2. 安装基础依赖、Node.js 和 npm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    gnupg \
+    nodejs \
+    npm \
+    && rm -rf /var/lib/apt/lists/*
 
-RUN apt-get install -y \
-       bzr=2.7.* \
-        curl \
-        dnsutils \
-        fd-find \
-        gettext \
-        git \
-        git-lfs \
-        inotify-tools \
-        iputils-ping \
-        jq \
-        moreutils \
-        netcat-openbsd \
-        openssh-client \
-        ripgrep \
-        rsync \
-        sqlite3 \
-        tzdata \
-        unzip \
-        uuid-dev \
-        wget \
-        xz-utils \
-        zip
+# 3. 使用 Docker 官方仓库安装新版 docker cli，避免与宿主 daemon API 不兼容
+RUN install -m 0755 -d /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && chmod a+r /etc/apt/keyrings/docker.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
+    > /etc/apt/sources.list.d/docker.list
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bzr=2.7.* \
+    dnsutils \
+    docker-buildx-plugin \
+    docker-ce-cli \
+    docker-compose-plugin \
+    fd-find \
+    gettext \
+    git \
+    git-lfs \
+    inotify-tools \
+    iputils-ping \
+    jq \
+    moreutils \
+    netcat-openbsd \
+    openssh-client \
+    ripgrep \
+    rsync \
+    sqlite3 \
+    tzdata \
+    unzip \
+    uuid-dev \
+    wget \
+    xz-utils \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
 
 ADD https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags /tmp/version-cache-buster.json
 
-# 3. 通过 npm 全局安装 codex
+# 4. 通过 npm 全局安装 codex
 RUN npm i -g @openai/codex
 
 # 定义容器内的 HOME 目录，通常 root 用户是 /root
 ENV HOME=/root
 
-# 4. 设置工作目录的基础路径
+# 5. 设置工作目录的基础路径
 WORKDIR /workspace
 
-# 5. 入口点
+# 6. 入口点
 # 默认直接执行 codex 命令，这样你可以直接像使用本地命令一样传参
 ENTRYPOINT ["codex"]
-
