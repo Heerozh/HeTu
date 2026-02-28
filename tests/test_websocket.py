@@ -12,6 +12,7 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import pipeline, worker_main
+from hetu.server import websocket as websocket_server
 from hetu.system import SystemClusters
 
 logger = logging.getLogger("HeTu.root")
@@ -124,7 +125,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             "APP_FILE": app_file,
             "NAMESPACE": "pytest",
             "INSTANCES": ["pytest_1"],
-            "LISTEN": f"0.0.0.0:874",
+            "LISTEN": "0.0.0.0:874",
             "PACKET_LAYERS": [
                 {"type": "jsonb"},
                 {"type": "zlib"},
@@ -253,6 +254,50 @@ def test_websocket_kick_connect(test_server):
         "add_rls_comp_value",
         4,
     ], "最后一行没执行到"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_disconnect_system_called(test_server):
+    user_id = 199991
+
+    async def disconnect_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", user_id])
+        await client1.recv()
+        await client1.close()
+
+        client2 = await connect()
+        count = 0
+        for _ in range(20):
+            await client2.send(["rpc", "get_disconnect_count", user_id])
+            message = await client2.recv()
+            count = message[1]
+            if count == 1:
+                break
+            await asyncio.sleep(0.05)
+        assert count == 1
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=disconnect_routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_disconnect_system_missing_skip(monkeypatch, test_server):
+    user_id = 199992
+    monkeypatch.setattr(websocket_server, "DISCONNECT_SYSTEM", "__not_exists__")
+
+    async def disconnect_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", user_id])
+        await client1.recv()
+        await client1.close()
+        await asyncio.sleep(0.2)
+
+        client2 = await connect()
+        await client2.send(["rpc", "get_disconnect_count", user_id])
+        message = await client2.recv()
+        assert message[1] == 0
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=disconnect_routine)
 
 
 def test_call_flooding_lv1_normal(test_server):

@@ -22,6 +22,7 @@ from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
+DISCONNECT_SYSTEM = "on_disconnect"
 
 
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
@@ -161,6 +162,20 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
+        try:
+            system_caller.call_check(DISCONNECT_SYSTEM)
+        except ValueError:
+            pass
+        else:
+            try:
+                await system_caller.call(DISCONNECT_SYSTEM)
+            except BaseException as e:
+                err_msg = (
+                    f"❌ [📡WSDisconnectHook] 断线System调用异常: "
+                    f"{DISCONNECT_SYSTEM} | {type(e).__name__}:{e}"
+                )
+                replay.info(err_msg)
+                logger.exception(err_msg)
         await endpoint_executor.terminate()
         await broker.close()
         request.app.purge_tasks()

@@ -211,3 +211,34 @@ async def race_range(ctx: hetu.SystemContext, sleep):
 )
 async def uncallable(ctx: hetu.SystemContext, sleep):
     assert False
+
+
+# ============================
+
+
+@hetu.define_component(namespace="pytest", force=True, permission=hetu.Permission.ADMIN)
+class DisconnectRecord(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    count: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(DisconnectRecord,),
+    permission=None,
+)
+async def on_disconnect(ctx: hetu.SystemContext):
+    if not ctx.caller:
+        return
+    async with ctx.repo[DisconnectRecord].upsert(owner=ctx.caller) as row:
+        row.count += 1
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(DisconnectRecord,),
+    permission=hetu.Permission.EVERYBODY,
+)
+async def get_disconnect_count(ctx: hetu.SystemContext, owner):
+    row = await ctx.repo[DisconnectRecord].get(owner=owner)
+    return hetu.ResponseToClient(int(row.count) if row is not None else 0)
