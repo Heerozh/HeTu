@@ -7,6 +7,7 @@ image_name="${CODEX_IMAGE:-heerozh_codex}"
 dind_image="${DIND_IMAGE:-docker:27-dind}"
 dind_name="${DIND_NAME:-codex-dind}"
 dind_run_volume="${DIND_RUN_VOLUME:-${dind_name}-run}"
+editor="${EDITOR:-${VISUAL:-vim}}"
 
 docker build -f codex_docker -t "${image_name}" .
 
@@ -49,6 +50,11 @@ docker run --rm -it \
   --network "container:${dind_name}" \
   -e UV_PROJECT_ENVIRONMENT="/workspace/${dir_name}/.venv-docker" \
   -e UV_CACHE_DIR=/tmp/uv-cache \
+  -e EDITOR="${editor}" \
+  -e VISUAL="${editor}" \
+  -e editor="${editor}" \
+  -e LANG=C.UTF-8 \
+  -e LC_ALL=C.UTF-8 \
   -e DOCKER_TLS_CERTDIR= \
   -v "${dind_run_volume}:/var/run" \
   -v "$(pwd):/workspace/${dir_name}" \
