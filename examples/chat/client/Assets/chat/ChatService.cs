@@ -2,15 +2,32 @@ using System;
 using System.Threading.Tasks;
 using HeTu;
 using R3;
-using UnityEngine;
 
 namespace Chat
 {
     public sealed class ChatService : IDisposable
     {
-        private IndexSubscription<OnlineUser> _onlineSub;
-        private IndexSubscription<ChatMessage> _messageSub;
         private bool _disposed;
+        private IndexSubscription<ChatMessage> _messageSub;
+        private IndexSubscription<OnlineUser> _onlineSub;
+
+        public ChatService()
+        {
+            HeTuClient.Instance.OnConnected += HandleConnected;
+            HeTuClient.Instance.OnClosed += HandleClosed;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+
+            _disposed = true;
+            HeTuClient.Instance.OnConnected -= HandleConnected;
+            HeTuClient.Instance.OnClosed -= HandleClosed;
+            _onlineSub?.Dispose();
+            _messageSub?.Dispose();
+            HeTuClient.Instance.Close();
+        }
 
         public event Action Connected;
         public event Action<string> Closed;
@@ -18,12 +35,6 @@ namespace Chat
         public event Action<long> MemberDeleted;
         public event Action<ChatMessage> MessageUpserted;
         public event Action<long> MessageDeleted;
-
-        public ChatService()
-        {
-            HeTuClient.Instance.OnConnected += HandleConnected;
-            HeTuClient.Instance.OnClosed += HandleClosed;
-        }
 
         public void Connect(string url, string authKey)
         {
@@ -48,7 +59,7 @@ namespace Chat
                 .Subscribe(added =>
                 {
                     MemberUpserted?.Invoke(added);
-                    _onlineSub.ObserveReplace(added.ID)
+                    _onlineSub.ObserveRow(added.ID)
                         .Subscribe(
                             replaced => MemberUpserted?.Invoke(replaced),
                             _ => MemberDeleted?.Invoke(added.ID))
@@ -65,7 +76,7 @@ namespace Chat
                 .Subscribe(added =>
                 {
                     MessageUpserted?.Invoke(added);
-                    _messageSub.ObserveReplace(added.ID)
+                    _messageSub.ObserveRow(added.ID)
                         .Subscribe(
                             replaced => MessageUpserted?.Invoke(replaced),
                             _ => MessageDeleted?.Invoke(added.ID))
@@ -76,21 +87,6 @@ namespace Chat
 
         public void Close()
         {
-            HeTuClient.Instance.Close();
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
-            {
-                return;
-            }
-
-            _disposed = true;
-            HeTuClient.Instance.OnConnected -= HandleConnected;
-            HeTuClient.Instance.OnClosed -= HandleClosed;
-            _onlineSub?.Dispose();
-            _messageSub?.Dispose();
             HeTuClient.Instance.Close();
         }
 

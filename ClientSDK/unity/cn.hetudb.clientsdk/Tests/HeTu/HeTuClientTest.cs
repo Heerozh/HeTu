@@ -229,7 +229,7 @@ namespace Tests.HeTu
             await Sleep(1);
             Assert.AreEqual(removedPlayer, 123);
 
-            Assert.False(sub.Rows.ContainsKey(123));
+            Assert.False(sub.Rows.Values.Any(row => row.Owner == 123));
             Debug.Log("TestIndexSubscribeOnInsert结束");
         }
 
@@ -320,25 +320,30 @@ namespace Tests.HeTu
 
             // 订阅响应
             List<double> receivedValues = new();
+            List<long> observeRemovedIDs = new();
             sub.ObserveAdd()
                 .Subscribe(added =>
                     {
                         receivedValues.Add(added.Value);
 
-                        sub.ObserveReplace(added.ID)
+                        sub.ObserveRow(added.ID)
                             .Subscribe(
                                 replaced => { receivedValues.Add(replaced.Value); },
                                 result => receivedValues.Add(added.ID)
                             ).AddTo(ref sub.DisposeBag);
                     }
                 ).AddTo(ref sub.DisposeBag);
+            sub.ObserveRemove()
+                .Subscribe(removedID => { observeRemovedIDs.Add(removedID); })
+                .AddTo(ref sub.DisposeBag);
 
             // 测试是否已经加入到了DisposeBag
             var countField = typeof(DisposableBag)
                 .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.IsNotNull(countField);
-            // 1 add subject， 2查询到的值到replaceSubject, 1 sub自身, 在加上2查询到的值.Subscribe,和1 add.Subscribe
-            Assert.True((int)countField.GetValue(sub.DisposeBag) == 6);
+            // Range时初始化：2 add/remove subject， 2查询到的值到replaceSubject
+            // 再加上上述代码会重走一遍和Range时初始化过程，加入数量翻倍
+            Assert.True((int)countField.GetValue(sub.DisposeBag) == 8);
 
             // 发送更新，等待变更
             _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1);
@@ -359,6 +364,9 @@ namespace Tests.HeTu
                     initIDs[0]
                 },
                 receivedValues);
+            CollectionAssert.AreEqual(
+                new List<long> { initIDs[0] },
+                observeRemovedIDs);
 
             // 检查DisposeBag是否已Dispose
             Object.Destroy(go);

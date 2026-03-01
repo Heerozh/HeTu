@@ -176,3 +176,5 @@ benchmark_results.csv
 /examples/chat/client/Packages
 /examples/chat/client/ProjectSettings
 /examples/chat/client/UIElementsSchema
+# 禁用 claude
+/.claude
