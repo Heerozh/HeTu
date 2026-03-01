@@ -1,5 +1,6 @@
-import numpy as np
 import time
+
+import numpy as np
 
 import hetu
 
@@ -41,6 +42,7 @@ async def _insert_message(ctx: hetu.SystemContext, owner: int, name: str, text: 
     permission=hetu.Permission.EVERYBODY,
 )
 async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
+    print("try login", user_id, name)
     await hetu.elevate(ctx, int(user_id), kick_logged_in=True)
     username = str(name)[:32]
     async with ctx.repo[OnlineUser].upsert(owner=ctx.caller) as row:

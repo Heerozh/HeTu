@@ -13,16 +13,19 @@ namespace Chat
         [SerializeField] private long userId = 10001;
         [SerializeField] private string userName = "guest_10001";
 
+        private readonly List<ChatFeedItemVm> _feedItems = new();
+        private readonly List<MemberVm> _onlineItems = new();
+        private readonly List<MemberVm> _offlineItems = new();
+
         private DisposableBag _uiBag;
         private ChatViewModel _viewModel;
 
         private Label _statusLabel;
         private Label _onlineTitle;
         private Label _offlineTitle;
-        private VisualElement _messageList;
-        private ScrollView _messageScroll;
-        private VisualElement _onlineList;
-        private VisualElement _offlineList;
+        private ListView _messageList;
+        private ListView _onlineList;
+        private ListView _offlineList;
         private TextField _composerInput;
         private Button _composerSend;
 
@@ -58,20 +61,82 @@ namespace Chat
             _statusLabel = root.Q<Label>("status-label");
             _onlineTitle = root.Q<Label>("online-title");
             _offlineTitle = root.Q<Label>("offline-title");
-            _messageScroll = root.Q<ScrollView>("message-scroll");
-            _messageList = root.Q<VisualElement>("message-list");
-            _onlineList = root.Q<VisualElement>("online-list");
-            _offlineList = root.Q<VisualElement>("offline-list");
+            _messageList = root.Q<ListView>("message-list");
+            _onlineList = root.Q<ListView>("online-list");
+            _offlineList = root.Q<ListView>("offline-list");
             _composerInput = root.Q<TextField>("composer-input");
             _composerSend = root.Q<Button>("composer-send");
 
-            _messageList?.Clear();
-            _onlineList?.Clear();
-            _offlineList?.Clear();
+            ConfigureMessageListView();
+            ConfigureMemberListView(_onlineList, _onlineItems);
+            ConfigureMemberListView(_offlineList, _offlineItems);
+
             if (_statusLabel != null)
             {
                 _statusLabel.text = "CONNECTING";
             }
+        }
+
+        private void ConfigureMessageListView()
+        {
+            if (_messageList == null)
+            {
+                return;
+            }
+
+            _messageList.itemsSource = _feedItems;
+            _messageList.selectionType = SelectionType.None;
+            _messageList.showBorder = false;
+            _messageList.showAlternatingRowBackgrounds = AlternatingRowBackground.None;
+            _messageList.virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight;
+            _messageList.makeItem = static () =>
+            {
+                var host = new VisualElement();
+                host.AddToClassList("list-row-host");
+                return host;
+            };
+            _messageList.bindItem = (element, index) =>
+            {
+                if ((uint)index >= (uint)_feedItems.Count)
+                {
+                    return;
+                }
+
+                element.Clear();
+                element.Add(ChatRenderers.CreateFeedItem(_feedItems[index]));
+            };
+            _messageList.unbindItem = (element, _) => element.Clear();
+        }
+
+        private static void ConfigureMemberListView(ListView listView, List<MemberVm> source)
+        {
+            if (listView == null)
+            {
+                return;
+            }
+
+            listView.itemsSource = source;
+            listView.selectionType = SelectionType.None;
+            listView.showBorder = false;
+            listView.showAlternatingRowBackgrounds = AlternatingRowBackground.None;
+            listView.virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight;
+            listView.makeItem = static () =>
+            {
+                var host = new VisualElement();
+                host.AddToClassList("list-row-host");
+                return host;
+            };
+            listView.bindItem = (element, index) =>
+            {
+                if ((uint)index >= (uint)source.Count)
+                {
+                    return;
+                }
+
+                element.Clear();
+                element.Add(ChatRenderers.CreateMemberRow(source[index]));
+            };
+            listView.unbindItem = (element, _) => element.Clear();
         }
 
         private void BindViewModel()
@@ -139,18 +204,39 @@ namespace Chat
                 return;
             }
 
-            _messageList.Clear();
-            VisualElement last = null;
-            foreach (var item in feed)
+            _feedItems.Clear();
+            _feedItems.AddRange(feed);
+            _messageList.Rebuild();
+            if (_feedItems.Count > 0)
             {
-                var row = ChatRenderers.CreateFeedItem(item);
-                _messageList.Add(row);
-                last = row;
+                ScheduleScrollFeedToBottom(attempts: 4);
+            }
+        }
+
+        private void ScheduleScrollFeedToBottom(int attempts)
+        {
+            if (_messageList == null || attempts <= 0 || _feedItems.Count == 0)
+            {
+                return;
             }
 
-            if (last != null && _messageScroll != null)
+            var targetIndex = _feedItems.Count - 1;
+            _messageList.schedule.Execute(() => ScrollFeedToBottomAttempt(targetIndex, attempts));
+        }
+
+        private void ScrollFeedToBottomAttempt(int targetIndex, int attemptsLeft)
+        {
+            if (_messageList == null || _feedItems.Count == 0 || attemptsLeft <= 0)
             {
-                _messageScroll.ScrollTo(last);
+                return;
+            }
+
+            var clampedIndex = Mathf.Clamp(targetIndex, 0, _feedItems.Count - 1);
+            _messageList.ScrollToItem(clampedIndex);
+
+            if (attemptsLeft > 1)
+            {
+                _messageList.schedule.Execute(() => ScrollFeedToBottomAttempt(clampedIndex, attemptsLeft - 1));
             }
         }
 
@@ -161,17 +247,20 @@ namespace Chat
                 return;
             }
 
-            _onlineList.Clear();
+            _onlineItems.Clear();
             foreach (var member in members.OnlineMembers)
             {
-                _onlineList.Add(ChatRenderers.CreateMemberRow(member));
+                _onlineItems.Add(member);
             }
 
-            _offlineList.Clear();
+            _offlineItems.Clear();
             foreach (var member in members.OfflineMembers)
             {
-                _offlineList.Add(ChatRenderers.CreateMemberRow(member));
+                _offlineItems.Add(member);
             }
+
+            _onlineList.Rebuild();
+            _offlineList.Rebuild();
 
             if (_onlineTitle != null)
             {
