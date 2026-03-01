@@ -7,7 +7,9 @@
 
 import hashlib
 import logging
-from contextlib import AbstractContextManager
+import time
+from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
@@ -29,6 +31,10 @@ class SQLTableMaintenance(TableMaintenance):
     """
     SQL后端的组件表维护实现。
     """
+
+    _lock_name = "maintenance:lock"
+    _lock_ttl = timedelta(minutes=5)
+    _lock_retry_sleep = 0.1
 
     client: SQLBackendClient
 
@@ -163,7 +169,53 @@ class SQLTableMaintenance(TableMaintenance):
     @override
     def get_lock(self) -> AbstractContextManager:
         """获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁"""
-        raise NotImplementedError
+        lock_table = self.client.maintenance_lock_table()
+
+        @contextmanager
+        def _lock_ctx():
+            acquired_at: datetime | None = None
+            while acquired_at is None:
+                now = datetime.now(UTC).replace(tzinfo=None)
+                stale_before = now - self._lock_ttl
+                try:
+                    with self.client.io.begin() as conn:
+                        # 清理超时锁，避免异常退出后永久死锁。
+                        conn.execute(
+                            sa.delete(lock_table).where(
+                                lock_table.c.lock_name == self._lock_name,
+                                lock_table.c.updated_at < stale_before,
+                            )
+                        )
+                        conn.execute(
+                            sa.insert(lock_table).values(
+                                lock_name=self._lock_name,
+                                updated_at=now,
+                            )
+                        )
+                        acquired_at = cast(
+                            datetime,
+                            conn.execute(
+                                sa.select(lock_table.c.updated_at).where(
+                                    lock_table.c.lock_name == self._lock_name
+                                )
+                            ).scalar_one(),
+                        )
+                except sa_exc.IntegrityError:
+                    time.sleep(self._lock_retry_sleep)
+
+            try:
+                yield
+            finally:
+                with self.client.io.begin() as conn:
+                    # 仅释放当前持有者对应的锁，避免误删后来者锁。
+                    conn.execute(
+                        sa.delete(lock_table).where(
+                            lock_table.c.lock_name == self._lock_name,
+                            lock_table.c.updated_at == acquired_at,
+                        )
+                    )
+
+        return _lock_ctx()
 
     @override
     def do_create_table_(self, table_ref: TableReference) -> TableMaintenance.TableMeta:
