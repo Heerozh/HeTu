@@ -7,6 +7,8 @@
 
 import pytest
 import numpy as np
+import threading
+import time
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 
@@ -115,3 +117,50 @@ async def test_reconnect(auto_backend, mod_item_model):
     async with backend2.session("test", 1) as session:
         repo = session.using(mod_item_model)
         assert len(await repo.range("id", -np.inf, +np.inf, limit=999)) == size
+
+
+async def test_get_lock_blocks_until_release(auto_backend):
+    backend = auto_backend("lock_test")
+    maint1 = backend.get_table_maintenance()
+    maint2 = backend.get_table_maintenance()
+
+    holder_ready = threading.Event()
+    holder_release = threading.Event()
+    waiter_done = threading.Event()
+    errors: list[BaseException] = []
+    elapsed: dict[str, float] = {}
+
+    def holder():
+        try:
+            with maint1.get_lock():
+                holder_ready.set()
+                holder_release.wait(timeout=3.0)
+        except BaseException as exc:  # pragma: no cover - debug only
+            errors.append(exc)
+            holder_ready.set()
+
+    def waiter():
+        started = time.perf_counter()
+        try:
+            with maint2.get_lock():
+                elapsed["seconds"] = time.perf_counter() - started
+        except BaseException as exc:  # pragma: no cover - debug only
+            errors.append(exc)
+        finally:
+            waiter_done.set()
+
+    t_holder = threading.Thread(target=holder, daemon=True)
+    t_waiter = threading.Thread(target=waiter, daemon=True)
+    t_holder.start()
+
+    assert holder_ready.wait(timeout=3.0)
+    t_waiter.start()
+    time.sleep(0.2)
+    assert not waiter_done.is_set(), "锁未释放前，第二个get_lock不应拿到锁"
+
+    holder_release.set()
+    t_holder.join(timeout=3.0)
+    t_waiter.join(timeout=3.0)
+    assert not errors, f"线程执行出现异常: {errors!r}"
+    assert waiter_done.is_set()
+    assert elapsed["seconds"] >= 0.15

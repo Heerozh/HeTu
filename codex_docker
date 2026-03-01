@@ -49,6 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     && rm -rf /var/lib/apt/lists/*
 
+# 统一 Git 行尾行为，减少 Windows/Linux 行尾差异导致的无关 diff
+RUN git config --global core.whitespace cr-at-eol \
+    && git config --global core.autocrlf input
+
 ADD https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags /tmp/version-cache-buster.json
 
 # 4. 通过 npm 全局安装 codex
