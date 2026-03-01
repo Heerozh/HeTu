@@ -1,6 +1,6 @@
 # Unity Chat Client (UI Toolkit + R3)
 
-极简宣传示例：一个文件级可落地的 Unity 客户端，连接 `examples/server/chat`。
+极简示例：一个文件级可落地的 Unity 客户端，连接 `examples/server/chat`。
 
 ## Files
 

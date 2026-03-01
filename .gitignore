@@ -172,3 +172,6 @@ data/dump.rdb
 benchmark_results.csv
 *.mojo
 /examples/chat/server/data/chat.sqlite3
+/examples/chat/client/Assets/Packages
+/examples/chat/client/Packages
+/examples/chat/client/ProjectSettings
