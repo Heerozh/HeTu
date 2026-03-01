@@ -8,8 +8,8 @@
 import hashlib
 import logging
 import random
-from datetime import UTC, datetime, timedelta
 import time
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
 import numpy as np
@@ -61,6 +61,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     META_TABLE_NAME = "_HeTu_Component_Meta"
     NOTIFY_TABLE_NAME = "_Hetu_Notify"
+    MAINTENANCE_LOCK_TABLE_NAME = "_Hetu_Maintenance_Lock"
     NOTIFY_TTL_SECONDS = 60 * 60
     NOTIFY_CLEANUP_INTERVAL = 60 * 15
     NOTIFY_CLEANUP_JITTER = 90.0
@@ -227,6 +228,24 @@ class SQLBackendClient(BackendClient, alias="sql"):
             sa.Column("created_at", sa.TIMESTAMP(), nullable=False, index=True),
         )
 
+    @classmethod
+    def maintenance_lock_table(cls, metadata: sa.MetaData | None = None):
+        if metadata is None:
+            metadata = sa.MetaData()
+        if cls.MAINTENANCE_LOCK_TABLE_NAME in metadata.tables:
+            return metadata.tables[cls.MAINTENANCE_LOCK_TABLE_NAME]
+        return sa.Table(
+            cls.MAINTENANCE_LOCK_TABLE_NAME,
+            metadata,
+            sa.Column("lock_name", sa.String(length=64), primary_key=True),
+            sa.Column(
+                "updated_at",
+                sa.TIMESTAMP(),
+                nullable=False,
+                server_default=sa.text("CURRENT_TIMESTAMP"),
+            ),
+        )
+
     @override
     def index_channel(self, table_ref: TableReference, index_name: str):
         return self.index_key(table_ref, index_name)
@@ -283,17 +302,24 @@ class SQLBackendClient(BackendClient, alias="sql"):
         if not self._ios:
             raise ConnectionError("连接已关闭，已调用过close")
 
-    def _ensure_support_tables_sync(self):
+    def ensure_support_tables_sync(self):
         meta = sa.MetaData()
         self.meta_table(meta)
         self.notify_table(meta)
-        meta.create_all(self.io, checkfirst=True)
+        self.maintenance_lock_table(meta)
+        try:
+            meta.create_all(self.io, checkfirst=True)
+        except sa_exc.DBAPIError as exc:
+            if "already exists" in str(exc).lower():
+                # 可能是并发创建导致的，忽略
+                return
+            raise
 
     @override
     def post_configure(self) -> None:
         self._ensure_open()
         if not self.is_servant:
-            self._ensure_support_tables_sync()
+            self.ensure_support_tables_sync()
         # 提示用户schema定义是否符合sql要求
         self._schema_checking_for_sql()
 
@@ -573,6 +599,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             meta = sa.MetaData()
             self.meta_table(meta)
             self.notify_table(meta)
+            self.maintenance_lock_table(meta)
             for ref in refs:
                 self.component_table(ref, meta)
             meta.create_all(io, checkfirst=True)

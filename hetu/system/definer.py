@@ -13,10 +13,9 @@ from inspect import signature
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
 
-from ..endpoint.definer import EndpointDefine, ENDPOINT_NAME_MAX_LEN
-
 from ..common import Singleton
 from ..common.permission import Permission
+from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN, EndpointDefine
 from .lock import SystemLock
 
 if TYPE_CHECKING:
@@ -113,7 +112,7 @@ class SystemClusters(metaclass=Singleton):
     def build_clusters(self, main_namespace: str):
         assert self._clusters == {}, "簇已经生成过了"
         assert main_namespace in self._system_map, (
-            f"没有找到namespace={main_namespace}的System定义"
+            f"没有找到namespace={main_namespace}的System定义, APP中的Namespace有：{list(self._system_map.keys())}"
         )
         self._main_namespace = main_namespace
 

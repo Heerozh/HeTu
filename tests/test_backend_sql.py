@@ -1,13 +1,14 @@
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql, postgresql
-from types import SimpleNamespace
-from unittest.mock import Mock
 
+from hetu.common.multimap import MultiMap
 from hetu.data.backend.sql import SQLBackendClient
 from hetu.data.backend.sql.mq import MAX_CHANNELS_IN_FILTER, SQLMQClient
-from hetu.common.multimap import MultiMap
 
 
 def test_sql_parse_engine_urls_auto_driver():
@@ -75,13 +76,13 @@ def test_sql_post_configure_runs_support_table_ddl_on_master():
     client = object.__new__(SQLBackendClient)
     client.is_servant = False
     client._ensure_open = Mock()
-    client._ensure_support_tables_sync = Mock()
+    client.ensure_support_tables_sync = Mock()
     client._schema_checking_for_sql = Mock()
 
     client.post_configure()
 
     client._ensure_open.assert_called_once_with()
-    client._ensure_support_tables_sync.assert_called_once_with()
+    client.ensure_support_tables_sync.assert_called_once_with()
     client._schema_checking_for_sql.assert_called_once_with()
 
 
@@ -89,13 +90,13 @@ def test_sql_post_configure_skips_support_table_ddl_on_servant():
     client = object.__new__(SQLBackendClient)
     client.is_servant = True
     client._ensure_open = Mock()
-    client._ensure_support_tables_sync = Mock()
+    client.ensure_support_tables_sync = Mock()
     client._schema_checking_for_sql = Mock()
 
     client.post_configure()
 
     client._ensure_open.assert_called_once_with()
-    client._ensure_support_tables_sync.assert_not_called()
+    client.ensure_support_tables_sync.assert_not_called()
     client._schema_checking_for_sql.assert_called_once_with()
 
 
