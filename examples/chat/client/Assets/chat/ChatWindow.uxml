@@ -1,33 +1,161 @@
-<UXML xmlns="UnityEngine.UIElements">
-    <VisualElement class="chat-root">
-        <VisualElement class="bg-orb orb-a" />
-        <VisualElement class="bg-orb orb-b" />
-        <VisualElement class="bg-orb orb-c" />
-
-        <VisualElement class="shell">
-            <VisualElement class="header">
-                <Label text="HeTu Chat" class="title" />
-                <Label name="status-label" text="offline" class="status" />
-                <Label name="me-label" text="ME: -" class="me" />
-            </VisualElement>
-
-            <VisualElement class="body">
-                <VisualElement class="left-panel card">
-                    <Label text="ONLINE" class="panel-title" />
-                    <TextField name="name-input" label="Name" class="name-input" />
-                    <ScrollView name="online-list" class="online-list" />
-                </VisualElement>
-
-                <VisualElement class="right-panel card">
-                    <Label text="CHAT" class="panel-title" />
-                    <ScrollView name="message-list" class="message-list" />
-                </VisualElement>
-            </VisualElement>
-
-            <VisualElement class="composer card">
-                <TextField name="message-input" class="message-input" />
-                <Button name="send-button" text="SEND" class="send-button" />
-            </VisualElement>
-        </VisualElement>
-    </VisualElement>
-</UXML>
+<ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns:uie="UnityEditor.UIElements" xmlns="UnityEngine.UIElements">
+    <Style src="project://database/Assets/Chat/ChatWindow.uss?fileID=7433441132597879392&amp;guid=0b5bc7542f336bd4b89f5e2aced86e56&amp;type=3#ChatWindow" />
+    <ui:VisualElement class="chat-root">
+        <ui:VisualElement class="chat-shell">
+            <ui:VisualElement class="chat-main">
+                <ui:VisualElement class="chat-header">
+                    <ui:VisualElement class="chat-header-main">
+                        <ui:Label text="# general" class="channel-title" />
+                        <ui:Label text="Welcome to the minimal HeTu chat demo." class="channel-subtitle" />
+                    </ui:VisualElement>
+                    <ui:Label text="CONNECTED" class="connection-chip" />
+                </ui:VisualElement>
+                <ui:ScrollView name="message-scroll" class="message-scroll">
+                    <ui:VisualElement name="message-list" class="message-list">
+                        <ui:VisualElement class="date-divider">
+                            <ui:Label text="Today at March 1, 2026" class="date-divider-text" />
+                        </ui:VisualElement>
+                        <ui:VisualElement class="event-row event--join">
+                            <ui:Label text="Luna joined the chat" class="event-text" />
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--other">
+                            <ui:VisualElement class="avatar avatar--other">
+                                <ui:Label text="L" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="Luna" class="message-author" />
+                                    <ui:Label text="19:42" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Hey all, server is up and subscriptions are flowing." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--self">
+                            <ui:VisualElement class="avatar avatar--self">
+                                <ui:Label text="Y" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="You" class="message-author" />
+                                    <ui:Label text="19:43" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Nice, UI Toolkit view looks much cleaner now." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--other">
+                            <ui:VisualElement class="avatar avatar--other">
+                                <ui:Label text="M" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="Milo" class="message-author" />
+                                    <ui:Label text="19:43" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Could we keep message header, time, and body separated for later binding?" class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="event-row event--join">
+                            <ui:Label text="Rin joined the chat" class="event-text" />
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--self">
+                            <ui:VisualElement class="avatar avatar--self">
+                                <ui:Label text="Y" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="You" class="message-author" />
+                                    <ui:Label text="19:44" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Yep. We can clone this row template and only swap text/class later." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--other">
+                            <ui:VisualElement class="avatar avatar--other">
+                                <ui:Label text="R" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="Rin" class="message-author" />
+                                    <ui:Label text="19:45" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Online/offline panel on the right is exactly what I needed." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--other">
+                            <ui:VisualElement class="avatar avatar--other">
+                                <ui:Label text="L" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="Luna" class="message-author" />
+                                    <ui:Label text="19:46" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="System event rows for join/leave should stay subtle." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                        <ui:VisualElement class="event-row event--leave">
+                            <ui:Label text="Milo left the chat" class="event-text" />
+                        </ui:VisualElement>
+                        <ui:VisualElement class="message-row message--self">
+                            <ui:VisualElement class="avatar avatar--self">
+                                <ui:Label text="Y" class="avatar-text" />
+                            </ui:VisualElement>
+                            <ui:VisualElement class="message-content">
+                                <ui:VisualElement class="message-meta">
+                                    <ui:Label text="You" class="message-author" />
+                                    <ui:Label text="19:47" class="message-time" />
+                                </ui:VisualElement>
+                                <ui:Label text="Perfect. Next step can wire these classes to real subscriptions." class="message-bubble" />
+                            </ui:VisualElement>
+                        </ui:VisualElement>
+                    </ui:VisualElement>
+                </ui:ScrollView>
+                <ui:VisualElement class="composer">
+                    <ui:TextField name="composer-input" class="composer-input" />
+                    <ui:Button name="composer-send" text="Send Message" class="composer-send" />
+                </ui:VisualElement>
+            </ui:VisualElement>
+            <ui:VisualElement class="members-panel">
+                <ui:Label text="MEMBERS" class="members-title" />
+                <ui:VisualElement class="members-online-group">
+                    <ui:Label text="ONLINE - 4" class="members-group-title" />
+                    <ui:VisualElement class="member-row member--online">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="You" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--online">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Luna" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--online">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Aster" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--online">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Rin" class="member-name" />
+                    </ui:VisualElement>
+                </ui:VisualElement>
+                <ui:VisualElement class="members-offline-group">
+                    <ui:Label text="OFFLINE - 4" class="members-group-title" />
+                    <ui:VisualElement class="member-row member--offline">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Milo" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--offline">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Nina" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--offline">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Theo" class="member-name" />
+                    </ui:VisualElement>
+                    <ui:VisualElement class="member-row member--offline">
+                        <ui:VisualElement class="member-status-dot" />
+                        <ui:Label text="Uma" class="member-name" />
+                    </ui:VisualElement>
+                </ui:VisualElement>
+            </ui:VisualElement>
+        </ui:VisualElement>
+    </ui:VisualElement>
+</ui:UXML>
