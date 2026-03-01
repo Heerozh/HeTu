@@ -1,15 +1,10 @@
-using System;
 using System.Collections.Generic;
-using HeTu;
-using MessagePack;
 using R3;
 using UnityEngine;
 using UnityEngine.UIElements;
 
 namespace Chat
 {
-  
-
     [RequireComponent(typeof(UIDocument))]
     public sealed class ChatClient : MonoBehaviour
     {
@@ -18,230 +13,174 @@ namespace Chat
         [SerializeField] private long userId = 10001;
         [SerializeField] private string userName = "guest_10001";
 
-        private readonly Dictionary<long, Label> _userChips = new();
-        private readonly Dictionary<long, Label> _bubbles = new();
-        private readonly Dictionary<long, RowSubscription<ChatMessage>> _messageRows = new();
-
         private DisposableBag _uiBag;
-        private IndexSubscription<OnlineUser> _onlineSub;
-        private IndexSubscription<ChatMessage> _messageSub;
-        private RowSubscription<OnlineUser> _selfSub;
+        private ChatViewModel _viewModel;
 
         private Label _statusLabel;
-        private Label _meLabel;
-        private ScrollView _onlineList;
-        private ScrollView _messageList;
-        private TextField _nameInput;
-        private TextField _messageInput;
-        private Button _sendButton;
-        private Subject<Unit> _sendClick;
+        private Label _onlineTitle;
+        private Label _offlineTitle;
+        private VisualElement _messageList;
+        private ScrollView _messageScroll;
+        private VisualElement _onlineList;
+        private VisualElement _offlineList;
+        private TextField _composerInput;
+        private Button _composerSend;
 
         private void OnEnable()
         {
             _uiBag = default;
             BindView();
-            WireReactiveUi();
-
-            HeTuClient.Instance.OnConnected += HandleConnected;
-            HeTuClient.Instance.OnClosed += HandleClosed;
-            _ = HeTuClient.Instance.Connect(serverUrl, "password123");
+            BindViewModel();
+            BindUserInput();
+            _viewModel.Start(serverUrl, userId, userName);
         }
 
         private void OnDisable()
         {
-            HeTuClient.Instance.OnConnected -= HandleConnected;
-            HeTuClient.Instance.OnClosed -= HandleClosed;
-            if (_sendButton != null) _sendButton.clicked -= PushSend;
-            if (_messageInput != null) _messageInput.UnregisterCallback<KeyDownEvent>(OnMessageInputKeyDown);
-            _sendClick?.Dispose();
-            _uiBag.Dispose();
-            HeTuClient.Instance.Close();
-        }
-
-        private void OnDestroy()
-        {
-            _selfSub?.Dispose();
-            _onlineSub?.Dispose();
-            _messageSub?.Dispose();
-            foreach (var rowSub in _messageRows.Values)
+            if (_composerSend != null)
             {
-                rowSub?.Dispose();
+                _composerSend.clicked -= OnSendClicked;
             }
-            HeTuClient.Instance.Close();
+
+            if (_composerInput != null)
+            {
+                _composerInput.UnregisterCallback<KeyDownEvent>(OnComposerKeyDown);
+            }
+
+            _uiBag.Dispose();
+            _viewModel?.Dispose();
+            _viewModel = null;
         }
 
         private void BindView()
         {
             var root = GetComponent<UIDocument>().rootVisualElement;
             _statusLabel = root.Q<Label>("status-label");
-            _meLabel = root.Q<Label>("me-label");
-            _onlineList = root.Q<ScrollView>("online-list");
-            _messageList = root.Q<ScrollView>("message-list");
-            _nameInput = root.Q<TextField>("name-input");
-            _messageInput = root.Q<TextField>("message-input");
-            _sendButton = root.Q<Button>("send-button");
-            _nameInput.value = userName;
-            _statusLabel.text = "connecting...";
+            _onlineTitle = root.Q<Label>("online-title");
+            _offlineTitle = root.Q<Label>("offline-title");
+            _messageScroll = root.Q<ScrollView>("message-scroll");
+            _messageList = root.Q<VisualElement>("message-list");
+            _onlineList = root.Q<VisualElement>("online-list");
+            _offlineList = root.Q<VisualElement>("offline-list");
+            _composerInput = root.Q<TextField>("composer-input");
+            _composerSend = root.Q<Button>("composer-send");
+
+            _messageList?.Clear();
+            _onlineList?.Clear();
+            _offlineList?.Clear();
+            if (_statusLabel != null)
+            {
+                _statusLabel.text = "CONNECTING";
+            }
         }
 
-        private void WireReactiveUi()
+        private void BindViewModel()
         {
-            _sendClick = new Subject<Unit>();
-            _sendButton.clicked += PushSend;
-            _messageInput.RegisterCallback<KeyDownEvent>(OnMessageInputKeyDown);
-            _sendClick
-                .Select(_ => _messageInput.value?.Trim())
-                .Where(text => !string.IsNullOrEmpty(text))
+            _viewModel = new ChatViewModel(new ChatService());
+            _viewModel.ConnectionText
                 .Subscribe(text =>
                 {
-                    _ = HeTuClient.Instance.CallSystem("user_chat", text);
-                    _messageInput.value = string.Empty;
+                    if (_statusLabel != null)
+                    {
+                        _statusLabel.text = text;
+                    }
+                })
+                .AddTo(ref _uiBag);
+
+            _viewModel.FeedChanged
+                .Subscribe(RenderFeed)
+                .AddTo(ref _uiBag);
+
+            _viewModel.MembersChanged
+                .Subscribe(RenderMembers)
+                .AddTo(ref _uiBag);
+
+            _viewModel.ClearComposerRequested
+                .Subscribe(_ =>
+                {
+                    if (_composerInput != null)
+                    {
+                        _composerInput.value = string.Empty;
+                    }
                 })
                 .AddTo(ref _uiBag);
         }
 
-        private async void HandleConnected()
+        private void BindUserInput()
         {
-            userName = string.IsNullOrWhiteSpace(_nameInput.value)
-                ? $"guest_{userId}"
-                : _nameInput.value.Trim();
-
-            _statusLabel.text = "connected";
-            _ = HeTuClient.Instance.CallSystem("user_login", userId, userName);
-
-            _selfSub = await HeTuClient.Instance.Get<OnlineUser>("owner", userId);
-            if (_selfSub != null)
+            if (_composerSend != null)
             {
-                _selfSub.AddTo(gameObject);
-                _selfSub.Subject
-                    .Subscribe(user =>
-                    {
-                        _meLabel.text = user == null ? "ME: offline" : $"ME: {user.Name}";
-                    })
-                    .AddTo(ref _selfSub.DisposeBag);
+                _composerSend.clicked += OnSendClicked;
             }
 
-            _onlineSub = await HeTuClient.Instance.Range<OnlineUser>("owner", 0, long.MaxValue, 256);
-            _onlineSub.AddTo(gameObject);
-            _onlineSub.ObserveAdd()
-                .Subscribe(added =>
-                {
-                    UpsertUserChip(added);
-                    _onlineSub.ObserveReplace(added.ID)
-                        .Subscribe(
-                            replaced => UpsertUserChip(replaced),
-                            _ => RemoveUserChip(added.ID))
-                        .AddTo(ref _onlineSub.DisposeBag);
-                })
-                .AddTo(ref _onlineSub.DisposeBag);
-
-            _messageSub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 512);
-            _messageSub.AddTo(gameObject);
-            _messageSub.ObserveAdd()
-                .Subscribe(added =>
-                {
-                    UpsertBubble(added);
-                    BindMessageRow(added.ID);
-                })
-                .AddTo(ref _messageSub.DisposeBag);
+            _composerInput?.RegisterCallback<KeyDownEvent>(OnComposerKeyDown);
         }
 
-        private void HandleClosed(string errMsg)
+        private void OnSendClicked()
         {
-            _statusLabel.text = errMsg == null ? "disconnected" : $"closed: {errMsg}";
+            _viewModel?.RequestSend(_composerInput?.value);
         }
 
-        private async void BindMessageRow(long rowId)
-        {
-            if (_messageRows.ContainsKey(rowId))
-            {
-                return;
-            }
-
-            var rowSub = await HeTuClient.Instance.Get<ChatMessage>("id", rowId);
-            if (rowSub == null)
-            {
-                return;
-            }
-
-            rowSub.AddTo(gameObject);
-            _messageRows[rowId] = rowSub;
-            rowSub.Subject
-                .Subscribe(row =>
-                {
-                    if (row == null)
-                    {
-                        RemoveBubble(rowId);
-                        if (_messageRows.Remove(rowId, out var removed))
-                        {
-                            removed.Dispose();
-                        }
-                        return;
-                    }
-                    UpsertBubble(row);
-                })
-                .AddTo(ref rowSub.DisposeBag);
-        }
-
-        private void PushSend()
-        {
-            _sendClick?.OnNext(Unit.Default);
-        }
-
-        private void OnMessageInputKeyDown(KeyDownEvent evt)
+        private void OnComposerKeyDown(KeyDownEvent evt)
         {
             if (evt.keyCode != KeyCode.Return && evt.keyCode != KeyCode.KeypadEnter)
             {
                 return;
             }
 
-            _sendClick?.OnNext(Unit.Default);
+            _viewModel?.RequestSend(_composerInput?.value);
             evt.StopImmediatePropagation();
         }
 
-        private void UpsertUserChip(OnlineUser user)
+        private void RenderFeed(IReadOnlyList<ChatFeedItemVm> feed)
         {
-            if (!_userChips.TryGetValue(user.ID, out var chip))
+            if (_messageList == null)
             {
-                chip = new Label();
-                chip.AddToClassList("user-chip");
-                _onlineList.Add(chip);
-                _userChips[user.ID] = chip;
+                return;
             }
 
-            chip.text = $"{user.Name}  #{user.Owner}";
-            chip.EnableInClassList("user-chip--me", user.Owner == userId);
-        }
-
-        private void RemoveUserChip(long id)
-        {
-            if (_userChips.Remove(id, out var chip))
+            _messageList.Clear();
+            VisualElement last = null;
+            foreach (var item in feed)
             {
-                chip.RemoveFromHierarchy();
+                var row = ChatRenderers.CreateFeedItem(item);
+                _messageList.Add(row);
+                last = row;
+            }
+
+            if (last != null && _messageScroll != null)
+            {
+                _messageScroll.ScrollTo(last);
             }
         }
 
-        private void UpsertBubble(ChatMessage msg)
+        private void RenderMembers(MemberSnapshotVm members)
         {
-            if (!_bubbles.TryGetValue(msg.ID, out var bubble))
+            if (_onlineList == null || _offlineList == null)
             {
-                bubble = new Label();
-                bubble.AddToClassList("bubble");
-                _messageList.Add(bubble);
-                _bubbles[msg.ID] = bubble;
+                return;
             }
 
-            bubble.text = $"{msg.Name}: {msg.Text}";
-            bubble.EnableInClassList("bubble--me", msg.Owner == userId);
-            bubble.EnableInClassList("bubble--other", msg.Owner != userId);
-            _messageList.ScrollTo(bubble);
-        }
-
-        private void RemoveBubble(long id)
-        {
-            if (_bubbles.Remove(id, out var bubble))
+            _onlineList.Clear();
+            foreach (var member in members.OnlineMembers)
             {
-                bubble.RemoveFromHierarchy();
+                _onlineList.Add(ChatRenderers.CreateMemberRow(member));
+            }
+
+            _offlineList.Clear();
+            foreach (var member in members.OfflineMembers)
+            {
+                _offlineList.Add(ChatRenderers.CreateMemberRow(member));
+            }
+
+            if (_onlineTitle != null)
+            {
+                _onlineTitle.text = $"ONLINE - {members.OnlineMembers.Count}";
+            }
+
+            if (_offlineTitle != null)
+            {
+                _offlineTitle.text = $"OFFLINE - {members.OfflineMembers.Count}";
             }
         }
     }

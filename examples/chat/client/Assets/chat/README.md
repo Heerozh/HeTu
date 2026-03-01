@@ -1,25 +1,29 @@
 # Unity Chat Client (UI Toolkit + R3)
 
-极简示例：一个文件级可落地的 Unity 客户端，连接 `examples/server/chat`。
+极简示例：一个可落地的 Unity 客户端，连接 `examples/chat/server`。
 
 ## Files
 
-- `ChatClient.cs`：连接、3 个 System 调用、R3 绑定逻辑
-- `ChatWindow.uxml`：左在线用户 / 右聊天气泡 / 下输入框
-- `ChatWindow.uss`：现代炫彩风格
+- `ChatClient.cs`：View 层，负责 UI 查询、事件绑定、渲染
+- `ChatViewModel.cs`：MVVM 状态与响应式流程
+- `ChatService.cs`：HeTu 连接、系统调用与订阅桥接
+- `ChatRenderers.cs`：消息/系统事件/成员项 UI 渲染器
+- `ChatModels.cs`：ViewModel 的展示模型
+- `Components.cs`：MessagePack 组件映射
+- `ChatWindow.uxml` + `ChatWindow.uss`：Discord 风格 UI
 
 ## Quick Use
 
 1. 把这 3 个文件复制到 Unity 工程（例如 `Assets/ChatExample/`）。
 2. 新建场景对象并挂 `UIDocument` + `ChatClient`。
 3. `UIDocument` 指向 `ChatWindow.uxml`，并把 `ChatWindow.uss` 加到根样式。
-4. 启动服务端：`examples/server/chat/config.yml`。
+4. 启动服务端：`examples/chat/server/config.yml`。
 5. Play。
 
 ## Reactive Binding
 
-- 在线用户列表：`IndexSubscription<OnlineUser>.ObserveAdd()`
-- 聊天气泡列表：`IndexSubscription<ChatMessage>.ObserveAdd()`
-- 单条消息与本人信息实时刷新：`RowSubscription<T>.Subject`
+- 在线成员列表：订阅 `OnlineUser`，按 `online` 分组为在线/离线
+- 聊天流：订阅 `ChatMessage`，`kind=chat/system` 分别渲染
+- 时间显示：使用 `created_at_ms` 格式化为 `HH:mm`
 
-所有 UI 更新都走 R3 流，不走轮询。
+所有 UI 更新都走 R3 响应流，不走轮询。

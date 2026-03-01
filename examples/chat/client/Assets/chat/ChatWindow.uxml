@@ -8,7 +8,7 @@
                         <ui:Label text="# general" class="channel-title" />
                         <ui:Label text="Welcome to the minimal HeTu chat demo." class="channel-subtitle" />
                     </ui:VisualElement>
-                    <ui:Label text="CONNECTED" class="connection-chip" />
+                    <ui:Label name="status-label" text="CONNECTED" class="connection-chip" />
                 </ui:VisualElement>
                 <ui:ScrollView name="message-scroll" class="message-scroll">
                     <ui:VisualElement name="message-list" class="message-list">
@@ -115,47 +115,17 @@
                     <ui:Button name="composer-send" text="Send Message" class="composer-send" />
                 </ui:VisualElement>
             </ui:VisualElement>
-            <ui:VisualElement class="members-panel">
-                <ui:Label text="MEMBERS" class="members-title" />
-                <ui:VisualElement class="members-online-group">
-                    <ui:Label text="ONLINE - 4" class="members-group-title" />
-                    <ui:VisualElement class="member-row member--online">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="You" class="member-name" />
+                <ui:VisualElement class="members-panel">
+                    <ui:Label text="MEMBERS" class="members-title" />
+                    <ui:VisualElement class="members-online-group">
+                        <ui:Label name="online-title" text="ONLINE - 0" class="members-group-title" />
+                        <ui:VisualElement name="online-list" class="members-list" />
                     </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--online">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Luna" class="member-name" />
-                    </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--online">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Aster" class="member-name" />
-                    </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--online">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Rin" class="member-name" />
+                    <ui:VisualElement class="members-offline-group">
+                        <ui:Label name="offline-title" text="OFFLINE - 0" class="members-group-title" />
+                        <ui:VisualElement name="offline-list" class="members-list" />
                     </ui:VisualElement>
                 </ui:VisualElement>
-                <ui:VisualElement class="members-offline-group">
-                    <ui:Label text="OFFLINE - 4" class="members-group-title" />
-                    <ui:VisualElement class="member-row member--offline">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Milo" class="member-name" />
-                    </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--offline">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Nina" class="member-name" />
-                    </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--offline">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Theo" class="member-name" />
-                    </ui:VisualElement>
-                    <ui:VisualElement class="member-row member--offline">
-                        <ui:VisualElement class="member-status-dot" />
-                        <ui:Label text="Uma" class="member-name" />
-                    </ui:VisualElement>
-                </ui:VisualElement>
-            </ui:VisualElement>
         </ui:VisualElement>
     </ui:VisualElement>
 </ui:UXML>

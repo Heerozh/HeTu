@@ -344,6 +344,10 @@
     margin-bottom: 14px;
 }
 
+.members-list {
+    flex-direction: column;
+}
+
 .members-group-title {
     font-size: 11px;
     color: #949ba4;
