@@ -26,7 +26,9 @@ def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
-async def _insert_message(ctx: hetu.SystemContext, owner: int, name: str, text: str, kind: str):
+async def _insert_message(
+    ctx: hetu.SystemContext, owner: int, name: str, text: str, kind: str
+):
     row = ChatMessage.new_row()
     row.owner = int(owner)
     row.name = str(name)[:32]
@@ -49,6 +51,7 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
         row.name = username
         row.online = True
         row.last_seen_ms = _now_ms()
+        ctx.user_data["me"] = row
 
     await _insert_message(
         ctx,
@@ -66,12 +69,11 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
 )
 async def user_quit(ctx: hetu.SystemContext):
     if row := await ctx.repo[OnlineUser].get(owner=ctx.caller):
-        username = row.name
-        async with ctx.repo[OnlineUser].upsert(owner=ctx.caller) as current:
-            current.name = username
-            current.online = False
-            current.last_seen_ms = _now_ms()
+        row.online = False
+        row.last_seen_ms = _now_ms()
+        await ctx.repo[OnlineUser].update(row)
 
+        username = row.name
         await _insert_message(
             ctx,
             owner=ctx.caller,
@@ -87,7 +89,7 @@ async def user_quit(ctx: hetu.SystemContext):
     permission=hetu.Permission.USER,
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
-    me = await ctx.repo[OnlineUser].get(owner=ctx.caller)
+    me = ctx.user_data["me"]
     assert me and me.online, "call user_login first"
     await _insert_message(
         ctx,
