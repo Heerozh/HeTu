@@ -1,5 +1,3 @@
-using System.Collections.Generic;
-
 namespace Chat
 {
     public enum ChatFeedItemType
@@ -8,13 +6,6 @@ namespace Chat
         SystemJoin,
         SystemLeave,
         SystemInfo,
-    }
-
-    public enum ChatConnectionState
-    {
-        Connecting,
-        Connected,
-        Disconnected,
     }
 
     public sealed class ChatFeedItemVm
@@ -36,17 +27,5 @@ namespace Chat
         public string Name;
         public bool Online;
         public long LastSeenMs;
-    }
-
-    public sealed class MemberSnapshotVm
-    {
-        public IReadOnlyList<MemberVm> OnlineMembers;
-        public IReadOnlyList<MemberVm> OfflineMembers;
-
-        public MemberSnapshotVm(IReadOnlyList<MemberVm> onlineMembers, IReadOnlyList<MemberVm> offlineMembers)
-        {
-            OnlineMembers = onlineMembers;
-            OfflineMembers = offlineMembers;
-        }
     }
 }
