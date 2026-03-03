@@ -4,17 +4,17 @@
 
 ## Files
 
-- `ChatClient.cs`：View 层，负责 UI 查询、事件绑定、渲染
-- `ChatViewModel.cs`：MVVM 状态与响应式流程
-- `ChatService.cs`：HeTu 连接、系统调用与订阅桥接
+- `ChatClient.cs`：View 层，负责 UI 查询、HeTu 订阅流消费与渲染
+- `ChatViewModel.cs`：MVVM-Lite 透传层，只暴露 Observable 与调用入口
+- `ChatRepository.cs`：Model 层，负责 HeTu 连接、系统调用与订阅桥接
 - `ChatRenderers.cs`：消息/系统事件/成员项 UI 渲染器
-- `ChatModels.cs`：ViewModel 的展示模型
+- `ChatModels.cs`：View 的展示模型
 - `Components.cs`：MessagePack 组件映射
 - `ChatWindow.uxml` + `ChatWindow.uss`：Discord 风格 UI
 
 ## Quick Use
 
-1. 把这 3 个文件复制到 Unity 工程（例如 `Assets/ChatExample/`）。
+1. 把 `chat` 目录下的脚本与 UXML/USS 一起复制到 Unity 工程（例如 `Assets/ChatExample/`）。
 2. 新建场景对象并挂 `UIDocument` + `ChatClient`。
 3. `UIDocument` 指向 `ChatWindow.uxml`，并把 `ChatWindow.uss` 加到根样式。
 4. 启动服务端：`examples/chat/server/config.yml`。
