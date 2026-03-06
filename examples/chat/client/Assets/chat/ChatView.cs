@@ -181,11 +181,25 @@ namespace Chat
             if (_offlineTitle != null) _offlineTitle.text = $"OFFLINE - {_offlineMembers.Count}";
         }
 
-        private void ScheduleScrollToBottom()
+        private void ScheduleScrollToBottom(int attempts = 4)
         {
-            if (_messageList == null || _messages.Count == 0) return;
-            var idx = _messages.Count - 1;
-            _messageList.schedule.Execute(() => _messageList?.ScrollToItem(idx));
+            if (_messageList == null || attempts <= 0 || _messages.Count == 0) return;
+
+            var targetIndex = _messages.Count - 1;
+            _messageList.schedule.Execute(() => ScrollAttempt(targetIndex, attempts));
+        }
+
+        private void ScrollAttempt(int targetIndex, int attemptsLeft)
+        {
+            if (_messageList == null || _messages.Count == 0 || attemptsLeft <= 0) return;
+
+            var clampedIndex = Mathf.Clamp(targetIndex, 0, _messages.Count - 1);
+            _messageList.ScrollToItem(clampedIndex);
+
+            if (attemptsLeft > 1)
+            {
+                _messageList.schedule.Execute(() => ScrollAttempt(clampedIndex, attemptsLeft - 1));
+            }
         }
 
         // ───────────────────────────────────────────────────────────
