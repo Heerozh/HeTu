@@ -54,10 +54,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git config --global core.whitespace cr-at-eol \
     && git config --global core.autocrlf input
 
-ADD https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags /tmp/version-cache-buster.json
-
-# 4. 通过 npm 全局安装 codex
-RUN npm i -g @openai/codex
+# 4. 通过 npm 全局安装 gemini
+RUN npm install -g @google/gemini-cli
 
 # 定义容器内的 HOME 目录，通常 root 用户是 /root
 ENV HOME=/root
@@ -66,5 +64,5 @@ ENV HOME=/root
 WORKDIR /workspace
 
 # 6. 入口点
-# 默认直接执行 codex 命令，这样你可以直接像使用本地命令一样传参
-ENTRYPOINT ["codex"]
+# 默认直接执行 gemini 命令，这样你可以直接像使用本地命令一样传参
+ENTRYPOINT ["gemini"]

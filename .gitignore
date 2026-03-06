@@ -165,6 +165,7 @@ cython_debug/
 .idea/
 /logs
 /tests/logs
+/tests/data
 /notebooks
 profile.svg
 data/dump.rdb
@@ -178,3 +179,4 @@ benchmark_results.csv
 /examples/chat/client/UIElementsSchema
 # 禁用 claude
 /.claude
+examples/chat/client/output/*
