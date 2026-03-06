@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using HeTu;
 using R3;
 using UnityEngine;
 using UnityEngine.UIElements;
@@ -14,25 +15,25 @@ namespace Chat
     [RequireComponent(typeof(UIDocument))]
     public sealed class ChatView : MonoBehaviour
     {
-        [SerializeField] private LoginView loginView;
-
-        // ── UI refs ────────────────────────────────────────────────
-        private ListView _messageList;
-        private ListView _onlineList;
-        private ListView _offlineList;
-        private TextField _composerInput;
-        private Button _composerSend;
-        private Label _onlineTitle;
-        private Label _offlineTitle;
+        public LoginView loginView;
+        private readonly Dictionary<long, OnlineUser> _membersById = new();
 
         // ── Data (itemsSource for ListViews) ───────────────────────
         private readonly List<ChatMessage> _messages = new();
-        private readonly List<OnlineUser> _onlineMembers = new();
         private readonly List<OnlineUser> _offlineMembers = new();
-        private readonly Dictionary<long, OnlineUser> _membersById = new();
+        private readonly List<OnlineUser> _onlineMembers = new();
+        private DisposableBag _bag;
+        private TextField _composerInput;
+        private Button _composerSend;
+
+        // ── UI refs ────────────────────────────────────────────────
+        private ListView _messageList;
+        private ListView _offlineList;
+        private Label _offlineTitle;
+        private ListView _onlineList;
+        private Label _onlineTitle;
 
         private ChatViewModel _vm;
-        private DisposableBag _bag;
 
         // ───────────────────────────────────────────────────────────
         // Lifecycle
@@ -87,10 +88,12 @@ namespace Chat
             _ = SubscribeDataAsync();
 
             // ── Input ↔ ReactiveProperty (two-way) ──
-            _composerInput.RegisterValueChangedCallback(
-                evt => _vm.InputText.Value = evt.newValue);
+            _composerInput.RegisterValueChangedCallback(evt => _vm.InputText.Value = evt.newValue);
             _vm.InputText
-                .Subscribe(v => { if (_composerInput.value != v) _composerInput.value = v; })
+                .Subscribe(v =>
+                {
+                    if (_composerInput.value != v) _composerInput.value = v;
+                })
                 .AddTo(ref _bag);
 
             // ── Send button & Enter key → ReactiveCommand ──
@@ -109,56 +112,60 @@ namespace Chat
         {
             try
             {
-                await _vm.SubscribeAsync();
+                var memberSub = await HeTuClient.Instance.Range<OnlineUser>("owner", 0, long.MaxValue, 512);
+                var messageSub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+
+                // Tie subscription lifetime to this GameObject
+                memberSub.AddTo(gameObject);
+                messageSub.AddTo(gameObject);
+
+                // ── Messages ──
+                messageSub.ObserveAdd()
+                    .Subscribe(msg =>
+                    {
+                        _messages.Add(msg);
+                        _messageList?.Rebuild();
+                        ScheduleScrollToBottom();
+                    })
+                    .AddTo(ref _bag);
+
+                messageSub.ObserveRemove()
+                    .Subscribe(id =>
+                    {
+                        _messages.RemoveAll(m => m.ID == id);
+                        _messageList?.Rebuild();
+                    })
+                    .AddTo(ref _bag);
+
+                // ── Members ──
+                memberSub.ObserveAdd()
+                    .Subscribe(member =>
+                    {
+                        _membersById[member.ID] = member;
+                        // Also observe future updates for this row
+                        memberSub.ObserveRow(member.ID)
+                            .Subscribe(updated =>
+                            {
+                                _membersById[updated.ID] = updated;
+                                RebuildMemberLists();
+                            })
+                            .AddTo(ref _bag);
+                        RebuildMemberLists();
+                    })
+                    .AddTo(ref _bag);
+
+                memberSub.ObserveRemove()
+                    .Subscribe(id =>
+                    {
+                        _membersById.Remove(id);
+                        RebuildMemberLists();
+                    })
+                    .AddTo(ref _bag);
             }
             catch (Exception ex)
             {
                 Debug.LogError($"[ChatView] Subscribe failed: {ex.Message}");
-                return;
             }
-
-            // ── Messages ──
-            _vm.MessageAdded?
-                .Subscribe(msg =>
-                {
-                    _messages.Add(msg);
-                    _messageList?.Rebuild();
-                    ScheduleScrollToBottom();
-                })
-                .AddTo(ref _bag);
-
-            _vm.MessageRemoved?
-                .Subscribe(id =>
-                {
-                    _messages.RemoveAll(m => m.ID == id);
-                    _messageList?.Rebuild();
-                })
-                .AddTo(ref _bag);
-
-            // ── Members ──
-            _vm.MemberAdded?
-                .Subscribe(member =>
-                {
-                    _membersById[member.ID] = member;
-                    // Also observe future updates for this row
-                    _vm.ObserveMember(member.ID)?
-                        .Subscribe(updated =>
-                        {
-                            _membersById[updated.ID] = updated;
-                            RebuildMemberLists();
-                        })
-                        .AddTo(ref _bag);
-                    RebuildMemberLists();
-                })
-                .AddTo(ref _bag);
-
-            _vm.MemberRemoved?
-                .Subscribe(id =>
-                {
-                    _membersById.Remove(id);
-                    RebuildMemberLists();
-                })
-                .AddTo(ref _bag);
         }
 
         // ───────────────────────────────────────────────────────────
@@ -170,10 +177,8 @@ namespace Chat
             _onlineMembers.Clear();
             _offlineMembers.Clear();
             foreach (var m in _membersById.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
-            {
                 if (m.Online != 0) _onlineMembers.Add(m);
                 else _offlineMembers.Add(m);
-            }
 
             _onlineList?.Rebuild();
             _offlineList?.Rebuild();
@@ -196,10 +201,7 @@ namespace Chat
             var clampedIndex = Mathf.Clamp(targetIndex, 0, _messages.Count - 1);
             _messageList.ScrollToItem(clampedIndex);
 
-            if (attemptsLeft > 1)
-            {
-                _messageList.schedule.Execute(() => ScrollAttempt(clampedIndex, attemptsLeft - 1));
-            }
+            if (attemptsLeft > 1) _messageList.schedule.Execute(() => ScrollAttempt(clampedIndex, attemptsLeft - 1));
         }
 
         // ───────────────────────────────────────────────────────────

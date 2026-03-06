@@ -77,6 +77,7 @@ namespace Chat
 
             var dot = new VisualElement();
             dot.AddToClassList("member-status-dot");
+
             row.Add(dot);
 
             var name = new Label(member.Name);

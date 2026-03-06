@@ -12,7 +12,7 @@ namespace Chat
         [Key("kind")] public string Kind;
         [Key("name")] public string Name;
         [Key("owner")] public long Owner;
-        [Key("text")] public string Text;
+        [Key("text")] public string Text; 
     }
     
     

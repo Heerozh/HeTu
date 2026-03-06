@@ -5,17 +5,18 @@
 @email: heeroz@gmail.com
 """
 
-from typing import TYPE_CHECKING, cast, Callable, AsyncIterator
 import asyncio
 from contextlib import AbstractAsyncContextManager
-from .base import RaceCondition
+from typing import TYPE_CHECKING, AsyncIterator, Callable, cast
 
+from .base import RaceCondition
 from .idmap import IdentityMap
 from .repo import SessionRepository
 
 if TYPE_CHECKING:
-    from . import Backend, BackendClient
     from hetu.data.component import BaseComponent
+
+    from . import Backend, BackendClient
 
 
 class Session(AbstractAsyncContextManager):

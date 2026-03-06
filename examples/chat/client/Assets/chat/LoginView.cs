@@ -10,7 +10,7 @@ namespace Chat
     ///     Minimal login screen — shows how few lines you need to connect with HeTu.
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
-    public sealed class LoginView : MonoBehaviour
+    public sealed class LoginView : MonoBehaviour 
     {
         /// <summary>Fired after a successful login. Args: userId, userName.</summary>
         public event Action<long, string> OnLoggedIn;

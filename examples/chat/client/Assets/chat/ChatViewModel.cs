@@ -1,21 +1,18 @@
 using System;
-using System.Threading.Tasks;
 using HeTu;
 using R3;
 
 namespace Chat
 {
     /// <summary>
-    ///     Reactive ViewModel — directly wraps HeTu subscriptions.
-    ///     No Repository or Model layers needed: HeTu Components ARE the model.
+    ///     Reactive ViewModel for Chat Input — handles input state and send command.
+    ///     Data subscriptions are directly managed by the View.
     /// </summary>
     public sealed class ChatViewModel : IDisposable
     {
         private bool _disposed;
-        private IndexSubscription<OnlineUser> _memberSub;
-        private IndexSubscription<ChatMessage> _messageSub;
 
-        // ── Constructor ────────────────────────────────────────────
+        // ── Constructor ──────────────────────────────────────────── 
         public ChatViewModel(long userId)
         {
             UserId = userId;
@@ -42,14 +39,6 @@ namespace Chat
         /// </summary>
         public ReactiveCommand<Unit> SendChat { get; }
 
-        // ── Message stream (for ListView binding) ──────────────────
-        public Observable<ChatMessage> MessageAdded => _messageSub?.ObserveAdd();
-        public Observable<long> MessageRemoved => _messageSub?.ObserveRemove();
-
-        // ── Member stream (for ListView binding) ───────────────────
-        public Observable<OnlineUser> MemberAdded => _memberSub?.ObserveAdd();
-        public Observable<long> MemberRemoved => _memberSub?.ObserveRemove();
-
         // ── Cleanup ────────────────────────────────────────────────
         public void Dispose()
         {
@@ -57,24 +46,6 @@ namespace Chat
             _disposed = true;
             SendChat?.Dispose();
             InputText?.Dispose();
-            _messageSub?.Dispose();
-            _memberSub?.Dispose();
-        }
-
-        /// <summary>Observe a specific member row for updates.</summary>
-        public Observable<OnlineUser> ObserveMember(long rowId)
-        {
-            return _memberSub?.ObserveRow(rowId);
-        }
-
-        // ── Subscribe to HeTu data ────────────────────────────────
-        public async Task SubscribeAsync()
-        {
-            _memberSub = await HeTuClient.Instance.Range<OnlineUser>(
-                "owner", 0, long.MaxValue, 512);
-
-            _messageSub = await HeTuClient.Instance.Range<ChatMessage>(
-                "id", 0, long.MaxValue, 1024);
         }
     }
 }
