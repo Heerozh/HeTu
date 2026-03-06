@@ -1,21 +1,79 @@
+using System;
 using UnityEngine.UIElements;
 
 namespace Chat
 {
+    /// <summary>
+    ///     Pure UI renderers — build VisualElements from HeTu Components directly.
+    /// </summary>
     public static class ChatRenderers
     {
-        public static VisualElement CreateFeedItem(ChatFeedItemVm item)
+        // ── Messages ─────────────────────────────────────────────
+
+        public static VisualElement CreateFeedItem(ChatMessage msg, long selfUserId)
         {
-            return item.Type == ChatFeedItemType.Chat
-                ? CreateMessageRow(item)
-                : CreateEventRow(item);
+            return IsSystemMessage(msg.Kind)
+                ? CreateEventRow(msg)
+                : CreateMessageRow(msg, msg.Owner == selfUserId);
         }
 
-        public static VisualElement CreateMemberRow(MemberVm member)
+        private static VisualElement CreateMessageRow(ChatMessage msg, bool isSelf)
+        {
+            var row = new VisualElement();
+            row.AddToClassList("message-row");
+            row.AddToClassList(isSelf ? "message--self" : "message--other");
+
+            var avatar = new VisualElement();
+            avatar.AddToClassList("avatar");
+            avatar.AddToClassList(isSelf ? "avatar--self" : "avatar--other");
+            var avatarText = new Label(GetInitial(msg.Name));
+            avatarText.AddToClassList("avatar-text");
+            avatar.Add(avatarText);
+
+            var content = new VisualElement();
+            content.AddToClassList("message-content");
+
+            var meta = new VisualElement();
+            meta.AddToClassList("message-meta");
+            var author = new Label(msg.Name);
+            author.AddToClassList("message-author");
+            var time = new Label(FormatTime(msg.CreatedAtMs));
+            time.AddToClassList("message-time");
+            meta.Add(author);
+            meta.Add(time);
+
+            var text = new Label(msg.Text);
+            text.AddToClassList("message-bubble");
+
+            content.Add(meta);
+            content.Add(text);
+            row.Add(avatar);
+            row.Add(content);
+            return row;
+        }
+
+        private static VisualElement CreateEventRow(ChatMessage msg)
+        {
+            var row = new VisualElement();
+            row.AddToClassList("event-row");
+
+            var lower = msg.Text?.ToLowerInvariant() ?? "";
+            if (lower.Contains("joined the chat")) row.AddToClassList("event--join");
+            else if (lower.Contains("left the chat")) row.AddToClassList("event--leave");
+
+            var text = new Label(msg.Text);
+            text.AddToClassList("event-text");
+            row.Add(text);
+            return row;
+        }
+
+        // ── Members ──────────────────────────────────────────────
+
+        public static VisualElement CreateMemberRow(OnlineUser member)
         {
             var row = new VisualElement();
             row.AddToClassList("member-row");
-            row.AddToClassList(member.Online ? "member--online" : "member--offline");
+            row.AddToClassList(member.Online != 0 ? "member--online" : "member--offline");
 
             var dot = new VisualElement();
             dot.AddToClassList("member-status-dot");
@@ -27,70 +85,25 @@ namespace Chat
             return row;
         }
 
-        private static VisualElement CreateMessageRow(ChatFeedItemVm item)
+        // ── Helpers ──────────────────────────────────────────────
+
+        private static bool IsSystemMessage(string kind) =>
+            string.Equals(kind, "system", StringComparison.OrdinalIgnoreCase);
+
+        private static string GetInitial(string name) =>
+            string.IsNullOrWhiteSpace(name) ? "?" : name.Trim().Substring(0, 1).ToUpperInvariant();
+
+        private static string FormatTime(long createdAtMs)
         {
-            var row = new VisualElement();
-            row.AddToClassList("message-row");
-            row.AddToClassList(item.IsSelf ? "message--self" : "message--other");
-
-            var avatar = new VisualElement();
-            avatar.AddToClassList("avatar");
-            avatar.AddToClassList(item.IsSelf ? "avatar--self" : "avatar--other");
-            var avatarText = new Label(GetInitial(item.Author));
-            avatarText.AddToClassList("avatar-text");
-            avatar.Add(avatarText);
-
-            var content = new VisualElement();
-            content.AddToClassList("message-content");
-
-            var meta = new VisualElement();
-            meta.AddToClassList("message-meta");
-            var author = new Label(item.Author);
-            author.AddToClassList("message-author");
-            var time = new Label(item.TimeText);
-            time.AddToClassList("message-time");
-            meta.Add(author);
-            meta.Add(time);
-
-            var text = new Label(item.Text);
-            text.AddToClassList("message-bubble");
-
-            content.Add(meta);
-            content.Add(text);
-
-            row.Add(avatar);
-            row.Add(content);
-            return row;
-        }
-
-        private static VisualElement CreateEventRow(ChatFeedItemVm item)
-        {
-            var row = new VisualElement();
-            row.AddToClassList("event-row");
-            switch (item.Type)
+            if (createdAtMs <= 0) return "--:--";
+            try
             {
-                case ChatFeedItemType.SystemJoin:
-                    row.AddToClassList("event--join");
-                    break;
-                case ChatFeedItemType.SystemLeave:
-                    row.AddToClassList("event--leave");
-                    break;
+                return DateTimeOffset
+                    .FromUnixTimeMilliseconds(createdAtMs)
+                    .ToLocalTime()
+                    .ToString("HH:mm");
             }
-
-            var text = new Label(item.Text);
-            text.AddToClassList("event-text");
-            row.Add(text);
-            return row;
-        }
-
-        private static string GetInitial(string name)
-        {
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                return "?";
-            }
-
-            return name.Trim().Substring(0, 1).ToUpperInvariant();
+            catch { return "--:--"; }
         }
     }
 }

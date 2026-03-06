@@ -1,65 +1,80 @@
 using System;
 using System.Threading.Tasks;
+using HeTu;
 using R3;
 
 namespace Chat
 {
+    /// <summary>
+    ///     Reactive ViewModel — directly wraps HeTu subscriptions.
+    ///     No Repository or Model layers needed: HeTu Components ARE the model.
+    /// </summary>
     public sealed class ChatViewModel : IDisposable
     {
-        private readonly ChatRepository _repository;
         private bool _disposed;
+        private IndexSubscription<OnlineUser> _memberSub;
+        private IndexSubscription<ChatMessage> _messageSub;
 
-        public ChatViewModel(ChatRepository repository)
+        // ── Constructor ────────────────────────────────────────────
+        public ChatViewModel(long userId)
         {
-            _repository = repository;
+            UserId = userId;
+
+            SendChat = InputText
+                .Select(t => !string.IsNullOrWhiteSpace(t))
+                .ToReactiveCommand(x =>
+                {
+                    var text = InputText.Value?.Trim();
+                    if (string.IsNullOrEmpty(text)) return;
+                    _ = HeTuClient.Instance.CallSystem("user_chat", text);
+                    InputText.Value = "";
+                });
         }
 
-        public Observable<Unit> Connected => _repository.Connected;
-        public Observable<string> Closed => _repository.Closed;
-        public Observable<OnlineUser> MemberUpserted => _repository.MemberUpserted;
-        public Observable<long> MemberDeleted => _repository.MemberDeleted;
-        public Observable<ChatMessage> MessageUpserted => _repository.MessageUpserted;
-        public Observable<long> MessageDeleted => _repository.MessageDeleted;
+        public long UserId { get; }
 
-        public void Connect(string serverUrl, string authKey)
-        {
-            _repository.Connect(serverUrl, authKey);
-        }
+        // ── Input ──────────────────────────────────────────────────
+        public BindableReactiveProperty<string> InputText { get; } = new("");
 
-        public Task LoginAsync(long userId, string userName)
-        {
-            return _repository.LoginAsync(userId, userName);
-        }
+        // ── Command ────────────────────────────────────────────────
+        /// <summary>
+        ///     Send chat — only executable when InputText is non-empty.
+        /// </summary>
+        public ReactiveCommand<Unit> SendChat { get; }
 
-        public Task SubscribeMembersAsync()
-        {
-            return _repository.SubscribeMembersAsync();
-        }
+        // ── Message stream (for ListView binding) ──────────────────
+        public Observable<ChatMessage> MessageAdded => _messageSub?.ObserveAdd();
+        public Observable<long> MessageRemoved => _messageSub?.ObserveRemove();
 
-        public Task SubscribeMessagesAsync()
-        {
-            return _repository.SubscribeMessagesAsync();
-        }
+        // ── Member stream (for ListView binding) ───────────────────
+        public Observable<OnlineUser> MemberAdded => _memberSub?.ObserveAdd();
+        public Observable<long> MemberRemoved => _memberSub?.ObserveRemove();
 
-        public Task SendChatAsync(string text)
-        {
-            return _repository.SendChatAsync(text);
-        }
-
-        public void Close()
-        {
-            _repository.Close();
-        }
-
+        // ── Cleanup ────────────────────────────────────────────────
         public void Dispose()
         {
-            if (_disposed)
-            {
-                return;
-            }
-
+            if (_disposed) return;
             _disposed = true;
-            _repository.Dispose();
+            SendChat?.Dispose();
+            InputText?.Dispose();
+            _messageSub?.Dispose();
+            _memberSub?.Dispose();
+        }
+
+        /// <summary>Observe a specific member row for updates.</summary>
+        public Observable<OnlineUser> ObserveMember(long rowId)
+        {
+            return _memberSub?.ObserveRow(rowId);
+        }
+
+        // ── Subscribe to HeTu data ────────────────────────────────
+        public async Task SubscribeAsync()
+        {
+            _memberSub = await HeTuClient.Instance.Range<OnlineUser>(
+                "owner", 0, long.MaxValue, 512);
+
+            _messageSub = await HeTuClient.Instance.Range<ChatMessage>(
+                "id", 0, long.MaxValue, 1024);
         }
     }
 }

@@ -9,39 +9,39 @@ using UnityEngine.UIElements;
 namespace Chat
 {
     /// <summary>
-    ///     Chat view — only handles chat UI. Connection / login is managed by <see cref="LoginView"/>.
+    ///     Chat view — subscribes ViewModel reactive streams to UIToolkit controls.
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public sealed class ChatView : MonoBehaviour
     {
         [SerializeField] private LoginView loginView;
 
-        private readonly Dictionary<long, ChatFeedItemVm> _feedById = new();
-        private readonly List<ChatFeedItemVm> _feedItems = new();
-        private readonly Dictionary<long, MemberVm> _membersById = new();
-        private readonly List<MemberVm> _offlineItems = new();
-        private readonly List<MemberVm> _onlineItems = new();
+        // ── UI refs ────────────────────────────────────────────────
+        private ListView _messageList;
+        private ListView _onlineList;
+        private ListView _offlineList;
         private TextField _composerInput;
         private Button _composerSend;
-        private ListView _messageList;
-        private ListView _offlineList;
-        private Label _offlineTitle;
-        private ListView _onlineList;
         private Label _onlineTitle;
-        private Label _statusLabel;
+        private Label _offlineTitle;
 
-        private long _userId;
+        // ── Data (itemsSource for ListViews) ───────────────────────
+        private readonly List<ChatMessage> _messages = new();
+        private readonly List<OnlineUser> _onlineMembers = new();
+        private readonly List<OnlineUser> _offlineMembers = new();
+        private readonly Dictionary<long, OnlineUser> _membersById = new();
 
-        private DisposableBag _uiBag;
-        private ChatViewModel _viewModel;
+        private ChatViewModel _vm;
+        private DisposableBag _bag;
+
+        // ───────────────────────────────────────────────────────────
+        // Lifecycle
+        // ───────────────────────────────────────────────────────────
 
         private void OnEnable()
         {
-            _uiBag = default;
-            BindView();
-            BindViewModel();
-            BindUserInput();
-
+            _bag = default;
+            BindUI();
             if (loginView != null)
                 loginView.OnLoggedIn += HandleLoggedIn;
         }
@@ -50,187 +50,149 @@ namespace Chat
         {
             if (loginView != null)
                 loginView.OnLoggedIn -= HandleLoggedIn;
-
-            if (_composerSend != null) _composerSend.clicked -= OnSendClicked;
-            if (_composerInput != null) _composerInput.UnregisterCallback<KeyDownEvent>(OnComposerKeyDown);
-
-            _uiBag.Dispose();
-            _viewModel?.Dispose();
-            _viewModel = null;
+            _bag.Dispose();
+            _vm?.Dispose();
+            _vm = null;
         }
 
-        // ── View Binding ──────────────────────────────────────────────
+        // ───────────────────────────────────────────────────────────
+        // UI Setup
+        // ───────────────────────────────────────────────────────────
 
-        private void BindView()
+        private void BindUI()
         {
             var root = GetComponent<UIDocument>().rootVisualElement;
-            _statusLabel = root.Q<Label>("status-label");
-            _onlineTitle = root.Q<Label>("online-title");
-            _offlineTitle = root.Q<Label>("offline-title");
             _messageList = root.Q<ListView>("message-list");
             _onlineList = root.Q<ListView>("online-list");
             _offlineList = root.Q<ListView>("offline-list");
             _composerInput = root.Q<TextField>("composer-input");
             _composerSend = root.Q<Button>("composer-send");
+            _onlineTitle = root.Q<Label>("online-title");
+            _offlineTitle = root.Q<Label>("offline-title");
 
-            ConfigureMessageListView();
-            ConfigureMemberListView(_onlineList, _onlineItems);
-            ConfigureMemberListView(_offlineList, _offlineItems);
+            ConfigureListView(_messageList, _messages);
+            ConfigureListView(_onlineList, _onlineMembers);
+            ConfigureListView(_offlineList, _offlineMembers);
         }
 
-        private void BindViewModel()
-        {
-            _viewModel = new ChatViewModel(new ChatRepository());
-
-            _viewModel.MemberUpserted
-                .Subscribe(HandleMemberUpserted)
-                .AddTo(ref _uiBag);
-
-            _viewModel.MemberDeleted
-                .Subscribe(HandleMemberDeleted)
-                .AddTo(ref _uiBag);
-
-            _viewModel.MessageUpserted
-                .Subscribe(HandleMessageUpserted)
-                .AddTo(ref _uiBag);
-
-            _viewModel.MessageDeleted
-                .Subscribe(HandleMessageDeleted)
-                .AddTo(ref _uiBag);
-        }
-
-        private void BindUserInput()
-        {
-            if (_composerSend != null) _composerSend.clicked += OnSendClicked;
-            _composerInput?.RegisterCallback<KeyDownEvent>(OnComposerKeyDown);
-        }
-
-        // ── Login callback ────────────────────────────────────────────
+        // ───────────────────────────────────────────────────────────
+        // After login — wire up ViewModel reactive streams
+        // ───────────────────────────────────────────────────────────
 
         private void HandleLoggedIn(long userId, string userName)
         {
-            _userId = userId;
-            SetStatus("CONNECTED");
+            _vm = new ChatViewModel(userId);
+
+            // ── Subscribe data streams ──
             _ = SubscribeDataAsync();
+
+            // ── Input ↔ ReactiveProperty (two-way) ──
+            _composerInput.RegisterValueChangedCallback(
+                evt => _vm.InputText.Value = evt.newValue);
+            _vm.InputText
+                .Subscribe(v => { if (_composerInput.value != v) _composerInput.value = v; })
+                .AddTo(ref _bag);
+
+            // ── Send button & Enter key → ReactiveCommand ──
+            _composerSend.clicked += () => _vm.SendChat.Execute(Unit.Default);
+            _composerInput.RegisterCallback<KeyDownEvent>(evt =>
+            {
+                if (evt.keyCode is KeyCode.Return or KeyCode.KeypadEnter)
+                {
+                    _vm.SendChat.Execute(Unit.Default);
+                    evt.StopImmediatePropagation();
+                }
+            });
         }
 
         private async Task SubscribeDataAsync()
         {
-            var vm = _viewModel;
-            if (vm == null) return;
-
             try
             {
-                await vm.SubscribeMembersAsync();
-                await vm.SubscribeMessagesAsync();
+                await _vm.SubscribeAsync();
             }
             catch (Exception ex)
             {
-                SetStatus($"ERROR: {ex.Message}");
+                Debug.LogError($"[ChatView] Subscribe failed: {ex.Message}");
+                return;
             }
+
+            // ── Messages ──
+            _vm.MessageAdded?
+                .Subscribe(msg =>
+                {
+                    _messages.Add(msg);
+                    _messageList?.Rebuild();
+                    ScheduleScrollToBottom();
+                })
+                .AddTo(ref _bag);
+
+            _vm.MessageRemoved?
+                .Subscribe(id =>
+                {
+                    _messages.RemoveAll(m => m.ID == id);
+                    _messageList?.Rebuild();
+                })
+                .AddTo(ref _bag);
+
+            // ── Members ──
+            _vm.MemberAdded?
+                .Subscribe(member =>
+                {
+                    _membersById[member.ID] = member;
+                    // Also observe future updates for this row
+                    _vm.ObserveMember(member.ID)?
+                        .Subscribe(updated =>
+                        {
+                            _membersById[updated.ID] = updated;
+                            RebuildMemberLists();
+                        })
+                        .AddTo(ref _bag);
+                    RebuildMemberLists();
+                })
+                .AddTo(ref _bag);
+
+            _vm.MemberRemoved?
+                .Subscribe(id =>
+                {
+                    _membersById.Remove(id);
+                    RebuildMemberLists();
+                })
+                .AddTo(ref _bag);
         }
 
-        // ── User Input ───────────────────────────────────────────────
+        // ───────────────────────────────────────────────────────────
+        // List helpers
+        // ───────────────────────────────────────────────────────────
 
-        private void OnSendClicked() => _ = SendChatAsync();
-
-        private void OnComposerKeyDown(KeyDownEvent evt)
+        private void RebuildMemberLists()
         {
-            if (evt.keyCode != KeyCode.Return && evt.keyCode != KeyCode.KeypadEnter) return;
-            _ = SendChatAsync();
-            evt.StopImmediatePropagation();
-        }
-
-        private async Task SendChatAsync()
-        {
-            var vm = _viewModel;
-            if (vm == null) return;
-
-            var text = _composerInput?.value;
-            if (string.IsNullOrWhiteSpace(text)) return;
-
-            try
+            _onlineMembers.Clear();
+            _offlineMembers.Clear();
+            foreach (var m in _membersById.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase))
             {
-                await vm.SendChatAsync(text.Trim());
-                if (_composerInput != null) _composerInput.value = string.Empty;
+                if (m.Online != 0) _onlineMembers.Add(m);
+                else _offlineMembers.Add(m);
             }
-            catch (Exception ex)
-            {
-                SetStatus($"SEND FAILED: {ex.Message}");
-            }
-        }
-
-        // ── Data Handlers ────────────────────────────────────────────
-
-        private void HandleMemberUpserted(OnlineUser user)
-        {
-            _membersById[user.ID] = new MemberVm
-            {
-                Id = user.ID,
-                Owner = user.Owner,
-                Name = user.Name,
-                Online = user.Online != 0,
-                LastSeenMs = user.LastSeenMs
-            };
-            RebuildMembers();
-        }
-
-        private void HandleMemberDeleted(long rowId)
-        {
-            if (_membersById.Remove(rowId)) RebuildMembers();
-        }
-
-        private void HandleMessageUpserted(ChatMessage row)
-        {
-            _feedById[row.ID] = MapFeedItem(row);
-            RebuildFeed();
-        }
-
-        private void HandleMessageDeleted(long rowId)
-        {
-            if (_feedById.Remove(rowId)) RebuildFeed();
-        }
-
-        // ── Rebuild Lists ────────────────────────────────────────────
-
-        private void RebuildFeed()
-        {
-            _feedItems.Clear();
-            _feedItems.AddRange(_feedById.Values
-                .OrderBy(item => item.CreatedAtMs)
-                .ThenBy(item => item.Id));
-
-            _messageList?.Rebuild();
-            if (_feedItems.Count > 0) ScheduleScrollFeedToBottom(4);
-        }
-
-        private void RebuildMembers()
-        {
-            _onlineItems.Clear();
-            _onlineItems.AddRange(_membersById.Values
-                .Where(item => item.Online)
-                .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase));
-
-            _offlineItems.Clear();
-            _offlineItems.AddRange(_membersById.Values
-                .Where(item => !item.Online)
-                .OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase));
 
             _onlineList?.Rebuild();
             _offlineList?.Rebuild();
-
-            if (_onlineTitle != null) _onlineTitle.text = $"ONLINE - {_onlineItems.Count}";
-            if (_offlineTitle != null) _offlineTitle.text = $"OFFLINE - {_offlineItems.Count}";
+            if (_onlineTitle != null) _onlineTitle.text = $"ONLINE - {_onlineMembers.Count}";
+            if (_offlineTitle != null) _offlineTitle.text = $"OFFLINE - {_offlineMembers.Count}";
         }
 
-        // ── Helpers ──────────────────────────────────────────────────
-
-        private void SetStatus(string text)
+        private void ScheduleScrollToBottom()
         {
-            if (_statusLabel != null) _statusLabel.text = text;
+            if (_messageList == null || _messages.Count == 0) return;
+            var idx = _messages.Count - 1;
+            _messageList.schedule.Execute(() => _messageList?.ScrollToItem(idx));
         }
 
-        private static void ConfigureMemberListView(ListView listView, List<MemberVm> source)
+        // ───────────────────────────────────────────────────────────
+        // ListView configuration
+        // ───────────────────────────────────────────────────────────
+
+        private void ConfigureListView<T>(ListView listView, List<T> source)
         {
             if (listView == null) return;
 
@@ -239,107 +201,24 @@ namespace Chat
             listView.showBorder = false;
             listView.showAlternatingRowBackgrounds = AlternatingRowBackground.None;
             listView.virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight;
-            listView.makeItem = static () =>
-            {
-                var host = new VisualElement();
-                host.AddToClassList("list-row-host");
-                return host;
-            };
+
+            listView.makeItem = () => new VisualElement { name = "list-row-host" };
             listView.bindItem = (element, index) =>
             {
                 if ((uint)index >= (uint)source.Count) return;
-
                 element.Clear();
-                element.Add(ChatRenderers.CreateMemberRow(source[index]));
+                var item = source[index];
+                switch (item)
+                {
+                    case ChatMessage msg:
+                        element.Add(ChatRenderers.CreateFeedItem(msg, _vm?.UserId ?? 0));
+                        break;
+                    case OnlineUser member:
+                        element.Add(ChatRenderers.CreateMemberRow(member));
+                        break;
+                }
             };
             listView.unbindItem = (element, _) => element.Clear();
-        }
-
-        private void ConfigureMessageListView()
-        {
-            if (_messageList == null) return;
-
-            _messageList.itemsSource = _feedItems;
-            _messageList.selectionType = SelectionType.None;
-            _messageList.showBorder = false;
-            _messageList.showAlternatingRowBackgrounds = AlternatingRowBackground.None;
-            _messageList.virtualizationMethod = CollectionVirtualizationMethod.DynamicHeight;
-            _messageList.makeItem = static () =>
-            {
-                var host = new VisualElement();
-                host.AddToClassList("list-row-host");
-                return host;
-            };
-            _messageList.bindItem = (element, index) =>
-            {
-                if ((uint)index >= (uint)_feedItems.Count) return;
-
-                element.Clear();
-                element.Add(ChatRenderers.CreateFeedItem(_feedItems[index]));
-            };
-            _messageList.unbindItem = (element, _) => element.Clear();
-        }
-
-        private void ScheduleScrollFeedToBottom(int attempts)
-        {
-            if (_messageList == null || attempts <= 0 || _feedItems.Count == 0) return;
-
-            var targetIndex = _feedItems.Count - 1;
-            _messageList.schedule.Execute(() => ScrollFeedToBottomAttempt(targetIndex, attempts));
-        }
-
-        private void ScrollFeedToBottomAttempt(int targetIndex, int attemptsLeft)
-        {
-            if (_messageList == null || _feedItems.Count == 0 || attemptsLeft <= 0) return;
-
-            var clampedIndex = Mathf.Clamp(targetIndex, 0, _feedItems.Count - 1);
-            _messageList.ScrollToItem(clampedIndex);
-
-            if (attemptsLeft > 1)
-                _messageList.schedule.Execute(() => ScrollFeedToBottomAttempt(clampedIndex, attemptsLeft - 1));
-        }
-
-        private ChatFeedItemVm MapFeedItem(ChatMessage row)
-        {
-            var type = MapFeedType(row.Kind, row.Text);
-            return new ChatFeedItemVm
-            {
-                Id = row.ID,
-                Type = type,
-                Owner = row.Owner,
-                Author = row.Name,
-                Text = row.Text,
-                IsSelf = type == ChatFeedItemType.Chat && row.Owner == _userId,
-                TimeText = FormatTime(row.CreatedAtMs),
-                CreatedAtMs = row.CreatedAtMs
-            };
-        }
-
-        private static ChatFeedItemType MapFeedType(string kind, string text)
-        {
-            if (!string.Equals(kind, "system", StringComparison.OrdinalIgnoreCase)) return ChatFeedItemType.Chat;
-
-            var lower = text?.ToLowerInvariant() ?? "";
-            if (lower.Contains("joined the chat")) return ChatFeedItemType.SystemJoin;
-            if (lower.Contains("left the chat")) return ChatFeedItemType.SystemLeave;
-            return ChatFeedItemType.SystemInfo;
-        }
-
-        private static string FormatTime(long createdAtMs)
-        {
-            if (createdAtMs <= 0) return "--:--";
-
-            try
-            {
-                return DateTimeOffset
-                    .FromUnixTimeMilliseconds(createdAtMs)
-                    .ToLocalTime()
-                    .ToString("HH:mm");
-            }
-            catch
-            {
-                return "--:--";
-            }
         }
     }
 }
