@@ -1,7 +1,23 @@
 <ui:UXML xmlns:ui="UnityEngine.UIElements" xmlns="UnityEngine.UIElements">
     <Style src="project://database/Assets/Chat/ChatWindow.uss?fileID=7433441132597879392&amp;guid=0b5bc7542f336bd4b89f5e2aced86e56&amp;type=3#ChatWindow" />
     <ui:VisualElement class="chat-root">
-        <ui:VisualElement class="chat-shell">
+        <!-- ───── Login Panel ───── -->
+        <ui:VisualElement name="login-panel" class="login-panel">
+            <ui:VisualElement class="login-card">
+                <ui:VisualElement class="login-logo">
+                    <ui:Label text="⬡" class="login-logo-icon" />
+                </ui:VisualElement>
+                <ui:Label text="Welcome to HeTu Chat" class="login-title" />
+                <ui:Label text="Connect to a chat room to start messaging" class="login-subtitle" />
+                <ui:TextField name="login-url" label="SERVER URL" value="ws://127.0.0.1:2466/hetu/chat-room-1" class="login-field" />
+                <ui:TextField name="login-userid" label="USER ID" value="10001" class="login-field" />
+                <ui:TextField name="login-username" label="DISPLAY NAME" value="guest_10001" class="login-field" />
+                <ui:Button name="login-btn" text="Login" class="login-btn" />
+                <ui:Label name="login-status" class="login-status" />
+            </ui:VisualElement>
+        </ui:VisualElement>
+        <!-- ───── Chat Shell (hidden until login) ───── -->
+        <ui:VisualElement name="chat-shell" class="chat-shell" style="display: none;">
             <ui:VisualElement class="chat-main">
                 <ui:VisualElement class="chat-header">
                     <ui:VisualElement class="chat-header-main">

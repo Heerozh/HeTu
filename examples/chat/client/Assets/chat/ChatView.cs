@@ -8,13 +8,13 @@ using UnityEngine.UIElements;
 
 namespace Chat
 {
+    /// <summary>
+    ///     Chat view — only handles chat UI. Connection / login is managed by <see cref="LoginView"/>.
+    /// </summary>
     [RequireComponent(typeof(UIDocument))]
     public sealed class ChatView : MonoBehaviour
     {
-        [Header("Server")][SerializeField] private string serverUrl = "ws://127.0.0.1:2466/hetu/chat-room-1";
-
-        [SerializeField] private long userId = 10001;
-        [SerializeField] private string userName = "guest_10001";
+        [SerializeField] private LoginView loginView;
 
         private readonly Dictionary<long, ChatFeedItemVm> _feedById = new();
         private readonly List<ChatFeedItemVm> _feedItems = new();
@@ -23,15 +23,14 @@ namespace Chat
         private readonly List<MemberVm> _onlineItems = new();
         private TextField _composerInput;
         private Button _composerSend;
-        private bool _isConnected;
         private ListView _messageList;
         private ListView _offlineList;
         private Label _offlineTitle;
         private ListView _onlineList;
         private Label _onlineTitle;
-        private string _resolvedUserName;
-
         private Label _statusLabel;
+
+        private long _userId;
 
         private DisposableBag _uiBag;
         private ChatViewModel _viewModel;
@@ -42,20 +41,25 @@ namespace Chat
             BindView();
             BindViewModel();
             BindUserInput();
-            ConnectToServer();
+
+            if (loginView != null)
+                loginView.OnLoggedIn += HandleLoggedIn;
         }
 
         private void OnDisable()
         {
-            if (_composerSend != null) _composerSend.clicked -= OnSendClicked;
+            if (loginView != null)
+                loginView.OnLoggedIn -= HandleLoggedIn;
 
+            if (_composerSend != null) _composerSend.clicked -= OnSendClicked;
             if (_composerInput != null) _composerInput.UnregisterCallback<KeyDownEvent>(OnComposerKeyDown);
 
             _uiBag.Dispose();
             _viewModel?.Dispose();
             _viewModel = null;
-            _isConnected = false;
         }
+
+        // ── View Binding ──────────────────────────────────────────────
 
         private void BindView()
         {
@@ -72,20 +76,11 @@ namespace Chat
             ConfigureMessageListView();
             ConfigureMemberListView(_onlineList, _onlineItems);
             ConfigureMemberListView(_offlineList, _offlineItems);
-            SetStatus("CONNECTING");
         }
 
         private void BindViewModel()
         {
             _viewModel = new ChatViewModel(new ChatRepository());
-
-            _viewModel.Connected
-                .Subscribe(x => _ = HandleConnectedAsync())
-                .AddTo(ref _uiBag);
-
-            _viewModel.Closed
-                .Subscribe(HandleClosed)
-                .AddTo(ref _uiBag);
 
             _viewModel.MemberUpserted
                 .Subscribe(HandleMemberUpserted)
@@ -107,31 +102,25 @@ namespace Chat
         private void BindUserInput()
         {
             if (_composerSend != null) _composerSend.clicked += OnSendClicked;
-
             _composerInput?.RegisterCallback<KeyDownEvent>(OnComposerKeyDown);
         }
 
-        private void ConnectToServer()
+        // ── Login callback ────────────────────────────────────────────
+
+        private void HandleLoggedIn(long userId, string userName)
         {
-            _resolvedUserName = ResolveUserName(userId, userName);
-            _feedById.Clear();
-            _membersById.Clear();
-            RebuildFeed();
-            RebuildMembers();
-            SetStatus("CONNECTING");
-            _viewModel?.Connect(serverUrl, "password123");
+            _userId = userId;
+            SetStatus("CONNECTED");
+            _ = SubscribeDataAsync();
         }
 
-        private async Task HandleConnectedAsync()
+        private async Task SubscribeDataAsync()
         {
-            _isConnected = true;
-            SetStatus("CONNECTED");
             var vm = _viewModel;
             if (vm == null) return;
 
             try
             {
-                await vm.LoginAsync(userId, _resolvedUserName);
                 await vm.SubscribeMembersAsync();
                 await vm.SubscribeMessagesAsync();
             }
@@ -141,28 +130,19 @@ namespace Chat
             }
         }
 
-        private void HandleClosed(string errMsg)
-        {
-            _isConnected = false;
-            SetStatus(string.IsNullOrEmpty(errMsg) ? "DISCONNECTED" : $"CLOSED: {errMsg}");
-        }
+        // ── User Input ───────────────────────────────────────────────
 
-        private void OnSendClicked()
-        {
-            _ = SendChatAsync();
-        }
+        private void OnSendClicked() => _ = SendChatAsync();
 
         private void OnComposerKeyDown(KeyDownEvent evt)
         {
             if (evt.keyCode != KeyCode.Return && evt.keyCode != KeyCode.KeypadEnter) return;
-
             _ = SendChatAsync();
             evt.StopImmediatePropagation();
         }
 
         private async Task SendChatAsync()
         {
-            if (!_isConnected) return;
             var vm = _viewModel;
             if (vm == null) return;
 
@@ -179,6 +159,8 @@ namespace Chat
                 SetStatus($"SEND FAILED: {ex.Message}");
             }
         }
+
+        // ── Data Handlers ────────────────────────────────────────────
 
         private void HandleMemberUpserted(OnlineUser user)
         {
@@ -209,6 +191,8 @@ namespace Chat
             if (_feedById.Remove(rowId)) RebuildFeed();
         }
 
+        // ── Rebuild Lists ────────────────────────────────────────────
+
         private void RebuildFeed()
         {
             _feedItems.Clear();
@@ -236,9 +220,10 @@ namespace Chat
             _offlineList?.Rebuild();
 
             if (_onlineTitle != null) _onlineTitle.text = $"ONLINE - {_onlineItems.Count}";
-
             if (_offlineTitle != null) _offlineTitle.text = $"OFFLINE - {_offlineItems.Count}";
         }
+
+        // ── Helpers ──────────────────────────────────────────────────
 
         private void SetStatus(string text)
         {
@@ -324,7 +309,7 @@ namespace Chat
                 Owner = row.Owner,
                 Author = row.Name,
                 Text = row.Text,
-                IsSelf = type == ChatFeedItemType.Chat && row.Owner == userId,
+                IsSelf = type == ChatFeedItemType.Chat && row.Owner == _userId,
                 TimeText = FormatTime(row.CreatedAtMs),
                 CreatedAtMs = row.CreatedAtMs
             };
@@ -336,9 +321,7 @@ namespace Chat
 
             var lower = text?.ToLowerInvariant() ?? "";
             if (lower.Contains("joined the chat")) return ChatFeedItemType.SystemJoin;
-
             if (lower.Contains("left the chat")) return ChatFeedItemType.SystemLeave;
-
             return ChatFeedItemType.SystemInfo;
         }
 
@@ -357,13 +340,6 @@ namespace Chat
             {
                 return "--:--";
             }
-        }
-
-        private static string ResolveUserName(long currentUserId, string rawName)
-        {
-            if (string.IsNullOrWhiteSpace(rawName)) return $"guest_{currentUserId}";
-
-            return rawName.Trim();
         }
     }
 }
