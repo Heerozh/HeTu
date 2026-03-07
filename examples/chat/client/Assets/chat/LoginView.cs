@@ -10,21 +10,19 @@ namespace Chat
     ///     Minimal login screen — shows how few lines you need to connect with HeTu.
     /// </summary>
     [RequireComponent(typeof(UIDocument))]
-    public sealed class LoginView : MonoBehaviour 
+    public sealed class LoginView : MonoBehaviour
     {
-        /// <summary>Fired after a successful login. Args: userId, userName.</summary>
-        public event Action<long, string> OnLoggedIn;
-
-        public long UserId { get; private set; }
-        public string UserName { get; private set; }
+        private VisualElement _chatShell;
+        private Button _loginBtn;
 
         private VisualElement _loginPanel;
-        private VisualElement _chatShell;
+        private Label _statusLabel;
         private TextField _urlField;
         private TextField _userIdField;
         private TextField _userNameField;
-        private Button _loginBtn;
-        private Label _statusLabel;
+
+        public long UserId { get; private set; }
+        public string UserName { get; private set; }
 
         private void OnEnable()
         {
@@ -46,16 +44,29 @@ namespace Chat
             if (_loginBtn != null) _loginBtn.clicked -= OnLoginClicked;
         }
 
-        private void OnLoginClicked() => _ = DoLoginAsync();
+        /// <summary>Fired after a successful login. Args: userId, userName.</summary>
+        public event Action<long, string> OnLoggedIn;
+
+        private void OnLoginClicked()
+        {
+            _ = DoLoginAsync();
+        }
 
         private async Task DoLoginAsync()
         {
             // ── Parse inputs ──
             var url = _urlField?.value?.Trim();
-            if (string.IsNullOrEmpty(url)) { SetStatus("Please enter a server URL."); return; }
+            if (string.IsNullOrEmpty(url))
+            {
+                SetStatus("Please enter a server URL.");
+                return;
+            }
 
             if (!long.TryParse(_userIdField?.value?.Trim(), out var userId))
-            { SetStatus("User ID must be a number."); return; }
+            {
+                SetStatus("User ID must be a number.");
+                return;
+            }
 
             var userName = _userNameField?.value?.Trim();
             if (string.IsNullOrEmpty(userName)) userName = $"guest_{userId}";
@@ -66,33 +77,52 @@ namespace Chat
 
             try
             {
-                // Step 1: register connected callback, then start connecting
-                var connectedTcs = new TaskCompletionSource<bool>();
-                void OnConnected() => connectedTcs.TrySetResult(true);
-                HeTuClient.Instance.OnConnected += OnConnected;
+                HeTuClient.Instance.OnConnected += HandleConnected;
 
-                // fire-and-forget — Connect() blocks until disconnect
-                _ = HeTuClient.Instance.Connect(url, "password123");
+                // Connect() blocks until disconnect
+                var result = await HeTuClient.Instance.Connect(url, "password123");
 
-                // wait until the OnConnected event fires
-                await connectedTcs.Task;
-                HeTuClient.Instance.OnConnected -= OnConnected;
-
-                // Step 2: login RPC
-                SetStatus("Logging in...");
-                await HeTuClient.Instance.CallSystem("user_login", userId, userName);
-
-                // ── Success ── switch to chat view
-                UserId = userId;
-                UserName = userName;
-                _loginPanel.style.display = DisplayStyle.None;
-                _chatShell.style.display = DisplayStyle.Flex;
-                OnLoggedIn?.Invoke(userId, userName);
+                if (result != null && result != "Canceled")
+                    SetStatus($"Disconnected: {result}");
+                else
+                    SetStatus("Disconnected.");
             }
             catch (Exception ex)
             {
-                SetStatus($"Failed: {ex.Message}");
+                SetStatus($"Connection error: {ex.Message}");
+            }
+            finally
+            {
+                HeTuClient.Instance.OnConnected -= HandleConnected;
+
+                // ── Back to log in state ──
                 _loginBtn.SetEnabled(true);
+                _loginPanel.style.display = DisplayStyle.Flex;
+                _chatShell.style.display = DisplayStyle.None;
+            }
+
+            return;
+
+            async void HandleConnected()
+            {
+                try
+                {
+                    // Step 2: login RPC
+                    SetStatus("Logging in...");
+                    await HeTuClient.Instance.CallSystem("user_login", userId, userName);
+
+                    // ── Success ── switch to chat view
+                    UserId = userId;
+                    UserName = userName;
+                    _loginPanel.style.display = DisplayStyle.None;
+                    _chatShell.style.display = DisplayStyle.Flex;
+                    OnLoggedIn?.Invoke(userId, userName);
+                }
+                catch (Exception ex)
+                {
+                    SetStatus($"Login failed: {ex.Message}");
+                    HeTuClient.Instance.Close(); // Trigger Connect to return
+                }
             }
         }
 
