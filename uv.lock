@@ -7,6 +7,12 @@ resolution-markers = [
     "sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
+[manifest]
+members = [
+    "benchmark",
+    "hetudb",
+]
+
 [[package]]
 name = "aiofiles"
 version = "25.1.0"
@@ -200,6 +206,27 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/e4/a3/20aa7c4e83f2f614e0036300f3c352775dede0655c66814da16c37b661a9/basedpyright-1.38.2.tar.gz", hash = "sha256:b433b2b8ba745ed7520cdc79a29a03682f3fb00346d272ece5944e9e5e5daa92", size = 25277019, upload-time = "2026-02-26T11:18:43.594Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/12/736cab83626fea3fe65cdafb3ef3d2ee9480c56723f2fd33921537289a5e/basedpyright-1.38.2-py3-none-any.whl", hash = "sha256:153481d37fd19f9e3adedc8629d1d071b10c5f5e49321fb026b74444b7c70e24", size = 12312475, upload-time = "2026-02-26T11:18:40.373Z" },
+]
+
+[[package]]
+name = "benchmark"
+version = "0.1.0"
+source = { virtual = "benchmark" }
+dependencies = [
+    { name = "aiohttp" },
+    { name = "hetudb" },
+    { name = "socketify" },
+    { name = "websockets" },
+    { name = "ya" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "aiohttp" },
+    { name = "hetudb", editable = "." },
+    { name = "socketify" },
+    { name = "websockets" },
+    { name = "ya", git = "https://github.com/Heerozh/ya.git" },
 ]
 
 [[package]]
@@ -637,7 +664,6 @@ dev = [
     { name = "sanic-testing" },
     { name = "tqdm" },
     { name = "trustme" },
-    { name = "ya" },
 ]
 
 [package.metadata]
@@ -684,7 +710,6 @@ dev = [
     { name = "sanic-testing", specifier = ">=24.6.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "trustme", specifier = ">=1.2.1" },
-    { name = "ya", git = "https://github.com/Heerozh/ya.git" },
 ]
 
 [[package]]
@@ -1818,6 +1843,16 @@ sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050, upload-time = "2024-12-04T17:35:26.475Z" },
 ]
+
+[[package]]
+name = "socketify"
+version = "0.0.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cffi" },
+    { name = "setuptools" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ef/74/c7ba0eadc4946de73c7146d6750542fda9b47883e6aaedadef88c1aba94e/socketify-0.0.31.tar.gz", hash = "sha256:7502bed5b382e75f04ea3c6d6b53b76f27bb8653740db92e3f2b55fab388df20", size = 4872407, upload-time = "2024-10-29T19:15:57.411Z" }
 
 [[package]]
 name = "sortedcontainers"

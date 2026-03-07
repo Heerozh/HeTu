@@ -1,0 +1,16 @@
+[project]
+name = "benchmark"
+version = "0.1.0"
+description = "Benchmarks for HeTu"
+requires-python = ">=3.14"
+dependencies = [
+    "aiohttp",
+    "websockets",
+    "socketify",
+    "ya",
+    "hetudb",
+]
+
+[tool.uv.sources]
+ya = { git = "https://github.com/Heerozh/ya.git" }
+hetudb = { workspace = true }

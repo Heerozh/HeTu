@@ -78,7 +78,6 @@ dev = [
     "sanic-testing>=24.6.0",
     "tqdm>=4.67.1",
     "trustme>=1.2.1",
-    "ya",
 ]
 
 [tool.setuptools_scm]
@@ -104,8 +103,8 @@ line-length = 88
 [tool.ruff]
 line-length = 88
 
-[tool.uv.sources]
-ya = { git = "https://github.com/Heerozh/ya.git" }
+[tool.uv.workspace]
+members = ["benchmark"]
 
 [tool.pyright]
 typeCheckingMode = "standard"
