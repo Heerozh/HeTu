@@ -47,7 +47,10 @@ function Remove-DindResources {
     docker volume rm $dindRunVolume *> $null
 }
 
-docker build -f gemini_docker -t $imageName .
+# 如果命令是./xxx.sh build，才执行
+if ( $args[0] -eq "build" ) {
+    docker build -f gemini_docker -t $imageName .
+}
 
 try {
     Remove-DindResources
@@ -69,6 +72,7 @@ try {
             $ready = $true
             break
         }
+        Write-Host "Waiting for DinD daemon to become ready..."
         Start-Sleep -Seconds 1
     }
 
@@ -91,7 +95,9 @@ try {
         -v "${currentDir}:/workspace/${dirName}" `
         -w "/workspace/${dirName}" `
         -v "${geminiHome}/.gemini:/root/.gemini" `
-        $imageName
+        $imageName --yolo
+    # --entrypoint=/bin/bash `
+    # $imageName  
 }
 finally {
     Remove-DindResources
