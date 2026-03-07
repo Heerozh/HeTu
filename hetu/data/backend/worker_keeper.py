@@ -7,7 +7,7 @@
 
 import logging
 from time import time
-from typing import final, override, TYPE_CHECKING
+from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
@@ -93,7 +93,10 @@ class GeneralWorkerKeeper(WorkerKeeper):
             try:
                 async with self.table.session() as session:
                     repo = session.using(WorkerLease)
-                    row = await repo.get(id=worker_id)
+                    try:
+                        row = await repo.get(id=worker_id)
+                    except KeyError:  # 可能是direct set导致的副作用，写入了垃圾数据
+                        row = None
                     now_ms = self._now_ms()
 
                     if row is None:

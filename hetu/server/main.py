@@ -15,14 +15,14 @@ import sys
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Sanic
 
-from ..common.snowflake_id import SnowflakeID, WorkerKeeper
+from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
+from ..data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
 from ..endpoint import connection
 from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
 from ..system.future import future_call_task
-from ..data.backend.worker_keeper import WorkerLease, GeneralWorkerKeeper
 from . import pipeline
 from . import websocket as _  # noqa: F401 (防止未使用警告)
 from .web import HETU_BLUEPRINT
@@ -74,6 +74,7 @@ async def start_backends(app: Sanic):
 
     # 在backend初始化完毕后，启动WorkerKeeper，分配Worker ID，并把Worker ID和上次时间戳传给雪花ID生成器
     lease_tbl = table_managers[app.config.INSTANCES[0]].get_table(WorkerLease)
+    assert lease_tbl is not None
     worker_keeper = GeneralWorkerKeeper(os.getpid(), lease_tbl)
 
     # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
@@ -82,7 +83,7 @@ async def start_backends(app: Sanic):
             worker_id = await worker_keeper.get_worker_id()
             break
         except KeyError as e:
-            logger.error(e)
+            logger.exception(e)
             logger.info(
                 "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
             )
