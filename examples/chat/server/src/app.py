@@ -30,10 +30,10 @@ async def _insert_message(
     ctx: hetu.SystemContext, owner: int, name: str, text: str, kind: str
 ):
     row = ChatMessage.new_row()
-    row.owner = int(owner)
-    row.name = str(name)[:32]
-    row.text = str(text)[:256]
-    row.kind = str(kind)[:16]
+    row.owner = owner
+    row.name = name
+    row.text = text
+    row.kind = kind
     row.created_at_ms = _now_ms()
     await ctx.repo[ChatMessage].insert(row)
 
@@ -46,9 +46,8 @@ async def _insert_message(
 async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
     print("try login", user_id, name)
     await hetu.elevate(ctx, int(user_id), kick_logged_in=True)
-    username = str(name)[:32]
     async with ctx.repo[OnlineUser].upsert(owner=ctx.caller) as row:
-        row.name = username
+        row.name = name
         row.online = True
         row.last_seen_ms = _now_ms()
         ctx.user_data["me"] = row
@@ -56,8 +55,8 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
     await _insert_message(
         ctx,
         owner=ctx.caller,
-        name=username,
-        text=f"{username} joined the chat",
+        name=name,
+        text=f"{name} joined the chat",
         kind="system",
     )
 
