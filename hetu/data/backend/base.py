@@ -394,7 +394,7 @@ class TableMaintenance:
         raise NotImplementedError
 
     def get_lock(self) -> AbstractContextManager:
-        """获得一个可以锁整个数据库的with锁"""
+        """获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁"""
         raise NotImplementedError
 
     def do_create_table_(self, table_ref: TableReference) -> TableMeta:

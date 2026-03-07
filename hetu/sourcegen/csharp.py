@@ -5,8 +5,11 @@
 @email: heeroz@gmail.com
 """
 
+import re
+
 import numpy as np
 
+from hetu import Permission
 from hetu.data import BaseComponent
 from hetu.system import SystemClusters
 
@@ -37,18 +40,27 @@ def dtype_to_csharp(dtype: str | type):
         return "string"
 
 
+def to_csharp_property_name(name: str) -> str:
+    parts = [p for p in re.split(r"_+", name.strip("_")) if p]
+    if not parts:
+        return "Field"
+    return "".join(part[:1].upper() + part[1:] for part in parts)
+
+
 def generate_component(component_cls: type[BaseComponent]):
     attributes = [
-        f"    public {dtype_to_csharp(prop.dtype)} {name};"
+        f'    [Key("{name}")] public {dtype_to_csharp(prop.dtype)} '
+        f"{to_csharp_property_name(name)};"
         for name, prop in component_cls.properties_
         if name not in {"id", "_version"}
     ]
 
     lines = [
         "",
-        f"class {component_cls.name_}: IBaseComponent",
+        "[MessagePackObject]",
+        f"public class {component_cls.name_} : IBaseComponent",
         "{",
-        "    public long id { get; set; }",
+        '    [Key("id")] public long ID { get; set; }',
         *attributes,
         "}",
         "",
@@ -59,6 +71,7 @@ def generate_component(component_cls: type[BaseComponent]):
 def generate_all_components(namespace: str, output: str):
     lines = [
         "using HeTu;",
+        "using MessagePack;",
         "",
         f"namespace {namespace}",
         "{",
@@ -66,7 +79,14 @@ def generate_all_components(namespace: str, output: str):
 
     clusters = SystemClusters().get_clusters(namespace)
     assert clusters
-    components = [comp for cluster in clusters for comp in cluster.components]
+    components = []
+    visited: set[type[BaseComponent]] = set()
+    for cluster in clusters:
+        for comp in cluster.components:
+            if comp in visited or comp.permission_ == Permission.ADMIN:
+                continue
+            components.append(comp)
+            visited.add(comp)
 
     from tqdm import tqdm
 
@@ -75,5 +95,5 @@ def generate_all_components(namespace: str, output: str):
 
     lines.append("}")
 
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))

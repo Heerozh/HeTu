@@ -22,6 +22,7 @@ from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
+DISCONNECT_SYSTEM = "on_disconnect"
 
 
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
@@ -44,6 +45,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         logger.info("New Connect Error: Invalid handshake message format")
         ws.fail_connection()
         return
+
     # 进行握手处理，获得连接上下文
     if len(handshake_msg) != msg_pipe.num_handshake_layers:
         logger.info(
@@ -52,6 +54,16 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         ws.fail_connection()
         return
+
+    # 在客户端握手后，才返回实例是否存在的错误，防止暴露实例信息给扫描器
+    instance = db_name
+    if instance not in request.app.ctx.table_managers:
+        logger.info(f"New Connect Error: 错误的路径，实例名不存在: {instance}")
+        ws.fail_connection()
+        return
+    tbl_mgr = request.app.ctx.table_managers[instance]
+
+    # 返回握手结果
     try:
         pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
         await ws.send(reply)
@@ -62,14 +74,6 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         finally:
             ws.fail_connection()
         return
-
-    # 检查实例是否存在
-    instance = db_name
-    if instance not in request.app.ctx.table_managers:
-        logger.info(f"New Connect Error: Invalid instance name: {instance}")
-        ws.fail_connection()
-        return
-    tbl_mgr = request.app.ctx.table_managers[instance]
 
     # 初始化Context，一个连接一个Context
     context = SystemContext(
@@ -161,6 +165,20 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
         await request.app.cancel_task(puller_task_id, raise_exception=False)
+        try:
+            system_caller.call_check(DISCONNECT_SYSTEM)
+        except ValueError:
+            pass
+        else:
+            try:
+                await system_caller.call(DISCONNECT_SYSTEM)
+            except BaseException as e:
+                err_msg = (
+                    f"❌ [📡WSDisconnectHook] 断线System调用异常: "
+                    f"{DISCONNECT_SYSTEM} | {type(e).__name__}:{e}"
+                )
+                replay.info(err_msg)
+                logger.exception(err_msg)
         await endpoint_executor.terminate()
         await broker.close()
         request.app.purge_tasks()

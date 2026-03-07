@@ -1,0 +1,18 @@
+APP_FILE: ./src/app.py
+NAMESPACE: Chat
+INSTANCES: [ chat-room-1 ]
+LISTEN: 0.0.0.0:2466
+WORKER_NUM: 1
+DEBUG: false
+ACCESS_LOG: false
+
+PACKET_LAYERS:
+  - type: jsonb
+  - type: zlib
+  - type: crypto
+    auth_key: password123
+
+BACKENDS:
+  test_db:
+    type: SQL
+    master: sqlite:///./data/chat.sqlite3

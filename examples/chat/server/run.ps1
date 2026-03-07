@@ -1,0 +1,1 @@
+uvx --from hetudb hetu start --config ./config.yml

@@ -1,13 +1,17 @@
+import asyncio
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql, postgresql
-from types import SimpleNamespace
-from unittest.mock import Mock
 
+from hetu.common.multimap import MultiMap
 from hetu.data.backend.sql import SQLBackendClient
 from hetu.data.backend.sql.mq import MAX_CHANNELS_IN_FILTER, SQLMQClient
-from hetu.common.multimap import MultiMap
 
 
 def test_sql_parse_engine_urls_auto_driver():
@@ -75,13 +79,13 @@ def test_sql_post_configure_runs_support_table_ddl_on_master():
     client = object.__new__(SQLBackendClient)
     client.is_servant = False
     client._ensure_open = Mock()
-    client._ensure_support_tables_sync = Mock()
+    client.ensure_support_tables_sync = Mock()
     client._schema_checking_for_sql = Mock()
 
     client.post_configure()
 
     client._ensure_open.assert_called_once_with()
-    client._ensure_support_tables_sync.assert_called_once_with()
+    client.ensure_support_tables_sync.assert_called_once_with()
     client._schema_checking_for_sql.assert_called_once_with()
 
 
@@ -89,13 +93,13 @@ def test_sql_post_configure_skips_support_table_ddl_on_servant():
     client = object.__new__(SQLBackendClient)
     client.is_servant = True
     client._ensure_open = Mock()
-    client._ensure_support_tables_sync = Mock()
+    client.ensure_support_tables_sync = Mock()
     client._schema_checking_for_sql = Mock()
 
     client.post_configure()
 
     client._ensure_open.assert_called_once_with()
-    client._ensure_support_tables_sync.assert_not_called()
+    client.ensure_support_tables_sync.assert_not_called()
     client._schema_checking_for_sql.assert_called_once_with()
 
 
@@ -161,3 +165,54 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeyp
     assert calls["count"] >= 2
     assert target_channel in mq.pulled_set
     assert mq._last_notify_id == 2
+
+
+def test_sql_maintenance_get_lock_blocks_until_release(tmp_path):
+    db_path = tmp_path / "maintenance_lock.sqlite3"
+    client = SQLBackendClient(f"sqlite:///{db_path.as_posix()}", is_servant=False)
+    try:
+        maint1 = client.get_table_maintenance()
+        maint2 = client.get_table_maintenance()
+
+        holder_ready = threading.Event()
+        holder_release = threading.Event()
+        waiter_done = threading.Event()
+        errors: list[BaseException] = []
+        elapsed: dict[str, float] = {}
+
+        def holder():
+            try:
+                with maint1.get_lock():
+                    holder_ready.set()
+                    holder_release.wait(timeout=3.0)
+            except BaseException as exc:  # pragma: no cover - debug only
+                errors.append(exc)
+                holder_ready.set()
+
+        def waiter():
+            started = time.perf_counter()
+            try:
+                with maint2.get_lock():
+                    elapsed["seconds"] = time.perf_counter() - started
+            except BaseException as exc:  # pragma: no cover - debug only
+                errors.append(exc)
+            finally:
+                waiter_done.set()
+
+        t_holder = threading.Thread(target=holder, daemon=True)
+        t_waiter = threading.Thread(target=waiter, daemon=True)
+        t_holder.start()
+        assert holder_ready.wait(timeout=3.0)
+
+        t_waiter.start()
+        time.sleep(0.2)
+        assert not waiter_done.is_set(), "锁未释放前，第二个get_lock不应拿到锁"
+
+        holder_release.set()
+        t_holder.join(timeout=3.0)
+        t_waiter.join(timeout=3.0)
+        assert not errors, f"线程执行出现异常: {errors!r}"
+        assert waiter_done.is_set()
+        assert elapsed["seconds"] >= 0.15
+    finally:
+        asyncio.run(client.close())

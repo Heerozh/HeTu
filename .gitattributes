@@ -1,4 +1,2 @@
-# 忽略特定目录
-ClientSDK/unity/UniTask/** linguist-vendored
-ClientSDK/unity/cn.hetudb.clientsdk/UniTask/** linguist-vendored
+# Github语言统计忽略特定目录
 ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket/** linguist-vendored

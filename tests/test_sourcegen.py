@@ -6,9 +6,11 @@
 #  """
 
 import numpy as np
+from types import SimpleNamespace
 
 from hetu.data import BaseComponent, Permission, define_component, property_field
-from hetu.sourcegen.csharp import generate_component
+from hetu.sourcegen.csharp import generate_component, generate_all_components
+from hetu.system import SystemClusters
 
 
 def test_component_csharp_gen():
@@ -27,18 +29,48 @@ def test_component_csharp_gen():
     code = "\n".join(generate_component(TestComponent))
 
     expect = """
-class TestComponent: IBaseComponent
+[MessagePackObject]
+public class TestComponent : IBaseComponent
 {
-    public long id { get; set; }
-    public sbyte bool_;
-    public float float16;
-    public double float64;
-    public short int16;
-    public long int64b;
-    public long int64l;
-    public string str7;
-    public ulong uint64;
-    public byte uint8;
+    [Key("id")] public long ID { get; set; }
+    [Key("bool_")] public sbyte Bool;
+    [Key("float16")] public float Float16;
+    [Key("float64")] public double Float64;
+    [Key("int16")] public short Int16;
+    [Key("int64b")] public long Int64b;
+    [Key("int64l")] public long Int64l;
+    [Key("str7")] public string Str7;
+    [Key("uint64")] public ulong Uint64;
+    [Key("uint8")] public byte Uint8;
 }
 """
     assert code == expect
+
+
+def test_generate_all_components_latest_template(tmp_path, monkeypatch):
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class TestA(BaseComponent):
+        owner: np.int64 = property_field(0)
+
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class TestB(BaseComponent):
+        value: np.float32 = property_field(0)
+
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [
+            SimpleNamespace(components=[TestA]),
+            SimpleNamespace(components=[TestA, TestB]),
+        ],
+    )
+
+    output = tmp_path / "Components.cs"
+    generate_all_components("demo_ns", str(output))
+    code = output.read_text(encoding="utf-8")
+
+    assert "using MessagePack;" in code
+    assert "namespace demo_ns" in code
+    assert code.count("public class TestA : IBaseComponent") == 1
+    assert code.count("public class TestB : IBaseComponent") == 1
+    assert '[Key("id")] public long ID { get; set; }' in code

@@ -165,10 +165,18 @@ cython_debug/
 .idea/
 /logs
 /tests/logs
+/tests/data
 /notebooks
 profile.svg
-/examples/server/first_game/data
 data/dump.rdb
 /hetu/__version__.py
 benchmark_results.csv
 *.mojo
+/examples/chat/server/data/chat.sqlite3
+/examples/chat/client/Assets/Packages
+/examples/chat/client/Packages
+/examples/chat/client/ProjectSettings
+/examples/chat/client/UIElementsSchema
+# 禁用 claude
+/.claude
+examples/chat/client/output/*

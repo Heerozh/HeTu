@@ -7,8 +7,9 @@
 
 import hashlib
 import logging
-import threading
-from contextlib import AbstractContextManager
+import time
+from contextlib import AbstractContextManager, contextmanager
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast, final, override
 
 import numpy as np
@@ -31,14 +32,18 @@ class SQLTableMaintenance(TableMaintenance):
     SQL后端的组件表维护实现。
     """
 
+    _lock_name = "maintenance:lock"
+    _lock_ttl = timedelta(minutes=5)
+    _lock_retry_sleep = 0.1
+
     client: SQLBackendClient
 
     def __init__(self, master: SQLBackendClient):
         super().__init__(master)
-        self._lock = threading.RLock()
-        self.client._ensure_support_tables_sync()
+        self.client.ensure_support_tables_sync()
 
-    def _table_exists(self, conn: sa.Connection, table_name: str) -> bool:
+    @staticmethod
+    def _table_exists(conn: sa.Connection, table_name: str) -> bool:
         return sa.inspect(conn).has_table(table_name)
 
     def _safe_get_table(self, ref: TableReference):
@@ -83,8 +88,10 @@ class SQLTableMaintenance(TableMaintenance):
         col = table.c[index_name]
         cond_left = col >= left if li else col > left
         cond_right = col <= right if ri else col < right
-        stmt = sa.select(table.c.id).where(cond_left, cond_right).order_by(
-            col.asc(), table.c.id.asc()
+        stmt = (
+            sa.select(table.c.id)
+            .where(cond_left, cond_right)
+            .order_by(col.asc(), table.c.id.asc())
         )
         if limit >= 0:
             stmt = stmt.limit(limit)
@@ -120,7 +127,11 @@ class SQLTableMaintenance(TableMaintenance):
         with self.client.io.begin() as conn:
             if not self._table_exists(conn, table.name):
                 table.create(conn)
-            stmt = sa.update(table).where(table.c.id == int(row_data.id)).values(**row_dict)
+            stmt = (
+                sa.update(table)
+                .where(table.c.id == int(row_data.id))
+                .values(**row_dict)
+            )
             updated = conn.execute(stmt)
             if updated.rowcount == 0:
                 try:
@@ -157,7 +168,54 @@ class SQLTableMaintenance(TableMaintenance):
 
     @override
     def get_lock(self) -> AbstractContextManager:
-        return self._lock
+        """获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁"""
+        lock_table = self.client.maintenance_lock_table()
+
+        @contextmanager
+        def _lock_ctx():
+            acquired_at: datetime | None = None
+            while acquired_at is None:
+                now = datetime.now(UTC).replace(tzinfo=None)
+                stale_before = now - self._lock_ttl
+                try:
+                    with self.client.io.begin() as conn:
+                        # 清理超时锁，避免异常退出后永久死锁。
+                        conn.execute(
+                            sa.delete(lock_table).where(
+                                lock_table.c.lock_name == self._lock_name,
+                                lock_table.c.updated_at < stale_before,
+                            )
+                        )
+                        conn.execute(
+                            sa.insert(lock_table).values(
+                                lock_name=self._lock_name,
+                                updated_at=now,
+                            )
+                        )
+                        acquired_at = cast(
+                            datetime,
+                            conn.execute(
+                                sa.select(lock_table.c.updated_at).where(
+                                    lock_table.c.lock_name == self._lock_name
+                                )
+                            ).scalar_one(),
+                        )
+                except sa_exc.IntegrityError:
+                    time.sleep(self._lock_retry_sleep)
+
+            try:
+                yield
+            finally:
+                with self.client.io.begin() as conn:
+                    # 仅释放当前持有者对应的锁，避免误删后来者锁。
+                    conn.execute(
+                        sa.delete(lock_table).where(
+                            lock_table.c.lock_name == self._lock_name,
+                            lock_table.c.updated_at == acquired_at,
+                        )
+                    )
+
+        return _lock_ctx()
 
     @override
     def do_create_table_(self, table_ref: TableReference) -> TableMaintenance.TableMeta:
@@ -177,10 +235,12 @@ class SQLTableMaintenance(TableMaintenance):
 
         with self.client.io.begin() as conn:
             table.create(conn, checkfirst=True)
-            conn.execute(sa.delete(meta).where(
-                meta.c.instance_name == table_ref.instance_name,
-                meta.c.comp_name == table_ref.comp_name,
-            ))
+            conn.execute(
+                sa.delete(meta).where(
+                    meta.c.instance_name == table_ref.instance_name,
+                    meta.c.comp_name == table_ref.comp_name,
+                )
+            )
             conn.execute(sa.insert(meta).values(**meta_row))
 
         meta_recon = self.read_meta(table_ref.instance_name, table_ref.comp_cls)
@@ -236,10 +296,12 @@ class SQLTableMaintenance(TableMaintenance):
                     or 0
                 )
                 table.drop(conn)
-            conn.execute(sa.delete(meta).where(
-                meta.c.instance_name == table_ref.instance_name,
-                meta.c.comp_name == table_ref.comp_name,
-            ))
+            conn.execute(
+                sa.delete(meta).where(
+                    meta.c.instance_name == table_ref.instance_name,
+                    meta.c.comp_name == table_ref.comp_name,
+                )
+            )
         return count
 
     @override
@@ -251,16 +313,14 @@ class SQLTableMaintenance(TableMaintenance):
                 return 0
 
             row_count = int(
-                conn.execute(sa.select(sa.func.count()).select_from(table)).scalar() or 0
+                conn.execute(sa.select(sa.func.count()).select_from(table)).scalar()
+                or 0
             )
 
             for unique_name in table_ref.comp_cls.uniques_:
                 col = table.c[unique_name]
                 duplicated = conn.execute(
-                    sa.select(col)
-                    .group_by(col)
-                    .having(sa.func.count() > 1)
-                    .limit(1)
+                    sa.select(col).group_by(col).having(sa.func.count() > 1).limit(1)
                 ).first()
                 if duplicated is not None:
                     raise RuntimeError(

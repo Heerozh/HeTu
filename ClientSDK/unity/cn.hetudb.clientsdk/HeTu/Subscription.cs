@@ -47,6 +47,7 @@ namespace HeTu
         private readonly string _creationStack;
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
+
         /// <summary>
         ///     对应的组件名。
         /// </summary>
@@ -156,7 +157,7 @@ namespace HeTu
         /// <summary>
         ///     更新当前行数据并触发相关事件。
         /// </summary>
-        /// <param name="data">新数据；为 <see langword="null"/> 表示删除。</param>
+        /// <param name="data">新数据；为 <see langword="null" /> 表示删除。</param>
         public void Update(T data)
         {
             if (data is null)
@@ -194,6 +195,7 @@ namespace HeTu
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _addSubject;
+        private readonly Subject<long> _removeSubject;
         private readonly Dictionary<long, Subject<T>> _replaceSubjects;
 
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
@@ -202,8 +204,10 @@ namespace HeTu
         {
             Rows = rows.ToDictionary(row => row.ID);
             _addSubject = new Subject<T>();
+            _removeSubject = new Subject<long>();
             _replaceSubjects = new Dictionary<long, Subject<T>>();
             DisposeBag.Add(_addSubject);
+            DisposeBag.Add(_removeSubject);
             foreach (var (id, row) in Rows)
                 DisposeBag.Add(_replaceSubjects[id] = new Subject<T>());
         }
@@ -232,7 +236,7 @@ namespace HeTu
         ///     对指定行应用新增/更新/删除变更。
         /// </summary>
         /// <param name="rowID">目标行 ID。</param>
-        /// <param name="data">新数据；为 <see langword="null"/> 表示删除。</param>
+        /// <param name="data">新数据；为 <see langword="null" /> 表示删除。</param>
         public void Update(long rowID, T data)
         {
             var exist = Rows.ContainsKey(rowID);
@@ -245,6 +249,7 @@ namespace HeTu
                 _replaceSubjects[rowID].OnCompleted();
                 Rows.Remove(rowID);
                 _replaceSubjects.Remove(rowID);
+                _removeSubject.OnNext(rowID);
             }
             else
             {
@@ -273,26 +278,40 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     获得范围订阅的响应式热源，自动处理 OnInsert、OnUpdate 和 OnDelete 事件。
+        ///     获得范围订阅的新增热源，初始行也会先依次发出。
+        ///     推荐和 <see cref="ObserveRemove" /> 配对使用。
         ///     用法：
         ///     <![CDATA[
+        ///     var uiItems = new Dictionary<long, GameObject>();
         ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
         ///     indexSub.AddTo(gameObject);
         ///
-        ///     // 订阅所有数据，初始数据也会触发此事件
-        ///     indexSub.ObserveAdd()
-        ///         .Subscribe(added => {
-        ///             var go = new GameObject($"ID: {added.id}");
-        ///             var hpText = go.AddComponent<TMP_Text>();
+        ///     // 创建新UI对象
+        ///     Action<long> createUI = rowID => {
+        ///         var go = new GameObject($"ID: {rowID}");
+        ///         uiItems[rowID] = go;
         ///
-        ///             // 监听更新，和删除
-        ///             indexSub.ObserveReplace(added.id)
-        ///                 .Select(x => $"{x.value}")
-        ///                 .Subscribe(
-        ///                     value => hpText.text = value, // OnNext事件
-        ///                     result => Object.Destroy(go)  // OnCompleted事件
-        ///                 )
-        ///                 .AddTo(go);
+        ///         var hpText = go.AddComponent<TMP_Text>();
+        ///         // bind 更新
+        ///         indexSub.ObserveRow(rowID)
+        ///             .Select(x => $"{x.value}")
+        ///             .Subscribe(
+        ///                 value => hpText.text = value // OnNext事件
+        ///             )
+        ///             .AddTo(go);
+        ///     };
+        ///
+        ///     // 统一处理新增（包含初始行）
+        ///     indexSub.ObserveAdd()
+        ///         .Subscribe(added => { createUI(added.ID); })
+        ///         .AddTo(ref indexSub.DisposeBag);
+        ///
+        ///     // 统一处理删除
+        ///     indexSub.ObserveRemove()
+        ///         .Subscribe(removedID => {
+        ///             if (!uiItems.TryGetValue(removedID, out var go)) return;
+        ///             Object.Destroy(go);
+        ///             uiItems.Remove(removedID);
         ///         })
         ///         .AddTo(ref indexSub.DisposeBag);
         ///     ]]>
@@ -302,11 +321,16 @@ namespace HeTu
             Observable.Defer(() => Rows.Values.ToObservable().Concat(_addSubject));
 
         /// <summary>
-        ///     监听指定行的替换更新流。
+        ///     监听范围内行删除事件，返回被删除的行 ID。
+        /// </summary>
+        public Observable<long> ObserveRemove() => _removeSubject;
+
+        /// <summary>
+        ///     监听指定行的数据更新流。
         /// </summary>
         /// <param name="rowID">目标行 ID。</param>
         /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>
-        public Observable<T> ObserveReplace(long rowID) => _replaceSubjects[rowID];
+        public Observable<T> ObserveRow(long rowID) => _replaceSubjects[rowID];
     }
 
     /// <summary>
