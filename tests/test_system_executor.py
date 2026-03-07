@@ -134,7 +134,9 @@ async def test_slow_log(mod_test_app, executor, caplog):
         assert ok
 
     # 检查日志输出
-    assert len(caplog.records) == 4
+    assert (
+        5 >= len(caplog.records) >= 4
+    )  # 应该4份，sql初始化时可能多一份create_row慢日志
     assert "[User_b]" in caplog.text
     assert "[User_c]" in caplog.text
     assert "[User_d]" in caplog.text
