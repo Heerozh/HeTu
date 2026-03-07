@@ -1,44 +1,45 @@
-name-template: 'v$RESOLVED_VERSION 🌈'
-tag-template: 'v$RESOLVED_VERSION'
+name-template: "v$RESOLVED_VERSION 🌈"
+tag-template: "v$RESOLVED_VERSION"
 categories:
-  - title: '💥 重大变更'
+  - title: "💥 重大变更"
     labels:
-      - 'major'
-  - title: '🚀 新功能'
+      - "major"
+  - title: "🚀 新功能"
     labels:
-      - 'feature'
-      - 'enhancement'
-  - title: '🐛 Bug Fixes'
+      - "feature"
+      - "enhancement"
+  - title: "🐛 Bug Fixes"
     labels:
-      - 'fix'
-      - 'bugfix'
-      - 'bug'
-  - title: '🧰 杂项维护'
+      - "fix"
+      - "bugfix"
+      - "bug"
+  - title: "🧰 杂项维护"
     labels:
-      - 'chore'
-      - 'dependencies'
+      - "chore"
+      - "dependencies"
 autolabeler:
-  - label: 'chore'
+  - label: "chore"
     branch:
-      - '/maint\/.+/'
-  - label: 'bug'
+      - "/maint\/.+/"
+      - "/chore\/.+/"
+  - label: "bug"
     branch:
-      - '/fix\/.+/'
-  - label: 'enhancement'
+      - "/fix\/.+/"
+  - label: "enhancement"
     branch:
-      - '/feature\/.+/'
-change-template: '- $TITLE @$AUTHOR (#$NUMBER)'
-change-title-escapes: '\<*_&' # You can add # and @ to disable mentions, and add ` to disable code blocks.
+      - "/feature\/.+/"
+change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
+change-title-escapes: "\\<*_&" # You can add # and @ to disable mentions, and add ` to disable code blocks.
 version-resolver:
   major:
     labels:
-      - 'major'
+      - "major"
   minor:
     labels:
-      - 'minor'
+      - "minor"
   patch:
     labels:
-      - 'patch'
+      - "patch"
   default: patch
 template: |
 
