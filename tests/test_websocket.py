@@ -51,7 +51,7 @@ def setup_websocket_proxy():
             crypto_layer = pipeline.CryptoLayer()
             client_pipe.add_layer(crypto_layer)
             pipe_ctx = None
-            print("客户端pipe", id(crypto_layer))
+            logger.debug(f"客户端pipe {id(crypto_layer)}")
 
             async def handshake():
                 nonlocal pipe_ctx
@@ -72,14 +72,18 @@ def setup_websocket_proxy():
                 pipe_ctx = ctx
 
             async def send(data):
-                logger.debug(f"> Sent: {data} [{len(repr(data))} bytes]")
+                logger.debug(
+                    f"[{id(crypto_layer)}] > Sent: {data} [{len(repr(data))} bytes]"
+                )
                 ws_proxy.client_sent.append(data)
                 await do_send(client_pipe.encode(pipe_ctx, data))
 
             async def recv():
                 data = cast(bytes, await do_recv())
                 message = client_pipe.decode(pipe_ctx, data)
-                logger.debug(f"< Received: {message} [{len(repr(message))} bytes]")
+                logger.debug(
+                    f"[{id(crypto_layer)}] < Received: {message} [{len(repr(message))} bytes]"
+                )
                 ws_proxy.client_received.append(message)
                 return message
 
@@ -228,13 +232,15 @@ def test_websocket_kick_connect(test_server):
     async def kick_routine(connect):
         client1 = await connect()
         await client1.send(["rpc", "login", 1])
+        await client1.recv()
         await client1.send(["rpc", "add_rls_comp_value", 1])
-        await asyncio.sleep(0.8)
+        await client1.recv()
 
         client2 = await connect()
         await client2.send(["rpc", "login", 1])
+        await client2.recv()
         await client2.send(["rpc", "add_rls_comp_value", 2])
-        await asyncio.sleep(1)
+        await client2.recv()
 
         # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
         # 需要调用一次system才能发现自己被踢掉了
