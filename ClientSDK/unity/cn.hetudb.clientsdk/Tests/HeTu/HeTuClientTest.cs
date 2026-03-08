@@ -203,17 +203,17 @@ namespace Tests.HeTu
         private async Task TestIndexSubscribeOnInsertAsync()
         {
             _ = HeTuClient.Instance.CallSystem("login", 123, true);
-            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -10);
-            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 0);
-            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, -20);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 234, 10);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 20);
 
             // 测试OnInsert, OnDelete
             using var sub = await HeTuClient.Instance.Range<IndexComp1>(
-                "value", 0, 10, 100);
+                "value", 10, 20, 100);
 
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
-            _ = await HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2);
+            _ = await HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 12);
 
             await Sleep(1);
             Assert.AreEqual(newPlayer, 123);
@@ -224,7 +224,7 @@ namespace Tests.HeTu
             {
                 removedPlayer = sender.Rows[rowID].Owner;
             };
-            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 11);
+            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 21);
 
             await Sleep(1);
             Assert.AreEqual(removedPlayer, 123);

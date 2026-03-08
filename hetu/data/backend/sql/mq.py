@@ -87,17 +87,18 @@ class SQLMQClient(MQClient):
             return
 
         notify = self._client.notify_table()
-        channels = list(self.subscribed)
-        use_channel_filter = self._should_use_channel_in_filter(len(channels))
-        if not use_channel_filter and not self._large_sub_warned:
-            logger.warning(
-                "⚠️ [💾SQL] 订阅频道过多，pull切换为按id扫描后本地过滤模式，"
-                f"当前订阅数={len(channels)}，阈值={MAX_CHANNELS_IN_FILTER}"
-            )
-            self._large_sub_warned = True
 
         while True:
             async with self._client.aio.connect() as conn:
+                channels = list(self.subscribed)
+                use_channel_filter = self._should_use_channel_in_filter(len(channels))
+                if not use_channel_filter and not self._large_sub_warned:
+                    logger.warning(
+                        "⚠️ [💾SQL] 订阅频道过多，pull切换为按id扫描后本地过滤模式，"
+                        f"当前订阅数={len(channels)}，阈值={MAX_CHANNELS_IN_FILTER}"
+                    )
+                    self._large_sub_warned = True
+
                 stmt = sa.select(notify.c.id, notify.c.channel).where(
                     notify.c.id > self._last_notify_id
                 )

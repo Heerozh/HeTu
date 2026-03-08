@@ -216,3 +216,84 @@ def test_sql_maintenance_get_lock_blocks_until_release(tmp_path):
         assert elapsed["seconds"] >= 0.15
     finally:
         asyncio.run(client.close())
+
+
+@pytest.mark.asyncio
+async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    new_channel = "new-channel"
+    
+    # We'll use a side effect to simulate adding a subscription mid-loop
+    calls = {"count": 0}
+    
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+        def mappings(self): return self
+        def all(self): return self._rows
+
+    class _FakeConn:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return False
+        async def execute(self, stmt):
+            calls["count"] += 1
+            # On first call, return nothing and add a new subscription
+            if calls["count"] == 1:
+                mq.subscribed.add(new_channel)
+                return _FakeResult([])
+            # On second call, simulate the DB having a message for the new channel
+            # In the BUGGY version, the query's WHERE IN (...) clause will NOT include new_channel
+            # because 'channels' was captured before the loop.
+            # However, since we are MOCKING the execution, we need to check the STMT.
+            
+            # Check if new_channel is in the statement's IN clause if use_channel_filter is true
+            # For simplicity, we can just return the row and see if SQLMQClient filters it out locally.
+            # SQLMQClient also has a local check: if channel_name not in self.subscribed: continue
+            # But the MAIN issue is the SQL query itself being too restrictive.
+            
+            # To strictly prove the SQL bug, we check 'stmt'
+            compiled_stmt = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            if new_channel not in compiled_stmt:
+                 # This simulates the DB NOT returning the row because it's not in the IN clause
+                 return _FakeResult([])
+            
+            return _FakeResult([{"id": 1, "channel": new_channel}])
+
+    class _FakeAio:
+        def connect(self): return _FakeConn()
+
+    orig_sleep = asyncio.sleep
+    async def _fast_sleep(_seconds: float):
+        # Allow the loop to continue
+        await orig_sleep(0)
+        if calls["count"] > 10: # Safety break
+            raise Exception("Looping too much - reproduction failed or stale channels used")
+
+    monkeypatch.setattr("hetu.data.backend.sql.mq.asyncio.sleep", _fast_sleep)
+
+    mq = object.__new__(SQLMQClient)
+    mq._client = SimpleNamespace(
+        notify_table=lambda: notify_table,
+        aio=_FakeAio(),
+    )
+    # Start with one existing channel to ensure use_channel_filter is True
+    mq.subscribed = {"existing-channel"}
+    mq.pulled_deque = MultiMap()
+    mq.pulled_set = set()
+    mq._last_notify_id = 0
+    mq._large_sub_warned = False
+    
+    # Run pull. It should finish when it receives the message for new_channel.
+    # In the buggy version, it will loop indefinitely (or until our safety break)
+    # because the SQL query will never include 'new-channel' in its IN filter.
+    try:
+        await asyncio.wait_for(mq.pull(), timeout=2.0)
+    except asyncio.TimeoutError:
+        pytest.fail("Timed out! SQLMQClient.pull() did not pick up the new channel (BUG REPRODUCED)")
+    except Exception as e:
+        if "Looping too much" in str(e):
+            pytest.fail("SQLMQClient.pull() is stuck in a loop because it's using stale channels (BUG REPRODUCED)")
+        raise e
+
+    assert new_channel in mq.pulled_set
+    assert mq._last_notify_id == 1
