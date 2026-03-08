@@ -196,6 +196,7 @@ def worker_main(app_name, config) -> Sanic:
     root_logger.parent = logger
     if config["DEBUG"]:
         logger.setLevel(logging.DEBUG)
+    if int(config["DEBUG"]) > 1:
         logging.getLogger().setLevel(logging.DEBUG)
         root_logger.setLevel(logging.DEBUG)
 

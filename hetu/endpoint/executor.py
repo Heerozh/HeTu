@@ -10,10 +10,10 @@ from time import time as now
 from typing import TYPE_CHECKING
 
 from ..common import Permission
-from .connection import ConnectionAliveChecker, new_connection, del_connection
-from .definer import EndpointDefine, EndpointDefines
-from .context import Context
 from ..safelogging.filter import ContextFilter
+from .connection import ConnectionAliveChecker, del_connection, new_connection
+from .context import Context
+from .definer import EndpointDefine, EndpointDefines
 
 if TYPE_CHECKING:
     from ..manager import ComponentTableManager
@@ -118,7 +118,7 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        # logger.debug(f"⌚ [📞Endpoint] 调用Endpoint: {ep_name}")
+        logger.debug("⌚ [📞Endpoint] 调用Endpoint: %s", ep_name)
 
         # 初始化context值
         context = self.context

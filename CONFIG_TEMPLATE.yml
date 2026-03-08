@@ -12,7 +12,8 @@ INSTANCES:
   - nanjing-server1
   - nanjing-server2
 
-# 开启服务器的debug模式，打印debug消息，并且自动生成调试用的https证书
+# 开启服务器的debug模式，打印debug消息。可设置为false/true/2。
+# 如果设置为2，则开启深度debug模式，框架和协程都将在Debug模式下，性能只有10%
 DEBUG: false
 # 开启web控制后台，GET /获得信息 POST /reload重载代码 POST /shutdown关闭服务器
 #INSPECTOR: true

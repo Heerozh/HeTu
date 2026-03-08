@@ -100,12 +100,12 @@ class StartCommand(CommandInterface):
         )
         cli_group.add_argument(
             "--debug",
-            type=str2bool,
+            type=int,
             nargs="?",
-            const=True,
-            help="启用debug模式，显示更多的log信息。因为也会开启Python协程的Debug模式，速度慢90％。",
-            default=False,
-            metavar="False",
+            const=1,
+            help="开启debug模式，显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，也会开启Python协程的Debug模式，速度慢90％。",
+            default=0,
+            metavar="0/1/2",
         )
         cli_group.add_argument(
             "--cert",
@@ -211,15 +211,15 @@ class StartCommand(CommandInterface):
         layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
         logger.info(f"ℹ️ 消息流协议：json -> {' -> '.join(layer_types)} -> Network")
 
-        if config.DEBUG:
+        if int(config.DEBUG) > 1:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
-            logger.warning("⚠️⚠️⚠️ Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%")
+            logger.warning("⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%")
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
 
         # 准备启动服务器
         os.environ["SANIC_IGNORE_PRODUCTION_WARNING"] = "1"
         app.prepare(
-            debug=config.DEBUG,
+            debug=int(config.DEBUG) > 1,
             access_log=config.ACCESS_LOG,
             motd=False,
             host=host,
