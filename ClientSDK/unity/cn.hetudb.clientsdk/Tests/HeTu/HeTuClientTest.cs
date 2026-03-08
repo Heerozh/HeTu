@@ -213,7 +213,7 @@ namespace Tests.HeTu
 
             long? newPlayer = null;
             sub.OnInsert += (sender, rowID) => { newPlayer = sender.Rows[rowID].Owner; };
-            _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2);
+            _ = await HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 2);
 
             await Sleep(1);
             Assert.AreEqual(newPlayer, 123);
@@ -232,9 +232,6 @@ namespace Tests.HeTu
             Assert.False(sub.Rows.Values.Any(row => row.Owner == 123));
             Debug.Log("TestIndexSubscribeOnInsert结束");
         }
-
-        //todo unity6测试
-        //todo R3响应式测试
 
         [UnityTest]
         public IEnumerator TestRowSubscribeR3()

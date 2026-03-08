@@ -11,23 +11,18 @@ namespace HeTu
 {
     /// <summary>
     ///     延迟反序列化的 MessagePack 数据包装器。
-    ///     用于在不知道目标类型时先保留原始片段，再按需 <see cref="To{T}"/> 转换。
+    ///     用于在不知道目标类型时先保留原始片段，再按需 <see cref="To{T}" /> 转换。
     /// </summary>
     public class JsonObject
     {
         private readonly byte[] _rawData;
 
         /// <summary>
-        ///     原始 MessagePack 片段字节长度。
-        /// </summary>
-        public int RawSize => _rawData?.Length ?? 0;
-
-        /// <summary>
         ///     从当前 reader 所在位置截取一个完整 MessagePack 节点的数据。
         /// </summary>
         /// <param name="reader">MessagePack 读取器。</param>
-        /// <param name="bytes">原始字节数组。</param>
-        public JsonObject(MessagePackReader reader, byte[] bytes)
+        /// <param name="memory">原始字节切片。</param>
+        public JsonObject(ref MessagePackReader reader, ReadOnlyMemory<byte> memory)
         {
             // 记录当前 Data 开始的字节位置
             var startOffset = reader.Consumed;
@@ -42,9 +37,14 @@ namespace HeTu
             var dataLength = (int)(endOffset - startOffset);
             _rawData = new byte[dataLength];
 
-            // 将这部分字节从原始数组中拷贝出来
-            Array.Copy(bytes, startOffset, _rawData, 0, dataLength);
+            // 将这部分字节从原始切片中拷贝出来
+            memory.Slice((int)startOffset, dataLength).Span.CopyTo(_rawData);
         }
+
+        /// <summary>
+        ///     原始 MessagePack 片段字节长度。
+        /// </summary>
+        public int RawSize => _rawData?.Length ?? 0;
 
         /// <summary>
         ///     <![CDATA[
@@ -71,7 +71,7 @@ namespace HeTu
         /// </summary>
         /// <typeparam name="T1">字典键类型。</typeparam>
         /// <typeparam name="T2">字典值类型。</typeparam>
-        /// <returns>字典对象；若数据为空返回 <see langword="null"/>。</returns>
+        /// <returns>字典对象；若数据为空返回 <see langword="null" />。</returns>
         public Dictionary<T1, T2> ToDict<T1, T2>()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
@@ -82,7 +82,7 @@ namespace HeTu
         ///     转换为列表
         /// </summary>
         /// <typeparam name="T">元素类型。</typeparam>
-        /// <returns>列表对象；若数据为空返回 <see langword="null"/>。</returns>
+        /// <returns>列表对象；若数据为空返回 <see langword="null" />。</returns>
         public List<T> ToList<T>()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
@@ -92,7 +92,7 @@ namespace HeTu
         /// <summary>
         ///     转换为动态对象（Dictionary/List/基础类型）。
         /// </summary>
-        /// <returns>反序列化对象；若数据为空返回 <see langword="null"/>。</returns>
+        /// <returns>反序列化对象；若数据为空返回 <see langword="null" />。</returns>
         public object ToUntyped()
         {
             if (_rawData == null || _rawData.Length == 0) return null;
@@ -102,7 +102,7 @@ namespace HeTu
 
     /// <summary>
     ///     MessagePack 编解码层。
-    ///     对服务器标准协议（<c>rsp/sub/updt</c>）进行轻量解析，复杂负载使用 <see cref="JsonObject"/> 延迟反序列化。
+    ///     对服务器标准协议（<c>rsp/sub/updt</c>）进行轻量解析，复杂负载使用 <see cref="JsonObject" /> 延迟反序列化。
     /// </summary>
     public class JsonbLayer : MessageProcessLayer
     {
@@ -124,11 +124,11 @@ namespace HeTu
         /// <summary>
         ///     尝试按 HeTu 标准消息格式解析数据包。
         /// </summary>
-        /// <param name="bytes">原始 MessagePack 字节。</param>
+        /// <param name="memory">原始 MessagePack 字节切片。</param>
         /// <returns>统一结构的对象数组。</returns>
-        public object TryDecodeStandardMessage(byte[] bytes)
+        private static object TryDecodeStandardMessage(ReadOnlyMemory<byte> memory)
         {
-            var reader = new MessagePackReader(new ReadOnlyMemory<byte>(bytes));
+            var reader = new MessagePackReader(memory);
             // 1. 读取数组长度 (对应 Python 的 list 长度)
             var count = reader.ReadArrayHeader();
             if (count < 2) throw new Exception("数据包格式错误，长度不足2");
@@ -142,14 +142,14 @@ namespace HeTu
             {
                 case HeTuClientBase.MessageResponse: // list[Any] | dict[Any, Any]
                     {
-                        var jsonData = new JsonObject(reader, bytes);
+                        var jsonData = new JsonObject(ref reader, memory);
                         return new object[] { cmd, jsonData };
                     }
                 case HeTuClientBase.MessageSubed: // dict[str, Any] | list[dict[str, Any]]
                 case HeTuClientBase.MessageUpdate: // dict[str, dict[str, Any]]
                     {
                         var subId = reader.ReadString();
-                        var jsonData = new JsonObject(reader, bytes);
+                        var jsonData = new JsonObject(ref reader, memory);
                         return new object[] { cmd, subId, jsonData };
                     }
                 default:
@@ -159,16 +159,21 @@ namespace HeTu
 
         public override object Decode(object message)
         {
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("JsonbLayer只能Decode byte[] 类型数据");
+            var memory = message switch
+            {
+                byte[] bytes => new ReadOnlyMemory<byte>(bytes),
+                PipelineBuffer buf => buf.Memory,
+                _ => throw new InvalidOperationException(
+                    "JsonbLayer只能Decode byte[]或PipelineBuffer类型数据")
+            };
 
             try
             {
-                return TryDecodeStandardMessage(bytes);
+                return TryDecodeStandardMessage(memory);
             }
             catch (Exception)
             {
-                return MessagePackSerializer.Deserialize<object>(bytes);
+                return MessagePackSerializer.Deserialize<object>(memory);
             }
         }
     }

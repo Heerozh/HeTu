@@ -195,12 +195,38 @@ namespace HeTu
                 if (_disabled[i]) continue;
                 if (0 < until && until < i) break;
 
+                var prevEncoded = encoded;
                 encoded = _layers[i].Encode(encoded);
-                if (metrics.SourceSizeBytes < 0 && encoded is byte[] sourceBytes)
-                    metrics.SourceSizeBytes = sourceBytes.Length;
+
+                // Dispose previous PipelineBuffer if it was consumed and replaced
+                if (prevEncoded is PipelineBuffer prevBuf && prevEncoded != encoded)
+                {
+                    prevBuf.Dispose();
+                }
+
+                // 基础Raw数据尺寸，所以只记录第一次
+                if (metrics.SourceSizeBytes >= 0) continue;
+                metrics.SourceSizeBytes = encoded switch
+                {
+                    byte[] sourceBytes => sourceBytes.Length,
+                    PipelineBuffer sourceBuf => sourceBuf.Segment.Count,
+                    _ => metrics.SourceSizeBytes
+                };
             }
 
-            var transport = encoded as byte[];
+            // Extract exact byte[] for transport and dispose the final buffer
+            byte[] transport = null;
+            switch (encoded)
+            {
+                case byte[] bytes:
+                    transport = bytes;
+                    break;
+                case PipelineBuffer finalBuf:
+                    transport = finalBuf.Segment.ToArray();
+                    finalBuf.Dispose();
+                    break;
+            }
+
             if (transport != null)
                 metrics.TransportSizeBytes = transport.Length;
             return transport;
@@ -209,20 +235,14 @@ namespace HeTu
         /// <summary>
         ///     对消息进行逆向处理
         /// </summary>
-        public object Decode(byte[] message)
-        {
-            return Decode(message, out _);
-        }
+        public object Decode(byte[] message) => Decode(message, out _);
 
         /// <summary>
         ///     对消息进行逆向处理并采集尺寸指标。
         /// </summary>
         public object Decode(byte[] message, out PipelineMetrics metrics)
         {
-            metrics = new PipelineMetrics
-            {
-                TransportSizeBytes = message?.Length ?? -1
-            };
+            metrics = new PipelineMetrics { TransportSizeBytes = message?.Length ?? -1 };
 
             object decoded = message;
             for (var i = 0; i < _layers.Count; i++)
@@ -230,10 +250,21 @@ namespace HeTu
                 var originalIndex = _layers.Count - 1 - i;
                 if (_disabled[originalIndex]) continue;
 
+                var prevDecoded = decoded;
                 decoded = _layers[originalIndex].Decode(decoded);
 
-                if (decoded is byte[] sourceBytes)
-                    metrics.SourceSizeBytes = sourceBytes.Length;
+                // Dispose previous PipelineBuffer if it was consumed and replaced
+                if (prevDecoded is PipelineBuffer prevBuf && prevDecoded != decoded)
+                {
+                    prevBuf.Dispose();
+                }
+
+                metrics.SourceSizeBytes = decoded switch
+                {
+                    byte[] sourceBytes => sourceBytes.Length,
+                    PipelineBuffer sourceBuf => sourceBuf.Segment.Count,
+                    _ => metrics.SourceSizeBytes
+                };
             }
 
             return decoded;

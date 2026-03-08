@@ -8,6 +8,7 @@ using System.Buffers;
 using System.IO;
 using Unity.SharpZipLib.Zip.Compression;
 using Unity.SharpZipLib.Zip.Compression.Streams;
+using UnityEngine;
 
 namespace HeTu
 {
@@ -88,10 +89,16 @@ namespace HeTu
         public override object Encode(object message)
         {
             if (_deflater == null) return message;
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("ZlibLayer 只能压缩 byte[] 类型的消息");
 
-            var chunk = Deflate(bytes);
+            ReadOnlySpan<byte> inputSpan = message switch
+            {
+                byte[] bytes => bytes,
+                PipelineBuffer buf => buf.Segment.AsSpan(),
+                _ => throw new InvalidOperationException(
+                    "ZlibLayer 只能压缩 byte[] 或 PipelineBuffer 类型的消息")
+            };
+
+            var chunk = Deflate(inputSpan);
 
             return chunk;
         }
@@ -99,28 +106,64 @@ namespace HeTu
         public override object Decode(object message)
         {
             if (_inflater == null) return message;
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("ZlibLayer 只能解压 byte[] 类型的消息");
 
-            return Inflate(bytes);
+            ReadOnlySpan<byte> inputSpan = message switch
+            {
+                byte[] bytes => bytes,
+                PipelineBuffer buf => buf.Segment.AsSpan(),
+                _ => throw new InvalidOperationException(
+                    "ZlibLayer 只能解压 byte[] 或 PipelineBuffer 类型的消息")
+            };
+
+            return
+                Inflate(inputSpan
+                    .ToArray()); // TODO: Inflater requires byte[], we may need to allocate or pass rented array if SharpZipLib supports it.
         }
 
-        private byte[] Deflate(byte[] input)
+        private PipelineBuffer Deflate(ReadOnlySpan<byte> inputSpan)
         {
             _deflateBuffer.SetLength(0);
             _deflateBuffer.Position = 0;
-            _deflateStream.Write(input, 0, input.Length);
+
+            var tempArray = ArrayPool<byte>.Shared.Rent(inputSpan.Length);
+            inputSpan.CopyTo(tempArray);
+
+            _deflateStream.Write(tempArray, 0, inputSpan.Length);
             _deflateStream.Flush();
-            // todo 0gc
-            return _deflateBuffer.ToArray();
+
+            ArrayPool<byte>.Shared.Return(tempArray);
+
+            // 必须从 ArrayPool 借出新数组，严禁直接使用 MemoryStream 后端数组包装进 PipelineBuffer
+            // 否则在后续层 Dispose() 时，会把 MemoryStream 私有数组错误归还进全局线程池造成内存毁损。
+            var count = (int)_deflateBuffer.Length;
+            var rentedOutput = ArrayPool<byte>.Shared.Rent(count);
+
+            if (_deflateBuffer.TryGetBuffer(out var bufferSegment))
+            {
+                Debug.Assert(bufferSegment.Array != null);
+                Array.Copy(bufferSegment.Array, bufferSegment.Offset, rentedOutput, 0,
+                    count);
+            }
+            else
+            {
+                var prevPos = _deflateBuffer.Position;
+                _deflateBuffer.Position = 0;
+                var read = _deflateBuffer.Read(rentedOutput, 0, count);
+                _deflateBuffer.Position = prevPos;
+                Debug.Assert(read == count);
+            }
+
+            return PipelineBuffer.CreateFromRented(rentedOutput, 0, count);
         }
 
-        private byte[] Inflate(byte[] input)
+        private PipelineBuffer
+            Inflate(byte[] input) // SharpZipLib Inflater requires byte[]
         {
             _inflater.SetInput(input);
 
             // 预估一个大小，避免频繁扩容
-            using var outputStream = new MemoryStream(input.Length * 2);
+            var rentedOutput = ArrayPool<byte>.Shared.Rent(input.Length * 2);
+            var outputOffset = 0;
             var buffer = ArrayPool<byte>.Shared.Rent(4096); // 临时缓存
 
             while (!_inflater.IsFinished)
@@ -131,7 +174,18 @@ namespace HeTu
                 // 解压出数据了，写入输出流
                 if (count > 0)
                 {
-                    outputStream.Write(buffer, 0, count);
+                    // Ensure space
+                    if (outputOffset + count > rentedOutput.Length)
+                    {
+                        var newRented =
+                            ArrayPool<byte>.Shared.Rent(rentedOutput.Length * 2 + count);
+                        Array.Copy(rentedOutput, 0, newRented, 0, outputOffset);
+                        ArrayPool<byte>.Shared.Return(rentedOutput);
+                        rentedOutput = newRented;
+                    }
+
+                    Array.Copy(buffer, 0, rentedOutput, outputOffset, count);
+                    outputOffset += count;
                 }
                 else
                 {
@@ -160,8 +214,9 @@ namespace HeTu
             }
 
             ArrayPool<byte>.Shared.Return(buffer);
-            // todo 0gc
-            return outputStream.ToArray();
+
+            // 0分配，直接使用 rentedOutput 组装
+            return PipelineBuffer.CreateFromRented(rentedOutput, 0, outputOffset);
         }
     }
 }

@@ -4,6 +4,7 @@
 // <summary>河图客户端SDK的Unity加密层</summary>
 
 using System;
+using System.Buffers;
 using System.Text;
 using Org.BouncyCastle.Crypto;
 using Org.BouncyCastle.Crypto.Agreement;
@@ -24,7 +25,7 @@ namespace HeTu
         private const int NonceSize = 12;
 
         private static readonly byte[]
-            SignedHelloMagic = { 0x48, 0x32, 0x41, 0x31 }; // H2A1
+            s_signedHelloMagic = { 0x48, 0x32, 0x41, 0x31 }; // H2A1
 
         private readonly bool _serverMode;
         private byte[] _authKey;
@@ -112,8 +113,14 @@ namespace HeTu
         public override object Encode(object message)
         {
             if (_sessionKey == null) return message;
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("CryptoLayer只能加密 byte[] 类型数据");
+
+            ReadOnlySpan<byte> inputSpan = message switch
+            {
+                byte[] bytes => bytes,
+                PipelineBuffer buf => buf.Segment.AsSpan(),
+                _ => throw new InvalidOperationException(
+                    "CryptoLayer只能加密 byte[] 或 PipelineBuffer 类型数据")
+            };
 
             _sendNonce++;
             var nonce = BuildNonce(_serverMode ? (byte)0x00 : (byte)0xFF, _sendNonce);
@@ -123,19 +130,57 @@ namespace HeTu
                 new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(true, parameters);
 
-            var output = new byte[cipher.GetOutputSize(bytes.Length)];
-            var len = cipher.ProcessBytes(bytes, 0, bytes.Length, output, 0);
-            cipher.DoFinal(output, len);
-            return output;
+            var outputSize = cipher.GetOutputSize(inputSpan.Length);
+            var outputRented = ArrayPool<byte>.Shared.Rent(outputSize);
+
+            // BouncyCastle API expects arrays. We need a way to process bytes from span/rented arrays
+            byte[] inputArr;
+            int inputOffset;
+            if (message is PipelineBuffer pb)
+            {
+                inputArr = pb.Segment.Array;
+                inputOffset = pb.Segment.Offset;
+            }
+            else
+            {
+                inputArr = (byte[])message;
+                inputOffset = 0;
+            }
+
+            var len = cipher.ProcessBytes(inputArr, inputOffset, inputSpan.Length,
+                outputRented, 0);
+
+            cipher.DoFinal(outputRented, len);
+
+            return PipelineBuffer.CreateFromRented(outputRented, 0, outputSize);
         }
 
         public override object Decode(object message)
         {
             if (_sessionKey == null) return message;
-            if (message is not byte[] bytes)
-                throw new InvalidOperationException("CryptoLayer只能解密 byte[] 类型数据");
 
-            if (bytes.Length < 16)
+            byte[] inputArr;
+            int inputOffset;
+            int inputLength;
+
+            switch (message)
+            {
+                case byte[] bytes:
+                    inputArr = bytes;
+                    inputOffset = 0;
+                    inputLength = bytes.Length;
+                    break;
+                case PipelineBuffer buf:
+                    inputArr = buf.Segment.Array;
+                    inputOffset = buf.Segment.Offset;
+                    inputLength = buf.Segment.Count;
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        "CryptoLayer只能解密 byte[] 或 PipelineBuffer 类型数据");
+            }
+
+            if (inputLength < 16)
                 throw new InvalidOperationException("解密失败：数据长度不足，可能非加密数据或截断");
 
             _recvNonce++;
@@ -146,15 +191,19 @@ namespace HeTu
                 new AeadParameters(new KeyParameter(_sessionKey), 128, nonce);
             cipher.Init(false, parameters);
 
-            var output = new byte[cipher.GetOutputSize(bytes.Length)];
+            var outputSize = cipher.GetOutputSize(inputLength);
+            var outputRented = ArrayPool<byte>.Shared.Rent(outputSize);
+
             try
             {
-                var len = cipher.ProcessBytes(bytes, 0, bytes.Length, output, 0);
-                cipher.DoFinal(output, len);
-                return output;
+                var len = cipher.ProcessBytes(inputArr, inputOffset, inputLength,
+                    outputRented, 0);
+                cipher.DoFinal(outputRented, len);
+                return PipelineBuffer.CreateFromRented(outputRented, 0, outputSize);
             }
             catch (InvalidCipherTextException e)
             {
+                ArrayPool<byte>.Shared.Return(outputRented);
                 throw new InvalidOperationException("解密验证失败，可能密钥不匹配或数据被篡改", e);
             }
         }
@@ -193,15 +242,16 @@ namespace HeTu
             var nonce = new byte[16];
             new SecureRandom().NextBytes(nonce);
 
-            var payload = new byte[SignedHelloMagic.Length + publicKey.Length +
+            var payload = new byte[s_signedHelloMagic.Length + publicKey.Length +
                                    timestamp.Length + nonce.Length];
-            Buffer.BlockCopy(SignedHelloMagic, 0, payload, 0, SignedHelloMagic.Length);
-            Buffer.BlockCopy(publicKey, 0, payload, SignedHelloMagic.Length,
+            Buffer.BlockCopy(s_signedHelloMagic, 0, payload, 0,
+                s_signedHelloMagic.Length);
+            Buffer.BlockCopy(publicKey, 0, payload, s_signedHelloMagic.Length,
                 publicKey.Length);
             Buffer.BlockCopy(timestamp, 0, payload,
-                SignedHelloMagic.Length + publicKey.Length, timestamp.Length);
+                s_signedHelloMagic.Length + publicKey.Length, timestamp.Length);
             Buffer.BlockCopy(nonce, 0, payload,
-                SignedHelloMagic.Length + publicKey.Length + timestamp.Length,
+                s_signedHelloMagic.Length + publicKey.Length + timestamp.Length,
                 nonce.Length);
 
             var hmac = new HMac(new Sha256Digest());
