@@ -7,8 +7,9 @@
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, Any, Mapping
 from contextvars import ContextVar
+from typing import TYPE_CHECKING, Any, Mapping
+
 import numpy as np
 
 from hetu.data.backend import BackendClient, RowFormat
@@ -284,11 +285,12 @@ class SubscriptionBroker:
         # 开始订阅
         sub_id = self.make_query_id_(table_ref, "id", row["id"], None, 1, False)
         if sub_id in self._subs:
-            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
+            logger.warning(f"⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, row
 
         channel_name = servant.row_channel(table_ref, row["id"])
         await self._mq_client.subscribe(channel_name)
+        logger.debug("🆕 [📡Subscription] 订阅了行: %s %s", sub_id, channel_name)
 
         self._subs[sub_id] = RowSubscription(
             table_ref, servant, ctx, channel_name, row["id"]
@@ -340,7 +342,7 @@ class SubscriptionBroker:
         # 首先caller要对整个表有权限，不然就算force也不给订阅
         if not self._has_table_permission(table_ref, ctx):
             logger.warning(
-                f"⚠️ [💾Subscription] {table_ref.comp_name}无调用权限，"
+                f"⚠️ [📡Subscription] {table_ref.comp_name}无调用权限，"
                 f"检查是否非法调用，caller：{ctx.caller}"
             )
             return None, []
@@ -364,11 +366,12 @@ class SubscriptionBroker:
 
         sub_id = self.make_query_id_(table_ref, index_name, left, right, limit, desc)
         if sub_id in self._subs:
-            logger.warning(f"⚠️ [💾Subscription] {sub_id} 数据重复订阅，检查客户端代码")
+            logger.warning(f"⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码")
             return sub_id, rows
 
         index_channel = servant.index_channel(table_ref, index_name)
         await self._mq_client.subscribe(index_channel)
+        logger.debug("🆕 [📡Subscription] 订阅了索引: %s %s", sub_id, index_channel)
 
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(

@@ -11,10 +11,10 @@ import random
 import time
 from typing import TYPE_CHECKING
 
-from .lock import SystemLock
 from ..common.slowlog import SlowLog
 from ..data.backend import RaceCondition
 from .definer import SystemClusters, SystemDefine
+from .lock import SystemLock
 
 if TYPE_CHECKING:
     from ..endpoint.response import ResponseToClient
@@ -61,7 +61,7 @@ class SystemCaller:
         """
         # 开始调用
         sys_name = sys.func.__name__
-        # logger.debug(f"⌚ [📞System] 调用System: {sys_name}")
+        # logger.debug(f"🔜 [📞System] 调用System: {sys_name}")
 
         # 初始化context值
         context = self.context
@@ -105,7 +105,7 @@ class SystemCaller:
                 if uuid and await context.repo[SystemLock].get(uuid=uuid):
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
-                        f"⌚ [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                        f"🛑 [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
                     )
                     return None
                 # 执行
@@ -127,7 +127,7 @@ class SystemCaller:
                 delay = random.random() / 5
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(
-                    f"⌚ [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                    f"🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
                 )
                 await asyncio.sleep(delay)
                 continue

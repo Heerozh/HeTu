@@ -118,7 +118,7 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        logger.debug("⌚ [📞Endpoint] 调用Endpoint: %s", ep_name)
+        logger.debug("🔜 [📞Endpoint] 调用Endpoint: %s%s", ep_name, args)
 
         # 初始化context值
         context = self.context
