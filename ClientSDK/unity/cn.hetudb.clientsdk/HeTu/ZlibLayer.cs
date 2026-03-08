@@ -107,17 +107,27 @@ namespace HeTu
         {
             if (_inflater == null) return message;
 
-            ReadOnlySpan<byte> inputSpan = message switch
+            byte[] inputArr;
+            int inputOffset;
+            int inputLength;
+            switch (message)
             {
-                byte[] bytes => bytes,
-                PipelineBuffer buf => buf.Segment.AsSpan(),
-                _ => throw new InvalidOperationException(
-                    "ZlibLayer 只能解压 byte[] 或 PipelineBuffer 类型的消息")
-            };
+                case byte[] bytes:
+                    inputArr = bytes;
+                    inputOffset = 0;
+                    inputLength = bytes.Length;
+                    break;
+                case PipelineBuffer buf:
+                    inputArr = buf.Segment.Array;
+                    inputOffset = buf.Segment.Offset;
+                    inputLength = buf.Segment.Count;
+                    break;
+                default:
+                    throw new InvalidOperationException(
+                        "ZlibLayer 只能解压 byte[] 或 PipelineBuffer 类型的消息");
+            }
 
-            return
-                Inflate(inputSpan
-                    .ToArray()); // TODO: Inflater requires byte[], we may need to allocate or pass rented array if SharpZipLib supports it.
+            return Inflate(inputArr, inputOffset, inputLength);
         }
 
         private PipelineBuffer Deflate(ReadOnlySpan<byte> inputSpan)
@@ -157,12 +167,12 @@ namespace HeTu
         }
 
         private PipelineBuffer
-            Inflate(byte[] input) // SharpZipLib Inflater requires byte[]
+            Inflate(byte[] input, int offset, int length)
         {
-            _inflater.SetInput(input);
+            _inflater.SetInput(input, offset, length);
 
             // 预估一个大小，避免频繁扩容
-            var rentedOutput = ArrayPool<byte>.Shared.Rent(input.Length * 2);
+            var rentedOutput = ArrayPool<byte>.Shared.Rent(length * 2);
             var outputOffset = 0;
             var buffer = ArrayPool<byte>.Shared.Rent(4096); // 临时缓存
 
