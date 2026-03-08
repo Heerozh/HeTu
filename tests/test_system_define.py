@@ -7,31 +7,31 @@
 
 import pytest
 
-from hetu.data import define_component, property_field, BaseComponent, Permission
-from hetu.system import SystemClusters, define_system, SystemContext
+from hetu.data import BaseComponent, Permission, define_component, property_field
+from hetu.system import SystemClusters, SystemContext, define_system
 
 
 @pytest.fixture
 def test_component(new_component_env, new_clusters_env):
     @define_component(namespace="pytest", force=True)
-    class Comp1(BaseComponent):
+    class EComp1(BaseComponent):
         index1: float = property_field(0, True)
         index2: float = property_field(0, True)
 
     @define_component(namespace="pytest", force=True)
-    class Comp2(BaseComponent):
+    class AComp2(BaseComponent):
         value1: float = property_field(0)
         value2: float = property_field(0)
 
     @define_component(namespace="pytest", force=True)
-    class Comp3(BaseComponent):
+    class CComp3(BaseComponent):
         owner: int = property_field(0, True)
 
     @define_component(namespace="pytest", force=True)
-    class Comp4(BaseComponent):
+    class BComp4(BaseComponent):
         value1: float = property_field(0)
 
-    return Comp1, Comp2, Comp3, Comp4
+    return EComp1, AComp2, CComp3, BComp4
 
 
 @pytest.fixture
@@ -151,7 +151,7 @@ def test_system_inheritance(test_component):
 
     sys_def = SystemClusters().get_system("system_inherit2", namespace="pytest")
     assert sys_def
-    clu = SystemClusters().get_cluster("pytest", 0)
+    clu = SystemClusters().get_cluster("pytest", 1)
     assert sys_def.full_components == set(test_component)
     assert clu.components == set(test_component)
 
@@ -225,9 +225,7 @@ def test_system_clusters(test_component):
         pass
 
     @define_system(namespace="global", components=(comp3, comp4))
-    async def system5(
-        ctx,
-    ):
+    async def system5(ctx):
         pass
 
     # 测试cluster
@@ -240,15 +238,15 @@ def test_system_clusters(test_component):
 
     global_clusters = len(global_clusters) - 1
     assert len(pytest_clusters) == 2 + global_clusters
-    assert len(pytest_clusters[0].systems) == 3
-    assert len(pytest_clusters[1].systems) == 2
+    assert len(pytest_clusters[0].systems) == 2
+    assert len(pytest_clusters[1].systems) == 1
     assert pytest_clusters[0].id == 0
     assert second_clusters[0].id == 0
 
-    assert clusters.get_system("system1", namespace="pytest").cluster_id == 0  # type: ignore
-    assert clusters.get_system("system4_a", namespace="pytest").cluster_id == 1  # type: ignore
+    assert clusters.get_system("system1", namespace="pytest").cluster_id == 2  # type: ignore
+    assert clusters.get_system("system4_a", namespace="pytest").cluster_id == 0  # type: ignore
     assert clusters.get_system("system4_b", namespace="second").cluster_id == 0  # type: ignore
-    assert clusters.get_system("system5", namespace="pytest").cluster_id == 1  # type: ignore
+    assert clusters.get_system("system5", namespace="pytest").cluster_id == 0  # type: ignore
 
     # bug 测试clusters.append是忘记sys_def.full_components.copy()的bug
     assert clusters.get_system("system4_a", namespace="pytest").full_components == {  # type: ignore

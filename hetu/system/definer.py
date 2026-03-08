@@ -210,11 +210,24 @@ class SystemClusters(metaclass=Singleton):
             while merge_cluster(clusters):
                 pass
 
-            # 先按system数排序，然后按第一个system的alphabet排序，让簇id尽量不变
-            # todo 需要改成取这个组中最hub的Component作为名字来排序，在实际生产环境中测试下是不是比较稳定
-            sorted(
-                clusters, key=lambda x: f"{len(x.systems):02}_{next(iter(x.systems))}"
-            )
+            # 按最核心的组件名字来排序，让大簇id尽量不变
+            def cluster_sort_key(_cluster: SystemClusters.Cluster):
+                if not _cluster.components:
+                    return f"00_{next(iter(_cluster.systems))}"
+                _sys_map = self._system_map[_cluster.namespace]
+                # 统计簇内组件被引用的频率
+                counts = {_comp: 0 for _comp in _cluster.components}
+                for _sys_name in _cluster.systems:
+                    for _comp in _sys_map[_sys_name].full_components:
+                        if _comp in counts:
+                            counts[_comp] += 1
+                # 找到被引用最多的组件（核心组件）
+                hub_comp = max(counts.keys(), key=lambda c: (counts[c], c.__name__))
+                return hub_comp.__name__
+
+            # 按这个组中最hub的Component作为名字来排序，对于大簇来说理论更稳定。小簇还是会id抖动
+            # 按System数排序也较稳定，只是数量接近时，簇之间id会抖动，可能导致大簇迁移比较慢
+            clusters.sort(key=cluster_sort_key)
             for i in range(len(clusters)):
                 clusters[i].id = i
 
