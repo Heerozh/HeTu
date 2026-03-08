@@ -131,13 +131,19 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 - Always use Context7 MCP when I need library/API documentation, code generation, setup
   or configuration steps without me having to explicitly ask.
+- 请使用中文思考，在回复用户时也要使用中文
 
 ## Practical Notes
 
-- WebSocket 连接路径使用 `/hetu/<instance_name>`，这里的 `<instance_name>` 对应配置中的 `INSTANCES` 项，不是 `NAMESPACE`。
-- System 间调用必须先在 `@define_system(..., depends=(...))` 声明依赖，再通过 `ctx.depend["system_name"](ctx, ...)` 调用，不能直接函数互调。
+- WebSocket 连接路径使用 `/hetu/<instance_name>`，这里的 `<instance_name>` 对应配置中的
+  `INSTANCES` 项，不是 `NAMESPACE`。
+- System 间调用必须先在 `@define_system(..., depends=(...))` 声明依赖，再通过
+  `ctx.depend["system_name"](ctx, ...)` 调用，不能直接函数互调。
 - Unity SDK 响应式速查：
-  - `RowSubscription.Subject`：热源，包含当前初始值并持续推送更新/删除（删除时会推送 `null/default`）。
-  - `IndexSubscription.ObserveAdd()`：先发当前范围内已有行，再发后续新增。
-  - `IndexSubscription.ObserveReplace(rowID)`：监听单行更新，行被移除时触发 `OnCompleted`。
-- Unity 订阅生命周期：`RowSubscription/IndexSubscription` 必须显式 `Dispose()` 或 `.AddTo(gameObject)` 绑定生命周期，否则服务端会持续保留并推送该订阅。
+    - `RowSubscription.Subject`：热源，包含当前初始值并持续推送更新/删除（删除时会推送
+      `null/default`）。
+    - `IndexSubscription.ObserveAdd()`：先发当前范围内已有行，再发后续新增。
+    - `IndexSubscription.ObserveReplace(rowID)`：监听单行更新，行被移除时触发
+      `OnCompleted`。
+- Unity 订阅生命周期：`RowSubscription/IndexSubscription` 必须显式 `Dispose()` 或
+  `.AddTo(gameObject)` 绑定生命周期，否则服务端会持续保留并推送该订阅。
