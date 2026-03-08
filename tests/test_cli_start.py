@@ -18,6 +18,6 @@ def test_required_parameters():
     with pytest.raises(SystemExit):
         main()
 
-    sys.argv[1:] = ["start", "--namespace=ssw", "--instance=unittest1", "--debug=True"]
+    sys.argv[1:] = ["start", "--namespace=ssw", "--instance=unittest1", "--debug=2"]
     with pytest.raises(FileNotFoundError):
         main()

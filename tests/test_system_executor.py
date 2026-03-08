@@ -3,6 +3,7 @@ import time
 from typing import cast
 
 import pytest
+
 import hetu
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import RowFormat
@@ -129,19 +130,18 @@ async def test_slow_log(mod_test_app, executor, caplog):
     ok, _ = await executor.execute("create_row", 6, 21, "e")  # 0-20和b-d query都不符合
     assert ok
 
+    caplog.clear()  # 上面也会记录，at_level只是切换记录等级
     with caplog.at_level(logging.INFO, logger="HeTu"):
         ok, _ = await executor.execute("composer_system")
         assert ok
 
     # 检查日志输出
-    assert (
-        5 >= len(caplog.records) >= 4
-    )  # 应该4份，sql初始化时可能多一份create_row慢日志
+    print(caplog.text)
+    assert len(caplog.records) == 4
     assert "[User_b]" in caplog.text
     assert "[User_c]" in caplog.text
     assert "[User_d]" in caplog.text
     assert "慢日志" in caplog.text
-    print(caplog.text)
 
 
 async def test_get_race_condition(

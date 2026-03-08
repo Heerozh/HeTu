@@ -5,12 +5,12 @@
 @email: heeroz@gmail.com
 """
 
+import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
 import logging
 import time
 from dataclasses import dataclass
 from typing import Any, override
 
-import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
 import numpy as np
 
 from .pipeline import JSONType, MessageProcessLayer
@@ -71,6 +71,8 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
             dt = default_row.dtype
             raw = bytearray(default_row.tobytes())  # 拷贝为可变 bytes
             raw[:] = rng.integers(0, 256, size=len(raw), dtype=np.uint8).tobytes()
+            # todo 对于Unicode类型，随机数字的填充会报错
+            #      这里以后还是改成收集正式数据
             default_row = np.frombuffer(raw, dtype=dt, count=1)[0]  # 结构化标量
             row_dict = _comp.struct_to_dict(default_row)
             del row_dict["_version"]  # 删除版本字段
@@ -99,9 +101,12 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
                 sub_message = make_rand_sub_message(comp)
                 # 把订阅更新消息编码到压缩前
                 if self._parent:
-                    encoded_message = self._parent.encode(
-                        [None] * (self._layer_idx + 1), sub_message, self._layer_idx
-                    )
+                    try:
+                        encoded_message = self._parent.encode(
+                            [None] * (self._layer_idx + 1), sub_message, self._layer_idx
+                        )
+                    except UnicodeEncodeError:
+                        encoded_message = ""
                 else:
                     encoded_message = str(sub_message).encode("utf-8")
                 samples.append(encoded_message)
