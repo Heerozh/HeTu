@@ -202,7 +202,7 @@ namespace HeTu
                 if (!_enabled)
                     return null;
 
-                var callerStack = InspectorTraceStack.CaptureCurrent(skipFrames: 2);
+                var callerStack = InspectorTraceStack.CaptureCurrent(2);
                 var traceId = Guid.NewGuid().ToString("N");
                 var traceEvent = new InspectorTraceEvent
                 {
@@ -444,8 +444,7 @@ namespace HeTu
             if (trace == null)
                 return new InspectorCapturedStack
                 {
-                    RawStack = "-",
-                    Frames = BuildUnavailableFrames()
+                    RawStack = "-", Frames = BuildUnavailableFrames()
                 };
 
             var frames = trace.GetFrames();
@@ -524,6 +523,7 @@ namespace HeTu
                 assemblyName.StartsWith("netstandard", StringComparison.Ordinal) ||
                 assemblyName.StartsWith("Unity", StringComparison.Ordinal) ||
                 assemblyName.StartsWith("nunit", StringComparison.OrdinalIgnoreCase) ||
+                assemblyName.StartsWith("UniTask", StringComparison.OrdinalIgnoreCase) ||
                 assemblyName.StartsWith("Mono.", StringComparison.Ordinal))
                 return false;
 
@@ -532,6 +532,7 @@ namespace HeTu
                 ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
                 ns.StartsWith("UnityEditor", StringComparison.Ordinal) ||
                 ns.StartsWith("HeTu", StringComparison.Ordinal) ||
+                ns.StartsWith("Cysharp", StringComparison.Ordinal) ||
                 ns.StartsWith("NUnit", StringComparison.Ordinal) ||
                 ns.StartsWith("Mono.", StringComparison.Ordinal))
                 return false;
@@ -553,7 +554,8 @@ namespace HeTu
 
         private static bool ShouldSkipFrame(string typeName, string methodName) =>
             (typeName == nameof(Environment) && methodName == "get_StackTrace") ||
-            (typeName == nameof(InspectorTraceStack) && methodName == nameof(CaptureCurrent)) ||
+            (typeName == nameof(InspectorTraceStack) &&
+             methodName == nameof(CaptureCurrent)) ||
             (typeName == nameof(HeTuClientBase) &&
              methodName == "CaptureCreationTrace");
     }

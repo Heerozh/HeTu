@@ -78,7 +78,7 @@ namespace HeTu.Editor.Inspector
         {
             EditorApplication.update -= OnEditorUpdate;
             EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
-            StopRecording(clearSessionIntent: false);
+            StopRecording(false);
         }
 
         private void OnGUI()
@@ -453,10 +453,10 @@ namespace HeTu.Editor.Inspector
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    var title = row.Type == UpdateMessageType
-                        ? "Call Stack @ Subscribe"
-                        : "Call Stack (Double Click Jumps to File)";
-                    GUILayout.Label(title, EditorStyles.boldLabel);
+                    var callStackTitle = row.Type == UpdateMessageType
+                        ? "Initiator (Subscription)"
+                        : "Initiator";
+                    GUILayout.Label(callStackTitle, EditorStyles.boldLabel);
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("x", EditorStyles.miniButton,
                             GUILayout.Width(22), GUILayout.Height(18)))
@@ -510,8 +510,7 @@ namespace HeTu.Editor.Inspector
 
             if (!rect.Contains(evt.mousePosition) ||
                 evt.type != EventType.MouseDown ||
-                evt.button != 0 ||
-                evt.clickCount != 2)
+                evt.button != 0)
                 return;
 
             InternalEditorUtility.OpenFileAtLineExternal(frame.FilePath,
@@ -522,7 +521,9 @@ namespace HeTu.Editor.Inspector
         private GUIStyle GetStackFrameStyle(InspectorStackFrameInfo frame)
         {
             if (frame.IsPrimaryUserFrame)
-                return frame.IsVisible ? _stackPrimaryVisibleStyle : _stackPrimaryHiddenStyle;
+                return frame.IsVisible
+                    ? _stackPrimaryVisibleStyle
+                    : _stackPrimaryHiddenStyle;
 
             return frame.IsVisible ? _stackVisibleStyle : _stackHiddenStyle;
         }
