@@ -143,7 +143,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
             "LOGGING": logging_cfg,
-            "DEBUG": True,
+            "DEBUG": False,
             "WORKER_NUM": 4,
             "ACCESS_LOG": False,
         },
