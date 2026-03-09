@@ -373,20 +373,35 @@ namespace HeTu.Editor.Inspector
             switch (evt.type)
             {
                 case EventType.MouseDown when evt.button == 0:
-                    _selectedTraceId = row.TraceId;
-                    _showPayloadDetail = true;
-                    _showResponseDetail = true;
-                    _showStackDetail = true;
+                    SelectRow(row.TraceId);
                     Repaint();
                     evt.Use();
                     return;
                 case EventType.ContextClick:
-                    _selectedTraceId = row.TraceId;
+                    SelectRow(row.TraceId);
                     ShowContextMenu(row);
                     Repaint();
                     evt.Use();
                     break;
             }
+        }
+
+        private void SelectRow(string traceId)
+        {
+            if (!string.Equals(_selectedTraceId, traceId, StringComparison.Ordinal))
+                ClearDetailTextFocus();
+
+            _selectedTraceId = traceId;
+            _showPayloadDetail = true;
+            _showResponseDetail = true;
+            _showStackDetail = true;
+        }
+
+        private static void ClearDetailTextFocus()
+        {
+            GUI.FocusControl(null);
+            EditorGUIUtility.editingTextField = false;
+            GUIUtility.keyboardControl = 0;
         }
 
         private void DrawDetailPanel()
