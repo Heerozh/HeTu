@@ -11,6 +11,7 @@ namespace HeTu.Editor.Inspector
     public class HeTuInspectorWindow : EditorWindow
     {
         private const int MaxRows = 2000;
+        private const string RecordingSessionKey = "HeTu.Inspector.RecordingWanted";
         private const string UpdateMessageType = "updt";
         private const float RowHeight = 22f;
         private const float HeaderHeight = 24f;
@@ -67,12 +68,15 @@ namespace HeTu.Editor.Inspector
             titleContent = new GUIContent("HeTu Inspector");
             _dispatcher = new HeTuInspectorDispatcher(this);
             EditorApplication.update += OnEditorUpdate;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            RestoreRecordingIfNeeded();
         }
 
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
-            StopRecording();
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            StopRecording(clearSessionIntent: false);
         }
 
         private void OnGUI()
@@ -655,17 +659,25 @@ namespace HeTu.Editor.Inspector
 
         private void StartRecording()
         {
+            if (_isRecording || _dispatcher == null)
+                return;
+
             var client = HeTuClient.Instance;
             _samplerWasEnabledBeforeRecording = client.InspectorEnabled;
             client.AddInspectorDispatcher(_dispatcher);
             client.ConfigureInspector(true);
             _isRecording = true;
+            SessionState.SetBool(RecordingSessionKey, true);
         }
 
-        private void StopRecording()
+        private void StopRecording(bool clearSessionIntent = true)
         {
             if (!_isRecording || _dispatcher == null)
+            {
+                if (clearSessionIntent)
+                    SessionState.EraseBool(RecordingSessionKey);
                 return;
+            }
 
             var client = HeTuClient.Instance;
             client.RemoveInspectorDispatcher(_dispatcher);
@@ -674,6 +686,27 @@ namespace HeTu.Editor.Inspector
                 client.ConfigureInspector(false);
 
             _isRecording = false;
+            if (clearSessionIntent)
+                SessionState.EraseBool(RecordingSessionKey);
+        }
+
+        private void RestoreRecordingIfNeeded()
+        {
+            if (!SessionState.GetBool(RecordingSessionKey, false))
+                return;
+
+            StartRecording();
+        }
+
+        private void OnPlayModeStateChanged(PlayModeStateChange change)
+        {
+            switch (change)
+            {
+                case PlayModeStateChange.EnteredEditMode:
+                case PlayModeStateChange.EnteredPlayMode:
+                    RestoreRecordingIfNeeded();
+                    break;
+            }
         }
 
         private void ClearRows()
