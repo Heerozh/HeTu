@@ -435,7 +435,10 @@ namespace HeTu.Editor.Inspector
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    GUILayout.Label("Call Stack", EditorStyles.boldLabel);
+                    var title = row.Type == HeTuClientBase.MessageUpdate
+                        ? "Call Stack @ Subscribe"
+                        : "Call Stack";
+                    GUILayout.Label(title, EditorStyles.boldLabel);
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("x", EditorStyles.miniButton,
                             GUILayout.Width(22), GUILayout.Height(18)))

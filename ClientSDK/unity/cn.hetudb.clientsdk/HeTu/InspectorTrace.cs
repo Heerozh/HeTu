@@ -187,7 +187,7 @@ namespace HeTu
         /// <summary>
         ///     拦截并立即分发一条 Pending 请求事件。
         /// </summary>
-        public string InterceptRequest(string type, string target, object payload,
+        internal string InterceptRequest(string type, string target, object payload,
             InspectorTraceCompletionMode completionMode =
                 InspectorTraceCompletionMode.OnResponse)
         {
@@ -223,7 +223,7 @@ namespace HeTu
             }
         }
 
-        public void CompleteAfterSendIfNeeded(string traceId)
+        internal void CompleteAfterSendIfNeeded(string traceId)
         {
             if (traceId == null) return;
             lock (_syncRoot)
@@ -240,7 +240,7 @@ namespace HeTu
         /// <summary>
         ///     更新请求尺寸并重新分发（仍保持 Pending）。
         /// </summary>
-        public void UpdateRequestSize(string traceId, int sourceSizeBytes,
+        internal void UpdateRequestSize(string traceId, int sourceSizeBytes,
             int transportSizeBytes)
         {
             if (traceId == null) return;
@@ -257,7 +257,7 @@ namespace HeTu
         /// <summary>
         ///     完成请求并分发最终状态。
         /// </summary>
-        public void CompleteRequest(string traceId, string status,
+        internal void CompleteRequest(string traceId, string status,
             object responsePayload = null)
         {
             if (traceId == null) return;
@@ -272,7 +272,7 @@ namespace HeTu
         /// <summary>
         ///     收集 MessageUpdate 推送。
         /// </summary>
-        public void InterceptMessageUpdate(string target, JsonObject payload,
+        internal void InterceptMessageUpdate(string target, JsonObject payload,
             StackTrace callerTrace, int sourceSizeBytes, int transportSizeBytes)
         {
             lock (_syncRoot)
