@@ -115,7 +115,13 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 创建接受客户端消息的协程2
     recv_task_id = f"client_handler:{request.id}"
     receiver_task = client_handler(
-        ws, pipe_ctx, endpoint_executor, broker, push_queue, flood_checker
+        ws,
+        pipe_ctx,
+        endpoint_executor,
+        broker,
+        push_queue,
+        flood_checker,
+        int(request.app.config.get("DEBUG", 0)),
     )
     _ = request.app.add_task(receiver_task, name=recv_task_id)
 
