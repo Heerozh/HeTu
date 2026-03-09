@@ -36,6 +36,17 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void IsUserCodeDeclaringType_DistinguishesSdkAndUserTypes()
+        {
+            Assert.False(InspectorTraceStack.IsUserCodeDeclaringType(
+                typeof(HeTuClientBase)));
+            Assert.False(InspectorTraceStack.IsUserCodeDeclaringType(
+                typeof(string)));
+            Assert.True(InspectorTraceStack.IsUserCodeDeclaringType(
+                typeof(InspectorTraceTest)));
+        }
+
+        [Test]
         public void InterceptRequest_PopulatesCallerFrames()
         {
             var collector = new InspectorTraceCollector();

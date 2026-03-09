@@ -61,13 +61,19 @@ namespace HeTu
 
         public bool IsVisible { get; set; }
 
+        public bool IsUserCode { get; set; }
+
+        public bool IsPrimaryUserFrame { get; set; }
+
         public InspectorStackFrameInfo Clone() =>
             new()
             {
                 DisplayText = DisplayText,
                 FilePath = FilePath,
                 Line = Line,
-                IsVisible = IsVisible
+                IsVisible = IsVisible,
+                IsUserCode = IsUserCode,
+                IsPrimaryUserFrame = IsPrimaryUserFrame
             };
     }
 
@@ -456,7 +462,8 @@ namespace HeTu
         }
 
         internal static InspectorStackFrameInfo CreateFrameInfo(string declaringTypeName,
-            string methodName, string filePath, int line)
+            string methodName, string filePath, int line,
+            bool isUserCode = false, bool isPrimaryUserFrame = false)
         {
             var hasVisibleSource = !string.IsNullOrWhiteSpace(filePath) && line > 0;
             var fileName = hasVisibleSource ? Path.GetFileName(filePath) : "-";
@@ -467,13 +474,16 @@ namespace HeTu
                     $"{declaringTypeName}.{methodName} ({fileName}:{lineText})",
                 FilePath = hasVisibleSource ? filePath : null,
                 Line = hasVisibleSource ? line : 0,
-                IsVisible = hasVisibleSource
+                IsVisible = hasVisibleSource,
+                IsUserCode = isUserCode,
+                IsPrimaryUserFrame = isPrimaryUserFrame
             };
         }
 
         private static List<InspectorStackFrameInfo> BuildFrameInfos(StackFrame[] frames)
         {
             var callerFrames = new List<InspectorStackFrameInfo>();
+            var firstUserFrameIndex = -1;
             foreach (var frame in frames)
             {
                 var method = frame.GetMethod();
@@ -484,12 +494,49 @@ namespace HeTu
                     ShouldSkipFrame(typeName, methodName))
                     continue;
 
+                var isUserCode = IsUserCodeDeclaringType(method.DeclaringType);
                 callerFrames.Add(CreateFrameInfo(typeName, methodName,
                     frame.GetFileName(),
-                    frame.GetFileLineNumber()));
+                    frame.GetFileLineNumber(),
+                    isUserCode));
+                if (isUserCode && firstUserFrameIndex < 0)
+                    firstUserFrameIndex = callerFrames.Count - 1;
             }
 
+            if (firstUserFrameIndex >= 0)
+                callerFrames[firstUserFrameIndex].IsPrimaryUserFrame = true;
+
             return callerFrames.Count == 0 ? BuildUnavailableFrames() : callerFrames;
+        }
+
+        internal static bool IsUserCodeDeclaringType(Type declaringType)
+        {
+            if (declaringType == null)
+                return false;
+
+            var assembly = declaringType.Assembly;
+            if (assembly == typeof(HeTuClientBase).Assembly)
+                return false;
+
+            var assemblyName = assembly.GetName().Name ?? string.Empty;
+            if (assemblyName.StartsWith("System", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("mscorlib", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("netstandard", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("Unity", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("nunit", StringComparison.OrdinalIgnoreCase) ||
+                assemblyName.StartsWith("Mono.", StringComparison.Ordinal))
+                return false;
+
+            var ns = declaringType.Namespace ?? string.Empty;
+            if (ns.StartsWith("System", StringComparison.Ordinal) ||
+                ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
+                ns.StartsWith("UnityEditor", StringComparison.Ordinal) ||
+                ns.StartsWith("HeTu", StringComparison.Ordinal) ||
+                ns.StartsWith("NUnit", StringComparison.Ordinal) ||
+                ns.StartsWith("Mono.", StringComparison.Ordinal))
+                return false;
+
+            return true;
         }
 
         private static List<InspectorStackFrameInfo> BuildUnavailableFrames() =>

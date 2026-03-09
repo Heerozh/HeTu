@@ -61,6 +61,8 @@ namespace HeTu.Editor.Inspector
         private bool _showStackDetail = true;
         private Vector2 _stackDetailScroll;
         private GUIStyle _stackHiddenStyle;
+        private GUIStyle _stackPrimaryHiddenStyle;
+        private GUIStyle _stackPrimaryVisibleStyle;
         private GUIStyle _stackVisibleStyle;
 
         private void OnEnable()
@@ -92,7 +94,8 @@ namespace HeTu.Editor.Inspector
         private void EnsureStyles()
         {
             if (_rowStyle != null && _headerStyle != null && _cellStyle != null &&
-                _stackVisibleStyle != null && _stackHiddenStyle != null)
+                _stackVisibleStyle != null && _stackHiddenStyle != null &&
+                _stackPrimaryVisibleStyle != null && _stackPrimaryHiddenStyle != null)
                 return;
 
             _rowStyle = new GUIStyle(EditorStyles.label)
@@ -129,6 +132,16 @@ namespace HeTu.Editor.Inspector
             _stackHiddenStyle.hover.textColor = Color.gray;
             _stackHiddenStyle.focused.textColor = Color.gray;
             _stackHiddenStyle.active.textColor = Color.gray;
+
+            _stackPrimaryVisibleStyle = new GUIStyle(_stackVisibleStyle)
+            {
+                fontStyle = FontStyle.Bold
+            };
+
+            _stackPrimaryHiddenStyle = new GUIStyle(_stackHiddenStyle)
+            {
+                fontStyle = FontStyle.Bold
+            };
         }
 
         private void DrawToolbar()
@@ -442,7 +455,7 @@ namespace HeTu.Editor.Inspector
                 {
                     var title = row.Type == UpdateMessageType
                         ? "Call Stack @ Subscribe"
-                        : "Call Stack";
+                        : "Call Stack (Double Click Jumps to File)";
                     GUILayout.Label(title, EditorStyles.boldLabel);
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button("x", EditorStyles.miniButton,
@@ -481,12 +494,14 @@ namespace HeTu.Editor.Inspector
 
         private void DrawStackFrameRow(InspectorStackFrameInfo frame)
         {
-            var style = frame.IsVisible ? _stackVisibleStyle : _stackHiddenStyle;
+            var style = GetStackFrameStyle(frame);
             var rect = GUILayoutUtility.GetRect(
                 new GUIContent(frame.DisplayText),
                 style,
                 GUILayout.ExpandWidth(true),
                 GUILayout.Height(StackRowHeight));
+            if (frame.IsPrimaryUserFrame)
+                EditorGUI.DrawRect(rect, new Color(1f, 0.8f, 0.15f, 0.14f));
             EditorGUI.LabelField(rect, frame.DisplayText, style);
 
             var evt = Event.current;
@@ -502,6 +517,14 @@ namespace HeTu.Editor.Inspector
             InternalEditorUtility.OpenFileAtLineExternal(frame.FilePath,
                 Mathf.Max(1, frame.Line));
             evt.Use();
+        }
+
+        private GUIStyle GetStackFrameStyle(InspectorStackFrameInfo frame)
+        {
+            if (frame.IsPrimaryUserFrame)
+                return frame.IsVisible ? _stackPrimaryVisibleStyle : _stackPrimaryHiddenStyle;
+
+            return frame.IsVisible ? _stackVisibleStyle : _stackHiddenStyle;
         }
 
         private bool TryGetSelectedRow(out InspectorTraceEvent row)
