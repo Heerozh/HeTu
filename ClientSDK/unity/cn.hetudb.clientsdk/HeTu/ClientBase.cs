@@ -7,6 +7,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 
 namespace HeTu
@@ -211,6 +212,8 @@ namespace HeTu
                 SendCore(buffer);
                 if (callback != null)
                     ResponseQueue.EnqueueCallback(callback, traceId);
+                else
+                    InspectorCollector.CompleteAfterSendIfNeeded(traceId);
             }
 
             OfflineQueue.Clear();
@@ -259,6 +262,8 @@ namespace HeTu
                 SendCore(buffer); // 后台线程发送
                 if (callback != null)
                     ResponseQueue.EnqueueCallback(callback, traceId);
+                else
+                    InspectorCollector.CompleteAfterSendIfNeeded(traceId);
             }
             else
             {
@@ -350,13 +355,13 @@ namespace HeTu
             return true;
         }
 
-        private static string CaptureCreationSource()
+        private static StackTrace CaptureCreationTrace()
         {
-            string creationSource = null;
 #if DEBUG
-            creationSource = Environment.StackTrace;
+            return new StackTrace(1, true);
+#else
+            return null;
 #endif
-            return creationSource;
         }
 
         /// <summary>
@@ -392,7 +397,7 @@ namespace HeTu
                 }
             }
 
-            var creationSource = CaptureCreationSource();
+            var creationTrace = CaptureCreationTrace();
 
             // 向服务器订阅
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
@@ -425,7 +430,7 @@ namespace HeTu
                             var data = ((JsonObject)response[2]).To<T>();
                             // ReSharper disable once NotDisposedResource
                             rowSubscription = new RowSubscription<T>(
-                                subID, componentName, data, this, creationSource);
+                                subID, componentName, data, this, creationTrace);
                             Subscriptions.Add(subID,
                                 new WeakReference(rowSubscription, false));
                         }
@@ -491,7 +496,7 @@ namespace HeTu
                 return;
             }
 
-            var creationSource = CaptureCreationSource();
+            var creationTrace = CaptureCreationTrace();
 
             // 发送订阅请求
             var payload = new[]
@@ -529,7 +534,7 @@ namespace HeTu
                             var rows = rawRows.ToList<T>();
                             // ReSharper disable once NotDisposedResource
                             idxSubscription = new IndexSubscription<T>(
-                                subID, componentName, rows, this, creationSource);
+                                subID, componentName, rows, this, creationTrace);
                             Subscriptions.Add(subID,
                                 new WeakReference(idxSubscription, false));
                         }
@@ -570,7 +575,9 @@ namespace HeTu
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
             var payload = new object[] { CommandUnsub, subID };
-            SendOrQueueRequest(payload, null);
+            var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
+                payload, InspectorTraceCompletionMode.AfterSend);
+            SendOrQueueRequest(payload, null, traceId);
             Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
@@ -599,6 +606,7 @@ namespace HeTu
                     var rows = (JsonObject)structuredMsg[2];
                     var target = subID?.Split('.')[0] ?? "unknown";
                     InspectorCollector.InterceptMessageUpdate(target, rows,
+                        subscribed.CreationTrace,
                         decodeMetrics.SourceSizeBytes,
                         decodeMetrics.TransportSizeBytes);
                     subscribed.UpdateRows(rows);

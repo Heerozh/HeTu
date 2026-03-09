@@ -6,6 +6,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using JetBrains.Annotations;
 using R3;
@@ -44,7 +45,7 @@ namespace HeTu
     [MustDisposeResource]
     public abstract class BaseSubscription : IDisposable
     {
-        private readonly string _creationStack;
+        private readonly StackTrace _creationTrace;
         private readonly HeTuClientBase _parentClient;
         private readonly string _subscriptID;
 
@@ -58,13 +59,15 @@ namespace HeTu
         /// </summary>
         public DisposableBag DisposeBag;
 
+        internal StackTrace CreationTrace => _creationTrace;
+
         protected BaseSubscription(string subscriptID, string componentName,
-            HeTuClientBase client, string creationStack = null)
+            HeTuClientBase client, StackTrace creationTrace = null)
         {
             _subscriptID = subscriptID;
             ComponentName = componentName;
             _parentClient = client;
-            _creationStack = creationStack;
+            _creationTrace = creationTrace;
         }
 
         /// <summary>
@@ -98,7 +101,7 @@ namespace HeTu
         ~BaseSubscription() =>
             Logger.Instance.Error(
                 "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID +
-                "\n创建时的堆栈：\n" + _creationStack);
+                "\n创建时的堆栈：\n" + _creationTrace);
     }
 
     /// <summary>
@@ -111,8 +114,8 @@ namespace HeTu
         public long LastRowID;
 
         public RowSubscription(string subscriptID, string componentName, T row,
-            HeTuClientBase client, string creationStack = null) :
-            base(subscriptID, componentName, client, creationStack)
+            HeTuClientBase client, StackTrace creationTrace = null) :
+            base(subscriptID, componentName, client, creationTrace)
         {
             Data = row;
             LastRowID = row.ID;
@@ -199,8 +202,8 @@ namespace HeTu
         private readonly Dictionary<long, Subject<T>> _replaceSubjects;
 
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
-            HeTuClientBase client, string creationStack = null) :
-            base(subscriptID, componentName, client, creationStack)
+            HeTuClientBase client, StackTrace creationTrace = null) :
+            base(subscriptID, componentName, client, creationTrace)
         {
             Rows = rows.ToDictionary(row => row.ID);
             _addSubject = new Subject<T>();
