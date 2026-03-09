@@ -129,7 +129,7 @@ namespace HeTu.Editor.PostStation
                     {
                         if (GUILayout.Button("清空", EditorStyles.miniButton,
                                 GUILayout.Width(52)))
-                            _resultText = "等待请求...";
+                            SetResultText("等待请求...");
                     }
                 }
 
@@ -146,11 +146,11 @@ namespace HeTu.Editor.PostStation
             if (_isRequesting) return;
             if (string.IsNullOrWhiteSpace(_systemName))
             {
-                _resultText = "System 名不能为空";
+                SetResultText("System 名不能为空");
                 return;
             }
 
-            _resultText = "请求中...";
+            SetResultText("请求中...");
             Repaint();
             _isRequesting = true;
             try
@@ -162,11 +162,11 @@ namespace HeTu.Editor.PostStation
                 var rsp = await HeTuClient.Instance.CallSystem(_systemName, args);
 #endif
                 var value = rsp?.ToUntyped();
-                _resultText = MiniJson.PrettyPrint(value);
+                SetResultText(MiniJson.PrettyPrint(value));
             }
             catch (Exception ex)
             {
-                _resultText = $"请求失败: {ex.Message}";
+                SetResultText($"请求失败: {ex.Message}");
             }
             finally
             {
@@ -180,11 +180,11 @@ namespace HeTu.Editor.PostStation
             if (_isRequesting) return;
             if (string.IsNullOrWhiteSpace(_rangeComponentName))
             {
-                _resultText = "Component 名不能为空";
+                SetResultText("Component 名不能为空");
                 return;
             }
 
-            _resultText = "请求中...";
+            SetResultText("请求中...");
             Repaint();
             _isRequesting = true;
             IndexSubscription<DictComponent> sub = null;
@@ -218,7 +218,7 @@ namespace HeTu.Editor.PostStation
 
                 if (sub == null)
                 {
-                    _resultText = "null";
+                    SetResultText("null");
                     return;
                 }
 
@@ -226,11 +226,11 @@ namespace HeTu.Editor.PostStation
                 foreach (var pair in sub.Rows)
                     rows[pair.Key] = pair.Value;
 
-                _resultText = MiniJson.PrettyPrint(rows);
+                SetResultText(MiniJson.PrettyPrint(rows));
             }
             catch (Exception ex)
             {
-                _resultText = $"请求失败: {ex.Message}";
+                SetResultText($"请求失败: {ex.Message}");
             }
             finally
             {
@@ -238,6 +238,22 @@ namespace HeTu.Editor.PostStation
                 _isRequesting = false;
                 Repaint();
             }
+        }
+
+        private void SetResultText(string value)
+        {
+            if (string.Equals(_resultText, value, StringComparison.Ordinal))
+                return;
+
+            ClearTextAreaFocus();
+            _resultText = value;
+        }
+
+        private static void ClearTextAreaFocus()
+        {
+            GUI.FocusControl(null);
+            EditorGUIUtility.editingTextField = false;
+            GUIUtility.keyboardControl = 0;
         }
 
         private static object[] ParseArgsJson(string json)
