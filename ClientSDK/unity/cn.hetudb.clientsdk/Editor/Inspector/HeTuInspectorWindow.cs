@@ -11,6 +11,7 @@ namespace HeTu.Editor.Inspector
     public class HeTuInspectorWindow : EditorWindow
     {
         private const int MaxRows = 2000;
+        private const string UpdateMessageType = "updt";
         private const float RowHeight = 22f;
         private const float HeaderHeight = 24f;
         private const float DetailPanelHeight = 220f;
@@ -435,7 +436,7 @@ namespace HeTu.Editor.Inspector
             {
                 using (new EditorGUILayout.HorizontalScope())
                 {
-                    var title = row.Type == HeTuClientBase.MessageUpdate
+                    var title = row.Type == UpdateMessageType
                         ? "Call Stack @ Subscribe"
                         : "Call Stack";
                     GUILayout.Label(title, EditorStyles.boldLabel);
