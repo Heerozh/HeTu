@@ -759,7 +759,10 @@ namespace HeTu.Editor.Inspector
         [MenuItem("HeTu/Inspector...")]
         public static void Open()
         {
-            var window = GetWindow<HeTuInspectorWindow>("HeTu Inspector");
+            var inspectorType = Type.GetType("UnityEditor.InspectorWindow,UnityEditor");
+            var window = inspectorType != null
+                ? GetWindow<HeTuInspectorWindow>("HeTu Inspector", true, inspectorType)
+                : GetWindow<HeTuInspectorWindow>("HeTu Inspector");
             window.minSize = new Vector2(720, 420);
             window.Show();
         }
