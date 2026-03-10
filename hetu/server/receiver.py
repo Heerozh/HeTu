@@ -29,6 +29,14 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
+BAD_REQUEST = ["rsp", "DEBUG MODE: server rejected the request."]
+BAD_SUBS = [
+    "sub",
+    "fail",
+    [{"id": 0, "info": "DEBUG MODE: server rejected the request."}],
+]
+
+
 def check_length(name, data: list, left, right):
     if left > len(data) > right:
         raise ValueError(f"Invalid {name} message")
@@ -60,16 +68,17 @@ async def sub_call(
     executor: EndpointExecutor,
     broker: SubscriptionBroker,
     push_queue: asyncio.Queue,
-):
+) -> bool:
     """处理Client SDK调用订阅的命令"""
     ctx = executor.context
     # print(executor.context, 'sub', data)
     check_length("sub", data, 4, 100)
     table = executor.tbl_mgr.get_table(data[1])
     if table is None:
-        raise ValueError(
-            f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}"
-        )
+        err_msg = f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}"
+        replay.info(err_msg)
+        logger.warning(err_msg)
+        return False
 
     sub_id = None
     sub_data: dict[str, Any] | list[dict] | None = None
@@ -91,10 +100,14 @@ async def sub_call(
 
     num_row_sub, num_idx_sub = broker.count()
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
-        raise ValueError(
+        err_msg = (
             f" [非法操作] 订阅数超过限制："
             f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅"
         )
+        replay.info(err_msg)
+        logger.warning(err_msg)
+        return False
+    return True
 
 
 async def client_handler(
@@ -104,6 +117,7 @@ async def client_handler(
     broker: SubscriptionBroker,
     push_queue: asyncio.Queue,
     flood_checker: connection.ConnectionFloodChecker,
+    debug: int,
 ):
     """ws接受消息循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
     pipe = ServerMessagePipeline()
@@ -133,10 +147,17 @@ async def client_handler(
                 case "rpc":  # rpc endpoint_name args ...
                     rpc_ok = await rpc(last_data, executor, push_queue)
                     if not rpc_ok:
-                        print(executor.context, "call failed, close connection...")
-                        return ws.fail_connection()
+                        if debug:
+                            await push_queue.put(BAD_REQUEST)
+                        else:
+                            return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...
-                    await sub_call(last_data, executor, broker, push_queue)
+                    sub_ok = await sub_call(last_data, executor, broker, push_queue)
+                    if not sub_ok:
+                        if debug:
+                            await push_queue.put(BAD_SUBS)
+                        else:
+                            return ws.fail_connection()
                 case "unsub":  # unsub sub_id
                     check_length("unsub", last_data, 2, 2)
                     await broker.unsubscribe(last_data[1])
@@ -163,7 +184,7 @@ async def client_handler(
         )
         replay.info(err_msg)
         logger.exception(err_msg)
-        ws.fail_connection()
+        return ws.fail_connection()
     finally:
         # print(ctx, 'client_handler closed')
         pass

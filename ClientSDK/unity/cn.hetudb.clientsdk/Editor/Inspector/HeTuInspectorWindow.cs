@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using UnityEditor;
+using UnityEditorInternal;
 using UnityEngine;
 
 namespace HeTu.Editor.Inspector
@@ -10,9 +11,13 @@ namespace HeTu.Editor.Inspector
     public class HeTuInspectorWindow : EditorWindow
     {
         private const int MaxRows = 2000;
+        private const string RecordingSessionKey = "HeTu.Inspector.RecordingWanted";
+        private const string UpdateMessageType = "updt";
         private const float RowHeight = 22f;
         private const float HeaderHeight = 24f;
         private const float DetailPanelHeight = 220f;
+        private const float StackPanelHeight = 180f;
+        private const float StackRowHeight = 20f;
         private const float MinColumnWidth = 60f;
         private const float ResizeHandleHalfWidth = 3f;
 
@@ -53,18 +58,27 @@ namespace HeTu.Editor.Inspector
         private string _selectedTraceId;
         private bool _showPayloadDetail = true;
         private bool _showResponseDetail = true;
+        private bool _showStackDetail = true;
+        private Vector2 _stackDetailScroll;
+        private GUIStyle _stackHiddenStyle;
+        private GUIStyle _stackPrimaryHiddenStyle;
+        private GUIStyle _stackPrimaryVisibleStyle;
+        private GUIStyle _stackVisibleStyle;
 
         private void OnEnable()
         {
             titleContent = new GUIContent("HeTu Inspector");
             _dispatcher = new HeTuInspectorDispatcher(this);
             EditorApplication.update += OnEditorUpdate;
+            EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
+            RestoreRecordingIfNeeded();
         }
 
         private void OnDisable()
         {
             EditorApplication.update -= OnEditorUpdate;
-            StopRecording();
+            EditorApplication.playModeStateChanged -= OnPlayModeStateChanged;
+            StopRecording(false);
         }
 
         private void OnGUI()
@@ -79,7 +93,9 @@ namespace HeTu.Editor.Inspector
 
         private void EnsureStyles()
         {
-            if (_rowStyle != null && _headerStyle != null && _cellStyle != null)
+            if (_rowStyle != null && _headerStyle != null && _cellStyle != null &&
+                _stackVisibleStyle != null && _stackHiddenStyle != null &&
+                _stackPrimaryVisibleStyle != null && _stackPrimaryHiddenStyle != null)
                 return;
 
             _rowStyle = new GUIStyle(EditorStyles.label)
@@ -102,6 +118,29 @@ namespace HeTu.Editor.Inspector
                 alignment = TextAnchor.MiddleLeft,
                 clipping = TextClipping.Clip,
                 padding = new RectOffset(6, 6, 2, 2)
+            };
+
+            _stackVisibleStyle = new GUIStyle(EditorStyles.label)
+            {
+                alignment = TextAnchor.MiddleLeft,
+                clipping = TextClipping.Clip,
+                padding = new RectOffset(6, 6, 1, 1)
+            };
+
+            _stackHiddenStyle = new GUIStyle(_stackVisibleStyle);
+            _stackHiddenStyle.normal.textColor = Color.gray;
+            _stackHiddenStyle.hover.textColor = Color.gray;
+            _stackHiddenStyle.focused.textColor = Color.gray;
+            _stackHiddenStyle.active.textColor = Color.gray;
+
+            _stackPrimaryVisibleStyle = new GUIStyle(_stackVisibleStyle)
+            {
+                fontStyle = FontStyle.Bold
+            };
+
+            _stackPrimaryHiddenStyle = new GUIStyle(_stackHiddenStyle)
+            {
+                fontStyle = FontStyle.Bold
             };
         }
 
@@ -334,14 +373,12 @@ namespace HeTu.Editor.Inspector
             switch (evt.type)
             {
                 case EventType.MouseDown when evt.button == 0:
-                    _selectedTraceId = row.TraceId;
-                    _showPayloadDetail = true;
-                    _showResponseDetail = true;
+                    SelectRow(row.TraceId);
                     Repaint();
                     evt.Use();
                     return;
                 case EventType.ContextClick:
-                    _selectedTraceId = row.TraceId;
+                    SelectRow(row.TraceId);
                     ShowContextMenu(row);
                     Repaint();
                     evt.Use();
@@ -349,25 +386,50 @@ namespace HeTu.Editor.Inspector
             }
         }
 
+        private void SelectRow(string traceId)
+        {
+            if (!string.Equals(_selectedTraceId, traceId, StringComparison.Ordinal))
+                ClearDetailTextFocus();
+
+            _selectedTraceId = traceId;
+            _showPayloadDetail = true;
+            _showResponseDetail = true;
+            _showStackDetail = true;
+        }
+
+        private static void ClearDetailTextFocus()
+        {
+            GUI.FocusControl(null);
+            EditorGUIUtility.editingTextField = false;
+            GUIUtility.keyboardControl = 0;
+        }
+
         private void DrawDetailPanel()
         {
             if (!TryGetSelectedRow(out var selectedRow))
                 return;
-            if (!_showPayloadDetail && !_showResponseDetail)
+            if (!_showPayloadDetail && !_showResponseDetail && !_showStackDetail)
                 return;
 
             GUILayout.Space(6);
 
-            using (new EditorGUILayout.HorizontalScope())
+            if (_showPayloadDetail || _showResponseDetail)
             {
-                if (_showPayloadDetail)
-                    DrawDetailBox("Payload", selectedRow.Payload,
-                        ref _showPayloadDetail, ref _payloadDetailScroll);
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    if (_showPayloadDetail)
+                        DrawDetailBox("Payload", selectedRow.Payload,
+                            ref _showPayloadDetail, ref _payloadDetailScroll);
 
-                if (_showResponseDetail)
-                    DrawDetailBox("Response", selectedRow.Response,
-                        ref _showResponseDetail, ref _responseDetailScroll);
+                    if (_showResponseDetail)
+                        DrawDetailBox("Response", selectedRow.Response,
+                            ref _showResponseDetail, ref _responseDetailScroll);
+                }
             }
+
+            if (_showStackDetail)
+                DrawCallStackBox(selectedRow, ref _showStackDetail,
+                    ref _stackDetailScroll);
         }
 
         private static void DrawDetailBox(string title, string content,
@@ -396,6 +458,89 @@ namespace HeTu.Editor.Inspector
                     GUILayout.ExpandHeight(true));
                 EditorGUILayout.EndScrollView();
             }
+        }
+
+        private void DrawCallStackBox(InspectorTraceEvent row, ref bool visible,
+            ref Vector2 contentScroll)
+        {
+            using (new EditorGUILayout.VerticalScope("box", GUILayout.ExpandWidth(true),
+                       GUILayout.Height(StackPanelHeight)))
+            {
+                using (new EditorGUILayout.HorizontalScope())
+                {
+                    var callStackTitle = row.Type == UpdateMessageType
+                        ? "Initiator (Subscription)"
+                        : "Initiator";
+                    GUILayout.Label(callStackTitle, EditorStyles.boldLabel);
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button("x", EditorStyles.miniButton,
+                            GUILayout.Width(22), GUILayout.Height(18)))
+                    {
+                        visible = false;
+                        return;
+                    }
+                }
+
+                contentScroll = EditorGUILayout.BeginScrollView(contentScroll,
+                    GUILayout.ExpandHeight(true));
+                foreach (var frame in GetDisplayFrames(row))
+                    DrawStackFrameRow(frame);
+                EditorGUILayout.EndScrollView();
+            }
+        }
+
+        private IEnumerable<InspectorStackFrameInfo> GetDisplayFrames(
+            InspectorTraceEvent row)
+        {
+            if (row?.CallerFrames != null && row.CallerFrames.Count > 0)
+                return row.CallerFrames;
+
+            return new[]
+            {
+                new InspectorStackFrameInfo
+                {
+                    DisplayText = "-",
+                    FilePath = null,
+                    Line = 0,
+                    IsVisible = false
+                }
+            };
+        }
+
+        private void DrawStackFrameRow(InspectorStackFrameInfo frame)
+        {
+            var style = GetStackFrameStyle(frame);
+            var rect = GUILayoutUtility.GetRect(
+                new GUIContent(frame.DisplayText),
+                style,
+                GUILayout.ExpandWidth(true),
+                GUILayout.Height(StackRowHeight));
+            if (frame.IsPrimaryUserFrame)
+                EditorGUI.DrawRect(rect, new Color(1f, 0.8f, 0.15f, 0.14f));
+            EditorGUI.LabelField(rect, frame.DisplayText, style);
+
+            var evt = Event.current;
+            if (!frame.IsVisible)
+                return;
+
+            if (!rect.Contains(evt.mousePosition) ||
+                evt.type != EventType.MouseDown ||
+                evt.button != 0)
+                return;
+
+            InternalEditorUtility.OpenFileAtLineExternal(frame.FilePath,
+                Mathf.Max(1, frame.Line));
+            evt.Use();
+        }
+
+        private GUIStyle GetStackFrameStyle(InspectorStackFrameInfo frame)
+        {
+            if (frame.IsPrimaryUserFrame)
+                return frame.IsVisible
+                    ? _stackPrimaryVisibleStyle
+                    : _stackPrimaryHiddenStyle;
+
+            return frame.IsVisible ? _stackVisibleStyle : _stackHiddenStyle;
         }
 
         private bool TryGetSelectedRow(out InspectorTraceEvent row)
@@ -553,17 +698,25 @@ namespace HeTu.Editor.Inspector
 
         private void StartRecording()
         {
+            if (_isRecording || _dispatcher == null)
+                return;
+
             var client = HeTuClient.Instance;
             _samplerWasEnabledBeforeRecording = client.InspectorEnabled;
             client.AddInspectorDispatcher(_dispatcher);
             client.ConfigureInspector(true);
             _isRecording = true;
+            SessionState.SetBool(RecordingSessionKey, true);
         }
 
-        private void StopRecording()
+        private void StopRecording(bool clearSessionIntent = true)
         {
             if (!_isRecording || _dispatcher == null)
+            {
+                if (clearSessionIntent)
+                    SessionState.EraseBool(RecordingSessionKey);
                 return;
+            }
 
             var client = HeTuClient.Instance;
             client.RemoveInspectorDispatcher(_dispatcher);
@@ -572,6 +725,27 @@ namespace HeTu.Editor.Inspector
                 client.ConfigureInspector(false);
 
             _isRecording = false;
+            if (clearSessionIntent)
+                SessionState.EraseBool(RecordingSessionKey);
+        }
+
+        private void RestoreRecordingIfNeeded()
+        {
+            if (!SessionState.GetBool(RecordingSessionKey, false))
+                return;
+
+            StartRecording();
+        }
+
+        private void OnPlayModeStateChanged(PlayModeStateChange change)
+        {
+            switch (change)
+            {
+                case PlayModeStateChange.EnteredEditMode:
+                case PlayModeStateChange.EnteredPlayMode:
+                    RestoreRecordingIfNeeded();
+                    break;
+            }
         }
 
         private void ClearRows()
@@ -657,8 +831,11 @@ namespace HeTu.Editor.Inspector
         [MenuItem("HeTu/Inspector...")]
         public static void Open()
         {
-            var window = GetWindow<HeTuInspectorWindow>("HeTu Inspector");
-            window.minSize = new Vector2(720, 260);
+            var inspectorType = Type.GetType("UnityEditor.InspectorWindow,UnityEditor");
+            var window = inspectorType != null
+                ? GetWindow<HeTuInspectorWindow>("HeTu Inspector", true, inspectorType)
+                : GetWindow<HeTuInspectorWindow>("HeTu Inspector");
+            window.minSize = new Vector2(720, 420);
             window.Show();
         }
 

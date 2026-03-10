@@ -7,10 +7,18 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
 using System.Text;
 
 namespace HeTu
 {
+    internal enum InspectorTraceCompletionMode
+    {
+        OnResponse,
+        AfterSend
+    }
+
     /// <summary>
     ///     Inspector 事件分发器接口。
     /// </summary>
@@ -41,6 +49,35 @@ namespace HeTu
     }
 
     /// <summary>
+    ///     Inspector 调用堆栈帧模型。
+    /// </summary>
+    public sealed class InspectorStackFrameInfo
+    {
+        public string DisplayText { get; set; }
+
+        public string FilePath { get; set; }
+
+        public int Line { get; set; }
+
+        public bool IsVisible { get; set; }
+
+        public bool IsUserCode { get; set; }
+
+        public bool IsPrimaryUserFrame { get; set; }
+
+        public InspectorStackFrameInfo Clone() =>
+            new()
+            {
+                DisplayText = DisplayText,
+                FilePath = FilePath,
+                Line = Line,
+                IsVisible = IsVisible,
+                IsUserCode = IsUserCode,
+                IsPrimaryUserFrame = IsPrimaryUserFrame
+            };
+    }
+
+    /// <summary>
     ///     Inspector 事件模型。
     /// </summary>
     public sealed class InspectorTraceEvent
@@ -58,6 +95,10 @@ namespace HeTu
         public string Response { get; set; }
 
         public string CallerStack { get; set; }
+
+        public List<InspectorStackFrameInfo> CallerFrames { get; set; }
+
+        internal InspectorTraceCompletionMode CompletionMode { get; set; }
 
         /// <summary>
         ///     形如 "源/传输"，单位字节。
@@ -84,6 +125,10 @@ namespace HeTu
                 Payload = Payload,
                 Response = Response,
                 CallerStack = CallerStack,
+                CallerFrames = CallerFrames?
+                    .Select(frame => frame.Clone())
+                    .ToList(),
+                CompletionMode = CompletionMode,
                 Size = Size,
                 CallDuration = CallDuration,
                 Status = Status
@@ -148,13 +193,16 @@ namespace HeTu
         /// <summary>
         ///     拦截并立即分发一条 Pending 请求事件。
         /// </summary>
-        public string InterceptRequest(string type, string target, object payload)
+        internal string InterceptRequest(string type, string target, object payload,
+            InspectorTraceCompletionMode completionMode =
+                InspectorTraceCompletionMode.OnResponse)
         {
             lock (_syncRoot)
             {
                 if (!_enabled)
                     return null;
 
+                var callerStack = InspectorTraceStack.CaptureCurrent(2);
                 var traceId = Guid.NewGuid().ToString("N");
                 var traceEvent = new InspectorTraceEvent
                 {
@@ -164,7 +212,9 @@ namespace HeTu
                     Target = target,
                     Payload = InspectorTraceStringify.Stringify(payload),
                     Response = NotAvailable,
-                    CallerStack = CaptureStackOrUnavailable(),
+                    CallerStack = callerStack.RawStack,
+                    CallerFrames = callerStack.Frames,
+                    CompletionMode = completionMode,
                     Size = NotAvailable,
                     CallDuration = "Pending",
                     Status = "pending"
@@ -179,10 +229,24 @@ namespace HeTu
             }
         }
 
+        internal void CompleteAfterSendIfNeeded(string traceId)
+        {
+            if (traceId == null) return;
+            lock (_syncRoot)
+            {
+                if (!_pendingTraces.TryGetValue(traceId, out var trace))
+                    return;
+                if (trace.CompletionMode != InspectorTraceCompletionMode.AfterSend)
+                    return;
+
+                CompleteRequestInternal(traceId, trace, "completed", null);
+            }
+        }
+
         /// <summary>
         ///     更新请求尺寸并重新分发（仍保持 Pending）。
         /// </summary>
-        public void UpdateRequestSize(string traceId, int sourceSizeBytes,
+        internal void UpdateRequestSize(string traceId, int sourceSizeBytes,
             int transportSizeBytes)
         {
             if (traceId == null) return;
@@ -199,7 +263,7 @@ namespace HeTu
         /// <summary>
         ///     完成请求并分发最终状态。
         /// </summary>
-        public void CompleteRequest(string traceId, string status,
+        internal void CompleteRequest(string traceId, string status,
             object responsePayload = null)
         {
             if (traceId == null) return;
@@ -207,34 +271,22 @@ namespace HeTu
             {
                 if (!_pendingTraces.TryGetValue(traceId, out var trace))
                     return;
-
-                if (_pendingStopwatches.TryGetValue(traceId, out var sw))
-                {
-                    sw.Stop();
-                    trace.CallDuration = $"{sw.ElapsedMilliseconds}ms";
-                }
-
-                trace.Status = status;
-                if (responsePayload != null)
-                    trace.Response = InspectorTraceStringify.Stringify(responsePayload);
-                DispatchInternal(trace);
-
-                _pendingTraces.Remove(traceId);
-                _pendingStopwatches.Remove(traceId);
+                CompleteRequestInternal(traceId, trace, status, responsePayload);
             }
         }
 
         /// <summary>
         ///     收集 MessageUpdate 推送。
         /// </summary>
-        public void InterceptMessageUpdate(string target, JsonObject payload,
-            int sourceSizeBytes, int transportSizeBytes)
+        internal void InterceptMessageUpdate(string target, JsonObject payload,
+            StackTrace callerTrace, int sourceSizeBytes, int transportSizeBytes)
         {
             lock (_syncRoot)
             {
                 if (!_enabled)
                     return;
 
+                var captured = InspectorTraceStack.FromStackTrace(callerTrace);
                 var traceEvent = new InspectorTraceEvent
                 {
                     TraceId = Guid.NewGuid().ToString("N"),
@@ -243,7 +295,8 @@ namespace HeTu
                     Target = target,
                     Payload = InspectorTraceStringify.Stringify(payload),
                     Response = NotAvailable,
-                    CallerStack = NotAvailable,
+                    CallerStack = captured.RawStack,
+                    CallerFrames = captured.Frames,
                     Size = BuildSize(sourceSizeBytes, transportSizeBytes),
                     CallDuration = NotAvailable,
                     Status = "completed"
@@ -261,6 +314,24 @@ namespace HeTu
                 dispatcher.Dispatch(snapshot);
         }
 
+        private void CompleteRequestInternal(string traceId, InspectorTraceEvent trace,
+            string status, object responsePayload)
+        {
+            if (_pendingStopwatches.TryGetValue(traceId, out var sw))
+            {
+                sw.Stop();
+                trace.CallDuration = $"{sw.ElapsedMilliseconds}ms";
+            }
+
+            trace.Status = status;
+            if (responsePayload != null)
+                trace.Response = InspectorTraceStringify.Stringify(responsePayload);
+            DispatchInternal(trace);
+
+            _pendingTraces.Remove(traceId);
+            _pendingStopwatches.Remove(traceId);
+        }
+
         private static string BuildSize(int source, int transport)
         {
             if (source < 0 || transport < 0) return NotAvailable;
@@ -272,15 +343,6 @@ namespace HeTu
                 >= 1024 => $"{source / 1024}KB/{transport / 1024}KB",
                 _ => $"{source}B/{transport}B"
             };
-        }
-
-        private static string CaptureStackOrUnavailable()
-        {
-#if DEBUG
-            return Environment.StackTrace;
-#else
-            return NotAvailable;
-#endif
         }
     }
 
@@ -352,5 +414,149 @@ namespace HeTu
                     return;
             }
         }
+    }
+
+    internal sealed class InspectorCapturedStack
+    {
+        public string RawStack { get; set; }
+
+        public List<InspectorStackFrameInfo> Frames { get; set; }
+    }
+
+    internal static class InspectorTraceStack
+    {
+        internal static InspectorCapturedStack CaptureCurrent(int skipFrames = 0)
+        {
+#if DEBUG
+            var trace = new StackTrace(skipFrames, true);
+            return FromStackTrace(trace);
+#else
+            return new InspectorCapturedStack
+            {
+                RawStack = "-",
+                Frames = BuildUnavailableFrames()
+            };
+#endif
+        }
+
+        internal static InspectorCapturedStack FromStackTrace(StackTrace trace)
+        {
+            if (trace == null)
+                return new InspectorCapturedStack
+                {
+                    RawStack = "-", Frames = BuildUnavailableFrames()
+                };
+
+            var frames = trace.GetFrames();
+            var callerFrames = frames == null
+                ? BuildUnavailableFrames()
+                : BuildFrameInfos(frames);
+            return new InspectorCapturedStack
+            {
+                RawStack = string.IsNullOrWhiteSpace(trace.ToString())
+                    ? "-"
+                    : trace.ToString(),
+                Frames = callerFrames
+            };
+        }
+
+        internal static InspectorStackFrameInfo CreateFrameInfo(string declaringTypeName,
+            string methodName, string filePath, int line,
+            bool isUserCode = false, bool isPrimaryUserFrame = false)
+        {
+            var hasVisibleSource = !string.IsNullOrWhiteSpace(filePath) && line > 0;
+            var fileName = hasVisibleSource ? Path.GetFileName(filePath) : "-";
+            var lineText = hasVisibleSource ? line.ToString() : "-";
+            return new InspectorStackFrameInfo
+            {
+                DisplayText =
+                    $"{declaringTypeName}.{methodName} ({fileName}:{lineText})",
+                FilePath = hasVisibleSource ? filePath : null,
+                Line = hasVisibleSource ? line : 0,
+                IsVisible = hasVisibleSource,
+                IsUserCode = isUserCode,
+                IsPrimaryUserFrame = isPrimaryUserFrame
+            };
+        }
+
+        private static List<InspectorStackFrameInfo> BuildFrameInfos(StackFrame[] frames)
+        {
+            var callerFrames = new List<InspectorStackFrameInfo>();
+            var firstUserFrameIndex = -1;
+            foreach (var frame in frames)
+            {
+                var method = frame.GetMethod();
+                var methodName = method?.Name;
+                var typeName = method?.DeclaringType?.Name;
+                if (string.IsNullOrWhiteSpace(methodName) ||
+                    string.IsNullOrWhiteSpace(typeName) ||
+                    ShouldSkipFrame(typeName, methodName))
+                    continue;
+
+                var isUserCode = IsUserCodeDeclaringType(method.DeclaringType);
+                callerFrames.Add(CreateFrameInfo(typeName, methodName,
+                    frame.GetFileName(),
+                    frame.GetFileLineNumber(),
+                    isUserCode));
+                if (isUserCode && firstUserFrameIndex < 0)
+                    firstUserFrameIndex = callerFrames.Count - 1;
+            }
+
+            if (firstUserFrameIndex >= 0)
+                callerFrames[firstUserFrameIndex].IsPrimaryUserFrame = true;
+
+            return callerFrames.Count == 0 ? BuildUnavailableFrames() : callerFrames;
+        }
+
+        internal static bool IsUserCodeDeclaringType(Type declaringType)
+        {
+            if (declaringType == null)
+                return false;
+
+            var assembly = declaringType.Assembly;
+            if (assembly == typeof(HeTuClientBase).Assembly)
+                return false;
+
+            var assemblyName = assembly.GetName().Name ?? string.Empty;
+            if (assemblyName.StartsWith("System", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("mscorlib", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("netstandard", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("Unity", StringComparison.Ordinal) ||
+                assemblyName.StartsWith("nunit", StringComparison.OrdinalIgnoreCase) ||
+                assemblyName.StartsWith("UniTask", StringComparison.OrdinalIgnoreCase) ||
+                assemblyName.StartsWith("Mono.", StringComparison.Ordinal))
+                return false;
+
+            var ns = declaringType.Namespace ?? string.Empty;
+            if (ns.StartsWith("System", StringComparison.Ordinal) ||
+                ns.StartsWith("UnityEngine", StringComparison.Ordinal) ||
+                ns.StartsWith("UnityEditor", StringComparison.Ordinal) ||
+                ns.StartsWith("HeTu", StringComparison.Ordinal) ||
+                ns.StartsWith("Cysharp", StringComparison.Ordinal) ||
+                ns.StartsWith("NUnit", StringComparison.Ordinal) ||
+                ns.StartsWith("Mono.", StringComparison.Ordinal))
+                return false;
+
+            return true;
+        }
+
+        private static List<InspectorStackFrameInfo> BuildUnavailableFrames() =>
+            new()
+            {
+                new InspectorStackFrameInfo
+                {
+                    DisplayText = "-",
+                    FilePath = null,
+                    Line = 0,
+                    IsVisible = false
+                }
+            };
+
+        private static bool ShouldSkipFrame(string typeName, string methodName) =>
+            (typeName == nameof(Environment) && methodName == "get_StackTrace") ||
+            (typeName == nameof(InspectorTraceStack) &&
+             methodName == nameof(CaptureCurrent)) ||
+            (typeName == nameof(HeTuClientBase) &&
+             methodName == "CaptureCreationTrace");
     }
 }
