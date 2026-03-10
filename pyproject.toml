@@ -34,7 +34,6 @@ dependencies = [
     "aiosqlite>=0.22.1",
     "asyncpg>=0.31.0",
     "brotli>=1.2.0",
-    "filelock>=3.24.3",
     "msgpack>=1.1.2",
     "msgspec>=0.20.0",
     "numpy~=2.3",
