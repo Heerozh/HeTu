@@ -8,12 +8,12 @@
 
 import inspect
 from dataclasses import dataclass
-from types import FunctionType
 from inspect import signature
-from typing import Callable, Awaitable, Any
+from types import FunctionType
+from typing import Any, Awaitable, Callable
 
-from ..common import Singleton, Permission
-
+from ..common import Permission, Singleton
+from ..i18n import _
 
 ENDPOINT_NAME_MAX_LEN = 32
 
@@ -65,7 +65,9 @@ class EndpointDefines(metaclass=Singleton):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
         if not force:
-            assert func.__name__ not in sub_map, "Endpoint重复定义：" + func.__name__
+            assert func.__name__ not in sub_map, (
+                _("Endpoint重复定义：") + func.__name__
+            )
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         assert isinstance(func, FunctionType)
@@ -162,17 +164,17 @@ def define_endpoint(
         # 严格要求第一个参数命名
         func_args = signature(func).parameters
         func_arg_names = list(func_args.keys())[:1]
-        assert func_arg_names == ["ctx"], (
-            f"Endpoint参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
-        )
+        assert func_arg_names == ["ctx"], _(
+            "Endpoint参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
+        ).format(func_arg_names=func_arg_names)
+ 
+        assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, _(
+            "Endpoint函数名过长，最大长度为{max_len}个字符"
+        ).format(max_len=ENDPOINT_NAME_MAX_LEN)
 
-        assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, (
-            f"Endpoint函数名过长，最大长度为{ENDPOINT_NAME_MAX_LEN}个字符"
-        )
-
-        assert inspect.iscoroutinefunction(func), (
-            f"Endpoint {func.__name__} 必须是异步函数(`async def ...`)"
-        )
+        assert inspect.iscoroutinefunction(func), _(
+            "Endpoint {name} 必须是异步函数(`async def ...`)"
+        ).format(name=func.__name__)
 
         EndpointDefines().add(namespace, func, force, permission)
 

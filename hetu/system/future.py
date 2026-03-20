@@ -18,6 +18,7 @@ from hetu.data.backend import RowFormat
 
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
+from ..i18n import _
 from .caller import SystemCaller
 from .context import SystemContext
 from .definer import SystemClusters, define_system
@@ -115,38 +116,48 @@ async def create_future_call(
 
     args_str = repr(args)
     if len(args_str) > 1024:
-        raise ValueError(f"args长度超过1024字符: {len(args_str)}")
+        raise ValueError(
+            _("args长度超过1024字符: {length}").format(length=len(args_str))
+        )
 
     try:
         revert = eval(args_str)
     except Exception as e:
-        raise AssertionError("args无法通过eval还原") from e
-    assert revert == args, "args通过eval还原丢失了信息"
+        raise AssertionError(_("args无法通过eval还原")) from e
+    assert revert == args, _("args通过eval还原丢失了信息")
 
-    assert not recurring or timeout != 0, "recurring=True时timeout不能为0"
+    assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
 
     # 读取保存的system define，检查是否开了call lock
     sys = SYSTEM_CLUSTERS.get_system(system)
     if not sys:
-        raise RuntimeError(f"⚠️ [⚙️Future] [致命错误] 不存在的System {system}")
+        raise RuntimeError(
+            _("⚠️ [⚙️Future] [致命错误] 不存在的System {system}").format(system=system)
+        )
     lk = any(
         comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
     )
     if not lk:
         raise RuntimeError(
-            f"⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock"
+            _("⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock").format(
+                system=system
+            )
         )
 
     if sys.permission == Permission.USER:
         warnings.warn(
-            f"⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{sys.permission.name}权限，"
-            f"建议设为None防止客户端调用。"
-            f"且未来调用为后台任务，执行时Context无用户信息"
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+                "且未来调用为后台任务，执行时Context无用户信息"
+            ).format(system=system, permission=sys.permission.name)
         )
     elif sys.permission != Permission.ADMIN and sys.permission is not None:
         warnings.warn(
-            f"⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{sys.permission.name}权限，"
-            f"建议设为None防止客户端调用。"
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+            ).format(system=system, permission=sys.permission.name)
         )
 
     # 创建
@@ -206,7 +217,9 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     sys = SYSTEM_CLUSTERS.get_system(call.system)
     if not sys:
         logger.error(
-            f"❌ [⚙️Future] 不存在的System, 检查是否代码修改删除了该System：{call.system}"
+            _(
+                "❌ [⚙️Future] 不存在的System, 检查是否代码修改删除了该System：{system}"
+            ).format(system=call.system)
         )
         return False
     args = eval(call.args)
@@ -222,7 +235,9 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
             res = await caller.call_(sys, *args)
         ok = True
     except Exception as e:
-        err_msg = f"❌ [⚙️Future] 未来调用System异常，调用：{call.system}{args}，异常：{type(e).__name__}:{e}"
+        err_msg = _(
+            "❌ [⚙️Future] 未来调用System异常，调用：{system}{args}，异常：{exc}"
+        ).format(system=call.system, args=args, exc=f"{type(e).__name__}:{e}")
         logger.exception(err_msg)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
@@ -246,7 +261,9 @@ async def future_call_task(app):
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
-    logger.info(f"🔗 [⚙️Future] 新Task：{current_task.get_name()}")
+    logger.info(
+        _("🔗 [⚙️Future] 新Task：{task_name}").format(task_name=current_task.get_name())
+    )
 
     # 启动时清空超过7天的call_lock的已执行uuid数据
     for tbl_mgr in app.ctx.table_managers.values():
@@ -307,6 +324,7 @@ async def future_call_task(app):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            # 遇到backend断线正常，其他异常不应该发生
-            err_msg = f"❌ [⚙️Future] Task执行异常：{type(e).__name__}:{e}"
+            err_msg = _("❌ [⚙️Future] Task执行异常：{exc}").format(
+                exc=f"{type(e).__name__}:{e}"
+            )
             logger.exception(err_msg)

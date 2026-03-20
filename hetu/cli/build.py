@@ -8,6 +8,7 @@
 import sys
 
 from hetu.cli.base import CommandInterface
+from hetu.i18n import _
 
 
 class BuildCommand(CommandInterface):
@@ -17,21 +18,23 @@ class BuildCommand(CommandInterface):
 
     @classmethod
     def register(cls, subparsers):
-        parser_build = subparsers.add_parser("build", help="生成客户端SDK C# 类型代码")
+        parser_build = subparsers.add_parser(
+            "build", help=_("生成客户端SDK C# 类型代码")
+        )
         parser_build.add_argument(
             "--app-file",
-            help="河图app的py文件",
+            help=_("河图app的py文件"),
             metavar=".app.py",
             default="/app/app.py",
         )
         parser_build.add_argument(
             "--namespace",
             metavar="game1",
-            help="编译app.py中哪个namespace下的数据类型",
+            help=_("编译app.py中哪个namespace下的数据类型"),
             required=True,
         )
         parser_build.add_argument(
-            "--output", metavar="./Components.cs", help="输出文件路径", required=True
+            "--output", metavar="./Components.cs", help=_("输出文件路径"), required=True
         )
 
     @classmethod
@@ -40,7 +43,9 @@ class BuildCommand(CommandInterface):
 
         # 加载玩家的app文件
         spec = importlib.util.spec_from_file_location("HeTuApp", args.app_file)
-        assert spec and spec.loader, f"无法加载app文件 {args.app_file}"
+        assert spec and spec.loader, _("无法加载app文件 {app_file}").format(
+            app_file=args.app_file
+        )
         module = importlib.util.module_from_spec(spec)
         sys.modules["HeTuApp"] = module
         spec.loader.exec_module(module)
@@ -51,4 +56,4 @@ class BuildCommand(CommandInterface):
         from hetu.sourcegen.csharp import generate_all_components
 
         generate_all_components(args.namespace, args.output)
-        print(f"✅ 已生成C#代码到 {args.output}")
+        print(_("✅ 已生成C#代码到 {output}").format(output=args.output))

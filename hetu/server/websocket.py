@@ -14,6 +14,7 @@ from sanic.exceptions import WebsocketClosed
 from ..data.sub import SubscriptionBroker
 from ..endpoint import connection
 from ..endpoint.executor import EndpointExecutor
+from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
@@ -31,7 +32,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 获取当前协程任务, 自身算是一个协程1
     current_task = asyncio.current_task()
     assert current_task, "Must be called in an asyncio task"
-    logger.info(f"🔗 [📡WSConnect] 新连接：{db_name}: {current_task.get_name()}")
+    logger.info(_("🔗 [📡WSConnect] 新连接：{db_name}: {task_name}").format(db_name=db_name, task_name=current_task.get_name()))
 
     # 获得客户端握手消息
     msg_pipe = ServerMessagePipeline()
@@ -58,7 +59,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 在客户端握手后，才返回实例是否存在的错误，防止暴露实例信息给扫描器
     instance = db_name
     if instance not in request.app.ctx.table_managers:
-        logger.info(f"New Connect Error: 错误的路径，实例名不存在: {instance}")
+        logger.info(_("New Connect Error: 错误的路径，实例名不存在: {instance}").format(instance=instance))
         ws.fail_connection()
         return
     tbl_mgr = request.app.ctx.table_managers[instance]
@@ -153,19 +154,19 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 break
     except asyncio.CancelledError:
         if ws.ws_proto.parser_exc:
-            err_msg = f"❌ [📡WSSender] WS协议异常：{ws.ws_proto.parser_exc}"
+            err_msg = _("❌ [📡WSSender] WS协议异常：{exc}").format(exc=ws.ws_proto.parser_exc)
             replay.info(err_msg)
             logger.exception(err_msg, exc_info=ws.ws_proto.parser_exc)
         # print(executor.context, 'websocket_connection normal canceled', ws.ws_proto.parser_exc)
     except WebsocketClosed:
         pass
     except BaseException as e:
-        err_msg = f"❌ [📡WSSender] 发送数据异常：{type(e).__name__}:{e}"
+        err_msg = _("❌ [📡WSSender] 发送数据异常：{err}").format(err=f"{type(e).__name__}:{e}")
         replay.info(err_msg)
         logger.exception(err_msg)
     finally:
         # 连接断开，强制关闭此协程时也会调用
-        close_msg = f"⛓️ [📡WSConnect] 连接断开：{current_task.get_name()}"
+        close_msg = _("⛓️ [📡WSConnect] 连接断开：{task_name}").format(task_name=current_task.get_name())
         replay.info(close_msg)
         logger.info(close_msg)
         await request.app.cancel_task(recv_task_id, raise_exception=False)
@@ -179,10 +180,10 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             try:
                 await system_caller.call(DISCONNECT_SYSTEM)
             except BaseException as e:
-                err_msg = (
-                    f"❌ [📡WSDisconnectHook] 断线System调用异常: "
-                    f"{DISCONNECT_SYSTEM} | {type(e).__name__}:{e}"
-                )
+                err_msg = _(
+                    "❌ [📡WSDisconnectHook] 断线System调用异常: "
+                    "{system} | {err}"
+                ).format(system=DISCONNECT_SYSTEM, err=f"{type(e).__name__}:{e}")
                 replay.info(err_msg)
                 logger.exception(err_msg)
         await endpoint_executor.terminate()

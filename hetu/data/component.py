@@ -21,6 +21,7 @@ if TYPE_CHECKING:
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
 from ..common.snowflake_id import SnowflakeID
+from ..i18n import _
 
 logger = logging.getLogger("HeTu.root")
 SNOWFLAKE_ID = SnowflakeID()
@@ -249,7 +250,7 @@ class ComponentDefines(metaclass=Singleton):
     ):
         comp_map = self._components.setdefault(namespace, dict())
         if not force:
-            assert component_cls.name_ not in comp_map, "Component重复定义"
+            assert component_cls.name_ not in comp_map, _("Component重复定义")
         comp_map[component_cls.name_] = component_cls
 
 
@@ -364,16 +365,24 @@ def define_component(
             prop.dtype = anno_type
         # 判断名称合法性
         if keyword.iskeyword(fname) or fname in ["bool", "int", "float", "str"]:
-            raise ValueError(f"{cname}.{fname}属性定义出错，属性名不能是Python关键字。")
+            raise ValueError(
+                _("{cname}.{fname}属性定义出错，属性名不能是Python关键字。").format(
+                    cname=cname, fname=fname
+                )
+            )
         if csharp_keyword.iskeyword(fname):
-            raise ValueError(f"{cname}.{fname}属性定义出错，属性名不能是C#关键字。")
+            raise ValueError(
+                _("{cname}.{fname}属性定义出错，属性名不能是C#关键字。").format(
+                    cname=cname, fname=fname
+                )
+            )
         # 判断类型，以及长度合法性
-        assert np.dtype(prop.dtype).itemsize > 0, (
-            f"{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
-        )
-        assert np.dtype(prop.dtype).type is not np.void, (
-            f"{cname}.{fname}属性的dtype不支持void类型"
-        )
+        assert np.dtype(prop.dtype).itemsize > 0, _(
+            "{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+        ).format(cname=cname, fname=fname)
+        assert np.dtype(prop.dtype).type is not np.void, _(
+            "{cname}.{fname}属性的dtype不支持void类型"
+        ).format(cname=cname, fname=fname)
         # bool类型在一些后端数据库中不支持，强制转换为int8
         if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == "?":
             prop.dtype = np.int8
@@ -381,15 +390,17 @@ def define_component(
         if prop.unique:
             if not prop.index:
                 logger.warning(
-                    f"⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，"
-                    f"index不能设置为False。"
+                    _(
+                        "⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，"
+                        "index不能设置为False。"
+                    ).format(cname=cname, fname=fname)
                 )
             prop.index = True
         # 判断default值必须设置
-        assert prop.default is not None, (
-            f"{cname}.{fname}默认值不能为None。所有属性都要有默认值，"
-            f"因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。"
-        )
+        assert prop.default is not None, _(
+            "{cname}.{fname}默认值不能为None。所有属性都要有默认值，"
+            "因为数据接口统一用c like struct实现，强类型struct不接受NULL/None值。"
+        ).format(cname=cname, fname=fname)
         # 判断default值和dtype匹配，包括长度能安全转换
         can_cast = np.can_cast(np.min_scalar_type(prop.default), prop.dtype)
         non_numeric = (str, bytes)
@@ -397,46 +408,60 @@ def define_component(
             # min_scalar_type(1)会判断为uint8, prop.dtype为int8时判断会失败,所以要转为负数再判断一次
             default_value = -prop.default if prop.default != 0 else -1
             can_cast = np.can_cast(np.min_scalar_type(default_value), prop.dtype)
-        assert can_cast, (
-            f"{cname}.{fname}的default值："
-            f"{type(prop.default).__name__}({prop.default})"
-            f"和属性dtype({prop.dtype})不匹配"
+        assert can_cast, _(
+            "{cname}.{fname}的default值："
+            "{default_type}({default_value})"
+            "和属性dtype({dtype})不匹配"
+        ).format(
+            cname=cname,
+            fname=fname,
+            default_type=type(prop.default).__name__,
+            default_value=prop.default,
+            dtype=prop.dtype,
         )
 
     def _rls_define_check(cname, properties):
         if permission == Permission.OWNER:
-            assert rls_compare is None, f"{cname}权限为OWNER时，不能设置rls_compare参数"
-            assert "owner" in properties, f"{cname}权限为OWNER时，必须有owner属性"
+            assert rls_compare is None, _(
+                "{cname}权限为OWNER时，不能设置rls_compare参数"
+            ).format(cname=cname)
+            assert "owner" in properties, _(
+                "{cname}权限为OWNER时，必须有owner属性"
+            ).format(cname=cname)
             # 取消, owner有很多地方需要不是唯一，比如每行一个道具的情况
             # if not properties['owner'].unique:
             #     logger.warning(f"⚠️ [🛠️Define] {cls.__name__}.owner属性不是unique唯一，"
             #                    f"你确定正确么？")
-            assert np.issubdtype(properties["owner"].dtype, np.number), (
-                f"{cname}的owner属性必需是numeric数字(int, np.int64, ...)类型"
-            )
+            assert np.issubdtype(properties["owner"].dtype, np.number), _(
+                "{cname}的owner属性必需是numeric数字(int, np.int64, ...)类型"
+            ).format(cname=cname)
 
         # 检查RLS定义
         if permission == Permission.RLS:
-            assert rls_compare is not None, (
-                f"{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
-            )
-            assert all(type(e) is str for e in rls_compare), (
-                f"{cname}.rls_compare参数必须全部是字符串类型"
-            )
-            assert len(rls_compare) == 3, f"{cname}.rls_compare参数必须只有3个元素)"
+            assert rls_compare is not None, _(
+                "{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
+            ).format(cname=cname)
+            assert all(type(e) is str for e in rls_compare), _(
+                "{cname}.rls_compare参数必须全部是字符串类型"
+            ).format(cname=cname)
+            assert len(rls_compare) == 3, _(
+                "{cname}.rls_compare参数必须只有3个元素)"
+            ).format(cname=cname)
 
-            assert hasattr(operator, rls_compare[0]), (
-                f"{cname}权限为RLS: {rls_compare}，但operator模块没有{rls_compare[0]}方法"
-            )
+            assert hasattr(operator, rls_compare[0]), _(
+                "{cname}权限为RLS: {rls_compare}，但operator模块没有{method}方法"
+            ).format(cname=cname, rls_compare=rls_compare, method=rls_compare[0])
 
-            assert rls_compare[1] in properties, (
-                f"{cname}权限为RLS: {rls_compare}，但表没有定义{rls_compare[1]}属性"
-            )
+            assert rls_compare[1] in properties, _(
+                "{cname}权限为RLS: {rls_compare}，但表没有定义{prop}属性"
+            ).format(cname=cname, rls_compare=rls_compare, prop=rls_compare[1])
 
     def warp(cls):
         # class名合法性检测
         if csharp_keyword.iskeyword(cls.__name__):
-            raise ValueError(f"组件名({cls.__name__})是C#关键字，请refactor。")
+            raise ValueError(
+                _("组件名({name})是C#关键字，请refactor。").format(name=cls.__name__)
+            )
         # 获取class的property成员列表
         cls_annotations = inspect.get_annotations(cls)
         properties = {}
@@ -447,32 +472,42 @@ def define_component(
                 _normalize_prop(cls.__name__, _name, anno_type, prop)
                 properties[_name] = prop
             else:
-                raise AssertionError(f"{cls.__name__}.{_name}不是Property类型")
+                raise AssertionError(
+                    _("{cls_name}.{name}不是Property类型").format(
+                        cls_name=cls.__name__, name=_name
+                    )
+                )
             delattr(cls, _name)
         # Property类型强制要求定义type hint
         for name, value in cls.__dict__.items():
             if isinstance(value, Property) and name not in properties:
                 raise ValueError(
-                    f"{cls.__name__}.{name}属性未定义type hint。请使用以下形式，"
-                    f"{name}: type = property_field(...)"
+                    _(
+                        "{cls_name}.{name}属性未定义type hint。请使用以下形式，"
+                        "{name}: type = property_field(...)"
+                    ).format(cls_name=cls.__name__, name=name)
                 )
 
-        assert properties, f"{cls.__name__}至少要有1个Property成员"
+        assert properties, _("{cls_name}至少要有1个Property成员").format(
+            cls_name=cls.__name__
+        )
 
         # 添加保留键，如果冲突，报错
-        assert "id" not in properties, (
-            f"{cls.__name__}.id是保留的内置主键，外部不能重定义"
-        )
-        assert "_version" not in properties, (
-            f"{cls.__name__}._version是保留的内置主键，外部不能重定义"
-        )
+        assert "id" not in properties, _(
+            "{cls_name}.id是保留的内置主键，外部不能重定义"
+        ).format(cls_name=cls.__name__)
+        assert "_version" not in properties, _(
+            "{cls_name}._version是保留的内置主键，外部不能重定义"
+        ).format(cls_name=cls.__name__)
         # 必备索引，调用new_row时会用雪花算法生成uuid，该属性无法修改。加unique索引防止意外
         properties["id"] = Property(0, True, True, np.int64)
         # 增加version属性，该属性只读（只能lua修改）
         properties["_version"] = Property(0, False, False, np.int32)
 
         # 检查class必须继承于BaseComponent
-        assert issubclass(cls, BaseComponent), f"{cls.__name__}必须继承于BaseComponent"
+        assert issubclass(cls, BaseComponent), _(
+            "{cls_name}必须继承于BaseComponent"
+        ).format(cls_name=cls.__name__)
 
         # 检查RLS权限各种定义符合要求
         _rls_define_check(cls.__name__, properties)

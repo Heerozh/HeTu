@@ -17,6 +17,7 @@ import nacl.hash
 import nacl.utils
 from nacl.public import PrivateKey, PublicKey
 
+from ...i18n import _
 from .pipeline import JSONType, MessageProcessLayer
 
 logger = logging.getLogger("HeTu.root")
@@ -138,7 +139,7 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             return ctx, public_key.encode()
 
         except Exception as e:
-            logger.warning(f"⚠️ [📡Pipeline] [Crypto层] 握手异常: {e}")
+            logger.warning(_("⚠️ [📡Pipeline] [Crypto层] 握手异常: {err}").format(err=e))
             raise
 
     @override
@@ -201,10 +202,12 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         # 去掉NONCE SIZE
         min_len = 16
         if len(message) < min_len:
-            err_msg = (
-                f"解密失败：数据长度不足 (len={len(message)})，可能非加密数据或截断"
+            err_msg = _(
+                "解密失败：数据长度不足 (len={length})，可能非加密数据或截断"
+            ).format(length=len(message))
+            logger.warning(
+                _("⚠️ [📡Pipeline] [Crypto层] {err_msg}").format(err_msg=err_msg)
             )
-            logger.warning(f"⚠️ [📡Pipeline] [Crypto层] {err_msg}")
             raise ValueError(err_msg)
 
         # 1. 提取 Nonce
@@ -231,6 +234,8 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         except Exception as e:
             # 严重安全警告：解密/验证失败意味着数据可能被篡改或密钥不匹配
             logger.error(
-                f"❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {e}"
+                _(
+                    "❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {err}"
+                ).format(err=e)
             )
             raise

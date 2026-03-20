@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from ..common import Singleton
 from ..common.permission import Permission
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN, EndpointDefine
+from ..i18n import _
 from .lock import SystemLock
 
 if TYPE_CHECKING:
@@ -110,9 +111,12 @@ class SystemClusters(metaclass=Singleton):
         return self._clusters[namespace][cluster_id]
 
     def build_clusters(self, main_namespace: str):
-        assert self._clusters == {}, "簇已经生成过了"
-        assert main_namespace in self._system_map, (
-            f"没有找到namespace={main_namespace}的System定义, APP中的Namespace有：{list(self._system_map.keys())}"
+        assert self._clusters == {}, _("簇已经生成过了")
+        assert main_namespace in self._system_map, _(
+            "没有找到namespace={main_namespace}的System定义, APP中的Namespace有：{namespaces}"
+        ).format(
+            main_namespace=main_namespace,
+            namespaces=list(self._system_map.keys()),
         )
         self._main_namespace = main_namespace
 
@@ -155,7 +159,9 @@ class SystemClusters(metaclass=Singleton):
                 )
                 if base_name not in self._system_map[namespace_]:
                     raise RuntimeError(
-                        f"{sys_name} 的 `depends` 引用的System {base_name} 不存在"
+                        _(
+                            "{sys_name} 的 `depends` 引用的System {base_name} 不存在"
+                        ).format(sys_name=sys_name, base_name=base_name)
                     )
                 base_def = self._system_map[namespace_][base_name]
                 if sys_suffix:
@@ -194,8 +200,10 @@ class SystemClusters(metaclass=Singleton):
                         for comp in sys_def.full_components
                     ]
                     raise AssertionError(
-                        f"System {sys_name} 引用的Component必须都是同一种backend，"
-                        f"现在有：{refs}"
+                        _(
+                            "System {sys_name} 引用的Component必须都是同一种backend，"
+                            "现在有：{refs}"
+                        ).format(sys_name=sys_name, refs=refs)
                     )
                 # 添加到clusters
                 clusters.append(
@@ -267,7 +275,7 @@ class SystemClusters(metaclass=Singleton):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
-            assert func.__name__ not in sub_map, "System重复定义：" + func.__name__
+            assert func.__name__ not in sub_map, _("System重复定义：") + func.__name__
         if components is None:
             components = set()
 
@@ -452,29 +460,29 @@ def define_system(
         # 严格要求第一个参数命名
         func_args = signature(func).parameters
         func_arg_names = list(func_args.keys())[:1]
-        assert func_arg_names == ["ctx"], (
-            f"System参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
-        )
+        assert func_arg_names == ["ctx"], _(
+            "System参数名定义错误，第一个参数必须为：ctx。你的：{arg_names}"
+        ).format(arg_names=func_arg_names)
 
         if permission:
-            assert permission not in (permission.OWNER, permission.RLS), (
+            assert permission not in (permission.OWNER, permission.RLS), _(
                 "System的权限不支持OWNER/RLS"
             )
 
-        assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, (
-            f"System函数名过长，最大长度为{ENDPOINT_NAME_MAX_LEN}个字符"
-        )
+        assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, _(
+            "System函数名过长，最大长度为{max_len}个字符"
+        ).format(max_len=ENDPOINT_NAME_MAX_LEN)
 
-        assert inspect.iscoroutinefunction(func), (
-            f"System {func.__name__} 必须是异步函数(`async def ...`)"
-        )
+        assert inspect.iscoroutinefunction(func), _(
+            "System {name} 必须是异步函数(`async def ...`)"
+        ).format(name=func.__name__)
 
         if components is not None and len(components) > 0:
             # 检查components是否都是同一个backend
             backend_names = [comp.backend_ for comp in components]
-            assert len(set(backend_names)) <= 1, (
-                f"System {func.__name__} 引用的Component必须都是同一种backend"
-            )
+            assert len(set(backend_names)) <= 1, _(
+                "System {name} 引用的Component必须都是同一种backend"
+            ).format(name=func.__name__)
 
         _components = components
 
@@ -500,15 +508,17 @@ def define_system(
         def warp_direct_system_call(*_args, **__kwargs) -> Any:
             # 检查ctx
             ctx = _args[0]
-            assert isinstance(ctx, SystemContext), "第一个参数必须是SystemContext实例"
+            assert isinstance(ctx, SystemContext), _(
+                "第一个参数必须是SystemContext实例"
+            )
             # 检查当前ctx[]
             try:
-                assert ctx.depend[func.__name__] == func, (
-                    f"错误，ctx[{func.__name__}] 返回值不是本函数"
-                )
+                assert ctx.depend[func.__name__] == func, _(
+                    "错误，ctx[{name}] 返回值不是本函数"
+                ).format(name=func.__name__)
             except KeyError:
                 raise RuntimeError(
-                    "要调用其他System必须在define_system时通过depends参数定义"
+                    _("要调用其他System必须在define_system时通过depends参数定义")
                 )
             return func(*_args, **__kwargs)
 

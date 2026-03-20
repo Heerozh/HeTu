@@ -12,6 +12,7 @@ from time import sleep, time
 from typing import final
 
 from hetu.common.singleton import Singleton
+from hetu.i18n import _
 
 logger = logging.getLogger("HeTu.root")
 
@@ -80,7 +81,7 @@ class SnowflakeID(metaclass=Singleton):
         """
         if worker_id > MAX_WORKER_ID or worker_id < 0:
             raise ValueError(
-                f"Worker ID can't be greater than {MAX_WORKER_ID} or less than 0"
+                _("Worker ID不能大于{max}或小于0").format(max=MAX_WORKER_ID)
             )
 
         if last_timestamp < 0:
@@ -93,7 +94,12 @@ class SnowflakeID(metaclass=Singleton):
         self.last_timestamp = last_timestamp
 
         logger.info(
-            f"[❄️ID] 雪花ID生成器初始化完成，Worker ID: {worker_id}, last_timestamp: {datetime.fromtimestamp(last_timestamp / 1000):%Y-%m-%d %H:%M:%S}"
+            _(
+                "[❄️ID] 雪花ID生成器初始化完成，Worker ID: {worker_id}, last_timestamp: {ts}"
+            ).format(
+                worker_id=worker_id,
+                ts=f"{datetime.fromtimestamp(last_timestamp / 1000):%Y-%m-%d %H:%M:%S}",
+            )
         )
 
     def _next_id(self) -> int | None:
@@ -101,7 +107,7 @@ class SnowflakeID(metaclass=Singleton):
         生成下一个 ID，超标时返回 None。
         """
         worker_id = self.worker_id
-        assert worker_id >= 0, "SnowflakeID 未初始化，请先调用 init() 方法。"
+        assert worker_id >= 0, _("SnowflakeID 未初始化，请先调用 init() 方法。")
 
         timestamp = int(time() * 1000)
         last_timestamp = self.last_timestamp
@@ -109,9 +115,11 @@ class SnowflakeID(metaclass=Singleton):
         # 如果时钟回拨，使用最后的时间
         if timestamp < last_timestamp:
             # 警告：时钟回拨发生。
-            logger.warning(f"[❄️ID] 时钟回拨了 {last_timestamp - timestamp} 毫秒。")
+            logger.warning(
+                _("[❄️ID] 时钟回拨了 {ms} 毫秒。").format(ms=last_timestamp - timestamp)
+            )
             # 策略：假装时间没有倒流，继续使用 last_timestamp
-            # 这会导致我们在“过去”的时间里消耗序列号，直到系统时间追上来
+            # 这会导致我们在"过去"的时间里消耗序列号，直到系统时间追上来
             timestamp = last_timestamp
 
         # 如果是同一毫秒内生成的
@@ -143,7 +151,7 @@ class SnowflakeID(metaclass=Singleton):
         """
         new_id = self._next_id()
         while new_id is None:
-            logger.debug("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms")
+            logger.debug(_("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms"))
             # 等待到下一毫秒
             sleep(0.001)
             new_id = self._next_id()
@@ -159,7 +167,7 @@ class SnowflakeID(metaclass=Singleton):
         """
         new_id = self._next_id()
         while new_id is None:
-            logger.debug("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms")
+            logger.debug(_("[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms"))
             # 等待到下一毫秒
             await asyncio.sleep(0.001)
             new_id = self._next_id()
