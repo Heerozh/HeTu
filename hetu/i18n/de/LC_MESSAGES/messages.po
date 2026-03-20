@@ -1,0 +1,131 @@
+# German translations for PROJECT.
+# Copyright (C) 2026 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-03-20 22:00+0800\n"
+"PO-Revision-Date: 2026-03-20 21:43+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: de <LL@li.org>\n"
+"Language: de\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: hetu/cli/start.py:52
+#, python-brace-format
+msgid ""
+"不支持的数据库URL scheme: '{scheme}'。目前支持 "
+"redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+msgstr ""
+"Nicht unterstütztes Datenbank-URL-Schema: '{scheme}'. Derzeit werden "
+"redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb "
+"unterstützt."
+
+#: hetu/cli/start.py:77
+msgid "启动河图服务"
+msgstr "Hetu-Dienst starten"
+
+#: hetu/cli/start.py:79
+msgid "通过命令行启动参数"
+msgstr "Über Befehlszeilen-Startparameter"
+
+#: hetu/cli/start.py:82
+msgid "河图app的py文件"
+msgstr "Py-Datei der Hetu-App"
+
+#: hetu/cli/start.py:89
+msgid "启动app.py中哪个namespace下的System"
+msgstr ""
+"Welches System unter welchem Namespace in app.py gestartet werden soll"
+
+#: hetu/cli/start.py:92
+msgid "实例名称，每个实例是一个副本"
+msgstr "Instanzname, jede Instanz ist eine Replik"
+
+#: hetu/cli/start.py:95
+msgid "监听的Websocket端口"
+msgstr "Websocket-Port, auf dem gelauscht wird"
+
+#: hetu/cli/start.py:100
+msgid "后端数据库地址"
+msgstr "Adresse der Backend-Datenbank"
+
+#: hetu/cli/start.py:104
+msgid "工作进程数，可设为 CPU * 1.2"
+msgstr "Anzahl der Worker-Prozesse, kann auf CPU * 1.2 gesetzt werden"
+
+#: hetu/cli/start.py:112
+msgid ""
+"开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
+msgstr ""
+"Debug-Modus aktivieren. Dies startet Hot-Reloading von Code und zeigt mehr "
+"Log-Informationen an. Wenn auf 2 gesetzt, wird der Debug-Modus auch für das "
+"Framework-Kernel aktiviert, was den Python-Coroutine-Debug-Modus einschaltet"
+" und die Geschwindigkeit um 90% verringert."
+
+#: hetu/cli/start.py:122
+msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
+msgstr ""
+"Zertifikatsverzeichnis. Wenn nicht gesetzt, wird eine unsichere Verbindung "
+"verwendet. Es wird nicht empfohlen, dies hier zu setzen; bitte verwenden Sie"
+" einen zusätzlichen Reverse-HTTPS-Proxy. 'auto' eingeben, um ein "
+"selbstsigniertes HTTPS-Zertifikat zu generieren."
+
+#: hetu/cli/start.py:130
+msgid "默认crypto层的auth_key，用于握手签名校验。留空则不启用。"
+msgstr ""
+"Standard-Auth-Key für die Crypto-Schicht, verwendet für Handshake-"
+"Signaturprüfung. Leer lassen, um nicht zu aktivieren."
+
+#: hetu/cli/start.py:137
+msgid "配置文件模板见CONFIG_TEMPLATE.yml"
+msgstr "Konfigurationsvorlage siehe CONFIG_TEMPLATE.yml"
+
+#: hetu/cli/start.py:155
+msgid "--app_file是必须参数，或者用--config"
+msgstr ""
+"--app_file ist ein erforderlicher Parameter, oder verwenden Sie --config"
+
+#: hetu/cli/start.py:158
+msgid "--namespace是必须参数，或者用--config"
+msgstr ""
+"--namespace ist ein erforderlicher Parameter, oder verwenden Sie --config"
+
+#: hetu/cli/start.py:161
+msgid "--instance是必须参数，或者用--config"
+msgstr ""
+"--instance ist ein erforderlicher Parameter, oder verwenden Sie --config"
+
+#: hetu/cli/start.py:218
+#, python-brace-format
+msgid "ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}"
+msgstr ""
+"ℹ️ {name}, {mode}, {workers} Worker-Prozesse, Manager-Prozess-PID: {pid}"
+
+#: hetu/cli/start.py:226
+#, python-brace-format
+msgid "ℹ️ Python {version} 平台 {platform}"
+msgstr "ℹ️ Python {version} Plattform {platform}"
+
+#: hetu/cli/start.py:231
+#, python-brace-format
+msgid "📡 监听地址： http{s}://{host}:{port}"
+msgstr "📡 Lauscht auf Adresse: http{s}://{host}:{port}"
+
+#: hetu/cli/start.py:237
+#, python-brace-format
+msgid "ℹ️ 消息流协议：json -> {layers} -> Network"
+msgstr "ℹ️ Nachrichtenstromprotokoll: json -> {layers} -> Netzwerk"
+
+#: hetu/cli/start.py:244
+msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
+msgstr ""
+"⚠️⚠️⚠️ Tiefen-Debug-Modus aktiviert  ⚠️⚠️⚠️   In diesem Modus sind Python-"
+"Coroutines 90% langsamer"

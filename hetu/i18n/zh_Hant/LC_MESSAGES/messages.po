@@ -1,0 +1,114 @@
+# Chinese (Traditional) translations for PROJECT.
+# Copyright (C) 2026 ORGANIZATION
+# This file is distributed under the same license as the PROJECT project.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2026.
+#
+msgid ""
+msgstr ""
+"Project-Id-Version: PROJECT VERSION\n"
+"Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
+"POT-Creation-Date: 2026-03-20 22:00+0800\n"
+"PO-Revision-Date: 2026-03-20 21:43+0800\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_Hant <LL@li.org>\n"
+"Language: zh_Hant\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.18.0\n"
+
+#: hetu/cli/start.py:52
+#, python-brace-format
+msgid ""
+"不支持的数据库URL scheme: '{scheme}'。目前支持 "
+"redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+msgstr ""
+"不支援的資料庫URL scheme: '{scheme}'。目前支援 "
+"redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+
+#: hetu/cli/start.py:77
+msgid "启动河图服务"
+msgstr "啟動河圖服務"
+
+#: hetu/cli/start.py:79
+msgid "通过命令行启动参数"
+msgstr "透過命令列啟動參數"
+
+#: hetu/cli/start.py:82
+msgid "河图app的py文件"
+msgstr "河圖app的py檔案"
+
+#: hetu/cli/start.py:89
+msgid "启动app.py中哪个namespace下的System"
+msgstr "啟動app.py中哪個namespace下的System"
+
+#: hetu/cli/start.py:92
+msgid "实例名称，每个实例是一个副本"
+msgstr "實例名稱，每個實例是一個副本"
+
+#: hetu/cli/start.py:95
+msgid "监听的Websocket端口"
+msgstr "監聽的Websocket埠"
+
+#: hetu/cli/start.py:100
+msgid "后端数据库地址"
+msgstr "後端資料庫位址"
+
+#: hetu/cli/start.py:104
+msgid "工作进程数，可设为 CPU * 1.2"
+msgstr "工作行程數，可設為 CPU * 1.2"
+
+#: hetu/cli/start.py:112
+msgid ""
+"开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
+msgstr ""
+"開啟debug模式，這會啟動程式碼熱更新，並顯示更多的log資訊。如果設定為2，則對框架核心也啟用debug模式，會開啟Python協程的Debug模式，速度慢90％。"
+
+#: hetu/cli/start.py:122
+msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
+msgstr "憑證目錄，如果不設定則使用不安全的連線。不建議這裡設定，請外加一層反向https代理。填入auto會產生自簽https憑證。"
+
+#: hetu/cli/start.py:130
+msgid "默认crypto层的auth_key，用于握手签名校验。留空则不启用。"
+msgstr "預設crypto層的auth_key，用於握手簽章校驗。留空則不啟用。"
+
+#: hetu/cli/start.py:137
+msgid "配置文件模板见CONFIG_TEMPLATE.yml"
+msgstr "設定檔範本見CONFIG_TEMPLATE.yml"
+
+#: hetu/cli/start.py:155
+msgid "--app_file是必须参数，或者用--config"
+msgstr "--app_file是必須參數，或者用--config"
+
+#: hetu/cli/start.py:158
+msgid "--namespace是必须参数，或者用--config"
+msgstr "--namespace是必須參數，或者用--config"
+
+#: hetu/cli/start.py:161
+msgid "--instance是必须参数，或者用--config"
+msgstr "--instance是必須參數，或者用--config"
+
+#: hetu/cli/start.py:218
+#, python-brace-format
+msgid "ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}"
+msgstr "ℹ️ {name}, {mode}, {workers} 個工作行程, 管理行程 pid: {pid}"
+
+#: hetu/cli/start.py:226
+#, python-brace-format
+msgid "ℹ️ Python {version} 平台 {platform}"
+msgstr "ℹ️ Python {version} 平台 {platform}"
+
+#: hetu/cli/start.py:231
+#, python-brace-format
+msgid "📡 监听地址： http{s}://{host}:{port}"
+msgstr "📡 監聽位址： http{s}://{host}:{port}"
+
+#: hetu/cli/start.py:237
+#, python-brace-format
+msgid "ℹ️ 消息流协议：json -> {layers} -> Network"
+msgstr "ℹ️ 訊息流協定：json -> {layers} -> Network"
+
+#: hetu/cli/start.py:244
+msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
+msgstr "⚠️⚠️⚠️ 深度Debug模式開啟  ⚠️⚠️⚠️   此模式下Python協程慢90%"
