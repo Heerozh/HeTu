@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
+from ...i18n import _
 from .base import RaceCondition, RowFormat, UniqueViolation
 from .idmap import RowState
 from .table import TableReference
@@ -118,11 +119,11 @@ class SessionRepository:
         if not insert:
             # 如果有id字段，表示没有找到旧数据
             assert "id" not in changed_fields, (
-                f"row id({row.id})在session中未寻到，更新操作必须有旧数据。"
+                _("row id({row_id})在session中未寻到，更新操作必须有旧数据。").format(row_id=row.id)
             )
         else:
             assert "id" in changed_fields, (
-                f"session中已存在该row id({row.id})，插入操作必须没有旧数据。"
+                _("session中已存在该row id({row_id})，插入操作必须没有旧数据。").format(row_id=row.id)
             )
 
         changed_fields = changed_fields & self.ref.comp_cls.uniques_
@@ -198,7 +199,7 @@ class SessionRepository:
         comp_cls = self.ref.comp_cls
 
         assert index_name in comp_cls.indexes_, (
-            f"{comp_cls.name_} 组件没有叫 {index_name} 的索引"
+            _("{comp_name} 组件没有叫 {index_name} 的索引").format(comp_name=comp_cls.name_, index_name=index_name)
         )
 
         # 如果不是主键，直接用range方法
@@ -266,8 +267,8 @@ class SessionRepository:
             assert len(kwargs) == 1, "Only one field can be queried."
             index_name, (_left, _right) = next(iter(kwargs.items()))
         else:
-            assert index_name, "不使用kwargs形式时，index_name不能为空"
-            assert _left is not None, "不使用kwargs形式时，left不能为空"
+            assert index_name, _("不使用kwargs形式时，index_name不能为空")
+            assert _left is not None, _("不使用kwargs形式时，left不能为空")
 
         # assert np.isscalar(left), (
         #     f"left必须为标量类型(数字，字符串等), 你的:{type(left)}, {left}"
@@ -280,7 +281,7 @@ class SessionRepository:
 
         # 判断index_name存在
         assert index_name in comp_cls.indexes_, (
-            f"{comp_cls.name_} 组件没有叫 {index_name} 的索引"
+            _("{comp_name} 组件没有叫 {index_name} 的索引").format(comp_name=comp_cls.name_, index_name=index_name)
         )
 
         if isinstance(_left, np.generic):
@@ -380,8 +381,9 @@ class SessionRepository:
         # 检查index_name存在且为unique索引
         comp_cls = self.ref.comp_cls
         assert index_name in comp_cls.uniques_, (
-            "upsert只能用于unique索引，"
-            f"{comp_cls.name_}组件的{index_name}不是unique索引"
+            _("upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引").format(
+                comp_name=comp_cls.name_, index_name=index_name
+            )
         )
 
         return UpsertContext(self, index_name, query_value)
@@ -436,7 +438,9 @@ class UpsertContext:
                     self.row_data, {self.index_name}
                 ):
                     raise RaceCondition(
-                        f"Upsert failed: 锚定的index({self.index_name})存在Unique违反，说明竞态insert"
+                        _("Upsert failed: 锚定的index({index_name})存在Unique违反，说明竞态insert").format(
+                            index_name=self.index_name
+                        )
                     )
                 # 因为上面remote已经检查过了，所以ignore self.index_name
                 # 不然如果中间有别的session插入，还是会报UniqueViolation错误而不是Race

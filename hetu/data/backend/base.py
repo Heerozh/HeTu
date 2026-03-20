@@ -41,6 +41,8 @@ from typing import TYPE_CHECKING, Any, Literal, final, overload
 
 import numpy as np
 
+from ...i18n import _
+
 if TYPE_CHECKING:
     from ..component import BaseComponent
     from .idmap import IdentityMap
@@ -343,7 +345,7 @@ class BackendClientFactory:
     ) -> BackendClient:
         alias = alias.lower()
         if alias not in BackendClientFactory._registry:
-            raise NotImplementedError(f"{alias} 后端未实现")
+            raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
         return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
 
 
@@ -465,14 +467,22 @@ class TableMaintenance:
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "not_exists":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
+                    _(
+                        "[💾Redis][{comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
+                    ).format(comp_name=table_ref.comp_name, status=status)
                 )
             # 创建表
             logger.info(
-                f"  ➖ [💾Redis][{table_ref.comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+                _(
+                    "  ➖ [💾Redis][{comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+                ).format(comp_name=table_ref.comp_name)
             )
             ret = self.do_create_table_(table_ref)
-            logger.info(f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 空表创建完成")
+            logger.info(
+                _("  ✔️ [💾Redis][{comp_name}组件] 空表创建完成").format(
+                    comp_name=table_ref.comp_name
+                )
+            )
             return ret
 
     # 无需drop_table, 此类操作适合人工删除
@@ -487,13 +497,20 @@ class TableMaintenance:
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "cluster_mismatch":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
+                    _(
+                        "[💾Redis][{comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
+                    ).format(comp_name=table_ref.comp_name, status=status)
                 )
             old_cluster_id = old_meta.cluster_id
             logger.warning(
-                f"  ⚠️ [💾Redis][{table_ref.comp_name}组件] "
-                f"cluster_id 由 {old_cluster_id} 变更为 {table_ref.cluster_id}，"
-                f"将尝试迁移cluster数据..."
+                _(
+                    "  ⚠️ [💾Redis][{comp_name}组件] "
+                    "cluster_id 由 {old_id} 变更为 {new_id}，将尝试迁移cluster数据..."
+                ).format(
+                    comp_name=table_ref.comp_name,
+                    old_id=old_cluster_id,
+                    new_id=table_ref.cluster_id,
+                )
             )
             # 只修改cluster_id
             from_ref = TableReference(
@@ -523,7 +540,9 @@ class TableMaintenance:
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
                 raise RaceCondition(
-                    f"[💾Redis][{table_ref.comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
+                    _(
+                        "[💾Redis][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
+                    ).format(comp_name=table_ref.comp_name, status=status)
                 )
             from ..migration import MigrationScript
 
@@ -548,35 +567,57 @@ class TableMaintenance:
         注意：此操作会删除所有数据！
         """
         if force:
-            warnings.warn("flush正在强制删除所有数据，此方式只建议维护代码调用。")
+            warnings.warn(_("flush正在强制删除所有数据，此方式只建议维护代码调用。"))
 
         # 如果非持久化组件，则允许调用flush主动清空数据
         if table_ref.comp_cls.volatile_ or force:
             logger.info(
-                f"⌚ [💾Redis][{table_ref.comp_name}组件] 对非持久化组件flush清空数据中..."
+                _(
+                    "⌚ [💾Redis][{comp_name}组件] 对非持久化组件flush清空数据中..."
+                ).format(comp_name=table_ref.comp_name)
             )
 
             with self.get_lock():
                 count = self.do_drop_table_(table_ref)
                 self.do_create_table_(table_ref)
 
-            logger.info(f"✅ [💾Redis][{table_ref.comp_name}组件] 已删除{count}个键值")
+            logger.info(
+                _("✅ [💾Redis][{comp_name}组件] 已删除{count}个键值").format(
+                    comp_name=table_ref.comp_name, count=count
+                )
+            )
         else:
-            raise ValueError(f"{table_ref.comp_name}是持久化组件，不允许flush操作")
+            raise ValueError(
+                _("{comp_name}是持久化组件，不允许flush操作").format(
+                    comp_name=table_ref.comp_name
+                )
+            )
 
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
-        logger.info(f"  ➖ [💾Redis][{table_ref.comp_name}组件] 正在重建索引...")
+        logger.info(
+            _("  ➖ [💾Redis][{comp_name}组件] 正在重建索引...").format(
+                comp_name=table_ref.comp_name
+            )
+        )
         with self.get_lock():
             count = self.do_rebuild_index_(table_ref)
             if count == 0:
                 logger.info(
-                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 无数据，无需重建索引。"
+                    _("  ✔️ [💾Redis][{comp_name}组件] 无数据，无需重建索引。").format(
+                        comp_name=table_ref.comp_name
+                    )
                 )
             else:
                 logger.info(
-                    f"  ✔️ [💾Redis][{table_ref.comp_name}组件] 索引重建完成, "
-                    f"{count}行 * {len(table_ref.comp_cls.indexes_)}个索引。"
+                    _(
+                        "  ✔️ [💾Redis][{comp_name}组件] 索引重建完成, "
+                        "{count}行 * {num_indexes}个索引。"
+                    ).format(
+                        comp_name=table_ref.comp_name,
+                        count=count,
+                        num_indexes=len(table_ref.comp_cls.indexes_),
+                    )
                 )
 
 

@@ -7,6 +7,7 @@ import redis.asyncio
 
 from ....common.helper import get_machine_id
 from ....common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
+from ....i18n import _
 
 if TYPE_CHECKING:
     import redis
@@ -75,8 +76,10 @@ class RedisWorkerKeeper(WorkerKeeper):
             if await self.aio.expire(key, WORKER_ID_EXPIRE_SEC) != 1:
                 continue
             logger.info(
-                f"[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
-                f"(通过相同进程码 {self.node_id} )"
+                _(
+                    "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} "
+                    "(通过相同进程码 {node_id} )"
+                ).format(worker_id=worker_id, node_id=self.node_id)
             )
             self.worker_id = worker_id
             return worker_id
@@ -90,13 +93,17 @@ class RedisWorkerKeeper(WorkerKeeper):
             )
             if result:
                 logger.info(
-                    f"[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {self.node_id}"
+                    _(
+                        "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+                    ).format(worker_id=worker_id, node_id=self.node_id)
                 )
                 self.worker_id = worker_id
                 return worker_id
 
         raise KeyError(
-            "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+            _(
+                "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+            )
         )
 
     @override
@@ -108,7 +115,9 @@ class RedisWorkerKeeper(WorkerKeeper):
             return
         key = f"{self.worker_id_key}:{self.worker_id}"
         await self.aio.delete(key)
-        logger.info(f"[❄️ID] 释放 Worker ID: {self.worker_id}")
+        logger.info(
+            _("[❄️ID] 释放 Worker ID: {worker_id}").format(worker_id=self.worker_id)
+        )
 
     @override
     async def get_last_timestamp(self) -> int:
@@ -119,8 +128,10 @@ class RedisWorkerKeeper(WorkerKeeper):
         last_timestamp = cast(bytes, await self.aio.get(key))
         if last_timestamp is not None:
             logger.info(
-                f"[❄️ID] 成功获取 {self.node_id} 持久化的 last_timestamp: "
-                f"{datetime.fromtimestamp(int(last_timestamp) / 1000):%Y-%m-%d %H:%M:%S}"
+                _("[❄️ID] 成功获取 {node_id} 持久化的 last_timestamp: {ts}").format(
+                    node_id=self.node_id,
+                    ts=f"{datetime.fromtimestamp(int(last_timestamp) / 1000):%Y-%m-%d %H:%M:%S}",
+                )
             )
             # 返回持久化的时间戳和当前时间的最大值，因为这是为了防止回拨，自然要取最大值
             return max(int(last_timestamp), int(time() * 1000))
@@ -140,11 +151,13 @@ class RedisWorkerKeeper(WorkerKeeper):
         resp = await self.aio.expire(key, WORKER_ID_EXPIRE_SEC)
         if resp != 1:
             logger.error(
-                f"[❄️ID] 续约 Worker ID {worker_id} 失败: "
-                + "可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
+                _(
+                    "[❄️ID] 续约 Worker ID {worker_id} 失败: "
+                    "可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
+                ).format(worker_id=worker_id)
             )
             # 关闭Worker
-            raise SystemExit("Worker ID 续约失败，重启Worker...")
+            raise SystemExit(_("Worker ID 续约失败，重启Worker..."))
         # 记录last_timestamp到redis，防止重启回拨
         ts_key = f"{self.last_timestamp_key}:{self.node_id}"
         await self.aio.set(ts_key, last_timestamp, ex=86400)
