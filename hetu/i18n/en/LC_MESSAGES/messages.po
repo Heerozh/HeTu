@@ -7,16 +7,168 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PROJECT VERSION\n"
 "Report-Msgid-Bugs-To: EMAIL@ADDRESS\n"
-"POT-Creation-Date: 2026-03-20 22:00+0800\n"
+"POT-Creation-Date: 2026-03-21 15:26+0800\n"
 "PO-Revision-Date: 2026-03-20 21:43+0800\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
-"Language-Team: en <LL@li.org>\n"
 "Language: en\n"
+"Language-Team: en <LL@li.org>\n"
+"Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=utf-8\n"
 "Content-Transfer-Encoding: 8bit\n"
-"Plural-Forms: nplurals=2; plural=(n != 1);\n"
 "Generated-By: Babel 2.18.0\n"
+
+#: hetu/manager.py:56
+#, python-brace-format
+msgid "Backend {backend}未找到"
+msgstr "Backend {backend} not found"
+
+#: hetu/manager.py:100
+#, python-brace-format
+msgid "⚠️  组件 {comp_name} 的表结构需要迁移Schema。"
+msgstr "⚠️ Component {comp_name}'s table structure requires schema migration."
+
+#: hetu/manager.py:107
+#, python-brace-format
+msgid "⚠️  组件 {comp_name} 的表需要迁移到新集群。"
+msgstr "⚠️ Component {comp_name}'s table needs to be migrated to the new cluster."
+
+#: hetu/cli/__init__.py:25
+msgid "河图数据库"
+msgstr "Hetu Database"
+
+#: hetu/cli/__init__.py:29
+msgid "执行操作"
+msgstr "Execute operation"
+
+#: hetu/cli/base.py:21
+msgid "Boolean value expected."
+msgstr "Boolean value expected."
+
+#: hetu/cli/build.py:22
+msgid "生成客户端SDK C# 类型代码"
+msgstr "Generate C# type code for the client SDK"
+
+#: hetu/cli/build.py:26 hetu/cli/migrate.py:46 hetu/cli/start.py:82
+msgid "河图app的py文件"
+msgstr "Python file for the Hetu app"
+
+#: hetu/cli/build.py:33
+msgid "编译app.py中哪个namespace下的数据类型"
+msgstr "Which namespace's data types to compile from app.py"
+
+#: hetu/cli/build.py:37
+msgid "输出文件路径"
+msgstr "Output file path"
+
+#: hetu/cli/build.py:46 hetu/cli/migrate.py:92
+#, python-brace-format
+msgid "无法加载app文件 {app_file}"
+msgstr "Unable to load app file {app_file}"
+
+#: hetu/cli/build.py:59
+#, python-brace-format
+msgid "✅ 已生成C#代码到 {output}"
+msgstr "✅ C# code has been generated to {output}"
+
+#: hetu/cli/migrate.py:34
+msgid "在数据库执行Schema升级脚本,如果没有则创建，如果无变更则跳过。同时还会进行临时表的清空。应该在CI/CD流程中，每次启动服务器前执行一次。"
+msgstr ""
+"Executes schema upgrade scripts in the database, creating them if they "
+"don't exist and skipping if there are no changes. Also clears temporary "
+"tables. Should be executed once before each server start in the CI/CD "
+"pipeline."
+
+#: hetu/cli/migrate.py:41 hetu/cli/start.py:100
+msgid "后端数据库地址"
+msgstr "Backend database address"
+
+#: hetu/cli/migrate.py:51 hetu/cli/start.py:89
+msgid "启动app.py中哪个namespace下的System"
+msgstr "Which System under which namespace in app.py to start"
+
+#: hetu/cli/migrate.py:54 hetu/cli/start.py:92
+msgid "实例名称，每个实例是一个副本"
+msgstr "Instance name, each instance is a replica"
+
+#: hetu/cli/migrate.py:58
+msgid "通过yml配置文件读取后端数据库地址"
+msgstr "Reads the backend database address from the YAML configuration file."
+
+#: hetu/cli/migrate.py:64
+msgid "自动确认数据备份提示"
+msgstr "Automatically confirms the data backup prompt."
+
+#: hetu/cli/migrate.py:70
+msgid "强制执行升级迁移，丢弃无法迁移的数据。请勿在生产环境使用此选项！"
+msgstr ""
+"Forces the upgrade migration, discarding data that cannot be migrated. Do"
+" not use this option in production!"
+
+#: hetu/cli/migrate.py:104
+msgid "⚠️  升级数据库表结构可能会导致数据丢失，请确保已备份数据。确认继续请输 y ，取消请输其他键然后回车："
+msgstr ""
+"⚠️  Upgrading the database schema may cause data loss. Please ensure you "
+"have backed up your data. Enter 'y' to confirm and continue, or any other"
+" key and press Enter to cancel:"
+
+#: hetu/cli/migrate.py:109 hetu/cli/migrate.py:136
+msgid "❌  升级迁移已取消。"
+msgstr "❌  Upgrade migration has been canceled."
+
+#: hetu/cli/migrate.py:126
+msgid "❗ Component有数据删除或类型变更，请修改自动生成的迁移脚本，手动处理这些属性。或使用--drop-data参数直接丢弃这些属性。"
+msgstr ""
+"❗ Component has data deletion or type changes. Please modify the auto-"
+"generated migration script to handle these attributes manually. Or use "
+"the --drop-data parameter to discard these attributes directly."
+
+#: hetu/cli/migrate.py:133
+msgid "⚠️  确认强制迁移请输 y ，取消请输其他键然后回车："
+msgstr ""
+"⚠️  Enter 'y' to confirm forced migration, or any other key and press "
+"Enter to cancel:"
+
+#: hetu/cli/migrate.py:139
+#, python-brace-format
+msgid "⚠️  正在强制迁移 {instance_name} 服所有表结构，可能会丢失数据..."
+msgstr ""
+"⚠️  Forcing migration of all table structures for the {instance_name} "
+"instance, data may be lost..."
+
+#: hetu/cli/migrate.py:147
+#, python-brace-format
+msgid "🧹 正在清除 {instance_name} 服易失数据..."
+msgstr "🧹 Clearing volatile data for the {instance_name} instance..."
+
+#: hetu/cli/migrate.py:150
+#, python-brace-format
+msgid "✅  {instance_name} 服升级迁移完成！"
+msgstr "✅  Upgrade migration for the {instance_name} instance is complete!"
+
+#: hetu/cli/migrate.py:151
+msgid "🎉  恭喜！所有数据库表结构均已升级完成！"
+msgstr ""
+"🎉  Congratulations! All database table structures have been successfully "
+"upgraded!"
+
+#: hetu/cli/migrate.py:173
+msgid "namespace参数不能为空，建议用--config参数"
+msgstr ""
+"The namespace parameter cannot be empty. It is recommended to use the "
+"--config parameter."
+
+#: hetu/cli/migrate.py:174
+msgid "instance参数不能为空，建议用--config参数"
+msgstr ""
+"The instance parameter cannot be empty. It is recommended to use the "
+"--config parameter."
+
+#: hetu/cli/migrate.py:175
+msgid "app_file参数不能为空，建议用--config参数"
+msgstr ""
+"The app_file parameter cannot be empty. It is recommended to use the "
+"--config parameter."
 
 #: hetu/cli/start.py:52
 #, python-brace-format
@@ -35,44 +187,27 @@ msgstr "Start Hetu service"
 msgid "通过命令行启动参数"
 msgstr "Via command line startup parameters"
 
-#: hetu/cli/start.py:82
-msgid "河图app的py文件"
-msgstr "Python file for the Hetu app"
-
-#: hetu/cli/start.py:89
-msgid "启动app.py中哪个namespace下的System"
-msgstr "Which System under which namespace in app.py to start"
-
-#: hetu/cli/start.py:92
-msgid "实例名称，每个实例是一个副本"
-msgstr "Instance name, each instance is a replica"
-
 #: hetu/cli/start.py:95
 msgid "监听的Websocket端口"
 msgstr "Websocket port to listen on"
-
-#: hetu/cli/start.py:100
-msgid "后端数据库地址"
-msgstr "Backend database address"
 
 #: hetu/cli/start.py:104
 msgid "工作进程数，可设为 CPU * 1.2"
 msgstr "Number of worker processes, can be set to CPU * 1.2"
 
 #: hetu/cli/start.py:112
-msgid ""
-"开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
+msgid "开启debug模式，这会启动代码热更新，并显示更多的log信息。如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
 msgstr ""
 "Enable debug mode. This will start code hot reloading and show more log "
-"information. If set to 2, debug mode is also enabled for the framework core,"
-" which activates Python coroutine Debug mode, slowing down by 90%."
+"information. If set to 2, debug mode is also enabled for the framework "
+"core, which activates Python coroutine Debug mode, slowing down by 90%."
 
 #: hetu/cli/start.py:122
 msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
 msgstr ""
-"Certificate directory. If not set, an insecure connection is used. It is not"
-" recommended to set this here; please add an external reverse HTTPS proxy "
-"layer. Enter 'auto' to generate a self-signed HTTPS certificate."
+"Certificate directory. If not set, an insecure connection is used. It is "
+"not recommended to set this here; please add an external reverse HTTPS "
+"proxy layer. Enter 'auto' to generate a self-signed HTTPS certificate."
 
 #: hetu/cli/start.py:130
 msgid "默认crypto层的auth_key，用于握手签名校验。留空则不启用。"
@@ -99,8 +234,7 @@ msgstr "--instance is a required parameter, or use --config"
 #: hetu/cli/start.py:218
 #, python-brace-format
 msgid "ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}"
-msgstr ""
-"ℹ️ {name}, {mode}, {workers} worker processes, manager process pid: {pid}"
+msgstr "ℹ️ {name}, {mode}, {workers} worker processes, manager process pid: {pid}"
 
 #: hetu/cli/start.py:226
 #, python-brace-format
@@ -120,5 +254,1107 @@ msgstr "ℹ️ Message flow protocol: json -> {layers} -> Network"
 #: hetu/cli/start.py:244
 msgid "⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"
 msgstr ""
-"⚠️⚠️⚠️ Deep Debug Mode Enabled  ⚠️⚠️⚠️   Python coroutines are 90% slower in"
-" this mode."
+"⚠️⚠️⚠️ Deep Debug Mode Enabled  ⚠️⚠️⚠️   Python coroutines are 90% slower"
+" in this mode."
+
+#: hetu/common/slowlog.py:72
+#, python-brace-format
+msgid ""
+"⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed}秒，事务冲突次数 {retry}，平均时间 {avg_time}秒\n"
+"{table}"
+msgstr ""
+"⚠️ [📞 Slow Log] System {name} execution time {elapsed} seconds, "
+"transaction conflict count {retry}, average time {avg_time} seconds\n"
+"{table}"
+
+#: hetu/common/slowlog.py:99
+msgid "系统"
+msgstr "System"
+
+#: hetu/common/slowlog.py:99
+msgid "平均时间"
+msgstr "Average Time"
+
+#: hetu/common/slowlog.py:99
+msgid "平均冲突次数"
+msgstr "Average Conflict Count"
+
+#: hetu/common/snowflake_id.py:84
+#, python-brace-format
+msgid "Worker ID不能大于{max}或小于0"
+msgstr "Worker ID cannot be greater than {max} or less than 0"
+
+#: hetu/common/snowflake_id.py:98
+#, python-brace-format
+msgid "[❄️ID] 雪花ID生成器初始化完成，Worker ID: {worker_id}, last_timestamp: {ts}"
+msgstr ""
+"[❄️ID] Snowflake ID generator initialized successfully. Worker ID: "
+"{worker_id}, last_timestamp: {ts}"
+
+#: hetu/common/snowflake_id.py:110
+msgid "SnowflakeID 未初始化，请先调用 init() 方法。"
+msgstr "SnowflakeID is not initialized. Please call the init() method first."
+
+#: hetu/common/snowflake_id.py:119
+#, python-brace-format
+msgid "[❄️ID] 时钟回拨了 {ms} 毫秒。"
+msgstr "[❄️ID] Clock moved backwards by {ms} milliseconds."
+
+#: hetu/common/snowflake_id.py:154 hetu/common/snowflake_id.py:170
+msgid "[❄️ID] 每毫秒只能生成有限的ID，需要休眠 1 ms"
+msgstr ""
+"[❄️ID] Only a limited number of IDs can be generated per millisecond. "
+"Need to sleep for 1 ms"
+
+#: hetu/data/component.py:253
+msgid "Component重复定义"
+msgstr "Component duplicate definition"
+
+#: hetu/data/component.py:369
+#, python-brace-format
+msgid "{cname}.{fname}属性定义出错，属性名不能是Python关键字。"
+msgstr ""
+"{cname}.{fname} property definition error: property name cannot be a "
+"Python keyword."
+
+#: hetu/data/component.py:375
+#, python-brace-format
+msgid "{cname}.{fname}属性定义出错，属性名不能是C#关键字。"
+msgstr ""
+"{cname}.{fname} property definition error: property name cannot be a C# "
+"keyword."
+
+#: hetu/data/component.py:381
+#, python-brace-format
+msgid "{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
+msgstr ""
+"{cname}.{fname} property dtype cannot be zero length. For str type, "
+"please define it using '<U8' format."
+
+#: hetu/data/component.py:384
+#, python-brace-format
+msgid "{cname}.{fname}属性的dtype不支持void类型"
+msgstr "{cname}.{fname} property dtype does not support void type."
+
+#: hetu/data/component.py:394
+#, python-brace-format
+msgid "⚠️ [🛠️Define] {cname}.{fname}属性设置为unique时，index不能设置为False。"
+msgstr ""
+"⚠️ [🛠️Define] When {cname}.{fname} property is set to unique, index "
+"cannot be set to False."
+
+#: hetu/data/component.py:401
+#, python-brace-format
+msgid ""
+"{cname}.{fname}默认值不能为None。所有属性都要有默认值，因为数据接口统一用c like "
+"struct实现，强类型struct不接受NULL/None值。"
+msgstr ""
+"{cname}.{fname} default value cannot be None. All properties must have "
+"default values because the data interface is uniformly implemented using "
+"C-like structs, and strongly-typed structs do not accept NULL/None "
+"values."
+
+#: hetu/data/component.py:412
+#, python-brace-format
+msgid "{cname}.{fname}的default值：{default_type}({default_value})和属性dtype({dtype})不匹配"
+msgstr ""
+"{cname}.{fname} default value: {default_type}({default_value}) does not "
+"match property dtype ({dtype})."
+
+#: hetu/data/component.py:426
+#, python-brace-format
+msgid "{cname}权限为OWNER时，不能设置rls_compare参数"
+msgstr "When {cname} permission is OWNER, the rls_compare parameter cannot be set."
+
+#: hetu/data/component.py:429
+#, python-brace-format
+msgid "{cname}权限为OWNER时，必须有owner属性"
+msgstr "When {cname} permission is OWNER, it must have an owner property."
+
+#: hetu/data/component.py:436
+#, python-brace-format
+msgid "{cname}的owner属性必需是numeric数字(int, np.int64, ...)类型"
+msgstr "{cname}'s owner property must be a numeric type (int, np.int64, ...)."
+
+#: hetu/data/component.py:442
+#, python-brace-format
+msgid "{cname}权限为RLS时，必须通过rls_compare参数定义行级权限逻辑"
+msgstr ""
+"When {cname} permission is RLS, the row-level permission logic must be "
+"defined via the rls_compare parameter."
+
+#: hetu/data/component.py:445
+#, python-brace-format
+msgid "{cname}.rls_compare参数必须全部是字符串类型"
+msgstr "{cname}.rls_compare parameters must all be string types."
+
+#: hetu/data/component.py:448
+#, python-brace-format
+msgid "{cname}.rls_compare参数必须只有3个元素)"
+msgstr "{cname}.rls_compare parameter must have exactly 3 elements."
+
+#: hetu/data/component.py:452
+#, python-brace-format
+msgid "{cname}权限为RLS: {rls_compare}，但operator模块没有{method}方法"
+msgstr ""
+"{cname} permission is RLS: {rls_compare}, but the operator module does "
+"not have the {method} method."
+
+#: hetu/data/component.py:456
+#, python-brace-format
+msgid "{cname}权限为RLS: {rls_compare}，但表没有定义{prop}属性"
+msgstr ""
+"{cname} permission is RLS: {rls_compare}, but the table does not define "
+"the {prop} property."
+
+#: hetu/data/component.py:463
+#, python-brace-format
+msgid "组件名({name})是C#关键字，请refactor。"
+msgstr "Component name ({name}) is a C# keyword, please refactor."
+
+#: hetu/data/component.py:476
+#, python-brace-format
+msgid "{cls_name}.{name}不是Property类型"
+msgstr "{cls_name}.{name} is not of Property type."
+
+#: hetu/data/component.py:486
+#, python-brace-format
+msgid "{cls_name}.{name}属性未定义type hint。请使用以下形式，{name}: type = property_field(...)"
+msgstr ""
+"{cls_name}.{name} property does not have a type hint defined. Please use "
+"the following format: {name}: type = property_field(...)"
+
+#: hetu/data/component.py:491
+#, python-brace-format
+msgid "{cls_name}至少要有1个Property成员"
+msgstr "{cls_name} must have at least 1 Property member."
+
+#: hetu/data/component.py:497
+#, python-brace-format
+msgid "{cls_name}.id是保留的内置主键，外部不能重定义"
+msgstr ""
+"{cls_name}.id is a reserved built-in primary key and cannot be redefined "
+"externally."
+
+#: hetu/data/component.py:500
+#, python-brace-format
+msgid "{cls_name}._version是保留的内置主键，外部不能重定义"
+msgstr ""
+"{cls_name}._version is a reserved built-in primary key and cannot be "
+"redefined externally."
+
+#: hetu/data/component.py:509
+#, python-brace-format
+msgid "{cls_name}必须继承于BaseComponent"
+msgstr "{cls_name} must inherit from BaseComponent."
+
+#: hetu/data/migration.py:39
+#, python-brace-format
+msgid "  ➖ [💾Redis][{comp_name}组件] 发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
+msgstr ""
+"  ➖ [💾Redis][{comp_name} component] Custom migration script {file} found."
+" Executing script for migration..."
+
+#: hetu/data/migration.py:88
+#, python-brace-format
+msgid ""
+"  ➖ [💾Redis][{comp_name}组件] 缺少迁移脚本，生成默认迁移脚本 "
+"{script_path}，请根据需要修改脚本内容后再执行迁移操作..."
+msgstr ""
+"  ➖ [💾Redis][{comp_name} component] Migration script missing. Default "
+"migration script {script_path} generated. Please modify the script "
+"content as needed before executing the migration operation..."
+
+#: hetu/data/migration.py:200
+#, python-brace-format
+msgid "  ➖ [💾Redis][{comp_name}组件] 执行upgrade迁移：{module}"
+msgstr "  ➖ [💾Redis][{comp_name} component] Executing upgrade migration: {module}"
+
+#: hetu/data/migration.py:207
+#, python-brace-format
+msgid "  ✔️ [💾Redis][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
+msgstr ""
+"  ✔️ [💾Redis][{comp_name} component] Schema upgrade migration completed. "
+"Total rows processed: {count}"
+
+#: hetu/data/migration.py:212
+#, python-brace-format
+msgid "  ✔️ [💾Redis][{comp_name}组件] 已重建Index"
+msgstr "  ✔️ [💾Redis][{comp_name} component] Index rebuilt"
+
+#: hetu/data/sub.py:179
+#, python-brace-format
+msgid "IndexSubscription收到了未知的channel消息: {channel}"
+msgstr "IndexSubscription received an unknown channel message: {channel}"
+
+#: hetu/data/sub.py:294 hetu/data/sub.py:385
+#, python-brace-format
+msgid "⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码"
+msgstr "⚠️ [📡Subscription] {sub_id} Data duplicate subscription, check client code"
+
+#: hetu/data/sub.py:303
+#, python-brace-format
+msgid "🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}"
+msgstr "🆕 [📡Subscription] Subscribed to row: {sub_id} {channel_name}"
+
+#: hetu/data/sub.py:359
+#, python-brace-format
+msgid "⚠️ [📡Subscription] {comp_name}无调用权限，检查是否非法调用，caller：{caller}"
+msgstr ""
+"⚠️ [📡Subscription] {comp_name} has no call permission, check for illegal "
+"invocation, caller: {caller}"
+
+#: hetu/data/sub.py:394
+#, python-brace-format
+msgid "🆕 [📡Subscription] 订阅了索引: {sub_id} {index_channel}"
+msgstr "🆕 [📡Subscription] Subscribed to index: {sub_id} {index_channel}"
+
+#: hetu/data/backend/base.py:348
+#, python-brace-format
+msgid "{alias} 后端未实现"
+msgstr "{alias} backend not implemented"
+
+#: hetu/data/backend/base.py:471
+#, python-brace-format
+msgid "[💾Redis][{comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
+msgstr ""
+"[💾Redis][{comp_name} component] Cannot create table, component table "
+"status is incorrect, currently: {status}"
+
+#: hetu/data/backend/base.py:477
+#, python-brace-format
+msgid "  ➖ [💾Redis][{comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+msgstr ""
+"  ➖ [💾Redis][{comp_name} component] Component has no meta information, "
+"data does not exist, creating empty table..."
+
+#: hetu/data/backend/base.py:482
+#, python-brace-format
+msgid "  ✔️ [💾Redis][{comp_name}组件] 空表创建完成"
+msgstr "  ✔️ [💾Redis][{comp_name} component] Empty table creation completed"
+
+#: hetu/data/backend/base.py:501
+#, python-brace-format
+msgid "[💾Redis][{comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
+msgstr ""
+"[💾Redis][{comp_name} component] Cannot migrate cluster id, component "
+"table status is incorrect, currently: {status}"
+
+#: hetu/data/backend/base.py:507
+#, python-brace-format
+msgid ""
+"  ⚠️ [💾Redis][{comp_name}组件] cluster_id 由 {old_id} 变更为 "
+"{new_id}，将尝试迁移cluster数据..."
+msgstr ""
+"  ⚠️ [💾Redis][{comp_name} component] cluster_id changed from {old_id} to "
+"{new_id}, attempting to migrate cluster data..."
+
+#: hetu/data/backend/base.py:544
+#, python-brace-format
+msgid "[💾Redis][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
+msgstr ""
+"[💾Redis][{comp_name} component] Cannot migrate, component table status is"
+" incorrect, currently: {status}"
+
+#: hetu/data/backend/base.py:570
+msgid "flush正在强制删除所有数据，此方式只建议维护代码调用。"
+msgstr ""
+"flush is forcibly deleting all data, this method is only recommended for "
+"maintenance code calls."
+
+#: hetu/data/backend/base.py:576
+#, python-brace-format
+msgid "⌚ [💾Redis][{comp_name}组件] 对非持久化组件flush清空数据中..."
+msgstr ""
+"⌚ [💾Redis][{comp_name} component] Flushing and clearing data for non-"
+"persistent component..."
+
+#: hetu/data/backend/base.py:585
+#, python-brace-format
+msgid "✅ [💾Redis][{comp_name}组件] 已删除{count}个键值"
+msgstr "✅ [💾Redis][{comp_name} component] Deleted {count} key-value pairs"
+
+#: hetu/data/backend/base.py:591
+#, python-brace-format
+msgid "{comp_name}是持久化组件，不允许flush操作"
+msgstr "{comp_name} is a persistent component, flush operation is not allowed"
+
+#: hetu/data/backend/base.py:599
+#, python-brace-format
+msgid "  ➖ [💾Redis][{comp_name}组件] 正在重建索引..."
+msgstr "  ➖ [💾Redis][{comp_name} component] Rebuilding index..."
+
+#: hetu/data/backend/base.py:607
+#, python-brace-format
+msgid "  ✔️ [💾Redis][{comp_name}组件] 无数据，无需重建索引。"
+msgstr "  ✔️ [💾Redis][{comp_name} component] No data, no need to rebuild index."
+
+#: hetu/data/backend/base.py:614
+#, python-brace-format
+msgid "  ✔️ [💾Redis][{comp_name}组件] 索引重建完成, {count}行 * {num_indexes}个索引。"
+msgstr ""
+"  ✔️ [💾Redis][{comp_name} component] Index rebuild completed, {count} "
+"rows * {num_indexes} indexes."
+
+#: hetu/data/backend/repo.py:122
+#, python-brace-format
+msgid "row id({row_id})在session中未寻到，更新操作必须有旧数据。"
+msgstr ""
+"Row id({row_id}) not found in session. Update operations must have "
+"existing data."
+
+#: hetu/data/backend/repo.py:126
+#, python-brace-format
+msgid "session中已存在该row id({row_id})，插入操作必须没有旧数据。"
+msgstr ""
+"Row id({row_id}) already exists in session. Insert operations must not "
+"have existing data."
+
+#: hetu/data/backend/repo.py:202 hetu/data/backend/repo.py:284
+#, python-brace-format
+msgid "{comp_name} 组件没有叫 {index_name} 的索引"
+msgstr "Component {comp_name} does not have an index named {index_name}."
+
+#: hetu/data/backend/repo.py:270
+msgid "不使用kwargs形式时，index_name不能为空"
+msgstr "When not using kwargs form, index_name cannot be empty."
+
+#: hetu/data/backend/repo.py:271
+msgid "不使用kwargs形式时，left不能为空"
+msgstr "When not using kwargs form, left cannot be empty."
+
+#: hetu/data/backend/repo.py:384
+#, python-brace-format
+msgid "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
+msgstr ""
+"Upsert can only be used on unique indexes. Index {index_name} of "
+"component {comp_name} is not a unique index."
+
+#: hetu/data/backend/repo.py:441
+#, python-brace-format
+msgid "Upsert failed: 锚定的index({index_name})存在Unique违反，说明竞态insert"
+msgstr ""
+"Upsert failed: The anchored index({index_name}) has a Unique violation, "
+"indicating a race condition insert."
+
+#: hetu/data/backend/worker_keeper.py:137
+#, python-brace-format
+msgid "[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+msgstr ""
+"[❄️ID] [General] Successfully obtained Worker ID: {worker_id}, Process "
+"code: {node_id}"
+
+#: hetu/data/backend/redis/worker_keeper.py:105
+#: hetu/data/backend/worker_keeper.py:144
+msgid "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+msgstr ""
+"Unable to obtain an available Worker ID, all IDs are occupied. If there "
+"are crashed instances, please wait for the IDs to expire and try again."
+
+#: hetu/data/backend/worker_keeper.py:156
+#, python-brace-format
+msgid "[❄️ID] [General] 释放 Worker ID: {worker_id}"
+msgstr "[❄️ID] [General] Released Worker ID: {worker_id}"
+
+#: hetu/data/backend/redis/client.py:64
+#, python-brace-format
+msgid "Component `{comp_name}` 的索引字段`{field}`使用了复数，Redis后端不支持此类型作为索引字段"
+msgstr ""
+"Component `{comp_name}` has a plural index field `{field}`. The Redis "
+"backend does not support this type as an index field."
+
+#: hetu/data/backend/redis/client.py:72
+#, python-brace-format
+msgid "Component `{comp_name}` 的索引字段`{field}`使用了不可用的类型 `{dtype}`，此类型不支持索引"
+msgstr ""
+"Component `{comp_name}` has an index field `{field}` with an unsupported "
+"type `{dtype}`. This type cannot be indexed."
+
+#: hetu/data/backend/redis/client.py:78 hetu/data/backend/redis/client.py:258
+#: hetu/data/backend/redis/client.py:278 hetu/data/backend/redis/client.py:325
+#: hetu/data/backend/redis/client.py:461 hetu/data/backend/redis/client.py:653
+#: hetu/data/backend/redis/client.py:865 hetu/data/backend/redis/client.py:874
+#: hetu/data/backend/sql/client.py:310
+msgid "连接已关闭，已调用过close"
+msgstr "Connection is closed; close has already been called."
+
+#: hetu/data/backend/redis/client.py:80
+msgid "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+msgstr ""
+"Servants are not allowed to load Lua transaction scripts. Lua transaction"
+" scripts can only be loaded on the Master."
+
+#: hetu/data/backend/redis/client.py:83
+msgid "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+msgstr ""
+"Lua transaction scripts can only be loaded on the Master, but the current"
+" connection pool contains multiple servers."
+
+#: hetu/data/backend/redis/client.py:107
+msgid "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+msgstr ""
+"Backend can only be used within the same coroutine. A change in the "
+"calling coroutine was detected."
+
+#: hetu/data/backend/redis/client.py:182
+#, python-brace-format
+msgid "不可排序的索引类型: {dtype}"
+msgstr "Unsortable index type: {dtype}"
+
+#: hetu/data/backend/redis/client.py:193 hetu/data/backend/sql/client.py:265
+msgid "必须至少指定一个数据库连接URL"
+msgstr "At least one database connection URL must be specified."
+
+#: hetu/data/backend/redis/client.py:226
+#, python-brace-format
+msgid "无法连接到Redis数据库：{url}"
+msgstr "Failed to connect to Redis database: {url}"
+
+#: hetu/data/backend/redis/client.py:299
+#, python-brace-format
+msgid ""
+"⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将不起效。可手动设置配置文件：notify-"
+"keyspace-events={keyspace}"
+msgstr ""
+"⚠️ [💾Redis] No permission to call the config_set command on database "
+"{url}. Data subscription will not work. You can manually set the "
+"configuration: notify-keyspace-events={keyspace}"
+
+#: hetu/data/backend/redis/client.py:327
+msgid "is_synced只能在master上调用"
+msgstr "is_synced can only be called on the master."
+
+#: hetu/data/backend/redis/client.py:400 hetu/data/backend/sql/client.py:450
+#, python-brace-format
+msgid "不可用的行格式: {fmt}"
+msgstr "Invalid row format: {fmt}"
+
+#: hetu/data/backend/redis/client.py:756 hetu/data/backend/sql/client.py:775
+msgid "从节点不允许提交事务"
+msgstr "Replica nodes are not allowed to commit transactions."
+
+#: hetu/data/backend/redis/client.py:760 hetu/data/backend/sql/client.py:779
+msgid "没有脏数据需要提交"
+msgstr "No dirty data to commit."
+
+#: hetu/data/backend/redis/client.py:813
+msgid "lua_commit脚本没有初始化，请先调用 post_configure"
+msgstr ""
+"The lua_commit script is not initialized. Please call post_configure "
+"first."
+
+#: hetu/data/backend/redis/client.py:827
+#, python-brace-format
+msgid "未知的提交错误：{resp}"
+msgstr "Unknown commit error: {resp}"
+
+#: hetu/data/backend/redis/client.py:850 hetu/data/backend/sql/client.py:920
+#, python-brace-format
+msgid "索引字段`{prop}`不允许用direct_set修改"
+msgstr "Index field `{prop}` cannot be modified using direct_set."
+
+#: hetu/data/backend/redis/client.py:854 hetu/data/backend/sql/client.py:924
+#, python-brace-format
+msgid "Component `{comp_name}` 没有字段`{prop}`"
+msgstr "Component `{comp_name}` does not have a field `{prop}`."
+
+#: hetu/data/backend/redis/mq.py:87
+#, python-brace-format
+msgid "🔔 [💾Redis] 收到订阅更新通知: {channel_name}"
+msgstr "🔔 [💾Redis] Received subscription update notification: {channel_name}"
+
+#: hetu/data/backend/redis/mq.py:93
+#, python-brace-format
+msgid "⚠️ [💾Redis] 订阅更新通知来不及处理，丢弃了2分钟前的消息共{count}条"
+msgstr ""
+"⚠️ [💾Redis] Subscription update notifications could not be processed in "
+"time, discarded {count} messages from 2 minutes ago"
+
+#: hetu/data/backend/redis/worker_keeper.py:80
+#, python-brace-format
+msgid "[❄️ID] 重新使用已分配的 Worker ID: {worker_id} (通过相同进程码 {node_id} )"
+msgstr ""
+"[❄️ID] Reusing previously assigned Worker ID: {worker_id} (via the same "
+"process code {node_id})"
+
+#: hetu/data/backend/redis/worker_keeper.py:97
+#, python-brace-format
+msgid "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+msgstr ""
+"[❄️ID] Successfully obtained Worker ID: {worker_id}, process code: "
+"{node_id}"
+
+#: hetu/data/backend/redis/worker_keeper.py:119
+#, python-brace-format
+msgid "[❄️ID] 释放 Worker ID: {worker_id}"
+msgstr "[❄️ID] Releasing Worker ID: {worker_id}"
+
+#: hetu/data/backend/redis/worker_keeper.py:131
+#, python-brace-format
+msgid "[❄️ID] 成功获取 {node_id} 持久化的 last_timestamp: {ts}"
+msgstr ""
+"[❄️ID] Successfully retrieved the persisted last_timestamp for {node_id}:"
+" {ts}"
+
+#: hetu/data/backend/redis/worker_keeper.py:155
+#, python-brace-format
+msgid ""
+"[❄️ID] 续约 Worker ID {worker_id} 失败: "
+"可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
+msgstr ""
+"[❄️ID] Failed to renew Worker ID {worker_id}: it may have been taken by "
+"another instance, or Redis may be under high load and unable to respond "
+"promptly. Restarting Worker..."
+
+#: hetu/data/backend/redis/worker_keeper.py:160
+msgid "Worker ID 续约失败，重启Worker..."
+msgstr "Worker ID renewal failed, restarting Worker..."
+
+#: hetu/data/backend/sql/client.py:56
+#, python-brace-format
+msgid "SQLBackend不支持的数据类型: {dtype}"
+msgstr "Unsupported data type for SQLBackend: {dtype}"
+
+#: hetu/data/backend/sql/client.py:97
+#, python-brace-format
+msgid ""
+"SQL后端不允许dsn显式指定driver: `{dsn}`，请只传 `postgresql://` / `mysql://` / "
+"`mariadb://` / `sqlite://`"
+msgstr ""
+"SQL backend does not allow explicitly specifying driver in dsn: `{dsn}`. "
+"Please use only `postgresql://` / `mysql://` / `mariadb://` / `sqlite://`"
+
+#: hetu/data/backend/sql/client.py:119
+#, python-brace-format
+msgid "SQL后端目前只支持postgresql/mysql(mariadb)/sqlite，收到: `{dsn}`"
+msgstr ""
+"SQL backend currently only supports postgresql/mysql(mariadb)/sqlite, "
+"received: `{dsn}`"
+
+#: hetu/data/backend/sql/client.py:291
+#, python-brace-format
+msgid "无法连接到SQL数据库：{url}"
+msgstr "Unable to connect to SQL database: {url}"
+
+#: hetu/data/backend/sql/client.py:513
+#, python-brace-format
+msgid "bytes索引类型不支持该查询值: {value_type}"
+msgstr "Bytes index type does not support this query value: {value_type}"
+
+#: hetu/data/backend/sql/client.py:902
+msgid "⚠️ [💾SQL] commit时发现缺失表，正在用同步IO创建相关表并重试事务..."
+msgstr ""
+"⚠️ [💾SQL] Missing tables detected during commit, creating relevant tables"
+" with synchronous IO and retrying transaction..."
+
+#: hetu/data/backend/sql/mq.py:122
+#, python-brace-format
+msgid "🔔 [💾SQL] 收到订阅更新通知: {channel_name}"
+msgstr "🔔 [💾SQL] Received subscription update notification: {channel_name}"
+
+#: hetu/data/backend/sql/mq.py:132
+#, python-brace-format
+msgid "⚠️ [💾SQL] 订阅更新通知来不及处理，丢弃了2分钟前的消息共{count}条"
+msgstr ""
+"⚠️ [💾SQL] Subscription update notifications could not be processed in "
+"time, discarded {count} messages from 2 minutes ago"
+
+#: hetu/endpoint/connection.py:50 hetu/endpoint/connection.py:80
+#: hetu/endpoint/connection.py:110
+msgid "未初始化ComponentTableManager，无法使用Connection组件"
+msgstr "ComponentTableManager not initialized, cannot use Connection component"
+
+#: hetu/endpoint/connection.py:61
+#, python-brace-format
+msgid "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
+msgstr ""
+"⚠️ [📞Endpoint] [Illegal Operation] Too many anonymous connections from "
+"the same IP ({count}), possible attack."
+
+#: hetu/endpoint/connection.py:107
+msgid "请先初始化连接"
+msgstr "Please initialize the connection first"
+
+#: hetu/endpoint/connection.py:136
+msgid "连接数据不存在，可能是写入未同步，重试"
+msgstr ""
+"Connection data does not exist, possibly due to write not being "
+"synchronized, retrying"
+
+#: hetu/endpoint/connection.py:178
+#, python-brace-format
+msgid "⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
+msgstr ""
+"⚠️ [📞Endpoint] Current connection data has been deleted, possibly kicked "
+"out, will disconnect. Call: {ex_info}"
+
+#: hetu/endpoint/connection.py:216
+#, python-brace-format
+msgid ""
+"⚠️ [📞Endpoint] [非法操作] 发送消息数过多({sent_msgs} in "
+"{sent_elapsed}s)，可能是订阅攻击，将断开连接。调用：{info}"
+msgstr ""
+"⚠️ [📞Endpoint] [Illegal Operation] Sent too many messages ({sent_msgs} in"
+" {sent_elapsed}s), possible subscription attack, will disconnect. Call: "
+"{info}"
+
+#: hetu/endpoint/connection.py:240
+#, python-brace-format
+msgid ""
+"⚠️ [📞Endpoint] [非法操作] 收到消息数过多({received_msgs} in "
+"{received_elapsed}s)，可能是flood攻击，将断开连接。调用：{info}"
+msgstr ""
+"⚠️ [📞Endpoint] [Illegal Operation] Received too many messages "
+"({received_msgs} in {received_elapsed}s), possible flood attack, will "
+"disconnect. Call: {info}"
+
+#: hetu/endpoint/definer.py:69
+msgid "Endpoint重复定义："
+msgstr "Endpoint duplicate definition:"
+
+#: hetu/endpoint/definer.py:168
+#, python-brace-format
+msgid "Endpoint参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
+msgstr ""
+"Endpoint parameter name definition error, the first parameter must be: "
+"ctx. Yours: {func_arg_names}"
+
+#: hetu/endpoint/definer.py:172
+#, python-brace-format
+msgid "Endpoint函数名过长，最大长度为{max_len}个字符"
+msgstr "Endpoint function name is too long, maximum length is {max_len} characters"
+
+#: hetu/endpoint/definer.py:176
+#, python-brace-format
+msgid "Endpoint {name} 必须是异步函数(`async def ...`)"
+msgstr "Endpoint {name} must be an asynchronous function (`async def ...`)"
+
+#: hetu/endpoint/executor.py:47
+msgid "连接初始化失败，new_connection调用失败"
+msgstr "Connection initialization failed, new_connection call failed"
+
+#: hetu/endpoint/executor.py:68
+#, python-brace-format
+msgid ""
+"⚠️ [📞Endpoint] [非法操作] {context} | 不存在的Endpoint, "
+"检查是否非法调用：{namespace}.{endpoint}"
+msgstr ""
+"⚠️ [📞Endpoint] [Illegal Operation] {context} | Non-existent Endpoint, "
+"check for illegal call: {namespace}.{endpoint}"
+
+#: hetu/endpoint/executor.py:80 hetu/endpoint/executor.py:89
+#, python-brace-format
+msgid "⚠️ [📞Endpoint] [非法操作] {context} | {endpoint}无调用权限，检查是否非法调用：{args}"
+msgstr ""
+"⚠️ [📞Endpoint] [Illegal Operation] {context} | No permission to call "
+"{endpoint}, check for illegal call: {args}"
+
+#: hetu/endpoint/executor.py:99
+#, python-brace-format
+msgid ""
+"❌ [📞Endpoint] [非法操作] {context} | "
+"{namespace}.{endpoint}参数数量不对，检查客户端代码。要求{min_args}-{max_args}个参数, "
+"传入了{actual_args}个。调用内容：{args}"
+msgstr ""
+"❌ [📞Endpoint] [Illegal Operation] {context} | Incorrect number of "
+"arguments for {namespace}.{endpoint}, check client code. Requires "
+"{min_args}-{max_args} arguments, but {actual_args} were provided. Call "
+"content: {args}"
+
+#: hetu/endpoint/executor.py:131
+#, python-brace-format
+msgid "🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}"
+msgstr "🔜 [📞Endpoint] Calling Endpoint: {ep_name}{args}"
+
+#: hetu/endpoint/executor.py:148
+#, python-brace-format
+msgid "❌ [📞Endpoint] [调用异常] {context} | {ep_name}{args}，异常：{exc_type}:{exc}"
+msgstr ""
+"❌ [📞Endpoint] [Call Exception] {context} | {ep_name}{args}, exception: "
+"{exc_type}:{exc}"
+
+#: hetu/server/main.py:65
+msgid ""
+"❌ [📡Server] 数据库表结构需要迁移，请使用迁移命令：hetu upgrade --config "
+"<your_config_file>.yml"
+msgstr ""
+"❌ [📡Server] Database table structure requires migration. Please use the "
+"migration command: hetu upgrade --config <your_config_file>.yml"
+
+#: hetu/server/main.py:89
+msgid "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
+msgstr ""
+"⌚ [📡Server] Worker ID allocation failed, possibly due to repeated crashes"
+" exhausting the Worker ID pool. Retrying after 1 second..."
+
+#: hetu/server/main.py:107
+#, python-brace-format
+msgid "⌚ [📡Server] Closing backend {attrib}..."
+msgstr "⌚ [📡Server] Closing backend {attrib}..."
+
+#: hetu/server/main.py:115
+#, python-brace-format
+msgid "❌ 进程[{pid}] 启动失败: {err}"
+msgstr "❌ Process [{pid}] failed to start: {err}"
+
+#: hetu/server/main.py:123
+#, python-brace-format
+msgid "ℹ️ 进程[{pid}] 加载 {app_file} 完成"
+msgstr "ℹ️ Process [{pid}] has loaded {app_file}"
+
+#: hetu/server/main.py:129
+#, python-brace-format
+msgid "ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服"
+msgstr ""
+"ℹ️ Process [{pid}] has started {instances} server(s) for the {namespace} "
+"application"
+
+#: hetu/server/main.py:146
+msgid "⌚ [📡WorkerKeeper] 续约中... "
+msgstr "⌚ [📡WorkerKeeper] Renewing lease..."
+
+#: hetu/server/main.py:152
+#, python-brace-format
+msgid "❌ [📡WorkerKeeper] 续约失败，将重试: {err}"
+msgstr "❌ [📡WorkerKeeper] Lease renewal failed, will retry: {err}"
+
+#: hetu/server/main.py:176
+#, python-brace-format
+msgid ""
+"无法加载主启动文件({err})：{app_file}，检查以下可能性：\n"
+"* 如果是命令行启动，检查--app-file参数路径是否正确\n"
+"* 如果是通过Config启动，此文件由APP_FILE参数设置\n"
+"* 如果由Docker启动，还需检查是否正确映射了/app目录\n"
+msgstr ""
+"Failed to load the main startup file ({err}): {app_file}. Check the "
+"following possibilities:\n"
+"* If starting via command line, check if the --app-file parameter path is"
+" correct.\n"
+"* If starting via Config, this file is set by the APP_FILE parameter.\n"
+"* If starting via Docker, also check if the /app directory is correctly "
+"mapped."
+
+#: hetu/server/receiver.py:79
+#, python-brace-format
+msgid " [非法操作] subscribe了不存在的Component名，注意大小写：{name}"
+msgstr ""
+"[Illegal Operation] Subscribed to a non-existent Component name, note "
+"case sensitivity: {name}"
+
+#: hetu/server/receiver.py:97
+#, python-brace-format
+msgid " [非法操作] 未知订阅操作：{op}"
+msgstr "[Illegal Operation] Unknown subscription operation: {op}"
+
+#: hetu/server/receiver.py:105
+#, python-brace-format
+msgid " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅"
+msgstr ""
+"[Illegal Operation] Subscription count exceeds limit: {num_row_sub} row "
+"subscriptions, {num_idx_sub} index subscriptions"
+
+#: hetu/server/receiver.py:167
+#, python-brace-format
+msgid " [非法操作] 未知消息类型：{msg_type}"
+msgstr "[Illegal Operation] Unknown message type: {msg_type}"
+
+#: hetu/server/receiver.py:175
+#, python-brace-format
+msgid "❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}"
+msgstr "❌ [📡WSReceiver] Redis ConnectionError, disconnecting: {err}"
+
+#: hetu/server/receiver.py:182
+#, python-brace-format
+msgid "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
+msgstr "❌ [📡WSReceiver] Execution exception, packet: {data}, exception: {err}"
+
+#: hetu/server/receiver.py:201
+#, python-brace-format
+msgid ""
+"❌ [📡WSMQPuller] Redis ConnectionError，断开连接: "
+"{err}网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。"
+msgstr ""
+"❌ [📡WSMQPuller] Redis ConnectionError, disconnecting: {err} Possible "
+"reasons other than network failure: connection unable to handle pubsub "
+"messages in time, backlog too large causing disconnect."
+
+#: hetu/server/receiver.py:209
+#, python-brace-format
+msgid "❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{err}"
+msgstr ""
+"❌ [📡WSMQPuller] Exception while pulling MQ messages from database, "
+"exception: {err}"
+
+#: hetu/server/receiver.py:234
+#, python-brace-format
+msgid "❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}上次接受了：{count}条消息。"
+msgstr ""
+"❌ [📡WSSubscription] Redis ConnectionError, disconnecting: {err} Last "
+"received: {count} messages."
+
+#: hetu/server/receiver.py:242
+#, python-brace-format
+msgid "❌ [📡WSSubscription] 数据库获取订阅消息时异常，上条消息：{updates}，异常：{err}"
+msgstr ""
+"❌ [📡WSSubscription] Exception while fetching subscription messages from "
+"database, last message: {updates}, exception: {err}"
+
+#: hetu/server/websocket.py:35
+#, python-brace-format
+msgid "🔗 [📡WSConnect] 新连接：{db_name}: {task_name}"
+msgstr "🔗 [📡WSConnect] New connection: {db_name}: {task_name}"
+
+#: hetu/server/websocket.py:62
+#, python-brace-format
+msgid "New Connect Error: 错误的路径，实例名不存在: {instance}"
+msgstr "New Connect Error: Invalid path, instance name does not exist: {instance}"
+
+#: hetu/server/websocket.py:157
+#, python-brace-format
+msgid "❌ [📡WSSender] WS协议异常：{exc}"
+msgstr "❌ [📡WSSender] WebSocket protocol exception: {exc}"
+
+#: hetu/server/websocket.py:164
+#, python-brace-format
+msgid "❌ [📡WSSender] 发送数据异常：{err}"
+msgstr "❌ [📡WSSender] Error sending data: {err}"
+
+#: hetu/server/websocket.py:169
+#, python-brace-format
+msgid "⛓️ [📡WSConnect] 连接断开：{task_name}"
+msgstr "⛓️ [📡WSConnect] Connection disconnected: {task_name}"
+
+#: hetu/server/websocket.py:184
+#, python-brace-format
+msgid "❌ [📡WSDisconnectHook] 断线System调用异常: {system} | {err}"
+msgstr "❌ [📡WSDisconnectHook] Disconnect System call exception: {system} | {err}"
+
+#: hetu/server/pipeline/crypto.py:142
+#, python-brace-format
+msgid "⚠️ [📡Pipeline] [Crypto层] 握手异常: {err}"
+msgstr "⚠️ [📡Pipeline] [Crypto layer] Handshake exception: {err}"
+
+#: hetu/server/pipeline/crypto.py:206
+#, python-brace-format
+msgid "解密失败：数据长度不足 (len={length})，可能非加密数据或截断"
+msgstr ""
+"Decryption failed: insufficient data length (len={length}), possibly non-"
+"encrypted data or truncated"
+
+#: hetu/server/pipeline/crypto.py:209
+#, python-brace-format
+msgid "⚠️ [📡Pipeline] [Crypto层] {err_msg}"
+msgstr "⚠️ [📡Pipeline] [Crypto layer] {err_msg}"
+
+#: hetu/server/pipeline/crypto.py:238
+#, python-brace-format
+msgid "❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {err}"
+msgstr ""
+"❌ [📡Pipeline] [Crypto layer] Decryption verification failed, "
+"disconnecting. Reason: {err}"
+
+#: hetu/server/pipeline/pipeline.py:32
+#, python-brace-format
+msgid "{alias} MessageProcessLayer未实现"
+msgstr "{alias} MessageProcessLayer not implemented"
+
+#: hetu/server/pipeline/pipeline.py:41
+#, python-brace-format
+msgid "{cls_name} MessageProcessLayer子类必须指定alias参数"
+msgstr "{cls_name} MessageProcessLayer subclass must specify the alias parameter"
+
+#: hetu/server/pipeline/pipeline.py:145
+#, python-brace-format
+msgid "🔧 [📡Pipeline] 握手完成 {pipe_ctx}"
+msgstr "🔧 [📡Pipeline] Handshake completed {pipe_ctx}"
+
+#: hetu/server/pipeline/pipeline.py:181
+#, python-brace-format
+msgid "最终解码结果必须是JSON类型, 但实际得到: {decoded}"
+msgstr "Final decoded result must be JSON type, but got: {decoded}"
+
+#: hetu/sourcegen/csharp.py:41
+#, python-brace-format
+msgid "Warning: dtype：{dtype} 不可识别, 转换为 string 类型"
+msgstr "Warning: dtype: {dtype} is unrecognized, converting to string type"
+
+#: hetu/system/caller.py:52
+#, python-brace-format
+msgid "不存在的System, 检查是否非法调用：{system}"
+msgstr "System does not exist, check for illegal call: {system}"
+
+#: hetu/system/caller.py:90
+#, python-brace-format
+msgid "调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
+msgstr ""
+"System {sys_name} was called with uuid anti-duplication enabled, but the "
+"System is not defined with call_lock=True"
+
+#: hetu/system/caller.py:114
+#, python-brace-format
+msgid "🛑 [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+msgstr ""
+"🛑 [📞System] Duplicate System execution encountered: {sys_name}, {uuid} "
+"has already been executed"
+
+#: hetu/system/caller.py:138
+#, python-brace-format
+msgid "🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+msgstr ""
+"🔄 [📞System] Race condition encountered when calling System: {sys_name}, "
+"retrying after {delay} seconds"
+
+#: hetu/system/caller.py:154
+#, python-brace-format
+msgid "调用System失败, 超过{sys_name}重试次数{max_retry}"
+msgstr ""
+"System call failed, exceeded maximum retry count {max_retry} for "
+"{sys_name}"
+
+#: hetu/system/definer.py:114
+msgid "簇已经生成过了"
+msgstr "Cluster has already been generated."
+
+#: hetu/system/definer.py:116
+#, python-brace-format
+msgid "没有找到namespace={main_namespace}的System定义, APP中的Namespace有：{namespaces}"
+msgstr ""
+"No System definition found for namespace={main_namespace}. Namespaces in "
+"the APP are: {namespaces}"
+
+#: hetu/system/definer.py:163
+#, python-brace-format
+msgid "{sys_name} 的 `depends` 引用的System {base_name} 不存在"
+msgstr ""
+"The System {base_name} referenced in the `depends` of {sys_name} does not"
+" exist."
+
+#: hetu/system/definer.py:204
+#, python-brace-format
+msgid "System {sys_name} 引用的Component必须都是同一种backend，现在有：{refs}"
+msgstr ""
+"All Components referenced by System {sys_name} must be of the same "
+"backend. Currently have: {refs}"
+
+#: hetu/system/definer.py:278
+msgid "System重复定义："
+msgstr "Duplicate System definition:"
+
+#: hetu/system/definer.py:464
+#, python-brace-format
+msgid "System参数名定义错误，第一个参数必须为：ctx。你的：{arg_names}"
+msgstr ""
+"System parameter name definition error. The first parameter must be: ctx."
+" Yours: {arg_names}"
+
+#: hetu/system/definer.py:469
+msgid "System的权限不支持OWNER/RLS"
+msgstr "System permissions do not support OWNER/RLS."
+
+#: hetu/system/definer.py:473
+#, python-brace-format
+msgid "System函数名过长，最大长度为{max_len}个字符"
+msgstr "System function name is too long. Maximum length is {max_len} characters."
+
+#: hetu/system/definer.py:477
+#, python-brace-format
+msgid "System {name} 必须是异步函数(`async def ...`)"
+msgstr "System {name} must be an asynchronous function (`async def ...`)."
+
+#: hetu/system/definer.py:484
+#, python-brace-format
+msgid "System {name} 引用的Component必须都是同一种backend"
+msgstr "All Components referenced by System {name} must be of the same backend."
+
+#: hetu/system/definer.py:512
+msgid "第一个参数必须是SystemContext实例"
+msgstr "The first parameter must be a SystemContext instance."
+
+#: hetu/system/definer.py:517
+#, python-brace-format
+msgid "错误，ctx[{name}] 返回值不是本函数"
+msgstr "Error, ctx[{name}] return value is not this function."
+
+#: hetu/system/definer.py:521
+msgid "要调用其他System必须在define_system时通过depends参数定义"
+msgstr ""
+"To call another System, it must be defined via the depends parameter in "
+"define_system."
+
+#: hetu/system/future.py:120
+#, python-brace-format
+msgid "args长度超过1024字符: {length}"
+msgstr "args length exceeds 1024 characters: {length}"
+
+#: hetu/system/future.py:126
+msgid "args无法通过eval还原"
+msgstr "args cannot be restored via eval"
+
+#: hetu/system/future.py:127
+msgid "args通过eval还原丢失了信息"
+msgstr "args lost information when restored via eval"
+
+#: hetu/system/future.py:129
+msgid "recurring=True时timeout不能为0"
+msgstr "timeout cannot be 0 when recurring=True"
+
+#: hetu/system/future.py:135
+#, python-brace-format
+msgid "⚠️ [⚙️Future] [致命错误] 不存在的System {system}"
+msgstr "⚠️ [⚙️Future] [Fatal Error] Non-existent System {system}"
+
+#: hetu/system/future.py:142
+#, python-brace-format
+msgid "⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock"
+msgstr ""
+"⚠️ [⚙️Future] [Fatal Error] System {system} definition does not have "
+"call_lock enabled"
+
+#: hetu/system/future.py:150
+#, python-brace-format
+msgid ""
+"⚠️ [⚙️Future] [警告] 未来任务的目标 {system} "
+"为{permission}权限，建议设为None防止客户端调用。且未来调用为后台任务，执行时Context无用户信息"
+msgstr ""
+"⚠️ [⚙️Future] [Warning] The target System {system} for the future task "
+"has {permission} permission. It is recommended to set it to None to "
+"prevent client calls. Also, future calls are background tasks and the "
+"Context has no user information during execution."
+
+#: hetu/system/future.py:158
+#, python-brace-format
+msgid "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，建议设为None防止客户端调用。"
+msgstr ""
+"⚠️ [⚙️Future] [Warning] The target System {system} for the future task "
+"has {permission} permission. It is recommended to set it to None to "
+"prevent client calls."
+
+#: hetu/system/future.py:221
+#, python-brace-format
+msgid "❌ [⚙️Future] 不存在的System, 检查是否代码修改删除了该System：{system}"
+msgstr ""
+"❌ [⚙️Future] Non-existent System, check if the code modification deleted "
+"this System: {system}"
+
+#: hetu/system/future.py:239
+#, python-brace-format
+msgid "❌ [⚙️Future] 未来调用System异常，调用：{system}{args}，异常：{exc}"
+msgstr ""
+"❌ [⚙️Future] Future System call exception, call: {system}{args}, "
+"exception: {exc}"
+
+#: hetu/system/future.py:265
+#, python-brace-format
+msgid "🔗 [⚙️Future] 新Task：{task_name}"
+msgstr "🔗 [⚙️Future] New Task: {task_name}"
+
+#: hetu/system/future.py:327
+#, python-brace-format
+msgid "❌ [⚙️Future] Task执行异常：{exc}"
+msgstr "❌ [⚙️Future] Task execution exception: {exc}"
+
+#: hetu/system/lock.py:55
+#, python-brace-format
+msgid "🔗 [⚙️Future] 释放了 {comp_name} 的 {deleted} 条过期数据"
+msgstr "🔗 [⚙️Future] Released {deleted} expired data entries for {comp_name}"
+
