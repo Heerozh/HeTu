@@ -116,6 +116,7 @@ try
         -v "${agentHome}/.codex:/root/.codex" `
         -v "${agentHome}/.gemini:/root/.gemini" `
         -v "${agentHome}/.claude:/root/.claude" `
+        -v "${agentHome}/.claude.json:/root/.claude.json" `
         $imageName
 }
 finally

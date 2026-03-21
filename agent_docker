@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 RUN apt-get install -y nodejs
 
+# agent沙盒环境依赖
+RUN apt-get install -y bubblewrap socat
+
+
 # 3. 使用 Docker 官方仓库安装新版 docker cli，避免与宿主 daemon API 不兼容
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
@@ -64,9 +68,7 @@ RUN git config --global core.whitespace cr-at-eol \
 RUN npm i -g @openai/codex
 RUN npm install -g @google/gemini-cli
 RUN curl -fsSL https://claude.ai/install.sh | bash
-
-# agent沙盒环境依赖
-RUN apt-get install bubblewrap socat
+RUN echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc
 
 # 定义容器内的 HOME 目录，通常 root 用户是 /root
 ENV HOME=/root
