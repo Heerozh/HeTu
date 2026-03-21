@@ -67,7 +67,7 @@ namespace HeTu.Editor.Inspector
 
         private void OnEnable()
         {
-            titleContent = new GUIContent("HeTu Inspector");
+            titleContent = new GUIContent("HeTu Network");
             _dispatcher = new HeTuInspectorDispatcher(this);
             EditorApplication.update += OnEditorUpdate;
             EditorApplication.playModeStateChanged += OnPlayModeStateChanged;
@@ -828,13 +828,13 @@ namespace HeTu.Editor.Inspector
             }
         }
 
-        [MenuItem("HeTu/Inspector...")]
+        [MenuItem("HeTu/Network Inspector...")]
         public static void Open()
         {
             var inspectorType = Type.GetType("UnityEditor.InspectorWindow,UnityEditor");
             var window = inspectorType != null
-                ? GetWindow<HeTuInspectorWindow>("HeTu Inspector", true, inspectorType)
-                : GetWindow<HeTuInspectorWindow>("HeTu Inspector");
+                ? GetWindow<HeTuInspectorWindow>("HeTu Network", true, inspectorType)
+                : GetWindow<HeTuInspectorWindow>("HeTu Network");
             window.minSize = new Vector2(720, 420);
             window.Show();
         }

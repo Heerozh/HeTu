@@ -260,10 +260,21 @@ class StartCommand(CommandInterface):
             single_process=workers == 1,
         )
         # 启动并堵塞
-        if workers == 1:
-            Sanic.serve_single(primary=app)
-        else:
-            Sanic.serve(primary=app, app_loader=loader)
+        try:
+            if workers == 1:
+                Sanic.serve_single(primary=app)
+            else:
+                Sanic.serve(primary=app, app_loader=loader)
+        except PermissionError as e:
+            if "10013" in str(e):
+                print(
+                    _(
+                        "端口可能被系统 excludedportrange 禁用了，请用管理员执行："
+                        "net stop winnat"
+                        "net start winnat"
+                    )
+                )
+                raise
 
         # 退出log listener
         log_handlers.stop_all_logging_handlers()
