@@ -3,15 +3,15 @@ set -euo pipefail
 
 current_dir="$(pwd)"
 dir_name="$(basename "$current_dir")"
-image_name="${CODEX_IMAGE:-heerozh_codex}"
+image_name="${AGENT_IMAGE:-heerozh_agent}"
 dind_image="${DIND_IMAGE:-docker:27-dind}"
-dind_name="${DIND_NAME:-codex-dind}"
+dind_name="${DIND_NAME:-agent-dind}"
 dind_run_volume="${DIND_RUN_VOLUME:-${dind_name}-run}"
 editor="${EDITOR:-${VISUAL:-vim}}"
 
 # 如果命令是./xxx.sh build，才执行
 if [[ "${1:-}" == "build" ]]; then
-  docker build -f codex_docker -t "${image_name}" .
+  docker build -f agent_docker -t "${image_name}" .
 fi
 
 cleanup() {
@@ -53,6 +53,7 @@ fi
 
 printf "DinD daemon is ready. Starting Main container...\n"
 docker run --rm -it \
+  --security-opt seccomp=unconfined \
   --network "container:${dind_name}" \
   -e UV_PROJECT_ENVIRONMENT="/workspace/${dir_name}/.venv-docker" \
   -e UV_CACHE_DIR=/tmp/uv-cache \
@@ -66,4 +67,6 @@ docker run --rm -it \
   -v "$(pwd):/workspace/${dir_name}" \
   -w "/workspace/${dir_name}" \
   -v "${HOME}/.codex:/root/.codex" \
+  -v "${HOME}/.gemini:/root/.gemini" \
+  -v "${HOME}/.claude:/root/.claude" \
   "${image_name}"

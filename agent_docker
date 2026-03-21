@@ -22,7 +22,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian bookworm stable" \
     > /etc/apt/sources.list.d/docker.list
 
-# 4. 添加 Microsoft Debian 12 软件源，安装 .NET 10 SDK 供 Serena 的 C# LSP 使用
+# 4. 添加 Microsoft Debian 12 软件源，安装 .NET 10 SDK 供 C# LSP 使用
 RUN curl -fsSL https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -o /tmp/packages-microsoft-prod.deb \
     && dpkg -i /tmp/packages-microsoft-prod.deb \
     && rm /tmp/packages-microsoft-prod.deb
@@ -60,10 +60,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN git config --global core.whitespace cr-at-eol \
     && git config --global core.autocrlf input
 
-ADD https://registry.npmjs.org/-/package/@openai%2fcodex/dist-tags /tmp/version-cache-buster.json
-
-# 5. 通过 npm 全局安装 codex
+# 5. 安装agent
 RUN npm i -g @openai/codex
+RUN npm install -g @google/gemini-cli
+RUN curl -fsSL https://claude.ai/install.sh | bash
+
+# agent沙盒环境依赖
+RUN apt-get install bubblewrap socat
 
 # 定义容器内的 HOME 目录，通常 root 用户是 /root
 ENV HOME=/root
@@ -72,5 +75,4 @@ ENV HOME=/root
 WORKDIR /workspace
 
 # 7. 入口点
-# 默认直接执行 codex 命令，这样你可以直接像使用本地命令一样传参
-ENTRYPOINT ["codex"]
+ENTRYPOINT ["/bin/bash"]

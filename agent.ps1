@@ -2,13 +2,13 @@ $ErrorActionPreference = "Stop"
 
 $currentDir = (Get-Location).Path
 $dirName = Split-Path -Path $currentDir -Leaf
-$imageName = if ($env:CODEX_IMAGE)
+$imageName = if ($env:AGENT_IMAGE)
 {
-    $env:CODEX_IMAGE
+    $env:AGENT_IMAGE
 }
 else
 {
-    "heerozh_codex"
+    "heerozh_agent"
 }
 $dindImage = if ($env:DIND_IMAGE)
 {
@@ -24,7 +24,7 @@ $dindName = if ($env:DIND_NAME)
 }
 else
 {
-    "codex-dind"
+    "agent-dind"
 }
 $dindRunVolume = if ($env:DIND_RUN_VOLUME)
 {
@@ -46,7 +46,7 @@ else
 {
     "vim"
 }
-$codexHome = if ($env:HOME)
+$agentHome = if ($env:HOME)
 {
     $env:HOME
 }
@@ -61,7 +61,11 @@ function Remove-DindResources
     docker volume rm $dindRunVolume *> $null
 }
 
-docker build -f codex_docker -t $imageName .
+# 如果命令是./xxx.sh build，才执行
+if ($args[0] -eq "build")
+{
+    docker build -f agent_docker -t $imageName .
+}
 
 try
 {
@@ -71,7 +75,7 @@ try
     docker run -d --rm --privileged `
         --name $dindName `
         -e DOCKER_TLS_CERTDIR= `
-          -e DOCKER_DRIVER=overlay2 `
+        -e DOCKER_DRIVER=overlay2 `
         -v "${dindRunVolume}:/var/run" `
         $dindImage `
         --host=tcp://0.0.0.0:2375 `
@@ -85,6 +89,7 @@ try
             $ready = $true
             break
         }
+        Write-Host "Waiting for DinD daemon to become ready..."
         Start-Sleep -Seconds 1
     }
 
@@ -95,6 +100,7 @@ try
     }
 
     docker run --rm -it `
+        --security-opt seccomp=unconfined `
         --network "container:$dindName" `
         -e UV_PROJECT_ENVIRONMENT="/workspace/${dirName}/.venv-docker" `
         -e UV_CACHE_DIR=/tmp/uv-cache `
@@ -104,10 +110,12 @@ try
         -e LANG=C.UTF-8 `
         -e LC_ALL=C.UTF-8 `
         -e DOCKER_TLS_CERTDIR= `
-          -v "${dindRunVolume}:/var/run" `
+        -v "${dindRunVolume}:/var/run" `
         -v "${currentDir}:/workspace/${dirName}" `
         -w "/workspace/${dirName}" `
-        -v "${codexHome}/.codex:/root/.codex" `
+        -v "${agentHome}/.codex:/root/.codex" `
+        -v "${agentHome}/.gemini:/root/.gemini" `
+        -v "${agentHome}/.claude:/root/.claude" `
         $imageName
 }
 finally
