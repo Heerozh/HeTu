@@ -8,6 +8,7 @@ SnowflakeID().init(1, 0)
 
 async def test_version_race(item_ref, mod_auto_backend):
     import asyncio
+
     from hetu.data.backend import RaceCondition
 
     # 测试竞态，通过2个协程来测试
@@ -82,6 +83,7 @@ async def test_version_race(item_ref, mod_auto_backend):
 async def test_unique_commit_race(item_ref, mod_auto_backend):
     """测试服务器端提交时，牵涉unique的竞态检查。"""
     import asyncio
+
     from hetu.data.backend import RaceCondition
 
     backend: Backend = mod_auto_backend()
@@ -128,6 +130,7 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
 
 async def test_update_or_insert_race(item_ref, mod_auto_backend):
     import asyncio
+
     from hetu.data.backend import RaceCondition
 
     backend = mod_auto_backend()
@@ -170,6 +173,7 @@ async def test_retry_generator(item_ref, mod_auto_backend):
                 async with _item_repo.upsert(name=name) as _row:
                     await asyncio.sleep(sleep)
                     _row.qty = (_row.qty or 1) + 1
+                    _row.time = _row.id
 
     await asyncio.gather(
         write_task("a", 0.1),
