@@ -11,6 +11,7 @@ import numpy as np
 
 from hetu import Permission
 from hetu.data import BaseComponent
+from hetu.i18n import _
 from hetu.system import SystemClusters
 
 DTYPE_CS_MAP = {
@@ -36,7 +37,11 @@ def dtype_to_csharp(dtype: str | type):
     elif dtype.startswith("str"):
         return "string"
     else:
-        print(f"Warning: dtype：{dtype} 不可识别, 转换为 string 类型")
+        print(
+            _("Warning: dtype：{dtype} 不可识别, 转换为 string 类型").format(
+                dtype=dtype
+            )
+        )
         return "string"
 
 

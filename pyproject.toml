@@ -33,6 +33,7 @@ dependencies = [
     "aiomysql>=0.3.2",
     "aiosqlite>=0.22.1",
     "asyncpg>=0.31.0",
+    "babel>=2.18.0",
     "brotli>=1.2.0",
     "msgpack>=1.1.2",
     "msgspec>=0.20.0",
@@ -61,6 +62,7 @@ hetu = "hetu.__main__:main"
 dev = [
     "aiohttp>=3.13.1",
     "austin-dist>=4.0.0",
+    "autolang",
     "basedpyright>=1.38.1",
     "docker>=7.1.0",
     "ipykernel>=7.1.0",
@@ -104,6 +106,9 @@ line-length = 88
 
 [tool.uv.workspace]
 members = ["benchmark"]
+
+[tool.uv.sources]
+autolang = { git = "https://github.com/Heerozh/autolang.git" }
 
 [tool.pyright]
 typeCheckingMode = "standard"

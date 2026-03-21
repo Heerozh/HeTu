@@ -12,9 +12,9 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-
 from ..common.permission import Permission
 from ..data import BaseComponent, define_component, property_field
+from ..i18n import _
 
 if TYPE_CHECKING:
     from hetu.manager import ComponentTableManager
@@ -51,5 +51,5 @@ async def clean_expired_call_locks(tbl_mgr: ComponentTableManager):
                     repo.delete(row.id)
                 deleted += len(rows)
                 if len(rows) == 0:
-                    break
-        logger.info(f"🔗 [⚙️Future] 释放了 {comp.name_} 的 {deleted} 条过期数据")
+                    break 
+        logger.info(_("🔗 [⚙️Future] 释放了 {comp_name} 的 {deleted} 条过期数据").format(comp_name=comp.name_, deleted=deleted))

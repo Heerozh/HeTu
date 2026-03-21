@@ -7,6 +7,8 @@
 
 import argparse
 
+from ..i18n import _
+
 
 def str2bool(v):
     if isinstance(v, bool):
@@ -16,7 +18,7 @@ def str2bool(v):
     elif v.lower() in ("no", "false", "f", "n", "0", "None"):
         return False
     else:
-        raise argparse.ArgumentTypeError("Boolean value expected.")
+        raise argparse.ArgumentTypeError(_("Boolean value expected."))
 
 
 class CommandInterface:

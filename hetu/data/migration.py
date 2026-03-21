@@ -14,6 +14,7 @@ from types import ModuleType
 from typing import TYPE_CHECKING
 
 from hetu.data import BaseComponent
+from hetu.i18n import _
 
 from .backend.table import TableReference
 
@@ -34,8 +35,10 @@ class MigrationScript:
     def _load_schema_migration_script(table_ref, file: Path):
         """import script.py"""
         logger.warning(
-            f"  ➖ [💾Redis][{table_ref.comp_name}组件] "
-            f"发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
+            _(
+                "  ➖ [💾Redis][{comp_name}组件] "
+                "发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
+            ).format(comp_name=table_ref.comp_name, file=file)
         )
         module_name = str(file)
         spec = importlib.util.spec_from_file_location(module_name, file)
@@ -81,8 +84,10 @@ class MigrationScript:
         with open(script_path, "w", encoding="utf-8") as f:
             f.write(template)
         logger.warning(
-            f"  ➖ [💾Redis][{target_model.name_}组件] "
-            f"缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
+            _(
+                "  ➖ [💾Redis][{comp_name}组件] "
+                "缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
+            ).format(comp_name=target_model.name_, script_path=script_path)
         )
         return script_path
 
@@ -192,11 +197,19 @@ class MigrationScript:
 
             # 开始迁移
             logger.info(
-                f"  ➖ [💾Redis][{self.ref.comp_name}组件] 执行upgrade迁移：{module}"
+                _("  ➖ [💾Redis][{comp_name}组件] 执行upgrade迁移：{module}").format(
+                    comp_name=self.ref.comp_name, module=module
+                )
             )
             upgrade_func(row_ids, down_tables, target_table, maint)
             logger.warning(
-                f"  ✔️ [💾Redis][{self.ref.comp_name}组件] Schema升级迁移完成，共处理{len(row_ids)}行"
+                _(
+                    "  ✔️ [💾Redis][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
+                ).format(comp_name=self.ref.comp_name, count=len(row_ids))
             )
             maint.do_rebuild_index_(target_table)
-            logger.warning(f"  ✔️ [💾Redis][{self.ref.comp_name}组件] 已重建Index")
+            logger.warning(
+                _("  ✔️ [💾Redis][{comp_name}组件] 已重建Index").format(
+                    comp_name=self.ref.comp_name
+                )
+            )

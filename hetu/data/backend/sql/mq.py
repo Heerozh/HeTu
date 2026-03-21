@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, final, override
 import sqlalchemy as sa
 
 from ....common.multimap import MultiMap
+from ....i18n import _
 from ..base import MQClient
 
 if TYPE_CHECKING:
@@ -117,14 +118,20 @@ class SQLMQClient(MQClient):
                     if channel_name not in self.subscribed:
                         continue
                     has_subscribed_updates = True
-                    logger.debug(f"🔔 [💾SQL] 收到订阅更新通知: {channel_name}")
+                    logger.debug(
+                        _("🔔 [💾SQL] 收到订阅更新通知: {channel_name}").format(
+                            channel_name=channel_name
+                        )
+                    )
 
                     dropped = set(self.pulled_deque.pop(0, time.time() - 120))
                     if dropped:
                         self.pulled_set -= dropped
                         logger.warning(
-                            f"⚠️ [💾SQL] 订阅更新通知来不及处理，"
-                            f"丢弃了2分钟前的消息共{len(dropped)}条"
+                            _(
+                                "⚠️ [💾SQL] 订阅更新通知来不及处理，"
+                                "丢弃了2分钟前的消息共{count}条"
+                            ).format(count=len(dropped))
                         )
 
                     if channel_name not in self.pulled_set:

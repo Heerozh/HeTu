@@ -17,6 +17,7 @@ import hetu  # for obtaining __version__
 
 from ..endpoint import connection
 from ..endpoint.response import ResponseToClient
+from ..i18n import _
 from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
 if TYPE_CHECKING:
@@ -75,7 +76,7 @@ async def sub_call(
     check_length("sub", data, 4, 100)
     table = executor.tbl_mgr.get_table(data[1])
     if table is None:
-        err_msg = f" [非法操作] subscribe了不存在的Component名，注意大小写：{data[1]}"
+        err_msg = _(" [非法操作] subscribe了不存在的Component名，注意大小写：{name}").format(name=data[1])
         replay.info(err_msg)
         logger.warning(err_msg)
         return False
@@ -93,17 +94,16 @@ async def sub_call(
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
         case _:
-            raise ValueError(f" [非法操作] 未知订阅操作：{data[2]}")
+            raise ValueError(_(" [非法操作] 未知订阅操作：{op}").format(op=data[2]))
 
     reply = ["sub", sub_id, sub_data]
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub = broker.count()
     if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
-        err_msg = (
-            f" [非法操作] 订阅数超过限制："
-            f"{num_row_sub}个行订阅，{num_idx_sub}个索引订阅"
-        )
+        err_msg = _(
+            " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅"
+        ).format(num_row_sub=num_row_sub, num_idx_sub=num_idx_sub)
         replay.info(err_msg)
         logger.warning(err_msg)
         return False
@@ -164,24 +164,23 @@ async def client_handler(
                 case "motd":
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
-                    raise ValueError(f" [非法操作] 未知消息类型：{last_data[0]}")
+                    raise ValueError(_(" [非法操作] 未知消息类型：{msg_type}").format(msg_type=last_data[0]))
     except asyncio.CancelledError:
         # print(ctx, 'client_handler normal canceled')
         pass
     except WebsocketClosed:
         pass
     except RedisConnectionError as e:
-        err_msg = (
-            f"❌ [📡WSReceiver] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
-        )
+        err_msg = _(
+            "❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}"
+        ).format(err=f"{type(e).__name__}:{e}")
         replay.info(err_msg)
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        err_msg = (
-            f"❌ [📡WSReceiver] 执行异常，封包：{last_data}，"
-            f"异常：{type(e).__name__}:{e}"
-        )
+        err_msg = _(
+            "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
+        ).format(data=last_data, err=f"{type(e).__name__}:{e}")
         replay.info(err_msg)
         logger.exception(err_msg)
         return ws.fail_connection()
@@ -199,14 +198,17 @@ async def mq_puller(ws: Websocket, broker: SubscriptionBroker):
         pass
     except RedisConnectionError as e:
         logger.error(
-            f"❌ [📡WSMQPuller] Redis ConnectionError，断开连接: "
-            f"{type(e).__name__}:{e}"
-            f"网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。"
+            _("❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {err}"
+            "网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。").format(
+                err=f"{type(e).__name__}:{e}"
+            )
         )
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(
-            f"❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{type(e).__name__}:{e}"
+            _("❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{err}").format(
+                err=f"{type(e).__name__}:{e}"
+            )
         )
         return ws.fail_connection()
     finally:
@@ -229,14 +231,18 @@ async def subscription_handler(
         pass
     except RedisConnectionError as e:
         logger.error(
-            f"❌ [📡WSSubscription] Redis ConnectionError，断开连接: {type(e).__name__}:{e}"
-            f"上次接受了：{len(last_updates)}条消息。"
+            _("❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}"
+            "上次接受了：{count}条消息。").format(
+                err=f"{type(e).__name__}:{e}", count=len(last_updates)
+            )
         )
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(
-            f"❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
-            f"上条消息：{last_updates}，异常：{type(e).__name__}:{e}"
+            _("❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
+            "上条消息：{updates}，异常：{err}").format(
+                updates=last_updates, err=f"{type(e).__name__}:{e}"
+            )
         )
         return ws.fail_connection()
     finally:

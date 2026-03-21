@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from ...common.singleton import Singleton
+from ...i18n import _
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -28,7 +29,7 @@ class MessageProcessLayerFactory:
     def create(**kwargs) -> MessageProcessLayer:
         alias = kwargs.pop("type").lower()
         if alias not in MessageProcessLayerFactory._registry:
-            raise NotImplementedError(f"{alias} MessageProcessLayer未实现")
+            raise NotImplementedError(_("{alias} MessageProcessLayer未实现").format(alias=alias))
         return MessageProcessLayerFactory._registry[alias](**kwargs)
 
 
@@ -37,7 +38,7 @@ class MessageProcessLayer:
         """让继承子类自动注册alias"""
         super().__init_subclass__()
         assert "alias" in kwargs, (
-            f"{cls.__name__} MessageProcessLayer子类必须指定alias参数"
+            _("{cls_name} MessageProcessLayer子类必须指定alias参数").format(cls_name=cls.__name__)
         )
         MessageProcessLayerFactory.register(kwargs["alias"], cls)
 
@@ -141,7 +142,7 @@ class MessagePipeline:
             else:
                 pipe_ctx.append(None)
 
-        logger.info(f"🔧 [📡Pipeline] 握手完成 {pipe_ctx}")
+        logger.info(_("🔧 [📡Pipeline] 握手完成 {pipe_ctx}").format(pipe_ctx=pipe_ctx))
         return pipe_ctx, self.encode(None, reply_messages)
 
     def encode(
@@ -177,7 +178,7 @@ class MessagePipeline:
                 ctx = pipe_ctx[original_index]
             decoded = layer.decode(ctx, decoded)
         assert isinstance(decoded, (dict, list)), (
-            "最终解码结果必须是JSON类型, 但实际得到: " + str(decoded)
+            _("最终解码结果必须是JSON类型, 但实际得到: {decoded}").format(decoded=decoded)
         )
         return decoded
 

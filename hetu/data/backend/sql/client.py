@@ -17,6 +17,7 @@ import sqlalchemy as sa
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from ....i18n import _
 from ..base import BackendClient, RaceCondition, RowFormat
 
 if TYPE_CHECKING:
@@ -52,7 +53,7 @@ def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
     if np.issubdtype(dtype_type, np.bytes_):
         return sa.LargeBinary(length=max(1, dtype.itemsize))
 
-    raise TypeError(f"SQLBackend不支持的数据类型: {dtype}")
+    raise TypeError(_("SQLBackend不支持的数据类型: {dtype}").format(dtype=dtype))
 
 
 @final
@@ -75,7 +76,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def _schema_checking_for_sql(self):
         """检查Component的schema定义，确保符合sql系列的要求"""
         for comp_cls in self._get_referred_components():
-            for field, _ in comp_cls.indexes_.items():
+            for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 如果有不支持的dtype，在这raise
                 del dtype
@@ -92,8 +93,10 @@ class SQLBackendClient(BackendClient, alias="sql"):
         driver_name = url.drivername.lower()
         if "+" in driver_name:
             raise ValueError(
-                f"SQL后端不允许dsn显式指定driver: `{dsn}`，"
-                "请只传 `postgresql://` / `mysql://` / `mariadb://` / `sqlite://`"
+                _(
+                    "SQL后端不允许dsn显式指定driver: `{dsn}`，"
+                    "请只传 `postgresql://` / `mysql://` / `mariadb://` / `sqlite://`"
+                ).format(dsn=dsn)
             )
 
         if driver_name == "postgres":
@@ -112,7 +115,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             async_url = url.set(drivername="sqlite+aiosqlite")
         else:
             raise ValueError(
-                f"SQL后端目前只支持postgresql/mysql(mariadb)/sqlite，收到: `{dsn}`"
+                _(
+                    "SQL后端目前只支持postgresql/mysql(mariadb)/sqlite，收到: `{dsn}`"
+                ).format(dsn=dsn)
             )
 
         return sync_url.render_as_string(
@@ -257,7 +262,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def __init__(self, endpoint: str | list[str], is_servant, **kwargs):
         super().__init__(endpoint, is_servant, **kwargs)
         self.urls = [endpoint] if isinstance(endpoint, str) else endpoint
-        assert len(self.urls) > 0, "必须至少指定一个数据库连接URL"
+        assert len(self.urls) > 0, _("必须至少指定一个数据库连接URL")
 
         self._ios: list[sa.Engine] = []
         self._async_ios: list[AsyncEngine] = []
@@ -282,7 +287,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 with io.connect() as conn:
                     conn.execute(sa.text("SELECT 1"))
             except Exception as exc:
-                raise ConnectionError(f"无法连接到SQL数据库：{self.urls[i]}") from exc
+                raise ConnectionError(
+                    _("无法连接到SQL数据库：{url}").format(url=self.urls[i])
+                ) from exc
 
         self._next_notify_cleanup_at = (
             time.time()
@@ -300,7 +307,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     def _ensure_open(self):
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
     def ensure_support_tables_sync(self):
         meta = sa.MetaData()
@@ -440,7 +447,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 struct_row = comp_cls.dict_to_struct(typed)
                 return comp_cls.struct_to_dict(struct_row)
             case _:
-                raise ValueError(f"不可用的行格式: {fmt}")
+                raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
 
     @overload
     async def get(
@@ -502,7 +509,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 return bytes(value)
             if isinstance(value, str):
                 return value.encode("utf-8")
-            raise TypeError(f"bytes索引类型不支持该查询值: {type(value)}")
+            raise TypeError(
+                _("bytes索引类型不支持该查询值: {value_type}").format(
+                    value_type=type(value)
+                )
+            )
         if np.issubdtype(dtype_type, np.bool_):
             return cls._coerce_bool(value)
         if np.issubdtype(dtype_type, np.integer):
@@ -761,11 +772,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
     @override
     async def commit(self, idmap: IdentityMap) -> None:
         self._ensure_open()
-        assert not self.is_servant, "从节点不允许提交事务"
+        assert not self.is_servant, _("从节点不允许提交事务")
 
         dirties = idmap.get_dirty_rows()
         if not dirties:
-            raise ValueError("没有脏数据需要提交")
+            raise ValueError(_("没有脏数据需要提交"))
 
         notify_table = self.notify_table()
         now_ts = time.time()
@@ -887,7 +898,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 # 但是tests很多表是单元中动态创建，每次都写create又不清晰，暂时放这里创建，以后再想想
                 if attempt == 0 and self._is_table_missing_error(exc):
                     logger.warning(
-                        "⚠️ [💾SQL] commit时发现缺失表，正在用同步IO创建相关表并重试事务..."
+                        _(
+                            "⚠️ [💾SQL] commit时发现缺失表，正在用同步IO创建相关表并重试事务..."
+                        )
                     )
                     self._create_related_tables_sync(refs)
                     continue
@@ -903,9 +916,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
         for prop in kwargs:
             if prop in table_ref.comp_cls.indexes_:
-                raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
+                raise ValueError(
+                    _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
+                )
             if prop not in table_ref.comp_cls.prop_idx_map_:
-                raise ValueError(f"Component `{table_ref.comp_name}` 没有字段`{prop}`")
+                raise ValueError(
+                    _("Component `{comp_name}` 没有字段`{prop}`").format(
+                        comp_name=table_ref.comp_name, prop=prop
+                    )
+                )
 
         values = {
             key: self._coerce_scalar(table_ref.comp_cls.dtype_map_[key], value)

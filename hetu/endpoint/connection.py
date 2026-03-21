@@ -14,13 +14,14 @@ import numpy as np
 from hetu.data.backend import RaceCondition
 from hetu.data.backend.base import RowFormat
 
-from .context import Context
-from ..data import BaseComponent, define_component, property_field, Permission
+from ..data import BaseComponent, Permission, define_component, property_field
+from ..i18n import _
 from ..safelogging.filter import ContextFilter
+from .context import Context
 
 if TYPE_CHECKING:
-    from ..manager import ComponentTableManager
     from ..data.backend.table import Table
+    from ..manager import ComponentTableManager
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -46,7 +47,7 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
     此方法不会事务冲突，因为只插入Connection，且Connection没有Unique属性。
     """
     table = tbl_mgr.get_table(Connection)
-    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
+    assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
 
     # 不会事务冲突只会连接错误
     async with table.session() as session:
@@ -56,7 +57,9 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
             same_ips = await repo.range("address", address, limit=1000)
             same_ip_guests = same_ips[same_ips.owner == 0]
             if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
-                msg = f"⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({len(same_ips)})，可能是攻击。"
+                msg = _(
+                    "⚠️ [📞Endpoint] [非法操作] 同一IP匿名连接数过多({count})，可能是攻击。"
+                ).format(count=len(same_ips))
                 logger.warning(msg)
                 raise RuntimeError(msg)
 
@@ -74,7 +77,7 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
 
 async def del_connection(tbl_mgr: ComponentTableManager, connection_id: int) -> None:
     table = tbl_mgr.get_table(Connection)
-    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
+    assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
 
     async for attempt in table.session().retry(5):
         async with attempt as session:
@@ -101,10 +104,10 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     # 不过这个是endpoint负责的东西，用system写会导致互相耦合。但这里已经用了ctx.systems了。
     # 另外elevate加到system里需要用depends调用，作为新人教程第一步太复杂了。
     # 但是现在新人教程也可以用ctx.systems.call("elevate", ...)来调用这个函数了。
-    assert ctx.connection_id != 0, "请先初始化连接"
+    assert ctx.connection_id != 0, _("请先初始化连接")
     tbl_mgr: ComponentTableManager = ctx.systems.tbl_mgr
     table = tbl_mgr.get_table(Connection)
-    assert table, "未初始化ComponentTableManager，无法使用Connection组件"
+    assert table, _("未初始化ComponentTableManager，无法使用Connection组件")
 
     # 如果当前连接已提权
     if ctx.caller:
@@ -130,7 +133,7 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
             if not conn:
                 # 连接断开时才会找不到conn，但是连接断开时会cancel所有task，不应该到这
                 # 所以大部分情况还是race condition导致，也就是还没读到新建的连接
-                raise RaceCondition("连接数据不存在，可能是写入未同步，重试")
+                raise RaceCondition(_("连接数据不存在，可能是写入未同步，重试"))
                 # return False, "CONNECTION_NOT_FOUND"
             conn.owner = user_id
             await repo.update(conn)
@@ -171,7 +174,9 @@ class ConnectionAliveChecker:
             # 所以大部分情况是servant还没有从master同步数据过来，如果有些数据库wait sync无效，
             # 这里可以考虑重试几次
             if conn is None or conn.owner != caller:
-                err_msg = f"⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
+                err_msg = _(
+                    "⚠️ [📞Endpoint] 当前连接数据已删除，可能已被踢出，将断开连接。调用：{ex_info}"
+                ).format(ex_info=ex_info)
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True
@@ -207,10 +212,14 @@ class ConnectionFloodChecker:
         sent_elapsed = now - self.sent_start_time
         for limit in ctx.server_limits:
             if self.sent_msgs > limit[0] and sent_elapsed < limit[1]:
-                err_msg = (
-                    f"⚠️ [📞Endpoint] [非法操作] "
-                    f"发送消息数过多({self.sent_msgs} in {sent_elapsed:0.2f}s)，"
-                    f"可能是订阅攻击，将断开连接。调用：{info}"
+                err_msg = _(
+                    "⚠️ [📞Endpoint] [非法操作] "
+                    "发送消息数过多({sent_msgs} in {sent_elapsed}s)，"
+                    "可能是订阅攻击，将断开连接。调用：{info}"
+                ).format(
+                    sent_msgs=self.sent_msgs,
+                    sent_elapsed=f"{sent_elapsed:0.2f}",
+                    info=info,
                 )
                 replay.info(err_msg)
                 logger.warning(err_msg)
@@ -227,11 +236,15 @@ class ConnectionFloodChecker:
         received_elapsed = now - self.received_start_time
         for limit in ctx.client_limits:
             if self.received_msgs > limit[0] and received_elapsed < limit[1]:
-                err_msg = (
-                    f"⚠️ [📞Endpoint] [非法操作] "
-                    f"收到消息数过多({self.received_msgs} in {received_elapsed:0.2f}s)，"
-                    f"可能是flood攻击，将断开连接。调用：{info}"
-                )
+                err_msg = _(
+                    "⚠️ [📞Endpoint] [非法操作] "
+                    "收到消息数过多({received_msgs} in {received_elapsed}s)，"
+                    "可能是flood攻击，将断开连接。调用：{info}"
+                ).format(
+                    received_msgs=self.received_msgs,
+                    received_elapsed=f"{received_elapsed:0.2f}",
+                    info=info,
+                ) 
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True

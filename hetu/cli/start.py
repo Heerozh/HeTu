@@ -20,9 +20,10 @@ from sanic.config import Config
 from sanic.worker.loader import AppLoader
 
 from ..common import yamlloader
+from ..i18n import _
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
-from .base import CommandInterface, str2bool
+from .base import CommandInterface
 
 logger = logging.getLogger("HeTu.root")
 
@@ -47,8 +48,10 @@ def infer_backend_type_from_db_url(db_url: str) -> str:
     if scheme in {"file"}:
         return "sharedmemory"
     raise ValueError(
-        f"不支持的数据库URL scheme: '{scheme}'。"
-        "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+        _(
+            "不支持的数据库URL scheme: '{scheme}'。"
+            "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+        ).format(scheme=scheme)
     )
 
 
@@ -71,60 +74,68 @@ class StartCommand(CommandInterface):
 
     @classmethod
     def register(cls, subparsers):
-        parser_start = subparsers.add_parser("start", help="启动河图服务")
+        parser_start = subparsers.add_parser("start", help=_("启动河图服务"))
 
-        cli_group = parser_start.add_argument_group("通过命令行启动参数")
+        cli_group = parser_start.add_argument_group(_("通过命令行启动参数"))
         cli_group.add_argument(
             "--app-file",
-            help="河图app的py文件",
+            help=_("河图app的py文件"),
             metavar=".app.py",
             default="/app/app.py",
         )
         cli_group.add_argument(
-            "--namespace", metavar="game1", help="启动app.py中哪个namespace下的System"
+            "--namespace",
+            metavar="game1",
+            help=_("启动app.py中哪个namespace下的System"),
         )
         cli_group.add_argument(  # 不能require=True，因为有config参数
-            "--instance", help="实例名称，每个实例是一个副本", metavar="server1"
+            "--instance", help=_("实例名称，每个实例是一个副本"), metavar="server1"
         )
         cli_group.add_argument(
-            "--port", metavar="2446", help="监听的Websocket端口", default="2466"
+            "--port", metavar="2446", help=_("监听的Websocket端口"), default="2466"
         )
         cli_group.add_argument(
             "--db",
             metavar="redis://127.0.0.1:6379/0",
-            help="后端数据库地址",
+            help=_("后端数据库地址"),
             default="redis://127.0.0.1:6379/0",
         )
         cli_group.add_argument(
-            "--workers", type=int, help="工作进程数，可设为 CPU * 1.2", default=4
+            "--workers", type=int, help=_("工作进程数，可设为 CPU * 1.2"), default=4
         )
         cli_group.add_argument(
             "--debug",
             type=int,
             nargs="?",
             const=1,
-            help="开启debug模式，这会启动代码热更新，并显示更多的log信息。"
-            "如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。",
+            help=_(
+                "开启debug模式，这会启动代码热更新，并显示更多的log信息。"
+                "如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
+            ),
             default=0,
             metavar="0/1/2",
         )
         cli_group.add_argument(
             "--cert",
             metavar="/etc/letsencrypt/live/example.com/",
-            help="证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。"
-            "填入auto会生成自签https证书。",
+            help=_(
+                "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。"
+                "填入auto会生成自签https证书。"
+            ),
             default="",
         )
         cli_group.add_argument(
             "--authkey",
             metavar="your-auth-key",
-            help="默认crypto层的auth_key，用于握手签名校验。留空则不启用。",
+            help=_("默认crypto层的auth_key，用于握手签名校验。留空则不启用。"),
             default="",
         )
 
         cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
         cfg_group.add_argument(
-            "--config", help="配置文件模板见CONFIG_TEMPLATE.yml", metavar="config.yml"
+            "--config",
+            help=_("配置文件模板见CONFIG_TEMPLATE.yml"),
+            metavar="config.yml",
         )
 
     @classmethod
@@ -141,13 +152,13 @@ class StartCommand(CommandInterface):
         else:
             if not args.app_file or not args.namespace or not args.instance:
                 print(
-                    "--app_file是必须参数，或者用--config"
+                    _("--app_file是必须参数，或者用--config")
                 ) if not args.app_file else None
                 print(
-                    "--namespace是必须参数，或者用--config"
+                    _("--namespace是必须参数，或者用--config")
                 ) if not args.namespace else None
                 print(
-                    "--instance是必须参数，或者用--config"
+                    _("--instance是必须参数，或者用--config")
                 ) if not args.instance else None
                 sys.exit(2)
             backend_type = infer_backend_type_from_db_url(args.db)
@@ -204,17 +215,33 @@ class StartCommand(CommandInterface):
 
         logger.info(FULL_COLOR_LOGO)
         logger.info(
-            f"ℹ️ {app.name}, {'Debug' if config.DEBUG else 'Production'}, {workers} workers, "
-            f"manager pid: {os.getpid()}"
+            _("ℹ️ {name}, {mode}, {workers} 个工作进程, 管理进程 pid: {pid}").format(
+                name=app.name,
+                mode="Debug" if config.DEBUG else "Production",
+                workers=workers,
+                pid=os.getpid(),
+            )
         )
-        logger.info(f"ℹ️ Python {sys.version} on {sys.platform}")
-        logger.info(f"📡 Listening on http{'s' if ssl else ''}://{host}:{port}")
+        logger.info(
+            _("ℹ️ Python {version} 平台 {platform}").format(
+                version=sys.version, platform=sys.platform
+            )
+        )
+        logger.info(
+            _("📡 监听地址： http{s}://{host}:{port}").format(
+                s="s" if ssl else "", host=host, port=port
+            )
+        )
         layer_types = [layer.get("type") for layer in config.get("PACKET_LAYERS", [])]
-        logger.info(f"ℹ️ 消息流协议：json -> {' -> '.join(layer_types)} -> Network")
+        logger.info(
+            _("ℹ️ 消息流协议：json -> {layers} -> Network").format(
+                layers=" -> ".join(layer_types)
+            )
+        )
 
         if int(config.DEBUG) > 1:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
-            logger.warning("⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%")
+            logger.warning(_("⚠️⚠️⚠️ 深度Debug模式开启  ⚠️⚠️⚠️   此模式下Python协程慢90%"))
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
 
         # 准备启动服务器

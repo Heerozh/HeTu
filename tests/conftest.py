@@ -1,13 +1,17 @@
+import logging
+import os
+import sys
+
+os.environ.setdefault("LANG", "zh")
+
+from fixtures.backends import *
+from fixtures.defines import *
 from fixtures.redis_service import *
 from fixtures.sql_service import *
-from fixtures.testdata import *
-from fixtures.defines import *
 from fixtures.testapp import *
-from fixtures.backends import *
+from fixtures.testdata import *
 
-
-import logging
-import sys
+# set default lang
 
 
 @pytest.fixture(autouse=True, scope="session")

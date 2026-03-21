@@ -19,6 +19,7 @@ import numpy as np
 import redis
 from redis.cluster import LoadBalancingStrategy
 
+from ....i18n import _
 from ..base import BackendClient, RaceCondition, RowFormat
 
 # from .batch import RedisBatchedClient
@@ -54,27 +55,31 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def _schema_checking_for_redis(self):
         """检查Component的schema定义，确保符合Redis的要求"""
         for comp_cls in self._get_referred_components():
-            for field, _ in comp_cls.indexes_.items():
+            for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 索引不支持复数
                 if np.issubdtype(dtype, np.complexfloating):
                     raise ValueError(
-                        f"Component `{comp_cls.name_}` 的索引字段`{field}`"
-                        "使用了复数，Redis后端不支持此类型作为索引字段"
+                        _(
+                            "Component `{comp_name}` 的索引字段`{field}`"
+                            "使用了复数，Redis后端不支持此类型作为索引字段"
+                        ).format(comp_name=comp_cls.name_, field=field)
                     )
                 # 其他类型不支持索引
                 elif np.issubdtype(dtype, np.object_):
                     raise ValueError(
-                        f"Component `{comp_cls.name_}` 的索引字段`{field}`"
-                        f"使用了不可用的类型 `{dtype}`，此类型不支持索引"
+                        _(
+                            "Component `{comp_name}` 的索引字段`{field}`"
+                            "使用了不可用的类型 `{dtype}`，此类型不支持索引"
+                        ).format(comp_name=comp_cls.name_, field=field, dtype=dtype)
                     )
 
     def load_commit_scripts(self, file: str | Path):
-        assert self._async_ios, "连接已关闭，已调用过close"
-        assert self.is_servant is False, (
+        assert self._async_ios, _("连接已关闭，已调用过close")
+        assert self.is_servant is False, _(
             "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
         )
-        assert len(self._async_ios) == 1, (
+        assert len(self._async_ios) == 1, _(
             "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
         )
         # read file to text
@@ -98,7 +103,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.loop_id = hash(asyncio.get_running_loop())
         # redis-py的async connection用的python的steam.connect，绑定到当前协程
         # 而aio是一个connection pool，断开的连接会放回pool中，所以aio不能跨协程传递
-        assert hash(asyncio.get_running_loop()) == self.loop_id, (
+        assert hash(asyncio.get_running_loop()) == self.loop_id, _(
             "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
         )
 
@@ -174,7 +179,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             return value.item()
         elif np.issubdtype(dtype, np.bool_):
             return b"\x01" if value else b"\x00"
-        assert False, f"不可排序的索引类型: {dtype}"
+        assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
 
     # ============ 主要方法 ============
 
@@ -185,7 +190,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self.raw_clustering = raw_clustering
         # redis的endpoint配置为url, 或list of url
         self.urls = [endpoint] if type(endpoint) is str else endpoint
-        assert len(self.urls) > 0, "必须至少指定一个数据库连接URL"
+        assert len(self.urls) > 0, _("必须至少指定一个数据库连接URL")
 
         # 创建连接
         self._ios: list[redis.Redis | redis.cluster.RedisCluster] = []
@@ -217,7 +222,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             try:
                 io.ping()
             except redis.exceptions.ConnectionError as e:
-                raise ConnectionError(f"无法连接到Redis数据库：{self.urls[i]}") from e
+                raise ConnectionError(
+                    _("无法连接到Redis数据库：{url}").format(url=self.urls[i])
+                ) from e
 
         # 获得db index
         if self.raw_clustering:
@@ -248,7 +255,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     def configure_master(self) -> None:
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
         # 检测redis版本
         def parse_version(x):
@@ -268,7 +275,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     def configure_servant(self) -> None:
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
             # 检查servants设置
 
         target_keyspace = "Kghz"
@@ -288,10 +295,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 redis.exceptions.NoPermissionError,
                 redis.exceptions.ResponseError,
             ):
-                msg = (
-                    f"⚠️ [💾Redis] 无权限调用数据库{self.urls[i]}的config_set命令，数据订阅将"
-                    f"不起效。可手动设置配置文件：notify-keyspace-events={target_keyspace}"
-                )
+                msg = _(
+                    "⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将"
+                    "不起效。可手动设置配置文件：notify-keyspace-events={keyspace}"
+                ).format(url=self.urls[i], keyspace=target_keyspace)
                 logger.warning(msg)
             # 检查是否是replica模式(目前是把master也当servent的，这个检查不行，对只有master的配置会报错）
             # db_replica = cast(dict, io.config_get("replica-read-only"))
@@ -315,9 +322,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         返回是否已完成同步，以及master最新checkpoint（可以用来下一次查询）。
         """
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
-        assert not self.is_servant, "is_synced只能在master上调用"
+        assert not self.is_servant, _("is_synced只能在master上调用")
 
         info = await self.aio.info("replication")
         master_offset = int(info.get("master_repl_offset", 0))
@@ -390,7 +397,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 struct_row = comp_cls.dict_to_struct(row_decoded)
                 return comp_cls.struct_to_dict(struct_row)
             case _:
-                raise ValueError(f"不可用的行格式: {fmt}")
+                raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
 
     @overload
     async def get(
@@ -451,7 +458,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
         """
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         key = self.row_key(table_ref, row_id)
         aio = self.aio  # self._batched_aio
         if row := await aio.hgetall(key):  # type: ignore
@@ -643,7 +650,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
         idx_key = self.index_key(table_ref, index_name)
         aio = self.aio  # self._batched_aio
@@ -746,11 +753,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
             """添加del的push命令"""
             pushes.append(["DEL", _key])
 
-        assert not self.is_servant, "从节点不允许提交事务"
+        assert not self.is_servant, _("从节点不允许提交事务")
 
         dirties = idmap.get_dirty_rows()
         if not dirties:
-            raise ValueError("没有脏数据需要提交")
+            raise ValueError(_("没有脏数据需要提交"))
 
         first_ref = idmap.first_reference()
         assert first_ref is not None, "typing检查"
@@ -802,7 +809,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         keys = [self.row_key(first_ref, 1)]
 
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
-        assert self.lua_commit is not None, (
+        assert self.lua_commit is not None, _(
             "lua_commit脚本没有初始化，请先调用 post_configure"
         )
         resp = await self.lua_commit(keys, [payload_json])
@@ -817,7 +824,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 # unique违反就是index的竞态原因
                 raise RaceCondition(resp)
             else:
-                raise RuntimeError(f"未知的提交错误：{resp}")
+                raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
 
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
@@ -839,9 +846,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         for prop in kwargs:
             if prop in table_ref.comp_cls.indexes_:
-                raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
+                raise ValueError(
+                    _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
+                )
             if prop not in table_ref.comp_cls.prop_idx_map_:
-                raise ValueError(f"Component `{table_ref.comp_name}` 没有字段`{prop}`")
+                raise ValueError(
+                    _("Component `{comp_name}` 没有字段`{prop}`").format(
+                        comp_name=table_ref.comp_name, prop=prop
+                    )
+                )
         await aio.hset(key, mapping=kwargs)  # type: ignore
 
     def get_table_maintenance(self) -> RedisTableMaintenance:
@@ -849,7 +862,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         获取表维护对象。
         """
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
         from .maint import RedisTableMaintenance
 
@@ -858,7 +871,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def get_mq_client(self) -> RedisMQClient:
         """获取消息队列连接"""
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         from .mq import RedisMQClient
 
         return RedisMQClient(self)

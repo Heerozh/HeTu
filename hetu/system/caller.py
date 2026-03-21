@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 
 from ..common.slowlog import SlowLog
 from ..data.backend import RaceCondition
+from ..i18n import _
 from .definer import SystemClusters, SystemDefine
 from .lock import SystemLock
 
@@ -47,7 +48,9 @@ class SystemCaller:
         # 读取保存的system define
         sys = SYSTEM_CLUSTERS.get_system(system)
         if not sys:
-            raise ValueError(f"不存在的System, 检查是否非法调用：{system}")
+            raise ValueError(
+                _("不存在的System, 检查是否非法调用：{system}").format(system=system)
+            )
 
         return sys
 
@@ -83,12 +86,14 @@ class SystemCaller:
             context.repo[master] = repo
         if uuid and SystemLock not in context.repo:
             raise ValueError(
-                f"调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
+                _(
+                    "调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
+                ).format(sys_name=sys_name)
             )
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
-            base, _, _ = dep_name.partition(":")
+            base, _sep, _suffix = dep_name.partition(":")
             dep_sys = SYSTEM_CLUSTERS.get_system(base)
             assert dep_sys, f"TYPING不该走到: System {sys_name} 的依赖 {base} 找不到"
             context.depend[dep_name] = dep_sys.func
@@ -105,7 +110,9 @@ class SystemCaller:
                 if uuid and await context.repo[SystemLock].get(uuid=uuid):
                     replay.info(f"[UUIDExist][{sys_name}] 该uuid {uuid} 已执行过")
                     logger.debug(
-                        f"🛑 [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                        _(
+                            "🛑 [📞System] 调用System遇到重复执行: {sys_name}，{uuid} 已执行过"
+                        ).format(sys_name=sys_name, uuid=uuid)
                     )
                     return None
                 # 执行
@@ -127,11 +134,13 @@ class SystemCaller:
                 delay = random.random() / 5
                 replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
                 logger.debug(
-                    f"🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                    _(
+                        "🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
+                    ).format(sys_name=sys_name, delay=delay)
                 )
                 await asyncio.sleep(delay)
                 continue
-            except Exception as _:
+            except Exception:
                 # err_msg = f"嵌套系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
                 raise
             finally:
@@ -141,7 +150,11 @@ class SystemCaller:
                 elapsed = time.perf_counter() - start_time
                 SLOW_LOG.log(elapsed, sys_name, context.race_count)
 
-        raise RuntimeError(f"调用System失败, 超过{sys_name}重试次数{sys.max_retry}")
+        raise RuntimeError(
+            _("调用System失败, 超过{sys_name}重试次数{max_retry}").format(
+                sys_name=sys_name, max_retry=sys.max_retry
+            )
+        )
 
     async def call(self, system: str, *args, uuid: str = "") -> ResponseToClient | None:
         """
