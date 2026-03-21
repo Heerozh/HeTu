@@ -70,8 +70,8 @@ def test_direct_func_call_forbid(test_system1):
         race_count=0,
         repo={},
         depend={},
-        request=None,
-        systems=None,
+        request=None,  # noqa  # pyright: ignore[reportArgumentType]
+        systems=None,  # noqa  # pyright: ignore[reportArgumentType]
     )
     with pytest.raises(RuntimeError, match="depends"):
         test_system1(ctx, 2, 3)
@@ -79,7 +79,7 @@ def test_direct_func_call_forbid(test_system1):
 
 def test_duplicate_define(test_system1):
     # 重复定义
-    with pytest.raises(AssertionError, match="System重复定义"):
+    with pytest.raises(AssertionError, match="重复定义"):
 
         @define_system(namespace="pytest", components=())
         async def system1(ctx):
