@@ -7,24 +7,24 @@ Node.js 双平台运行。不包含 Unity Editor 相关工具（Inspector、Post
 
 ## 需求摘要
 
-| 项目 | 决定 |
-|------|------|
-| 运行环境 | 浏览器 + Node.js 通用 |
-| 模块格式 | ESM 为主，兼容 CJS |
-| 语言 | 纯 JavaScript（不使用 TypeScript） |
-| Pipeline 层级 | 全部三层：jsonb + zlib + crypto |
-| 订阅 API 风格 | 回调 + EventEmitter（零依赖） |
-| 代码生成 | 生成 JSDoc 注解的组件包装类 |
-| 发布方式 | 项目内子目录 `ClientSDK/js/` |
+| 项目          | 决定                           |
+|-------------|------------------------------|
+| 运行环境        | 浏览器 + Node.js 通用             |
+| 模块格式        | ESM 为主，兼容 CJS                |
+| 语言          | 纯 JavaScript（不使用 TypeScript） |
+| Pipeline 层级 | 全部三层：jsonb + zlib + crypto   |
+| 订阅 API 风格   | 回调 + EventEmitter（零依赖）       |
+| 代码生成        | 生成 JSDoc 注解的组件包装类            | 
+| 发布方式        | 项目内子目录 `ClientSDK/js/`       |
 
 ## 依赖选型
 
-| 依赖 | 用途 | 浏览器 | Node.js |
-|------|------|--------|---------|
-| `msgpackr` | MessagePack 序列化 | 纯 JS fallback | native addon 加速 |
-| `pako` | Zlib 压缩/解压 | 纯 JS | 纯 JS |
-| `libsodium-wrappers-sumo` | X25519 + ChaCha20-Poly1305-IETF | WASM | WASM |
-| `ws` (peerDep) | Node.js WebSocket | 不需要 | peerDependency |
+| 依赖                        | 用途                              | 浏览器           | Node.js         |
+|---------------------------|---------------------------------|---------------|-----------------|
+| `msgpackr`                | MessagePack 序列化                 | 纯 JS fallback | native addon 加速 |
+| `pako`                    | Zlib 压缩/解压                      | 纯 JS          | 纯 JS            |
+| `libsodium-wrappers-sumo` | X25519 + ChaCha20-Poly1305-IETF | WASM          | WASM            |
+| `ws` (peerDep)            | Node.js WebSocket               | 不需要           | peerDependency  |
 
 选择 `libsodium` 的原因：服务端使用 PyNaCl（底层也是 libsodium），两端算法实现完全
 一致，避免兼容性问题。
@@ -53,17 +53,17 @@ ClientSDK/js/
 
 ### 与 Unity 客户端的模块映射
 
-| Unity (C#) | JS | 说明 |
-|---|---|---|
-| `ClientBase.cs` + `UnityClient.cs` | `client.js` | 合并，JS 无需 sync/async 双 API |
-| `Pipeline.cs` | `pipeline/pipeline.js` | 相同职责 |
-| `JsonbLayer.cs` | `pipeline/jsonb.js` | msgpackr 替代 MessagePack-CSharp |
-| `ZlibLayer.cs` | `pipeline/zlib.js` | pako 替代 SharpZipLib |
-| `CryptoLayer.cs` | `pipeline/crypto.js` | libsodium 替代 BouncyCastle |
-| `Subscription.cs` | `subscription.js` | EventEmitter 替代 R3 Observable |
-| `Response.cs` | `response.js` | 相同的 FIFO 模式 |
-| `InspectorTrace.cs` | 不实现 | Unity Editor 专属 |
-| `Editor/` | 不实现 | Unity Editor 专属 |
+| Unity (C#)                         | JS                     | 说明                             |
+|------------------------------------|------------------------|--------------------------------|
+| `ClientBase.cs` + `UnityClient.cs` | `client.js`            | 合并，JS 无需 sync/async 双 API      |
+| `Pipeline.cs`                      | `pipeline/pipeline.js` | 相同职责                           |
+| `JsonbLayer.cs`                    | `pipeline/jsonb.js`    | msgpackr 替代 MessagePack-CSharp |
+| `ZlibLayer.cs`                     | `pipeline/zlib.js`     | pako 替代 SharpZipLib            |
+| `CryptoLayer.cs`                   | `pipeline/crypto.js`   | libsodium 替代 BouncyCastle      |
+| `Subscription.cs`                  | `subscription.js`      | EventEmitter 替代 R3 Observable  |
+| `Response.cs`                      | `response.js`          | 相同的 FIFO 模式                    |
+| `InspectorTrace.cs`                | 不实现                    | Unity Editor 专属                |
+| `Editor/`                          | 不实现                    | Unity Editor 专属                |
 
 ## 核心 API 设计
 
@@ -115,13 +115,13 @@ const client = new HeTuClient({
 
 ### 与 Unity API 对比
 
-| 功能 | Unity | JS |
-|------|-------|-----|
-| RPC | `await CallSystem("name", args)` → `JsonObject` | `await callSystem("name", ...args)` → `Object` |
-| 单行订阅 | `await Get<T>("index", value)` 泛型强类型 | `await get(component, index, value)` → plain object |
-| 范围订阅 | `await Range<T>(...)` + R3 Observable | `await range(...)` + EventEmitter |
-| 事件 | C# event delegate | `.on()` / `.off()` |
-| 取消订阅 | `sub.Dispose()` | `sub.unsubscribe()` |
+| 功能   | Unity                                           | JS                                                  |
+|------|-------------------------------------------------|-----------------------------------------------------|
+| RPC  | `await CallSystem("name", args)` → `JsonObject` | `await callSystem("name", ...args)` → `Object`      |
+| 单行订阅 | `await Get<T>("index", value)` 泛型强类型            | `await get(component, index, value)` → plain object |
+| 范围订阅 | `await Range<T>(...)` + R3 Observable           | `await range(...)` + EventEmitter                   |
+| 事件   | C# event delegate                               | `.on()` / `.off()`                                  |
+| 取消订阅 | `sub.Dispose()`                                 | `sub.unsubscribe()`                                 |
 
 ## Pipeline 实现
 
@@ -148,24 +148,28 @@ class PipelineLayer {
 ### 各层细节
 
 **JsonbLayer**
+
 - `msgpackr` 的 `pack()` / `unpack()`
 - 无需握手
 
 **ZlibLayer**
+
 - `pako.Inflate` / `pako.Deflate` 流式实例
 - 握手：接收服务端发来的 preset dictionary，设入压缩/解压上下文
 - 使用 `Z_SYNC_FLUSH` 保持流式语义
 
 **CryptoLayer**
+
 - `libsodium-wrappers-sumo`
 - 握手流程：
-  1. 生成 X25519 临时密钥对
-  2. 发送公钥（32 字节），或带 authKey 的签名 hello（H2A1 magic + 公钥 + 时间戳 + nonce + HMAC-SHA256，共 92 字节）
-  3. 接收服务端公钥
-  4. ECDH → 共享密钥 → blake2b 哈希 → session key
+    1. 生成 X25519 临时密钥对
+    2. 发送公钥（32 字节），或带 authKey 的签名 hello（H2A1 magic + 公钥 + 时间戳 + nonce +
+       HMAC-SHA256，共 92 字节）
+    3. 接收服务端公钥
+    4. ECDH → 共享密钥 → blake2b 哈希 → session key
 - 加解密：ChaCha20-Poly1305-IETF，12 字节 nonce 递增计数器
-  - 客户端→服务端方向标志：`0x00`
-  - 服务端→客户端方向标志：`0xff`
+    - 客户端→服务端方向标志：`0x00`
+    - 服务端→客户端方向标志：`0xff`
 
 ### 握手时序
 
@@ -222,6 +226,7 @@ Client                              Server
 Node.js 下 `ws` 作为 peerDependency，不打包进浏览器产物。
 
 适配器封装：
+
 - `connect(url)` → Promise
 - `send(bytes)` → 发送 Uint8Array
 - `onmessage` → 接收 Uint8Array
@@ -240,13 +245,13 @@ async connect(url, opts) {
 
 ### 错误分类
 
-| 类型 | 处理方式 |
-|------|----------|
+| 类型        | 处理方式                                                             |
+|-----------|------------------------------------------------------------------|
 | 连接失败 / 断开 | `connect()` reject；触发 `client.on("closed")`；所有 pending 回调 reject |
-| 握手失败 | `connect()` reject，附带错误信息 |
-| RPC 服务端错误 | `callSystem()` reject，message 为服务端返回的错误文本 |
-| 订阅失败 | `get()` / `range()` reject（服务端返回 `["sub", "fail", ...]`） |
-| 消息解码异常 | 触发 `client.on("error")`，跳过该消息，不断开连接 |
+| 握手失败      | `connect()` reject，附带错误信息                                        |
+| RPC 服务端错误 | `callSystem()` reject，message 为服务端返回的错误文本                        |
+| 订阅失败      | `get()` / `range()` reject（服务端返回 `["sub", "fail", ...]`）         |
+| 消息解码异常    | 触发 `client.on("error")`，跳过该消息，不断开连接                              |
 
 ### 连接断开时的行为
 
@@ -298,12 +303,12 @@ export const HPFields = {
 
 ### 类型映射
 
-| NumPy dtype | JS 类型 |
-|-------------|---------|
-| `int8` / `int16` / `int32` / `int64` | `number` |
-| `float32` / `float64` | `number` |
-| `bool` | `boolean` |
-| `str*` | `string` |
+| NumPy dtype                          | JS 类型     |
+|--------------------------------------|-----------|
+| `int8` / `int16` / `int32` / `int64` | `number`  |
+| `float32` / `float64`                | `number`  |
+| `bool`                               | `boolean` |
+| `str*`                               | `string`  |
 
 ### CLI 集成
 
