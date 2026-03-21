@@ -55,7 +55,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def _schema_checking_for_redis(self):
         """检查Component的schema定义，确保符合Redis的要求"""
         for comp_cls in self._get_referred_components():
-            for field, _ in comp_cls.indexes_.items():
+            for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 索引不支持复数
                 if np.issubdtype(dtype, np.complexfloating):
@@ -275,7 +275,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     def configure_servant(self) -> None:
         if not self._ios:
-            raise ConnectionError("连接已关闭，已调用过close")
+            raise ConnectionError(_("连接已关闭，已调用过close"))
             # 检查servants设置
 
         target_keyspace = "Kghz"
@@ -846,9 +846,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         for prop in kwargs:
             if prop in table_ref.comp_cls.indexes_:
-                raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
+                raise ValueError(
+                    _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
+                )
             if prop not in table_ref.comp_cls.prop_idx_map_:
-                raise ValueError(f"Component `{table_ref.comp_name}` 没有字段`{prop}`")
+                raise ValueError(
+                    _("Component `{comp_name}` 没有字段`{prop}`").format(
+                        comp_name=table_ref.comp_name, prop=prop
+                    )
+                )
         await aio.hset(key, mapping=kwargs)  # type: ignore
 
     def get_table_maintenance(self) -> RedisTableMaintenance:

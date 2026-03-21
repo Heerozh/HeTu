@@ -76,7 +76,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def _schema_checking_for_sql(self):
         """检查Component的schema定义，确保符合sql系列的要求"""
         for comp_cls in self._get_referred_components():
-            for field, _ in comp_cls.indexes_.items():
+            for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 如果有不支持的dtype，在这raise
                 del dtype
@@ -916,9 +916,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
         for prop in kwargs:
             if prop in table_ref.comp_cls.indexes_:
-                raise ValueError(f"索引字段`{prop}`不允许用direct_set修改")
+                raise ValueError(
+                    _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
+                )
             if prop not in table_ref.comp_cls.prop_idx_map_:
-                raise ValueError(f"Component `{table_ref.comp_name}` 没有字段`{prop}`")
+                raise ValueError(
+                    _("Component `{comp_name}` 没有字段`{prop}`").format(
+                        comp_name=table_ref.comp_name, prop=prop
+                    )
+                )
 
         values = {
             key: self._coerce_scalar(table_ref.comp_cls.dtype_map_[key], value)

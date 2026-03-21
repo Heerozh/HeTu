@@ -6,7 +6,6 @@
 """
 
 import argparse
-import gettext
 
 from ..i18n import _
 from .build import BuildCommand

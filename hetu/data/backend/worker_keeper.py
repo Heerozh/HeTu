@@ -14,6 +14,7 @@ import numpy as np
 from ...common.helper import get_machine_id
 from ...common.permission import Permission
 from ...common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
+from ...i18n import _
 from ..component import BaseComponent, define_component, property_field
 from .base import RaceCondition, RowFormat
 
@@ -89,7 +90,7 @@ class GeneralWorkerKeeper(WorkerKeeper):
         return WORKER_ID_EXPIRE_SEC * 1000
 
     async def _try_claim_worker_id(self, worker_id: int) -> bool:
-        for _ in range(5):
+        for _attempt in range(5):
             try:
                 async with self.table.session() as session:
                     repo = session.using(WorkerLease)
@@ -133,12 +134,14 @@ class GeneralWorkerKeeper(WorkerKeeper):
                 continue
             self.worker_id = worker_id
             logger.info(
-                f"[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {self.node_id}"
+                _("[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}").format(
+                    worker_id=worker_id, node_id=self.node_id
+                )
             )
             return worker_id
 
         raise KeyError(
-            "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+            _("无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试")
         )
 
     @override
@@ -150,7 +153,7 @@ class GeneralWorkerKeeper(WorkerKeeper):
         if worker_id < 0:
             return
         await self.table.direct_set(worker_id, expires_at="0")
-        logger.info(f"[❄️ID] [General] 释放 Worker ID: {worker_id}")
+        logger.info(_("[❄️ID] [General] 释放 Worker ID: {worker_id}").format(worker_id=worker_id))
 
     @override
     async def get_last_timestamp(self) -> int:

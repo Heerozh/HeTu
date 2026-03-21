@@ -11,6 +11,8 @@ import time
 
 from tabulate import tabulate
 
+from ..i18n import _
+
 logger = logging.getLogger("HeTu.root")
 SLOW_LOG_TIME_THRESHOLD = 1
 SLOW_LOG_RETRY_THRESHOLD = 5
@@ -66,8 +68,16 @@ class SlowLog:
         if elapsed > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD:
             if now - self._logged.get(name, 0) > self.log_interval:
                 logger.warning(
-                    f"⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed:.3f}秒，"
-                    f"事务冲突次数 {retry}，平均时间 {time_avg.value:.3f}秒\n{self}"
+                    _(
+                        "⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed}秒，"
+                        "事务冲突次数 {retry}，平均时间 {avg_time}秒\n{table}"
+                    ).format(
+                        name=name,
+                        elapsed=f"{elapsed:.3f}",
+                        retry=retry,
+                        avg_time=f"{time_avg.value:.3f}",
+                        table=self,
+                    )
                 )
                 self._logged[name] = now
 
@@ -86,7 +96,7 @@ class SlowLog:
         ]
         return tabulate(
             rows,
-            headers=["系统", "平均时间", "平均冲突次数"],
+            headers=[_("系统"), _("平均时间"), _("平均冲突次数")],
             tablefmt="github",
             floatfmt=".2f",
         )

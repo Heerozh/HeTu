@@ -299,7 +299,11 @@ class SubscriptionBroker:
 
         channel_name = servant.row_channel(table_ref, row["id"])
         await self._mq_client.subscribe(channel_name)
-        logger.debug("🆕 [📡Subscription] 订阅了行: %s %s", sub_id, channel_name)
+        logger.debug(
+            _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
+                sub_id=sub_id, channel_name=channel_name
+            )
+        )
 
         self._subs[sub_id] = RowSubscription(
             table_ref, servant, ctx, channel_name, row["id"]
@@ -386,7 +390,11 @@ class SubscriptionBroker:
 
         index_channel = servant.index_channel(table_ref, index_name)
         await self._mq_client.subscribe(index_channel)
-        logger.debug("🆕 [📡Subscription] 订阅了索引: %s %s", sub_id, index_channel)
+        logger.debug(
+            _("🆕 [📡Subscription] 订阅了索引: {sub_id} {index_channel}").format(
+                sub_id=sub_id, index_channel=index_channel
+            )
+        )
 
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(

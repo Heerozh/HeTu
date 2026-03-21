@@ -93,7 +93,7 @@ class SystemCaller:
 
         # 复制inherited函数
         for dep_name in sys.full_depends:
-            base, _, _ = dep_name.partition(":")
+            base, _sep, _suffix = dep_name.partition(":")
             dep_sys = SYSTEM_CLUSTERS.get_system(base)
             assert dep_sys, f"TYPING不该走到: System {sys_name} 的依赖 {base} 找不到"
             context.depend[dep_name] = dep_sys.func
@@ -140,7 +140,7 @@ class SystemCaller:
                 )
                 await asyncio.sleep(delay)
                 continue
-            except Exception as _:
+            except Exception:
                 # err_msg = f"嵌套系统调用异常，调用：{sys_name}{args}，异常：{type(e).__name__}:{e}"
                 raise
             finally:

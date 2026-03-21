@@ -11,6 +11,7 @@ import time
 from typing import TYPE_CHECKING, final, override
 
 from ....common.multimap import MultiMap
+from ....i18n import _
 from ..base import MQClient
 from .pubsub import AsyncKeyspacePubSub
 
@@ -83,14 +84,14 @@ class RedisMQClient(MQClient):
 
         if msg is not None:
             channel_name = msg["channel"].decode()
-            logger.debug(f"🔔 [💾Redis] 收到订阅更新通知: {channel_name}")
+            logger.debug(_("🔔 [💾Redis] 收到订阅更新通知: {channel_name}").format(channel_name=channel_name))
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
             if dropped:
                 self.pulled_set -= dropped
                 logger.warning(
-                    f"⚠️ [💾Redis] 订阅更新通知来不及处理，"
-                    f"丢弃了2分钟前的消息共{len(dropped)}条"
+                    _("⚠️ [💾Redis] 订阅更新通知来不及处理，"
+                    "丢弃了2分钟前的消息共{count}条").format(count=len(dropped))
                 )
 
             # 判断是否已在deque中了，去重用。self.get_message也会自动去重，
