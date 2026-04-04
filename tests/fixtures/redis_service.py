@@ -1,6 +1,7 @@
-import time
-import sys
 import socket
+import sys
+import time
+
 import docker
 import docker.errors
 import pytest
@@ -337,7 +338,8 @@ def ses_redis_cluster_service():
                     print(f"✅ Redis Cluster 已就绪 (耗时 {i}s)")
                     ready = True
                     break
-            except Exception as _:
+            except Exception as e:
+                print(str(e), "如果无法连接，确定wsl的网络模式为Nat")
                 pass
             time.sleep(1)
             if rc:
