@@ -1,2 +1,5 @@
 # Github语言统计忽略特定目录
 ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket/** linguist-vendored
+
+# Shell 脚本必须 LF —— Windows 上 git autocrlf 不要碰
+*.sh text eol=lf

@@ -2,7 +2,8 @@ import logging
 import os
 import sys
 
-os.environ.setdefault("LANG", "zh")
+os.environ["LANG"] = "zh_CN.UTF-8"
+os.environ["LC_ALL"] = "zh_CN.UTF-8"
 
 from fixtures.backends import *
 from fixtures.defines import *
