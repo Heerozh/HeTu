@@ -130,6 +130,26 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - 测试文件：`test_*.py`，fixtures 在 `tests/fixtures/`
 - pytest 配置中使用 `asyncio_mode = "auto"`；fixture/test 的 loop scope 为 `module`
 
+## Sandbox (sbx) 环境
+
+当在 `sbx run claude` 启动的 sandbox 中工作（`IS_SANDBOX=1`）：
+
+- **不要尝试在 sandbox 内 `apt-get install` 或 `sudo`**：被 "no new privileges" 屏蔽，且
+  `/etc` `/usr` 都是只读。安装系统包必须由用户从 host 执行 `agent_install.sh`：
+  ```
+  # PowerShell（cmd /c 包一层避免 PS 把 LF 转 CRLF）
+  cmd /c "type agent_install.sh | sbx exec -u root -i claude-HeTu bash"
+  # cmd.exe
+  type agent_install.sh | sbx exec -u root -i claude-HeTu bash
+  # Bash / zsh / Git Bash
+  cat agent_install.sh | sbx exec -u root -i claude-HeTu bash
+  ```
+  "claude-HeTu" 一般是本项目的默认 sandbox 名（用 `sbx ls` 查）。
+- **Python venv 路径**：如果uv run报错，可能是因为用了host的venv目录，正常安装后应该会有， 
+  `UV_PROJECT_ENVIRONMENT=.venv-sandbox`（由 `agent_install.sh` 写入 
+  `/etc/sandbox-persistent.sh`）。
+- 若发现缺少软件，提示用户在 host 跑上面的 `sbx exec` 命令，不要在 sandbox 内自行尝试安装。
+
 ## Rule
 
 - Always use Context7 MCP when I need library/API documentation, code generation, setup
