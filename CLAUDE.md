@@ -134,21 +134,10 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 当在 `sbx run claude` 启动的 sandbox 中工作（`IS_SANDBOX=1`）：
 
-- **不要尝试在 sandbox 内 `apt-get install` 或 `sudo`**：被 "no new privileges" 屏蔽，且
-  `/etc` `/usr` 都是只读。安装系统包必须由用户从 host 执行 `agent_install.sh`：
-  ```
-  # PowerShell（cmd /c 包一层避免 PS 把 LF 转 CRLF）
-  cmd /c "type agent_install.sh | sbx exec -u root -i claude-HeTu bash"
-  # cmd.exe
-  type agent_install.sh | sbx exec -u root -i claude-HeTu bash
-  # Bash / zsh / Git Bash
-  cat agent_install.sh | sbx exec -u root -i claude-HeTu bash
-  ```
-  "claude-HeTu" 一般是本项目的默认 sandbox 名（用 `sbx ls` 查）。
-- **Python venv 路径**：如果uv run报错，可能是因为用了host的venv目录，正常安装后应该会有， 
-  `UV_PROJECT_ENVIRONMENT=.venv-sandbox`（由 `agent_install.sh` 写入 
-  `/etc/sandbox-persistent.sh`）。
-- 若发现缺少软件，提示用户在 host 跑上面的 `sbx exec` 命令，不要在 sandbox 内自行尝试安装。
+- **Python venv 路径**：如果uv run报错，可能是因为用了host的venv目录，需要用户通过sbx执行
+  `agent_install.sh` 写入 `UV_PROJECT_ENVIRONMENT=/tmp/hetu-venv-sandbox` 到`/etc/sandbox-persistent.sh`
+- 如果sudo显示: The "no new privileges" flag is set, which prevents sudo from running as root.
+  这是需要用户关闭Claude Code自己的sandbox, 执行`agent_install.sh`会自动关闭
 
 ## Rule
 

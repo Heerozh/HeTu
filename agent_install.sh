@@ -39,14 +39,32 @@ if grep -qF "$BEGIN" "$PERSIST"; then
 fi
 {
     echo "$BEGIN"
-    # Linux venv lives separately from Windows-side .venv/ to avoid conflict.
-    echo 'export UV_PROJECT_ENVIRONMENT=.venv-sandbox'
+    echo 'export UV_PROJECT_ENVIRONMENT=/tmp/hetu-venv-sandbox'
     echo "$END"
 } >> "$PERSIST"
 chmod 644 "$PERSIST"
 echo "[agent_install] env vars written to $PERSIST"
 
-# --- 2. apt packages (skipped if marker exists) ---
+# --- 2. Disable Claude Code's per-Bash sandbox (always refreshed) ---
+# We're already inside an isolated sbx VM, so Claude's inner sandbox
+# (NoNewPrivs + userns remap) is redundant and breaks sudo / apt.
+SETTINGS=/home/agent/.claude/settings.json
+mkdir -p "$(dirname "$SETTINGS")"
+python3 - "$SETTINGS" <<'PY'
+import json, os, sys
+p = sys.argv[1]
+data = {}
+if os.path.exists(p) and os.path.getsize(p) > 0:
+    with open(p) as f:
+        data = json.load(f)
+data.setdefault("sandbox", {})["enabled"] = False
+with open(p, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+chown agent:agent "$(dirname "$SETTINGS")" "$SETTINGS"
+echo "[agent_install] Claude sandbox disabled in $SETTINGS"
+
+# --- 3. apt packages (skipped if marker exists) ---
 if [[ -f "$MARKER" ]]; then
     echo "[agent_install] packages already installed (marker: $MARKER), skipping."
     exit 0
@@ -87,6 +105,9 @@ apt-get install -y --no-install-recommends \
     xz-utils \
     zip
 rm -rf /var/lib/apt/lists/*
+
+# update uv
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 mkdir -p "$(dirname "$MARKER")"
 touch "$MARKER"
