@@ -65,6 +65,7 @@ RUN git config --global core.whitespace cr-at-eol \
     && git config --global core.autocrlf input
 
 # 5. 安装agent
+ARG AGENT_CACHE_BUST=1  # 外面改这个值可激发下面重建
 RUN npm i -g @openai/codex
 RUN npm install -g @google/gemini-cli
 RUN curl -fsSL https://claude.ai/install.sh | bash

@@ -2,76 +2,61 @@ $ErrorActionPreference = "Stop"
 
 $currentDir = (Get-Location).Path
 $dirName = Split-Path -Path $currentDir -Leaf
-$imageName = if ($env:AGENT_IMAGE)
-{
+$imageName = if ($env:AGENT_IMAGE) {
     $env:AGENT_IMAGE
 }
-else
-{
-    "heerozh_agent"
+else {
+    "agent_sandbox"
 }
-$dindImage = if ($env:DIND_IMAGE)
-{
+$dindImage = if ($env:DIND_IMAGE) {
     $env:DIND_IMAGE
 }
-else
-{
+else {
     "docker:27-dind"
 }
-$dindName = if ($env:DIND_NAME)
-{
+$dindName = if ($env:DIND_NAME) {
     $env:DIND_NAME
 }
-else
-{
+else {
     "agent-dind"
 }
-$dindRunVolume = if ($env:DIND_RUN_VOLUME)
-{
+$dindRunVolume = if ($env:DIND_RUN_VOLUME) {
     $env:DIND_RUN_VOLUME
 }
-else
-{
+else {
     "$dindName-run"
 }
-$editor = if ($env:EDITOR)
-{
+$editor = if ($env:EDITOR) {
     $env:EDITOR
 }
-elseif ($env:VISUAL)
-{
+elseif ($env:VISUAL) {
     $env:VISUAL
 }
-else
-{
+else {
     "vim"
 }
-$agentHome = if ($env:HOME)
-{
+$agentHome = if ($env:HOME) {
     $env:HOME
 }
-else
-{
+else {
     $env:USERPROFILE
 }
 
-function Remove-DindResources
-{
+function Remove-DindResources {
     docker rm -f $dindName *> $null
     docker volume rm $dindRunVolume *> $null
 }
 
 # 如果命令是./xxx.sh build，才执行
-if ($args[0] -eq "build")
-{
-    docker build -f agent_docker -t $imageName .
+if ($args[0] -eq "build") {
+    docker build -f agent_docker -t $imageName --build-arg AGENT_CACHE_BUST=$( Get-Date -UFormat %Y%m%d ) .
 }
 
-try
-{
+try {
     Remove-DindResources
     docker volume create $dindRunVolume *> $null
 
+    # docker in docker, enable docker ability in container.
     docker run -d --rm --privileged `
         --name $dindName `
         -e DOCKER_TLS_CERTDIR= `
@@ -84,8 +69,7 @@ try
     $ready = $false
     for ($i = 0; $i -lt 60; $i++) {
         docker exec $dindName docker version *> $null
-        if ($LASTEXITCODE -eq 0)
-        {
+        if ($LASTEXITCODE -eq 0) {
             $ready = $true
             break
         }
@@ -93,11 +77,11 @@ try
         Start-Sleep -Seconds 1
     }
 
-    if (-not $ready)
-    {
+    if (-not $ready) {
         docker logs $dindName
         throw "DinD daemon did not become ready within 60s"
     }
+
 
     docker run --rm -it `
         --security-opt seccomp=unconfined `
@@ -115,11 +99,10 @@ try
         -w "/workspace/${dirName}" `
         -v "${agentHome}/.codex:/root/.codex" `
         -v "${agentHome}/.gemini:/root/.gemini" `
-        -v "${agentHome}/.claude:/root/.claude" `
-        -v "${agentHome}/.claude.json:/root/.claude.json" `
+        -v "${agentHome}/.claude_docker:/root/.claude" `
+        -v "${agentHome}/.claude_docker.json:/root/.claude.json" `
         $imageName
 }
-finally
-{
+finally {
     Remove-DindResources
 }
