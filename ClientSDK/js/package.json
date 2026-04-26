@@ -1,0 +1,54 @@
+{
+  "name": "@hetudb/client-sdk",
+  "version": "0.1.0",
+  "description": "HeTu game database JavaScript client SDK (browser + Node.js).",
+  "license": "Apache-2.0",
+  "author": "Heerozh",
+  "homepage": "https://github.com/heerozh/HeTu",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/heerozh/HeTu.git",
+    "directory": "ClientSDK/js"
+  },
+  "type": "module",
+  "main": "./dist/hetu-client.cjs",
+  "module": "./dist/hetu-client.mjs",
+  "exports": {
+    ".": {
+      "import": "./dist/hetu-client.mjs",
+      "require": "./dist/hetu-client.cjs",
+      "default": "./src/index.js"
+    },
+    "./src/*": "./src/*"
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rollup -c rollup.config.js",
+    "test": "node --test tests/test_pipeline.mjs tests/test_h2a1_compat.mjs"
+  },
+  "dependencies": {
+    "libsodium-wrappers-sumo": "0.7.13",
+    "msgpackr": "^1.10.1",
+    "pako": "^2.1.0"
+  },
+  "peerDependencies": {
+    "ws": "^8.0.0"
+  },
+  "peerDependenciesMeta": {
+    "ws": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.7",
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "rollup": "^4.9.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
