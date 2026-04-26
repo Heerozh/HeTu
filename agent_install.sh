@@ -35,7 +35,7 @@ END='# <<< HeTu agent_install (managed) <<<'
 # --- 1. Persistent env vars (always refreshed) ---
 touch "$PERSIST"
 if grep -qF "$BEGIN" "$PERSIST"; then
-    sed -i "\#$BEGIN#,\#$END#d" "$PERSIST"
+    sed -i "\|$BEGIN|,\|$END|d" "$PERSIST"
 fi
 {
     echo "$BEGIN"
