@@ -127,6 +127,8 @@ namespace Chat
                         _messageList?.Rebuild();
                         ScheduleScrollToBottom();
                     })
+                    // 一般用.AddTo(ref memberSub.DisposeBag)和订阅源绑定，
+                    // 但既然本类已经有自己的bag，就用它了
                     .AddTo(ref _bag);
 
                 messageSub.ObserveRemove()

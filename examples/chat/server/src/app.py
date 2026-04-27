@@ -83,9 +83,7 @@ async def user_quit(ctx: hetu.SystemContext):
 
 
 @hetu.define_system(
-    namespace="Chat",
-    components=(OnlineUser, ChatMessage),
-    permission=hetu.Permission.USER,
+    namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
     me = ctx.user_data["me"]
@@ -100,10 +98,7 @@ async def user_chat(ctx: hetu.SystemContext, text: str):
 
 
 @hetu.define_system(
-    namespace="Chat",
-    components=(OnlineUser,),
-    depends=("user_quit",),
-    permission=None,
+    namespace="Chat", components=(OnlineUser,), depends=("user_quit",), permission=None
 )
 async def on_disconnect(ctx: hetu.SystemContext):
     await ctx.depend["user_quit"](ctx)

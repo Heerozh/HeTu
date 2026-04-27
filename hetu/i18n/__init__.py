@@ -7,7 +7,6 @@
 
 import gettext
 import locale
-import logging
 import sys
 from importlib.resources import files
 
@@ -18,16 +17,13 @@ from babel.support import Format
 DEFAULT_I18N_DIR = str(files("hetu").joinpath("i18n"))
 
 
-logger = logging.getLogger()
-
-
 def get_system_language() -> str:
     """Return the system UI language as a short code (e.g. 'en', 'zh')."""
     # 优先从环境变量获取
     try:
         env_default = Locale.default()
         if env_default:
-            logger.info(f"System language: {str(env_default)}")
+            print(f"Use language defined by ENV (LANG, LC_*): {str(env_default)}")
             return str(env_default)
     except TypeError:
         pass
@@ -43,10 +39,10 @@ def get_system_language() -> str:
         posix = locale.getlocale()[0]
 
     if posix:
-        logger.info(f"System language: {str(posix)}")
+        print(f"Use system language: {str(posix)}")
         return posix
 
-    logger.info("System language: en")
+    print("Use fallback language: en")
     return "en"
 
 

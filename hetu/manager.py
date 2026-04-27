@@ -93,7 +93,7 @@ class ComponentTableManager:
                 case "not_exists":
                     try:
                         maint.create_table(tbl)
-                    except RaceCondition as _:
+                    except RaceCondition:
                         pass
                 case "schema_mismatch":
                     logger.warning(

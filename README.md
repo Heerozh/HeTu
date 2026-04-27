@@ -7,13 +7,15 @@
 
 # 🌌 河图 HeTu
 
-河图是一个可自动伸缩的高性能游戏服务器引擎，采用现代极简 BaaS 后端平台设计。
-重高频 RPC 和内存计算，让你的算法和数据一样持久在线。
+河图是一个可自动伸缩的高性能游戏服务器引擎，采用现代“数据驱动开发”范式，
+但重高频 RPC 和强状态的内存计算。
+
+90%代码由古法编程实现，并且都经过精心设计。
 
 - 高开发效率：2-Tier（两层模式），透明，直接写逻辑，无需关心数据库，事务/线程冲突等问题。
-- Python 语言：支持各种数据科学库，拥抱未来。
+- Python 语言：支持各种AI数据科学库，拥抱未来。
 - 高性能：高并发异步架构 + Redis 后端，数据库操作性能约 10x 倍于 supabase 等。
-- Stateful：不同于其他同类平台只专注数据，河图专注有状态的长连接计算，以及高性能NoSql数据。
+- Stateful：不同于其他同类平台只专注数据，河图专注有状态的长连接计算。
 - Unity 客户端 SDK：支持 C# Reactive，调用简单，基于服务器推送的天然响应式，视图与业务解耦。
 
 具体性能见下方[性能测试](#-性能测试)。
@@ -30,88 +32,58 @@ get/range 订阅。
 
 欢迎贡献代码。商业使用只需在 Credits 中注明即可。
 
-## 🔰 快速示例（30 行）
+## 🔰 快速示例
 
-[//]: # (todo 详细内容移到文档去，这里只展示客户端和服务器的一行代码和效果gif。)
-
-一个登录，并在地图上移动的简单示例。
-
-### 定义组件（Component）
-
-为了描述玩家的坐标，我们定义一个名为`Position`的组件（可理解为表 Schema），通过`owner`属性
-将其关联到玩家 ID。
-组件的权限设为`Permission.USER`，所有登录的客户端都可直接向河图查询该组件。
+一个简单的聊天室， 服务器代码：
 
 ```Python
-import numpy as np
-from hetu import define_component, property_field, Permission, BaseComponent
+# 定义一个 Component，类似数据库表，属性即字段
+@hetu.define_component(namespace="Chat", permission=hetu.Permission.EVERYBODY)
+class ChatMessage(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    text: str = hetu.property_field("", dtype="U256")
 
-
-# 通过@define_component修饰，表示Position结构是一个组件
-@define_component(namespace='ssw', permission=Permission.USER)
-class Position(BaseComponent):
-    x: np.float32 = property_field(default=0)  # 定义Position.x为np.float32类型，默认值为0
-    y: np.float32 = property_field(default=0)  # 只能定义为c类型(np类型)
-    owner: np.int64 = property_field(default=0, unique=True)  # 开启unique索引
-```
-
-> [!WARNING]
-> 不要创建名叫 Player 的大表，而是把 Player 的不同属性拆成不同的组件，比如这里坐标就单独是一个组件，
-> 然后通过`owner`属性关联到 Player 身上。大表会严重影响性能和扩展性。
-
-### 定义 System（数据逻辑）
-
-#### move_to 移动逻辑
-
-玩家移动逻辑`move_to`通过`define_system`定义，参数`components`引用要操作的表，这里我们操作玩家位置数据
-`Position`。
-
-`permission`设置为只有 USER 组的用户才能调用，
-`ctx.caller`是登录用户的 id，此 id 稍后登录时会通过`elevate`方法决定。
-
-```Python
-from hetu import define_system, SystemContext
-
-
-@define_system(
-    namespace="ssw",
-    components=(Position,),  # 定义System引用的表
-    permission=Permission.USER,
-    retry=999,  # 遇到事务冲突时重试次数
+# 定义一个 System，类似储存过程，客户端通过 RPC 调用
+@hetu.define_system(
+    namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER
 )
-async def move_to(ctx: SystemContext, x, y):
-    # 在Position表（组件）中查询或创建owner=ctx.caller的行，然后修改x和y
-    async with ctx.repo[Position].upsert(owner=ctx.caller) as pos:
-        pos.x = x
-        pos.y = y
-        # with结束后会自动提交修改
+async def user_chat(ctx: hetu.SystemContext, text: str):
+    assert ctx.caller, "call user_login first"
+    row = ChatMessage.new_row()
+    row.owner = ctx.caller
+    row.text = text
+    await ctx.repo[ChatMessage].insert(row)
 ```
 
-客户端通过`HeTuClient.Instance.CallSystem("move_to", x, y)`可直接调用。
+客户端代码：
 
-#### Login 登录逻辑
+```csharp
+// UI成员，一个发送按钮，一个聊天列表
+private ListView _messageList;
+private Button _composerSend;
 
-我们定义一个`login_test`System，作为客户端登录接口。
+// 发送：
+_composerSend.clicked += () => {  
+    _ = HeTuClient.Instance.CallSystem("user_chat", text); 
+}
 
-河图有个内部方法叫`elevate`可以帮我们完成登录，它会把当前连接提权到 USER 组，并关联
-`user_id`。
+// 聊天列表，订阅服务器推送，自动更新UI
+_messageList.itemsSource = _messages;
 
-```Python
-from hetu import elevate
+var messageSub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+messageSub.AddTo(gameObject); // 绑定生命周期，go销毁自动取消订阅
+messageSub.ObserveAdd()  // 监听新增消息事件
+    .Subscribe(msg =>
+    {
+        _messages.Add(msg);
+        _messageList.Rebuild();
+        _messageList.ScrollToItem(_messages.Count - 1);
+    })
+    .AddTo(ref messageSub.DisposeBag);
 
-
-# permission定义为任何人可调用
-@define_system(namespace="ssw", permission=Permission.EVERYBODY)
-async def login_test(ctx: SystemContext, user_id):
-    # 提权以后ctx.caller就是user_id。
-    await elevate(ctx, user_id, kick_logged_in=True)
 ```
 
-我们让客户端直接传入 user_id，省去验证过程。实际应该传递 token 验证。
-
-服务器就完成了，我们不需要传输数据的代码，因为河图是个“数据库”，客户端可直接查询。
-
-把以上内容存到`.\src\app.py`文件（或分成多个文件，然后在入口`app.py`文件`import`他们）。
+详见示例代码： [examples/chat/server/src/app.py](examples/chat/server/src/app.py)
 
 #### 启动服务器
 
@@ -452,44 +424,6 @@ UniTask，已内置在 SDK 库中。
 
 > [!NOTE]
 > 如果使用 Unity 6 及以上版本，SDK 使用 Unity 原生 Async 库，可以直接删除 UniTask 目录。
-
-### TypeScript SDK
-
-用法和接口和之前的 Unity 示例基本一致，安装：
-
-`npm install --save Heerozh/HeTu#npm`
-
-用法：
-
-```typescript
-import { HeTuClient, ZlibProtocol, BrowserWebSocket, logger as HeTuLogger } from "hetu-sdk";
-HeTuLogger.setLevel(-1) // 设置日志级别
-HeTuClient.setProtocol(new ZlibProtocol()) // 设置压缩协议
-HeTuClient.connect(new BrowserWebSocket('ws://127.0.0.1:2466/hetu'))
-
-// 订阅行 (类似select * from HP where owner=100)
-const sub1 = await HeTuClient.select('HP', 100, 'owner')
-
-// 订阅索引 (类似select * form Position where x >=0 and x <= 10 limit 100)
-// 并注册更新回调
-const sub2 = await HeTuClient.query('Position', 'x', 0, 10, 100)
-sub2!.onInsert = (sender, rowID) => {
-    newPlayer = sender.rows.get(rowID)?.owner
-}
-sub2!.onDelete = (sender, rowID) => {
-    removedPlayer = sender.rows.get(rowID)?.owner
-}
-sub2!.onUpdate = (sender, rowID) => {
-    const data = sender.rows.get(rowID)
-}
-// 调用远端函数
-HeTuClient.callSystem('move_user', ...)
-// 取消订阅，在这之前数据有变更都会对订阅推送
-sub1.dispose()
-sub2.dispose()
-// 退出
-HeTuClient.close()
-```
 
 ## 📚 文档：
 

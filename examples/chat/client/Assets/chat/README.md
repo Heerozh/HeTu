@@ -2,6 +2,7 @@
 
 极简示例：一个可落地的 Unity 客户端，连接 `examples/chat/server`。
 展示如何用 HeTu 客户端 SDK 的响应式功能，几行代码写出界面。
+注意，大部分为界面控制代码，核心代码见 `SubscribeDataAsync`。
 
 ## Architecture
 
