@@ -34,6 +34,8 @@ get/range 订阅。
 
 ## 🔰 快速示例
 
+<img src="https://github.com/Heerozh/HeTu/blob/media/exsample.png" width="609.5" height="345.5"/>
+
 一个简单的聊天室， 服务器代码：
 
 ```Python
