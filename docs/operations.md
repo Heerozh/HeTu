@@ -3,7 +3,7 @@ title: "Operations"
 description: "Production deployment, Redis topology, load balancing, and the hetu CLI."
 type: docs
 weight: 40
-prev: concepts
+prev: unity-client
 ---
 
 # Operations
