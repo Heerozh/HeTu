@@ -4,7 +4,7 @@ description: "Connecting Unity to a HeTu server: System RPC, row subscriptions, 
 type: docs
 weight: 35
 prev: concepts
-next: operations
+next: advanced
 ---
 
 # Unity Client SDK
@@ -289,6 +289,9 @@ calling code only needs to choose one delay style.
 
 ## Where to next
 
+- **[Advanced](advanced.md)** — System copies, scheduled future calls,
+  raw Endpoints, custom pipeline layers, and the engine internals you'll
+  reach for once a project gets real.
 - **[Concepts](concepts.md)** — re-read the Subscriptions section now that
   you've seen the client side; permissions / RLS filter what `Get` and
   `Range` can return.

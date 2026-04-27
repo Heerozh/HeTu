@@ -72,6 +72,8 @@ subscription. No schema migrations, no API gateway, no message broker.
   end-to-end.
 - **[Concepts](concepts.md)** — the ECS model, subscriptions, permissions, and
   the transaction guarantees you get.
+- **[Advanced](advanced.md)** — System copies, scheduled future calls,
+  raw Endpoints, lifecycle hooks, and custom pipeline layers.
 - **[Operations](operations.md)** — production deployment, Redis topology,
   and load balancing.
 - **[API Reference](api/)** — auto-generated from source docstrings.
