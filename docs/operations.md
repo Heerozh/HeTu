@@ -21,8 +21,9 @@ gives you a Python 3.14 environment with HeTu pre-installed. Your project
 extends it:
 
 ```dockerfile
-# Mainland-China users: replace the registry with the Aliyun mirror above.
-FROM registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
+FROM heerozh/hetu:latest
+# or use this Aliyun mirror in Shanghai location.
+# FROM registry.cn-shanghai.aliyuncs.com/heerozh/hetu:latest
 
 WORKDIR /app
 
@@ -42,7 +43,7 @@ docker build -t my-game .
 docker run -it --rm -p 2466:2466 --name game-srv my-game
 ```
 
-The Docker workflow exists primarily so you can run on cheap pre-emptible
+The Docker workflow exists primarily so you can run on cheap Spot
 instances behind a reverse proxy: containers come and go, and the proxy
 drops or adds them automatically.
 
@@ -69,12 +70,6 @@ replicas for the subscription fan-out. The
 adding replicas scales subscription throughput linearly without touching the
 master.
 
-### Redis Cluster
-
-HeTu uses only basic Redis features (hashes, sorted sets, pub/sub), so
-Redis Cluster works without special configuration. You'll want it once a
-single shard's write throughput becomes the bottleneck.
-
 ### Drop-in alternatives
 
 The same wire protocol means you can substitute:
@@ -90,6 +85,17 @@ Enable AOF or RDB on the Redis side; HeTu doesn't choose for you, but it does
 expect the backend to survive restarts. Pure-volatile setups will lose state
 between deploys.
 
+### Redis Cluster
+
+HeTu uses only basic Redis features (hashes, sorted sets, pub/sub),
+moreover, the concept of component clusters is specifically designed to serve database
+clusters, so Redis Cluster works without special configuration.
+You'll want it once a single shard's write throughput becomes the bottleneck.
+
+However, we do not recommend using the native Redis Cluster, we recommend using Redis
+Proxy to achieve same functionality, because this makes it easier to manage Cluster
+level read-write separation.
+
 ## Load balancing
 
 ### Caddy (recommended)
@@ -102,7 +108,7 @@ automatic.
 
 This pairs well with pre-emptible / spot instances: the game-server fleet
 churns continuously while the proxy keeps a stable client-facing endpoint.
-Game clients need automatic reconnect, which the official SDKs already do.
+Game clients need automatic reconnect, this is easily achievable using the official SDK.
 
 If you'd rather not run Swarm, talk to Caddy's admin API directly from your
 own orchestration code.
@@ -114,7 +120,7 @@ encourages is verbose and easy to get wrong. Caddy fits the workload better.
 
 ## The `hetu` CLI
 
-The `hetu` command (installed by `pip install hetudb`) is your operations
+The `hetu` command (run by `uv run hetu`) is your operations
 entry point. The three subcommands:
 
 ### `hetu start`
@@ -127,13 +133,13 @@ hetu start --config=./config.yml
 
 CLI flags override config-file fields. The most useful ones:
 
-| Flag | Purpose |
-|---|---|
-| `--config FILE` | Load `config.yml` (see [`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml) for the full schema) |
-| `--app-file FILE` | Path to your `app.py` (component & system definitions) |
-| `--db URL` | Backend DSN: `redis://host:6379/0`, `sqlite:///path.db`, `postgresql://user:pw@host/db`, or `mysql://...` |
-| `--namespace NAME` | Which namespace from `app.py` to run |
-| `--instance NAME` | Logical instance id (used for snowflake worker assignment; each running process needs a unique one) |
+| Flag               | Purpose                                                                                                                            |
+|--------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `--config FILE`    | Load `config.yml` (see [`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml) for the full schema) |
+| `--app-file FILE`  | Path to your `app.py` (component & system definitions)                                                                             |
+| `--db URL`         | Backend DSN: `redis://host:6379/0`, `sqlite:///path.db`, `postgresql://user:pw@host/db`, or `mysql://...`                          |
+| `--namespace NAME` | Which namespace from `app.py` to run                                                                                               |
+| `--instance NAME`  | Logical instance id (used for snowflake worker assignment; each running process needs a unique one)                                |
 
 Run `hetu start --help` for the full list.
 
@@ -165,7 +171,8 @@ boilerplate.
 
 ## Configuration file
 
-The full schema is in [`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml).
+The full schema is in [
+`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml).
 A minimal production `config.yml`:
 
 ```yaml
