@@ -43,7 +43,8 @@ class ChatMessage(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
     text: str = hetu.property_field("", dtype="U256")
 
-# 定义一个 System，类似储存过程，客户端通过 RPC 调用
+
+# 定义一个 System，客户端通过 RPC 调用，其中可以做游戏逻辑或写入数据库
 @hetu.define_system(
     namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER
 )
@@ -90,11 +91,9 @@ messageSub.ObserveAdd()  // 监听新增消息事件
 详见 [安装](#%EF%B8%8F-安装) 部分：
 
 ```bash
-# 安装Docker Desktop后，启动Redis服务器(开发环境用，需外网）
-docker run -d --rm --name hetu-redis -p 6379:6379 redis:latest
-# 启动你的App服务器
-cd examples/server/first_game
-uv run hetu start --app-file=./src/app.py --db=redis://127.0.0.1:6379/0 --namespace=ssw --instance=walking
+cd examples/chat/server
+# 演示使用sqlite测试数据库，可直接启动
+uv run hetu start --config=./config.yml
 ```
 
 ### 客户端代码部分
