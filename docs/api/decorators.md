@@ -75,7 +75,18 @@ weight: 10
 
 
 ### Notes
-<griffe._internal.docstrings.models.DocstringAdmonition object at 0x7fbede75d2b0>
+`property_field(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
+    - `index` 表示此属性开启索引；
+    - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
+
+.. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
+
+属性值的类型由type hint决定（如 `: np.float32`），请使用长度明确的np类型。
+字符串类型格式为"<U8"，U是Unicode，8表示长度，<表示little-endian。
+不想看到"<U8"在IDE里标红语法错误的话，可用 `name: str = property_field(dtype='<U8')` 方式。
+
+每个Component表都有个默认的主键`id: np.int64 = property_field(default=雪花uuid, unique=True)`，
+是一个uuid，无法修改。
 
 
 ---
@@ -126,7 +137,8 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 
 
 ### Notes
-<griffe._internal.docstrings.models.DocstringAdmonition object at 0x7fbedea06b10>
+hetu.system.define_system : define_system装饰器定义System
+hetu.endpoint.Context : Context类定义
 
 
 ---
@@ -212,7 +224,8 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 
 
 ### Notes
-<griffe._internal.docstrings.models.DocstringAdmonition object at 0x7fbede748710>
+hetu.system.SystemContext : SystemContext类定义
+hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
 
 
 ---

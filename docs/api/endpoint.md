@@ -63,7 +63,7 @@ kick_logged_in:
 
 
 ### Notes
-<griffe._internal.docstrings.models.DocstringAdmonition object at 0x7fbede878f30>
+本方法是一个独立的事务，如果你在System中(另一个事务中）调用此方法，父事务回退时不会回退此方法的结果。
 
 
 ---
