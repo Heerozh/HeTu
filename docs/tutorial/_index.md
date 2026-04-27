@@ -7,8 +7,6 @@ sidebar:
   open: true
 ---
 
-# Tutorial
-
 Hands-on walkthroughs. Each tutorial assumes you've finished
 [Getting Started](../getting-started.md) and have a Python project with
 `hetudb` installed.

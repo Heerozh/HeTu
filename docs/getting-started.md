@@ -7,8 +7,6 @@ prev: /
 next: tutorial/chat-room
 ---
 
-# Getting Started
-
 This page takes you from a blank directory to a running HeTu server with a
 client connected to it. Plan on roughly 10–15 minutes.
 

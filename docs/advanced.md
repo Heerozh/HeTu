@@ -7,8 +7,6 @@ prev: unity-client
 next: operations
 ---
 
-# Advanced
-
 Once you've built a few Systems and shipped them through the Unity SDK, the
 features on this page are what you'll reach for next. None of them are
 required to get started, but each one solves a real problem that comes up
@@ -29,7 +27,8 @@ once a project leaves the prototype stage:
 - **[Per-connection state](#per-connection-state-user_data-group-and-limits)** —
   `ctx.user_data`, admin elevation via `ctx.group`, and rate-limit
   overrides.
-- **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)** —
+- **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)
+  ** —
   commit (or abort) the transaction before the System body returns.
 - **[NumPy patterns for range queries](#numpy-patterns-for-range-queries)** —
   broadcasting, boolean masks, aggregations, and joining two queries in
@@ -109,9 +108,9 @@ Skeleton:
 ```python
 @hetu.define_system(
     namespace="MyGame",
-    permission=None,            # not callable from clients
+    permission=None,  # not callable from clients
     components=(SomeComponent,),
-    call_lock=True,             # required by future calls (see below)
+    call_lock=True,  # required by future calls (see below)
 )
 async def reward_daily_bonus(ctx: hetu.SystemContext, user_id: int):
     async with ctx.repo[SomeComponent].upsert(owner=user_id) as row:
@@ -241,7 +240,7 @@ when the websocket closes:
 ```python
 @hetu.define_system(
     namespace="MyGame", components=(OnlineUser,),
-    permission=None,    # not callable by clients
+    permission=None,  # not callable by clients
 )
 async def on_disconnect(ctx: hetu.SystemContext):
     if not ctx.caller:
@@ -309,11 +308,11 @@ websocket. Several fields on it are intended for application code:
 
 ```python
 async def my_system(ctx: hetu.SystemContext, ...):
-    ctx.user_data["last_seen_zone"] = zone_id     # arbitrary state
+    ctx.user_data["last_seen_zone"] = zone_id  # arbitrary state
     if ctx.is_admin():
-        ...                                       # ctx.group startswith "admin"
-    ctx.client_limits = [[100, 1], [500, 60]]     # widen rate limit
-    ctx.max_index_sub *= 4                        # allow more concurrent ranges
+        ...  # ctx.group startswith "admin"
+    ctx.client_limits = [[100, 1], [500, 60]]  # widen rate limit
+    ctx.max_index_sub *= 4  # allow more concurrent ranges
 ```
 
 What each field is for:
@@ -354,7 +353,7 @@ A System normally commits when its body returns. Two awaitable methods on
 async def long_running(ctx: hetu.SystemContext, ...):
     async with ctx.repo[Order].upsert(id=order_id) as o:
         o.status = "processing"
-    await ctx.session_commit()           # <-- writes are durable now
+    await ctx.session_commit()  # <-- writes are durable now
 
     # ↓ Slow work below; even if the worker dies, "processing" is persisted.
     result = await call_external_payment_provider(...)
@@ -421,8 +420,8 @@ A comparison on a column returns a boolean array; indexing a recarray
 with that mask returns the matching rows:
 
 ```python
-hot       = rows[rows.hp < 30]
-mine      = rows[rows.owner == ctx.caller]
+hot = rows[rows.hp < 30]
+mine = rows[rows.owner == ctx.caller]
 ```
 
 Combine masks with `&`, `|`, `~`. **Parentheses are mandatory** —
@@ -450,11 +449,11 @@ Every column has built-in statistics:
 
 ```python
 total_damage = rows.damage.sum()
-average_hp   = rows.hp.mean()
-max_score    = rows.score.max()
-hp_p95       = np.percentile(rows.hp, 95)
-hp_std       = rows.hp.std()
-n_alive      = (rows.hp > 0).sum()      # counting via boolean mask
+average_hp = rows.hp.mean()
+max_score = rows.score.max()
+hp_p95 = np.percentile(rows.hp, 95)
+hp_std = rows.hp.std()
+n_alive = (rows.hp > 0).sum()  # counting via boolean mask
 ```
 
 `(boolean_array).sum()` counts `True`s — the canonical "count where"
@@ -497,7 +496,7 @@ in-process by `owner` (or any shared key):
 
 ```python
 positions = await ctx.repo[Position].range("zone", zone_id, zone_id, limit=500)
-hps       = await ctx.repo[HP].range("zone", zone_id, zone_id, limit=500)
+hps = await ctx.repo[HP].range("zone", zone_id, zone_id, limit=500)
 
 # Owners present in both result sets
 both = np.intersect1d(positions.owner, hps.owner)
@@ -532,6 +531,7 @@ Components can live on different physical databases:
 @hetu.define_component(namespace="Game", backend="hot")
 class Position(hetu.BaseComponent):
     ...
+
 
 @hetu.define_component(namespace="Game", backend="cold")
 class GameLog(hetu.BaseComponent):
@@ -608,12 +608,13 @@ add layers by subclassing:
 # myproto.py
 from hetu.server.pipeline import MessageProcessLayer
 
+
 class FramingLayer(MessageProcessLayer, alias="framing"):
     def is_handshake_required(self) -> bool:
         return False
 
     def encode(self, layer_ctx, message):
-        return b"\x01" + message     # message is bytes here
+        return b"\x01" + message  # message is bytes here
 
     def decode(self, layer_ctx, message):
         assert message[:1] == b"\x01"

@@ -7,8 +7,6 @@ prev: tutorial/chat-room
 next: unity-client
 ---
 
-# Concepts
-
 This page explains the mental model behind HeTu so you can reason about
 performance, transactions, and security yourself instead of guessing.
 

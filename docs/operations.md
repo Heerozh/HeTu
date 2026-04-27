@@ -6,8 +6,6 @@ weight: 40
 prev: advanced
 ---
 
-# Operations
-
 Everything you need to take a working dev setup to production: deployment
 options, Redis topology, reverse-proxy setup, and a CLI reference.
 

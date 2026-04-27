@@ -7,8 +7,6 @@ prev: /tutorial
 next: ../concepts
 ---
 
-# Tutorial: Chat Room
-
 In this tutorial you'll build a multi-user chat room. By the end you'll have
 exercised every major HeTu concept: typed components, server-side systems,
 subscription-based realtime updates, permission checks, and lifecycle hooks.

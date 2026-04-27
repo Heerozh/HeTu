@@ -7,8 +7,6 @@ sidebar:
   open: true
 ---
 
-# HeTu
-
 HeTu (河图) is a high-performance, multi-process, distributed game-server
 engine. It uses the **Entity-Component-System (ECS)** pattern, stores state in
 **Redis**, and exposes that state to game clients over **WebSocket** as a
@@ -80,6 +78,4 @@ subscription. No schema migrations, no API gateway, no message broker.
 
 ## Status
 
-HeTu is currently in **closed beta** (内测中) and developed primarily inside
-its sponsoring company. The public API is stable enough to build against, but
-expect occasional breaking changes until the 1.0 release.
+HeTu is currently in **closed beta**

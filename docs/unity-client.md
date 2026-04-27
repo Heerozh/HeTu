@@ -7,8 +7,6 @@ prev: concepts
 next: advanced
 ---
 
-# Unity Client SDK
-
 The Unity SDK (`cn.hetudb.clientsdk`) is how a Unity game talks to a HeTu
 server. It wraps the WebSocket protocol, the message pipeline (MessagePack +
 zlib + crypto), and the subscription bookkeeping behind a single
