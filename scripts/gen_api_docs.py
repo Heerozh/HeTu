@@ -173,7 +173,12 @@ def _parse_docstring(obj: object) -> dict:
             out["examples"] = [_example_to_string(v) for v in section.value]
         elif kind in ("notes", "admonition"):
             value = section.value
-            out["notes"] = value if isinstance(value, str) else str(value)
+            if isinstance(value, str):
+                out["notes"] = value
+            elif hasattr(value, "description"):
+                out["notes"] = value.description
+            else:
+                out["notes"] = None
     return out
 
 
