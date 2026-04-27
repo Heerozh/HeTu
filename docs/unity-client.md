@@ -77,6 +77,12 @@ public class NetBootstrap : MonoBehaviour
 
 Key points the source enforces but isn't always obvious from a snippet:
 
+- **URL format** — `ws://<host>:<port>/hetu/<instance>` (or `wss://...`
+  when the server / reverse-proxy terminates TLS). The `/hetu/` prefix is
+  required, and `<instance>` must match one of the `INSTANCES:` entries
+  in your server's `config.yml` (or the `--instance` flag if it was
+  started from CLI). An unknown instance is rejected after the handshake
+  — by design, so port scanners can't enumerate valid names.
 - **`Connect` is long-lived.** It awaits until the socket closes, returning
   `null` on a clean close, `"Canceled"` on app-exit / `Close()`, or an error
   string otherwise. Don't `await` it on the same path that needs to start

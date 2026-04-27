@@ -113,6 +113,9 @@ Game clients need automatic reconnect, this is easily achievable using the offic
 If you'd rather not run Swarm, talk to Caddy's admin API directly from your
 own orchestration code.
 
+*You can use the HeTu server root path（https://localhost/） as the health check
+endpoint.*
+
 ### Why not Nginx
 
 Nginx works, but its config syntax for the dynamic add/remove pattern HeTu
