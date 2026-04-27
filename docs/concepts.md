@@ -42,12 +42,14 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
-- **Two index types.** `unique=True` builds a hash index for fast point
-  lookups and enforces uniqueness on insert. `index=True` builds a sorted
-  index that supports `range()` queries; subscriptions can ride on these
-  indexes.
-- **`namespace=` partitions deployments.** A single HeTu binary can host many
-  namespaces, but a websocket connection binds to exactly one.
+- **One index type, two flavors.** Indexes are always sorted sets supporting
+  `range()` queries and subscriptions. `unique=True` is the same sorted index
+  plus a uniqueness check on insert, and it implicitly turns on `index=True`.
+- **`namespace=` is just a label.** Any string works. A running server binds
+  to exactly one namespace at startup (`--namespace`) and only its Systems
+  and Endpoints are loaded; Components from any namespace come along for the
+  ride if those Systems reference them. To host multiple namespaces, start
+  multiple servers.
 
 ## Systems
 
@@ -97,6 +99,26 @@ Two implications:
 - Long-running Systems are more likely to lose the race. Keep them short;
   push slow work into a separate Endpoint that doesn't hold the transaction.
 
+## Endpoints (advanced)
+
+Endpoints are the underlying RPC primitive; Systems are Endpoints with a
+transactional body. You only need to write a raw Endpoint when:
+
+- You want to call **multiple** Systems from a single client RPC, with each
+  System committing independently.
+- You want to do work that doesn't touch Components at all (validation,
+  fan-out to external services).
+
+```python
+@hetu.define_endpoint(namespace="Chat", permission=hetu.Permission.USER)
+async def whoami(ctx: hetu.EndpointContext):
+    return hetu.ResponseToClient({"id": ctx.caller})
+```
+
+**Caveat:** Systems called through an Endpoint do **not** share a transaction.
+Each commits on its own. If you need atomicity across multiple Components,
+declare a single System that lists all of them in `components=` instead.
+
 ## Subscriptions
 
 Clients ask the server for live row data with two operations:
@@ -118,13 +140,13 @@ client cannot subscribe to data it isn't allowed to see.
 Every Component and every System carries a `permission=` level. The four
 useful levels:
 
-| Level | Meaning |
-|---|---|
-| `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public. |
-| `USER` | Connection must have called `elevate(ctx, user_id)` first. Standard "logged in" gate. |
-| `OWNER` | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages. |
-| `RLS` | Same as OWNER but with a custom comparator. Declare `rls_compare=(operator, component_field, context_field)` on the Component to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
-| `ADMIN` | Server-internal calls only; not exposed over the RPC wire. |
+| Level       | Meaning                                                                                                                                                                                                                           |
+|-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public.                                                                                                                         |
+| `USER`      | Connection must have called `elevate(ctx, user_id)` first. Standard "logged in" gate.                                                                                                                                             |
+| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages.                                                                                                                |
+| `RLS`       | Same as OWNER but with a custom comparator. Declare `rls_compare=(operator, component_field, context_field)` on the Component to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
+| `ADMIN`     | Server-internal calls only; not exposed over the RPC wire.                                                                                                                                                                        |
 
 OWNER and RLS are enforced inside `SessionRepository`, not just at the call
 boundary. A System with `permission=USER` that reads an OWNER Component still
@@ -143,26 +165,6 @@ There is no manual `BEGIN` / `COMMIT` — Systems are the transaction boundary.
 If you need multiple steps that share a transaction, put them in one System.
 If you need steps that should commit independently, use an
 [Endpoint](#endpoints-advanced) and call multiple Systems from it.
-
-## Endpoints (advanced)
-
-Endpoints are the underlying RPC primitive; Systems are Endpoints with a
-transactional body. You only need to write a raw Endpoint when:
-
-- You want to call **multiple** Systems from a single client RPC, with each
-  System committing independently.
-- You want to do work that doesn't touch Components at all (validation,
-  fan-out to external services).
-
-```python
-@hetu.define_endpoint(namespace="Chat", permission=hetu.Permission.USER)
-async def whoami(ctx: hetu.EndpointContext):
-    return hetu.ResponseToClient({"id": ctx.caller})
-```
-
-**Caveat:** Systems called through an Endpoint do **not** share a transaction.
-Each commits on its own. If you need atomicity across multiple Components,
-declare a single System that lists all of them in `components=` instead.
 
 ## Where to next
 
