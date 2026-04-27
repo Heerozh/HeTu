@@ -26,7 +26,7 @@ The complete reference implementation is at
 
 ## Step 1 — Define `ChatMessage`
 
-Components are typed tables. Add this to `app.py`:
+Components are typed tables. Add this to `src/app.py`:
 
 ```python
 import time
@@ -176,11 +176,11 @@ async def on_disconnect(ctx: hetu.SystemContext):
 
 ## Step 6 — Run it
 
-Save `app.py` and start the server (SQLite for local dev):
+Save `src/app.py` and start the server (SQLite for local dev):
 
 ```bash
 uv run hetu start \
-  --app-file=./app.py \
+  --app-file=./src/app.py \
   --db=sqlite:///./chat.db \
   --namespace=Chat \
   --instance=dev

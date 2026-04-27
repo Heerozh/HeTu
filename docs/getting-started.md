@@ -18,8 +18,8 @@ client connected to it. Plan on roughly 10–15 minutes.
   improvements. Older versions will not work.
 - **Redis (optional for the first run).** A SQLite backend is included for
   local experiments; you do not need Redis until you go to production.
-- **A Unity project, JS browser app, or .NET console app** for the client side
-  (this page uses Unity in the snippets).
+- **A Unity project, or other supported SDK** for the client side  (this page uses Unity
+  in the snippets).
 
 ## 1. Install `uv` and create a project
 
@@ -47,25 +47,39 @@ After this, `uv run hetu --help` should print HeTu's CLI usage.
 
 ## 2. Project layout
 
-A minimal HeTu project looks like this:
+HeTu projects use a **src-layout**: your application code lives under `src/`,
+which keeps imports unambiguous and makes the project ready for `pip install .`
+in a Docker image (see [Operations](operations.md) for the production story).
 
 ```
 my-game-server/
-├── pyproject.toml      # created by `uv init`
-├── app.py              # your game logic (Components + Systems)
-└── config.yml          # optional: server config; CLI flags also work
+├── pyproject.toml
+├── config.yml          # optional: server config; CLI flags also work
+└── src/
+    └── app.py          # your game logic (Components + Systems)
 ```
 
-The single `app.py` is enough to start. As your game grows, split it into a
-package and point HeTu at it with `--app-file`.
+`uv init` creates a flat layout by default, so create the `src/` directory
+and move `hello.py`/`main.py` (or whatever stub it generated) out of the way:
+
+```bash
+mkdir src
+touch src/app.py
+# delete the stub uv created at the repo root, if any
+```
+
+The single `src/app.py` is enough to start. As your game grows, split it into
+a package (`src/my_game_server/__init__.py`, etc.) and point HeTu at it with
+the `--app-file` flag.
 
 ## 3. Define your first Component and System
 
-Put this in `app.py`:
+Put this in `src/app.py`:
 
 ```python
 import hetu
 import numpy as np
+
 
 @hetu.define_component(namespace="Hello", permission=hetu.Permission.EVERYBODY)
 class Greeting(hetu.BaseComponent):
@@ -92,7 +106,7 @@ For a local-only run, use the bundled SQLite backend:
 
 ```bash
 uv run hetu start \
-  --app-file=./app.py \
+  --app-file=./src/app.py \
   --db=sqlite:///./hetu.db \
   --namespace=Hello \
   --instance=dev
