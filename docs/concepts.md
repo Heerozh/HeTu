@@ -192,7 +192,9 @@ useful levels:
 OWNER and RLS are enforced inside `SessionRepository`, not just at the call
 boundary. A `System` with `permission=USER` that reads an `permission=OWNER` `Component`
 still only sees rows the caller owns — there is no way to "leak" through a more
-privileged caller.
+privileged caller. That is: A `System`'s permissions merely determine who is authorized
+to invoke that `System`; when reading data, access is still determined by the permission
+definitions of the `Components`.
 
 ## Transactions
 
