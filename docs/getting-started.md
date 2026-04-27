@@ -68,9 +68,45 @@ touch src/app.py
 # delete the stub uv created at the repo root, if any
 ```
 
-The single `src/app.py` is enough to start. As your game grows, split it into
-a package (`src/my_game_server/__init__.py`, etc.) and point HeTu at it with
-the `--app-file` flag.
+The single `src/app.py` is enough for prototyping. As your game grows you'll
+want to split definitions across multiple files — one giant `app.py` with
+hundreds of Components and Systems gets hard to navigate, and teammates will
+collide on the same file. The standard fix is to turn `src/` into a real
+Python package:
+
+```
+my-game-server/
+├── pyproject.toml
+└── src/
+    └── my_game_server/
+        ├── __init__.py        # entry point HeTu loads
+        ├── components.py
+        ├── systems.py
+        └── endpoints.py
+```
+
+The `__init__.py` re-imports the submodules so their `@define_*` decorators
+run when HeTu loads the entry file:
+
+```python
+# src/my_game_server/__init__.py
+from my_game_server.components import *  # noqa: F401,F403
+from my_game_server.systems import *      # noqa: F401,F403
+from my_game_server.endpoints import *    # noqa: F401,F403
+```
+
+Point HeTu at the `__init__.py` directly:
+
+```bash
+--app-file=./src/my_game_server/__init__.py
+```
+
+`--app-file` takes a **file path**, not an import name (HeTu uses
+`importlib.util.spec_from_file_location` to load it), so an `__init__.py` is
+a perfectly valid target. For the `from my_game_server...` imports inside it
+to resolve, `src/` must be on `sys.path` — `pip install -e .` arranges this
+for local dev, and the production Docker image's `RUN pip install .` does the
+same in a container.
 
 ## 3. Define your first Component and System
 
