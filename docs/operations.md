@@ -125,21 +125,43 @@ entry point. The three subcommands:
 
 ### `hetu start`
 
-Starts the server. Most common form:
+The server can be launched in **two mutually exclusive modes**: from a YAML
+config file, or entirely from CLI flags. They cannot be mixed — when
+`--config` is supplied, all other flags are ignored.
+
+#### Mode 1 — Config file (recommended for production)
 
 ```bash
 hetu start --config=./config.yml
 ```
 
-CLI flags override config-file fields. The most useful ones:
+Everything is read from the YAML file. See
+[Configuration file](#configuration-file) below for a minimal sample, and
+[`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml)
+for the full schema.
 
-| Flag               | Purpose                                                                                                                            |
-|--------------------|------------------------------------------------------------------------------------------------------------------------------------|
-| `--config FILE`    | Load `config.yml` (see [`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml) for the full schema) |
-| `--app-file FILE`  | Path to your `app.py` (component & system definitions)                                                                             |
-| `--db URL`         | Backend DSN: `redis://host:6379/0`, `sqlite:///path.db`, `postgresql://user:pw@host/db`, or `mysql://...`                          |
-| `--namespace NAME` | Which namespace from `app.py` to run                                                                                               |
-| `--instance NAME`  | Logical instance id (used for snowflake worker assignment; each running process needs a unique one)                                |
+#### Mode 2 — CLI flags (no config file)
+
+For ad-hoc launches without a YAML:
+
+```bash
+hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
+    --db=redis://127.0.0.1:6379/0 --port=2466
+```
+
+`--app-file`, `--namespace`, and `--instance` are required in this mode.
+
+| Flag               | Default                    | Purpose                                                                                              |
+|--------------------|----------------------------|------------------------------------------------------------------------------------------------------|
+| `--app-file FILE`  | `/app/app.py`              | Path to your `app.py` (component & system definitions)                                               |
+| `--namespace NAME` | —                          | Which namespace from `app.py` to run                                                                 |
+| `--instance NAME`  | —                          | Logical instance id (each running process needs a unique one for snowflake worker assignment)        |
+| `--port PORT`      | `2466`                     | WebSocket listening port                                                                             |
+| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `sqlite:///`, `postgresql://`, `mysql://`, ...)   |
+| `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                    |
+| `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)          |
+| `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy  |
+| `--authkey KEY`    | `""`                       | Crypto-layer auth key for handshake signature; empty disables it                                     |
 
 Run `hetu start --help` for the full list.
 
@@ -147,24 +169,43 @@ Run `hetu start --help` for the full list.
 
 Schema migration. Run it before deploying a release that changes a Component
 shape (added column, changed dtype, new index). It compares the current
-schema in Redis against your `app.py` and applies the difference:
+schema in the backend against your `app.py` and applies the difference.
+
+Like `hetu start`, it accepts either a config file **or** direct CLI flags
+(not both):
 
 ```bash
+# Mode 1 — from config
 hetu upgrade --config=./config.yml
+
+# Mode 2 — from CLI flags
+hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
+    --db=redis://127.0.0.1:6379/0
 ```
+
+Extra flags that apply to both modes:
+
+- `-y` — skip the data-backup confirmation prompt (use in CI/CD).
+- `--drop-data` — force-migrate by discarding data that cannot be migrated.
+  **Do not use in production.**
 
 If you do not run `upgrade`, `hetu start` will refuse to launch when it sees
 a schema mismatch.
 
 ### `hetu build`
 
-Generates client-side SDK code (typed C# classes, JS types) from your
-server-side Component definitions. Run it once per Component change and
-commit the output into your client project:
+Generates client-side SDK code (typed C# classes) from your server-side
+Component definitions. Run it once per Component change and commit the
+output into your client project. Unlike `start` and `upgrade`, this command
+has no config-file mode — only CLI flags:
 
 ```bash
-hetu build --config=./config.yml --target=csharp --output=../client/Generated/
+hetu build --app-file=./app.py --namespace=my_game \
+    --output=../client/Generated/Components.cs
 ```
+
+`--namespace` and `--output` are required; `--app-file` defaults to
+`/app/app.py`.
 
 This keeps client and server schemas in lockstep without hand-written
 boilerplate.
