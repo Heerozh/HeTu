@@ -81,15 +81,15 @@ What that one suffix actually does:
   table. `ctx.depend["remove:ItemOrder"]` calls *that* copy.
 - Cluster computation runs against the copies: the `:ItemOrder` cluster
   has no overlap with the original `Order` cluster, so they never share a
-  shard and never serialize across each other.
+  shard and never read/write across each other.
 - All inheritance still works. If `remove` itself depended on other
   `Systems`, the whole graph is duplicated under the same suffix.
 
 Use this when one `Component` sits at a bottleneck — say, a `FutureCalls`
 queue or a global `Inventory` — and you want some callers to operate on a
 separate physical copy. **Don't** use it as a generic "namespacing"
-mechanism: every copy is a real table that costs storage and breaks any
-cross-copy queries you might have wanted.
+mechanism: every copy is a real table that costs storage and isolated,
+whereas you might actually want them to function cooperatively.
 
 The built-in `create_future_call` `System` is the canonical example; the
 [Future calls](#future-calls-scheduled-and-recurring-system-invocations)
@@ -169,7 +169,11 @@ cluster centered on `FutureCalls`. The `:scheduler` suffix gives this
 caller its own copy of the queue, isolated from any other code path that
 also uses futures. Pick a stable suffix per logical group (e.g.
 `:scheduler`, `:rewards`) — every distinct suffix is a real, separate
-queue table the future-call worker will sweep.
+queue table.
+
+Since table are separated, how exactly do the `FutureCalls` worker threads become
+aware of these tables? This is because these tables registers itself in a
+duplication list, and `FutureCalls` processes them all, one by one.
 
 ### Cancelling a future call
 
@@ -252,11 +256,11 @@ async def on_disconnect(ctx: hetu.SystemContext):
 
 Notes:
 
-- **`permission=None`** is strongly recommended. Any other value also
+- **`permission=None`** for safety. Any other value also
   generates a client-callable `Endpoint` with the same name, and a
   malicious client could fire your "disconnect" behavior at will. The
   engine itself ignores permission when invoking the hook on socket
-  close, so `None` costs you nothing.
+  close.
 - **`ctx.caller`** is the user id if the connection was elevated, or `0`
   if it disconnected before login. Guard accordingly.
 - The hook runs in a normal transaction, so failures retry on
@@ -347,7 +351,8 @@ call, so it's safe to use as "now" without re-reading the clock.
 ## Early `session_commit` / `session_discard`
 
 A `System` normally commits when its body returns. Two awaitable methods on
-`ctx` let you commit (or abort) earlier:
+`ctx` let you commit (or abort) earlier, allows you to execute long-running or
+non-idempotent operations only after the commit has successfully completed.
 
 ```python
 async def long_running(ctx: hetu.SystemContext, ...):
@@ -541,11 +546,10 @@ class GameLog(hetu.BaseComponent):
 The hard constraint: **every `Component` referenced by one `System` must
 share the same backend**. The cluster builder rejects mixed-backend
 clusters at startup. So in practice "multiple backends" is "different
-groups of related `Components` on different databases" — typically a fast
-in-memory Redis for hot game state and a cheaper SQL or larger Redis for
-logs / analytics.
+groups of related `Components` on different databases". Currently, only Redis is
+supported; its utility is limited at this stage, as it is intended for future expansion.
 
-Backend names default to `"default"`. The first backend listed in
+Backend names default to `"default"`. The first backend listed in `config.yaml`'s
 `BACKENDS:` is also treated as the default if no key named `"default"`
 exists.
 
@@ -593,8 +597,7 @@ worker ids.
 For application code this is mostly an implementation detail. The
 legitimate user-side use case is narrow: a `Component` that you want to
 exist in the database but read/write only via direct backend calls
-(maintenance scripts, custom CLI tools, an audit table populated by a
-trigger). If a regular `System` touches it, just give it a normal
+(`direct_set`/`direct_get`). If a regular `System` touches it, just give it a normal
 namespace — it'll be loaded automatically.
 
 ## Custom message pipeline layers
@@ -711,15 +714,10 @@ For your code, the practical implications are short:
 - **[Operations](operations.md)** — production deployment, Redis topology,
   the `hetu` CLI, and the rest of `config.yml`.
 - **[API Reference](api/)** — every public symbol referenced on this page.
-refer `new_rows(N)` so all ids come from
+  refer `new_rows(N)` so all ids come from
   the same monotonic burst.
 - The clock-rollback guard means **a server with a wildly wrong clock
   will refuse to issue ids and stall**. Run NTP. If you must fix a
   rollback, restart the affected workers — the keeper will reseed the
   timestamps automatically.
 
-## Where to next
-
-- **[Operations](operations.md)** — production deployment, Redis topology,
-  the `hetu` CLI, and the rest of `config.yml`.
-- **[API Reference](api/)** — every public symbol referenced on this page.

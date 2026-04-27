@@ -204,11 +204,11 @@ of rows touched), routes reads and writes through `SessionRepository` per
 conflict on a row, the second to commit raises `RaceCondition` and the engine
 retries.
 
-There is no manual `BEGIN` / `COMMIT` — `Systems` are the transaction boundary.
+There is no need `BEGIN` / `COMMIT` — `Systems` are the transaction boundary.
 If you need multiple steps that share a transaction, put them in one `System` or
-use [depends](#calling-another-system-with-depends).
-If you need steps that should commit independently, use an
-[Endpoint](#endpoints-advanced) and call multiple `Systems` from it.
+use [`depends`](#calling-another-system-with-depends).
+If you need early commit,
+use [session_commit](advanced.md#early-session_commit--session_discard)
 
 ## Where to next
 

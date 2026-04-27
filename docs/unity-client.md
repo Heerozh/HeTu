@@ -30,8 +30,6 @@ steps it offers:
 1. **NuGet dependencies** — MessagePack, BouncyCastle.
 2. **UPM dependencies** — `UniTask` on Unity 2022.3, `Awaitable` is built in
    on Unity 6000+.
-3. **Optional dependencies** — install **R3** if you want the reactive APIs
-   shown later on this page. The event-based APIs work without it.
 
 The wizard pops automatically on first import; that's expected.
 
@@ -81,11 +79,11 @@ Key points the source enforces but isn't always obvious from a snippet:
   in your server's `config.yml` (or the `--instance` flag if it was
   started from CLI). An unknown instance is rejected after the handshake
   — by design, so port scanners can't enumerate valid names.
-- **`Connect` is long-lived.** It awaits until the socket closes, returning
+- **`Connect` is long-blocked.** It awaits until the socket closes, returning
   `null` on a clean close, `"Canceled"` on app-exit / `Close()`, or an error
   string otherwise. Don't `await` it on the same path that needs to start
-  sending RPCs — kick off `CallSystem` from `OnConnected` (or after a
-  separate task awaits the handshake), not from below the `await Connect`.
+  sending RPCs — kick off `CallSystem` from `OnConnected` (or a
+  separate task), not from below the `await Connect`.
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`
@@ -136,8 +134,7 @@ Drop it for `DictComponent`, a string-keyed `Dictionary` you index manually.
 
 `Range`'s `force=true` (default) keeps the subscription alive even if the
 initial query returns zero rows, so newly-inserted rows still trigger
-`OnInsert` / `ObserveAdd`. Set `force=false` if you only care when there is
-already data.
+`OnInsert` / `ObserveAdd`. Set `force=false` if you not want subscript an empty query.
 
 ## Typed components vs `DictComponent`
 
@@ -254,9 +251,9 @@ hp.Subject
 
 When to prefer which:
 
-- **Events** for a couple of simple side-effects (spawn, move, despawn).
-- **R3** when you want to filter, throttle, combine, or feed UI bindings —
-  and when chaining is clearer than nested handlers.
+- **`R3`** approach is recommended, as it is more concise and clear, and involves less
+  code.
+- **`Events`** for a couple of simple side-effects (spawn, move, despawn).
 
 ## Subscription lifecycle (don't skip this)
 
@@ -301,7 +298,7 @@ calling code only needs to choose one delay style.
   `Range` can return.
 - **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-
   server example using the patterns above.
-](concepts.md)** — re-read the Subscriptions section now that
+  ](concepts.md)** — re-read the Subscriptions section now that
   you've seen the client side; permissions / RLS filter what `Get` and
   `Range` can return.
 - **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-
