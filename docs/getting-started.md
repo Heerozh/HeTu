@@ -128,7 +128,7 @@ Install the Unity SDK via the Unity Package Manager:
 Then, in any MonoBehaviour:
 
 ```csharp
-# Connect is a blocked async function, so we use fire and forget.
+// Connect is a blocked async function, so we use fire and forget.
 _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
