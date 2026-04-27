@@ -114,6 +114,10 @@ rm -rf /var/lib/apt/lists/*
 sudo locale-gen en_US.UTF-8
 sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
+# setting up git to avoid CRLF issues with the agent's repos (which may be shared with Windows host)
+git config --global core.whitespace cr-at-eol \
+    && git config --global core.autocrlf input
+
 # update uv
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
