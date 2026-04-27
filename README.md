@@ -327,7 +327,7 @@ from git URL”
 
 ## 📚 文档：
 
-详细文档见 [HeTu Documentation](https://hetudocsite.vercel.app/) 。
+详细文档见 [HeTu Documentation](https://hetudb.vercel.app/) 。
 
 ## 🗯 讨论
 
