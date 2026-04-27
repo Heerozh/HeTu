@@ -118,6 +118,52 @@ own orchestration code.
 Nginx works, but its config syntax for the dynamic add/remove pattern HeTu
 encourages is verbose and easy to get wrong. Caddy fits the workload better.
 
+## Migrations
+
+You'll need a migration whenever `app.py` changes in a way that the live
+backend cannot serve as-is:
+
+- **System references change** — Systems get regrouped into different
+  co-location clusters.
+- **Component schema changes** — a column is added, removed, renamed,
+  retyped, or an index changes.
+
+Both are driven by `hetu upgrade`, but they behave very differently.
+
+### Cluster reshuffles — handled automatically
+
+When only the cluster grouping changes, no row data needs to move.
+`upgrade` renames the table to its new cluster id and you're done — there's
+no script to review and no risk of data loss.
+
+### Schema changes — via a migration script
+
+When a Component's schema changes, the first run of `upgrade` generates a
+default migration script under `<your-app-dir>/maint/migration/` — one
+file per Component, versioned by schema hash. From there:
+
+1. **Most cases — `upgrade` self-completes.** Added columns are filled
+   from each property's default value; losslessly castable type changes
+   (e.g., `int32 → int64`) are applied automatically. The generated
+   script runs on the same `upgrade` invocation; just commit the file
+   afterward so every environment migrates the same way.
+
+2. **Lossy cases — you have to intervene.** If a column is dropped or a
+   type change can't be cast cleanly, the script's `prepare()` returns
+   `unsafe` and `upgrade` refuses to proceed. Two options:
+
+    - **Edit the generated script.** The common case is a "drop + add"
+      pair that's really a rename — modify the script's `upgrade()` body
+      to copy the old column into the new one before the old is dropped.
+    - **Force it with `--drop-data`.** Discards the affected attributes
+      outright. Don't use in production.
+
+Commit everything under `maint/migration/` to your repo so deployed
+environments don't regenerate (and possibly diverge from) the script you
+already reviewed.
+
+Downgrading is currently not supported, may adding this feature in the future.
+
 ## The `hetu` CLI
 
 The `hetu` command (run by `uv run hetu`) is your operations
@@ -151,17 +197,17 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 
 `--app-file`, `--namespace`, and `--instance` are required in this mode.
 
-| Flag               | Default                    | Purpose                                                                                              |
-|--------------------|----------------------------|------------------------------------------------------------------------------------------------------|
-| `--app-file FILE`  | `/app/app.py`              | Path to your `app.py` (component & system definitions)                                               |
-| `--namespace NAME` | —                          | Which namespace from `app.py` to run                                                                 |
-| `--instance NAME`  | —                          | Logical instance id (each running process needs a unique one for snowflake worker assignment)        |
-| `--port PORT`      | `2466`                     | WebSocket listening port                                                                             |
-| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `sqlite:///`, `postgresql://`, `mysql://`, ...)   |
-| `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                    |
-| `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)          |
-| `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy  |
-| `--authkey KEY`    | `""`                       | Crypto-layer auth key for handshake signature; empty disables it                                     |
+| Flag               | Default                    | Purpose                                                                                             |
+|--------------------|----------------------------|-----------------------------------------------------------------------------------------------------|
+| `--app-file FILE`  | `/app/app.py`              | Path to your `app.py` (component & system definitions)                                              |
+| `--namespace NAME` | —                          | Which namespace from `app.py` to run                                                                |
+| `--instance NAME`  | —                          | Logical instance id (each running process needs a unique one for snowflake worker assignment)       |
+| `--port PORT`      | `2466`                     | WebSocket listening port                                                                            |
+| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `sqlite:///`, `postgresql://`, `mysql://`, ...)  |
+| `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                   |
+| `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)         |
+| `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy |
+| `--authkey KEY`    | `""`                       | Crypto-layer auth key for handshake signature; empty disables it                                    |
 
 Run `hetu start --help` for the full list.
 
@@ -214,47 +260,8 @@ boilerplate.
 
 The full schema is in [
 `CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml).
-A minimal production `config.yml`:
 
-```yaml
-APP_FILE: app.py
-NAMESPACE: my_game
-INSTANCES:
-  - server1
-  - server2
-
-LISTEN: 0.0.0.0:2466
-WORKER_NUM: -1          # auto-detect CPU count
-DEBUG: false
-ACCESS_LOG: false
-PROXIES_COUNT: 1        # one reverse proxy in front
-
-BACKENDS:
-  default:
-    type: redis
-    master: redis://master.internal:6379/0
-    servants:
-      - redis://replica1.internal:6379/0
-      - redis://replica2.internal:6379/0
-```
-
-Key things to set per-environment:
-
-- `INSTANCES` — one entry per process replica you'll run on this host.
-- `WORKER_NUM` — set to `-1` for auto, or pin to a specific number when you
-  share the host with other workloads.
-- `BACKENDS.default.master` and `.servants` — split reads across replicas.
-- `MAX_ANONYMOUS_CONNECTION_BY_IP`, `CLIENT_SEND_LIMITS`, `MAX_ROW_SUBSCRIPTION` —
-  rate limits applied to unauthenticated connections; defaults are
-  conservative. Authenticated connections (post-`elevate`) get 10x / 50x
-  multipliers.
-
-## Logging
-
-HeTu uses a process-safe queue/listener (`hetu/safelogging/`). Logging is
-configured in the `LOGGING:` section of `config.yml` (standard Python
-`dictConfig` schema). Common production setup: root logger at `WARNING`,
-`HeTu.*` at `INFO`, file handler with rotation.
+The specific definitions are explained in detail within the document's comments.
 
 ## Where to next
 
