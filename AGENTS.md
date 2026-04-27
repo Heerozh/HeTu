@@ -18,8 +18,11 @@ uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
 uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 ```
 
-需要 Python 3.14。测试依赖 Docker (Redis)。为保持与 CI 一致，请设置
-`HETU_TEST_BACKENDS=redis`。
+需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey/Postgres/MariaDB
+容器；SQLite 后端无需 Docker）。`HETU_TEST_BACKENDS` 接受逗号分隔的子集，
+取值范围：`redis`、`valkey`、`redis_cluster`、`postgres`、`sqlite`、`mariadb`。
+未设置时跑全部后端；一般TDD时只需跑`redis`，CI 在 `push` 到非 `main`
+分支时也会限制为 `redis` 为了快速验证。
 
 ## Architecture
 
@@ -69,8 +72,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 - `Backend`：管理 master + servant（read replica）连接，使用 weighted random
   selection。
-- `BackendClient` / `BackendClientFactory`：抽象 DB client；Redis 实现在
-  `backend/redis/`。
+- `BackendClient` / `BackendClientFactory`：抽象 DB client。生产推荐 Redis
+  （`backend/redis/`，含 cluster 支持）；`backend/sql/` 提供 SQLAlchemy
+  based 实现（PostgreSQL/SQLite/MariaDB），仅用于开发或低订阅负载场景；
 - `Session`：transaction manager，使用 optimistic concurrency（通过
   `IdentityMap` 检测冲突并抛出 `RaceCondition`）。
 - `SessionRepository`：Session 内按 Component 进行 CRUD（`get`、`range`、
@@ -104,19 +108,21 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Module Map
 
-| Module                   | Role                                                           |
-|--------------------------|----------------------------------------------------------------|
-| `hetu/data/component.py` | `@define_component`, `BaseComponent`, `property_field`         |
-| `hetu/system/definer.py` | `@define_system`, `SystemClusters`（cluster grouping）           |
-| `hetu/system/caller.py`  | `SystemCaller` —— 执行 System 并支持 transaction retry              |
-| `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context         |
-| `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor` |
-| `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`             |
-| `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription`   |
-| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline               |
-| `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables     |
-| `hetu/cli/`              | CLI commands：`start`、`migrate`、`build`                         |
-| `hetu/sourcegen/`        | Client SDK code generation（C#）                                 |
+| Module                   | Role                                                                   |
+|--------------------------|------------------------------------------------------------------------|
+| `hetu/data/component.py` | `@define_component`, `BaseComponent`, `property_field`                 |
+| `hetu/system/definer.py` | `@define_system`, `SystemClusters`（cluster grouping）                   |
+| `hetu/system/caller.py`  | `SystemCaller` —— 执行 System 并支持 transaction retry                      |
+| `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context                 |
+| `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor`         |
+| `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`                     |
+| `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription`           |
+| `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline                       |
+| `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables             |
+| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK） |
+| `hetu/sourcegen/`        | Client SDK code generation（C#）；由 `hetu build` 调用                       |
+| `hetu/safelogging/`      | 进程安全的日志 queue/listener；通过 YAML 配置见 CONFIG_TEMPLATE.yml                 |
+| `hetu/i18n/`             | gettext 风格的翻译，所有用户可见字符串都包在 `_("...")` 中                                |
 
 ## Conventions
 
@@ -127,17 +133,18 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - 测试文件：`test_*.py`，fixtures 在 `tests/fixtures/`
 - pytest 配置中使用 `asyncio_mode = "auto"`；fixture/test 的 loop scope 为 `module`
 
+## Sandbox (sbx) 环境
+
+当在 `sbx run claude` 启动的 sandbox 中工作（`IS_SANDBOX=1`）：
+
+- **Python venv 路径**：如果uv run报错，可能是因为用了host的venv目录，需要用户通过sbx执行
+  `agent_install.sh` 写入 `UV_PROJECT_ENVIRONMENT=/tmp/hetu-venv-sandbox` 到
+  `/etc/sandbox-persistent.sh`
+- 如果sudo显示: The "no new privileges" flag is set, which prevents sudo from running as
+  root.
+  这是需要用户关闭Claude Code自己的sandbox, 执行`agent_install.sh`会自动关闭
+
 ## Rule
 
 - Always use Context7 MCP when I need library/API documentation, code generation, setup
   or configuration steps without me having to explicitly ask.
-
-## Practical Notes
-
-- WebSocket 连接路径使用 `/hetu/<instance_name>`，这里的 `<instance_name>` 对应配置中的 `INSTANCES` 项，不是 `NAMESPACE`。
-- System 间调用必须先在 `@define_system(..., depends=(...))` 声明依赖，再通过 `ctx.depend["system_name"](ctx, ...)` 调用，不能直接函数互调。
-- Unity SDK 响应式速查：
-  - `RowSubscription.Subject`：热源，包含当前初始值并持续推送更新/删除（删除时会推送 `null/default`）。
-  - `IndexSubscription.ObserveAdd()`：先发当前范围内已有行，再发后续新增。
-  - `IndexSubscription.ObserveReplace(rowID)`：监听单行更新，行被移除时触发 `OnCompleted`。
-- Unity 订阅生命周期：`RowSubscription/IndexSubscription` 必须显式 `Dispose()` 或 `.AddTo(gameObject)` 绑定生命周期，否则服务端会持续保留并推送该订阅。
