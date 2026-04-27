@@ -1,6 +1,6 @@
 ---
 title: "Advanced"
-description: "System copies for vertical sharding, scheduled FutureCalls, lifecycle hooks, raw Endpoints, custom pipeline layers, and other engine internals you'll reach for once a project gets real."
+description: "System copies for vertical sharding, scheduled FutureCalls, lifecycle hooks, raw Endpoints, custom pipeline layers, NumPy patterns for range queries, and other engine internals you'll reach for once a project gets real."
 type: docs
 weight: 38
 prev: unity-client
@@ -31,6 +31,9 @@ once a project leaves the prototype stage:
   overrides.
 - **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)** —
   commit (or abort) the transaction before the System body returns.
+- **[NumPy patterns for range queries](#numpy-patterns-for-range-queries)** —
+  broadcasting, boolean masks, aggregations, and joining two queries in
+  memory instead of looping.
 - **[Multiple backends](#multiple-backends-per-component)** — pin selected
   Components to a separate database via `backend=`.
 - **[Volatile components](#volatile-components)** — `volatile=True` for
@@ -370,6 +373,154 @@ Two important caveats:
 `session_discard()` is the same shape but throws everything away. Use it
 when the System has decided early that the right answer is "do nothing"
 and you want to skip the commit entirely.
+
+## NumPy patterns for range queries
+
+`await ctx.repo[Comp].range(...)` returns a NumPy **recarray** — a
+typed C-struct array, not a Python list. If you've never used NumPy,
+skipping the features below and falling back to `for row in rows:` is
+*correct* but throws away the throughput advantage HeTu's NumPy storage
+was designed for. A 1000-row recarray run through a vectorized
+expression is roughly the cost of a 5-row Python `for` loop.
+
+You'll need `import numpy as np` for the helpers (`np.sqrt`,
+`np.percentile`, `np.argsort`, `np.intersect1d`, `np.isin` …); column
+methods like `.sum()` / `.mean()` are available without it.
+
+### Column access and broadcasting
+
+`rows.field` is a 1-D array of that column's values. Operators apply
+**element-wise**, with scalars broadcast across the whole column:
+
+```python
+rows = await ctx.repo[Player].range("level", 1, 100, limit=1000)
+
+# Distance from origin for every row, vectorized in C.
+d2 = rows.x ** 2 + rows.y ** 2
+
+# Shift everyone by (dx, dy)
+shifted_x = rows.x + dx
+shifted_y = rows.y + dy
+```
+
+For two equal-length recarrays, operators line up element-by-element:
+
+```python
+dx = players.x - targets.x
+dy = players.y - targets.y
+distances = np.sqrt(dx * dx + dy * dy)
+```
+
+The Python equivalent (`for row in rows: d = row.x ** 2 + row.y ** 2`)
+is 10–100× slower on a 1k-row query because the inner work is
+interpreted instead of SIMD-vectorized.
+
+### Boolean masks: compound filtering without a re-query
+
+A comparison on a column returns a boolean array; indexing a recarray
+with that mask returns the matching rows:
+
+```python
+hot       = rows[rows.hp < 30]
+mine      = rows[rows.owner == ctx.caller]
+```
+
+Combine masks with `&`, `|`, `~`. **Parentheses are mandatory** —
+operator precedence on `&` is lower than `<`/`==`, so the unparenthesized
+version raises:
+
+```python
+critical = rows[(rows.hp < 30) & (rows.shield == 0)]
+```
+
+This is the recommended pattern for **compound queries**: pull a small
+window from the database with one indexed column, refine in memory with
+NumPy. Asking the backend to evaluate compound predicates is slower
+because the database interprets a query while NumPy uses SIMD.
+
+```python
+# Pull a small window with a real index, then filter in memory.
+items = await ctx.repo[Item].range(level=(10, 20), limit=200)
+cheap_strong = items[(items.price < 100) & (items.attack > 50)]
+```
+
+### Aggregations and statistics
+
+Every column has built-in statistics:
+
+```python
+total_damage = rows.damage.sum()
+average_hp   = rows.hp.mean()
+max_score    = rows.score.max()
+hp_p95       = np.percentile(rows.hp, 95)
+hp_std       = rows.hp.std()
+n_alive      = (rows.hp > 0).sum()      # counting via boolean mask
+```
+
+`(boolean_array).sum()` counts `True`s — the canonical "count where"
+pattern. Use it instead of `len([r for r in rows if r.hp > 0])`.
+
+For grouped counts, `np.unique(arr, return_counts=True)` is a one-liner
+equivalent of `collections.Counter`:
+
+```python
+kinds, counts = np.unique(rows.kind, return_counts=True)
+# kinds  = array(['chat', 'system'], dtype='<U16')
+# counts = array([842, 18])
+```
+
+`len(rows)` and `rows.shape[0]` both give the row count.
+
+### Top-N, argmin, argsort
+
+Sorting by a non-indexed column is fine in memory. `argsort` returns
+the *indices* you'd reorder by — index the recarray with those to pick
+top-N without sorting twice:
+
+```python
+# Top-3 by score, descending order.
+top3 = rows[np.argsort(rows.score)[-3:][::-1]]
+
+# The single closest row to a target point.
+dx = rows.x - target_x
+dy = rows.y - target_y
+nearest = rows[np.argmin(dx * dx + dy * dy)]
+```
+
+`argmax`/`argmin` on a 1-D column returns the index of the extremum;
+indexing the recarray with that gives you the whole row.
+
+### "Joining" two range queries
+
+A common pattern: query two indexed Components separately, then combine
+in-process by `owner` (or any shared key):
+
+```python
+positions = await ctx.repo[Position].range("zone", zone_id, zone_id, limit=500)
+hps       = await ctx.repo[HP].range("zone", zone_id, zone_id, limit=500)
+
+# Owners present in both result sets
+both = np.intersect1d(positions.owner, hps.owner)
+matched_positions = positions[np.isin(positions.owner, both)]
+```
+
+`np.intersect1d` and `np.isin` are the SIMD-friendly equivalents of
+`set` intersection and `in` membership; both stay in NumPy land, so the
+result keeps the recarray type and you can chain more masks onto it.
+
+### When a Python loop is the right answer
+
+Two cases where falling back to a `for` loop is fine (or unavoidable):
+
+- **Per-row database writes.** `ctx.repo[Comp].update(row)` and
+  `upsert(...)` are async and operate one row at a time. Iterate
+  explicitly: `for r in rows: await ctx.repo[Comp].update(r)`.
+- **Genuinely heterogeneous per-row work.** Branching to different
+  tables or different external services per row can't be vectorized; a
+  loop is clearer than contorted NumPy.
+
+For everything else — filtering, arithmetic, statistics, sorting,
+joining — stay in NumPy.
 
 ## Multiple backends per Component
 
