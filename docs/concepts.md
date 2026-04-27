@@ -84,6 +84,51 @@ Practical consequence: declare `components=` accurately. Leaving out a
 Component "for performance" hides a real conflict and corrupts data.
 Including extra Components serializes work that didn't need to be serialized.
 
+### Calling another System with `depends`
+
+A System can call other Systems and have them run **inside the same
+transaction**. Declare the call up front in `depends=`, then invoke it
+through `ctx.depend[...]`:
+
+```python
+@hetu.define_system(namespace="Shop", components=(Stock,))
+async def add_stock(ctx, owner, qty):
+    async with ctx.repo[Stock].upsert(owner=owner) as s:
+        s.value += qty
+
+
+@hetu.define_system(
+    namespace="Shop", components=(Order,), depends=(add_stock,),
+    permission=hetu.Permission.USER,
+)
+async def pay(ctx, order_id):
+    async with ctx.repo[Order].upsert(id=order_id) as o:
+        o.paid = True
+        await ctx.depend["add_stock"](ctx, o.owner, o.qty)
+    return hetu.ResponseToClient("ok")
+```
+
+What this buys you, and what it costs:
+
+- **One Session, one commit.** The child System reads/writes through the
+  same `ctx.repo[...]`, so either everything commits or `RaceCondition`
+  retries the whole call from the parent's top.
+- **Components inherit.** The parent transparently gains access to the
+  child's declared Components — you don't need to repeat them in the
+  parent's `components=`.
+- **Return value passes through.** Whatever the child returns is what
+  `await ctx.depend[...]()` returns. `ResponseToClient` only matters at the
+  outermost System (the one the client RPC'd into).
+- **Cluster merge.** All Systems linked by `depends` end up in the same
+  co-location cluster as if their `components=` were unioned. This is the
+  price of the shared transaction; plan your dependency graph accordingly.
+- **Must be declared.** Calling a System that isn't in `depends=` raises at
+  runtime — there is no implicit cross-System call.
+
+This is the right tool for composing transactional logic. It is the wrong
+tool for "I just want to reuse some code" — for that, write a plain async
+helper that takes `ctx` and call it directly.
+
 ### `RaceCondition` and automatic retry
 
 HeTu uses optimistic concurrency. Every Session keeps an `IdentityMap` of the
@@ -140,17 +185,17 @@ client cannot subscribe to data it isn't allowed to see.
 Every Component and every System carries a `permission=` level. The four
 useful levels:
 
-| Level       | Meaning                                                                                                                                                                                                                           |
-|-------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public.                                                                                                                         |
-| `USER`      | Connection must have called `elevate(ctx, user_id)` first. Standard "logged in" gate.                                                                                                                                             |
-| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages.                                                                                                                |
-| `RLS`       | Same as OWNER but with a custom comparator. Declare `rls_compare=(operator, component_field, context_field)` on the Component to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
-| `ADMIN`     | Server-internal calls only; not exposed over the RPC wire.                                                                                                                                                                        |
+| Level       | Meaning                                                                                                                                                                                               |
+|-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public.                                                                                             |
+| `USER`      | Connection must have called `elevate(ctx, user_id)` first (by server). Standard "logged in" gate.                                                                                                     |
+| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages.                                                                                    |
+| `RLS`       | Raw RLS filter. Declare `rls_compare=(operator, component_field, context_field)` on the Component to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
+| `ADMIN`     | Server-internal calls only; not exposed over the RPC wire.                                                                                                                                            |
 
 OWNER and RLS are enforced inside `SessionRepository`, not just at the call
-boundary. A System with `permission=USER` that reads an OWNER Component still
-only sees rows the caller owns — there is no way to "leak" through a more
+boundary. A System with `permission=USER` that reads an `permission=OWNER` Component
+still only sees rows the caller owns — there is no way to "leak" through a more
 privileged caller.
 
 ## Transactions
@@ -162,7 +207,8 @@ conflict on a row, the second to commit raises `RaceCondition` and the engine
 retries.
 
 There is no manual `BEGIN` / `COMMIT` — Systems are the transaction boundary.
-If you need multiple steps that share a transaction, put them in one System.
+If you need multiple steps that share a transaction, put them in one System or
+use [depends](#calling-another-system-with-depends).
 If you need steps that should commit independently, use an
 [Endpoint](#endpoints-advanced) and call multiple Systems from it.
 
