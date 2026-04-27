@@ -146,6 +146,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - 如果sudo显示: The "no new privileges" flag is set, which prevents sudo from running as
   root.
   这是需要用户关闭Claude Code自己的sandbox, 执行`agent_install.sh`会自动关闭
+- 已知问题：sbx下uv sync有时会在Building hetudb @ file:///...地方卡20分钟。
 
 ## Rule
 

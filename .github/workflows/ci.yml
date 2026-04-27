@@ -6,11 +6,17 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ci.yml"
+      - "scripts/gen_api_docs.py"
+      - "scripts/api_extras.py"
+      - "scripts/templates/**"
   pull_request:
     paths:
       - "**.py"
       - "pyproject.toml"
       - "uv.lock"
+      - "scripts/gen_api_docs.py"
+      - "scripts/api_extras.py"
+      - "scripts/templates/**"
 
 concurrency:
   # github.ref = refs/heads/branch_name or refs/tags/tag_name
@@ -52,3 +58,29 @@ jobs:
           flags: pytest
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  api-docs-drift:
+    timeout-minutes: 5
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install dependencies
+        run: |
+          pip install -e .
+          pip install --group dev
+      - name: Regenerate API docs
+        run: python scripts/gen_api_docs.py
+      - name: Fail if docs/api/ has drifted
+        run: |
+          if ! git diff --exit-code -- docs/api/; then
+            echo ""
+            echo "::error::docs/api/ is out of date. Run:"
+            echo "::error::    uv run python scripts/gen_api_docs.py"
+            echo "::error::then commit the result."
+            exit 1
+          fi
