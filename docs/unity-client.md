@@ -1,6 +1,6 @@
 ---
 title: "Unity Client SDK"
-description: "Connecting Unity to a HeTu server: System RPC, row subscriptions, and the two data-update patterns (event callbacks and R3 reactive)."
+description: "Connecting Unity to a HeTu server: `System` RPC, row subscriptions, and the two data-update patterns (event callbacks and R3 reactive)."
 type: docs
 weight: 35
 prev: concepts
@@ -13,7 +13,7 @@ zlib + crypto), and the subscription bookkeeping behind a single
 `HeTuClient.Instance`.
 
 This page assumes you can already start a server and have read
-[Concepts](concepts.md) — Components, Systems, and Subscriptions are
+[Concepts](concepts.md) — `Components`, `Systems`, and Subscriptions are
 mentioned without re-explanation.
 
 ## Install
@@ -92,9 +92,9 @@ Key points the source enforces but isn't always obvious from a snippet:
   / `Get` / `Range` calls and tears the socket down — call it from
   `OnDestroy` so quitting Play Mode doesn't leak a worker task.
 
-## Calling Systems
+## Calling `Systems`
 
-`CallSystem(name, args...)` invokes a server-side System by name. You have
+`CallSystem(name, args...)` invokes a server-side `System` by name. You have
 two ways to use it:
 
 ```csharp
@@ -111,7 +111,7 @@ Use `.Forget()` (or `_ = CallSystem(...)`) for fast input streams like per-
 frame movement; `await` for actions whose result you actually need.
 
 **Local pre-callbacks.** You can register a client-side hook that runs every
-time you call a System with that name — useful for client-side prediction:
+time you call a `System` with that name — useful for client-side prediction:
 
 ```csharp
 HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
@@ -131,7 +131,7 @@ rows change in Redis.
 | `Get<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
 | `Range<T>(index, left, right, limit, desc, force)` | `IndexSubscription<T>` (a dictionary of rows, kept in sync) | You want a window over an indexed column — nearby players, top-N leaderboard, the last 100 chat messages. |
 
-The `T` parameter is your strongly-typed Component class (see next section).
+The `T` parameter is your strongly-typed `Component` class (see next section).
 Drop it for `DictComponent`, a string-keyed `Dictionary` you index manually.
 
 `Range`'s `force=true` (default) keeps the subscription alive even if the
@@ -141,7 +141,7 @@ already data.
 
 ## Typed components vs `DictComponent`
 
-The server can generate matching C# classes from your Component definitions
+The server can generate matching C# classes from your `Component` definitions
 via `hetu build`. The result implements `IBaseComponent`:
 
 ```csharp
@@ -293,10 +293,15 @@ calling code only needs to choose one delay style.
 
 ## Where to next
 
-- **[Advanced](advanced.md)** — System copies, scheduled future calls,
-  raw Endpoints, custom pipeline layers, and the engine internals you'll
+- **[Advanced](advanced.md)** — `System` copies, scheduled future calls,
+  raw `Endpoints`, custom pipeline layers, and the engine internals you'll
   reach for once a project gets real.
 - **[Concepts](concepts.md)** — re-read the Subscriptions section now that
+  you've seen the client side; permissions / RLS filter what `Get` and
+  `Range` can return.
+- **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-
+  server example using the patterns above.
+](concepts.md)** — re-read the Subscriptions section now that
   you've seen the client side; permissions / RLS filter what `Get` and
   `Range` can return.
 - **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-

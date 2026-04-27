@@ -124,9 +124,9 @@ encourages is verbose and easy to get wrong. Caddy fits the workload better.
 You'll need a migration whenever `app.py` changes in a way that the live
 backend cannot serve as-is:
 
-- **System references change** — Systems get regrouped into different
+- **`System` references change** — `Systems` get regrouped into different
   co-location clusters.
-- **Component schema changes** — a column is added, removed, renamed,
+- **`Component` schema changes** — a column is added, removed, renamed,
   retyped, or an index changes.
 
 Both are driven by `hetu upgrade`, but they behave very differently.
@@ -139,9 +139,9 @@ no script to review and no risk of data loss.
 
 ### Schema changes — via a migration script
 
-When a Component's schema changes, the first run of `upgrade` generates a
+When a `Component`'s schema changes, the first run of `upgrade` generates a
 default migration script under `<your-app-dir>/maint/migration/` — one
-file per Component, versioned by schema hash. From there:
+file per `Component`, versioned by schema hash. From there:
 
 1. **Most cases — `upgrade` self-completes.** Added columns are filled
    from each property's default value; losslessly castable type changes
@@ -214,7 +214,7 @@ Run `hetu start --help` for the full list.
 
 ### `hetu upgrade`
 
-Schema migration. Run it before deploying a release that changes a Component
+Schema migration. Run it before deploying a release that changes a `Component`
 shape (added column, changed dtype, new index). It compares the current
 schema in the backend against your `app.py` and applies the difference.
 
@@ -242,7 +242,7 @@ a schema mismatch.
 ### `hetu build`
 
 Generates client-side SDK code (typed C# classes) from your server-side
-Component definitions. Run it once per Component change and commit the
+`Component` definitions. Run it once per `Component` change and commit the
 output into your client project. Unlike `start` and `upgrade`, this command
 has no config-file mode — only CLI flags:
 
@@ -263,6 +263,13 @@ The full schema is in [
 `CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml).
 
 The specific definitions are explained in detail within the document's comments.
+
+## Where to next
+
+- **[API Reference](api/)** — every public symbol you'll touch in `app.py`.
+- The [README](https://github.com/Heerozh/HeTu/blob/main/README.md) has
+  performance benchmarks (in Chinese) for capacity-planning context.
+comments.
 
 ## Where to next
 
