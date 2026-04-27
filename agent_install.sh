@@ -40,6 +40,9 @@ fi
 {
     echo "$BEGIN"
     echo 'export UV_PROJECT_ENVIRONMENT=/tmp/hetu-venv-sandbox'
+    echo 'export LANG=en_US.UTF-8'
+    echo 'export LC_ALL=en_US.UTF-8'
+    echo 'export LANGUAGE=en_US:en'
     echo "$END"
 } >> "$PERSIST"
 chmod 644 "$PERSIST"
@@ -86,6 +89,7 @@ fi
 
 apt-get update
 apt-get install -y --no-install-recommends \
+    locales \
     bzr \
     dotnet-sdk-10.0 \
     fd-find \
@@ -105,6 +109,10 @@ apt-get install -y --no-install-recommends \
     xz-utils \
     zip
 rm -rf /var/lib/apt/lists/*
+
+# install utf8
+sudo locale-gen en_US.UTF-8
+sudo update-locale LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 
 # update uv
 curl -LsSf https://astral.sh/uv/install.sh | sh

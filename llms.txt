@@ -1,0 +1,67 @@
+# HeTu (河图)
+
+> HeTu 是一个高性能、多进程分布式 game server engine，基于 ECS
+> (Entity-Component-System) 架构，使用 Redis 作为 backend。通过 WebSocket
+> 暴露类似 database 的接口，client 端可订阅数据变更，并通过 RPC 调用 server-side
+> logic。底层数据结构为 NumPy structured array（C struct），支持 Unity
+> 客户端 SDK。需 Python 3.14+。
+
+HeTu (河图) is a high-performance, multi-process distributed game server engine
+built on ECS architecture with Redis backend. Schema-as-API: clients subscribe
+to row/index changes via WebSocket and invoke server-side Systems via RPC under
+row-level security. Authoritative source: https://github.com/Heerozh/HeTu
+
+## Getting Started
+
+- [README](https://raw.githubusercontent.com/Heerozh/HeTu/main/README.md): 项目总览、聊天室快速示例（Component + System + 客户端订阅）、性能测试、安装与生产部署
+- [Installation](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/installation.md): 开发环境（uv + Python 3.14）与生产环境（Docker / pip + miniconda）的完整安装流程
+- [Chat 示例 - 服务器端](https://raw.githubusercontent.com/Heerozh/HeTu/main/examples/chat/server/src/app.py): 最小可运行的端到端示例，演示 `@define_component` / `@define_system` / 启动方式
+- [配置模板 CONFIG_TEMPLATE.yml](https://raw.githubusercontent.com/Heerozh/HeTu/main/CONFIG_TEMPLATE.yml): 所有 server / backend / logging 配置项及其注释
+
+## Core Concepts
+
+- [Component](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/component.md): `@define_component` 装饰器、`property_field` 字段类型、`unique` / `index`、权限级别 EVERYBODY / USER / OWNER / RLS / ADMIN *(planned)*
+- [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/system.md): `@define_system` 装饰器、SystemContext、co-location cluster 规则、`RaceCondition` 自动重试 *(planned)*
+- [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/endpoint.md): `@define_endpoint`、Context、`elevate()` 权限提升、与 System 的关系 *(planned)*
+- [Subscription](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/subscription.md): `RowSubscription` / `IndexSubscription`、SubscriptionBroker、Redis pub/sub 推送链路 *(planned)*
+- [Transaction Model](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/transaction.md): Session、SessionRepository、IdentityMap、optimistic concurrency 与冲突处理 *(planned)*
+
+## Backend & Storage
+
+- [Backend Selection](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/backend.md): Redis / Redis Cluster / SQL（PostgreSQL/SQLite/MariaDB）选型、master + servant 读写分离、何时不该用 SQL backend *(planned)*
+- [Schema 迁移 (hetu upgrade)](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/upgrade.md): Component schema 变更后的迁移流程 *(planned)*
+- [SnowflakeID 与 WorkerKeeper](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/snowflake.md): 分布式唯一 ID 生成与 worker ID 分配 *(planned)*
+
+## Client SDK
+
+- [Unity SDK 安装与使用](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/sdk-unity.md): UPM 安装、`CallSystem`、`Get` / `Range` 订阅、Reactive 生命周期绑定、WebGL 支持 *(planned)*
+- [.NET SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/sdk-dotnet.md): 从 Unity SDK 抽出的核心库 *(planned)*
+- [JS / TS SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/sdk-js.md): WebSocket 协议封装、订阅 API *(planned)*
+- [Wire Protocol](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/protocol.md): pipeline 层（jsonb → zlib/brotli/zstd → ChaCha20）、消息格式、`rpc` / `sub` / `unsub` / `sel` 命令 *(planned)*
+
+## CLI & Tooling
+
+- [hetu start](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/cli-start.md): 启动服务器，参数与配置文件 *(planned)*
+- [hetu build](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/cli-build.md): 由 Component 定义生成 C# Client SDK 代码 *(planned)*
+- [hetu upgrade](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/cli-upgrade.md): Schema 迁移命令 *(planned)*
+
+## Deployment
+
+- [Docker 部署](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/deploy-docker.md): 国内（阿里云镜像）/ 国际（Docker Hub）镜像、抢占式服务器策略、反向代理与负载均衡 *(planned)*
+- [pip 原生部署](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/deploy-pip.md): miniconda + pip 的非容器化部署，约比 Docker 高 20% 性能 *(planned)*
+- [Caddy 反向代理 + 自动负载均衡](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/deploy-caddy.md): caddy-docker-proxy + Docker Swarm，自动注册 / 摘除 *(planned)*
+
+## For LLM-assisted Development
+
+- [CLAUDE.md - 项目工作约定](https://raw.githubusercontent.com/Heerozh/HeTu/main/CLAUDE.md): 模块地图、commit 前缀、coding style、测试约定、sandbox 注意事项
+- [AGENTS.md - Agent 工作流](https://raw.githubusercontent.com/Heerozh/HeTu/main/AGENTS.md): agent 协作约定
+
+## Optional
+
+- [Native 计算 (cffi / FFI)](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/native.md): 用 C/Rust 直接处理 NumPy struct array，无拷贝传指针 *(planned)*
+- [FutureCalls (定时 / 周期 System)](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/future-calls.md): 内置的定时调用机制 *(planned)*
+- [设计文档：Shared-memory backend](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/plans/2026-02-16-shared-memory-backend-design.md): 设计草案
+- [设计文档：SQL backend](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/plans/2026-02-21-sql-backend-prompt.md): 设计草案
+- [设计文档：JS Client SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/plans/2026-03-21-js-client-sdk.md): 设计草案
+- [Benchmark 历史数据](https://raw.githubusercontent.com/Heerozh/HeTu/main/benchmark_results.csv): 历次压测结果
+- [DeepWiki AI 总览 (英文)](https://deepwiki.com/Heerozh/HeTu): 第三方自动生成的英文项目摘要
