@@ -14,7 +14,8 @@ exercised every major HeTu concept: typed components, server-side systems,
 subscription-based realtime updates, permission checks, and lifecycle hooks.
 
 The complete reference implementation is at
-[`examples/chat/server/src/app.py`](https://github.com/Heerozh/HeTu/blob/main/examples/chat/server/src/app.py).
+[
+`examples/chat/server/src/app.py`](https://github.com/Heerozh/HeTu/blob/main/examples/chat/server/src/app.py).
 
 ## What you'll build
 
@@ -198,12 +199,17 @@ uv run hetu start --config=./config.yml
 In Unity, subscribe to the chat history and react to new messages:
 
 ```csharp
-await HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat");
+// Fire and forget connect
+// In practice, this should be wrapped within an asynchronous method, 
+// with a loop controlling the automatic reconnection.
+HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat"); 
+// will automatically wait for the connection to be established before sending.
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 
 var messages = await HeTuClient.Instance.Range<ChatMessage>(
     "created_at_ms", 0, long.MaxValue, 1024);
 
+messages.addTo(gameObject);
 messages.ObserveAdd()
     .Subscribe(msg => Debug.Log($"{msg.name}: {msg.text}"))
     .AddTo(ref messages.DisposeBag);

@@ -34,10 +34,12 @@ Server (Python):
 import hetu
 import numpy as np
 
+
 @hetu.define_component(namespace="Chat", permission=hetu.Permission.EVERYBODY)
 class ChatMessage(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, index=True)
     text: str = hetu.property_field("", dtype="U256")
+
 
 @hetu.define_system(
     namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER
@@ -55,6 +57,7 @@ Client (Unity / C#):
 await HeTuClient.Instance.CallSystem("user_chat", "Hello world");
 
 var sub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+sub.AddTo(gameObject); 
 sub.ObserveAdd().Subscribe(msg => Render(msg));
 ```
 

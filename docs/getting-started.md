@@ -54,59 +54,18 @@ in a Docker image (see [Operations](operations.md) for the production story).
 ```
 my-game-server/
 ├── pyproject.toml
-├── config.yml          # optional: server config; CLI flags also work
 └── src/
-    └── app.py          # your game logic (Components + Systems)
+    ├── my_game_server/
+    │    ├── __init__.py        
+    │    ├── components.py
+    │    ├── systems.py
+    │    ├── endpoints.py
+    │    └── etc....
+    └── app.py          # entry point
 ```
 
 `uv init` creates a flat layout by default, so create the `src/` directory
-and move `hello.py`/`main.py` (or whatever stub it generated) out of the way:
-
-```bash
-mkdir src
-touch src/app.py
-# delete the stub uv created at the repo root, if any
-```
-
-The single `src/app.py` is enough for prototyping. As your game grows you'll
-want to split definitions across multiple files — one giant `app.py` with
-hundreds of Components and Systems gets hard to navigate, and teammates will
-collide on the same file. The standard fix is to turn `src/` into a real
-Python package:
-
-```
-my-game-server/
-├── pyproject.toml
-└── src/
-    └── my_game_server/
-        ├── __init__.py        # entry point HeTu loads
-        ├── components.py
-        ├── systems.py
-        └── endpoints.py
-```
-
-The `__init__.py` re-imports the submodules so their `@define_*` decorators
-run when HeTu loads the entry file:
-
-```python
-# src/my_game_server/__init__.py
-from my_game_server.components import *  # noqa: F401,F403
-from my_game_server.systems import *      # noqa: F401,F403
-from my_game_server.endpoints import *    # noqa: F401,F403
-```
-
-Point HeTu at the `__init__.py` directly:
-
-```bash
---app-file=./src/my_game_server/__init__.py
-```
-
-`--app-file` takes a **file path**, not an import name (HeTu uses
-`importlib.util.spec_from_file_location` to load it), so an `__init__.py` is
-a perfectly valid target. For the `from my_game_server...` imports inside it
-to resolve, `src/` must be on `sys.path` — `pip install -e .` arranges this
-for local dev, and the production Docker image's `RUN pip install .` does the
-same in a container.
+and move `hello.py`/`main.py` (or whatever stub it generated) out of the way.
 
 ## 3. Define your first Component and System
 
@@ -175,16 +134,6 @@ await HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
 
-### JavaScript / Browser
-
-The JS SDK is in development; see the `ClientSDK/js/` directory for current
-status.
-
-### .NET console (no Unity)
-
-There is no separate .NET package today, but the Unity SDK's runtime code is
-Unity-independent and can be extracted from `ClientSDK/unity/cn.hetudb.clientsdk/HeTu/`.
-
 ## 6. Verify it worked
 
 After calling `say_hello`, the row exists in the SQLite file (or Redis). You
@@ -192,6 +141,7 @@ can prove it by adding a temporary client subscription:
 
 ```csharp
 var sub = await HeTuClient.Instance.Range<Greeting>("id", 0, long.MaxValue, 100);
+sub.AddTo(gameObject); // dont forget! Otherwise, you will receive a warning about GC leaks when you stop playing.
 sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
 ```
 
