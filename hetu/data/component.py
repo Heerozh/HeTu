@@ -15,9 +15,6 @@ from typing import TYPE_CHECKING, Any, Callable, cast, overload
 
 import numpy as np
 
-if TYPE_CHECKING:
-    from .backend.table import Table
-
 from ..common import Singleton, csharp_keyword
 from ..common.permission import Permission
 from ..common.snowflake_id import SnowflakeID
@@ -29,23 +26,87 @@ SNOWFLAKE_ID = SnowflakeID()
 
 @dataclass
 class Property:
-    default: Any  # 属性的默认值
-    unique: bool = False  # 是否是字典索引 (此项优先级高于index，查询速度高)
-    index: bool = False  # 是否是排序索引
-    dtype: str | type = ""  # 数据类型，最好用np的明确定义
-    # nullable说明：
-    # Component表现为c-struct like的数据，因此值不能为null，也无法判断值是否有被设置过
-    # 因此nullable是无法实现的。hetu本身的理念是细化Component，所以如果有nullable需求的
-    # 列，可以单独拆分成一个Component来存储，然后用owner来关联。
+    """
+    Component属性定义的内部数据结构。
+
+    一般不直接实例化此类，而是通过 `property_field(...)` 在Component类中声明字段。
+    Component使用c-struct like的定长数据模型，因此字段值不支持 `None` / nullable，
+    也无法区分“未设置”和“设置为默认值”。有nullable需求的列应拆成单独Component，
+    再通过 `owner` 或其他字段关联。
+    """
+
+    default: Any
+    """属性默认值。所有字段都必须有默认值，且不能为 `None`。"""
+
+    unique: bool = False
+    """是否是唯一索引。用于高效精确查询；开启后要求字段值唯一并强制启用 `index`。"""
+
+    index: bool = False
+    """是否是排序索引。开启后可按该字段进行索引查询；索引数量应控制。"""
+
+    dtype: str | type = ""
+    """字段数据类型。建议使用长度明确的NumPy dtype；留空时由type hint推导。"""
 
 
-# 辅助函数，过滤类型检查器报错
 def property_field(
     default: Any,
     unique: bool = False,
     index: bool | None = None,
     dtype: str | type = "",
 ) -> Any:
+    """
+    Define a Component field declaration helper.
+
+    定义 Component 的属性字段。它通常与 type hint 一起使用，在
+    `@define_component` 处理 class 时被解析为内部 `Property` 定义。
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> class Position(BaseComponent):
+    ...     x: np.float32 = property_field(default=0)
+    ...     owner: np.int64 = property_field(default=0, unique=True)
+    ...     name: str = property_field(default="hero", dtype="U16")
+
+    Parameters
+    ----------
+    default : Any
+        属性默认值。所有字段都必须提供默认值，且不能为 `None`。
+        HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullable。
+    unique : bool, default False
+        是否为唯一索引。开启后字段值必须唯一，并会自动启用 `index`。
+    index : bool | None, default None
+        是否建立索引。
+
+        - `None` 表示沿用 `unique` 的值；
+        - `False` 表示不建立普通索引；
+        - `True` 表示建立普通索引。
+
+        当 `unique=True` 时，即使显式传入 `False`，后续定义阶段也会被强制修正为
+        `True`。
+    dtype : str | type, default ""
+        字段数据类型。留空时默认使用属性的 type hint。
+
+        推荐使用长度明确的 NumPy dtype，例如 `np.int64`、`np.float32`、
+        `"U8"`、`"<U32"`。字符串类型需要显式指定长度。
+
+    Returns
+    -------
+    Any
+        内部 `Property` 对象。返回类型标注为 `Any` 是为了减少类型检查器对
+        `class attribute default value` 的误报，运行时仍会被当作 `Property`
+        处理。
+
+    Notes
+    -----
+    `property_field(...)` 只负责声明字段元数据，真正的合法性校验会在
+    `@define_component` 执行时完成，包括：
+
+    - 字段名是否合法；
+    - `default` 与 `dtype` 是否兼容；
+    - `dtype` 是否可用于 NumPy structured array；
+    - `unique/index` 组合是否合法。
+    """
     if index is None:
         index = unique
     return Property(default=default, unique=unique, index=index, dtype=dtype)

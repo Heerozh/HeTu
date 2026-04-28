@@ -24,7 +24,7 @@ define_component(
 ) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:283`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L283)</small>
+<small>Source: [`hetu/data/component.py:344`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L344)</small>
 
 
 
@@ -288,20 +288,71 @@ property_field(
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:43`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L43)</small>
+<small>Source: [`hetu/data/component.py:51`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L51)</small>
 
 
 
-_No documentation available._
+Define a Component field declaration helper.
+
+定义 Component 的属性字段。它通常与 type hint 一起使用，在
+`@define_component` 处理 class 时被解析为内部 `Property` 定义。
+
+
+### Parameters
+
+- **`default`** (Any) — 属性默认值。所有字段都必须提供默认值，且不能为 `None`。
+HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullable。
+
+- **`unique`** (bool, default `False`) — 是否为唯一索引。开启后字段值必须唯一，并会自动启用 `index`。
+
+- **`index`** (bool | None, default `None`) — 是否建立索引。
+
+- `None` 表示沿用 `unique` 的值；
+- `False` 表示不建立普通索引；
+- `True` 表示建立普通索引。
+
+当 `unique=True` 时，即使显式传入 `False`，后续定义阶段也会被强制修正为
+`True`。
+
+- **`dtype`** (str | type, default `""`) — 字段数据类型。留空时默认使用属性的 type hint。
+
+推荐使用长度明确的 NumPy dtype，例如 `np.int64`、`np.float32`、
+`"U8"`、`"<U32"`。字符串类型需要显式指定长度。
 
 
 
 
 
 
+### Returns
+内部 `Property` 对象。返回类型标注为 `Any` 是为了减少类型检查器对
+`class attribute default value` 的误报，运行时仍会被当作 `Property`
+处理。
 
 
 
+
+### Examples
+
+```python
+>>> import numpy as np
+>>> class Position(BaseComponent):
+...     x: np.float32 = property_field(default=0)
+...     owner: np.int64 = property_field(default=0, unique=True)
+...     name: str = property_field(default="hero", dtype="U16")
+```
+
+
+
+
+### Notes
+`property_field(...)` 只负责声明字段元数据，真正的合法性校验会在
+`@define_component` 执行时完成，包括：
+
+- 字段名是否合法；
+- `default` 与 `dtype` 是否兼容；
+- `dtype` 是否可用于 NumPy structured array；
+- `unique/index` 组合是否合法。
 
 
 

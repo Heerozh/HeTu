@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Callable
 
 from ..endpoint import Context
 
-
 if TYPE_CHECKING:
     from ..data import BaseComponent
     from ..data.backend import SessionRepository
@@ -19,7 +18,7 @@ if TYPE_CHECKING:
 @dataclass
 class SystemContext(Context):
     """
-    System调用时的上下文，继承自 :class:`Context` 并添加事务相关属性。
+    System调用时的上下文，继承自 `Context` 并添加事务相关属性。
     每次System执行时由engine创建并作为第一个参数 `ctx` 传入。
     """
 

@@ -14,7 +14,7 @@ weight: 20
 BaseComponent()
 ```
 
-<small>Source: [`hetu/data/component.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L54)</small>
+<small>Source: [`hetu/data/component.py:115`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L115)</small>
 
 
 
