@@ -42,7 +42,8 @@ Permission(*values)
 
 <small>Source: [`hetu/common/permission.py:11`](https://github.com/Heerozh/HeTu/blob/main/hetu/common/permission.py#L11)</small>
 
-<small>Bases: `IntEnum`</small>
+
+**Bases:** `IntEnum`
 
 
 

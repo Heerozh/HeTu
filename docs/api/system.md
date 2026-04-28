@@ -109,7 +109,8 @@ SystemContext(
 
 <small>Source: [`hetu/system/context.py:18`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/context.py#L18)</small>
 
-<small>Bases: [`EndpointContext`](endpoint.md#endpointcontext)</small>
+
+**Bases:** [`EndpointContext`](endpoint.md#endpointcontext)
 
 
 

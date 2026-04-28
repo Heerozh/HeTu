@@ -153,7 +153,8 @@ ResponseToClient(message: list | dict)
 
 <small>Source: [`hetu/endpoint/response.py:13`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/response.py#L13)</small>
 
-<small>Bases: `EndpointResponse`</small>
+
+**Bases:** `EndpointResponse`
 
 
 

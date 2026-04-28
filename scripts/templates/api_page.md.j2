@@ -16,7 +16,8 @@ weight: {{ weight }}
 
 <small>Source: [`{{ api.source_path }}:{{ api.source_line }}`](https://github.com/Heerozh/HeTu/blob/main/{{ api.source_path }}#L{{ api.source_line }})</small>
 {% if api.bases %}
-<small>Bases: {% for b in api.bases %}{% if b.link %}[`{{ b.name }}`]({{ b.link }}){% else %}`{{ b.name }}`{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}</small>
+
+**Bases:** {% for b in api.bases %}{% if b.link %}[`{{ b.name }}`]({{ b.link }}){% else %}`{{ b.name }}`{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
 {% endif %}
 {% if api.deprecated %}
 > **Deprecated.** {{ api.deprecated }}
