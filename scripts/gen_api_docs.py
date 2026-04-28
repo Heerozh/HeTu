@@ -351,10 +351,31 @@ def _parse_docstring(obj: object) -> dict:
     return out
 
 
-def build_record(symbol: Symbol) -> dict:
+def _resolve_bases(cls: type, symbol_index: dict[int, Symbol]) -> list[dict]:
+    """
+    Map cls.__bases__ to a list of {name, link?} dicts. If a base is itself a
+    documented symbol (possibly under a different public name, e.g. Context →
+    EndpointContext), resolve to its public name and anchor.
+    """
+    out: list[dict] = []
+    for base in cls.__bases__:
+        if base is object:
+            continue
+        sym = symbol_index.get(id(base))
+        if sym is not None:
+            anchor = sym.short_name.lower()
+            out.append(
+                {"name": sym.short_name, "link": f"{sym.topic}.md#{anchor}"}
+            )
+        else:
+            out.append({"name": base.__name__, "link": None})
+    return out
+
+
+def build_record(symbol: Symbol, symbol_index: dict[int, Symbol]) -> dict:
     src_path, src_line = _source_location(symbol.obj)
     parsed = _parse_docstring(symbol.obj)
-    methods = _collect_methods(symbol.obj) if inspect.isclass(symbol.obj) else []
+    is_cls = inspect.isclass(symbol.obj)
     return {
         "qualname": symbol.qualname,
         "short_name": symbol.short_name,
@@ -363,7 +384,8 @@ def build_record(symbol: Symbol) -> dict:
         "source_line": src_line,
         "deprecated": None,
         **parsed,
-        "methods": methods,
+        "bases": _resolve_bases(symbol.obj, symbol_index) if is_cls else [],
+        "methods": _collect_methods(symbol.obj) if is_cls else [],
     }
 
 
@@ -383,9 +405,11 @@ def _env() -> Environment:
     )
 
 
-def render_topic_page(topic: str, symbols: list[Symbol]) -> str:
+def render_topic_page(
+    topic: str, symbols: list[Symbol], symbol_index: dict[int, Symbol]
+) -> str:
     title, description, weight = TOPIC_META[topic]
-    records = [build_record(s) for s in symbols]
+    records = [build_record(s, symbol_index) for s in symbols]
     return _env().get_template("api_page.md.j2").render(
         topic_title=title,
         topic_description=description,
@@ -428,6 +452,7 @@ def render_coverage_page(symbols: list[Symbol]) -> str:
 def main() -> None:
     DOCS_API_DIR.mkdir(parents=True, exist_ok=True)
     symbols = collect_public_symbols()
+    symbol_index = {id(s.obj): s for s in symbols}
     grouped = group_by_topic(symbols)
 
     (DOCS_API_DIR / "_index.md").write_text(
@@ -435,7 +460,7 @@ def main() -> None:
     )
     for topic, group_symbols in grouped.items():
         (DOCS_API_DIR / f"{topic}.md").write_text(
-            render_topic_page(topic, group_symbols), encoding="utf-8"
+            render_topic_page(topic, group_symbols, symbol_index), encoding="utf-8"
         )
     (DOCS_API_DIR / "_coverage.md").write_text(
         render_coverage_page(symbols), encoding="utf-8"

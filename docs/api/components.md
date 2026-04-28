@@ -17,6 +17,7 @@ BaseComponent()
 <small>Source: [`hetu/data/component.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L54)</small>
 
 
+
 _No documentation available._
 
 
@@ -40,6 +41,9 @@ Permission(*values)
 ```
 
 <small>Source: [`hetu/common/permission.py:11`](https://github.com/Heerozh/HeTu/blob/main/hetu/common/permission.py#L11)</small>
+
+<small>Bases: `IntEnum`</small>
+
 
 
 Enum where members are also (and must be) ints

@@ -27,6 +27,7 @@ define_component(
 <small>Source: [`hetu/data/component.py:283`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L283)</small>
 
 
+
 定义Component组件的schema模型
 
 
@@ -120,6 +121,7 @@ define_endpoint(
 <small>Source: [`hetu/endpoint/definer.py:90`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L90)</small>
 
 
+
 把一个函数包装成可供客户端远程调用的接口。
 
 大部分情况不需要调用此包装器，你可以把逻辑代码直接写在System中。
@@ -186,6 +188,7 @@ define_system(
 ```
 
 <small>Source: [`hetu/system/definer.py:303`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L303)</small>
+
 
 
 定义System，System类似数据库的储存过程，主要用于数据CRUD。
@@ -286,6 +289,7 @@ property_field(
 ```
 
 <small>Source: [`hetu/data/component.py:43`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L43)</small>
+
 
 
 _No documentation available._

@@ -30,6 +30,7 @@ EndpointContext(
 <small>Source: [`hetu/endpoint/context.py:18`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L18)</small>
 
 
+
 Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpoint函数；
 `SystemContext` 继承自此类。包含调用方身份、当前连接的用户数据，
 以及消息发送和订阅数量限制等。
@@ -152,6 +153,9 @@ ResponseToClient(message: list | dict)
 
 <small>Source: [`hetu/endpoint/response.py:13`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/response.py#L13)</small>
 
+<small>Bases: `EndpointResponse`</small>
+
+
 
 回报message给客户端，注意必须是json可以序列化的数据
 
@@ -181,6 +185,7 @@ elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 ```
 
 <small>Source: [`hetu/endpoint/connection.py:90`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L90)</small>
+
 
 
 提升到User权限。如果该连接已提权，或user_id已在其他连接登录，返回False。
