@@ -62,7 +62,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
                                         Redis ◄──────────┘
 ```
 
-1. Client 通过 WebSocket 连接到 `/hetu/<db_name>`，并经过 message pipeline
+1. Client 通过 WebSocket 连接到 `/hetu/<instance_name>`，并经过 message pipeline
    （jsonb → zlib → crypto）。
 2. RPC 调用（`callSystem`）经由 `EndpointExecutor` → `SystemCaller` 路由，后者会
    打开 `Session`（transaction）、为每个 Component 创建 `SessionRepository`、执行
@@ -146,7 +146,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 - 如果sudo显示: The "no new privileges" flag is set, which prevents sudo from running as
   root.
   这是需要用户关闭Claude Code自己的sandbox, 执行`agent_install.sh`会自动关闭
-- 已知问题：sbx下uv sync有时会在Building hetudb @ file:///...地方卡20分钟。
+- 已知问题：windows下sbx里pytest比较耗时，整个项目完整测试要10分钟
 
 ## Rule
 
