@@ -66,7 +66,34 @@ class Context:
         return True if self.group.startswith("admin") else False
 
     def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
-        """配置连接选项"""
+        """
+        配置当前连接的限流与订阅配额。
+
+        此方法通常在连接建立后调用，用于把 websocket/app 配置中的连接级限制
+        写入 `Context`，供后续消息收发和订阅逻辑直接读取。
+
+        Parameters
+        ----------
+        client_limits: list[list[int]]
+            客户端向服务端发送消息的频率限制。每项格式为
+            ``[最大消息数, 统计时间(秒)]``；空列表表示不限制。
+            一般对应配置项 `CLIENT_SEND_LIMITS`。
+        server_limits: list[list[int]]
+            服务端向客户端发送消息的频率限制。每项格式同上；
+            一般对应配置项 `SERVER_SEND_LIMITS`。
+        max_row_sub: int
+            当前连接允许的最大行订阅数量。一般对应配置项
+            `MAX_ROW_SUBSCRIPTION`。
+        max_index_sub: int
+            当前连接允许的最大索引订阅数量。一般对应配置项
+            `MAX_INDEX_SUBSCRIPTION`。
+
+        Notes
+        -----
+        本方法只负责保存传入值，不做校验、排序或拷贝。
+        `client_limits` 和 `server_limits` 应按统计时间从小到大排列，
+        因为后续限流检查会使用最后一项的时间窗口作为计数重置基准。
+        """
         self.client_limits = client_limits
         self.server_limits = server_limits
         self.max_row_sub = max_row_sub

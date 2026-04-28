@@ -1,0 +1,14 @@
+name: Trigger Vercel rebuild on API docs change
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/api/**"
+
+jobs:
+  redeploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Vercel deploy hook
+        run: curl -fsS -X POST "${{ secrets.VERCEL_DEPLOY_HOOK }}"
