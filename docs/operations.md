@@ -68,6 +68,38 @@ replicas for the subscription fan-out. The
 adding replicas scales subscription throughput linearly without touching the
 master.
 
+In HeTu's config the backend is declared like this:
+
+```yaml
+backends:
+  backend_name:
+    type: Redis                        # backend type; 
+    master: redis://127.0.0.1:6379/0   # master server, exactly one address
+    servants: [ ]                       # read-only replicas; Reads are randomly load-balanced across them
+    # URL format: redis://[[username]:password]@host:6379/0  (username may be empty)
+```
+
+`System` commits all run against the **master**; ClientSDK
+subscriptions/queries (and some `System` reads) run against a **random
+servant**. This split lets one HeTu deployment carry a very large user
+population while staying consistent.
+
+**About master and servants**
+
+- Add as many `servants` as you need; each is a Redis read-only replica that
+  syncs from the master.
+- `servants` is optional. Leaving it empty puts you in single-master mode —
+  fine for small games.
+- Set Redis `client-output-buffer-limit` on the servants conservatively;
+  too generous a limit risks Redis OOM under subscription bursts.
+
+**Redis connection budget**
+
+- Servant connections ≈ number of HeTu ClientSDK connections (online users).
+- Master connections ≈ `workers × concurrent System calls per worker`.
+- Redis caps at ~10K connections per instance. If your concurrent online
+  population gets close to that, scale out by adding more `servants`.
+
 ### Drop-in alternatives
 
 The same wire protocol means you can substitute:
