@@ -11,7 +11,17 @@ weight: 10
 ## `define_component`
 
 ```python
-define_component(_cls=None, /, *, namespace: str = 'default', force: bool = False, permission=<Permission.USER: 2>, volatile=False, backend: str = 'default', rls_compare: tuple[str, str, str] | None = None) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
+define_component(
+    _cls=None,
+    /,
+    *,
+    namespace: str = 'default',
+    force: bool = False,
+    permission=<Permission.USER: 2>,
+    volatile=False,
+    backend: str = 'default',
+    rls_compare: tuple[str, str, str] | None = None,
+) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
 <small>Source: [`hetu/data/component.py:283`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L283)</small>
@@ -96,7 +106,11 @@ define_component(_cls=None, /, *, namespace: str = 'default', force: bool = Fals
 ## `define_endpoint`
 
 ```python
-define_endpoint(namespace: str = 'global', force: bool = False, permission: hetu.common.permission.Permission = <Permission.USER: 2>)
+define_endpoint(
+    namespace: str = 'global',
+    force: bool = False,
+    permission: hetu.common.permission.Permission = <Permission.USER: 2>,
+)
 ```
 
 <small>Source: [`hetu/endpoint/definer.py:90`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L90)</small>
@@ -243,7 +257,12 @@ hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
 ## `property_field`
 
 ```python
-property_field(default: Any, unique: bool = False, index: bool | None = None, dtype: str | type = '') -> Any
+property_field(
+    default: Any,
+    unique: bool = False,
+    index: bool | None = None,
+    dtype: str | type = '',
+) -> Any
 ```
 
 <small>Source: [`hetu/data/component.py:43`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L43)</small>

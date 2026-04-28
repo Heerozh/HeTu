@@ -102,12 +102,40 @@ def collect_public_symbols() -> list[Symbol]:
     return out
 
 
+SIGNATURE_WRAP_THRESHOLD = 88
+
+
 def _signature_string(obj: object, name: str) -> str:
     try:
         sig = inspect.signature(obj)
-        return f"{name}{sig}"
     except (TypeError, ValueError, NameError):
         return name
+
+    one_line = f"{name}{sig}"
+    if len(one_line) <= SIGNATURE_WRAP_THRESHOLD:
+        return one_line
+
+    PO = inspect.Parameter.POSITIONAL_ONLY
+    VP = inspect.Parameter.VAR_POSITIONAL
+    KO = inspect.Parameter.KEYWORD_ONLY
+
+    parts: list[str] = []
+    prev_kind = None
+    for p in sig.parameters.values():
+        if prev_kind == PO and p.kind != PO:
+            parts.append("/")
+        if p.kind == KO and prev_kind not in (KO, VP):
+            parts.append("*")
+        parts.append(str(p))
+        prev_kind = p.kind
+    if prev_kind == PO:
+        parts.append("/")
+
+    body = ",\n    ".join(parts)
+    out = f"{name}(\n    {body},\n)"
+    if sig.return_annotation is not inspect.Signature.empty:
+        out += f" -> {inspect.formatannotation(sig.return_annotation)}"
+    return out
 
 
 def _source_location(obj: object) -> tuple[str, int]:
