@@ -2,6 +2,7 @@ import logging
 import os
 import sys
 
+os.environ["LANGUAGE"] = "zh_CN"
 os.environ["LANG"] = "zh_CN.UTF-8"
 os.environ["LC_ALL"] = "zh_CN.UTF-8"
 
