@@ -175,7 +175,8 @@ package-lock.json
 /tests/logs
 /tests/data
 /notebooks
-profile.svg
+/*.svg
+/*.austin
 data/dump.rdb
 /hetu/__version__.py
 benchmark_results.csv
@@ -188,3 +189,4 @@ benchmark_results.csv
 # 禁用 claude
 /.claude
 examples/chat/client/output/*
+/*.txt

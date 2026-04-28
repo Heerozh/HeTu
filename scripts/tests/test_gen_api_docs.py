@@ -1,11 +1,16 @@
 import pytest
 
 from scripts.gen_api_docs import (
+    _build_symbol_link_map,
     build_record,
     collect_public_symbols,
     group_by_topic,
     render_topic_page,
 )
+
+
+def _build_index(symbols):
+    return {id(s.obj): s for s in symbols}
 
 
 def test_collect_public_symbols_includes_all_and_extras():
@@ -21,9 +26,10 @@ def test_collect_public_symbols_includes_all_and_extras():
 
 def test_build_record_extracts_signature_and_source():
     symbols = collect_public_symbols()
+    symbol_index = _build_index(symbols)
     define_component = next(s for s in symbols if s.short_name == "define_component")
 
-    record = build_record(define_component)
+    record = build_record(define_component, symbol_index)
 
     assert "define_component" in record["signature"]
     assert record["source_path"].endswith("hetu/data/component.py")
@@ -33,8 +39,9 @@ def test_build_record_extracts_signature_and_source():
 
 def test_build_record_handles_missing_docstring():
     symbols = collect_public_symbols()
+    symbol_index = _build_index(symbols)
     for s in symbols:
-        record = build_record(s)
+        record = build_record(s, symbol_index)
         if record["summary"] is None:
             return
     pytest.skip("All current symbols have docstrings; nothing to verify")
@@ -52,9 +59,13 @@ def test_group_by_topic_buckets_correctly():
 def test_render_topic_page_returns_markdown_with_frontmatter():
     symbols = collect_public_symbols()
     grouped = group_by_topic(symbols)
+    symbol_index = _build_index(symbols)
+    link_map = _build_symbol_link_map(symbols)
 
-    md = render_topic_page("decorators", grouped["decorators"])
+    md = render_topic_page(
+        "decorators", grouped["decorators"], symbol_index, link_map
+    )
 
-    assert md.startswith("<!-- AUTO-GENERATED")
-    assert "---\ntitle: " in md
+    assert md.startswith("---\ntitle: ")
+    assert "<!-- AUTO-GENERATED" in md
     assert "## `define_component" in md
