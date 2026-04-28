@@ -120,11 +120,27 @@ between deploys.
 HeTu uses only basic Redis features (hashes, sorted sets, pub/sub),
 moreover, the concept of component clusters is specifically designed to serve database
 clusters, so Redis Cluster works without special configuration.
-You'll want it once a single shard's write throughput becomes the bottleneck.
+For most projects, the read/write split is more than
+enough; You'll want it once a single shard's write throughput becomes the bottleneck.
 
 However, we do not recommend using the native Redis Cluster, we recommend using Redis
 Proxy to achieve same functionality, because this makes it easier to manage Cluster
 level read-write separation.
+
+To stay ready for that future, design your `Components` with sharding in mind:
+
+- HeTu distributes data by computing whether `Systems` overlap on
+  `Components` — that overlap forms the **System clusters** that get pinned
+  to a shard.
+- The more finely you split `Components`, the more System clusters you get,
+  and the better Cluster performance scales.
+- This is not automatic. While writing code, actively watch for *hub
+  `Components`* — a single `Component` referenced by many otherwise
+  unrelated `Systems` collapses everything into one giant cluster.
+- Avoid wide "god tables". Split each kind of attribute into its own
+  `Component`.
+- Use the `hetu` CLI during development to inspect each cluster's size and
+  catch hub-shaped growth early.
 
 ## Load balancing
 
