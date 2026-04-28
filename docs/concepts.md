@@ -77,6 +77,22 @@ into **co-location clusters** based on overlap. Two `Systems` whose
 `Systems` in different clusters never conflict and run in parallel; `Systems`
 in the same cluster contend for the same set of rows.
 
+```mermaid
+---
+title: Cluster example
+---
+graph TD;
+    subgraph "Cluster 1"
+        System_A --> Component1;
+        System_B --> Component1;
+    end
+    subgraph "Cluster 2"
+        System_D --> Component3;
+        System_D --> Component2;
+        System_C --> Component2;
+    end
+```
+
 Practical consequence: declare `components=` accurately,
 including extra `Components` may slow down systems.
 

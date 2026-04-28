@@ -12,6 +12,21 @@ engine. It uses the **Entity-Component-System (ECS)** pattern, stores state in
 **Redis**, and exposes that state to game clients over **WebSocket** as a
 subscribable, row-level-permissioned database.
 
+```mermaid
+graph TD
+;
+    subgraph "HeTu"
+        DB1["Message Queue"];
+        DB2["Logic (System)"];
+    end
+    Client["Game Client"] <-- Subscription stream --> DB1;
+    Client -- RPC --> DB2;
+    subgraph "Database"
+        DB1 <-- Read - only subscribe --> Replica;
+        DB2 -- Read/write transaction --> Master;
+    end
+```
+
 ## Why HeTu?
 
 - **2-Tier development model.** Write game logic directly against typed

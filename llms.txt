@@ -51,7 +51,6 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
 - [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition`
-- [API Coverage 报告](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/_coverage.md): 缺失 docstring 的 API 清单
 
 ## For LLM-assisted Development
 
