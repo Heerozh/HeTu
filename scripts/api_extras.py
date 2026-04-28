@@ -8,6 +8,8 @@ EXTRAS: dict[str, str] = {
     "hetu.data.backend.base.RaceCondition": "exceptions",
     "hetu.data.backend.base.UniqueViolation": "exceptions",
     "hetu.data.backend.repo.SessionRepository": "system",
+    "hetu.data.backend.table.TableReference": "system",
+    "hetu.data.backend.table.Table": "system",
     "hetu.system.definer.SystemClusters": "system",
     "hetu.system.future.create_future_call": "system",
 }

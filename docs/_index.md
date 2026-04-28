@@ -102,7 +102,8 @@ subscription. No schema migrations, no API gateway, no message broker.
     - Any row that was read, or that is about to be written, raises a
       conflict if another process/coroutine changes it underneath.
         - Exception: `range()` queries don't lock the index, so other Systems adding,
-          removing, or reordering rows in the queried range won't raise a conflict.
+          removing, or reordering rows in the queried range won't raise a conflict. Use
+          `unique` constraint instead of index checks.
     - Any external or persistent side effect — updating `ctx` globals,
       writing to a file, sending a network call — must happen **after** the
       transaction commits. Otherwise the transaction may be discarded while

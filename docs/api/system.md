@@ -520,6 +520,235 @@ session_discard() -> None
 
 ---
 
+## `Table`
+
+```python
+Table(
+    comp_cls: type[BaseComponent],
+    instance_name: str,
+    cluster_id: int,
+    backend: Backend,
+) -> None
+```
+
+<small>Source: [`hetu/data/backend/table.py:57`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L57)</small>
+
+
+**Bases:** [`TableReference`](system.md#tablereference)
+
+
+
+Table表的地址信息加上所属的Backend。
+
+
+
+
+### Attributes
+
+- **`backend`** (Backend) — _No description._
+
+- **`servant_get`** (Any) — _No description._
+
+- **`servant_range`** (Any) — _No description._
+
+- **`direct_set`** (Any) — _No description._
+
+
+
+
+
+
+
+
+
+
+### Methods
+
+#### `servant_get`
+
+```python
+servant_get(
+    row_id: int,
+    row_format=<RowFormat.STRUCT: 1>,
+) -> numpy.record | dict[str, Any] | None
+```
+
+<small>Source: [`hetu/data/backend/base.py:180`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L180)</small>
+
+从数据库直接获取单行数据。
+
+
+**Parameters**
+
+- **`table_ref`** (Any) — 表信息，指定Component、实例名、分片簇id。
+
+- **`row_id`** (Any) — row id主键
+
+- **`row_format`** (Any) — 返回数据解码格式，见 "Returns"
+
+
+
+
+**Returns**
+
+如果未查询到匹配数据，则返回 None。
+否则根据 `row_format` 参数返回以下格式之一：
+
+- RowFormat.STRUCT - **默认值**
+    返回 np.record (c-struct) 的单行数据
+- RowFormat.RAW
+    返回无类型的原始数据 (dict[str, str])
+- RowFormat.TYPED_DICT
+    返回符合Component定义的，有格式的dict类型。
+
+
+
+
+
+
+
+#### `servant_range`
+
+```python
+servant_range(
+    index_name: str,
+    left: int | float | str | bytes | bool,
+    right: int | float | str | bytes | bool | None = None,
+    limit: int = 10,
+    desc: bool = False,
+    row_format=<RowFormat.STRUCT: 1>,
+)
+```
+
+<small>Source: [`hetu/data/backend/base.py:265`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L265)</small>
+
+从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
+如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
+
+
+**Parameters**
+
+- **`table_ref`** (Any) — 表信息，指定Component、实例名、分片簇id。
+
+- **`index_name`** (Any) — 查询Component中的哪条索引
+
+- **`left`** (Any) — 查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+如果right不填写，则精确查询等于left的数据。
+
+- **`right`** (Any) — 查询范围，闭区间。字符串查询时，可以在开头指定是[闭区间，还是(开区间。
+如果right不填写，则精确查询等于left的数据。
+
+- **`limit`** (Any) — 限制返回的行数，越少越快。负数表示不限制行数。
+
+- **`desc`** (Any) — 是否降序排列
+
+- **`row_format`** (Any) — 返回数据解码格式，见 "Returns"
+
+
+
+
+**Returns**
+
+根据 `row_format` 参数返回以下格式之一：
+
+- RowFormat.STRUCT - **默认值**
+    返回 `numpy.recarray`，如果没有查询到数据，返回空 `numpy.recarray`。
+    `numpy.recarray` 是一种 c-struct array。
+- RowFormat.RAW
+    返回无类型的原始数据 (dict[str, str]) 列表，如果没有查询到数据，返回空list
+- RowFormat.TYPED_DICT
+    返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
+- RowFormat.ID_LIST
+    返回查询到的 row id 列表，如果没有查询到数据，返回空list
+
+
+
+
+
+
+**Notes**
+
+如何复合条件查询？
+请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
+
+    items = client.range(ref, "owner", player_id, limit=100)
+    few_items = items[items.amount < 10]
+
+由于python numpy支持SIMD，比直接在数据库复合查询快。
+
+
+
+#### `direct_set`
+
+```python
+direct_set(id_: int, **kwargs: str) -> None
+```
+
+<small>Source: [`hetu/data/backend/base.py:334`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L334)</small>
+
+UNSAFE! 只用于易失数据! 不会做类型检查!
+
+直接写入属性到数据库，避免session必须要执行get+事务2条指令。
+仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
+注意此方法可能导致写入数据到已删除的行，请确保逻辑。
+
+一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
+## `TableReference`
+
+```python
+TableReference(
+    comp_cls: type[BaseComponent],
+    instance_name: str,
+    cluster_id: int,
+) -> None
+```
+
+<small>Source: [`hetu/data/backend/table.py:35`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L35)</small>
+
+
+
+Table表的地址信息，在后端，组件持久化的目标称为表。
+组件实际储存在数据库中时，需要实例名和cluster id等信息，此类封装了这些信息。
+
+
+
+
+### Attributes
+
+- **`comp_cls`** (type[BaseComponent]) — _No description._
+
+- **`instance_name`** (str) — _No description._
+
+- **`cluster_id`** (int) — _No description._
+
+- **`comp_name`** (str) — _No description._
+
+
+
+
+
+
+
+
+
+
+
+---
+
 ## `create_future_call`
 
 ```python

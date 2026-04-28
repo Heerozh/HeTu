@@ -10,14 +10,18 @@ The script overwrites every file under docs/api/. Manual edits are lost.
 from __future__ import annotations
 
 import annotationlib
+import ast
 import dataclasses
 import importlib
 import inspect
 import re
 import sys
+import textwrap
+import typing as _typing
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 import griffe
 from jinja2 import Environment, FileSystemLoader
@@ -117,7 +121,12 @@ def _clean_forwardref(s: str) -> str:
     return _FORWARDREF_REPR_RE.sub(r"\1", s)
 
 
-def _signature_string(obj: object, name: str, skip_self: bool = False) -> str:
+def _signature_string(
+    obj: object,
+    name: str,
+    skip_self: bool = False,
+    drop_first_n: int = 0,
+) -> str:
     try:
         # FORWARDREF lets PEP 649 lazy annotations resolve when possible and
         # fall back to ForwardRef objects for TYPE_CHECKING-only names —
@@ -132,6 +141,10 @@ def _signature_string(obj: object, name: str, skip_self: bool = False) -> str:
         params = list(sig.parameters.values())
         if params and params[0].name in ("self", "cls"):
             sig = sig.replace(parameters=params[1:])
+
+    if drop_first_n > 0:
+        params = list(sig.parameters.values())
+        sig = sig.replace(parameters=params[drop_first_n:])
 
     one_line = _clean_forwardref(f"{name}{sig}")
     if len(one_line) <= SIGNATURE_WRAP_THRESHOLD:
@@ -215,12 +228,154 @@ def _griffe_attributes(cls: type) -> list[dict]:
     return out
 
 
+_BIND_HELPER_NAMES = {"bind_first_arg_with_typehint"}
+_MISSING: Any = object()
+
+
+def _resolve_one_annotation(obj: Any, name: str) -> Any:
+    """Resolve a single annotation on `obj`, walking parent-package namespaces
+    so TYPE_CHECKING-only imports (e.g. table.py's `Backend`) still resolve.
+    Returns the live type, or None if the annotation is missing/unresolvable.
+    """
+    try:
+        ann = annotationlib.get_annotations(
+            obj, format=annotationlib.Format.FORWARDREF
+        )
+    except Exception:
+        return None
+    val = ann.get(name)
+    if val is None:
+        return None
+    if not isinstance(val, annotationlib.ForwardRef):
+        return val
+    module_name = getattr(obj, "__module__", "")
+    if not module_name:
+        return None
+    parts = module_name.split(".")
+    for i in range(len(parts), 0, -1):
+        mod = sys.modules.get(".".join(parts[:i]))
+        if mod is None:
+            continue
+        try:
+            return val.evaluate(locals=vars(mod))
+        except Exception:
+            continue
+    return None
+
+
+def _flatten_attr_chain(node: ast.AST) -> list[str] | None:
+    """Convert AST `self.a.b.c` into ['self', 'a', 'b', 'c']; None if shape differs."""
+    parts: list[str] = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if isinstance(node, ast.Name):
+        parts.append(node.id)
+        return list(reversed(parts))
+    return None
+
+
+def _walk_attr_chain(start_cls: type, parts: list[str]) -> object | None:
+    """Statically walk a dotted attribute chain on `start_cls`. Properties are
+    traversed via their fget return annotation; other names via the host class's
+    annotations (covers dataclass fields and plain `name: T` declarations).
+    Returns the leaf attribute (typically an unbound function), or None if any
+    hop is unresolvable.
+    """
+    current_cls: type | None = start_cls
+    for i, part in enumerate(parts):
+        if current_cls is None or not inspect.isclass(current_cls):
+            return None
+        attr = inspect.getattr_static(current_cls, part, _MISSING)
+        is_leaf = i == len(parts) - 1
+        if is_leaf:
+            return None if attr is _MISSING else attr
+        if attr is not _MISSING and isinstance(attr, property):
+            if attr.fget is None:
+                return None
+            current_cls = _resolve_one_annotation(attr.fget, "return")
+        else:
+            current_cls = _resolve_one_annotation(current_cls, part)
+    return None
+
+
+def _bind_first_arg_target(cls: type, prop: property) -> object | None:
+    """If a @property's body is exactly
+        return bind_first_arg_with_typehint(<self.x.y.z>, self)
+    statically resolve <self.x.y.z> to the wrapped callable. Returns None if
+    the property's shape doesn't match this pattern.
+    """
+    if prop.fget is None:
+        return None
+    try:
+        src = textwrap.dedent(inspect.getsource(prop.fget))
+    except (OSError, TypeError):
+        return None
+    try:
+        tree = ast.parse(src)
+    except SyntaxError:
+        return None
+    if not tree.body:
+        return None
+    func_node = tree.body[0]
+    if not isinstance(func_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        return None
+    if len(func_node.body) != 1:
+        return None
+    stmt = func_node.body[0]
+    if not isinstance(stmt, ast.Return) or stmt.value is None:
+        return None
+    call = stmt.value
+    if not (
+        isinstance(call, ast.Call)
+        and isinstance(call.func, ast.Name)
+        and call.func.id in _BIND_HELPER_NAMES
+        and call.args
+    ):
+        return None
+    parts = _flatten_attr_chain(call.args[0])
+    if parts is None or parts[0] != "self":
+        return None
+    return _walk_attr_chain(cls, parts[1:])
+
+
 def _collect_methods(cls: type) -> list[dict]:
     """Build sub-records for public methods defined directly on this class."""
     out: list[dict] = []
     for name, raw in vars(cls).items():
         if name.startswith("_"):
             continue
+
+        # Special case: @property whose body is just
+        #   return bind_first_arg_with_typehint(self.x.y.z, self)
+        # Borrow the wrapped target's docstring and signature, dropping `self`
+        # plus the bound first argument.
+        if isinstance(raw, property):
+            target = _bind_first_arg_target(cls, raw)
+            if target is None:
+                continue
+            if not (inspect.isfunction(target) or inspect.iscoroutinefunction(target)):
+                continue
+            if not inspect.getdoc(target):
+                continue
+            path, line = _source_location(target)
+            parsed = _parse_docstring(target)
+            out.append(
+                {
+                    "qualname": f"{cls.__qualname__}.{name}",
+                    "short_name": name,
+                    "signature": _signature_string(
+                        target, name, skip_self=True, drop_first_n=1
+                    ),
+                    "source_path": path,
+                    "source_line": line,
+                    "deprecated": None,
+                    **parsed,
+                    "methods": [],
+                }
+            )
+            continue
+
         # Unwrap classmethod / staticmethod descriptors.
         if isinstance(raw, (classmethod, staticmethod)):
             attr = raw.__func__
