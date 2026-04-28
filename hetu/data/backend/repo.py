@@ -34,17 +34,18 @@ Int64 = np.int64 | int
 
 
 class SessionRepository:
-    """帮助方法，从数据库查询数据并放入Session缓存。"""
+    """从数据库查询数据并放入Session缓存，`System`的`ctx.repo[...]`返回的便是此类。"""
 
     def __init__(self, session: Session, comp_cls: type[BaseComponent]) -> None:
         self._session = session
         self.ref: TableReference = TableReference(
             comp_cls, session.instance_name, session.cluster_id
         )
+        """`TableReference`对象，表示当前repo关联的数据库`Table`信息"""
 
     @property
     def session(self) -> Session:
-        """获取所属的Session对象。"""
+        """获取所属的内部`Session`对象。"""
         return self._session
 
     def _local_has_unique_conflicts(self, row: np.record, fields: set) -> str | None:
@@ -64,7 +65,7 @@ class SessionRepository:
         self, row: np.record, fields: set
     ) -> str | None:
         """
-        在远程数据库中检查Unique索引冲突。
+        内部方法，在远程数据库中检查Unique索引冲突。
         """
         session = self._session
         client = session.master_or_servant
@@ -118,13 +119,13 @@ class SessionRepository:
         changed_fields = self._get_changed_fields(row)
         if not insert:
             # 如果有id字段，表示没有找到旧数据
-            assert "id" not in changed_fields, (
-                _("row id({row_id})在session中未寻到，更新操作必须有旧数据。").format(row_id=row.id)
-            )
+            assert "id" not in changed_fields, _(
+                "row id({row_id})在session中未寻到，更新操作必须有旧数据。"
+            ).format(row_id=row.id)
         else:
-            assert "id" in changed_fields, (
-                _("session中已存在该row id({row_id})，插入操作必须没有旧数据。").format(row_id=row.id)
-            )
+            assert "id" in changed_fields, _(
+                "session中已存在该row id({row_id})，插入操作必须没有旧数据。"
+            ).format(row_id=row.id)
 
         changed_fields = changed_fields & self.ref.comp_cls.uniques_
 
@@ -140,7 +141,7 @@ class SessionRepository:
 
     async def get_by_id(self, row_id: Int64) -> np.record | None:
         """
-        从数据库获取单行数据，并放入Session缓存。
+        从数据库获取单行数据，并放入`Session`缓存。
         本指令如果命中缓存，不会去数据库查询。
         """
         idmap = self._session.idmap
@@ -198,9 +199,9 @@ class SessionRepository:
 
         comp_cls = self.ref.comp_cls
 
-        assert index_name in comp_cls.indexes_, (
-            _("{comp_name} 组件没有叫 {index_name} 的索引").format(comp_name=comp_cls.name_, index_name=index_name)
-        )
+        assert index_name in comp_cls.indexes_, _(
+            "{comp_name} 组件没有叫 {index_name} 的索引"
+        ).format(comp_name=comp_cls.name_, index_name=index_name)
 
         # 如果不是主键，直接用range方法
         if index_name != "id":
@@ -280,9 +281,9 @@ class SessionRepository:
         comp_cls = self.ref.comp_cls
 
         # 判断index_name存在
-        assert index_name in comp_cls.indexes_, (
-            _("{comp_name} 组件没有叫 {index_name} 的索引").format(comp_name=comp_cls.name_, index_name=index_name)
-        )
+        assert index_name in comp_cls.indexes_, _(
+            "{comp_name} 组件没有叫 {index_name} 的索引"
+        ).format(comp_name=comp_cls.name_, index_name=index_name)
 
         if isinstance(_left, np.generic):
             _left = _left.item()
@@ -380,11 +381,9 @@ class SessionRepository:
 
         # 检查index_name存在且为unique索引
         comp_cls = self.ref.comp_cls
-        assert index_name in comp_cls.uniques_, (
-            _("upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引").format(
-                comp_name=comp_cls.name_, index_name=index_name
-            )
-        )
+        assert index_name in comp_cls.uniques_, _(
+            "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
+        ).format(comp_name=comp_cls.name_, index_name=index_name)
 
         return UpsertContext(self, index_name, query_value)
 
@@ -438,9 +437,9 @@ class UpsertContext:
                     self.row_data, {self.index_name}
                 ):
                     raise RaceCondition(
-                        _("Upsert failed: 锚定的index({index_name})存在Unique违反，说明竞态insert").format(
-                            index_name=self.index_name
-                        )
+                        _(
+                            "Upsert failed: 锚定的index({index_name})存在Unique违反，说明竞态insert"
+                        ).format(index_name=self.index_name)
                     )
                 # 因为上面remote已经检查过了，所以ignore self.index_name
                 # 不然如果中间有别的session插入，还是会报UniqueViolation错误而不是Race

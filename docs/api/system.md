@@ -18,16 +18,16 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 
 
 
-帮助方法，从数据库查询数据并放入Session缓存。
+从数据库查询数据并放入Session缓存，`System`的`ctx.repo[...]`返回的便是此类。
 
 
 
 
 ### Attributes
 
-- **`ref`** (TableReference) — _No description._
+- **`ref`** (TableReference) — `TableReference`对象，表示当前repo关联的数据库`Table`信息
 
-- **`session`** (Session) — 获取所属的Session对象。
+- **`session`** (Session) — 获取所属的内部`Session`对象。
 
 
 
@@ -46,9 +46,9 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:63`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L63)</small>
+<small>Source: [`hetu/data/backend/repo.py:64`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L64)</small>
 
-在远程数据库中检查Unique索引冲突。
+内部方法，在远程数据库中检查Unique索引冲突。
 
 
 
@@ -69,7 +69,7 @@ is_unique_conflicts(
 ) -> str | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:103`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L103)</small>
+<small>Source: [`hetu/data/backend/repo.py:104`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L104)</small>
 
 检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
@@ -97,9 +97,9 @@ is_unique_conflicts(
 get_by_id(row_id: numpy.int64 | int) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:141`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L141)</small>
+<small>Source: [`hetu/data/backend/repo.py:142`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L142)</small>
 
-从数据库获取单行数据，并放入Session缓存。
+从数据库获取单行数据，并放入`Session`缓存。
 本指令如果命中缓存，不会去数据库查询。
 
 
@@ -121,7 +121,7 @@ get(
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:163`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L163)</small>
+<small>Source: [`hetu/data/backend/repo.py:164`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L164)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
@@ -171,7 +171,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:219`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L219)</small>
+<small>Source: [`hetu/data/backend/repo.py:220`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L220)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1+(limit-缓存命中) 次查询，至少要进行1次数据库查询。
@@ -224,7 +224,7 @@ range(
 insert(row: numpy.record, ignore: str | None = None) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:309`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L309)</small>
+<small>Source: [`hetu/data/backend/repo.py:310`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L310)</small>
 
 向Session中添加一行待插入数据。
 
@@ -250,7 +250,7 @@ insert(row: numpy.record, ignore: str | None = None) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:330`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L330)</small>
+<small>Source: [`hetu/data/backend/repo.py:331`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L331)</small>
 
 向Session中添加一行待更新数据。
 
@@ -276,7 +276,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:360`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L360)</small>
+<small>Source: [`hetu/data/backend/repo.py:361`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L361)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -311,7 +311,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:391`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L391)</small>
+<small>Source: [`hetu/data/backend/repo.py:390`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L390)</small>
 
 向Session中添加一行待删除数据。
 
