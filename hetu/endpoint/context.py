@@ -17,24 +17,47 @@ if TYPE_CHECKING:
 
 @dataclass
 class Context:
-    # 通用变量
-    # 调用方的user id，如果你执行过`elevate()`，此值为传入的`user_id`
+    """
+    Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpoint函数；
+    `SystemContext` 继承自此类。包含调用方身份、当前连接的用户数据，
+    以及消息发送和订阅数量限制等。
+    """
+
     caller: int
-    connection_id: int  # 调用方的connection id
-    address: str  # 调用方的ip
-    group: str  # 所属组名，目前只用于判断是否admin
-    user_data: dict[str, Any]  # 当前连接的用户数据，可自由设置，在所有System间共享
-    timestamp: float  # 调用时间戳
-    # 系统变量
-    request: Request  # framework原始请求对象，unsafe
-    systems: SystemCaller  # 全局System管理器，unsafe
-    # 限制变量
-    # 客户端消息发送限制（次数）
+    """调用方的user id；未登录为0；执行过 `elevate()` 后为传入的 `user_id` 。"""
+
+    connection_id: int
+    """调用方的connection id。"""
+
+    address: str
+    """调用方的IP地址。"""
+
+    group: str
+    """所属组名，目前只用于判断是否admin。"""
+
+    user_data: dict[str, Any]
+    """当前连接的用户数据，可自由设置，在所有System间共享。"""
+
+    timestamp: float
+    """调用时间戳。"""
+
+    request: Request
+    """framework原始请求对象，unsafe，普通业务代码请避免直接使用。"""
+
+    systems: SystemCaller
+    """全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。"""
+
     client_limits: list[list[int]] = field(default_factory=list)
-    # 服务端消息发送限制（次数）
+    """客户端消息发送限制（次数）。"""
+
     server_limits: list[list[int]] = field(default_factory=list)
-    max_row_sub: int = 0  # 行订阅限制
-    max_index_sub: int = 0  # 索引订阅限制
+    """服务端消息发送限制（次数）。"""
+
+    max_row_sub: int = 0
+    """行订阅数量限制。"""
+
+    max_index_sub: int = 0
+    """索引订阅数量限制。"""
 
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"

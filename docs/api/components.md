@@ -27,6 +27,10 @@ _No documentation available._
 
 
 
+
+
+
+
 ---
 
 ## `Permission`
@@ -39,6 +43,23 @@ Permission(*values)
 
 
 Enum where members are also (and must be) ints
+
+
+
+
+### Attributes
+
+- **`EVERYBODY`** (Any) — _No description._
+
+- **`USER`** (Any) — _No description._
+
+- **`OWNER`** (Any) — _No description._
+
+- **`RLS`** (Any) — _No description._
+
+- **`ADMIN`** (Any) — _No description._
+
+
 
 
 

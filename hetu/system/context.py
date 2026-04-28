@@ -18,13 +18,23 @@ if TYPE_CHECKING:
 
 @dataclass
 class SystemContext(Context):
-    # 事务变量
-    # 当前事务冲突重试次数
+    """
+    System调用时的上下文，继承自 :class:`Context` 并添加事务相关属性。
+    每次System执行时由engine创建并作为第一个参数 `ctx` 传入。
+    """
+
     race_count: int = 0
-    # 当前事务的repo实例
+    """当前事务因 `RaceCondition` 重试的次数，初始为0。注意：`timeout` 引发的再次
+    触发会从0重新计数。"""
+
     repo: dict[type[BaseComponent], SessionRepository] = field(default_factory=dict)
-    # 继承的父事务函数
+    """当前事务的repo字典，键为Component类，值为对应的 `SessionRepository`。
+    通过 `ctx.repo[ComponentClass]` 取得并执行 `get` / `range` / `upsert` /
+    `update` / `delete` 等CRUD操作；事务结束时统一提交。"""
+
     depend: dict[str, Callable] = field(default_factory=dict)
+    """`depends` 依赖中声明的父事务函数字典，键为System名（可带":副本名"后缀）。
+    通过 `ctx.depend["system_name"](ctx, ...)` 调用以在同一事务中执行。"""
 
     async def session_commit(self) -> None:
         """

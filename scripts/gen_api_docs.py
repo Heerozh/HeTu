@@ -9,8 +9,11 @@ The script overwrites every file under docs/api/. Manual edits are lost.
 
 from __future__ import annotations
 
+import annotationlib
+import dataclasses
 import importlib
 import inspect
+import re
 import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -104,14 +107,33 @@ def collect_public_symbols() -> list[Symbol]:
 
 SIGNATURE_WRAP_THRESHOLD = 88
 
+# inspect.formatannotation prints a top-level ForwardRef nicely as "Name", but
+# nested inside a generic (e.g. dict[type[ForwardRef('X')], ...]) it falls back
+# to repr. Strip the verbose form to just the bare name.
+_FORWARDREF_REPR_RE = re.compile(r"ForwardRef\('([^']+)'(?:,[^)]*)?\)")
 
-def _signature_string(obj: object, name: str) -> str:
+
+def _clean_forwardref(s: str) -> str:
+    return _FORWARDREF_REPR_RE.sub(r"\1", s)
+
+
+def _signature_string(obj: object, name: str, skip_self: bool = False) -> str:
     try:
-        sig = inspect.signature(obj)
+        # FORWARDREF lets PEP 649 lazy annotations resolve when possible and
+        # fall back to ForwardRef objects for TYPE_CHECKING-only names —
+        # avoids NameError on otherwise valid signatures.
+        sig = inspect.signature(
+            obj, annotation_format=annotationlib.Format.FORWARDREF
+        )
     except (TypeError, ValueError, NameError):
         return name
 
-    one_line = f"{name}{sig}"
+    if skip_self:
+        params = list(sig.parameters.values())
+        if params and params[0].name in ("self", "cls"):
+            sig = sig.replace(parameters=params[1:])
+
+    one_line = _clean_forwardref(f"{name}{sig}")
     if len(one_line) <= SIGNATURE_WRAP_THRESHOLD:
         return one_line
 
@@ -135,6 +157,88 @@ def _signature_string(obj: object, name: str) -> str:
     out = f"{name}(\n    {body},\n)"
     if sig.return_annotation is not inspect.Signature.empty:
         out += f" -> {inspect.formatannotation(sig.return_annotation)}"
+    return _clean_forwardref(out)
+
+
+_griffe_pkg_cache: dict[str, object] = {}
+
+
+def _griffe_load_pkg(pkg_name: str):
+    if pkg_name not in _griffe_pkg_cache:
+        try:
+            _griffe_pkg_cache[pkg_name] = griffe.load(
+                pkg_name, search_paths=[str(REPO_ROOT)]
+            )
+        except Exception as e:
+            print(f"WARN: griffe load failed for {pkg_name}: {e}", file=sys.stderr)
+            _griffe_pkg_cache[pkg_name] = None
+    return _griffe_pkg_cache[pkg_name]
+
+
+def _griffe_class(cls: type):
+    """Locate the griffe Class node corresponding to a runtime Python class."""
+    module_path = cls.__module__
+    pkg_name = module_path.split(".")[0]
+    pkg = _griffe_load_pkg(pkg_name)
+    if pkg is None:
+        return None
+    try:
+        node = pkg
+        for part in module_path.split(".")[1:]:
+            node = node[part]
+        return node[cls.__name__]
+    except (KeyError, AttributeError):
+        return None
+
+
+def _griffe_attributes(cls: type) -> list[dict]:
+    """Pull per-attribute docstrings from griffe (style A: string after field)."""
+    g_cls = _griffe_class(cls)
+    if g_cls is None:
+        return []
+    out: list[dict] = []
+    for name, member in g_cls.members.items():
+        if member.kind.value != "attribute":
+            continue
+        if name.startswith("_"):
+            continue
+        doc = member.docstring
+        description = inspect.cleandoc(doc.value) if doc else None
+        annotation = str(member.annotation) if member.annotation else "Any"
+        out.append(
+            {
+                "name": name,
+                "annotation": annotation,
+                "description": description,
+            }
+        )
+    return out
+
+
+def _collect_methods(cls: type) -> list[dict]:
+    """Build sub-records for public methods defined directly on this class."""
+    out: list[dict] = []
+    for name, attr in vars(cls).items():
+        if name.startswith("_"):
+            continue
+        if not (inspect.isfunction(attr) or inspect.iscoroutinefunction(attr)):
+            continue
+        if not inspect.getdoc(attr):
+            continue
+        path, line = _source_location(attr)
+        parsed = _parse_docstring(attr)
+        out.append(
+            {
+                "qualname": f"{cls.__qualname__}.{name}",
+                "short_name": name,
+                "signature": _signature_string(attr, name, skip_self=True),
+                "source_path": path,
+                "source_line": line,
+                "deprecated": None,
+                **parsed,
+                "methods": [],
+            }
+        )
     return out
 
 
@@ -161,12 +265,23 @@ def _example_to_string(value: object) -> str:
     return str(value)
 
 
+def _is_auto_dataclass_doc(obj: object, raw: str) -> bool:
+    """
+    Python's @dataclass synthesizes __doc__ as 'ClassName(field: T, ...)' when
+    the class lacks a real docstring. Treat that as no documentation.
+    """
+    if not (inspect.isclass(obj) and dataclasses.is_dataclass(obj)):
+        return False
+    return raw.startswith(f"{obj.__name__}(")
+
+
 def _parse_docstring(obj: object) -> dict:
     raw = inspect.getdoc(obj)
-    if not raw:
+    if not raw or _is_auto_dataclass_doc(obj, raw):
         return {
             "summary": None,
             "parameters": [],
+            "attributes": [],
             "returns": None,
             "examples": [],
             "notes": None,
@@ -178,6 +293,7 @@ def _parse_docstring(obj: object) -> dict:
     out: dict = {
         "summary": None,
         "parameters": [],
+        "attributes": [],
         "returns": None,
         "examples": [],
         "notes": None,
@@ -196,8 +312,24 @@ def _parse_docstring(obj: object) -> dict:
                         "description": p.description or None,
                     }
                 )
+        elif kind == "attributes":
+            for a in section.value:
+                out["attributes"].append(
+                    {
+                        "name": a.name,
+                        "annotation": str(a.annotation) if a.annotation else "Any",
+                        "description": a.description or None,
+                    }
+                )
         elif kind == "returns":
-            out["returns"] = "\n".join(r.description for r in section.value)
+            parts = []
+            for r in section.value:
+                # numpy parser puts free-form prose in `annotation` when there
+                # is no `name : type` header — fall back to it.
+                text = r.description or (str(r.annotation) if r.annotation else "")
+                if text:
+                    parts.append(text)
+            out["returns"] = "\n".join(parts) if parts else None
         elif kind == "examples":
             out["examples"] = [_example_to_string(v) for v in section.value]
         elif kind in ("notes", "admonition"):
@@ -208,12 +340,21 @@ def _parse_docstring(obj: object) -> dict:
                 out["notes"] = value.description
             else:
                 out["notes"] = None
+
+    # For classes, prefer style-A per-attribute docstrings from source
+    # (only visible via griffe — runtime introspection cannot see them).
+    if inspect.isclass(obj):
+        griffe_attrs = _griffe_attributes(obj)
+        if griffe_attrs:
+            out["attributes"] = griffe_attrs
+
     return out
 
 
 def build_record(symbol: Symbol) -> dict:
     src_path, src_line = _source_location(symbol.obj)
     parsed = _parse_docstring(symbol.obj)
+    methods = _collect_methods(symbol.obj) if inspect.isclass(symbol.obj) else []
     return {
         "qualname": symbol.qualname,
         "short_name": symbol.short_name,
@@ -222,6 +363,7 @@ def build_record(symbol: Symbol) -> dict:
         "source_line": src_line,
         "deprecated": None,
         **parsed,
+        "methods": methods,
     }
 
 
@@ -271,7 +413,8 @@ def render_index_page(grouped: dict[str, list[Symbol]]) -> str:
 def render_coverage_page(symbols: list[Symbol]) -> str:
     missing = []
     for s in symbols:
-        if not inspect.getdoc(s.obj):
+        raw = inspect.getdoc(s.obj)
+        if not raw or _is_auto_dataclass_doc(s.obj, raw):
             path, line = _source_location(s.obj)
             missing.append(
                 {"qualname": s.qualname, "source_path": path, "source_line": line}

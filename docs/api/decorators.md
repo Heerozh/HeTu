@@ -70,6 +70,8 @@ define_component(
 
 
 
+
+
 ### Examples
 
 ```python
@@ -99,6 +101,8 @@ define_component(
 
 每个Component表都有个默认的主键`id: np.int64 = property_field(default=雪花uuid, unique=True)`，
 是一个uuid，无法修改。
+
+
 
 
 ---
@@ -142,6 +146,8 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 
 
 
+
+
 ### Examples
 
 ```python
@@ -161,12 +167,22 @@ hetu.system.define_system : define_system装饰器定义System
 hetu.endpoint.Context : Context类定义
 
 
+
+
 ---
 
 ## `define_system`
 
 ```python
-define_system
+define_system(
+    components: tuple[type[BaseComponent], ...] | None = None,
+    namespace: str = 'default',
+    force: bool = False,
+    permission: hetu.common.permission.Permission | None = None,
+    retry: int = 9999,
+    depends: tuple[str | function, ...] = (),
+    call_lock=False,
+)
 ```
 
 <small>Source: [`hetu/system/definer.py:303`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L303)</small>
@@ -218,6 +234,8 @@ define_system
 
 
 
+
+
 ### Examples
 
 ```python
@@ -252,6 +270,8 @@ hetu.system.SystemContext : SystemContext类定义
 hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
 
 
+
+
 ---
 
 ## `property_field`
@@ -269,6 +289,10 @@ property_field(
 
 
 _No documentation available._
+
+
+
+
 
 
 

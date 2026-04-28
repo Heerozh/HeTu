@@ -28,6 +28,13 @@ weight: {{ weight }}
 {% endfor %}
 {% endif %}
 
+{% if api.attributes %}
+### Attributes
+{% for a in api.attributes %}
+- **`{{ a.name }}`** ({{ a.annotation }}) — {{ a.description or "_No description._" }}
+{% endfor %}
+{% endif %}
+
 {% if api.returns %}
 ### Returns
 {{ api.returns }}
@@ -45,6 +52,50 @@ weight: {{ weight }}
 {% if api.notes %}
 ### Notes
 {{ api.notes }}
+{% endif %}
+
+{% if api.methods %}
+### Methods
+{% for m in api.methods %}
+#### `{{ m.short_name }}`
+
+```python
+{{ m.signature }}
+```
+
+<small>Source: [`{{ m.source_path }}:{{ m.source_line }}`](https://github.com/Heerozh/HeTu/blob/main/{{ m.source_path }}#L{{ m.source_line }})</small>
+
+{% if m.summary %}{{ m.summary }}{% endif %}
+
+{% if m.parameters %}
+**Parameters**
+{% for p in m.parameters %}
+- **`{{ p.name }}`** ({{ p.annotation }}{% if p.default %}, default `{{ p.default }}`{% endif %}) — {{ p.description or "_No description._" }}
+{% endfor %}
+{% endif %}
+
+{% if m.returns %}
+**Returns**
+
+{{ m.returns }}
+{% endif %}
+
+{% if m.examples %}
+**Examples**
+{% for ex in m.examples %}
+```python
+{{ ex }}
+```
+{% endfor %}
+{% endif %}
+
+{% if m.notes %}
+**Notes**
+
+{{ m.notes }}
+{% endif %}
+
+{% endfor %}
 {% endif %}
 
 ---

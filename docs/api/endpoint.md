@@ -11,13 +11,103 @@ weight: 40
 ## `EndpointContext`
 
 ```python
-EndpointContext
+EndpointContext(
+    caller: int,
+    connection_id: int,
+    address: str,
+    group: str,
+    user_data: dict[str, typing.Any],
+    timestamp: float,
+    request: Request,
+    systems: SystemCaller,
+    client_limits: list[list[int]] = <factory>,
+    server_limits: list[list[int]] = <factory>,
+    max_row_sub: int = 0,
+    max_index_sub: int = 0,
+) -> None
 ```
 
 <small>Source: [`hetu/endpoint/context.py:18`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L18)</small>
 
 
-Context(caller: int, connection_id: int, address: str, group: str, user_data: dict[str, typing.Any], timestamp: float, request: Request, systems: SystemCaller, client_limits: list[list[int]] = <factory>, server_limits: list[list[int]] = <factory>, max_row_sub: int = 0, max_index_sub: int = 0)
+Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpoint函数；
+`SystemContext` 继承自此类。包含调用方身份、当前连接的用户数据，
+以及消息发送和订阅数量限制等。
+
+
+
+
+### Attributes
+
+- **`caller`** (int) — 调用方的user id；未登录为0；执行过 `elevate()` 后为传入的 `user_id` 。
+
+- **`connection_id`** (int) — 调用方的connection id。
+
+- **`address`** (str) — 调用方的IP地址。
+
+- **`group`** (str) — 所属组名，目前只用于判断是否admin。
+
+- **`user_data`** (dict[str, Any]) — 当前连接的用户数据，可自由设置，在所有System间共享。
+
+- **`timestamp`** (float) — 调用时间戳。
+
+- **`request`** (Request) — framework原始请求对象，unsafe，普通业务代码请避免直接使用。
+
+- **`systems`** (SystemCaller) — 全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。
+
+- **`client_limits`** (list[list[int]]) — 客户端消息发送限制（次数）。
+
+- **`server_limits`** (list[list[int]]) — 服务端消息发送限制（次数）。
+
+- **`max_row_sub`** (int) — 行订阅数量限制。
+
+- **`max_index_sub`** (int) — 索引订阅数量限制。
+
+
+
+
+
+
+
+
+
+
+### Methods
+
+#### `configure`
+
+```python
+configure(client_limits, server_limits, max_row_sub, max_index_sub)
+```
+
+<small>Source: [`hetu/endpoint/context.py:68`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L68)</small>
+
+配置连接选项
+
+
+
+
+
+
+
+
+
+
+#### `rls_check`
+
+```python
+rls_check(
+    component: type[BaseComponent],
+    row: numpy.record | numpy.ndarray | numpy.rec.recarray | dict,
+) -> bool
+```
+
+<small>Source: [`hetu/endpoint/context.py:75`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L75)</small>
+
+检查当前用户对某个component的权限
+
+
+
 
 
 
@@ -39,6 +129,15 @@ ResponseToClient(message: list | dict)
 
 
 回报message给客户端，注意必须是json可以序列化的数据
+
+
+
+
+### Attributes
+
+- **`message`** (Any) — _No description._
+
+
 
 
 
@@ -72,8 +171,12 @@ kick_logged_in:
 
 
 
+
+
 ### Notes
 本方法是一个独立的事务，如果你在System中(另一个事务中）调用此方法，父事务回退时不会回退此方法的结果。
+
+
 
 
 ---
