@@ -26,7 +26,7 @@ from typing import Any
 import griffe
 from jinja2 import Environment, FileSystemLoader
 
-from scripts.api_extras import EXTRAS, SKIP, TOPIC_MAP
+from api_extras import EXTRAS, SKIP, TOPIC_MAP
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DOCS_API_DIR = REPO_ROOT / "docs" / "api"
