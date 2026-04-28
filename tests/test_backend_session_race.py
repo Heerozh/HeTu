@@ -80,6 +80,72 @@ async def test_version_race(item_ref, mod_auto_backend):
     await asyncio.gather(task1, task2)
 
 
+async def test_stale_read_race(item_ref, mod_auto_backend):
+    """
+    测试陈旧读（stale read）场景：
+    事务1先读行A的值，再用读到的值更新行B；
+    在事务1提交前，事务2修改了行A。
+
+    依据严格的事务语义（Snapshot/Serializable Isolation），
+    事务1此时持有的是A的陈旧快照，提交时应抛出 RaceCondition。
+    """
+    import asyncio
+
+    from hetu.data.backend import RaceCondition
+
+    backend: Backend = mod_auto_backend()
+
+    # 数据准备：插入源行A 与目标行B
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(item_ref.comp_cls)
+        row_a = item_ref.comp_cls.new_row()
+        row_a.owner = 1
+        row_a.name = "SourceA"
+        row_a.time = 100
+        row_a.qty = 1
+        await item_repo.insert(row_a)
+
+        row_b = item_ref.comp_cls.new_row()
+        row_b.id = SnowflakeID().next_id()
+        row_b.owner = 2
+        row_b.name = "TargetB"
+        row_b.time = 101
+        row_b.qty = 0
+        await item_repo.insert(row_b)
+
+    await backend.wait_for_synced()
+
+    async def copy_a_to_b(sleep):
+        """读A，把读到的qty写到B"""
+        async with backend.session("pytest", 1) as _session:
+            _item_repo = _session.using(item_ref.comp_cls)
+            _a = await _item_repo.get(name="SourceA")
+            assert _a is not None
+            stale_qty = int(_a.qty)
+            await asyncio.sleep(sleep)  # 期间A被task2改掉
+            _b = await _item_repo.get(name="TargetB")
+            assert _b is not None
+            _b.qty = stale_qty  # type: ignore
+            await _item_repo.update(_b)
+
+    async def modify_a(sleep):
+        """修改A的qty"""
+        async with backend.session("pytest", 1) as _session:
+            _item_repo = _session.using(item_ref.comp_cls)
+            _a = await _item_repo.get(name="SourceA")
+            assert _a is not None
+            await asyncio.sleep(sleep)
+            _a.qty = _a.qty + 99  # type: ignore
+            await _item_repo.update(_a)
+
+    # task1先读A并等待，task2在此期间修改A并先提交，然后task1把A的旧值写入B
+    task1 = asyncio.create_task(copy_a_to_b(0.2))
+    task2 = asyncio.create_task(modify_a(0.05))
+    await task2  # 先等task2完成（A已被改）
+    with pytest.raises(RaceCondition):
+        await task1
+
+
 async def test_unique_commit_race(item_ref, mod_auto_backend):
     """测试服务器端提交时，牵涉unique的竞态检查。"""
     import asyncio
