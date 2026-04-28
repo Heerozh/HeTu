@@ -804,6 +804,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
 
+        # 对纯读行加版本检查，防止事务依赖的陈旧读：
+        # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
+        for ref, row_versions in idmap.get_clean_rows().items():
+            clean_id_prefix = self.cluster_prefix(ref) + ":id:"
+            for row_id, old_version in row_versions.items():
+                _version_must_match(clean_id_prefix + str(row_id), old_version)
+
         payload_json: bytes = msg_packer.pack([checks, pushes, deleted])  # type: ignore
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]

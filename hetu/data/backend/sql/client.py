@@ -787,6 +787,26 @@ class SQLBackendClient(BackendClient, alias="sql"):
             channels: set[str] = set()
             try:
                 async with self.aio.begin() as conn:
+                    # 对纯读行加版本检查，防止事务依赖的陈旧读：
+                    # 事务读到的某行，在提交前若被其他事务修改/删除，本事务应失败重试。
+                    for ref, row_versions in idmap.get_clean_rows().items():
+                        clean_table = self.component_table(ref)
+                        clean_ids = [int(rid) for rid in row_versions.keys()]
+                        clean_stmt = sa.select(
+                            clean_table.c.id, clean_table.c._version
+                        ).where(clean_table.c.id.in_(clean_ids))
+                        clean_result = await conn.execute(clean_stmt)
+                        found = {
+                            int(_id): int(_ver) for _id, _ver in clean_result.all()
+                        }
+                        for row_id, expected_version in row_versions.items():
+                            actual = found.get(int(row_id))
+                            if actual is None or actual != int(expected_version):
+                                raise RaceCondition(
+                                    f"Version mismatch on read row id={int(row_id)} "
+                                    f"exp:{expected_version} got:{actual}"
+                                )
+
                     # 先删除，避免insert/update遇到本事务中将被删除数据导致unique冲突。
                     for ref, (
                         _inserts,

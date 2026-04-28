@@ -257,6 +257,31 @@ class IdentityMap:
             for row_id in dat.keys()
         }
 
+    def get_clean_rows(self) -> dict["TableReference", dict[int, str]]:
+        """
+        返回当前仍处于CLEAN状态的行（被读取但未被修改/删除/重新插入），
+        以及它们读取时的 `_version`。提交时用于对纯读行做严格的乐观锁检查，
+        避免事务依赖的陈旧读（stale read）。
+
+        Returns
+        -------
+        {TableReference: {row_id: _version_str}}
+        """
+        ret: dict[TableReference, dict[int, str]] = {}
+        for table_ref, states in self._row_states.items():
+            clean_cache = self._row_clean.get(table_ref, {})
+            row_versions: dict[int, str] = {}
+            for row_id, state in states.items():
+                if state != RowState.CLEAN:
+                    continue
+                clean_row = clean_cache.get(row_id)
+                if clean_row is None:
+                    continue
+                row_versions[row_id] = str(clean_row["_version"])
+            if row_versions:
+                ret[table_ref] = row_versions
+        return ret
+
     def get_dirty_rows(
         self,
     ) -> dict[
