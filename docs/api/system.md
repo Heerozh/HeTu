@@ -147,11 +147,11 @@ get(
 
 **Examples**
 
-```python
+
 ::
 
     item = await session.using(Item).get(id=1234567890)
-```
+
 
 
 
@@ -293,12 +293,12 @@ upsert(
 
 **Examples**
 
-```python
+
 ::
 
     async with session.using(Order).upsert(id=1234567890) as order:
         order.status = "completed"
-```
+
 
 
 
@@ -579,6 +579,7 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 
 ### Examples
 
+
 ```python
 >>> import hetu
 >>> @hetu.define_system(namespace='test', permission=None)
@@ -590,11 +591,12 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 ...     ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
 ```
 
-```python
+
+
 示例中，`depends`依赖使用':'符号创建了`create_future_call`的test副本。
 继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
 增加backend的扩展性，具体参考簇相关的文档。
-```
+
 
 
 

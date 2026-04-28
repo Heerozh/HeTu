@@ -47,9 +47,13 @@ weight: {{ weight }}
 {% if api.examples %}
 ### Examples
 {% for ex in api.examples %}
+{% if ex.kind == "examples" %}
 ```python
-{{ ex }}
+{{ ex.content }}
 ```
+{% else %}
+{{ ex.content }}
+{% endif %}
 {% endfor %}
 {% endif %}
 
@@ -87,9 +91,13 @@ weight: {{ weight }}
 {% if m.examples %}
 **Examples**
 {% for ex in m.examples %}
+{% if ex.kind == "examples" %}
 ```python
-{{ ex }}
+{{ ex.content }}
 ```
+{% else %}
+{{ ex.content }}
+{% endif %}
 {% endfor %}
 {% endif %}
 

@@ -263,11 +263,16 @@ def _source_location(obj: object) -> tuple[str, int]:
         return (str(abs_path), lineno)
 
 
-def _example_to_string(value: object) -> str:
-    """griffe's Examples section returns list[tuple[kind, str]] in 2.x."""
+def _example_item(value: object) -> dict:
+    """
+    griffe's Examples section returns list[tuple[kind, str]] in 2.x, where kind
+    is `examples` (doctest code) or `text` (prose between code blocks).
+    """
     if isinstance(value, tuple) and len(value) == 2:
-        return str(value[1])
-    return str(value)
+        kind = value[0]
+        kind_str = kind.value if hasattr(kind, "value") else str(kind)
+        return {"kind": kind_str, "content": str(value[1])}
+    return {"kind": "examples", "content": str(value)}
 
 
 def _is_auto_dataclass_doc(obj: object, raw: str) -> bool:
@@ -336,7 +341,7 @@ def _parse_docstring(obj: object) -> dict:
                     parts.append(text)
             out["returns"] = "\n".join(parts) if parts else None
         elif kind == "examples":
-            out["examples"] = [_example_to_string(v) for v in section.value]
+            out["examples"] = [_example_item(v) for v in section.value]
         elif kind in ("notes", "admonition"):
             value = section.value
             if isinstance(value, str):

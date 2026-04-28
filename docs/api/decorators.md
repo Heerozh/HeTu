@@ -75,6 +75,7 @@ define_component(
 
 ### Examples
 
+
 ```python
 >>> import hetu
 >>> import numpy as np
@@ -85,6 +86,7 @@ define_component(
 ...     owner: np.int64 = hetu.property_field(default=0, unique=True)
 ...     name: str = hetu.property_field(default="12345678", dtype="U8")
 ```
+
 
 
 
@@ -152,6 +154,7 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 
 ### Examples
 
+
 ```python
 >>> import hetu
 >>>
@@ -160,6 +163,7 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 ...     await ctx.systems.call("SystemName", order_id, paid)
 ...     return hetu.ResponseToClient(['anything', 'blah blah'])
 ```
+
 
 
 
@@ -241,6 +245,7 @@ define_system(
 
 ### Examples
 
+
 ```python
 >>> import hetu
 >>> # 定义Component
@@ -264,6 +269,7 @@ define_system(
 ...     # ctx.commit()  # 可以省略，也可以提前提交
 ...     return hetu.ResponseToClient(['anything', 'blah blah'])
 ```
+
 
 
 
@@ -334,6 +340,7 @@ HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullab
 
 ### Examples
 
+
 ```python
 >>> import numpy as np
 >>> class Position(BaseComponent):
@@ -341,6 +348,7 @@ HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullab
 ...     owner: np.int64 = property_field(default=0, unique=True)
 ...     name: str = property_field(default="hero", dtype="U16")
 ```
+
 
 
 
