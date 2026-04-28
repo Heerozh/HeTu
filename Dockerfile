@@ -23,6 +23,6 @@ USER hetu
 # 入口
 EXPOSE 2466/tcp
 
-ENTRYPOINT ["python -m hetu"]
-#ENTRYPOINT ["python -O -m hetu"]  项目成熟后再开-O
+ENTRYPOINT ["python", "-m", "hetu"]
+#ENTRYPOINT ["python", "-O", "-m", "hetu"]  项目成熟后再开-O
 CMD ["start", "--config /app/config.yml"]
