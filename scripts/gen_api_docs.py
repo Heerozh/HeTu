@@ -218,9 +218,14 @@ def _griffe_attributes(cls: type) -> list[dict]:
 def _collect_methods(cls: type) -> list[dict]:
     """Build sub-records for public methods defined directly on this class."""
     out: list[dict] = []
-    for name, attr in vars(cls).items():
+    for name, raw in vars(cls).items():
         if name.startswith("_"):
             continue
+        # Unwrap classmethod / staticmethod descriptors.
+        if isinstance(raw, (classmethod, staticmethod)):
+            attr = raw.__func__
+        else:
+            attr = raw
         if not (inspect.isfunction(attr) or inspect.iscoroutinefunction(attr)):
             continue
         if not inspect.getdoc(attr):

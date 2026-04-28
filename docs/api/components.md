@@ -31,6 +31,143 @@ _No documentation available._
 
 
 
+### Methods
+
+#### `new_row`
+
+```python
+new_row(id_=None) -> numpy.record
+```
+
+<small>Source: [`hetu/data/component.py:222`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L222)</small>
+
+返回空数据行，id生成uuid，用于insert
+
+
+
+
+
+
+
+
+
+
+#### `new_rows`
+
+```python
+new_rows(size) -> numpy.rec.recarray
+```
+
+<small>Source: [`hetu/data/component.py:232`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L232)</small>
+
+返回空数据行，id生成uuid，用于insert
+
+
+
+
+
+
+
+
+
+
+#### `dict_to_struct`
+
+```python
+dict_to_struct(data: dict) -> numpy.record
+```
+
+<small>Source: [`hetu/data/component.py:240`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L240)</small>
+
+从dict转换为c-struct like的，可直接传给数据库的，行数据
+
+
+
+
+
+
+
+
+
+
+#### `struct_to_dict`
+
+```python
+struct_to_dict(data: numpy.record) -> dict[str, typing.Any]
+```
+
+<small>Source: [`hetu/data/component.py:248`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L248)</small>
+
+从c-struct like的行数据转换为typed dict
+
+
+
+
+
+
+
+
+
+
+#### `duplicate`
+
+```python
+duplicate(namespace: str, suffix: str) -> type[hetu.data.component.BaseComponent]
+```
+
+<small>Source: [`hetu/data/component.py:254`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L254)</small>
+
+复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
+注意：只能在define阶段使用
+
+
+
+
+
+
+
+
+
+
+#### `get_duplicates`
+
+```python
+get_duplicates(namespace: str) -> dict[str, type[hetu.data.component.BaseComponent]]
+```
+
+<small>Source: [`hetu/data/component.py:272`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L272)</small>
+
+获取此Component在指定namespace下的所有副本实例
+
+
+
+
+
+
+
+
+
+
+#### `is_rls`
+
+```python
+is_rls() -> bool
+```
+
+<small>Source: [`hetu/data/component.py:277`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L277)</small>
+
+此Component是否是RLS权限
+
+
+
+
+
+
+
+
+
+
+
 
 ---
 
@@ -47,22 +184,26 @@ Permission(*values)
 
 
 
-Enum where members are also (and must be) ints
+客户端访问权限级别。
+
+用于 `define_endpoint` / `define_system` 暴露给客户端的调用权限，也用于
+`define_component` 声明Component数据的读取权限。服务端内部代码不受这些权限
+限制；业务逻辑中的写入权限和更细粒度安全检查仍需要自行实现。
 
 
 
 
 ### Attributes
 
-- **`EVERYBODY`** (Any) — _No description._
+- **`EVERYBODY`** (Any) — 任何客户端连接都允许访问；适合公开状态、公告、配置等低敏感数据。
 
-- **`USER`** (Any) — _No description._
+- **`USER`** (Any) — 仅已登录客户端允许访问；要求 `ctx.caller` 有有效用户id。
 
-- **`OWNER`** (Any) — _No description._
+- **`OWNER`** (Any) — Component行级读取权限；等同于 `RLS` 且预设 `rls_compare=("eq", "owner", "caller")`。
 
-- **`RLS`** (Any) — _No description._
+- **`RLS`** (Any) — Component自定义行级读取权限；具体比较逻辑由 `rls_compare` 参数定义。
 
-- **`ADMIN`** (Any) — _No description._
+- **`ADMIN`** (Any) — 仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。
 
 
 

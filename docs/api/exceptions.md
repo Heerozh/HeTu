@@ -21,7 +21,53 @@ RaceCondition
 
 
 
-Common base class for all non-exit exceptions.
+事务竞态异常，表示当前事务基于过期状态提交失败，可以丢弃本次Session并重试。
+
+常见触发场景包括：
+
+- 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
+- 提交 `insert` / `update` 时，唯一索引在提交阶段被其他事务抢先占用；
+- `upsert` 发现锚定的unique索引已被并发事务插入；
+- 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
+
+`SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
+
+
+
+
+
+
+
+
+
+
+
+
+
+---
+
+## `UniqueViolation`
+
+```python
+UniqueViolation
+```
+
+<small>Source: [`hetu/data/backend/base.py:71`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L71)</small>
+
+
+**Bases:** `IndexError`
+
+
+
+唯一索引违反异常，表示当前Session提交前已确认写入会破坏unique约束。
+
+`SessionRepository.insert(...)` 和 `SessionRepository.update(...)` 会在本地
+IdentityMap与远程数据库中检查unique字段；发现同事务内重复值，或数据库已有
+同值记录时抛出此异常。异常消息通常会包含冲突字段名，便于定位哪个unique索引
+发生冲突。
+
+此异常代表确定性的业务/数据冲突，不应被自动重试。只有Upsert并发
+unique冲突会被后端转换为 `RaceCondition`，由事务重试机制处理。
 
 
 

@@ -6,6 +6,8 @@ are the topic-group page they belong on (matching docs/api/<group>.md).
 
 EXTRAS: dict[str, str] = {
     "hetu.data.backend.base.RaceCondition": "exceptions",
+    "hetu.data.backend.base.UniqueViolation": "exceptions",
+    "hetu.data.backend.repo.SessionRepository": "system",
     "hetu.system.definer.SystemClusters": "system",
     "hetu.system.future.create_future_call": "system",
 }

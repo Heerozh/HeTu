@@ -17,9 +17,9 @@ regeneration; update the docstring in the source file instead.
 |---|---|
 | [Decorators](decorators.md) | define_component, define_endpoint, define_system, property_field |
 | [Components](components.md) | BaseComponent, Permission |
-| [System](system.md) | SystemClusters, SystemContext, create_future_call |
+| [System](system.md) | SessionRepository, SystemClusters, SystemContext, create_future_call |
 | [Endpoint](endpoint.md) | EndpointContext, ResponseToClient, elevate |
-| [Exceptions](exceptions.md) | RaceCondition |
+| [Exceptions](exceptions.md) | RaceCondition, UniqueViolation |
 
 
 See also: [Coverage report](_coverage.md) — APIs missing docstrings.
