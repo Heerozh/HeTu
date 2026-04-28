@@ -55,7 +55,8 @@ class ChatMessage(hetu.BaseComponent):
 
 
 @hetu.define_system(
-    namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER
+    namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER,
+    retry=99
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
     row = ChatMessage.new_row()
@@ -76,6 +77,44 @@ sub.ObserveAdd().Subscribe(msg => Render(msg));
 
 That's the entire wire: a typed table, an RPC entry point, and a reactive
 subscription. No schema migrations, no API gateway, no message broker.
+
+## Core concept: transactions
+
+### Guarantees
+
+* HeTu guarantees that a client's `System` calls execute in the order the
+  client issued them; every call from a given client runs inside the same
+  coroutine.
+    - In other words, each player's own logic runs single-threaded, and the
+      client's call order is never broken.
+    - `async` / `await` does not break this guarantee — when an `await`
+      suspends, control can only switch to coroutines belonging to *other*
+      connections.
+    - This also guarantees `System` calls are never dropped (unless the
+      retry budget is exhausted).
+
+### Transaction conflicts and retries
+
+* Writes inside a `System` may hit a transaction conflict; setting `retry > 0`
+  reruns the `System` automatically.
+    - Transactions use optimistic version locking and commit when the
+      `System` function returns.
+    - Any row that was read, or that is about to be written, raises a
+      conflict if another process/coroutine changes it underneath.
+        - Exception: `range()` queries don't lock the index, so other Systems adding,
+          removing, or reordering rows in the queried range won't raise a conflict.
+    - Any external or persistent side effect — updating `ctx` globals,
+      writing to a file, sending a network call — must happen **after** the
+      transaction commits. Otherwise the transaction may be discarded while
+      those side effects have already taken hold. Use the explicit
+      `ctx.session_commit()` to commit early; on conflict it raises, so any
+      code below it will not execute.
+    - Use `ctx.race_count` to tell which retry attempt the current run is.
+* How to reduce transaction conflicts
+    - The slower a `System` runs, the higher its conflict probability. If you
+      need heavy computation inside a `System`, consider using `Endpoint` for more
+      granular control.
+    - Watch the slow log; only dig in if conflicts pile up.
 
 ## Where to next
 
