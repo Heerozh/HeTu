@@ -90,7 +90,8 @@ version_scheme = "guess-next-dev"
 fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
-
+include = ["hetu*"]
+exclude = ["tests*", "benchmark*", "docs*"]
 
 [tool.pytest.ini_options]
 # 自动发现async test_*函数
