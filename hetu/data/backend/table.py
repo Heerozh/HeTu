@@ -6,9 +6,7 @@
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
-from typing import Callable, Concatenate, ParamSpec, TypeVar
-
+from typing import TYPE_CHECKING, Callable, Concatenate, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
@@ -40,10 +38,14 @@ class TableReference:
     """
 
     comp_cls: type[BaseComponent]
+    """该表所属的组件类"""
     instance_name: str
+    """该表所属服务器实例名"""
     cluster_id: int
+    """该表所属的`System`簇ID"""
 
     def is_same_txn_group(self, other: TableReference) -> bool:
+        """内部方法，判断和另一个`TableReference`是否可以在同一事务中执行"""
         return (
             self.instance_name == other.instance_name
             and self.cluster_id == other.cluster_id
@@ -51,16 +53,18 @@ class TableReference:
 
     @property
     def comp_name(self) -> str:
+        """获得组件名称"""
         return self.comp_cls.name_
 
 
 @dataclass(frozen=True, eq=True)
 class Table(TableReference):
     """
-    Table表的地址信息加上所属的Backend。
+    Table表的地址信息加上所属的`Backend`，能够让你直接去数据库中操作此表。
     """
 
     backend: Backend
+    """内部数据库连接管理实例"""
 
     def session(self) -> Session:
         return self.backend.session(self.instance_name, self.cluster_id)

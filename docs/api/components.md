@@ -186,8 +186,8 @@ Permission(*values)
 
 客户端访问权限级别。
 
-用于 `define_endpoint` / `define_system` 暴露给客户端的调用权限，也用于
-`define_component` 声明Component数据的读取权限。服务端内部代码不受这些权限
+用于 [`define_endpoint`](decorators.md#define_endpoint) / [`define_system`](decorators.md#define_system) 暴露给客户端的调用权限，也用于
+[`define_component`](decorators.md#define_component) 声明Component数据的读取权限。服务端内部代码不受这些权限
 限制；业务逻辑中的写入权限和更细粒度安全检查仍需要自行实现。
 
 

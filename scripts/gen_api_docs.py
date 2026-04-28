@@ -360,6 +360,10 @@ def _collect_methods(cls: type) -> list[dict]:
                 continue
             path, line = _source_location(target)
             parsed = _parse_docstring(target)
+            # Match the dropped signature args: drop the first docstring
+            # parameter (the bound first_arg, e.g. table_ref).
+            if parsed["parameters"]:
+                parsed["parameters"] = parsed["parameters"][1:]
             out.append(
                 {
                     "qualname": f"{cls.__qualname__}.{name}",
@@ -541,6 +545,15 @@ def build_record(symbol: Symbol, symbol_index: dict[int, Symbol]) -> dict:
     src_path, src_line = _source_location(symbol.obj)
     parsed = _parse_docstring(symbol.obj)
     is_cls = inspect.isclass(symbol.obj)
+    methods = _collect_methods(symbol.obj) if is_cls else []
+    # Names rendered as Methods (e.g. bind-first-arg properties) shouldn't
+    # also appear as bare Attributes — griffe picks up the property name
+    # without seeing the borrowed docstring underneath.
+    method_names = {m["short_name"] for m in methods}
+    if parsed["attributes"] and method_names:
+        parsed["attributes"] = [
+            a for a in parsed["attributes"] if a["name"] not in method_names
+        ]
     return {
         "qualname": symbol.qualname,
         "short_name": symbol.short_name,
@@ -550,8 +563,62 @@ def build_record(symbol: Symbol, symbol_index: dict[int, Symbol]) -> dict:
         "deprecated": None,
         **parsed,
         "bases": _resolve_bases(symbol.obj, symbol_index) if is_cls else [],
-        "methods": _collect_methods(symbol.obj) if is_cls else [],
+        "methods": methods,
     }
+
+
+_INLINE_CODE_RE = re.compile(r"`([A-Za-z_][A-Za-z0-9_]*)`")
+_BARE_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b")
+
+
+def _build_symbol_link_map(symbols: list[Symbol]) -> dict[str, str]:
+    """Map each documented symbol's short name to its `topic.md#anchor` URL."""
+    out: dict[str, str] = {}
+    for s in symbols:
+        anchor = s.short_name.lower()
+        out[s.short_name] = f"{s.topic}.md#{anchor}"
+    return out
+
+
+def _link_inline_code(text: str | None, link_map: dict[str, str]) -> str | None:
+    """Turn `Symbol` (inline code) into [`Symbol`](link) when Symbol is documented."""
+    if not text:
+        return text
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(1)
+        link = link_map.get(name)
+        return f"[`{name}`]({link})" if link else m.group(0)
+
+    return _INLINE_CODE_RE.sub(repl, text)
+
+
+def _link_annotation(text: str | None, link_map: dict[str, str]) -> str | None:
+    """Turn bare Symbol identifiers in a type annotation into [`Symbol`](link)."""
+    if not text:
+        return text
+
+    def repl(m: re.Match[str]) -> str:
+        name = m.group(0)
+        link = link_map.get(name)
+        return f"[`{name}`]({link})" if link else name
+
+    return _BARE_IDENT_RE.sub(repl, text)
+
+
+def _apply_links(rec: dict, link_map: dict[str, str]) -> None:
+    """Walk a record (and its nested method records) replacing cross-refs."""
+    rec["summary"] = _link_inline_code(rec.get("summary"), link_map)
+    rec["returns"] = _link_inline_code(rec.get("returns"), link_map)
+    rec["notes"] = _link_inline_code(rec.get("notes"), link_map)
+    for p in rec.get("parameters") or []:
+        p["annotation"] = _link_annotation(p.get("annotation"), link_map)
+        p["description"] = _link_inline_code(p.get("description"), link_map)
+    for a in rec.get("attributes") or []:
+        a["annotation"] = _link_annotation(a.get("annotation"), link_map)
+        a["description"] = _link_inline_code(a.get("description"), link_map)
+    for m in rec.get("methods") or []:
+        _apply_links(m, link_map)
 
 
 def group_by_topic(symbols: list[Symbol]) -> dict[str, list[Symbol]]:
@@ -571,10 +638,15 @@ def _env() -> Environment:
 
 
 def render_topic_page(
-    topic: str, symbols: list[Symbol], symbol_index: dict[int, Symbol]
+    topic: str,
+    symbols: list[Symbol],
+    symbol_index: dict[int, Symbol],
+    link_map: dict[str, str],
 ) -> str:
     title, description, weight = TOPIC_META[topic]
     records = [build_record(s, symbol_index) for s in symbols]
+    for rec in records:
+        _apply_links(rec, link_map)
     return _env().get_template("api_page.md.j2").render(
         topic_title=title,
         topic_description=description,
@@ -618,6 +690,7 @@ def main() -> None:
     DOCS_API_DIR.mkdir(parents=True, exist_ok=True)
     symbols = collect_public_symbols()
     symbol_index = {id(s.obj): s for s in symbols}
+    link_map = _build_symbol_link_map(symbols)
     grouped = group_by_topic(symbols)
 
     (DOCS_API_DIR / "_index.md").write_text(
@@ -625,7 +698,8 @@ def main() -> None:
     )
     for topic, group_symbols in grouped.items():
         (DOCS_API_DIR / f"{topic}.md").write_text(
-            render_topic_page(topic, group_symbols, symbol_index), encoding="utf-8"
+            render_topic_page(topic, group_symbols, symbol_index, link_map),
+            encoding="utf-8",
         )
     (DOCS_API_DIR / "_coverage.md").write_text(
         render_coverage_page(symbols), encoding="utf-8"

@@ -67,7 +67,7 @@ IdentityMap与远程数据库中检查unique字段；发现同事务内重复值
 发生冲突。
 
 此异常代表确定性的业务/数据冲突，不应被自动重试。只有Upsert并发
-unique冲突会被后端转换为 `RaceCondition`，由事务重试机制处理。
+unique冲突会被后端转换为 [`RaceCondition`](exceptions.md#racecondition)，由事务重试机制处理。
 
 
 

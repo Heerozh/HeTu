@@ -25,7 +25,7 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 
 ### Attributes
 
-- **`ref`** (TableReference) — `TableReference`对象，表示当前repo关联的数据库`Table`信息
+- **`ref`** ([`TableReference`](system.md#tablereference)) — [`TableReference`](system.md#tablereference)对象，表示当前repo关联的数据库[`Table`](system.md#table)信息
 
 - **`session`** (Session) — 获取所属的内部`Session`对象。
 
@@ -447,10 +447,10 @@ System调用时的上下文，继承自 `Context` 并添加事务相关属性。
 
 ### Attributes
 
-- **`race_count`** (int) — 当前事务因 `RaceCondition` 重试的次数，初始为0。注意：`timeout` 引发的再次
+- **`race_count`** (int) — 当前事务因 [`RaceCondition`](exceptions.md#racecondition) 重试的次数，初始为0。注意：`timeout` 引发的再次
 触发会从0重新计数。
 
-- **`repo`** (dict[type[BaseComponent], SessionRepository]) — 当前事务的repo字典，键为Component类，值为对应的 `SessionRepository`。
+- **`repo`** (dict[type[[`BaseComponent`](components.md#basecomponent)], [`SessionRepository`](system.md#sessionrepository)]) — 当前事务的repo字典，键为Component类，值为对应的 [`SessionRepository`](system.md#sessionrepository)。
 通过 `ctx.repo[ComponentClass]` 取得并执行 `get` / `range` / `upsert` /
 `update` / `delete` 等CRUD操作；事务结束时统一提交。
 
@@ -531,27 +531,21 @@ Table(
 ) -> None
 ```
 
-<small>Source: [`hetu/data/backend/table.py:57`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L57)</small>
+<small>Source: [`hetu/data/backend/table.py:60`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L60)</small>
 
 
 **Bases:** [`TableReference`](system.md#tablereference)
 
 
 
-Table表的地址信息加上所属的Backend。
+Table表的地址信息加上所属的`Backend`，能够让你直接去数据库中操作此表。
 
 
 
 
 ### Attributes
 
-- **`backend`** (Backend) — _No description._
-
-- **`servant_get`** (Any) — _No description._
-
-- **`servant_range`** (Any) — _No description._
-
-- **`direct_set`** (Any) — _No description._
+- **`backend`** (Backend) — 内部数据库连接管理实例
 
 
 
@@ -579,8 +573,6 @@ servant_get(
 
 
 **Parameters**
-
-- **`table_ref`** (Any) — 表信息，指定Component、实例名、分片簇id。
 
 - **`row_id`** (Any) — row id主键
 
@@ -627,8 +619,6 @@ servant_range(
 
 
 **Parameters**
-
-- **`table_ref`** (Any) — 表信息，指定Component、实例名、分片簇id。
 
 - **`index_name`** (Any) — 查询Component中的哪条索引
 
@@ -717,7 +707,7 @@ TableReference(
 ) -> None
 ```
 
-<small>Source: [`hetu/data/backend/table.py:35`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L35)</small>
+<small>Source: [`hetu/data/backend/table.py:33`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L33)</small>
 
 
 
@@ -729,13 +719,35 @@ Table表的地址信息，在后端，组件持久化的目标称为表。
 
 ### Attributes
 
-- **`comp_cls`** (type[BaseComponent]) — _No description._
+- **`comp_cls`** (type[[`BaseComponent`](components.md#basecomponent)]) — 该表所属的组件类
 
-- **`instance_name`** (str) — _No description._
+- **`instance_name`** (str) — 该表所属服务器实例名
 
-- **`cluster_id`** (int) — _No description._
+- **`cluster_id`** (int) — 该表所属的`System`簇ID
 
-- **`comp_name`** (str) — _No description._
+- **`comp_name`** (str) — 获得组件名称
+
+
+
+
+
+
+
+
+
+
+### Methods
+
+#### `is_same_txn_group`
+
+```python
+is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
+```
+
+<small>Source: [`hetu/data/backend/table.py:47`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/table.py#L47)</small>
+
+内部方法，判断和另一个[`TableReference`](system.md#tablereference)是否可以在同一事务中执行
+
 
 
 

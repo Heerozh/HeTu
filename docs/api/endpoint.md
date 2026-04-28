@@ -32,7 +32,7 @@ EndpointContext(
 
 
 Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpoint函数；
-`SystemContext` 继承自此类。包含调用方身份、当前连接的用户数据，
+[`SystemContext`](system.md#systemcontext) 继承自此类。包含调用方身份、当前连接的用户数据，
 以及消息发送和订阅数量限制等。
 
 
