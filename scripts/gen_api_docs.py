@@ -139,9 +139,10 @@ def _signature_string(obj: object, name: str) -> str:
 
 
 def _source_location(obj: object) -> tuple[str, int]:
+    target = inspect.unwrap(obj) if callable(obj) else obj
     try:
-        path = inspect.getsourcefile(obj) or "<unknown>"
-        _, lineno = inspect.getsourcelines(obj)
+        path = inspect.getsourcefile(target) or "<unknown>"
+        _, lineno = inspect.getsourcelines(target)
     except (OSError, TypeError):
         return ("<unknown>", 0)
 

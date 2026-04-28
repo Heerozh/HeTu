@@ -55,3 +55,83 @@ SystemContext(caller: int, connection_id: int, address: str, group: str, user_da
 
 ---
 
+## `create_future_call`
+
+```python
+create_future_call(
+    ctx: hetu.system.context.SystemContext,
+    at: float,
+    system: str,
+    *args,
+    timeout: int = 60,
+    recurring: bool = False,
+)
+```
+
+<small>Source: [`hetu/system/future.py:48`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L48)</small>
+
+
+创建一个未来调用任务，到约定时间后会由内部进程执行该System。
+未来调用储存在FutureCalls组件中，服务器重启不会丢失。
+timeout不为0时，则保证目标System事务一定成功，且只执行一次。
+只执行一次的保证通过call_lock引发的事务冲突实现，会强制要求定义System时开启call_lock。
+
+
+### Parameters
+
+- **`ctx`** (Any) — System默认变量
+
+- **`at`** (Any) — 正数是执行的绝对时间(POSIX时间戳)；负数是相对时间，表示延后几秒执行。
+
+- **`system`** (Any) — 未来调用的目标system名
+
+- **`*args`** (Any) — 目标system的参数，注意，只支持可以通过repr转义为string并不丢失信息的参数，比如基础类型。
+
+- **`timeout`** (Any) — 再次调用时间（秒）。如果超过这个时间System调用依然没有成功，就会再次触发调用。
+注意：代码错误/数据库错误也会引发timeout重试。如果是代码错误，虽然重试大概率还是失败，
+     但任务并不会丢失，等程序员修复完代码任务会再次伟大
+
+如果设为0，则不重试，因此不保证任务成功，甚至会丢失。执行时遇到任何错误/程序关闭/Crash，
+则未来调用丢失。
+
+如果timeout再次触发时前一次执行还未完成，会引起事务竞态，其中一个事务会被抛弃。
+如果前一次已经成功执行，call_lock会触发，跳过执行。
+* 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
+* 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+
+- **`recurring`** (Any) — 设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
+
+
+
+
+
+
+### Examples
+
+```python
+>>> import hetu
+>>> @hetu.define_system(namespace='test', permission=None)
+... def test_future_call(ctx: hetu.SystemContext, *args):
+...     # do ctx.repo[...] operations
+...     print('Future call test', args)
+>>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test') )
+... def test_future_create(ctx: hetu.SystemContext):
+...     ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
+```
+
+```python
+示例中，`depends`依赖使用':'符号创建了`create_future_call`的test副本。
+继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
+增加backend的扩展性，具体参考簇相关的文档。
+```
+
+
+
+
+### Notes
+* System执行时的Context是内部服务，而不是用户连接，无法获取用户ID，要自己作为参数传入
+* 触发精度<=1秒，由每个Worker每秒运行一次循环检查并触发
+
+
+---
+

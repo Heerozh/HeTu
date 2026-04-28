@@ -7,6 +7,7 @@ are the topic-group page they belong on (matching docs/api/<group>.md).
 EXTRAS: dict[str, str] = {
     "hetu.data.backend.base.RaceCondition": "exceptions",
     "hetu.system.definer.SystemClusters": "system",
+    "hetu.system.future.create_future_call": "system",
 }
 
 # Topic mapping for items already in hetu.__all__. If a name from __all__ is
