@@ -6,17 +6,11 @@ on:
       - "pyproject.toml"
       - "uv.lock"
       - ".github/workflows/ci.yml"
-      - "scripts/gen_api_docs.py"
-      - "scripts/api_extras.py"
-      - "scripts/templates/**"
   pull_request:
     paths:
       - "**.py"
       - "pyproject.toml"
       - "uv.lock"
-      - "scripts/gen_api_docs.py"
-      - "scripts/api_extras.py"
-      - "scripts/templates/**"
 
 concurrency:
   # github.ref = refs/heads/branch_name or refs/tags/tag_name

@@ -91,7 +91,7 @@ subscription. No schema migrations, no API gateway, no message broker.
       suspends, control can only switch to coroutines belonging to *other*
       connections.
     - This also guarantees `System` calls are never dropped (unless the
-      retry budget is exhausted).
+      retry budget is exhausted or server crashed).
 
 ### Transaction conflicts and retries
 

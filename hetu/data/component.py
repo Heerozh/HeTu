@@ -113,6 +113,8 @@ def property_field(
 
 
 class BaseComponent:
+    """所有组件的基类"""
+
     # -------------------------------定义部分-------------------------------
     properties_: list[tuple[str, Property]] = []  # Ordered属性列表
     name_: str
@@ -124,7 +126,8 @@ class BaseComponent:
     backend_: str  # 自定义该Component由哪个后端(数据库)负责储存和查询
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
-    default_row: np.recarray  # 默认空数据行
+    """组件的numpy格式的dtype信息"""
+    default_row_: np.recarray  # 默认空数据行
     prop_idx_map_: dict[str, int]  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
     uniques_: set[str]  # 唯一索引的属性名集合
@@ -200,7 +203,7 @@ class BaseComponent:
         comp.dtypes = np.dtype(
             [(name, prop.dtype) for name, prop in comp.properties_], align=False
         )
-        comp.default_row = np.rec.array(
+        comp.default_row_ = np.rec.array(
             [tuple([prop.default for name, prop in comp.properties_])],
             dtype=comp.dtypes,
         )
@@ -221,8 +224,8 @@ class BaseComponent:
 
     @classmethod
     def new_row(cls, id_=None) -> np.record:
-        """返回空数据行，id生成uuid，用于insert"""
-        row = cast(np.record, cls.default_row[0].copy())
+        """返回空数据行，id请设置为None，会自动生成规范雪花uuid，用于insert"""
+        row = cast(np.record, cls.default_row_[0].copy())
         if id_ is not None:
             row.id = id_
         else:
@@ -231,15 +234,17 @@ class BaseComponent:
 
     @classmethod
     def new_rows(cls, size) -> np.recarray:
-        """返回空数据行，id生成uuid，用于insert"""
-        rows = cls.default_row.copy() if size == 1 else cls.default_row.repeat(size, 0)
+        """返回多行空数据行，用于批量insert"""
+        rows = (
+            cls.default_row_.copy() if size == 1 else cls.default_row_.repeat(size, 0)
+        )
         for i in range(size):
             rows[i].id = SNOWFLAKE_ID.next_id()
         return cast(np.recarray, rows)
 
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:
-        """从dict转换为c-struct like的，可直接传给数据库的，行数据"""
+        """从dict转换为c-struct like的类型，成为可直接传给数据库的行数据"""
         row = cls.new_row(id_=data["id"])
         for i, (name, _prop) in enumerate(cls.properties_):
             row[i] = data[name]
@@ -255,7 +260,11 @@ class BaseComponent:
     def duplicate(cls, namespace: str, suffix: str) -> type[BaseComponent]:
         """
         复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
-        注意：只能在define阶段使用
+
+        注意：只能在 define_system 时，传递成员变量时使用，如：
+        ```
+        @hetu.define_system(namespace="Loot", components=(Order.duplicate("Loot", "Copy"),))
+        ```
         """
         if namespace == cls.namespace_ and not suffix:
             return cls
@@ -276,7 +285,7 @@ class BaseComponent:
 
     @classmethod
     def is_rls(cls) -> bool:
-        """此Component是否是RLS权限"""
+        """判断此Component是否是RLS权限"""
         return cls.permission_ in (Permission.OWNER, Permission.RLS)
 
 

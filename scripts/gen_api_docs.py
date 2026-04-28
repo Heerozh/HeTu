@@ -213,7 +213,7 @@ def _griffe_attributes(cls: type) -> list[dict]:
     for name, member in g_cls.members.items():
         if member.kind.value != "attribute":
             continue
-        if name.startswith("_"):
+        if name.startswith("_") or name.endswith("_"):
             continue
         doc = member.docstring
         description = inspect.cleandoc(doc.value) if doc else None
