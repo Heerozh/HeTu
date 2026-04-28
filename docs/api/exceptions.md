@@ -10,6 +10,10 @@ weight: 50
 
 ## `RaceCondition`
 
+```python
+RaceCondition
+```
+
 <small>Source: [`hetu/data/backend/base.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L54)</small>
 
 

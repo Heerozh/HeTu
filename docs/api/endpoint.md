@@ -10,6 +10,10 @@ weight: 40
 
 ## `EndpointContext`
 
+```python
+EndpointContext
+```
+
 <small>Source: [`hetu/endpoint/context.py:18`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L18)</small>
 
 
@@ -25,7 +29,11 @@ Context(caller: int, connection_id: int, address: str, group: str, user_data: di
 
 ---
 
-## `ResponseToClient(message: list | dict)`
+## `ResponseToClient`
+
+```python
+ResponseToClient(message: list | dict)
+```
 
 <small>Source: [`hetu/endpoint/response.py:13`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/response.py#L13)</small>
 
@@ -42,7 +50,11 @@ Context(caller: int, connection_id: int, address: str, group: str, user_data: di
 
 ---
 
-## `elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)`
+## `elevate`
+
+```python
+elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
+```
 
 <small>Source: [`hetu/endpoint/connection.py:90`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L90)</small>
 
