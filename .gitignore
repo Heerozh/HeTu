@@ -190,3 +190,5 @@ benchmark_results.csv
 /.claude
 examples/chat/client/output/*
 /*.txt
+*.local
+*.local.*

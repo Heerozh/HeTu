@@ -94,6 +94,15 @@ include = ["hetu*"]
 exclude = ["tests*", "benchmark*", "docs*"]
 
 [tool.pytest.ini_options]
+# 限定 collect 路径，避免 9p mount 下 pytest 递归扫描整个仓库（hetu/、examples/、build/ 等）
+testpaths = ["tests"]
+# 跳过明显不含测试的目录，进一步减少 stat 调用
+norecursedirs = [
+    ".git", ".idea", ".venv", ".benchmarks", "__pycache__",
+    "build", "dist", "*.egg-info",
+    "hetu", "examples", "benchmark", "docs", "ClientSDK",
+    "tests/fixtures", "tests/data", "tests/logs", "tests/deprecated_tests",
+]
 # 自动发现async test_*函数
 asyncio_mode = "auto" # or "strict"
 # 夹具和测试函数的asyncio loop在同一个文件中保持一致

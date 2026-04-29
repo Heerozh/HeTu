@@ -138,15 +138,14 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Sandbox (sbx) 环境
 
-当在 `sbx run claude` 启动的 sandbox 中工作（`IS_SANDBOX=1`）：
+当在 `sbx run claude` 启动的 sandbox 中工作（`IS_SANDBOX=1`）时，
+全新系统首次一定要提权执行 `agent_install.sh` 脚本，否则可能会：
 
-- **Python venv 路径**：如果uv run报错，可能是因为用了host的venv目录，需要用户通过sbx执行
-  `agent_install.sh` 写入 `UV_PROJECT_ENVIRONMENT=/tmp/hetu-venv-sandbox` 到
-  `/etc/sandbox-persistent.sh`
+- 如果uv run报错，可能是因为用了host的venv目录，脚本会设置UV_PROJECT_ENVIRONMENT
 - 如果sudo显示: The "no new privileges" flag is set, which prevents sudo from running as
-  root.
-  这是需要用户关闭Claude Code自己的sandbox, 执行`agent_install.sh`会自动关闭
-- 已知问题：windows下sbx里pytest比较耗时，整个项目完整测试要10分钟
+  root. 这是需要用户关闭Claude Code的sandbox，安装脚本会关闭，或可提权执行
+
+已知问题：windows下sbx里pytest比较耗时，整个项目完整测试要397.96s（6分钟），请合理安排测试项目
 
 ## Rule
 
