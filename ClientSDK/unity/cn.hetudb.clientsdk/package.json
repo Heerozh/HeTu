@@ -1,23 +1,23 @@
 {
-  "name": "cn.hetudb.clientsdk",
-  "version": "0.2.0",
-  "displayName": "HeTu ClientSDK",
-  "description": "Client SDK For HeTu.\n\nHeTu is the backend platform for Logic-Heavy apps. \nBuilt for Game Servers, Real-time Simulations, \nand AI Agents that need persistent memory context.",
-  "unity": "2022.3",
-  "documentationUrl": "https://hetudb.cn/",
-  "changelogUrl": "https://hetudb.cn/changelog.html",
-  "licensesUrl": "https://hetudb.cn/licensing.html",
-  "keywords": [
-    "hetu",
-    "\u6cb3\u56fe",
-    "websocket"
-  ],
-  "author": {
-    "name": "Heerozh",
-    "email": "heeroz@gmail.com",
-    "url": "https://www.heerozh.com"
-  },
-  "dependencies": {
-    "com.unity.sharp-zip-lib": "1.4.0"
-  }
+    "name": "cn.hetudb.clientsdk",
+    "version": "0.2.1",
+    "displayName": "HeTu ClientSDK",
+    "description": "Client SDK For HeTu.\n\nHeTu is the backend platform for Logic-Heavy apps. \nBuilt for Game Servers, Real-time Simulations, \nand AI Agents that need persistent memory context.",
+    "unity": "2022.3",
+    "documentationUrl": "https://hetudb.cn/",
+    "changelogUrl": "https://hetudb.cn/changelog.html",
+    "licensesUrl": "https://hetudb.cn/licensing.html",
+    "keywords": [
+        "hetu",
+        "河图",
+        "websocket"
+    ],
+    "author": {
+        "name": "Heerozh",
+        "email": "heeroz@gmail.com",
+        "url": "https://www.heerozh.com"
+    },
+    "dependencies": {
+        "com.unity.sharp-zip-lib": "1.4.0"
+    }
 }
