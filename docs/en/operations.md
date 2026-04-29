@@ -144,6 +144,9 @@ To stay ready for that future, design your `Components` with sharding in mind:
 
 ## Load balancing
 
+You can start any number of Hetu servers to increase server capacity in parallel, but a
+reverse proxy is required.
+
 ### Caddy (recommended)
 
 The recommended setup is `caddy-docker-proxy` running in **controller mode**
@@ -159,7 +162,7 @@ Game clients need automatic reconnect, this is easily achievable using the offic
 If you'd rather not run Swarm, talk to Caddy's admin API directly from your
 own orchestration code.
 
-*You can use the HeTu server root path（https://localhost/） as the health check
+*You can use the HeTu server root path（http://localhost/） as the health check
 endpoint.*
 
 ### Why not Nginx
@@ -314,7 +317,7 @@ The specific definitions are explained in detail within the document's comments.
 
 ## Where to next
 
-- **[API Reference](api/)** — every public symbol you'll touch in `app.py`.
+- **[API Reference](../api/)** — every public symbol you'll touch in `app.py`.
 - The [README](https://github.com/Heerozh/HeTu/blob/main/README.md) has
   performance benchmarks (in Chinese) for capacity-planning context.
   comments.

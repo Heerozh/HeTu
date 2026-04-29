@@ -25,7 +25,7 @@ The complete reference implementation is at
 
 ## Step 1 — Define `ChatMessage`
 
-Components are typed tables. Add this to `src/app.py`:
+`Components` are typed tables. Add this to `src/app.py`:
 
 ```python
 import time
@@ -45,7 +45,7 @@ class ChatMessage(hetu.BaseComponent):
 Notes on this declaration:
 
 - `permission=Permission.EVERYBODY` lets unauthenticated clients **read** this
-  table. (Writes still go through Systems, which can have stricter permissions.)
+  table. (Writes still go through `Systems`, which can have stricter permissions.)
 - `index=True` on `owner` and `created_at_ms` builds sorted indexes that
   clients can `range`-query.
 - `dtype="U256"` declares a fixed-width 256-character UTF-32 column. Strings
@@ -69,7 +69,7 @@ also creates a fast point-lookup index.
 
 ## Step 3 — `user_login` System
 
-Systems are async functions that run inside a transaction. They receive a
+`Systems` are async functions that run inside a transaction. They receive a
 `SystemContext` (typically `ctx`) plus your RPC arguments.
 
 ```python

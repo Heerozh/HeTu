@@ -58,6 +58,11 @@ TOPIC_META: dict[str, tuple[str, str, int]] = {
         "Exceptions you may catch in your application code.",
         50,
     ),
+    "migration": (
+        "Migration",
+        "Schema 迁移脚本编写指南：默认迁移脚本模板与底层表维护方法。",
+        60,
+    ),
 }
 
 
@@ -339,8 +344,27 @@ def _bind_first_arg_target(cls: type, prop: property) -> object | None:
     return _walk_attr_chain(cls, parts[1:])
 
 
+_SEPARATOR_RE = re.compile(r"^\s*#\s*={3,}(?:\s+={3,})*\s*$")
+
+
+def _separator_cutoff_line(cls: type) -> int | None:
+    """Find the line number of a `# === === ===` separator inside `cls`'s body.
+    Methods at or after this line are excluded from documentation — useful for
+    classes that mix a public-facing helper layer with an internal one.
+    """
+    try:
+        src_lines, start_line = inspect.getsourcelines(cls)
+    except (OSError, TypeError):
+        return None
+    for i, line in enumerate(src_lines):
+        if _SEPARATOR_RE.match(line):
+            return start_line + i
+    return None
+
+
 def _collect_methods(cls: type) -> list[dict]:
     """Build sub-records for public methods defined directly on this class."""
+    cutoff = _separator_cutoff_line(cls)
     out: list[dict] = []
     for name, raw in vars(cls).items():
         if name.startswith("_"):
@@ -359,6 +383,8 @@ def _collect_methods(cls: type) -> list[dict]:
             if not inspect.getdoc(target):
                 continue
             path, line = _source_location(target)
+            if cutoff is not None and line >= cutoff:
+                continue
             parsed = _parse_docstring(target)
             # Match the dropped signature args: drop the first docstring
             # parameter (the bound first_arg, e.g. table_ref).
@@ -390,6 +416,8 @@ def _collect_methods(cls: type) -> list[dict]:
         if not inspect.getdoc(attr):
             continue
         path, line = _source_location(attr)
+        if cutoff is not None and line >= cutoff:
+            continue
         parsed = _parse_docstring(attr)
         out.append(
             {
@@ -637,6 +665,33 @@ def _env() -> Environment:
     )
 
 
+def _migration_topic_intro() -> str:
+    """Render an intro block for the `migration` topic page that embeds the
+    full default migration script as a copy-paste template.
+    """
+    script_path = REPO_ROOT / "hetu" / "data" / "default_migration.py"
+    script = script_path.read_text(encoding="utf-8")
+    return (
+        "## 编写迁移脚本\n\n"
+        "运行 `hetu upgrade` 时，框架会针对每个 schema 变更的组件查找同名迁移"
+        "脚本；找不到时回退到下方默认脚本。脚本必须导出两个模块级函数 "
+        "`prepare()` 和 `upgrade(...)`，可参考下方完整源码。\n\n"
+        "`upgrade(...)` 中传入的 `client` 参数是 "
+        "[`TableMaintenance`](#tablemaintenance) 实例，"
+        "其下方所列方法是迁移期间唯一可用的底层数据库操作。\n\n"
+        "### 默认迁移脚本模板\n\n"
+        "完整源码（`hetu/data/default_migration.py`），可直接复制后修改：\n\n"
+        "```python\n"
+        f"{script}"
+        "```\n"
+    )
+
+
+TOPIC_INTROS: dict[str, _typing.Callable[[], str]] = {
+    "migration": _migration_topic_intro,
+}
+
+
 def render_topic_page(
     topic: str,
     symbols: list[Symbol],
@@ -647,11 +702,13 @@ def render_topic_page(
     records = [build_record(s, symbol_index) for s in symbols]
     for rec in records:
         _apply_links(rec, link_map)
+    intro_fn = TOPIC_INTROS.get(topic)
     return _env().get_template("api_page.md.j2").render(
         topic_title=title,
         topic_description=description,
         weight=weight,
         apis=records,
+        topic_intro=intro_fn() if intro_fn else None,
     )
 
 

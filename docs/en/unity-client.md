@@ -79,8 +79,8 @@ Key points the source enforces but isn't always obvious from a snippet:
   in your server's `config.yml` (or the `--instance` flag if it was
   started from CLI). An unknown instance is rejected after the handshake
   — by design, so port scanners can't enumerate valid names.
-- **`Connect` is long-blocked.** It awaits until the socket closes, returning
-  `null` on a clean close, `"Canceled"` on app-exit / `Close()`, or an error
+- **`Connect` is async method but long-blocked.** It awaits until the socket closes,
+  returning `null` on a clean close, `"Canceled"` on app-exit / `Close()`, or an error
   string otherwise. Don't `await` it on the same path that needs to start
   sending RPCs — kick off `CallSystem` from `OnConnected` (or a
   separate task), not from below the `await Connect`.

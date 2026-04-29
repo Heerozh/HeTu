@@ -20,6 +20,7 @@ regeneration; update the docstring in the source file instead.
 | [System](system.md) | SessionRepository, SystemClusters, SystemContext, Table, TableReference, create_future_call |
 | [Endpoint](endpoint.md) | EndpointContext, ResponseToClient, elevate |
 | [Exceptions](exceptions.md) | RaceCondition, UniqueViolation |
+| [Migration](migration.md) | TableMaintenance |
 
 
 See also: [Coverage report](_coverage.md) — APIs missing docstrings.

@@ -148,7 +148,7 @@ Things to know about the API:
   not `recurring`. The scheduler uses the call's row id as a UUID to
   deduplicate retries; without `call_lock`, the engine refuses to register
   the future call.
-- **Trigger granularity is ~1 second.** Each worker runs a
+- **Trigger granularity is ~1 second.** Each `worker` runs a
   `future_call_task` background coroutine that polls every second; don't
   use this for sub-second precision.
 - **The execution `ctx` has no user identity.** The scheduler runs as
@@ -172,8 +172,9 @@ also uses futures. Pick a stable suffix per logical group (e.g.
 queue table.
 
 Since table are separated, how exactly do the `FutureCalls` worker threads become
-aware of these tables? This is because these tables registers itself in a
-duplication list, and `FutureCalls` processes them all, one by one.
+aware of these tables? This is because these duplicated tables are enumerable
+(by `base_component.get_duplicates()`), and `FutureCalls` processes them all, one by
+one.
 
 ### Cancelling a future call
 
@@ -199,10 +200,11 @@ async def cancel_future(ctx, future_id):
 
 ## `call_lock` and idempotent `System` execution
 
-`call_lock=True` makes a `System` participate in HeTu's UUID-keyed
-deduplication. It's how future calls implement exactly-once semantics on
-top of an at-least-once queue, and you can use it directly when a `System`
-must execute at most once per logical operation.
+`call_lock=True` makes a `System` participate in UUID-keyed deduplication.
+It's how future calls implement exactly-once semantics, on top of the existing "at least
+once" guarantee in the "FutureCalls" queue.
+And you can use it directly when calling `system`, by passing a UUID, you can invoke it
+repeatedly, yet it will ultimately execute only once.
 
 ```python
 @hetu.define_system(
