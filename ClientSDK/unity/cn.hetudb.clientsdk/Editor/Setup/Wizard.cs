@@ -183,7 +183,7 @@ namespace HeTu.Editor.Setup
                     "用于异步编程支持（Unity 6 不安装）/ Async programming support (not installed on Unity 6).",
                 "com.github.messagepack-csharp" =>
                     "用于 MessagePack 的 Unity 集成 / MessagePack Unity integration.",
-                "com.cysharp.r3" => "响应式编程Unity扩展 / Reactive programming Unity support.",
+                "com.cysharp.r3" => " (可选) 响应式编程Unity扩展 / (Optional) Reactive programming Unity support. ",
                 _ => "UPM dependency."
             };
 
@@ -191,7 +191,7 @@ namespace HeTu.Editor.Setup
         public static void Open()
         {
             var w = GetWindow<HeTuPackageSetupWizard>(true, "HeTu Setup");
-            w.minSize = new Vector2(420, 560);
+            w.minSize = new Vector2(420, 600);
             w.Show();
         }
 

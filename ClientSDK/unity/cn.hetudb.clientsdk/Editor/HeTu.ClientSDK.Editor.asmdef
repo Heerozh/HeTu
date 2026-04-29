@@ -15,14 +15,18 @@
     "precompiledReferences": [],
     "autoReferenced": false,
     "defineConstraints": [
-        "MSGPACK_INSTALLED",
-        "R3_INSTALLED"
+        "MSGPACK_INSTALLED"
     ],
     "versionDefines": [
         {
             "name": "com.github-glitchenzo.nugetforunity",
             "expression": "",
             "define": "NUGET_INSTALLED"
+        },
+        {
+            "name": "com.github.messagepack-csharp",
+            "expression": "",
+            "define": "MSGPACK_INSTALLED"
         }
     ],
     "noEngineReferences": false

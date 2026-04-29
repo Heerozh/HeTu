@@ -80,7 +80,7 @@ namespace HeTu
             GC.SuppressFinalize(this);
         }
 
-#if UNITY_2022_3_OR_NEWER
+#if R3_UNITY_INSTALLED
         /// <summary>
         ///     把HeTu数据订阅的生命周期和GameObject绑定，在GameObject.Destroy时自动对数据订阅Dispose。
         ///     Dispose负责去HeTu服务器反订阅，并清理后续的所有R3响应式Subscribe。

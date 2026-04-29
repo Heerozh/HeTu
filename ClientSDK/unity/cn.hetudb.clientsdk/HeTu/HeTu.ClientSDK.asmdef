@@ -19,14 +19,13 @@
     ],
     "autoReferenced": true,
     "defineConstraints": [
-        "MSGPACK_INSTALLED",
-        "R3_INSTALLED"
+        "MSGPACK_INSTALLED"
     ],
     "versionDefines": [
         {
             "name": "com.cysharp.r3",
             "expression": "",
-            "define": "R3_INSTALLED"
+            "define": "R3_UNITY_INSTALLED"
         },
         {
             "name": "com.github.messagepack-csharp",
