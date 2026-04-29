@@ -25,7 +25,7 @@ FROM heerozh/hetu:latest
 
 WORKDIR /app
 
-COPY . .
+COPY .. .
 RUN pip install .
 
 ENTRYPOINT ["hetu", "start", "--config=./config.yml"]

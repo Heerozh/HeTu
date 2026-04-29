@@ -36,7 +36,7 @@ LARGE_SOURCE_MAX_TOKENS = 8 * 1024
 
 # 不参与翻译的源目录：api 由 scripts/gen_api_docs.py 自动生成（重译会被覆盖），
 # plans/superpowers 是开发内部产物。
-EXCLUDED_SOURCE_DIRS = ("docs/api", "docs/plans", "docs/superpowers")
+EXCLUDED_SOURCE_DIRS = ("docs/en/api",)
 
 SYSTEM_PROMPT = """你是一名专业技术文档翻译助手。
 请将输入的 Hugo/Markdown 文档翻译为目标语言。
@@ -403,7 +403,7 @@ def main() -> int:
     force = "--force" in sys.argv[1:]
 
     default_lang = "en"
-    default_content_dir = "docs/"
+    default_content_dir = "docs/en/"
     targets = [LanguageConfig("zh_Hans", "docs/zh/", "Chinese")]
 
     if not targets:
