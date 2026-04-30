@@ -12,23 +12,26 @@ namespace HeTu.Editor
     public class UPMDependenciesInstaller
     {
         // 定义 Git 依赖
-        private static readonly (string packageId, string packageUrl)[] s_dependencies =
+        private static readonly (string packageId, string packageUrl, bool optional)[] s_dependencies =
         {
 #if !UNITY_6000_0_OR_NEWER
             ("com.cysharp.unitask",
-                "https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask"),
+                "https://github.com/Cysharp/UniTask.git?path=src/UniTask/Assets/Plugins/UniTask",
+                false),
 #endif
             ("com.github.messagepack-csharp",
-                "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git?path=src/MessagePack.UnityClient/Assets/Scripts/MessagePack"),
+                "https://github.com/MessagePack-CSharp/MessagePack-CSharp.git?path=src/MessagePack.UnityClient/Assets/Scripts/MessagePack",
+                false),
             ("com.cysharp.r3",
-                "https://github.com/Cysharp/R3.git?path=src/R3.Unity/Assets/R3.Unity")
+                "https://github.com/Cysharp/R3.git?path=src/R3.Unity/Assets/R3.Unity",
+                true)
         };
 
 
         private static AddRequest s_lastRequest;
         private static string s_currentInstallingPackageId;
 
-        public static IReadOnlyList<(string packageId, string packageUrl)> Dependencies =>
+        public static IReadOnlyList<(string packageId, string packageUrl, bool optional)> Dependencies =>
             s_dependencies;
 
         public static bool IsInstallInProgress
@@ -53,6 +56,8 @@ namespace HeTu.Editor
         {
             foreach (var dep in s_dependencies)
             {
+                if (dep.optional)
+                    continue;
                 if (!IsUPMPackageInstalled(dep.packageId))
                     return false;
             }
