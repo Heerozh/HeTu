@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using HeTu;
 using NUnit.Framework;
 
@@ -95,7 +96,7 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { transport }),
                 scheduler);
-            SessionRowSubscription<TestComponent> subscription = null;
+            RowSubscription<TestComponent> subscription = null;
 
             session.Start();
             session.WatchRow<TestComponent>("id", 7L, null,
@@ -115,7 +116,7 @@ namespace Tests.HeTu
         }
 
         [Test]
-        public void WatchRow_WithSameIntent_SharesSingleRemoteSubscription()
+        public void WatchRow_WithSameSubId_ReturnsSameSubscription()
         {
             var transport = new FakeTransport("c1");
             transport.RowResults[("id", 7L)] =
@@ -128,8 +129,8 @@ namespace Tests.HeTu
             session.Start();
             transport.RaiseConnected();
 
-            SessionRowSubscription<TestComponent> first = null;
-            SessionRowSubscription<TestComponent> second = null;
+            RowSubscription<TestComponent> first = null;
+            RowSubscription<TestComponent> second = null;
             session.WatchRow<TestComponent>("id", 7L, null,
                 sub => first = sub,
                 _ => Assert.Fail("watch should not fail"));
@@ -139,12 +140,47 @@ namespace Tests.HeTu
 
             Assert.NotNull(first);
             Assert.NotNull(second);
-            Assert.AreNotSame(first, second);
+            Assert.AreSame(first, second);
             Assert.AreEqual(10, first.Data.Value);
             Assert.AreEqual(10, second.Data.Value);
             CollectionAssert.AreEqual(
                 new[] { ("id", (object)7L) },
                 transport.WatchedRows);
+        }
+
+        [Test]
+        public void WatchRange_WithSameSubId_ReturnsSameSubscription()
+        {
+            var transport = new FakeTransport("c1");
+            transport.RangeResults[("value", 0, 10, 10, false, true)] =
+                new List<TestComponent>
+                {
+                    new() { ID = 1, Value = 1 }
+                };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+
+            IndexSubscription<TestComponent> first = null;
+            IndexSubscription<TestComponent> second = null;
+            session.WatchRange<TestComponent>(
+                "value", 0, 10, 10, null,
+                sub => first = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRange<TestComponent>(
+                "value", 0, 10, 10, null,
+                sub => second = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.AreSame(first, second);
+            Assert.AreEqual(1, first.Rows.Count);
+            Assert.AreEqual(1, transport.WatchedRanges.Count);
         }
 
         [Test]
@@ -162,7 +198,7 @@ namespace Tests.HeTu
             session.Start();
             first.RaiseConnected();
 
-            SessionRowSubscription<TestComponent> subscription = null;
+            RowSubscription<TestComponent> subscription = null;
             session.WatchRow<TestComponent>("id", 7L, null,
                 sub => subscription = sub,
                 _ => Assert.Fail("watch should not fail"));
@@ -181,14 +217,14 @@ namespace Tests.HeTu
         }
 
         [Test]
-        public void WatchRow_RestoresUsingOriginalIntent_NotPreviousRemoteSubId()
+        public void WatchRow_ResolvedByNonId_RestoresUsingBoundRowId()
         {
             var first = new FakeTransport("c1");
             first.RowResults[("owner", 123L)] =
                 new TestComponent { ID = 7, Value = 10 };
             var second = new FakeTransport("c2");
-            second.RowResults[("owner", 123L)] =
-                new TestComponent { ID = 9, Value = 30 };
+            second.RowResults[("id", 7L)] =
+                new TestComponent { ID = 7, Value = 30 };
             var scheduler = new FakeScheduler();
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { first, second }),
@@ -197,7 +233,7 @@ namespace Tests.HeTu
             session.Start();
             first.RaiseConnected();
 
-            SessionRowSubscription<TestComponent> subscription = null;
+            RowSubscription<TestComponent> subscription = null;
             session.WatchRow<TestComponent>("owner", 123L, null,
                 sub => subscription = sub,
                 _ => Assert.Fail("watch should not fail"));
@@ -206,9 +242,9 @@ namespace Tests.HeTu
             scheduler.RunNext();
             second.RaiseConnected();
 
-            Assert.AreEqual(9, subscription.Data.ID);
+            Assert.AreEqual(7, subscription.Data.ID);
             CollectionAssert.AreEqual(
-                new[] { ("owner", (object)123L) },
+                new[] { ("id", (object)7L) },
                 second.WatchedRows);
         }
 
@@ -237,7 +273,7 @@ namespace Tests.HeTu
             session.Start();
             first.RaiseConnected();
 
-            SessionIndexSubscription<TestComponent> subscription = null;
+            IndexSubscription<TestComponent> subscription = null;
             session.WatchRange<TestComponent>(
                 "value", 0, 10, 10, null,
                 sub => subscription = sub,
@@ -256,6 +292,54 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchRange_Resync_PreservesExistingRowSubject()
+        {
+            var first = new FakeTransport("c1");
+            first.RangeResults[("value", 0, 10, 10, false, true)] =
+                new List<TestComponent>
+                {
+                    new() { ID = 2, Value = 2 }
+                };
+            var second = new FakeTransport("c2");
+            second.RangeResults[("value", 0, 10, 10, false, true)] =
+                new List<TestComponent>
+                {
+                    new() { ID = 2, Value = 20 }
+                };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> subscription = null;
+            session.WatchRange<TestComponent>(
+                "value", 0, 10, 10, null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            var replaceSubjectsField = typeof(IndexSubscription<TestComponent>)
+                .GetField("_replaceSubjects",
+                    BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.NotNull(replaceSubjectsField);
+            var replaceSubjects = replaceSubjectsField.GetValue(subscription);
+            var itemProperty = replaceSubjects.GetType().GetProperty("Item");
+            Assert.NotNull(itemProperty);
+            var subjectBefore = itemProperty.GetValue(replaceSubjects,
+                new object[] { 2L });
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+            var subjectAfter = itemProperty.GetValue(replaceSubjects,
+                new object[] { 2L });
+
+            Assert.AreSame(subjectBefore, subjectAfter);
+        }
+
+        [Test]
         public void DisposedSubscriptionWhileDisconnected_IsNotRestored()
         {
             var first = new FakeTransport("c1");
@@ -270,7 +354,7 @@ namespace Tests.HeTu
             session.Start();
             first.RaiseConnected();
 
-            SessionRowSubscription<TestComponent> subscription = null;
+            RowSubscription<TestComponent> subscription = null;
             session.WatchRow<TestComponent>("id", 7L, null,
                 sub => subscription = sub,
                 _ => Assert.Fail("watch should not fail"));
@@ -323,7 +407,7 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { first, second }),
                 scheduler);
-            SessionRowSubscription<TestComponent> subscription = null;
+            RowSubscription<TestComponent> subscription = null;
 
             session.Start();
             first.RaiseConnected();
@@ -398,6 +482,8 @@ namespace Tests.HeTu
             public List<string> Operations { get; } = new();
             public List<CallRecord> Calls { get; } = new();
             public List<(string Index, object Value)> WatchedRows { get; } = new();
+            public List<(string Index, object Left, object Right, int Limit, bool Desc,
+                bool Force)> WatchedRanges { get; } = new();
             public Dictionary<(string Index, object Value), TestComponent> RowResults
             {
                 get;
@@ -439,7 +525,8 @@ namespace Tests.HeTu
             public void WatchRow<T>(
                 string index, object value,
                 Action<RowSubscription<T>, bool, Exception> onResponse,
-                string componentName = null)
+                string componentName = null,
+                RowSubscription<T> reusable = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-row");
@@ -450,12 +537,19 @@ namespace Tests.HeTu
                     return;
                 }
 
+                componentName ??= typeof(T).Name;
+                var row = (T)(IBaseComponent)result;
+                var subId = HeTuClientBase.MakeSubId(
+                    componentName, "id", row.ID, null, 1, false);
+                if (reusable != null)
+                {
+                    reusable.Rebind(subId, row, _remoteClient);
+                    onResponse(reusable, false, null);
+                    return;
+                }
+
                 onResponse(
-                    new RowSubscription<T>(
-                        $"{Name}.row.{index}.{value}",
-                        componentName ?? typeof(T).Name,
-                        (T)(IBaseComponent)result,
-                        _remoteClient),
+                    new RowSubscription<T>(subId, componentName, row, _remoteClient),
                     false,
                     null);
             }
@@ -463,20 +557,29 @@ namespace Tests.HeTu
             public void WatchRange<T>(
                 string index, object left, object right, int limit,
                 Action<IndexSubscription<T>, bool, Exception> onResponse,
-                bool desc = false, bool force = true, string componentName = null)
+                bool desc = false, bool force = true, string componentName = null,
+                IndexSubscription<T> reusable = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-range");
                 var key = (index, left, right, limit, desc, force);
+                WatchedRanges.Add(key);
                 var rows = RangeResults[key].Cast<T>().ToList();
-                onResponse(
-                    new IndexSubscription<T>(
-                        $"{Name}.range.{index}",
-                        componentName ?? typeof(T).Name,
-                        rows,
-                        _remoteClient),
-                    false,
-                    null);
+                componentName ??= typeof(T).Name;
+                var subId = HeTuClientBase.MakeSubId(
+                    componentName, index, left, right, limit, desc);
+                if (reusable != null)
+                {
+                    reusable.Rebind(subId, rows, _remoteClient);
+                    onResponse(reusable, false, null);
+                    return;
+                }
+
+                var subscription = new IndexSubscription<T>(
+                    subId, componentName, rows, _remoteClient);
+                subscription.ConfigureRestoreQuery(index, left, right, limit, desc,
+                    force);
+                onResponse(subscription, false, null);
             }
 
             public void Dispose()

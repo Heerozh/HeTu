@@ -14,6 +14,7 @@ namespace Tests.HeTu
             var client = new TestClient();
             var canceled = false;
 
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
             client.ForceReadyForConnect();
             client.CallSystem("login", Array.Empty<object>(), (_, cancel) =>
             {

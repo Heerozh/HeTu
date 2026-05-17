@@ -186,14 +186,25 @@ namespace Tests.HeTu
             public void WatchRow<T>(
                 string index, object value,
                 Action<RowSubscription<T>, bool, Exception> onResponse,
-                string componentName = null)
+                string componentName = null,
+                RowSubscription<T> reusable = null)
                 where T : IBaseComponent
             {
+                componentName ??= typeof(T).Name;
                 var row = (T)(IBaseComponent)RowResults[(index, value)];
+                var subId = HeTuClientBase.MakeSubId(
+                    componentName, "id", row.ID, null, 1, false);
+                if (reusable != null)
+                {
+                    reusable.Rebind(subId, row, _remoteClient);
+                    onResponse(reusable, false, null);
+                    return;
+                }
+
                 onResponse(
                     new RowSubscription<T>(
-                        $"{Name}.row.{index}.{value}",
-                        componentName ?? typeof(T).Name,
+                        subId,
+                        componentName,
                         row,
                         _remoteClient),
                     false,
@@ -203,7 +214,8 @@ namespace Tests.HeTu
             public void WatchRange<T>(
                 string index, object left, object right, int limit,
                 Action<IndexSubscription<T>, bool, Exception> onResponse,
-                bool desc = false, bool force = true, string componentName = null)
+                bool desc = false, bool force = true, string componentName = null,
+                IndexSubscription<T> reusable = null)
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 

@@ -167,7 +167,7 @@ namespace Tests.HeTu
             public void Receive(byte[] buffer) => OnReceived(buffer);
 
             public void RegisterSubscription(string subId, BaseSubscription subscription) =>
-                Subscriptions.Add(subId, new WeakReference(subscription, false));
+                Subscriptions.Add(subId, subscription);
 
             protected override void ConnectCore(string url, Action onConnected,
                 Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)

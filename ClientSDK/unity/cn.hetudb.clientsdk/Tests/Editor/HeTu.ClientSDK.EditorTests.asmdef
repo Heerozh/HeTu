@@ -2,7 +2,8 @@
     "name": "HeTu.ClientSDK.EditorTests",
     "rootNamespace": "",
     "references": [
-        "GUID:e4aa3c779c5c37f45a22b7160eb9a992"
+        "GUID:e4aa3c779c5c37f45a22b7160eb9a992",
+        "R3.Unity"
     ],
     "includePlatforms": [
         "Editor"
@@ -11,7 +12,8 @@
     "allowUnsafeCode": false,
     "overrideReferences": true,
     "precompiledReferences": [
-        "nunit.framework.dll"
+        "nunit.framework.dll",
+        "R3.dll"
     ],
     "optionalUnityReferences": [
         "TestAssemblies"

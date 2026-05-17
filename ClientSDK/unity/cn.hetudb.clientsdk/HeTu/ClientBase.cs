@@ -196,6 +196,7 @@ namespace HeTu
         private void HandleClosed(string errMsg)
         {
             State = ConnectionState.Disconnected;
+            Subscriptions.Clean();
             if (errMsg == null)
                 Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
             OnClosed?.Invoke(errMsg);
@@ -221,6 +222,7 @@ namespace HeTu
         {
             Logger.Instance.Info("[HeTuClient] 主动调用了Close");
             ResponseQueue.CancelAll("主动调用了Close");
+            Subscriptions.Clean();
             CloseCore();
         }
 
@@ -287,7 +289,7 @@ namespace HeTu
             callbacks?.Invoke(args);
         }
 
-        private static string MakeSubId(string table, string index, object left,
+        internal static string MakeSubId(string table, string index, object left,
             object right,
             int limit, bool desc) =>
             $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
@@ -343,7 +345,8 @@ namespace HeTu
         public void WatchRowSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
-            string componentName = null)
+            string componentName = null,
+            RowSubscription<T> reusable = null)
             where T : IBaseComponent
         {
             if (!EnsureConnected("WatchRowSync"))
@@ -397,10 +400,18 @@ namespace HeTu
                         {
                             var data = ((JsonObject)response[2]).To<T>();
                             // ReSharper disable once NotDisposedResource
-                            rowSubscription = new RowSubscription<T>(
-                                subID, componentName, data, this, creationTrace);
-                            Subscriptions.Add(subID,
-                                new WeakReference(rowSubscription, false));
+                            if (reusable == null)
+                            {
+                                rowSubscription = new RowSubscription<T>(
+                                    subID, componentName, data, this, creationTrace);
+                            }
+                            else
+                            {
+                                reusable.Rebind(subID, data, this);
+                                rowSubscription = reusable;
+                            }
+
+                            Subscriptions.Add(subID, rowSubscription);
                         }
                     }
                 }
@@ -443,7 +454,8 @@ namespace HeTu
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
-            string componentName = null)
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
             where T : IBaseComponent
         {
             if (!EnsureConnected("WatchRangeSync"))
@@ -501,10 +513,20 @@ namespace HeTu
                             var rawRows = (JsonObject)response[2];
                             var rows = rawRows.ToList<T>();
                             // ReSharper disable once NotDisposedResource
-                            idxSubscription = new IndexSubscription<T>(
-                                subID, componentName, rows, this, creationTrace);
-                            Subscriptions.Add(subID,
-                                new WeakReference(idxSubscription, false));
+                            if (reusable == null)
+                            {
+                                idxSubscription = new IndexSubscription<T>(
+                                    subID, componentName, rows, this, creationTrace);
+                            }
+                            else
+                            {
+                                reusable.Rebind(subID, rows, this);
+                                idxSubscription = reusable;
+                            }
+
+                            idxSubscription.ConfigureRestoreQuery(
+                                index, left, right, limit, desc, force);
+                            Subscriptions.Add(subID, idxSubscription);
                         }
                     }
                 }
@@ -538,10 +560,10 @@ namespace HeTu
         /// <param name="from">取消来源说明（用于日志）。</param>
         public void Unsubscribe(string subID, string from)
         {
-            if (State != ConnectionState.Connected)
-                return;
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
+            if (State != ConnectionState.Connected)
+                return;
             var payload = new object[] { CommandUnsub, subID };
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
