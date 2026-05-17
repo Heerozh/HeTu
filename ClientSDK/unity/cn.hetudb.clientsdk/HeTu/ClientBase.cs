@@ -254,7 +254,7 @@ namespace HeTu
         /// <param name="systemName">系统名。</param>
         /// <param name="args">参数列表。</param>
         /// <param name="onResponse">响应回调，第二参数为是否取消。</param>
-        protected void CallSystemSync(string systemName, object[] args,
+        internal protected void CallSystemSync(string systemName, object[] args,
             Action<JsonObject, bool> onResponse)
         {
             if (!EnsureConnected("CallSystem"))
