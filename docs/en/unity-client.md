@@ -87,7 +87,7 @@ Key points the source enforces but isn't always obvious from a snippet:
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`
-  / `Get` / `Range` calls and tears the socket down — call it from
+  / `WatchRow` / `WatchRange` calls and tears the socket down — call it from
   `OnDestroy` so quitting Play Mode doesn't leak a worker task.
 
 ## Calling `Systems`
@@ -119,20 +119,20 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 };
 ```
 
-## Subscriptions: `Get` vs `Range`
+## Subscriptions: `WatchRow` vs `WatchRange`
 
 Both subscriptions are **live**: the server pushes deltas as the underlying
 rows change in Redis.
 
-| API                                                | Returns                                                     | Use it when                                                                                               |
-|----------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| `Get<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
-| `Range<T>(index, left, right, limit, desc, force)` | `IndexSubscription<T>` (a dictionary of rows, kept in sync) | You want a window over an indexed column — nearby players, top-N leaderboard, the last 100 chat messages. |
+| API                                                     | Returns                                                     | Use it when                                                                                               |
+|---------------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
+| `WatchRow<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
+| `WatchRange<T>(index, left, right, limit, desc, force)` | `IndexSubscription<T>` (a dictionary of rows, kept in sync) | You want a window over an indexed column — nearby players, top-N leaderboard, the last 100 chat messages. |
 
 The `T` parameter is your strongly-typed `Component` class (see next section).
 Drop it for `DictComponent`, a string-keyed `Dictionary` you index manually.
 
-`Range`'s `force=true` (default) keeps the subscription alive even if the
+`WatchRange`'s `force=true` (default) keeps the subscription alive even if the
 initial query returns zero rows, so newly-inserted rows still trigger
 `OnInsert` / `ObserveAdd`. Set `force=false` if you not want subscript an empty query.
 
@@ -170,7 +170,7 @@ Plain C# events. No extra dependencies.
 ```csharp
 async void SubscribeOthers()
 {
-    var players = await HeTuClient.Instance.Range<Position>(
+    var players = await HeTuClient.Instance.WatchRange<Position>(
         "owner", 1, 999, 100);
     players.AddTo(gameObject); // dispose when this GameObject is destroyed
 
@@ -207,7 +207,7 @@ binding to UI.
 ```csharp
 async void SubscribeOthers()
 {
-    var players = await HeTuClient.Instance.Range<Position>(
+    var players = await HeTuClient.Instance.WatchRange<Position>(
         "owner", 1, 999, 100);
     players.AddTo(gameObject);
 
@@ -240,7 +240,7 @@ For `RowSubscription<T>`, use `sub.Subject` — it emits the current row first,
 then every update, and is ideal for direct UI binding:
 
 ```csharp
-var hp = await HeTuClient.Instance.Get<HP>("owner", SelfID);
+var hp = await HeTuClient.Instance.WatchRow<HP>("owner", SelfID);
 hp.AddTo(gameObject);
 
 hp.Subject
@@ -280,7 +280,7 @@ After dispose, the `Subject` / `ObserveRow` streams will not emit further.
 
 ## Unity version notes
 
-- **Unity 6000+** — `Connect`, `CallSystem`, `Get`, and `Range` return
+- **Unity 6000+** — `Connect`, `CallSystem`, `WatchRow`, and `WatchRange` return
   `Awaitable<T>`. Use `await Awaitable.WaitForSecondsAsync(...)` for delays.
 - **Unity 2022.3** — same APIs return `UniTask<T>`. Install UniTask through
   the Setup Wizard. Use `await UniTask.Delay(ms)` for delays.
@@ -294,12 +294,12 @@ calling code only needs to choose one delay style.
   raw `Endpoints`, custom pipeline layers, and the engine internals you'll
   reach for once a project gets real.
 - **[Concepts](concepts.md)** — re-read the Subscriptions section now that
-  you've seen the client side; permissions / RLS filter what `Get` and
-  `Range` can return.
+  you've seen the client side; permissions / RLS filter what `WatchRow` and
+  `WatchRange` can return.
 - **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-
   server example using the patterns above.
   ](concepts.md)** — re-read the Subscriptions section now that
-  you've seen the client side; permissions / RLS filter what `Get` and
-  `Range` can return.
+  you've seen the client side; permissions / RLS filter what `WatchRow` and
+  `WatchRange` can return.
 - **[Tutorial: Chat Room](tutorial/chat-room.md)** — a complete client-and-
   server example using the patterns above.

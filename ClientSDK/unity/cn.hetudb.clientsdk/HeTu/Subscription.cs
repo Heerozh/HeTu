@@ -133,7 +133,7 @@ namespace HeTu
         ///     用法：
         ///     // HeTu数据订阅
         ///     <![CDATA[
-        ///     RowSubscription<HP> hpSub = client.Get<HP>("owner", 123);
+        ///     RowSubscription<HP> hpSub = client.WatchRow<HP>("owner", 123);
         ///     // 在gameObject销毁时反订阅HeTu数据，或手动调用hpSub.Dispose()，不然服务器永远发送订阅消息。
         ///     hpSub.AddTo(gameObject);
         ///     ]]>
@@ -286,7 +286,7 @@ namespace HeTu
         ///     用法：
         ///     <![CDATA[
         ///     var uiItems = new Dictionary<long, GameObject>();
-        ///     IndexSubscription<HP> indexSub = client.Range<HP>(...);
+        ///     IndexSubscription<HP> indexSub = client.WatchRange<HP>(...);
         ///     indexSub.AddTo(gameObject);
         ///
         ///     // 创建新UI对象

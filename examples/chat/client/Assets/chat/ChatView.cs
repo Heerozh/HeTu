@@ -112,8 +112,8 @@ namespace Chat
         {
             try
             {
-                var memberSub = await HeTuClient.Instance.Range<OnlineUser>("owner", 0, long.MaxValue, 512);
-                var messageSub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+                var memberSub = await HeTuClient.Instance.WatchRange<OnlineUser>("owner", 0, long.MaxValue, 512);
+                var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
 
                 // Tie subscription lifetime to this GameObject
                 memberSub.AddTo(gameObject);

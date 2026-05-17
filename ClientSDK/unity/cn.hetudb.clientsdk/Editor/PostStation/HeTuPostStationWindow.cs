@@ -206,7 +206,7 @@ namespace HeTu.Editor.PostStation
                     _rangeDesc
                 );
 #else
-                sub = await HeTuClient.Instance.Range(
+                sub = await HeTuClient.Instance.WatchRange(
                     _rangeComponentName,
                     _rangeIndex,
                     left,

@@ -332,14 +332,15 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     按条件查询数据，并按行 ID 订阅单行数据。
+        ///     先按条件找出第一行，随后按这行RowID订阅。
+        ///     (按RowID订阅的快速模式，不处理索引值的变化)
         /// </summary>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
         /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
-        public void WatchFirstSync<T>(
+        public void WatchRowSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
             string componentName = null)
@@ -418,13 +419,13 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     同 WatchFirstSync<T>，但使用默认字典类型。
+        ///     同 WatchRowSync<T>，但使用默认字典类型。
         /// </summary>
-        public void WatchFirstSync(
+        public void WatchRowSync(
             string index, object value,
             Action<RowSubscription<DictComponent>, bool, Exception> onResponse,
             string componentName = null) =>
-            WatchFirstSync<DictComponent>(index, value, onResponse, componentName);
+            WatchRowSync<DictComponent>(index, value, onResponse, componentName);
 
         /// <summary>
         ///     订阅索引范围数据。（Range)

@@ -73,7 +73,7 @@ _composerSend.clicked += () => {
 // 聊天列表，订阅服务器推送，自动更新UI
 _messageList.itemsSource = _messages;
 
-var messageSub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
 messageSub.AddTo(gameObject); // 绑定生命周期，go销毁自动取消订阅
 messageSub.ObserveAdd()  // 监听新增消息事件
     .Subscribe(msg =>

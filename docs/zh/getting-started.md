@@ -7,7 +7,8 @@ prev: /
 next: tutorial/chat-room
 ---
 
-本页面将带你从一个空目录开始，搭建一个运行中的 HeTu 服务器，并连接一个客户端。预计耗时约 10–15 分钟。
+本页面将带你从一个空目录开始，搭建一个运行中的 HeTu 服务器，并连接一个客户端。预计耗时约
+10–15 分钟。
 
 ## 前提条件
 
@@ -41,7 +42,8 @@ uv add hetudb
 
 ## 2. 项目结构
 
-HeTu 项目使用 **src 布局**：你的应用代码位于 `src/` 下，这使导入清晰明确，并且使项目在 Docker 镜像中准备好使用 `pip install .`（关于生产环境的故事请参见[运维](operations.md)）。
+HeTu 项目使用 **src 布局**：你的应用代码位于 `src/` 下，这使导入清晰明确，并且使项目在
+Docker 镜像中准备好使用 `pip install .`（关于生产环境的故事请参见[运维](operations.md)）。
 
 ```
 my-game-server/
@@ -128,7 +130,7 @@ await HeTuClient.Instance.CallSystem("say_hello", "world");
 调用 `say_hello` 后，该行会存在于 SQLite 文件（或 Redis）中。你可以通过添加一个临时客户端订阅来证明：
 
 ```csharp
-var sub = await HeTuClient.Instance.Range<Greeting>("id", 0, long.MaxValue, 100);
+var sub = await HeTuClient.Instance.WatchRange<Greeting>("id", 0, long.MaxValue, 100);
 sub.AddTo(gameObject); // 别忘了！否则，当你停止播放时会收到关于 GC 泄漏的警告。
 sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
 ```

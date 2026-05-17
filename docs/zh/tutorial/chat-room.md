@@ -7,7 +7,8 @@ prev: /tutorial
 next: ../concepts
 ---
 
-在本教程中，你将构建一个多用户聊天室。完成后，你将实践 HeTu 的每一个主要概念：类型化组件、服务端系统、基于订阅的实时更新、权限检查和生命周期钩子。
+在本教程中，你将构建一个多用户聊天室。完成后，你将实践 HeTu
+的每一个主要概念：类型化组件、服务端系统、基于订阅的实时更新、权限检查和生命周期钩子。
 
 完整的参考实现位于：
 [
@@ -42,9 +43,11 @@ class ChatMessage(hetu.BaseComponent):
 
 关于此声明的一些说明：
 
-- `permission=Permission.EVERYBODY` 允许未认证的客户端**读取**此表。（写入仍然通过系统进行，系统可以有更严格的权限。）
+- `permission=Permission.EVERYBODY` 允许未认证的客户端**读取**
+  此表。（写入仍然通过系统进行，系统可以有更严格的权限。）
 - `owner` 和 `created_at_ms` 上的 `index=True` 构建了排序索引，客户端可以通过 `range` 查询。
-- `dtype="U256"` 声明了一个固定宽度的 256 字符 UTF-32 列。字符串存储在 NumPy 结构化数组中，这就是为什么需要显式指定宽度。
+- `dtype="U256"` 声明了一个固定宽度的 256 字符 UTF-32 列。字符串存储在 NumPy
+  结构化数组中，这就是为什么需要显式指定宽度。
 
 ## 第 2 步 — 定义 `OnlineUser`（在线状态）
 
@@ -101,8 +104,11 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
 
 有两件事值得指出：
 
-- **`hetu.elevate(ctx, user_id)`** 将此连接从匿名提升为用户认证。之后在同一个连接上的一切操作都以 `ctx.caller == user_id` 运行，并通过 `Permission.USER` 检查。（实际应用应在调用 `elevate` 之前，根据外部认证提供者验证 `user_id`。）
-- **`ctx.user_data`** 是一个按连接存储的字典，可在 RPC 调用间持久存在。我们将用户的 `OnlineUser` 行存储起来，这样后面的系统就不必重新查询了。
+- **`hetu.elevate(ctx, user_id)`** 将此连接从匿名提升为用户认证。之后在同一个连接上的一切操作都以
+  `ctx.caller == user_id` 运行，并通过 `Permission.USER` 检查。（实际应用应在调用 `elevate`
+  之前，根据外部认证提供者验证 `user_id`。）
+- **`ctx.user_data`** 是一个按连接存储的字典，可在 RPC 调用间持久存在。我们将用户的
+  `OnlineUser` 行存储起来，这样后面的系统就不必重新查询了。
 
 ## 第 4 步 — `user_chat` 系统
 
@@ -155,7 +161,8 @@ async def on_disconnect(ctx: hetu.SystemContext):
 
 - `permission=None` 意味着**客户端不能直接调用它。**
 - HeTu 在 WebSocket 连接关闭时自动触发它。
-- `depends=("user_quit",)` 让我们通过 `ctx.depend["user_quit"](ctx)` 复用 `user_quit` 的实现。
+- `depends=("user_quit",)` 让我们通过 `ctx.depend["user_quit"](ctx)` 复用 `user_quit`
+  的实现。
 
 ## 第 6 步 — 运行它
 
@@ -187,7 +194,7 @@ HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat");
 // 会自动等待连接建立后再发送。
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 
-var messages = await HeTuClient.Instance.Range<ChatMessage>(
+var messages = await HeTuClient.Instance.WatchRange<ChatMessage>(
     "created_at_ms", 0, long.MaxValue, 1024);
 
 messages.addTo(gameObject);
@@ -198,7 +205,8 @@ messages.ObserveAdd()
 await HeTuClient.Instance.CallSystem("user_chat", "Hello, world!");
 ```
 
-订阅是响应式的：由**任何**客户端（不仅仅是你的）插入的任何新消息，都会在毫秒内流入 `ObserveAdd()`，无需轮询。
+订阅是响应式的：由**任何**客户端（不仅仅是你的）插入的任何新消息，都会在毫秒内流入
+`ObserveAdd()`，无需轮询。
 
 ## 你学到了什么
 

@@ -139,7 +139,7 @@ After calling `say_hello`, the row exists in the SQLite file (or Redis). You
 can prove it by adding a temporary client subscription:
 
 ```csharp
-var sub = await HeTuClient.Instance.Range<Greeting>("id", 0, long.MaxValue, 100);
+var sub = await HeTuClient.Instance.WatchRange<Greeting>("id", 0, long.MaxValue, 100);
 sub.AddTo(gameObject); // dont forget! Otherwise, you will receive a warning about GC leaks when you stop playing.
 sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
 ```

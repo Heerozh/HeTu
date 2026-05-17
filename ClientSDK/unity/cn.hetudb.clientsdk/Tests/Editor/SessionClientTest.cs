@@ -162,10 +162,10 @@ namespace Tests.HeTu
         }
 
         [UnityTest]
-        public IEnumerator WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubId() =>
-            RunTask(WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync());
+        public IEnumerator WatchRow_RestoresUsingOriginalIntent_NotPreviousRemoteSubId() =>
+            RunTask(WatchRow_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync());
 
-        private async Task WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync()
+        private async Task WatchRow_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.FirstResults[("owner", 123L)] =
@@ -179,7 +179,7 @@ namespace Tests.HeTu
                 new Queue<FakeSessionConnection>(new[] { first, second }));
             await session.StartAsync();
 
-            using var sub = await session.WatchFirst<TestComponent>("owner", 123L);
+            using var sub = await session.WatchRow<TestComponent>("owner", 123L);
             Assert.AreEqual(7, sub.Data.ID);
 
             first.Close("network lost");
@@ -384,20 +384,7 @@ namespace Tests.HeTu
                 return null;
             }
 
-            public Task<RowSubscription<T>> WatchRowByIdAsync<T>(
-                long id, string componentName = null,
-                CancellationToken cancellationToken = default)
-                where T : IBaseComponent
-            {
-                Operations.Add("watch-row");
-                WatchedRowIds.Add(id);
-                var row = (T)(IBaseComponent)RowByIdResults[id];
-                return Task.FromResult(new RowSubscription<T>(
-                    $"{Name}.row.{id}", componentName ?? typeof(T).Name, row,
-                    _remoteClient));
-            }
-
-            public Task<RowSubscription<T>> WatchFirstAsync<T>(
+            public Task<RowSubscription<T>> WatchRowAsync<T>(
                 string index, object value, string componentName = null,
                 CancellationToken cancellationToken = default)
                 where T : IBaseComponent

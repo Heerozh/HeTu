@@ -4,9 +4,7 @@
 // <summary>河图客户端SDK的Unity库</summary>
 
 
-#if UNITY_6000_0_OR_NEWER
-using System.Threading.Tasks;
-#else
+#if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
 #endif
 using System;
@@ -269,9 +267,9 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     订阅组件的行数据。订阅`index`属性值==`value`的第一行数据。
-        ///     `Get`只对“单行”订阅，如果没有查询到行，会返回`null`。
-        ///     如果想要订阅不存在的行，请用`Range`订阅索引。
+        ///     订阅组件的行数据。查找`index`属性值==`value`的第一行数据，然后按该行RowID订阅。
+        ///     如果没有查询到行，会返回`null`。按RowID订阅的快速模式，不处理索引值的变化。
+        ///     如果想要订阅不存在的行，请用`WatchRange`订阅索引。
         /// </summary>
         /// <returns>
         ///     返回`null`如果没查询到行，否则返回`RowSubscription`对象。
@@ -287,7 +285,7 @@ namespace HeTu
         /// <code>
         /// // 使用示例
         /// // 假设HP组件有owner属性，表示属于哪个玩家，value属性表示hp值。
-        /// var subscription = await HeTuClient.Instance.Get("HP", "owner", user_id);
+        /// var subscription = await HeTuClient.Instance.WatchRow("HP", "owner", user_id);
         /// Debug.log("My HP:" + int.Parse(subscription.Data["value"]));
         /// subscription.OnUpdate += (sender, rowID) => {
         ///     Debug.log("My New HP:" + int.Parse(sender.Data["value"]));
@@ -300,7 +298,7 @@ namespace HeTu
         ///     public long owner;
         ///     public int value;
         /// }
-        /// var subscription = await HeTuClient.Instance.Get<HP>("owner", user_id);
+        /// var subscription = await HeTuClient.Instance.WatchRow<HP>("owner", user_id);
         /// Debug.log("My HP:" + subscription.Data.value);
         /// subscription.Dispose(); // 反订阅
         /// // 或使用AddTo和gameObject生命周期绑定
@@ -309,9 +307,9 @@ namespace HeTu
         /// </code>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<T>> WatchFirst<T>(
+        public async Awaitable<RowSubscription<T>> WatchRow<T>(
 #else
-        public async UniTask<RowSubscription<T>> WatchFirst<T>(
+        public async UniTask<RowSubscription<T>> WatchRow<T>(
 #endif
             string index, object value, string componentName = null)
             where T : IBaseComponent
@@ -324,7 +322,7 @@ namespace HeTu
             }
 
             var tcs = NewCompletionSource<RowSubscription<T>>();
-            WatchFirstSync<T>(index, value, (rowSub, cancel, ex) =>
+            WatchRowSync<T>(index, value, (rowSub, cancel, ex) =>
             {
                 if (cancel)
                 {
@@ -351,7 +349,7 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     订阅单行数据（字典版本）。
+        ///     同 WatchRow<T>，但使用默认字典类型。
         /// </summary>
         /// <param name="componentName">组件名。</param>
         /// <param name="index">索引字段名。</param>
@@ -359,13 +357,13 @@ namespace HeTu
         /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null" />。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<DictComponent>> WatchFirst(
+        public async Awaitable<RowSubscription<DictComponent>> WatchRow(
 #else
-        public async UniTask<RowSubscription<DictComponent>> WatchFirst(
+        public async UniTask<RowSubscription<DictComponent>> WatchRow(
 #endif
             string componentName, string index, object value)
         {
-            return await WatchFirst<DictComponent>(index, value, componentName);
+            return await WatchRow<DictComponent>(index, value, componentName);
         }
 
         /// <summary>
