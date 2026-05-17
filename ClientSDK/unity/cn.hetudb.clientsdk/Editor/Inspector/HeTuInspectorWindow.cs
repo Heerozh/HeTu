@@ -706,7 +706,7 @@ namespace HeTu.Editor.Inspector
             client.AddInspectorDispatcher(_dispatcher);
             client.ConfigureInspector(true);
             _isRecording = true;
-            SessionState.SetBool(RecordingSessionKey, true);
+            UnityEditor.SessionState.SetBool(RecordingSessionKey, true);
         }
 
         private void StopRecording(bool clearSessionIntent = true)
@@ -714,7 +714,7 @@ namespace HeTu.Editor.Inspector
             if (!_isRecording || _dispatcher == null)
             {
                 if (clearSessionIntent)
-                    SessionState.EraseBool(RecordingSessionKey);
+                    UnityEditor.SessionState.EraseBool(RecordingSessionKey);
                 return;
             }
 
@@ -726,12 +726,12 @@ namespace HeTu.Editor.Inspector
 
             _isRecording = false;
             if (clearSessionIntent)
-                SessionState.EraseBool(RecordingSessionKey);
+                UnityEditor.SessionState.EraseBool(RecordingSessionKey);
         }
 
         private void RestoreRecordingIfNeeded()
         {
-            if (!SessionState.GetBool(RecordingSessionKey, false))
+            if (!UnityEditor.SessionState.GetBool(RecordingSessionKey, false))
                 return;
 
             StartRecording();

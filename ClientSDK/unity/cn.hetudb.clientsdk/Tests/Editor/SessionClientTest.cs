@@ -1,18 +1,23 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
+using UnityEngine.TestTools;
 
 namespace Tests.HeTu
 {
     [TestFixture]
     public class SessionClientTest
     {
-        [Test]
-        public async Task CallBeforeReady_WaitsUntilBootstrapCompletes()
+        [UnityTest]
+        public IEnumerator CallBeforeReady_WaitsUntilBootstrapCompletes() =>
+            RunTask(CallBeforeReady_WaitsUntilBootstrapCompletesAsync());
+
+        private async Task CallBeforeReady_WaitsUntilBootstrapCompletesAsync()
         {
             var connection = new FakeSessionConnection("c1");
             var bootstrapGate = new TaskCompletionSource<bool>(
@@ -39,8 +44,62 @@ namespace Tests.HeTu
                 connection.Calls.Select(call => call.SystemName));
         }
 
-        [Test]
-        public async Task SentCallThenDisconnect_CompletesAsUnknownOutcome_WithoutRetry()
+        [UnityTest]
+        public IEnumerator WatchBeforeReady_WaitsUntilInitialSnapshotIsAvailable() =>
+            RunTask(WatchBeforeReady_WaitsUntilInitialSnapshotIsAvailableAsync());
+
+        private async Task WatchBeforeReady_WaitsUntilInitialSnapshotIsAvailableAsync()
+        {
+            var connection = new FakeSessionConnection("c1");
+            connection.RowByIdResults[7] = new TestComponent { ID = 7, Value = 10 };
+            var bootstrapGate = new TaskCompletionSource<bool>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var session = CreateSession(
+                new Queue<FakeSessionConnection>(new[] { connection }),
+                async (_, ct) =>
+                {
+                    await bootstrapGate.Task;
+                    ct.ThrowIfCancellationRequested();
+                });
+
+            _ = session.StartAsync();
+            var watchTask = session.WatchRowById<TestComponent>(7);
+
+            Assert.False(watchTask.IsCompleted);
+            Assert.AreEqual(0, connection.WatchedRowIds.Count);
+
+            bootstrapGate.TrySetResult(true);
+            using var sub = await watchTask;
+
+            Assert.AreEqual(10, sub.Data.Value);
+            CollectionAssert.AreEqual(new long[] { 7 }, connection.WatchedRowIds);
+        }
+
+        [UnityTest]
+        public IEnumerator DuplicateIntent_SharesSingleRemoteSubscription() =>
+            RunTask(DuplicateIntent_SharesSingleRemoteSubscriptionAsync());
+
+        private async Task DuplicateIntent_SharesSingleRemoteSubscriptionAsync()
+        {
+            var connection = new FakeSessionConnection("c1");
+            connection.RowByIdResults[7] = new TestComponent { ID = 7, Value = 10 };
+            var session = CreateSession(
+                new Queue<FakeSessionConnection>(new[] { connection }));
+            await session.StartAsync();
+
+            using var first = await session.WatchRowById<TestComponent>(7);
+            using var second = await session.WatchRowById<TestComponent>(7);
+
+            Assert.AreEqual(10, first.Data.Value);
+            Assert.AreEqual(10, second.Data.Value);
+            CollectionAssert.AreEqual(new long[] { 7 }, connection.WatchedRowIds);
+        }
+
+        [UnityTest]
+        public IEnumerator SentCallThenDisconnect_CompletesAsUnknownOutcome_WithoutRetry() =>
+            RunTask(SentCallThenDisconnect_CompletesAsUnknownOutcome_WithoutRetryAsync());
+
+        private async Task SentCallThenDisconnect_CompletesAsUnknownOutcome_WithoutRetryAsync()
         {
             var first = new FakeSessionConnection("c1")
             {
@@ -55,16 +114,28 @@ namespace Tests.HeTu
             await WaitUntilAsync(() => first.Calls.Count == 1);
 
             first.Close("network lost");
-            await WaitUntilAsync(() => session.State == SessionState.Ready &&
+                await WaitUntilAsync(() => session.State == HeTuSessionState.Ready &&
                                        second.OpenCount == 1);
 
-            Assert.ThrowsAsync<CallOutcomeUnknownException>(async () =>
-                await callTask);
+            var unknownOutcome = false;
+            try
+            {
+                await callTask;
+            }
+            catch (CallOutcomeUnknownException)
+            {
+                unknownOutcome = true;
+            }
+
+            Assert.True(unknownOutcome);
             Assert.AreEqual(0, second.Calls.Count);
         }
 
-        [Test]
-        public async Task WatchRowById_RestoresAfterReconnect()
+        [UnityTest]
+        public IEnumerator WatchRowById_RestoresAfterReconnect() =>
+            RunTask(WatchRowById_RestoresAfterReconnectAsync());
+
+        private async Task WatchRowById_RestoresAfterReconnectAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.RowByIdResults[7] = new TestComponent { ID = 7, Value = 10 };
@@ -90,8 +161,11 @@ namespace Tests.HeTu
             CollectionAssert.AreEqual(new long[] { 7 }, second.WatchedRowIds);
         }
 
-        [Test]
-        public async Task WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubId()
+        [UnityTest]
+        public IEnumerator WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubId() =>
+            RunTask(WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync());
+
+        private async Task WatchFirst_RestoresUsingOriginalIntent_NotPreviousRemoteSubIdAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.FirstResults[("owner", 123L)] =
@@ -119,8 +193,11 @@ namespace Tests.HeTu
                 second.WatchedFirstQueries);
         }
 
-        [Test]
-        public async Task WatchRange_RestoresAndReplacesSnapshotAfterReconnect()
+        [UnityTest]
+        public IEnumerator WatchRange_RestoresAndReplacesSnapshotAfterReconnect() =>
+            RunTask(WatchRange_RestoresAndReplacesSnapshotAfterReconnectAsync());
+
+        private async Task WatchRange_RestoresAndReplacesSnapshotAfterReconnectAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.RangeResults[("value", 0, 10, 10, false, true)] =
@@ -157,8 +234,11 @@ namespace Tests.HeTu
             Assert.AreEqual(20, sub.Rows[2].Value);
         }
 
-        [Test]
-        public async Task DisposedSubscriptionWhileDisconnected_IsNotRestored()
+        [UnityTest]
+        public IEnumerator DisposedSubscriptionWhileDisconnected_IsNotRestored() =>
+            RunTask(DisposedSubscriptionWhileDisconnected_IsNotRestoredAsync());
+
+        private async Task DisposedSubscriptionWhileDisconnected_IsNotRestoredAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.RowByIdResults[7] = new TestComponent { ID = 7, Value = 10 };
@@ -166,22 +246,26 @@ namespace Tests.HeTu
             second.RowByIdResults[7] = new TestComponent { ID = 7, Value = 20 };
 
             var session = CreateSession(
-                new Queue<FakeSessionConnection>(new[] { first, second }));
+                new Queue<FakeSessionConnection>(new[] { first, second }),
+                reconnectDelay: TimeSpan.FromMilliseconds(50));
             await session.StartAsync();
 
             var sub = await session.WatchRowById<TestComponent>(7);
             first.Close("network lost");
-            await WaitUntilAsync(() => session.State == SessionState.Reconnecting);
+            await WaitUntilAsync(() => session.State == HeTuSessionState.Reconnecting);
             sub.Dispose();
 
-            await WaitUntilAsync(() => session.State == SessionState.Ready &&
+            await WaitUntilAsync(() => session.State == HeTuSessionState.Ready &&
                                        second.OpenCount == 1);
 
             Assert.AreEqual(0, second.WatchedRowIds.Count);
         }
 
-        [Test]
-        public async Task RestoreOrder_BootstrapRunsBeforeSubscriptions()
+        [UnityTest]
+        public IEnumerator RestoreOrder_BootstrapRunsBeforeSubscriptions() =>
+            RunTask(RestoreOrder_BootstrapRunsBeforeSubscriptionsAsync());
+
+        private async Task RestoreOrder_BootstrapRunsBeforeSubscriptionsAsync()
         {
             var first = new FakeSessionConnection("c1");
             first.RowByIdResults[7] = new TestComponent { ID = 7, Value = 10 };
@@ -208,14 +292,24 @@ namespace Tests.HeTu
 
         private static HeTuSessionClient CreateSession(
             Queue<FakeSessionConnection> connections,
-            Func<FakeSessionConnection, CancellationToken, Task> bootstrap = null)
+            Func<FakeSessionConnection, CancellationToken, Task> bootstrap = null,
+            TimeSpan? reconnectDelay = null)
         {
             return new HeTuSessionClient(
                 () => connections.Dequeue(),
                 bootstrap == null
                     ? null
                     : (conn, ct) => bootstrap((FakeSessionConnection)conn, ct),
-                TimeSpan.Zero);
+                reconnectDelay ?? TimeSpan.Zero);
+        }
+
+        private static IEnumerator RunTask(Task task)
+        {
+            while (!task.IsCompleted)
+                yield return null;
+
+            if (task.Exception != null)
+                throw task.Exception;
         }
 
         private static async Task WaitUntilAsync(Func<bool> predicate)
@@ -334,7 +428,7 @@ namespace Tests.HeTu
 
             public void Close(string reason) => _closed.TrySetResult(reason);
 
-            public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+            public ValueTask DisposeAsync() => new();
 
             public readonly struct CallRecord
             {

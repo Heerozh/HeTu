@@ -309,9 +309,9 @@ namespace HeTu
         /// </code>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<T>> Get<T>(
+        public async Awaitable<RowSubscription<T>> WatchFirst<T>(
 #else
-        public async UniTask<RowSubscription<T>> Get<T>(
+        public async UniTask<RowSubscription<T>> WatchFirst<T>(
 #endif
             string index, object value, string componentName = null)
             where T : IBaseComponent
@@ -324,7 +324,7 @@ namespace HeTu
             }
 
             var tcs = NewCompletionSource<RowSubscription<T>>();
-            GetSync<T>(index, value, (rowSub, cancel, ex) =>
+            WatchFirstSync<T>(index, value, (rowSub, cancel, ex) =>
             {
                 if (cancel)
                 {
@@ -359,13 +359,13 @@ namespace HeTu
         /// <returns>查询到时返回行订阅；未命中时返回 <see langword="null" />。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<RowSubscription<DictComponent>> Get(
+        public async Awaitable<RowSubscription<DictComponent>> WatchFirst(
 #else
-        public async UniTask<RowSubscription<DictComponent>> Get(
+        public async UniTask<RowSubscription<DictComponent>> WatchFirst(
 #endif
             string componentName, string index, object value)
         {
-            return await Get<DictComponent>(index, value, componentName);
+            return await WatchFirst<DictComponent>(index, value, componentName);
         }
 
         /// <summary>
@@ -399,9 +399,9 @@ namespace HeTu
         /// </code>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<IndexSubscription<T>> Range<T>(
+        public async Awaitable<IndexSubscription<T>> WatchRange<T>(
 #else
-        public async UniTask<IndexSubscription<T>> Range<T>(
+        public async UniTask<IndexSubscription<T>> WatchRange<T>(
 #endif
             string index, object left, object right, int limit,
             bool desc = false, bool force = true, string componentName = null)
@@ -416,7 +416,7 @@ namespace HeTu
 
             var tcs = NewCompletionSource<IndexSubscription<T>>();
 
-            RangeSync<T>(
+            WatchRangeSync<T>(
                 index, left, right, limit,
                 (idxSub, cancel, ex) =>
                 {
@@ -457,14 +457,14 @@ namespace HeTu
         /// <returns>范围订阅对象。</returns>
         [MustDisposeResource]
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<IndexSubscription<DictComponent>> Range(
+        public async Awaitable<IndexSubscription<DictComponent>> WatchRange(
 #else
-        public async UniTask<IndexSubscription<DictComponent>> Range(
+        public async UniTask<IndexSubscription<DictComponent>> WatchRange(
 #endif
             string componentName, string index, object left, object right, int limit,
             bool desc = false, bool force = true)
         {
-            return await Range<DictComponent>(index, left, right, limit, desc, force,
+            return await WatchRange<DictComponent>(index, left, right, limit, desc, force,
                 componentName);
         }
     }

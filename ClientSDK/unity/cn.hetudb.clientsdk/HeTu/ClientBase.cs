@@ -5,7 +5,6 @@
 
 
 using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -48,10 +47,6 @@ namespace HeTu
         internal const string MessageSubed = "sub";
         internal const string IndexId = "id";
         protected readonly InspectorTraceCollector InspectorCollector = new();
-
-        protected readonly ConcurrentQueue<
-                ValueTuple<object, ResponseManager.Callback, string>>
-            OfflineQueue = new();
 
         protected readonly MessagePipeline Pipeline = new();
         protected readonly ResponseManager ResponseQueue = new();
@@ -195,28 +190,7 @@ namespace HeTu
             Logger.Instance.Info("[HeTuClient] 连接成功。");
             State = ConnectionState.Connected;
 
-            // 连接完成开始发送离线消息队列中的消息
             OnConnected?.Invoke();
-            // OnConnected后Pipeline才可用
-            FlushOfflineQueue();
-        }
-
-        private void FlushOfflineQueue()
-        {
-            foreach (var (payload, callback, traceId) in OfflineQueue)
-            {
-                var buffer = Pipeline.Encode(payload, out var metrics);
-                InspectorCollector.UpdateRequestSize(traceId,
-                    metrics.SourceSizeBytes,
-                    metrics.TransportSizeBytes);
-                SendCore(buffer);
-                if (callback != null)
-                    ResponseQueue.EnqueueCallback(callback, traceId);
-                else
-                    InspectorCollector.CompleteAfterSendIfNeeded(traceId);
-            }
-
-            OfflineQueue.Clear();
         }
 
         private void HandleClosed(string errMsg)
@@ -250,34 +224,27 @@ namespace HeTu
             CloseCore();
         }
 
-        private void SendOrQueueRequest(object payload, ResponseManager.Callback callback,
+        private void SendRequest(object payload, ResponseManager.Callback callback,
             string traceId = null)
         {
-            if (State == ConnectionState.Connected)
-            {
-                var buffer = Pipeline.Encode(payload, out var metrics);
-                InspectorCollector.UpdateRequestSize(traceId,
-                    metrics.SourceSizeBytes,
-                    metrics.TransportSizeBytes);
-                SendCore(buffer); // 后台线程发送
-                if (callback != null)
-                    ResponseQueue.EnqueueCallback(callback, traceId);
-                else
-                    InspectorCollector.CompleteAfterSendIfNeeded(traceId);
-            }
+            // 这里不检查State == ConnectionState.Connected，请确保调用前使用过 EnsureConnected()
+            var buffer = Pipeline.Encode(payload, out var metrics);
+            InspectorCollector.UpdateRequestSize(traceId,
+                metrics.SourceSizeBytes,
+                metrics.TransportSizeBytes);
+            SendCore(buffer); // 后台线程发送
+            if (callback != null)
+                ResponseQueue.EnqueueCallback(callback, traceId);
             else
-            {
-                Logger.Instance.Info("尝试发送数据但连接未建立，将加入队列在建立后发送。");
-                OfflineQueue.Enqueue((payload, callback, traceId));
-            }
+                InspectorCollector.CompleteAfterSendIfNeeded(traceId);
         }
 
         private bool EnsureConnected(string operationName)
         {
-            if (State != ConnectionState.Disconnected)
+            if (State == ConnectionState.Connected)
                 return true;
 
-            Logger.Instance.Error($"[HeTuClient] {operationName}失败，请先调用Connect");
+            Logger.Instance.Error($"[HeTuClient] {operationName}失败，连接尚未就绪");
             return false;
         }
 
@@ -299,7 +266,7 @@ namespace HeTu
             var payload = new object[] { CommandRpc, systemName }.Concat(args).ToArray();
             var traceId = InspectorCollector.InterceptRequest("callsystem", systemName,
                 payload);
-            SendOrQueueRequest(payload, (response, cancel) =>
+            SendRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -365,20 +332,20 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     发起单行订阅（Get）。
+        ///     按条件查询数据，并按行 ID 订阅单行数据。
         /// </summary>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
         /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
-        public void GetSync<T>(
+        public void WatchFirstSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
             string componentName = null)
             where T : IBaseComponent
         {
-            if (!EnsureConnected("Get"))
+            if (!EnsureConnected("WatchRowByIdSync"))
             {
                 onResponse(null, true, null);
                 return;
@@ -403,7 +370,7 @@ namespace HeTu
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
-            SendOrQueueRequest(payload, (response, cancel) =>
+            SendRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -451,16 +418,16 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     发起字典组件单行订阅（Get）。
+        ///     同 WatchFirstSync<T>，但使用默认字典类型。
         /// </summary>
-        public void GetSync(
+        public void WatchFirstSync(
             string index, object value,
             Action<RowSubscription<DictComponent>, bool, Exception> onResponse,
             string componentName = null) =>
-            GetSync<DictComponent>(index, value, onResponse, componentName);
+            WatchFirstSync<DictComponent>(index, value, onResponse, componentName);
 
         /// <summary>
-        ///     发起范围订阅（Range）。
+        ///     订阅索引范围数据。（Range)
         /// </summary>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="index">索引字段名。</param>
@@ -471,14 +438,14 @@ namespace HeTu
         /// <param name="desc">是否降序。</param>
         /// <param name="force">无数据时是否仍保持订阅。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
-        public void RangeSync<T>(
+        public void WatchRangeSync<T>(
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
             string componentName = null)
             where T : IBaseComponent
         {
-            if (!EnsureConnected("Range"))
+            if (!EnsureConnected("WatchRangeSync"))
             {
                 onResponse(null, true, null);
                 return;
@@ -506,7 +473,7 @@ namespace HeTu
             };
             var traceId = InspectorCollector.InterceptRequest(QueryRange,
                 componentName, payload);
-            SendOrQueueRequest(payload, (response, cancel) =>
+            SendRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -555,13 +522,13 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     发起字典组件范围订阅（Range）。
+        ///     按字典类型，订阅索引范围数据。（Range)
         /// </summary>
-        public void RangeSync(
+        public void WatchRangeSync(
             string componentName, string index, object left, object right, int limit,
             Action<IndexSubscription<DictComponent>, bool, Exception> onResponse,
             bool desc = false, bool force = true) =>
-            RangeSync(index, left, right, limit, onResponse, desc, force, componentName);
+            WatchRangeSync(index, left, right, limit, onResponse, desc, force, componentName);
 
         /// <summary>
         ///     取消指定订阅。
@@ -570,14 +537,14 @@ namespace HeTu
         /// <param name="from">取消来源说明（用于日志）。</param>
         public void Unsubscribe(string subID, string from)
         {
-            if (State == ConnectionState.Disconnected)
+            if (State != ConnectionState.Connected)
                 return;
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
             var payload = new object[] { CommandUnsub, subID };
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
-            SendOrQueueRequest(payload, null, traceId);
+            SendRequest(payload, null, traceId);
             Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
