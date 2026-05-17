@@ -346,7 +346,7 @@ namespace HeTu
             string componentName = null)
             where T : IBaseComponent
         {
-            if (!EnsureConnected("WatchRowByIdSync"))
+            if (!EnsureConnected("WatchRowSync"))
             {
                 onResponse(null, true, null);
                 return;

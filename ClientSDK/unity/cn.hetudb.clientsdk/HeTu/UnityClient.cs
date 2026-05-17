@@ -38,6 +38,13 @@ namespace HeTu
 #endif
 
         private CancellationTokenSource _connectionCancelSource;
+#if UNITY_6000_0_OR_NEWER
+        private AwaitableCompletionSource<bool> _connectCompletion;
+        private AwaitableCompletionSource<string> _closeCompletion;
+#else
+        private UniTaskCompletionSource<bool> _connectCompletion;
+        private UniTaskCompletionSource<string> _closeCompletion;
+#endif
 
         private IWebSocket _socket;
 
@@ -106,6 +113,7 @@ namespace HeTu
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = null;
+            _closeCompletion?.TrySetResult("Canceled");
             State = ConnectionState.Disconnected;
         }
 
@@ -116,107 +124,100 @@ namespace HeTu
 
 
         /// <summary>
-        ///     连接到河图url，url格式为"wss://host:port/hetu"
-        ///     此方法为async/await异步堵塞，在连接断开前不会结束。
+        ///     连接到河图 url，并在握手完成后返回。url格式为"wss://host:port/hetu/<instance_name>"
         /// </summary>
-        /// <returns>
-        ///     返回null或错误信息。
-        ///     - 正常断开返回null或"Canceled"。其中Canceled在游戏退出，或手动调用Close时返回。
-        ///     - 连接异常断开返回错误信息；
-        /// </returns>
-        /// <code>
-        ///     //UnityEngine使用示例：
-        ///     public class YourNetworkManager : MonoBehaviour {
-        ///         async void Start() {
-        ///             HeTuClient.Instance.OnConnected += () => {
-        ///                 HeTuClient.Instance.CallSystem("login", "userToken");
-        ///             };
-        ///             // 手游可以放入while循环，实现断线自动重连
-        ///             while (true) {
-        ///                 var e = await HeTuClient.Instance.Connect("wss://host:port/hetu");
-        ///                 // 断线处理...是否重连等等
-        ///                 if (e is null || e == "Canceled")
-        ///                     break;
-        ///                 else
-        ///                     Debug.LogError("连接断开, 将继续重连：" + e);
-        ///                 await Awaitable.WaitForSecondsAsync(1); // Unity 6000+
-        ///                 // Unity 2022+: await UniTask.Delay(1000);
-        ///     }}}
-        /// </code>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<string> Connect(string url)
+        public async Awaitable Connect(string url, string authKey = null,
 #else
-        public async UniTask<string> Connect(string url)
+        public async UniTask Connect(string url, string authKey = null,
 #endif
+            CancellationToken cancellationToken = default)
         {
-            // 检查连接状态(应该不会遇到，但ReadyState经常为Closing状态）
             var state = _socket?.ReadyState ?? WebSocketState.Closed;
             if (state != WebSocketState.Closed)
-            {
-                Logger.Instance.Error(
-                    $"[HeTuClient] Connect前请先Close Socket, socket state:{_socket?.ReadyState}");
-                return null;
-            }
+                throw new InvalidOperationException(
+                    $"Connect前请先Close Socket, socket state:{_socket?.ReadyState}");
 
-            // 连接并等待
-            var tcs = NewCompletionSource<string>();
+            if (authKey != null)
+                ConfigureCryptoAuthKey(authKey);
 
-            ConnectSync(url);
-
-            Action<string> onClose = errMsg =>
-            {
-                if (errMsg is null)
-                {
-                    Logger.Instance.Info("[HeTuClient] 连接已断开.");
-                    tcs.TrySetResult(null);
-                }
-                else
-                {
-                    Logger.Instance.Info($"[HeTuClient] 连接断开，{errMsg}.");
-                    tcs.TrySetResult(errMsg);
-                }
-
-                CloseCore();
-            };
-            OnClosed += onClose;
-
-            // 必须在退出时保证cancel, 不然会卡死unity
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = new CancellationTokenSource();
+
+            _connectCompletion = NewCompletionSource<bool>();
+            _closeCompletion = NewCompletionSource<string>();
+
+            Action onConnected = null;
+            onConnected = () => _connectCompletion.TrySetResult(true);
+            OnConnected += onConnected;
+            OnClosed += HandleConnectionClosed;
+
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,
-                Application.exitCancellationToken
+                Application.exitCancellationToken,
+                cancellationToken
             );
-
-            // token可取消等待
-            await using var reg = linkedCts.Token.Register(() =>
+            using var reg = linkedCts.Token.Register(() =>
             {
-                Logger.Instance.Info("[HeTuClient] 连接断开，收到了Cancel取消请求.");
-                ResponseQueue.CancelAll("收到了Cancel取消请求");
-                tcs.TrySetResult("Canceled");
+                _connectCompletion.TrySetCanceled();
+                _closeCompletion.TrySetResult("Canceled");
                 CloseCore();
             });
 
-            // 等待连接断开
-            var result = await AwaitFrom(tcs);
-            OnClosed -= onClose;
-            return result;
+            ConnectSync(url);
+            try
+            {
+                await AwaitFrom(_connectCompletion);
+            }
+            finally
+            {
+                OnConnected -= onConnected;
+            }
         }
 
         /// <summary>
-        ///     连接到河图url，并在握手中携带 authKey 签名。
+        ///     等待当前连接关闭。
         /// </summary>
 #if UNITY_6000_0_OR_NEWER
-            public async Awaitable<string> Connect(string url, string authKey)
+        public Awaitable<string> WaitClosedAsync()
 #else
-        public async UniTask<string> Connect(string url, string authKey)
+        public UniTask<string> WaitClosedAsync()
 #endif
         {
-            ConfigureCryptoAuthKey(authKey);
-            return await Connect(url);
+            return _closeCompletion == null
+                ? CompletedAwaitable<string>(null)
+                : WaitClosedCoreAsync();
         }
 
+#if UNITY_6000_0_OR_NEWER
+        private async Awaitable<string> WaitClosedCoreAsync()
+#else
+        private async UniTask<string> WaitClosedCoreAsync()
+#endif
+        {
+            try
+            {
+                return await AwaitFrom(_closeCompletion);
+            }
+            finally
+            {
+                OnClosed -= HandleConnectionClosed;
+            }
+        }
+
+        private void HandleConnectionClosed(string errMsg)
+        {
+            _closeCompletion?.TrySetResult(errMsg);
+            CloseCore();
+        }
+
+#if UNITY_6000_0_OR_NEWER
+        private static async Awaitable<T> CompletedAwaitable<T>(T value) => value;
+#else
+        private static UniTask<T> CompletedAwaitable<T>(T value) =>
+            UniTask.FromResult(value);
+#endif
 
         /// <summary>
         ///     执行System调用。
