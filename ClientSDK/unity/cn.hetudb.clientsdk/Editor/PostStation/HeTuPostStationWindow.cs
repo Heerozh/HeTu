@@ -197,7 +197,7 @@ namespace HeTu.Editor.PostStation
                 var right = ParseJsonValue(_rangeRight);
 
 #if UNITY_6000_0_OR_NEWER
-                sub = await HeTuClient.Instance.Range(
+                sub = await HeTuClient.Instance.WatchRange(
                     _rangeComponentName,
                     _rangeIndex,
                     left,
