@@ -83,6 +83,18 @@ Unity 6000+ 的 `Awaitable` 或 Unity 2022.3 的 `UniTask`，因此在 WebGL 上
 当前会话仍在运行时再次 `Connect` 会抛 `InvalidOperationException`，需要先 `Close()` 才能换 URL
 重新建立会话。
 
+`Connect` 的可选参数（带默认值）：
+
+| 参数                     | 默认            | 说明                                            |
+|------------------------|---------------|-----------------------------------------------|
+| `reconnectDelay`       | `1s`          | 重连退避起点。                                       |
+| `maxReconnectDelay`    | `30s`         | 退避上限；指数翻倍封顶在这里。                              |
+| `maxReconnectAttempts` | `20`           | 连续失败次数上限，`0` = 不限次。游戏端常用 `0`，让玩家挂着等维护结束。      |
+| `connectTimeout`       | `30s`         | 首次到 Ready 的整体超时；超时自动 Close 并抛 `TimeoutException`。`TimeSpan.Zero` 关闭。 |
+
+`Faulted` 事件每次连接失败（socket 断开、bootstrap 异常、restore 异常）都会触发一次，
+携带本次失败的异常，是否终态请读 `State`（`Faulted` 状态才是终态）。
+
 ### 连接
 
 - `Connect(url)`：建立单条物理连接并等待握手完成。

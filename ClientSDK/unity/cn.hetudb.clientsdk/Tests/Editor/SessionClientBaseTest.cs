@@ -864,6 +864,75 @@ namespace Tests.HeTu
             StringAssert.Contains("fatal close reason", observed.Message);
         }
 
+        // socket 关闭只要还会重试，也得通知 Faulted 事件；不能等到终态才告诉用户。
+        [Test]
+        public void Reconnect_TransientClose_FiresFaultedEventPerAttempt()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectAttempts: 0); // 不限次：永不进 Faulted 终态
+
+            var observed = new List<Exception>();
+            session.Faulted += observed.Add;
+
+            session.Start();
+            ts[0].RaiseClosed("drop 1");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("drop 2");
+            // 不再 RunNext，状态留在 Reconnecting 等下一次。
+
+            Assert.AreEqual(2, observed.Count,
+                "每次 socket 关闭都应触发一次 Faulted 事件（即使会继续重试）");
+            StringAssert.Contains("drop 1", observed[0].Message);
+            StringAssert.Contains("drop 2", observed[1].Message);
+            Assert.AreNotEqual(HeTuSessionState.Faulted, session.State,
+                "maxReconnectAttempts=0 时不应进入 Faulted 终态");
+        }
+
+        // 用户在 Faulted 回调里主动 Close 时，不应再调度新的重连或进 Faulted 终态。
+        [Test]
+        public void FaultedCallback_CallingClose_ShortCircuitsReconnect()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectAttempts: 0);
+
+            session.Faulted += _ => session.Close();
+
+            session.Start();
+            ts[0].RaiseClosed("user-aborted");
+
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "Faulted 回调里 Close 应该让 session 进 Stopped 而不是 Reconnecting/Faulted");
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "Close 后不应再排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount,
+                "第二条 transport 不应被构造");
+        }
+
         // 问题 #4：bootstrap/restore 失败时 transport 只 Dispose 未 Close。
         [Test]
         public void Bootstrap_Failure_ClosesUnderlyingTransport()

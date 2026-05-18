@@ -51,6 +51,32 @@ namespace HeTu
             _core?.State ?? HeTuSessionState.Stopped;
 
         /// <summary>
+        ///     首次连接超时默认值。游戏客户端用 30s 一般够覆盖正常握手 + bootstrap
+        ///     的时间预算；想关掉超时就传 <see cref="TimeSpan.Zero" />。
+        /// </summary>
+        public static readonly TimeSpan DefaultConnectTimeout =
+            TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        ///     首次重连延迟默认值（指数退避起点）。
+        /// </summary>
+        public static readonly TimeSpan DefaultReconnectDelay =
+            TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        ///     重连延迟上限默认值。指数退避会从
+        ///     <see cref="DefaultReconnectDelay" /> 翻倍直到这个值封顶。
+        /// </summary>
+        public static readonly TimeSpan DefaultMaxReconnectDelay =
+            TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        ///     连续重试次数上限默认值。20 次按 1/2/4/8/16/30s 退避大约覆盖 8 分钟，
+        ///     足以扛过常规热重启；想让玩家挂着等长维护就显式传 <c>0</c>（不限次）。
+        /// </summary>
+        public const int DefaultMaxReconnectAttempts = 20;
+
+        /// <summary>
         ///     启动逻辑会话：连接 <paramref name="url" />、跑 <paramref name="bootstrap" />、
         ///     恢复所有存活订阅。await 返回时
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Ready" />。
@@ -58,19 +84,42 @@ namespace HeTu
         /// <param name="url">河图服务端 URL，例如 <c>ws://127.0.0.1:2466/hetu/MyGame</c>。</param>
         /// <param name="authKey">可选预共享密钥（服务端启用 <c>--authkey</c> 时必填）。</param>
         /// <param name="bootstrap">每次握手成功后的初始化委托，典型用于登录。</param>
-        /// <param name="reconnectDelay">重连前等待时间，默认 1 秒。</param>
+        /// <param name="reconnectDelay">
+        ///     首次重连前等待时间（指数退避起点）。<c>null</c> 用
+        ///     <see cref="DefaultReconnectDelay" />（1s）。
+        /// </param>
+        /// <param name="maxReconnectDelay">
+        ///     退避上限。<c>null</c> 用 <see cref="DefaultMaxReconnectDelay" />（30s）。
+        /// </param>
+        /// <param name="maxReconnectAttempts">
+        ///     连续失败到此数即进入 <see cref="HeTuSessionState.Faulted" /> 终态。
+        ///     默认 <see cref="DefaultMaxReconnectAttempts" />（20）；
+        ///     <c>0</c> = 不限次，配合 Faulted 事件做 UI 反馈即可。
+        /// </param>
+        /// <param name="connectTimeout">
+        ///     本次 Connect 的整体超时（从 Connecting 到 Ready）。超时会自动 Close
+        ///     并把 await 抛 <see cref="TimeoutException" />。<c>null</c> 用
+        ///     <see cref="DefaultConnectTimeout" />（30s）；<see cref="TimeSpan.Zero" />
+        ///     关闭超时，await 一直等到 Ready 或 Faulted。
+        /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, Awaitable> bootstrap = null,
-            TimeSpan? reconnectDelay = null)
+            TimeSpan? reconnectDelay = null,
+            TimeSpan? maxReconnectDelay = null,
+            int maxReconnectAttempts = DefaultMaxReconnectAttempts,
+            TimeSpan? connectTimeout = null)
 #else
         public UniTask Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, UniTask> bootstrap = null,
-            TimeSpan? reconnectDelay = null)
+            TimeSpan? reconnectDelay = null,
+            TimeSpan? maxReconnectDelay = null,
+            int maxReconnectAttempts = DefaultMaxReconnectAttempts,
+            TimeSpan? connectTimeout = null)
 #endif
         {
             if (_core != null
@@ -87,54 +136,81 @@ namespace HeTu
                     ? null
                     : (_, succeed, fail) =>
                         RunBootstrapAsync(client, bootstrap, succeed, fail),
-                reconnectDelay);
+                reconnectDelay ?? DefaultReconnectDelay,
+                maxReconnectDelay ?? DefaultMaxReconnectDelay,
+                maxReconnectAttempts);
 
-            return ConnectCore();
+            return ConnectCore(connectTimeout ?? DefaultConnectTimeout);
         }
 
-        // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这个重载触发 Start。
+        // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这两个重载触发 Start。
+        // 无参 = 不开 timeout，便于 fake transport 显式控制时序；TimeSpan 重载
+        // 让 ScheduleConnectTimeout 跑在测试可控的时长上。
 #if UNITY_6000_0_OR_NEWER
         internal Awaitable Connect()
 #else
         internal UniTask Connect()
 #endif
         {
-            return ConnectCore();
+            return ConnectCore(TimeSpan.Zero);
         }
 
 #if UNITY_6000_0_OR_NEWER
-        private Awaitable ConnectCore()
+        internal Awaitable Connect(TimeSpan connectTimeout)
 #else
-        private UniTask ConnectCore()
+        internal UniTask Connect(TimeSpan connectTimeout)
+#endif
+        {
+            return ConnectCore(connectTimeout);
+        }
+
+#if UNITY_6000_0_OR_NEWER
+        private Awaitable ConnectCore(TimeSpan connectTimeout)
+#else
+        private UniTask ConnectCore(TimeSpan connectTimeout)
 #endif
         {
             if (_core.State == HeTuSessionState.Ready)
                 return CompletedAwaitable();
 
             var tcs = NewCompletionSource<bool>();
+            // 最近一次 Faulted 事件携带的异常；用于把"重试用尽"那条 await 抛出去时
+            // 能带上真实原因（StateChanged 信号本身不带 fault）。
+            Exception capturedFault = null;
             void OnReady() => tcs.TrySetResult(true);
+            void OnFaulted(Exception ex) => capturedFault = ex;
             void OnStateChanged(HeTuSessionState state)
             {
                 if (state == HeTuSessionState.Stopped)
                     tcs.TrySetCanceled();
+                else if (state == HeTuSessionState.Faulted)
+                    tcs.TrySetException(capturedFault ?? new InvalidOperationException(
+                        "Session faulted: reconnect attempts exhausted."));
             }
 
             _core.Ready += OnReady;
+            _core.Faulted += OnFaulted;
             _core.StateChanged += OnStateChanged;
             _core.Start();
-            return AwaitConnectAsync(tcs, OnReady, OnStateChanged);
+
+            if (connectTimeout > TimeSpan.Zero)
+                ScheduleConnectTimeout(connectTimeout, tcs);
+
+            return AwaitConnectAsync(tcs, OnReady, OnStateChanged, OnFaulted);
         }
 
 #if UNITY_6000_0_OR_NEWER
         private async Awaitable AwaitConnectAsync(
             AwaitableCompletionSource<bool> tcs,
             Action onReady,
-            Action<HeTuSessionState> onStateChanged)
+            Action<HeTuSessionState> onStateChanged,
+            Action<Exception> onFaulted)
 #else
         private async UniTask AwaitConnectAsync(
             UniTaskCompletionSource<bool> tcs,
             Action onReady,
-            Action<HeTuSessionState> onStateChanged)
+            Action<HeTuSessionState> onStateChanged,
+            Action<Exception> onFaulted)
 #endif
         {
             try
@@ -145,8 +221,41 @@ namespace HeTu
             {
                 _core.Ready -= onReady;
                 _core.StateChanged -= onStateChanged;
+                _core.Faulted -= onFaulted;
             }
         }
+
+#if UNITY_6000_0_OR_NEWER
+        private void ScheduleConnectTimeout(
+            TimeSpan timeout, AwaitableCompletionSource<bool> tcs) =>
+            _ = RunConnectTimeoutAsync(timeout, tcs);
+
+        private async Awaitable RunConnectTimeoutAsync(
+            TimeSpan timeout, AwaitableCompletionSource<bool> tcs)
+        {
+            await Awaitable.WaitForSecondsAsync((float)timeout.TotalSeconds);
+            // tcs 已经 settle（Ready / cancel / faulted）则 TrySetException 返回 false，
+            // 不会去戳已经成功的会话或新一轮 Connect 的 core。
+            if (tcs.TrySetException(new TimeoutException(
+                    $"Session did not become Ready within " +
+                    $"{timeout.TotalSeconds:F0}s.")))
+                Close();
+        }
+#else
+        private void ScheduleConnectTimeout(
+            TimeSpan timeout, UniTaskCompletionSource<bool> tcs) =>
+            RunConnectTimeoutAsync(timeout, tcs).Forget();
+
+        private async UniTask RunConnectTimeoutAsync(
+            TimeSpan timeout, UniTaskCompletionSource<bool> tcs)
+        {
+            await UniTask.Delay(timeout);
+            if (tcs.TrySetException(new TimeoutException(
+                    $"Session did not become Ready within " +
+                    $"{timeout.TotalSeconds:F0}s.")))
+                Close();
+        }
+#endif
 
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<JsonObject> CallSystem(string systemName,

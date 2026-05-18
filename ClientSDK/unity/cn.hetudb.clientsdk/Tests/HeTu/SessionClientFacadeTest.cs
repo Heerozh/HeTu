@@ -104,6 +104,96 @@ namespace Tests.HeTu
             Assert.True(canceled);
         }
 
+        [UnityTest]
+        public IEnumerator Connect_TimesOut_When_TransportNeverConnects() =>
+            RunTask(Connect_TimesOut_When_TransportNeverConnectsAsync());
+
+        private async Task Connect_TimesOut_When_TransportNeverConnectsAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            // transport 不 RaiseConnected：timeout 200ms 内应触发并 Close 会话。
+            var connectTask =
+                ToTask(session.Connect(TimeSpan.FromMilliseconds(200)));
+
+            TimeoutException caught = null;
+            try
+            {
+                await connectTask;
+            }
+            catch (TimeoutException ex)
+            {
+                caught = ex;
+            }
+
+            Assert.IsNotNull(caught,
+                "Connect 在 transport 不响应时必须抛 TimeoutException");
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "Connect 超时必须把 session Close 掉");
+        }
+
+        [UnityTest]
+        public IEnumerator Connect_TimeoutNoOp_After_Ready() =>
+            RunTask(Connect_TimeoutNoOp_After_ReadyAsync());
+
+        private async Task Connect_TimeoutNoOp_After_ReadyAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            var connectTask =
+                ToTask(session.Connect(TimeSpan.FromMilliseconds(150)));
+            transport.RaiseConnected();
+            await connectTask;
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            // 等过超时窗口；State 必须仍是 Ready（迟到的 timer 不应误关已成功的 session）。
+            await Task.Delay(400);
+            Assert.AreEqual(HeTuSessionState.Ready, session.State,
+                "Ready 之后才 fire 的 timeout 必须是 no-op");
+        }
+
+        [UnityTest]
+        public IEnumerator Connect_ThrowsCapturedFault_When_CoreEntersFaulted() =>
+            RunTask(Connect_ThrowsCapturedFault_When_CoreEntersFaultedAsync());
+
+        private async Task Connect_ThrowsCapturedFault_When_CoreEntersFaultedAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            // maxReconnectAttempts=1：第一次 close 即耗尽进 Faulted 终态。
+            var core = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.Zero,
+                maxReconnectDelay: TimeSpan.Zero,
+                maxReconnectAttempts: 1);
+            using var session = new HeTuSessionClient(core);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseClosed("network down");
+
+            Exception caught = null;
+            try
+            {
+                await connectTask;
+            }
+            catch (Exception ex)
+            {
+                caught = ex;
+            }
+
+            Assert.IsNotNull(caught,
+                "core 进 Faulted 终态时 Connect 的 await 必须抛出");
+            StringAssert.Contains("network down", caught.Message,
+                "抛出的异常应携带 Faulted 事件捕获到的原始 fault");
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+        }
+
         private static HeTuSessionClient CreateSession(
             FakeTransport transport,
             FakeScheduler scheduler)

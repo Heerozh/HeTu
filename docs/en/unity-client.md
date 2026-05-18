@@ -324,16 +324,53 @@ await session.CallSystem("move_to", 12f, 8f);
 
 `Connect` only resolves *after* bootstrap and subscription restore have both
 completed — so once it returns, your live data is hot and your code is on
-the same footing it would have been before the drop. The signature is
-`Connect(string url, string authKey = null, Func<HeTuClient, Awaitable>
-bootstrap = null, TimeSpan? reconnectDelay = null)`; the default
-`reconnectDelay` is 1 second, fixed (the underlying core supports
-exponential back-off if you wire `HeTuSessionClientBase` up directly).
+the same footing it would have been before the drop.
+
+The full signature:
+
+```csharp
+Awaitable Connect(
+    string url,
+    string authKey = null,
+    Func<HeTuClient, Awaitable> bootstrap = null,
+    TimeSpan? reconnectDelay = null,        // default: 1s
+    TimeSpan? maxReconnectDelay = null,     // default: 30s (exponential cap)
+    int maxReconnectAttempts = 20,          // 0 = unlimited
+    TimeSpan? connectTimeout = null);       // default: 30s
+```
+
+What the await can do:
+
+- **resolve** when the session reaches `Ready` — normal path.
+- throw **`TimeoutException`** if `Ready` isn't reached within
+  `connectTimeout` (default 30 s). The session is `Close()`'d on the way
+  out — you can `Connect(...)` again afterward. Pass `TimeSpan.Zero` to
+  disable the timeout.
+- throw **`InvalidOperationException`** if `maxReconnectAttempts` is reached
+  before `Ready`. The session enters `Faulted` terminal state.
+- throw **`OperationCanceledException`** if someone called `Close()` from
+  another code path.
 
 Calling `Connect` while the session is already running throws — call
-`Close()` first if you really want to reconnect with a different URL. Within
-the same singleton, after `Close()` you can `Connect` again and the
-state machine starts from scratch with a fresh core.
+`Close()` first if you really want to reconnect with a different URL. After
+`Close()` (or `Faulted`), you can `Connect` again and the state machine
+starts from scratch with a fresh core.
+
+### Defaults — when to override
+
+- `reconnectDelay = 1s`, `maxReconnectDelay = 30s` — exponential back-off
+  from 1 s, doubling each attempt, capped at 30 s. Reasonable for both
+  transient hiccups and longer outages; the cap stops you from hammering
+  the server while still waking up promptly when it recovers.
+- `maxReconnectAttempts = 20` — with the exponential schedule above, 20
+  attempts spans roughly 8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s) before
+  surrendering to `Faulted`. That's enough to ride out short hot-restarts;
+  for long maintenance windows, pass `0` (unlimited) so a player can leave
+  the app open and rejoin when the server returns.
+- `connectTimeout = 30s` — guards the **initial** `Connect` only; reconnects
+  after `Ready` aren't subject to it. If you set `maxReconnectAttempts > 0`,
+  consider raising or disabling this — otherwise whichever budget runs out
+  first wins.
 
 ### State machine
 
@@ -348,7 +385,13 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — bootstrap or restore failed unrecoverably. `Faulted` event carries the `Exception`.     |
+| `Faulted`                | Terminal — `maxReconnectAttempts` reached. `Faulted` event carries the last `Exception`.            |
+
+The `Faulted` **event** is broader than the `Faulted` **state**: it fires
+once per failed attempt (socket close, bootstrap error, restore error) so
+you can surface "disconnected, retrying…" UI without waiting for terminal
+exhaustion. Check `session.State` from inside the handler to tell transient
+from terminal.
 
 ### `CallSystem` semantics
 

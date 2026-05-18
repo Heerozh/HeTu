@@ -14,6 +14,8 @@ Repository layout:
 - `cn.hetudb.clientsdk/Tests/Editor/` — EditMode tests (pure-C# unit tests, no server / no Unity engine required)
 - `cn.hetudb.clientsdk/UnityWebSocket/` — vendored `com.psygames.unitywebsocket` (do not modify; upstream copy)
 
+开发时请使用TDD，先写RED测试，再修改。
+
 ## Architecture
 
 ### Layered client design

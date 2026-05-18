@@ -420,15 +420,16 @@ namespace HeTu
 
             // transport 已被对端关闭，不需要再发 Close 帧。
             MarkConnectionLost(closeTransport: false);
+            // 每次 socket 关闭都通知一次 Faulted 事件，和 HandleRecoverableFailure
+            // 对齐：Faulted 事件 = "本次连接失败了"，是否终态请读 State。
+            Exception fault = new InvalidOperationException(
+                $"Connection closed: {reason ?? "(unknown)"}");
+            SafeInvokeUserCallback(Faulted, fault);
+            // 用户回调里可能 Close，这种情况已经走清理路径，无需再排退避或进入 Faulted 终态。
+            if (_closed)
+                return;
             if (ExhaustedRetries())
             {
-                Exception fault = new InvalidOperationException(
-                    $"Reconnect attempts exhausted. Last close reason: {reason}");
-                // 进入 Faulted 终态前给用户一次通知，与 HandleRecoverableFailure
-                // 的 Faulted 触发路径对称。
-                SafeInvokeUserCallback(Faulted, fault);
-                if (_closed)
-                    return;
                 EnterFaulted(fault);
                 return;
             }
