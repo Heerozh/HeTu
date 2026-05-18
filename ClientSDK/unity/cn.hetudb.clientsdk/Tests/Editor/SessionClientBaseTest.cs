@@ -774,6 +774,117 @@ namespace Tests.HeTu
             Assert.AreEqual(0, second.ConnectCount);
         }
 
+        // ----- Code-review 4 个问题对应的 TDD 用例 -----
+
+        // 问题 #1：Ready 触发顺序破坏 FIFO。
+        [Test]
+        public void Ready_HandlerInvokedAfterPendingCallsFlushed()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            session.Start();
+            session.CallSystem("queued-before-ready", Array.Empty<object>(),
+                _ => { }, _ => { });
+
+            session.Ready += () =>
+            {
+                session.CallSystem("issued-from-ready-handler",
+                    Array.Empty<object>(), _ => { }, _ => { });
+            };
+
+            transport.RaiseConnected();
+
+            Assert.AreEqual(2, transport.Calls.Count);
+            Assert.AreEqual("queued-before-ready",
+                transport.Calls[0].SystemName,
+                "排队请求必须先于 Ready 回调里新发的请求送出");
+            Assert.AreEqual("issued-from-ready-handler",
+                transport.Calls[1].SystemName);
+        }
+
+        // 问题 #2：用户回调抛异常会打断 Close 的清理循环。
+        [Test]
+        public void Close_OnePendingCallFailedHandlerThrows_OthersStillNotified()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            session.Start();
+
+            var firstFailed = false;
+            var secondFailed = false;
+            session.CallSystem("first", Array.Empty<object>(), _ => { },
+                _ =>
+                {
+                    firstFailed = true;
+                    throw new InvalidOperationException("user handler boom");
+                });
+            session.CallSystem("second", Array.Empty<object>(), _ => { },
+                _ => secondFailed = true);
+
+            Assert.DoesNotThrow(() => session.Close(),
+                "Close 不应把用户回调里的异常向外抛");
+            Assert.IsTrue(firstFailed, "first pending 必须被通知");
+            Assert.IsTrue(secondFailed,
+                "first 的 OnFailed 抛异常后,second 仍必须被通知");
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "Close 必须能跑完到 Stopped 终态");
+        }
+
+        // 问题 #3：transport-level 重试耗尽时未触发 Faulted 事件。
+        [Test]
+        public void Reconnect_AfterMaxAttempts_FiresFaultedEvent()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 1);
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            transport.RaiseClosed("fatal close reason");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsNotNull(observed,
+                "transport 重试耗尽进入 Faulted 终态前必须 invoke Faulted 事件");
+            StringAssert.Contains("fatal close reason", observed.Message);
+        }
+
+        // 问题 #4：bootstrap/restore 失败时 transport 只 Dispose 未 Close。
+        [Test]
+        public void Bootstrap_Failure_ClosesUnderlyingTransport()
+        {
+            var transport = new FakeTransport("c1");
+            var fallback = new FakeTransport("c2");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport, fallback }),
+                scheduler,
+                (_, _, fail) =>
+                    fail(new InvalidOperationException("bootstrap failed")));
+
+            session.Start();
+            transport.RaiseConnected();
+
+            Assert.IsFalse(transport.IsConnected,
+                "应用层 bootstrap 失败时 session 必须主动 Close 还活着的 transport, "
+                + "否则要等到 TCP keepalive 服务器才会回收连接");
+        }
+
         private static HeTuSessionClientBase CreateSession(
             Queue<FakeTransport> transports,
             FakeScheduler scheduler,

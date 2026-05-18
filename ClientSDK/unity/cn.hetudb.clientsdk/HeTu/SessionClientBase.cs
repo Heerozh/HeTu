@@ -147,22 +147,25 @@ namespace HeTu
             _scheduledReconnect?.Dispose();
             _scheduledReconnect = null;
 
+            // 显式声明为 Exception，避免 SafeInvokeUserCallback<T>(Action<T>, T)
+            // 在 Action<Exception> + OperationCanceledException 组合下的类型推断歧义。
+            Exception canceled = new OperationCanceledException("Session closed.");
             while (_pendingCalls.Count > 0)
-                _pendingCalls.Dequeue().OnFailed(
-                    new OperationCanceledException("Session closed."));
+                SafeInvokeUserCallback(
+                    _pendingCalls.Dequeue().OnFailed, canceled);
 
             foreach (var pending in _inFlightCalls.ToArray())
-                pending.OnFailed(new OperationCanceledException("Session closed."));
+                SafeInvokeUserCallback(pending.OnFailed, canceled);
             _inFlightCalls.Clear();
 
             foreach (var pending in _pendingWatches.ToArray())
             {
                 RemovePendingWatch(pending);
-                pending.Fail(new OperationCanceledException("Session closed."));
+                pending.Fail(canceled);
             }
 
             foreach (var subscription in _subscriptions.Values.ToArray())
-                subscription.Dispose();
+                SafeInvokeUserCallback(subscription.Dispose);
 
             _subscriptions.Clear();
             CleanupTransport(closeTransport: true);
@@ -357,9 +360,11 @@ namespace HeTu
             _currentReconnectDelay = _reconnectDelay;
             _consecutiveFailures = 0;
             SetState(HeTuSessionState.Ready);
-            Ready?.Invoke();
+            // 先把排队请求派发完再触发 Ready，避免用户在 Ready 回调里新发的
+            // CallSystem/WatchRow 抢在排队请求之前破坏 FIFO 顺序。
             FlushPendingCalls();
             DispatchPendingWatches();
+            SafeInvokeUserCallback(Ready);
         }
 
         private void FlushPendingCalls()
@@ -413,11 +418,18 @@ namespace HeTu
             if (_closed)
                 return;
 
-            MarkConnectionLost();
+            // transport 已被对端关闭，不需要再发 Close 帧。
+            MarkConnectionLost(closeTransport: false);
             if (ExhaustedRetries())
             {
-                EnterFaulted(new InvalidOperationException(
-                    $"Reconnect attempts exhausted. Last close reason: {reason}"));
+                Exception fault = new InvalidOperationException(
+                    $"Reconnect attempts exhausted. Last close reason: {reason}");
+                // 进入 Faulted 终态前给用户一次通知，与 HandleRecoverableFailure
+                // 的 Faulted 触发路径对称。
+                SafeInvokeUserCallback(Faulted, fault);
+                if (_closed)
+                    return;
+                EnterFaulted(fault);
                 return;
             }
             ScheduleReconnect();
@@ -428,8 +440,10 @@ namespace HeTu
             if (_closed)
                 return;
 
-            MarkConnectionLost();
-            Faulted?.Invoke(exception);
+            // bootstrap/restore 失败时底层 socket 通常仍存活，必须主动关闭，
+            // 否则服务器要等到 TCP keepalive 才会回收连接。
+            MarkConnectionLost(closeTransport: true);
+            SafeInvokeUserCallback(Faulted, exception);
             // Faulted 用户回调里可能 Close，这种情况已经走清理路径，无需再排
             // 退避或进入 Faulted 终态。
             if (_closed)
@@ -461,10 +475,11 @@ namespace HeTu
             // 与 Close 一致地清理 pending 与现存订阅；只是终态用 Faulted 区分
             // "用户主动关闭" 与 "重试用尽自动退出"。
             while (_pendingCalls.Count > 0)
-                _pendingCalls.Dequeue().OnFailed(fault);
+                SafeInvokeUserCallback(_pendingCalls.Dequeue().OnFailed, fault);
 
             foreach (var pending in _inFlightCalls.ToArray())
-                pending.OnFailed(
+                SafeInvokeUserCallback<Exception>(
+                    pending.OnFailed,
                     new CallOutcomeUnknownException(pending.SystemName));
             _inFlightCalls.Clear();
 
@@ -475,17 +490,18 @@ namespace HeTu
             }
 
             foreach (var subscription in _subscriptions.Values.ToArray())
-                subscription.Dispose();
+                SafeInvokeUserCallback(subscription.Dispose);
             _subscriptions.Clear();
 
             CleanupTransport(closeTransport: true);
             SetState(HeTuSessionState.Faulted);
         }
 
-        private void MarkConnectionLost()
+        private void MarkConnectionLost(bool closeTransport)
         {
             foreach (var pending in _inFlightCalls.ToArray())
-                pending.OnFailed(
+                SafeInvokeUserCallback<Exception>(
+                    pending.OnFailed,
                     new CallOutcomeUnknownException(pending.SystemName));
             _inFlightCalls.Clear();
 
@@ -495,7 +511,7 @@ namespace HeTu
             foreach (var pending in _pendingWatches)
                 pending.MarkRetryable();
 
-            CleanupTransport(closeTransport: false);
+            CleanupTransport(closeTransport: closeTransport);
         }
 
         private void ScheduleReconnect()
@@ -628,7 +644,40 @@ namespace HeTu
                 return;
 
             State = state;
-            StateChanged?.Invoke(state);
+            SafeInvokeUserCallback(StateChanged, state);
+        }
+
+        // 在内部清理流程里调用用户委托一定要走这个包装：用户回调（Unity 里典型的
+        // MissingReferenceException）抛出后会打断循环，留下半清空的队列和未推进
+        // 的状态，让 session 卡死。
+        private static void SafeInvokeUserCallback(Action action)
+        {
+            if (action == null)
+                return;
+            try
+            {
+                action();
+            }
+            catch (Exception ex)
+            {
+                Logger.Instance.Error(
+                    $"[HeTuSession] user callback threw: {ex}");
+            }
+        }
+
+        private static void SafeInvokeUserCallback<T>(Action<T> action, T arg)
+        {
+            if (action == null)
+                return;
+            try
+            {
+                action(arg);
+            }
+            catch (Exception ex)
+            {
+                Logger.Instance.Error(
+                    $"[HeTuSession] user callback threw: {ex}");
+            }
         }
 
         private sealed class PendingCall
@@ -728,16 +777,18 @@ namespace HeTu
             public override void Complete(BaseSubscription subscription)
             {
                 var typed = subscription as RowSubscription<T>;
-                foreach (var waiter in _waiters)
-                    waiter.OnCompleted(typed);
+                var snapshot = _waiters.ToArray();
                 _waiters.Clear();
+                foreach (var waiter in snapshot)
+                    SafeInvokeUserCallback(waiter.OnCompleted, typed);
             }
 
             public override void Fail(Exception exception)
             {
-                foreach (var waiter in _waiters)
-                    waiter.OnFailed(exception);
+                var snapshot = _waiters.ToArray();
                 _waiters.Clear();
+                foreach (var waiter in snapshot)
+                    SafeInvokeUserCallback(waiter.OnFailed, exception);
             }
 
             private readonly struct RowWaiter
@@ -826,16 +877,18 @@ namespace HeTu
             public override void Complete(BaseSubscription subscription)
             {
                 var typed = subscription as IndexSubscription<T>;
-                foreach (var waiter in _waiters)
-                    waiter.OnCompleted(typed);
+                var snapshot = _waiters.ToArray();
                 _waiters.Clear();
+                foreach (var waiter in snapshot)
+                    SafeInvokeUserCallback(waiter.OnCompleted, typed);
             }
 
             public override void Fail(Exception exception)
             {
-                foreach (var waiter in _waiters)
-                    waiter.OnFailed(exception);
+                var snapshot = _waiters.ToArray();
                 _waiters.Clear();
+                foreach (var waiter in snapshot)
+                    SafeInvokeUserCallback(waiter.OnFailed, exception);
             }
 
             private readonly struct RangeWaiter
