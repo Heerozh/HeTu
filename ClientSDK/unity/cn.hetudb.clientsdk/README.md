@@ -56,7 +56,7 @@ public class NetBootstrap : MonoBehaviour
 
 ### 推荐入口：逻辑会话
 
-- `HeTuSessionClient`
+- `HeTuSessionClient.Instance` —— 单件，和 `HeTuClient.Instance` 一样一个进程一个。
     - 管理持续存在的逻辑会话，而不是只管理一条当前 WebSocket。
     - 断线后会重新建立连接、先执行 `bootstrap`，再恢复仍然存活的订阅。
     - `WatchRow` / `WatchRange` 返回的就是普通 `RowSubscription` /
@@ -65,21 +65,23 @@ public class NetBootstrap : MonoBehaviour
       `CallOutcomeUnknownException`，不会自动重试副作用请求。
 
 ```csharp
-var session = new HeTuSessionClient(
+await HeTuSessionClient.Instance.Connect(
     "ws://127.0.0.1:2466/hetu/pytest",
     bootstrap: async client =>
     {
         await client.CallSystem("login", userToken);
     });
 
-await session.Connect();
-using var hp = await session.WatchRow<HP>("owner", userId);
-using var players = await session.WatchRange<Player>(
-    "room_id", roomId, roomId, 100);
+using var hp = await HeTuSessionClient.Instance
+    .WatchRow<HP>("owner", userId);
+using var players = await HeTuSessionClient.Instance
+    .WatchRange<Player>("room_id", roomId, roomId, 100);
 ```
 
 `HeTuSessionClient` 的内部逻辑由 awaitable-free 的 session core 驱动；Unity 包装层只负责把它桥接成
 Unity 6000+ 的 `Awaitable` 或 Unity 2022.3 的 `UniTask`，因此在 WebGL 上不会依赖 `.NET Task`。
+当前会话仍在运行时再次 `Connect` 会抛 `InvalidOperationException`，需要先 `Close()` 才能换 URL
+重新建立会话。
 
 ### 连接
 
