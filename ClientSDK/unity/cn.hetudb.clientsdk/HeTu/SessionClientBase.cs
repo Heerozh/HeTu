@@ -92,11 +92,15 @@ namespace HeTu
         private readonly Dictionary<string, PendingWatch> _pendingWatchesByKey = new();
         private readonly List<PendingWatch> _pendingWatches = new();
         private readonly TimeSpan _reconnectDelay;
+        private readonly TimeSpan _maxReconnectDelay;
+        private readonly int _maxReconnectAttempts;
         private readonly IHeTuSessionScheduler _scheduler;
         private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
         private readonly Func<IHeTuSessionTransport> _transportFactory;
 
         private bool _closed;
+        private int _consecutiveFailures;
+        private TimeSpan _currentReconnectDelay;
         private IDisposable _scheduledReconnect;
         private IHeTuSessionTransport _transport;
 
@@ -104,12 +108,19 @@ namespace HeTu
             Func<IHeTuSessionTransport> transportFactory,
             IHeTuSessionScheduler scheduler,
             HeTuSessionBootstrap bootstrap = null,
-            TimeSpan? reconnectDelay = null)
+            TimeSpan? reconnectDelay = null,
+            TimeSpan? maxReconnectDelay = null,
+            int maxReconnectAttempts = 0)
         {
             _transportFactory = transportFactory;
             _scheduler = scheduler;
             _bootstrap = bootstrap;
             _reconnectDelay = reconnectDelay ?? TimeSpan.FromSeconds(1);
+            // 未指定 max 时退化为固定延迟（不做指数退避），保持调用方旧行为。
+            _maxReconnectDelay = maxReconnectDelay ?? _reconnectDelay;
+            // 0 = 无限重试（旧行为）；正数 = 连续失败到此数即进入 Faulted 终态。
+            _maxReconnectAttempts = maxReconnectAttempts;
+            _currentReconnectDelay = _reconnectDelay;
         }
 
         public HeTuSessionState State { get; private set; } =
@@ -337,6 +348,10 @@ namespace HeTu
         {
             _scheduledReconnect?.Dispose();
             _scheduledReconnect = null;
+            // 成功 Ready 之后重置退避和失败计数器：下一次断线从初始延迟重新开始，
+            // maxReconnectAttempts 也按 "本次会话期内连续失败" 重新计数。
+            _currentReconnectDelay = _reconnectDelay;
+            _consecutiveFailures = 0;
             SetState(HeTuSessionState.Ready);
             Ready?.Invoke();
             FlushPendingCalls();
@@ -389,12 +404,18 @@ namespace HeTu
             pending.Dispatch(this, _transport);
         }
 
-        private void HandleTransportClosed(string _)
+        private void HandleTransportClosed(string reason)
         {
             if (_closed)
                 return;
 
             MarkConnectionLost();
+            if (ExhaustedRetries())
+            {
+                EnterFaulted(new InvalidOperationException(
+                    $"Reconnect attempts exhausted. Last close reason: {reason}"));
+                return;
+            }
             ScheduleReconnect();
         }
 
@@ -404,8 +425,57 @@ namespace HeTu
                 return;
 
             MarkConnectionLost();
-            ScheduleReconnect();
             Faulted?.Invoke(exception);
+            // Faulted 用户回调里可能 Close，这种情况已经走清理路径，无需再排
+            // 退避或进入 Faulted 终态。
+            if (_closed)
+                return;
+            if (ExhaustedRetries())
+            {
+                EnterFaulted(exception);
+                return;
+            }
+            ScheduleReconnect();
+        }
+
+        private bool ExhaustedRetries()
+        {
+            _consecutiveFailures++;
+            return _maxReconnectAttempts > 0 &&
+                   _consecutiveFailures >= _maxReconnectAttempts;
+        }
+
+        private void EnterFaulted(Exception fault)
+        {
+            if (_closed)
+                return;
+
+            _closed = true;
+            _scheduledReconnect?.Dispose();
+            _scheduledReconnect = null;
+
+            // 与 Close 一致地清理 pending 与现存订阅；只是终态用 Faulted 区分
+            // "用户主动关闭" 与 "重试用尽自动退出"。
+            while (_pendingCalls.Count > 0)
+                _pendingCalls.Dequeue().OnFailed(fault);
+
+            foreach (var pending in _inFlightCalls.ToArray())
+                pending.OnFailed(
+                    new CallOutcomeUnknownException(pending.SystemName));
+            _inFlightCalls.Clear();
+
+            foreach (var pending in _pendingWatches.ToArray())
+            {
+                RemovePendingWatch(pending);
+                pending.Fail(fault);
+            }
+
+            foreach (var subscription in _subscriptions.Values.ToArray())
+                subscription.Dispose();
+            _subscriptions.Clear();
+
+            CleanupTransport(closeTransport: true);
+            SetState(HeTuSessionState.Faulted);
         }
 
         private void MarkConnectionLost()
@@ -431,9 +501,14 @@ namespace HeTu
 
             SetState(HeTuSessionState.Reconnecting);
             _scheduledReconnect?.Dispose();
-            _scheduledReconnect = _scheduler.Schedule(
-                _reconnectDelay,
-                ConnectNewTransport);
+            var delay = _currentReconnectDelay;
+            _scheduledReconnect = _scheduler.Schedule(delay, ConnectNewTransport);
+            // 指数退避：下一次失败时使用翻倍的延迟，封顶在 _maxReconnectDelay。
+            // BecomeReady 会把 _currentReconnectDelay 重置回 _reconnectDelay。
+            var nextMs = Math.Min(
+                delay.TotalMilliseconds * 2,
+                _maxReconnectDelay.TotalMilliseconds);
+            _currentReconnectDelay = TimeSpan.FromMilliseconds(nextMs);
         }
 
         private void CleanupTransport(bool closeTransport)

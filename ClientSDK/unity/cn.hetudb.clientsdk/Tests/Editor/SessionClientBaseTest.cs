@@ -562,6 +562,196 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void Reconnect_UsesExponentialBackoff()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3"),
+                new FakeTransport("c4")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30));
+
+            session.Start();
+            ts[0].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[2].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[3].RaiseClosed("e");
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(2),
+                    TimeSpan.FromSeconds(4),
+                    TimeSpan.FromSeconds(8)
+                },
+                scheduler.ScheduledDelays);
+        }
+
+        [Test]
+        public void Reconnect_BackoffResetsAfterReady()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3"),
+                new FakeTransport("c4")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30));
+
+            session.Start();
+            ts[0].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[2].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            ts[2].RaiseClosed("e");
+            scheduler.RunNext();
+            ts[3].RaiseClosed("e");
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(2),
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(2)
+                },
+                scheduler.ScheduledDelays);
+        }
+
+        [Test]
+        public void Reconnect_BackoffCapsAtMax()
+        {
+            var ts = new FakeTransport[6];
+            for (var i = 0; i < ts.Length; i++)
+                ts[i] = new FakeTransport($"c{i}");
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(4));
+
+            session.Start();
+            for (var i = 0; i < ts.Length - 1; i++)
+            {
+                ts[i].RaiseClosed("e");
+                scheduler.RunNext();
+            }
+            ts[^1].RaiseClosed("e");
+
+            CollectionAssert.AreEqual(
+                new[]
+                {
+                    TimeSpan.FromSeconds(1),
+                    TimeSpan.FromSeconds(2),
+                    TimeSpan.FromSeconds(4),
+                    TimeSpan.FromSeconds(4),
+                    TimeSpan.FromSeconds(4),
+                    TimeSpan.FromSeconds(4)
+                },
+                scheduler.ScheduledDelays);
+        }
+
+        [Test]
+        public void Reconnect_AfterMaxAttempts_EntersFaultedAndStopsRetrying()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 3);
+
+            var observed = new List<HeTuSessionState>();
+            session.StateChanged += observed.Add;
+
+            session.Start();
+            ts[0].RaiseClosed("fail 1");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("fail 2");
+            scheduler.RunNext();
+            ts[2].RaiseClosed("fail 3");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.Contains(HeTuSessionState.Faulted, observed);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "no further reconnect should be scheduled after Faulted");
+            Assert.AreEqual(0, ts[3].ConnectCount,
+                "the 4th transport should never be constructed");
+        }
+
+        [Test]
+        public void Faulted_FailsPendingCallsAndWatchesAndRejectsNewWork()
+        {
+            var ts = new[] { new FakeTransport("c1") };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 1);
+
+            session.Start();
+
+            Exception callFailure = null;
+            Exception watchFailure = null;
+            session.CallSystem("noop", Array.Empty<object>(),
+                _ => Assert.Fail("call should not succeed"),
+                ex => callFailure = ex);
+            session.WatchRow<TestComponent>("id", 1L, null,
+                _ => Assert.Fail("watch should not succeed"),
+                ex => watchFailure = ex);
+
+            ts[0].RaiseClosed("fatal");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.NotNull(callFailure, "queued CallSystem must fail when entering Faulted");
+            Assert.NotNull(watchFailure, "queued WatchRow must fail when entering Faulted");
+
+            Assert.Throws<ObjectDisposedException>(() =>
+                session.CallSystem("noop", Array.Empty<object>(),
+                    _ => { }, _ => { }));
+        }
+
+        [Test]
         public void Close_CancelsScheduledReconnectAndStopsSession()
         {
             var first = new FakeTransport("c1");
@@ -773,9 +963,11 @@ namespace Tests.HeTu
             private readonly Queue<ScheduledAction> _scheduled = new();
 
             public int PendingCount => _scheduled.Count(x => !x.IsDisposed);
+            public List<TimeSpan> ScheduledDelays { get; } = new();
 
             public IDisposable Schedule(TimeSpan delay, Action action)
             {
+                ScheduledDelays.Add(delay);
                 var scheduled = new ScheduledAction(action);
                 _scheduled.Enqueue(scheduled);
                 return scheduled;
