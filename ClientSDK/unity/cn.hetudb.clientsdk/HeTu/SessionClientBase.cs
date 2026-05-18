@@ -312,7 +312,7 @@ namespace HeTu
             if (knownSubId != null &&
                 _pendingWatchesByKey.TryGetValue(knownSubId, out var pending))
             {
-                if (pending is PendingRowWatch<T> typed)
+                if (pending is PendingWatch<RowSubscription<T>> typed)
                 {
                     typed.AddWaiter(onCompleted, onFailed);
                     return;
@@ -322,8 +322,21 @@ namespace HeTu
                     $"Subscription '{knownSubId}' already exists with type {pending.DataType}.");
             }
 
-            var watch = new PendingRowWatch<T>(
-                knownSubId, index, value, componentName, onCompleted, onFailed);
+            var watch = new PendingWatch<RowSubscription<T>>(
+                knownSubId,
+                typeof(T),
+                (tx, promise) => tx.WatchRow<T>(
+                    index,
+                    value,
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled) return;
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
+                    componentName),
+                onCompleted,
+                onFailed);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -353,7 +366,7 @@ namespace HeTu
 
             if (_pendingWatchesByKey.TryGetValue(subId, out var pending))
             {
-                if (pending is PendingRangeWatch<T> typed)
+                if (pending is PendingWatch<IndexSubscription<T>> typed)
                 {
                     typed.AddWaiter(onCompleted, onFailed);
                     return;
@@ -363,9 +376,25 @@ namespace HeTu
                     $"Subscription '{subId}' already exists with type {pending.DataType}.");
             }
 
-            var watch = new PendingRangeWatch<T>(
-                subId, index, left, right, limit, desc, force, componentName,
-                onCompleted, onFailed);
+            var watch = new PendingWatch<IndexSubscription<T>>(
+                subId,
+                typeof(T),
+                (tx, promise) => tx.WatchRange<T>(
+                    index,
+                    left,
+                    right,
+                    limit,
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled) return;
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
+                    desc,
+                    force,
+                    componentName),
+                onCompleted,
+                onFailed);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -863,61 +892,55 @@ namespace HeTu
             public void MarkRetryable() => IsInFlight = false;
         }
 
-        private sealed class PendingRowWatch<T> : PendingWatch
-            where T : IBaseComponent
+        // Row/Range 唯一的差异是 transport.WatchRow vs transport.WatchRange 这一次
+        // 调用。把它折成一个 dispatch lambda 注入进来，剩下的"deduplication / 在飞
+        // 标志 / waiter 列表 / 完成时通知所有 waiter"逻辑就完全共用。
+        private sealed class PendingWatch<TSub> : PendingWatch
+            where TSub : BaseSubscription
         {
-            private readonly string _componentName;
-            private readonly string _index;
-            private readonly List<RowWaiter> _waiters = new();
-            private readonly object _value;
+            private readonly Action<IHeTuSessionTransport, Promise<TSub>> _dispatch;
+            private readonly List<Waiter> _waiters = new();
 
-            public PendingRowWatch(
+            public PendingWatch(
                 string key,
-                string index,
-                object value,
-                string componentName,
-                Action<RowSubscription<T>> onCompleted,
-                Action<Exception> onFailed) :
-                base(key, typeof(T))
+                Type dataType,
+                Action<IHeTuSessionTransport, Promise<TSub>> dispatch,
+                Action<TSub> firstOnCompleted,
+                Action<Exception> firstOnFailed) :
+                base(key, dataType)
             {
-                _index = index;
-                _value = value;
-                _componentName = componentName;
-                AddWaiter(onCompleted, onFailed);
+                _dispatch = dispatch;
+                _waiters.Add(new Waiter(firstOnCompleted, firstOnFailed));
             }
 
             public void AddWaiter(
-                Action<RowSubscription<T>> onCompleted,
+                Action<TSub> onCompleted,
                 Action<Exception> onFailed) =>
-                _waiters.Add(new RowWaiter(onCompleted, onFailed));
+                _waiters.Add(new Waiter(onCompleted, onFailed));
 
             public override void Dispatch(
                 HeTuSessionClientBase owner,
                 IHeTuSessionTransport transport)
             {
                 IsInFlight = true;
-                transport.WatchRow<T>(
-                    _index,
-                    _value,
-                    (subscription, canceled, exception) =>
+                var p = new Promise<TSub>();
+                _dispatch(transport, p);
+                p.Future
+                    .Then(sub =>
                     {
                         IsInFlight = false;
-                        if (canceled)
-                            return;
-                        if (exception != null)
-                        {
-                            owner.FailPending(this, exception);
-                            return;
-                        }
-
-                        owner.CompletePending(this, subscription);
-                    },
-                    _componentName);
+                        owner.CompletePending(this, sub);
+                    })
+                    .Catch(ex =>
+                    {
+                        IsInFlight = false;
+                        owner.FailPending(this, ex);
+                    });
             }
 
             public override void Complete(BaseSubscription subscription)
             {
-                var typed = subscription as RowSubscription<T>;
+                var typed = subscription as TSub;
                 var snapshot = _waiters.ToArray();
                 _waiters.Clear();
                 foreach (var waiter in snapshot)
@@ -932,117 +955,15 @@ namespace HeTu
                     SafeInvokeUserCallback(waiter.OnFailed, exception);
             }
 
-            private readonly struct RowWaiter
+            private readonly struct Waiter
             {
-                public RowWaiter(
-                    Action<RowSubscription<T>> onCompleted,
-                    Action<Exception> onFailed)
+                public Waiter(Action<TSub> onCompleted, Action<Exception> onFailed)
                 {
                     OnCompleted = onCompleted;
                     OnFailed = onFailed;
                 }
 
-                public Action<RowSubscription<T>> OnCompleted { get; }
-                public Action<Exception> OnFailed { get; }
-            }
-        }
-
-        private sealed class PendingRangeWatch<T> : PendingWatch
-            where T : IBaseComponent
-        {
-            private readonly string _componentName;
-            private readonly bool _desc;
-            private readonly bool _force;
-            private readonly string _index;
-            private readonly object _left;
-            private readonly int _limit;
-            private readonly object _right;
-            private readonly List<RangeWaiter> _waiters = new();
-
-            public PendingRangeWatch(
-                string key,
-                string index,
-                object left,
-                object right,
-                int limit,
-                bool desc,
-                bool force,
-                string componentName,
-                Action<IndexSubscription<T>> onCompleted,
-                Action<Exception> onFailed) :
-                base(key, typeof(T))
-            {
-                _index = index;
-                _left = left;
-                _right = right;
-                _limit = limit;
-                _desc = desc;
-                _force = force;
-                _componentName = componentName;
-                AddWaiter(onCompleted, onFailed);
-            }
-
-            public void AddWaiter(
-                Action<IndexSubscription<T>> onCompleted,
-                Action<Exception> onFailed) =>
-                _waiters.Add(new RangeWaiter(onCompleted, onFailed));
-
-            public override void Dispatch(
-                HeTuSessionClientBase owner,
-                IHeTuSessionTransport transport)
-            {
-                IsInFlight = true;
-                transport.WatchRange<T>(
-                    _index,
-                    _left,
-                    _right,
-                    _limit,
-                    (subscription, canceled, exception) =>
-                    {
-                        IsInFlight = false;
-                        if (canceled)
-                            return;
-                        if (exception != null)
-                        {
-                            owner.FailPending(this, exception);
-                            return;
-                        }
-
-                        owner.CompletePending(this, subscription);
-                    },
-                    _desc,
-                    _force,
-                    _componentName);
-            }
-
-            public override void Complete(BaseSubscription subscription)
-            {
-                var typed = subscription as IndexSubscription<T>;
-                var snapshot = _waiters.ToArray();
-                _waiters.Clear();
-                foreach (var waiter in snapshot)
-                    SafeInvokeUserCallback(waiter.OnCompleted, typed);
-            }
-
-            public override void Fail(Exception exception)
-            {
-                var snapshot = _waiters.ToArray();
-                _waiters.Clear();
-                foreach (var waiter in snapshot)
-                    SafeInvokeUserCallback(waiter.OnFailed, exception);
-            }
-
-            private readonly struct RangeWaiter
-            {
-                public RangeWaiter(
-                    Action<IndexSubscription<T>> onCompleted,
-                    Action<Exception> onFailed)
-                {
-                    OnCompleted = onCompleted;
-                    OnFailed = onFailed;
-                }
-
-                public Action<IndexSubscription<T>> OnCompleted { get; }
+                public Action<TSub> OnCompleted { get; }
                 public Action<Exception> OnFailed { get; }
             }
         }
