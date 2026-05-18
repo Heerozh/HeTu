@@ -204,7 +204,7 @@ HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat");
 // will automatically wait for the connection to be established before sending.
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 
-var messages = await HeTuClient.Instance.Range<ChatMessage>(
+var messages = await HeTuClient.Instance.WatchRange<ChatMessage>(
     "created_at_ms", 0, long.MaxValue, 1024);
 
 messages.addTo(gameObject);

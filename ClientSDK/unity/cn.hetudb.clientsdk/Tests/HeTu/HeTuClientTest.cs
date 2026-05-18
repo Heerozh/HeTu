@@ -20,6 +20,8 @@ namespace Tests.HeTu
     [TestFixture]
     public class HeTuClientTest
     {
+        private bool _connected;
+
         [OneTimeSetUp]
         public void Init()
         {
@@ -27,7 +29,22 @@ namespace Tests.HeTu
             HeTuClient.Instance.ConfigureInspector(true);
             HeTuClient.Instance.AddInspectorDispatcher(
                 new LoggerInspectorTraceDispatcher());
+            HeTuClient.Instance.OnConnected += () => { _connected = true; };
             _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest", "pytest");
+        }
+
+        [UnitySetUp]
+        public IEnumerator WaitUntilConnected()
+        {
+            const float timeoutSeconds = 5f;
+            var deadline = Time.realtimeSinceStartup + timeoutSeconds;
+            while (!_connected && Time.realtimeSinceStartup < deadline)
+            {
+                yield return null;
+            }
+
+            Assert.True(_connected,
+                "HeTuClient should finish connecting before PlayMode tests use it.");
         }
 
         [OneTimeTearDown]
@@ -84,14 +101,14 @@ namespace Tests.HeTu
         private async Task TestRowSubscribeAsync()
         {
             // 测试订阅失败
-            var sub = await HeTuClient.Instance.Get(
+            var sub = await HeTuClient.Instance.WatchRow(
                 "RLSComp", "owner", 123);
             Assert.AreEqual(sub, null);
 
             // 测试订阅
             _ = HeTuClient.Instance.CallSystem("login", 123, true);
             _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
-            sub = await HeTuClient.Instance.Get(
+            sub = await HeTuClient.Instance.WatchRow(
                 "RLSComp", "owner", 123);
             var lastValue = Convert.ToInt32(sub.Data["value"]);
 
@@ -113,7 +130,7 @@ namespace Tests.HeTu
             var success = false;
             try
             {
-                using var _ = await HeTuClient.Instance.Get<RLSComp>("owner", 123);
+                using var _ = await HeTuClient.Instance.WatchRow<RLSComp>("owner", 123);
                 success = true;
             }
             catch (InvalidCastException)
@@ -127,7 +144,7 @@ namespace Tests.HeTu
             sub.Dispose();
 
             // 测试回收自动反订阅，顺带测试Class类型
-            using var typedSub = await HeTuClient.Instance.Get<RLSComp>(
+            using var typedSub = await HeTuClient.Instance.WatchRow<RLSComp>(
                 "owner", 123);
             Assert.AreEqual(lastValue - 3, typedSub.Data.value);
 
@@ -173,7 +190,7 @@ namespace Tests.HeTu
             // 测试订阅
             _ = HeTuClient.Instance.CallSystem("login", 123, true);
             _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", -1);
-            using var sub = await HeTuClient.Instance.Range(
+            using var sub = await HeTuClient.Instance.WatchRange(
                 "RLSComp", "owner", 0, 300, 100);
             // 这是Owner权限表，应该只能取到自己的数据
             Assert.AreEqual(1, sub.Rows.Count);
@@ -208,7 +225,7 @@ namespace Tests.HeTu
             _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 20);
 
             // 测试OnInsert, OnDelete
-            using var sub = await HeTuClient.Instance.Range<IndexComp1>(
+            using var sub = await HeTuClient.Instance.WatchRange<IndexComp1>(
                 "value", 10, 20, 100);
 
             long? newPlayer = null;
@@ -248,7 +265,7 @@ namespace Tests.HeTu
             _ = HeTuClient.Instance.CallSystem("login", 123, true);
             _ = HeTuClient.Instance.CallSystem("add_rls_comp_value", 1);
             // 订阅
-            var sub = await HeTuClient.Instance.Get<RLSComp>(
+            var sub = await HeTuClient.Instance.WatchRow<RLSComp>(
                 "owner", 123);
             Assert.IsNotNull(sub);
             sub.AddTo(go);
@@ -307,7 +324,7 @@ namespace Tests.HeTu
             _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 345, 10);
 
             // 订阅
-            var sub = await HeTuClient.Instance.Range<IndexComp1>(
+            var sub = await HeTuClient.Instance.WatchRange<IndexComp1>(
                 "value", 0, 10, 100);
             sub.AddTo(go);
             // 应该查询到2个值

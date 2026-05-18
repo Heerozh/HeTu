@@ -70,7 +70,7 @@ Client (Unity / C#):
 ```csharp
 await HeTuClient.Instance.CallSystem("user_chat", "Hello world");
 
-var sub = await HeTuClient.Instance.Range<ChatMessage>("id", 0, long.MaxValue, 1024);
+var sub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
 sub.AddTo(gameObject); 
 sub.ObserveAdd().Subscribe(msg => Render(msg));
 ```
