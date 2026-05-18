@@ -8,7 +8,6 @@
 using Cysharp.Threading.Tasks;
 #endif
 using System;
-using System.Threading;
 using UnityEngine;
 
 namespace HeTu
@@ -174,156 +173,24 @@ namespace HeTu
 
         // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这两个重载触发 Start。
         // 无参 = 不开 timeout，便于 fake transport 显式控制时序；TimeSpan 重载
-        // 让 ScheduleConnectTimeout 跑在测试可控的时长上。
+        // 让超时跑在测试可控的时长上。
 #if UNITY_6000_0_OR_NEWER
-        internal Awaitable Connect()
-#else
-        internal UniTask Connect()
-#endif
-        {
-            return ConnectCore(TimeSpan.Zero);
-        }
+        internal Awaitable Connect() => ConnectCore(TimeSpan.Zero);
+        internal Awaitable Connect(TimeSpan connectTimeout) =>
+            ConnectCore(connectTimeout);
 
-#if UNITY_6000_0_OR_NEWER
-        internal Awaitable Connect(TimeSpan connectTimeout)
-#else
-        internal UniTask Connect(TimeSpan connectTimeout)
-#endif
-        {
-            return ConnectCore(connectTimeout);
-        }
-
-#if UNITY_6000_0_OR_NEWER
         private Awaitable ConnectCore(TimeSpan connectTimeout)
 #else
+        internal UniTask Connect() => ConnectCore(TimeSpan.Zero);
+        internal UniTask Connect(TimeSpan connectTimeout) =>
+            ConnectCore(connectTimeout);
+
         private UniTask ConnectCore(TimeSpan connectTimeout)
 #endif
         {
-            if (_core.State == HeTuSessionState.Ready)
-                return CompletedAwaitable();
-
-            var tcs = NewCompletionSource<bool>();
-            // 最近一次 Faulted 事件携带的异常；用于把"重试用尽"那条 await 抛出去时
-            // 能带上真实原因（StateChanged 信号本身不带 fault）。
-            Exception capturedFault = null;
-            void OnReady() => tcs.TrySetResult(true);
-            void OnFaulted(Exception ex) => capturedFault = ex;
-            void OnStateChanged(HeTuSessionState state)
-            {
-                if (state == HeTuSessionState.Stopped)
-                    tcs.TrySetCanceled();
-                else if (state == HeTuSessionState.Faulted)
-                    tcs.TrySetException(capturedFault ?? new InvalidOperationException(
-                        "Session faulted: reconnect attempts exhausted."));
-            }
-
-            _core.Ready += OnReady;
-            _core.Faulted += OnFaulted;
-            _core.StateChanged += OnStateChanged;
             _core.Start();
-
-            if (connectTimeout > TimeSpan.Zero)
-            {
-                var coreAtSchedule = _core;
-                ScheduleConnectTimeout(connectTimeout, () =>
-                    HandleConnectTimeout(
-                        coreAtSchedule, OnStateChanged, tcs, connectTimeout,
-                        () => capturedFault));
-            }
-
-            return AwaitConnectAsync(tcs, OnReady, OnStateChanged, OnFaulted);
+            return FutureToAwaitable(_core.WaitForReady(connectTimeout));
         }
-
-#if UNITY_6000_0_OR_NEWER
-        private void HandleConnectTimeout(
-            HeTuSessionClientBase coreAtSchedule,
-            Action<HeTuSessionState> onStateChanged,
-            AwaitableCompletionSource<bool> tcs,
-            TimeSpan timeout,
-            Func<Exception> getCapturedFault)
-#else
-        private void HandleConnectTimeout(
-            HeTuSessionClientBase coreAtSchedule,
-            Action<HeTuSessionState> onStateChanged,
-            UniTaskCompletionSource<bool> tcs,
-            TimeSpan timeout,
-            Func<Exception> getCapturedFault)
-#endif
-        {
-            // 旧定时器：用户已经走完一轮 Connect/Close/Connect 又起了新 core，
-            // 这个 timer 不应该误伤新 session。
-            if (_core != coreAtSchedule) return;
-            // 曾经 Ready：connect await 早就成功返回了，后续状态变化（断线、重连）
-            // 跟 connectTimeout 无关；不然一个 30s 的初始超时会把游戏中的会话误关。
-            if (_core.HasBeenReady) return;
-            // 已经 Stopped / Faulted：tcs 早被对应 OnStateChanged 分支占走了；
-            // 下面的 Close + TrySetException 都是 no-op，让它过去也没副作用。
-
-            // 关键顺序：Unity 的 AwaitableCompletionSource 在 TrySet 内部同步唤醒
-            // awaiter；若顺序是 (TrySetException → Close)，test 在 Close 之前就拿到
-            // 控制权看到 State 还是 Connecting。
-            // 反过来 (Close → TrySetException) 时 Close 触发的 Stopped 又会被
-            // OnStateChanged 抢成 Canceled。所以先把 OnStateChanged 摘了再 Close。
-            _core.StateChanged -= onStateChanged;
-            _core.Close();
-            // 把最近一次 Faulted 事件捕获到的真实异常带在 TimeoutException 上：
-            // message 里直接拼好，InnerException 里也挂着，业务方一条 try/catch
-            // 读 ex.Message 就能拿到真实原因。
-            var underlying = getCapturedFault();
-            var message = underlying != null
-                ? $"Connect timed out after {timeout.TotalSeconds:F0}s: " +
-                  $"{underlying.Message}"
-                : $"Connect timed out after {timeout.TotalSeconds:F0}s.";
-            tcs.TrySetException(new TimeoutException(message, underlying));
-        }
-
-#if UNITY_6000_0_OR_NEWER
-        private async Awaitable AwaitConnectAsync(
-            AwaitableCompletionSource<bool> tcs,
-            Action onReady,
-            Action<HeTuSessionState> onStateChanged,
-            Action<Exception> onFaulted)
-#else
-        private async UniTask AwaitConnectAsync(
-            UniTaskCompletionSource<bool> tcs,
-            Action onReady,
-            Action<HeTuSessionState> onStateChanged,
-            Action<Exception> onFaulted)
-#endif
-        {
-            try
-            {
-                await AwaitFrom(tcs);
-            }
-            finally
-            {
-                _core.Ready -= onReady;
-                _core.StateChanged -= onStateChanged;
-                _core.Faulted -= onFaulted;
-            }
-        }
-
-#if UNITY_6000_0_OR_NEWER
-        private void ScheduleConnectTimeout(TimeSpan timeout, Action onTimeout) =>
-            _ = RunConnectTimeoutAsync(timeout, onTimeout);
-
-        private async Awaitable RunConnectTimeoutAsync(
-            TimeSpan timeout, Action onTimeout)
-        {
-            await Awaitable.WaitForSecondsAsync((float)timeout.TotalSeconds);
-            onTimeout();
-        }
-#else
-        private void ScheduleConnectTimeout(TimeSpan timeout, Action onTimeout) =>
-            RunConnectTimeoutAsync(timeout, onTimeout).Forget();
-
-        private async UniTask RunConnectTimeoutAsync(
-            TimeSpan timeout, Action onTimeout)
-        {
-            await UniTask.Delay(timeout);
-            onTimeout();
-        }
-#endif
 
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<JsonObject> CallSystem(string systemName,
@@ -446,12 +313,25 @@ namespace HeTu
         }
 #endif
 
+        // Future → awaitable 单点桥接：已完成的 Future 直接构造已结算的 TCS；
+        // 未完成的 Future 用 Then/Catch 把结果搬运过去。把 Connect 那一堆 TCS+三个
+        // event handler+timeout 的拼装收成"一行 await"。
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable CompletedAwaitable()
+        private static Awaitable FutureToAwaitable(Future f)
         {
+            var tcs = new AwaitableCompletionSource();
+            f.Then(() => tcs.TrySetResult())
+             .Catch(ex => tcs.TrySetException(ex));
+            return tcs.Awaitable;
         }
 #else
-        private static UniTask CompletedAwaitable() => UniTask.CompletedTask;
+        private static UniTask FutureToAwaitable(Future f)
+        {
+            var tcs = new UniTaskCompletionSource();
+            f.Then(() => tcs.TrySetResult())
+             .Catch(ex => tcs.TrySetException(ex));
+            return tcs.Task;
+        }
 #endif
     }
 

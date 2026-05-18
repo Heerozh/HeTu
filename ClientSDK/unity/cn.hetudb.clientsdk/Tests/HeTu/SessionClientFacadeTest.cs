@@ -333,16 +333,40 @@ namespace Tests.HeTu
             }
         }
 
+        // 用真实 Unity 计时器替代旧版无操作 FakeScheduler——Connect 超时改走
+        // _core.WaitForReady 经过 scheduler，而 PlayMode 里测试要的就是真实时序。
         private sealed class FakeScheduler : IHeTuSessionScheduler
         {
-            public IDisposable Schedule(TimeSpan delay, Action action) =>
-                new NoopDisposable();
-
-            private sealed class NoopDisposable : IDisposable
+            public IDisposable Schedule(TimeSpan delay, Action action)
             {
-                public void Dispose()
-                {
-                }
+                var scheduled = new ScheduledAction();
+#if UNITY_6000_0_OR_NEWER
+                _ = RunAsync(delay, action, scheduled);
+#else
+                RunAsync(delay, action, scheduled).Forget();
+#endif
+                return scheduled;
+            }
+
+#if UNITY_6000_0_OR_NEWER
+            private static async Awaitable RunAsync(
+#else
+            private static async UniTask RunAsync(
+#endif
+                TimeSpan delay, Action action, ScheduledAction scheduled)
+            {
+#if UNITY_6000_0_OR_NEWER
+                await Awaitable.WaitForSecondsAsync((float)delay.TotalSeconds);
+#else
+                await UniTask.Delay(delay);
+#endif
+                if (!scheduled.IsDisposed) action();
+            }
+
+            private sealed class ScheduledAction : IDisposable
+            {
+                public bool IsDisposed { get; private set; }
+                public void Dispose() => IsDisposed = true;
             }
         }
 
