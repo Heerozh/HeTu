@@ -317,6 +317,10 @@ namespace HeTu
 
         private void RestoreSubscriptionAt(BaseSubscription[] subscriptions, int index)
         {
+            // 若 transport.Restore 的回调是同步触发的（同步网络库 / 已订阅 / 测试 fake），
+            // 原本的递归会按订阅数线性涨栈，N 大时 StackOverflow。
+            // 所以不能使用任何同步的网络库 (Unity的都是异步的，理论上应该没问题)
+            // 已订阅状态不会在目前出现，因为只有Connect才会调用RestoreSubscriptions
             if (_closed)
                 return;
 
@@ -485,7 +489,7 @@ namespace HeTu
                     new CallOutcomeUnknownException(pending.SystemName));
             _inFlightCalls.Clear();
 
-            foreach (var subscription in _subscriptions.Values)
+            foreach (var subscription in _subscriptions.Values.ToArray())
                 ((IRestorableSubscription)subscription).Suspend();
 
             foreach (var pending in _pendingWatches)
