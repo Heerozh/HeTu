@@ -55,61 +55,56 @@ namespace HeTu
     [MustDisposeResource]
     public abstract class BaseSubscription : IDisposable, IRestorableSubscription
     {
-        private readonly StackTrace _creationTrace;
-        private HeTuClientBase _parentClient;
-        private readonly string _subscriptID;
-        private bool _disposed;
-
         /// <summary>
         ///     对应的组件名。
         /// </summary>
         public readonly string ComponentName;
+
+        private HeTuClientBase _parentClient;
 
         /// <summary>
         ///     该订阅关联的 R3 资源袋。
         /// </summary>
         public DisposableBag DisposeBag;
 
-        internal StackTrace CreationTrace => _creationTrace;
+        protected BaseSubscription(string subscriptID, string componentName,
+            HeTuClientBase client, StackTrace creationTrace = null)
+        {
+            SubId = subscriptID;
+            ComponentName = componentName;
+            _parentClient = client;
+            CreationTrace = creationTrace;
+        }
+
+        internal StackTrace CreationTrace { get; }
 
         /// <summary>
         ///     服务器侧 canonical 订阅 ID。
         /// </summary>
-        public string SubId => _subscriptID;
+        public string SubId { get; }
 
         /// <summary>
         ///     当前对象是否已脱离活跃连接，等待 Session 重连恢复。
         /// </summary>
         public bool IsStale { get; private set; }
 
-        internal bool IsDisposed => _disposed;
-
-        internal event Action<BaseSubscription> Disposed;
-
-        protected BaseSubscription(string subscriptID, string componentName,
-            HeTuClientBase client, StackTrace creationTrace = null)
-        {
-            _subscriptID = subscriptID;
-            ComponentName = componentName;
-            _parentClient = client;
-            _creationTrace = creationTrace;
-        }
+        internal bool IsDisposed { get; private set; }
 
         /// <summary>
         ///     销毁远端订阅对象。Dispose应该明确调用。
         /// </summary>
         public virtual void Dispose()
         {
-            if (_disposed)
+            if (IsDisposed)
                 return;
 
-            _disposed = true;
+            IsDisposed = true;
             // Stale 表示底层连接已经断了（Session 在 MarkConnectionLost 里挨个
             // Suspend），此时再向 _parentClient 发 unsub 没意义：底层
             // HeTuClient 通常已经 Subscriptions.Clean()，能早返；即使顺序变了
             // 守住这里也不会戳到死 socket。
             if (!IsStale)
-                _parentClient?.Unsubscribe(_subscriptID, "Dispose");
+                _parentClient?.Unsubscribe(SubId, "Dispose");
             // 复位 IsStale：Dispose 后对象不再属于"等重连"状态，外部只看
             // IsStale 不应被误导。生命周期判断请用 IsDisposed。
             IsStale = false;
@@ -117,6 +112,16 @@ namespace HeTu
             Disposed?.Invoke(this);
             GC.SuppressFinalize(this);
         }
+
+        void IRestorableSubscription.Suspend() => Suspend();
+
+        void IRestorableSubscription.Restore(
+            IHeTuSessionTransport transport,
+            Action<bool> onCompleted,
+            Action<Exception> onFailed) =>
+            Restore(transport, onCompleted, onFailed);
+
+        internal event Action<BaseSubscription> Disposed;
 
 #if R3_UNITY_INSTALLED
         /// <summary>
@@ -136,19 +141,11 @@ namespace HeTu
         /// <param name="data">更新数据。</param>
         public abstract void UpdateRows(JsonObject data);
 
-        void IRestorableSubscription.Suspend() => Suspend();
-
-        void IRestorableSubscription.Restore(
-            IHeTuSessionTransport transport,
-            Action<bool> onCompleted,
-            Action<Exception> onFailed) =>
-            Restore(transport, onCompleted, onFailed);
-
         internal void RebindRemote(string subscriptID, HeTuClientBase client)
         {
-            if (_subscriptID != subscriptID)
+            if (SubId != subscriptID)
                 throw new Exception("错误，Rebind的subscriptID不应该有变化，" +
-                                    $"旧的：{_subscriptID}, 新的：{subscriptID}");
+                                    $"旧的：{SubId}, 新的：{subscriptID}");
             _parentClient = client;
             IsStale = false;
         }
@@ -164,8 +161,8 @@ namespace HeTu
 
         ~BaseSubscription() =>
             Logger.Instance.Error(
-                "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + _subscriptID +
-                "\n创建时的堆栈：\n" + _creationTrace);
+                "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + SubId +
+                "\n创建时的堆栈：\n" + CreationTrace);
     }
 
     /// <summary>
@@ -290,8 +287,7 @@ namespace HeTu
         internal override void Restore(
             IHeTuSessionTransport transport,
             Action<bool> onCompleted,
-            Action<Exception> onFailed)
-        {
+            Action<Exception> onFailed) =>
             transport.WatchRow(
                 HeTuClientBase.IndexId,
                 BoundRowID,
@@ -322,7 +318,6 @@ namespace HeTu
                 },
                 ComponentName,
                 this);
-        }
     }
 
     /// <summary>
@@ -352,15 +347,6 @@ namespace HeTu
                 _replaceSubjects[id] = new Subject<T>();
         }
 
-        public override void Dispose()
-        {
-            if (IsDisposed) return;
-            foreach (var subject in _replaceSubjects.Values)
-                subject.Dispose();
-            _replaceSubjects.Clear();
-            base.Dispose();
-        }
-
         /// <summary>
         ///     当前订阅范围内的行集合（key 为行 ID）。
         /// </summary>
@@ -372,6 +358,15 @@ namespace HeTu
         internal int RestoreLimit { get; private set; }
         internal bool RestoreDesc { get; private set; }
         internal bool RestoreForce { get; private set; } = true;
+
+        public override void Dispose()
+        {
+            if (IsDisposed) return;
+            foreach (var subject in _replaceSubjects.Values)
+                subject.Dispose();
+            _replaceSubjects.Clear();
+            base.Dispose();
+        }
 
         /// <summary>
         ///     行更新事件。
@@ -464,7 +459,9 @@ namespace HeTu
         ///             .Subscribe(
         ///                 value => hpText.text = value // OnNext事件
         ///             )
-        ///             .AddTo(go);
+        ///             //.AddTo(go);  // IndexSubscription自己会负责
+        ///             // 注意，规范上来说，AddTo应该能加就加，不管别人是否会处理，重复添加一般
+        ///             // 无副作用。但这里不是，这里是ObserveAdd事件，导致Bag会持续增长，内存溢出。
         ///     };
         ///
         ///     // 统一处理新增（包含初始行）
@@ -530,8 +527,7 @@ namespace HeTu
         internal override void Restore(
             IHeTuSessionTransport transport,
             Action<bool> onCompleted,
-            Action<Exception> onFailed)
-        {
+            Action<Exception> onFailed) =>
             transport.WatchRange(
                 RestoreIndex,
                 RestoreLeft,
@@ -556,7 +552,6 @@ namespace HeTu
                 RestoreForce,
                 ComponentName,
                 this);
-        }
 
         private void ReplaceSnapshot(List<T> rows)
         {
