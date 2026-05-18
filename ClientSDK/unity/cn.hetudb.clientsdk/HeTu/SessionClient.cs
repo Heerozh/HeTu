@@ -220,9 +220,48 @@ namespace HeTu
             _core.Start();
 
             if (connectTimeout > TimeSpan.Zero)
-                ScheduleConnectTimeout(connectTimeout, tcs);
+            {
+                var coreAtSchedule = _core;
+                ScheduleConnectTimeout(connectTimeout, () =>
+                    HandleConnectTimeout(
+                        coreAtSchedule, OnStateChanged, tcs, connectTimeout));
+            }
 
             return AwaitConnectAsync(tcs, OnReady, OnStateChanged, OnFaulted);
+        }
+
+#if UNITY_6000_0_OR_NEWER
+        private void HandleConnectTimeout(
+            HeTuSessionClientBase coreAtSchedule,
+            Action<HeTuSessionState> onStateChanged,
+            AwaitableCompletionSource<bool> tcs,
+            TimeSpan timeout)
+#else
+        private void HandleConnectTimeout(
+            HeTuSessionClientBase coreAtSchedule,
+            Action<HeTuSessionState> onStateChanged,
+            UniTaskCompletionSource<bool> tcs,
+            TimeSpan timeout)
+#endif
+        {
+            // 旧定时器：用户已经走完一轮 Connect/Close/Connect 又起了新 core，
+            // 这个 timer 不应该误伤新 session。
+            if (_core != coreAtSchedule) return;
+            // 已经 Ready：timer 迟到了，session 已经成功，不能误关。
+            if (_core.State == HeTuSessionState.Ready) return;
+            // 已经 Stopped / Faulted：tcs 早被对应 OnStateChanged 分支占走了；
+            // 下面的 Close + TrySetException 都是 no-op，让它过去也没副作用。
+
+            // 关键顺序：Unity 的 AwaitableCompletionSource 在 TrySet 内部同步唤醒
+            // awaiter；若顺序是 (TrySetException → Close)，test 在 Close 之前就拿到
+            // 控制权看到 State 还是 Connecting。
+            // 反过来 (Close → TrySetException) 时 Close 触发的 Stopped 又会被
+            // OnStateChanged 抢成 Canceled。所以先把 OnStateChanged 摘了再 Close。
+            _core.StateChanged -= onStateChanged;
+            _core.Close();
+            tcs.TrySetException(new TimeoutException(
+                $"Session did not become Ready within " +
+                $"{timeout.TotalSeconds:F0}s."));
         }
 
 #if UNITY_6000_0_OR_NEWER
@@ -252,34 +291,24 @@ namespace HeTu
         }
 
 #if UNITY_6000_0_OR_NEWER
-        private void ScheduleConnectTimeout(
-            TimeSpan timeout, AwaitableCompletionSource<bool> tcs) =>
-            _ = RunConnectTimeoutAsync(timeout, tcs);
+        private void ScheduleConnectTimeout(TimeSpan timeout, Action onTimeout) =>
+            _ = RunConnectTimeoutAsync(timeout, onTimeout);
 
         private async Awaitable RunConnectTimeoutAsync(
-            TimeSpan timeout, AwaitableCompletionSource<bool> tcs)
+            TimeSpan timeout, Action onTimeout)
         {
             await Awaitable.WaitForSecondsAsync((float)timeout.TotalSeconds);
-            // tcs 已经 settle（Ready / cancel / faulted）则 TrySetException 返回 false，
-            // 不会去戳已经成功的会话或新一轮 Connect 的 core。
-            if (tcs.TrySetException(new TimeoutException(
-                    $"Session did not become Ready within " +
-                    $"{timeout.TotalSeconds:F0}s.")))
-                Close();
+            onTimeout();
         }
 #else
-        private void ScheduleConnectTimeout(
-            TimeSpan timeout, UniTaskCompletionSource<bool> tcs) =>
-            RunConnectTimeoutAsync(timeout, tcs).Forget();
+        private void ScheduleConnectTimeout(TimeSpan timeout, Action onTimeout) =>
+            RunConnectTimeoutAsync(timeout, onTimeout).Forget();
 
         private async UniTask RunConnectTimeoutAsync(
-            TimeSpan timeout, UniTaskCompletionSource<bool> tcs)
+            TimeSpan timeout, Action onTimeout)
         {
             await UniTask.Delay(timeout);
-            if (tcs.TrySetException(new TimeoutException(
-                    $"Session did not become Ready within " +
-                    $"{timeout.TotalSeconds:F0}s.")))
-                Close();
+            onTimeout();
         }
 #endif
 
