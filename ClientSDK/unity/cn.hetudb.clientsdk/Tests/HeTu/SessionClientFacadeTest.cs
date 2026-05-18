@@ -3,12 +3,13 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using HeTu;
+using NUnit.Framework;
+using UnityEngine;
+using UnityEngine.TestTools;
 #if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
 #endif
-using HeTu;
-using NUnit.Framework;
-using UnityEngine.TestTools;
 
 namespace Tests.HeTu
 {
@@ -168,10 +169,10 @@ namespace Tests.HeTu
             var core = new HeTuSessionClientBase(
                 () => transport,
                 scheduler,
-                bootstrap: null,
-                reconnectDelay: TimeSpan.Zero,
-                maxReconnectDelay: TimeSpan.Zero,
-                maxReconnectAttempts: 1);
+                null,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                1);
             using var session = new HeTuSessionClient(core);
 
             var connectTask = ToTask(session.Connect());
@@ -196,15 +197,13 @@ namespace Tests.HeTu
 
         private static HeTuSessionClient CreateSession(
             FakeTransport transport,
-            FakeScheduler scheduler)
-        {
-            return new HeTuSessionClient(
+            FakeScheduler scheduler) =>
+            new(
                 new HeTuSessionClientBase(
                     () => transport,
                     scheduler,
                     null,
                     TimeSpan.Zero));
-        }
 
         private static IEnumerator RunTask(Task task)
         {
@@ -229,8 +228,8 @@ namespace Tests.HeTu
 
         private sealed class TestComponent : IBaseComponent
         {
-            public long ID { get; set; }
             public int Value { get; set; }
+            public long ID { get; set; }
         }
 
         private sealed class FakeTransport : IHeTuSessionTransport
@@ -244,12 +243,14 @@ namespace Tests.HeTu
             }
 
             public string Name { get; }
-            public bool IsConnected { get; private set; }
             public List<CallRecord> Calls { get; } = new();
+
             public Dictionary<(string Index, object Value), TestComponent> RowResults
             {
                 get;
             } = new();
+
+            public bool IsConnected { get; private set; }
 
             public event Action Connected;
             public event Action<string> Closed;
@@ -259,12 +260,6 @@ namespace Tests.HeTu
             }
 
             public void Close() => IsConnected = false;
-
-            public void RaiseConnected()
-            {
-                IsConnected = true;
-                Connected?.Invoke();
-            }
 
             public void CallSystem(string systemName, object[] args,
                 Action<JsonObject, bool> onResponse)
@@ -311,6 +306,18 @@ namespace Tests.HeTu
 
             public void Dispose()
             {
+            }
+
+            public void RaiseConnected()
+            {
+                IsConnected = true;
+                Connected?.Invoke();
+            }
+
+            public void RaiseClosed(string reason)
+            {
+                IsConnected = false;
+                Closed?.Invoke(reason);
             }
 
             public readonly struct CallRecord

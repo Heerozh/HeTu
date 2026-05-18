@@ -41,7 +41,11 @@ namespace HeTu
 
         private HeTuSessionClient() { }
 
-        internal HeTuSessionClient(HeTuSessionClientBase core) => _core = core;
+        internal HeTuSessionClient(HeTuSessionClientBase core)
+        {
+            _core = core;
+            WireFacadeEvents(core);
+        }
 
         /// <summary>
         ///     当前会话状态；尚未 Connect 时为
@@ -49,6 +53,27 @@ namespace HeTu
         /// </summary>
         public HeTuSessionState State =>
             _core?.State ?? HeTuSessionState.Stopped;
+
+        /// <summary>
+        ///     会话状态每次变化都触发一次；最常用于驱动 UI（断线 → 显示 syncing...
+        ///     条幅 / Ready → 隐藏）。
+        /// </summary>
+        public event Action<HeTuSessionState> StateChanged;
+
+        /// <summary>
+        ///     每次"本次连接失败"触发一次：socket 关闭、bootstrap 异常、restore 异常
+        ///     都会进来，携带本次失败的异常。是否已经是终态请同时观察
+        ///     <see cref="State" /> == <see cref="HeTuSessionState.Faulted" />。
+        /// </summary>
+        public event Action<Exception> Faulted;
+
+        private void WireFacadeEvents(HeTuSessionClientBase core)
+        {
+            // 给每个 core 单独装 forwarder：旧 core 被替换后会随它一起 GC 掉，
+            // 不需要显式取消订阅。
+            core.StateChanged += state => StateChanged?.Invoke(state);
+            core.Faulted += ex => Faulted?.Invoke(ex);
+        }
 
         /// <summary>
         ///     首次连接超时默认值。游戏客户端用 30s 一般够覆盖正常握手 + bootstrap
@@ -139,6 +164,7 @@ namespace HeTu
                 reconnectDelay ?? DefaultReconnectDelay,
                 maxReconnectDelay ?? DefaultMaxReconnectDelay,
                 maxReconnectAttempts);
+            WireFacadeEvents(_core);
 
             return ConnectCore(connectTimeout ?? DefaultConnectTimeout);
         }
