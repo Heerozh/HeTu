@@ -163,8 +163,7 @@ namespace HeTu
                 new UnityHeTuSessionScheduler(),
                 bootstrap == null
                     ? null
-                    : (_, succeed, fail) =>
-                        RunBootstrapAsync(client, bootstrap, succeed, fail),
+                    : _ => RunBootstrapAsync(client, bootstrap),
                 reconnectDelay ?? DefaultReconnectDelay,
                 maxReconnectDelay ?? DefaultMaxReconnectDelay,
                 maxReconnectAttempts);
@@ -396,29 +395,56 @@ namespace HeTu
         public void Dispose() => _core?.Dispose();
 
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable RunBootstrapAsync(
+        private static Future RunBootstrapAsync(
+            HeTuClient client,
+            Func<HeTuClient, Awaitable> bootstrap)
+        {
+            var p = new Promise();
+            _ = BridgeBootstrap(client, bootstrap, p);
+            return p.Future;
+        }
+
+        private static async Awaitable BridgeBootstrap(
             HeTuClient client,
             Func<HeTuClient, Awaitable> bootstrap,
-            Action succeed,
-            Action<Exception> fail)
-#else
-        private static async UniTaskVoid RunBootstrapAsync(
-            HeTuClient client,
-            Func<HeTuClient, UniTask> bootstrap,
-            Action succeed,
-            Action<Exception> fail)
-#endif
+            Promise p)
         {
             try
             {
                 await bootstrap(client);
-                succeed();
+                p.TryComplete();
             }
             catch (Exception ex)
             {
-                fail(ex);
+                p.TryFail(ex);
             }
         }
+#else
+        private static Future RunBootstrapAsync(
+            HeTuClient client,
+            Func<HeTuClient, UniTask> bootstrap)
+        {
+            var p = new Promise();
+            BridgeBootstrap(client, bootstrap, p).Forget();
+            return p.Future;
+        }
+
+        private static async UniTaskVoid BridgeBootstrap(
+            HeTuClient client,
+            Func<HeTuClient, UniTask> bootstrap,
+            Promise p)
+        {
+            try
+            {
+                await bootstrap(client);
+                p.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                p.TryFail(ex);
+            }
+        }
+#endif
 
 #if UNITY_6000_0_OR_NEWER
         private static async Awaitable CompletedAwaitable()

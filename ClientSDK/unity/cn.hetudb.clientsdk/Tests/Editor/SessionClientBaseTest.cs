@@ -19,10 +19,10 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { transport }),
                 scheduler,
-                (_, succeed, _) =>
+                _ =>
                 {
                     operations.Add("bootstrap");
-                    succeed();
+                    return Future.Completed;
                 });
 
             session.Start();
@@ -378,10 +378,10 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { first, second }),
                 scheduler,
-                (transport, succeed, _) =>
+                transport =>
                 {
                     ((FakeTransport)transport).Operations.Add("bootstrap");
-                    succeed();
+                    return Future.Completed;
                 });
 
             session.Start();
@@ -930,8 +930,8 @@ namespace Tests.HeTu
             var session = new HeTuSessionClientBase(
                 () => q.Dequeue(),
                 scheduler,
-                bootstrap: (_, _, fail) =>
-                    fail(new InvalidOperationException("bad credentials")),
+                bootstrap: _ =>
+                    Future.Failed(new InvalidOperationException("bad credentials")),
                 reconnectDelay: TimeSpan.FromSeconds(1),
                 maxReconnectDelay: TimeSpan.FromSeconds(30),
                 maxReconnectAttempts: 20);
@@ -1030,8 +1030,7 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { transport, fallback }),
                 scheduler,
-                (_, _, fail) =>
-                    fail(new InvalidOperationException("bootstrap failed")));
+                _ => Future.Failed(new InvalidOperationException("bootstrap failed")));
 
             session.Start();
             transport.RaiseConnected();

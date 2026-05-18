@@ -76,10 +76,7 @@ namespace HeTu
         IDisposable Schedule(TimeSpan delay, Action action);
     }
 
-    internal delegate void HeTuSessionBootstrap(
-        IHeTuSessionTransport transport,
-        Action onSucceeded,
-        Action<Exception> onFailed);
+    internal delegate Future HeTuSessionBootstrap(IHeTuSessionTransport transport);
 
     /// <summary>
     ///     不依赖任何 awaitable 类型的逻辑会话核心。
@@ -98,6 +95,7 @@ namespace HeTu
         private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
         private readonly Func<IHeTuSessionTransport> _transportFactory;
 
+        private Promise _activeStepPromise;
         private bool _closed;
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
@@ -105,6 +103,7 @@ namespace HeTu
         private Exception _lastFault;
         private IDisposable _scheduledReconnect;
         private IHeTuSessionTransport _transport;
+        private bool _transportClosedItself;
 
         public HeTuSessionClientBase(
             Func<IHeTuSessionTransport> transportFactory,
@@ -147,7 +146,7 @@ namespace HeTu
             if (_closed || State != HeTuSessionState.Stopped)
                 return;
 
-            ConnectNewTransport();
+            RunSessionLifecycle();
         }
 
         public void Close()
@@ -371,81 +370,137 @@ namespace HeTu
             DispatchPendingIfReady(watch);
         }
 
-        private void ConnectNewTransport()
+        // ---------- 状态机：单条 Future 链 ----------
+        // Start → ConnectTransport → RunBootstrap → RestoreAllSubscriptions → MarkReady
+        //                                                                    ↘ Catch(HandleSessionFailure)
+        // 每一步把自己的 Promise 注册为 _activeStepPromise；OnTransportClosed
+        // 通过它把"在飞那一步"失败掉，让失败统一从 .Catch 一处出口走。
+        // MarkReady 之后 _activeStepPromise 设回 null，断线走 HandleSessionFailure
+        // 直连路径。
+        private void RunSessionLifecycle()
         {
-            if (_closed)
-                return;
+            if (_closed) return;
+            ConnectTransport()
+                .Then(RunBootstrap)
+                .Then(RestoreAllSubscriptions)
+                .Then(MarkReady)
+                .Catch(HandleSessionFailure);
+        }
+
+        private Future ConnectTransport()
+        {
+            if (_closed) return Future.Failed(
+                new ObjectDisposedException(nameof(HeTuSessionClientBase)));
 
             CleanupTransport(closeTransport: false);
             _transport = _transportFactory();
-            _transport.Connected += HandleTransportConnected;
-            _transport.Closed += HandleTransportClosed;
+            _transportClosedItself = false;
+            var p = new Promise();
+            _activeStepPromise = p;
+            _transport.Connected += () => p.TryComplete();
+            _transport.Closed += OnTransportClosed;
             SetState(HeTuSessionState.Connecting);
             _transport.Connect();
+            return p.Future;
         }
 
-        private void HandleTransportConnected()
+        private Future RunBootstrap()
         {
-            if (_closed)
-                return;
-
+            if (_closed) return Future.Completed;
             SetState(HeTuSessionState.Bootstrapping);
             if (_bootstrap == null)
             {
-                RestoreSubscriptions();
-                return;
+                _activeStepPromise = null;
+                return Future.Completed;
             }
 
+            var p = new Promise();
+            _activeStepPromise = p;
+            Future bootstrapFuture;
             try
             {
-                _bootstrap(_transport, RestoreSubscriptions, HandleRecoverableFailure);
+                bootstrapFuture = _bootstrap(_transport);
             }
             catch (Exception ex)
             {
-                HandleRecoverableFailure(ex);
+                p.TryFail(ex);
+                return p.Future;
             }
+
+            if (bootstrapFuture == null)
+            {
+                p.TryComplete();
+                return p.Future;
+            }
+
+            bootstrapFuture
+                .Then(() => p.TryComplete())
+                .Catch(ex => p.TryFail(ex));
+            return p.Future;
         }
 
-        private void RestoreSubscriptions()
+        private Future RestoreAllSubscriptions()
         {
-            if (_closed)
-                return;
-
+            if (_closed) return Future.Completed;
             SetState(HeTuSessionState.RestoringSubscriptions);
-            RestoreSubscriptionAt(_subscriptions.Values.ToArray(), 0);
+
+            var p = new Promise();
+            _activeStepPromise = p;
+            // 若 transport.Restore 的回调同步触发，按订阅数线性涨栈在递归实现里会
+            // StackOverflow。fold 成 Future 链后 continuation 在堆里而非栈里串联，
+            // 栈深恒定。
+            var subs = _subscriptions.Values.ToArray();
+            var head = Future.Completed;
+            foreach (var sub in subs)
+                head = head.Then(() => RestoreOne(sub));
+            head
+                .Then(() => p.TryComplete())
+                .Catch(ex => p.TryFail(ex));
+            return p.Future;
         }
 
-        private void RestoreSubscriptionAt(BaseSubscription[] subscriptions, int index)
+        private Future RestoreOne(BaseSubscription subscription)
         {
-            // 若 transport.Restore 的回调是同步触发的（同步网络库 / 已订阅 / 测试 fake），
-            // 原本的递归会按订阅数线性涨栈，N 大时 StackOverflow。
-            // 所以不能使用任何同步的网络库 (Unity的都是异步的，理论上应该没问题)
-            // 已订阅状态不会在目前出现，因为只有Connect才会调用RestoreSubscriptions
-            if (_closed)
-                return;
+            if (_closed) return Future.Completed;
+            if (subscription.IsDisposed) return Future.Completed;
 
-            if (index >= subscriptions.Length)
-            {
-                BecomeReady();
-                return;
-            }
-
-            var subscription = subscriptions[index];
-            if (subscription.IsDisposed)
-            {
-                RestoreSubscriptionAt(subscriptions, index + 1);
-                return;
-            }
-
+            var p = new Promise();
             ((IRestorableSubscription)subscription).Restore(
                 _transport,
                 isActive =>
                 {
                     if (!isActive)
                         UnregisterSubscription(subscription);
-                    RestoreSubscriptionAt(subscriptions, index + 1);
+                    p.TryComplete();
                 },
-                HandleRecoverableFailure);
+                ex => p.TryFail(ex));
+            return p.Future;
+        }
+
+        private Future MarkReady()
+        {
+            if (_closed) return Future.Completed;
+            // 清掉 _activeStepPromise——之后再来的 Closed 事件就走 HandleSessionFailure
+            // 直连路径，不再尝试失败一个已完成的 step。
+            _activeStepPromise = null;
+            BecomeReady();
+            return Future.Completed;
+        }
+
+        private void OnTransportClosed(string reason)
+        {
+            if (_closed) return;
+
+            _transportClosedItself = true;
+            var fault = new InvalidOperationException(
+                $"Connection closed: {reason ?? "(unknown)"}");
+
+            // 链在飞：把当前 step 失败掉，由 .Catch(HandleSessionFailure) 统一处理。
+            if (_activeStepPromise != null && _activeStepPromise.TryFail(fault))
+                return;
+
+            // 没有活动 step（已 Ready）：直走 HandleSessionFailure。
+            HandleSessionFailure(fault);
         }
 
         private void BecomeReady()
@@ -512,23 +567,21 @@ namespace HeTu
             pending.Dispatch(this, _transport);
         }
 
-        private void HandleTransportClosed(string reason)
+        // 统一失败入口。来源：(a) 链的 .Catch；(b) OnTransportClosed 在 Ready 后
+        // 直走的路径。两者都已经把 fault 准备好。closeTransport 由
+        // _transportClosedItself 决定——对端自己关了就不用再发 Close 帧，
+        // 否则 bootstrap/restore 抛出时 socket 还活着，必须主动关掉。
+        private void HandleSessionFailure(Exception fault)
         {
-            if (_closed)
-                return;
+            if (_closed) return;
 
-            // transport 已被对端关闭，不需要再发 Close 帧。
-            MarkConnectionLost(closeTransport: false);
-            // 每次 socket 关闭都通知一次 Faulted 事件，和 HandleRecoverableFailure
-            // 对齐：Faulted 事件 = "本次连接失败了"，是否终态请读 State。
-            Exception fault = new InvalidOperationException(
-                $"Connection closed: {reason ?? "(unknown)"}");
+            _activeStepPromise = null;
+            var closeTransport = !_transportClosedItself;
+            _transportClosedItself = false;
+            MarkConnectionLost(closeTransport);
             SafeInvokeUserCallback(Faulted, fault);
-            // 用户回调里可能 Close，这种情况已经走清理路径，无需再排退避或进入 Faulted 终态。
-            if (_closed)
-                return;
-            // 首次 Ready 之前的关闭 = "连不上"，重试同一份配置没意义；只有玩家已经
-            // 进入过会话，后续断线才走 reconnect。
+            if (_closed) return;
+            // 首次 Ready 前的失败 = 凭据/配置/URL 错，重同样一份没意义。
             if (!_hasBeenReady)
             {
                 EnterFaulted(fault);
@@ -537,34 +590,6 @@ namespace HeTu
             if (ExhaustedRetries())
             {
                 EnterFaulted(fault);
-                return;
-            }
-            ScheduleReconnect();
-        }
-
-        private void HandleRecoverableFailure(Exception exception)
-        {
-            if (_closed)
-                return;
-
-            // bootstrap/restore 失败时底层 socket 通常仍存活，必须主动关闭，
-            // 否则服务器要等到 TCP keepalive 才会回收连接。
-            MarkConnectionLost(closeTransport: true);
-            SafeInvokeUserCallback(Faulted, exception);
-            // Faulted 用户回调里可能 Close，这种情况已经走清理路径，无需再排
-            // 退避或进入 Faulted 终态。
-            if (_closed)
-                return;
-            // 首次 Ready 之前 bootstrap/restore 抛出 = 凭据 / 配置错，重同样一份
-            // 也是错；只有进游戏后断线再触发的 bootstrap 失败才走 reconnect。
-            if (!_hasBeenReady)
-            {
-                EnterFaulted(exception);
-                return;
-            }
-            if (ExhaustedRetries())
-            {
-                EnterFaulted(exception);
                 return;
             }
             ScheduleReconnect();
@@ -636,7 +661,7 @@ namespace HeTu
             SetState(HeTuSessionState.Reconnecting);
             _scheduledReconnect?.Dispose();
             var delay = _currentReconnectDelay;
-            _scheduledReconnect = _scheduler.Schedule(delay, ConnectNewTransport);
+            _scheduledReconnect = _scheduler.Schedule(delay, RunSessionLifecycle);
             // 指数退避：下一次失败时使用翻倍的延迟，封顶在 _maxReconnectDelay。
             // BecomeReady 会把 _currentReconnectDelay 重置回 _reconnectDelay。
             var nextMs = Math.Min(
@@ -650,8 +675,10 @@ namespace HeTu
             if (_transport == null)
                 return;
 
-            _transport.Connected -= HandleTransportConnected;
-            _transport.Closed -= HandleTransportClosed;
+            // Connected 用的是 lambda，无法 -=；ConnectTransport 一旦 promise 完成
+            // 就不再有意义。Closed 用的是命名方法，必须显式取消订阅，否则旧 transport
+            // 的 Closed 事件会触发新一轮 OnTransportClosed。
+            _transport.Closed -= OnTransportClosed;
             if (closeTransport)
                 _transport.Close();
             _transport.Dispose();
