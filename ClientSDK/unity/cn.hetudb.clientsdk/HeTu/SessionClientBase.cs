@@ -101,6 +101,7 @@ namespace HeTu
         private bool _closed;
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
+        private bool _hasBeenReady;
         private IDisposable _scheduledReconnect;
         private IHeTuSessionTransport _transport;
 
@@ -125,6 +126,12 @@ namespace HeTu
 
         public HeTuSessionState State { get; private set; } =
             HeTuSessionState.Stopped;
+
+        /// <summary>
+        ///     本 core 是否曾经达到过 <see cref="HeTuSessionState.Ready" />；
+        ///     用来区分 "首次连接没成功" 和 "进游戏后断线"——前者不重试，后者才重试。
+        /// </summary>
+        internal bool HasBeenReady => _hasBeenReady;
 
         public event Action Ready;
         public event Action<HeTuSessionState> StateChanged;
@@ -359,6 +366,8 @@ namespace HeTu
             // maxReconnectAttempts 也按 "本次会话期内连续失败" 重新计数。
             _currentReconnectDelay = _reconnectDelay;
             _consecutiveFailures = 0;
+            // 标记 "本 core 至少 Ready 过一次"——之后的 close / restore 失败才走 reconnect。
+            _hasBeenReady = true;
             SetState(HeTuSessionState.Ready);
             // 先把排队请求派发完再触发 Ready，避免用户在 Ready 回调里新发的
             // CallSystem/WatchRow 抢在排队请求之前破坏 FIFO 顺序。
@@ -428,6 +437,13 @@ namespace HeTu
             // 用户回调里可能 Close，这种情况已经走清理路径，无需再排退避或进入 Faulted 终态。
             if (_closed)
                 return;
+            // 首次 Ready 之前的关闭 = "连不上"，重试同一份配置没意义；只有玩家已经
+            // 进入过会话，后续断线才走 reconnect。
+            if (!_hasBeenReady)
+            {
+                EnterFaulted(fault);
+                return;
+            }
             if (ExhaustedRetries())
             {
                 EnterFaulted(fault);
@@ -449,6 +465,13 @@ namespace HeTu
             // 退避或进入 Faulted 终态。
             if (_closed)
                 return;
+            // 首次 Ready 之前 bootstrap/restore 抛出 = 凭据 / 配置错，重同样一份
+            // 也是错；只有进游戏后断线再触发的 bootstrap 失败才走 reconnect。
+            if (!_hasBeenReady)
+            {
+                EnterFaulted(exception);
+                return;
+            }
             if (ExhaustedRetries())
             {
                 EnterFaulted(exception);

@@ -89,11 +89,12 @@ Unity 6000+ 的 `Awaitable` 或 Unity 2022.3 的 `UniTask`，因此在 WebGL 上
 |------------------------|---------------|-----------------------------------------------|
 | `reconnectDelay`       | `1s`          | 重连退避起点。                                       |
 | `maxReconnectDelay`    | `30s`         | 退避上限；指数翻倍封顶在这里。                              |
-| `maxReconnectAttempts` | `20`           | 连续失败次数上限，`0` = 不限次。游戏端常用 `0`，让玩家挂着等维护结束。      |
-| `connectTimeout`       | `30s`         | 首次到 Ready 的整体超时；超时自动 Close 并抛 `TimeoutException`。`TimeSpan.Zero` 关闭。 |
+| `maxReconnectAttempts` | `20`          | **仅作用于 post-Ready 重连**——首次 Ready 之前任何失败直接进 Faulted（不重试）。`0` = post-Ready 不限次。 |
+| `connectTimeout`       | `30s`         | 首次到 Ready 的整体超时（兜底 transport 挂着不响应的场景）。超时自动 Close 并抛 `TimeoutException`（`InnerException` 带最近一次 Faulted 事件的异常）。`TimeSpan.Zero` 关闭。 |
 
 `Faulted` 事件每次连接失败（socket 断开、bootstrap 异常、restore 异常）都会触发一次，
-携带本次失败的异常，是否终态请读 `State`（`Faulted` 状态才是终态）。
+携带本次失败的异常；是否终态请读 `State`——首次 Ready 之前任何失败都进 `Faulted` 状态，
+post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的过渡通知。
 
 ### 连接
 

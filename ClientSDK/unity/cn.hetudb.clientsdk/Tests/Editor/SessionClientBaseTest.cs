@@ -581,6 +581,9 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(30));
 
             session.Start();
+            // 先 Ready 一次：首次 Ready 之前任何 close 都直接进 Faulted，
+            // 测不到 backoff。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("e");
             scheduler.RunNext();
             ts[1].RaiseClosed("e");
@@ -620,6 +623,8 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(30));
 
             session.Start();
+            // 先把首次 Ready 拿到手，再开始测 backoff 重置。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("e");
             scheduler.RunNext();
             ts[1].RaiseClosed("e");
@@ -657,6 +662,8 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(4));
 
             session.Start();
+            // 同样先 Ready 一次，才有 reconnect 语义可测。
+            ts[0].RaiseConnected();
             for (var i = 0; i < ts.Length - 1; i++)
             {
                 ts[i].RaiseClosed("e");
@@ -701,6 +708,8 @@ namespace Tests.HeTu
             session.StateChanged += observed.Add;
 
             session.Start();
+            // 先 Ready 一次。pre-Ready 任何 close 都直接 Faulted，测不到"重试 N 次"。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("fail 1");
             scheduler.RunNext();
             ts[1].RaiseClosed("fail 2");
@@ -839,13 +848,19 @@ namespace Tests.HeTu
         }
 
         // 问题 #3：transport-level 重试耗尽时未触发 Faulted 事件。
+        // (现在还顺便覆盖了 post-Ready 重试用尽的语义，因为只有 Ready 之后才会进退避循环。)
         [Test]
         public void Reconnect_AfterMaxAttempts_FiresFaultedEvent()
         {
-            var transport = new FakeTransport("c1");
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
             var scheduler = new FakeScheduler();
             var session = new HeTuSessionClientBase(
-                () => transport,
+                () => q.Dequeue(),
                 scheduler,
                 bootstrap: null,
                 reconnectDelay: TimeSpan.FromSeconds(1),
@@ -856,12 +871,82 @@ namespace Tests.HeTu
             session.Faulted += ex => observed = ex;
 
             session.Start();
-            transport.RaiseClosed("fatal close reason");
+            // 先 Ready 一次解锁 reconnect 语义；再断线触发 maxAttempts=1 退尽。
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("fatal close reason");
 
             Assert.AreEqual(HeTuSessionState.Faulted, session.State);
             Assert.IsNotNull(observed,
                 "transport 重试耗尽进入 Faulted 终态前必须 invoke Faulted 事件");
             StringAssert.Contains("fatal close reason", observed.Message);
+        }
+
+        // pre-Ready 任何 close 都直接 Faulted——不重试，因为重试同一份配置无意义。
+        [Test]
+        public void PreReady_TransportClose_EntersFaultedImmediately()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20); // 给得很高，确认不依赖耗尽
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            ts[0].RaiseClosed("server-side rejection");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State,
+                "pre-Ready close 不应进入 reconnect 循环");
+            Assert.IsNotNull(observed);
+            StringAssert.Contains("server-side rejection", observed.Message);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "pre-Ready close 不应排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount,
+                "第二条 transport 不应被构造");
+        }
+
+        // pre-Ready bootstrap/restore 抛出同样不重试——凭据/配置错误重试无用。
+        [Test]
+        public void PreReady_BootstrapFailure_EntersFaultedImmediately()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: (_, _, fail) =>
+                    fail(new InvalidOperationException("bad credentials")),
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20);
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            ts[0].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsNotNull(observed);
+            StringAssert.Contains("bad credentials", observed.Message);
+            Assert.AreEqual(0, scheduler.PendingCount);
+            Assert.AreEqual(0, ts[1].ConnectCount);
         }
 
         // socket 关闭只要还会重试，也得通知 Faulted 事件；不能等到终态才告诉用户。
@@ -888,6 +973,8 @@ namespace Tests.HeTu
             session.Faulted += observed.Add;
 
             session.Start();
+            // 先 Ready 一次解锁 reconnect 语义；之后每次 close 都走重连而非 Faulted。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("drop 1");
             scheduler.RunNext();
             ts[1].RaiseClosed("drop 2");

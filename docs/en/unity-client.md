@@ -342,12 +342,18 @@ Awaitable Connect(
 What the await can do:
 
 - **resolve** when the session reaches `Ready` — normal path.
+- throw **the underlying failure exception** as soon as it happens — the
+  session does **not retry before first Ready**. Anything that fails the
+  initial connect (socket close, bootstrap throw, restore error) lands in
+  `Faulted` terminal state on the first attempt, and the awaiter sees the
+  original exception (e.g. your `CallSystem("login", ...)` exception, or
+  `InvalidOperationException("Connection closed: <reason>")`). Retries with
+  the same URL / credentials wouldn't help, so the SDK doesn't try.
 - throw **`TimeoutException`** if `Ready` isn't reached within
-  `connectTimeout` (default 30 s). The session is `Close()`'d on the way
-  out — you can `Connect(...)` again afterward. Pass `TimeSpan.Zero` to
-  disable the timeout.
-- throw **`InvalidOperationException`** if `maxReconnectAttempts` is reached
-  before `Ready`. The session enters `Faulted` terminal state.
+  `connectTimeout` (default 30 s) — primarily a safety net for a transport
+  that hangs without ever raising close/error. The `Message` and
+  `InnerException` carry the last captured fault (if any). The session is
+  `Close()`'d on the way out; you can `Connect(...)` again afterward.
 - throw **`OperationCanceledException`** if someone called `Close()` from
   another code path.
 
@@ -362,11 +368,13 @@ starts from scratch with a fresh core.
   from 1 s, doubling each attempt, capped at 30 s. Reasonable for both
   transient hiccups and longer outages; the cap stops you from hammering
   the server while still waking up promptly when it recovers.
-- `maxReconnectAttempts = 20` — with the exponential schedule above, 20
-  attempts spans roughly 8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s) before
-  surrendering to `Faulted`. That's enough to ride out short hot-restarts;
-  for long maintenance windows, pass `0` (unlimited) so a player can leave
-  the app open and rejoin when the server returns.
+- `maxReconnectAttempts = 20` — **only governs reconnects after the session
+  has reached `Ready` at least once**. With the exponential schedule above,
+  20 attempts spans roughly 8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s) of
+  in-game retry before surrendering to `Faulted`. Long maintenance windows:
+  pass `0` (unlimited) so a player can leave the app open and rejoin when
+  the server returns. **Initial connect always uses 1 attempt** — there's no
+  retry value when the credentials or URL might be wrong.
 - `connectTimeout = 30s` — guards the **initial** `Connect` only; reconnects
   after `Ready` aren't subject to it. If you set `maxReconnectAttempts > 0`,
   consider raising or disabling this — otherwise whichever budget runs out
@@ -385,13 +393,13 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — `maxReconnectAttempts` reached. `Faulted` event carries the last `Exception`.            |
+| `Faulted`                | Terminal — either an initial-connect failure (always terminal), or post-Ready `maxReconnectAttempts` reached. `Faulted` event carries the last `Exception`. |
 
 The `Faulted` **event** is broader than the `Faulted` **state**: it fires
-once per failed attempt (socket close, bootstrap error, restore error) so
-you can surface "disconnected, retrying…" UI without waiting for terminal
-exhaustion. Check `session.State` from inside the handler to tell transient
-from terminal.
+once per failed attempt — pre-Ready failures fire it once then go terminal;
+post-Ready transient drops fire it on every retry. Check `session.State`
+from inside the handler to tell terminal from transient (post-Ready retry
+keeps state in `Reconnecting`).
 
 ### `CallSystem` semantics
 

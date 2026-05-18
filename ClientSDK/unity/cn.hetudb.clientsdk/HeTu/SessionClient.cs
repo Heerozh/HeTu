@@ -117,15 +117,19 @@ namespace HeTu
         ///     退避上限。<c>null</c> 用 <see cref="DefaultMaxReconnectDelay" />（30s）。
         /// </param>
         /// <param name="maxReconnectAttempts">
-        ///     连续失败到此数即进入 <see cref="HeTuSessionState.Faulted" /> 终态。
-        ///     默认 <see cref="DefaultMaxReconnectAttempts" />（20）；
-        ///     <c>0</c> = 不限次，配合 Faulted 事件做 UI 反馈即可。
+        ///     **仅作用于"曾经 Ready 之后的重连"**。首次 Ready 之前的任何 close /
+        ///     bootstrap 异常都直接进 <see cref="HeTuSessionState.Faulted" /> 终态
+        ///     （重试同一份凭据 / URL 无意义）。Ready 之后再断线，会按本值循环重连，
+        ///     连续失败到此数才转 Faulted。默认
+        ///     <see cref="DefaultMaxReconnectAttempts" />（20）；
+        ///     <c>0</c> = post-Ready 不限次重连。
         /// </param>
         /// <param name="connectTimeout">
         ///     本次 Connect 的整体超时（从 Connecting 到 Ready）。超时会自动 Close
-        ///     并把 await 抛 <see cref="TimeoutException" />。<c>null</c> 用
+        ///     并把 await 抛 <see cref="TimeoutException" />（InnerException 携带
+        ///     最近一次 Faulted 事件的异常）。<c>null</c> 用
         ///     <see cref="DefaultConnectTimeout" />（30s）；<see cref="TimeSpan.Zero" />
-        ///     关闭超时，await 一直等到 Ready 或 Faulted。
+        ///     关闭超时，await 等到 Ready 或 Faulted 为止。
         /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable Connect(
@@ -224,7 +228,8 @@ namespace HeTu
                 var coreAtSchedule = _core;
                 ScheduleConnectTimeout(connectTimeout, () =>
                     HandleConnectTimeout(
-                        coreAtSchedule, OnStateChanged, tcs, connectTimeout));
+                        coreAtSchedule, OnStateChanged, tcs, connectTimeout,
+                        () => capturedFault));
             }
 
             return AwaitConnectAsync(tcs, OnReady, OnStateChanged, OnFaulted);
@@ -235,20 +240,23 @@ namespace HeTu
             HeTuSessionClientBase coreAtSchedule,
             Action<HeTuSessionState> onStateChanged,
             AwaitableCompletionSource<bool> tcs,
-            TimeSpan timeout)
+            TimeSpan timeout,
+            Func<Exception> getCapturedFault)
 #else
         private void HandleConnectTimeout(
             HeTuSessionClientBase coreAtSchedule,
             Action<HeTuSessionState> onStateChanged,
             UniTaskCompletionSource<bool> tcs,
-            TimeSpan timeout)
+            TimeSpan timeout,
+            Func<Exception> getCapturedFault)
 #endif
         {
             // 旧定时器：用户已经走完一轮 Connect/Close/Connect 又起了新 core，
             // 这个 timer 不应该误伤新 session。
             if (_core != coreAtSchedule) return;
-            // 已经 Ready：timer 迟到了，session 已经成功，不能误关。
-            if (_core.State == HeTuSessionState.Ready) return;
+            // 曾经 Ready：connect await 早就成功返回了，后续状态变化（断线、重连）
+            // 跟 connectTimeout 无关；不然一个 30s 的初始超时会把游戏中的会话误关。
+            if (_core.HasBeenReady) return;
             // 已经 Stopped / Faulted：tcs 早被对应 OnStateChanged 分支占走了；
             // 下面的 Close + TrySetException 都是 no-op，让它过去也没副作用。
 
@@ -259,9 +267,15 @@ namespace HeTu
             // OnStateChanged 抢成 Canceled。所以先把 OnStateChanged 摘了再 Close。
             _core.StateChanged -= onStateChanged;
             _core.Close();
-            tcs.TrySetException(new TimeoutException(
-                $"Session did not become Ready within " +
-                $"{timeout.TotalSeconds:F0}s."));
+            // 把最近一次 Faulted 事件捕获到的真实异常带在 TimeoutException 上：
+            // message 里直接拼好，InnerException 里也挂着，业务方一条 try/catch
+            // 读 ex.Message 就能拿到真实原因。
+            var underlying = getCapturedFault();
+            var message = underlying != null
+                ? $"Connect timed out after {timeout.TotalSeconds:F0}s: " +
+                  $"{underlying.Message}"
+                : $"Connect timed out after {timeout.TotalSeconds:F0}s.";
+            tcs.TrySetException(new TimeoutException(message, underlying));
         }
 
 #if UNITY_6000_0_OR_NEWER
