@@ -14,7 +14,9 @@ using UnityEngine;
 namespace HeTu
 {
     /// <summary>
-    ///     自动管理重连、bootstrap 与订阅恢复的 Unity 逻辑会话层。
+    ///     自动管理重连、bootstrap 与订阅恢复的 Unity 逻辑会话层。单件，通过
+    ///     <see cref="Instance" /> 获取——底层共享 <see cref="HeTuClient.Instance" />
+    ///     的物理连接，所以一个进程同时只能有一个会话。
     /// </summary>
     public sealed class HeTuSessionClient : IDisposable
     {
@@ -28,22 +30,55 @@ namespace HeTu
             tcs.Task;
 #endif
 
-        private readonly HeTuSessionClientBase _core;
+        private static readonly HeTuSessionClient s_instance = new();
 
+        /// <summary>
+        ///     单件实例。
+        /// </summary>
+        public static HeTuSessionClient Instance => s_instance;
+
+        private HeTuSessionClientBase _core;
+
+        private HeTuSessionClient() { }
+
+        internal HeTuSessionClient(HeTuSessionClientBase core) => _core = core;
+
+        /// <summary>
+        ///     当前会话状态；尚未 Connect 时为
+        ///     <see cref="HeTuSessionState.Stopped" />。
+        /// </summary>
+        public HeTuSessionState State =>
+            _core?.State ?? HeTuSessionState.Stopped;
+
+        /// <summary>
+        ///     启动逻辑会话：连接 <paramref name="url" />、跑 <paramref name="bootstrap" />、
+        ///     恢复所有存活订阅。await 返回时
+        ///     <see cref="State" /> == <see cref="HeTuSessionState.Ready" />。
+        /// </summary>
+        /// <param name="url">河图服务端 URL，例如 <c>ws://127.0.0.1:2466/hetu/MyGame</c>。</param>
+        /// <param name="authKey">可选预共享密钥（服务端启用 <c>--authkey</c> 时必填）。</param>
+        /// <param name="bootstrap">每次握手成功后的初始化委托，典型用于登录。</param>
+        /// <param name="reconnectDelay">重连前等待时间，默认 1 秒。</param>
 #if UNITY_6000_0_OR_NEWER
-        public HeTuSessionClient(
+        public Awaitable Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, Awaitable> bootstrap = null,
             TimeSpan? reconnectDelay = null)
 #else
-        public HeTuSessionClient(
+        public UniTask Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, UniTask> bootstrap = null,
             TimeSpan? reconnectDelay = null)
 #endif
         {
+            if (_core != null
+                && _core.State != HeTuSessionState.Stopped
+                && _core.State != HeTuSessionState.Faulted)
+                throw new InvalidOperationException(
+                    "HeTuSessionClient 已经在运行中。请先 Close() 再调用 Connect。");
+
             var client = HeTuClient.Instance;
             _core = new HeTuSessionClientBase(
                 () => new UnityHeTuSessionTransport(client, url, authKey),
@@ -53,16 +88,24 @@ namespace HeTu
                     : (_, succeed, fail) =>
                         RunBootstrapAsync(client, bootstrap, succeed, fail),
                 reconnectDelay);
+
+            return ConnectCore();
         }
 
-        internal HeTuSessionClient(HeTuSessionClientBase core) => _core = core;
-
-        public HeTuSessionState State => _core.State;
+        // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这个重载触发 Start。
+#if UNITY_6000_0_OR_NEWER
+        internal Awaitable Connect()
+#else
+        internal UniTask Connect()
+#endif
+        {
+            return ConnectCore();
+        }
 
 #if UNITY_6000_0_OR_NEWER
-        public Awaitable Connect()
+        private Awaitable ConnectCore()
 #else
-        public UniTask Connect()
+        private UniTask ConnectCore()
 #endif
         {
             if (_core.State == HeTuSessionState.Ready)
@@ -163,9 +206,16 @@ namespace HeTu
             return AwaitFrom(tcs);
         }
 
-        public void Close() => _core.Close();
+        /// <summary>
+        ///     关闭当前会话，取消所有进行中的调用与订阅。Close 后再次调用 Connect
+        ///     会建立全新的会话。
+        /// </summary>
+        public void Close() => _core?.Close();
 
-        public void Dispose() => _core.Dispose();
+        /// <summary>
+        ///     等价于 <see cref="Close" />。单件实例本身不会被销毁。
+        /// </summary>
+        public void Dispose() => _core?.Dispose();
 
 #if UNITY_6000_0_OR_NEWER
         private static async Awaitable RunBootstrapAsync(
