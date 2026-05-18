@@ -1041,6 +1041,175 @@ namespace Tests.HeTu
                 + "否则要等到 TCP keepalive 服务器才会回收连接");
         }
 
+        // -------- WaitForReady --------
+
+        [Test]
+        public void WaitForReady_OnAlreadyReady_CompletesImmediately()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "已 Ready 时不应再排定 timeout");
+        }
+
+        [Test]
+        public void WaitForReady_OnAlreadyClosed_FailsAsObjectDisposed()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+            session.Close();
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<ObjectDisposedException>(f.Exception);
+        }
+
+        [Test]
+        public void WaitForReady_OnAlreadyFaulted_FailsWithLastFault()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseClosed("network lost"); // 首次 Ready 前关闭 → Faulted
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsNotNull(f.Exception);
+            StringAssert.Contains("network lost", f.Exception.Message);
+        }
+
+        [Test]
+        public void WaitForReady_CompletesWhen_TransitionsToReady()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+            Assert.IsFalse(f.IsCompleted);
+
+            transport.RaiseConnected();
+
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+        }
+
+        [Test]
+        public void WaitForReady_FailsWhen_TransitionsToFaulted_CarryingFault()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            transport.RaiseClosed("bad creds");
+
+            Assert.IsTrue(f.IsFailed);
+            StringAssert.Contains("bad creds", f.Exception.Message);
+        }
+
+        [Test]
+        public void WaitForReady_FailsAsOperationCanceled_WhenSessionStops()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            session.Close();
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<OperationCanceledException>(f.Exception);
+        }
+
+        [Test]
+        public void WaitForReady_TimeoutFires_ClosesSessionAndFailsWithTimeoutException()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsFalse(f.IsCompleted);
+            Assert.AreEqual(1, scheduler.PendingCount, "应排定 timeout");
+
+            scheduler.RunNext(); // 触发 timeout
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<TimeoutException>(f.Exception);
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "timeout 内部应调用 Close 关闭会话");
+        }
+
+        [Test]
+        public void WaitForReady_ZeroTimeout_DoesNotSchedule()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.Zero);
+
+            Assert.IsFalse(f.IsCompleted);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "传 Zero 时不应排定 timer——调用方愿意一直等");
+        }
+
+        [Test]
+        public void WaitForReady_TimerNoOp_AfterReady()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            transport.RaiseConnected();
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+
+            // 即使再驱动 scheduler，已被 Unwire 释放的 timer 不应再翻动状态
+            scheduler.RunNext();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+        }
+
+        // -------- helpers --------
+
         private static HeTuSessionClientBase CreateSession(
             Queue<FakeTransport> transports,
             FakeScheduler scheduler,

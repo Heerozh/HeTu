@@ -102,6 +102,7 @@ namespace HeTu
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
         private bool _hasBeenReady;
+        private Exception _lastFault;
         private IDisposable _scheduledReconnect;
         private IHeTuSessionTransport _transport;
 
@@ -122,6 +123,10 @@ namespace HeTu
             // 0 = 无限重试（旧行为）；正数 = 连续失败到此数即进入 Faulted 终态。
             _maxReconnectAttempts = maxReconnectAttempts;
             _currentReconnectDelay = _reconnectDelay;
+            // 自订阅以追踪最近一次 Faulted 异常——WaitForReady / 后续重构都依赖
+            // _lastFault 在 SetState(Faulted) 之前已被赋值。委托在构造时第一个挂上，
+            // 所以一定排在用户后挂的 Faulted handler 前面，事件触发顺序对齐。
+            Faulted += ex => _lastFault = ex;
         }
 
         public HeTuSessionState State { get; private set; } =
@@ -180,6 +185,91 @@ namespace HeTu
         }
 
         public void Dispose() => Close();
+
+        /// <summary>
+        ///     返回一个在 Session 进入 <see cref="HeTuSessionState.Ready" /> 后完成
+        ///     的 Future。失败语义：
+        ///     <list type="bullet">
+        ///         <item>已被 <see cref="Close" /> → <see cref="ObjectDisposedException" />；</item>
+        ///         <item>已进入 Faulted → 携带最近一次 Faulted 事件的异常；</item>
+        ///         <item>等待过程中 Stopped → <see cref="OperationCanceledException" />；</item>
+        ///         <item>等待过程中 Faulted → 同样携带 fault；</item>
+        ///         <item>超时 → 主动 <see cref="Close" /> 并返回 <see cref="TimeoutException" />，
+        ///             InnerException 携带最近一次 fault。</item>
+        ///     </list>
+        ///     timeout=<see cref="TimeSpan.Zero" /> 表示不开超时（一直等到 Ready
+        ///     或显式 Close）。timeout 只在"首次 Ready 之前"有效：
+        ///     <see cref="HasBeenReady" /> 之后 timer 命中会被忽略。
+        /// </summary>
+        public Future WaitForReady(TimeSpan timeout)
+        {
+            // Faulted 在内部会同时置 _closed=true，先判 Faulted 才能拿到真异常；
+            // 否则 ObjectDisposed 会盖掉 fault。
+            if (State == HeTuSessionState.Ready)
+                return Future.Completed;
+            if (State == HeTuSessionState.Faulted)
+                return Future.Failed(_lastFault ?? new InvalidOperationException(
+                    "Session faulted: reconnect attempts exhausted."));
+            if (_closed)
+                return Future.Failed(new ObjectDisposedException(
+                    nameof(HeTuSessionClientBase)));
+
+            var p = new Promise();
+            Action onReady = null;
+            Action<HeTuSessionState> onState = null;
+            IDisposable timer = null;
+
+            void Unwire()
+            {
+                if (onReady != null) Ready -= onReady;
+                if (onState != null) StateChanged -= onState;
+                timer?.Dispose();
+            }
+
+            onReady = () =>
+            {
+                Unwire();
+                p.TryComplete();
+            };
+            onState = st =>
+            {
+                if (st == HeTuSessionState.Faulted)
+                {
+                    Unwire();
+                    p.TryFail(_lastFault ?? new InvalidOperationException(
+                        "Session faulted: reconnect attempts exhausted."));
+                }
+                else if (st == HeTuSessionState.Stopped)
+                {
+                    Unwire();
+                    p.TryFail(new OperationCanceledException("Session closed."));
+                }
+            };
+
+            Ready += onReady;
+            StateChanged += onState;
+
+            if (timeout > TimeSpan.Zero)
+            {
+                timer = _scheduler.Schedule(timeout, () =>
+                {
+                    // 曾经 Ready：connect 早就成功返回了，后续状态变化跟
+                    // connectTimeout 无关——不能让一个 30s 的初始超时误关游戏中的会话。
+                    if (HasBeenReady) return;
+                    // 先把 onState 摘掉再 Close：否则 Close 触发的 Stopped 会被 onState
+                    // 抢成 OperationCanceled，覆盖掉真正的 TimeoutException。
+                    Unwire();
+                    Close();
+                    var msg = _lastFault != null
+                        ? $"Connect timed out after {timeout.TotalSeconds:F0}s: "
+                          + $"{_lastFault.Message}"
+                        : $"Connect timed out after {timeout.TotalSeconds:F0}s.";
+                    p.TryFail(new TimeoutException(msg, _lastFault));
+                });
+            }
+
+            return p.Future;
+        }
 
         public void CallSystem(
             string systemName,
