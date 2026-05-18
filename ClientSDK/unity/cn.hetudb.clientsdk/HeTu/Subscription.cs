@@ -297,12 +297,13 @@ namespace HeTu
                 BoundRowID,
                 (subscription, canceled, exception) =>
                 {
+                    // canceled 代表底层 ResponseQueue.CancelAll 把这条迟到的回调冲掉了，
+                    // 一般发生在新一轮 Connect 的 ConnectSync 内部。Session 已通过
+                    // transport.Closed 事件知道断线并自行调度了重连，再走 onFailed 会
+                    // 反过来触发 HandleRecoverableFailure → MarkConnectionLost，把刚
+                    // 建出来的新 transport 当场 Dispose 形成死循环。直接吞掉。
                     if (canceled)
-                    {
-                        onFailed(new OperationCanceledException(
-                            $"WatchRow '{SubId}' was canceled."));
                         return;
-                    }
 
                     if (exception != null)
                     {
@@ -538,12 +539,10 @@ namespace HeTu
                 RestoreLimit,
                 (subscription, canceled, exception) =>
                 {
+                    // 同 RowSubscription.Restore：迟到的 cancel 不能再调 onFailed，
+                    // 否则会级联到 HandleRecoverableFailure 把新 transport 又 Dispose。
                     if (canceled)
-                    {
-                        onFailed(new OperationCanceledException(
-                            $"WatchRange '{SubId}' was canceled."));
                         return;
-                    }
 
                     if (exception != null)
                     {

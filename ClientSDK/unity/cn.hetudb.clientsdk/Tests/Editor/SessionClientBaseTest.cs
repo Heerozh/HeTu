@@ -425,6 +425,143 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void Restore_LateCancelAfterReconnect_DoesNotCascadeIntoNewTransport()
+        {
+            var first = new FakeTransport("c1");
+            first.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var second = new FakeTransport("c2") { HoldWatchCallbacks = true };
+            var third = new FakeTransport("c3");
+            third.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 30 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second, third }),
+                scheduler);
+
+            session.Start();
+            first.RaiseConnected();
+
+            RowSubscription<TestComponent> subscription = null;
+            session.WatchRow<TestComponent>("id", 7L, null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"));
+            Assert.NotNull(subscription);
+
+            // 第一次断线 → 重连到 second，second 把 Restore 的 WatchRow 回调挂起不返回，
+            // 模拟真实底层把 callback 留在 ResponseQueue 里等下一轮 CancelAll 触发。
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+            Assert.AreEqual(1, second.HeldWatchCount,
+                "second 应正在 Restore，WatchRow 回调被挂起");
+            Assert.AreEqual(HeTuSessionState.RestoringSubscriptions, session.State);
+
+            // 第二次断线 → 重连到 third，third 立刻完成 Restore 进入 Ready。
+            second.RaiseClosed("network lost again");
+            scheduler.RunNext();
+            third.RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.IsFalse(third.IsDisposed);
+
+            // 现在 second 那条 stale 的 WatchRow 回调以 canceled=true 触发，
+            // 模拟真实底层 ResponseQueue.CancelAll 在 third 的 ConnectSync 中冲掉它。
+            // 修复前：会级联到 HandleRecoverableFailure，把刚 Ready 的 third 当场 Dispose
+            // 并再排一次 reconnect。
+            second.ReleaseHeldWatches(canceled: true);
+
+            Assert.IsFalse(third.IsDisposed,
+                "stale cancel 不应当级联 Dispose 当前 transport");
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "不应当排出额外的 reconnect");
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+        }
+
+        [Test]
+        public void CallSystemAfterClose_Throws()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            session.Close();
+
+            Assert.Throws<ObjectDisposedException>(() =>
+                session.CallSystem("noop", Array.Empty<object>(),
+                    _ => { }, _ => { }));
+        }
+
+        [Test]
+        public void WatchRowAfterClose_Throws()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            session.Close();
+
+            Assert.Throws<ObjectDisposedException>(() =>
+                session.WatchRow<TestComponent>("id", 1L, null,
+                    _ => { }, _ => { }));
+        }
+
+        [Test]
+        public void WatchRangeAfterClose_Throws()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            session.Close();
+
+            Assert.Throws<ObjectDisposedException>(() =>
+                session.WatchRange<TestComponent>("value", 0, 10, 10, null,
+                    _ => { }, _ => { }));
+        }
+
+        [Test]
+        public void Close_LateWatchSuccess_DisposesSubscriptionInsteadOfOrphaning()
+        {
+            var transport = new FakeTransport("c1") { HoldWatchCallbacks = true };
+            transport.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+
+            RowSubscription<TestComponent> received = null;
+            Exception failure = null;
+            session.WatchRow<TestComponent>("id", 7L, null,
+                sub => received = sub,
+                ex => failure = ex);
+            Assert.AreEqual(1, transport.HeldWatchCount);
+
+            // Close 期间 watch 还在 in-flight。
+            session.Close();
+            Assert.IsInstanceOf<OperationCanceledException>(failure);
+
+            // 服务端晚到的成功响应。
+            transport.ReleaseHeldWatches(canceled: false);
+
+            // 用户回调不能被二次触发。
+            Assert.IsNull(received,
+                "Close 后晚到的成功响应不应再回调用户");
+            // 新生成的 subscription 必须 Dispose，否则就是孤儿（服务器仍在推送）。
+            Assert.NotNull(transport.LastIssuedSubscription);
+            Assert.IsTrue(transport.LastIssuedSubscription.IsDisposed,
+                "Close 后晚到的 subscription 必须 Dispose，不能留在 session 里");
+        }
+
+        [Test]
         public void Close_CancelsScheduledReconnectAndStopsSession()
         {
             var first = new FakeTransport("c1");
@@ -477,7 +614,9 @@ namespace Tests.HeTu
 
             public string Name { get; }
             public bool HoldCallsOpen { get; set; }
+            public bool HoldWatchCallbacks { get; set; }
             public bool IsConnected { get; private set; }
+            public bool IsDisposed { get; private set; }
             public int ConnectCount { get; private set; }
             public List<string> Operations { get; } = new();
             public List<CallRecord> Calls { get; } = new();
@@ -490,6 +629,17 @@ namespace Tests.HeTu
             } = new();
             public Dictionary<(string Index, object Left, object Right, int Limit,
                 bool Desc, bool Force), List<TestComponent>> RangeResults { get; } = new();
+            public BaseSubscription LastIssuedSubscription { get; private set; }
+            public int HeldWatchCount => _heldWatches.Count;
+            private readonly List<Action<bool>> _heldWatches = new();
+
+            public void ReleaseHeldWatches(bool canceled)
+            {
+                var snapshot = _heldWatches.ToArray();
+                _heldWatches.Clear();
+                foreach (var responder in snapshot)
+                    responder(canceled);
+            }
 
             public event Action Connected;
             public event Action<string> Closed;
@@ -531,27 +681,48 @@ namespace Tests.HeTu
             {
                 Operations.Add("watch-row");
                 WatchedRows.Add((index, value));
-                if (!RowResults.TryGetValue((index, value), out var result))
+
+                void Respond(bool canceled)
                 {
-                    onResponse(null, false, null);
+                    if (canceled)
+                    {
+                        onResponse(null, true, null);
+                        return;
+                    }
+
+                    if (!RowResults.TryGetValue((index, value), out var result))
+                    {
+                        onResponse(null, false, null);
+                        return;
+                    }
+
+                    var compName = componentName ?? typeof(T).Name;
+                    var row = (T)(IBaseComponent)result;
+                    var subId = HeTuClientBase.MakeSubId(
+                        compName, "id", row.ID, null, 1, false);
+                    RowSubscription<T> resolved;
+                    if (reusable != null)
+                    {
+                        reusable.Rebind(subId, row, _remoteClient);
+                        resolved = reusable;
+                    }
+                    else
+                    {
+                        resolved = new RowSubscription<T>(
+                            subId, compName, row, _remoteClient);
+                    }
+
+                    LastIssuedSubscription = resolved;
+                    onResponse(resolved, false, null);
+                }
+
+                if (HoldWatchCallbacks)
+                {
+                    _heldWatches.Add(Respond);
                     return;
                 }
 
-                componentName ??= typeof(T).Name;
-                var row = (T)(IBaseComponent)result;
-                var subId = HeTuClientBase.MakeSubId(
-                    componentName, "id", row.ID, null, 1, false);
-                if (reusable != null)
-                {
-                    reusable.Rebind(subId, row, _remoteClient);
-                    onResponse(reusable, false, null);
-                    return;
-                }
-
-                onResponse(
-                    new RowSubscription<T>(subId, componentName, row, _remoteClient),
-                    false,
-                    null);
+                Respond(false);
             }
 
             public void WatchRange<T>(
@@ -582,9 +753,7 @@ namespace Tests.HeTu
                 onResponse(subscription, false, null);
             }
 
-            public void Dispose()
-            {
-            }
+            public void Dispose() => IsDisposed = true;
 
             public readonly struct CallRecord
             {

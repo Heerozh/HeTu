@@ -166,6 +166,7 @@ namespace HeTu
             Action<JsonObject> onCompleted,
             Action<Exception> onFailed)
         {
+            ThrowIfClosed();
             var pending = new PendingCall(systemName, args, onCompleted, onFailed);
             if (State == HeTuSessionState.Ready && _transport != null)
             {
@@ -184,6 +185,7 @@ namespace HeTu
             Action<Exception> onFailed)
             where T : IBaseComponent
         {
+            ThrowIfClosed();
             componentName ??= typeof(T).Name;
             var knownSubId = index == HeTuClientBase.IndexId
                 ? HeTuClientBase.MakeSubId(
@@ -228,6 +230,7 @@ namespace HeTu
             bool force = true)
             where T : IBaseComponent
         {
+            ThrowIfClosed();
             componentName ??= typeof(T).Name;
             var subId = HeTuClientBase.MakeSubId(
                 componentName, index, left, right, limit, desc);
@@ -509,6 +512,14 @@ namespace HeTu
             where TSubscription : BaseSubscription
         {
             RemovePendingWatch(watch);
+            // Close 后晚到的成功响应：session 已不再管理订阅，必须把这条 subscription
+            // 立即 Dispose，否则它会被 RegisterSubscription 写回已清空的 _subscriptions
+            // 成为孤儿（服务器还会持续推送）。
+            if (_closed)
+            {
+                subscription?.Dispose();
+                return;
+            }
             if (subscription == null)
             {
                 watch.Complete(null);
@@ -521,7 +532,15 @@ namespace HeTu
         private void FailPending(PendingWatch watch, Exception exception)
         {
             RemovePendingWatch(watch);
+            if (_closed)
+                return;
             watch.Fail(exception);
+        }
+
+        private void ThrowIfClosed()
+        {
+            if (_closed)
+                throw new ObjectDisposedException(nameof(HeTuSessionClientBase));
         }
 
         private void SetState(HeTuSessionState state)
