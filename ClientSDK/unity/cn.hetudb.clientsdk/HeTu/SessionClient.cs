@@ -251,6 +251,35 @@ namespace HeTu
         }
 
         /// <summary>
+        ///     替换"下次重连"用的 bootstrap。典型场景:启动时
+        ///     <see cref="Connect"/> 不传 bootstrap(匿名连接),用户成功登录后
+        ///     再调用本方法装上"重连时自动重登"逻辑——SDK 在 Ready 之后断线会
+        ///     自动重连,届时跑这里设置的委托。<paramref name="bootstrap"/> 传
+        ///     <c>null</c> 表示清空(例如用户退登)。
+        ///     <para>必须先 <see cref="Connect"/> 过一次,否则抛
+        ///     <see cref="InvalidOperationException"/>。</para>
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+        public void SetBootstrap(Func<HeTuClient, Awaitable> bootstrap)
+#else
+        public void SetBootstrap(Func<HeTuClient, UniTask> bootstrap)
+#endif
+        {
+            if (_core == null)
+                throw new InvalidOperationException(
+                    "HeTuSessionClient 尚未 Connect, 不能 SetBootstrap。");
+
+            if (bootstrap == null)
+            {
+                _core.SetBootstrap(null);
+                return;
+            }
+
+            var client = HeTuClient.Instance;
+            _core.SetBootstrap(_ => RunBootstrapAsync(client, bootstrap));
+        }
+
+        /// <summary>
         ///     关闭当前会话，取消所有进行中的调用与订阅。Close 后再次调用 Connect
         ///     会建立全新的会话。
         /// </summary>

@@ -195,6 +195,67 @@ namespace Tests.HeTu
             Assert.AreEqual(HeTuSessionState.Faulted, session.State);
         }
 
+        // 主用例:启动时匿名 Connect → Ready → 用户登录后 SetBootstrap →
+        // 断线时 SDK 自动重连,跑这个新装的 bootstrap。
+        [UnityTest]
+        public IEnumerator SetBootstrap_AfterReady_NextReconnectRunsNewBootstrap() =>
+            RunTask(SetBootstrap_AfterReady_NextReconnectRunsNewBootstrapAsync());
+
+        private async Task
+            SetBootstrap_AfterReady_NextReconnectRunsNewBootstrapAsync()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var core = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                maxReconnectAttempts: 0);
+            using var session = new HeTuSessionClient(core);
+
+            var connectTask = ToTask(session.Connect());
+            ts[0].RaiseConnected();
+            await connectTask;
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            var calls = 0;
+            session.SetBootstrap(_ =>
+            {
+                calls++;
+                return CompletedAwaitable();
+            });
+
+            ts[0].RaiseClosed("network");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+
+            // bootstrap 通过 async Awaitable 桥接,continuation 需要一帧来回
+            await Task.Yield();
+            await Task.Yield();
+
+            Assert.AreEqual(1, calls,
+                "断线重连必须跑用 SetBootstrap 设置的新 bootstrap");
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+        }
+
+#if UNITY_6000_0_OR_NEWER
+        private static Awaitable CompletedAwaitable()
+        {
+            var tcs = new AwaitableCompletionSource();
+            tcs.SetResult();
+            return tcs.Awaitable;
+        }
+#else
+        private static UniTask CompletedAwaitable() => UniTask.CompletedTask;
+#endif
+
         private static HeTuSessionClient CreateSession(
             FakeTransport transport,
             FakeScheduler scheduler) =>

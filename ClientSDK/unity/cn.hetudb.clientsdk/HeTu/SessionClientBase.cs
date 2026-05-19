@@ -83,7 +83,9 @@ namespace HeTu
     /// </summary>
     internal sealed class HeTuSessionClientBase : IDisposable
     {
-        private readonly HeTuSessionBootstrap _bootstrap;
+        // 允许运行时换 bootstrap（典型场景：先匿名 Connect，登录后再装上重连用的
+        // 登录逻辑）。RunBootstrap 每轮读一次 _bootstrap，所以 set 只影响下一轮。
+        private HeTuSessionBootstrap _bootstrap;
         private readonly HashSet<PendingCall> _inFlightCalls = new();
         private readonly Queue<PendingCall> _pendingCalls = new();
         private readonly Dictionary<string, PendingWatch> _pendingWatchesByKey = new();
@@ -184,6 +186,18 @@ namespace HeTu
         }
 
         public void Dispose() => Close();
+
+        /// <summary>
+        ///     替换下一轮 <c>RunBootstrap</c> 使用的 bootstrap 委托。当前已经
+        ///     在跑的 lifecycle 不会被打断,<see cref="StateChanged"/> 也不会被
+        ///     触发——只影响 <em>下一次</em>(reconnect / 首次 Start)的 bootstrap
+        ///     阶段。<paramref name="bootstrap"/> 传 <c>null</c> 等于清空,
+        ///     下次重连将跳过 bootstrap 阶段。
+        /// </summary>
+        public void SetBootstrap(HeTuSessionBootstrap bootstrap)
+        {
+            _bootstrap = bootstrap;
+        }
 
         /// <summary>
         ///     返回一个在 Session 进入 <see cref="HeTuSessionState.Ready" /> 后完成

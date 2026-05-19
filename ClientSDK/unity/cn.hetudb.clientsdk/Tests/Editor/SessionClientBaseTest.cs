@@ -1207,6 +1207,134 @@ namespace Tests.HeTu
             Assert.AreEqual(HeTuSessionState.Ready, session.State);
         }
 
+        // -------- SetBootstrap --------
+        // 主用例：先匿名 Connect → Ready → 用户点登录后 SetBootstrap → 断线
+        // 重连时跑这个新装的 bootstrap（典型"登录后才提权"流程）。
+        [Test]
+        public void SetBootstrap_AfterReady_NextReconnectUsesIt()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            var calls = new List<string>();
+            session.SetBootstrap(_ =>
+            {
+                calls.Add("login");
+                return Future.Completed;
+            });
+
+            ts[0].RaiseClosed("network");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            CollectionAssert.AreEqual(new[] { "login" }, calls,
+                "断线重连必须跑用 SetBootstrap 设置的新 bootstrap");
+        }
+
+        // 清空场景（用户退登 / 切账号前先收回登录态）。
+        [Test]
+        public void SetBootstrap_ToNull_NextReconnectSkipsBootstrap()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var calls = new List<string>();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                {
+                    calls.Add("initial");
+                    return Future.Completed;
+                },
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            Assert.AreEqual(1, calls.Count);
+
+            session.SetBootstrap(null);
+
+            ts[0].RaiseClosed("network");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.AreEqual(1, calls.Count,
+                "SetBootstrap(null) 后断线重连不应再跑旧 bootstrap");
+        }
+
+        // SetBootstrap 是配置型 API：不能打断当前 Ready 会话，也不能触发事件。
+        [Test]
+        public void SetBootstrap_OnReady_DoesNotChangeStateOrFireEvent()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            var stateChanges = new List<HeTuSessionState>();
+            session.StateChanged += stateChanges.Add;
+
+            session.SetBootstrap(_ => Future.Completed);
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.AreEqual(0, stateChanges.Count,
+                "SetBootstrap 不应触发 StateChanged");
+        }
+
+        // 构造时未传 bootstrap，Start 之前 SetBootstrap → 首次连接就用它。
+        // 等价于"晚到的 ctor 参数"，避免调用方为了换 bootstrap 而必须重建 core。
+        [Test]
+        public void SetBootstrap_BeforeStart_TakesEffectOnFirstConnect()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var calls = new List<string>();
+            var session = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                bootstrap: null,
+                TimeSpan.Zero);
+
+            session.SetBootstrap(_ =>
+            {
+                calls.Add("login");
+                return Future.Completed;
+            });
+
+            session.Start();
+            transport.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            CollectionAssert.AreEqual(new[] { "login" }, calls);
+        }
+
         // -------- helpers --------
 
         private static HeTuSessionClientBase CreateSession(
