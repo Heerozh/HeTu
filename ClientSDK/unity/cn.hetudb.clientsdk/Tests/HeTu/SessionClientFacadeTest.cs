@@ -233,7 +233,10 @@ namespace Tests.HeTu
             });
 
             ts[0].RaiseClosed("network");
-            scheduler.RunNext();
+            // 真实计时器 FakeScheduler 异步触发 reconnectDelay=0,
+            // 让一帧给 factory dequeue ts[1] 并订阅其 Connected
+            await Task.Yield();
+            await Task.Yield();
             ts[1].RaiseConnected();
 
             // bootstrap 通过 async Awaitable 桥接,continuation 需要一帧来回
