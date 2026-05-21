@@ -1,0 +1,59 @@
+# HeTu (河图)
+
+> HeTu 是一个高性能、多进程分布式 game server engine，基于 ECS
+> (Entity-Component-System) 架构，使用 Redis 作为 backend。通过 WebSocket
+> 暴露类似 database 的接口，client 端可订阅 row/index 变更，并通过 RPC 调用
+> server-side System，受 row-level security 控制。底层数据结构为 NumPy
+> structured array（C struct），随附 Unity SDK。需 Python 3.14+。
+
+HeTu (河图) is a high-performance, multi-process distributed game server engine
+built on ECS architecture with Redis backend. Schema-as-API: clients subscribe
+to row/index changes via WebSocket and invoke server-side Systems via RPC under
+row-level security. Authoritative source: https://github.com/Heerozh/HeTu
+
+## Documentation
+
+- [Documentation Index](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/_index.md): 总览、30 秒示例（Component + System + 客户端订阅）、文档导航
+- [README](https://raw.githubusercontent.com/Heerozh/HeTu/main/README.md): 项目总览、聊天室快速示例、性能测试、安装与生产部署
+- [配置模板 CONFIG_TEMPLATE.yml](https://raw.githubusercontent.com/Heerozh/HeTu/main/hetu/CONFIG_TEMPLATE.yml): 所有 server / backend / logging 配置项及其注释
+
+## Getting Started
+
+- [Getting Started](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/getting-started.md): 从空目录到运行中的 HeTu server——前置条件（Python 3.14、Redis 可选）、`uv` 项目初始化、第一个 Component / System、启动服务、Unity 客户端连接（约 10–15 分钟）
+
+## Tutorial
+
+- [Tutorial 索引](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/tutorial/_index.md): 端到端教程清单
+- [Chat Room 教程](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/tutorial/chat-room.md): 多人聊天室——presence 组件、聊天历史、登录 / 发送 / 退出 RPC、实时订阅推送、断线 disconnect hook 清理
+- [Chat 示例 - 服务器端代码](https://raw.githubusercontent.com/Heerozh/HeTu/main/examples/chat/server/src/app.py): 上述教程的可运行参考实现
+
+## Concepts
+
+- [Concepts](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/concepts.md): HeTu 的 ECS 心智模型——Component（NumPy structured array 表）、System（事务函数）、`unique` / `index`、权限级别 EVERYBODY / USER / OWNER / RLS / ADMIN、co-location cluster 规则、Subscription（RowSubscription / IndexSubscription）推送链路、optimistic concurrency 与 `RaceCondition` 自动重试
+
+## Client SDK
+
+- [Unity Client SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/unity-client.md): UPM 安装（`cn.hetudb.clientsdk`）、`HeTuClient.Instance`、`CallSystem` RPC、`Get` / `Range` 订阅、两种数据更新模式（事件回调与 R3 Reactive）、生命周期绑定、WebGL 支持
+
+## Advanced
+
+- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns
+
+## Operations & Deployment
+
+- [Operations](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/operations.md): 生产部署——Docker 部署（`heerozh/hetu:latest` / 阿里云上海镜像）、pip + miniconda 原生部署（约比 Docker 高 20% 性能）、Redis 拓扑（master + servant 读写分离、Redis Cluster）、Caddy 反向代理 + Docker Swarm 自动负载均衡、`hetu` CLI（`start` / `build` / `upgrade`）
+
+## API Reference
+
+- [API Reference 索引](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/_index.md): 由 `scripts/gen_api_docs.py` 从 docstring 自动生成
+- [Decorators](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/decorators.md): `define_component` / `define_endpoint` / `define_system` / `property_field`
+- [Components](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/components.md): `BaseComponent` / `Permission`
+- [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
+- [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
+- [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition`
+
+## For LLM-assisted Development
+
+- [CLAUDE.md - 项目工作约定](https://raw.githubusercontent.com/Heerozh/HeTu/main/CLAUDE.md): 模块地图、commit 前缀、coding style、测试约定、sandbox 注意事项
+- [AGENTS.md - Agent 工作流](https://raw.githubusercontent.com/Heerozh/HeTu/main/AGENTS.md): agent 协作约定
+
