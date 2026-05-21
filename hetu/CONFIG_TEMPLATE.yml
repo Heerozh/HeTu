@@ -138,6 +138,11 @@ LOGGING:
       propagate: false # 不向上级传递，不然会传递给root
       handlers:
         - replay_queue
+    # 第三方库的日志记录器：它们在DEBUG级别会刷屏（如SQLite后端用的aiosqlite，
+    # 会为每次数据库游标操作打印日志）
+    # 其他想安静的第三方库（如websockets）可照此添加。
+    aiosqlite:
+      level: INFO
 
   filters:
     add_context: # 生成ctx信息的filter
