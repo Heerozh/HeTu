@@ -50,5 +50,6 @@
   "python.testing.pytestEnabled": true,
   "python.analysis.typeCheckingMode": "off",
   "python-envs.defaultEnvManager": "ms-python.python:venv",
-  "python-envs.pythonProjects": []
+  "python-envs.pythonProjects": [],
+  "dotnet.preferCSharpExtension": true
 }
