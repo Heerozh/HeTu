@@ -36,7 +36,7 @@ class MigrationScript:
         """import script.py"""
         logger.warning(
             _(
-                "  ➖ [💾Redis][{comp_name}组件] "
+                "  ➖ [💾MIGRATION][{comp_name}组件] "
                 "发现自定义迁移脚本 {file}，将调用脚本进行迁移..."
             ).format(comp_name=table_ref.comp_name, file=file)
         )
@@ -85,7 +85,7 @@ class MigrationScript:
             f.write(template)
         logger.warning(
             _(
-                "  ➖ [💾Redis][{comp_name}组件] "
+                "  ➖ [💾MIGRATION][{comp_name}组件] "
                 "缺少迁移脚本，生成默认迁移脚本 {script_path}，请根据需要修改脚本内容后再执行迁移操作..."
             ).format(comp_name=target_model.name_, script_path=script_path)
         )
@@ -197,19 +197,19 @@ class MigrationScript:
 
             # 开始迁移
             logger.info(
-                _("  ➖ [💾Redis][{comp_name}组件] 执行upgrade迁移：{module}").format(
-                    comp_name=self.ref.comp_name, module=module
-                )
+                _(
+                    "  ➖ [💾MIGRATION][{comp_name}组件] 执行upgrade迁移：{module}"
+                ).format(comp_name=self.ref.comp_name, module=module)
             )
             upgrade_func(row_ids, down_tables, target_table, maint)
             logger.warning(
                 _(
-                    "  ✔️ [💾Redis][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] Schema升级迁移完成，共处理{count}行"
                 ).format(comp_name=self.ref.comp_name, count=len(row_ids))
             )
             maint.do_rebuild_index_(target_table)
             logger.warning(
-                _("  ✔️ [💾Redis][{comp_name}组件] 已重建Index").format(
+                _("  ✔️ [💾MIGRATION][{comp_name}组件] 已重建Index").format(
                     comp_name=self.ref.comp_name
                 )
             )
