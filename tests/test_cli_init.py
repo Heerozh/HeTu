@@ -35,10 +35,22 @@ def test_render_config_substitutes_namespace_and_app_file():
     assert "DEBUG: false" in out  # 其余内容保留
 
 
+def test_render_config_switches_backend_to_sqlite():
+    template = "  type: Redis\n  master: redis://127.0.0.1:6379/0\n"
+    out = render_config(template, "ns", "app.py")
+    assert "type: SQL" in out
+    assert "master: sqlite:///./hetu.db" in out
+    assert "type: Redis" not in out
+    assert "master: redis://127.0.0.1:6379/0" not in out
+
+
 def test_read_config_template_is_packaged():
     text = read_config_template()
     assert "APP_FILE: app.py" in text
     assert "NAMESPACE: game_short_name" in text
+    # render_config 依赖以下两行作为后端替换锚点
+    assert "type: Redis" in text
+    assert "master: redis://127.0.0.1:6379/0" in text
 
 
 # --- 命令注册 ---
@@ -89,8 +101,12 @@ def test_execute_fresh_project(tmp_path, monkeypatch):
     assert app_py.exists()
     assert config.exists()
     assert 'namespace="mygame"' in app_py.read_text(encoding="utf-8")
-    assert "APP_FILE: src/mygame/app.py" in config.read_text(encoding="utf-8")
-    assert "NAMESPACE: mygame" in config.read_text(encoding="utf-8")
+    cfg = config.read_text(encoding="utf-8")
+    assert "APP_FILE: src/mygame/app.py" in cfg
+    assert "NAMESPACE: mygame" in cfg
+    # 默认后端为 SQLite，生成的项目无需数据库服务即可启动
+    assert "type: SQL" in cfg
+    assert "master: sqlite:///./hetu.db" in cfg
     assert ["init", "--lib", "--python", "3.14", "mygame"] in calls
     assert ["add", "hetudb"] in calls
 

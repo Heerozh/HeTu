@@ -71,12 +71,21 @@ def read_config_template() -> str:
 
 
 def render_config(template_text: str, namespace: str, app_file: str) -> str:
-    """根据 namespace 与 app 文件路径渲染 config.yml，保留模板注释。"""
+    """根据 namespace 与 app 文件路径渲染 config.yml，保留模板注释。
+
+    后端默认替换为 SQLite 调试数据库，让生成的项目无需额外服务即可启动。
+    """
     text = template_text.replace(
         "NAMESPACE: game_short_name",
         f"NAMESPACE: {namespace}",
     )
     text = text.replace("APP_FILE: app.py", f"APP_FILE: {app_file}")
+    # 默认用 SQLite 调试数据库，无需启动数据库服务即可 hetu start
+    text = text.replace("type: Redis", "type: SQL")
+    text = text.replace(
+        "master: redis://127.0.0.1:6379/0",
+        "master: sqlite:///./hetu.db",
+    )
     return text
 
 
@@ -180,6 +189,5 @@ class InitCommand(CommandInterface):
             print(f"  cd {args.name}")
         print("  uv run hetu start --config=config.yml")
         print()
-        print(
-            _("提示：启动前需要一个可用的后端数据库（默认 redis://127.0.0.1:6379/0）。")
-        )
+        print(_("提示：默认使用 SQLite 调试数据库，文件会自动创建，无需额外服务。"))
+        print(_("      生产环境请在 config.yml 的 BACKENDS 中改用 Redis。"))
