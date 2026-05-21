@@ -9,6 +9,7 @@ import argparse
 
 from ..i18n import _
 from .build import BuildCommand
+from .init import InitCommand
 from .migrate import MigrateCommand
 from .start import StartCommand
 
@@ -17,6 +18,7 @@ COMMANDS = [
     StartCommand,
     MigrateCommand,
     BuildCommand,
+    InitCommand,
 ]
 
 
