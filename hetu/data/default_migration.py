@@ -42,7 +42,7 @@ def prepare() -> str:
         return "skip"
 
     logger.warning(
-        f"  ⚠️ [💾Redis][{name}组件] 代码定义的Schema与已存的不一致，"
+        f"  ⚠️ [💾MIGRATION][{name}组件] 代码定义的Schema与已存的不一致，"
         f"数据库中：\n"
         f"{down_dtypes}\n"
         f"代码定义的：\n"
@@ -59,7 +59,7 @@ def prepare() -> str:
     for down_column in down_columns:
         if down_column not in target_columns:
             msg = (
-                f"  ⚠️ [💾Redis][{name}组件] "
+                f"  ⚠️ [💾MIGRATION][{name}组件] "
                 f"数据库中的属性 {down_column} 在新的组件定义中不存在，如果改名了需要手动迁移，"
                 f"强制执行将丢弃该属性数据。"
             )
@@ -75,7 +75,7 @@ def prepare() -> str:
                 type_convert_columns.append(target_column)
                 if not np.can_cast(old_type[0], new_type[0]):
                     msg = (
-                        f"  ⚠️ [💾Redis][{name}组件] "
+                        f"  ⚠️ [💾MIGRATION][{name}组件] "
                         f"属性 {target_column} 的类型由 {old_type} 变更为 {new_type}，"
                         f"无法自动转换类型，需要手动迁移，强制执行将截断/丢弃该属性数据。"
                     )
@@ -88,13 +88,13 @@ def prepare() -> str:
         if target_column not in down_columns:
             add_columns.append(target_column)
             logger.warning(
-                f"  ⚠️ [💾Redis][{name}组件] "
+                f"  ⚠️ [💾MIGRATION][{name}组件] "
                 f"新的代码定义中多出属性 {target_column}，将使用默认值填充。"
             )
             default = target_props[target_column].default
             if default is None:
                 msg = (
-                    f"  ⚠️ [💾Redis][{name}组件] "
+                    f"  ⚠️ [💾MIGRATION][{name}组件] "
                     f"迁移时尝试新增 {target_column} 属性失败，该属性没有默认值，无法新增。"
                 )
                 logger.error(msg)

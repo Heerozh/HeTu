@@ -57,10 +57,10 @@ uv run hetu start --config=config.yml
 ```
 
 `hetu init` is safe to re-run: it skips any file that already exists and
-never overwrites your code. The generated `config.yml` points at Redis by
-default; edit its `BACKENDS` section to use SQLite instead. The numbered
-walkthrough below builds a project by hand, so you can see how each piece
-fits together.
+never overwrites your code. The generated `config.yml` uses a local SQLite
+database, so the project starts with no extra services running — switch its
+`BACKENDS` section to Redis for production. The numbered walkthrough below
+builds a project by hand, so you can see how each piece fits together.
 
 ## 2. Project layout
 

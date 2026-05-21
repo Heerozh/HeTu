@@ -493,18 +493,18 @@ class TableMaintenance:
             if (status := self.check_table(table_ref)[0]) != "not_exists":
                 raise RaceCondition(
                     _(
-                        "[💾Redis][{comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
+                        "[💾TABLE_MAINT][{comp_name}组件] 无法创建表，组件表状态不对，目前为：{status}"
                     ).format(comp_name=table_ref.comp_name, status=status)
                 )
             # 创建表
             logger.info(
                 _(
-                    "  ➖ [💾Redis][{comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
+                    "  ➖ [💾TABLE_MAINT][{comp_name}组件] 组件无meta信息，数据不存在，正在创建空表..."
                 ).format(comp_name=table_ref.comp_name)
             )
             ret = self.do_create_table_(table_ref)
             logger.info(
-                _("  ✔️ [💾Redis][{comp_name}组件] 空表创建完成").format(
+                _("  ✔️ [💾TABLE_MAINT][{comp_name}组件] 空表创建完成").format(
                     comp_name=table_ref.comp_name
                 )
             )
@@ -523,13 +523,13 @@ class TableMaintenance:
             if (status := self.check_table(table_ref)[0]) != "cluster_mismatch":
                 raise RaceCondition(
                     _(
-                        "[💾Redis][{comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
+                        "[💾TABLE_MAINT][{comp_name}组件] 无法迁移cluster id，组件表状态不对，目前为：{status}"
                     ).format(comp_name=table_ref.comp_name, status=status)
                 )
             old_cluster_id = old_meta.cluster_id
             logger.warning(
                 _(
-                    "  ⚠️ [💾Redis][{comp_name}组件] "
+                    "  ⚠️ [💾TABLE_MAINT][{comp_name}组件] "
                     "cluster_id 由 {old_id} 变更为 {new_id}，将尝试迁移cluster数据..."
                 ).format(
                     comp_name=table_ref.comp_name,
@@ -566,7 +566,7 @@ class TableMaintenance:
             if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
                 raise RaceCondition(
                     _(
-                        "[💾Redis][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
+                        "[💾TABLE_MAINT][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
                     ).format(comp_name=table_ref.comp_name, status=status)
                 )
             from ..migration import MigrationScript
@@ -598,7 +598,7 @@ class TableMaintenance:
         if table_ref.comp_cls.volatile_ or force:
             logger.info(
                 _(
-                    "⌚ [💾Redis][{comp_name}组件] 对非持久化组件flush清空数据中..."
+                    "⌚ [💾TABLE_MAINT][{comp_name}组件] 对非持久化组件flush清空数据中..."
                 ).format(comp_name=table_ref.comp_name)
             )
 
@@ -607,7 +607,7 @@ class TableMaintenance:
                 self.do_create_table_(table_ref)
 
             logger.info(
-                _("✅ [💾Redis][{comp_name}组件] 已删除{count}个键值").format(
+                _("✅ [💾TABLE_MAINT][{comp_name}组件] 已删除{count}个键值").format(
                     comp_name=table_ref.comp_name, count=count
                 )
             )
@@ -621,7 +621,7 @@ class TableMaintenance:
     def rebuild_index(self, table_ref: TableReference) -> None:
         """重建组件表的索引数据"""
         logger.info(
-            _("  ➖ [💾Redis][{comp_name}组件] 正在重建索引...").format(
+            _("  ➖ [💾TABLE_MAINT][{comp_name}组件] 正在重建索引...").format(
                 comp_name=table_ref.comp_name
             )
         )
@@ -629,14 +629,14 @@ class TableMaintenance:
             count = self.do_rebuild_index_(table_ref)
             if count == 0:
                 logger.info(
-                    _("  ✔️ [💾Redis][{comp_name}组件] 无数据，无需重建索引。").format(
-                        comp_name=table_ref.comp_name
-                    )
+                    _(
+                        "  ✔️ [💾TABLE_MAINT][{comp_name}组件] 无数据，无需重建索引。"
+                    ).format(comp_name=table_ref.comp_name)
                 )
             else:
                 logger.info(
                     _(
-                        "  ✔️ [💾Redis][{comp_name}组件] 索引重建完成, "
+                        "  ✔️ [💾TABLE_MAINT][{comp_name}组件] 索引重建完成, "
                         "{count}行 * {num_indexes}个索引。"
                     ).format(
                         comp_name=table_ref.comp_name,
