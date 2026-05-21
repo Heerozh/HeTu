@@ -22,16 +22,16 @@ def ses_redis_service():
     try:
         client.containers.get("hetu_test_redis").kill()
         client.containers.get("hetu_test_redis").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
     try:
         client.containers.get("hetu_test_redis_replica").kill()
         client.containers.get("hetu_test_redis_replica").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
     try:
         client.networks.get("hetu_test_redis_net").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
 
     # 启动交换机
@@ -99,12 +99,12 @@ def ses_redis_service():
         try:
             container.stop()
             container.wait()
-        except (NotFound, ImportError, docker.errors.APIError):
+        except NotFound, ImportError, docker.errors.APIError:
             pass
     print("ℹ️ 清理redis交换机")
     try:
         network.remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
 
 
@@ -122,16 +122,16 @@ def ses_valkey_service():
     try:
         client.containers.get("hetu_test_valkey").kill()
         client.containers.get("hetu_test_valkey").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
     try:
         client.containers.get("hetu_test_valkey_replica").kill()
         client.containers.get("hetu_test_valkey_replica").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
     try:
         client.networks.get("hetu_test_valkey_net").remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
 
     # 启动交换机
@@ -199,12 +199,12 @@ def ses_valkey_service():
         try:
             container.stop()
             container.wait()
-        except (NotFound, ImportError, docker.errors.APIError):
+        except NotFound, ImportError, docker.errors.APIError:
             pass
     print("ℹ️ 清理valkey交换机")
     try:
         network.remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
 
 
@@ -248,11 +248,11 @@ def ses_redis_cluster_service():
             c = client.containers.get(f"{base_name}_{i}")
             c.kill()
             c.remove()
-        except (docker.errors.NotFound, docker.errors.APIError):
+        except docker.errors.NotFound, docker.errors.APIError:
             pass
     try:
         client.networks.get(network_name).remove()
-    except (docker.errors.NotFound, docker.errors.APIError):
+    except docker.errors.NotFound, docker.errors.APIError:
         pass
 
     # --- 2. 启动新环境 ---
@@ -275,7 +275,6 @@ def ses_redis_cluster_service():
                 "--cluster-node-timeout 5000",
                 "--appendonly yes",
                 "--cluster-announce-hostname host.docker.internal",
-                "--cluster-announce-ip host.docker.internal",  # 比如设置布告ip，不然redis insight无法识别，实际上用域名也是可以的
                 "--cluster-preferred-endpoint-type hostname",
                 f"--cluster-announce-port {port}",
                 f"--cluster-announce-bus-port 1{port:04d}",
@@ -357,10 +356,10 @@ def ses_redis_cluster_service():
             try:
                 c.kill()
                 c.remove()
-            except (docker.errors.NotFound, docker.errors.APIError):
+            except docker.errors.NotFound, docker.errors.APIError:
                 pass
         if network:
             try:
                 network.remove()
-            except (docker.errors.NotFound, docker.errors.APIError):
+            except docker.errors.NotFound, docker.errors.APIError:
                 pass
