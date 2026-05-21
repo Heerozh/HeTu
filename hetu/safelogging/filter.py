@@ -9,8 +9,10 @@ import contextvars
 import logging
 import os
 
-log_contex_var = contextvars.ContextVar("client_ctx")
-log_contex_var.set("[None|None|Startup]")
+# 必须在构造时提供 default：filter 会在未 set 过此 ContextVar 的线程里运行
+# （如 aiosqlite 的 DB worker thread），ContextVar 不跨线程继承，缺省时 .get()
+# 会抛 LookupError。不能改用 .set() 代替，.set() 只对当前线程的 context 生效。
+log_contex_var = contextvars.ContextVar("client_ctx", default="[None|None|Startup]")
 
 
 class ContextFilter(logging.Filter):

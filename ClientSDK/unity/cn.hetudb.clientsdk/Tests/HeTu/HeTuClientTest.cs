@@ -344,7 +344,7 @@ namespace Tests.HeTu
                             .Subscribe(
                                 replaced => { receivedValues.Add(replaced.Value); },
                                 result => receivedValues.Add(added.ID)
-                            ).AddTo(ref sub.DisposeBag);
+                            );
                     }
                 ).AddTo(ref sub.DisposeBag);
             sub.ObserveRemove()
@@ -355,9 +355,8 @@ namespace Tests.HeTu
             var countField = typeof(DisposableBag)
                 .GetField("count", BindingFlags.NonPublic | BindingFlags.Instance);
             Assert.IsNotNull(countField);
-            // Range时初始化：2 add/remove subject， 2查询到的值到replaceSubject
-            // 再加上上述代码会重走一遍和Range时初始化过程，加入数量翻倍
-            Assert.True((int)countField.GetValue(sub.DisposeBag) == 8);
+            // Range时初始化：2 add/remove subject，再加上上述2个AddTo
+            Assert.AreEqual((int)countField.GetValue(sub.DisposeBag), 4);
 
             // 发送更新，等待变更
             _ = HeTuClient.Instance.CallSystem("client_index_upsert_test", 123, 1);

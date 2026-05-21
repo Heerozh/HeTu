@@ -2,9 +2,9 @@ name: Trigger Vercel rebuild on API docs change
 
 on:
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
-      - "docs/*.md"
+      - "docs/en/*.md"
       - "docs/api/**"
 
 jobs:

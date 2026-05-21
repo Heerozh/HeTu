@@ -76,17 +76,16 @@ namespace HeTu
         IDisposable Schedule(TimeSpan delay, Action action);
     }
 
-    internal delegate void HeTuSessionBootstrap(
-        IHeTuSessionTransport transport,
-        Action onSucceeded,
-        Action<Exception> onFailed);
+    internal delegate Future HeTuSessionBootstrap(IHeTuSessionTransport transport);
 
     /// <summary>
     ///     不依赖任何 awaitable 类型的逻辑会话核心。
     /// </summary>
     internal sealed class HeTuSessionClientBase : IDisposable
     {
-        private readonly HeTuSessionBootstrap _bootstrap;
+        // 允许运行时换 bootstrap（典型场景：先匿名 Connect，登录后再装上重连用的
+        // 登录逻辑）。RunBootstrap 每轮读一次 _bootstrap，所以 set 只影响下一轮。
+        private HeTuSessionBootstrap _bootstrap;
         private readonly HashSet<PendingCall> _inFlightCalls = new();
         private readonly Queue<PendingCall> _pendingCalls = new();
         private readonly Dictionary<string, PendingWatch> _pendingWatchesByKey = new();
@@ -98,11 +97,15 @@ namespace HeTu
         private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
         private readonly Func<IHeTuSessionTransport> _transportFactory;
 
+        private Promise _activeStepPromise;
         private bool _closed;
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
+        private bool _hasBeenReady;
+        private Exception _lastFault;
         private IDisposable _scheduledReconnect;
         private IHeTuSessionTransport _transport;
+        private bool _transportClosedItself;
 
         public HeTuSessionClientBase(
             Func<IHeTuSessionTransport> transportFactory,
@@ -121,10 +124,20 @@ namespace HeTu
             // 0 = 无限重试（旧行为）；正数 = 连续失败到此数即进入 Faulted 终态。
             _maxReconnectAttempts = maxReconnectAttempts;
             _currentReconnectDelay = _reconnectDelay;
+            // 自订阅以追踪最近一次 Faulted 异常——WaitForReady / 后续重构都依赖
+            // _lastFault 在 SetState(Faulted) 之前已被赋值。委托在构造时第一个挂上，
+            // 所以一定排在用户后挂的 Faulted handler 前面，事件触发顺序对齐。
+            Faulted += ex => _lastFault = ex;
         }
 
         public HeTuSessionState State { get; private set; } =
             HeTuSessionState.Stopped;
+
+        /// <summary>
+        ///     本 core 是否曾经达到过 <see cref="HeTuSessionState.Ready" />；
+        ///     用来区分 "首次连接没成功" 和 "进游戏后断线"——前者不重试，后者才重试。
+        /// </summary>
+        internal bool HasBeenReady => _hasBeenReady;
 
         public event Action Ready;
         public event Action<HeTuSessionState> StateChanged;
@@ -135,7 +148,7 @@ namespace HeTu
             if (_closed || State != HeTuSessionState.Stopped)
                 return;
 
-            ConnectNewTransport();
+            RunSessionLifecycle();
         }
 
         public void Close()
@@ -173,6 +186,103 @@ namespace HeTu
         }
 
         public void Dispose() => Close();
+
+        /// <summary>
+        ///     替换下一轮 <c>RunBootstrap</c> 使用的 bootstrap 委托。当前已经
+        ///     在跑的 lifecycle 不会被打断,<see cref="StateChanged"/> 也不会被
+        ///     触发——只影响 <em>下一次</em>(reconnect / 首次 Start)的 bootstrap
+        ///     阶段。<paramref name="bootstrap"/> 传 <c>null</c> 等于清空,
+        ///     下次重连将跳过 bootstrap 阶段。
+        /// </summary>
+        public void SetBootstrap(HeTuSessionBootstrap bootstrap)
+        {
+            _bootstrap = bootstrap;
+        }
+
+        /// <summary>
+        ///     返回一个在 Session 进入 <see cref="HeTuSessionState.Ready" /> 后完成
+        ///     的 Future。失败语义：
+        ///     <list type="bullet">
+        ///         <item>已被 <see cref="Close" /> → <see cref="ObjectDisposedException" />；</item>
+        ///         <item>已进入 Faulted → 携带最近一次 Faulted 事件的异常；</item>
+        ///         <item>等待过程中 Stopped → <see cref="OperationCanceledException" />；</item>
+        ///         <item>等待过程中 Faulted → 同样携带 fault；</item>
+        ///         <item>超时 → 主动 <see cref="Close" /> 并返回 <see cref="TimeoutException" />，
+        ///             InnerException 携带最近一次 fault。</item>
+        ///     </list>
+        ///     timeout=<see cref="TimeSpan.Zero" /> 表示不开超时（一直等到 Ready
+        ///     或显式 Close）。timeout 只在"首次 Ready 之前"有效：
+        ///     <see cref="HasBeenReady" /> 之后 timer 命中会被忽略。
+        /// </summary>
+        public Future WaitForReady(TimeSpan timeout)
+        {
+            // Faulted 在内部会同时置 _closed=true，先判 Faulted 才能拿到真异常；
+            // 否则 ObjectDisposed 会盖掉 fault。
+            if (State == HeTuSessionState.Ready)
+                return Future.Completed;
+            if (State == HeTuSessionState.Faulted)
+                return Future.Failed(_lastFault ?? new InvalidOperationException(
+                    "Session faulted: reconnect attempts exhausted."));
+            if (_closed)
+                return Future.Failed(new ObjectDisposedException(
+                    nameof(HeTuSessionClientBase)));
+
+            var p = new Promise();
+            Action onReady = null;
+            Action<HeTuSessionState> onState = null;
+            IDisposable timer = null;
+
+            void Unwire()
+            {
+                if (onReady != null) Ready -= onReady;
+                if (onState != null) StateChanged -= onState;
+                timer?.Dispose();
+            }
+
+            onReady = () =>
+            {
+                Unwire();
+                p.TryComplete();
+            };
+            onState = st =>
+            {
+                if (st == HeTuSessionState.Faulted)
+                {
+                    Unwire();
+                    p.TryFail(_lastFault ?? new InvalidOperationException(
+                        "Session faulted: reconnect attempts exhausted."));
+                }
+                else if (st == HeTuSessionState.Stopped)
+                {
+                    Unwire();
+                    p.TryFail(new OperationCanceledException("Session closed."));
+                }
+            };
+
+            Ready += onReady;
+            StateChanged += onState;
+
+            if (timeout > TimeSpan.Zero)
+            {
+                timer = _scheduler.Schedule(timeout, () =>
+                {
+                    // 曾经 Ready：connect 早就成功返回了，后续状态变化跟
+                    // connectTimeout 无关——不能让一个 30s 的初始超时误关游戏中的会话。
+                    if (HasBeenReady) return;
+                    // 先把 onState 摘掉再 Close：否则 Close 触发的 Stopped 会被 onState
+                    // 抢成 OperationCanceled，覆盖掉真正的 TimeoutException。
+                    Unwire();
+                    Close();
+                    var msg = _lastFault != null
+                        ? $"Connect timed out after {timeout.TotalSeconds:F0}s: "
+                          + $"{_lastFault.Message}"
+                        : $"Connect timed out after {timeout.TotalSeconds:F0}s.";
+                    p.TryFail(new TimeoutException(msg, _lastFault));
+                });
+            }
+
+            return p.Future;
+        }
 
         public void CallSystem(
             string systemName,
@@ -216,7 +326,7 @@ namespace HeTu
             if (knownSubId != null &&
                 _pendingWatchesByKey.TryGetValue(knownSubId, out var pending))
             {
-                if (pending is PendingRowWatch<T> typed)
+                if (pending is PendingWatch<RowSubscription<T>> typed)
                 {
                     typed.AddWaiter(onCompleted, onFailed);
                     return;
@@ -226,8 +336,21 @@ namespace HeTu
                     $"Subscription '{knownSubId}' already exists with type {pending.DataType}.");
             }
 
-            var watch = new PendingRowWatch<T>(
-                knownSubId, index, value, componentName, onCompleted, onFailed);
+            var watch = new PendingWatch<RowSubscription<T>>(
+                knownSubId,
+                typeof(T),
+                (tx, promise) => tx.WatchRow<T>(
+                    index,
+                    value,
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled) return;
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
+                    componentName),
+                onCompleted,
+                onFailed);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -257,7 +380,7 @@ namespace HeTu
 
             if (_pendingWatchesByKey.TryGetValue(subId, out var pending))
             {
-                if (pending is PendingRangeWatch<T> typed)
+                if (pending is PendingWatch<IndexSubscription<T>> typed)
                 {
                     typed.AddWaiter(onCompleted, onFailed);
                     return;
@@ -267,88 +390,160 @@ namespace HeTu
                     $"Subscription '{subId}' already exists with type {pending.DataType}.");
             }
 
-            var watch = new PendingRangeWatch<T>(
-                subId, index, left, right, limit, desc, force, componentName,
-                onCompleted, onFailed);
+            var watch = new PendingWatch<IndexSubscription<T>>(
+                subId,
+                typeof(T),
+                (tx, promise) => tx.WatchRange<T>(
+                    index,
+                    left,
+                    right,
+                    limit,
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled) return;
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
+                    desc,
+                    force,
+                    componentName),
+                onCompleted,
+                onFailed);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
 
-        private void ConnectNewTransport()
+        // ---------- 状态机：单条 Future 链 ----------
+        // Start → ConnectTransport → RunBootstrap → RestoreAllSubscriptions → MarkReady
+        //                                                                    ↘ Catch(HandleSessionFailure)
+        // 每一步把自己的 Promise 注册为 _activeStepPromise；OnTransportClosed
+        // 通过它把"在飞那一步"失败掉，让失败统一从 .Catch 一处出口走。
+        // MarkReady 之后 _activeStepPromise 设回 null，断线走 HandleSessionFailure
+        // 直连路径。
+        private void RunSessionLifecycle()
         {
-            if (_closed)
-                return;
+            if (_closed) return;
+            ConnectTransport()
+                .Then(RunBootstrap)
+                .Then(RestoreAllSubscriptions)
+                .Then(MarkReady)
+                .Catch(HandleSessionFailure);
+        }
+
+        private Future ConnectTransport()
+        {
+            if (_closed) return Future.Failed(
+                new ObjectDisposedException(nameof(HeTuSessionClientBase)));
 
             CleanupTransport(closeTransport: false);
             _transport = _transportFactory();
-            _transport.Connected += HandleTransportConnected;
-            _transport.Closed += HandleTransportClosed;
+            _transportClosedItself = false;
+            var p = new Promise();
+            _activeStepPromise = p;
+            _transport.Connected += () => p.TryComplete();
+            _transport.Closed += OnTransportClosed;
             SetState(HeTuSessionState.Connecting);
             _transport.Connect();
+            return p.Future;
         }
 
-        private void HandleTransportConnected()
+        private Future RunBootstrap()
         {
-            if (_closed)
-                return;
-
+            if (_closed) return Future.Completed;
             SetState(HeTuSessionState.Bootstrapping);
             if (_bootstrap == null)
             {
-                RestoreSubscriptions();
-                return;
+                _activeStepPromise = null;
+                return Future.Completed;
             }
 
+            var p = new Promise();
+            _activeStepPromise = p;
+            Future bootstrapFuture;
             try
             {
-                _bootstrap(_transport, RestoreSubscriptions, HandleRecoverableFailure);
+                bootstrapFuture = _bootstrap(_transport);
             }
             catch (Exception ex)
             {
-                HandleRecoverableFailure(ex);
+                p.TryFail(ex);
+                return p.Future;
             }
+
+            if (bootstrapFuture == null)
+            {
+                p.TryComplete();
+                return p.Future;
+            }
+
+            bootstrapFuture
+                .Then(() => p.TryComplete())
+                .Catch(ex => p.TryFail(ex));
+            return p.Future;
         }
 
-        private void RestoreSubscriptions()
+        private Future RestoreAllSubscriptions()
         {
-            if (_closed)
-                return;
-
+            if (_closed) return Future.Completed;
             SetState(HeTuSessionState.RestoringSubscriptions);
-            RestoreSubscriptionAt(_subscriptions.Values.ToArray(), 0);
+
+            var p = new Promise();
+            _activeStepPromise = p;
+            // 若 transport.Restore 的回调同步触发，按订阅数线性涨栈在递归实现里会
+            // StackOverflow。fold 成 Future 链后 continuation 在堆里而非栈里串联，
+            // 栈深恒定。
+            var subs = _subscriptions.Values.ToArray();
+            var head = Future.Completed;
+            foreach (var sub in subs)
+                head = head.Then(() => RestoreOne(sub));
+            head
+                .Then(() => p.TryComplete())
+                .Catch(ex => p.TryFail(ex));
+            return p.Future;
         }
 
-        private void RestoreSubscriptionAt(BaseSubscription[] subscriptions, int index)
+        private Future RestoreOne(BaseSubscription subscription)
         {
-            // 若 transport.Restore 的回调是同步触发的（同步网络库 / 已订阅 / 测试 fake），
-            // 原本的递归会按订阅数线性涨栈，N 大时 StackOverflow。
-            // 所以不能使用任何同步的网络库 (Unity的都是异步的，理论上应该没问题)
-            // 已订阅状态不会在目前出现，因为只有Connect才会调用RestoreSubscriptions
-            if (_closed)
-                return;
+            if (_closed) return Future.Completed;
+            if (subscription.IsDisposed) return Future.Completed;
 
-            if (index >= subscriptions.Length)
-            {
-                BecomeReady();
-                return;
-            }
-
-            var subscription = subscriptions[index];
-            if (subscription.IsDisposed)
-            {
-                RestoreSubscriptionAt(subscriptions, index + 1);
-                return;
-            }
-
+            var p = new Promise();
             ((IRestorableSubscription)subscription).Restore(
                 _transport,
                 isActive =>
                 {
                     if (!isActive)
                         UnregisterSubscription(subscription);
-                    RestoreSubscriptionAt(subscriptions, index + 1);
+                    p.TryComplete();
                 },
-                HandleRecoverableFailure);
+                ex => p.TryFail(ex));
+            return p.Future;
+        }
+
+        private Future MarkReady()
+        {
+            if (_closed) return Future.Completed;
+            // 清掉 _activeStepPromise——之后再来的 Closed 事件就走 HandleSessionFailure
+            // 直连路径，不再尝试失败一个已完成的 step。
+            _activeStepPromise = null;
+            BecomeReady();
+            return Future.Completed;
+        }
+
+        private void OnTransportClosed(string reason)
+        {
+            if (_closed) return;
+
+            _transportClosedItself = true;
+            var fault = new InvalidOperationException(
+                $"Connection closed: {reason ?? "(unknown)"}");
+
+            // 链在飞：把当前 step 失败掉，由 .Catch(HandleSessionFailure) 统一处理。
+            if (_activeStepPromise != null && _activeStepPromise.TryFail(fault))
+                return;
+
+            // 没有活动 step（已 Ready）：直走 HandleSessionFailure。
+            HandleSessionFailure(fault);
         }
 
         private void BecomeReady()
@@ -359,6 +554,8 @@ namespace HeTu
             // maxReconnectAttempts 也按 "本次会话期内连续失败" 重新计数。
             _currentReconnectDelay = _reconnectDelay;
             _consecutiveFailures = 0;
+            // 标记 "本 core 至少 Ready 过一次"——之后的 close / restore 失败才走 reconnect。
+            _hasBeenReady = true;
             SetState(HeTuSessionState.Ready);
             // 先把排队请求派发完再触发 Ready，避免用户在 Ready 回调里新发的
             // CallSystem/WatchRow 抢在排队请求之前破坏 FIFO 顺序。
@@ -413,44 +610,29 @@ namespace HeTu
             pending.Dispatch(this, _transport);
         }
 
-        private void HandleTransportClosed(string reason)
+        // 统一失败入口。来源：(a) 链的 .Catch；(b) OnTransportClosed 在 Ready 后
+        // 直走的路径。两者都已经把 fault 准备好。closeTransport 由
+        // _transportClosedItself 决定——对端自己关了就不用再发 Close 帧，
+        // 否则 bootstrap/restore 抛出时 socket 还活着，必须主动关掉。
+        private void HandleSessionFailure(Exception fault)
         {
-            if (_closed)
-                return;
+            if (_closed) return;
 
-            // transport 已被对端关闭，不需要再发 Close 帧。
-            MarkConnectionLost(closeTransport: false);
-            if (ExhaustedRetries())
+            _activeStepPromise = null;
+            var closeTransport = !_transportClosedItself;
+            _transportClosedItself = false;
+            MarkConnectionLost(closeTransport);
+            SafeInvokeUserCallback(Faulted, fault);
+            if (_closed) return;
+            // 首次 Ready 前的失败 = 凭据/配置/URL 错，重同样一份没意义。
+            if (!_hasBeenReady)
             {
-                Exception fault = new InvalidOperationException(
-                    $"Reconnect attempts exhausted. Last close reason: {reason}");
-                // 进入 Faulted 终态前给用户一次通知，与 HandleRecoverableFailure
-                // 的 Faulted 触发路径对称。
-                SafeInvokeUserCallback(Faulted, fault);
-                if (_closed)
-                    return;
                 EnterFaulted(fault);
                 return;
             }
-            ScheduleReconnect();
-        }
-
-        private void HandleRecoverableFailure(Exception exception)
-        {
-            if (_closed)
-                return;
-
-            // bootstrap/restore 失败时底层 socket 通常仍存活，必须主动关闭，
-            // 否则服务器要等到 TCP keepalive 才会回收连接。
-            MarkConnectionLost(closeTransport: true);
-            SafeInvokeUserCallback(Faulted, exception);
-            // Faulted 用户回调里可能 Close，这种情况已经走清理路径，无需再排
-            // 退避或进入 Faulted 终态。
-            if (_closed)
-                return;
             if (ExhaustedRetries())
             {
-                EnterFaulted(exception);
+                EnterFaulted(fault);
                 return;
             }
             ScheduleReconnect();
@@ -522,7 +704,7 @@ namespace HeTu
             SetState(HeTuSessionState.Reconnecting);
             _scheduledReconnect?.Dispose();
             var delay = _currentReconnectDelay;
-            _scheduledReconnect = _scheduler.Schedule(delay, ConnectNewTransport);
+            _scheduledReconnect = _scheduler.Schedule(delay, RunSessionLifecycle);
             // 指数退避：下一次失败时使用翻倍的延迟，封顶在 _maxReconnectDelay。
             // BecomeReady 会把 _currentReconnectDelay 重置回 _reconnectDelay。
             var nextMs = Math.Min(
@@ -536,8 +718,10 @@ namespace HeTu
             if (_transport == null)
                 return;
 
-            _transport.Connected -= HandleTransportConnected;
-            _transport.Closed -= HandleTransportClosed;
+            // Connected 用的是 lambda，无法 -=；ConnectTransport 一旦 promise 完成
+            // 就不再有意义。Closed 用的是命名方法，必须显式取消订阅，否则旧 transport
+            // 的 Closed 事件会触发新一轮 OnTransportClosed。
+            _transport.Closed -= OnTransportClosed;
             if (closeTransport)
                 _transport.Close();
             _transport.Dispose();
@@ -722,61 +906,55 @@ namespace HeTu
             public void MarkRetryable() => IsInFlight = false;
         }
 
-        private sealed class PendingRowWatch<T> : PendingWatch
-            where T : IBaseComponent
+        // Row/Range 唯一的差异是 transport.WatchRow vs transport.WatchRange 这一次
+        // 调用。把它折成一个 dispatch lambda 注入进来，剩下的"deduplication / 在飞
+        // 标志 / waiter 列表 / 完成时通知所有 waiter"逻辑就完全共用。
+        private sealed class PendingWatch<TSub> : PendingWatch
+            where TSub : BaseSubscription
         {
-            private readonly string _componentName;
-            private readonly string _index;
-            private readonly List<RowWaiter> _waiters = new();
-            private readonly object _value;
+            private readonly Action<IHeTuSessionTransport, Promise<TSub>> _dispatch;
+            private readonly List<Waiter> _waiters = new();
 
-            public PendingRowWatch(
+            public PendingWatch(
                 string key,
-                string index,
-                object value,
-                string componentName,
-                Action<RowSubscription<T>> onCompleted,
-                Action<Exception> onFailed) :
-                base(key, typeof(T))
+                Type dataType,
+                Action<IHeTuSessionTransport, Promise<TSub>> dispatch,
+                Action<TSub> firstOnCompleted,
+                Action<Exception> firstOnFailed) :
+                base(key, dataType)
             {
-                _index = index;
-                _value = value;
-                _componentName = componentName;
-                AddWaiter(onCompleted, onFailed);
+                _dispatch = dispatch;
+                _waiters.Add(new Waiter(firstOnCompleted, firstOnFailed));
             }
 
             public void AddWaiter(
-                Action<RowSubscription<T>> onCompleted,
+                Action<TSub> onCompleted,
                 Action<Exception> onFailed) =>
-                _waiters.Add(new RowWaiter(onCompleted, onFailed));
+                _waiters.Add(new Waiter(onCompleted, onFailed));
 
             public override void Dispatch(
                 HeTuSessionClientBase owner,
                 IHeTuSessionTransport transport)
             {
                 IsInFlight = true;
-                transport.WatchRow<T>(
-                    _index,
-                    _value,
-                    (subscription, canceled, exception) =>
+                var p = new Promise<TSub>();
+                _dispatch(transport, p);
+                p.Future
+                    .Then(sub =>
                     {
                         IsInFlight = false;
-                        if (canceled)
-                            return;
-                        if (exception != null)
-                        {
-                            owner.FailPending(this, exception);
-                            return;
-                        }
-
-                        owner.CompletePending(this, subscription);
-                    },
-                    _componentName);
+                        owner.CompletePending(this, sub);
+                    })
+                    .Catch(ex =>
+                    {
+                        IsInFlight = false;
+                        owner.FailPending(this, ex);
+                    });
             }
 
             public override void Complete(BaseSubscription subscription)
             {
-                var typed = subscription as RowSubscription<T>;
+                var typed = subscription as TSub;
                 var snapshot = _waiters.ToArray();
                 _waiters.Clear();
                 foreach (var waiter in snapshot)
@@ -791,117 +969,15 @@ namespace HeTu
                     SafeInvokeUserCallback(waiter.OnFailed, exception);
             }
 
-            private readonly struct RowWaiter
+            private readonly struct Waiter
             {
-                public RowWaiter(
-                    Action<RowSubscription<T>> onCompleted,
-                    Action<Exception> onFailed)
+                public Waiter(Action<TSub> onCompleted, Action<Exception> onFailed)
                 {
                     OnCompleted = onCompleted;
                     OnFailed = onFailed;
                 }
 
-                public Action<RowSubscription<T>> OnCompleted { get; }
-                public Action<Exception> OnFailed { get; }
-            }
-        }
-
-        private sealed class PendingRangeWatch<T> : PendingWatch
-            where T : IBaseComponent
-        {
-            private readonly string _componentName;
-            private readonly bool _desc;
-            private readonly bool _force;
-            private readonly string _index;
-            private readonly object _left;
-            private readonly int _limit;
-            private readonly object _right;
-            private readonly List<RangeWaiter> _waiters = new();
-
-            public PendingRangeWatch(
-                string key,
-                string index,
-                object left,
-                object right,
-                int limit,
-                bool desc,
-                bool force,
-                string componentName,
-                Action<IndexSubscription<T>> onCompleted,
-                Action<Exception> onFailed) :
-                base(key, typeof(T))
-            {
-                _index = index;
-                _left = left;
-                _right = right;
-                _limit = limit;
-                _desc = desc;
-                _force = force;
-                _componentName = componentName;
-                AddWaiter(onCompleted, onFailed);
-            }
-
-            public void AddWaiter(
-                Action<IndexSubscription<T>> onCompleted,
-                Action<Exception> onFailed) =>
-                _waiters.Add(new RangeWaiter(onCompleted, onFailed));
-
-            public override void Dispatch(
-                HeTuSessionClientBase owner,
-                IHeTuSessionTransport transport)
-            {
-                IsInFlight = true;
-                transport.WatchRange<T>(
-                    _index,
-                    _left,
-                    _right,
-                    _limit,
-                    (subscription, canceled, exception) =>
-                    {
-                        IsInFlight = false;
-                        if (canceled)
-                            return;
-                        if (exception != null)
-                        {
-                            owner.FailPending(this, exception);
-                            return;
-                        }
-
-                        owner.CompletePending(this, subscription);
-                    },
-                    _desc,
-                    _force,
-                    _componentName);
-            }
-
-            public override void Complete(BaseSubscription subscription)
-            {
-                var typed = subscription as IndexSubscription<T>;
-                var snapshot = _waiters.ToArray();
-                _waiters.Clear();
-                foreach (var waiter in snapshot)
-                    SafeInvokeUserCallback(waiter.OnCompleted, typed);
-            }
-
-            public override void Fail(Exception exception)
-            {
-                var snapshot = _waiters.ToArray();
-                _waiters.Clear();
-                foreach (var waiter in snapshot)
-                    SafeInvokeUserCallback(waiter.OnFailed, exception);
-            }
-
-            private readonly struct RangeWaiter
-            {
-                public RangeWaiter(
-                    Action<IndexSubscription<T>> onCompleted,
-                    Action<Exception> onFailed)
-                {
-                    OnCompleted = onCompleted;
-                    OnFailed = onFailed;
-                }
-
-                public Action<IndexSubscription<T>> OnCompleted { get; }
+                public Action<TSub> OnCompleted { get; }
                 public Action<Exception> OnFailed { get; }
             }
         }

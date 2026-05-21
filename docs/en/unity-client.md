@@ -324,16 +324,61 @@ await session.CallSystem("move_to", 12f, 8f);
 
 `Connect` only resolves *after* bootstrap and subscription restore have both
 completed — so once it returns, your live data is hot and your code is on
-the same footing it would have been before the drop. The signature is
-`Connect(string url, string authKey = null, Func<HeTuClient, Awaitable>
-bootstrap = null, TimeSpan? reconnectDelay = null)`; the default
-`reconnectDelay` is 1 second, fixed (the underlying core supports
-exponential back-off if you wire `HeTuSessionClientBase` up directly).
+the same footing it would have been before the drop.
+
+The full signature:
+
+```csharp
+Awaitable Connect(
+    string url,
+    string authKey = null,
+    Func<HeTuClient, Awaitable> bootstrap = null,
+    TimeSpan? reconnectDelay = null,        // default: 1s
+    TimeSpan? maxReconnectDelay = null,     // default: 30s (exponential cap)
+    int maxReconnectAttempts = 20,          // 0 = unlimited
+    TimeSpan? connectTimeout = null);       // default: 30s
+```
+
+What the await can do:
+
+- **resolve** when the session reaches `Ready` — normal path.
+- throw **the underlying failure exception** as soon as it happens — the
+  session does **not retry before first Ready**. Anything that fails the
+  initial connect (socket close, bootstrap throw, restore error) lands in
+  `Faulted` terminal state on the first attempt, and the awaiter sees the
+  original exception (e.g. your `CallSystem("login", ...)` exception, or
+  `InvalidOperationException("Connection closed: <reason>")`). Retries with
+  the same URL / credentials wouldn't help, so the SDK doesn't try.
+- throw **`TimeoutException`** if `Ready` isn't reached within
+  `connectTimeout` (default 30 s) — primarily a safety net for a transport
+  that hangs without ever raising close/error. The `Message` and
+  `InnerException` carry the last captured fault (if any). The session is
+  `Close()`'d on the way out; you can `Connect(...)` again afterward.
+- throw **`OperationCanceledException`** if someone called `Close()` from
+  another code path.
 
 Calling `Connect` while the session is already running throws — call
-`Close()` first if you really want to reconnect with a different URL. Within
-the same singleton, after `Close()` you can `Connect` again and the
-state machine starts from scratch with a fresh core.
+`Close()` first if you really want to reconnect with a different URL. After
+`Close()` (or `Faulted`), you can `Connect` again and the state machine
+starts from scratch with a fresh core.
+
+### Defaults — when to override
+
+- `reconnectDelay = 1s`, `maxReconnectDelay = 30s` — exponential back-off
+  from 1 s, doubling each attempt, capped at 30 s. Reasonable for both
+  transient hiccups and longer outages; the cap stops you from hammering
+  the server while still waking up promptly when it recovers.
+- `maxReconnectAttempts = 20` — **only governs reconnects after the session
+  has reached `Ready` at least once**. With the exponential schedule above,
+  20 attempts spans roughly 8 minutes (1+2+4+8+16+30 × 15 ≈ 481 s) of
+  in-game retry before surrendering to `Faulted`. Long maintenance windows:
+  pass `0` (unlimited) so a player can leave the app open and rejoin when
+  the server returns. **Initial connect always uses 1 attempt** — there's no
+  retry value when the credentials or URL might be wrong.
+- `connectTimeout = 30s` — guards the **initial** `Connect` only; reconnects
+  after `Ready` aren't subject to it. If you set `maxReconnectAttempts > 0`,
+  consider raising or disabling this — otherwise whichever budget runs out
+  first wins.
 
 ### State machine
 
@@ -348,7 +393,13 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — bootstrap or restore failed unrecoverably. `Faulted` event carries the `Exception`.     |
+| `Faulted`                | Terminal — either an initial-connect failure (always terminal), or post-Ready `maxReconnectAttempts` reached. `Faulted` event carries the last `Exception`. |
+
+The `Faulted` **event** is broader than the `Faulted` **state**: it fires
+once per failed attempt — pre-Ready failures fire it once then go terminal;
+post-Ready transient drops fire it on every retry. Check `session.State`
+from inside the handler to tell terminal from transient (post-Ready retry
+keeps state in `Reconnecting`).
 
 ### `CallSystem` semantics
 

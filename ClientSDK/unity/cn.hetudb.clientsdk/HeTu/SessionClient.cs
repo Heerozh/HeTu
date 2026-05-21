@@ -8,7 +8,6 @@
 using Cysharp.Threading.Tasks;
 #endif
 using System;
-using System.Threading;
 using UnityEngine;
 
 namespace HeTu
@@ -41,7 +40,11 @@ namespace HeTu
 
         private HeTuSessionClient() { }
 
-        internal HeTuSessionClient(HeTuSessionClientBase core) => _core = core;
+        internal HeTuSessionClient(HeTuSessionClientBase core)
+        {
+            _core = core;
+            WireFacadeEvents(core);
+        }
 
         /// <summary>
         ///     当前会话状态；尚未 Connect 时为
@@ -51,6 +54,53 @@ namespace HeTu
             _core?.State ?? HeTuSessionState.Stopped;
 
         /// <summary>
+        ///     会话状态每次变化都触发一次；最常用于驱动 UI（断线 → 显示 syncing...
+        ///     条幅 / Ready → 隐藏）。
+        /// </summary>
+        public event Action<HeTuSessionState> StateChanged;
+
+        /// <summary>
+        ///     每次"本次连接失败"触发一次：socket 关闭、bootstrap 异常、restore 异常
+        ///     都会进来，携带本次失败的异常。是否已经是终态请同时观察
+        ///     <see cref="State" /> == <see cref="HeTuSessionState.Faulted" />。
+        /// </summary>
+        public event Action<Exception> Faulted;
+
+        private void WireFacadeEvents(HeTuSessionClientBase core)
+        {
+            // 给每个 core 单独装 forwarder：旧 core 被替换后会随它一起 GC 掉，
+            // 不需要显式取消订阅。
+            core.StateChanged += state => StateChanged?.Invoke(state);
+            core.Faulted += ex => Faulted?.Invoke(ex);
+        }
+
+        /// <summary>
+        ///     首次连接超时默认值。游戏客户端用 30s 一般够覆盖正常握手 + bootstrap
+        ///     的时间预算；想关掉超时就传 <see cref="TimeSpan.Zero" />。
+        /// </summary>
+        public static readonly TimeSpan DefaultConnectTimeout =
+            TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        ///     首次重连延迟默认值（指数退避起点）。
+        /// </summary>
+        public static readonly TimeSpan DefaultReconnectDelay =
+            TimeSpan.FromSeconds(1);
+
+        /// <summary>
+        ///     重连延迟上限默认值。指数退避会从
+        ///     <see cref="DefaultReconnectDelay" /> 翻倍直到这个值封顶。
+        /// </summary>
+        public static readonly TimeSpan DefaultMaxReconnectDelay =
+            TimeSpan.FromSeconds(30);
+
+        /// <summary>
+        ///     连续重试次数上限默认值。20 次按 1/2/4/8/16/30s 退避大约覆盖 8 分钟，
+        ///     足以扛过常规热重启；想让玩家挂着等长维护就显式传 <c>0</c>（不限次）。
+        /// </summary>
+        public const int DefaultMaxReconnectAttempts = 20;
+
+        /// <summary>
         ///     启动逻辑会话：连接 <paramref name="url" />、跑 <paramref name="bootstrap" />、
         ///     恢复所有存活订阅。await 返回时
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Ready" />。
@@ -58,19 +108,46 @@ namespace HeTu
         /// <param name="url">河图服务端 URL，例如 <c>ws://127.0.0.1:2466/hetu/MyGame</c>。</param>
         /// <param name="authKey">可选预共享密钥（服务端启用 <c>--authkey</c> 时必填）。</param>
         /// <param name="bootstrap">每次握手成功后的初始化委托，典型用于登录。</param>
-        /// <param name="reconnectDelay">重连前等待时间，默认 1 秒。</param>
+        /// <param name="reconnectDelay">
+        ///     首次重连前等待时间（指数退避起点）。<c>null</c> 用
+        ///     <see cref="DefaultReconnectDelay" />（1s）。
+        /// </param>
+        /// <param name="maxReconnectDelay">
+        ///     退避上限。<c>null</c> 用 <see cref="DefaultMaxReconnectDelay" />（30s）。
+        /// </param>
+        /// <param name="maxReconnectAttempts">
+        ///     **仅作用于"曾经 Ready 之后的重连"**。首次 Ready 之前的任何 close /
+        ///     bootstrap 异常都直接进 <see cref="HeTuSessionState.Faulted" /> 终态
+        ///     （重试同一份凭据 / URL 无意义）。Ready 之后再断线，会按本值循环重连，
+        ///     连续失败到此数才转 Faulted。默认
+        ///     <see cref="DefaultMaxReconnectAttempts" />（20）；
+        ///     <c>0</c> = post-Ready 不限次重连。
+        /// </param>
+        /// <param name="connectTimeout">
+        ///     本次 Connect 的整体超时（从 Connecting 到 Ready）。超时会自动 Close
+        ///     并把 await 抛 <see cref="TimeoutException" />（InnerException 携带
+        ///     最近一次 Faulted 事件的异常）。<c>null</c> 用
+        ///     <see cref="DefaultConnectTimeout" />（30s）；<see cref="TimeSpan.Zero" />
+        ///     关闭超时，await 等到 Ready 或 Faulted 为止。
+        /// </param>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, Awaitable> bootstrap = null,
-            TimeSpan? reconnectDelay = null)
+            TimeSpan? reconnectDelay = null,
+            TimeSpan? maxReconnectDelay = null,
+            int maxReconnectAttempts = DefaultMaxReconnectAttempts,
+            TimeSpan? connectTimeout = null)
 #else
         public UniTask Connect(
             string url,
             string authKey = null,
             Func<HeTuClient, UniTask> bootstrap = null,
-            TimeSpan? reconnectDelay = null)
+            TimeSpan? reconnectDelay = null,
+            TimeSpan? maxReconnectDelay = null,
+            int maxReconnectAttempts = DefaultMaxReconnectAttempts,
+            TimeSpan? connectTimeout = null)
 #endif
         {
             if (_core != null
@@ -85,67 +162,34 @@ namespace HeTu
                 new UnityHeTuSessionScheduler(),
                 bootstrap == null
                     ? null
-                    : (_, succeed, fail) =>
-                        RunBootstrapAsync(client, bootstrap, succeed, fail),
-                reconnectDelay);
+                    : _ => RunBootstrapAsync(client, bootstrap),
+                reconnectDelay ?? DefaultReconnectDelay,
+                maxReconnectDelay ?? DefaultMaxReconnectDelay,
+                maxReconnectAttempts);
+            WireFacadeEvents(_core);
 
-            return ConnectCore();
+            return ConnectCore(connectTimeout ?? DefaultConnectTimeout);
         }
 
-        // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这个重载触发 Start。
+        // 测试通过内部 ctor 注入预构建的 core，无需 url 配置；走这两个重载触发 Start。
+        // 无参 = 不开 timeout，便于 fake transport 显式控制时序；TimeSpan 重载
+        // 让超时跑在测试可控的时长上。
 #if UNITY_6000_0_OR_NEWER
-        internal Awaitable Connect()
+        internal Awaitable Connect() => ConnectCore(TimeSpan.Zero);
+        internal Awaitable Connect(TimeSpan connectTimeout) =>
+            ConnectCore(connectTimeout);
+
+        private Awaitable ConnectCore(TimeSpan connectTimeout)
 #else
-        internal UniTask Connect()
+        internal UniTask Connect() => ConnectCore(TimeSpan.Zero);
+        internal UniTask Connect(TimeSpan connectTimeout) =>
+            ConnectCore(connectTimeout);
+
+        private UniTask ConnectCore(TimeSpan connectTimeout)
 #endif
         {
-            return ConnectCore();
-        }
-
-#if UNITY_6000_0_OR_NEWER
-        private Awaitable ConnectCore()
-#else
-        private UniTask ConnectCore()
-#endif
-        {
-            if (_core.State == HeTuSessionState.Ready)
-                return CompletedAwaitable();
-
-            var tcs = NewCompletionSource<bool>();
-            void OnReady() => tcs.TrySetResult(true);
-            void OnStateChanged(HeTuSessionState state)
-            {
-                if (state == HeTuSessionState.Stopped)
-                    tcs.TrySetCanceled();
-            }
-
-            _core.Ready += OnReady;
-            _core.StateChanged += OnStateChanged;
             _core.Start();
-            return AwaitConnectAsync(tcs, OnReady, OnStateChanged);
-        }
-
-#if UNITY_6000_0_OR_NEWER
-        private async Awaitable AwaitConnectAsync(
-            AwaitableCompletionSource<bool> tcs,
-            Action onReady,
-            Action<HeTuSessionState> onStateChanged)
-#else
-        private async UniTask AwaitConnectAsync(
-            UniTaskCompletionSource<bool> tcs,
-            Action onReady,
-            Action<HeTuSessionState> onStateChanged)
-#endif
-        {
-            try
-            {
-                await AwaitFrom(tcs);
-            }
-            finally
-            {
-                _core.Ready -= onReady;
-                _core.StateChanged -= onStateChanged;
-            }
+            return FutureToAwaitable(_core.WaitForReady(connectTimeout));
         }
 
 #if UNITY_6000_0_OR_NEWER
@@ -207,6 +251,35 @@ namespace HeTu
         }
 
         /// <summary>
+        ///     替换"下次重连"用的 bootstrap。典型场景:启动时
+        ///     <see cref="Connect"/> 不传 bootstrap(匿名连接),用户成功登录后
+        ///     再调用本方法装上"重连时自动重登"逻辑——SDK 在 Ready 之后断线会
+        ///     自动重连,届时跑这里设置的委托。<paramref name="bootstrap"/> 传
+        ///     <c>null</c> 表示清空(例如用户退登)。
+        ///     <para>必须先 <see cref="Connect"/> 过一次,否则抛
+        ///     <see cref="InvalidOperationException"/>。</para>
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+        public void SetBootstrap(Func<HeTuClient, Awaitable> bootstrap)
+#else
+        public void SetBootstrap(Func<HeTuClient, UniTask> bootstrap)
+#endif
+        {
+            if (_core == null)
+                throw new InvalidOperationException(
+                    "HeTuSessionClient 尚未 Connect, 不能 SetBootstrap。");
+
+            if (bootstrap == null)
+            {
+                _core.SetBootstrap(null);
+                return;
+            }
+
+            var client = HeTuClient.Instance;
+            _core.SetBootstrap(_ => RunBootstrapAsync(client, bootstrap));
+        }
+
+        /// <summary>
         ///     关闭当前会话，取消所有进行中的调用与订阅。Close 后再次调用 Connect
         ///     会建立全新的会话。
         /// </summary>
@@ -218,36 +291,76 @@ namespace HeTu
         public void Dispose() => _core?.Dispose();
 
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable RunBootstrapAsync(
+        private static Future RunBootstrapAsync(
+            HeTuClient client,
+            Func<HeTuClient, Awaitable> bootstrap)
+        {
+            var p = new Promise();
+            _ = BridgeBootstrap(client, bootstrap, p);
+            return p.Future;
+        }
+
+        private static async Awaitable BridgeBootstrap(
             HeTuClient client,
             Func<HeTuClient, Awaitable> bootstrap,
-            Action succeed,
-            Action<Exception> fail)
-#else
-        private static async UniTaskVoid RunBootstrapAsync(
-            HeTuClient client,
-            Func<HeTuClient, UniTask> bootstrap,
-            Action succeed,
-            Action<Exception> fail)
-#endif
+            Promise p)
         {
             try
             {
                 await bootstrap(client);
-                succeed();
+                p.TryComplete();
             }
             catch (Exception ex)
             {
-                fail(ex);
+                p.TryFail(ex);
             }
         }
-
-#if UNITY_6000_0_OR_NEWER
-        private static async Awaitable CompletedAwaitable()
+#else
+        private static Future RunBootstrapAsync(
+            HeTuClient client,
+            Func<HeTuClient, UniTask> bootstrap)
         {
+            var p = new Promise();
+            BridgeBootstrap(client, bootstrap, p).Forget();
+            return p.Future;
+        }
+
+        private static async UniTaskVoid BridgeBootstrap(
+            HeTuClient client,
+            Func<HeTuClient, UniTask> bootstrap,
+            Promise p)
+        {
+            try
+            {
+                await bootstrap(client);
+                p.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                p.TryFail(ex);
+            }
+        }
+#endif
+
+        // Future → awaitable 单点桥接：已完成的 Future 直接构造已结算的 TCS；
+        // 未完成的 Future 用 Then/Catch 把结果搬运过去。把 Connect 那一堆 TCS+三个
+        // event handler+timeout 的拼装收成"一行 await"。
+#if UNITY_6000_0_OR_NEWER
+        private static Awaitable FutureToAwaitable(Future f)
+        {
+            var tcs = new AwaitableCompletionSource();
+            f.Then(() => tcs.TrySetResult())
+             .Catch(ex => tcs.TrySetException(ex));
+            return tcs.Awaitable;
         }
 #else
-        private static UniTask CompletedAwaitable() => UniTask.CompletedTask;
+        private static UniTask FutureToAwaitable(Future f)
+        {
+            var tcs = new UniTaskCompletionSource();
+            f.Then(() => tcs.TrySetResult())
+             .Catch(ex => tcs.TrySetException(ex));
+            return tcs.Task;
+        }
 #endif
     }
 

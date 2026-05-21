@@ -19,10 +19,10 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { transport }),
                 scheduler,
-                (_, succeed, _) =>
+                _ =>
                 {
                     operations.Add("bootstrap");
-                    succeed();
+                    return Future.Completed;
                 });
 
             session.Start();
@@ -378,10 +378,10 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { first, second }),
                 scheduler,
-                (transport, succeed, _) =>
+                transport =>
                 {
                     ((FakeTransport)transport).Operations.Add("bootstrap");
-                    succeed();
+                    return Future.Completed;
                 });
 
             session.Start();
@@ -581,6 +581,9 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(30));
 
             session.Start();
+            // 先 Ready 一次：首次 Ready 之前任何 close 都直接进 Faulted，
+            // 测不到 backoff。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("e");
             scheduler.RunNext();
             ts[1].RaiseClosed("e");
@@ -620,6 +623,8 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(30));
 
             session.Start();
+            // 先把首次 Ready 拿到手，再开始测 backoff 重置。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("e");
             scheduler.RunNext();
             ts[1].RaiseClosed("e");
@@ -657,6 +662,8 @@ namespace Tests.HeTu
                 maxReconnectDelay: TimeSpan.FromSeconds(4));
 
             session.Start();
+            // 同样先 Ready 一次，才有 reconnect 语义可测。
+            ts[0].RaiseConnected();
             for (var i = 0; i < ts.Length - 1; i++)
             {
                 ts[i].RaiseClosed("e");
@@ -701,6 +708,8 @@ namespace Tests.HeTu
             session.StateChanged += observed.Add;
 
             session.Start();
+            // 先 Ready 一次。pre-Ready 任何 close 都直接 Faulted，测不到"重试 N 次"。
+            ts[0].RaiseConnected();
             ts[0].RaiseClosed("fail 1");
             scheduler.RunNext();
             ts[1].RaiseClosed("fail 2");
@@ -839,13 +848,19 @@ namespace Tests.HeTu
         }
 
         // 问题 #3：transport-level 重试耗尽时未触发 Faulted 事件。
+        // (现在还顺便覆盖了 post-Ready 重试用尽的语义，因为只有 Ready 之后才会进退避循环。)
         [Test]
         public void Reconnect_AfterMaxAttempts_FiresFaultedEvent()
         {
-            var transport = new FakeTransport("c1");
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
             var scheduler = new FakeScheduler();
             var session = new HeTuSessionClientBase(
-                () => transport,
+                () => q.Dequeue(),
                 scheduler,
                 bootstrap: null,
                 reconnectDelay: TimeSpan.FromSeconds(1),
@@ -856,12 +871,153 @@ namespace Tests.HeTu
             session.Faulted += ex => observed = ex;
 
             session.Start();
-            transport.RaiseClosed("fatal close reason");
+            // 先 Ready 一次解锁 reconnect 语义；再断线触发 maxAttempts=1 退尽。
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("fatal close reason");
 
             Assert.AreEqual(HeTuSessionState.Faulted, session.State);
             Assert.IsNotNull(observed,
                 "transport 重试耗尽进入 Faulted 终态前必须 invoke Faulted 事件");
             StringAssert.Contains("fatal close reason", observed.Message);
+        }
+
+        // pre-Ready 任何 close 都直接 Faulted——不重试，因为重试同一份配置无意义。
+        [Test]
+        public void PreReady_TransportClose_EntersFaultedImmediately()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20); // 给得很高，确认不依赖耗尽
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            ts[0].RaiseClosed("server-side rejection");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State,
+                "pre-Ready close 不应进入 reconnect 循环");
+            Assert.IsNotNull(observed);
+            StringAssert.Contains("server-side rejection", observed.Message);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "pre-Ready close 不应排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount,
+                "第二条 transport 不应被构造");
+        }
+
+        // pre-Ready bootstrap/restore 抛出同样不重试——凭据/配置错误重试无用。
+        [Test]
+        public void PreReady_BootstrapFailure_EntersFaultedImmediately()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                    Future.Failed(new InvalidOperationException("bad credentials")),
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20);
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            ts[0].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsNotNull(observed);
+            StringAssert.Contains("bad credentials", observed.Message);
+            Assert.AreEqual(0, scheduler.PendingCount);
+            Assert.AreEqual(0, ts[1].ConnectCount);
+        }
+
+        // socket 关闭只要还会重试，也得通知 Faulted 事件；不能等到终态才告诉用户。
+        [Test]
+        public void Reconnect_TransientClose_FiresFaultedEventPerAttempt()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("c3")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectAttempts: 0); // 不限次：永不进 Faulted 终态
+
+            var observed = new List<Exception>();
+            session.Faulted += observed.Add;
+
+            session.Start();
+            // 先 Ready 一次解锁 reconnect 语义；之后每次 close 都走重连而非 Faulted。
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("drop 1");
+            scheduler.RunNext();
+            ts[1].RaiseClosed("drop 2");
+            // 不再 RunNext，状态留在 Reconnecting 等下一次。
+
+            Assert.AreEqual(2, observed.Count,
+                "每次 socket 关闭都应触发一次 Faulted 事件（即使会继续重试）");
+            StringAssert.Contains("drop 1", observed[0].Message);
+            StringAssert.Contains("drop 2", observed[1].Message);
+            Assert.AreNotEqual(HeTuSessionState.Faulted, session.State,
+                "maxReconnectAttempts=0 时不应进入 Faulted 终态");
+        }
+
+        // 用户在 Faulted 回调里主动 Close 时，不应再调度新的重连或进 Faulted 终态。
+        [Test]
+        public void FaultedCallback_CallingClose_ShortCircuitsReconnect()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectDelay: TimeSpan.FromMilliseconds(10),
+                maxReconnectAttempts: 0);
+
+            session.Faulted += _ => session.Close();
+
+            session.Start();
+            ts[0].RaiseClosed("user-aborted");
+
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "Faulted 回调里 Close 应该让 session 进 Stopped 而不是 Reconnecting/Faulted");
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "Close 后不应再排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount,
+                "第二条 transport 不应被构造");
         }
 
         // 问题 #4：bootstrap/restore 失败时 transport 只 Dispose 未 Close。
@@ -874,8 +1030,7 @@ namespace Tests.HeTu
             var session = CreateSession(
                 new Queue<FakeTransport>(new[] { transport, fallback }),
                 scheduler,
-                (_, _, fail) =>
-                    fail(new InvalidOperationException("bootstrap failed")));
+                _ => Future.Failed(new InvalidOperationException("bootstrap failed")));
 
             session.Start();
             transport.RaiseConnected();
@@ -884,6 +1039,303 @@ namespace Tests.HeTu
                 "应用层 bootstrap 失败时 session 必须主动 Close 还活着的 transport, "
                 + "否则要等到 TCP keepalive 服务器才会回收连接");
         }
+
+        // -------- WaitForReady --------
+
+        [Test]
+        public void WaitForReady_OnAlreadyReady_CompletesImmediately()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "已 Ready 时不应再排定 timeout");
+        }
+
+        [Test]
+        public void WaitForReady_OnAlreadyClosed_FailsAsObjectDisposed()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+            session.Close();
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<ObjectDisposedException>(f.Exception);
+        }
+
+        [Test]
+        public void WaitForReady_OnAlreadyFaulted_FailsWithLastFault()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseClosed("network lost"); // 首次 Ready 前关闭 → Faulted
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsNotNull(f.Exception);
+            StringAssert.Contains("network lost", f.Exception.Message);
+        }
+
+        [Test]
+        public void WaitForReady_CompletesWhen_TransitionsToReady()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+            Assert.IsFalse(f.IsCompleted);
+
+            transport.RaiseConnected();
+
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+        }
+
+        [Test]
+        public void WaitForReady_FailsWhen_TransitionsToFaulted_CarryingFault()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            transport.RaiseClosed("bad creds");
+
+            Assert.IsTrue(f.IsFailed);
+            StringAssert.Contains("bad creds", f.Exception.Message);
+        }
+
+        [Test]
+        public void WaitForReady_FailsAsOperationCanceled_WhenSessionStops()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            session.Close();
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<OperationCanceledException>(f.Exception);
+        }
+
+        [Test]
+        public void WaitForReady_TimeoutFires_ClosesSessionAndFailsWithTimeoutException()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            Assert.IsFalse(f.IsCompleted);
+            Assert.AreEqual(1, scheduler.PendingCount, "应排定 timeout");
+
+            scheduler.RunNext(); // 触发 timeout
+
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<TimeoutException>(f.Exception);
+            Assert.AreEqual(HeTuSessionState.Stopped, session.State,
+                "timeout 内部应调用 Close 关闭会话");
+        }
+
+        [Test]
+        public void WaitForReady_ZeroTimeout_DoesNotSchedule()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.Zero);
+
+            Assert.IsFalse(f.IsCompleted);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "传 Zero 时不应排定 timer——调用方愿意一直等");
+        }
+
+        [Test]
+        public void WaitForReady_TimerNoOp_AfterReady()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+
+            transport.RaiseConnected();
+            Assert.IsTrue(f.IsCompleted);
+            Assert.IsFalse(f.IsFailed);
+
+            // 即使再驱动 scheduler，已被 Unwire 释放的 timer 不应再翻动状态
+            scheduler.RunNext();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+        }
+
+        // -------- SetBootstrap --------
+        // 主用例：先匿名 Connect → Ready → 用户点登录后 SetBootstrap → 断线
+        // 重连时跑这个新装的 bootstrap（典型"登录后才提权"流程）。
+        [Test]
+        public void SetBootstrap_AfterReady_NextReconnectUsesIt()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            var calls = new List<string>();
+            session.SetBootstrap(_ =>
+            {
+                calls.Add("login");
+                return Future.Completed;
+            });
+
+            ts[0].RaiseClosed("network");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            CollectionAssert.AreEqual(new[] { "login" }, calls,
+                "断线重连必须跑用 SetBootstrap 设置的新 bootstrap");
+        }
+
+        // 清空场景（用户退登 / 切账号前先收回登录态）。
+        [Test]
+        public void SetBootstrap_ToNull_NextReconnectSkipsBootstrap()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var calls = new List<string>();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                {
+                    calls.Add("initial");
+                    return Future.Completed;
+                },
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            Assert.AreEqual(1, calls.Count);
+
+            session.SetBootstrap(null);
+
+            ts[0].RaiseClosed("network");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.AreEqual(1, calls.Count,
+                "SetBootstrap(null) 后断线重连不应再跑旧 bootstrap");
+        }
+
+        // SetBootstrap 是配置型 API：不能打断当前 Ready 会话，也不能触发事件。
+        [Test]
+        public void SetBootstrap_OnReady_DoesNotChangeStateOrFireEvent()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }), scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            var stateChanges = new List<HeTuSessionState>();
+            session.StateChanged += stateChanges.Add;
+
+            session.SetBootstrap(_ => Future.Completed);
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.AreEqual(0, stateChanges.Count,
+                "SetBootstrap 不应触发 StateChanged");
+        }
+
+        // 构造时未传 bootstrap，Start 之前 SetBootstrap → 首次连接就用它。
+        // 等价于"晚到的 ctor 参数"，避免调用方为了换 bootstrap 而必须重建 core。
+        [Test]
+        public void SetBootstrap_BeforeStart_TakesEffectOnFirstConnect()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var calls = new List<string>();
+            var session = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                bootstrap: null,
+                TimeSpan.Zero);
+
+            session.SetBootstrap(_ =>
+            {
+                calls.Add("login");
+                return Future.Completed;
+            });
+
+            session.Start();
+            transport.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            CollectionAssert.AreEqual(new[] { "login" }, calls);
+        }
+
+        // -------- helpers --------
 
         private static HeTuSessionClientBase CreateSession(
             Queue<FakeTransport> transports,
