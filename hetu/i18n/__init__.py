@@ -7,14 +7,15 @@
 
 import gettext
 import locale
+import os
 import sys
 from importlib.resources import files
 
-from autolang.config import get_domain
 from babel import Locale
 from babel.support import Format
 
 DEFAULT_I18N_DIR = str(files("hetu").joinpath("i18n"))
+I18N_DOMAIN: str = os.environ.get("DEFAULT_DOMAIN", "messages")
 
 
 def get_system_language() -> str:
@@ -52,7 +53,7 @@ def get_translator(language=None, directory: str = DEFAULT_I18N_DIR):
         language_list = [language, "en"]
 
     return gettext.translation(
-        get_domain(),
+        I18N_DOMAIN,
         localedir=directory,
         languages=language_list,
         fallback=True,
