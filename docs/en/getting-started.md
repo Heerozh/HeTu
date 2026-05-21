@@ -43,6 +43,25 @@ uv add hetudb
 
 After this, `uv run hetu --help` should print HeTu's CLI usage.
 
+### Or: scaffold a project with `hetu init`
+
+To skip the manual setup, the `hetu init` command scaffolds a ready-to-run
+project — it runs `uv init`, adds the `hetudb` dependency, and writes a
+starter `app.py` under `src/` (a minimal `login` System plus an
+`on_disconnect` handler) and a `config.yml`:
+
+```bash
+uvx --from hetudb hetu init my-game-server
+cd my-game-server
+uv run hetu start --config=config.yml
+```
+
+`hetu init` is safe to re-run: it skips any file that already exists and
+never overwrites your code. The generated `config.yml` points at Redis by
+default; edit its `BACKENDS` section to use SQLite instead. The numbered
+walkthrough below builds a project by hand, so you can see how each piece
+fits together.
+
 ## 2. Project layout
 
 HeTu projects use a **src-layout**: your application code lives under `src/`,
