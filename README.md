@@ -196,7 +196,7 @@ uv run hetu start --app-file=./app.py --db=redis://127.0.0.1:6379/0 --namespace=
 ```
 
 其他参数见`hetu start --help`，比如可以用`hetu start --config ./config.yml`方式启动，
-配置模板见 CONFIG_TEMPLATE.yml 文件。
+配置模板见 hetu/CONFIG_TEMPLATE.yml 文件。
 
 ## 🎉 生产部署
 

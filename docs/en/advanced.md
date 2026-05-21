@@ -606,7 +606,7 @@ namespace — it'll be loaded automatically.
 
 The wire protocol is a stack of `MessageProcessLayer` objects: each layer
 encodes outgoing data and decodes incoming data. The default stack from
-`CONFIG_TEMPLATE.yml` is `jsonb → zlib → crypto`. You can substitute or
+`hetu/CONFIG_TEMPLATE.yml` is `jsonb → zlib → crypto`. You can substitute or
 add layers by subclassing:
 
 ```python
@@ -676,7 +676,7 @@ HeTu exposes two specialized loggers that are easy to overlook:
 
 Both are configured in the `LOGGING:` section of `config.yml` (standard
 `dictConfig`). You'll see them mentioned by handler name in
-`CONFIG_TEMPLATE.yml`.
+`hetu/CONFIG_TEMPLATE.yml`.
 
 ## SnowflakeID and worker IDs
 
