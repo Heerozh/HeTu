@@ -53,7 +53,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://hetudb.cn"
+Homepage = "https://github.com/Heerozh/HeTu"
+Documentation = "https://hetudb.vercel.app/en/docs/concepts/"
+Repository = "https://github.com/Heerozh/HeTu"
 
 [project.scripts]
 hetu = "hetu.__main__:main"
@@ -94,7 +96,7 @@ include = ["hetu*"]
 exclude = ["tests*", "benchmark*", "docs*"]
 
 [tool.setuptools.package-data]
-hetu = ["CONFIG_TEMPLATE.yml"]
+hetu = ["CONFIG_TEMPLATE.yml", "llms.txt"]
 
 [tool.pytest.ini_options]
 # 限定 collect 路径，避免 9p mount 下 pytest 递归扫描整个仓库（hetu/、examples/、build/ 等）
