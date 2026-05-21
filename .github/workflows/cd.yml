@@ -127,6 +127,62 @@ jobs:
 #          body_path: RELEASE_NOTES.md
 #          generate_release_notes: false
 
+  sync-translate-i18n:
+    timeout-minutes: 15
+    name: Sync and Translate i18n on Tag
+    # 仅在正式版本 tag 推送时运行；与发布 job 并行，不阻塞发布
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # 创建分支
+      pull-requests: write  # 创建 PR
+    steps:
+      # 在 main 上操作，PR 以 main 为干净 base（release tag 通常即 main HEAD）
+      - name: Check out main
+        uses: actions/checkout@v5
+        with:
+          ref: main
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # 从 hetu/ 源码重新抽取可翻译字符串，更新各语言 .po
+      - name: Sync i18n catalogs
+        run: uv run autolang sync -d ./hetu/i18n --source ./hetu/
+
+      # 通过 API 补全未翻译条目（autolang 的 --model/--base-url/--api-key 为必填项）
+      - name: Translate pending entries
+        env:
+          AUTOLANG_API_KEY: ${{ secrets.AUTOLANG_API_KEY }}
+          AUTOLANG_BASE_URL: ${{ secrets.AUTOLANG_BASE_URL }}
+          AUTOLANG_MODEL: ${{ secrets.AUTOLANG_MODEL }}
+        run: >
+          uv run autolang translate -d ./hetu/i18n --source ./hetu/
+          --api-key "$AUTOLANG_API_KEY"
+          --base-url "$AUTOLANG_BASE_URL"
+          --model "$AUTOLANG_MODEL"
+
+      # 把更新后的 .po 提交到分支并向 main 开 PR 供审核（.pot/.mo 已被 .gitignore 忽略）
+      # 无改动时该 action 不会创建 PR
+      - name: Create pull request for i18n updates
+        uses: peter-evans/create-pull-request@v7
+        with:
+          base: main
+          branch: chore/i18n-sync-${{ github.ref_name }}
+          delete-branch: true
+          add-paths: hetu/i18n/**/*.po
+          commit-message: "MAINT: 同步并翻译 i18n 多国语言 (${{ github.ref_name }})"
+          title: "MAINT: 同步并翻译 i18n 多国语言 (${{ github.ref_name }})"
+          body: |
+            由 `${{ github.ref_name }}` 发布流程自动生成。
+
+            - `autolang sync`：从 `hetu/` 源码重新抽取可翻译字符串并更新各语言 `.po`
+            - `autolang translate`：通过 API 补全未翻译条目
+
+            请审核 AI 翻译结果后合并。翻译将随**下一次**发布生效。
+
   nightly_build:
     timeout-minutes: 10
     name: Nightly build and push (if new commits)
