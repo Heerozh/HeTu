@@ -235,7 +235,7 @@ hetu start --config=./config.yml
 
 Everything is read from the YAML file. See
 [Configuration file](#configuration-file) below for a minimal sample, and
-[`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml)
+[`hetu/CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/hetu/CONFIG_TEMPLATE.yml)
 for the full schema.
 
 #### Mode 2 — CLI flags (no config file)
@@ -311,7 +311,7 @@ boilerplate.
 ## Configuration file
 
 The full schema is in [
-`CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/CONFIG_TEMPLATE.yml).
+`hetu/CONFIG_TEMPLATE.yml`](https://github.com/Heerozh/HeTu/blob/main/hetu/CONFIG_TEMPLATE.yml).
 
 The specific definitions are explained in detail within the document's comments.
 

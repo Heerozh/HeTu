@@ -121,7 +121,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 | `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables             |
 | `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK） |
 | `hetu/sourcegen/`        | Client SDK code generation（C#）；由 `hetu build` 调用                       |
-| `hetu/safelogging/`      | 进程安全的日志 queue/listener；通过 YAML 配置见 CONFIG_TEMPLATE.yml                 |
+| `hetu/safelogging/`      | 进程安全的日志 queue/listener；通过 YAML 配置见 hetu/CONFIG_TEMPLATE.yml            |
 | `hetu/i18n/`             | gettext 风格的翻译，所有用户可见字符串都包在 `_("...")` 中                                |
 
 ## Conventions

@@ -404,7 +404,7 @@ class GameLog(hetu.BaseComponent):
 
 ## 自定义消息管道层
 
-线路协议是一个 `MessageProcessLayer` 对象栈：每一层为外发数据编码并解码传入数据。`CONFIG_TEMPLATE.yml` 中的默认栈是 `jsonb → zlib → crypto`。你可以通过子类化来替换或添加层：
+线路协议是一个 `MessageProcessLayer` 对象栈：每一层为外发数据编码并解码传入数据。`hetu/CONFIG_TEMPLATE.yml` 中的默认栈是 `jsonb → zlib → crypto`。你可以通过子类化来替换或添加层：
 
 ```python
 # myproto.py
@@ -450,7 +450,7 @@ HeTu 暴露了两个容易被忽略的专用日志记录器：
 - **`HeTu.replay`** —— 每个连接事件（握手、RPC 调用、非法请求、websocket 关闭）都会以 `INFO` 级别发送到此日志记录器。默认配置将其写入循环的 `replay.log`。逐行重放该日志可以重现服务器看到的精确顺序——对于诊断“我无法重现”的 bug 非常宝贵。将级别设置为 `ERROR` 可完全禁用（引擎会快速路径处理字符串格式化开销）。
 - **`HeTu.root` 慢日志** —— 引擎会测量每个 `System` 调用的挂钟时间和 `RaceCondition` 重试次数。当单个调用超过约 1 秒或 5 次重试时，它会记录一条警告，其中包含该工作器上最慢/争用最激烈的 `Systems` 的前 20 个表。每个工作器随机选择一个 60–600 秒的抑制间隔，以避免所有副本同时打印相同的警告。
 
-两者都在 `config.yml` 的 `LOGGING:` 部分（标准 `dictConfig`）中配置。你会在 `CONFIG_TEMPLATE.yml` 中通过处理器名称看到它们。
+两者都在 `config.yml` 的 `LOGGING:` 部分（标准 `dictConfig`）中配置。你会在 `hetu/CONFIG_TEMPLATE.yml` 中通过处理器名称看到它们。
 
 ## SnowflakeID 与工作器 ID
 
