@@ -13,9 +13,51 @@ from pathlib import Path
 from .base import CommandInterface
 from ..i18n import _
 
-# 初始 app.py 模板。__NAMESPACE__ 在渲染时被替换为项目的 namespace。
+# 各模板中的 __NAMESPACE__ 在渲染时被替换为项目的 namespace。
+
+# src/app.py —— 引擎入口文件。它不属于包，只 import 包以触发全部注册。
 APP_PY_TEMPLATE = '''\
-"""__NAMESPACE__ — HeTu starter app. 在此定义你的 Component 和 System。"""
+"""__NAMESPACE__ — HeTu app 入口 / entry point。引擎按 APP_FILE 路径加载本文件。
+
+本文件不属于 __NAMESPACE__ 包，只是入口；import 包即触发全部 Component/System 注册。
+"""
+
+import __NAMESPACE__  # noqa: F401
+'''
+
+# src/<namespace>/__init__.py —— 用 iter_modules 自动加载 Component/ 与 System/。
+INIT_PY_TEMPLATE = '''\
+"""HeTu app 包。import 本包即自动加载 Component/ 与 System/ 下的所有模块。"""
+
+
+def _autoload() -> None:
+    """import Component/ 与 System/ 根目录下的所有模块以触发装饰器注册。"""
+    import importlib
+    import pkgutil
+
+    from . import Component, System
+
+    for pkg in (Component, System):
+        for info in pkgutil.iter_modules(pkg.__path__, pkg.__name__ + "."):
+            importlib.import_module(info.name)
+
+
+_autoload()
+'''
+
+# src/<namespace>/Component/__init__.py
+COMPONENT_INIT_TEMPLATE = '''\
+"""内建 Component 目录。新增数据表：放一个 .py 文件并用 @define_component。"""
+'''
+
+# src/<namespace>/System/__init__.py
+SYSTEM_INIT_TEMPLATE = '''\
+"""内建 System 目录。新增逻辑：放一个 .py 文件并用 @define_system。"""
+'''
+
+# src/<namespace>/Component/player.py
+PLAYER_PY_TEMPLATE = '''\
+"""玩家数据表 Component / Player component."""
 
 import numpy as np
 
@@ -32,6 +74,16 @@ class Player(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
     name: str = hetu.property_field("", dtype="U32")
     online: bool = hetu.property_field(False)
+'''
+
+# src/<namespace>/System/login.py
+LOGIN_PY_TEMPLATE = '''\
+"""登录与断线 System / login & disconnect systems."""
+
+# noinspection PyPackageRequirements
+import hetu
+
+from ..Component.player import Player
 
 
 @hetu.define_system(
@@ -61,8 +113,18 @@ async def on_disconnect(ctx: hetu.SystemContext):
 
 
 def render_app_py(namespace: str) -> str:
-    """渲染初始 app.py 内容。"""
+    """渲染 src/app.py 入口文件内容。"""
     return APP_PY_TEMPLATE.replace("__NAMESPACE__", namespace)
+
+
+def render_player_py(namespace: str) -> str:
+    """渲染 Component/player.py 内容。"""
+    return PLAYER_PY_TEMPLATE.replace("__NAMESPACE__", namespace)
+
+
+def render_login_py(namespace: str) -> str:
+    """渲染 System/login.py 内容。"""
+    return LOGIN_PY_TEMPLATE.replace("__NAMESPACE__", namespace)
 
 
 def read_config_template() -> str:
@@ -106,6 +168,32 @@ def run_uv(uv_args: list[str], cwd: Path) -> None:
         sys.exit(e.returncode or 1)
 
 
+def _is_uv_boilerplate_init(content: str) -> bool:
+    """判断包 __init__.py 是否仍是 uv init --lib 生成的 hello() 样板。"""
+    return "def hello()" in content and "Hello from" in content
+
+
+def write_project_file(
+    path: Path,
+    content: str,
+    rel_label: str,
+    *,
+    replace_uv_boilerplate: bool = False,
+) -> None:
+    """写入项目文件；已存在则跳过，绝不覆盖用户代码。
+
+    replace_uv_boilerplate=True 时，若文件仍是 uv init 的 hello() 样板则覆盖之。
+    """
+    if path.exists():
+        existing = path.read_text(encoding="utf-8")
+        if not (replace_uv_boilerplate and _is_uv_boilerplate_init(existing)):
+            print(_("ℹ️  {path} 已存在，跳过").format(path=rel_label))
+            return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    print(_("✅ 已创建 {path}").format(path=rel_label))
+
+
 class InitCommand(CommandInterface):
     @classmethod
     def name(cls):
@@ -140,7 +228,7 @@ class InitCommand(CommandInterface):
                 uv_args.append(args.name)
             run_uv(uv_args, cwd=Path.cwd())
 
-        # 确定包目录、namespace 与 app.py 路径
+        # 确定包目录与 namespace：取 src/ 下的首个包目录，没有则按项目名新建
         src_dir = project_dir / "src"
         pkg_dirs: list[Path] = []
         if src_dir.is_dir():
@@ -150,28 +238,49 @@ class InitCommand(CommandInterface):
                 if p.is_dir() and not p.name.startswith((".", "__"))
             )
         if pkg_dirs:
-            namespace = pkg_dirs[0].name
-            app_py_path = pkg_dirs[0] / "app.py"
-            app_file_rel = f"src/{namespace}/app.py"
+            pkg_dir = pkg_dirs[0]
+            namespace = pkg_dir.name
         else:
             namespace = project_dir.name.replace("-", "_")
-            app_py_path = project_dir / "app.py"
-            app_file_rel = "app.py"
+            pkg_dir = src_dir / namespace
 
-        # 步骤2：写 app.py（已存在则跳过，绝不覆盖用户代码）
-        if app_py_path.exists():
-            print(_("ℹ️  {path} 已存在，跳过").format(path=app_file_rel))
-        else:
-            app_py_path.parent.mkdir(parents=True, exist_ok=True)
-            app_py_path.write_text(render_app_py(namespace), encoding="utf-8")
-            print(_("✅ 已创建 {path}").format(path=app_file_rel))
+        # 步骤2：写入入口文件与包内 Component / System（已存在均跳过，不覆盖用户代码）
+        # src/app.py 是引擎入口，不属于包，只 import 包
+        write_project_file(src_dir / "app.py", render_app_py(namespace), "src/app.py")
+        # 包 __init__.py：uv init 生成的是 hello() 样板，替换为自动加载器
+        write_project_file(
+            pkg_dir / "__init__.py",
+            INIT_PY_TEMPLATE,
+            f"src/{namespace}/__init__.py",
+            replace_uv_boilerplate=True,
+        )
+        write_project_file(
+            pkg_dir / "Component" / "__init__.py",
+            COMPONENT_INIT_TEMPLATE,
+            f"src/{namespace}/Component/__init__.py",
+        )
+        write_project_file(
+            pkg_dir / "Component" / "player.py",
+            render_player_py(namespace),
+            f"src/{namespace}/Component/player.py",
+        )
+        write_project_file(
+            pkg_dir / "System" / "__init__.py",
+            SYSTEM_INIT_TEMPLATE,
+            f"src/{namespace}/System/__init__.py",
+        )
+        write_project_file(
+            pkg_dir / "System" / "login.py",
+            render_login_py(namespace),
+            f"src/{namespace}/System/login.py",
+        )
 
         # 步骤3：写 config.yml（已存在则跳过）
         config_path = project_dir / "config.yml"
         if config_path.exists():
             print(_("ℹ️  config.yml 已存在，跳过"))
         else:
-            config_text = render_config(read_config_template(), namespace, app_file_rel)
+            config_text = render_config(read_config_template(), namespace, "src/app.py")
             config_path.write_text(config_text, encoding="utf-8")
             print(_("✅ 已创建 config.yml"))
 
