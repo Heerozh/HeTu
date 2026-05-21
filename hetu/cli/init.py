@@ -10,8 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ..i18n import _
 from .base import CommandInterface
+from ..i18n import _
 
 # 初始 app.py 模板。__NAMESPACE__ 在渲染时被替换为项目的 namespace。
 APP_PY_TEMPLATE = '''\
@@ -19,6 +19,7 @@ APP_PY_TEMPLATE = '''\
 
 import numpy as np
 
+# noinspection PyPackageRequirements
 import hetu
 
 
@@ -174,13 +175,13 @@ class InitCommand(CommandInterface):
             config_path.write_text(config_text, encoding="utf-8")
             print(_("✅ 已创建 config.yml"))
 
-        # 步骤4：uv add hetudb（已在依赖中则跳过）
+        # 步骤4：uv add hetudb numpy（hetudb 已在依赖中则跳过）
         # 走到这里 pyproject.toml 必定已存在（uv init 创建或本就存在）
         pyproject_path = project_dir / "pyproject.toml"
         if "hetudb" in pyproject_path.read_text(encoding="utf-8"):
             print(_("ℹ️  hetudb 已在依赖中，跳过 uv add"))
         else:
-            run_uv(["add", "hetudb"], cwd=project_dir)
+            run_uv(["add", "hetudb", "numpy"], cwd=project_dir)
 
         # 步骤5：提示启动命令
         print()

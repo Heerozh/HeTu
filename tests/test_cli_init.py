@@ -26,6 +26,11 @@ def test_render_app_py_is_valid_python():
     compile(render_app_py("mygame"), "app.py", "exec")
 
 
+def test_render_app_py_suppresses_pycharm_warning():
+    # hetudb 的 import 名是 hetu，PyCharm 会误报缺依赖，故模板内置抑制注释
+    assert "# noinspection PyPackageRequirements\nimport hetu" in render_app_py("ns")
+
+
 def test_render_config_substitutes_namespace_and_app_file():
     template = "APP_FILE: app.py\nNAMESPACE: game_short_name\nDEBUG: false\n"
     out = render_config(template, "mygame", "src/mygame/app.py")
@@ -108,7 +113,7 @@ def test_execute_fresh_project(tmp_path, monkeypatch):
     assert "type: SQL" in cfg
     assert "master: sqlite:///./hetu.db" in cfg
     assert ["init", "--lib", "--python", "3.14", "mygame"] in calls
-    assert ["add", "hetudb"] in calls
+    assert ["add", "hetudb", "numpy"] in calls
 
 
 def test_execute_skips_existing_files(tmp_path, monkeypatch):
