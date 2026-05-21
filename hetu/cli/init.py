@@ -10,8 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .base import CommandInterface
 from ..i18n import _
+from .base import CommandInterface
 
 # 各模板中的 __NAMESPACE__ 在渲染时被替换为项目的 namespace。
 
@@ -19,25 +19,25 @@ from ..i18n import _
 APP_PY_TEMPLATE = '''\
 """__NAMESPACE__ — HeTu app 入口 / entry point。引擎按 APP_FILE 路径加载本文件。
 
-本文件不属于 __NAMESPACE__ 包，只是入口；import 包即触发全部 Component/System 注册。
+本文件不属于 __NAMESPACE__ 包，只是入口；import 包即触发全部 component/system 注册。
 """
 
 import __NAMESPACE__  # noqa: F401
 '''
 
-# src/<namespace>/__init__.py —— 用 iter_modules 自动加载 Component/ 与 System/。
+# src/<namespace>/__init__.py —— 用 iter_modules 自动加载 component/ 与 system/。
 INIT_PY_TEMPLATE = '''\
-"""HeTu app 包。import 本包即自动加载 Component/ 与 System/ 下的所有模块。"""
+"""HeTu app 包。import 本包即自动加载 component/ 与 system/ 下的所有模块。"""
 
 
 def _autoload() -> None:
-    """import Component/ 与 System/ 根目录下的所有模块以触发装饰器注册。"""
+    """import component/ 与 system/ 根目录下的所有模块以触发装饰器注册。"""
     import importlib
     import pkgutil
 
-    from . import Component, System
+    from . import component, system
 
-    for pkg in (Component, System):
+    for pkg in (component, system):
         for info in pkgutil.iter_modules(pkg.__path__, pkg.__name__ + "."):
             importlib.import_module(info.name)
 
@@ -45,19 +45,19 @@ def _autoload() -> None:
 _autoload()
 '''
 
-# src/<namespace>/Component/__init__.py
+# src/<namespace>/component/__init__.py
 COMPONENT_INIT_TEMPLATE = '''\
-"""内建 Component 目录。新增数据表：放一个 .py 文件并用 @define_component。"""
+"""内建 component 目录。新增数据表：放一个 .py 文件并用 @define_component。"""
 '''
 
-# src/<namespace>/System/__init__.py
+# src/<namespace>/system/__init__.py
 SYSTEM_INIT_TEMPLATE = '''\
-"""内建 System 目录。新增逻辑：放一个 .py 文件并用 @define_system。"""
+"""内建 system 目录。新增逻辑：放一个 .py 文件并用 @define_system。"""
 '''
 
-# src/<namespace>/Component/player.py
+# src/<namespace>/component/player.py
 PLAYER_PY_TEMPLATE = '''\
-"""玩家数据表 Component / Player component."""
+"""玩家数据表 component / Player component."""
 
 import numpy as np
 
@@ -76,14 +76,14 @@ class Player(hetu.BaseComponent):
     online: bool = hetu.property_field(False)
 '''
 
-# src/<namespace>/System/login.py
+# src/<namespace>/system/login.py
 LOGIN_PY_TEMPLATE = '''\
-"""登录与断线 System / login & disconnect systems."""
+"""登录与断线 system / login & disconnect systems."""
 
 # noinspection PyPackageRequirements
 import hetu
 
-from ..Component.player import Player
+from ..component.player import Player
 
 
 @hetu.define_system(
@@ -118,12 +118,12 @@ def render_app_py(namespace: str) -> str:
 
 
 def render_player_py(namespace: str) -> str:
-    """渲染 Component/player.py 内容。"""
+    """渲染 component/player.py 内容。"""
     return PLAYER_PY_TEMPLATE.replace("__NAMESPACE__", namespace)
 
 
 def render_login_py(namespace: str) -> str:
-    """渲染 System/login.py 内容。"""
+    """渲染 system/login.py 内容。"""
     return LOGIN_PY_TEMPLATE.replace("__NAMESPACE__", namespace)
 
 
@@ -244,7 +244,7 @@ class InitCommand(CommandInterface):
             namespace = project_dir.name.replace("-", "_")
             pkg_dir = src_dir / namespace
 
-        # 步骤2：写入入口文件与包内 Component / System（已存在均跳过，不覆盖用户代码）
+        # 步骤2：写入入口文件与包内 component / system（已存在均跳过，不覆盖用户代码）
         # src/app.py 是引擎入口，不属于包，只 import 包
         write_project_file(src_dir / "app.py", render_app_py(namespace), "src/app.py")
         # 包 __init__.py：uv init 生成的是 hello() 样板，替换为自动加载器
@@ -255,24 +255,24 @@ class InitCommand(CommandInterface):
             replace_uv_boilerplate=True,
         )
         write_project_file(
-            pkg_dir / "Component" / "__init__.py",
+            pkg_dir / "component" / "__init__.py",
             COMPONENT_INIT_TEMPLATE,
-            f"src/{namespace}/Component/__init__.py",
+            f"src/{namespace}/component/__init__.py",
         )
         write_project_file(
-            pkg_dir / "Component" / "player.py",
+            pkg_dir / "component" / "player.py",
             render_player_py(namespace),
-            f"src/{namespace}/Component/player.py",
+            f"src/{namespace}/component/player.py",
         )
         write_project_file(
-            pkg_dir / "System" / "__init__.py",
+            pkg_dir / "system" / "__init__.py",
             SYSTEM_INIT_TEMPLATE,
-            f"src/{namespace}/System/__init__.py",
+            f"src/{namespace}/system/__init__.py",
         )
         write_project_file(
-            pkg_dir / "System" / "login.py",
+            pkg_dir / "system" / "login.py",
             render_login_py(namespace),
-            f"src/{namespace}/System/login.py",
+            f"src/{namespace}/system/login.py",
         )
 
         # 步骤3：写 config.yml（已存在则跳过）

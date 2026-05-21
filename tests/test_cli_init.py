@@ -15,7 +15,6 @@ from hetu.cli.init import (
     render_player_py,
 )
 
-
 # --- 渲染函数 ---
 
 
@@ -24,7 +23,7 @@ def test_render_app_py_only_imports_package():
     code = render_app_py("mygame")
     assert "import mygame" in code
     assert "__NAMESPACE__" not in code
-    # 入口里不再内联 Component/System 定义
+    # 入口里不再内联 component/system 定义
     assert "define_component" not in code
     assert "define_system" not in code
 
@@ -47,15 +46,15 @@ def test_render_login_py_substitutes_namespace():
     assert "__NAMESPACE__" not in code
     assert "async def login(" in code
     assert "async def on_disconnect(" in code
-    # System 从 Component 子包 import 它引用的数据表
-    assert "from ..Component.player import Player" in code
+    # system 从 component 子包 import 它引用的数据表
+    assert "from ..component.player import Player" in code
     compile(code, "login.py", "exec")
 
 
 def test_package_templates_are_valid_python():
     compile(INIT_PY_TEMPLATE, "__init__.py", "exec")
-    compile(COMPONENT_INIT_TEMPLATE, "Component/__init__.py", "exec")
-    compile(SYSTEM_INIT_TEMPLATE, "System/__init__.py", "exec")
+    compile(COMPONENT_INIT_TEMPLATE, "component/__init__.py", "exec")
+    compile(SYSTEM_INIT_TEMPLATE, "system/__init__.py", "exec")
     # __init__.py 用 iter_modules 自动加载子模块
     assert "iter_modules" in INIT_PY_TEMPLATE
 
@@ -160,11 +159,11 @@ def test_execute_fresh_project(tmp_path, monkeypatch):
     assert "iter_modules" in init_code
     assert "Hello from" not in init_code
 
-    # Component / System 两个目录及内建文件
-    assert (pkg / "Component" / "__init__.py").exists()
-    assert (pkg / "System" / "__init__.py").exists()
-    player_code = (pkg / "Component" / "player.py").read_text(encoding="utf-8")
-    login_code = (pkg / "System" / "login.py").read_text(encoding="utf-8")
+    # component / system 两个目录及内建文件
+    assert (pkg / "component" / "__init__.py").exists()
+    assert (pkg / "system" / "__init__.py").exists()
+    player_code = (pkg / "component" / "player.py").read_text(encoding="utf-8")
+    login_code = (pkg / "system" / "login.py").read_text(encoding="utf-8")
     assert 'namespace="mygame"' in player_code
     assert "class Player(" in player_code
     assert "async def login(" in login_code
