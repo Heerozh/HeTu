@@ -247,7 +247,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error("[HeTuClient] CallSystem过程中遇到取消信号");
+                    Logger.Instance.Error("CallSystem过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else
@@ -327,7 +327,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
+                    Logger.Instance.Error("订阅数据过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else if (ex != null)
@@ -421,7 +421,7 @@ namespace HeTu
                 {
                     if (cancel)
                     {
-                        Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
+                        Logger.Instance.Error("订阅数据过程中遇到取消信号");
                         tcs.TrySetCanceled();
                     }
                     else if (ex != null)

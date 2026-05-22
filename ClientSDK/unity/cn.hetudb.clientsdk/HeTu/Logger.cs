@@ -9,6 +9,7 @@ namespace HeTu
     /// <summary>
     ///     SDK 日志入口。
     ///     默认不输出日志，需要在运行前通过 <see cref="SetLogger"/> 注入日志函数。
+    ///     所有输出都会自动加上带色的 <c>[HeTuClient]</c> tag 前缀。
     /// </summary>
     public class Logger
     {
@@ -22,6 +23,12 @@ namespace HeTu
         ///     全局单例。
         /// </summary>
         public static readonly Logger Instance = new();
+
+        /// <summary>
+        ///     SDK 日志统一的带色 tag 前缀。所有日志输出都会自动加上它，
+        ///     调用方无需自己写 tag。
+        /// </summary>
+        private const string Tag = "[<color=#19aaff>HeTuClient</color>]";
 
         private LogFunction _logDebug;
         private LogFunction _logError;
@@ -46,18 +53,18 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     输出信息日志。
+        ///     输出信息日志。会自动加上带色的 <c>[HeTuClient]</c> tag 前缀。
         /// </summary>
-        public void Info(object message) => _logInfo?.Invoke(message);
+        public void Info(object message) => _logInfo?.Invoke($"{Tag} {message}");
 
         /// <summary>
-        ///     输出错误日志。
+        ///     输出错误日志。会自动加上带色的 <c>[HeTuClient]</c> tag 前缀。
         /// </summary>
-        public void Error(object message) => _logError?.Invoke(message);
+        public void Error(object message) => _logError?.Invoke($"{Tag} {message}");
 
         /// <summary>
-        ///     输出调试日志。
+        ///     输出调试日志。会自动加上带色的 <c>[HeTuClient]</c> tag 前缀。
         /// </summary>
-        public void Debug(object message) => _logDebug?.Invoke(message);
+        public void Debug(object message) => _logDebug?.Invoke($"{Tag} {message}");
     }
 }

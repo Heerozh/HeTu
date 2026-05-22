@@ -78,7 +78,7 @@ namespace HeTu
         public void CancelAll(string reason)
         {
             if (_requestCallbacks.IsEmpty) return;
-            Logger.Instance.Info($"[HeTuClient] {reason}, 取消所有等待任务...");
+            Logger.Instance.Info($"{reason}, 取消所有等待任务...");
             foreach (var pending in _requestCallbacks)
                 pending.Callback?.Invoke(null, true);
             _requestCallbacks.Clear();
