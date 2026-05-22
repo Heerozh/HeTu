@@ -29,16 +29,16 @@ namespace HeTu
             tcs.Task;
 #endif
 
-        private static readonly HeTuSessionClient s_instance = new();
-
         /// <summary>
         ///     单件实例。
         /// </summary>
-        public static HeTuSessionClient Instance => s_instance;
+        public static HeTuSessionClient Instance { get; } = new();
 
         private HeTuSessionClientBase _core;
 
-        private HeTuSessionClient() { }
+        private HeTuSessionClient()
+        {
+        }
 
         internal HeTuSessionClient(HeTuSessionClientBase core)
         {
@@ -176,6 +176,7 @@ namespace HeTu
         // 让超时跑在测试可控的时长上。
 #if UNITY_6000_0_OR_NEWER
         internal Awaitable Connect() => ConnectCore(TimeSpan.Zero);
+
         internal Awaitable Connect(TimeSpan connectTimeout) =>
             ConnectCore(connectTimeout);
 
@@ -252,12 +253,14 @@ namespace HeTu
 
         /// <summary>
         ///     替换"下次重连"用的 bootstrap。典型场景:启动时
-        ///     <see cref="Connect"/> 不传 bootstrap(匿名连接),用户成功登录后
+        ///     <see cref="Connect" /> 不传 bootstrap(匿名连接),用户成功登录后
         ///     再调用本方法装上"重连时自动重登"逻辑——SDK 在 Ready 之后断线会
-        ///     自动重连,届时跑这里设置的委托。<paramref name="bootstrap"/> 传
+        ///     自动重连,届时跑这里设置的委托。<paramref name="bootstrap" /> 传
         ///     <c>null</c> 表示清空(例如用户退登)。
-        ///     <para>必须先 <see cref="Connect"/> 过一次,否则抛
-        ///     <see cref="InvalidOperationException"/>。</para>
+        ///     <para>
+        ///         必须先 <see cref="Connect" /> 过一次,否则抛
+        ///         <see cref="InvalidOperationException" />。
+        ///     </para>
         /// </summary>
 #if UNITY_6000_0_OR_NEWER
         public void SetBootstrap(Func<HeTuClient, Awaitable> bootstrap)
@@ -312,6 +315,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
+                Debug.LogError("Bootstrap code throw a error, connection closed: " + ex);
                 p.TryFail(ex);
             }
         }
@@ -337,6 +341,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
+                Debug.LogError("Bootstrap code throw a error, connection closed: " + ex);
                 p.TryFail(ex);
             }
         }
@@ -350,7 +355,7 @@ namespace HeTu
         {
             var tcs = new AwaitableCompletionSource();
             f.Then(() => tcs.TrySetResult())
-             .Catch(ex => tcs.TrySetException(ex));
+                .Catch(ex => tcs.TrySetException(ex));
             return tcs.Awaitable;
         }
 #else
