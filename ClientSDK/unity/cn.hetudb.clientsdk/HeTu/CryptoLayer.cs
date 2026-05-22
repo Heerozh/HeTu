@@ -98,7 +98,8 @@ namespace HeTu
         public override void Handshake(byte[] message)
         {
             if (message is not { Length: 32 })
-                throw new ArgumentException("对端公钥长度错误，预期32字节", nameof(message));
+                throw new ArgumentException("对端公钥长度错误，预期32字节，可能是AuthKey不对。",
+                    nameof(message));
 
             var peerPublicKey = new X25519PublicKeyParameters(message, 0);
             var sessionKey = DeriveSessionKey(_privateKey, peerPublicKey);

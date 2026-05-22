@@ -51,6 +51,8 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         if isinstance(auth_key, str):
             auth_key = auth_key.encode("utf-8")
         self._auth_key = auth_key or None
+        if self._auth_key is None:
+            print("WARNING: Auth key not set, any AuthKey will be accepted!")
 
     def _parse_client_public_key(self, message: bytes) -> bytes:
         if len(message) == self.LEGACY_HELLO_SIZE:
