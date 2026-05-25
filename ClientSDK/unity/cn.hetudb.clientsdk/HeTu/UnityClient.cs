@@ -213,7 +213,12 @@ namespace HeTu
         }
 
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable<T> CompletedAwaitable<T>(T value) => value;
+        private static Awaitable<T> CompletedAwaitable<T>(T value)
+        {
+            var tcs = NewCompletionSource<T>();
+            tcs.SetResult(value);
+            return AwaitFrom(tcs);
+        }
 #else
         private static UniTask<T> CompletedAwaitable<T>(T value) =>
             UniTask.FromResult(value);
