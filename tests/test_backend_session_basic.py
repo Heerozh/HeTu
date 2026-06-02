@@ -273,7 +273,7 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
     # 测试字符串类型的无限不允许
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
-        with pytest.raises(AssertionError, match="str"):
+        with pytest.raises(ValueError, match="str"):
             np.testing.assert_array_equal(
                 (await item_repo.range(name=(-np.inf, "Itm15"))).time, range(110, 116)
             )
@@ -309,7 +309,7 @@ async def test_range_number_index(filled_item_ref, mod_auto_backend):
         )
         # 测试range的方向反了
         # AssertionError: right必须大于等于left，你的:
-        with pytest.raises(AssertionError, match="right.*left"):
+        with pytest.raises(ValueError, match="right.*left"):
             await item_repo.range(time=(115, 110))
         # 测试float类型索引
         np.testing.assert_array_equal(
@@ -326,7 +326,7 @@ async def test_query_string_index(filled_item_ref, mod_auto_backend):
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
         # range string with int
-        with pytest.raises(AssertionError, match="str"):
+        with pytest.raises(ValueError, match="str"):
             assert (await item_repo.range(name=(11, 11))).shape[0] == 0
         # range on str typed unique
         assert (await item_repo.range(name=("11", "11"))).shape[0] == 0

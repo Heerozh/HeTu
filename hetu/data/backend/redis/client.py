@@ -483,10 +483,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         if issubclass(dtype.type, np.character):
             # component字段如果是str/bytes类型的索引，不能查询数字
-            assert type(left) in (str, bytes) and type(right) in (str, bytes), (
-                f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
-                f"right={type(right)}({right})"
-            )
+            if type(left) not in (str, bytes) or type(right) not in (str, bytes):
+                raise ValueError(
+                    f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
+                    f"right={type(right)}({right})"
+                )
         else:
             # component字段如果是int数字，则处理inf
             # 浮点不用处理，因为浮点的inf是高位的Exponent全FF，大于2**1023最大值，自然永远最大
@@ -657,15 +658,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
-        assert index_name in comp_cls.indexes_, (
-            f"Component `{comp_cls.name_}` 没有索引 `{index_name}`"
-        )
+        if index_name not in comp_cls.indexes_:
+            raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
         b_left, b_right = self.range_normalize_(
             comp_cls.dtype_map_[index_name], left, right, desc
         )
-        assert (b_left >= b_right) if desc else (b_right >= b_left), (
-            f"left必须大于等于right，你的:right={right}, left={left}"
-        )
+        if (b_left < b_right) if desc else (b_right < b_left):
+            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
 
         row_ids = await aio.zrange(
             name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
