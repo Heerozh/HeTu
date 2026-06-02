@@ -174,9 +174,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
             return struct.pack(">Q", u64)
         elif np.issubdtype(dtype, np.str_):
             encoded = value.item().encode("utf-8")
-            return encoded
+            # 变长类型把 0x00 转义成 0x00 0xff，使 member 的 value 段能用单个 0x00 自分隔
+            # （定长的数字/bool 不会和终止符混淆，无需转义）。详见 _exc_index/range_normalize_
+            return encoded.replace(b"\x00", b"\x00\xff")
         elif np.issubdtype(dtype, np.bytes_):
-            return value.item()
+            return value.item().replace(b"\x00", b"\x00\xff")
         elif np.issubdtype(dtype, np.bool_):
             return b"\x01" if value else b"\x00"
         assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
@@ -514,9 +516,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         left, li = peel(left, True)
         right, ri = peel(right, True)
-        # 因为member是value:id，所以left="value;"为排除，right="value:"为排除
-        ls = b":" if li else b";"
-        rs = b";" if ri else b":"
+        # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
+        # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
+        ls = b"\x00" if li else b"\x00\xff"
+        rs = b"\x00\xff" if ri else b"\x00"
         if desc:
             ls, rs = rs, ls
 
@@ -669,7 +672,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         row_ids = await aio.zrange(
             name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
         )
-        row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
+        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
 
         if row_format == RowFormat.ID_LIST:
             return row_ids
@@ -717,8 +720,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     _sortable_value = self.to_sortable_bytes(
                         _dtype_map[_field].type(_value)
                     )
-                    _start_val = b"[" + _sortable_value + b":"
-                    _end_val = b"[" + _sortable_value + b";"
+                    _start_val = b"[" + _sortable_value + b"\x00"
+                    _end_val = b"[" + _sortable_value + b"\x00\xff"
                     checks.append(["UNIQ", _idx_key, _start_val, _end_val])
 
         def _hset_key(_key, _old_version, _update: dict[str, str]):
@@ -741,7 +744,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     _sortable_value = self.to_sortable_bytes(
                         _dtype_map[_field].type(_values[_field])
                     )
-                    _member = _sortable_value + b":" + _b_row_id
+                    _member = _sortable_value + b"\x00" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能
                         pushes.append(["ZADD", _idx_key, "0", _member])

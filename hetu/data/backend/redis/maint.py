@@ -78,7 +78,7 @@ class RedisTableMaintenance(TableMaintenance):
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
         row_ids = cast(list[bytes], row_ids)
-        row_ids = [int(vk.rsplit(b":", 1)[-1]) for vk in row_ids]
+        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
         return row_ids
 
     @override
@@ -256,7 +256,7 @@ class RedisTableMaintenance(TableMaintenance):
             # 建立redis索引
             def get_member(_value: np.generic, _b_row_id) -> bytes:
                 _sortable_value = RedisBackendClient.to_sortable_bytes(_value)
-                return _sortable_value + b":" + _b_row_id
+                return _sortable_value + b"\x00" + _b_row_id
 
             io.zadd(
                 idx_key,

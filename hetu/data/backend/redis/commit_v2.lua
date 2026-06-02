@@ -52,11 +52,12 @@ if checks then
             local idx_key = check[2]
             local start_val = check[3]
             local end_val = check[4]
-            -- ZRANGE key [val: [val:\xff BYLEX LIMIT 0 1
+            -- ZRANGE key [val\x00 [val\x00\xff BYLEX LIMIT 0 1
             local res = redis_call("ZRANGE", idx_key, start_val, end_val, "BYLEX", "LIMIT", 0, 1)
             if #res > 0 then
                 if next(deleted) ~= nil then
-                    local row_key = string_match(res[1], ".*:(.*)$")
+                    -- member 是 value\x00row_id，row_id 不含 0x00，故最后一个 0x00 即终止符
+                    local row_key = string_match(res[1], ".*%z(.*)$")
                     if deleted[row_key] then
                         -- 唯一索引指向的 key 在本次事务中被删除了，则不算冲突
                     else
