@@ -137,3 +137,46 @@ async def test_future_call_bypass_flood_detect(mod_test_app, tbl_mgr, new_ctx):
 
     for loc_executor in executors:
         await loc_executor.terminate()
+
+
+def test_endpoint_reject_owner_rls():
+    """发现5回归：define_endpoint 不允许 OWNER/RLS（与 define_system 一致），
+    否则执行网关会 fall-through 成『任何人可调用』。"""
+    from hetu.common import Permission
+    from hetu.endpoint.definer import define_endpoint
+
+    with pytest.raises(AssertionError, match="权限"):
+
+        @define_endpoint(namespace="pytest", force=True, permission=Permission.OWNER)
+        async def ep_owner(ctx):
+            pass
+
+    with pytest.raises(AssertionError, match="权限"):
+
+        @define_endpoint(namespace="pytest", force=True, permission=Permission.RLS)
+        async def ep_rls(ctx):
+            pass
+
+
+async def test_endpoint_permission_fail_closed(mod_test_app, tbl_mgr, new_ctx):
+    """发现5回归：执行网关对未处理的权限级别(OWNER/RLS/未知)失败关闭。
+    即使绕过 define_endpoint 定义期断言(模拟 -O 剥掉断言)注册了 OWNER 端点，
+    匿名客户端也必须被拒绝。"""
+    from hetu.common import Permission
+    from hetu.endpoint.definer import EndpointDefines
+
+    async def ep_owner_sneaky(ctx):
+        pass
+
+    async def ep_public(ctx):
+        pass
+
+    # 直接 add，绕过 define_endpoint 的定义期检查（等价于 -O 下断言被剥掉的情形）
+    EndpointDefines().add("pytest", ep_owner_sneaky, True, Permission.OWNER)
+    EndpointDefines().add("pytest", ep_public, True, Permission.EVERYBODY)
+
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())  # 匿名 caller=0
+    # OWNER 端点：网关失败关闭，拒绝匿名（实则拒绝所有）调用
+    assert executor.execute_check("ep_owner_sneaky", ()) is None
+    # 对照：EVERYBODY 端点匿名可正常通过网关
+    assert executor.execute_check("ep_public", ()) is not None
