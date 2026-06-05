@@ -767,6 +767,7 @@ dependencies = [
     { name = "sortedcontainers" },
     { name = "sqlalchemy" },
     { name = "tabulate" },
+    { name = "tqdm" },
     { name = "wcwidth" },
     { name = "websockets" },
 ]
@@ -792,7 +793,6 @@ dev = [
     { name = "pytest-timeout" },
     { name = "ruff" },
     { name = "sanic-testing" },
-    { name = "tqdm" },
     { name = "trustme" },
 ]
 
@@ -816,6 +816,7 @@ requires-dist = [
     { name = "sortedcontainers", specifier = "~=2.4" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
     { name = "tabulate", specifier = ">=0.9.0" },
+    { name = "tqdm", specifier = ">=4.67.3" },
     { name = "wcwidth", specifier = ">=0.2.13" },
     { name = "websockets", specifier = ">=15.0.1" },
 ]
@@ -841,7 +842,6 @@ dev = [
     { name = "pytest-timeout", specifier = ">=2.4.0" },
     { name = "ruff", specifier = ">=0.14.6" },
     { name = "sanic-testing", specifier = ">=24.6.0" },
-    { name = "tqdm", specifier = ">=4.67.1" },
     { name = "trustme", specifier = ">=1.2.1" },
 ]
 
