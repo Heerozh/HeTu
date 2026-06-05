@@ -103,16 +103,19 @@ def test_normal_define(new_component_env):
     row = MyPosition.new_rows(2)
     assert row.x[1] == 88
 
-    # 测试布尔值强制更换
+    # 测试布尔值强制更换（含字符串拼写的 bool dtype，应同样转为 int8）
     @define_component(namespace="pytest", force=True)
     class TestBool(BaseComponent):
         a: bool = property_field(True, True)
         b: "?" = property_field(True, False)
         c: np.bool_ = property_field(True, False)
+        d: bool = property_field(True, False, dtype="bool")
+        e: bool = property_field(True, False, dtype="|b1")
+        f: bool = property_field(True, False, dtype="<b1")
 
     np.testing.assert_array_equal(
         np.array(list(TestBool.dtypes.fields.values()))[:, 0],
-        [np.int32, np.int8, np.int8, np.int8, np.int64],
+        [np.int32, np.int8, np.int8, np.int8, np.int8, np.int8, np.int8, np.int64],
     )
 
     # 测试字符串byte类型
