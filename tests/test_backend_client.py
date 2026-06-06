@@ -79,12 +79,15 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:id"]
-        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
+        + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
     )
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10:", b"[10;"])
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10\x00", b"[10\x00\xff"])
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:time"]
-        + [b"[\x80\x00\x00\x00\x00\x00\x00\n:", b"[\x80\x00\x00\x00\x00\x00\x00\n;"]
+        + [
+            b"[\x80\x00\x00\x00\x00\x00\x00\n\x00",
+            b"[\x80\x00\x00\x00\x00\x00\x00\n\x00\xff",
+        ]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -98,26 +101,27 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + ["0", b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + ["0", b"\xc0^\xd3\xd7\x00\x00\x00\x00:" + str(row.id).encode()]
+        + ["0", b"\xc0^\xd3\xd7\x00\x00\x00\x00\x00" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"10:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"]
+        + ["0", b"10\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\n\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
     )
 
     # 插入 item row2
@@ -133,12 +137,15 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:id"]
-        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
+        + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
     )
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11:", b"[11;"])
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11\x00", b"[11\x00\xff"])
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:time"]
-        + [b"[\x80\x00\x00\x00\x00\x00\x00\x0b:", b"[\x80\x00\x00\x00\x00\x00\x00\x0b;"]
+        + [
+            b"[\x80\x00\x00\x00\x00\x00\x00\x0b\x00",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x0b\x00\xff",
+        ]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -152,26 +159,27 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:id"]
-        + ["0", b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:model"]
-        + ["0", b"?\xa1,(\xff\xff\xff\xff:" + str(row.id).encode()]
+        + ["0", b"?\xa1,(\xff\xff\xff\xff\x00" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"11:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"]
+        + ["0", b"11\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:used"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x01:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x01\x00" + str(row.id).encode()]
     )
 
     # 插入 rls row1
@@ -183,7 +191,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
     checks.append(
         ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
-        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
+        + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -197,11 +205,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + ["0", b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0b\x00" + str(row.id).encode()]
     )
 
     # 插入 rls row2
@@ -213,7 +221,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
     checks.append(
         ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
-        + [b"[" + b_rowid + b":", b"[" + b_rowid + b";"]
+        + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -227,11 +235,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # insert的索引部分
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:id"]
-        + ["0", b_rowid + b":" + str(row.id).encode()]
+        + ["0", b_rowid + b"\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:RLSTest:{CLU1}:index:owner"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0c:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x0c\x00" + str(row.id).encode()]
     )
 
     # update 1, change time
@@ -247,7 +255,10 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "16"])
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:time"]
-        + [b"[\x80\x00\x00\x00\x00\x00\x00\x17:", b"[\x80\x00\x00\x00\x00\x00\x00\x17;"]
+        + [
+            b"[\x80\x00\x00\x00\x00\x00\x00\x17\x00",
+            b"[\x80\x00\x00\x00\x00\x00\x00\x17\x00\xff",
+        ]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "17"]
@@ -256,11 +267,11 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # update的index变更
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:time"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x14:" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x14\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZADD", "pytest:Item:{CLU1}:index:time"]
-        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x17:" + str(row.id).encode()]
+        + ["0", b"\x80\x00\x00\x00\x00\x00\x00\x17\x00" + str(row.id).encode()]
     )
 
     # update 2, change name
@@ -274,16 +285,17 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.update(item_ref, row)
     # 更新的payload应该是这些check和push
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "233"])
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23:", b"[23;"])
+    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23\x00", b"[23\x00\xff"])
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "234"]
         + ["name", "23"]
     )
     pushes.append(
-        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21:" + str(row.id).encode()]
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"21\x00" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZADD", "pytest:Item:{CLU1}:index:name"] + ["0", b"23:" + str(row.id).encode()]
+        ["ZADD", "pytest:Item:{CLU1}:index:name"]
+        + ["0", b"23\x00" + str(row.id).encode()]
     )
 
     # delete
@@ -300,26 +312,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     pushes.append(["DEL", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:id"]
-        + [b_rowid + b":" + str(row.id).encode()]
+        + [b_rowid + b"\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:model"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
     )
     pushes.append(
-        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"22:" + str(row.id).encode()]
+        ["ZREM", "pytest:Item:{CLU1}:index:name"] + [b"22\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:owner"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x16:" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:time"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x16:" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x16\x00" + str(row.id).encode()]
     )
     pushes.append(
         ["ZREM", "pytest:Item:{CLU1}:index:used"]
-        + [b"\x80\x00\x00\x00\x00\x00\x00\x00:" + str(row.id).encode()]
+        + [b"\x80\x00\x00\x00\x00\x00\x00\x00\x00" + str(row.id).encode()]
     )
 
     # commit

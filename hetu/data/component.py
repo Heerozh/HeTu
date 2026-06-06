@@ -454,7 +454,8 @@ def define_component(
             "{cname}.{fname}属性的dtype不支持void类型"
         ).format(cname=cname, fname=fname)
         # bool类型在一些后端数据库中不支持，强制转换为int8
-        if prop.dtype is bool or prop.dtype is np.bool_ or prop.dtype == "?":
+        # 用numpy kind判断，可覆盖所有bool拼写（bool/np.bool_/"?"/"bool"/"|b1"/"<b1"...）
+        if np.dtype(prop.dtype).kind == "b":
             prop.dtype = np.int8
         # 开启unique时，强制index为True
         if prop.unique:

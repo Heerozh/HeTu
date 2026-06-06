@@ -23,7 +23,7 @@ from ..common import yamlloader
 from ..i18n import _
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
-from .base import CommandInterface
+from .base import CommandInterface, resolve_app_file
 
 logger = logging.getLogger("HeTu.root")
 
@@ -148,6 +148,9 @@ class StartCommand(CommandInterface):
                 config_dict = yaml.load(f, yamlloader.Loader)
             # update_config只会读取大写的值到config变量
             config.update_config(config_dict)
+            # APP_FILE 相对路径按配置文件所在目录解析，而非进程 CWD
+            if config.get("APP_FILE"):
+                config["APP_FILE"] = resolve_app_file(config["APP_FILE"], config_file)
             config_for_factory = config
         else:
             if not args.app_file or not args.namespace or not args.instance:

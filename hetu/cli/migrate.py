@@ -11,14 +11,14 @@ import sys
 
 import yaml
 
-from hetu.cli.base import CommandInterface
+from hetu.cli.base import CommandInterface, resolve_app_file
 from hetu.common import yamlloader
 from hetu.i18n import _
 
 logger = logging.getLogger("HeTu.root")
 logger.setLevel(logging.DEBUG)
 assert logging.lastResort
-logging.lastResort.setLevel(logging.DEBUG) 
+logging.lastResort.setLevel(logging.DEBUG)
 
 
 class MigrateCommand(CommandInterface):
@@ -48,14 +48,18 @@ class MigrateCommand(CommandInterface):
             default="app.py",
         )
         parser_migrate.add_argument(
-            "--namespace", metavar="game1", help=_("启动app.py中哪个namespace下的System")
+            "--namespace",
+            metavar="game1",
+            help=_("启动app.py中哪个namespace下的System"),
         )
         parser_migrate.add_argument(  # 不能require=True，因为有config参数
             "--instance", help=_("实例名称，每个实例是一个副本"), metavar="server1"
         )
 
         parser_migrate.add_argument(
-            "--config", help=_("通过yml配置文件读取后端数据库地址"), metavar="config.yml"
+            "--config",
+            help=_("通过yml配置文件读取后端数据库地址"),
+            metavar="config.yml",
         )
         parser_migrate.add_argument(
             "-y",
@@ -89,7 +93,9 @@ class MigrateCommand(CommandInterface):
 
         # 加载玩家的app文件
         spec = importlib.util.spec_from_file_location("HeTuApp", config["APP_FILE"])
-        assert spec and spec.loader, _("无法加载app文件 {app_file}").format(app_file=config["APP_FILE"])
+        assert spec and spec.loader, _("无法加载app文件 {app_file}").format(
+            app_file=config["APP_FILE"]
+        )
         module = importlib.util.module_from_spec(spec)
         sys.modules["HeTuApp"] = module
         spec.loader.exec_module(module)
@@ -136,18 +142,26 @@ class MigrateCommand(CommandInterface):
                         print(_("❌  升级迁移已取消。"))
                         return
                     print(
-                        _("⚠️  正在强制迁移 {instance_name} 服所有表结构，可能会丢失数据...").format(
-                            instance_name=instance_name
-                        )
+                        _(
+                            "⚠️  正在强制迁移 {instance_name} 服所有表结构，可能会丢失数据..."
+                        ).format(instance_name=instance_name)
                     )
                     silence = True
                 tbl_mgr.create_or_migrate_all(config["APP_FILE"], force=True)
 
             # 清除易失数据
-            print(_("🧹 正在清除 {instance_name} 服易失数据...").format(instance_name=instance_name))
+            print(
+                _("🧹 正在清除 {instance_name} 服易失数据...").format(
+                    instance_name=instance_name
+                )
+            )
             tbl_mgr.flush_volatile()
 
-            print(_("✅  {instance_name} 服升级迁移完成！").format(instance_name=instance_name))
+            print(
+                _("✅  {instance_name} 服升级迁移完成！").format(
+                    instance_name=instance_name
+                )
+            )
         print(_("🎉  恭喜！所有数据库表结构均已升级完成！"))
         pass
 
@@ -158,6 +172,9 @@ class MigrateCommand(CommandInterface):
             with open(config_file, "r", encoding="utf-8") as f:
                 config_dict = yaml.load(f, yamlloader.Loader)
             config = config_dict
+            # APP_FILE 相对路径按配置文件所在目录解析，而非进程 CWD
+            if config.get("APP_FILE"):
+                config["APP_FILE"] = resolve_app_file(config["APP_FILE"], config_file)
         else:
             config = {
                 "APP_FILE": args.app_file,

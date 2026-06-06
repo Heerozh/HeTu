@@ -72,8 +72,11 @@ class EndpointExecutor:
             logger.warning(err_msg)
             return None
 
-        # 检查权限是否符合
+        # 检查权限是否符合。默认拒绝：只有显式放行的权限级别才允许，未处理的级别
+        # (OWNER/RLS/未知) 一律失败关闭——即使 -O 去掉了 define_endpoint 定义期的断言。
         match ep.permission:
+            case Permission.EVERYBODY:
+                pass  # 公开接口，任何连接都可调用
             case Permission.USER:
                 if not context.caller:
                     err_msg = _(
@@ -92,6 +95,15 @@ class EndpointExecutor:
                     replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
+            case _:
+                # OWNER/RLS 或未知权限级别：失败关闭，拒绝调用
+                err_msg = _(
+                    "⚠️ [📞Endpoint] [非法操作] {context} | "
+                    "{endpoint}权限级别不支持，拒绝调用：{permission}"
+                ).format(context=context, endpoint=endpoint, permission=ep.permission)
+                replay.info(err_msg)
+                logger.warning(err_msg)
+                return None
 
         # 检测args数量是否对得上
         if not (ep.arg_count - ep.defaults_count - 1 <= len(args) <= ep.arg_count - 1):

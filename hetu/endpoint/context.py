@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from sanic import Request
     from ..system.caller import SystemCaller
 
+# rls_check 用的"未找到"哨兵；不能用 np.nan 当哨兵，因为 np.isnan 对字符串/None 会抛 TypeError
+_UNSET = object()
+
 
 @dataclass
 class Context:
@@ -113,12 +116,16 @@ class Context:
             return True
         assert component.rls_compare_
         rls_func, comp_attr, ctx_attr = component.rls_compare_
-        b = getattr(self, ctx_attr, np.nan)
-        if np.isnan(b):
+        # ctx_attr 先查 Context 属性，没有再查 user_data。用哨兵判断"是否存在"，
+        # 避免对字符串/None 值调用 np.isnan 抛 TypeError。
+        b = getattr(self, ctx_attr, _UNSET)
+        if b is _UNSET:
             b = self.user_data.get(ctx_attr, np.nan)
+        # struct 行也要按配置的 comp_attr 取值（与 dict 分支一致），不能写死 "owner"，
+        # 否则字段名非 owner 的自定义 RLS 会拿错列判断权限。
         a = type(b)(
             row.get(comp_attr, np.nan)
             if type(row) is dict
-            else getattr(row, "owner", np.nan)
+            else getattr(row, comp_attr, np.nan)
         )
         return bool(rls_func(a, b))

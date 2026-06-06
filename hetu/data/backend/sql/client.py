@@ -537,10 +537,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
             left, right = right, left
 
         if issubclass(dtype.type, np.character):
-            assert type(left) in (str, bytes) and type(right) in (str, bytes), (
-                f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
-                f"right={type(right)}({right})"
-            )
+            if type(left) not in (str, bytes) or type(right) not in (str, bytes):
+                raise ValueError(
+                    f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
+                    f"right={type(right)}({right})"
+                )
         else:
             if issubclass(dtype.type, np.integer):
                 type_info = np.iinfo(dtype)
@@ -684,17 +685,17 @@ class SQLBackendClient(BackendClient, alias="sql"):
         self._ensure_open()
 
         comp_cls = table_ref.comp_cls
-        assert index_name in comp_cls.indexes_, (
-            f"Component `{comp_cls.name_}` 没有索引 `{index_name}`"
-        )
+        if index_name not in comp_cls.indexes_:
+            raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
 
         dtype = comp_cls.dtype_map_[index_name]
         left, right, li, ri = self.range_normalize_(dtype, left, right, desc)
-        assert (
-            (cast(Any, left) >= cast(Any, right))
+        if (
+            (cast(Any, left) < cast(Any, right))
             if desc
-            else (cast(Any, right) >= cast(Any, left))
-        ), f"left必须大于等于right，你的:right={right}, left={left}"
+            else (cast(Any, right) < cast(Any, left))
+        ):
+            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
 
         table = self.component_table(table_ref)
         col = table.c[index_name]

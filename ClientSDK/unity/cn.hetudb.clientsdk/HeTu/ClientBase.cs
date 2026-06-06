@@ -152,7 +152,7 @@ namespace HeTu
                 Logger.Instance.Debug("Pipeline为空，可能是忘了调用SetupPipeline");
 
             // 前置清理
-            Logger.Instance.Info($"[HeTuClient] 正在连接到：{url}...");
+            Logger.Instance.Info($"正在连接到：{url}...");
             Subscriptions.Clean();
             ResponseQueue.CancelAll("重新连接");
 
@@ -187,7 +187,7 @@ namespace HeTu
             var serverHandshake = Pipeline.Decode(msg) as object[];
             Pipeline.Handshake(serverHandshake?.Cast<byte[]>().ToArray());
 
-            Logger.Instance.Info("[HeTuClient] 连接成功。");
+            Logger.Instance.Info("<color=green>连接成功。</color>");
             State = ConnectionState.Connected;
 
             OnConnected?.Invoke();
@@ -198,7 +198,7 @@ namespace HeTu
             State = ConnectionState.Disconnected;
             Subscriptions.Clean();
             if (errMsg == null)
-                Logger.Instance.Info("[HeTuClient] 连接断开，收到了服务器Close消息。");
+                Logger.Instance.Info("连接断开，收到了服务器Close消息。");
             OnClosed?.Invoke(errMsg);
         }
 
@@ -207,10 +207,10 @@ namespace HeTu
             switch (State)
             {
                 case ConnectionState.ReadyForConnect:
-                    Logger.Instance.Error($"[HeTuClient] 连接失败: {errMsg}");
+                    Logger.Instance.Error($"连接失败: {errMsg}");
                     break;
                 case ConnectionState.Connected:
-                    Logger.Instance.Error($"[HeTuClient] 接受消息时发生异常: {errMsg}");
+                    Logger.Instance.Error($"接受消息时发生异常: {errMsg}");
                     break;
             }
         }
@@ -220,7 +220,7 @@ namespace HeTu
         /// </summary>
         public virtual void Close()
         {
-            Logger.Instance.Info("[HeTuClient] 主动调用了Close");
+            Logger.Instance.Info("主动调用了Close");
             ResponseQueue.CancelAll("主动调用了Close");
             Subscriptions.Clean();
             CloseCore();
@@ -246,7 +246,7 @@ namespace HeTu
             if (State == ConnectionState.Connected)
                 return true;
 
-            Logger.Instance.Error($"[HeTuClient] {operationName}失败，连接尚未就绪");
+            Logger.Instance.Error($"{operationName}失败，连接尚未就绪");
             return false;
         }
 
@@ -568,13 +568,13 @@ namespace HeTu
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
             SendRequest(payload, null, traceId);
-            Logger.Instance.Info($"[HeTuClient] 因BaseSubscription {from}，已取消订阅 {subID}");
+            Logger.Instance.Info($"因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
         protected virtual void OnReceived(byte[] buffer)
         {
             // 解码消息
-            // Logger.Instance.Info($"[HeTuClient] 收到消息: {decoded}");
+            // Logger.Instance.Info($"收到消息: {decoded}");
             if (Pipeline.Decode(buffer, out var decodeMetrics) is not object[]
                     structuredMsg ||
                 structuredMsg.Length == 0)

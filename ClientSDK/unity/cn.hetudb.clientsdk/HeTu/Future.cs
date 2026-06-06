@@ -174,7 +174,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Logger.Instance.Error($"[HeTu Future] continuation threw: {ex}");
+                Logger.Instance.Error($"continuation threw: {ex}");
             }
         }
 
@@ -187,7 +187,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Logger.Instance.Error($"[HeTu Future] continuation threw: {ex}");
+                Logger.Instance.Error($"continuation threw: {ex}");
             }
         }
     }
@@ -373,7 +373,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Logger.Instance.Error($"[HeTu Future] continuation threw: {ex}");
+                Logger.Instance.Error($"continuation threw: {ex}");
             }
         }
     }

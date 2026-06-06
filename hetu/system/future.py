@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+import ast
 import asyncio
 import logging
 import random
@@ -121,7 +122,7 @@ async def create_future_call(
         )
 
     try:
-        revert = eval(args_str)
+        revert = ast.literal_eval(args_str)
     except Exception as e:
         raise AssertionError(_("args无法通过eval还原")) from e
     assert revert == args, _("args通过eval还原丢失了信息")
@@ -222,7 +223,7 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
             ).format(system=call.system)
         )
         return False
-    args = eval(call.args)
+    args = ast.literal_eval(call.args)
     # 循环任务和立即删除的任务都不需要lock
     req_call_lock = not call.recurring and call.timeout != 0
     # 执行

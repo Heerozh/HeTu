@@ -65,9 +65,7 @@ class EndpointDefines(metaclass=Singleton):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
         if not force:
-            assert func.__name__ not in sub_map, (
-                _("Endpoint重复定义：") + func.__name__
-            )
+            assert func.__name__ not in sub_map, _("Endpoint重复定义：") + func.__name__
 
         # 获取函数参数个数，存下来，要求客户端调用严格匹配
         assert isinstance(func, FunctionType)
@@ -167,7 +165,14 @@ def define_endpoint(
         assert func_arg_names == ["ctx"], _(
             "Endpoint参数名定义错误，第一个参数必须为：ctx。你的：{func_arg_names}"
         ).format(func_arg_names=func_arg_names)
- 
+
+        # OWNER/RLS 是Component行级读取权限，Endpoint无法据此做有意义的检查；必须拒绝，
+        # 否则会在执行网关(executor.execute_check)里 fall-through 成『任何人可调用』。
+        if permission:
+            assert permission not in (permission.OWNER, permission.RLS), _(
+                "Endpoint的权限不支持OWNER/RLS"
+            )
+
         assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, _(
             "Endpoint函数名过长，最大长度为{max_len}个字符"
         ).format(max_len=ENDPOINT_NAME_MAX_LEN)

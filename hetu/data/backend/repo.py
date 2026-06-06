@@ -199,9 +199,12 @@ class SessionRepository:
 
         comp_cls = self.ref.comp_cls
 
-        assert index_name in comp_cls.indexes_, _(
-            "{comp_name} 组件没有叫 {index_name} 的索引"
-        ).format(comp_name=comp_cls.name_, index_name=index_name)
+        if index_name not in comp_cls.indexes_:
+            raise ValueError(
+                _("{comp_name} 组件没有叫 {index_name} 的索引").format(
+                    comp_name=comp_cls.name_, index_name=index_name
+                )
+            )
 
         # 如果不是主键，直接用range方法
         if index_name != "id":
@@ -281,9 +284,12 @@ class SessionRepository:
         comp_cls = self.ref.comp_cls
 
         # 判断index_name存在
-        assert index_name in comp_cls.indexes_, _(
-            "{comp_name} 组件没有叫 {index_name} 的索引"
-        ).format(comp_name=comp_cls.name_, index_name=index_name)
+        if index_name not in comp_cls.indexes_:
+            raise ValueError(
+                _("{comp_name} 组件没有叫 {index_name} 的索引").format(
+                    comp_name=comp_cls.name_, index_name=index_name
+                )
+            )
 
         if isinstance(_left, np.generic):
             _left = _left.item()

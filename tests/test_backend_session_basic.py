@@ -273,7 +273,7 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
     # 测试字符串类型的无限不允许
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
-        with pytest.raises(AssertionError, match="str"):
+        with pytest.raises(ValueError, match="str"):
             np.testing.assert_array_equal(
                 (await item_repo.range(name=(-np.inf, "Itm15"))).time, range(110, 116)
             )
@@ -309,7 +309,7 @@ async def test_range_number_index(filled_item_ref, mod_auto_backend):
         )
         # 测试range的方向反了
         # AssertionError: right必须大于等于left，你的:
-        with pytest.raises(AssertionError, match="right.*left"):
+        with pytest.raises(ValueError, match="right.*left"):
             await item_repo.range(time=(115, 110))
         # 测试float类型索引
         np.testing.assert_array_equal(
@@ -326,7 +326,7 @@ async def test_query_string_index(filled_item_ref, mod_auto_backend):
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
         # range string with int
-        with pytest.raises(AssertionError, match="str"):
+        with pytest.raises(ValueError, match="str"):
             assert (await item_repo.range(name=(11, 11))).shape[0] == 0
         # range on str typed unique
         assert (await item_repo.range(name=("11", "11"))).shape[0] == 0
@@ -342,6 +342,79 @@ async def test_query_string_index(filled_item_ref, mod_auto_backend):
         # reverse range one row
         assert (await item_repo.range(time=(111, 111))).name == ["Itm11"]
         assert len((await item_repo.range(time=(111, 111))).name) == 1
+
+
+async def test_string_index_colon_no_collision(item_ref, mod_auto_backend):
+    """发现2回归：字符串索引曾用 ':' 分隔 value/row_id，value 内含 ':' 会串扰。
+    查询 value=='boss' 不应命中 'boss:1' 等；unique 也不应被 ':' 串扰。"""
+    backend = mod_auto_backend()
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        for i, nm in enumerate(["boss", "boss:1", "boss:99", "bossX"]):
+            row = item_ref.comp_cls.new_row()
+            row.name = nm
+            row.time = 300 + i  # time 也是 unique，给不同值
+            await repo.insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        # 精确查询只能命中自己，不能带出 'boss:1'/'boss:99'
+        assert set(
+            map(str, (await repo.range(name=("boss", "boss"), limit=99)).name)
+        ) == {"boss"}
+        assert str((await repo.get(name="boss")).name) == "boss"
+        # 含 ':' 的值本身也能被精确查询
+        assert set(
+            map(str, (await repo.range(name=("boss:1", "boss:1"), limit=99)).name)
+        ) == {"boss:1"}
+
+    # unique 串扰：已存在 'zzz:1' 时插入 'zzz' 不应被误判为唯一冲突
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
+        row.name = "zzz:1"
+        row.time = 400
+        await repo.insert(row)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        row = item_ref.comp_cls.new_row()
+        row.name = "zzz"
+        row.time = 401
+        await repo.insert(row)  # 旧编码会在此误报 UniqueViolation
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        assert str((await repo.get(name="zzz")).name) == "zzz"
+        assert str((await repo.get(name="zzz:1")).name) == "zzz:1"
+
+
+async def test_string_index_variable_length_ordering(item_ref, mod_auto_backend):
+    """潜伏 bug 回归：变长字符串索引的 range 查询必须保持字符串字典序。
+    旧 ':'(0x3A) 分隔符会让『更短的前缀』排到『后接 <0x3A 字符(如数字)的更长值』之后，
+    导致 range 漏查/乱序（例如 'a' 会排到 'a0' 之后，range('a','ab') 会漏掉 'a0'/'a9'）。"""
+    backend = mod_auto_backend()
+
+    # 'a' 是 'a0'/'a9'/'ab' 的前缀；'0'(0x30)、'9'(0x39) 都 < ':'(0x3A)
+    names = ["a", "a0", "a9", "ab"]
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        for i, nm in enumerate(names):
+            row = item_ref.comp_cls.new_row()
+            row.name = nm
+            row.time = 500 + i  # time 也是 unique
+            await repo.insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        # 升序：必须按字符串序返回且不漏（旧 ':' 方案会漏 'a0'/'a9'）
+        rows = await repo.range(name=("a", "ab"), limit=99)
+        assert [str(n) for n in rows.name] == ["a", "a0", "a9", "ab"]
+        # 降序：必须是严格逆序
+        rows_desc = await repo.range(name=("a", "ab"), limit=99, desc=True)
+        assert [str(n) for n in rows_desc.name] == ["ab", "a9", "a0", "a"]
 
 
 async def test_query_bool(filled_item_ref, mod_auto_backend):

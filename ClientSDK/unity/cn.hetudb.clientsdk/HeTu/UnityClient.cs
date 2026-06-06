@@ -213,7 +213,12 @@ namespace HeTu
         }
 
 #if UNITY_6000_0_OR_NEWER
-        private static async Awaitable<T> CompletedAwaitable<T>(T value) => value;
+        private static Awaitable<T> CompletedAwaitable<T>(T value)
+        {
+            var tcs = NewCompletionSource<T>();
+            tcs.SetResult(value);
+            return AwaitFrom(tcs);
+        }
 #else
         private static UniTask<T> CompletedAwaitable<T>(T value) =>
             UniTask.FromResult(value);
@@ -247,7 +252,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error("[HeTuClient] CallSystem过程中遇到取消信号");
+                    Logger.Instance.Error("CallSystem过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else
@@ -327,7 +332,7 @@ namespace HeTu
             {
                 if (cancel)
                 {
-                    Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
+                    Logger.Instance.Error("订阅数据过程中遇到取消信号");
                     tcs.TrySetCanceled();
                 }
                 else if (ex != null)
@@ -421,7 +426,7 @@ namespace HeTu
                 {
                     if (cancel)
                     {
-                        Logger.Instance.Error("[HeTuClient] 订阅数据过程中遇到取消信号");
+                        Logger.Instance.Error("订阅数据过程中遇到取消信号");
                         tcs.TrySetCanceled();
                     }
                     else if (ex != null)

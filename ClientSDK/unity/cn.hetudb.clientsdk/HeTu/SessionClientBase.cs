@@ -844,8 +844,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Logger.Instance.Error(
-                    $"[HeTuSession] user callback threw: {ex}");
+                Logger.Instance.Error($"user callback threw: {ex}");
             }
         }
 
@@ -859,8 +858,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Logger.Instance.Error(
-                    $"[HeTuSession] user callback threw: {ex}");
+                Logger.Instance.Error($"user callback threw: {ex}");
             }
         }
 
