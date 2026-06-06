@@ -86,7 +86,9 @@ async def start_backends(app: Sanic):
         except KeyError as e:
             logger.exception(e)
             logger.info(
-                _("⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试...")
+                _(
+                    "⌚ [📡Server] Worker ID分配失败，可能是反复宕机导致Worker ID分配满了，等待1秒后重试..."
+                )
             )
             await asyncio.sleep(1)
     last_timestamp = await worker_keeper.get_last_timestamp()
@@ -104,7 +106,9 @@ async def close_backends(app: Sanic):
     for attrib in dir(app.ctx):
         backend = app.ctx.__getattribute__(attrib)
         if isinstance(backend, Backend):
-            logger.info(_("⌚ [📡Server] Closing backend {attrib}...").format(attrib=attrib))
+            logger.info(
+                _("⌚ [📡Server] Closing backend {attrib}...").format(attrib=attrib)
+            )
             await backend.close()
 
 
@@ -112,7 +116,11 @@ async def worker_start(app: Sanic):
     try:
         await start_backends(app)
     except Exception as e:
-        logger.exception(_("❌ 进程[{pid}] 启动失败: {err}").format(pid=os.getpid(), err=f"{type(e).__name__}:{e}"))
+        logger.exception(
+            _("❌ 进程[{pid}] 启动失败: {err}").format(
+                pid=os.getpid(), err=f"{type(e).__name__}:{e}"
+            )
+        )
         app.stop()
         return
 
@@ -122,14 +130,14 @@ async def worker_start(app: Sanic):
     logger.info(
         _("ℹ️ 进程[{pid}] 加载 {app_file} 完成").format(
             pid=os.getpid(),
-            app_file=Path(app.config.get('APP_FILE', None)).resolve(strict=False),
+            app_file=Path(app.config.get("APP_FILE", None)).resolve(strict=False),
         )
     )
     logger.info(
         _("ℹ️ 进程[{pid}] 已启动 {namespace} 应用的 {instances} 服").format(
             pid=os.getpid(),
-            namespace=app.config['NAMESPACE'],
-            instances=app.config['INSTANCES'],
+            namespace=app.config["NAMESPACE"],
+            instances=app.config["INSTANCES"],
         )
     )
 
@@ -143,13 +151,15 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
+        # logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
         # todo sanic bug: 来新连接时，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
         except RedisConnectionError as e:
             logger.error(
-                _("❌ [📡WorkerKeeper] 续约失败，将重试: {err}").format(err=f"{type(e).__name__}:{e}")
+                _("❌ [📡WorkerKeeper] 续约失败，将重试: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
             )
             continue
         except SystemExit:
@@ -173,12 +183,12 @@ def worker_main(app_name, config) -> Sanic:
             spec.loader.exec_module(module)
         except Exception as e:
             print(
-                _("无法加载主启动文件({err})：{app_file}，检查以下可能性：\n"
-                "* 如果是命令行启动，检查--app-file参数路径是否正确\n"
-                "* 如果是通过Config启动，此文件由APP_FILE参数设置\n"
-                "* 如果由Docker启动，还需检查是否正确映射了/app目录\n").format(
-                    err=type(e).__name__, app_file=app_file
-                )
+                _(
+                    "无法加载主启动文件({err})：{app_file}，检查以下可能性：\n"
+                    "* 如果是命令行启动，检查--app-file参数路径是否正确\n"
+                    "* 如果是通过Config启动，此文件由APP_FILE参数设置\n"
+                    "* 如果由Docker启动，还需检查是否正确映射了/app目录\n"
+                ).format(err=type(e).__name__, app_file=app_file)
             )
             raise e
 
@@ -227,5 +237,5 @@ def worker_main(app_name, config) -> Sanic:
     app.add_task(worker_keeper_renewal(app))
 
     # 启动服务器监听
-    app.blueprint(HETU_BLUEPRINT) 
+    app.blueprint(HETU_BLUEPRINT)
     return app
