@@ -146,19 +146,23 @@ class Sandbox:
         return cls(namespace, instance_name, backend, tbl_mgr)
 
     async def call(
-        self, system: str, *args: Any, caller: int = 0, uuid: str = ""
+        self, system: str, *args: Any, caller: int = 0, uuid: str = "",
+        user_data: dict | None = None,
     ) -> Any:
         """以 `caller` 身份跑一个 System，返回该 System 的返回值。
 
         System 若返回 `ResponseToClient`，则原样返回该对象（其载荷在 `.message`）。
         内部会开事务、自动在 `RaceCondition` 时重试。
+
+        user_data: 传入则作为 `ctx.user_data`（同一 dict 对调用方可见，便于断言
+        System 对其的写入）；不传则用空 dict。
         """
         ctx = SystemContext(
             caller=caller,
             connection_id=0,
             address="sandbox",
             group="",
-            user_data={},
+            user_data=user_data if user_data is not None else {},
             timestamp=0,
             request=None,  # type: ignore[arg-type]
             systems=None,  # type: ignore[arg-type]
