@@ -58,12 +58,27 @@ working examples — read them first.
 - **Component** — a typed table. Strings are **fixed-width** (`dtype="U256"`)
   and truncate; there are **no nulls** (every column has a default). `index=True`
   builds a sorted index for `range()`; `unique=True` adds a uniqueness check.
+- **Volatile components** — `@define_component(volatile=True)` marks a table as
+  transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
+  `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
+  ephemeral leaderboards) or caches whose source of truth is elsewhere. **Never**
+  for player data, currency, or anything that must survive a deploy. (→ `advanced.md`)
 - **System** — an async function in a transaction. Declare *every* table it
   touches in `components=`; Systems sharing a Component land in the same
   **co-location cluster** (the unit of isolation and sharding — avoid "hub"
   tables touched by everything). CRUD through `ctx.repo[Component]`: `get`,
   `range`, `upsert`, `insert`, `update`, `delete`. Compose other Systems in the
   **same** transaction via `depends=` + `ctx.depend["name"](ctx, ...)`.
+- **System copies / component duplicates (`:tag` sharding)** — the escape hatch
+  for a hub Component that drags everything into one cluster. Append a `:tag` in
+  `depends=` (`depends=("remove:ItemOrder",)`, invoked via
+  `ctx.depend["remove:ItemOrder"]`): the engine duplicates the Component into a
+  **separate physical sibling table** (`Order:ItemOrder`, same schema / index /
+  permission) and registers a copy of the System bound to it, in its own isolated
+  cluster — not generic namespacing, each copy is a real table. Resolve a copy at
+  load time with `Component.duplicate(namespace, tag)`, enumerate with
+  `get_duplicates()`. Built-in `create_future_call:scheduler` is the canonical
+  example. (→ `advanced.md`)
 - **RaceCondition / retry** — commit uses optimistic version checks; on conflict
   the engine re-runs the System from the top (`retry=`, default high). So System
   bodies must be **safe to re-run**; do external / non-idempotent side effects
@@ -110,7 +125,6 @@ client uses `HeTuClient.Instance` (one raw socket) or, preferred,
   (Systems & clusters), `system/context.py` (`ctx` + repo), `endpoint/`
   (Endpoints, `elevate`), `data/backend/` (`SessionRepository` CRUD),
   `CONFIG_TEMPLATE.yml` (every config key).
-- **Advanced** (`advanced.md`): System copies (`:tag` sharding), scheduled
-  `FutureCalls`, `call_lock` idempotency, the `on_disconnect` hook, per-
-  connection limits, NumPy patterns over `range()` results, custom pipeline
-  layers.
+- **Advanced** (`advanced.md`): scheduled `FutureCalls`, `call_lock` idempotency,
+  the `on_disconnect` hook, per-connection limits, NumPy patterns over `range()`
+  results, custom pipeline layers.
