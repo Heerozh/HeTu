@@ -88,10 +88,14 @@ def generate_all_components(namespace: str, output: str):
     visited: set[type[BaseComponent]] = set()
     for cluster in clusters:
         for comp in cluster.components:
-            if comp in visited or comp.permission_ == Permission.ADMIN:
+            # 副本(duplicate)的 name_ 带冒号(如 ChatMessage:Universe)，是非法 C# 类名。
+            # 副本与 master schema 完全相同，统一映射到 master 去重，只输出干净的 master 类。
+            # 客户端用 master 类型 + componentName 字符串订阅各副本。
+            master = comp.master_ or comp
+            if master in visited or master.permission_ == Permission.ADMIN:
                 continue
-            components.append(comp)
-            visited.add(comp)
+            components.append(master)
+            visited.add(master)
 
     from tqdm import tqdm
 
