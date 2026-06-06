@@ -37,6 +37,57 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void IsConnectionAlive_BeforeStart_IsFalse()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            Assert.IsFalse(session.IsConnectionAlive,
+                "尚未 Connect 时不该报告存活连接");
+        }
+
+        [Test]
+        public void IsConnectionAlive_WhenReady_IsTrue()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.IsTrue(session.IsConnectionAlive,
+                "Ready 且底层连接存活时应报告存活");
+        }
+
+        [Test]
+        public void IsConnectionAlive_WhenSocketSilentlyDropped_IsFalse()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+
+            session.Start();
+            transport.RaiseConnected();
+            // 复现关 Domain Reload 停 Play 的场景:底层 socket 死了但 Closed 没送达,
+            // 逻辑状态仍 stale 在 Ready。
+            transport.SimulateSilentDrop();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State,
+                "前置:State 必须仍 stale 在 Ready,否则没复现到该 bug");
+            Assert.IsFalse(session.IsConnectionAlive,
+                "底层连接已死时 IsConnectionAlive 必须为 false,不能被 stale Ready 骗到");
+        }
+
+        [Test]
         public void CallBeforeReady_IsQueuedUntilSessionReady()
         {
             var transport = new FakeTransport("c1");
@@ -1416,6 +1467,11 @@ namespace Tests.HeTu
                 IsConnected = false;
                 Closed?.Invoke(reason);
             }
+
+            // 模拟 socket 静默死亡：底层连接没了,但 Closed 事件没送达(典型如
+            // Editor 关 Domain Reload 后停 Play,OnClose 卡在未派发的事件队列里),
+            // 会话状态因此 stale 在 Ready。
+            public void SimulateSilentDrop() => IsConnected = false;
 
             public void CallSystem(string systemName, object[] args,
                 Action<JsonObject, bool> onResponse)

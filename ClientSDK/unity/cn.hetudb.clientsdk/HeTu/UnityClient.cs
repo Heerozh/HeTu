@@ -54,6 +54,15 @@ namespace HeTu
         public static HeTuClient Instance => s_lazy.Value;
 
         /// <summary>
+        ///     底层 WebSocket 是否仍处于 Open。区别于 <see cref="HeTuClientBase.IsConnected" />
+        ///     （读缓存的握手状态,断线事件没派发时会 stale,典型如 Editor 关 Domain
+        ///     Reload 后停 Play）,本属性直读底层 socket 的真实 <c>ReadyState</c>,
+        ///     可靠反映连接是否还活着,可用来判断现有连接能否直接复用。
+        /// </summary>
+        public bool IsConnectionAlive =>
+            _socket?.ReadyState == WebSocketState.Open;
+
+        /// <summary>
         ///     对于全局连接(HeTuClient.Instance)，可以不做Dispose。
         /// </summary>
         public override void Dispose()

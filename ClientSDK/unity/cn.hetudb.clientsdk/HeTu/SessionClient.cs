@@ -54,6 +54,15 @@ namespace HeTu
             _core?.State ?? HeTuSessionState.Stopped;
 
         /// <summary>
+        ///     当前是否真的握着一条存活的物理连接（<see cref="State" /> == Ready 且
+        ///     底层 WebSocket 仍 Open）。区别于 <see cref="State" />：关掉 Domain
+        ///     Reload 后停 Play / 热重载时,断线事件可能没派发,<see cref="State" /> 会
+        ///     stale 在 Ready,而本属性透过底层 socket 的真实状态判断,可靠地告诉你
+        ///     "这条连接还能不能直接复用"——重进 Play 时用它决定复用还是重连。
+        /// </summary>
+        public bool IsConnectionAlive => _core?.IsConnectionAlive ?? false;
+
+        /// <summary>
         ///     会话状态每次变化都触发一次；最常用于驱动 UI（断线 → 显示 syncing...
         ///     条幅 / Ready → 隐藏）。
         /// </summary>
@@ -387,7 +396,9 @@ namespace HeTu
             _client.OnClosed += HandleClosed;
         }
 
-        public bool IsConnected => _client.IsConnected;
+        // 用 IsConnectionAlive(底层 socket 真实 ReadyState)而非缓存的
+        // IsConnected：后者在断线事件没派发时会 stale,会让会话误判连接还活着。
+        public bool IsConnected => _client.IsConnectionAlive;
 
         public event Action Connected;
         public event Action<string> Closed;
