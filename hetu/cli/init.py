@@ -133,6 +133,18 @@ def read_config_template() -> str:
     return resource.read_text(encoding="utf-8")
 
 
+# 随包发布、供编码 AI 阅读的 HeTu 开发索引 skill 名（写入项目 .claude/skills/）。
+HETU_SKILL_NAME = "building-on-hetu"
+
+
+def read_skill_doc() -> str:
+    """读取打包在 hetu 包内的 building-on-hetu skill（给 LLM 的 HeTu 开发索引）。"""
+    resource = importlib.resources.files("hetu").joinpath(
+        "skills", HETU_SKILL_NAME, "SKILL.md"
+    )
+    return resource.read_text(encoding="utf-8")
+
+
 def render_config(template_text: str, namespace: str, app_file: str) -> str:
     """根据 namespace 与 app 文件路径渲染 config.yml，保留模板注释。
 
@@ -284,7 +296,14 @@ class InitCommand(CommandInterface):
             config_path.write_text(config_text, encoding="utf-8")
             print(_("✅ 已创建 config.yml"))
 
-        # 步骤4：uv add hetudb numpy（hetudb 已在依赖中则跳过）
+        # 步骤4：写入供编码 AI 阅读的 HeTu 开发 skill（.claude/skills/，已存在则跳过）
+        write_project_file(
+            project_dir / ".claude" / "skills" / HETU_SKILL_NAME / "SKILL.md",
+            read_skill_doc(),
+            f".claude/skills/{HETU_SKILL_NAME}/SKILL.md",
+        )
+
+        # 步骤5：uv add hetudb numpy（hetudb 已在依赖中则跳过）
         # 走到这里 pyproject.toml 必定已存在（uv init 创建或本就存在）
         pyproject_path = project_dir / "pyproject.toml"
         if "hetudb" in pyproject_path.read_text(encoding="utf-8"):
@@ -292,7 +311,7 @@ class InitCommand(CommandInterface):
         else:
             run_uv(["add", "hetudb", "numpy"], cwd=project_dir)
 
-        # 步骤5：提示启动命令
+        # 步骤6：提示启动命令
         print()
         print(_("🎉 项目已就绪！下一步："))
         if args.name:
@@ -301,3 +320,8 @@ class InitCommand(CommandInterface):
         print()
         print(_("提示：默认使用 SQLite 调试数据库，文件会自动创建，无需额外服务。"))
         print(_("      生产环境请在 config.yml 的 BACKENDS 中改用 Redis。"))
+        print(
+            _("      已写入 .claude/skills/{name}/，供编码 AI 了解 HeTu 用法。").format(
+                name=HETU_SKILL_NAME
+            )
+        )
