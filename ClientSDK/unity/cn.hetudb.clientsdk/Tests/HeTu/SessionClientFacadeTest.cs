@@ -36,6 +36,31 @@ namespace Tests.HeTu
         }
 
         [UnityTest]
+        public IEnumerator IsConnectionAlive_FalseWhenSocketSilentlyDropped() =>
+            RunTask(IsConnectionAlive_FalseWhenSocketSilentlyDroppedAsync());
+
+        private async Task IsConnectionAlive_FalseWhenSocketSilentlyDroppedAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseConnected();
+            await connectTask;
+            Assert.IsTrue(session.IsConnectionAlive,
+                "Ready 且底层连接存活时应为 true");
+
+            // 关 Domain Reload 停 Play 的复现:socket 死了但 Closed 没派发,
+            // State 仍 stale 在 Ready。
+            transport.SimulateSilentDrop();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.IsFalse(session.IsConnectionAlive,
+                "底层 socket 静默断开后 IsConnectionAlive 必须为 false");
+        }
+
+        [UnityTest]
         public IEnumerator CallSystem_CompletesFromCoreCallback() =>
             RunTask(CallSystem_CompletesFromCoreCallbackAsync());
 
@@ -383,6 +408,10 @@ namespace Tests.HeTu
                 IsConnected = false;
                 Closed?.Invoke(reason);
             }
+
+            // 底层 socket 静默死亡:连接没了但 Closed 没送达(关 Domain Reload 停
+            // Play 的典型情形),会话状态因此 stale 在 Ready。
+            public void SimulateSilentDrop() => IsConnected = false;
 
             public readonly struct CallRecord
             {

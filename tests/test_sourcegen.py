@@ -74,3 +74,32 @@ def test_generate_all_components_latest_template(tmp_path, monkeypatch):
     assert code.count("public class TestA : IBaseComponent") == 1
     assert code.count("public class TestB : IBaseComponent") == 1
     assert '[Key("id")] public long ID { get; set; }' in code
+
+
+def test_generate_all_components_dedup_duplicates(tmp_path, monkeypatch):
+    # 副本(duplicate)的 name_ 带冒号(如 ChatMessage:Universe)，是非法 C# 类名。
+    # 生成时应统一映射到 master 去重，只输出一个干净的 master 类。
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class ChatMessage(BaseComponent):
+        owner: np.int64 = property_field(0)
+
+    dup = ChatMessage.duplicate("HeTu", "Universe")
+    assert dup.name_ == "ChatMessage:Universe"
+
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [
+            SimpleNamespace(components=[ChatMessage]),
+            SimpleNamespace(components=[dup]),
+        ],
+    )
+
+    output = tmp_path / "Components.cs"
+    generate_all_components("demo_ns", str(output))
+    code = output.read_text(encoding="utf-8")
+
+    # 副本不能生成带冒号的非法 C# 类
+    assert "ChatMessage:Universe" not in code
+    # 只输出一个干净的 master 类
+    assert code.count("public class ChatMessage : IBaseComponent") == 1

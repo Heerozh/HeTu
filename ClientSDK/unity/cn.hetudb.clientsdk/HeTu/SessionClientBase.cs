@@ -134,6 +134,18 @@ namespace HeTu
             HeTuSessionState.Stopped;
 
         /// <summary>
+        ///     底层物理连接当前是否真的存活——区别于 <see cref="State" />：
+        ///     <see cref="State" /> 只是逻辑会话最后一次已知状态，断线事件若没送达
+        ///     （典型如 Editor 关掉 Domain Reload 后停 Play，OnClose 卡在未派发的事件
+        ///     队列里），它会 stale 在 <see cref="HeTuSessionState.Ready" />。本属性
+        ///     透过 transport 读底层 socket 的真实存活状态，可用来判断"现有连接是否
+        ///     还能直接复用"——例如重进 Play / 热重载后决定复用还是重连。
+        /// </summary>
+        public bool IsConnectionAlive =>
+            State == HeTuSessionState.Ready &&
+            _transport != null && _transport.IsConnected;
+
+        /// <summary>
         ///     本 core 是否曾经达到过 <see cref="HeTuSessionState.Ready" />；
         ///     用来区分 "首次连接没成功" 和 "进游戏后断线"——前者不重试，后者才重试。
         /// </summary>

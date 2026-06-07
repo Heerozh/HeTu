@@ -1,6 +1,7 @@
 """hetu init 命令的测试。"""
 
 import argparse
+import tomllib
 
 from hetu.cli import CommandIndex
 from hetu.cli.init import (
@@ -8,9 +9,14 @@ from hetu.cli.init import (
     INIT_PY_TEMPLATE,
     SYSTEM_INIT_TEMPLATE,
     InitCommand,
+    ensure_gitignore_entry,
+    ensure_project_scripts,
+    output_env_var,
     read_config_template,
     render_app_py,
     render_config,
+    render_devtools,
+    render_env_test,
     render_login_py,
     render_player_py,
 )
@@ -91,6 +97,97 @@ def test_read_config_template_is_packaged():
     # render_config 依赖以下两行作为后端替换锚点
     assert "type: Redis" in text
     assert "master: redis://127.0.0.1:6379/0" in text
+
+
+# --- devtools / 命令注册到 pyproject ---
+
+
+def test_output_env_var_is_namespaced():
+    assert output_env_var("mygame") == "MYGAME_CLIENT_OUTPUT"
+    assert output_env_var("ssw_lobby") == "SSW_LOBBY_CLIENT_OUTPUT"
+
+
+def test_render_devtools_substitutes_namespace():
+    code = render_devtools("mygame")
+    assert '_NAMESPACE = "mygame"' in code
+    assert '_OUTPUT_ENV = "MYGAME_CLIENT_OUTPUT"' in code
+    assert "__NAMESPACE__" not in code
+    assert "__OUTPUT_ENV__" not in code
+    assert "def build(" in code
+    assert "def dev(" in code
+    # dev 走强制迁移（--drop-data），且 build 输出路径来自环境变量
+    assert "--drop-data" in code
+    compile(code, "devtools.py", "exec")
+
+
+def test_render_env_test_substitutes_output_env():
+    text = render_env_test("mygame")
+    assert "MYGAME_CLIENT_OUTPUT" in text
+    assert "__OUTPUT_ENV__" not in text
+
+
+def test_ensure_project_scripts_fresh(tmp_path):
+    # 没有 [project.scripts] 段时，追加新段并注册 build/dev
+    pp = tmp_path / "pyproject.toml"
+    pp.write_text('[project]\nname = "mygame"\ndependencies = []\n', encoding="utf-8")
+    ensure_project_scripts(pp, "mygame")
+    data = tomllib.loads(pp.read_text(encoding="utf-8"))
+    assert data["project"]["scripts"]["build"] == "mygame.devtools:build"
+    assert data["project"]["scripts"]["dev"] == "mygame.devtools:dev"
+
+
+def test_ensure_project_scripts_into_existing_section(tmp_path):
+    # 已有 [project.scripts] 段时，插入 build/dev 且保留既有项
+    pp = tmp_path / "pyproject.toml"
+    pp.write_text(
+        '[project]\nname = "mygame"\n\n[project.scripts]\nhetu = "hetu.__main__:main"\n',
+        encoding="utf-8",
+    )
+    ensure_project_scripts(pp, "mygame")
+    data = tomllib.loads(pp.read_text(encoding="utf-8"))
+    scripts = data["project"]["scripts"]
+    assert scripts["hetu"] == "hetu.__main__:main"
+    assert scripts["build"] == "mygame.devtools:build"
+    assert scripts["dev"] == "mygame.devtools:dev"
+
+
+def test_ensure_project_scripts_idempotent(tmp_path):
+    pp = tmp_path / "pyproject.toml"
+    pp.write_text('[project]\nname = "mygame"\n', encoding="utf-8")
+    ensure_project_scripts(pp, "mygame")
+    once = pp.read_text(encoding="utf-8")
+    ensure_project_scripts(pp, "mygame")
+    assert pp.read_text(encoding="utf-8") == once
+    # 不重复键，仍是合法 TOML
+    tomllib.loads(pp.read_text(encoding="utf-8"))
+
+
+def test_ensure_project_scripts_skips_on_conflict(tmp_path):
+    # 已有别处定义的 build key 时不动它（否则会生成重复键即非法 TOML）
+    pp = tmp_path / "pyproject.toml"
+    original = (
+        '[project]\nname = "mygame"\n\n[project.scripts]\nbuild = "other:thing"\n'
+    )
+    pp.write_text(original, encoding="utf-8")
+    ensure_project_scripts(pp, "mygame")
+    assert pp.read_text(encoding="utf-8") == original
+    tomllib.loads(pp.read_text(encoding="utf-8"))
+
+
+def test_ensure_gitignore_entry_creates_and_appends(tmp_path):
+    gi = tmp_path / ".gitignore"
+    # 文件不存在 → 创建
+    ensure_gitignore_entry(gi, ".env.test")
+    assert ".env.test" in gi.read_text(encoding="utf-8").splitlines()
+    # 已存在该条目 → 幂等
+    before = gi.read_text(encoding="utf-8")
+    ensure_gitignore_entry(gi, ".env.test")
+    assert gi.read_text(encoding="utf-8") == before
+    # 追加新条目，保留原有内容
+    ensure_gitignore_entry(gi, ".venv")
+    lines = gi.read_text(encoding="utf-8").splitlines()
+    assert ".env.test" in lines
+    assert ".venv" in lines
 
 
 # --- 命令注册 ---
@@ -175,6 +272,17 @@ def test_execute_fresh_project(tmp_path, monkeypatch):
     assert "NAMESPACE: mygame" in cfg
     assert "type: SQL" in cfg
     assert "master: sqlite:///./hetu.db" in cfg
+
+    # devtools.py + uv run build/dev 注册到 pyproject.toml
+    assert '_NAMESPACE = "mygame"' in (pkg / "devtools.py").read_text(encoding="utf-8")
+    pp = tomllib.loads((proj / "pyproject.toml").read_text(encoding="utf-8"))
+    assert pp["project"]["scripts"]["build"] == "mygame.devtools:build"
+    assert pp["project"]["scripts"]["dev"] == "mygame.devtools:dev"
+
+    # .env.test 含输出环境变量名，且被 gitignore
+    env_test = (proj / ".env.test").read_text(encoding="utf-8")
+    assert "MYGAME_CLIENT_OUTPUT" in env_test
+    assert ".env.test" in (proj / ".gitignore").read_text(encoding="utf-8").splitlines()
 
     assert ["init", "--lib", "--python", "3.14", "mygame"] in calls
     assert ["add", "hetudb", "numpy"] in calls
