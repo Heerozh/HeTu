@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <AssemblyName>HeTu.Client</AssemblyName>
+    <RootNamespace>HeTu</RootNamespace>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+  </PropertyGroup>
+
+  <!-- 链接共享纯协议源码（不拷贝）；排除 Unity 适配器与会重复的 AssemblyInfo。
+       维护提醒 / MAINTENANCE: 此 glob 会自动纳入 Unity HeTu/ 目录下每个新增 .cs。
+       任何使用 Unity API（UnityEngine / UnityWebSocket / UniTask 等）的新文件，必须
+       要么加入下方 Exclude，要么用 #if UNITY_2022_3_OR_NEWER 守住 Unity 专属代码
+       （参考 ZlibLayer.cs），否则 headless 构建会失败。 -->
+  <ItemGroup>
+    <Compile Include="..\..\unity\cn.hetudb.clientsdk\HeTu\*.cs"
+             Exclude="..\..\unity\cn.hetudb.clientsdk\HeTu\UnityClient.cs;..\..\unity\cn.hetudb.clientsdk\HeTu\SessionClient.cs;..\..\unity\cn.hetudb.clientsdk\HeTu\AssemblyInfo.cs"
+             Link="Shared\%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="MessagePack" Version="2.5.198" />
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.4.0" />
+    <PackageReference Include="SharpZipLib" Version="1.4.2" />
+    <PackageReference Include="R3" Version="1.2.9" />
+  </ItemGroup>
+</Project>

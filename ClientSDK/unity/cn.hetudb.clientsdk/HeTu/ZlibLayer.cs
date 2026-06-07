@@ -6,9 +6,15 @@
 using System;
 using System.Buffers;
 using System.IO;
+#if UNITY_2022_3_OR_NEWER
 using Unity.SharpZipLib.Zip.Compression;
 using Unity.SharpZipLib.Zip.Compression.Streams;
 using UnityEngine;
+#else
+using ICSharpCode.SharpZipLib.Zip.Compression;
+using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
+using Debug = System.Diagnostics.Debug;
+#endif
 
 namespace HeTu
 {
