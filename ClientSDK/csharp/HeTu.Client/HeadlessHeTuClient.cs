@@ -34,9 +34,18 @@ namespace HeTu
 
         public override void Dispose()
         {
-            base.Dispose();
-            _socket?.Dispose();
+            // 先停并排空泵（其 Dispose 会 join 泵线程），此后不再有任何动作访问基类状态，
+            // 从而 Pipeline 可安全地最后释放，不被排空中的动作触碰（spec §7 单线程不变量延伸到 teardown）。
             _pump.Dispose();
+            // 关闭并释放底层 socket（释放其 CTS/信号量/ws）。
+            _socket?.Close();
+            _socket?.Dispose();
+            _socket = null;
+            State = ConnectionState.Disconnected;
+            // 取消仍在等待的响应回调，避免 await 中的 CallSystem/WatchXxx 永久挂起（泵已停，无竞态）。
+            ResponseQueue.CancelAll("disposed");
+            // 最后释放 Pipeline。
+            base.Dispose();
         }
 
         // ---- Task 外观 ----
@@ -49,7 +58,8 @@ namespace HeTu
             OnConnected += OnConn;
             OnClosed += OnClose;
             if (ct.CanBeCanceled)
-                ct.Register(() => { Cleanup(); tcs.TrySetCanceled(); CloseCore(); });
+                // CloseCore 写 _socket/State，必须与泵上的 SendCore/状态读取串行化，故改投泵线程。
+                ct.Register(() => { Cleanup(); tcs.TrySetCanceled(); _pump.Post(CloseCore); });
             _pump.Post(() =>
             {
                 if (authKey != null) ConfigureCryptoAuthKey(authKey);

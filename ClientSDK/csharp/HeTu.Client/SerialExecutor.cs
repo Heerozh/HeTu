@@ -36,14 +36,19 @@ namespace HeTu
             }
         }
 
-        /// <summary>停止接收新动作；已入队的动作仍会在泵线程上执行完毕。
-        /// 若调用方需要在释放下游资源前确保清空，应在 Dispose 前 Post 一个收尾动作。</summary>
+        /// <summary>停止接收新动作；已入队的动作会在泵线程上执行完毕，随后泵线程退出。
+        /// 返回前会（有上限地）等待泵线程结束，从而调用方可在 Dispose 后安全释放下游资源
+        /// （Pipeline / socket）而不与排空中的动作竞争。</summary>
         public void Dispose()
         {
-            // 仅 CompleteAdding 通知泵退出；不在此 Dispose _q：泵线程仍在
+            // CompleteAdding 通知泵排空后退出；不在此 Dispose _q：泵线程仍在
             // GetConsumingEnumerable 上迭代，立即 Dispose 会与之竞争（use-after-dispose）。
-            // 泵线程 IsBackground=true + 每连接生命周期，进程退出时自然回收。
             try { _q.CompleteAdding(); } catch { /* 已释放 */ }
+            // 等待泵把已入队动作排空并退出，使 teardown 确定化。
+            // 自我 join 守卫：若从泵线程内部调用 Dispose，跳过 join 以免死锁。
+            // 超时（动作阻塞）时不静默继续而是记一条错误日志，便于诊断病态动作。
+            if (Thread.CurrentThread != _thread && !_thread.Join(TimeSpan.FromSeconds(5)))
+                Logger.Instance.Error("SerialExecutor: 泵线程 5s 内未退出，继续 teardown（可能有动作阻塞）");
         }
     }
 }
