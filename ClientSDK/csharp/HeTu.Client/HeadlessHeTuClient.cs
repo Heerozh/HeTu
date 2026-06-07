@@ -48,6 +48,10 @@ namespace HeTu
             base.Dispose();
         }
 
+        /// <summary>主动关闭连接：路由到泵线程执行，保持 spec §7 单线程不变量
+        /// （base.Close 会改动 ResponseQueue/Subscriptions/State，不能在调用方线程并发执行）。</summary>
+        public override void Close() => _pump.Post(base.Close);
+
         // ---- Task 外观 ----
         public Task Connect(string url, string authKey = null, CancellationToken ct = default)
         {
@@ -65,6 +69,22 @@ namespace HeTu
                 if (authKey != null) ConfigureCryptoAuthKey(authKey);
                 ConnectSync(url);
             });
+            return tcs.Task;
+        }
+
+        /// <summary>等待连接关闭：完成于基类 OnClosed，返回关闭原因（null = 正常关闭）。
+        /// 若调用时已处于断开态则立即完成，避免永久挂起。</summary>
+        public Task<string> WaitClosedAsync()
+        {
+            var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+            void OnClose(string reason) { OnClosed -= OnClose; tcs.TrySetResult(reason); }
+            OnClosed += OnClose;
+            // 订阅时若已断开，OnClosed 不会再触发，立即完成以免永久挂起。
+            if (State == ConnectionState.Disconnected)
+            {
+                OnClosed -= OnClose;
+                tcs.TrySetResult(null);
+            }
             return tcs.Task;
         }
 

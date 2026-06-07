@@ -39,5 +39,22 @@ namespace HeTu.Client.Tests
             }
             Assert.That(c.IsConnected, Is.False, "失败后应为未连接");
         }
+
+        // WaitClosedAsync 在未连接（断开态）时应立即完成而非永久挂起。
+        [Test]
+        public async Task WaitClosedAsync_WhenNotConnected_CompletesImmediately()
+        {
+            using var c = new HeadlessHeTuClient();
+            var reason = await c.WaitClosedAsync().WaitAsync(TimeSpan.FromSeconds(2));
+            Assert.That(reason, Is.Null, "断开态视为正常关闭，原因为 null");
+        }
+
+        // Close() 路由到泵线程；对未连接实例调用应安全不抛。
+        [Test]
+        public void Close_OnFreshClient_DoesNotThrow()
+        {
+            using var c = new HeadlessHeTuClient();
+            Assert.DoesNotThrow(() => c.Close());
+        }
     }
 }
