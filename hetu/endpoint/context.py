@@ -5,17 +5,19 @@
 @email: heeroz@gmail.com
 """
 
-import numpy as np
 from dataclasses import dataclass, field
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import numpy as np
 
 if TYPE_CHECKING:
-    from ..data.component import BaseComponent
     from sanic import Request
+
+    from ..data.component import BaseComponent
     from ..system.caller import SystemCaller
 
 # rls_check 用的"未找到"哨兵；不能用 np.nan 当哨兵，因为 np.isnan 对字符串/None 会抛 TypeError
-_UNSET = object()
+_UNSET = "__UNSET__"
 
 
 @dataclass
