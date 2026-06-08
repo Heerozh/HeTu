@@ -37,7 +37,8 @@ uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
   支撑（类似 C struct 的 row）。定义在用户 app 代码中，存储在 Redis。每个
   component 都是一张 table，通过 `property_field()` 定义带类型的 columns。
   支持字段 `unique`/`index`。权限级别：`EVERYBODY`、`USER`、`OWNER`/`RLS`、
-  `ADMIN`。
+  `ADMIN`（`OWNER` = 行级私有：自动只让 client 订阅到 `owner==ctx.caller` 的行，
+  等价 `rls_compare=("eq", "owner", "caller")`，组件需有 `owner` 字段；服务端代码不受限）。
 
 - **System** (`@define_system`)：在 transaction 中操作 Components 的
   server-side logic function。System 声明其引用的 Components；engine 会将引用

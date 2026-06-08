@@ -1474,11 +1474,11 @@ namespace Tests.HeTu
             public void SimulateSilentDrop() => IsConnected = false;
 
             public void CallSystem(string systemName, object[] args,
-                Action<JsonObject, bool> onResponse)
+                Action<JsonObject, CallOutcome, string> onResponse)
             {
                 Calls.Add(new CallRecord(systemName, args));
                 if (!HoldCallsOpen)
-                    onResponse(null, false);
+                    onResponse(null, CallOutcome.Completed, null);
             }
 
             public void WatchRow<T>(

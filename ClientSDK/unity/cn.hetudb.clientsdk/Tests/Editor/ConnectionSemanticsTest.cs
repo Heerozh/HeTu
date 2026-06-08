@@ -16,9 +16,9 @@ namespace Tests.HeTu
 
             Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
             client.ForceReadyForConnect();
-            client.CallSystem("login", Array.Empty<object>(), (_, cancel) =>
+            client.CallSystem("login", Array.Empty<object>(), (_, outcome, _2) =>
             {
-                canceled = cancel;
+                canceled = outcome == CallOutcome.Canceled;
             });
 
             Assert.True(canceled);
@@ -35,7 +35,7 @@ namespace Tests.HeTu
             public void ForceReadyForConnect() => State = ConnectionState.ReadyForConnect;
 
             public void CallSystem(string systemName, object[] args,
-                Action<JsonObject, bool> onResponse) =>
+                Action<JsonObject, CallOutcome, string> onResponse) =>
                 CallSystemSync(systemName, args, onResponse);
 
             protected override void ConnectCore(string url, Action onConnected,

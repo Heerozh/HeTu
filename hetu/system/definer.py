@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from ..common import Singleton
 from ..common.permission import Permission
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN, EndpointDefine
+from ..endpoint.guard import collect_guards, mark_defined
 from ..i18n import _
 from .lock import SystemLock
 
@@ -269,9 +270,11 @@ class SystemClusters(metaclass=Singleton):
                     permission=sys_def.permission,
                     arg_count=sys_def.arg_count,
                     defaults_count=sys_def.defaults_count,
+                    guards=sys_def.guards,
                 )
 
-    def add(self, namespace, func, components, force, permission, depends, max_retry):
+    def add(self, namespace, func, components, force, permission, depends, max_retry,
+            guards=None):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -294,6 +297,7 @@ class SystemClusters(metaclass=Singleton):
             permission=permission,
             full_components=set(),
             full_depends=set(),
+            guards=list(guards) if guards else [],
         )
 
         if namespace == "global":
@@ -499,8 +503,11 @@ def define_system(
             dep if isinstance(dep, str) else dep.__name__ for dep in depends
         ]
 
+        guards = collect_guards(func)
+
         SystemClusters().add(
-            namespace, func, _components, force, permission, depend_names, retry
+            namespace, func, _components, force, permission, depend_names, retry,
+            guards=guards,
         )
 
         # 返回包装的func，因为不允许直接调用，需要检查。
@@ -522,6 +529,7 @@ def define_system(
                 )
             return func(*_args, **__kwargs)
 
+        mark_defined(warp_direct_system_call)
         return warp_direct_system_call
 
     return warp

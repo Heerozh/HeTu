@@ -415,7 +415,7 @@ namespace HeTu
         public void Close() => _client.Close();
 
         public void CallSystem(string systemName, object[] args,
-            Action<JsonObject, bool> onResponse) =>
+            Action<JsonObject, CallOutcome, string> onResponse) =>
             _client.CallSystemSync(systemName, args, onResponse);
 
         public void WatchRow<T>(

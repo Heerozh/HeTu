@@ -7,13 +7,14 @@
 """
 
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from inspect import signature
 from types import FunctionType
 from typing import Any, Awaitable, Callable
 
 from ..common import Permission, Singleton
 from ..i18n import _
+from .guard import collect_guards, mark_defined
 
 ENDPOINT_NAME_MAX_LEN = 32
 
@@ -26,6 +27,7 @@ class EndpointDefine:
     permission: Permission
     arg_count: int  # 全部参数个数（含默认参数）
     defaults_count: int  # 默认参数个数
+    guards: list = field(default_factory=list, kw_only=True)  # 调用前守卫链
 
 
 class EndpointDefines(metaclass=Singleton):
@@ -61,6 +63,7 @@ class EndpointDefines(metaclass=Singleton):
         permission,
         arg_count=None,
         defaults_count=None,
+        guards=None,
     ):
         sub_map = self._endpoint_map.setdefault(namespace, dict())
 
@@ -79,6 +82,7 @@ class EndpointDefines(metaclass=Singleton):
             permission=permission,
             arg_count=arg_count,
             defaults_count=defaults_count,
+            guards=list(guards) if guards else [],
         )
 
         if namespace == "global":
@@ -181,8 +185,10 @@ def define_endpoint(
             "Endpoint {name} 必须是异步函数(`async def ...`)"
         ).format(name=func.__name__)
 
-        EndpointDefines().add(namespace, func, force, permission)
+        guards = collect_guards(func)
+        EndpointDefines().add(namespace, func, force, permission, guards=guards)
 
+        mark_defined(func)
         return func
 
     return warp
