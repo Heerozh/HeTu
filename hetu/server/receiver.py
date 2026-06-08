@@ -16,7 +16,7 @@ from sanic.exceptions import WebsocketClosed
 import hetu  # for obtaining __version__
 
 from ..endpoint import connection
-from ..endpoint.response import ResponseToClient
+from ..endpoint.response import RejectResponse, ResponseToClient
 from ..i18n import _
 from .pipeline.pipeline import PipeContext, ServerMessagePipeline
 
@@ -56,7 +56,10 @@ async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue)
         # 关闭连接
         return False
 
-    if isinstance(res, ResponseToClient):
+    if isinstance(res, RejectResponse):
+        # 软拒绝：发 rej 帧，连接保持
+        await push_queue.put(["rej", data[1], res.code])
+    elif isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
     else:
         # 无视返回值，直接返回ok，如果不返回，Request无法对应

@@ -12,6 +12,37 @@ using System.Linq;
 namespace HeTu
 {
     /// <summary>
+    ///     System 调用结果。
+    /// </summary>
+    public enum CallOutcome
+    {
+        /// <summary>正常完成。</summary>
+        Completed,
+
+        /// <summary>因连接取消/重连而取消。</summary>
+        Canceled,
+
+        /// <summary>被服务端守卫拒绝（如限流）。</summary>
+        Rejected
+    }
+
+    /// <summary>
+    ///     System 调用被服务端守卫拒绝（如限流）时抛出。
+    /// </summary>
+    public sealed class HeTuCallRejectedException : Exception
+    {
+        public string SystemName { get; }
+        public string Code { get; }
+
+        public HeTuCallRejectedException(string systemName, string code)
+            : base($"System '{systemName}' rejected by server: {code}")
+        {
+            SystemName = systemName;
+            Code = code;
+        }
+    }
+
+    /// <summary>
     ///     客户端连接状态。
     /// </summary>
     public enum ConnectionState
@@ -45,6 +76,7 @@ namespace HeTu
         internal const string MessageResponse = "rsp";
         internal const string MessageUpdate = "updt";
         internal const string MessageSubed = "sub";
+        internal const string MessageReject = "rej";
         internal const string IndexId = "id";
         protected readonly InspectorTraceCollector InspectorCollector = new();
 
@@ -111,6 +143,12 @@ namespace HeTu
         ///     参数为 <see langword="null" /> 表示正常关闭；否则为错误信息。
         /// </remarks>
         public event Action<string> OnClosed;
+
+        /// <summary>
+        ///     System 调用被服务端守卫拒绝（如限流）时触发的通用回调。
+        ///     参数为 (systemName, code)。用户可在此统一弹窗/提示。
+        /// </summary>
+        public event Action<string, string> OnCallRejected;
 
         // 实际Websocket连接方法
         protected abstract void ConnectCore(string url, Action onConnected,
@@ -255,13 +293,13 @@ namespace HeTu
         /// </summary>
         /// <param name="systemName">系统名。</param>
         /// <param name="args">参数列表。</param>
-        /// <param name="onResponse">响应回调，第二参数为是否取消。</param>
+        /// <param name="onResponse">响应回调，第二参数为调用结果，第三参数为拒绝码。</param>
         internal protected void CallSystemSync(string systemName, object[] args,
-            Action<JsonObject, bool> onResponse)
+            Action<JsonObject, CallOutcome, string> onResponse)
         {
             if (!EnsureConnected("CallSystem"))
             {
-                onResponse(null, true);
+                onResponse(null, CallOutcome.Canceled, null);
                 return;
             }
 
@@ -273,17 +311,27 @@ namespace HeTu
                 if (cancel)
                 {
                     InspectorCollector.CompleteRequest(traceId, "canceled");
-                    onResponse(null, true);
+                    onResponse(null, CallOutcome.Canceled, null);
+                    return;
                 }
-                else
+
+                // 服务端守卫拒绝：response = ["rej", systemName, code]
+                if (response != null && response.Length > 0 &&
+                    response[0] as string == MessageReject)
                 {
-                    var responsePayload = response != null && response.Length > 1
-                        ? response[1]
-                        : null;
-                    InspectorCollector.CompleteRequest(traceId, "completed",
-                        responsePayload);
-                    onResponse((JsonObject)responsePayload, false);
+                    var code = response.Length > 2 ? response[2] as string : "REJECTED";
+                    InspectorCollector.CompleteRequest(traceId, "rejected", code);
+                    OnCallRejected?.Invoke(systemName, code);
+                    onResponse(null, CallOutcome.Rejected, code);
+                    return;
                 }
+
+                var responsePayload = response != null && response.Length > 1
+                    ? response[1]
+                    : null;
+                InspectorCollector.CompleteRequest(traceId, "completed",
+                    responsePayload);
+                onResponse((JsonObject)responsePayload, CallOutcome.Completed, null);
             }, traceId);
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
@@ -585,7 +633,8 @@ namespace HeTu
             {
                 case MessageResponse:
                 case MessageSubed:
-                    // 这2个都是round trip响应，所以有对应的请求等待队列
+                case MessageReject:
+                    // 这些都是 round trip 响应，有对应的请求等待队列
                     ResponseQueue.CompleteNext(structuredMsg);
                     break;
                 case MessageUpdate:

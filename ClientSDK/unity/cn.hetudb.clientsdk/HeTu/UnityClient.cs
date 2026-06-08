@@ -257,15 +257,22 @@ namespace HeTu
 
             var tcs = NewCompletionSource<JsonObject>();
 
-            CallSystemSync(systemName, args, (response, cancel) =>
+            CallSystemSync(systemName, args, (response, outcome, code) =>
             {
-                if (cancel)
+                switch (outcome)
                 {
-                    Logger.Instance.Error("CallSystem过程中遇到取消信号");
-                    tcs.TrySetCanceled();
+                    case CallOutcome.Canceled:
+                        Logger.Instance.Error("CallSystem过程中遇到取消信号");
+                        tcs.TrySetCanceled();
+                        break;
+                    case CallOutcome.Rejected:
+                        tcs.TrySetException(
+                            new HeTuCallRejectedException(systemName, code));
+                        break;
+                    default:
+                        tcs.TrySetResult(response);
+                        break;
                 }
-                else
-                    tcs.TrySetResult(response);
             });
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(

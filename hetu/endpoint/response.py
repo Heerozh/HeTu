@@ -19,3 +19,14 @@ class ResponseToClient(EndpointResponse):
     def __repr__(self):
         # 代码格式返回response，未来可用于replay还原
         return f"ResponseToClient({self.message})"
+
+
+class RejectResponse(EndpointResponse):
+    """软拒绝响应，承载 code/reason，由 receiver 转成 rej 帧；不走普通 rsp 路径。"""
+
+    def __init__(self, code: str, reason: str | None = None):
+        self.code = code
+        self.reason = reason
+
+    def __repr__(self):
+        return f"RejectResponse({self.code!r})"

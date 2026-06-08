@@ -152,6 +152,12 @@ namespace HeTu
                         var jsonData = new JsonObject(ref reader, memory);
                         return new object[] { cmd, subId, jsonData };
                     }
+                case HeTuClientBase.MessageReject: // ["rej", system_name, code]
+                    {
+                        var sysName = reader.ReadString();
+                        var code = reader.ReadString();
+                        return new object[] { cmd, sysName, code };
+                    }
                 default:
                     throw new Exception($"未知的命令类型: {cmd}");
             }
