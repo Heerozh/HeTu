@@ -92,6 +92,43 @@ async def test_rate_limit_window_resets(monkeypatch):
     await g(ctx, 1)  # 窗口过后重置，放行
 
 
+async def test_rate_limit_violation_extends_lockout(monkeypatch):
+    """触发拒绝后，封锁应从违规时刻起算满 per 秒；期间重试会顺延封锁。"""
+    import sys
+    import hetu.endpoint.guard  # noqa: F401
+    from hetu.endpoint.guard import rate_limit
+
+    guard_mod = sys.modules["hetu.endpoint.guard"]
+    now = [1000.0]
+    monkeypatch.setattr(guard_mod.time, "time", lambda: now[0])
+
+    @rate_limit(times=2, per=10)
+    async def f(ctx, x):
+        pass
+
+    g = f.__hetu_guards__[0]
+
+    class FakeCtx:
+        guard_state: dict = {}
+
+    ctx = FakeCtx()
+    await g(ctx, 1)  # t=1000 放行
+    await g(ctx, 1)  # t=1000 放行
+
+    now[0] = 1005.0
+    with pytest.raises(ClientReject):
+        await g(ctx, 1)  # t=1005 超限拒绝，窗口顺延至 1005
+
+    # t=1011：旧实现窗口锚定首次调用(1000)已过期会误放行；修复后违规起算未满 per 仍拒绝
+    now[0] = 1011.0
+    with pytest.raises(ClientReject):
+        await g(ctx, 1)
+
+    # t=1022：距最后一次违规(1011)已过 per 秒，解封放行
+    now[0] = 1022.0
+    await g(ctx, 1)
+
+
 def test_context_has_guard_state():
     from hetu.endpoint.context import Context
 

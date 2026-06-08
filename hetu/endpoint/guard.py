@@ -64,6 +64,8 @@ def rate_limit(times: int, per: float):
     """内置 guard：每「连接 × system」固定窗口限流。
 
     per 秒窗口内最多允许 times 次，超出 raise ClientReject('RATE_LIMITED')。
+    触发拒绝后，窗口起点顺延到当前时刻，故必须静默满 per 秒才解封；期间持续
+    重试会不断顺延封锁（最大程度阻止刷调用），不会像锚定首次调用那样提前重置。
     状态存 ctx.guard_state，以本装饰应用的唯一 key 索引 [window_start, count]。
     """
 
@@ -78,6 +80,8 @@ def rate_limit(times: int, per: float):
                 return
             st[1] += 1
             if st[1] > times:
+                # 违规即把窗口起点推到当前：封锁从此刻起算满 per 秒，重试则顺延
+                st[0] = now
                 raise ClientReject("RATE_LIMITED")
 
         return _attach_guard(func, _rate_limit_guard)

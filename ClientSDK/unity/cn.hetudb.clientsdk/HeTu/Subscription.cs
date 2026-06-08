@@ -440,18 +440,19 @@ namespace HeTu
 
         /// <summary>
         ///     获得范围订阅的新增热源，初始行也会先依次发出。
+        ///     你需要在本ObserveAdd事件中，通过ObserveRow订阅新增数据，不然只能收到1次初始值。
         ///     推荐和 <see cref="ObserveRemove" /> 配对使用。
         ///     用法：
         ///     <![CDATA[
         ///     var uiItems = new Dictionary<long, GameObject>();
         ///     IndexSubscription<HP> indexSub = client.WatchRange<HP>(...);
         ///     indexSub.AddTo(gameObject);
-        ///
+        /// 
         ///     // 创建新UI对象
         ///     Action<long> createUI = rowID => {
         ///         var go = new GameObject($"ID: {rowID}");
         ///         uiItems[rowID] = go;
-        ///
+        /// 
         ///         var hpText = go.AddComponent<TMP_Text>();
         ///         // bind 更新
         ///         indexSub.ObserveRow(rowID)
@@ -463,12 +464,12 @@ namespace HeTu
         ///             // 注意，规范上来说，AddTo应该能加就加，不管别人是否会处理，重复添加一般
         ///             // 无副作用。但这里不是，这里是ObserveAdd事件，导致Bag会持续增长，内存溢出。
         ///     };
-        ///
+        /// 
         ///     // 统一处理新增（包含初始行）
         ///     indexSub.ObserveAdd()
         ///         .Subscribe(added => { createUI(added.ID); })
         ///         .AddTo(ref indexSub.DisposeBag);
-        ///
+        /// 
         ///     // 统一处理删除
         ///     indexSub.ObserveRemove()
         ///         .Subscribe(removedID => {
