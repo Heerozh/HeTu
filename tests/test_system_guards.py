@@ -102,3 +102,35 @@ def test_context_has_guard_state():
         timestamp=0, request=None, systems=None,
     )
     assert ctx2.guard_state == {}
+
+
+def test_define_endpoint_collects_guards():
+    from hetu.endpoint.definer import EndpointDefines
+    from hetu.endpoint.guard import guard
+
+    async def chk(ctx, x):
+        pass
+
+    @hetu.define_endpoint(
+        namespace="t_guard", permission=hetu.Permission.EVERYBODY, force=True
+    )
+    @guard(chk)
+    async def my_ep(ctx, x):
+        pass
+
+    ep = EndpointDefines().get_endpoint("t_guard", "my_ep")
+    assert ep is not None
+    assert ep.guards == [chk]
+
+
+def test_marker_above_definer_raises():
+    from hetu.endpoint.guard import rate_limit
+
+    with pytest.raises(TypeError, match="下面"):
+
+        @rate_limit(times=1, per=1)
+        @hetu.define_endpoint(
+            namespace="t_guard", permission=hetu.Permission.EVERYBODY, force=True
+        )
+        async def bad(ctx, x):
+            pass
