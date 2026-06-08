@@ -85,3 +85,20 @@ async def test_rate_limit_window_resets(monkeypatch):
 
     monkeypatch.setattr(guard_mod.time, "time", lambda: base + 11)
     await g(ctx, 1)  # 窗口过后重置，放行
+
+
+def test_context_has_guard_state():
+    from hetu.endpoint.context import Context
+
+    ctx = Context(
+        caller=0, connection_id=0, address="x", group="", user_data={},
+        timestamp=0, request=None, systems=None,
+    )
+    assert ctx.guard_state == {}
+    ctx.guard_state["k"] = 1
+    # 不同实例不共享
+    ctx2 = Context(
+        caller=0, connection_id=0, address="x", group="", user_data={},
+        timestamp=0, request=None, systems=None,
+    )
+    assert ctx2.guard_state == {}

@@ -52,6 +52,9 @@ class Context:
     systems: SystemCaller
     """全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。"""
 
+    guard_state: dict[str, Any] = field(default_factory=dict)
+    """每连接的 guard 私有状态（如 rate_limit 的窗口计数）；纯内存、不跨连接。"""
+
     client_limits: list[list[int]] = field(default_factory=list)
     """客户端消息发送限制（次数）。"""
 
