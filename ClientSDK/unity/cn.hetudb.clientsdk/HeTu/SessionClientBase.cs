@@ -48,7 +48,7 @@ namespace HeTu
         void CallSystem(
             string systemName,
             object[] args,
-            Action<JsonObject, bool> onResponse);
+            Action<JsonObject, CallOutcome, string> onResponse);
 
         void WatchRow<T>(
             string index,
@@ -588,19 +588,24 @@ namespace HeTu
             _transport.CallSystem(
                 pending.SystemName,
                 pending.Args,
-                (response, canceled) =>
+                (response, outcome, code) =>
                 {
                     if (!_inFlightCalls.Remove(pending))
                         return;
 
-                    if (canceled)
+                    switch (outcome)
                     {
-                        pending.OnFailed(new OperationCanceledException(
-                            $"System call '{pending.SystemName}' was canceled."));
-                    }
-                    else
-                    {
-                        pending.OnCompleted(response);
+                        case CallOutcome.Canceled:
+                            pending.OnFailed(new OperationCanceledException(
+                                $"System call '{pending.SystemName}' was canceled."));
+                            break;
+                        case CallOutcome.Rejected:
+                            pending.OnFailed(
+                                new HeTuCallRejectedException(pending.SystemName, code));
+                            break;
+                        default:
+                            pending.OnCompleted(response);
+                            break;
                     }
                 });
         }
