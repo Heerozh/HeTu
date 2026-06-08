@@ -1,8 +1,11 @@
 import pytest
 
 import hetu
+from hetu.common.snowflake_id import SnowflakeID
 from hetu.endpoint.guard import ClientReject
 from hetu.endpoint.response import RejectResponse
+
+SnowflakeID().init(1, 0)
 
 
 def test_client_reject_carries_code_and_reason():
@@ -146,3 +149,40 @@ def test_system_guards_copied_to_endpoint(mod_test_app):
     ep2 = EndpointDefines().get_endpoint("pytest", "guarded_add")
     assert ep2 is not None
     assert len(ep2.guards) == 1
+
+
+async def test_rate_limit_rejects_second_call(mod_test_app, executor):
+    from hetu.endpoint.response import RejectResponse
+
+    ok, _ = await executor.execute("login", 7001)
+    assert ok
+
+    ok, res = await executor.execute("rate_limited_add", 5)
+    assert ok
+    assert not isinstance(res, RejectResponse)
+
+    # 同窗口第二次：被软拒绝，连接保持(ok=True)
+    ok, res = await executor.execute("rate_limited_add", 5)
+    assert ok
+    assert isinstance(res, RejectResponse)
+    assert res.code == "RATE_LIMITED"
+
+    # 被拒调用没有写入：值仍为 100+5
+    ok, _ = await executor.execute("test_rls_comp_value", 105)
+    assert ok
+
+
+async def test_custom_guard_rejects(mod_test_app, executor):
+    from hetu.endpoint.response import RejectResponse
+
+    ok, _ = await executor.execute("login", 7002)
+    assert ok
+
+    ok, res = await executor.execute("guarded_add", -1)
+    assert ok
+    assert isinstance(res, RejectResponse)
+    assert res.code == "NEGATIVE"
+
+    ok, res = await executor.execute("guarded_add", 3)
+    assert ok
+    assert not isinstance(res, RejectResponse)

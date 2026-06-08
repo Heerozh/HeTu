@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+import inspect
 import logging
 from time import time as now
 from typing import TYPE_CHECKING
@@ -15,6 +16,8 @@ from ..safelogging.filter import ContextFilter
 from .connection import ConnectionAliveChecker, del_connection, new_connection
 from .context import Context
 from .definer import EndpointDefine, EndpointDefines
+from .guard import ClientReject
+from .response import RejectResponse
 
 if TYPE_CHECKING:
     from ..manager import ComponentTableManager
@@ -130,7 +133,7 @@ class EndpointExecutor:
 
     async def execute_(
         self, ep: EndpointDefine, *args
-    ) -> tuple[bool, ResponseToClient | None]:
+    ) -> tuple[bool, ResponseToClient | RejectResponse | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，Endpoint返回值
@@ -174,7 +177,7 @@ class EndpointExecutor:
 
     async def execute(
         self, endpoint: str, *args
-    ) -> tuple[bool, ResponseToClient | None]:
+    ) -> tuple[bool, ResponseToClient | RejectResponse | None]:
         """
         调用Endpoint，返回True表示调用成功，
         返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
@@ -190,6 +193,21 @@ class EndpointExecutor:
         )
         if illegal:
             return False, None
+
+        # 调用前守卫(guard)：raise ClientReject 即软拒绝，不开事务、不断连接
+        for g in ep.guards:
+            try:
+                r = g(self.context, *args)
+                if inspect.isawaitable(r):
+                    await r
+            except ClientReject as e:
+                replay.info(f"[Rejected][{endpoint}] {e.code} {self.context}")
+                logger.info(
+                    _("🚧 [📞Endpoint] {endpoint} 被守卫拒绝：{code}").format(
+                        endpoint=endpoint, code=e.code
+                    )
+                )
+                return True, RejectResponse(e.code, e.reason)
 
         # 开始调用
         return await self.execute_(ep, *args)
