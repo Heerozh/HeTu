@@ -19,6 +19,9 @@ define_component = data.define_component
 elevate = endpoint.elevate
 ResponseToClient = endpoint.ResponseToClient
 EndpointContext = endpoint.Context
+guard = endpoint.guard
+rate_limit = endpoint.rate_limit
+ClientReject = endpoint.ClientReject
 SystemContext = system.SystemContext
 BaseComponent = data.BaseComponent
 property_field = data.property_field
@@ -43,6 +46,9 @@ __all__ = [
     # ===
     "elevate",
     "ResponseToClient",
+    "guard",
+    "rate_limit",
+    "ClientReject",
     # ===
     "EndpointContext",
     "SystemContext",

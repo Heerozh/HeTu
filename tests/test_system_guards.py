@@ -66,9 +66,11 @@ async def test_rate_limit_guard_logic_window():
 
 
 async def test_rate_limit_window_resets(monkeypatch):
-    import hetu.endpoint.guard as guard_mod
+    import sys
+    import hetu.endpoint.guard  # noqa: F401 – ensures module is loaded
     from hetu.endpoint.guard import rate_limit
 
+    guard_mod = sys.modules["hetu.endpoint.guard"]
     base = 1000.0
     monkeypatch.setattr(guard_mod.time, "time", lambda: base)
 
@@ -94,15 +96,27 @@ def test_context_has_guard_state():
     from hetu.endpoint.context import Context
 
     ctx = Context(
-        caller=0, connection_id=0, address="x", group="", user_data={},
-        timestamp=0, request=None, systems=None,
+        caller=0,
+        connection_id=0,
+        address="x",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,
+        systems=None,
     )
     assert ctx.guard_state == {}
     ctx.guard_state["k"] = 1
     # 不同实例不共享
     ctx2 = Context(
-        caller=0, connection_id=0, address="x", group="", user_data={},
-        timestamp=0, request=None, systems=None,
+        caller=0,
+        connection_id=0,
+        address="x",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,
+        systems=None,
     )
     assert ctx2.guard_state == {}
 
@@ -211,3 +225,12 @@ async def test_rpc_emits_rej_frame(mod_test_app, executor):
     assert cont is True
     rej = await push_queue.get()
     assert rej == ["rej", "rate_limited_add", "RATE_LIMITED"]
+
+
+def test_top_level_exports():
+    import hetu
+
+    assert hasattr(hetu, "rate_limit")
+    assert hasattr(hetu, "guard")
+    assert hasattr(hetu, "ClientReject")
+    assert hetu.ClientReject("X").code == "X"
