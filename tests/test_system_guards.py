@@ -186,3 +186,28 @@ async def test_custom_guard_rejects(mod_test_app, executor):
     ok, res = await executor.execute("guarded_add", 3)
     assert ok
     assert not isinstance(res, RejectResponse)
+
+
+async def test_rpc_emits_rej_frame(mod_test_app, executor):
+    import asyncio
+
+    from hetu.server.receiver import rpc
+
+    push_queue: asyncio.Queue = asyncio.Queue()
+
+    # 登录
+    cont = await rpc(["rpc", "login", 7003], executor, push_queue)
+    assert cont is True
+    await push_queue.get()  # 丢弃 login 的 rsp
+
+    # 第一次正常
+    cont = await rpc(["rpc", "rate_limited_add", 5], executor, push_queue)
+    assert cont is True
+    first = await push_queue.get()
+    assert first[0] == "rsp"
+
+    # 第二次被限流：发 rej 帧，且不关连接(cont=True)
+    cont = await rpc(["rpc", "rate_limited_add", 5], executor, push_queue)
+    assert cont is True
+    rej = await push_queue.get()
+    assert rej == ["rej", "rate_limited_add", "RATE_LIMITED"]

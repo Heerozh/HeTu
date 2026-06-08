@@ -133,7 +133,7 @@ class EndpointExecutor:
 
     async def execute_(
         self, ep: EndpointDefine, *args
-    ) -> tuple[bool, ResponseToClient | RejectResponse | None]:
+    ) -> tuple[bool, ResponseToClient | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，Endpoint返回值
