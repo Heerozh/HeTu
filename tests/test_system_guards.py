@@ -134,3 +134,15 @@ def test_marker_above_definer_raises():
         )
         async def bad(ctx, x):
             pass
+
+
+def test_system_guards_copied_to_endpoint(mod_test_app):
+    from hetu.endpoint.definer import EndpointDefines
+
+    ep = EndpointDefines().get_endpoint("pytest", "rate_limited_add")
+    assert ep is not None
+    assert len(ep.guards) == 1
+
+    ep2 = EndpointDefines().get_endpoint("pytest", "guarded_add")
+    assert ep2 is not None
+    assert len(ep2.guards) == 1

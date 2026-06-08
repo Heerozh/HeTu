@@ -11,6 +11,7 @@ import asyncio
 import numpy as np
 
 import hetu
+from hetu.endpoint.guard import rate_limit, guard, ClientReject
 
 
 logger = logging.getLogger("HeTu.root")
@@ -242,3 +243,28 @@ async def on_disconnect(ctx: hetu.SystemContext):
 async def get_disconnect_count(ctx: hetu.SystemContext, owner):
     row = await ctx.repo[DisconnectRecord].get(owner=owner)
     return hetu.ResponseToClient(int(row.count) if row is not None else 0)
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+@rate_limit(times=1, per=100)
+async def rate_limited_add(ctx: hetu.SystemContext, value):
+    async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
+        row.value += value
+    return row.value
+
+
+async def _reject_when_negative(ctx, value):
+    if value < 0:
+        raise ClientReject("NEGATIVE")
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+@guard(_reject_when_negative)
+async def guarded_add(ctx: hetu.SystemContext, value):
+    async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
+        row.value += value
+    return row.value
