@@ -97,6 +97,26 @@ async def test_rls_comp_value_copy(ctx: hetu.SystemContext, value):
     return await ctx.depend["test_rls_comp_value:copy1"](ctx, value)
 
 
+# --------- Sandbox 序列化层测试用 System ---------
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.EVERYBODY
+)
+async def echo_response(ctx: hetu.SystemContext, payload):
+    """测试用：把 payload 原样包进 ResponseToClient，用于验证序列化层往返。"""
+    return hetu.ResponseToClient(payload)
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+async def get_rls_value_unsafe(ctx: hetu.SystemContext):
+    """测试用：故意直接返回 numpy 组件字段（未 int() 转换），模拟会在 wire 上崩的写法。"""
+    row = await ctx.repo[RLSComp].get(owner=ctx.caller)
+    return hetu.ResponseToClient(row.value)
+
+
 # ============================
 
 

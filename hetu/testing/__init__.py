@@ -17,10 +17,13 @@ import importlib
 import warnings
 from typing import TYPE_CHECKING, Any, Literal
 
+import msgspec
+
 from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
 from ..data.component import ComponentDefines
 from ..endpoint.definer import EndpointDefines
+from ..endpoint.response import RejectResponse, ResponseToClient
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemContext
 from ..system.caller import SystemCaller
@@ -47,13 +50,17 @@ class Sandbox:
             assert row.name == "Alice"
 
     `call` 以指定 `caller` 身份直接运行 System（绕过 Endpoint 权限校验，等同可信内部
-    调用）；`get`/`range` 直接读回组件表，不做 RLS 检查。
+    调用），默认返回 client SDK 实际收到的 payload——即按 server `receiver.rpc()` 的
+    framing 并过一遍真实 msgpack 序列化往返（不可序列化的返回会在此抛错，与生产 wire
+    一致）；传 `raw=True` 可拿 System 的原始返回值。`get`/`range` 直接读回组件表，不做
+    RLS 检查。
 
     注意 / Notes
     -----
     - 同一测试进程只支持一个 app/namespace（注册表为全局单例）。
     - 被调用的 System 必须引用至少 1 个 Component（引擎限制）。
-    - v1 不模拟连接/登录(`elevate`)，也不测 Endpoint 权限。
+    - v1 不模拟连接/登录(`elevate`)，也不测 Endpoint 权限；但 `call` 默认会覆盖
+      `ResponseToClient` 返回值的序列化层（msgpack 往返）。
     """
 
     namespace: str
@@ -74,6 +81,10 @@ class Sandbox:
         self.instance_name = instance_name
         self.backend = backend
         self.tbl_mgr = tbl_mgr
+        # 与 server pipeline 同款 msgpack codec（见 hetu/server/pipeline/jsonb.py），
+        # 用于 call() 默认路径模拟真实 wire 序列化往返。
+        self._msg_encoder = msgspec.msgpack.Encoder()
+        self._msg_decoder = msgspec.msgpack.Decoder()
 
     @classmethod
     async def create(
@@ -146,13 +157,37 @@ class Sandbox:
         return cls(namespace, instance_name, backend, tbl_mgr)
 
     async def call(
-        self, system: str, *args: Any, caller: int = 0, uuid: str = "",
+        self,
+        system: str,
+        *args: Any,
+        caller: int = 0,
+        uuid: str = "",
         user_data: dict | None = None,
+        raw: bool = False,
     ) -> Any:
-        """以 `caller` 身份跑一个 System，返回该 System 的返回值。
+        """以 `caller` 身份跑一个 System，默认返回 client SDK 实际收到的 payload。
 
-        System 若返回 `ResponseToClient`，则原样返回该对象（其载荷在 `.message`）。
+        默认（`raw=False`）按 server `receiver.rpc()` 的 framing 处理 System 返回值，
+        并过一遍与生产同款的 msgpack 序列化往返（见 `_to_client_payload`），以暴露在
+        真实 wire 上才会出现的问题：
+
+        - System 返回 `ResponseToClient(msg)` → 返回 msgpack 往返后的 `msg`；
+          不可序列化的 payload（如 numpy 标量、自定义对象）会在此抛 `TypeError`，
+          `tuple`/`set` 会如实变成 `list`，与 client 实际收到的一致。
+        - System 返回 `None` 或任意普通值 → 返回字符串 `"ok"`（普通返回值在 wire 上
+          被无视，仅用于 System 间嵌套调用）。
+        - System 返回 `RejectResponse` → 原样返回该对象（边角情况；软拒绝由 Endpoint
+          guard 产生，Sandbox 不模拟 Endpoint 层）。
+
+        `raw=True` 时跳过上述处理，原样返回 System 的返回值（等价 `ctx.systems.call`
+        的嵌套调用语义，便于断言 System 内部计算/返回值，不做序列化校验）。
+
         内部会开事务、自动在 `RaceCondition` 时重试。
+
+        Run a System as `caller`; by default returns what the client SDK actually
+        receives (after `receiver.rpc()` framing + the production msgpack round-trip),
+        so unit tests catch wire-only failures. Pass `raw=True` to get the System's
+        untouched return value instead.
 
         user_data: 传入则作为 `ctx.user_data`（同一 dict 对调用方可见，便于断言
         System 对其的写入）；不传则用空 dict。
@@ -168,7 +203,29 @@ class Sandbox:
             systems=None,  # type: ignore[arg-type]
         )
         ctx.systems = SystemCaller(self.namespace, self.tbl_mgr, ctx)
-        return await ctx.systems.call(system, *args, uuid=uuid)
+        rtn = await ctx.systems.call(system, *args, uuid=uuid)
+        if raw:
+            return rtn
+        return self._to_client_payload(rtn)
+
+    def _to_client_payload(self, rtn: Any) -> Any:
+        """把 System 返回值按 server `receiver.rpc()` 的 framing + 真实 msgpack 往返，
+        返回 client SDK 实际收到的 payload。
+
+        序列化采用与 `hetu/server/pipeline/jsonb.py` 同款的 `msgspec.msgpack`，因此
+        不可序列化的 payload 会在此抛 `TypeError`（与生产 wire 一致）。
+        """
+        if isinstance(rtn, RejectResponse):
+            # 软拒绝在 wire 上是 ["rej", name, code]，由 Endpoint guard 产生；Sandbox
+            # 不模拟 Endpoint 层，原样返回该对象（code/reason 是字符串，无序列化问题）。
+            return rtn
+        # framing 与 receiver.rpc() 对齐：ResponseToClient → ["rsp", message]，
+        # 其余（含 None / 普通返回值）→ ["rsp", "ok"]。
+        message = rtn.message if isinstance(rtn, ResponseToClient) else "ok"
+        frame = ["rsp", message]
+        # 过一遍真实 msgpack codec：encode 失败即不可序列化，向上抛给测试。
+        decoded = self._msg_decoder.decode(self._msg_encoder.encode(frame))
+        return decoded[1]
 
     def _resolve_table(self, comp: Any) -> "Table":
         """把 Component 类或名字字符串解析为本沙盒的 `Table`。"""
