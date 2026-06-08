@@ -13,8 +13,9 @@ _DEFINED_ATTR = "__hetu_defined__"
 class ClientReject(Exception):
     """guard 抛出它 = 软拒绝当次调用：不开事务、不断连接、回 rej 帧给客户端。
 
-    code 用于客户端通用回调区分原因（如 ``RATE_LIMITED``）；
-    reason 可选，仅放进客户端异常对象。
+    code 会随 rej 帧发送给客户端（``["rej", system, code]``），用于客户端通用回调
+    ``OnCallRejected`` 与异常 ``HeTuCallRejectedException`` 区分原因（如 ``RATE_LIMITED``）。
+    reason 可选，仅用于服务端日志/诊断，**不会**发送给客户端。
     """
 
     def __init__(self, code: str = "REJECTED", reason: str | None = None):
