@@ -153,6 +153,18 @@ def test_marker_above_definer_raises():
             pass
 
 
+def test_guard_on_permission_none_system_raises():
+    from hetu.endpoint.guard import rate_limit
+
+    # permission=None 的 System 不生成 endpoint，guard 永不执行；定义即报错防 footgun
+    with pytest.raises(TypeError, match="permission"):
+
+        @hetu.define_system(namespace="t_guard", force=True)
+        @rate_limit(times=1, per=1)
+        async def no_perm_guard(ctx, x):
+            pass
+
+
 def test_system_guards_copied_to_endpoint(mod_test_app):
     from hetu.endpoint.definer import EndpointDefines
 

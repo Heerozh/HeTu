@@ -504,6 +504,14 @@ def define_system(
         ]
 
         guards = collect_guards(func)
+        if permission is None and guards:
+            raise TypeError(
+                _(
+                    "@rate_limit/@guard 不能用于 permission=None 的 System {name}："
+                    "该 System 不生成 endpoint，guard 永远不会执行（继承调用也会绕过）。"
+                    "请设置 permission，或把 guard 挂到直接被客户端调用的外层 System 上。"
+                ).format(name=func.__name__)
+            )
 
         SystemClusters().add(
             namespace, func, _components, force, permission, depend_names, retry,
