@@ -76,6 +76,64 @@ def test_generate_all_components_latest_template(tmp_path, monkeypatch):
     assert '[Key("id")] public long ID { get; set; }' in code
 
 
+def test_generate_all_components_order_independent(tmp_path, monkeypatch):
+    # 真实路径里 Cluster.components 是 set，其对类对象的迭代顺序按 id() 哈希，
+    # 每个进程可能不同。生成内容必须与输入顺序无关，否则每次 build 内容都变，
+    # 触发客户端（Unity）无谓重编译。
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class Alpha(BaseComponent):
+        value: np.int64 = property_field(0)
+
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class Bravo(BaseComponent):
+        value: np.int64 = property_field(0)
+
+    out1 = tmp_path / "Order1.cs"
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [SimpleNamespace(components=[Alpha, Bravo])],
+    )
+    generate_all_components("demo_ns", str(out1))
+
+    out2 = tmp_path / "Order2.cs"
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [SimpleNamespace(components=[Bravo, Alpha])],
+    )
+    generate_all_components("demo_ns", str(out2))
+
+    assert out1.read_text(encoding="utf-8") == out2.read_text(encoding="utf-8")
+
+
+def test_generate_all_components_skips_write_when_unchanged(
+    tmp_path, monkeypatch, capsys
+):
+    # 内容不变时不应重写文件（保持 mtime），避免触发客户端重编译。
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class Skippy(BaseComponent):
+        value: np.int64 = property_field(0)
+
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [SimpleNamespace(components=[Skippy])],
+    )
+
+    output = tmp_path / "Components.cs"
+    generate_all_components("demo_ns", str(output))
+    first = output.read_text(encoding="utf-8")
+    mtime_before = output.stat().st_mtime_ns
+    capsys.readouterr()  # 清空首次输出
+
+    generate_all_components("demo_ns", str(output))
+
+    assert "跳过写入" in capsys.readouterr().out
+    assert output.read_text(encoding="utf-8") == first
+    assert output.stat().st_mtime_ns == mtime_before  # 未重写
+
+
 def test_generate_all_components_dedup_duplicates(tmp_path, monkeypatch):
     # 副本(duplicate)的 name_ 带冒号(如 ChatMessage:Universe)，是非法 C# 类名。
     # 生成时应统一映射到 master 去重，只输出一个干净的 master 类。
