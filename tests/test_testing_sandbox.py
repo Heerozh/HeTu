@@ -15,6 +15,21 @@ from hetu.testing import Sandbox, sandbox_fixture
 sandbox = sandbox_fixture("pytest", app)
 
 
+@pytest.fixture(autouse=True)
+def _restore_app_clusters(test_app):
+    """每个 sandbox 测试前重建干净的 app.py "pytest" 注册表，保证顺序无关。
+
+    Sandbox 默认走 build-once 路径（reload_app=False），仅靠
+    `get_clusters("pytest") is None` 判断是否需要构建，无法察觉同名 namespace 已被
+    换成另一套 System。HeTu 自身测试套件共享进程级单件，前序测试（如
+    test_system_startup 用 new_clusters_env 清空后以自己的 inline System 重建同名
+    "pytest"）会留下被污染的构建，于是 Sandbox 复用它，导致
+    `add_rls_comp_value` 等找不到。复用 test_app（清空+reload app+build "pytest"）在
+    每个 sandbox 测试前恢复正确环境。
+    """
+    return None
+
+
 async def test_sandbox_call_and_get(tmp_path):
     db = tmp_path / "t.sqlite3"
     async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
