@@ -134,6 +134,68 @@ def test_sandbox_codec_parity_with_server_pipeline():
         assert sandbox_encoder.encode(frame) == layer.encode(None, frame)
 
 
+async def test_sandbox_insert_and_get(tmp_path):
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        # 只给关心的字段，其余走组件默认；返回自动生成的雪花 id
+        rid = await sb.insert(app.RLSComp, owner=1001, value=42)
+        assert rid > 0
+        row = await sb.get("RLSComp", owner=1001)
+        assert row is not None
+        assert row.value == 42
+        assert int(row.id) == rid
+
+        # 未指定的字段保留组件默认值（RLSComp.value 默认 100）
+        await sb.insert(app.RLSComp, owner=1002)
+        assert (await sb.get("RLSComp", owner=1002)).value == 100
+
+
+async def test_sandbox_insert_explicit_id_and_bad_field(tmp_path):
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        # 指定 id，返回值即该 id，可按 owner 读回核对
+        rid = await sb.insert(app.RLSComp, owner=1003, value=7, id=12345)
+        assert rid == 12345
+        assert int((await sb.get("RLSComp", owner=1003)).id) == 12345
+
+        # 未知字段报错
+        with pytest.raises(ValueError):
+            await sb.insert(app.RLSComp, owner=1004, nope=1)
+        # _version 由引擎管理，不能设置
+        with pytest.raises(ValueError):
+            await sb.insert(app.RLSComp, owner=1005, _version=3)
+
+
+async def test_sandbox_upsert_insert_then_update(tmp_path):
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        # 不存在 → 插入（锚点 owner 自动落到新行），退出 with 自动 commit
+        async with sb.upsert(app.RLSComp, owner=2001) as row:
+            row.value = 55
+        seeded = await sb.get("RLSComp", owner=2001)
+        assert seeded is not None
+        assert seeded.value == 55
+        assert seeded.owner == 2001
+
+        # 已存在 → 更新同一行
+        async with sb.upsert(app.RLSComp, owner=2001) as row:
+            row.value = 99
+        assert (await sb.get("RLSComp", owner=2001)).value == 99
+
+
+async def test_sandbox_range_kwarg_matches_positional(tmp_path):
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        await sb.insert(app.IndexComp1, owner=10, value=1.0)
+        await sb.insert(app.IndexComp1, owner=11, value=2.0)
+        await sb.insert(app.IndexComp1, owner=12, value=3.0)
+
+        # 位置参数形式（现状）与 kwarg 区间形式（对齐 repo.range）等价
+        pos = await sb.range("IndexComp1", "value", 1.0, 2.0)
+        kw = await sb.range("IndexComp1", value=(1.0, 2.0))
+        assert set(pos.owner.tolist()) == set(kw.owner.tolist()) == {10, 11}
+
+
 async def test_sandbox_reload_app(tmp_path):
     # reload_app=True：清空注册表 + importlib.reload(app) + 重建，从任意状态都能跑
     db = tmp_path / "t.sqlite3"
