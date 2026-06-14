@@ -183,3 +183,16 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
 
     assert tbl_mgr.get_table(future_ns1[0]) is not None
     assert tbl_mgr.get_table(future_ns2[0]) is None
+
+
+async def test_build_future_row_validation(test_app, new_ctx):
+    """_build_future_row 的参数校验：目标 System 不存在 / 未开 call_lock 均报错"""
+    from hetu.system.future import _build_future_row
+
+    ctx = new_ctx()
+    # 不存在的 System
+    with pytest.raises(RuntimeError):
+        _build_future_row(ctx, -1, "no_such_system", (1,), timeout=10)
+    # 未开 call_lock 的 System（test_rls_comp_value 未设 call_lock=True）
+    with pytest.raises(RuntimeError):
+        _build_future_row(ctx, -1, "test_rls_comp_value", (1,), timeout=10)

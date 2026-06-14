@@ -45,6 +45,88 @@ class FutureCalls(BaseComponent):
     timeout: np.int32 = property_field(60)  # 再次调用时间（秒）
 
 
+def _build_future_row(
+    ctx: "SystemContext",
+    at: float,
+    system: str,
+    args: tuple,
+    *,
+    timeout: int = 60,
+    recurring: bool = False,
+    id_: int | None = None,
+) -> np.record:
+    """校验参数并组装一条 FutureCalls 行（不插入）。
+
+    create_future_call / ensure_future_call 共用。``id_`` 为 None 时用雪花 id；
+    给定时（ensure 的确定性 id）用显式 id。
+
+    Validate args and build (not insert) a FutureCalls row, shared by
+    create_future_call / ensure_future_call. ``id_`` None -> snowflake id; given ->
+    explicit id (ensure's deterministic id).
+    """
+    # 参数检查
+    timeout = max(timeout, 5) if timeout != 0 else 0
+    at = time.time() + abs(at) if at <= 0 else at
+
+    args_str = repr(args)
+    if len(args_str) > 1024:
+        raise ValueError(
+            _("args长度超过1024字符: {length}").format(length=len(args_str))
+        )
+
+    try:
+        revert = ast.literal_eval(args_str)
+    except Exception as e:
+        raise AssertionError(_("args无法通过eval还原")) from e
+    assert revert == args, _("args通过eval还原丢失了信息")
+
+    assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
+
+    # 读取保存的system define，检查是否开了call lock
+    sys = SYSTEM_CLUSTERS.get_system(system)
+    if not sys:
+        raise RuntimeError(
+            _("⚠️ [⚙️Future] [致命错误] 不存在的System {system}").format(system=system)
+        )
+    lk = any(
+        comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
+    )
+    if not lk:
+        raise RuntimeError(
+            _("⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock").format(
+                system=system
+            )
+        )
+
+    if sys.permission == Permission.USER:
+        warnings.warn(
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+                "且未来调用为后台任务，执行时Context无用户信息"
+            ).format(system=system, permission=sys.permission.name)
+        )
+    elif sys.permission != Permission.ADMIN and sys.permission is not None:
+        warnings.warn(
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+            ).format(system=system, permission=sys.permission.name)
+        )
+
+    # 创建
+    row = FutureCalls.new_row(id_=id_)
+    row.owner = ctx.caller or -1
+    row.system = system
+    row.args = args_str
+    row.recurring = recurring
+    row.created = time.time()
+    row.last_run = 0
+    row.scheduled = at
+    row.timeout = timeout
+    return row
+
+
 # permission设为admin权限阻止客户端调用
 @define_system(namespace="global", permission=None, components=(FutureCalls,))
 async def create_future_call(
@@ -111,66 +193,7 @@ async def create_future_call(
     增加backend的扩展性，具体参考簇相关的文档。
 
     """
-    # 参数检查
-    timeout = max(timeout, 5) if timeout != 0 else 0
-    at = time.time() + abs(at) if at <= 0 else at
-
-    args_str = repr(args)
-    if len(args_str) > 1024:
-        raise ValueError(
-            _("args长度超过1024字符: {length}").format(length=len(args_str))
-        )
-
-    try:
-        revert = ast.literal_eval(args_str)
-    except Exception as e:
-        raise AssertionError(_("args无法通过eval还原")) from e
-    assert revert == args, _("args通过eval还原丢失了信息")
-
-    assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
-
-    # 读取保存的system define，检查是否开了call lock
-    sys = SYSTEM_CLUSTERS.get_system(system)
-    if not sys:
-        raise RuntimeError(
-            _("⚠️ [⚙️Future] [致命错误] 不存在的System {system}").format(system=system)
-        )
-    lk = any(
-        comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
-    )
-    if not lk:
-        raise RuntimeError(
-            _("⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock").format(
-                system=system
-            )
-        )
-
-    if sys.permission == Permission.USER:
-        warnings.warn(
-            _(
-                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
-                "建议设为None防止客户端调用。"
-                "且未来调用为后台任务，执行时Context无用户信息"
-            ).format(system=system, permission=sys.permission.name)
-        )
-    elif sys.permission != Permission.ADMIN and sys.permission is not None:
-        warnings.warn(
-            _(
-                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
-                "建议设为None防止客户端调用。"
-            ).format(system=system, permission=sys.permission.name)
-        )
-
-    # 创建
-    row = FutureCalls.new_row()
-    row.owner = ctx.caller or -1
-    row.system = system
-    row.args = args_str
-    row.recurring = recurring
-    row.created = time.time()
-    row.last_run = 0
-    row.scheduled = at
-    row.timeout = timeout
+    row = _build_future_row(ctx, at, system, args, timeout=timeout, recurring=recurring)
     await ctx.repo[FutureCalls].insert(row)
     return row.id
 
