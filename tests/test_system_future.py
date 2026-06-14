@@ -300,3 +300,41 @@ async def test_ensure_skips_preexisting_row(test_app, tbl_mgr, executor):
         assert rows.size == 1  # 仍只有一条
         # 未被 999 覆盖（ensure-exists）
         assert "4" in rows[0].args and "999" not in rows[0].args
+
+
+async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor):
+    """ensure 的一次性调用（负数 id）能被 pop + exec，执行后删除，目标 System 生效"""
+    from hetu.system.future import (
+        FutureCalls,
+        _key_to_id,
+        pop_upcoming_call,
+        exec_future_call,
+    )
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    # ensure 一个一次性（recurring=False、timeout=10）调用：到点执行 add_rls_comp_value(4)
+    ok, fid = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+    assert ok and fid == _key_to_id("once")
+
+    # 让时间前进，pop 出到期任务（real time 捕获后再 monkeypatch）
+    last_time = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == fid  # 负数 id 正常 pop
+
+    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=str(负数 id)
+    # 注：测试复用已 login 的 executor（caller=1020）；生产中 future_call_task 的 caller 恒为 0
+    ok = await exec_future_call(call, executor.context.systems, fc_tbl)
+    assert ok
+
+    # 执行成功后一次性任务被删除
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=fid) is None
+
+    # 目标 System 真的执行了：RLSComp.value = 100 + 4
+    ok, _ = await executor.execute("test_rls_comp_value", 104)
+    assert ok
