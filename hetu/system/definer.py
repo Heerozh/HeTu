@@ -8,7 +8,7 @@
 import copy
 import functools
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from inspect import signature
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
@@ -37,6 +37,7 @@ class SystemDefine(EndpointDefine):
     full_depends: set[str]
     max_retry: int
     cluster_id: int
+    on_start: bool = field(default=False, kw_only=True)  # 是否启动时幂等执行一次
 
 
 class SystemClusters(metaclass=Singleton):
@@ -91,6 +92,14 @@ class SystemClusters(metaclass=Singleton):
         return {
             name: self.get_system(cluster.namespace, name) for name in cluster.systems
         }  # type: ignore
+
+    def get_startup_systems(self, namespace: str | None = None) -> list[str]:
+        """返回所有标记了 on_start=True 的 System 名字（按定义顺序）。
+
+        Return names of all systems marked with ``on_start=True`` (in definition order).
+        """
+        ns_map = self._system_map.get(namespace or self._main_namespace, {})
+        return [name for name, sdef in ns_map.items() if sdef.on_start]
 
     def get_component_cluster_id(
         self, namespace: str, comp: type[BaseComponent]
@@ -273,8 +282,18 @@ class SystemClusters(metaclass=Singleton):
                     guards=sys_def.guards,
                 )
 
-    def add(self, namespace, func, components, force, permission, depends, max_retry,
-            guards=None):
+    def add(
+        self,
+        namespace,
+        func,
+        components,
+        force,
+        permission,
+        depends,
+        max_retry,
+        guards=None,
+        on_start=False,
+    ):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -298,6 +317,7 @@ class SystemClusters(metaclass=Singleton):
             full_components=set(),
             full_depends=set(),
             guards=list(guards) if guards else [],
+            on_start=on_start,
         )
 
         if namespace == "global":
@@ -312,6 +332,7 @@ def define_system(
     retry: int = 9999,
     depends: tuple[str | FunctionType, ...] = tuple(),
     call_lock=False,
+    on_start=False,
 ):
     """
     定义System，System类似数据库的储存过程，主要用于数据CRUD。
@@ -378,6 +399,15 @@ def define_system(
 
         客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
         或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+    on_start: bool
+        标记此System为"启动钩子"：每个worker启动、开始收连接前，引擎会对每个instance
+        幂等执行一次。
+
+        通过SystemLock(uuid)去重，保证整集群、跨重启只成功提交一次，多worker并发由乐观锁
+        收敛。设置后会自动启用`call_lock`（去重所需），无需再手动设置。
+
+        注意：System在事务中执行，并可能因竞态/多worker而重跑，因此外部I/O（写文件、调
+        外部存储等）可能执行多次，需自行保证幂等。
 
     Notes
     -----
@@ -491,7 +521,8 @@ def define_system(
         _components = components
 
         # 把call lock的表添加到components中
-        if call_lock:
+        # on_start=True 依赖 uuid 去重实现"永久只跑一次"，所以强制启用 call_lock
+        if call_lock or on_start:
             lock_table = SystemLock.duplicate(namespace, func.__name__)
             if components is not None and len(components) > 0:
                 lock_table.backend_ = components[0].backend_
@@ -514,8 +545,15 @@ def define_system(
             )
 
         SystemClusters().add(
-            namespace, func, _components, force, permission, depend_names, retry,
+            namespace,
+            func,
+            _components,
+            force,
+            permission,
+            depend_names,
+            retry,
             guards=guards,
+            on_start=on_start,
         )
 
         # 返回包装的func，因为不允许直接调用，需要检查。
