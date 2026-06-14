@@ -76,6 +76,26 @@ async def add_rls_comp_value_future(ctx: hetu.SystemContext, value, recurring):
     )
 
 
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("ensure_future_call:copy1",),
+)
+async def ensure_rls_comp_value_future(ctx: hetu.SystemContext, key, value, recurring):
+    return await ctx.depend["ensure_future_call:copy1"](
+        ctx, key, -1, "add_rls_comp_value", value, timeout=10, recurring=recurring
+    )
+
+
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("cancel_future_call:copy1",),
+)
+async def cancel_rls_comp_value_future(ctx: hetu.SystemContext, key):
+    return await ctx.depend["cancel_future_call:copy1"](ctx, key)
+
+
 # ---------------------------------
 
 
@@ -95,6 +115,26 @@ async def add_rls_comp_value_copy(ctx: hetu.SystemContext, value):
 )
 async def test_rls_comp_value_copy(ctx: hetu.SystemContext, value):
     return await ctx.depend["test_rls_comp_value:copy1"](ctx, value)
+
+
+# --------- Sandbox 序列化层测试用 System ---------
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.EVERYBODY
+)
+async def echo_response(ctx: hetu.SystemContext, payload):
+    """测试用：把 payload 原样包进 ResponseToClient，用于验证序列化层往返。"""
+    return hetu.ResponseToClient(payload)
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+async def get_rls_value_unsafe(ctx: hetu.SystemContext):
+    """测试用：故意直接返回 numpy 组件字段（未 int() 转换），模拟会在 wire 上崩的写法。"""
+    row = await ctx.repo[RLSComp].get(owner=ctx.caller)
+    return hetu.ResponseToClient(row.value)
 
 
 # ============================
@@ -242,3 +282,28 @@ async def on_disconnect(ctx: hetu.SystemContext):
 async def get_disconnect_count(ctx: hetu.SystemContext, owner):
     row = await ctx.repo[DisconnectRecord].get(owner=owner)
     return hetu.ResponseToClient(int(row.count) if row is not None else 0)
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+@hetu.rate_limit(times=1, per=100)
+async def rate_limited_add(ctx: hetu.SystemContext, value):
+    async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
+        row.value += value
+    return row.value
+
+
+async def _reject_when_negative(ctx, value):
+    if value < 0:
+        raise hetu.ClientReject("NEGATIVE")
+
+
+@hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+@hetu.guard(_reject_when_negative)
+async def guarded_add(ctx: hetu.SystemContext, value):
+    async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
+        row.value += value
+    return row.value

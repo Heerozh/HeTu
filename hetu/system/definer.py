@@ -8,7 +8,7 @@
 import copy
 import functools
 import inspect
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from inspect import signature
 from types import FunctionType
 from typing import TYPE_CHECKING, Any
@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 from ..common import Singleton
 from ..common.permission import Permission
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN, EndpointDefine
+from ..endpoint.guard import collect_guards, mark_defined
 from ..i18n import _
 from .lock import SystemLock
 
@@ -36,6 +37,7 @@ class SystemDefine(EndpointDefine):
     full_depends: set[str]
     max_retry: int
     cluster_id: int
+    on_start: bool = field(default=False, kw_only=True)  # 是否每次开服执行一次
 
 
 class SystemClusters(metaclass=Singleton):
@@ -90,6 +92,14 @@ class SystemClusters(metaclass=Singleton):
         return {
             name: self.get_system(cluster.namespace, name) for name in cluster.systems
         }  # type: ignore
+
+    def get_startup_systems(self, namespace: str | None = None) -> list[str]:
+        """返回所有标记了 on_start=True 的 System 名字（按定义顺序）。
+
+        Return names of all systems marked with ``on_start=True`` (in definition order).
+        """
+        ns_map = self._system_map.get(namespace or self._main_namespace, {})
+        return [name for name, sdef in ns_map.items() if sdef.on_start]
 
     def get_component_cluster_id(
         self, namespace: str, comp: type[BaseComponent]
@@ -269,9 +279,21 @@ class SystemClusters(metaclass=Singleton):
                     permission=sys_def.permission,
                     arg_count=sys_def.arg_count,
                     defaults_count=sys_def.defaults_count,
+                    guards=sys_def.guards,
                 )
 
-    def add(self, namespace, func, components, force, permission, depends, max_retry):
+    def add(
+        self,
+        namespace,
+        func,
+        components,
+        force,
+        permission,
+        depends,
+        max_retry,
+        guards=None,
+        on_start=False,
+    ):
         sub_map = self._system_map.setdefault(namespace, dict())
 
         if not force:
@@ -294,6 +316,8 @@ class SystemClusters(metaclass=Singleton):
             permission=permission,
             full_components=set(),
             full_depends=set(),
+            guards=list(guards) if guards else [],
+            on_start=on_start,
         )
 
         if namespace == "global":
@@ -308,6 +332,7 @@ def define_system(
     retry: int = 9999,
     depends: tuple[str | FunctionType, ...] = tuple(),
     call_lock=False,
+    on_start=False,
 ):
     """
     定义System，System类似数据库的储存过程，主要用于数据CRUD。
@@ -374,6 +399,16 @@ def define_system(
 
         客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
         或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+    on_start: bool
+        标记此System为"启动钩子"：每次hetu start启动、开始收连接前，引擎会对每个instance
+        执行一次。
+
+        "每次hetu start只执行一次"由SystemLock实现：同次开服的所有worker共享同一boot uuid，去重到只
+        成功提交一次（并发由乐观锁收敛）；下次hetu start换新uuid，故会再次执行。会自动启用
+        `call_lock`（去重所需），无需手动设置。
+
+        注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
+        （写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
 
     Notes
     -----
@@ -469,6 +504,14 @@ def define_system(
                 "System的权限不支持OWNER/RLS"
             )
 
+        # on_start 是服务端启动种子逻辑，强制权限为 None 或 ADMIN，防止误设为客户端可调用
+        # 权限而生成 Endpoint，导致种子逻辑被外部触发
+        if on_start:
+            assert permission is None or permission == Permission.ADMIN, _(
+                "on_start=True 的 System 权限只能为 None 或 ADMIN，"
+                "否则会生成可被客户端调用的 Endpoint，启动种子逻辑有被外部触发的风险"
+            )
+
         assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, _(
             "System函数名过长，最大长度为{max_len}个字符"
         ).format(max_len=ENDPOINT_NAME_MAX_LEN)
@@ -487,7 +530,8 @@ def define_system(
         _components = components
 
         # 把call lock的表添加到components中
-        if call_lock:
+        # on_start=True 依赖 uuid 去重实现"每次开服一次"，所以强制启用 call_lock
+        if call_lock or on_start:
             lock_table = SystemLock.duplicate(namespace, func.__name__)
             if components is not None and len(components) > 0:
                 lock_table.backend_ = components[0].backend_
@@ -499,8 +543,26 @@ def define_system(
             dep if isinstance(dep, str) else dep.__name__ for dep in depends
         ]
 
+        guards = collect_guards(func)
+        if permission is None and guards:
+            raise TypeError(
+                _(
+                    "@rate_limit/@guard 不能用于 permission=None 的 System {name}："
+                    "该 System 不生成 endpoint，guard 永远不会执行（继承调用也会绕过）。"
+                    "请设置 permission，或把 guard 挂到直接被客户端调用的外层 System 上。"
+                ).format(name=func.__name__)
+            )
+
         SystemClusters().add(
-            namespace, func, _components, force, permission, depend_names, retry
+            namespace,
+            func,
+            _components,
+            force,
+            permission,
+            depend_names,
+            retry,
+            guards=guards,
+            on_start=on_start,
         )
 
         # 返回包装的func，因为不允许直接调用，需要检查。
@@ -522,6 +584,7 @@ def define_system(
                 )
             return func(*_args, **__kwargs)
 
+        mark_defined(warp_direct_system_call)
         return warp_direct_system_call
 
     return warp

@@ -97,6 +97,35 @@ working examples — read them first.
 - **Row ids** — every row has an int64 `id` from SnowflakeID; never assign it
   yourself. Use `new_row()` / `new_rows(n)`.
 
+## Testing Systems
+
+`hetu.testing.Sandbox` runs your app **in-process on a temp SQLite file** — unit-test
+Systems with no Docker/Redis needed. (→ `testing/__init__.py`)
+
+```python
+import app                              # your module with the @define_* decorators
+from hetu.testing import Sandbox, sandbox_fixture
+
+sandbox = sandbox_fixture("Game", app)             # a pytest fixture (put in conftest.py)
+
+async def test_rename(sandbox):
+    await sandbox.call("rename", "Alice", caller=1001)          # run a System as caller 1001
+    assert (await sandbox.get("Player", owner=1001)).name == "Alice"
+```
+
+- **`call(name, *args, caller=, raw=False)`** runs a System in a real transaction
+  (auto-retries on `RaceCondition`) and by default returns **what the client SDK
+  actually receives**: the return value framed like `receiver.rpc()` and run through the
+  **real msgpack round-trip** — `ResponseToClient(msg)` → the round-tripped `msg`; any
+  other return → `"ok"`. So a non-serializable payload (e.g. a raw `np.int64` — `int()`
+  it first) **raises here exactly as it would on the wire**, and a `tuple` comes back as
+  a `list`. Pass **`raw=True`** to get the System's untouched return value instead (for
+  asserting internal / nested-call results).
+- **`get(Comp, **key)`** / **`range(Comp, index, lo, hi, limit=)`** read rows back
+  directly (no RLS filtering); **`flush()`** wipes all tables between tests.
+- Bypasses the Endpoint layer — **no** permission / guard / `elevate` checks (call as any
+  `caller`); one app/namespace per process; the called System must reference ≥1 Component.
+
 ## Client (Unity / C#)
 
 `hetu build` generates typed C# component classes from your definitions. The
@@ -124,7 +153,8 @@ client uses `HeTuClient.Instance` (one raw socket) or, preferred,
   then read: `data/component.py` (components & fields), `system/definer.py`
   (Systems & clusters), `system/context.py` (`ctx` + repo), `endpoint/`
   (Endpoints, `elevate`), `data/backend/` (`SessionRepository` CRUD),
-  `CONFIG_TEMPLATE.yml` (every config key).
+  `testing/__init__.py` (`Sandbox` unit-test helper), `CONFIG_TEMPLATE.yml`
+  (every config key).
 - **Advanced** (`advanced.md`): scheduled `FutureCalls`, `call_lock` idempotency,
   the `on_disconnect` hook, per-connection limits, NumPy patterns over `range()`
   results, custom pipeline layers.

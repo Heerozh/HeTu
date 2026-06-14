@@ -5,9 +5,10 @@
 #  @email: heeroz@gmail.com
 #  """
 
+from pathlib import Path
+
 import numpy as np
 import pytest
-from pathlib import Path
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -74,6 +75,61 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
     with pytest.raises(RuntimeError, match="unique"):
         maint.migration_schema(test_app_file, new_table, old_meta, force=True)
         maint.rebuild_index(new_table)
+
+
+async def test_migration_add_unique_column(filled_item_ref, caplog):
+    """为已有数据的表新增 unique 列：所有现有行会被填入相同默认值，自动迁移无法生成
+    唯一值，应抛出可操作的报错（说明成因 + 两条修复建议）。"""
+    import shutil
+
+    test_app_file = Path(__file__).parent / "logs/test.py"
+    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    # 与原 Item 完全一致，只新增一个 unique 列 tag（无删除、无类型变更）
+    @define_component(namespace="pytest")
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        model: np.float32 = property_field(0, unique=False, index=True)
+        qty: np.int16 = property_field(1, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True)
+        tag: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
+
+    import json
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed_new_item_cls,
+        filled_item_ref.instance_name,
+        filled_item_ref.cluster_id,
+        backend,
+    )
+
+    maint = backend.get_table_maintenance()
+    tbl_status, old_meta = maint.check_table(new_table)
+    assert tbl_status == "schema_mismatch"
+
+    # 新增列被判定为安全迁移，但 25 行都会被填入相同默认值 '' → unique 冲突
+    with pytest.raises(RuntimeError) as exc_info:
+        maint.migration_schema(test_app_file, new_table, old_meta)
+
+    msg = str(exc_info.value)
+    assert "unique" in msg
 
 
 async def test_auto_migration(filled_item_ref, caplog):

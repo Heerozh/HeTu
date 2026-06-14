@@ -91,9 +91,21 @@ namespace HeTu
         public Task<JsonObject> CallSystem(string systemName, params object[] args)
         {
             var tcs = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pump.Post(() => CallSystemSync(systemName, args, (resp, cancel) =>
+            _pump.Post(() => CallSystemSync(systemName, args, (resp, outcome, code) =>
             {
-                if (cancel) tcs.TrySetCanceled(); else tcs.TrySetResult(resp);
+                switch (outcome)
+                {
+                    case CallOutcome.Canceled:
+                        tcs.TrySetCanceled();
+                        break;
+                    case CallOutcome.Rejected:
+                        tcs.TrySetException(
+                            new HeTuCallRejectedException(systemName, code));
+                        break;
+                    default:
+                        tcs.TrySetResult(resp);
+                        break;
+                }
             }));
             return tcs.Task;
         }

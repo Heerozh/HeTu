@@ -183,3 +183,158 @@ def test_duplicate_bug(mod_auto_backend, new_clusters_env):
 
     assert tbl_mgr.get_table(future_ns1[0]) is not None
     assert tbl_mgr.get_table(future_ns2[0]) is None
+
+
+async def test_build_future_row_validation(test_app, new_ctx):
+    """_build_future_row 的参数校验：目标 System 不存在 / 未开 call_lock 均报错"""
+    from hetu.system.future import _build_future_row
+
+    ctx = new_ctx()
+    # 不存在的 System
+    with pytest.raises(RuntimeError):
+        _build_future_row(ctx, -1, "no_such_system", (1,), timeout=10)
+    # 未开 call_lock 的 System（test_rls_comp_value 未设 call_lock=True）
+    with pytest.raises(RuntimeError):
+        _build_future_row(ctx, -1, "test_rls_comp_value", (1,), timeout=10)
+
+
+def test_key_to_id_properties():
+    """确定性 id：稳定、恒负（与雪花正 id 隔离）、非 0、落在 int64 范围、不同 key 不同 id"""
+    from hetu.system.future import _key_to_id
+
+    a = _key_to_id("world_tick")
+    b = _key_to_id("world_tick")
+    c = _key_to_id("other_key")
+    assert a == b  # 确定性（跨调用稳定）
+    assert a < 0  # 恒负
+    assert a != 0
+    assert c < 0 and a != c  # 不同 key 不同 id
+    assert -(2**63) <= a <= -1  # int64 负数范围内
+
+
+async def test_ensure_future_call_idempotent(test_app, tbl_mgr, executor):
+    """同 key 多次 ensure 只产生一条 FutureCalls 行，且返回同一确定性 id；不覆盖已有参数"""
+    from hetu.system.future import FutureCalls, _key_to_id
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    ok1, id1 = await executor.execute("ensure_rls_comp_value_future", "tick", 4, True)
+    ok2, id2 = await executor.execute("ensure_rls_comp_value_future", "tick", 9, True)
+    assert ok1 and ok2
+    assert id1 == id2 == _key_to_id("tick")
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        rows = await repo.range("scheduled", 0, time.time() + 100000, limit=100)
+        assert rows.size == 1  # 只有一条
+        assert rows[0].id == _key_to_id("tick")
+        assert rows[0].system == "add_rls_comp_value"
+        assert rows[0].recurring
+        assert rows[0].timeout == 10
+        # ensure-exists：第二次 value=9 未覆盖第一次 args=(4,)
+        assert "4" in rows[0].args and "9" not in rows[0].args
+
+
+async def test_cancel_future_call(test_app, tbl_mgr, executor):
+    """cancel 删除已存在 key（返回 True），不存在 key 返回 False，cancel 后可重新 ensure"""
+    from hetu.system.future import FutureCalls, _key_to_id
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    # 不存在 -> False
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "tick")
+    assert ok and deleted is False
+
+    # ensure 后存在
+    await executor.execute("ensure_rls_comp_value_future", "tick", 4, True)
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=_key_to_id("tick")) is not None
+
+    # cancel -> True 且行被删
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "tick")
+    assert ok and deleted is True
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=_key_to_id("tick")) is None
+
+    # cancel 后可重新 ensure（重配间隔的基础：cancel 再 ensure）
+    ok, id2 = await executor.execute("ensure_rls_comp_value_future", "tick", 7, True)
+    assert ok and id2 == _key_to_id("tick")
+
+
+async def test_ensure_skips_preexisting_row(test_app, tbl_mgr, executor):
+    """表里已有同 key 行时（代表上次开服播种的持久化行），再 ensure 不新增、不报错、返回同 id"""
+    from hetu.system.future import FutureCalls, _key_to_id, _build_future_row
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    fid = _key_to_id("tick")
+    # 直接预置一行（代表上次开服播种、持久化存活的 recurring 行）
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        row = _build_future_row(
+            executor.context,
+            -1,
+            "add_rls_comp_value",
+            (4,),
+            timeout=10,
+            recurring=True,
+            id_=fid,
+        )
+        await repo.insert(row)
+
+    # 再 ensure 同 key：命中 get-skip 分支（无写入，commit 空转），不报错
+    ok, rid = await executor.execute("ensure_rls_comp_value_future", "tick", 999, True)
+    assert ok and rid == fid
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        rows = await repo.range("scheduled", 0, time.time() + 100000, limit=100)
+        assert rows.size == 1  # 仍只有一条
+        # 未被 999 覆盖（ensure-exists）
+        assert "4" in rows[0].args and "999" not in rows[0].args
+
+
+async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor):
+    """ensure 的一次性调用（负数 id）能被 pop + exec，执行后删除，目标 System 生效"""
+    from hetu.system.future import (
+        FutureCalls,
+        _key_to_id,
+        pop_upcoming_call,
+        exec_future_call,
+    )
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    # ensure 一个一次性（recurring=False、timeout=10）调用：到点执行 add_rls_comp_value(4)
+    ok, fid = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+    assert ok and fid == _key_to_id("once")
+
+    # 让时间前进，pop 出到期任务（real time 捕获后再 monkeypatch）
+    last_time = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == fid  # 负数 id 正常 pop
+
+    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=str(负数 id)
+    # 注：测试复用已 login 的 executor（caller=1020）；生产中 future_call_task 的 caller 恒为 0
+    ok = await exec_future_call(call, executor.context.systems, fc_tbl)
+    assert ok
+
+    # 执行成功后一次性任务被删除
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=fid) is None
+
+    # 目标 System 真的执行了：RLSComp.value = 100 + 4
+    ok, _ = await executor.execute("test_rls_comp_value", 104)
+    assert ok

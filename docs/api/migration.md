@@ -119,6 +119,14 @@ def prepare() -> str:
                 )
                 logger.error(msg)
                 raise ValueError(msg)
+            if target_props[target_column].unique:
+                logger.warning(
+                    f"  ⚠️ [💾MIGRATION][{name}组件] "
+                    f"新增属性 {target_column} 带有unique唯一标记，若表中已有多行数据，"
+                    f"迁移会因所有行被填入相同默认值而触发唯一性冲突。"
+                    f"届时请在本迁移脚本的 upgrade() 中为每行的 {target_column} "
+                    f"赋予不同的唯一值，或在开发阶段清空数据库后重建。"
+                )
 
     if remove_columns or unsafe_convert_columns:
         return "unsafe"

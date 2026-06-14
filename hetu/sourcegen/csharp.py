@@ -6,6 +6,7 @@
 """
 
 import re
+from pathlib import Path
 
 import numpy as np
 
@@ -97,6 +98,10 @@ def generate_all_components(namespace: str, output: str):
             components.append(master)
             visited.add(master)
 
+    # Cluster.components 是 set，对类对象的迭代顺序按 id() 哈希、每进程不同。
+    # 按 name_ 排序固定输出顺序，确保内容跨 build 稳定（配合上面的跳过写入）。
+    components.sort(key=lambda c: c.name_)
+
     from tqdm import tqdm
 
     for component_cls in tqdm(components):
@@ -104,5 +109,10 @@ def generate_all_components(namespace: str, output: str):
 
     lines.append("}")
 
-    with open(output, "w", encoding="utf-8") as f:
-        f.write("\n".join(lines))
+    content = "\n".join(lines)
+    # 内容不变时跳过写入，避免触发客户端（如 Unity）无谓的重编译。
+    out_path = Path(output)
+    if out_path.exists() and out_path.read_text(encoding="utf-8") == content:
+        print(f"↩️  内容无变化，跳过写入 {output}")
+        return
+    out_path.write_text(content, encoding="utf-8")

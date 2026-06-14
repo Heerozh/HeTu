@@ -21,6 +21,7 @@ EndpointContext(
     timestamp: float,
     request: Request,
     systems: SystemCaller,
+    guard_state: dict[str, typing.Any] = <factory>,
     client_limits: list[list[int]] = <factory>,
     server_limits: list[list[int]] = <factory>,
     max_row_sub: int = 0,
@@ -28,7 +29,7 @@ EndpointContext(
 ) -> None
 ```
 
-<small>Source: [`hetu/endpoint/context.py:18`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L18)</small>
+<small>Source: [`hetu/endpoint/context.py:23`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L23)</small>
 
 
 
@@ -57,6 +58,8 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 - **`systems`** (SystemCaller) — 全局System管理器，unsafe，可通过 `ctx.systems.call(...)` 调用其他System。
 
+- **`guard_state`** (dict[str, Any]) — 每连接的 guard 私有状态（如 rate_limit 的窗口计数）；纯内存、不跨连接。
+
 - **`client_limits`** (list[list[int]]) — 客户端消息发送限制（次数）。
 
 - **`server_limits`** (list[list[int]]) — 服务端消息发送限制（次数）。
@@ -82,7 +85,7 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 configure(client_limits, server_limits, max_row_sub, max_index_sub)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:68`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L68)</small>
+<small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -129,7 +132,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:102`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L102)</small>
+<small>Source: [`hetu/endpoint/context.py:110`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L110)</small>
 
 检查当前用户对某个component的权限
 

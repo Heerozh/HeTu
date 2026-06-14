@@ -7,6 +7,7 @@
 
 import ast
 import asyncio
+import hashlib
 import logging
 import random
 import time
@@ -43,6 +44,103 @@ class FutureCalls(BaseComponent):
     last_run: np.double = property_field(0)  # 最后执行时间
     scheduled: np.double = property_field(0, index=True)  # 计划执行时间
     timeout: np.int32 = property_field(60)  # 再次调用时间（秒）
+
+
+def _key_to_id(key: str) -> int:
+    """把 ensure_future_call 的 key 稳定映射到负数 id，用作 FutureCalls 主键去重。
+
+    必须跨进程/重启确定性（不能用内置 hash()，其按进程加盐）；雪花 id 恒正，
+    负数区间专供 keyed 行，二者不会相撞。
+
+    Stably map a key to a negative id for primary-key dedup of FutureCalls. Must be
+    deterministic across processes/restarts (builtin hash() is per-process salted);
+    snowflake ids are always positive, so the negative range is reserved for keyed rows.
+    """
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    h = int.from_bytes(digest, "big")  # 0 .. 2**64 - 1
+    return -(h >> 1) - 1  # -> [-(2**63), -1]：恒负、非 0、落在 int64 范围内
+
+
+def _build_future_row(
+    ctx: "SystemContext",
+    at: float,
+    system: str,
+    args: tuple,
+    *,
+    timeout: int = 60,
+    recurring: bool = False,
+    id_: int | None = None,
+) -> np.record:
+    """校验参数并组装一条 FutureCalls 行（不插入）。
+
+    create_future_call / ensure_future_call 共用。``id_`` 为 None 时用雪花 id；
+    给定时（ensure 的确定性 id）用显式 id。
+
+    Validate args and build (not insert) a FutureCalls row, shared by
+    create_future_call / ensure_future_call. ``id_`` None -> snowflake id; given ->
+    explicit id (ensure's deterministic id).
+    """
+    # 参数检查
+    timeout = max(timeout, 5) if timeout != 0 else 0
+    at = time.time() + abs(at) if at <= 0 else at
+
+    args_str = repr(args)
+    if len(args_str) > 1024:
+        raise ValueError(
+            _("args长度超过1024字符: {length}").format(length=len(args_str))
+        )
+
+    try:
+        revert = ast.literal_eval(args_str)
+    except Exception as e:
+        raise AssertionError(_("args无法通过eval还原")) from e
+    assert revert == args, _("args通过eval还原丢失了信息")
+
+    assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
+
+    # 读取保存的system define，检查是否开了call lock
+    sys = SYSTEM_CLUSTERS.get_system(system)
+    if not sys:
+        raise RuntimeError(
+            _("⚠️ [⚙️Future] [致命错误] 不存在的System {system}").format(system=system)
+        )
+    lk = any(
+        comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
+    )
+    if not lk:
+        raise RuntimeError(
+            _("⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock").format(
+                system=system
+            )
+        )
+
+    if sys.permission == Permission.USER:
+        warnings.warn(
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+                "且未来调用为后台任务，执行时Context无用户信息"
+            ).format(system=system, permission=sys.permission.name)
+        )
+    elif sys.permission != Permission.ADMIN and sys.permission is not None:
+        warnings.warn(
+            _(
+                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
+                "建议设为None防止客户端调用。"
+            ).format(system=system, permission=sys.permission.name)
+        )
+
+    # 创建
+    row = FutureCalls.new_row(id_=id_)
+    row.owner = ctx.caller or -1
+    row.system = system
+    row.args = args_str
+    row.recurring = recurring
+    row.created = time.time()
+    row.last_run = 0
+    row.scheduled = at
+    row.timeout = timeout
+    return row
 
 
 # permission设为admin权限阻止客户端调用
@@ -99,80 +197,120 @@ async def create_future_call(
     --------
     >>> import hetu
     >>> @hetu.define_system(namespace='test', permission=None)
-    ... def test_future_call(ctx: hetu.SystemContext, *args):
+    ... async def test_future_call(ctx: hetu.SystemContext, *args):
     ...     # do ctx.repo[...] operations
     ...     print('Future call test', args)
-    >>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test') )
-    ... def test_future_create(ctx: hetu.SystemContext):
-    ...     ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
+    >>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test',) )
+    ... async def test_future_create(ctx: hetu.SystemContext):
+    ...     await ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
 
     示例中，`depends`依赖使用':'符号创建了`create_future_call`的test副本。
     继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
     增加backend的扩展性，具体参考簇相关的文档。
 
     """
-    # 参数检查
-    timeout = max(timeout, 5) if timeout != 0 else 0
-    at = time.time() + abs(at) if at <= 0 else at
-
-    args_str = repr(args)
-    if len(args_str) > 1024:
-        raise ValueError(
-            _("args长度超过1024字符: {length}").format(length=len(args_str))
-        )
-
-    try:
-        revert = ast.literal_eval(args_str)
-    except Exception as e:
-        raise AssertionError(_("args无法通过eval还原")) from e
-    assert revert == args, _("args通过eval还原丢失了信息")
-
-    assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
-
-    # 读取保存的system define，检查是否开了call lock
-    sys = SYSTEM_CLUSTERS.get_system(system)
-    if not sys:
-        raise RuntimeError(
-            _("⚠️ [⚙️Future] [致命错误] 不存在的System {system}").format(system=system)
-        )
-    lk = any(
-        comp == SystemLock or comp.master_ == SystemLock for comp in sys.full_components
-    )
-    if not lk:
-        raise RuntimeError(
-            _("⚠️ [⚙️Future] [致命错误] System {system} 定义未开启 call_lock").format(
-                system=system
-            )
-        )
-
-    if sys.permission == Permission.USER:
-        warnings.warn(
-            _(
-                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
-                "建议设为None防止客户端调用。"
-                "且未来调用为后台任务，执行时Context无用户信息"
-            ).format(system=system, permission=sys.permission.name)
-        )
-    elif sys.permission != Permission.ADMIN and sys.permission is not None:
-        warnings.warn(
-            _(
-                "⚠️ [⚙️Future] [警告] 未来任务的目标 {system} 为{permission}权限，"
-                "建议设为None防止客户端调用。"
-            ).format(system=system, permission=sys.permission.name)
-        )
-
-    # 创建
-    row = FutureCalls.new_row()
-    row.owner = ctx.caller or -1
-    row.system = system
-    row.args = args_str
-    row.recurring = recurring
-    row.created = time.time()
-    row.last_run = 0
-    row.scheduled = at
-    row.timeout = timeout
+    row = _build_future_row(ctx, at, system, args, timeout=timeout, recurring=recurring)
     await ctx.repo[FutureCalls].insert(row)
     return row.id
+
+
+@define_system(namespace="global", permission=None, components=(FutureCalls,))
+async def ensure_future_call(
+    ctx: SystemContext,
+    key: str,
+    at: float,
+    system: str,
+    *args,
+    timeout: int = 60,
+    recurring: bool = False,
+):
+    """按 key 等幂地确保一个未来调用存在；已存在则原样保留（不更新参数），返回其 id。
+
+    与 create_future_call 相同，但用 key 做幂等：同一 key 多次调用只会创建一条。
+    适合在 on_start System 里播种"开机即起"的全局循环任务（recurring=True），
+    服务器重启多次也不会重复堆积。
+
+    幂等通过 key 的确定性 id 复用 FutureCalls 主键唯一性实现：已存在则直接返回（不写入，
+    事务空提交），并发同 key 的多余插入会撞主键引发事务竞态并自动重试，最终只保留一条。
+
+    Idempotently ensure a single future call exists, keyed by ``key``; if it already
+    exists, keep it as-is (params are NOT updated) and return its id. Useful for seeding
+    a server-wide recurring background task from an on_start system without piling up
+    duplicates across restarts.
+
+    Parameters
+    ----------
+    ctx: Context
+        System默认变量
+    key: str
+        幂等键。同一 key 只会存在一条未来调用。
+    at: float
+        同 create_future_call：正数为绝对 POSIX 时间戳；负数为相对延后秒数。
+    system: str
+        未来调用的目标 system 名。
+    *args
+        目标 system 的参数（须能 repr 往返还原，如基础类型）。
+    timeout: int
+        再次调用时间（秒），含义同 create_future_call；recurring=True 时不能为 0。
+    recurring: bool
+        设置后永不删除，按 timeout 周期重复触发。
+
+    Returns
+    -------
+    返回未来调用的 id: int（由 key 推导的确定性负数 id）
+
+    Examples
+    --------
+    >>> import hetu
+    >>> @hetu.define_system(namespace='game', permission=None, call_lock=True,
+    ...                     components=(World,))
+    ... async def world_tick(ctx): ...
+    >>> @hetu.define_system(namespace='game', permission=None, on_start=True,
+    ...                     depends=('ensure_future_call:game',))
+    ... async def boot(ctx):
+    ...     await ctx.depend['ensure_future_call:game'](
+    ...         ctx, 'game:world_tick', -30, 'world_tick', recurring=True, timeout=30)
+
+    开服时 on_start 跑一次 → ensure 幂等 → 重启 N 次也只有一条 → 由 future_call_task
+    每 ~1 秒轮询、全局只一个 worker 执行、timeout 重试、重启不丢。
+    """
+    fid = _key_to_id(key)
+    if await ctx.repo[FutureCalls].get(id=fid):
+        return fid  # 已存在 → no-op（无写入，commit 空转，安全）
+    row = _build_future_row(
+        ctx, at, system, args, timeout=timeout, recurring=recurring, id_=fid
+    )
+    await ctx.repo[FutureCalls].insert(row)
+    return fid
+
+
+@define_system(namespace="global", permission=None, components=(FutureCalls,))
+async def cancel_future_call(ctx: SystemContext, key: str) -> bool:
+    """按 key 删除 ensure_future_call 创建的未来调用（停止 / 重配循环任务）。
+
+    返回 True 表示存在并已删除，False 表示该 key 没有对应的未来调用。重配间隔等参数：
+    先 cancel 再 ensure（ensure 是 ensure-exists，不会就地改参数）。
+
+    Cancel a keyed future call created by ensure_future_call. Returns True if it existed
+    and was deleted, False otherwise. To reconfigure (e.g. change interval): cancel then
+    ensure again.
+
+    Parameters
+    ----------
+    ctx: Context
+        System默认变量
+    key: str
+        要删除的未来调用的幂等键，与 ensure_future_call 的 key 一致。
+
+    Returns
+    -------
+    bool: 是否存在并删除
+    """
+    fid = _key_to_id(key)
+    if not await ctx.repo[FutureCalls].get(id=fid):
+        return False
+    ctx.repo[FutureCalls].delete(fid)
+    return True
 
 
 async def sleep_for_upcoming(tbl: Table):

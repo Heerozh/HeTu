@@ -141,6 +141,30 @@ async def worker_start(app: Sanic):
         )
     )
 
+    # 启动钩子：在开始收连接前，对每个instance执行所有 @define_system(on_start=True) 的System
+    # 每次hetu start执行一次：boot uuid 由main进程经config传入，本次开服所有worker共享同一值以去重；
+    # 缺失时（直接调用worker_main的测试/嵌入场景，均为单进程）退化为本进程生成。
+    # 执行失败则中止本worker启动，避免带病对外服务。
+    from ..system.startup import (
+        ON_START_UUID_CONFIG_KEY,
+        make_boot_uuid,
+        run_startup_systems,
+    )
+
+    boot_uuid = app.config.get(ON_START_UUID_CONFIG_KEY) or make_boot_uuid()
+    try:
+        await run_startup_systems(
+            app.config["NAMESPACE"], app.ctx.table_managers, boot_uuid
+        )
+    except Exception as e:
+        logger.exception(
+            _("❌ 进程[{pid}] 启动System执行失败: {err}").format(
+                pid=os.getpid(), err=f"{type(e).__name__}:{e}"
+            )
+        )
+        app.stop()
+        return
+
 
 async def worker_close(app):
     # ctrl+c并不会触发此函数，sanic会直接退出进程
