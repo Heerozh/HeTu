@@ -196,3 +196,17 @@ async def test_build_future_row_validation(test_app, new_ctx):
     # 未开 call_lock 的 System（test_rls_comp_value 未设 call_lock=True）
     with pytest.raises(RuntimeError):
         _build_future_row(ctx, -1, "test_rls_comp_value", (1,), timeout=10)
+
+
+def test_key_to_id_properties():
+    """确定性 id：稳定、恒负（与雪花正 id 隔离）、非 0、落在 int64 范围、不同 key 不同 id"""
+    from hetu.system.future import _key_to_id
+
+    a = _key_to_id("world_tick")
+    b = _key_to_id("world_tick")
+    c = _key_to_id("other_key")
+    assert a == b  # 确定性（跨调用稳定）
+    assert a < 0  # 恒负
+    assert a != 0
+    assert c < 0 and a != c  # 不同 key 不同 id
+    assert -(2**63) <= a <= -1  # int64 负数范围内

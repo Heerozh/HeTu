@@ -7,6 +7,7 @@
 
 import ast
 import asyncio
+import hashlib
 import logging
 import random
 import time
@@ -43,6 +44,21 @@ class FutureCalls(BaseComponent):
     last_run: np.double = property_field(0)  # 最后执行时间
     scheduled: np.double = property_field(0, index=True)  # 计划执行时间
     timeout: np.int32 = property_field(60)  # 再次调用时间（秒）
+
+
+def _key_to_id(key: str) -> int:
+    """把 ensure_future_call 的 key 稳定映射到负数 id，用作 FutureCalls 主键去重。
+
+    必须跨进程/重启确定性（不能用内置 hash()，其按进程加盐）；雪花 id 恒正，
+    负数区间专供 keyed 行，二者不会相撞。
+
+    Stably map a key to a negative id for primary-key dedup of FutureCalls. Must be
+    deterministic across processes/restarts (builtin hash() is per-process salted);
+    snowflake ids are always positive, so the negative range is reserved for keyed rows.
+    """
+    digest = hashlib.blake2b(key.encode("utf-8"), digest_size=8).digest()
+    h = int.from_bytes(digest, "big")  # 0 .. 2**64 - 1
+    return -(h >> 1) - 1  # -> [-(2**63), -1]：恒负、非 0、落在 int64 范围内
 
 
 def _build_future_row(
