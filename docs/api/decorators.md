@@ -121,7 +121,7 @@ define_endpoint(
 )
 ```
 
-<small>Source: [`hetu/endpoint/definer.py:90`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L90)</small>
+<small>Source: [`hetu/endpoint/definer.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L92)</small>
 
 
 
@@ -189,10 +189,11 @@ define_system(
     retry: int = 9999,
     depends: tuple[str | function, ...] = (),
     call_lock=False,
+    on_start=False,
 )
 ```
 
-<small>Source: [`hetu/system/definer.py:303`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L303)</small>
+<small>Source: [`hetu/system/definer.py:327`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L327)</small>
 
 
 
@@ -236,6 +237,16 @@ define_system(
 
 客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
 或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+
+- **`on_start`** (Any) — 标记此System为"启动钩子"：每次hetu start启动、开始收连接前，引擎会对每个instance
+执行一次。
+
+"每次hetu start只执行一次"由SystemLock实现：同次开服的所有worker共享同一boot uuid，去重到只
+成功提交一次（并发由乐观锁收敛）；下次hetu start换新uuid，故会再次执行。会自动启用
+`call_lock`（去重所需），无需手动设置。
+
+注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
+（写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
 
 
 
