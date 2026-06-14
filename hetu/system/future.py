@@ -269,7 +269,7 @@ async def ensure_future_call(
     ...                     depends=('ensure_future_call:game',))
     ... async def boot(ctx):
     ...     await ctx.depend['ensure_future_call:game'](
-    ...         ctx, 'world_tick', -30, 'world_tick', recurring=True, timeout=30)
+    ...         ctx, 'game:world_tick', -30, 'world_tick', recurring=True, timeout=30)
 
     开服时 on_start 跑一次 → ensure 幂等 → 重启 N 次也只有一条 → 由 future_call_task
     每 ~1 秒轮询、全局只一个 worker 执行、timeout 重试、重启不丢。

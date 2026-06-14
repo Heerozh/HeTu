@@ -992,7 +992,7 @@ duplicates across restarts.
 ...                     depends=('ensure_future_call:game',))
 ... async def boot(ctx):
 ...     await ctx.depend['ensure_future_call:game'](
-...         ctx, 'world_tick', -30, 'world_tick', recurring=True, timeout=30)
+...         ctx, 'game:world_tick', -30, 'world_tick', recurring=True, timeout=30)
 ```
 
 
