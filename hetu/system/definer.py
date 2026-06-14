@@ -503,6 +503,14 @@ def define_system(
                 "System的权限不支持OWNER/RLS"
             )
 
+        # on_start 是服务端启动种子逻辑，强制权限为 None 或 ADMIN，防止误设为客户端可调用
+        # 权限而生成 Endpoint，导致种子逻辑被外部触发
+        if on_start:
+            assert permission is None or permission == Permission.ADMIN, _(
+                "on_start=True 的 System 权限只能为 None 或 ADMIN，"
+                "否则会生成可被客户端调用的 Endpoint，启动种子逻辑有被外部触发的风险"
+            )
+
         assert len(func.__name__) <= ENDPOINT_NAME_MAX_LEN, _(
             "System函数名过长，最大长度为{max_len}个字符"
         ).format(max_len=ENDPOINT_NAME_MAX_LEN)

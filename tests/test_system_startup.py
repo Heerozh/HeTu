@@ -250,3 +250,59 @@ async def test_worker_start_aborts_on_on_start_failure(
     await main_mod.worker_start(app)
 
     assert app.stopped == [True]
+
+
+def test_on_start_rejects_client_permission(new_component_env, new_clusters_env):
+    """on_start System 不能用客户端可调用权限（USER/EVERYBODY），防止种子逻辑被外部触发。"""
+    import pytest
+
+    from hetu.data import Permission
+
+    @define_component(namespace="pytest", force=True)
+    class SeedComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        v: np.int32 = property_field(0)
+
+    with pytest.raises(AssertionError, match="on_start"):
+
+        @define_system(
+            namespace="pytest",
+            components=(SeedComp,),
+            on_start=True,
+            permission=Permission.USER,
+        )
+        async def seed_user(ctx):
+            pass
+
+    with pytest.raises(AssertionError, match="on_start"):
+
+        @define_system(
+            namespace="pytest",
+            components=(SeedComp,),
+            on_start=True,
+            permission=Permission.EVERYBODY,
+        )
+        async def seed_everybody(ctx):
+            pass
+
+
+def test_on_start_allows_admin_permission(new_component_env, new_clusters_env):
+    """on_start System 允许 permission=ADMIN（不被过度限制为只能 None）。"""
+    from hetu.data import Permission
+
+    @define_component(namespace="pytest", force=True)
+    class SeedComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        v: np.int32 = property_field(0)
+
+    @define_system(
+        namespace="pytest",
+        components=(SeedComp,),
+        on_start=True,
+        permission=Permission.ADMIN,
+    )
+    async def seed_admin(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    assert SystemClusters().get_startup_systems("pytest") == ["seed_admin"]
