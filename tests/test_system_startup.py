@@ -68,10 +68,10 @@ def test_get_startup_systems_lists_only_marked(new_component_env, new_clusters_e
     assert SystemClusters().get_startup_systems("pytest") == ["seed_sys"]
 
 
-async def test_run_startup_systems_runs_exactly_once(
+async def test_run_startup_systems_same_boot_dedups(
     mod_auto_backend, new_component_env, new_clusters_env
 ):
-    """连续两次 run_startup_systems，on_start System 只成功提交一次（SystemLock uuid 去重）。"""
+    """同一 boot uuid（=同次开服的多个 worker）只成功提交一次（SystemLock uuid 去重）。"""
     from hetu.manager import ComponentTableManager
     from hetu.system.startup import run_startup_systems
 
@@ -91,8 +91,8 @@ async def test_run_startup_systems_runs_exactly_once(
     tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
     tbl_mgr._flush_all(force=True)
 
-    await run_startup_systems("pytest", {"server1": tbl_mgr})
-    await run_startup_systems("pytest", {"server1": tbl_mgr})
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-same")
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-same")
 
     tbl = tbl_mgr.get_table(SeedCounter)
     async with tbl.session() as session:
@@ -127,7 +127,7 @@ async def test_run_startup_systems_per_instance_isolated(
     tm1._flush_all(force=True)
     tm2._flush_all(force=True)
 
-    await run_startup_systems("pytest", {"server1": tm1, "server2": tm2})
+    await run_startup_systems("pytest", {"server1": tm1, "server2": tm2}, "boot-x")
 
     for tm in (tm1, tm2):
         tbl = tm.get_table(SeedCounter)
@@ -162,7 +162,7 @@ async def test_run_startup_systems_propagates_failure(
     tbl_mgr._flush_all(force=True)
 
     with pytest.raises(RuntimeError, match="boom"):
-        await run_startup_systems("pytest", {"server1": tbl_mgr})
+        await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-x")
 
 
 def _fake_app(tbl_mgr):
@@ -306,3 +306,87 @@ def test_on_start_allows_admin_permission(new_component_env, new_clusters_env):
 
     SystemClusters().build_clusters("pytest")
     assert SystemClusters().get_startup_systems("pytest") == ["seed_admin"]
+
+
+async def test_run_startup_systems_reruns_next_boot(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """不同 boot uuid（=不同次开服）会让 on_start System 再次执行（每次开服跑一次）。"""
+    from hetu.manager import ComponentTableManager
+    from hetu.system.startup import run_startup_systems
+
+    @define_component(namespace="pytest", force=True)
+    class SeedCounter(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        n: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(SeedCounter,), on_start=True)
+    async def seed_counter(ctx):
+        async with ctx.repo[SeedCounter].upsert(owner=1) as row:
+            row.n += 1
+
+    SystemClusters().build_clusters("pytest")
+
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-A")
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-B")
+
+    tbl = tbl_mgr.get_table(SeedCounter)
+    async with tbl.session() as session:
+        row = await session.using(SeedCounter).get(owner=1)
+        assert row is not None
+        assert row.n == 2
+
+
+def test_make_boot_uuid_unique_and_within_lock_width():
+    """make_boot_uuid 每次不同，且长度 <= 32（SystemLock.uuid 为 <U32）。"""
+    from hetu.system.startup import make_boot_uuid
+
+    a, b = make_boot_uuid(), make_boot_uuid()
+    assert a != b
+    assert 0 < len(a) <= 32
+
+
+async def test_worker_start_dedups_with_shared_boot_uuid(
+    mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
+):
+    """同次开服的多个 worker（worker_start 用相同 config boot uuid）只 seed 一次。"""
+    import hetu.server.main as main_mod
+    from hetu.manager import ComponentTableManager
+    from hetu.system.startup import ON_START_UUID_CONFIG_KEY
+
+    @define_component(namespace="pytest", force=True)
+    class SeedCounter(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        n: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(SeedCounter,), on_start=True)
+    async def seed_counter(ctx):
+        async with ctx.repo[SeedCounter].upsert(owner=1) as row:
+            row.n += 1
+
+    SystemClusters().build_clusters("pytest")
+
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    async def fake_start_backends(_app):
+        pass
+
+    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
+
+    # 两个 worker 共享同一 config boot uuid（模拟同次开服的多进程）
+    for _ in range(2):
+        app = _fake_app(tbl_mgr)
+        app.config[ON_START_UUID_CONFIG_KEY] = "boot-shared"
+        await main_mod.worker_start(app)
+
+    tbl = tbl_mgr.get_table(SeedCounter)
+    async with tbl.session() as session:
+        row = await session.using(SeedCounter).get(owner=1)
+        assert row is not None
+        assert row.n == 1

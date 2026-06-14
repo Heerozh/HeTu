@@ -37,7 +37,7 @@ class SystemDefine(EndpointDefine):
     full_depends: set[str]
     max_retry: int
     cluster_id: int
-    on_start: bool = field(default=False, kw_only=True)  # 是否启动时幂等执行一次
+    on_start: bool = field(default=False, kw_only=True)  # 是否每次开服执行一次
 
 
 class SystemClusters(metaclass=Singleton):
@@ -400,14 +400,15 @@ def define_system(
         客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
         或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
     on_start: bool
-        标记此System为"启动钩子"：每个worker启动、开始收连接前，引擎会对每个instance
-        幂等执行一次。
+        标记此System为"启动钩子"：每次hetu start启动、开始收连接前，引擎会对每个instance
+        执行一次。
 
-        通过SystemLock(uuid)去重，保证整集群、跨重启只成功提交一次，多worker并发由乐观锁
-        收敛。设置后会自动启用`call_lock`（去重所需），无需再手动设置。
+        "每次hetu start只执行一次"由SystemLock实现：同次开服的所有worker共享同一boot uuid，去重到只
+        成功提交一次（并发由乐观锁收敛）；下次hetu start换新uuid，故会再次执行。会自动启用
+        `call_lock`（去重所需），无需手动设置。
 
-        注意：System在事务中执行，并可能因竞态/多worker而重跑，因此外部I/O（写文件、调
-        外部存储等）可能执行多次，需自行保证幂等。
+        注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
+        （写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
 
     Notes
     -----
@@ -529,7 +530,7 @@ def define_system(
         _components = components
 
         # 把call lock的表添加到components中
-        # on_start=True 依赖 uuid 去重实现"永久只跑一次"，所以强制启用 call_lock
+        # on_start=True 依赖 uuid 去重实现"每次开服一次"，所以强制启用 call_lock
         if call_lock or on_start:
             lock_table = SystemLock.duplicate(namespace, func.__name__)
             if components is not None and len(components) > 0:

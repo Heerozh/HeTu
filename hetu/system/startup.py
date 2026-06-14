@@ -12,26 +12,40 @@ worker starts, before it accepts connections.
 """
 
 import logging
+import uuid
 
 from ..i18n import _
 
 logger = logging.getLogger("HeTu.root")
 
-# 启动钩子调用锁的固定 uuid。每个 on_start System 各有独立的 SystemLock 副本表
-# （副本名含 System 名），所以此处用常量即可保证按 System、按 instance 去重。
-_ON_START_UUID = "@on_start"
+# 传递 per-boot uuid 的 config 键。由 main 进程（CLI）每次开服生成一次，写入 config 后
+# 经 AppLoader 的 factory 透传给每个 worker 进程，使同一次开服的所有 worker 共享同一值。
+ON_START_UUID_CONFIG_KEY = "ON_START_UUID"
 
 
-async def run_startup_systems(namespace: str, table_managers: dict) -> None:
-    """对每个 instance 幂等执行所有 ``on_start=True`` 的 System。
+def make_boot_uuid() -> str:
+    """生成一个本次开服(boot)的唯一标识，用作 on_start 去重的 SystemLock uuid。
 
-    通过 SystemLock(uuid) 去重：整集群、跨重启只会成功提交一次；多 worker 并发由乐观锁
-    收敛到恰好一次提交。任一 System 抛出非竞态异常都会向上传播，由调用方
-    （``worker_start``）据此中止启动。
+    长度需 <= 32（SystemLock.uuid 为 <U32），取 16 位 hex 足够避免开服间碰撞。
+    """
+    return uuid.uuid4().hex[:16]
 
-    Run every system marked ``on_start=True`` once per instance, deduplicated via
-    SystemLock so it commits exactly once across the cluster and across restarts.
-    Any non-race exception propagates so the caller can abort worker startup.
+
+async def run_startup_systems(
+    namespace: str, table_managers: dict, boot_uuid: str
+) -> None:
+    """对每个 instance 执行所有 ``on_start=True`` 的 System，每次开服一次。
+
+    ``boot_uuid`` 是本次开服的唯一标识，作为 SystemLock 的去重 uuid：同一次开服的所有
+    worker 传入相同值 → 整集群只成功提交一次（并发由乐观锁收敛）；下次开服传入新值 →
+    再次执行。任一 System 抛出非竞态异常都会向上传播，由调用方（``worker_start``）据此
+    中止启动。
+
+    Run every system marked ``on_start=True`` once per server boot. ``boot_uuid``
+    identifies this boot and is used as the SystemLock dedup key: all workers of the
+    same boot pass the same value (so it commits exactly once cluster-wide), and a new
+    boot passes a new value (so it runs again). Non-race exceptions propagate so the
+    caller can abort worker startup.
     """
     from .caller import SystemCaller
     from .context import SystemContext
@@ -62,4 +76,4 @@ async def run_startup_systems(namespace: str, table_managers: dict) -> None:
                     "🚀 [⚙️Startup] instance={instance} 执行启动System：{sys_name}"
                 ).format(instance=instance, sys_name=sys_name)
             )
-            await caller.call(sys_name, uuid=_ON_START_UUID)
+            await caller.call(sys_name, uuid=boot_uuid)

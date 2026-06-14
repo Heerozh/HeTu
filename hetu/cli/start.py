@@ -23,6 +23,7 @@ from ..common import yamlloader
 from ..i18n import _
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
+from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 from .base import CommandInterface, resolve_app_file
 
 logger = logging.getLogger("HeTu.root")
@@ -195,6 +196,9 @@ class StartCommand(CommandInterface):
         # prepare用的配置
         fast = config.WORKER_NUM < 0
         workers = fast and 1 or config.WORKER_NUM
+        # per-boot uuid：main进程每次开服生成一次，经config_for_factory透传给每个worker，
+        # 使 on_start System 在本次开服只跑一次（去重见 hetu.system.startup）
+        config_for_factory[ON_START_UUID_CONFIG_KEY] = make_boot_uuid()
         # 加载app
         loader = AppLoader(
             factory=partial(worker_main, f"Hetu-{config.NAMESPACE}", config_for_factory)
