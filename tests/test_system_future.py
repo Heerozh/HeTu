@@ -210,3 +210,28 @@ def test_key_to_id_properties():
     assert a != 0
     assert c < 0 and a != c  # 不同 key 不同 id
     assert -(2**63) <= a <= -1  # int64 负数范围内
+
+
+async def test_ensure_future_call_idempotent(test_app, tbl_mgr, executor):
+    """同 key 多次 ensure 只产生一条 FutureCalls 行，且返回同一确定性 id；不覆盖已有参数"""
+    from hetu.system.future import FutureCalls, _key_to_id
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    ok1, id1 = await executor.execute("ensure_rls_comp_value_future", "tick", 4, True)
+    ok2, id2 = await executor.execute("ensure_rls_comp_value_future", "tick", 9, True)
+    assert ok1 and ok2
+    assert id1 == id2 == _key_to_id("tick")
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        rows = await repo.range("scheduled", 0, time.time() + 100000, limit=100)
+        assert rows.size == 1  # 只有一条
+        assert rows[0].id == _key_to_id("tick")
+        assert rows[0].system == "add_rls_comp_value"
+        assert rows[0].recurring
+        assert rows[0].timeout == 10
+        # ensure-exists：第二次 value=9 未覆盖第一次 args=(4,)
+        assert "4" in rows[0].args and "9" not in rows[0].args

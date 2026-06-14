@@ -76,6 +76,17 @@ async def add_rls_comp_value_future(ctx: hetu.SystemContext, value, recurring):
     )
 
 
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("ensure_future_call:copy1",),
+)
+async def ensure_rls_comp_value_future(ctx: hetu.SystemContext, key, value, recurring):
+    return await ctx.depend["ensure_future_call:copy1"](
+        ctx, key, -1, "add_rls_comp_value", value, timeout=10, recurring=recurring
+    )
+
+
 # ---------------------------------
 
 

@@ -214,6 +214,76 @@ async def create_future_call(
     return row.id
 
 
+@define_system(namespace="global", permission=None, components=(FutureCalls,))
+async def ensure_future_call(
+    ctx: SystemContext,
+    key: str,
+    at: float,
+    system: str,
+    *args,
+    timeout: int = 60,
+    recurring: bool = False,
+):
+    """按 key 等幂地确保一个未来调用存在；已存在则原样保留（不更新参数），返回其 id。
+
+    与 create_future_call 相同，但用 key 做幂等：同一 key 多次调用只会创建一条。
+    适合在 on_start System 里播种"开机即起"的全局循环任务（recurring=True），
+    服务器重启多次也不会重复堆积。
+
+    幂等通过 key 的确定性 id 复用 FutureCalls 主键唯一性实现：已存在则直接返回（不写入，
+    事务空提交），并发同 key 的多余插入会撞主键引发事务竞态并自动重试，最终只保留一条。
+
+    Idempotently ensure a single future call exists, keyed by ``key``; if it already
+    exists, keep it as-is (params are NOT updated) and return its id. Useful for seeding
+    a server-wide recurring background task from an on_start system without piling up
+    duplicates across restarts.
+
+    Parameters
+    ----------
+    ctx: Context
+        System默认变量
+    key: str
+        幂等键。同一 key 只会存在一条未来调用。
+    at: float
+        同 create_future_call：正数为绝对 POSIX 时间戳；负数为相对延后秒数。
+    system: str
+        未来调用的目标 system 名。
+    *args
+        目标 system 的参数（须能 repr 往返还原，如基础类型）。
+    timeout: int
+        再次调用时间（秒），含义同 create_future_call；recurring=True 时不能为 0。
+    recurring: bool
+        设置后永不删除，按 timeout 周期重复触发。
+
+    Returns
+    -------
+    返回未来调用的 id: int（由 key 推导的确定性负数 id）
+
+    Examples
+    --------
+    >>> import hetu
+    >>> @hetu.define_system(namespace='game', permission=None, call_lock=True,
+    ...                     components=(World,))
+    ... async def world_tick(ctx): ...
+    >>> @hetu.define_system(namespace='game', permission=None, on_start=True,
+    ...                     depends=('ensure_future_call:game',))
+    ... async def boot(ctx):
+    ...     await ctx.depend['ensure_future_call:game'](
+    ...         ctx, 'world_tick', -30, 'world_tick', recurring=True, timeout=30)
+
+    开服时 on_start 跑一次 → ensure 幂等 → 重启 N 次也只有一条 → 由 future_call_task
+    每 ~1 秒轮询、全局只一个 worker 执行、timeout 重试、重启不丢。
+    """
+    fid = _key_to_id(key)
+    if await ctx.repo[FutureCalls].get(id=fid):
+        return fid  # 已存在 → no-op（无写入，commit 空转，安全）
+    row = _build_future_row(
+        ctx, at, system, args, timeout=timeout, recurring=recurring, id_=fid
+    )
+    await ctx.repo[FutureCalls].insert(row)
+    return fid
+
+
 async def sleep_for_upcoming(tbl: Table):
     """等待下一个即将到期的任务，返回是否有任务"""
     # query limit=1 获得即将到期任务(1秒内）
