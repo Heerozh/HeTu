@@ -235,3 +235,33 @@ async def test_ensure_future_call_idempotent(test_app, tbl_mgr, executor):
         assert rows[0].timeout == 10
         # ensure-exists：第二次 value=9 未覆盖第一次 args=(4,)
         assert "4" in rows[0].args and "9" not in rows[0].args
+
+
+async def test_cancel_future_call(test_app, tbl_mgr, executor):
+    """cancel 删除已存在 key（返回 True），不存在 key 返回 False，cancel 后可重新 ensure"""
+    from hetu.system.future import FutureCalls, _key_to_id
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    # 不存在 -> False
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "tick")
+    assert ok and deleted is False
+
+    # ensure 后存在
+    await executor.execute("ensure_rls_comp_value_future", "tick", 4, True)
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=_key_to_id("tick")) is not None
+
+    # cancel -> True 且行被删
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "tick")
+    assert ok and deleted is True
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        assert await repo.get(id=_key_to_id("tick")) is None
+
+    # cancel 后可重新 ensure（重配间隔的基础：cancel 再 ensure）
+    ok, id2 = await executor.execute("ensure_rls_comp_value_future", "tick", 7, True)
+    assert ok and id2 == _key_to_id("tick")

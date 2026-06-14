@@ -87,6 +87,15 @@ async def ensure_rls_comp_value_future(ctx: hetu.SystemContext, key, value, recu
     )
 
 
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("cancel_future_call:copy1",),
+)
+async def cancel_rls_comp_value_future(ctx: hetu.SystemContext, key):
+    return await ctx.depend["cancel_future_call:copy1"](ctx, key)
+
+
 # ---------------------------------
 
 

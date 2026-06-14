@@ -284,6 +284,35 @@ async def ensure_future_call(
     return fid
 
 
+@define_system(namespace="global", permission=None, components=(FutureCalls,))
+async def cancel_future_call(ctx: SystemContext, key: str) -> bool:
+    """按 key 删除 ensure_future_call 创建的未来调用（停止 / 重配循环任务）。
+
+    返回 True 表示存在并已删除，False 表示该 key 没有对应的未来调用。重配间隔等参数：
+    先 cancel 再 ensure（ensure 是 ensure-exists，不会就地改参数）。
+
+    Cancel a keyed future call created by ensure_future_call. Returns True if it existed
+    and was deleted, False otherwise. To reconfigure (e.g. change interval): cancel then
+    ensure again.
+
+    Parameters
+    ----------
+    ctx: Context
+        System默认变量
+    key: str
+        要删除的未来调用的幂等键，与 ensure_future_call 的 key 一致。
+
+    Returns
+    -------
+    bool: 是否存在并删除
+    """
+    fid = _key_to_id(key)
+    if not await ctx.repo[FutureCalls].get(id=fid):
+        return False
+    ctx.repo[FutureCalls].delete(fid)
+    return True
+
+
 async def sleep_for_upcoming(tbl: Table):
     """等待下一个即将到期的任务，返回是否有任务"""
     # query limit=1 获得即将到期任务(1秒内）
