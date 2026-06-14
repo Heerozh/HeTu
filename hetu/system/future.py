@@ -197,12 +197,12 @@ async def create_future_call(
     --------
     >>> import hetu
     >>> @hetu.define_system(namespace='test', permission=None)
-    ... def test_future_call(ctx: hetu.SystemContext, *args):
+    ... async def test_future_call(ctx: hetu.SystemContext, *args):
     ...     # do ctx.repo[...] operations
     ...     print('Future call test', args)
-    >>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test') )
-    ... def test_future_create(ctx: hetu.SystemContext):
-    ...     ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
+    >>> @hetu.define_system(namespace='test', permission=hetu.Permission.USER, depends=('create_future_call:test',) )
+    ... async def test_future_create(ctx: hetu.SystemContext):
+    ...     await ctx.depend['create_future_call:test'](ctx, -10, 'test_future_call', 'arg1', 'arg2', timeout=5)
 
     示例中，`depends`依赖使用':'符号创建了`create_future_call`的test副本。
     继承System会和对方的簇合并，而`create_future_call`是常用System，所以使用副本避免System簇过于集中，
