@@ -265,3 +265,38 @@ async def test_cancel_future_call(test_app, tbl_mgr, executor):
     # cancel 后可重新 ensure（重配间隔的基础：cancel 再 ensure）
     ok, id2 = await executor.execute("ensure_rls_comp_value_future", "tick", 7, True)
     assert ok and id2 == _key_to_id("tick")
+
+
+async def test_ensure_skips_preexisting_row(test_app, tbl_mgr, executor):
+    """表里已有同 key 行时（代表上次开服播种的持久化行），再 ensure 不新增、不报错、返回同 id"""
+    from hetu.system.future import FutureCalls, _key_to_id, _build_future_row
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+
+    fid = _key_to_id("tick")
+    # 直接预置一行（代表上次开服播种、持久化存活的 recurring 行）
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        row = _build_future_row(
+            executor.context,
+            -1,
+            "add_rls_comp_value",
+            (4,),
+            timeout=10,
+            recurring=True,
+            id_=fid,
+        )
+        await repo.insert(row)
+
+    # 再 ensure 同 key：命中 get-skip 分支（无写入，commit 空转），不报错
+    ok, rid = await executor.execute("ensure_rls_comp_value_future", "tick", 999, True)
+    assert ok and rid == fid
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        rows = await repo.range("scheduled", 0, time.time() + 100000, limit=100)
+        assert rows.size == 1  # 仍只有一条
+        # 未被 999 覆盖（ensure-exists）
+        assert "4" in rows[0].args and "999" not in rows[0].args
