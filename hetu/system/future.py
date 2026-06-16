@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import RowFormat
+from hetu.data.backend import RaceCondition, RowFormat
 
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
@@ -334,22 +334,24 @@ async def sleep_for_upcoming(tbl: Table):
 
 async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
-    async with tbl.session() as session:
-        repo = session.using(tbl.comp_cls)
-        # 取出最早到期的任务
-        now = time.time()
-        calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
-        # 检查可能被其他worker消费了
-        if calls.size == 0:
-            return None
-        call = calls[0]
-        # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
-        if call.timeout == 0:
-            repo.delete(call.id)
-        else:
-            call.scheduled = now + call.timeout
-            call.last_run = now
-            await repo.update(call)
+    call = None
+    async for attempt in tbl.session().retry(2):
+        async with attempt as session:
+            repo = session.using(tbl.comp_cls)
+            # 取出最早到期的任务
+            now = time.time()
+            calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
+            # 检查可能被其他worker消费了
+            if calls.size == 0:
+                return None
+            call = calls[0]
+            # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+            if call.timeout == 0:
+                repo.delete(call.id)
+            else:
+                call.scheduled = now + call.timeout
+                call.last_run = now
+                await repo.update(call)
     return call
 
 
