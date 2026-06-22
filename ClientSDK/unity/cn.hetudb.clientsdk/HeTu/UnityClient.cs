@@ -238,6 +238,9 @@ namespace HeTu
         ///     如果不await，用`CallSystem().Forget()`或直接`_ = CallSystem()`这种射后不管模式，
         ///     调用会立即返回，并且后台发送依然会按顺序进行。
         ///     如果await此方法，调用会等待服务器回应，默认返回"ok"，除非有使用ResponseToClient。
+        ///     如果服务端执行失败（System 抛异常或非法调用），await 会抛
+        ///     <see cref="HeTuCallFailedException" />；server debug 模式下其 Reason 带真实原因，
+        ///     release 模式下服务端直接断开连接。因此返回值可安全地用 `resp?.ToDict()` 处理。
         ///     另可通过`HeTuClient.Instance.SystemLocalCallbacks["system_name"] = (args) => {}`
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
@@ -268,6 +271,10 @@ namespace HeTu
                     case CallOutcome.Rejected:
                         tcs.TrySetException(
                             new HeTuCallRejectedException(systemName, code));
+                        break;
+                    case CallOutcome.Failed:
+                        tcs.TrySetException(
+                            new HeTuCallFailedException(systemName, code));
                         break;
                     default:
                         tcs.TrySetResult(response);

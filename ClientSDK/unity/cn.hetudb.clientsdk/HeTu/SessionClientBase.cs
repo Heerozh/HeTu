@@ -603,6 +603,10 @@ namespace HeTu
                             pending.OnFailed(
                                 new HeTuCallRejectedException(pending.SystemName, code));
                             break;
+                        case CallOutcome.Failed:
+                            pending.OnFailed(
+                                new HeTuCallFailedException(pending.SystemName, code));
+                            break;
                         default:
                             pending.OnCompleted(response);
                             break;

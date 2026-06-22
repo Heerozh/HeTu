@@ -50,6 +50,50 @@ namespace Tests.HeTu
             Assert.AreEqual(CallOutcome.Completed, outcomes[1]);
         }
 
+        [Test]
+        public void ErrFrame_FiresFailedOutcome_WithReason_AndNullResponse()
+        {
+            var client = new RejectTestClient();
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            client.ForceConnected();
+
+            CallOutcome outcome = CallOutcome.Completed;
+            string reason = null;
+            JsonObject resp = null;
+            bool fired = false;
+            client.CallSystem("crashing_system", Array.Empty<object>(),
+                (r, oc, code) => { fired = true; outcome = oc; reason = code; resp = r; });
+
+            client.Receive(new object[]
+                { "err", "crashing_system", "RuntimeError: boom for test" });
+
+            Assert.IsTrue(fired);
+            Assert.AreEqual(CallOutcome.Failed, outcome);
+            Assert.AreEqual("RuntimeError: boom for test", reason);
+            // 失败时 resp 为 null，调用方的 resp?.ToDict() 天然安全、不再抛反序列化异常
+            Assert.IsNull(resp);
+        }
+
+        [Test]
+        public void NormalRsp_AfterErr_StaysFifoAligned()
+        {
+            var client = new RejectTestClient();
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            client.ForceConnected();
+
+            var outcomes = new List<CallOutcome>();
+            client.CallSystem("a", Array.Empty<object>(),
+                (_, oc, _2) => outcomes.Add(oc));
+            client.CallSystem("b", Array.Empty<object>(),
+                (_, oc, _2) => outcomes.Add(oc));
+
+            client.Receive(new object[] { "err", "a", "RuntimeError: boom" });
+            client.Receive(new object[] { "rsp", "ok" });
+
+            Assert.AreEqual(CallOutcome.Failed, outcomes[0]);
+            Assert.AreEqual(CallOutcome.Completed, outcomes[1]);
+        }
+
         private sealed class RejectTestClient : HeTuClientBase
         {
             public RejectTestClient() =>

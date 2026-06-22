@@ -276,6 +276,44 @@ async def test_rpc_emits_rej_frame(mod_test_app, executor):
     assert rej == ["rej", "rate_limited_add", "RATE_LIMITED"]
 
 
+async def test_rpc_emits_err_frame_in_debug(mod_test_app, executor):
+    import asyncio
+
+    from hetu.server.receiver import rpc
+
+    push_queue: asyncio.Queue = asyncio.Queue()
+
+    cont = await rpc(["rpc", "login", 7005], executor, push_queue)
+    assert cont is True
+    await push_queue.get()  # 丢弃 login 的 rsp
+
+    # debug 模式：System 执行抛异常 → 发 err 帧（区别于 rsp/rej），且不关连接(cont=True)，
+    # reason 透传真实异常内容，方便开发期定位。
+    cont = await rpc(["rpc", "crashing_system"], executor, push_queue, debug=1)
+    assert cont is True
+    err = await push_queue.get()
+    assert err[0] == "err"
+    assert err[1] == "crashing_system"
+    assert "boom for test" in err[2]
+
+
+async def test_rpc_failure_closes_connection_in_release(mod_test_app, executor):
+    import asyncio
+
+    from hetu.server.receiver import rpc
+
+    push_queue: asyncio.Queue = asyncio.Queue()
+
+    cont = await rpc(["rpc", "login", 7006], executor, push_queue)
+    assert cont is True
+    await push_queue.get()  # 丢弃 login 的 rsp
+
+    # release 模式(debug=0)：执行失败 → 关连接(cont=False)，不向客户端发任何帧。
+    cont = await rpc(["rpc", "crashing_system"], executor, push_queue, debug=0)
+    assert cont is False
+    assert push_queue.empty()
+
+
 def test_top_level_exports():
     import hetu
 

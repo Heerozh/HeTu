@@ -30,7 +30,6 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
-BAD_REQUEST = ["rsp", "DEBUG MODE: server rejected the request."]
 BAD_SUBS = [
     "sub",
     "fail",
@@ -43,7 +42,12 @@ def check_length(name, data: list, left, right):
         raise ValueError(f"Invalid {name} message")
 
 
-async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue):
+async def rpc(
+    data: list,
+    executor: EndpointExecutor,
+    push_queue: asyncio.Queue,
+    debug: int = 0,
+):
     """处理Client SDK调用Endpoint的命令"""
     # print(executor.context, 'rpc', data)
     check_length("rpc", data, 2, 100)
@@ -53,7 +57,13 @@ async def rpc(data: list, executor: EndpointExecutor, push_queue: asyncio.Queue)
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
 
     if not ok:
-        # 关闭连接
+        # 执行失败/非法调用。debug 模式下发独立的 err 帧（区别于成功的 rsp 信封），
+        # 把失败原因回传客户端 SDK，便于开发期定位且不污染 ToDict 等反序列化；连接保持。
+        # release 模式下直接关闭连接，不向客户端泄露任何原因。
+        if debug:
+            reason = res if isinstance(res, str) else "server rejected the request."
+            await push_queue.put(["err", data[1], reason])
+            return True
         return False
 
     if isinstance(res, RejectResponse):
@@ -148,12 +158,9 @@ async def client_handler(
             # 执行消息
             match last_data[0]:
                 case "rpc":  # rpc endpoint_name args ...
-                    rpc_ok = await rpc(last_data, executor, push_queue)
-                    if not rpc_ok:
-                        if debug:
-                            await push_queue.put(BAD_REQUEST)
-                        else:
-                            return ws.fail_connection()
+                    # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接
+                    if not await rpc(last_data, executor, push_queue, debug):
+                        return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...
                     sub_ok = await sub_call(last_data, executor, broker, push_queue)
                     if not sub_ok:

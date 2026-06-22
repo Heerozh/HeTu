@@ -138,6 +138,30 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void ServerFailedOutcome_FailsCallWithHeTuCallFailedException()
+        {
+            var transport = new FakeTransport("c1")
+            {
+                FailCallsWithReason = "RuntimeError: boom for test"
+            };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+            Exception failure = null;
+
+            session.Start();
+            transport.RaiseConnected();
+            session.CallSystem("crashing_system", Array.Empty<object>(), _ => { },
+                ex => failure = ex);
+
+            // 服务端执行失败（err 帧）→ 会话调用以类型化异常失败，带透传的真实原因
+            Assert.IsInstanceOf<HeTuCallFailedException>(failure);
+            Assert.AreEqual("RuntimeError: boom for test",
+                ((HeTuCallFailedException)failure).Reason);
+        }
+
+        [Test]
         public void WatchRowBeforeReady_CompletesAfterInitialSnapshot()
         {
             var transport = new FakeTransport("c1");
@@ -1418,6 +1442,9 @@ namespace Tests.HeTu
 
             public string Name { get; }
             public bool HoldCallsOpen { get; set; }
+
+            // 非 null 时，CallSystem 以 CallOutcome.Failed + 该原因完成（模拟服务端 err 帧）。
+            public string FailCallsWithReason { get; set; }
             public bool HoldWatchCallbacks { get; set; }
             public bool IsConnected { get; private set; }
             public bool IsDisposed { get; private set; }
@@ -1477,7 +1504,11 @@ namespace Tests.HeTu
                 Action<JsonObject, CallOutcome, string> onResponse)
             {
                 Calls.Add(new CallRecord(systemName, args));
-                if (!HoldCallsOpen)
+                if (HoldCallsOpen)
+                    return;
+                if (FailCallsWithReason != null)
+                    onResponse(null, CallOutcome.Failed, FailCallsWithReason);
+                else
                     onResponse(null, CallOutcome.Completed, null);
             }
 
