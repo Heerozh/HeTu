@@ -340,15 +340,27 @@ class Sandbox:
         return table
 
     async def get(self, comp: Any, **query: Any) -> "np.record | None":
-        """按 unique/index 字段读一行；无则返回 None。
+        """按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
 
         `comp` 可传 Component 类或其名字字符串；`query` 只允许一个带索引的字段，
-        如 `get("Player", owner=1234)`。
+        如 `get("Player", owner=1234)`。已知行必然存在（如 setup 之后）时，改用
+        `must_get` 可免去 `is None` 判空、直接访问字段。
         """
         table = self._resolve_table(comp)
         async with table.session() as session:
             repo = session.using(table.comp_cls)
             return await repo.get(**query)
+
+    async def must_get(self, comp: Any, **query: Any) -> "np.record":
+        """同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
+
+        用于测试中 setup 后「保证存在」的读取，省去 `assert ... is not None` 样板；
+        返回类型为非 Optional 的 `numpy.record`，可直接访问字段（`row.value` 等）。
+        """
+        row = await self.get(comp, **query)
+        if row is None:
+            raise LookupError(f"{comp} 中不存在匹配 {query} 的行")
+        return row
 
     async def range(
         self,

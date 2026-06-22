@@ -9,7 +9,7 @@ import asyncio
 import logging
 import random
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..common.slowlog import SlowLog
 from ..data.backend import RaceCondition
@@ -54,9 +54,7 @@ class SystemCaller:
 
         return sys
 
-    async def call_(
-        self, sys: SystemDefine, *args, uuid: str = ""
-    ) -> ResponseToClient | None:
+    async def call_(self, sys: SystemDefine, *args, uuid: str = "") -> Any:
         """
         实际调用逻辑，无任何检查
         调用成功返回System返回值
@@ -156,7 +154,7 @@ class SystemCaller:
             )
         )
 
-    async def call(self, system: str, *args, uuid: str = "") -> ResponseToClient | None:
+    async def call(self, system: str, *args, uuid: str = "") -> Any:
         """
         调用一个System。
         服务器会启动一个数据库事务Session，执行System内的所有数据库操作。
@@ -177,7 +175,7 @@ class SystemCaller:
 
         Returns
         -------
-        如果成功则返回System的返回值。
+        如果成功则返回System的返回值 (ResponseToClient | None | Any)。
         抛出异常表示非法调用，或内部失败（代码错误，数据库错误），会自动记录日志。可以不处理扔给
         上级Endpoint，Endpoint收到异常会立即调用terminate断开客户端SDK的连接。
 

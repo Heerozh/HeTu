@@ -43,8 +43,7 @@ async def test_sandbox_call_and_get(tmp_path):
         assert ret_raw == 110
 
         # 用字符串名读回组件行
-        row = await sb.get("RLSComp", owner=1234)
-        assert row is not None
+        row = await sb.must_get("RLSComp", owner=1234)
         assert row.value == 110
 
 
@@ -66,7 +65,7 @@ async def test_sandbox_flush(tmp_path):
     db = tmp_path / "t.sqlite3"
     async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
         await sb.call_system("add_rls_comp_value", 5, caller=777)
-        assert (await sb.get("RLSComp", owner=777)).value == 105
+        assert (await sb.must_get("RLSComp", owner=777)).value == 105
 
         await sb.flush()
         # flush 后所有组件表数据被清空
@@ -144,14 +143,13 @@ async def test_sandbox_insert_and_get(tmp_path):
         # 只给关心的字段，其余走组件默认；返回自动生成的雪花 id
         rid = await sb.insert(app.RLSComp, owner=1001, value=42)
         assert rid > 0
-        row = await sb.get("RLSComp", owner=1001)
-        assert row is not None
+        row = await sb.must_get("RLSComp", owner=1001)
         assert row.value == 42
         assert int(row.id) == rid
 
         # 未指定的字段保留组件默认值（RLSComp.value 默认 100）
         await sb.insert(app.RLSComp, owner=1002)
-        assert (await sb.get("RLSComp", owner=1002)).value == 100
+        assert (await sb.must_get("RLSComp", owner=1002)).value == 100
 
 
 async def test_sandbox_insert_explicit_id_and_bad_field(tmp_path):
@@ -160,7 +158,7 @@ async def test_sandbox_insert_explicit_id_and_bad_field(tmp_path):
         # 指定 id，返回值即该 id，可按 owner 读回核对
         rid = await sb.insert(app.RLSComp, owner=1003, value=7, id=12345)
         assert rid == 12345
-        assert int((await sb.get("RLSComp", owner=1003)).id) == 12345
+        assert int((await sb.must_get("RLSComp", owner=1003)).id) == 12345
 
         # 未知字段报错
         with pytest.raises(ValueError):
@@ -176,15 +174,14 @@ async def test_sandbox_upsert_insert_then_update(tmp_path):
         # 不存在 → 插入（锚点 owner 自动落到新行），退出 with 自动 commit
         async with sb.upsert(app.RLSComp, owner=2001) as row:
             row.value = 55
-        seeded = await sb.get("RLSComp", owner=2001)
-        assert seeded is not None
+        seeded = await sb.must_get("RLSComp", owner=2001)
         assert seeded.value == 55
         assert seeded.owner == 2001
 
         # 已存在 → 更新同一行
         async with sb.upsert(app.RLSComp, owner=2001) as row:
             row.value = 99
-        assert (await sb.get("RLSComp", owner=2001)).value == 99
+        assert (await sb.must_get("RLSComp", owner=2001)).value == 99
 
 
 async def test_sandbox_range_kwarg_matches_positional(tmp_path):
@@ -217,7 +214,7 @@ async def test_sandbox_call_user_endpoint_as_caller(tmp_path):
         # add_rls_comp_value 返回普通 int（非 ResponseToClient）→ wire 上是 "ok"
         assert await sb.call("add_rls_comp_value", 9, caller=1234) == "ok"
         # 系统确实以 caller=1234 执行了：RLSComp.value 默认 100 + 9 = 109
-        assert (await sb.get("RLSComp", owner=1234)).value == 109
+        assert (await sb.must_get("RLSComp", owner=1234)).value == 109
 
 
 async def test_sandbox_call_soft_reject_raises(tmp_path):
@@ -257,4 +254,4 @@ async def test_sandbox_reload_app(tmp_path):
         "pytest", app, db_path=str(db), reload_app=True
     ) as sb:
         await sb.call_system("add_rls_comp_value", 7, caller=99)
-        assert (await sb.get("RLSComp", owner=99)).value == 107
+        assert (await sb.must_get("RLSComp", owner=99)).value == 107
