@@ -214,3 +214,55 @@ async def test_general_worker_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     await worker_keeper2.keep_alive(ts)
     last_ts = await worker_keeper2.get_last_timestamp()
     assert last_ts == ts
+
+
+async def test_general_worker_keeper_concurrent_claim_race(
+    mod_sqlite_backend, monkeypatch, tmp_path
+):
+    """
+    复现并回归：多个 worker 在 cold-start 时同时竞争同一个 worker_id。
+
+    输掉竞争的一方，其 `repo.insert()` 的 unique 预检查会读到对手刚提交的行而抛
+    `UniqueViolation`（`IndexError` 子类，**不是** `RaceCondition`）。修复前该异常会
+    逃出 `_try_claim_worker_id` 的 `except RaceCondition`，直接让 worker 启动失败；
+    修复后应作为竞态退让到下一个 id。
+    """
+    monkeypatch.chdir(tmp_path)
+    backend = mod_sqlite_backend()
+
+    from hetu.data.backend.repo import SessionRepository
+    from hetu.data.backend.table import Table
+    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+
+    table = Table(WorkerLease, "pytest", 1, backend)
+
+    winner = GeneralWorkerKeeper(302, table)  # 抢先提交并占住争用 id 的 worker
+    loser = GeneralWorkerKeeper(301, table)  # get→insert 窗口里输掉争用 id 的 worker
+
+    # winner 先正常占住一个 id 并提交（具体值取决于已占用情况，动态捕获）。
+    winner_id = await winner.get_worker_id()
+
+    # 给 loser 注入一次性「陈旧读」：让它对争用 id 的第一次主键查询看不到 winner 刚提交的行，
+    # 精确还原 cold-start 时 get(空) 与对手 insert 提交之间的竞态窗口。
+    # 在 get_by_id 层致盲（直接返回 None、不读真实 DB）以免污染 idmap 缓存；
+    # 而 insert 的远程 unique 检查走 client.range 直查数据库，仍会读到 winner 的行。
+    real_get_by_id = SessionRepository.get_by_id
+    state = {"blinded": False}
+
+    async def get_by_id_blind_once(self, row_id):
+        if (
+            not state["blinded"]
+            and self.ref.comp_cls is WorkerLease
+            and int(row_id) == winner_id
+        ):
+            state["blinded"] = True
+            return None  # 假装没看到 winner 的行，制造 TOCTOU
+        return await real_get_by_id(self, row_id)
+
+    monkeypatch.setattr(SessionRepository, "get_by_id", get_by_id_blind_once)
+
+    # 修复前：loser 的 insert(winner_id) 抛 UniqueViolation 逃逸，此处直接抛错。
+    # 修复后：视为竞态，退让到另一个 id。
+    loser_id = await loser.get_worker_id()
+    assert winner.worker_id == winner_id
+    assert loser_id != winner_id  # loser 没崩溃，且正确避开了被占用的 id

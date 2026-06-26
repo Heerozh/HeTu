@@ -105,6 +105,11 @@ class GeneralWorkerKeeper(WorkerKeeper):
                         lease.node_id = self.node_id
                         lease.expires_at = now_ms + self._expire_ms()
                         lease.last_timestamp = now_ms
+                        # cold-start 时多个 worker 会竞争同一个 worker_id。上面的
+                        # get(id) 读空已登记 negative observation，故若此处 insert 在
+                        # get 与提交之间被并发抢占，会抛 RaceCondition（而非不可重试的
+                        # UniqueViolation），由下面的 except 重试，下一轮 get 读到对方
+                        # 的行后走「被占用」分支退让到下一个 id。
                         await repo.insert(lease)
                         return True
 

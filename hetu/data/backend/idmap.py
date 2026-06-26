@@ -44,6 +44,12 @@ class IdentityMap:
         # {TableReference: {row_id: RowState}} - 存储每行的状态
         self._row_states: dict[TableReference, dict[int, RowState]] = {}
 
+        # 本事务对“等值精确查询读到不存在”的观察记录（negative observation）。
+        # {TableReference: {(index_name, normalized_value), ...}}
+        # 用途：insert/update 远程命中 unique 冲突时，若该列值在此集合内，说明本事务
+        # 是基于“它不存在”的过期快照做的决策，应判为 RaceCondition 而非 UniqueViolation。
+        self._absent: dict[TableReference, set[tuple[str, object]]] = {}
+
         # 范围查询缓存
         # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
         # self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
@@ -244,6 +250,33 @@ class IdentityMap:
 
         states = self._row_states[table_ref]
         return states.get(row_id) == RowState.DELETE
+
+    @staticmethod
+    def _norm_value(value: object) -> object:
+        """把np标量归一成python原生值，保证mark/observe两侧key一致。"""
+        return value.item() if isinstance(value, np.generic) else value
+
+    def mark_absent(
+        self, table_ref: TableReference, index_name: str, value: object
+    ) -> None:
+        """
+        登记一条「本事务等值查询 `index_name==value` 读到了不存在」的观察。
+        只应由等值精确查询（按主键或unique索引的get）在读空时调用。
+        """
+        self._absent.setdefault(table_ref, set()).add(
+            (index_name, self._norm_value(value))
+        )
+
+    def observed_absent(
+        self, table_ref: TableReference, index_name: str, value: object
+    ) -> bool:
+        """
+        本事务是否曾观察到 `index_name==value` 不存在（见 `mark_absent`）。
+        """
+        absent = self._absent.get(table_ref)
+        if not absent:
+            return False
+        return (index_name, self._norm_value(value)) in absent
 
     def get_clean_row_keys(self) -> set[str]:
         """
