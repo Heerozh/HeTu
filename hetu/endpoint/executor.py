@@ -133,12 +133,12 @@ class EndpointExecutor:
 
     async def execute_(
         self, ep: EndpointDefine, *args
-    ) -> tuple[bool, ResponseToClient | None]:
+    ) -> tuple[bool, ResponseToClient | str | None]:
         """
         实际调用逻辑，无任何检查
         调用成功返回True，Endpoint返回值
-        遇到异常则记录error日志，并返回False，None，表示内部失败或非法调用，此时需要立即调用
-        terminate断开连接
+        遇到异常则记录error日志，并返回(False, 异常原因字符串)，表示内部失败或非法调用，此时
+        需要立即调用terminate断开连接；该原因仅在server debug模式下回传客户端，便于开发期定位。
         """
         # 开始调用
         ep_name = ep.func.__name__
@@ -171,16 +171,17 @@ class EndpointExecutor:
             )
             replay.info(err_msg)
             logger.exception(err_msg)
-            return False, None
+            return False, f"{type(e).__name__}: {e}"
         finally:
             pass
 
     async def execute(
         self, endpoint: str, *args
-    ) -> tuple[bool, ResponseToClient | RejectResponse | None]:
+    ) -> tuple[bool, ResponseToClient | RejectResponse | str | None]:
         """
         调用Endpoint，返回True表示调用成功，
-        返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接
+        返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接；
+        失败时第二个返回值可能是异常原因字符串（仅server debug模式下回传客户端）。
         """
         # 检查call参数和call权限
         ep = self.execute_check(endpoint, args)

@@ -224,6 +224,49 @@ async def test_update_or_insert_race(item_ref, mod_auto_backend):
         await task1
 
 
+async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
+    """
+    泛化自 upsert 的特例：若本事务先 `get(unique)` 观察到该值不存在，之后 `insert`
+    时却发现远程已被并发插入，应判为 `RaceCondition`（基于过期快照的乐观并发失败），
+    而非不可重试的 `UniqueViolation`。
+
+    对照 `test_insert_unique`：未先 get、直接 insert 已存在数据，仍是确定性
+    `UniqueViolation`。
+    """
+    import asyncio
+
+    from hetu.data.backend import RaceCondition
+
+    backend = mod_auto_backend()
+
+    async def observer_task():
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True  # 强制 master 读，避免 replica 延迟
+            repo = session.using(item_ref.comp_cls)
+            # 观察到 name="zrc" 不存在
+            assert await repo.get(name="zrc") is None
+            await asyncio.sleep(0.1)  # 让 intruder 抢先插入并提交
+            row = item_ref.comp_cls.new_row()
+            row.name = "zrc"
+            row.time = 7770002
+            await repo.insert(row)  # 远程已被占用，且本事务曾观察其不存在 → Race
+
+    async def intruder_task():
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(item_ref.comp_cls)
+            row = item_ref.comp_cls.new_row()
+            row.name = "zrc"
+            row.time = 7770001  # time 取不同值，确保冲突只发生在 name 上
+            await repo.insert(row)
+
+    observer = asyncio.create_task(observer_task())
+    intruder = asyncio.create_task(intruder_task())
+    await intruder
+    with pytest.raises(RaceCondition):
+        await observer
+
+
 async def test_retry_generator(item_ref, mod_auto_backend):
     import asyncio
 

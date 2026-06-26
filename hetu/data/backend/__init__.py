@@ -5,6 +5,8 @@
 @email: heeroz@gmail.com
 """
 
+from . import redis as _  # noqa: F401,F811 注册redis后端，但不导出
+from . import sql as _  # noqa: F401,F811 注册sql后端，但不导出
 from .base import (
     BackendClient,
     BackendClientFactory,
@@ -17,8 +19,6 @@ from .base import (
 from .repo import SessionRepository
 from .session import Session
 from .table import Table, TableReference
-from . import redis as _  # noqa: F401,F811 注册redis后端，但不导出
-from . import sql as _  # noqa: F401,F811 注册sql后端，但不导出
 
 __all__ = [
     "RaceCondition",
@@ -36,10 +36,6 @@ __all__ = [
 
 import asyncio
 import random
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from ...common.snowflake_id import WorkerKeeper
 
 
 class Backend:

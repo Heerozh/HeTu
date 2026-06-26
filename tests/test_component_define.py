@@ -151,6 +151,23 @@ def test_instance_define(new_component_env, new_clusters_env):
     assert Health.get_duplicates("pytest")["copy"].instances_ == {}
 
 
+def test_str_max_len(new_component_env):
+    @define_component(namespace="pytest", force=True)
+    class TestStrLen(BaseComponent):
+        uni: "U32" = property_field("", False)
+        code: "U8" = property_field("", False)
+        raw: "S16" = property_field(b"", False)
+        num: np.int32 = property_field(0, False)
+
+    # 字符串(U)/字节(S)列：返回最大字符数（不是字节数）
+    assert TestStrLen.str_max_len("uni") == 32
+    assert TestStrLen.str_max_len("code") == 8
+    assert TestStrLen.str_max_len("raw") == 16
+    # 非字符串列 → ValueError
+    with pytest.raises(ValueError, match="字符串"):
+        TestStrLen.str_max_len("num")
+
+
 def test_keyword_define(new_component_env):
     with pytest.raises(ValueError, match="关键字"):
 

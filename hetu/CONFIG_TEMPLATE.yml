@@ -1,4 +1,11 @@
 # HeTu配置文件模板
+#
+# 环境变量插值：任意字符串值中的 ${VAR} 会在启动时被同名环境变量替换；
+#   ${VAR:-默认值} 在该变量未设置时使用默认值；${VAR} 无默认值且未设置则启动报错。
+#   适合把密钥、部署相关地址等敏感/可变值移出本文件，例如：
+#     auth_key: ${AUTH_KEY}
+#     master: redis://:${REDIS_PASSWORD}@127.0.0.1:6379/0
+#   注意：插值结果是字符串，需要布尔/数字的项请直接写字面量或用 !eval。
 
 # 你的游戏服务器端代码文件，也就是System和Component的定义
 APP_FILE: app.py
@@ -86,7 +93,7 @@ PACKET_LAYERS:
     level: 1  # 因为有字典，级别1以上压缩率无明显提升
   # 消息加密层，使用ChaCha20-Poly1305算法
   - type: crypto
-    auth_key: your_auth_key_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器
+    auth_key: your_auth_key_here  # 加密签名密钥，客户端必须有相同密钥才能连接服务器。可用 ${AUTH_KEY} 从环境变量注入
 
 
 # 后端数据库地址，component中的backend可以指定用这里的哪个后端
@@ -103,7 +110,7 @@ BACKENDS:
     # Postgres: postgresql://user:pass@localhost:5432/dbname
     # SQLite:   sqlite:///./data/hetu.sqlite3
     # MariaDB:  mysql://user:pass@localhost:3306/dbname
-    master: redis://127.0.0.1:6379/0
+    master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。

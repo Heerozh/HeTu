@@ -97,34 +97,42 @@ working examples — read them first.
 - **Row ids** — every row has an int64 `id` from SnowflakeID; never assign it
   yourself. Use `new_row()` / `new_rows(n)`.
 
-## Testing Systems
+## Testing Systems & Endpoints
 
 `hetu.testing.Sandbox` runs your app **in-process on a temp SQLite file** — unit-test
-Systems with no Docker/Redis needed. (→ `testing/__init__.py`)
+Systems and Endpoints with no Docker/Redis needed. (→ `testing/__init__.py`)
 
 ```python
 import app                              # your module with the @define_* decorators
-from hetu.testing import Sandbox, sandbox_fixture
+from hetu.testing import Sandbox, sandbox_fixture, CallRejected, ConnectionClosed
 
 sandbox = sandbox_fixture("Game", app)             # a pytest fixture (put in conftest.py)
 
 async def test_rename(sandbox):
-    await sandbox.call("rename", "Alice", caller=1001)          # run a System as caller 1001
+    await sandbox.call("rename", "Alice", caller=1001)     # full Endpoint path, as user 1001
     assert (await sandbox.get("Player", owner=1001)).name == "Alice"
 ```
 
-- **`call(name, *args, caller=, raw=False)`** runs a System in a real transaction
-  (auto-retries on `RaceCondition`) and by default returns **what the client SDK
-  actually receives**: the return value framed like `receiver.rpc()` and run through the
-  **real msgpack round-trip** — `ResponseToClient(msg)` → the round-tripped `msg`; any
-  other return → `"ok"`. So a non-serializable payload (e.g. a raw `np.int64` — `int()`
-  it first) **raises here exactly as it would on the wire**, and a `tuple` comes back as
-  a `list`. Pass **`raw=True`** to get the System's untouched return value instead (for
-  asserting internal / nested-call results).
+Two ways to invoke your code:
+
+- **`call(name, *args, caller=0, user_data=None)`** — the **client path**. Runs the full
+  Endpoint pipeline: connection → permission/arg checks → guards → your `@define_endpoint`
+  (or a System's auto-generated endpoint). `caller != 0` first `elevate`s a fresh
+  connection (simulates a logged-in client). Returns what the client SDK actually receives
+  (msgpack round-tripped). A guard soft-reject raises **`CallRejected`** (assert
+  `.code`); an illegal call (bad permission/args, unknown endpoint, or the endpoint
+  raised) raises **`ConnectionClosed`**. Each call is a fresh connection (no cross-call
+  guard/rate-limit state — `@rate_limit` counting is HeTu's job, test it in integration).
+- **`call_system(name, *args, caller=0, raw=False)`** — **bypasses the Endpoint layer**,
+  runs a System directly (trusted internal call, no permission/guard/login) in a real
+  transaction (auto-retries on `RaceCondition`). Default returns the client payload (same
+  msgpack round-trip — a raw `np.int64` raises here as on the wire, `int()` it first; a
+  `tuple` comes back as a `list`). Pass **`raw=True`** for the System's untouched return
+  value (assert internal / nested-call results).
 - **`get(Comp, **key)`** / **`range(Comp, index, lo, hi, limit=)`** read rows back
-  directly (no RLS filtering); **`flush()`** wipes all tables between tests.
-- Bypasses the Endpoint layer — **no** permission / guard / `elevate` checks (call as any
-  `caller`); one app/namespace per process; the called System must reference ≥1 Component.
+  directly (no RLS filtering); **`insert`/`upsert`** seed rows; **`flush()`** wipes all
+  tables between tests.
+- One app/namespace per process; a `call_system` target must reference ≥1 Component.
 
 ## Client (Unity / C#)
 

@@ -66,6 +66,15 @@ async def test_rls_comp_value(ctx: hetu.SystemContext, value):
 
 
 @hetu.define_system(
+    namespace="pytest", components=(RLSComp,), permission=hetu.Permission.USER
+)
+async def crashing_system(ctx: hetu.SystemContext):
+    # 测试用：故意抛普通异常，触发 executor.execute_ 的 except 路径
+    # （区别于 ClientReject 软拒绝），用于验证 debug 模式 err 帧透传真实原因。
+    raise RuntimeError("boom for test")
+
+
+@hetu.define_system(
     namespace="pytest",
     permission=hetu.Permission.EVERYBODY,
     depends=("create_future_call:copy1",),

@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     from ..table import TableReference
     from .maint import RedisTableMaintenance
     from .mq import RedisMQClient
-    from .worker_keeper import RedisWorkerKeeper
 
 logger = logging.getLogger("HeTu.root")
 msg_packer = msgpack.Packer(use_bin_type=False)

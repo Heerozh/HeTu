@@ -11,7 +11,7 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, cast, overload
+from typing import Any, Callable, cast, overload
 
 import numpy as np
 
@@ -241,6 +241,24 @@ class BaseComponent:
         for i in range(size):
             rows[i].id = SNOWFLAKE_ID.next_id()
         return cast(np.recarray, rows)
+
+    @classmethod
+    def str_max_len(cls, prop_name: str) -> int:
+        """返回字符串属性可存储的最大字符数（由该列 dtype 的列宽推导）。
+
+        用途：把可配置的长度上限钳到实际列宽，避免在调用方硬编码列宽，例如
+        ``min(user_cfg, MyComp.str_max_len("name"))``。仅适用于字符串(U)/
+        字节(S)属性；其它 dtype 抛 ValueError。
+        """
+        dt = cls.dtype_map_[prop_name]
+        if dt.kind not in ("U", "S"):
+            raise ValueError(
+                _("{cname}.{pname}不是字符串属性（dtype={d}）").format(
+                    cname=cls.name_, pname=prop_name, d=dt.str
+                )
+            )
+        # U(unicode)每字符4字节、S(bytes)每字符1字节：除以单字符宽度得字符数
+        return dt.itemsize // np.dtype(dt.kind + "1").itemsize
 
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:

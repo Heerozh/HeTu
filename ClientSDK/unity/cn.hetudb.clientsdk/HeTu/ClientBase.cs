@@ -23,7 +23,13 @@ namespace HeTu
         Canceled,
 
         /// <summary>被服务端守卫拒绝（如限流）。</summary>
-        Rejected
+        Rejected,
+
+        /// <summary>
+        ///     服务端执行失败（System 抛异常或非法调用）。
+        ///     仅在 server debug 模式下回传并带原因；release 模式服务端会直接断开连接。
+        /// </summary>
+        Failed
     }
 
     /// <summary>
@@ -39,6 +45,24 @@ namespace HeTu
         {
             SystemName = systemName;
             Code = code;
+        }
+    }
+
+    /// <summary>
+    ///     System 在服务端执行失败（抛异常或非法调用）时抛出。
+    ///     <see cref="Reason" /> 仅在 server debug 模式下有内容（透传服务端真实异常），
+    ///     release 模式下服务端直接断开连接、不会发送本帧。
+    /// </summary>
+    public sealed class HeTuCallFailedException : Exception
+    {
+        public string SystemName { get; }
+        public string Reason { get; }
+
+        public HeTuCallFailedException(string systemName, string reason)
+            : base($"System '{systemName}' failed on server: {reason}")
+        {
+            SystemName = systemName;
+            Reason = reason;
         }
     }
 
@@ -77,6 +101,7 @@ namespace HeTu
         internal const string MessageUpdate = "updt";
         internal const string MessageSubed = "sub";
         internal const string MessageReject = "rej";
+        internal const string MessageError = "err";
         internal const string IndexId = "id";
         protected readonly InspectorTraceCollector InspectorCollector = new();
 
@@ -323,6 +348,18 @@ namespace HeTu
                     InspectorCollector.CompleteRequest(traceId, "rejected", code);
                     OnCallRejected?.Invoke(systemName, code);
                     onResponse(null, CallOutcome.Rejected, code);
+                    return;
+                }
+
+                // 服务端执行失败：response = ["err", systemName, reason]（仅 debug 模式）。
+                // 失败原因走独立通道，response 置 null，调用方的 resp?.ToDict() 不会再
+                // 对失败字符串做反序列化而抛异常。
+                if (response != null && response.Length > 0 &&
+                    response[0] as string == MessageError)
+                {
+                    var reason = response.Length > 2 ? response[2] as string : null;
+                    InspectorCollector.CompleteRequest(traceId, "failed", reason);
+                    onResponse(null, CallOutcome.Failed, reason);
                     return;
                 }
 
@@ -634,6 +671,7 @@ namespace HeTu
                 case MessageResponse:
                 case MessageSubed:
                 case MessageReject:
+                case MessageError:
                     // 这些都是 round trip 响应，有对应的请求等待队列
                     ResponseQueue.CompleteNext(structuredMsg);
                     break;

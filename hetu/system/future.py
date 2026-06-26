@@ -233,6 +233,8 @@ async def ensure_future_call(
     幂等通过 key 的确定性 id 复用 FutureCalls 主键唯一性实现：已存在则直接返回（不写入，
     事务空提交），并发同 key 的多余插入会撞主键引发事务竞态并自动重试，最终只保留一条。
 
+    * 同create_future_call，目标system必须开启call_lock。
+
     Idempotently ensure a single future call exists, keyed by ``key``; if it already
     exists, keep it as-is (params are NOT updated) and return its id. Useful for seeding
     a server-wide recurring background task from an on_start system without piling up
@@ -332,22 +334,24 @@ async def sleep_for_upcoming(tbl: Table):
 
 async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
-    async with tbl.session() as session:
-        repo = session.using(tbl.comp_cls)
-        # 取出最早到期的任务
-        now = time.time()
-        calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
-        # 检查可能被其他worker消费了
-        if calls.size == 0:
-            return None
-        call = calls[0]
-        # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
-        if call.timeout == 0:
-            repo.delete(call.id)
-        else:
-            call.scheduled = now + call.timeout
-            call.last_run = now
-            await repo.update(call)
+    call = None
+    async for attempt in tbl.session().retry(2):
+        async with attempt as session:
+            repo = session.using(tbl.comp_cls)
+            # 取出最早到期的任务
+            now = time.time()
+            calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
+            # 检查可能被其他worker消费了
+            if calls.size == 0:
+                return None
+            call = calls[0]
+            # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+            if call.timeout == 0:
+                repo.delete(call.id)
+            else:
+                call.scheduled = now + call.timeout
+                call.last_run = now
+                await repo.update(call)
     return call
 
 

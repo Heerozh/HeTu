@@ -50,6 +50,50 @@ namespace HeTu.Client.Tests
             Assert.That(outcomes[1], Is.EqualTo(CallOutcome.Completed));
         }
 
+        [Test]
+        public void ErrFrame_FiresFailedOutcome_WithReason_AndNullResponse()
+        {
+            var client = new RejectTestClient();
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            client.ForceConnected();
+
+            CallOutcome outcome = CallOutcome.Completed;
+            string reason = null;
+            JsonObject resp = null;
+            bool fired = false;
+            client.CallSystem("crashing_system", Array.Empty<object>(),
+                (r, oc, code) => { fired = true; outcome = oc; reason = code; resp = r; });
+
+            client.Receive(new object[]
+                { "err", "crashing_system", "RuntimeError: boom for test" });
+
+            Assert.That(fired, Is.True);
+            Assert.That(outcome, Is.EqualTo(CallOutcome.Failed));
+            Assert.That(reason, Is.EqualTo("RuntimeError: boom for test"));
+            // 失败时 resp 为 null，调用方的 resp?.ToDict() 天然安全、不再抛反序列化异常
+            Assert.That(resp, Is.Null);
+        }
+
+        [Test]
+        public void NormalRsp_AfterErr_StaysFifoAligned()
+        {
+            var client = new RejectTestClient();
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            client.ForceConnected();
+
+            var outcomes = new List<CallOutcome>();
+            client.CallSystem("a", Array.Empty<object>(),
+                (_, oc, _2) => outcomes.Add(oc));
+            client.CallSystem("b", Array.Empty<object>(),
+                (_, oc, _2) => outcomes.Add(oc));
+
+            client.Receive(new object[] { "err", "a", "RuntimeError: boom" });
+            client.Receive(new object[] { "rsp", "ok" });
+
+            Assert.That(outcomes[0], Is.EqualTo(CallOutcome.Failed));
+            Assert.That(outcomes[1], Is.EqualTo(CallOutcome.Completed));
+        }
+
         private sealed class RejectTestClient : HeTuClientBase
         {
             public RejectTestClient() =>

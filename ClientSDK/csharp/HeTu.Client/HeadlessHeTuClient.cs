@@ -102,6 +102,10 @@ namespace HeTu
                         tcs.TrySetException(
                             new HeTuCallRejectedException(systemName, code));
                         break;
+                    case CallOutcome.Failed:
+                        tcs.TrySetException(
+                            new HeTuCallFailedException(systemName, code));
+                        break;
                     default:
                         tcs.TrySetResult(resp);
                         break;
