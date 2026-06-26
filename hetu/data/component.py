@@ -11,7 +11,7 @@ import keyword
 import logging
 import operator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, cast, overload
+from typing import Any, Callable, cast, overload
 
 import numpy as np
 

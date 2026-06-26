@@ -18,7 +18,6 @@ from .definer import SystemClusters, SystemDefine
 from .lock import SystemLock
 
 if TYPE_CHECKING:
-    from ..endpoint.response import ResponseToClient
     from ..manager import ComponentTableManager
     from .context import SystemContext
 

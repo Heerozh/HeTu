@@ -5,14 +5,12 @@
 @email: heeroz@gmail.com
 """
 
-from .definer import define_system, SystemClusters, SystemDefine
 from .context import SystemContext
-
+from .definer import SystemClusters, SystemDefine, define_system
 
 # future并不需要引用任何东西，只是为了让define生效
 from .future import (
     FutureCalls,
 )
 
-
-__all__ = ["define_system", "SystemClusters", "SystemContext", "FutureCalls"]
+__all__ = ["define_system", "SystemClusters", "SystemContext", "FutureCalls","SystemDefine"]

@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import RaceCondition, RowFormat
+from hetu.data.backend import RowFormat
 
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
