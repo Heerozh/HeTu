@@ -130,7 +130,6 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Conventions
 
-- Commit 前缀：`ENH:`、`BUG:`、`MAINT:`
 - 4 空格缩进，行长 88（Ruff）
 - `snake_case` functions、`PascalCase` classes、`UPPER_SNAKE_CASE` constants
 - public APIs 使用中英双语 docstrings
