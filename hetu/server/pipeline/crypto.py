@@ -46,6 +46,40 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         def __repr__(self) -> str:
             return f"CryptoContext('{self.session_key.hex()[:8]}...')"
 
+    class HandshakeError(ValueError):
+        """
+        握手失败异常。str() 故意保持含糊（"unknown protocol"），避免向客户端/扫描器泄漏
+        失败原因；diagnostic 字段携带详细原因，仅供 server 本地日志使用（不发给客户端）。
+
+        Handshake failure. str() stays vague on purpose so no reason leaks to the
+        client/scanner; `diagnostic` carries the detailed reason for the
+        server-side log only.
+        """
+
+        def __init__(self, diagnostic: str):
+            super().__init__("unknown protocol")
+            self.diagnostic = diagnostic
+
+    @staticmethod
+    def mask_auth_key(auth_key: str | bytes | None) -> str:
+        """
+        脱敏展示 auth_key：保留首尾真实字符、中间打码，便于在日志中辨识、跨服务器对比
+        密钥是否一致，又不泄漏完整值。过短（<8）的密钥整体打码，以免露首尾即暴露大半内容。
+
+        Mask an auth_key, keeping a few real head/tail chars for identification and
+        cross-server comparison without leaking the full value. Keys shorter than 8
+        chars are fully masked so head/tail don't expose most of the content.
+        """
+        if not auth_key:
+            return ""
+        if isinstance(auth_key, bytes):
+            auth_key = auth_key.decode("utf-8", errors="replace")
+        n = len(auth_key)
+        if n < 8:
+            return "*" * n
+        edge = min(4, (n - 4) // 2)
+        return auth_key[:edge] + "*" * (n - 2 * edge) + auth_key[-edge:]
+
     def __init__(self, auth_key: str | bytes | None = None):
         super().__init__()
         if isinstance(auth_key, str):
@@ -57,7 +91,12 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
     def _parse_client_public_key(self, message: bytes) -> bytes:
         if len(message) == self.LEGACY_HELLO_SIZE:
             if self._auth_key is not None:
-                raise ValueError("unknown protocol")
+                raise self.HandshakeError(
+                    _(
+                        "客户端发送未签名握手包，但服务器配置了 auth_key"
+                        "（客户端可能未配置 auth_key）"
+                    )
+                )
             return message
 
         if (
@@ -70,10 +109,14 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             if self._auth_key is not None:
                 expected = hmac.new(self._auth_key, payload, hashlib.sha256).digest()
                 if not hmac.compare_digest(signature, expected):
-                    raise ValueError("unknown protocol")
+                    raise self.HandshakeError(
+                        _("握手签名不匹配，客户端 auth_key 与服务器不一致")
+                    )
             return client_public_key
 
-        raise ValueError("unknown protocol")
+        raise self.HandshakeError(
+            _("无法识别的握手包格式（非 HeTu 客户端 / 协议版本不符）")
+        )
 
     def client_handshake(self, client_pvt: bytes, server_pub: bytes) -> CryptoContext:
         """
@@ -140,6 +183,16 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             ctx = self.CryptoContext(session_key, True, 0, 0)
             return ctx, public_key.encode()
 
+        except self.HandshakeError as e:
+            logger.warning(
+                _(
+                    "⚠️ [📡Pipeline] [Crypto层] 握手失败: {diag} (本机 auth_key: {key})"
+                ).format(
+                    diag=e.diagnostic,
+                    key=self.mask_auth_key(self._auth_key) or _("未设置"),
+                )
+            )
+            raise
         except Exception as e:
             logger.warning(_("⚠️ [📡Pipeline] [Crypto层] 握手异常: {err}").format(err=e))
             raise

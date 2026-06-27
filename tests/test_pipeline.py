@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import logging
 from typing import Any
 
 import pytest
@@ -225,3 +226,96 @@ def test_crypto_handshake_ignores_signed_key_when_server_has_no_auth_key():
     ctx, server_pub = layer.handshake(hello)
     assert isinstance(ctx, pipeline.CryptoLayer.CryptoContext)
     assert len(server_pub) == 32
+
+
+# ---- auth_key 脱敏展示（mask_auth_key） ----
+
+
+def test_mask_auth_key_middle_truncation():
+    # 首尾各 4 位真实字符，中间打码（Stripe 式）
+    assert pipeline.CryptoLayer.mask_auth_key("1a2bXXXXXXX3c4d") == "1a2b*******3c4d"
+
+
+def test_mask_auth_key_short_key_fully_masked():
+    # 太短（<8）的 key 全部打码，避免露头尾就暴露大半内容
+    assert pipeline.CryptoLayer.mask_auth_key("secret") == "******"
+    masked = pipeline.CryptoLayer.mask_auth_key("password")  # 正好 8 位
+    assert masked != "password"
+    assert set(masked.strip("*")) and "*" in masked  # 露一点、留星号
+
+
+def test_mask_auth_key_str_and_bytes_match():
+    assert pipeline.CryptoLayer.mask_auth_key("samevalue123") == (
+        pipeline.CryptoLayer.mask_auth_key(b"samevalue123")
+    )
+
+
+def test_mask_auth_key_distinguishes_different_keys():
+    # 不同 key 的脱敏结果不同，便于跨服务器辨识
+    assert pipeline.CryptoLayer.mask_auth_key(
+        "alpha-key-1234"
+    ) != pipeline.CryptoLayer.mask_auth_key("bravo-key-5678")
+
+
+def test_mask_auth_key_empty_returns_empty():
+    assert pipeline.CryptoLayer.mask_auth_key(None) == ""
+    assert pipeline.CryptoLayer.mask_auth_key("") == ""
+
+
+def test_mask_auth_key_never_leaks_full_key():
+    key = "server-secret-key-1234"
+    masked = pipeline.CryptoLayer.mask_auth_key(key)
+    assert key not in masked
+    assert "*" in masked
+
+
+# ---- 握手失败诊断（HandshakeError.diagnostic） ----
+
+
+def test_handshake_error_is_value_error_with_vague_str():
+    err = pipeline.CryptoLayer.HandshakeError("详细原因")
+    assert isinstance(err, ValueError)
+    assert str(err) == "unknown protocol"  # 对外含糊
+    assert err.diagnostic == "详细原因"
+
+
+def test_crypto_handshake_mismatch_diagnostic_mentions_auth_key():
+    layer = pipeline.CryptoLayer(auth_key="server-secret-key")
+    client_public = PrivateKey.generate().public_key.encode()
+    hello = _build_signed_hello(client_public, b"client-other-key")
+
+    with pytest.raises(pipeline.CryptoLayer.HandshakeError) as exc_info:
+        layer.handshake(hello)
+    assert str(exc_info.value) == "unknown protocol"
+    assert "auth_key" in exc_info.value.diagnostic
+
+
+def test_crypto_handshake_unsigned_client_with_server_authkey_diagnostic():
+    layer = pipeline.CryptoLayer(auth_key="server-secret-key")
+    client_public = PrivateKey.generate().public_key.encode()  # 32 字节，未签名
+
+    with pytest.raises(pipeline.CryptoLayer.HandshakeError) as exc_info:
+        layer.handshake(client_public)
+    assert "签名" in exc_info.value.diagnostic
+
+
+def test_crypto_handshake_malformed_diagnostic():
+    layer = pipeline.CryptoLayer(auth_key="server-secret-key")
+
+    with pytest.raises(pipeline.CryptoLayer.HandshakeError) as exc_info:
+        layer.handshake(b"\x00\x01\x02garbage")
+    assert "格式" in exc_info.value.diagnostic
+
+
+def test_crypto_handshake_failure_logs_masked_key_not_plaintext(caplog):
+    key = "server-secret-key-1234"
+    layer = pipeline.CryptoLayer(auth_key=key)
+    client_public = PrivateKey.generate().public_key.encode()
+    hello = _build_signed_hello(client_public, b"client-other-key-9999")
+
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        with pytest.raises(ValueError):
+            layer.handshake(hello)
+
+    assert pipeline.CryptoLayer.mask_auth_key(key) in caplog.text
+    assert key not in caplog.text  # 完整明文绝不进日志

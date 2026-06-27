@@ -23,6 +23,7 @@ from ..common import yamlloader
 from ..i18n import _
 from ..safelogging import handlers as log_handlers
 from ..server import worker_main
+from ..server.pipeline import CryptoLayer
 from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 from .base import CommandInterface, resolve_app_file
 
@@ -245,6 +246,21 @@ class StartCommand(CommandInterface):
                 layers=" -> ".join(layer_types)
             )
         )
+        # 打印 crypto 层 auth_key 的脱敏指纹，便于多服开服时核对各服/客户端密钥是否一致
+        crypto_layer = next(
+            (
+                layer
+                for layer in config.get("PACKET_LAYERS", [])
+                if layer.get("type") == "crypto"
+            ),
+            None,
+        )
+        if crypto_layer is not None:
+            masked = CryptoLayer.mask_auth_key(crypto_layer.get("auth_key"))
+            if masked:
+                logger.info(_("🔑 auth_key: {key}").format(key=masked))
+            else:
+                logger.warning(_("🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"))
 
         if int(config.DEBUG) > 1:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
