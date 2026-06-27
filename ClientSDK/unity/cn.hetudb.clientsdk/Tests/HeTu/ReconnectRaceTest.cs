@@ -97,8 +97,7 @@ namespace Tests.HeTu
         ///     回归:多次 Close→Connect 不应让 HeTuClient 自带的
         ///     HandleConnectionClosed 在进程级单例 OnClosed 上无限累加。
         ///     <para>
-        ///         原设计指望 <see cref="HeTuClient.WaitClosedAsync" /> 的 finally
-        ///         去 -=,但它全仓无调用方,于是每次 Connect 净增一个订阅。修复后
+        ///         事件 += 不去重,若每次 Connect 都无脑 += 就会跨重连累加;修复后
         ///         Connect 改为幂等订阅(先 -= 再 +=),订阅数恒为 1。
         ///     </para>
         /// </summary>
