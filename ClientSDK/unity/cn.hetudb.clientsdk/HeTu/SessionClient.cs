@@ -63,6 +63,17 @@ namespace HeTu
         public bool IsConnectionAlive => _core?.IsConnectionAlive ?? false;
 
         /// <summary>
+        ///     本会话是否曾经成功进入过 <see cref="HeTuSessionState.Ready" />。主要用来
+        ///     区分 <see cref="State" /> == <see cref="HeTuSessionState.Faulted" /> 的
+        ///     两种终态：<c>false</c> = 首次连接就失败（URL / 凭据错或服务器不可达，
+        ///     SDK 不会重试同一份配置）；<c>true</c> = 曾经在线、之后断线且重连耗尽才
+        ///     放弃。配合 <see cref="StateChanged" /> 绑 UI 时：
+        ///     <c>Faulted &amp;&amp; !HasBeenReady</c> → "连不上服务器"，
+        ///     <c>Faulted &amp;&amp; HasBeenReady</c> → "已掉线且无法恢复"。
+        /// </summary>
+        public bool HasBeenReady => _core?.HasBeenReady ?? false;
+
+        /// <summary>
         ///     会话状态每次变化都触发一次；最常用于驱动 UI（断线 → 显示 syncing...
         ///     条幅 / Ready → 隐藏）。
         /// </summary>

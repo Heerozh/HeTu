@@ -220,6 +220,77 @@ namespace Tests.HeTu
             Assert.AreEqual(HeTuSessionState.Faulted, session.State);
         }
 
+        // HasBeenReady 用来区分两种 Faulted 终态。State 1:首次连接就失败,从没
+        // Ready 过 → HasBeenReady 必须为 false(SDK 不重试,UI 提示"连不上服务器")。
+        [UnityTest]
+        public IEnumerator HasBeenReady_False_WhenFirstConnectFaults() =>
+            RunTask(HasBeenReady_False_WhenFirstConnectFaultsAsync());
+
+        private async Task HasBeenReady_False_WhenFirstConnectFaultsAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            // maxReconnectAttempts=1:首次 Ready 前 close 直接进 Faulted 终态。
+            var core = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                null,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                1);
+            using var session = new HeTuSessionClient(core);
+
+            Assert.IsFalse(session.HasBeenReady, "Connect 前应为 false");
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseClosed("first connect failed");
+            try
+            {
+                await connectTask;
+            }
+            catch
+            {
+                // 首连失败,connect 的 await 抛异常是预期行为,这里只关心终态标志。
+            }
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsFalse(session.HasBeenReady,
+                "首次连接就失败的 Faulted:HasBeenReady 必须为 false");
+        }
+
+        // State 3:曾经 Ready、断线后重连耗尽 → 同样是 Faulted,但 HasBeenReady
+        // 仍为 true(用于和 State 1 区分,UI 提示"已掉线且无法恢复")。
+        [UnityTest]
+        public IEnumerator HasBeenReady_True_WhenReconnectExhaustedAfterReady() =>
+            RunTask(HasBeenReady_True_WhenReconnectExhaustedAfterReadyAsync());
+
+        private async Task HasBeenReady_True_WhenReconnectExhaustedAfterReadyAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            // maxReconnectAttempts=1:Ready 后第一次断线即耗尽,直接进 Faulted,
+            // 不经过 scheduler,因此测试是确定性的。
+            var core = new HeTuSessionClientBase(
+                () => transport,
+                scheduler,
+                null,
+                TimeSpan.Zero,
+                TimeSpan.Zero,
+                1);
+            using var session = new HeTuSessionClient(core);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseConnected();
+            await connectTask;
+            Assert.IsTrue(session.HasBeenReady, "Ready 之后应为 true");
+
+            transport.RaiseClosed("connection lost mid-game");
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsTrue(session.HasBeenReady,
+                "重连耗尽进 Faulted 后 HasBeenReady 必须仍为 true");
+        }
+
         // 主用例:启动时匿名 Connect → Ready → 用户登录后 SetBootstrap →
         // 断线时 SDK 自动重连,跑这个新装的 bootstrap。
         [UnityTest]
