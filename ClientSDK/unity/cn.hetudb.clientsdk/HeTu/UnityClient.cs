@@ -79,12 +79,22 @@ namespace HeTu
         protected override void ConnectCore(string url, Action onConnected,
             Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
         {
-            _socket = new WebSocket(url);
-            _socket.OnOpen += (_, _) => { onConnected(); };
-
-            _socket.OnMessage += (_, e) => { onMessage(e.RawData); };
-            _socket.OnClose += (_, e) =>
+            // 每条连接捕获自己的 socket 做"代次"标记:UnityWebSocket 事件非线程、隔帧
+            // 才在主线程派发,Close 后立刻 Connect 时旧 socket 迟到的 OnClose/OnMessage
+            // 会打到共享单例上误伤新连接(典型:新 Connect 被旧 close 取消)。故回调先校验。
+            var socket = new WebSocket(url);
+            _socket = socket;
+            socket.OnOpen += (_, _) =>
             {
+                if (socket == _socket) onConnected();
+            };
+            socket.OnMessage += (_, e) =>
+            {
+                if (socket == _socket) onMessage(e.RawData);
+            };
+            socket.OnClose += (_, e) =>
+            {
+                if (socket != _socket) return;
                 switch (e.StatusCode)
                 {
                     case CloseStatusCode.Normal:
@@ -108,8 +118,11 @@ namespace HeTu
                         break;
                 }
             };
-            _socket.OnError += (_, e) => { onError(e.Message); };
-            _socket.ConnectAsync();
+            socket.OnError += (_, e) =>
+            {
+                if (socket == _socket) onError(e.Message);
+            };
+            socket.ConnectAsync();
         }
 
         // 实际关闭ws连接的方法
