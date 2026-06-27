@@ -173,6 +173,10 @@ namespace HeTu
             Action onConnected = null;
             onConnected = () => _connectCompletion.TrySetResult(true);
             OnConnected += onConnected;
+            // HandleConnectionClosed 是稳定实例方法。原设计靠 WaitClosedAsync 的
+            // finally 去 -=,但它全仓无调用方,导致每次 Connect 净增一个订阅、跨重连
+            // 在单例 OnClosed 上无限累加。重订阅前先 -=,保证恒为单个(幂等订阅)。
+            OnClosed -= HandleConnectionClosed;
             OnClosed += HandleConnectionClosed;
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(

@@ -1,7 +1,11 @@
+using System;
 using System.Collections;
+using System.Linq;
+using System.Reflection;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
+using UnityEngine;
 using UnityEngine.TestTools;
 #if !UNITY_6000_0_OR_NEWER
 using Cysharp.Threading.Tasks;
@@ -87,6 +91,66 @@ namespace Tests.HeTu
             //    证明 Connect 没被取消。
             var resp = await HeTuClient.Instance.CallSystem("login", 123, true);
             Assert.IsNotNull(resp, "重连后应能正常调用 System");
+        }
+
+        /// <summary>
+        ///     回归:多次 Close→Connect 不应让 HeTuClient 自带的
+        ///     HandleConnectionClosed 在进程级单例 OnClosed 上无限累加。
+        ///     <para>
+        ///         原设计指望 <see cref="HeTuClient.WaitClosedAsync" /> 的 finally
+        ///         去 -=,但它全仓无调用方,于是每次 Connect 净增一个订阅。修复后
+        ///         Connect 改为幂等订阅(先 -= 再 +=),订阅数恒为 1。
+        ///     </para>
+        /// </summary>
+        [UnityTest]
+        public IEnumerator TestReconnectDoesNotLeakClosedHandler()
+        {
+            yield return RunTask(ReconnectDoesNotLeakClosedHandlerAsync());
+        }
+
+        private static async Task ReconnectDoesNotLeakClosedHandlerAsync()
+        {
+            const int cycles = 3;
+            for (var i = 0; i < cycles; i++)
+            {
+                await HeTuClient.Instance.Connect(Url, AuthKey);
+                Assert.IsTrue(HeTuClient.Instance.IsConnectionAlive,
+                    $"第 {i + 1} 次连接应握手成功");
+                HeTuClient.Instance.Close();
+                await Settle();
+            }
+
+            // 跑了 cycles 次 Connect。幂等订阅下,无论本进程之前(本 fixture 或别的
+            // fixture)连过多少次,单例 OnClosed 上 HandleConnectionClosed 都只该有
+            // 一个(最后一次 Connect 挂上、Close 不解绑、故恒留 1);修复前则会随每次
+            // Connect 线性累加。
+            var count = CountOnClosedHandlers("HandleConnectionClosed");
+            Assert.AreEqual(1, count,
+                $"HandleConnectionClosed 订阅数应恒为 1,实际 {count}");
+        }
+
+#if UNITY_6000_0_OR_NEWER
+        private static async Awaitable Settle() =>
+            await Awaitable.WaitForSecondsAsync(0.2f);
+#else
+        private static async UniTask Settle() =>
+            await UniTask.Delay(200);
+#endif
+
+        // 反射数一下单例 OnClosed(field-like event)上名为 methodName 的订阅数。
+        // 没有公开 API 能枚举事件订阅,只能读编译器生成的 backing field——本仓测试
+        // 已有读私有字段的先例(见 HeTuClientTest 对 DisposableBag 的反射)。
+        private static int CountOnClosedHandlers(string methodName)
+        {
+            var field = typeof(HeTuClientBase).GetField("OnClosed",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            Assert.IsNotNull(field,
+                "找不到 OnClosed 的 backing field(field-like event 实现变了?)");
+            var del = field.GetValue(HeTuClient.Instance) as Delegate;
+            if (del == null)
+                return 0;
+            return del.GetInvocationList()
+                .Count(d => d.Method.Name == methodName);
         }
     }
 }
