@@ -13,7 +13,7 @@ namespace HeTu.Editor
     {
         private static readonly (string packageId, string minVersion)[] s_dependencies =
         {
-            ("BouncyCastle.Cryptography", "2.6.2"), ("MessagePack", "3.1.4"), ("R3", "1.3.0")
+            ("BouncyCastle.Cryptography", "2.6.2"), ("MessagePack", "3.1.8"), ("R3", "1.3.1")
         };
 
         public static IReadOnlyList<(string packageId, string minVersion)> Dependencies =>
