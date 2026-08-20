@@ -22,7 +22,7 @@ from sanic.worker.loader import AppLoader
 from ..common import yamlloader
 from ..i18n import _
 from ..safelogging import handlers as log_handlers
-from ..server import worker_main
+from ..server import StartupAborted, worker_main
 from ..server.pipeline import CryptoLayer
 from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 from .base import CommandInterface, resolve_app_file
@@ -288,6 +288,14 @@ class StartCommand(CommandInterface):
                 Sanic.serve_single(primary=app)
             else:
                 Sanic.serve(primary=app, app_loader=loader)
+        except StartupAborted as e:
+            # 单进程模式下worker异常会一路冒到这里（多进程模式则由管理进程中止），
+            # 打友好提示后以非0退出码结束，让docker/systemd/k8s能识别为启动失败
+            logger.error(
+                _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
+            )
+            log_handlers.stop_all_logging_handlers()
+            sys.exit(1)
         except PermissionError as e:
             if "10013" in str(e):
                 print(

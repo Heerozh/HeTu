@@ -165,13 +165,18 @@ async def test_run_startup_systems_propagates_failure(
         await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-x")
 
 
-def _fake_app(tbl_mgr):
+def _fake_app(tbl_mgr, **config):
     """构造一个够 worker_start 用的最小 app 替身（config 用 dict，ctx 持有 table_managers）。"""
     from types import SimpleNamespace
 
     stopped = []
     app = SimpleNamespace()
-    app.config = {"NAMESPACE": "pytest", "APP_FILE": "x", "INSTANCES": ["server1"]}
+    app.config = {
+        "NAMESPACE": "pytest",
+        "APP_FILE": "x",
+        "INSTANCES": ["server1"],
+        **config,
+    }
     app.ctx = SimpleNamespace(table_managers={"server1": tbl_mgr})
     app.stop = lambda: stopped.append(True)
     app.stopped = stopped
@@ -221,9 +226,15 @@ async def test_worker_start_runs_on_start_systems(
 async def test_worker_start_aborts_on_on_start_failure(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):
-    """on_start System 启动失败时，worker_start 调用 app.stop() 中止，且不向上抛。"""
+    """on_start System 启动失败时，worker_start 抛 StartupAborted 中止整个服务器启动。
+
+    必须是抛异常而不是 app.stop()：只有异常能让 Sanic 单/多进程都立刻中止且退出码非0，
+    app.stop() 两种模式下退出码都是0，会被docker/systemd当成正常退出。"""
+    import pytest
+
     import hetu.server.main as main_mod
     from hetu.manager import ComponentTableManager
+    from hetu.server.main import StartupAborted
 
     @define_component(namespace="pytest", force=True)
     class SeedComp(BaseComponent):
@@ -246,10 +257,125 @@ async def test_worker_start_aborts_on_on_start_failure(
     monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
 
     app = _fake_app(tbl_mgr)
-    # 不应抛出，而是 stop
-    await main_mod.worker_start(app)
+    with pytest.raises(StartupAborted, match="boom"):
+        await main_mod.worker_start(app)
 
-    assert app.stopped == [True]
+    # 不能用 app.stop()（退出码0），必须靠异常中止
+    assert app.stopped == []
+
+
+async def test_run_startup_systems_timeout_names_stuck_system(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """卡住的启动System会撞上启动超时，报错里带上是哪个instance的哪个System。"""
+    import asyncio
+
+    import pytest
+
+    from hetu.manager import ComponentTableManager
+    from hetu.system.startup import run_startup_systems
+
+    @define_component(namespace="pytest", force=True)
+    class SeedComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        v: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(SeedComp,), on_start=True)
+    async def seed_hang(ctx):
+        await asyncio.sleep(30)
+
+    SystemClusters().build_clusters("pytest")
+
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    deadline = asyncio.get_running_loop().time() + 0.2
+    with pytest.raises(TimeoutError, match="seed_hang"):
+        await run_startup_systems(
+            "pytest", {"server1": tbl_mgr}, "boot-timeout", deadline=deadline
+        )
+
+
+async def test_worker_start_aborts_on_startup_timeout(
+    mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
+):
+    """卡住的启动System不会让服务器无限等下去：worker_start 超时后抛 StartupAborted。"""
+    import asyncio
+
+    import pytest
+
+    import hetu.server.main as main_mod
+    from hetu.manager import ComponentTableManager
+    from hetu.server.main import StartupAborted
+
+    @define_component(namespace="pytest", force=True)
+    class SeedComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        v: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(SeedComp,), on_start=True)
+    async def seed_hang(ctx):
+        await asyncio.sleep(30)
+
+    SystemClusters().build_clusters("pytest")
+
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    async def fake_start_backends(_app):
+        pass
+
+    monkeypatch.setattr(main_mod, "start_backends", fake_start_backends)
+
+    app = _fake_app(tbl_mgr, STARTUP_TIMEOUT=0.2)
+    with pytest.raises(StartupAborted, match="seed_hang"):
+        await main_mod.worker_start(app)
+
+    assert app.stopped == []
+
+
+async def test_worker_start_aborts_on_backend_timeout(monkeypatch):
+    """连后端/建表卡住同样受启动超时保护（这一步卡死过去也是永久静默挂起）。"""
+    import asyncio
+
+    import pytest
+
+    import hetu.server.main as main_mod
+    from hetu.server.main import StartupAborted
+
+    async def hang_start_backends(_app):
+        await asyncio.sleep(30)
+
+    monkeypatch.setattr(main_mod, "start_backends", hang_start_backends)
+
+    app = _fake_app(None, STARTUP_TIMEOUT=0.2)
+    with pytest.raises(StartupAborted, match="后端"):
+        await main_mod.worker_start(app)
+
+    assert app.stopped == []
+
+
+def test_resolve_ack_threshold_follows_startup_timeout():
+    """ack阈值只由 STARTUP_TIMEOUT 推算（+余量），保证永远比我们自己的超时晚触发。"""
+    from hetu.server.main import (
+        ACK_TIMEOUT_MARGIN,
+        DEFAULT_STARTUP_TIMEOUT,
+        UNLIMITED_ACK_THRESHOLD,
+        resolve_ack_threshold,
+    )
+
+    # sanic的THRESHOLD单位是0.1秒
+    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 30}) == int(
+        (30 + ACK_TIMEOUT_MARGIN) * 10
+    )
+    # 没配则用默认值推算
+    assert resolve_ack_threshold({}) == int(
+        (DEFAULT_STARTUP_TIMEOUT + ACK_TIMEOUT_MARGIN) * 10
+    )
+    # 0 是不限制，不能原样传给sanic（sanic的0是"立刻判定启动失败"）
+    assert resolve_ack_threshold({"STARTUP_TIMEOUT": 0}) == UNLIMITED_ACK_THRESHOLD
 
 
 def test_on_start_rejects_client_permission(new_component_env, new_clusters_env):
