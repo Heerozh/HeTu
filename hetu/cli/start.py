@@ -57,6 +57,18 @@ def infer_backend_type_from_db_url(db_url: str) -> str:
     )
 
 
+def resolve_worker_num(worker_num: int) -> int:
+    """把配置的 WORKER_NUM 解析成真实的工作进程数，负数表示按CPU核心数自动。
+
+    没用sanic的fast=True来实现"自动"：fast和single_process互斥（单worker时要用
+    single_process），而且自己算才能让显示的进程数、auto_reload等判断都拿到真实值。
+    process_cpu_count()和sanic的fast一样会考虑CPU亲和性(cgroup/taskset)，容器里更准。
+    """
+    if worker_num < 0:
+        return os.process_cpu_count() or 1
+    return worker_num
+
+
 def wait_for_port(host, port, timeout=30):
     """轮询检测端口是否可用"""
     start_time = time.time()
@@ -103,7 +115,10 @@ class StartCommand(CommandInterface):
             default="redis://127.0.0.1:6379/0",
         )
         cli_group.add_argument(
-            "--workers", type=int, help=_("工作进程数，可设为 CPU * 1.2"), default=4
+            "--workers",
+            type=int,
+            help=_("工作进程数，可设为 CPU * 1.2，-1为按CPU核心数自动"),
+            default=4,
         )
         cli_group.add_argument(
             "--debug",
@@ -195,8 +210,7 @@ class StartCommand(CommandInterface):
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
         # prepare用的配置
-        fast = config.WORKER_NUM < 0
-        workers = fast and 1 or config.WORKER_NUM
+        workers = resolve_worker_num(config.WORKER_NUM)
         # per-boot uuid：main进程每次开服生成一次，经config_for_factory透传给每个worker，
         # 使 on_start System 在本次开服只跑一次（去重见 hetu.system.startup）
         config_for_factory[ON_START_UUID_CONFIG_KEY] = make_boot_uuid()
@@ -278,7 +292,6 @@ class StartCommand(CommandInterface):
             auto_tls=ssl == "auto",
             auto_reload=config.DEBUG and workers > 1,
             ssl=ssl if ssl != "auto" else None,
-            fast=fast,
             workers=workers,
             single_process=workers == 1,
         )
