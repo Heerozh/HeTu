@@ -379,13 +379,38 @@ System之间components有交集的，表示这些System互相之间可能有事�
 
 ### Methods
 
+#### `switch_main`
+
+```python
+switch_main(main_namespace: str) -> None
+```
+
+<small>Source: [`hetu/system/definer.py:83`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L83)</small>
+
+把主 namespace 快速访问表重指到另一个**已构建**的 namespace。
+
+多 app 共享测试进程时（各包 conftest 在收集期已 import 注册），首个
+build_clusters 会把所有 namespace 的簇一次建齐，但 main 快速表只指向
+首建者；后续 Sandbox 复用已建簇时用本方法重指即可——定义/簇本就按
+namespace 隔离共存，无需清表重建（清表重建对多模块包不可靠：reload
+不会重执行已缓存子模块里的装饰器）。
+
+
+
+
+
+
+
+
+
+
 #### `get_startup_systems`
 
 ```python
 get_startup_systems(namespace: str | None = None) -> list[str]
 ```
 
-<small>Source: [`hetu/system/definer.py:96`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L96)</small>
+<small>Source: [`hetu/system/definer.py:110`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L110)</small>
 
 返回所有标记了 on_start=True 的 System 名字（按定义顺序）。
 
@@ -406,7 +431,7 @@ Return names of all systems marked with ``on_start=True`` (in definition order).
 get_components(namespace: str | None = None) -> dict[type[BaseComponent], int]
 ```
 
-<small>Source: [`hetu/system/definer.py:109`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L109)</small>
+<small>Source: [`hetu/system/definer.py:123`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L123)</small>
 
 返回所有被System引用过的Component及其所属簇id
 
@@ -425,7 +450,7 @@ get_components(namespace: str | None = None) -> dict[type[BaseComponent], int]
 build_endpoints()
 ```
 
-<small>Source: [`hetu/system/definer.py:265`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L265)</small>
+<small>Source: [`hetu/system/definer.py:279`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L279)</small>
 
 把System定义复制到EndpointDefines中，作为Endpoint使用
 

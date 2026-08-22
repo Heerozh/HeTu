@@ -193,7 +193,7 @@ define_system(
 )
 ```
 
-<small>Source: [`hetu/system/definer.py:327`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L327)</small>
+<small>Source: [`hetu/system/definer.py:341`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L341)</small>
 
 
 
@@ -247,6 +247,10 @@ define_system(
 
 注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
 （写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
+
+启动System因为跑在收连接之前，卡住就等于服务器起不来，所以有超时保护：它和连后端、
+建表共用配置文件的 `STARTUP_TIMEOUT` 总预算（默认60秒），超时会报出卡在哪个System
+并中止开服（退出码非0）。需要跑更久的话调大该配置（0为不限制）。
 
 
 
