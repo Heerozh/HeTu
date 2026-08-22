@@ -6,6 +6,7 @@ import docker
 import docker.errors
 import pytest
 from docker.errors import NotFound
+from fixtures.docker_image import ensure_image
 
 
 @pytest.fixture(scope="session")
@@ -17,6 +18,8 @@ def ses_redis_service():
         client = docker.from_env()
     except docker.errors.DockerException:
         return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    ensure_image(client, "redis:latest")
 
     # 先删除已启动的
     try:
@@ -117,6 +120,8 @@ def ses_valkey_service():
         client = docker.from_env()
     except docker.errors.DockerException:
         return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    ensure_image(client, "valkey/valkey:latest")
 
     # 先删除已启动的
     try:
@@ -232,6 +237,8 @@ def ses_redis_cluster_service():
         client = docker.from_env()
     except docker.errors.DockerException:
         return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    ensure_image(client, "redis:latest")
 
     # 配置参数
     network_name = "hetu_test_cluster_net"
