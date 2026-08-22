@@ -57,6 +57,7 @@ class ClientReject(Exception):
     """guard 抛出它 = 软拒绝当次调用：不开事务、不断连接、回 rej 帧给客户端。
     code 用于客户端通用回调里区分原因（如 'RATE_LIMITED'）；reason 可选、仅放进客户端异常对象。
     """
+
     def __init__(self, code: str = "REJECTED", reason: str | None = None):
         self.code = code
         self.reason = reason
@@ -116,6 +117,7 @@ def rate_limit(times: int, per: float):
 ```python
 class RejectResponse(EndpointResponse):
     """软拒绝响应，承载 code/reason，由 receiver 转成 rej 帧。不发给普通 rsp 路径。"""
+
     def __init__(self, code: str, reason: str | None = None):
         self.code = code
         self.reason = reason

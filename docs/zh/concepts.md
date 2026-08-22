@@ -84,7 +84,9 @@ async def add_stock(ctx, owner, qty):
 
 
 @hetu.define_system(
-    namespace="Shop", components=(Order,), depends=(add_stock,),
+    namespace="Shop",
+    components=(Order,),
+    depends=(add_stock,),
     permission=hetu.Permission.USER,
 )
 async def pay(ctx, order_id):

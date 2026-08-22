@@ -161,9 +161,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 ws.fail_connection()
                 break
     except asyncio.CancelledError:
-        if ws.ws_proto.parser_exc and not isinstance(
-            ws.ws_proto.parser_exc, EOFError
-        ):
+        if ws.ws_proto.parser_exc and not isinstance(ws.ws_proto.parser_exc, EOFError):
             err_msg = _("❌ [📡WSSender] WS协议异常：{exc}").format(
                 exc=ws.ws_proto.parser_exc
             )

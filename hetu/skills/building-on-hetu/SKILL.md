@@ -44,8 +44,9 @@ class Player(hetu.BaseComponent):
     name: str = hetu.property_field("", dtype="U32")  # strings are fixed-width!
 
 
-@hetu.define_system(namespace="Game", components=(Player,),
-    permission=hetu.Permission.USER)
+@hetu.define_system(
+    namespace="Game", components=(Player,), permission=hetu.Permission.USER
+)
 async def rename(ctx: hetu.SystemContext, name: str):
     async with ctx.repo[Player].upsert(owner=ctx.caller) as row:
         row.name = name
@@ -112,8 +113,9 @@ sandbox = sandbox_fixture("Game", app)  # a pytest fixture (put in conftest.py)
 
 
 async def test_rename(sandbox):
-    await sandbox.call("rename", "Alice",
-        caller=1001)  # full Endpoint path, as user 1001
+    await sandbox.call(
+        "rename", "Alice", caller=1001
+    )  # full Endpoint path, as user 1001
     assert (await sandbox.get("Player", owner=1001)).name == "Alice"
 ```
 

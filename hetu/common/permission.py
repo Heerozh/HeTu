@@ -31,4 +31,3 @@ class Permission(IntEnum):
 
     ADMIN = 999
     """仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。"""
-

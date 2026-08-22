@@ -646,9 +646,7 @@ class InitCommand(CommandInterface):
         if config_path.exists():
             print(_("ℹ️  config.yml 已存在，跳过"))
         else:
-            config_text = render_config(
-                read_config_template(), namespace, app_file_rel
-            )
+            config_text = render_config(read_config_template(), namespace, app_file_rel)
             config_path.write_text(config_text, encoding="utf-8")
             print(_("✅ 已创建 config.yml"))
 
@@ -667,7 +665,9 @@ class InitCommand(CommandInterface):
             print(f"  cd {args.name}")
         print("  uv run hetu start --config=config.yml")
         print()
-        print(_("提示：启动前需要一个可用的后端数据库（默认 redis://127.0.0.1:6379/0）。"))
+        print(
+            _("提示：启动前需要一个可用的后端数据库（默认 redis://127.0.0.1:6379/0）。")
+        )
 ```
 
 - [ ] **Step 4: 在 hetu/cli/__init__.py 注册 InitCommand**

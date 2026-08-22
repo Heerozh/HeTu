@@ -38,7 +38,9 @@ async def remove(ctx, order_id):
 
 
 @hetu.define_system(
-    namespace="Loot", depends=("remove:ItemOrder",), permission=hetu.Permission.USER,
+    namespace="Loot",
+    depends=("remove:ItemOrder",),
+    permission=hetu.Permission.USER,
 )
 async def remove_item_order(ctx, order_id):
     return await ctx.depend["remove:ItemOrder"](ctx, order_id)
@@ -80,8 +82,12 @@ async def reward_daily_bonus(ctx: hetu.SystemContext, user_id: int):
 )
 async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
     uuid = await ctx.depend["create_future_call:scheduler"](
-        ctx, -delay_seconds, "reward_daily_bonus", ctx.caller,
-        timeout=10, recurring=False,
+        ctx,
+        -delay_seconds,
+        "reward_daily_bonus",
+        ctx.caller,
+        timeout=10,
+        recurring=False,
     )
     return hetu.ResponseToClient({"future_call_id": int(uuid)})
 ```
@@ -115,7 +121,8 @@ _FCQueue = FutureCalls.duplicate("MyGame", "scheduler")
 
 
 @hetu.define_system(
-    namespace="MyGame", permission=hetu.Permission.USER,
+    namespace="MyGame",
+    permission=hetu.Permission.USER,
     components=(_FCQueue,),
 )
 async def cancel_future(ctx, future_id):
@@ -129,8 +136,10 @@ async def cancel_future(ctx, future_id):
 
 ```python
 @hetu.define_system(
-    namespace="Shop", components=(Wallet,),
-    permission=None, call_lock=True,
+    namespace="Shop",
+    components=(Wallet,),
+    permission=None,
+    call_lock=True,
 )
 async def settle(ctx, user_id, amount):
     async with ctx.repo[Wallet].upsert(owner=user_id) as w:
@@ -156,7 +165,8 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 
 ```python
 @hetu.define_system(
-    namespace="MyGame", components=(OnlineUser,),
+    namespace="MyGame",
+    components=(OnlineUser,),
     permission=None,  # 不可由客户端调用
 )
 async def on_disconnect(ctx: hetu.SystemContext):
@@ -257,7 +267,7 @@ async def long_running(ctx: hetu.SystemContext, ...):
 rows = await ctx.repo[Player].range("level", 1, 100, limit=1000)
 
 # 每个行到原点的距离，在 C 中向量化。
-d2 = rows.x ** 2 + rows.y ** 2
+d2 = rows.x**2 + rows.y**2
 
 # 将所有行移动 (dx, dy)
 shifted_x = rows.x + dx
@@ -368,13 +378,11 @@ matched_positions = positions[np.isin(positions.owner, both)]
 
 ```python
 @hetu.define_component(namespace="Game", backend="hot")
-class Position(hetu.BaseComponent):
-    ...
+class Position(hetu.BaseComponent): ...
 
 
 @hetu.define_component(namespace="Game", backend="cold")
-class GameLog(hetu.BaseComponent):
-    ...
+class GameLog(hetu.BaseComponent): ...
 ```
 
 硬约束：**一个 `System` 引用的每个 `Component` 必须共享同一个后端**。集群构建器在启动时会拒绝混合后端的集群。因此实际上，“多后端”是指“不同组的关联 `Components` 位于不同的数据库上”。目前仅支持 Redis；其用途在现阶段有限，它是为未来扩展而设计的。

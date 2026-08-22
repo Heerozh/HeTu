@@ -66,7 +66,9 @@ async def remove(ctx, order_id):
 
 
 @hetu.define_system(
-    namespace="Loot", depends=("remove:ItemOrder",), permission=hetu.Permission.USER,
+    namespace="Loot",
+    depends=("remove:ItemOrder",),
+    permission=hetu.Permission.USER,
 )
 async def remove_item_order(ctx, order_id):
     return await ctx.depend["remove:ItemOrder"](ctx, order_id)
@@ -124,8 +126,12 @@ async def reward_daily_bonus(ctx: hetu.SystemContext, user_id: int):
 )
 async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
     uuid = await ctx.depend["create_future_call:scheduler"](
-        ctx, -delay_seconds, "reward_daily_bonus", ctx.caller,
-        timeout=10, recurring=False,
+        ctx,
+        -delay_seconds,
+        "reward_daily_bonus",
+        ctx.caller,
+        timeout=10,
+        recurring=False,
     )
     return hetu.ResponseToClient({"future_call_id": int(uuid)})
 ```
@@ -190,7 +196,8 @@ _FCQueue = FutureCalls.duplicate("MyGame", "scheduler")
 
 
 @hetu.define_system(
-    namespace="MyGame", permission=hetu.Permission.USER,
+    namespace="MyGame",
+    permission=hetu.Permission.USER,
     components=(_FCQueue,),
 )
 async def cancel_future(ctx, future_id):
@@ -208,8 +215,10 @@ repeatedly, yet it will ultimately execute only once.
 
 ```python
 @hetu.define_system(
-    namespace="Shop", components=(Wallet,),
-    permission=None, call_lock=True,
+    namespace="Shop",
+    components=(Wallet,),
+    permission=None,
+    call_lock=True,
 )
 async def settle(ctx, user_id, amount):
     async with ctx.repo[Wallet].upsert(owner=user_id) as w:
@@ -245,7 +254,8 @@ when the websocket closes:
 
 ```python
 @hetu.define_system(
-    namespace="MyGame", components=(OnlineUser,),
+    namespace="MyGame",
+    components=(OnlineUser,),
     permission=None,  # not callable by clients
 )
 async def on_disconnect(ctx: hetu.SystemContext):
@@ -402,7 +412,7 @@ methods like `.sum()` / `.mean()` are available without it.
 rows = await ctx.repo[Player].range("level", 1, 100, limit=1000)
 
 # Distance from origin for every row, vectorized in C.
-d2 = rows.x ** 2 + rows.y ** 2
+d2 = rows.x**2 + rows.y**2
 
 # Shift everyone by (dx, dy)
 shifted_x = rows.x + dx
@@ -536,13 +546,11 @@ matches a key in the `BACKENDS:` block of your config. Different
 
 ```python
 @hetu.define_component(namespace="Game", backend="hot")
-class Position(hetu.BaseComponent):
-    ...
+class Position(hetu.BaseComponent): ...
 
 
 @hetu.define_component(namespace="Game", backend="cold")
-class GameLog(hetu.BaseComponent):
-    ...
+class GameLog(hetu.BaseComponent): ...
 ```
 
 The hard constraint: **every `Component` referenced by one `System` must

@@ -136,10 +136,8 @@ def _signature_string(
         # FORWARDREF lets PEP 649 lazy annotations resolve when possible and
         # fall back to ForwardRef objects for TYPE_CHECKING-only names —
         # avoids NameError on otherwise valid signatures.
-        sig = inspect.signature(
-            obj, annotation_format=annotationlib.Format.FORWARDREF
-        )
-    except (TypeError, ValueError, NameError):
+        sig = inspect.signature(obj, annotation_format=annotationlib.Format.FORWARDREF)
+    except TypeError, ValueError, NameError:
         return name
 
     if skip_self:
@@ -205,7 +203,7 @@ def _griffe_class(cls: type):
         for part in module_path.split(".")[1:]:
             node = node[part]
         return node[cls.__name__]
-    except (KeyError, AttributeError):
+    except KeyError, AttributeError:
         return None
 
 
@@ -243,9 +241,7 @@ def _resolve_one_annotation(obj: Any, name: str) -> Any:
     Returns the live type, or None if the annotation is missing/unresolvable.
     """
     try:
-        ann = annotationlib.get_annotations(
-            obj, format=annotationlib.Format.FORWARDREF
-        )
+        ann = annotationlib.get_annotations(obj, format=annotationlib.Format.FORWARDREF)
     except Exception:
         return None
     val = ann.get(name)
@@ -314,7 +310,7 @@ def _bind_first_arg_target(cls: type, prop: property) -> object | None:
         return None
     try:
         src = textwrap.dedent(inspect.getsource(prop.fget))
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return None
     try:
         tree = ast.parse(src)
@@ -354,7 +350,7 @@ def _separator_cutoff_line(cls: type) -> int | None:
     """
     try:
         src_lines, start_line = inspect.getsourcelines(cls)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return None
     for i, line in enumerate(src_lines):
         if _SEPARATOR_RE.match(line):
@@ -439,7 +435,7 @@ def _source_location(obj: object) -> tuple[str, int]:
     try:
         path = inspect.getsourcefile(target) or "<unknown>"
         _, lineno = inspect.getsourcelines(target)
-    except (OSError, TypeError):
+    except OSError, TypeError:
         return ("<unknown>", 0)
 
     abs_path = Path(path).resolve()
@@ -561,9 +557,7 @@ def _resolve_bases(cls: type, symbol_index: dict[int, Symbol]) -> list[dict]:
         sym = symbol_index.get(id(base))
         if sym is not None:
             anchor = sym.short_name.lower()
-            out.append(
-                {"name": sym.short_name, "link": f"{sym.topic}.md#{anchor}"}
-            )
+            out.append({"name": sym.short_name, "link": f"{sym.topic}.md#{anchor}"})
         else:
             out.append({"name": base.__name__, "link": None})
     return out
@@ -703,20 +697,22 @@ def render_topic_page(
     for rec in records:
         _apply_links(rec, link_map)
     intro_fn = TOPIC_INTROS.get(topic)
-    return _env().get_template("api_page.md.j2").render(
-        topic_title=title,
-        topic_description=description,
-        weight=weight,
-        apis=records,
-        topic_intro=intro_fn() if intro_fn else None,
+    return (
+        _env()
+        .get_template("api_page.md.j2")
+        .render(
+            topic_title=title,
+            topic_description=description,
+            weight=weight,
+            apis=records,
+            topic_intro=intro_fn() if intro_fn else None,
+        )
     )
 
 
 def render_index_page(grouped: dict[str, list[Symbol]]) -> str:
     topics = []
-    for topic, symbols in sorted(
-        grouped.items(), key=lambda kv: TOPIC_META[kv[0]][2]
-    ):
+    for topic, symbols in sorted(grouped.items(), key=lambda kv: TOPIC_META[kv[0]][2]):
         title, _, _ = TOPIC_META[topic]
         topics.append(
             {
@@ -737,9 +733,13 @@ def render_coverage_page(symbols: list[Symbol]) -> str:
             missing.append(
                 {"qualname": s.qualname, "source_path": path, "source_line": line}
             )
-    return _env().get_template("api_coverage.md.j2").render(
-        total=len(symbols),
-        missing=missing,
+    return (
+        _env()
+        .get_template("api_coverage.md.j2")
+        .render(
+            total=len(symbols),
+            missing=missing,
+        )
     )
 
 

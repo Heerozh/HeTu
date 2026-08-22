@@ -8,31 +8,31 @@
 import sys
 
 DEFAULT_LOGGING_CONFIG = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'handlers': {
-        'console': {
-            'class': 'logging.StreamHandler',
-            'formatter': 'generic',
-            'stream': sys.stdout,
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "formatter": "generic",
+            "stream": sys.stdout,
         },
     },
-    'loggers': {
-        'root': {
-            'handlers': ['console'],
-            'level': 'INFO',
+    "loggers": {
+        "root": {
+            "handlers": ["console"],
+            "level": "INFO",
         },
-        'HeTu.root': {
-            'level': 'INFO',
+        "HeTu.root": {
+            "level": "INFO",
         },
-        'HeTu.replay': {
-            'level': 'ERROR',
-            'propagate': False,
+        "HeTu.replay": {
+            "level": "ERROR",
+            "propagate": False,
         },
     },
-    'formatters': {
-        'generic': {
-            'class': 'sanic.logging.formatter.AutoFormatter',
+    "formatters": {
+        "generic": {
+            "class": "sanic.logging.formatter.AutoFormatter",
         },
     },
 }

@@ -101,8 +101,11 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
         ctx.user_data["me"] = row
 
     await _insert_message(
-        ctx, owner=ctx.caller, name=name,
-        text=f"{name} joined the chat", kind="system",
+        ctx,
+        owner=ctx.caller,
+        name=name,
+        text=f"{name} joined the chat",
+        kind="system",
     )
 ```
 
@@ -123,14 +126,19 @@ The actual "send a message" RPC:
 
 ```python
 @hetu.define_system(
-    namespace="Chat", components=(ChatMessage,),
+    namespace="Chat",
+    components=(ChatMessage,),
     permission=hetu.Permission.USER,
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
     me = ctx.user_data["me"]
     assert me and me.online, "call user_login first"
     await _insert_message(
-        ctx, owner=ctx.caller, name=me.name, text=text, kind="chat",
+        ctx,
+        owner=ctx.caller,
+        name=me.name,
+        text=text,
+        kind="chat",
     )
 ```
 
@@ -144,7 +152,8 @@ Cleanly mark a user offline:
 
 ```python
 @hetu.define_system(
-    namespace="Chat", components=(OnlineUser, ChatMessage),
+    namespace="Chat",
+    components=(OnlineUser, ChatMessage),
     permission=hetu.Permission.USER,
 )
 async def user_quit(ctx: hetu.SystemContext):
@@ -153,14 +162,19 @@ async def user_quit(ctx: hetu.SystemContext):
         row.last_seen_ms = _now_ms()
         await ctx.repo[OnlineUser].update(row)
         await _insert_message(
-            ctx, owner=ctx.caller, name=row.name,
-            text=f"{row.name} left the chat", kind="system",
+            ctx,
+            owner=ctx.caller,
+            name=row.name,
+            text=f"{row.name} left the chat",
+            kind="system",
         )
 
 
 @hetu.define_system(
-    namespace="Chat", components=(OnlineUser,),
-    depends=("user_quit",), permission=None,
+    namespace="Chat",
+    components=(OnlineUser,),
+    depends=("user_quit",),
+    permission=None,
 )
 async def on_disconnect(ctx: hetu.SystemContext):
     await ctx.depend["user_quit"](ctx)

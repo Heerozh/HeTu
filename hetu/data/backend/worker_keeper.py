@@ -139,14 +139,16 @@ class GeneralWorkerKeeper(WorkerKeeper):
                 continue
             self.worker_id = worker_id
             logger.info(
-                _("[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}").format(
-                    worker_id=worker_id, node_id=self.node_id
-                )
+                _(
+                    "[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+                ).format(worker_id=worker_id, node_id=self.node_id)
             )
             return worker_id
 
         raise KeyError(
-            _("无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试")
+            _(
+                "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+            )
         )
 
     @override
@@ -158,7 +160,9 @@ class GeneralWorkerKeeper(WorkerKeeper):
         if worker_id < 0:
             return
         await self.table.direct_set(worker_id, expires_at="0")
-        logger.info(_("[❄️ID] [General] 释放 Worker ID: {worker_id}").format(worker_id=worker_id))
+        logger.info(
+            _("[❄️ID] [General] 释放 Worker ID: {worker_id}").format(worker_id=worker_id)
+        )
 
     @override
     async def get_last_timestamp(self) -> int:

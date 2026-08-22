@@ -235,6 +235,7 @@ async def mod_mariadb_backend(ses_mariadb_service):
     for backend in backends.values():
         await backend.close()
 
+
 REDIS_BACKENDS = ["redis", "redis_cluster"]
 REDIS_FORK_BACKENDS = ["valkey"]
 SQL_BACKENDS = ["postgres", "sqlite", "mariadb"]

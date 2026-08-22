@@ -55,8 +55,10 @@ class ChatMessage(hetu.BaseComponent):
 
 
 @hetu.define_system(
-    namespace="Chat", components=(ChatMessage,), permission=hetu.Permission.USER,
-    retry=99
+    namespace="Chat",
+    components=(ChatMessage,),
+    permission=hetu.Permission.USER,
+    retry=99,
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
     row = ChatMessage.new_row()

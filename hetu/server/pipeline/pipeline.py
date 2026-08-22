@@ -29,7 +29,9 @@ class MessageProcessLayerFactory:
     def create(**kwargs) -> MessageProcessLayer:
         alias = kwargs.pop("type").lower()
         if alias not in MessageProcessLayerFactory._registry:
-            raise NotImplementedError(_("{alias} MessageProcessLayer未实现").format(alias=alias))
+            raise NotImplementedError(
+                _("{alias} MessageProcessLayer未实现").format(alias=alias)
+            )
         return MessageProcessLayerFactory._registry[alias](**kwargs)
 
 
@@ -37,9 +39,9 @@ class MessageProcessLayer:
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
         super().__init_subclass__()
-        assert "alias" in kwargs, (
-            _("{cls_name} MessageProcessLayer子类必须指定alias参数").format(cls_name=cls.__name__)
-        )
+        assert "alias" in kwargs, _(
+            "{cls_name} MessageProcessLayer子类必须指定alias参数"
+        ).format(cls_name=cls.__name__)
         MessageProcessLayerFactory.register(kwargs["alias"], cls)
 
     def __init__(self, **kwargs: Any):
@@ -177,9 +179,9 @@ class MessagePipeline:
                 original_index = len(pipe_ctx) - 1 - i
                 ctx = pipe_ctx[original_index]
             decoded = layer.decode(ctx, decoded)
-        assert isinstance(decoded, (dict, list)), (
-            _("最终解码结果必须是JSON类型, 但实际得到: {decoded}").format(decoded=decoded)
-        )
+        assert isinstance(decoded, (dict, list)), _(
+            "最终解码结果必须是JSON类型, 但实际得到: {decoded}"
+        ).format(decoded=decoded)
         return decoded
 
 
