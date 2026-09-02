@@ -4,6 +4,7 @@
 @license: Apache2.0 可用作商业项目，再随便找个角落提及用到了此项目 :D
 @email: heeroz@gmail.com
 """
+
 from sortedcontainers import SortedList, SortedDict
 
 
@@ -52,7 +53,9 @@ class MultiMap:
     def count(self, left=None, right=None) -> int:
         """查询key的数量"""
         if left is None:
-            return sum(len(v) if isinstance(v, SortedList) else 1 for v in self._map.values())
+            return sum(
+                len(v) if isinstance(v, SortedList) else 1 for v in self._map.values()
+            )
 
         right = right or left
 
@@ -64,7 +67,9 @@ class MultiMap:
 
         stop = self._map.bisect_right(right)
         return sum(
-            len(v) if isinstance(v, SortedList) else 1 for v in self._map.values()[start:stop])
+            len(v) if isinstance(v, SortedList) else 1
+            for v in self._map.values()[start:stop]
+        )
 
     def iloc(self, index: slice) -> list:
         """传入index()返回的slice，获取map中的值"""
@@ -72,7 +77,7 @@ class MultiMap:
         rtn = []
         for mapped in maps:
             if type(mapped) is SortedList:  # do not use isinstance, it's slow
-                rtn.extend(mapped[::index.step])
+                rtn.extend(mapped[:: index.step])
             else:
                 rtn.append(mapped)
         return rtn
@@ -112,5 +117,3 @@ class MultiMap:
         else:
             hi = _map.bisect_right(right)
             return slice(lo, hi)
-
-

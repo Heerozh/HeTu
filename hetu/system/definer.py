@@ -80,6 +80,20 @@ class SystemClusters(metaclass=Singleton):
         self._component_map = {}
         self._system_map = {}
 
+    def switch_main(self, main_namespace: str) -> None:
+        """把主 namespace 快速访问表重指到另一个**已构建**的 namespace。
+
+        多 app 共享测试进程时（各包 conftest 在收集期已 import 注册），首个
+        build_clusters 会把所有 namespace 的簇一次建齐，但 main 快速表只指向
+        首建者；后续 Sandbox 复用已建簇时用本方法重指即可——定义/簇本就按
+        namespace 隔离共存，无需清表重建（清表重建对多模块包不可靠：reload
+        不会重执行已缓存子模块里的装饰器）。"""
+        assert main_namespace in self._clusters, _(
+            "namespace={main_namespace} 的簇尚未构建，不能 switch_main"
+        ).format(main_namespace=main_namespace)
+        self._main_namespace = main_namespace
+        self._main_system_map = self._system_map[main_namespace]
+
     def get_system(
         self, system_name: str, namespace: str | None = None
     ) -> SystemDefine | None:
@@ -409,6 +423,10 @@ def define_system(
 
         注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
         （写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
+
+        启动System因为跑在收连接之前，卡住就等于服务器起不来，所以有超时保护：它和连后端、
+        建表共用配置文件的 `STARTUP_TIMEOUT` 总预算（默认60秒），超时会报出卡在哪个System
+        并中止开服（退出码非0）。需要跑更久的话调大该配置（0为不限制）。
 
     Notes
     -----

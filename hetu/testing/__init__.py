@@ -100,7 +100,10 @@ class Sandbox:
 
     注意 / Notes
     -----
-    - 同一测试进程只支持一个 app/namespace（注册表为全局单例）。
+    - 注册表为全局单例；多 app/namespace 共享测试进程时（如 uv workspace 全仓
+      pytest，各包 conftest 收集期均已 import），首建者会把全部 namespace 的簇
+      一次建齐，其后 create 其他 namespace 仅重指 main 快速表（switch_main），
+      包间交错创建可双向切换。
     - `call_system` 调用的 System 必须引用至少 1 个 Component（引擎限制）。
     - `call` 每次都是独立的新连接、调用结束即断开，不跨调用累积 guard/限流状态；要验证
       `@rate_limit` 的跨调用计数请走集成测试（与不测 slowapi 同理，限流本身是 HeTu 的事）。
@@ -183,6 +186,12 @@ class Sandbox:
                 importlib.import_module(app_module.__name__)
             SystemClusters().build_clusters(namespace)
             SystemClusters().build_endpoints()
+        elif SystemClusters().main_namespace != namespace:
+            # 多游戏包共享测试进程：本 namespace 的簇已随首建者顺带建齐
+            # （build_clusters 会构建 _system_map 里的**所有** namespace，而各包
+            # conftest 在收集期就已 import 注册），只是 main 快速表仍指向首建者
+            # → 仅重指 main（get_system 单参查询走 main 表），不清表不重建。
+            SystemClusters().switch_main(namespace)
 
         # 3. SQLite backend
         config = {"type": "sql", "master": f"sqlite:///{db_path}", "servants": []}

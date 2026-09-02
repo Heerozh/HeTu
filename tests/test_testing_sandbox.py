@@ -255,3 +255,60 @@ async def test_sandbox_reload_app(tmp_path):
     ) as sb:
         await sb.call_system("add_rls_comp_value", 7, caller=99)
         assert (await sb.must_get("RLSComp", owner=99)).value == 107
+
+
+async def test_sandbox_second_namespace_repoints_main(tmp_path):
+    """多游戏包共享测试进程的回归（uv workspace 全仓 pytest 实况）：
+
+    各包 conftest 在**收集期**就 import 各自 app → 两个 namespace 的原始定义共存注册；
+    首个 Sandbox 构建时 build_clusters 会把**所有** namespace 的簇一次建齐，于是第二个
+    namespace 的 Sandbox.create 命中"已构建"跳过支——但 main 快速表仍指向首建者，
+    call_system 的单参 get_system 查 main 表 → ValueError: 不存在的System。
+    修复 = 跳过支里检测 main 不符时 SystemClusters().switch_main(namespace) 仅重指
+    （定义/簇按 namespace 隔离共存，无需清表重建）。"""
+    import importlib
+
+    from hetu.data.component import ComponentDefines
+    from hetu.endpoint.definer import EndpointDefines
+    from hetu.system import SystemClusters
+
+    # 干净起点：与 Sandbox 脏恢复同款重置（单文件 app 的 reload 可靠）
+    ComponentDefines().clear_()
+    EndpointDefines()._clear()
+    SystemClusters()._clear()
+    importlib.reload(app)
+
+    # 模拟"另一个游戏包在收集期已注册"：第二 namespace 的定义在首建**之前**注册
+    import numpy as np
+
+    @hetu.define_component(
+        namespace="mm2", force=True, permission=hetu.Permission.OWNER
+    )
+    class MM2Comp(hetu.BaseComponent):
+        owner: np.int64 = hetu.property_field(0, unique=True)
+        value: np.int32 = hetu.property_field(0)
+
+    @hetu.define_system(
+        namespace="mm2", components=(MM2Comp,), permission=hetu.Permission.USER
+    )
+    async def mm2_set(ctx: hetu.SystemContext, value):
+        async with ctx.repo[MM2Comp].upsert(owner=ctx.caller) as row:
+            row.value = value
+
+    # 先建 A（"pytest"）——build_clusters 顺带把 mm2 的簇也建了，main 指向 pytest
+    sb1 = await Sandbox.create("pytest", app, db_path=str(tmp_path / "a.sqlite3"))
+    await sb1.aclose()
+    assert SystemClusters().get_clusters("mm2") is not None  # 顺带构建的前提成立
+
+    # 再建 B（"mm2"）：修复前此处 call_system 抛 ValueError: 不存在的System
+    async with await Sandbox.create(
+        "mm2", app, db_path=str(tmp_path / "b.sqlite3")
+    ) as sb2:
+        await sb2.call_system("mm2_set", 42, caller=7)
+        assert (await sb2.must_get("MM2Comp", owner=7)).value == 42
+
+    # 回切 A 也要正常（双向重指，模拟包间交错）
+    async with await Sandbox.create(
+        "pytest", app, db_path=str(tmp_path / "c.sqlite3")
+    ) as sb3:
+        assert await sb3.call_system("add_rls_comp_value", 1, caller=5, raw=True) == 101

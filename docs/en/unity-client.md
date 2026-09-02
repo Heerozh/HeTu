@@ -70,8 +70,8 @@ public class NetBootstrap : MonoBehaviour
         await HeTuClient.Instance.CallSystem("login", SelfID);
 
         // Optional: be notified when the socket later drops.
-        var err = await HeTuClient.Instance.WaitClosedAsync();
-        Debug.Log($"disconnected: {err ?? "normal close"}");
+        HeTuClient.Instance.OnClosed += err =>
+            Debug.Log($"disconnected: {err ?? "normal close"}");
     }
 
     void OnDestroy() => HeTuClient.Instance.Close();
@@ -89,11 +89,12 @@ Key points the source enforces but isn't always obvious from a snippet:
 - **`Connect` returns once the handshake is complete.** A successful await
   means the socket is up, the encryption / dictionary handshake finished,
   and you can call `CallSystem` / `WatchRow` / `WatchRange` immediately. To
-  observe the eventual disconnect, await `WaitClosedAsync()` — it returns
-  `null` on a clean close, `"Canceled"` on app-exit / `Close()`, or the
-  error string otherwise. (Older versions of the SDK had `Connect` block
-  until close; if you're upgrading, replace the `while (true) { await
-  Connect... }` reconnect loop with `HeTuSessionClient` below.)
+  observe an unsolicited disconnect, subscribe to the `OnClosed` event — it
+  fires when the socket drops, with `null` for a clean server close or the
+  error string otherwise (it does not fire for your own `Close()`). (Older
+  versions of the SDK had `Connect` block until close; if you're upgrading,
+  replace the `while (true) { await Connect... }` reconnect loop with
+  `HeTuSessionClient` below.)
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`

@@ -316,15 +316,27 @@ def test_context_has_guard_state():
     from hetu.endpoint.context import Context
 
     ctx = Context(
-        caller=0, connection_id=0, address="x", group="", user_data={},
-        timestamp=0, request=None, systems=None,
+        caller=0,
+        connection_id=0,
+        address="x",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,
+        systems=None,
     )
     assert ctx.guard_state == {}
     ctx.guard_state["k"] = 1
     # 不同实例不共享
     ctx2 = Context(
-        caller=0, connection_id=0, address="x", group="", user_data={},
-        timestamp=0, request=None, systems=None,
+        caller=0,
+        connection_id=0,
+        address="x",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,
+        systems=None,
     )
     assert ctx2.guard_state == {}
 ```
@@ -583,36 +595,43 @@ class SystemDefine(EndpointDefine):
 Modify `SystemClusters.add`（约 274-300 行），签名加 `guards=None`，构造时传入：
 
 ```python
-    def add(
-        self, namespace, func, components, force, permission, depends, max_retry,
-        guards=None,
-    ):
-        sub_map = self._system_map.setdefault(namespace, dict())
+def add(
+    self,
+    namespace,
+    func,
+    components,
+    force,
+    permission,
+    depends,
+    max_retry,
+    guards=None,
+):
+    sub_map = self._system_map.setdefault(namespace, dict())
 
-        if not force:
-            assert func.__name__ not in sub_map, _("System重复定义：") + func.__name__
-        if components is None:
-            components = set()
+    if not force:
+        assert func.__name__ not in sub_map, _("System重复定义：") + func.__name__
+    if components is None:
+        components = set()
 
-        arg_count = func.__code__.co_argcount
-        defaults_count = len(func.__defaults__) if func.__defaults__ else 0
+    arg_count = func.__code__.co_argcount
+    defaults_count = len(func.__defaults__) if func.__defaults__ else 0
 
-        sub_map[func.__name__] = SystemDefine(
-            func=func,
-            components=components,
-            depends=depends,
-            max_retry=max_retry,
-            arg_count=arg_count,
-            defaults_count=defaults_count,
-            cluster_id=-1,
-            permission=permission,
-            full_components=set(),
-            full_depends=set(),
-            guards=list(guards) if guards else [],
-        )
+    sub_map[func.__name__] = SystemDefine(
+        func=func,
+        components=components,
+        depends=depends,
+        max_retry=max_retry,
+        arg_count=arg_count,
+        defaults_count=defaults_count,
+        cluster_id=-1,
+        permission=permission,
+        full_components=set(),
+        full_depends=set(),
+        guards=list(guards) if guards else [],
+    )
 
-        if namespace == "global":
-            self._global_system_map[func.__name__] = sub_map[func.__name__]
+    if namespace == "global":
+        self._global_system_map[func.__name__] = sub_map[func.__name__]
 ```
 
 - [ ] **Step 5: `build_endpoints` 拷贝 guards 到 EndpointDefine**
@@ -642,12 +661,18 @@ from ..endpoint.guard import collect_guards, mark_defined
 `define_system` 内 `warp(func)`：在调用 `SystemClusters().add(...)`（约 502 行）之前收集 guards 并透传：
 
 ```python
-        guards = collect_guards(func)
+guards = collect_guards(func)
 
-        SystemClusters().add(
-            namespace, func, _components, force, permission, depend_names, retry,
-            guards=guards,
-        )
+SystemClusters().add(
+    namespace,
+    func,
+    _components,
+    force,
+    permission,
+    depend_names,
+    retry,
+    guards=guards,
+)
 ```
 
 并在返回前标记产物——找到 `return warp_direct_system_call`（约 525 行），改为：
@@ -742,40 +767,36 @@ from .response import RejectResponse
 `execute`（约 175-195 行）在 alive 检查之后、`return await self.execute_(ep, *args)` 之前插入 guard 执行：
 
 ```python
-    async def execute(
-        self, endpoint: str, *args
-    ) -> tuple[bool, ResponseToClient | None]:
-        # 检查call参数和call权限
-        ep = self.execute_check(endpoint, args)
-        if ep is None:
-            return False, None
+async def execute(self, endpoint: str, *args) -> tuple[bool, ResponseToClient | None]:
+    # 检查call参数和call权限
+    ep = self.execute_check(endpoint, args)
+    if ep is None:
+        return False, None
 
-        # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
-        illegal = await self.alive_checker.is_illegal(
-            self.context, f"{self.namespace}.{endpoint}"
-        )
-        if illegal:
-            return False, None
+    # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
+    illegal = await self.alive_checker.is_illegal(
+        self.context, f"{self.namespace}.{endpoint}"
+    )
+    if illegal:
+        return False, None
 
-        # 调用前守卫(guard)：raise ClientReject 即软拒绝，不开事务、不断连接
-        for g in ep.guards:
-            try:
-                r = g(self.context, *args)
-                if inspect.isawaitable(r):
-                    await r
-            except ClientReject as e:
-                replay.info(
-                    f"[Rejected][{endpoint}] {e.code} {self.context}"
+    # 调用前守卫(guard)：raise ClientReject 即软拒绝，不开事务、不断连接
+    for g in ep.guards:
+        try:
+            r = g(self.context, *args)
+            if inspect.isawaitable(r):
+                await r
+        except ClientReject as e:
+            replay.info(f"[Rejected][{endpoint}] {e.code} {self.context}")
+            logger.info(
+                _("🚧 [📞Endpoint] {endpoint} 被守卫拒绝：{code}").format(
+                    endpoint=endpoint, code=e.code
                 )
-                logger.info(
-                    _("🚧 [📞Endpoint] {endpoint} 被守卫拒绝：{code}").format(
-                        endpoint=endpoint, code=e.code
-                    )
-                )
-                return True, RejectResponse(e.code, e.reason)
+            )
+            return True, RejectResponse(e.code, e.reason)
 
-        # 开始调用
-        return await self.execute_(ep, *args)
+    # 开始调用
+    return await self.execute_(ep, *args)
 ```
 
 注意 `execute` / `execute_` 的返回类型注解可放宽为
@@ -931,8 +952,13 @@ from .guard import guard, rate_limit, ClientReject
 
 
 __all__ = [
-    "define_endpoint", "Context", "ResponseToClient", "elevate",
-    "guard", "rate_limit", "ClientReject",
+    "define_endpoint",
+    "Context",
+    "ResponseToClient",
+    "elevate",
+    "guard",
+    "rate_limit",
+    "ClientReject",
 ]
 ```
 

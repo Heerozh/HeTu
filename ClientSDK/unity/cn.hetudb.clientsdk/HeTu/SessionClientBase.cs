@@ -651,6 +651,19 @@ namespace HeTu
                 EnterFaulted(fault);
                 return;
             }
+            // Ready 之后:bootstrap 阶段由应用层主动抛出(socket 仍存活,
+            // closeTransport==true)的非取消异常 = 票据/登录被永久拒绝(如 STALE_TICKET),
+            // 重连重跑同样的 bootstrap 只会得到同样结果 → 直接进 Faulted 终态,不浪费
+            // maxReconnectAttempts 次无谓重试。真正的连接掉线(含 bootstrap 期间掉线,
+            // 经 OnTransportClosed 置 _transportClosedItself=true)仍按退避重连;
+            // OperationCanceledException(取消,如退出/切场景)不当作永久拒绝。
+            if (State == HeTuSessionState.Bootstrapping
+                && closeTransport
+                && fault is not OperationCanceledException)
+            {
+                EnterFaulted(fault);
+                return;
+            }
             if (ExhaustedRetries())
             {
                 EnterFaulted(fault);

@@ -244,7 +244,7 @@ class ConnectionFloodChecker:
                     received_msgs=self.received_msgs,
                     received_elapsed=f"{received_elapsed:0.2f}",
                     info=info,
-                ) 
+                )
                 replay.info(err_msg)
                 logger.warning(err_msg)
                 return True

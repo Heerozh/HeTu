@@ -22,7 +22,8 @@ from sanic.worker.loader import AppLoader
 from ..common import yamlloader
 from ..i18n import _
 from ..safelogging import handlers as log_handlers
-from ..server import worker_main
+from ..server import StartupAborted, worker_main
+from ..server.pipeline import CryptoLayer
 from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
 from .base import CommandInterface, resolve_app_file
 
@@ -54,6 +55,18 @@ def infer_backend_type_from_db_url(db_url: str) -> str:
             "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
         ).format(scheme=scheme)
     )
+
+
+def resolve_worker_num(worker_num: int) -> int:
+    """把配置的 WORKER_NUM 解析成真实的工作进程数，负数表示按CPU核心数自动。
+
+    没用sanic的fast=True来实现"自动"：fast和single_process互斥（单worker时要用
+    single_process），而且自己算才能让显示的进程数、auto_reload等判断都拿到真实值。
+    process_cpu_count()和sanic的fast一样会考虑CPU亲和性(cgroup/taskset)，容器里更准。
+    """
+    if worker_num < 0:
+        return os.process_cpu_count() or 1
+    return worker_num
 
 
 def wait_for_port(host, port, timeout=30):
@@ -102,7 +115,10 @@ class StartCommand(CommandInterface):
             default="redis://127.0.0.1:6379/0",
         )
         cli_group.add_argument(
-            "--workers", type=int, help=_("工作进程数，可设为 CPU * 1.2"), default=4
+            "--workers",
+            type=int,
+            help=_("工作进程数，可设为 CPU * 1.2，-1为按CPU核心数自动"),
+            default=4,
         )
         cli_group.add_argument(
             "--debug",
@@ -194,8 +210,7 @@ class StartCommand(CommandInterface):
         # 生成log目录
         os.mkdir("logs") if not os.path.exists("logs") else None
         # prepare用的配置
-        fast = config.WORKER_NUM < 0
-        workers = fast and 1 or config.WORKER_NUM
+        workers = resolve_worker_num(config.WORKER_NUM)
         # per-boot uuid：main进程每次开服生成一次，经config_for_factory透传给每个worker，
         # 使 on_start System 在本次开服只跑一次（去重见 hetu.system.startup）
         config_for_factory[ON_START_UUID_CONFIG_KEY] = make_boot_uuid()
@@ -245,6 +260,21 @@ class StartCommand(CommandInterface):
                 layers=" -> ".join(layer_types)
             )
         )
+        # 打印 crypto 层 auth_key 的脱敏指纹，便于多服开服时核对各服/客户端密钥是否一致
+        crypto_layer = next(
+            (
+                layer
+                for layer in config.get("PACKET_LAYERS", [])
+                if layer.get("type") == "crypto"
+            ),
+            None,
+        )
+        if crypto_layer is not None:
+            masked = CryptoLayer.mask_auth_key(crypto_layer.get("auth_key"))
+            if masked:
+                logger.info(_("🔑 auth_key: {key}").format(key=masked))
+            else:
+                logger.warning(_("🔑 auth_key 未设置 ⚠️ 任意 key 都能连接"))
 
         if int(config.DEBUG) > 1:
             logger.warning("⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️⚠️")
@@ -262,7 +292,6 @@ class StartCommand(CommandInterface):
             auto_tls=ssl == "auto",
             auto_reload=config.DEBUG and workers > 1,
             ssl=ssl if ssl != "auto" else None,
-            fast=fast,
             workers=workers,
             single_process=workers == 1,
         )
@@ -272,6 +301,14 @@ class StartCommand(CommandInterface):
                 Sanic.serve_single(primary=app)
             else:
                 Sanic.serve(primary=app, app_loader=loader)
+        except StartupAborted as e:
+            # 单进程模式下worker异常会一路冒到这里（多进程模式则由管理进程中止），
+            # 打友好提示后以非0退出码结束，让docker/systemd/k8s能识别为启动失败
+            logger.error(
+                _("❌ 服务器启动失败，已中止，未对外提供服务：{err}").format(err=str(e))
+            )
+            log_handlers.stop_all_logging_handlers()
+            sys.exit(1)
         except PermissionError as e:
             if "10013" in str(e):
                 print(

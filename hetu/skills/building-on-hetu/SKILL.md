@@ -19,17 +19,17 @@ API, open the file rather than guessing.
 
 Everything an app touches is exported at the top level:
 
-| Symbol | Role |
-|--------|------|
-| `@define_component(namespace=, permission=, backend=, volatile=)` | Declare a typed table |
-| `property_field(default, dtype=, index=, unique=)` | Declare a column |
-| `BaseComponent` | Base class for a component; `.new_row()`, `.new_rows(n)` |
-| `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC |
-| `@define_endpoint(namespace=, permission=)` | Declare a raw (non-transactional) RPC |
-| `SystemContext` / `EndpointContext` | The `ctx` passed into your function |
-| `Permission` | `EVERYBODY` / `USER` / `OWNER` / `RLS` / `ADMIN` |
-| `elevate(ctx, user_id, ...)` | Promote a connection to authenticated |
-| `ResponseToClient(data)` | Wrap a return value to send back to the client |
+| Symbol                                                                               | Role                                                     |
+|--------------------------------------------------------------------------------------|----------------------------------------------------------|
+| `@define_component(namespace=, permission=, backend=, volatile=)`                    | Declare a typed table                                    |
+| `property_field(default, dtype=, index=, unique=)`                                   | Declare a column                                         |
+| `BaseComponent`                                                                      | Base class for a component; `.new_row()`, `.new_rows(n)` |
+| `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC                              |
+| `@define_endpoint(namespace=, permission=)`                                          | Declare a raw (non-transactional) RPC                    |
+| `SystemContext` / `EndpointContext`                                                  | The `ctx` passed into your function                      |
+| `Permission`                                                                         | `EVERYBODY` / `USER` / `OWNER` / `RLS` / `ADMIN`         |
+| `elevate(ctx, user_id, ...)`                                                         | Promote a connection to authenticated                    |
+| `ResponseToClient(data)`                                                             | Wrap a return value to send back to the client           |
 
 ## Minimal shape
 
@@ -37,13 +37,16 @@ Everything an app touches is exported at the top level:
 import hetu
 import numpy as np
 
+
 @hetu.define_component(namespace="Game", permission=hetu.Permission.EVERYBODY)
 class Player(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
-    name: str = hetu.property_field("", dtype="U32")   # strings are fixed-width!
+    name: str = hetu.property_field("", dtype="U32")  # strings are fixed-width!
 
-@hetu.define_system(namespace="Game", components=(Player,),
-                    permission=hetu.Permission.USER)
+
+@hetu.define_system(
+    namespace="Game", components=(Player,), permission=hetu.Permission.USER
+)
 async def rename(ctx: hetu.SystemContext, name: str):
     async with ctx.repo[Player].upsert(owner=ctx.caller) as row:
         row.name = name
@@ -103,29 +106,36 @@ working examples — read them first.
 Systems and Endpoints with no Docker/Redis needed. (→ `testing/__init__.py`)
 
 ```python
-import app                              # your module with the @define_* decorators
+import app  # your module with the @define_* decorators
 from hetu.testing import Sandbox, sandbox_fixture, CallRejected, ConnectionClosed
 
-sandbox = sandbox_fixture("Game", app)             # a pytest fixture (put in conftest.py)
+sandbox = sandbox_fixture("Game", app)  # a pytest fixture (put in conftest.py)
+
 
 async def test_rename(sandbox):
-    await sandbox.call("rename", "Alice", caller=1001)     # full Endpoint path, as user 1001
+    await sandbox.call(
+        "rename", "Alice", caller=1001
+    )  # full Endpoint path, as user 1001
     assert (await sandbox.get("Player", owner=1001)).name == "Alice"
 ```
 
 Two ways to invoke your code:
 
 - **`call(name, *args, caller=0, user_data=None)`** — the **client path**. Runs the full
-  Endpoint pipeline: connection → permission/arg checks → guards → your `@define_endpoint`
+  Endpoint pipeline: connection → permission/arg checks → guards → your
+  `@define_endpoint`
   (or a System's auto-generated endpoint). `caller != 0` first `elevate`s a fresh
-  connection (simulates a logged-in client). Returns what the client SDK actually receives
+  connection (simulates a logged-in client). Returns what the client SDK actually
+  receives
   (msgpack round-tripped). A guard soft-reject raises **`CallRejected`** (assert
   `.code`); an illegal call (bad permission/args, unknown endpoint, or the endpoint
   raised) raises **`ConnectionClosed`**. Each call is a fresh connection (no cross-call
-  guard/rate-limit state — `@rate_limit` counting is HeTu's job, test it in integration).
+  guard/rate-limit state — `@rate_limit` counting is HeTu's job, test it in
+  integration).
 - **`call_system(name, *args, caller=0, raw=False)`** — **bypasses the Endpoint layer**,
   runs a System directly (trusted internal call, no permission/guard/login) in a real
-  transaction (auto-retries on `RaceCondition`). Default returns the client payload (same
+  transaction (auto-retries on `RaceCondition`). Default returns the client payload (
+  same
   msgpack round-trip — a raw `np.int64` raises here as on the wire, `int()` it first; a
   `tuple` comes back as a `list`). Pass **`raw=True`** for the System's untouched return
   value (assert internal / nested-call results).
@@ -142,6 +152,9 @@ client uses `HeTuClient.Instance` (one raw socket) or, preferred,
 `CallSystem(name, args...)`, `WatchRow<T>(index, value)`,
 `WatchRange<T>(index, lo, hi, limit)`. Subscriptions hold a server resource and
 **must be disposed** (`sub.AddTo(gameObject)`). See `unity-client.md`.
+`ADMIN`-permission Components are **skipped** by codegen (no C# class emitted) —
+they're server-only. A GM tool that needs one can still subscribe **untyped**
+via the `DictComponent` overload and casting yourself; no generated type required.
 
 ## CLI
 

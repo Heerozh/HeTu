@@ -62,9 +62,7 @@ def test_render_topic_page_returns_markdown_with_frontmatter():
     symbol_index = _build_index(symbols)
     link_map = _build_symbol_link_map(symbols)
 
-    md = render_topic_page(
-        "decorators", grouped["decorators"], symbol_index, link_map
-    )
+    md = render_topic_page("decorators", grouped["decorators"], symbol_index, link_map)
 
     assert md.startswith("---\ntitle: ")
     assert "<!-- AUTO-GENERATED" in md

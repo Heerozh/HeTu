@@ -14,7 +14,10 @@ import sys
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import Sanic
+from sanic.worker.manager import WorkerManager
+from sanic.worker.process import WorkerProcess
 
+from .. import webext
 from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
 from ..data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
@@ -26,10 +29,53 @@ from ..system import SystemClusters
 from ..system.future import future_call_task
 from . import pipeline
 from . import websocket as _ws  # noqa: F401 (防止未使用警告)
-from .web import HETU_BLUEPRINT
+from .web import HETU_BLUEPRINT, web_root
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
+
+# worker启动流程（连后端、建表、跑启动System）的总超时秒数配置键，0为不限制。
+STARTUP_TIMEOUT_CONFIG_KEY = "STARTUP_TIMEOUT"
+DEFAULT_STARTUP_TIMEOUT = 60.0
+# 管理进程等worker ack的超时 = STARTUP_TIMEOUT + 这个余量。
+# 两级超时不是冗余：我们自己的 asyncio 超时挡不住阻塞式代码（启动System里写了
+# time.sleep/requests 之类把事件循环卡死），那时只有管理进程（另一个进程在数数）能兜底。
+# 余量只需盖住我们量不到的部分：进程spawn、import app文件、bind端口。
+ACK_TIMEOUT_MARGIN = 10.0
+# "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
+# 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
+UNLIMITED_ACK_THRESHOLD = 10**9
+
+
+def resolve_ack_threshold(config) -> int:
+    """按 STARTUP_TIMEOUT 算出管理进程等worker ack的阈值（sanic单位为0.1秒）。
+
+    ack超时必须晚于我们自己的启动超时，否则卡住时先被管理进程SIGKILL掉整个进程组，
+    用户只能看到sanic那句没头没脑的"Not all workers acknowledged"，不知道卡在哪。
+    所以它不单独配置，由 STARTUP_TIMEOUT 推算；STARTUP_TIMEOUT 为0(不限制)时它也不限制。
+
+    Derive the manager's worker-ack threshold (in units of 0.1s) from STARTUP_TIMEOUT,
+    so HeTu's own, more specific timeout always fires first.
+    """
+    startup_timeout = config.get(STARTUP_TIMEOUT_CONFIG_KEY, DEFAULT_STARTUP_TIMEOUT)
+    if not startup_timeout:
+        return UNLIMITED_ACK_THRESHOLD
+    return max(1, int((float(startup_timeout) + ACK_TIMEOUT_MARGIN) * 10))
+
+
+class StartupAborted(Exception):
+    """worker启动流程失败，服务器必须中止，不能带病对外服务。
+
+    必须以异常向上抛出（而不是app.stop()）才能真正中止：Sanic在
+    ``worker/serve.py`` 里会捕获启动异常并向管理进程发 ``__TERMINATE_EARLY__``，
+    多进程模式立刻中止（不用等30秒ack超时）；单进程模式则一路冒泡到CLI。
+    两种模式的退出码都非0，docker/systemd/k8s的重启策略才能识别为失败。
+
+    Raised when worker startup fails and the server must abort instead of serving in a
+    broken state. It must propagate as an exception (not ``app.stop()``) so that Sanic
+    aborts immediately and the process exits with a non-zero code in both single- and
+    multi-process mode.
+    """
 
 
 async def start_backends(app: Sanic):
@@ -113,16 +159,45 @@ async def close_backends(app: Sanic):
 
 
 async def worker_start(app: Sanic):
+    # 连后端、建表、跑启动System共用一个总超时预算，超时中止开服（见StartupAborted）。
+    # 没有它的话，任意一步卡住（后端TCP不返回、启动System等一个永远不回的外部服务）在
+    # 单进程模式下会让服务器永久静默挂起，多进程模式下则是被管理进程SIGKILL，看不出卡在哪。
+    startup_timeout = app.config.get(
+        STARTUP_TIMEOUT_CONFIG_KEY, DEFAULT_STARTUP_TIMEOUT
+    )
+    deadline = (
+        asyncio.get_running_loop().time() + float(startup_timeout)
+        if startup_timeout
+        else None
+    )
+
+    def timeout_aborted(err: str) -> StartupAborted:
+        """超时的统一报错：日志给排查线索，异常给CLI/管理进程做中止"""
+        logger.error(
+            _(
+                "❌ 进程[{pid}] 启动超时({timeout}秒): {err}\n"
+                "    启动流程卡住会让服务器一直起不来，已中止。"
+                "如果它本来就需要跑这么久，请调大配置 STARTUP_TIMEOUT（0为不限制）"
+            ).format(pid=os.getpid(), timeout=startup_timeout, err=err)
+        )
+        return StartupAborted(
+            _("启动超时({timeout}秒): {err}").format(timeout=startup_timeout, err=err)
+        )
+
     try:
-        await start_backends(app)
+        async with asyncio.timeout_at(deadline):
+            await start_backends(app)
+    except TimeoutError as e:
+        raise timeout_aborted(_("卡在连接后端/建表阶段")) from e
     except Exception as e:
         logger.exception(
             _("❌ 进程[{pid}] 启动失败: {err}").format(
                 pid=os.getpid(), err=f"{type(e).__name__}:{e}"
             )
         )
-        app.stop()
-        return
+        raise StartupAborted(
+            _("后端启动失败: {err}").format(err=f"{type(e).__name__}:{e}")
+        ) from e
 
     # 打印信息
     from pathlib import Path
@@ -144,7 +219,7 @@ async def worker_start(app: Sanic):
     # 启动钩子：在开始收连接前，对每个instance执行所有 @define_system(on_start=True) 的System
     # 每次hetu start执行一次：boot uuid 由main进程经config传入，本次开服所有worker共享同一值以去重；
     # 缺失时（直接调用worker_main的测试/嵌入场景，均为单进程）退化为本进程生成。
-    # 执行失败则中止本worker启动，避免带病对外服务。
+    # 执行失败或超时则中止整个服务器启动（抛StartupAborted），避免带病对外服务。
     from ..system.startup import (
         ON_START_UUID_CONFIG_KEY,
         make_boot_uuid,
@@ -154,16 +229,22 @@ async def worker_start(app: Sanic):
     boot_uuid = app.config.get(ON_START_UUID_CONFIG_KEY) or make_boot_uuid()
     try:
         await run_startup_systems(
-            app.config["NAMESPACE"], app.ctx.table_managers, boot_uuid
+            app.config["NAMESPACE"],
+            app.ctx.table_managers,
+            boot_uuid,
+            deadline=deadline,
         )
+    except TimeoutError as e:
+        raise timeout_aborted(str(e)) from e
     except Exception as e:
         logger.exception(
             _("❌ 进程[{pid}] 启动System执行失败: {err}").format(
                 pid=os.getpid(), err=f"{type(e).__name__}:{e}"
             )
         )
-        app.stop()
-        return
+        raise StartupAborted(
+            _("启动System执行失败: {err}").format(err=f"{type(e).__name__}:{e}")
+        ) from e
 
 
 async def worker_close(app):
@@ -232,6 +313,13 @@ def worker_main(app_name, config) -> Sanic:
     app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
     app.update_config(config)
 
+    # 设置管理进程等ack的超时。此函数在管理进程也会执行一次（AppLoader.load），
+    # 所以在这里改类属性就能生效。注意WorkerManager.THRESHOLD是模块导入时从
+    # WorkerProcess复制的，只改WorkerProcess的没用，两个都要设。
+    ack_threshold = resolve_ack_threshold(config)
+    WorkerManager.THRESHOLD = ack_threshold  # type: ignore
+    WorkerProcess.THRESHOLD = ack_threshold  # type: ignore
+
     # 重定向logger，把sanic的重定向到hetu
     root_logger = logging.getLogger("sanic")
     root_logger.parent = logger
@@ -262,4 +350,11 @@ def worker_main(app_name, config) -> Sanic:
 
     # 启动服务器监听
     app.blueprint(HETU_BLUEPRINT)
+
+    # 挂载用户自定义的HTTP端点（@hetu.define_route / @hetu.on_server_setup）
+    webext.apply_to(app)
+
+    # 最后补上HeTu的默认欢迎页，用户自己注册了"/"就让给用户，不去撞RouteExists
+    if not any(route.path in ("", "/") for route in app.router.routes):
+        app.route("/")(web_root)
     return app

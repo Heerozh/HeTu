@@ -40,9 +40,9 @@ public class NetBootstrap : MonoBehaviour
     await HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/pytest");
     HeTuClient.Instance.CallSystem("login", 123, true).Forget();
 
-    // 如果关心断线，再显式等待关闭
-    var err = await HeTuClient.Instance.WaitClosedAsync();
-    Debug.Log($"disconnect: {err ?? "normal"}");
+    // 如果关心断线，订阅 OnClosed（参数为空表示正常断开）
+    HeTuClient.Instance.OnClosed += err =>
+      Debug.Log($"disconnect: {err ?? "normal"}");
   }
 
   private void OnDestroy()
@@ -99,7 +99,6 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 ### 连接
 
 - `Connect(url)`：建立单条物理连接并等待握手完成。
-- `WaitClosedAsync()`：等待当前物理连接断开。
 - `Close()`：主动断开并取消所有挂起请求。
 - `OnConnected`：握手完成后触发。
 - `OnClosed`：连接断开时触发，参数为空表示正常断开。

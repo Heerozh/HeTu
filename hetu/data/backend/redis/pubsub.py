@@ -121,7 +121,7 @@ class AsyncKeyspacePubSub:
                     load_balancing_strategy=LoadBalancingStrategy.ROUND_ROBIN_REPLICAS,
                 )
             # 加KeyError是因为redis-py库的bug，没捕捉这个
-            except (KeyError, SlotNotCoveredError):
+            except KeyError, SlotNotCoveredError:
                 # 如果slot不在覆盖范围内，强制刷新一次拓扑
                 await asyncio.sleep(0.25)
                 await self.main_client.nodes_manager.initialize()

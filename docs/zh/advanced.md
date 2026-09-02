@@ -38,7 +38,9 @@ async def remove(ctx, order_id):
 
 
 @hetu.define_system(
-    namespace="Loot", depends=("remove:ItemOrder",), permission=hetu.Permission.USER,
+    namespace="Loot",
+    depends=("remove:ItemOrder",),
+    permission=hetu.Permission.USER,
 )
 async def remove_item_order(ctx, order_id):
     return await ctx.depend["remove:ItemOrder"](ctx, order_id)
@@ -80,8 +82,12 @@ async def reward_daily_bonus(ctx: hetu.SystemContext, user_id: int):
 )
 async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
     uuid = await ctx.depend["create_future_call:scheduler"](
-        ctx, -delay_seconds, "reward_daily_bonus", ctx.caller,
-        timeout=10, recurring=False,
+        ctx,
+        -delay_seconds,
+        "reward_daily_bonus",
+        ctx.caller,
+        timeout=10,
+        recurring=False,
     )
     return hetu.ResponseToClient({"future_call_id": int(uuid)})
 ```
@@ -115,7 +121,8 @@ _FCQueue = FutureCalls.duplicate("MyGame", "scheduler")
 
 
 @hetu.define_system(
-    namespace="MyGame", permission=hetu.Permission.USER,
+    namespace="MyGame",
+    permission=hetu.Permission.USER,
     components=(_FCQueue,),
 )
 async def cancel_future(ctx, future_id):
@@ -129,8 +136,10 @@ async def cancel_future(ctx, future_id):
 
 ```python
 @hetu.define_system(
-    namespace="Shop", components=(Wallet,),
-    permission=None, call_lock=True,
+    namespace="Shop",
+    components=(Wallet,),
+    permission=None,
+    call_lock=True,
 )
 async def settle(ctx, user_id, amount):
     async with ctx.repo[Wallet].upsert(owner=user_id) as w:
@@ -156,7 +165,8 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 
 ```python
 @hetu.define_system(
-    namespace="MyGame", components=(OnlineUser,),
+    namespace="MyGame",
+    components=(OnlineUser,),
     permission=None,  # 不可由客户端调用
 )
 async def on_disconnect(ctx: hetu.SystemContext):
@@ -257,7 +267,7 @@ async def long_running(ctx: hetu.SystemContext, ...):
 rows = await ctx.repo[Player].range("level", 1, 100, limit=1000)
 
 # 每个行到原点的距离，在 C 中向量化。
-d2 = rows.x ** 2 + rows.y ** 2
+d2 = rows.x**2 + rows.y**2
 
 # 将所有行移动 (dx, dy)
 shifted_x = rows.x + dx
@@ -368,13 +378,11 @@ matched_positions = positions[np.isin(positions.owner, both)]
 
 ```python
 @hetu.define_component(namespace="Game", backend="hot")
-class Position(hetu.BaseComponent):
-    ...
+class Position(hetu.BaseComponent): ...
 
 
 @hetu.define_component(namespace="Game", backend="cold")
-class GameLog(hetu.BaseComponent):
-    ...
+class GameLog(hetu.BaseComponent): ...
 ```
 
 硬约束：**一个 `System` 引用的每个 `Component` 必须共享同一个后端**。集群构建器在启动时会拒绝混合后端的集群。因此实际上，“多后端”是指“不同组的关联 `Components` 位于不同的数据库上”。目前仅支持 Redis；其用途在现阶段有限，它是为未来扩展而设计的。
@@ -442,6 +450,38 @@ PACKET_LAYERS:
 - 是否需要握手指定（`is_handshake_required()`）决定它是否在 websocket 打开期间有机会协商参数。大多数层（压缩、分帧）返回 `False`。默认的 `crypto` 层返回 `True` 以执行 ECDH 密钥交换。
 
 Unity SDK 附带了匹配的默认值。如果你添加了自定义层，你需要一个匹配的客户端实现——线路上没有自动发现机制。
+
+## 自定义 HTTP 端点
+
+HeTu 内置的 web 服务器就是 Sanic，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
+
+```python
+import hetu
+from sanic import Request, response
+
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return await response.file(f"/data/{name}")
+```
+
+装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。uri 之后的参数会原样透传给 Sanic 的 `Blueprint.route`，所以 `methods=["POST"]`、`stream=True` 等的行为和 Sanic 文档完全一致。
+
+它们就只是普通的 web 端点：不经过 HeTu 的 `Permission` 权限体系，拿不到 `SystemContext`，也没有数据库访问——鉴权、限流、输入校验都需要你自己写。需要客户端 SDK 调用的游戏逻辑，请用 `define_system` / `define_endpoint`。
+
+单条路由表达不了的场景——静态文件目录、中间件、异常处理器、带 `url_prefix` 的自建 Blueprint——用 `@hetu.on_server_setup`，它会在 Sanic app 创建后立即把 app 交给你：
+
+```python
+@hetu.on_server_setup
+def setup(app):
+    app.static("/download", "/data/files")
+```
+
+需要记住的三件事：
+
+- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它，你的页面就会顶掉 HeTu 的默认欢迎页。
+- 两个钩子都会在管理进程执行一次、每个 worker 进程再各执行一次，且此时后端还没连接。所以只做注册类操作；需要每个 worker 初始化的东西，请在 setup 回调里用 `app.before_server_start(...)` 挂钩子。
+- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 nginx/CDN，而不是穿过游戏 worker。
 
 ## 可操作性可见性：重放与慢日志
 

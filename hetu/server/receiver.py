@@ -89,7 +89,9 @@ async def sub_call(
     check_length("sub", data, 4, 100)
     table = executor.tbl_mgr.get_table(data[1])
     if table is None:
-        err_msg = _(" [非法操作] subscribe了不存在的Component名，注意大小写：{name}").format(name=data[1])
+        err_msg = _(
+            " [非法操作] subscribe了不存在的Component名，注意大小写：{name}"
+        ).format(name=data[1])
         replay.info(err_msg)
         logger.warning(err_msg)
         return False
@@ -174,23 +176,27 @@ async def client_handler(
                 case "motd":
                     await ws.send(f"👋 Welcome to HeTu Database! v{hetu.__version__}")
                 case _:
-                    raise ValueError(_(" [非法操作] 未知消息类型：{msg_type}").format(msg_type=last_data[0]))
+                    raise ValueError(
+                        _(" [非法操作] 未知消息类型：{msg_type}").format(
+                            msg_type=last_data[0]
+                        )
+                    )
     except asyncio.CancelledError:
         # print(ctx, 'client_handler normal canceled')
         pass
     except WebsocketClosed:
         pass
     except RedisConnectionError as e:
-        err_msg = _(
-            "❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}"
-        ).format(err=f"{type(e).__name__}:{e}")
+        err_msg = _("❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}").format(
+            err=f"{type(e).__name__}:{e}"
+        )
         replay.info(err_msg)
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
-        err_msg = _(
-            "❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}"
-        ).format(data=last_data, err=f"{type(e).__name__}:{e}")
+        err_msg = _("❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}").format(
+            data=last_data, err=f"{type(e).__name__}:{e}"
+        )
         replay.info(err_msg)
         logger.exception(err_msg)
         return ws.fail_connection()
@@ -208,10 +214,10 @@ async def mq_puller(ws: Websocket, broker: SubscriptionBroker):
         pass
     except RedisConnectionError as e:
         logger.error(
-            _("❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {err}"
-            "网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。").format(
-                err=f"{type(e).__name__}:{e}"
-            )
+            _(
+                "❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {err}"
+                "网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。"
+            ).format(err=f"{type(e).__name__}:{e}")
         )
         return ws.fail_connection()
     except BaseException as e:
@@ -241,18 +247,18 @@ async def subscription_handler(
         pass
     except RedisConnectionError as e:
         logger.error(
-            _("❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}"
-            "上次接受了：{count}条消息。").format(
-                err=f"{type(e).__name__}:{e}", count=len(last_updates)
-            )
+            _(
+                "❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}"
+                "上次接受了：{count}条消息。"
+            ).format(err=f"{type(e).__name__}:{e}", count=len(last_updates))
         )
         return ws.fail_connection()
     except BaseException as e:
         logger.exception(
-            _("❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
-            "上条消息：{updates}，异常：{err}").format(
-                updates=last_updates, err=f"{type(e).__name__}:{e}"
-            )
+            _(
+                "❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
+                "上条消息：{updates}，异常：{err}"
+            ).format(updates=last_updates, err=f"{type(e).__name__}:{e}")
         )
         return ws.fail_connection()
     finally:

@@ -9,6 +9,7 @@ from . import data
 from . import system
 from . import common
 from . import endpoint
+from . import webext
 from importlib.metadata import version, PackageNotFoundError
 
 # 常用核心对象导出到顶层命名空间
@@ -16,6 +17,8 @@ Permission = common.Permission
 define_endpoint = endpoint.define_endpoint
 define_system = system.define_system
 define_component = data.define_component
+define_route = webext.define_route
+on_server_setup = webext.on_server_setup
 elevate = endpoint.elevate
 ResponseToClient = endpoint.ResponseToClient
 EndpointContext = endpoint.Context
@@ -38,11 +41,14 @@ __all__ = [
     "system",
     "common",
     "endpoint",
+    "webext",
     "Permission",
     # ===
     "define_endpoint",
     "define_component",
     "define_system",
+    "define_route",
+    "on_server_setup",
     # ===
     "elevate",
     "ResponseToClient",

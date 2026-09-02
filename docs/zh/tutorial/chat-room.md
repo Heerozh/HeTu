@@ -97,8 +97,11 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
         ctx.user_data["me"] = row
 
     await _insert_message(
-        ctx, owner=ctx.caller, name=name,
-        text=f"{name} 加入了聊天", kind="system",
+        ctx,
+        owner=ctx.caller,
+        name=name,
+        text=f"{name} 加入了聊天",
+        kind="system",
     )
 ```
 
@@ -116,14 +119,19 @@ async def user_login(ctx: hetu.SystemContext, user_id: int, name: str):
 
 ```python
 @hetu.define_system(
-    namespace="Chat", components=(ChatMessage,),
+    namespace="Chat",
+    components=(ChatMessage,),
     permission=hetu.Permission.USER,
 )
 async def user_chat(ctx: hetu.SystemContext, text: str):
     me = ctx.user_data["me"]
     assert me and me.online, "请先调用 user_login"
     await _insert_message(
-        ctx, owner=ctx.caller, name=me.name, text=text, kind="chat",
+        ctx,
+        owner=ctx.caller,
+        name=me.name,
+        text=text,
+        kind="chat",
     )
 ```
 
@@ -135,7 +143,8 @@ async def user_chat(ctx: hetu.SystemContext, text: str):
 
 ```python
 @hetu.define_system(
-    namespace="Chat", components=(OnlineUser, ChatMessage),
+    namespace="Chat",
+    components=(OnlineUser, ChatMessage),
     permission=hetu.Permission.USER,
 )
 async def user_quit(ctx: hetu.SystemContext):
@@ -144,14 +153,19 @@ async def user_quit(ctx: hetu.SystemContext):
         row.last_seen_ms = _now_ms()
         await ctx.repo[OnlineUser].update(row)
         await _insert_message(
-            ctx, owner=ctx.caller, name=row.name,
-            text=f"{row.name} 离开了聊天", kind="system",
+            ctx,
+            owner=ctx.caller,
+            name=row.name,
+            text=f"{row.name} 离开了聊天",
+            kind="system",
         )
 
 
 @hetu.define_system(
-    namespace="Chat", components=(OnlineUser,),
-    depends=("user_quit",), permission=None,
+    namespace="Chat",
+    components=(OnlineUser,),
+    depends=("user_quit",),
+    permission=None,
 )
 async def on_disconnect(ctx: hetu.SystemContext):
     await ctx.depend["user_quit"](ctx)

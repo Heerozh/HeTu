@@ -45,6 +45,11 @@ LISTEN: 0.0.0.0:2466
 # 工作进程数，-1 为自动按cpu核心数
 WORKER_NUM: 4
 
+# worker启动流程的超时秒数，0为不限制。这段流程包括连接后端、建表、
+# 执行所有 @define_system(on_start=True) 的启动System，超过则打印卡在哪一步并中止开服
+# （退出码非0），避免服务器静默挂起起不来。如果首次开服建表、播种数据本来就慢，请调大
+STARTUP_TIMEOUT: 60
+
 # 反正是Websocket，可以关了加性能
 ACCESS_LOG: false
 

@@ -11,6 +11,7 @@ worker starts, before it accepts connections.
 @email: heeroz@gmail.com
 """
 
+import asyncio
 import logging
 import uuid
 
@@ -32,7 +33,10 @@ def make_boot_uuid() -> str:
 
 
 async def run_startup_systems(
-    namespace: str, table_managers: dict, boot_uuid: str
+    namespace: str,
+    table_managers: dict,
+    boot_uuid: str,
+    deadline: float | None = None,
 ) -> None:
     """对每个 instance 执行所有 ``on_start=True`` 的 System，每次开服一次。
 
@@ -41,11 +45,18 @@ async def run_startup_systems(
     再次执行。任一 System 抛出非竞态异常都会向上传播，由调用方（``worker_start``）据此
     中止启动。
 
+    ``deadline`` 是整个启动流程共用的截止时间（``loop.time()`` 时钟，None 为不限制，
+    由 ``worker_start`` 按配置 STARTUP_TIMEOUT 算出）。超过则抛 ``TimeoutError``，
+    消息中带上是哪个 instance 的哪个 System 卡住了。没有这个超时的话，卡死的启动 System
+    在单进程模式下会让服务器永久静默挂起。
+
     Run every system marked ``on_start=True`` once per server boot. ``boot_uuid``
     identifies this boot and is used as the SystemLock dedup key: all workers of the
     same boot pass the same value (so it commits exactly once cluster-wide), and a new
     boot passes a new value (so it runs again). Non-race exceptions propagate so the
-    caller can abort worker startup.
+    caller can abort worker startup. ``deadline`` is the shared startup deadline on the
+    ``loop.time()`` clock (None disables it); on expiry a ``TimeoutError`` naming the
+    stuck system is raised.
     """
     from .caller import SystemCaller
     from .context import SystemContext
@@ -76,4 +87,13 @@ async def run_startup_systems(
                     "🚀 [⚙️Startup] instance={instance} 执行启动System：{sys_name}"
                 ).format(instance=instance, sys_name=sys_name)
             )
-            await caller.call(sys_name, uuid=boot_uuid)
+            try:
+                async with asyncio.timeout_at(deadline):
+                    await caller.call(sys_name, uuid=boot_uuid)
+            except TimeoutError:
+                # 不带 from：卡住点的 CancelledError 对用户没有意义，消息本身才是线索
+                raise TimeoutError(
+                    _("卡在启动System {sys_name} (instance={instance})").format(
+                        sys_name=sys_name, instance=instance
+                    )
+                ) from None

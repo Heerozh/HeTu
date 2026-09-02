@@ -83,7 +83,7 @@ async def ensure_future_call(ctx, key, at, system, *args, timeout=60, recurring=
     返回确定性 id。"""
     fid = _key_to_id(key)
     if await ctx.repo[FutureCalls].get(id=fid):
-        return fid                      # 已存在 → no-op（commit 空转，安全）
+        return fid  # 已存在 → no-op（commit 空转，安全）
     # 复用 create_future_call 的校验/建行逻辑（抽成共享 _build_future_row）
     row = _build_future_row(ctx, at, system, args, timeout, recurring, id_=fid)
     await ctx.repo[FutureCalls].insert(row)
@@ -122,16 +122,23 @@ async def cancel_future_call(ctx, key) -> bool:
 ### 2.5 用户用法（开机即起的循环后台任务）
 
 ```python
-@define_system(namespace="game", permission=None, call_lock=True,
-               components=(FutureCalls, World))
-async def world_tick(ctx):
-    ...  # 每 tick 的全局逻辑
+@define_system(
+    namespace="game", permission=None, call_lock=True, components=(FutureCalls, World)
+)
+async def world_tick(ctx): ...  # 每 tick 的全局逻辑
 
-@define_system(namespace="game", permission=None, on_start=True,
-               depends=("ensure_future_call:game",), components=(...))
+
+@define_system(
+    namespace="game",
+    permission=None,
+    on_start=True,
+    depends=("ensure_future_call:game",),
+    components=(...),
+)
 async def boot(ctx):
     ctx.depend["ensure_future_call:game"](
-        ctx, key="world_tick", at=-30, system="world_tick", recurring=True, timeout=30)
+        ctx, key="world_tick", at=-30, system="world_tick", recurring=True, timeout=30
+    )
 ```
 
 - 开服 → `on_start` 跑一次 → ensure 幂等 → 重启 N 次也只有一条 → `future_call_task` 每 ~1s

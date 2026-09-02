@@ -165,6 +165,13 @@ def test_websocket_started(test_server):
     # app.ctx.default_backend.reset_connection_pool() 优化了process，不再需要
 
 
+def test_custom_http_route(test_server):
+    # app.py里用@hetu.define_route注册的普通HTTP端点应该能正常提供服务
+    _request, response = test_server.test_client.get("/webext-test/abc.zip")
+    assert response.status == 200
+    assert response.body.decode() == "downloaded abc.zip"
+
+
 @pytest.mark.timeout(20)
 def test_websocket_call_system(test_server):
     # 测试call和结果

@@ -66,7 +66,9 @@ async def remove(ctx, order_id):
 
 
 @hetu.define_system(
-    namespace="Loot", depends=("remove:ItemOrder",), permission=hetu.Permission.USER,
+    namespace="Loot",
+    depends=("remove:ItemOrder",),
+    permission=hetu.Permission.USER,
 )
 async def remove_item_order(ctx, order_id):
     return await ctx.depend["remove:ItemOrder"](ctx, order_id)
@@ -124,8 +126,12 @@ async def reward_daily_bonus(ctx: hetu.SystemContext, user_id: int):
 )
 async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
     uuid = await ctx.depend["create_future_call:scheduler"](
-        ctx, -delay_seconds, "reward_daily_bonus", ctx.caller,
-        timeout=10, recurring=False,
+        ctx,
+        -delay_seconds,
+        "reward_daily_bonus",
+        ctx.caller,
+        timeout=10,
+        recurring=False,
     )
     return hetu.ResponseToClient({"future_call_id": int(uuid)})
 ```
@@ -190,7 +196,8 @@ _FCQueue = FutureCalls.duplicate("MyGame", "scheduler")
 
 
 @hetu.define_system(
-    namespace="MyGame", permission=hetu.Permission.USER,
+    namespace="MyGame",
+    permission=hetu.Permission.USER,
     components=(_FCQueue,),
 )
 async def cancel_future(ctx, future_id):
@@ -208,8 +215,10 @@ repeatedly, yet it will ultimately execute only once.
 
 ```python
 @hetu.define_system(
-    namespace="Shop", components=(Wallet,),
-    permission=None, call_lock=True,
+    namespace="Shop",
+    components=(Wallet,),
+    permission=None,
+    call_lock=True,
 )
 async def settle(ctx, user_id, amount):
     async with ctx.repo[Wallet].upsert(owner=user_id) as w:
@@ -245,7 +254,8 @@ when the websocket closes:
 
 ```python
 @hetu.define_system(
-    namespace="MyGame", components=(OnlineUser,),
+    namespace="MyGame",
+    components=(OnlineUser,),
     permission=None,  # not callable by clients
 )
 async def on_disconnect(ctx: hetu.SystemContext):
@@ -402,7 +412,7 @@ methods like `.sum()` / `.mean()` are available without it.
 rows = await ctx.repo[Player].range("level", 1, 100, limit=1000)
 
 # Distance from origin for every row, vectorized in C.
-d2 = rows.x ** 2 + rows.y ** 2
+d2 = rows.x**2 + rows.y**2
 
 # Shift everyone by (dx, dy)
 shifted_x = rows.x + dx
@@ -536,13 +546,11 @@ matches a key in the `BACKENDS:` block of your config. Different
 
 ```python
 @hetu.define_component(namespace="Game", backend="hot")
-class Position(hetu.BaseComponent):
-    ...
+class Position(hetu.BaseComponent): ...
 
 
 @hetu.define_component(namespace="Game", backend="cold")
-class GameLog(hetu.BaseComponent):
-    ...
+class GameLog(hetu.BaseComponent): ...
 ```
 
 The hard constraint: **every `Component` referenced by one `System` must
@@ -655,6 +663,57 @@ Three rules to keep in mind:
 The Unity SDK ships with the matching defaults. If you add a custom
 layer, you'll need a matching client implementation — there's no
 auto-discovery on the wire.
+
+## Custom HTTP endpoints
+
+HeTu's built-in web server is Sanic, and the client SDK's websocket entry is
+just one route on it. You can mount your own plain HTTP routes next to it —
+file downloads, an admin page, a health check — with `@hetu.define_route`:
+
+```python
+import hetu
+from sanic import Request, response
+
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return await response.file(f"/data/{name}")
+```
+
+The decorator has to run while the engine loads your app file, i.e. at module
+top level, the same as `@define_system`. Everything after the uri is passed
+straight through to Sanic's `Blueprint.route`, so `methods=["POST"]`,
+`stream=True` and friends behave exactly as Sanic documents them.
+
+These are plain web endpoints and nothing more. They do not go through HeTu's
+`Permission` system, they get no `SystemContext`, and they have no database
+access — authentication, rate limiting and input validation are yours to
+write. Game logic that the client SDK calls belongs in `define_system` /
+`define_endpoint` instead.
+
+For anything a single route can't express — a static directory, middleware, an
+error handler, your own Blueprint with a `url_prefix` — use
+`@hetu.on_server_setup`, which hands you the Sanic app right after it is
+created:
+
+```python
+@hetu.on_server_setup
+def setup(app):
+    app.static("/download", "/data/files")
+```
+
+Three things to know:
+
+- `/hetu/...` is reserved for the websocket entry, and `define_route` refuses
+  it. `/` is *not* reserved: register it and your page quietly replaces
+  HeTu's default welcome text.
+- Both hooks run once in the manager process and once per worker, before any
+  backend is connected. Do registration only; anything that needs per-worker
+  initialization should be hung off `app.before_server_start(...)` from
+  inside the setup callback.
+- Your routes share the event loop with websocket game traffic, and every
+  worker serves them. Keep handlers stateless, and in production put large or
+  slow downloads behind nginx or a CDN instead of through the game workers.
 
 ## Operational visibility: replay and slow logs
 

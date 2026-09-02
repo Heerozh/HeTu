@@ -15,7 +15,7 @@ regeneration; update the docstring in the source file instead.
 
 | Topic | Symbols |
 |---|---|
-| [Decorators](decorators.md) | define_component, define_endpoint, define_system, property_field |
+| [Decorators](decorators.md) | define_component, define_endpoint, define_route, define_system, on_server_setup, property_field |
 | [Components](components.md) | BaseComponent, Permission |
 | [System](system.md) | SessionRepository, SystemClusters, SystemContext, Table, TableReference, cancel_future_call, create_future_call, ensure_future_call |
 | [Endpoint](endpoint.md) | EndpointContext, ResponseToClient, elevate |

@@ -178,6 +178,69 @@ hetu.endpoint.Context : Context类定义
 
 ---
 
+## `define_route`
+
+```python
+define_route(uri: str, **sanic_kwargs: Any)
+```
+
+<small>Source: [`hetu/webext.py:44`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L44)</small>
+
+
+
+把一个async函数注册为HTTP端点，挂载到HeTu的web服务器上。
+
+用于文件下载、后台页面、健康检查等和HeTu数据无关的普通web请求。它们是纯粹的
+Sanic路由，`hetu`只负责帮你挂上去：不经过客户端的权限体系（[`Permission`](components.md#permission)），
+也不提供数据库/`System`访问，鉴权、限流等都需要你自己在函数内处理。
+
+需要客户端SDK调用的游戏逻辑请用 [`define_system`](decorators.md#define_system) / [`define_endpoint`](decorators.md#define_endpoint)，不是这个。
+
+Register an async function as a plain HTTP endpoint on HeTu's web server, for
+things unrelated to HeTu's data (file downloads, admin pages, health checks).
+These routes bypass HeTu's [`Permission`](components.md#permission) system entirely and get no database
+access, so any authentication is up to you.
+
+
+### Parameters
+
+- **`uri`** (Any) — 路由路径，必须以"/"开头，可使用Sanic的路径参数语法（如 `/file/<name:str>`）。
+不能占用HeTu保留的 `/hetu` 前缀。注册"/"会覆盖HeTu的默认欢迎页。
+
+- **`**sanic_kwargs`** (Any) — 原样透传给Sanic的 `Blueprint.route`，常用的有 `methods=["POST"]`、
+`stream=True`、`websocket=True` 等。
+
+
+
+
+
+
+
+
+### Examples
+
+
+```python
+>>> import hetu
+>>> from sanic import Request, response
+>>>
+>>> @hetu.define_route("/download/<name:str>")
+... async def download(request: Request, name: str):
+...     return await response.file(f"/data/{name}")
+```
+
+
+
+
+
+### Notes
+hetu.on_server_setup : 直接拿到Sanic app做任意配置（静态目录、中间件等）
+
+
+
+
+---
+
 ## `define_system`
 
 ```python
@@ -193,7 +256,7 @@ define_system(
 )
 ```
 
-<small>Source: [`hetu/system/definer.py:327`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L327)</small>
+<small>Source: [`hetu/system/definer.py:341`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L341)</small>
 
 
 
@@ -248,6 +311,10 @@ define_system(
 注意：事务可能因竞态/多worker重试，System应自身幂等；外部I/O
 （写文件、调外部存储等）可能执行多次，需自行把握(可通过提前提交事务判断事务是否成功)。
 
+启动System因为跑在收连接之前，卡住就等于服务器起不来，所以有超时保护：它和连后端、
+建表共用配置文件的 `STARTUP_TIMEOUT` 总预算（默认60秒），超时会报出卡在哪个System
+并中止开服（退出码非0）。需要跑更久的话调大该配置（0为不限制）。
+
 
 
 
@@ -289,6 +356,56 @@ define_system(
 ### Notes
 hetu.system.SystemContext : SystemContext类定义
 hetu.endpoint.endpoint : endpoint装饰器定义Endpoint
+
+
+
+
+---
+
+## `on_server_setup`
+
+```python
+on_server_setup(func: collections.abc.Callable) -> collections.abc.Callable
+```
+
+<small>Source: [`hetu/webext.py:108`](https://github.com/Heerozh/HeTu/blob/main/hetu/webext.py#L108)</small>
+
+
+
+注册一个web服务器配置回调，在Sanic app创建后调用，参数为app本身。
+
+[`define_route`](decorators.md#define_route) 覆盖不到的场景用它：静态文件目录、中间件、异常处理器、自建带
+`url_prefix` 的Blueprint等，都可以在回调里直接对app操作。
+
+Register a callback invoked with the Sanic app right after it is created, for
+anything [`define_route`](decorators.md#define_route) cannot express: static directories, middleware, error
+handlers, your own prefixed Blueprint, and so on.
+
+
+
+
+
+
+
+
+### Examples
+
+
+```python
+>>> import hetu
+>>> from sanic import Sanic
+>>>
+>>> @hetu.on_server_setup
+... def setup(app: Sanic):
+...     app.static("/download", "/data/files")
+```
+
+
+
+
+
+### Notes
+hetu.define_route : 直接注册单条HTTP路由的快捷方式
 
 
 

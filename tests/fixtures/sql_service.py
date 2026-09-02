@@ -6,6 +6,7 @@ import docker.errors
 import pytest
 import sqlalchemy as sa
 from docker.errors import NotFound
+from fixtures.docker_image import ensure_image
 
 
 @pytest.fixture(scope="session")
@@ -17,6 +18,8 @@ def ses_postgres_service():
         client = docker.from_env()
     except docker.errors.DockerException:
         return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    ensure_image(client, "postgres:latest")
 
     container_name = "hetu_test_postgres"
     port = 23520
@@ -92,6 +95,8 @@ def ses_mariadb_service():
         client = docker.from_env()
     except docker.errors.DockerException:
         return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+
+    ensure_image(client, "mariadb:latest")
 
     container_name = "hetu_test_mariadb"
     port = 23530

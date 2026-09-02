@@ -40,10 +40,8 @@ namespace HeTu
         private CancellationTokenSource _connectionCancelSource;
 #if UNITY_6000_0_OR_NEWER
         private AwaitableCompletionSource<bool> _connectCompletion;
-        private AwaitableCompletionSource<string> _closeCompletion;
 #else
         private UniTaskCompletionSource<bool> _connectCompletion;
-        private UniTaskCompletionSource<string> _closeCompletion;
 #endif
 
         private IWebSocket _socket;
@@ -79,12 +77,22 @@ namespace HeTu
         protected override void ConnectCore(string url, Action onConnected,
             Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
         {
-            _socket = new WebSocket(url);
-            _socket.OnOpen += (_, _) => { onConnected(); };
-
-            _socket.OnMessage += (_, e) => { onMessage(e.RawData); };
-            _socket.OnClose += (_, e) =>
+            // 每条连接捕获自己的 socket 做"代次"标记:UnityWebSocket 事件非线程、隔帧
+            // 才在主线程派发,Close 后立刻 Connect 时旧 socket 迟到的 OnClose/OnMessage
+            // 会打到共享单例上误伤新连接(典型:新 Connect 被旧 close 取消)。故回调先校验。
+            var socket = new WebSocket(url);
+            _socket = socket;
+            socket.OnOpen += (_, _) =>
             {
+                if (socket == _socket) onConnected();
+            };
+            socket.OnMessage += (_, e) =>
+            {
+                if (socket == _socket) onMessage(e.RawData);
+            };
+            socket.OnClose += (_, e) =>
+            {
+                if (socket != _socket) return;
                 switch (e.StatusCode)
                 {
                     case CloseStatusCode.Normal:
@@ -108,8 +116,11 @@ namespace HeTu
                         break;
                 }
             };
-            _socket.OnError += (_, e) => { onError(e.Message); };
-            _socket.ConnectAsync();
+            socket.OnError += (_, e) =>
+            {
+                if (socket == _socket) onError(e.Message);
+            };
+            socket.ConnectAsync();
         }
 
         // 实际关闭ws连接的方法
@@ -122,7 +133,6 @@ namespace HeTu
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = null;
-            _closeCompletion?.TrySetResult("Canceled");
             State = ConnectionState.Disconnected;
         }
 
@@ -155,11 +165,13 @@ namespace HeTu
             _connectionCancelSource = new CancellationTokenSource();
 
             _connectCompletion = NewCompletionSource<bool>();
-            _closeCompletion = NewCompletionSource<string>();
 
             Action onConnected = null;
             onConnected = () => _connectCompletion.TrySetResult(true);
             OnConnected += onConnected;
+            // HandleConnectionClosed 是稳定实例方法,但事件 += 不去重。重订阅前先
+            // -= 一次,保证单例 OnClosed 上恒为单个,避免跨重连无限累加(幂等订阅)。
+            OnClosed -= HandleConnectionClosed;
             OnClosed += HandleConnectionClosed;
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
@@ -170,7 +182,6 @@ namespace HeTu
             using var reg = linkedCts.Token.Register(() =>
             {
                 _connectCompletion.TrySetCanceled();
-                _closeCompletion.TrySetResult("Canceled");
                 CloseCore();
             });
 
@@ -185,53 +196,13 @@ namespace HeTu
             }
         }
 
-        /// <summary>
-        ///     等待当前连接关闭。
-        /// </summary>
-#if UNITY_6000_0_OR_NEWER
-        public Awaitable<string> WaitClosedAsync()
-#else
-        public UniTask<string> WaitClosedAsync()
-#endif
-        {
-            return _closeCompletion == null
-                ? CompletedAwaitable<string>(null)
-                : WaitClosedCoreAsync();
-        }
-
-#if UNITY_6000_0_OR_NEWER
-        private async Awaitable<string> WaitClosedCoreAsync()
-#else
-        private async UniTask<string> WaitClosedCoreAsync()
-#endif
-        {
-            try
-            {
-                return await AwaitFrom(_closeCompletion);
-            }
-            finally
-            {
-                OnClosed -= HandleConnectionClosed;
-            }
-        }
-
+        // 物理 socket 自行关闭(服务端/网络/错误)时被 OnClosed 触发,跑一遍
+        // CloseCore 清掉 _socket / cancel source / 状态。errMsg(关闭原因)目前无
+        // 消费方,保留形参只为匹配 OnClosed 的 Action<string> 签名。
         private void HandleConnectionClosed(string errMsg)
         {
-            _closeCompletion?.TrySetResult(errMsg);
             CloseCore();
         }
-
-#if UNITY_6000_0_OR_NEWER
-        private static Awaitable<T> CompletedAwaitable<T>(T value)
-        {
-            var tcs = NewCompletionSource<T>();
-            tcs.SetResult(value);
-            return AwaitFrom(tcs);
-        }
-#else
-        private static UniTask<T> CompletedAwaitable<T>(T value) =>
-            UniTask.FromResult(value);
-#endif
 
         /// <summary>
         ///     执行System调用。

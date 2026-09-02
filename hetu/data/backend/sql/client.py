@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, ov
 
 import numpy as np
 import sqlalchemy as sa
+from sqlalchemy import event
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -54,6 +55,30 @@ def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
         return sa.LargeBinary(length=max(1, dtype.itemsize))
 
     raise TypeError(_("SQLBackend不支持的数据类型: {dtype}").format(dtype=dtype))
+
+
+def _apply_sqlite_pragmas(dbapi_conn: Any, _rec: Any) -> None:
+    """每条SQLite连接建立时设置PRAGMA，降低磁盘写入压力。
+
+    默认的 DELETE 回滚日志 + synchronous=FULL 下，每次事务提交都要建删 `-journal`
+    边车文件并 fsync 多次（哪怕只改一个字段也写整页）。HeTu 空闲时也在持续提交
+    （循环 FutureCall、Worker 租约续期、每次改动往通知表写行），会造成持续的、被
+    放大的磁盘写入。改用 WAL + synchronous=NORMAL 后，提交变成往单个 `-wal` 文件
+    追加、仅在 checkpoint 时 fsync，写入量数量级下降。
+
+    - journal_mode=WAL：持久化在库头，一次生效（重复设置无副作用）。
+    - synchronous=NORMAL：每连接生效，WAL 下不会丢已提交事务（只在断电+checkpoint
+      边界有极小丢失窗口，对游戏服可接受）。
+    - busy_timeout：多进程（instance×worker）共用一个库文件时，抢写锁优雅退避，
+      减少 "database is locked"。
+    """
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute("PRAGMA journal_mode=WAL")
+        cur.execute("PRAGMA synchronous=NORMAL")
+        cur.execute("PRAGMA busy_timeout=5000")
+    finally:
+        cur.close()
 
 
 @final
@@ -279,6 +304,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 future=True,
                 pool_pre_ping=True,
             )
+            # SQLite后端默认日志模式(DELETE+FULL)对频繁小事务磁盘写入极重，
+            # 挂connect监听切到WAL；异步engine要监听其底层sync_engine。
+            # 其他方言(postgres/mysql)无需此PRAGMA。
+            if io.dialect.name == "sqlite":
+                event.listen(io, "connect", _apply_sqlite_pragmas)
+                event.listen(aio.sync_engine, "connect", _apply_sqlite_pragmas)
             self._ios.append(io)
             self._async_ios.append(aio)
 

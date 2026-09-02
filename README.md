@@ -7,8 +7,8 @@
 
 # 🌌 河图 HeTu
 
-河图是一个可自动伸缩的高性能游戏服务器引擎，采用现代“数据驱动开发”范式，
-但重高频 RPC 和强状态的内存计算。
+河图是一个可自动伸缩的高性能游戏服务器引擎，采用现代“数据驱动开发”范式， 但重高频 RPC
+和强状态的内存计算。
 
 90%代码由古法编程实现，并且都经过精心设计。
 
@@ -22,9 +22,8 @@
 
 ## Schema即API
 
-河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS(行级权限) 下可安全的进行
-get/range 订阅。
-订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
+河图把数据库只读接口"暴露"给游戏客户端，客户端通过 SDK 在 RLS (行级权限) 下可安全的进行
+get/range 订阅。 订阅后数据自动同步，底层由数据库写入回调实现，无需轮询，响应速度<1ms。
 
 写入操作只能由服务器的逻辑代码执行，客户端通过 RPC 远程调用。类似储存过程，但更易写。
 
@@ -102,29 +101,29 @@ uv run hetu start --config=./config.yml
 
 ### 配置：
 
-|          |                          服务器 型号 |                                           设置 |
-|:---------|--------------------------------:|---------------------------------------------:|
-| 河图       |                cs.c9ae.16xlarge |             32 核 64 线程，默认配置，参数: --workers=76 |
-| Redis7.0 | redis.shard.with.proxy.small.ce |                           最低配, 单可用区，4节点 读写分离 |
-| 跑分程序     |                              本地 | cli： uv run ya ya_hetu_rpc.py -n 1200 -t 1.1 |
+|          |                     服务器 型号 |                                          设置 |
+|:---------|--------------------------------:|----------------------------------------------:|
+| 河图     |                cs.c9ae.16xlarge |   32 核 64 线程，默认配置，参数: --workers=76 |
+| Redis7.0 | redis.shard.with.proxy.small.ce |              最低配, 单可用区，4节点 读写分离 |
+| 跑分程序 |                            本地 | cli： uv run ya ya_hetu_rpc.py -n 1200 -t 1.1 |
 
 ### 压测结果：
 
 - hello world 测试：序列化并返回 hello world。
 - get + update：单 Component，随机单行读写，表 3W 行。
-- get*2 + update*2：同上，只是做2次
+- get *2 + update*2：同上，只是做2次
 - get：单 Component，随机单行读，表 3W 行。
 
-CPS(每秒调用次数)测试结果为：
+CPS (每秒调用次数)测试结果为：
 
-| Time     | hello world(Calls) | get + update(Calls) | get*2 + update*2(Calls) | get(Calls) |
-|:---------|-------------------:|--------------------:|------------------------:|-----------:|
+| Time       | hello world(Calls) | get + update(Calls) | get*2 + update*2(Calls) | get(Calls) |
+|:-----------|-------------------:|--------------------:|------------------------:|-----------:|
 | Avg(每秒)  |          1,200,929 |              90,776 |                  54,260 |    422,817 |
 | CPU 负载   |                98% |                 88% |                     78% |        98% |
 | Redis 负载 |                 0% |                 97% |                     90% |        41% |
 
-- _以上测试为单 Component，受限于Master写入io。多个 Component 有机会（要低耦合度）通过
-  Redis Cluster 扩展。_
+- _以上测试为单 Component，受限于Master写入io。多个 Component 有机会（要低耦合度）通过 Redis
+  Cluster 扩展。_
 
 ### 单连接性能：
 
@@ -132,7 +131,7 @@ CPS(每秒调用次数)测试结果为：
 
 | Time        | hello world(Calls) | get + update(Calls) | get*2 + update*2(Calls) | get(Calls) |
 |:------------|-------------------:|--------------------:|------------------------:|-----------:|
-| Avg(每秒)     |             29,921 |               1,498 |                     827 |      5,704 |
+| Avg(每秒)   |             29,921 |               1,498 |                     827 |      5,704 |
 | K90 RTT(ms) |               0.03 |                0.69 |                    1.33 |       0.18 |
 
 ### 关于 Python 性能
@@ -154,11 +153,11 @@ ffi = FFI()
 ffi.cdef("""
     void process(char* data, size_t n); // char*需转换成Position*
 """)
-c_lib = ffi.dlopen('lib.so')
+c_lib = ffi.dlopen("lib.so")
 
 # 获取Array of Position
 pos_repo = ctx.repo[Position]
-rows = await pos_repo.range('x', pos.x - 10, pos.x + 10)
+rows = await pos_repo.range("x", pos.x - 10, pos.x + 10)
 c_lib.process(ffi.from_buffer("char[]", rows), len(rows))  # 无拷贝，传递指针
 for row in rows:
     await pos_repo.update(row)
@@ -240,8 +239,8 @@ docker build -t app_image_name .
 docker run -it --rm -p 2466:2466 --name server_name app_image_name
 ```
 
-使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用
-9 折的抢占服务器，然后用反向代理对连接进行负载均衡。
+使用 Docker 的目的是为了河图的灵活启停特性，可以设置一台服务器为常驻包年服务器，其他都用 9
+折的抢占服务器，然后用反向代理对连接进行负载均衡。
 
 ### pip 原生部署
 
@@ -281,8 +280,8 @@ python -O -m hetu start --config=./config.yml
 Redis 配置只要开启持久化即可。 推荐用 master+多机只读 replica 的分布式架构，数据订阅都可分流到
 replica，大幅降低 master 负载。
 
-Redis只使用了基础特性，因此支持各种Fork，比如ValKey，阿里云Tair等。
-同时还支持Redis Proxy，Redis Cluster。
+Redis只使用了基础特性，因此支持各种Fork，比如ValKey，阿里云Tair等。 同时还支持Redis
+Proxy，Redis Cluster。
 
 ### 负载均衡
 
@@ -302,11 +301,11 @@ Redis只使用了基础特性，因此支持各种Fork，比如ValKey，阿里�
 
 ### Unity SDK
 
-河图 Unity SDK 基于 async/await，Unity 2022 及以上版本，含所有平台（包括 WebGL），
-基于 UnityWebSocket 和 UniTask，在 SDK 库的安装程序中可选择安装。
+河图 Unity SDK 基于 async/await，Unity 2022 及以上版本，含所有平台（包括 WebGL）， 基于
+UnityWebSocket 和 UniTask，在 SDK 库的安装程序中可选择安装。
 
-首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package
-from git URL”
+首先在 Unity 中导入客户端 SDK，点“Window”->“Package Manager”->“+加号”->“Add package from
+git URL”
 
 <img src="https://github.com/Heerozh/HeTu/blob/media/sdk1.png" width="306.5" height="156.5"/>
 <img src="https://github.com/Heerozh/HeTu/blob/media/sdk2.png" width="208.5" height="162.5"/>

@@ -122,11 +122,9 @@ def _build_future_row(
 保留 `create_future_call` 的 `@define_system` 装饰器、签名、以及完整 docstring **不变**；只把 docstring 之后的全部实现代码（原"参数检查 … `await ctx.repo[FutureCalls].insert(row)` / `return row.id`"那段）替换为：
 
 ```python
-    row = _build_future_row(
-        ctx, at, system, args, timeout=timeout, recurring=recurring
-    )
-    await ctx.repo[FutureCalls].insert(row)
-    return row.id
+row = _build_future_row(ctx, at, system, args, timeout=timeout, recurring=recurring)
+await ctx.repo[FutureCalls].insert(row)
+return row.id
 ```
 
 - [ ] **Step 4: 跑测试确认无回归**

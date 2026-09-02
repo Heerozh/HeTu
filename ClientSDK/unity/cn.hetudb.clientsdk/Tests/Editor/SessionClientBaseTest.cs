@@ -1063,6 +1063,92 @@ namespace Tests.HeTu
                 "maxReconnectAttempts=0 时不应进入 Faulted 终态");
         }
 
+        // 重连阶段 bootstrap（登录）主动抛异常 = 票据/凭据被永久拒绝（如 STALE_TICKET）,
+        // 重跑同样的 bootstrap 不会有不同结果 → 直接进 Faulted 终态,不浪费重试次数。
+        [Test]
+        public void Reconnect_BootstrapThrows_EntersFaultedImmediately_WithoutRetry()
+        {
+            var first = new FakeTransport("c1");
+            var second = new FakeTransport("c2");
+            var third = new FakeTransport("never-used");
+            var q = new Queue<FakeTransport>(new[] { first, second, third });
+            var scheduler = new FakeScheduler();
+            var bootstrapCalls = 0;
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                {
+                    bootstrapCalls++;
+                    return bootstrapCalls == 1
+                        ? Future.Completed
+                        : Future.Failed(new InvalidOperationException(
+                            "round login rejected: STALE_TICKET"));
+                },
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20);
+
+            Exception observed = null;
+            session.Faulted += ex => observed = ex;
+
+            session.Start();
+            first.RaiseConnected(); // 首次 bootstrap 成功 → Ready
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            first.RaiseClosed("network lost"); // 掉线（socket drop）→ 应正常重连
+            scheduler.RunNext();
+            second.RaiseConnected(); // 第二次 bootstrap 抛异常（socket 仍存活）
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State,
+                "重连阶段 bootstrap 主动抛异常应直接进 Faulted 终态,而不是继续重试");
+            Assert.IsNotNull(observed);
+            StringAssert.Contains("STALE_TICKET", observed.Message);
+            Assert.AreEqual(0, scheduler.PendingCount,
+                "bootstrap 抛异常进终态后不应再排重连");
+            Assert.AreEqual(0, third.ConnectCount,
+                "不应再构造第三条 transport");
+        }
+
+        // 但 bootstrap 抛的是 OperationCanceledException（取消,如退出/切场景）不算永久
+        // 拒绝——不进 Faulted,仍按普通失败继续重连。
+        [Test]
+        public void Reconnect_BootstrapCanceled_DoesNotFault_StillReconnects()
+        {
+            var first = new FakeTransport("c1");
+            var second = new FakeTransport("c2");
+            var third = new FakeTransport("c3");
+            var q = new Queue<FakeTransport>(new[] { first, second, third });
+            var scheduler = new FakeScheduler();
+            var bootstrapCalls = 0;
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                {
+                    bootstrapCalls++;
+                    return bootstrapCalls == 1
+                        ? Future.Completed
+                        : Future.Failed(new OperationCanceledException("canceled"));
+                },
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectDelay: TimeSpan.FromSeconds(30),
+                maxReconnectAttempts: 20);
+
+            session.Start();
+            first.RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected(); // 第二次 bootstrap 抛 OCE
+
+            Assert.AreNotEqual(HeTuSessionState.Faulted, session.State,
+                "bootstrap 抛 OperationCanceledException 不应被当作永久拒绝进 Faulted");
+            Assert.AreEqual(1, scheduler.PendingCount,
+                "OCE 应按普通失败继续排重连");
+        }
+
         // 用户在 Faulted 回调里主动 Close 时，不应再调度新的重连或进 Faulted 终态。
         [Test]
         public void FaultedCallback_CallingClose_ShortCircuitsReconnect()

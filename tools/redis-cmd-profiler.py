@@ -6,28 +6,36 @@ import matplotlib.pyplot as plt
 # 必须压测Redis到CPU 100%时(不然有OFF CPU时间)，保存的MONITOR的日志（或者用Insight工具保存），然后用这个脚本分析
 # MONITOR格式 1339518083.107412 [0 127.0.0.1:60866] "keys" "*"
 
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(prog='hetu', description='Hetu redis monitor log 绘图')
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        prog="hetu", description="Hetu redis monitor log 绘图"
+    )
     parser.add_argument("--file", type=str)
     args = parser.parse_args()
 
     with open(args.file) as f:
-        data = [list(re.match(r'^(\d*\.\d*) \[.*] "(.+?)" ?.*', line).groups())
-                for line in f]
+        data = [
+            list(re.match(r'^(\d*\.\d*) \[.*] "(.+?)" ?.*', line).groups())
+            for line in f
+        ]
 
     df = pd.DataFrame(data)
-    df.rename(columns={0: 'cost', 1: 'cmd'}, inplace=True)
-    df.cost = pd.to_datetime(df.cost.astype(float), unit='s')
+    df.rename(columns={0: "cost", 1: "cmd"}, inplace=True)
+    df.cost = pd.to_datetime(df.cost.astype(float), unit="s")
     df.cost = -(df.cost.diff(-1)).dt.total_seconds()
     df.cmd = df.cmd.str.lower()
 
-    df.groupby('cmd').sum().sort_values('cost', ascending=False).plot(kind='barh', legend=False)
-    plt.title('Redis命令总耗时', family=['SimHei'])
+    df.groupby("cmd").sum().sort_values("cost", ascending=False).plot(
+        kind="barh", legend=False
+    )
+    plt.title("Redis命令总耗时", family=["SimHei"])
     plt.show()
 
     count = df.cmd.value_counts()
     less_item = count.index[count.gt(count.quantile(0.15))]
     df = df[df.cmd.isin(less_item)]
-    df.groupby('cmd').mean().sort_values('cost', ascending=False).plot(kind='barh', legend=False)
-    plt.title('Redis命令平均耗时', family=['SimHei'])
+    df.groupby("cmd").mean().sort_values("cost", ascending=False).plot(
+        kind="barh", legend=False
+    )
+    plt.title("Redis命令平均耗时", family=["SimHei"])
     plt.show()
