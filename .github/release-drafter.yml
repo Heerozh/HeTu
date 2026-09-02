@@ -17,7 +17,17 @@ categories:
     labels:
       - "chore"
       - "dependencies"
+# dev 汇总 PR（dev -> main）打此 label 排除：它内含的功能 PR 会各自单独列出，
+# 汇总 PR 本身只会变成一条没有信息量的 "- dev (#132)"。
+exclude-labels:
+  - "skip-changelog"
 autolabeler:
+  # dev -> main 的汇总 PR：head 分支恒为 dev，自动打 skip-changelog。
+  # 必须用 /^dev$/ 锚定：不带斜杠的写法是子串匹配，会误伤 dependabot 的
+  # dependabot/uv/dev/* 分支（其 target-branch 为 dev，分支名里带 dev）。
+  - label: "skip-changelog"
+    branch:
+      - "/^dev$/"
   - label: "chore"
     branch:
       - "/maint\/.+/"
@@ -34,9 +44,13 @@ version-resolver:
   major:
     labels:
       - "major"
+  # 与上面"🚀 新功能"分类的 labels 对齐：进那个分类的就升 minor。
+  # enhancement 由 autolabeler 按 feature/* 分支名自动打，无需手动。
   minor:
     labels:
       - "minor"
+      - "feature"
+      - "enhancement"
   patch:
     labels:
       - "patch"
