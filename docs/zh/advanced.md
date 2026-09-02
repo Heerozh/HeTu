@@ -451,6 +451,38 @@ PACKET_LAYERS:
 
 Unity SDK 附带了匹配的默认值。如果你添加了自定义层，你需要一个匹配的客户端实现——线路上没有自动发现机制。
 
+## 自定义 HTTP 端点
+
+HeTu 内置的 web 服务器就是 Sanic，客户端 SDK 的 websocket 入口只是它上面的一条路由。你可以用 `@hetu.define_route` 在旁边挂上自己的普通 HTTP 路由——文件下载、后台页面、健康检查等：
+
+```python
+import hetu
+from sanic import Request, response
+
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return await response.file(f"/data/{name}")
+```
+
+装饰器必须在引擎加载你的 app 文件时执行，也就是写在模块顶层，和 `@define_system` 一样。uri 之后的参数会原样透传给 Sanic 的 `Blueprint.route`，所以 `methods=["POST"]`、`stream=True` 等的行为和 Sanic 文档完全一致。
+
+它们就只是普通的 web 端点：不经过 HeTu 的 `Permission` 权限体系，拿不到 `SystemContext`，也没有数据库访问——鉴权、限流、输入校验都需要你自己写。需要客户端 SDK 调用的游戏逻辑，请用 `define_system` / `define_endpoint`。
+
+单条路由表达不了的场景——静态文件目录、中间件、异常处理器、带 `url_prefix` 的自建 Blueprint——用 `@hetu.on_server_setup`，它会在 Sanic app 创建后立即把 app 交给你：
+
+```python
+@hetu.on_server_setup
+def setup(app):
+    app.static("/download", "/data/files")
+```
+
+需要记住的三件事：
+
+- `/hetu/...` 是 websocket 入口的保留路径，`define_route` 会拒绝它。`/` 则**不是**保留路径：你注册了它，你的页面就会顶掉 HeTu 的默认欢迎页。
+- 两个钩子都会在管理进程执行一次、每个 worker 进程再各执行一次，且此时后端还没连接。所以只做注册类操作；需要每个 worker 初始化的东西，请在 setup 回调里用 `app.before_server_start(...)` 挂钩子。
+- 你的路由和 websocket 游戏流量共用同一个事件循环，且每个 worker 都会提供服务。处理函数应保持无状态；生产环境中大文件或慢速下载建议交给前置的 nginx/CDN，而不是穿过游戏 worker。
+
 ## 可操作性可见性：重放与慢日志
 
 HeTu 暴露了两个容易被忽略的专用日志记录器：

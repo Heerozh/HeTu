@@ -24,6 +24,8 @@ TOPIC_MAP: dict[str, str] = {
     "define_component": "decorators",
     "define_system": "decorators",
     "define_endpoint": "decorators",
+    "define_route": "decorators",
+    "on_server_setup": "decorators",
     "property_field": "decorators",
     # components
     "BaseComponent": "components",
@@ -37,4 +39,4 @@ TOPIC_MAP: dict[str, str] = {
 }
 
 # Names from __all__ that the script intentionally skips (modules, not symbols).
-SKIP: set[str] = {"data", "system", "common", "endpoint"}
+SKIP: set[str] = {"data", "system", "common", "endpoint", "webext"}

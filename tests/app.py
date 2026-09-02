@@ -316,3 +316,14 @@ async def guarded_add(ctx: hetu.SystemContext, value):
     async with ctx.repo[RLSComp].upsert(owner=ctx.caller) as row:
         row.value += value
     return row.value
+
+
+# ============================
+# 自定义HTTP端点：和HeTu数据无关的普通web请求（见 hetu/webext.py）
+
+
+@hetu.define_route("/webext-test/<name:str>")
+async def webext_test_download(request, name: str):
+    from sanic import text
+
+    return text(f"downloaded {name}")

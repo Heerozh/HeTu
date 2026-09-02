@@ -664,6 +664,57 @@ The Unity SDK ships with the matching defaults. If you add a custom
 layer, you'll need a matching client implementation — there's no
 auto-discovery on the wire.
 
+## Custom HTTP endpoints
+
+HeTu's built-in web server is Sanic, and the client SDK's websocket entry is
+just one route on it. You can mount your own plain HTTP routes next to it —
+file downloads, an admin page, a health check — with `@hetu.define_route`:
+
+```python
+import hetu
+from sanic import Request, response
+
+
+@hetu.define_route("/download/<name:str>")
+async def download(request: Request, name: str):
+    return await response.file(f"/data/{name}")
+```
+
+The decorator has to run while the engine loads your app file, i.e. at module
+top level, the same as `@define_system`. Everything after the uri is passed
+straight through to Sanic's `Blueprint.route`, so `methods=["POST"]`,
+`stream=True` and friends behave exactly as Sanic documents them.
+
+These are plain web endpoints and nothing more. They do not go through HeTu's
+`Permission` system, they get no `SystemContext`, and they have no database
+access — authentication, rate limiting and input validation are yours to
+write. Game logic that the client SDK calls belongs in `define_system` /
+`define_endpoint` instead.
+
+For anything a single route can't express — a static directory, middleware, an
+error handler, your own Blueprint with a `url_prefix` — use
+`@hetu.on_server_setup`, which hands you the Sanic app right after it is
+created:
+
+```python
+@hetu.on_server_setup
+def setup(app):
+    app.static("/download", "/data/files")
+```
+
+Three things to know:
+
+- `/hetu/...` is reserved for the websocket entry, and `define_route` refuses
+  it. `/` is *not* reserved: register it and your page quietly replaces
+  HeTu's default welcome text.
+- Both hooks run once in the manager process and once per worker, before any
+  backend is connected. Do registration only; anything that needs per-worker
+  initialization should be hung off `app.before_server_start(...)` from
+  inside the setup callback.
+- Your routes share the event loop with websocket game traffic, and every
+  worker serves them. Keep handlers stateless, and in production put large or
+  slow downloads behind nginx or a CDN instead of through the game workers.
+
 ## Operational visibility: replay and slow logs
 
 HeTu exposes two specialized loggers that are easy to overlook:

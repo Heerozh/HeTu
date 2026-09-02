@@ -17,6 +17,7 @@ from sanic import Sanic
 from sanic.worker.manager import WorkerManager
 from sanic.worker.process import WorkerProcess
 
+from .. import webext
 from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
 from ..data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
@@ -28,7 +29,7 @@ from ..system import SystemClusters
 from ..system.future import future_call_task
 from . import pipeline
 from . import websocket as _ws  # noqa: F401 (防止未使用警告)
-from .web import HETU_BLUEPRINT
+from .web import HETU_BLUEPRINT, web_root
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -349,4 +350,11 @@ def worker_main(app_name, config) -> Sanic:
 
     # 启动服务器监听
     app.blueprint(HETU_BLUEPRINT)
+
+    # 挂载用户自定义的HTTP端点（@hetu.define_route / @hetu.on_server_setup）
+    webext.apply_to(app)
+
+    # 最后补上HeTu的默认欢迎页，用户自己注册了"/"就让给用户，不去撞RouteExists
+    if not any(route.path in ("", "/") for route in app.router.routes):
+        app.route("/")(web_root)
     return app
