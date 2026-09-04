@@ -224,6 +224,47 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchDispatchCanceledWhileReady_ReconnectsInsteadOfStrandingWatch()
+        {
+            var first = new FakeTransport("c1") { CancelWatchDispatch = true };
+            var second = new FakeTransport("c2");
+            second.RangeResults[("owner", 1L, 1L, 1, false, true)] =
+                new List<TestComponent> { new() { ID = 7, Value = 42 } };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            IndexSubscription<TestComponent> received = null;
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State,
+                "前置：会话必须自认为 Ready，否则没复现到状态失配");
+
+            // 物理层已不可用但 Closed 没派发（关 Domain Reload 停 Play 的典型残留）：
+            // 派发当场被取消。以前 promise 不结算、IsInFlight 停在 true，这条 watch
+            // 再也不会重投，调用方的 await 永久挂起，服务器上也看不到订阅请求。
+            session.WatchRange<TestComponent>(
+                "owner", 1L, 1L, 1, null,
+                sub => received = sub,
+                ex => failure = ex);
+
+            Assert.IsNull(received);
+            Assert.IsNull(failure, "取消不该当成失败抛给调用方");
+            Assert.AreEqual(HeTuSessionState.Reconnecting, session.State,
+                "会话状态与物理层失配时应触发重连，而不是干等");
+
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.NotNull(received, "重连后必须把挂起的订阅重投出去");
+            Assert.AreEqual(1, received.Rows.Count);
+            Assert.IsNull(failure);
+        }
+
+        [Test]
         public void WatchRange_WithSameSubId_ReturnsSameSubscription()
         {
             var transport = new FakeTransport("c1");
@@ -1532,6 +1573,10 @@ namespace Tests.HeTu
             // 非 null 时，CallSystem 以 CallOutcome.Failed + 该原因完成（模拟服务端 err 帧）。
             public string FailCallsWithReason { get; set; }
             public bool HoldWatchCallbacks { get; set; }
+
+            // 为 true 时任何 watch 派发都当场回 canceled，模拟物理层已不可用但
+            // Closed 事件没送达（WatchRow/RangeSync 的 EnsureConnected 直接回绝）。
+            public bool CancelWatchDispatch { get; set; }
             public bool IsConnected { get; private set; }
             public bool IsDisposed { get; private set; }
             public int ConnectCount { get; private set; }
@@ -1607,6 +1652,11 @@ namespace Tests.HeTu
             {
                 Operations.Add("watch-row");
                 WatchedRows.Add((index, value));
+                if (CancelWatchDispatch)
+                {
+                    onResponse(null, true, null);
+                    return;
+                }
 
                 void Respond(bool canceled)
                 {
@@ -1661,6 +1711,11 @@ namespace Tests.HeTu
                 Operations.Add("watch-range");
                 var key = (index, left, right, limit, desc, force);
                 WatchedRanges.Add(key);
+                if (CancelWatchDispatch)
+                {
+                    onResponse(null, true, null);
+                    return;
+                }
                 var rows = RangeResults[key].Cast<T>().ToList();
                 componentName ??= typeof(T).Name;
                 var subId = HeTuClientBase.MakeSubId(

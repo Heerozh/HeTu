@@ -35,6 +35,20 @@ namespace HeTu
         }
     }
 
+    /// <summary>
+    ///     内部信号：一次 watch 派发被底层取消（连接在飞行中断开，或派发那一刻
+    ///     物理层已不可用）。不会外泄给调用方，只用来把"取消"和"失败"区分开。
+    /// </summary>
+    internal sealed class WatchDispatchCanceledException : Exception
+    {
+        internal static readonly WatchDispatchCanceledException Instance = new();
+
+        private WatchDispatchCanceledException() : base(
+            "Watch dispatch was canceled by the transport.")
+        {
+        }
+    }
+
     internal interface IHeTuSessionTransport : IDisposable
     {
         event Action Connected;
@@ -101,6 +115,7 @@ namespace HeTu
         private bool _closed;
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
+        private bool _handlingConnectionLoss;
         private bool _hasBeenReady;
         private Exception _lastFault;
         private IDisposable _scheduledReconnect;
@@ -356,7 +371,12 @@ namespace HeTu
                     value,
                     (sub, canceled, ex) =>
                     {
-                        if (canceled) return;
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
                         if (ex != null) promise.TryFail(ex);
                         else promise.TryComplete(sub);
                     },
@@ -412,7 +432,12 @@ namespace HeTu
                     limit,
                     (sub, canceled, ex) =>
                     {
-                        if (canceled) return;
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
                         if (ex != null) promise.TryFail(ex);
                         else promise.TryComplete(sub);
                     },
@@ -672,6 +697,26 @@ namespace HeTu
             ScheduleReconnect();
         }
 
+        // 一次 watch 派发被底层取消。常规情况（连接掉了）会话已经在走断线流程，
+        // 订阅留在 _pendingWatches 里等下一次 Ready 重投即可。但若此刻会话还自认为
+        // Ready，说明物理层与会话状态失配（典型：Editor 关掉 Domain Reload 后停
+        // Play，OnClose 没派发，State stale 在 Ready；此时 WatchRangeSync 的
+        // EnsureConnected 会当场回 canceled），没有任何事件会再把它推向下一次
+        // Ready —— 主动走一次断线失败流程去重连，否则这条订阅永远不发包，调用方的
+        // await 永久挂起。
+        private void OnWatchDispatchCanceled()
+        {
+            if (_closed || _handlingConnectionLoss ||
+                State != HeTuSessionState.Ready)
+            {
+                return;
+            }
+
+            HandleSessionFailure(new InvalidOperationException(
+                "Watch dispatch canceled while the session was Ready: " +
+                "transport is out of sync with session state."));
+        }
+
         private bool ExhaustedRetries()
         {
             _consecutiveFailures++;
@@ -715,19 +760,30 @@ namespace HeTu
 
         private void MarkConnectionLost(bool closeTransport)
         {
-            foreach (var pending in _inFlightCalls.ToArray())
-                SafeInvokeUserCallback<Exception>(
-                    pending.OnFailed,
-                    new CallOutcomeUnknownException(pending.SystemName));
-            _inFlightCalls.Clear();
+            // 关掉 transport 会让底层 ResponseQueue.CancelAll 把在飞的 watch 冲成
+            // canceled、绕回 OnWatchDispatchCanceled，而此刻 State 还停在 Ready
+            // （SetState(Reconnecting) 在后面才发生），得挡住它再递归进一次失败处理。
+            _handlingConnectionLoss = true;
+            try
+            {
+                foreach (var pending in _inFlightCalls.ToArray())
+                    SafeInvokeUserCallback<Exception>(
+                        pending.OnFailed,
+                        new CallOutcomeUnknownException(pending.SystemName));
+                _inFlightCalls.Clear();
 
-            foreach (var subscription in _subscriptions.Values.ToArray())
-                ((IRestorableSubscription)subscription).Suspend();
+                foreach (var subscription in _subscriptions.Values.ToArray())
+                    ((IRestorableSubscription)subscription).Suspend();
 
-            foreach (var pending in _pendingWatches)
-                pending.MarkRetryable();
+                foreach (var pending in _pendingWatches)
+                    pending.MarkRetryable();
 
-            CleanupTransport(closeTransport: closeTransport);
+                CleanupTransport(closeTransport: closeTransport);
+            }
+            finally
+            {
+                _handlingConnectionLoss = false;
+            }
         }
 
         private void ScheduleReconnect()
@@ -980,6 +1036,17 @@ namespace HeTu
                     .Catch(ex =>
                     {
                         IsInFlight = false;
+                        // 取消不是失败：这条 watch 继续留在 _pendingWatches 里，
+                        // IsInFlight 已清掉，下一次 Ready 时 DispatchPendingWatches
+                        // 会重投。（早先这里连 promise 都不结算，IsInFlight 永远停
+                        // 在 true，watch 再也不会被派发 —— 调用方 await 永久挂起，
+                        // 而且服务器上看不到任何订阅请求。）
+                        if (ex is WatchDispatchCanceledException)
+                        {
+                            owner.OnWatchDispatchCanceled();
+                            return;
+                        }
+
                         owner.FailPending(this, ex);
                     });
             }
