@@ -18,7 +18,7 @@ from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import client_handler, mq_puller, subscription_handler
+from .receiver import PUSH_CLOSE, client_handler, mq_puller, subscription_handler
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -150,6 +150,10 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     try:
         while True:
             reply = await push_queue.get()
+            # 接收协程结束时会塞这个哨兵进来（它已经把连接拆了）：跳出去跑 finally
+            # 的清理，否则本协程会一直阻塞在 get() 上，连接半死不活地挂着
+            if reply is PUSH_CLOSE:
+                break
             # 如果关闭了replay，为了速度不执行下面的字符串序列化
             if replay.level < logging.ERROR:
                 replay.debug(">>> " + str(reply))

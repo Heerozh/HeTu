@@ -30,6 +30,10 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
+# 塞进 push_queue 用来叫醒外层 websocket_connection 的发送循环。接收协程一旦结束，
+# 外层还会永远阻塞在 push_queue.get() 上，靠它退出去跑 finally 里的清理。
+PUSH_CLOSE = object()
+
 BAD_SUBS = [
     "sub",
     "fail",
@@ -138,11 +142,18 @@ async def client_handler(
     pipe = ServerMessagePipeline()
     ctx = executor.context
     last_data = None
+    cancelled = False
+    # async for 正常跑完 = 对端把连接关了；其余出口在各自分支里改写此原因
+    exit_reason = _("对端关闭了连接")
     try:
         async for message in ws:
             if not message:
+                exit_reason = _("收到空帧")
                 break
             if type(message) is not bytes:
+                exit_reason = _("收到非二进制帧：{kind}").format(
+                    kind=type(message).__name__
+                )
                 break  # if not byte frame, close connection
             # 转换消息到array
             last_data = pipe.decode(pipe_ctx, message)
@@ -156,12 +167,14 @@ async def client_handler(
             if flood_checker.recv_limit_reached(
                 ctx, "Coroutines(Websocket.client_handler)"
             ):
+                exit_reason = _("超出接收频率上限")
                 return ws.fail_connection()
             # 执行消息
             match last_data[0]:
                 case "rpc":  # rpc endpoint_name args ...
                     # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接
                     if not await rpc(last_data, executor, push_queue, debug):
+                        exit_reason = _("rpc 调用失败")
                         return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...
                     sub_ok = await sub_call(last_data, executor, broker, push_queue)
@@ -169,6 +182,7 @@ async def client_handler(
                         if debug:
                             await push_queue.put(BAD_SUBS)
                         else:
+                            exit_reason = _("订阅请求非法")
                             return ws.fail_connection()
                 case "unsub":  # unsub sub_id
                     check_length("unsub", last_data, 2, 2)
@@ -183,10 +197,12 @@ async def client_handler(
                     )
     except asyncio.CancelledError:
         # print(ctx, 'client_handler normal canceled')
-        pass
+        # 唯一合法的静默出口：连接本来就在被 websocket_connection 拆，别再插手
+        cancelled = True
     except WebsocketClosed:
-        pass
+        exit_reason = _("WebSocket 已关闭")
     except RedisConnectionError as e:
+        exit_reason = _("Redis ConnectionError")
         err_msg = _("❌ [📡WSReceiver] Redis ConnectionError，断开连接: {err}").format(
             err=f"{type(e).__name__}:{e}"
         )
@@ -194,6 +210,7 @@ async def client_handler(
         logger.error(err_msg)
         return ws.fail_connection()
     except (SanicException, BaseException) as e:
+        exit_reason = f"{type(e).__name__}:{e}"
         err_msg = _("❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}").format(
             data=last_data, err=f"{type(e).__name__}:{e}"
         )
@@ -201,8 +218,22 @@ async def client_handler(
         logger.exception(err_msg)
         return ws.fail_connection()
     finally:
-        # print(ctx, 'client_handler closed')
-        pass
+        # 除了被取消（连接本来就在拆），任何退出路径都必须把连接一起拆掉并留下日志。
+        # 否则连接会变成"半死"：外层 websocket_connection 还阻塞在 push_queue.get()
+        # 上，谁也不知道接收协程没了 —— TCP 仍 ESTABLISHED、协议层 ping/pong 照常、
+        # 客户端 socket 还是 Open，但客户端之后发的每一帧都没人消费，请求永远等不到
+        # 回应，而且两端一行错误日志都没有（实测：卡在 WatchRange 上无限等待）。
+        if not cancelled:
+            close_msg = _("⛓️ [📡WSReceiver] 接收协程结束，关闭连接：{reason}").format(
+                reason=exit_reason
+            )
+            replay.info(close_msg)
+            logger.info(close_msg)
+            ws.fail_connection()
+            try:
+                push_queue.put_nowait(PUSH_CLOSE)
+            except asyncio.QueueFull:
+                pass  # 队列满时外层自然会被 Sanic 的连接关闭取消掉
 
 
 async def mq_puller(ws: Websocket, broker: SubscriptionBroker):
