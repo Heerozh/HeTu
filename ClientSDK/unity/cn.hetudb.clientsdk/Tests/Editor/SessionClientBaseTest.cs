@@ -224,6 +224,77 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchWithoutResponse_TimesOutIntoReconnect_ThenRetries()
+        {
+            var first = new FakeTransport("c1") { HoldWatchCallbacks = true };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", (object)7L)] =
+                new TestComponent { ID = 7, Value = 5 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler,
+                requestTimeout: TimeSpan.FromSeconds(30));
+            RowSubscription<TestComponent> received = null;
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.WatchRow<TestComponent>(
+                "id", 7L, null,
+                sub => received = sub,
+                ex => failure = ex);
+
+            // 复现服务端那条连接的接收协程悄悄结束：帧发出去了，socket 看着还活着，
+            // 但永远等不到回应。以前这里的 await 会永久挂起，且两端零报错。
+            Assert.AreEqual(1, first.HeldWatchCount, "前置：请求已发出、对端不给回应");
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            scheduler.RunNext(); // 请求超时定时器
+
+            Assert.AreEqual(HeTuSessionState.Reconnecting, session.State,
+                "发出去的请求迟迟无回应，应判定连接不通并重连，而不是永久挂起");
+            Assert.IsNull(received);
+            Assert.IsNull(failure, "超时按连接失配处理，不直接把调用方打成失败");
+
+            scheduler.RunNext(); // 重连退避
+            second.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.NotNull(received, "重连 Ready 后必须把挂起的订阅重投出去");
+            Assert.AreEqual(7, received.Data.ID);
+            Assert.IsNull(failure);
+        }
+
+        [Test]
+        public void CallWithoutResponse_TimesOutIntoReconnect_AsUnknownOutcome()
+        {
+            var first = new FakeTransport("c1") { HoldCallsOpen = true };
+            var second = new FakeTransport("c2");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler,
+                requestTimeout: TimeSpan.FromSeconds(30));
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.CallSystem("mutate", new object[] { 1 },
+                _ => Assert.Fail("call should not complete"),
+                ex => failure = ex);
+
+            Assert.AreEqual(1, first.Calls.Count);
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            scheduler.RunNext(); // 请求超时定时器
+
+            Assert.AreEqual(HeTuSessionState.Reconnecting, session.State);
+            // 调用可能已在服务端生效过，语义同"发出后掉线"：报结果未知，不静默重发
+            Assert.IsInstanceOf<CallOutcomeUnknownException>(failure);
+        }
+
+        [Test]
         public void WatchDispatchCanceledWhileReady_ReconnectsInsteadOfStrandingWatch()
         {
             var first = new FakeTransport("c1") { CancelWatchDispatch = true };
@@ -1542,13 +1613,15 @@ namespace Tests.HeTu
         private static HeTuSessionClientBase CreateSession(
             Queue<FakeTransport> transports,
             FakeScheduler scheduler,
-            HeTuSessionBootstrap bootstrap = null)
+            HeTuSessionBootstrap bootstrap = null,
+            TimeSpan? requestTimeout = null)
         {
             return new HeTuSessionClientBase(
                 () => transports.Dequeue(),
                 scheduler,
                 bootstrap,
-                TimeSpan.Zero);
+                TimeSpan.Zero,
+                requestTimeout: requestTimeout);
         }
 
         private sealed class TestComponent : IBaseComponent
