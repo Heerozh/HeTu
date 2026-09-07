@@ -207,7 +207,9 @@ LOGGING:
 
   formatters:
     colour: # 彩色格式
-      class: sanic.logging.formatter.AutoFormatter
+      # 不能用 sanic 的 AutoFormatter：它会把 record.ident 覆写成本进程的编号，而这个
+      # handler 跑在管理进程的 QueueListener 里，会导致所有 worker 的日志都显示 Main
+      class: hetu.safelogging.formatter.ContextAutoFormatter
     generic: # 文本格式
       format: "%(ident)s %(asctime)s %(levelname)-8s %(name)-12s %(ctx)-27s %(message)s"
       datefmt: "%Y-%m-%d %H:%M:%S %z"
