@@ -1,4 +1,4 @@
-// <copyright>
+﻿// <copyright>
 // Copyright 2026, Heerozh. All rights reserved.
 // </copyright>
 // <summary>河图客户端SDK的Unity逻辑会话层</summary>
@@ -286,6 +286,32 @@ namespace HeTu
                 ex => tcs.TrySetException(ex),
                 desc,
                 force);
+            return AwaitFrom(tcs);
+        }
+
+        /// <summary>
+        ///     订阅整张表（见 <c>HeTuClient.WatchTable</c>）。不管表有多少行，服务端只占一个
+        ///     订阅、只订一个频道；初始返回你有权限看到的全部行，之后按行推增量。返回的
+        ///     <see cref="IndexSubscription{T}" /> 用法与 <see cref="WatchRange{T}" /> 完全一样。
+        ///     断线重连后由会话层自动重发 table 订阅并用新快照 diff，**订阅对象保持同一实例**，
+        ///     调用方不需要写任何重连补偿。
+        ///     适合"行多、行小、很少变"的表；高频写入的表请用 <see cref="WatchRange{T}" />——
+        ///     整表订阅者会收到该表**所有**写入的通知。
+        /// </summary>
+        /// <returns>整表订阅对象；无权限或行数超服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
+#if UNITY_6000_0_OR_NEWER
+        public Awaitable<IndexSubscription<T>> WatchTable<T>(
+#else
+        public UniTask<IndexSubscription<T>> WatchTable<T>(
+#endif
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            var tcs = NewCompletionSource<IndexSubscription<T>>();
+            _core.WatchTable<T>(
+                componentName,
+                sub => tcs.TrySetResult(sub),
+                ex => tcs.TrySetException(ex));
             return AwaitFrom(tcs);
         }
 
