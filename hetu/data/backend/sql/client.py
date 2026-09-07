@@ -274,11 +274,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
         if "payload" in columns:
             return
         col_type = sa.LargeBinary().compile(dialect=io.dialect)
+        # 表名含大写，建表时被SQLAlchemy加了引号，这里也必须按方言引用，
+        # 否则PostgreSQL会把未引用的标识符折叠成小写而找不到表
+        table_name = io.dialect.identifier_preparer.quote(cls.NOTIFY_TABLE_NAME)
         with io.begin() as conn:
             conn.execute(
-                sa.text(
-                    f"ALTER TABLE {cls.NOTIFY_TABLE_NAME} ADD COLUMN payload {col_type}"
-                )
+                sa.text(f"ALTER TABLE {table_name} ADD COLUMN payload {col_type}")
             )
         logger.info(
             _("[💾SQL] 通知表 {table} 已补充 payload 列").format(
