@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -157,6 +158,7 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeyp
         mq.subscribed.add(f"extra-{i}")
     mq.pulled_deque = MultiMap()
     mq.pulled_set = set()
+    mq.pulled_payload = {}
     mq._last_notify_id = 0
     mq._large_sub_warned = True
 
@@ -292,6 +294,7 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
     mq.subscribed = {"existing-channel"}
     mq.pulled_deque = MultiMap()
     mq.pulled_set = set()
+    mq.pulled_payload = {}
     mq._last_notify_id = 0
     mq._large_sub_warned = False
 
@@ -313,3 +316,58 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
 
     assert new_channel in mq.pulled_set
     assert mq._last_notify_id == 1
+
+
+def _check_notify_payload_column_upgrade(engine):
+    """旧版本的通知表没有payload列，ensure_notify_payload_column_sync应补上且幂等"""
+    name = SQLBackendClient.NOTIFY_TABLE_NAME
+    # 先清掉可能残留的表，造一张旧结构的表
+    old_meta = sa.MetaData()
+    old_table = sa.Table(
+        name,
+        old_meta,
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("channel", sa.String(length=256), nullable=False, index=True),
+        sa.Column("created_at", sa.TIMESTAMP(), nullable=False, index=True),
+    )
+    old_table.drop(engine, checkfirst=True)
+    old_meta.create_all(engine)
+    cols = {c["name"] for c in sa.inspect(engine).get_columns(name)}
+    assert "payload" not in cols
+
+    SQLBackendClient.ensure_notify_payload_column_sync(engine)
+    cols = {c["name"] for c in sa.inspect(engine).get_columns(name)}
+    assert "payload" in cols
+    # 幂等
+    SQLBackendClient.ensure_notify_payload_column_sync(engine)
+
+    # 新结构能正常读写payload
+    payload = bytes([0x91, 0xA1, 0x31])  # msgpack(["1"])
+    table = SQLBackendClient.notify_table(sa.MetaData())
+    with engine.begin() as conn:
+        conn.execute(
+            sa.insert(table),
+            [{"channel": "c", "created_at": datetime.now(UTC), "payload": payload}],
+        )
+        got = conn.execute(sa.select(table.c.payload)).scalar()
+    assert bytes(got) == payload
+    table.drop(engine, checkfirst=True)
+
+
+def test_sql_notify_table_payload_column_upgrade_sqlite(tmp_path):
+    db_path = tmp_path / "notify_upgrade.sqlite3"
+    engine = sa.create_engine(f"sqlite:///{db_path.as_posix()}")
+    try:
+        _check_notify_payload_column_upgrade(engine)
+    finally:
+        engine.dispose()
+
+
+def test_sql_notify_table_payload_column_upgrade_postgres(ses_postgres_service):
+    # PostgreSQL 会把未引用的标识符折叠成小写，专门验证 ALTER TABLE 的表名引用
+    sync_url, _ = SQLBackendClient.parse_engine_urls(ses_postgres_service)
+    engine = sa.create_engine(sync_url)
+    try:
+        _check_notify_payload_column_upgrade(engine)
+    finally:
+        engine.dispose()

@@ -7,7 +7,12 @@ from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
-from hetu.data.sub import IndexSubscription, RowSubscription, SubscriptionBroker
+from hetu.data.sub import (
+    IndexSubscription,
+    RowSubscription,
+    SubscriptionBroker,
+    TableSubscription,
+)
 
 SnowflakeID().init(1, 0)
 
@@ -622,3 +627,313 @@ async def test_mq_backlog(
     monkeypatch.setattr(time, "time", lambda: time_time() + 210)
     notified_channels = await mq.get_message()
     assert len(notified_channels) == 2
+
+
+# ============================ 整表订阅 ============================
+
+
+async def test_subscribe_table(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
+):
+    """整表订阅：只订一个频道；insert/update/delete 分别推送 行/行/None"""
+    backend = broker._backend
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id == "Item.table"
+    assert len(rows) == 25
+    assert "_version" not in rows[0]
+    assert broker.count() == (0, 0, 1)
+    tbl_sub = cast(TableSubscription, broker._subs[sub_id])
+    assert type(tbl_sub) is TableSubscription
+    assert tbl_sub.known_ids == {row["id"] for row in rows}
+    # 不管多少行，都只有1个频道
+    assert len(broker._mq_client.subscribed_channels) == 1
+    assert tbl_sub.channels == {backend.servant.table_channel(filled_item_ref)}
+
+    # insert
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = filled_item_ref.comp_cls.new_row()
+        row.name = "TblIns"
+        row.owner = 10
+        row.time = 500
+        await repo.insert(row)
+        new_id = row.id
+    updates = await broker.get_updates()
+    assert updates == {sub_id: {new_id: updates[sub_id][new_id]}}
+    assert updates[sub_id][new_id]["name"] == "TblIns"
+    assert "_version" not in updates[sub_id][new_id]
+    assert new_id in tbl_sub.known_ids
+
+    # update
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
+        assert row
+        row.qty = 42
+        row1_id = row.id
+        await repo.update(row)
+    updates = await broker.get_updates()
+    assert list(updates[sub_id].keys()) == [row1_id]
+    assert updates[sub_id][row1_id]["qty"] == 42
+
+    # delete
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
+        assert row
+        repo.delete(row.id)
+    updates = await broker.get_updates()
+    assert updates == {sub_id: {row1_id: None}}
+    assert row1_id not in tbl_sub.known_ids
+
+
+async def test_subscribe_table_merge(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
+):
+    """同一tick内多个事务的变动合并到一次get_updates；同一行改两次只推最终值"""
+    backend = broker._backend
+    sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=111)
+        assert row
+        row.qty = 1
+        id_a = row.id
+        await repo.update(row)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=112)
+        assert row
+        row.qty = 2
+        id_b = row.id
+        await repo.update(row)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=111)
+        assert row
+        row.qty = 3
+        await repo.update(row)
+
+    updates = await broker.get_updates()
+    assert set(updates[sub_id].keys()) == {id_a, id_b}
+    assert updates[sub_id][id_a]["qty"] == 3
+    assert updates[sub_id][id_b]["qty"] == 2
+    # 合并后没有残留
+    updates = await broker.get_updates(timeout=0.3)
+    assert updates == {}
+
+
+async def test_subscribe_table_coexist_range(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
+):
+    """同一张表同时有range订阅和整表订阅，两者互不影响，都能收到更新"""
+    backend = broker._backend
+    sub_range, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    sub_table, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_range and sub_table
+    assert broker.count() == (0, 1, 1)
+    # 25行频道 + 1索引频道 + 1表级频道
+    assert len(broker._mq_client.subscribed_channels) == 27
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=113)
+        assert row
+        row.qty = 7
+        row_id = row.id
+        await repo.update(row)
+    updates = await broker.get_updates()
+    assert updates[sub_range][row_id]["qty"] == 7
+    assert updates[sub_table][row_id]["qty"] == 7
+
+    # 取消range订阅，整表订阅不受影响
+    await broker.unsubscribe(sub_range)
+    assert len(broker._mq_client.subscribed_channels) == 1
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=113)
+        assert row
+        row.qty = 8
+        await repo.update(row)
+    updates = await broker.get_updates()
+    assert updates == {sub_table: {row_id: updates[sub_table][row_id]}}
+    assert updates[sub_table][row_id]["qty"] == 8
+
+
+async def test_subscribe_table_rls(
+    broker: SubscriptionBroker,
+    filled_item_ref,
+    user_id10_ctx,
+    background_mq_puller_task,
+):
+    """整表订阅对RLS得失都做出反应；从未可见的行的变动不推送"""
+    backend = broker._backend
+    # Item是OWNER权限，用户10只看得到owner==10的行（初始全部25行）
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, user_id10_ctx)
+    assert sub_id
+    assert len(rows) == 25
+    tbl_sub = cast(TableSubscription, broker._subs[sub_id])
+
+    # 失去RLS：owner 10 -> 11，应收到None
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
+        assert row
+        row.owner = 11
+        row4_id = row.id
+        await repo.update(row)
+    updates = await broker.get_updates()
+    assert updates == {sub_id: {row4_id: None}}
+    assert row4_id not in tbl_sub.known_ids
+
+    # 从未可见的行(owner=11)被修改：不推送
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
+        assert row
+        row.qty = 5
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=0.5)
+    assert updates == {}
+
+    # 重新获得RLS：owner 11 -> 10，应收到行数据（range订阅做不到这点）
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=114)
+        assert row
+        row.owner = 10
+        await repo.update(row)
+    updates = await broker.get_updates()
+    assert updates[sub_id][row4_id]["owner"] == 10
+    assert row4_id in tbl_sub.known_ids
+
+    # 新插入一行别人的（owner=11）：不推送；插入自己的：推送
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        other = filled_item_ref.comp_cls.new_row()
+        other.name, other.owner, other.time = "Other", 11, 601
+        await repo.insert(other)
+        mine = filled_item_ref.comp_cls.new_row()
+        mine.name, mine.owner, mine.time = "Mine", 10, 602
+        await repo.insert(mine)
+        mine_id = mine.id
+    updates = await broker.get_updates()
+    assert updates == {sub_id: {mine_id: updates[sub_id][mine_id]}}
+    assert updates[sub_id][mine_id]["name"] == "Mine"
+
+
+async def test_subscribe_table_permission_denied(
+    broker: SubscriptionBroker, filled_item_ref
+):
+    """未登录用户对非EVERYBODY表整表订阅：拒绝，且不占用任何频道/计数"""
+    from hetu.system import SystemContext
+
+    anon_ctx = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, anon_ctx)
+    assert sub_id is None
+    assert rows == []
+    assert broker.count() == (0, 0, 0)
+    assert len(broker._mq_client.subscribed_channels) == 0
+
+
+async def test_subscribe_table_row_cap(mod_auto_backend, filled_item_ref, admin_ctx):
+    """表行数超过max_table_rows时拒绝订阅，不占用频道"""
+    broker = SubscriptionBroker(mod_auto_backend("main"), max_table_rows=10)
+    try:
+        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id is None
+        assert rows == []
+        assert broker.count() == (0, 0, 0)
+        assert len(broker._mq_client.subscribed_channels) == 0
+
+        # 刚好等于上限则允许
+        broker._max_table_rows = 25
+        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id
+        assert len(rows) == 25
+    finally:
+        await broker.close()
+
+
+async def test_subscribe_table_duplicate_and_unsubscribe(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, background_mq_puller_task
+):
+    """重复订阅返回同一sub_id且不重复计数；取消后频道释放、不再收到更新"""
+    backend = broker._backend
+    sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    sub_id2, rows2 = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id == sub_id2
+    assert len(rows2) == 25
+    assert broker.count() == (0, 0, 1)
+    assert len(broker._mq_client.subscribed_channels) == 1
+
+    await broker.unsubscribe(sub_id)
+    assert broker.count() == (0, 0, 0)
+    assert len(broker._mq_client.subscribed_channels) == 0
+    assert sub_id not in broker._subs
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=115)
+        assert row
+        row.qty = 9
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=0.5)
+    assert updates == {}
+
+    # 取消后可以重新订阅
+    sub_id3, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id3 == sub_id
+    assert broker.count() == (0, 0, 1)
+
+
+async def test_subscribe_table_large(
+    broker: SubscriptionBroker, item_ref, admin_ctx, background_mq_puller_task
+):
+    """大表整表订阅：几千行也只有1个频道；批量变动一次推送"""
+    from hetu.data.backend import Table
+
+    backend = broker._backend
+    n = 3000
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        for i in range(n):
+            row = item_ref.comp_cls.new_row()
+            row.name = f"P{i}"
+            row.owner = 10
+            row.time = 200000 + i
+            await repo.insert(row)
+    await backend.wait_for_synced()
+
+    table = Table(
+        item_ref.comp_cls, item_ref.instance_name, item_ref.cluster_id, backend
+    )
+    sub_id, rows = await broker.subscribe_table(table, admin_ctx)
+    assert sub_id
+    assert len(rows) == n
+    assert len(broker._mq_client.subscribed_channels) == 1
+
+    # 一个事务改50行
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        changed = await repo.range("time", 200000, 200049, limit=50)
+        assert len(changed) == 50
+        for row in changed:
+            row.qty = 77
+            await repo.update(row)
+    updates = await broker.get_updates()
+    assert len(updates[sub_id]) == 50
+    assert all(r["qty"] == 77 for r in updates[sub_id].values())

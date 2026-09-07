@@ -224,6 +224,77 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchWithoutResponse_TimesOutIntoReconnect_ThenRetries()
+        {
+            var first = new FakeTransport("c1") { HoldWatchCallbacks = true };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", (object)7L)] =
+                new TestComponent { ID = 7, Value = 5 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler,
+                requestTimeout: TimeSpan.FromSeconds(30));
+            RowSubscription<TestComponent> received = null;
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.WatchRow<TestComponent>(
+                "id", 7L, null,
+                sub => received = sub,
+                ex => failure = ex);
+
+            // 复现服务端那条连接的接收协程悄悄结束：帧发出去了，socket 看着还活着，
+            // 但永远等不到回应。以前这里的 await 会永久挂起，且两端零报错。
+            Assert.AreEqual(1, first.HeldWatchCount, "前置：请求已发出、对端不给回应");
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            scheduler.RunNext(); // 请求超时定时器
+
+            Assert.AreEqual(HeTuSessionState.Reconnecting, session.State,
+                "发出去的请求迟迟无回应，应判定连接不通并重连，而不是永久挂起");
+            Assert.IsNull(received);
+            Assert.IsNull(failure, "超时按连接失配处理，不直接把调用方打成失败");
+
+            scheduler.RunNext(); // 重连退避
+            second.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.NotNull(received, "重连 Ready 后必须把挂起的订阅重投出去");
+            Assert.AreEqual(7, received.Data.ID);
+            Assert.IsNull(failure);
+        }
+
+        [Test]
+        public void CallWithoutResponse_TimesOutIntoReconnect_AsUnknownOutcome()
+        {
+            var first = new FakeTransport("c1") { HoldCallsOpen = true };
+            var second = new FakeTransport("c2");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler,
+                requestTimeout: TimeSpan.FromSeconds(30));
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.CallSystem("mutate", new object[] { 1 },
+                _ => Assert.Fail("call should not complete"),
+                ex => failure = ex);
+
+            Assert.AreEqual(1, first.Calls.Count);
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+
+            scheduler.RunNext(); // 请求超时定时器
+
+            Assert.AreEqual(HeTuSessionState.Reconnecting, session.State);
+            // 调用可能已在服务端生效过，语义同"发出后掉线"：报结果未知，不静默重发
+            Assert.IsInstanceOf<CallOutcomeUnknownException>(failure);
+        }
+
+        [Test]
         public void WatchDispatchCanceledWhileReady_ReconnectsInsteadOfStrandingWatch()
         {
             var first = new FakeTransport("c1") { CancelWatchDispatch = true };
@@ -405,6 +476,91 @@ namespace Tests.HeTu
                 subscription.Rows.Keys);
             Assert.AreEqual(20, subscription.Rows[2].Value);
             Assert.AreEqual(1, resynced);
+        }
+
+        [Test]
+        public void WatchTable_RestoresViaTableAndReplacesSnapshotAfterReconnect()
+        {
+            var first = new FakeTransport("c1");
+            first.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 1, Value = 1 },
+                new() { ID = 2, Value = 2 }
+            };
+            var second = new FakeTransport("c2");
+            second.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 2, Value = 20 },
+                new() { ID = 3, Value = 3 }
+            };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> subscription = null;
+            session.WatchTable<TestComponent>(
+                null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"));
+            Assert.IsNotNull(subscription);
+            Assert.AreEqual("TestComponent.table", subscription.SubId);
+            Assert.IsTrue(subscription.RestoreAsTable);
+            CollectionAssert.AreEqual(new[] { "TestComponent" }, first.WatchedTables);
+
+            var deleted = new List<long>();
+            var inserted = new List<long>();
+            var updated = new List<long>();
+            subscription.OnDelete += (_, id) => deleted.Add(id);
+            subscription.OnInsert += (_, id) => inserted.Add(id);
+            subscription.OnUpdate += (_, id) => updated.Add(id);
+            var resynced = 0;
+            subscription.OnResynced += () => resynced++;
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            // 重连后走的是 table 而不是 range
+            CollectionAssert.AreEqual(new[] { "TestComponent" }, second.WatchedTables);
+            Assert.AreEqual(0, second.WatchedRanges.Count);
+            // 同一个订阅实例，快照按 diff 派发事件
+            CollectionAssert.AreEquivalent(new long[] { 2, 3 },
+                subscription.Rows.Keys);
+            Assert.AreEqual(20, subscription.Rows[2].Value);
+            CollectionAssert.AreEqual(new long[] { 1 }, deleted);
+            CollectionAssert.AreEqual(new long[] { 3 }, inserted);
+            CollectionAssert.AreEqual(new long[] { 2 }, updated);
+            Assert.AreEqual(1, resynced);
+        }
+
+        [Test]
+        public void WatchTable_WithSameComponent_ReturnsSameSubscription()
+        {
+            var first = new FakeTransport("c1");
+            first.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 1, Value = 1 }
+            };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first }),
+                new FakeScheduler());
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> a = null;
+            IndexSubscription<TestComponent> b = null;
+            session.WatchTable<TestComponent>(null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchTable<TestComponent>("TestComponent", sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            Assert.IsNotNull(a);
+            Assert.AreSame(a, b);
+            Assert.AreEqual(1, first.WatchedTables.Count);
         }
 
         [Test]
@@ -1542,13 +1698,15 @@ namespace Tests.HeTu
         private static HeTuSessionClientBase CreateSession(
             Queue<FakeTransport> transports,
             FakeScheduler scheduler,
-            HeTuSessionBootstrap bootstrap = null)
+            HeTuSessionBootstrap bootstrap = null,
+            TimeSpan? requestTimeout = null)
         {
             return new HeTuSessionClientBase(
                 () => transports.Dequeue(),
                 scheduler,
                 bootstrap,
-                TimeSpan.Zero);
+                TimeSpan.Zero,
+                requestTimeout: requestTimeout);
         }
 
         private sealed class TestComponent : IBaseComponent
@@ -1591,6 +1749,8 @@ namespace Tests.HeTu
             } = new();
             public Dictionary<(string Index, object Left, object Right, int Limit,
                 bool Desc, bool Force), List<TestComponent>> RangeResults { get; } = new();
+            public List<string> WatchedTables { get; } = new();
+            public Dictionary<string, List<TestComponent>> TableResults { get; } = new();
             public BaseSubscription LastIssuedSubscription { get; private set; }
             public int HeldWatchCount => _heldWatches.Count;
             private readonly List<Action<bool>> _heldWatches = new();
@@ -1731,6 +1891,35 @@ namespace Tests.HeTu
                     subId, componentName, rows, _remoteClient);
                 subscription.ConfigureRestoreQuery(index, left, right, limit, desc,
                     force);
+                onResponse(subscription, false, null);
+            }
+
+            public void WatchTable<T>(
+                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                string componentName = null,
+                IndexSubscription<T> reusable = null)
+                where T : IBaseComponent
+            {
+                Operations.Add("watch-table");
+                componentName ??= typeof(T).Name;
+                WatchedTables.Add(componentName);
+                if (CancelWatchDispatch)
+                {
+                    onResponse(null, true, null);
+                    return;
+                }
+                var rows = TableResults[componentName].Cast<T>().ToList();
+                var subId = HeTuClientBase.MakeTableSubId(componentName);
+                if (reusable != null)
+                {
+                    reusable.Rebind(subId, rows, _remoteClient);
+                    onResponse(reusable, false, null);
+                    return;
+                }
+
+                var subscription = new IndexSubscription<T>(
+                    subId, componentName, rows, _remoteClient);
+                subscription.ConfigureRestoreTable();
                 onResponse(subscription, false, null);
             }
 

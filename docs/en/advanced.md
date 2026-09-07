@@ -350,9 +350,11 @@ What each field is for:
   10×, so post-login users get the headroom that anonymous connections
   don't. Override per-connection in your own logic if you need a custom
   budget for, say, a bot account.
-- **`ctx.max_row_sub` / `ctx.max_index_sub`** — caps on the number of
-  active `Get` and `Range` subscriptions. `elevate()` multiplies by 50×.
-  Tighten or widen as needed.
+- **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** — caps on
+  the number of active `Get`, `Range` and `Table` (whole-table) subscriptions.
+  `elevate()` multiplies by 50×. Tighten or widen as needed. The per-table row
+  cap for table subscriptions is the global `MAX_TABLE_SUBSCRIPTION_ROWS`
+  setting, not a `ctx` field.
 - **`ctx.race_count`** — current retry count for this transaction. Useful
   for backing off non-idempotent side-effects: `if ctx.race_count == 0:
   send_email(...)` runs the email only on the first attempt.

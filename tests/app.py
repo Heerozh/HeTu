@@ -161,6 +161,41 @@ class IndexComp2(hetu.BaseComponent):
     name: str = hetu.property_field("", unique=True, dtype="U8")
 
 
+# --------- 整表订阅测试用：公开的"所有玩家名字"表 ---------
+
+
+@hetu.define_component(
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+)
+class PublicNames(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", dtype="U16")
+
+
+@hetu.define_component(
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+)
+class PublicConfig(hetu.BaseComponent):
+    key: str = hetu.property_field("", unique=True, dtype="U16")
+    value: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(PublicNames, PublicConfig),
+    permission=hetu.Permission.EVERYBODY,
+)
+async def set_public_name(ctx: hetu.SystemContext, owner, name):
+    """测试用：改名。name为空则删除该行"""
+    if name == "":
+        row = await ctx.repo[PublicNames].get(owner=owner)
+        if row is not None:
+            ctx.repo[PublicNames].delete(row.id)
+        return
+    async with ctx.repo[PublicNames].upsert(owner=owner) as row:
+        row.name = name
+
+
 @hetu.define_system(
     namespace="pytest",
     permission=hetu.Permission.USER,

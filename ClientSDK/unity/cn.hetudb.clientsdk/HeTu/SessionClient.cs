@@ -121,6 +121,17 @@ namespace HeTu
         public const int DefaultMaxReconnectAttempts = 20;
 
         /// <summary>
+        ///     单次请求（<see cref="CallSystem" /> / <see cref="WatchRow{T}" /> /
+        ///     <see cref="WatchRange{T}" />）的无响应超时默认值。发出去后这么久还没有
+        ///     任何回应，就认定物理连接已经不通（socket 看着还 Open、ping/pong 也照常，
+        ///     但对端已经没人消费我们的帧了），按断线走重连——排队中的调用与订阅会在
+        ///     重连 Ready 后自动重投，而不是让调用方的 await 永久挂起。
+        ///     传 <see cref="TimeSpan.Zero" /> 关闭该保护。
+        /// </summary>
+        public static readonly TimeSpan DefaultRequestTimeout =
+            TimeSpan.FromSeconds(30);
+
+        /// <summary>
         ///     启动逻辑会话：连接 <paramref name="url" />、跑 <paramref name="bootstrap" />、
         ///     恢复所有存活订阅。await 返回时
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Ready" />。
@@ -143,6 +154,10 @@ namespace HeTu
         ///     <see cref="DefaultMaxReconnectAttempts" />（20）；
         ///     <c>0</c> = post-Ready 不限次重连。
         /// </param>
+        /// <param name="requestTimeout">
+        ///     单次请求的无响应超时，见 <see cref="DefaultRequestTimeout" />（30s）。
+        ///     <c>null</c> 用默认值，<see cref="TimeSpan.Zero" /> 关闭。
+        /// </param>
         /// <param name="connectTimeout">
         ///     本次 Connect 的整体超时（从 Connecting 到 Ready）。超时会自动 Close
         ///     并把 await 抛 <see cref="TimeoutException" />（InnerException 携带
@@ -158,7 +173,8 @@ namespace HeTu
             TimeSpan? reconnectDelay = null,
             TimeSpan? maxReconnectDelay = null,
             int maxReconnectAttempts = DefaultMaxReconnectAttempts,
-            TimeSpan? connectTimeout = null)
+            TimeSpan? connectTimeout = null,
+            TimeSpan? requestTimeout = null)
 #else
         public UniTask Connect(
             string url,
@@ -167,7 +183,8 @@ namespace HeTu
             TimeSpan? reconnectDelay = null,
             TimeSpan? maxReconnectDelay = null,
             int maxReconnectAttempts = DefaultMaxReconnectAttempts,
-            TimeSpan? connectTimeout = null)
+            TimeSpan? connectTimeout = null,
+            TimeSpan? requestTimeout = null)
 #endif
         {
             if (_core != null
@@ -185,7 +202,8 @@ namespace HeTu
                     : _ => RunBootstrapAsync(client, bootstrap),
                 reconnectDelay ?? DefaultReconnectDelay,
                 maxReconnectDelay ?? DefaultMaxReconnectDelay,
-                maxReconnectAttempts);
+                maxReconnectAttempts,
+                requestTimeout ?? DefaultRequestTimeout);
             WireFacadeEvents(_core);
 
             return ConnectCore(connectTimeout ?? DefaultConnectTimeout);
@@ -451,6 +469,13 @@ namespace HeTu
             where T : IBaseComponent =>
             _client.WatchRangeSync(index, left, right, limit, onResponse,
                 desc, force, componentName, reusable);
+
+        public void WatchTable<T>(
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
+            where T : IBaseComponent =>
+            _client.WatchTableSync(onResponse, componentName, reusable);
 
         public void Dispose()
         {

@@ -82,6 +82,12 @@ SERVER_SEND_LIMITS:
 MAX_ROW_SUBSCRIPTION: 10
 # 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.range)。每次range订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
+# 限制未登录客户端最大允许的整表订阅数(HeTuClientSDK.table)。每次table订阅+1，不计入行数限制。
+# elevate(登录提权)同样*50，或自己在任意System中修改 ctx.max_table_sub 值
+MAX_TABLE_SUBSCRIPTION: 1
+# 单次整表订阅允许的最大行数，超过则拒绝订阅。整表订阅只订一个频道，行数不受MAX_ROW_SUBSCRIPTION
+# 限制，但订阅者会收到该表所有写入的通知，所以只适合"行多、行小、很少变"的表（如所有玩家名字）
+MAX_TABLE_SUBSCRIPTION_ROWS: 100000
 
 # 消息流处理层，可以设置多层，按照顺序处理。
 # 如需自定义层，只要继承自hetu.server.pipeline.MessageProcessLayer，并定义alias，即可在这添加
@@ -207,7 +213,9 @@ LOGGING:
 
   formatters:
     colour: # 彩色格式
-      class: sanic.logging.formatter.AutoFormatter
+      # 不能用 sanic 的 AutoFormatter：它会把 record.ident 覆写成本进程的编号，而这个
+      # handler 跑在管理进程的 QueueListener 里，会导致所有 worker 的日志都显示 Main
+      class: hetu.safelogging.formatter.ContextAutoFormatter
     generic: # 文本格式
       format: "%(ident)s %(asctime)s %(levelname)-8s %(name)-12s %(ctx)-27s %(message)s"
       datefmt: "%Y-%m-%d %H:%M:%S %z"

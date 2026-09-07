@@ -464,6 +464,13 @@ namespace Tests.HeTu
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 
+            public void WatchTable<T>(
+                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                string componentName = null,
+                IndexSubscription<T> reusable = null)
+                where T : IBaseComponent =>
+                throw new NotSupportedException();
+
             public void Dispose()
             {
             }

@@ -465,5 +465,81 @@ namespace HeTu
             return await WatchRange<DictComponent>(index, left, right, limit, desc, force,
                 componentName);
         }
+
+        /// <summary>
+        ///     订阅整张表。（Table）
+        ///     与 WatchRange 语义独立：不管表有多少行，服务端只占一个订阅、只订一个频道，
+        ///     初始返回你有权限看到的全部行，之后按行推送增量。返回的 IndexSubscription
+        ///     用法与 WatchRange 完全一样（OnInsert/OnUpdate/OnDelete、ObserveAdd/ObserveRow）。
+        ///     适合"行多、行小、很少变"的表，如所有玩家的名字；高频写入的表请用 WatchRange。
+        /// </summary>
+        /// <typeparam name="T">组件类型。</typeparam>
+        /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
+        /// <returns>整表订阅对象；无权限或行数超过服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
+        /// <code>
+        /// var names = await HeTuClient.Instance.WatchTable&lt;PlayerNames&gt;();
+        /// names.OnUpdate += (sub, rowID) => Debug.Log(sub.Rows[rowID].name);
+        /// names.Dispose(); // 反订阅
+        /// </code>
+        [MustDisposeResource]
+#if UNITY_6000_0_OR_NEWER
+        public async Awaitable<IndexSubscription<T>> WatchTable<T>(
+#else
+        public async UniTask<IndexSubscription<T>> WatchTable<T>(
+#endif
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            componentName ??= typeof(T).Name;
+            if (_connectionCancelSource == null)
+            {
+                throw new InvalidOperationException(
+                    "CallSystem前请先Connect Socket");
+            }
+
+            var tcs = NewCompletionSource<IndexSubscription<T>>();
+
+            WatchTableSync<T>(
+                (tblSub, cancel, ex) =>
+                {
+                    if (cancel)
+                    {
+                        Logger.Instance.Error("订阅数据过程中遇到取消信号");
+                        tcs.TrySetCanceled();
+                    }
+                    else if (ex != null)
+                        tcs.TrySetException(ex);
+                    else
+                        tcs.TrySetResult(tblSub);
+                }, componentName
+            );
+
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
+                _connectionCancelSource.Token,
+                Application.exitCancellationToken
+            );
+            await using var reg = linkedCts.Token.Register(() =>
+            {
+                tcs.TrySetCanceled();
+                CloseCore();
+            });
+            return await AwaitFrom(tcs);
+        }
+
+        /// <summary>
+        ///     订阅整张表（字典版本）。
+        /// </summary>
+        /// <param name="componentName">组件名。</param>
+        /// <returns>整表订阅对象。</returns>
+        [MustDisposeResource]
+#if UNITY_6000_0_OR_NEWER
+        public async Awaitable<IndexSubscription<DictComponent>> WatchTable(
+#else
+        public async UniTask<IndexSubscription<DictComponent>> WatchTable(
+#endif
+            string componentName)
+        {
+            return await WatchTable<DictComponent>(componentName);
+        }
     }
 }

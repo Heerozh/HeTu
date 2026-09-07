@@ -15,7 +15,7 @@ weight: 50
 RaceCondition
 ```
 
-<small>Source: [`hetu/data/backend/base.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L54)</small>
+<small>Source: [`hetu/data/backend/base.py:55`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L55)</small>
 
 
 **Bases:** `Exception`
@@ -53,7 +53,7 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:71`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L71)</small>
+<small>Source: [`hetu/data/backend/base.py:72`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L72)</small>
 
 
 **Bases:** `IndexError`

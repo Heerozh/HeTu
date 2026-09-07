@@ -67,13 +67,18 @@ class Context:
     max_index_sub: int = 0
     """索引订阅数量限制。"""
 
+    max_table_sub: int = 0
+    """整表订阅数量限制。"""
+
     def __str__(self):
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
     def is_admin(self):
         return True if self.group.startswith("admin") else False
 
-    def configure(self, client_limits, server_limits, max_row_sub, max_index_sub):
+    def configure(
+        self, client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0
+    ):
         """
         配置当前连接的限流与订阅配额。
 
@@ -95,6 +100,9 @@ class Context:
         max_index_sub: int
             当前连接允许的最大索引订阅数量。一般对应配置项
             `MAX_INDEX_SUBSCRIPTION`。
+        max_table_sub: int
+            当前连接允许的最大整表订阅数量。一般对应配置项
+            `MAX_TABLE_SUBSCRIPTION`。
 
         Notes
         -----
@@ -106,6 +114,7 @@ class Context:
         self.server_limits = server_limits
         self.max_row_sub = max_row_sub
         self.max_index_sub = max_index_sub
+        self.max_table_sub = max_table_sub
 
     def rls_check(
         self,

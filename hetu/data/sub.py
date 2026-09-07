@@ -7,8 +7,9 @@
 
 import asyncio
 import logging
+from collections import Counter
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping, cast
 
 import numpy as np
 
@@ -25,10 +26,11 @@ logger = logging.getLogger("HeTu.root")
 
 class BaseSubscription:
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
-        channel收到通知后，前来调用此get_updated方法。
+        channel收到通知后，前来调用此get_updated方法。payload是该频道消息携带的数据，
+        行/索引频道为None，表级频道为变动的row_id集合。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
         """
         raise NotImplementedError
@@ -73,7 +75,7 @@ class RowSubscription(BaseSubscription):
             cls.__cache.set({})
 
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
@@ -130,7 +132,7 @@ class IndexSubscription(BaseSubscription):
         )
 
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
@@ -187,18 +189,95 @@ class IndexSubscription(BaseSubscription):
         return {self.index_channel, *self.row_subs.keys()}
 
 
+class TableSubscription(BaseSubscription):
+    """
+    整表订阅：只订阅一个表级频道，消息payload即本tick内变动的row_id集合，
+    按id批量重读后推送。适合"行多、行小、很少变"的表，如所有玩家名字。
+    """
+
+    def __init__(
+        self,
+        table_ref: TableReference,
+        servant: BackendClient,
+        ctx: Context,
+        table_channel: str,
+        known_ids: set[int],
+    ):
+        self.table_ref = table_ref
+        self.servant = servant
+        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
+            self.rls_ctx = ctx
+        else:
+            self.rls_ctx = None
+        self.table_channel = table_channel
+        # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知
+        self.known_ids = known_ids
+
+    async def get_updated(
+        self, channel: str, payload: set[str] | None = None
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
+        """
+        表级频道收到通知后调用。payload是变动的row_id集合。
+        返回 {空}, {空}, {变更的row_id: 行数据，None表示删除或失去RLS权限}
+        """
+        if channel != self.table_channel:
+            raise RuntimeError(
+                _("TableSubscription收到了未知的channel消息: {channel}").format(
+                    channel=channel
+                )
+            )
+        if not payload:
+            return set(), set(), {}
+
+        ids = sorted(int(i) for i in payload)
+        rows = cast(
+            list[dict[str, Any] | None],
+            await self.servant.get_many(self.table_ref, ids, RowFormat.TYPED_DICT),
+        )
+        comp_cls = self.table_ref.comp_cls
+        ctx = self.rls_ctx
+        known = self.known_ids
+        rtn: dict[int, dict[str, Any] | None] = {}
+        for row_id, row in zip(ids, rows):
+            if row is not None and (ctx is None or ctx.rls_check(comp_cls, row)):
+                del row["_version"]
+                rtn[row_id] = row
+                known.add(row_id)
+            elif row_id in known:
+                # 被删除，或失去RLS权限：客户端持有该行，需要通知删除
+                rtn[row_id] = None
+                known.discard(row_id)
+            # 既不可见、客户端也从未持有的行：不推
+        return set(), set(), rtn
+
+    @property
+    def channels(self) -> set[str]:
+        """返回当前订阅关注的频道们"""
+        return {self.table_channel}
+
+
 class SubscriptionBroker:
     """
     Component的数据订阅和查询接口
     """
 
-    def __init__(self, backend: Backend):
+    def __init__(self, backend: Backend, max_table_rows: int = 100_000):
+        """
+        Parameters
+        ----------
+        backend: Backend
+            数据库后端
+        max_table_rows: int
+            单次整表订阅（subscribe_table）允许的最大行数，超过则拒绝订阅。
+            一般对应配置项 `MAX_TABLE_SUBSCRIPTION_ROWS`。
+        """
         self._backend = backend
         self._mq_client = backend.get_mq_client()
+        self._max_table_rows = max_table_rows
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
         self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
-        self._index_sub_count = 0
+        self._sub_counts: Counter[type[BaseSubscription]] = Counter()
 
     async def close(self):
         return await self._mq_client.close()
@@ -207,9 +286,13 @@ class SubscriptionBroker:
         """从MQ获得消息，并存放到本地内存。需要单独的协程反复调用，防止MQ消息堆积。"""
         return await self._mq_client.pull()
 
-    def count(self):
-        """获取订阅数，返回row订阅数，index订阅数"""
-        return len(self._subs) - self._index_sub_count, self._index_sub_count
+    def count(self) -> tuple[int, int, int]:
+        """获取订阅数，返回 (row订阅数, index订阅数, table订阅数)"""
+        return (
+            self._sub_counts[RowSubscription],
+            self._sub_counts[IndexSubscription],
+            self._sub_counts[TableSubscription],
+        )
 
     @classmethod
     def make_query_id_(
@@ -309,6 +392,7 @@ class SubscriptionBroker:
             table_ref, servant, ctx, channel_name, row["id"]
         )
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
+        self._sub_counts[RowSubscription] += 1
         return sub_id, row
 
     async def subscribe_range(
@@ -407,17 +491,118 @@ class SubscriptionBroker:
         )
         self._subs[sub_id] = idx_sub
         self._channel_subs.setdefault(index_channel, set()).add(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(
-            IndexSubscription
-        )
+        self._sub_counts[IndexSubscription] += 1
 
-        # 还要订阅每行的信息，这样每行数据变更时才能收到消息
+        # 还要订阅每行的信息，这样每行数据变更时才能收到消息。所有行频道一次批量订阅
+        row_channels = []
         for row_id in row_ids:
             row_channel = servant.row_channel(table_ref, row_id)
-            await self._mq_client.subscribe(row_channel)
+            row_channels.append(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)
+        await self._mq_client.subscribe(*row_channels)
 
+        return sub_id, rows
+
+    async def subscribe_table(
+        self,
+        table_ref: TableReference,
+        ctx: Context,
+    ) -> tuple[str | None, list[dict]]:
+        """
+        获取并订阅整张表。与 `subscribe_range` 语义独立：只订阅一个表级频道，
+        不管表有多少行都只占一个订阅，适合"行多、行小、很少变"的表（如所有玩家名字）。
+        如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+
+        订阅会观察表内任何行的添加/变化/删除，由get_updates调用时处理。
+        代价是每个整表订阅者会收到该表**所有**写入的通知（服务端按RLS过滤后再推），
+        所以高频写入的表请继续用 `subscribe_range`。
+
+        Notes
+        -----
+        与 `subscribe_range` 不同，整表订阅对RLS权限的得失都会做出反应：
+        - 当某行失去RLS权限时，**会**收到该行被删除的通知
+        - 当某行获得RLS权限时，**会**收到该行被添加的通知
+
+        Returns
+        --------
+        sub_id: str | None
+            订阅id，后续通过该id获取更新。如果无整表权限，或表行数超过
+            `max_table_rows`，返回None。
+        rows: list[dict[str, Any]]
+            caller可见的全部行数据。
+
+        See Also
+        --------
+        subscribe_range : 范围订阅
+        """
+        # 首先caller要对整个表有权限
+        if not self._has_table_permission(table_ref, ctx):
+            logger.warning(
+                _(
+                    "⚠️ [📡Subscription] {comp_name}无调用权限，"
+                    "检查是否非法调用，caller：{caller}"
+                ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
+            )
+            return None, []
+
+        servant = self._backend.servant
+        max_rows = self._max_table_rows
+
+        # 全量读取：id是每个Component的隐式unique索引，多读1行用于判断是否超限
+        rows = await servant.range(
+            table_ref,
+            "id",
+            float("-inf"),
+            float("inf"),
+            limit=max_rows + 1,
+            row_format=RowFormat.TYPED_DICT,
+        )
+        if len(rows) > max_rows:
+            logger.warning(
+                _(
+                    "⚠️ [📡Subscription] {comp_name}整表订阅行数超过限制"
+                    "MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}，拒绝订阅，caller：{caller}"
+                ).format(
+                    comp_name=table_ref.comp_name, max_rows=max_rows, caller=ctx.caller
+                )
+            )
+            return None, []
+        for row in rows:
+            del row["_version"]
+
+        # 如果是rls权限，需要对每行数据进行权限判断
+        if table_ref.comp_cls.is_rls():
+            rows = [
+                row for row in rows if self._has_row_permission(table_ref, ctx, row)
+            ]
+
+        sub_id = f"{table_ref.comp_name}.table"
+        if sub_id in self._subs:
+            logger.warning(
+                _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
+                    sub_id=sub_id
+                )
+            )
+            return sub_id, rows
+
+        table_channel = servant.table_channel(table_ref)
+        await self._mq_client.subscribe(table_channel)
+        logger.debug(
+            _("🆕 [📡Subscription] 订阅了整表: {sub_id} {table_channel}").format(
+                sub_id=sub_id, table_channel=table_channel
+            )
+        )
+
+        self._subs[sub_id] = TableSubscription(
+            table_ref,
+            servant,
+            ctx,
+            table_channel,
+            {int(row["id"]) for row in rows},
+        )
+        self._channel_subs.setdefault(table_channel, set()).add(sub_id)
+        self._sub_counts[TableSubscription] += 1
         return sub_id, rows
 
     async def unsubscribe(self, sub_id) -> None:
@@ -425,15 +610,15 @@ class SubscriptionBroker:
         if sub_id not in self._subs:
             return
 
+        rem_chans = []
         for channel in self._subs[sub_id].channels:
             self._channel_subs[channel].remove(sub_id)
             if len(self._channel_subs[channel]) == 0:
-                await self._mq_client.unsubscribe(channel)
+                rem_chans.append(channel)
                 del self._channel_subs[channel]
-        self._subs.pop(sub_id)
-        self._index_sub_count = list(map(type, self._subs.values())).count(
-            IndexSubscription
-        )
+        await self._mq_client.unsubscribe(*rem_chans)
+        sub = self._subs.pop(sub_id)
+        self._sub_counts[type(sub)] -= 1
 
     async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
         """
@@ -466,22 +651,26 @@ class SubscriptionBroker:
                 return rtn
         else:
             updated_channels = await mq.get_message()
-        for channel in updated_channels:
+        for channel, payload in updated_channels.items():
             RowSubscription.clear_cache(channel)
             sub_ids = channel_subs.get(channel, [])
             for sub_id in sub_ids:
                 sub = self._subs[sub_id]
                 # 获取sub更新的行数据
-                new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
-                # 如果有行添加或删除，订阅或取消订阅
+                new_chans, rem_chans, sub_updates = await sub.get_updated(
+                    channel, payload
+                )
+                # 如果有行添加或删除，订阅或取消订阅（各一次批量往返）
                 for new_chan in new_chans:
-                    await mq.subscribe(new_chan)
                     channel_subs.setdefault(new_chan, set()).add(sub_id)
+                await mq.subscribe(*new_chans)
+                released = []
                 for rem_chan in rem_chans:
                     channel_subs[rem_chan].remove(sub_id)
                     if len(channel_subs[rem_chan]) == 0:
-                        await mq.unsubscribe(rem_chan)
+                        released.append(rem_chan)
                         del channel_subs[rem_chan]
+                await mq.unsubscribe(*released)
                 # 添加行数据到返回值
                 if len(sub_updates) > 0:
                     rtn.setdefault(sub_id, dict()).update(sub_updates)

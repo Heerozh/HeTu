@@ -142,6 +142,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
                 }
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
+            "MAX_TABLE_SUBSCRIPTION": 1,
             "LOGGING": logging_cfg,
             "DEBUG": False,
             "WORKER_NUM": 4,
@@ -370,3 +371,115 @@ def test_call_flooding_lv2_flooding(test_server):
                     await asyncio.sleep(1)
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_table_subscribe(test_server):
+    # 整表订阅：["sub", comp, "table"]，回包格式与range一致，之后按行收增量
+    async def routine(connect):
+        client1 = await connect()
+        # 先造两行
+        await client1.send(["rpc", "set_public_name", 1, "Alice"])
+        await client1.recv()
+        await client1.send(["rpc", "set_public_name", 2, "Bob"])
+        await client1.recv()
+
+        await client1.send(["sub", "PublicNames", "table"])
+        await client1.recv()  # ["sub", "PublicNames.table", [rows...]]
+
+        # 自己改名 -> 收到updt
+        await client1.send(["rpc", "set_public_name", 1, "Alice2"])
+        await client1.recv()  # rsp
+        await client1.recv()  # updt
+
+        # 别人改名/新增/删除 -> 也收到
+        client2 = await connect()
+        await client2.send(["rpc", "set_public_name", 3, "Carol"])
+        await client2.recv()
+        await asyncio.sleep(0.3)
+        await client1.recv()  # updt insert
+        await client2.send(["rpc", "set_public_name", 2, ""])
+        await client2.recv()
+        await asyncio.sleep(0.3)
+        await client1.recv()  # updt delete
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    # client_received 混有两个连接的rsp，按帧类型筛
+    subs = [m for m in response.client_received if m[0] == "sub"]
+    updts = [
+        {int(k): v for k, v in m[2].items()}
+        for m in response.client_received
+        if m[0] == "updt" and m[1] == "PublicNames.table"
+    ]
+    assert len(subs) == 1 and len(updts) == 3
+    sub_reply = subs[0]
+    assert sub_reply[1] == "PublicNames.table"
+    names = {row["owner"]: row["name"] for row in sub_reply[2]}
+    assert names == {1: "Alice", 2: "Bob"}
+    ids = {row["owner"]: row["id"] for row in sub_reply[2]}
+
+    # 自己改名
+    assert updts[0][ids[1]]["name"] == "Alice2"
+    # 别人新增
+    (row,) = updts[1].values()
+    assert row["owner"] == 3 and row["name"] == "Carol"
+    # 别人删除
+    assert updts[2] == {ids[2]: None}
+
+
+@pytest.mark.timeout(20)
+def test_websocket_table_subscribe_limit(test_server):
+    # MAX_TABLE_SUBSCRIPTION=1：未登录连接订第二张表时被断开
+    closed_detected = False
+
+    async def routine(connect):
+        nonlocal closed_detected
+        client1 = await connect()
+        await client1.send(["sub", "PublicNames", "table"])
+        await client1.recv()
+        await client1.send(["sub", "PublicConfig", "table"])
+        # 服务器可能先发回包再关闭，也可能直接关闭，之后任何收发都应失败
+        with pytest.raises(ConnectionClosedError):
+            await client1.recv()
+            await asyncio.sleep(0.3)
+            await client1.send(["sub", "PublicNames", "table"])
+            await client1.recv()
+        closed_detected = True
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert response.client_received[0][1] == "PublicNames.table"
+    assert closed_detected, "连接没有被服务器关闭"
+
+
+def test_check_length():
+    from hetu.server.receiver import check_length
+
+    # 闭区间内不报错
+    check_length("x", [1, 2, 3], 3, 3)
+    check_length("x", [1, 2, 3], 2, 5)
+    check_length("x", list(range(9)), 5, 9)  # range 订阅带 desc/force 共 9 项
+    # 区间外报错
+    with pytest.raises(ValueError, match="Invalid x message"):
+        check_length("x", [1, 2], 3, 5)
+    with pytest.raises(ValueError, match="got 6"):
+        check_length("x", [1, 2, 3, 4, 5, 6], 3, 5)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_invalid_sub_length_disconnects(test_server):
+    # 长度不合法的 sub 消息应被拒绝并断开连接
+    closed = False
+
+    async def routine(connect):
+        nonlocal closed
+        client1 = await connect()
+        with pytest.raises(ConnectionClosedError):
+            await client1.send(["sub", "PublicNames"])  # 缺少查询类型
+            await client1.recv()
+            await asyncio.sleep(0.3)
+            await client1.send(["sub", "PublicNames", "table"])
+            await client1.recv()
+        closed = True
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert closed, "连接没有被服务器关闭"

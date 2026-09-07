@@ -10,6 +10,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, final, override
 
+import msgpack
+
 from ....common.multimap import MultiMap
 from ....i18n import _
 from ..base import MQClient
@@ -42,16 +44,20 @@ class RedisMQClient(MQClient):
         self.subscribed = set()
         self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
         self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重
+        # 表级频道合并后的payload：channel -> 变动的row_id集合
+        self.pulled_payload: dict[str, set[str]] = {}
 
     @override
     async def close(self):
         return await self._mq.close()
 
     @override
-    async def subscribe(self, channel_name) -> None:
-        """订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        await self._mq.subscribe(channel_name)
-        self.subscribed.add(channel_name)
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        await self._mq.subscribe(*channel_names)
+        self.subscribed.update(channel_names)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
             logger.warning(
@@ -59,10 +65,12 @@ class RedisMQClient(MQClient):
             )
 
     @override
-    async def unsubscribe(self, channel_name) -> None:
-        """取消订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        await self._mq.unsubscribe(channel_name)
-        self.subscribed.remove(channel_name)
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        await self._mq.unsubscribe(*channel_names)
+        self.subscribed.difference_update(channel_names)
 
     @override
     async def pull(self) -> None:
@@ -89,10 +97,22 @@ class RedisMQClient(MQClient):
                     channel_name=channel_name
                 )
             )
+            # 表级频道（非keyspace通知）带payload：msgpack的row_id列表，按频道合并
+            if not channel_name.startswith("__keyspace@"):
+                try:
+                    ids = msgpack.unpackb(msg["data"])
+                except Exception:  # noqa: BLE001 非法payload当作无payload
+                    ids = None
+                if isinstance(ids, list):
+                    self.pulled_payload.setdefault(channel_name, set()).update(
+                        str(i) for i in ids
+                    )
             # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
             dropped = set(self.pulled_deque.pop(0, time.time() - 120))
             if dropped:
                 self.pulled_set -= dropped
+                for ch in dropped:
+                    self.pulled_payload.pop(ch, None)
                 logger.warning(
                     _(
                         "⚠️ [💾Redis] 订阅更新通知来不及处理，"
@@ -107,11 +127,12 @@ class RedisMQClient(MQClient):
                 self.pulled_set.add(channel_name)
 
     @override
-    async def get_message(self) -> set[str]:
+    async def get_message(self) -> dict[str, set[str] | None]:
         """
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
 
+        返回 {channel名: payload}，表级频道的payload为合并后的row_id集合，其余为None。
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
@@ -128,7 +149,7 @@ class RedisMQClient(MQClient):
             if rtn:
                 self.pulled_set -= rtn
                 # logger.debug(f"🔔 [💾Redis] 发送通知给客户端: {str(rtn)[0:100]}...")
-                return rtn
+                return {ch: self.pulled_payload.pop(ch, None) for ch in rtn}
             await asyncio.sleep(interval)
 
     @property

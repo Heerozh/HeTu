@@ -26,6 +26,7 @@ EndpointContext(
     server_limits: list[list[int]] = <factory>,
     max_row_sub: int = 0,
     max_index_sub: int = 0,
+    max_table_sub: int = 0,
 ) -> None
 ```
 
@@ -68,6 +69,8 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 - **`max_index_sub`** (int) — 索引订阅数量限制。
 
+- **`max_table_sub`** (int) — 整表订阅数量限制。
+
 
 
 
@@ -82,10 +85,10 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 #### `configure`
 
 ```python
-configure(client_limits, server_limits, max_row_sub, max_index_sub)
+configure(client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
+<small>Source: [`hetu/endpoint/context.py:79`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L79)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -107,6 +110,9 @@ configure(client_limits, server_limits, max_row_sub, max_index_sub)
 
 - **`max_index_sub`** (Any) — 当前连接允许的最大索引订阅数量。一般对应配置项
 `MAX_INDEX_SUBSCRIPTION`。
+
+- **`max_table_sub`** (Any) — 当前连接允许的最大整表订阅数量。一般对应配置项
+`MAX_TABLE_SUBSCRIPTION`。
 
 
 
@@ -132,7 +138,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:110`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L110)</small>
+<small>Source: [`hetu/endpoint/context.py:119`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L119)</small>
 
 检查当前用户对某个component的权限
 

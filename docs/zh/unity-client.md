@@ -108,20 +108,35 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 };
 ```
 
-## 订阅：`Get` vs `Range`
+## 订阅：`Get` vs `Range` vs `Table`
 
-两种订阅都是**实时的**：当底层行在 Redis 中发生变化时，服务器会推送增量更新。
+三种订阅都是**实时的**：当底层行在 Redis 中发生变化时，服务器会推送增量更新。
 
 | API                                                     | 返回                                        | 使用场景                                      |
 |---------------------------------------------------------|-------------------------------------------|-------------------------------------------|
 | `WatchRow<T>(index, value)`                             | `RowSubscription<T>`（单行，如果没有匹配行则为 `null`） | 你希望根据唯一键获取一行 — 自己的血量、自己的库存记录。             |
 | `WatchRange<T>(index, left, right, limit, desc, force)` | `IndexSubscription<T>`（一个字典，行数据保持同步）      | 你希望获取索引列上的一个窗口 — 附近的玩家、排行榜前N名、最近100条聊天消息。 |
+| `WatchTable<T>()`                                       | `IndexSubscription<T>`（整张表，行数据保持同步）      | 你希望拿到"行多、行小、很少变"的整张表 — 所有玩家的名字、公会列表、公开配置。 |
 
 `T` 参数是你的强类型 `Component` 类（见下一节）。如果不指定，则使用 `DictComponent`
 ，它是一个可用字符串键手动索引的 `Dictionary`。
 
 `Range` 的 `force=true`（默认值）即使初始查询返回零行也会保持订阅活跃，因此新插入的行仍然会触发
 `OnInsert` / `ObserveAdd`。如果你不希望订阅空查询，请设置 `force=false`。
+
+`Table` 返回的对象和 `Range` 是同一个 `IndexSubscription<T>`，事件与 R3 流用法完全一样，
+区别在服务端：`Range` 为结果集里的每一行各订阅一个频道，几千行就是几千个频道；`Table`
+不管多少行都只订一个表级频道，所以不计入行订阅配额。代价是该表**任何**写入都会触发一次
+通知（服务端按权限过滤后再推），所以高频写入的表（位置、血量）请用 `Range`。
+服务端拒绝行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表，此时返回 `null`。
+
+```csharp
+// 所有玩家的名字：几千行，一个订阅
+var names = await HeTuClient.Instance.WatchTable<PlayerNames>();
+names.OnInsert += (sub, id) => AddNameTag(sub.Rows[id]);
+names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
+names.OnDelete += (sub, id) => RemoveNameTag(id);
+```
 
 ## 类型化组件 vs `DictComponent`
 

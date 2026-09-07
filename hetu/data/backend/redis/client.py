@@ -10,6 +10,7 @@ import itertools
 import logging
 import random
 import struct
+from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -43,6 +44,9 @@ msg_packer = msgpack.Packer(use_bin_type=False)
 @final
 class RedisBackendClient(BackendClient, alias="redis"):
     """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
+
+    # range/get_many 批量读行时，每个pipeline最多打包的HGETALL条数
+    RANGE_PIPELINE_CHUNK = 1000
 
     @staticmethod
     def _get_referred_components() -> list[type[BaseComponent]]:
@@ -140,6 +144,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def row_channel(self, table_ref: TableReference, row_id: int):
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
         return f"__keyspace@{self.dbi}__:{self.row_key(table_ref, row_id)}"
+
+    @override
+    def table_channel(self, table_ref: TableReference):
+        """
+        返回表级变更频道名。这是commit lua脚本主动PUBLISH的普通频道（非keyspace通知），
+        名字带{CLU}hash tag，cluster模式下AsyncKeyspacePubSub按slot路由订阅。
+        """
+        return f"{self.cluster_prefix(table_ref)}:table"
 
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
@@ -467,6 +479,40 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             return None
 
+    async def _hgetall_many(self, key_prefix: str, row_ids: Iterable[int | str]):
+        """
+        按块pipeline批量HGETALL，返回与row_ids顺序一致的raw dict列表，不存在的为空dict。
+
+        注意这与 batch.py 里被否决的跨请求自动合批不同：这里只是把**同一个逻辑操作**内部
+        的N次读取合并成 ceil(N/CHUNK) 次往返，不会让不相关的请求互相等待。
+        同一张表的所有行key都带同一个 {CLU} hash tag，cluster模式下同slot，pipeline可直接用。
+        """
+        aio = self.aio
+        rows: list[dict] = []
+        for chunk in itertools.batched(row_ids, self.RANGE_PIPELINE_CHUNK):
+            async with aio.pipeline(transaction=False) as pipe:
+                for _id in chunk:
+                    pipe.hgetall(key_prefix + str(_id))
+                rows.extend(await pipe.execute())
+        return rows
+
+    @override
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"
+        comp_cls = table_ref.comp_cls
+        return [
+            self.row_decode_(comp_cls, row, row_format) if row else None
+            for row in await self._hgetall_many(key_prefix, row_ids)
+        ]
+
     @classmethod
     def range_normalize_(
         cls,
@@ -677,10 +723,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
             return row_ids
 
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
-        rows = []
-        for _id in row_ids:
-            if row := await aio.hgetall(key_prefix + str(_id)):  # type: ignore
-                rows.append(self.row_decode_(comp_cls, row, row_format))
+        # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
+        rows = [
+            self.row_decode_(comp_cls, row, row_format)
+            for row in await self._hgetall_many(key_prefix, row_ids)
+            if row
+        ]
 
         if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
             return cast(list[dict[str, Any]], rows)
@@ -769,6 +817,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
+        # 表级变更通知：[channel, msgpack(row_id列表)]，一个事务一张表一条
+        publishes: list[list[str | bytes]] = []
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -777,6 +827,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
+            touched_ids: list[str] = []
             # insert
             for insert in inserts:
                 row_id = insert["id"]
@@ -785,6 +836,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _unique_meet(unique_fields, dtype_map, idx_prefix, insert)
                 _hset_key(key, 0, insert)
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
+                touched_ids.append(row_id)
             # update
             for old_row, new_row in zip(old_rows, new_rows):
                 row_id = old_row["id"]
@@ -795,6 +847,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _hset_key(key, old_version, new_row)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
+                touched_ids.append(row_id)
             # delete
             for delete in deletes:
                 # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
@@ -804,6 +857,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _version_must_match(key, old_version)
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
+                touched_ids.append(str(delete["id"]))
+            if touched_ids:
+                publishes.append(
+                    [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
+                )
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -812,7 +870,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
 
-        payload_json: bytes = msg_packer.pack([checks, pushes, deleted])  # type: ignore
+        payload_json: bytes = msg_packer.pack(  # type: ignore
+            [checks, pushes, deleted, publishes]
+        )
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 

@@ -359,6 +359,11 @@ namespace HeTu
         internal bool RestoreDesc { get; private set; }
         internal bool RestoreForce { get; private set; } = true;
 
+        /// <summary>
+        ///     为 true 表示这是 WatchTable 建立的整表订阅，断线重连时重发 table 而非 range。
+        /// </summary>
+        internal bool RestoreAsTable { get; private set; }
+
         public override void Dispose()
         {
             if (IsDisposed) return;
@@ -510,6 +515,12 @@ namespace HeTu
             RestoreLimit = limit;
             RestoreDesc = desc;
             RestoreForce = force;
+            RestoreAsTable = false;
+        }
+
+        internal void ConfigureRestoreTable()
+        {
+            RestoreAsTable = true;
         }
 
         internal void Rebind(
@@ -528,31 +539,43 @@ namespace HeTu
         internal override void Restore(
             IHeTuSessionTransport transport,
             Action<bool> onCompleted,
-            Action<Exception> onFailed) =>
+            Action<Exception> onFailed)
+        {
+            void OnRestored(IndexSubscription<T> subscription, bool canceled,
+                Exception exception)
+            {
+                // 同 RowSubscription.Restore：迟到的 cancel 不能再调 onFailed，
+                // 否则会级联到 HandleRecoverableFailure 把新 transport 又 Dispose。
+                if (canceled)
+                    return;
+
+                if (exception != null)
+                {
+                    onFailed(exception);
+                    return;
+                }
+
+                onCompleted(subscription != null);
+            }
+
+            if (RestoreAsTable)
+            {
+                // 整表订阅：重发 table，而不是 range
+                transport.WatchTable(OnRestored, ComponentName, this);
+                return;
+            }
+
             transport.WatchRange(
                 RestoreIndex,
                 RestoreLeft,
                 RestoreRight,
                 RestoreLimit,
-                (subscription, canceled, exception) =>
-                {
-                    // 同 RowSubscription.Restore：迟到的 cancel 不能再调 onFailed，
-                    // 否则会级联到 HandleRecoverableFailure 把新 transport 又 Dispose。
-                    if (canceled)
-                        return;
-
-                    if (exception != null)
-                    {
-                        onFailed(exception);
-                        return;
-                    }
-
-                    onCompleted(subscription != null);
-                },
+                OnRestored,
                 RestoreDesc,
                 RestoreForce,
                 ComponentName,
                 this);
+        }
 
         private void ReplaceSnapshot(List<T> rows)
         {

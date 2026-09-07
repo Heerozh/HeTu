@@ -34,6 +34,7 @@
 import hashlib
 import logging
 import warnings
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -114,6 +115,13 @@ class BackendClient:
 
     def row_channel(self, table_ref: TableReference, row_id: int):
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
+        raise NotImplementedError
+
+    def table_channel(self, table_ref: TableReference):
+        """
+        返回表级变更频道名。表内任何行 insert/update/delete，都会向该频道发送一条消息，
+        payload 为本次事务变动的 row_id（str）列表。一个事务一张表只发一条。
+        """
         raise NotImplementedError
 
     def __init_subclass__(cls, **kwargs):
@@ -208,6 +216,31 @@ class BackendClient:
                 返回无类型的原始数据 (dict[str, str])
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型。
+        """
+        raise NotImplementedError
+
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        """
+        批量获取多行数据，一次往返（或按块分批）读取，比循环调用 `get` 快得多。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。
+        row_ids: Iterable[int]
+            row id主键列表。
+        row_format
+            返回数据解码格式，同 `get`，但不支持 `RowFormat.ID_LIST`。
+
+        Returns
+        -------
+        rows: list
+            与 `row_ids` 顺序一一对应，不存在的行位置为 None。
         """
         raise NotImplementedError
 
@@ -669,6 +702,7 @@ class MQClient:
         """
         从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
         该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
+        表级频道（table_channel）的消息还带有变动的row_id列表payload，需要按频道合并保存。
 
         消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
         此方法需要单独的协程反复调用，防止服务器也消息堆积。如果没有消息，则堵塞到永远。
@@ -676,22 +710,25 @@ class MQClient:
         # 必须合并消息，因为index更新时大都是2条一起的(remove/add)
         raise NotImplementedError
 
-    async def get_message(self) -> set[str]:
+    async def get_message(self) -> dict[str, set[str] | None]:
         """
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
+
+        返回 {channel名: payload}。行/索引频道的payload为None；
+        表级频道的payload为这段时间内合并的变动row_id（str）集合。
 
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
         raise NotImplementedError
 
-    async def subscribe(self, channel_name: str) -> None:
-        """订阅频道"""
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道，可一次订阅多个，全部订阅成功后返回。实现应把多个频道合并成尽量少的往返。"""
         raise NotImplementedError
 
-    async def unsubscribe(self, channel_name: str) -> None:
-        """取消订阅频道"""
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道，可一次取消多个"""
         raise NotImplementedError
 
     @property
