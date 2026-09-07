@@ -83,6 +83,12 @@ namespace HeTu
             string componentName = null,
             IndexSubscription<T> reusable = null)
             where T : IBaseComponent;
+
+        void WatchTable<T>(
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
+            where T : IBaseComponent;
     }
 
     internal interface IHeTuSessionScheduler
@@ -453,6 +459,60 @@ namespace HeTu
                     },
                     desc,
                     force,
+                    componentName),
+                onCompleted,
+                onFailed);
+            AddPendingWatch(watch);
+            DispatchPendingIfReady(watch);
+        }
+
+        /// <summary>
+        ///     订阅整张表（见 HeTuClientBase.WatchTableSync）。断线重连后会自动重发 table
+        ///     订阅并用新快照做 diff，订阅对象保持同一个实例。
+        /// </summary>
+        public void WatchTable<T>(
+            string componentName,
+            Action<IndexSubscription<T>> onCompleted,
+            Action<Exception> onFailed)
+            where T : IBaseComponent
+        {
+            ThrowIfClosed();
+            componentName ??= typeof(T).Name;
+            var subId = HeTuClientBase.MakeTableSubId(componentName);
+
+            if (TryGetSubscription<IndexSubscription<T>>(subId, out var existing))
+            {
+                onCompleted(existing);
+                return;
+            }
+
+            if (_pendingWatchesByKey.TryGetValue(subId, out var pending))
+            {
+                if (pending is PendingWatch<IndexSubscription<T>> typed)
+                {
+                    typed.AddWaiter(onCompleted, onFailed);
+                    return;
+                }
+
+                throw new InvalidCastException(
+                    $"Subscription '{subId}' already exists with type {pending.DataType}.");
+            }
+
+            var watch = new PendingWatch<IndexSubscription<T>>(
+                subId,
+                typeof(T),
+                (tx, promise) => tx.WatchTable<T>(
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
                     componentName),
                 onCompleted,
                 onFailed);

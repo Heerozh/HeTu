@@ -97,6 +97,7 @@ namespace HeTu
         internal const string CommandUnsub = "unsub";
         internal const string QueryGet = "get";
         internal const string QueryRange = "range";
+        internal const string QueryTable = "table";
         internal const string MessageResponse = "rsp";
         internal const string MessageUpdate = "updt";
         internal const string MessageSubed = "sub";
@@ -379,6 +380,9 @@ namespace HeTu
             int limit, bool desc) =>
             $"{table}.{index}[{left}:{right ?? "None"}:{(desc ? -1 : 1)}][:{limit}]";
 
+        /// <summary>整表订阅的 sub_id，与服务端 SubscriptionBroker.subscribe_table 一致。</summary>
+        internal static string MakeTableSubId(string table) => $"{table}.table";
+
         private static string BuildSubscriptionTypeMismatchMessage(Type actualType,
             Type expectedComponentType) =>
             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{actualType}类型，你不能再用{expectedComponentType}类型订阅了";
@@ -637,6 +641,110 @@ namespace HeTu
             Action<IndexSubscription<DictComponent>, bool, Exception> onResponse,
             bool desc = false, bool force = true) =>
             WatchRangeSync(index, left, right, limit, onResponse, desc, force, componentName);
+
+        /// <summary>
+        ///     订阅整张表。（Table）
+        ///     与 WatchRange 语义独立：不管表有多少行，服务端只占一个订阅、只订一个频道，
+        ///     初始返回你有权限看到的全部行，之后按行推送增量。适合"行多、行小、很少变"的表，
+        ///     如所有玩家的名字。代价是该表任何写入都会触发通知，高频写入的表请用 WatchRange。
+        ///     服务端按 MAX_TABLE_SUBSCRIPTION_ROWS 限制行数，超过则返回 null。
+        /// </summary>
+        /// <typeparam name="T">组件类型。</typeparam>
+        /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
+        /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
+        public void WatchTableSync<T>(
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
+            where T : IBaseComponent
+        {
+            if (!EnsureConnected("WatchTableSync"))
+            {
+                onResponse(null, true, null);
+                return;
+            }
+
+            componentName ??= typeof(T).Name;
+
+            // 先要组合sub_id看看是否已订阅过
+            var predictID = MakeTableSubId(componentName);
+            if (TryGetExistingSubscription<IndexSubscription<T>, T>(predictID,
+                    out var existingTableSubscription))
+            {
+                onResponse(existingTableSubscription, false, null);
+                return;
+            }
+
+            var creationTrace = CaptureCreationTrace();
+
+            // 发送订阅请求
+            var payload = new object[] { CommandSub, componentName, QueryTable };
+            var traceId = InspectorCollector.InterceptRequest(QueryTable,
+                componentName, payload);
+            SendRequest(payload, (response, cancel) =>
+            {
+                if (cancel)
+                {
+                    InspectorCollector.CompleteRequest(traceId, "canceled");
+                    onResponse(null, true, null);
+                    return;
+                }
+
+                IndexSubscription<T> tblSubscription = null;
+                try
+                {
+                    var subID = (string)response[1];
+                    // 无权限或行数超限时服务端返回null
+                    if (subID != null)
+                    {
+                        // 如果依然是重复订阅，直接返回副本
+                        if (TryGetExistingSubscription<IndexSubscription<T>, T>(subID,
+                                out var existingSubscription))
+                        {
+                            tblSubscription = existingSubscription;
+                        }
+                        else
+                        {
+                            var rawRows = (JsonObject)response[2];
+                            var rows = rawRows.ToList<T>();
+                            // ReSharper disable once NotDisposedResource
+                            if (reusable == null)
+                            {
+                                tblSubscription = new IndexSubscription<T>(
+                                    subID, componentName, rows, this, creationTrace);
+                            }
+                            else
+                            {
+                                reusable.Rebind(subID, rows, this);
+                                tblSubscription = reusable;
+                            }
+
+                            tblSubscription.ConfigureRestoreTable();
+                            Subscriptions.Add(subID, tblSubscription);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    InspectorCollector.CompleteRequest(traceId, "failed", ex.Message);
+                    onResponse(null, false, ex);
+                    return;
+                }
+
+                var responsePayload = response.Length > 2 ? response[2] : null;
+                InspectorCollector.CompleteRequest(traceId, "completed",
+                    responsePayload);
+                onResponse(tblSubscription, false, null);
+            }, traceId);
+        }
+
+        /// <summary>
+        ///     按字典类型，订阅整张表。（Table）
+        /// </summary>
+        public void WatchTableSync(
+            string componentName,
+            Action<IndexSubscription<DictComponent>, bool, Exception> onResponse) =>
+            WatchTableSync(onResponse, componentName);
 
         /// <summary>
         ///     取消指定订阅。

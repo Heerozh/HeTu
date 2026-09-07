@@ -479,6 +479,91 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchTable_RestoresViaTableAndReplacesSnapshotAfterReconnect()
+        {
+            var first = new FakeTransport("c1");
+            first.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 1, Value = 1 },
+                new() { ID = 2, Value = 2 }
+            };
+            var second = new FakeTransport("c2");
+            second.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 2, Value = 20 },
+                new() { ID = 3, Value = 3 }
+            };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> subscription = null;
+            session.WatchTable<TestComponent>(
+                null,
+                sub => subscription = sub,
+                _ => Assert.Fail("watch should not fail"));
+            Assert.IsNotNull(subscription);
+            Assert.AreEqual("TestComponent.table", subscription.SubId);
+            Assert.IsTrue(subscription.RestoreAsTable);
+            CollectionAssert.AreEqual(new[] { "TestComponent" }, first.WatchedTables);
+
+            var deleted = new List<long>();
+            var inserted = new List<long>();
+            var updated = new List<long>();
+            subscription.OnDelete += (_, id) => deleted.Add(id);
+            subscription.OnInsert += (_, id) => inserted.Add(id);
+            subscription.OnUpdate += (_, id) => updated.Add(id);
+            var resynced = 0;
+            subscription.OnResynced += () => resynced++;
+
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            // 重连后走的是 table 而不是 range
+            CollectionAssert.AreEqual(new[] { "TestComponent" }, second.WatchedTables);
+            Assert.AreEqual(0, second.WatchedRanges.Count);
+            // 同一个订阅实例，快照按 diff 派发事件
+            CollectionAssert.AreEquivalent(new long[] { 2, 3 },
+                subscription.Rows.Keys);
+            Assert.AreEqual(20, subscription.Rows[2].Value);
+            CollectionAssert.AreEqual(new long[] { 1 }, deleted);
+            CollectionAssert.AreEqual(new long[] { 3 }, inserted);
+            CollectionAssert.AreEqual(new long[] { 2 }, updated);
+            Assert.AreEqual(1, resynced);
+        }
+
+        [Test]
+        public void WatchTable_WithSameComponent_ReturnsSameSubscription()
+        {
+            var first = new FakeTransport("c1");
+            first.TableResults["TestComponent"] = new List<TestComponent>
+            {
+                new() { ID = 1, Value = 1 }
+            };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first }),
+                new FakeScheduler());
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> a = null;
+            IndexSubscription<TestComponent> b = null;
+            session.WatchTable<TestComponent>(null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchTable<TestComponent>("TestComponent", sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            Assert.IsNotNull(a);
+            Assert.AreSame(a, b);
+            Assert.AreEqual(1, first.WatchedTables.Count);
+        }
+
+        [Test]
         public void WatchRange_Resync_PreservesExistingRowSubject()
         {
             var first = new FakeTransport("c1");
@@ -1664,6 +1749,8 @@ namespace Tests.HeTu
             } = new();
             public Dictionary<(string Index, object Left, object Right, int Limit,
                 bool Desc, bool Force), List<TestComponent>> RangeResults { get; } = new();
+            public List<string> WatchedTables { get; } = new();
+            public Dictionary<string, List<TestComponent>> TableResults { get; } = new();
             public BaseSubscription LastIssuedSubscription { get; private set; }
             public int HeldWatchCount => _heldWatches.Count;
             private readonly List<Action<bool>> _heldWatches = new();
@@ -1804,6 +1891,35 @@ namespace Tests.HeTu
                     subId, componentName, rows, _remoteClient);
                 subscription.ConfigureRestoreQuery(index, left, right, limit, desc,
                     force);
+                onResponse(subscription, false, null);
+            }
+
+            public void WatchTable<T>(
+                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                string componentName = null,
+                IndexSubscription<T> reusable = null)
+                where T : IBaseComponent
+            {
+                Operations.Add("watch-table");
+                componentName ??= typeof(T).Name;
+                WatchedTables.Add(componentName);
+                if (CancelWatchDispatch)
+                {
+                    onResponse(null, true, null);
+                    return;
+                }
+                var rows = TableResults[componentName].Cast<T>().ToList();
+                var subId = HeTuClientBase.MakeTableSubId(componentName);
+                if (reusable != null)
+                {
+                    reusable.Rebind(subId, rows, _remoteClient);
+                    onResponse(reusable, false, null);
+                    return;
+                }
+
+                var subscription = new IndexSubscription<T>(
+                    subId, componentName, rows, _remoteClient);
+                subscription.ConfigureRestoreTable();
                 onResponse(subscription, false, null);
             }
 

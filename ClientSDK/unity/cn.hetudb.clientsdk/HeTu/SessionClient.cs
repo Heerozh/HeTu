@@ -470,6 +470,13 @@ namespace HeTu
             _client.WatchRangeSync(index, left, right, limit, onResponse,
                 desc, force, componentName, reusable);
 
+        public void WatchTable<T>(
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
+            where T : IBaseComponent =>
+            _client.WatchTableSync(onResponse, componentName, reusable);
+
         public void Dispose()
         {
             _client.OnConnected -= HandleConnected;

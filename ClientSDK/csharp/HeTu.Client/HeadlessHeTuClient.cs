@@ -128,6 +128,20 @@ namespace HeTu
             return tcs.Task;
         }
 
+        /// <summary>整表订阅，见 HeTuClientBase.WatchTableSync。无权限或行数超限时结果为 null。</summary>
+        public Task<IndexSubscription<T>> WatchTable<T>(string componentName = null)
+            where T : IBaseComponent
+        {
+            var tcs = new TaskCompletionSource<IndexSubscription<T>>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _pump.Post(() => WatchTableSync<T>((sub, cancel, ex) =>
+            {
+                if (cancel) tcs.TrySetCanceled();
+                else if (ex != null) tcs.TrySetException(ex);
+                else tcs.TrySetResult(sub);
+            }, componentName));
+            return tcs.Task;
+        }
+
         public Task<RowSubscription<T>> WatchRow<T>(string index, object value,
             string componentName = null) where T : IBaseComponent
         {
