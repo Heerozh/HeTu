@@ -226,7 +226,7 @@ async def my_system(ctx: hetu.SystemContext, ...):
 - **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）。
 - **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。
 - **`ctx.client_limits` / `ctx.server_limits`** —— `[max_count, window_seconds]` 对的列表。一旦超出任何一对，引擎就会断开连接。`elevate()` 会自动将这些限制乘以 10 倍，因此登录后的用户获得匿名连接所没有的余量。如果需要为机器人账户等自定义预算，可以在自己的逻辑中覆盖每个连接的设置。
-- **`ctx.max_row_sub` / `ctx.max_index_sub`** —— 活动 `Get` 和 `Range` 订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。
+- **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** —— 活动 `Get`、`Range` 和 `Table`（整表）订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。整表订阅的单表行数上限是全局配置 `MAX_TABLE_SUBSCRIPTION_ROWS`，不在 `ctx` 上。
 - **`ctx.race_count`** —— 当前事务的重试次数。用于退避非幂等副作用：`if ctx.race_count == 0: send_email(...)` 仅在第一次尝试时发送电子邮件。
 
 `ctx.timestamp` 在每次 `System`/`Endpoint` 调用开始时设置为 `time()`，因此可以安全地用作“现在”，无需重新读取时钟。
