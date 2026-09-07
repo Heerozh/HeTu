@@ -59,6 +59,8 @@ class RaceCondition(Exception):
     常见触发场景包括：
 
     - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
+    - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
+      陈旧读（stale read）；纯读的行同样参与乐观锁校验；
     - 提交 `insert` / `update` 时，唯一索引在提交阶段被其他事务抢先占用；
     - `upsert` 发现锚定的unique索引已被并发事务插入；
     - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。

@@ -237,7 +237,7 @@ class SessionRepository:
             if rows.shape[0] > 0:
                 return rows[0]
             # 等值查询unique列读空：登记negative observation，供insert/update判定竞态。
-            # （区间range查询不登记，区间无穷且本就不保证事务内可见性。）
+            # （区间range查询不登记negative observation，区间无穷且本就不保证事务内可见性。）
             if index_name in comp_cls.uniques_:
                 idmap.mark_absent(self.ref, index_name, query_value)
             return None
