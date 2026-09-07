@@ -411,12 +411,14 @@ class SubscriptionBroker:
             IndexSubscription
         )
 
-        # 还要订阅每行的信息，这样每行数据变更时才能收到消息
+        # 还要订阅每行的信息，这样每行数据变更时才能收到消息。所有行频道一次批量订阅
+        row_channels = []
         for row_id in row_ids:
             row_channel = servant.row_channel(table_ref, row_id)
-            await self._mq_client.subscribe(row_channel)
+            row_channels.append(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id)
             self._channel_subs.setdefault(row_channel, set()).add(sub_id)
+        await self._mq_client.subscribe(*row_channels)
 
         return sub_id, rows
 
@@ -425,11 +427,13 @@ class SubscriptionBroker:
         if sub_id not in self._subs:
             return
 
+        rem_chans = []
         for channel in self._subs[sub_id].channels:
             self._channel_subs[channel].remove(sub_id)
             if len(self._channel_subs[channel]) == 0:
-                await self._mq_client.unsubscribe(channel)
+                rem_chans.append(channel)
                 del self._channel_subs[channel]
+        await self._mq_client.unsubscribe(*rem_chans)
         self._subs.pop(sub_id)
         self._index_sub_count = list(map(type, self._subs.values())).count(
             IndexSubscription
@@ -473,15 +477,17 @@ class SubscriptionBroker:
                 sub = self._subs[sub_id]
                 # 获取sub更新的行数据
                 new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
-                # 如果有行添加或删除，订阅或取消订阅
+                # 如果有行添加或删除，订阅或取消订阅（各一次批量往返）
                 for new_chan in new_chans:
-                    await mq.subscribe(new_chan)
                     channel_subs.setdefault(new_chan, set()).add(sub_id)
+                await mq.subscribe(*new_chans)
+                released = []
                 for rem_chan in rem_chans:
                     channel_subs[rem_chan].remove(sub_id)
                     if len(channel_subs[rem_chan]) == 0:
-                        await mq.unsubscribe(rem_chan)
+                        released.append(rem_chan)
                         del channel_subs[rem_chan]
+                await mq.unsubscribe(*released)
                 # 添加行数据到返回值
                 if len(sub_updates) > 0:
                     rtn.setdefault(sub_id, dict()).update(sub_updates)

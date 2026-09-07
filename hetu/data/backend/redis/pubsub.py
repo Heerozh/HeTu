@@ -43,6 +43,10 @@ class AsyncKeyspacePubSub:
         # 已成功订阅的频道
         self._subscribed: set[str] = set()
         self._pending_subscribe: set[str] = set()
+        self._pending_unsubscribe: set[str] = set()
+        # 每个频道订阅在哪个节点上，取消订阅时必须发回同一节点
+        # （cluster模式下按ROUND_ROBIN选replica，两次解析可能得到不同节点）
+        self._channel_node: dict[str, str] = {}
 
         # 统一的消息队列
         self.message_queue: Queue[dict] = asyncio.Queue()
@@ -104,10 +108,10 @@ class AsyncKeyspacePubSub:
         # 如果不保存task，task不会执行会被gc
         self._tasks.add(task)
 
-    async def subscribe(self, channel: str):
+    async def _resolve_node(self, channel: str) -> str:
         """
-        精确订阅。根据 Channel 中的 Key 计算 Slot，路由到指定 Node 的 PubSub。
-        Channel 格式预期: __keyspace@<db>__:<keyname>
+        根据 Channel 中的 Key 计算 Slot，找到目标 Node，并确保已建立到该节点的连接。
+        返回 node key。
         """
         target_node_key = "standalone"
 
@@ -142,41 +146,73 @@ class AsyncKeyspacePubSub:
             if target_node_key not in self.node_resources:
                 self.standalone_connect()
 
-        # 3. 执行订阅
-        ps = self.node_resources[target_node_key]["pubsub"]
-        await ps.subscribe(channel)
-        self._pending_subscribe.add(channel)
+        return target_node_key
+
+    async def subscribe(self, *channels: str):
+        """
+        精确订阅，可一次订阅多个频道，全部订阅成功后返回。
+        根据 Channel 中的 Key 计算 Slot，路由到指定 Node 的 PubSub；
+        同一 Node 的频道合并成一条 SUBSCRIBE 命令，N 个频道只需 O(节点数) 次往返。
+        Channel 格式预期: __keyspace@<db>__:<keyname> 或任何带 {hash tag} 的频道名
+        """
+        if not channels:
+            return
+
+        # 按目标节点分组
+        groups: dict[str, list[str]] = {}
+        for channel in channels:
+            node_key = await self._resolve_node(channel)
+            groups.setdefault(node_key, []).append(channel)
+            self._channel_node[channel] = node_key
+
+        # 每个节点一条SUBSCRIBE命令
+        for node_key, group in groups.items():
+            ps = self.node_resources[node_key]["pubsub"]
+            await ps.subscribe(*group)
+            self._pending_subscribe.update(group)
 
         # 等message返回了才能算订阅成功
+        waiting = set(channels)
         async with self._subscribe_notify:
             await self._subscribe_notify.wait_for(
-                lambda: channel not in self._pending_subscribe
+                lambda: self._pending_subscribe.isdisjoint(waiting)
             )
 
-    async def unsubscribe(self, channel: str):
+    async def unsubscribe(self, *channels: str):
         """
-        取消订阅，逻辑同 subscribe
+        取消订阅，可一次取消多个频道。发回各频道当初订阅的那个节点。
+        和 subscribe 一样，等 Redis 回 ack 后才返回，保证返回后不会再收到这些频道的消息。
         """
-        target_node_key = "standalone"
-        if self.is_cluster:
-            assert isinstance(self.main_client, RedisCluster)
-            node = self.main_client.get_node_from_key(channel, replica=True)
-            if node:
-                target_node_key = f"{node.host}:{node.port}"
+        groups: dict[str, list[str]] = {}
+        for channel in channels:
+            node_key = self._channel_node.pop(channel, "standalone")
+            if node_key in self.node_resources:
+                groups.setdefault(node_key, []).append(channel)
+            self._subscribed.discard(channel)
+            self._pending_subscribe.discard(channel)
 
-        if target_node_key in self.node_resources:
-            await self.node_resources[target_node_key]["pubsub"].unsubscribe(channel)
-        self._subscribed.discard(channel)
+        waiting: set[str] = set()
+        for node_key, group in groups.items():
+            await self.node_resources[node_key]["pubsub"].unsubscribe(*group)
+            self._pending_unsubscribe.update(group)
+            waiting.update(group)
+
+        if waiting:
+            async with self._subscribe_notify:
+                await self._subscribe_notify.wait_for(
+                    lambda: self._pending_unsubscribe.isdisjoint(waiting)
+                )
 
     async def resubscribe_all(self):
         """
         重新订阅所有频道，适用于拓扑变化后
         """
-        current_subscriptions = list(self._subscribed)
+        current_subscriptions = list(self._subscribed | self._pending_subscribe)
         self._subscribed.clear()
         self._pending_subscribe.clear()
-        for channel in current_subscriptions:
-            await self.subscribe(channel)
+        self._pending_unsubscribe.clear()
+        self._channel_node.clear()
+        await self.subscribe(*current_subscriptions)
 
     async def _node_listener(self, pubsub: PubSub):
         """
@@ -192,6 +228,11 @@ class AsyncKeyspacePubSub:
                             channel = message["channel"].decode()
                             self._subscribed.add(channel)
                             self._pending_subscribe.discard(channel)
+                            async with self._subscribe_notify:
+                                self._subscribe_notify.notify_all()
+                        elif mtype == "unsubscribe":
+                            channel = message["channel"].decode()
+                            self._pending_unsubscribe.discard(channel)
                             async with self._subscribe_notify:
                                 self._subscribe_notify.notify_all()
                         continue

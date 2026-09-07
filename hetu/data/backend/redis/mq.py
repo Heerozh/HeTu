@@ -48,10 +48,12 @@ class RedisMQClient(MQClient):
         return await self._mq.close()
 
     @override
-    async def subscribe(self, channel_name) -> None:
-        """订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        await self._mq.subscribe(channel_name)
-        self.subscribed.add(channel_name)
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        await self._mq.subscribe(*channel_names)
+        self.subscribed.update(channel_names)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
             logger.warning(
@@ -59,10 +61,12 @@ class RedisMQClient(MQClient):
             )
 
     @override
-    async def unsubscribe(self, channel_name) -> None:
-        """取消订阅频道，频道名通过 client.xxx_channel(table_ref) 获得"""
-        await self._mq.unsubscribe(channel_name)
-        self.subscribed.remove(channel_name)
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        await self._mq.unsubscribe(*channel_names)
+        self.subscribed.difference_update(channel_names)
 
     @override
     async def pull(self) -> None:

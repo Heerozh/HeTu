@@ -568,3 +568,26 @@ async def test_range_large(item_ref, mod_auto_backend):
     got = await backend.servant.get_many(item_ref, ids)
     assert len(got) == n and all(r is not None for r in got)
     assert [int(r.id) for r in got] == ids
+
+
+async def test_mq_client_batch_subscribe(filled_item_ref, mod_auto_backend):
+    """MQ client 一次订阅/取消多个频道"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+
+    rows = await servant.range(filled_item_ref, "time", 110, 115, limit=100)
+    channels = [servant.row_channel(filled_item_ref, r.id) for r in rows]
+    assert len(channels) == 6
+
+    await mq.subscribe(*channels)
+    assert set(channels) <= set(mq.subscribed_channels)
+
+    await mq.unsubscribe(*channels[:4])
+    assert not (set(channels[:4]) & set(mq.subscribed_channels))
+    assert set(channels[4:]) <= set(mq.subscribed_channels)
+
+    # 空调用不报错
+    await mq.subscribe()
+    await mq.unsubscribe()
+    await mq.close()

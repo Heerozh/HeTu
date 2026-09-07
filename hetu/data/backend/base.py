@@ -712,12 +712,12 @@ class MQClient:
         """
         raise NotImplementedError
 
-    async def subscribe(self, channel_name: str) -> None:
-        """订阅频道"""
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道，可一次订阅多个，全部订阅成功后返回。实现应把多个频道合并成尽量少的往返。"""
         raise NotImplementedError
 
-    async def unsubscribe(self, channel_name: str) -> None:
-        """取消订阅频道"""
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道，可一次取消多个"""
         raise NotImplementedError
 
     @property

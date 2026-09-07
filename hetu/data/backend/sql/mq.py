@@ -66,19 +66,21 @@ class SQLMQClient(MQClient):
         return None
 
     @override
-    async def subscribe(self, channel_name) -> None:
+    async def subscribe(self, *channel_names: str) -> None:
+        if not channel_names:
+            return
         if not self.subscribed:
             # 与Redis pubsub语义对齐：只消费订阅之后产生的通知。
             self._last_notify_id = await self._get_current_notify_id_async()
-        self.subscribed.add(channel_name)
+        self.subscribed.update(channel_names)
         if len(self.subscribed) > MAX_SUBSCRIBED:
             logger.warning(
                 f"⚠️ [💾SQL] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，"
             )
 
     @override
-    async def unsubscribe(self, channel_name) -> None:
-        self.subscribed.remove(channel_name)
+    async def unsubscribe(self, *channel_names: str) -> None:
+        self.subscribed.difference_update(channel_names)
 
     @override
     async def pull(self) -> None:
