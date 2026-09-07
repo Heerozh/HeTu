@@ -90,7 +90,7 @@ async def sub_call(
     """处理Client SDK调用订阅的命令"""
     ctx = executor.context
     # print(executor.context, 'sub', data)
-    check_length("sub", data, 4, 100)
+    check_length("sub", data, 3, 100)
     table = executor.tbl_mgr.get_table(data[1])
     if table is None:
         err_msg = _(
@@ -109,6 +109,9 @@ async def sub_call(
         case "range":
             check_length("range", data, 5, 8)
             sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
+        case "table":  # sub component_name table
+            check_length("table", data, 3, 3)
+            sub_id, sub_data = await broker.subscribe_table(table, ctx)
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
@@ -118,11 +121,18 @@ async def sub_call(
     reply = ["sub", sub_id, sub_data]
     await push_queue.put(reply)
 
-    num_row_sub, num_idx_sub = broker.count()
-    if num_row_sub > ctx.max_row_sub or num_idx_sub > ctx.max_index_sub:
+    num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
+    if (
+        num_row_sub > ctx.max_row_sub
+        or num_idx_sub > ctx.max_index_sub
+        or num_tbl_sub > ctx.max_table_sub
+    ):
         err_msg = _(
-            " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅"
-        ).format(num_row_sub=num_row_sub, num_idx_sub=num_idx_sub)
+            " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，"
+            "{num_tbl_sub}个整表订阅"
+        ).format(
+            num_row_sub=num_row_sub, num_idx_sub=num_idx_sub, num_tbl_sub=num_tbl_sub
+        )
         replay.info(err_msg)
         logger.warning(err_msg)
         return False

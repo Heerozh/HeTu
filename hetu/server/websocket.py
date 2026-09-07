@@ -101,6 +101,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         server_limits=request.app.config.get("SERVER_SEND_LIMITS", default_limits),
         max_row_sub=request.app.config.get("MAX_ROW_SUBSCRIPTION", 1000),
         max_index_sub=request.app.config.get("MAX_INDEX_SUBSCRIPTION", 50),
+        max_table_sub=request.app.config.get("MAX_TABLE_SUBSCRIPTION", 20),
     )
 
     # 初始化System执行器，一个连接一个执行器
@@ -113,7 +114,10 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     await endpoint_executor.initialize(request.client_ip)
 
     # 初始化订阅管理器，一个连接一个订阅管理器
-    broker = SubscriptionBroker(request.app.ctx.default_backend)
+    broker = SubscriptionBroker(
+        request.app.ctx.default_backend,
+        max_table_rows=request.app.config.get("MAX_TABLE_SUBSCRIPTION_ROWS", 100_000),
+    )
 
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
