@@ -42,8 +42,11 @@ BAD_SUBS = [
 
 
 def check_length(name, data: list, left, right):
-    if left > len(data) > right:
-        raise ValueError(f"Invalid {name} message")
+    """检查消息长度在 [left, right] 闭区间内，否则抛 ValueError 让连接断开"""
+    if not (left <= len(data) <= right):
+        raise ValueError(
+            f"Invalid {name} message: expected {left}..{right} items, got {len(data)}"
+        )
 
 
 async def rpc(
@@ -107,7 +110,8 @@ async def sub_call(
             check_length("get", data, 5, 5)
             sub_id, sub_data = await broker.subscribe_get(table, ctx, *data[3:])
         case "range":
-            check_length("range", data, 5, 8)
+            # sub comp range index left [right limit desc force]
+            check_length("range", data, 5, 9)
             sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
         case "table":  # sub component_name table
             check_length("table", data, 3, 3)

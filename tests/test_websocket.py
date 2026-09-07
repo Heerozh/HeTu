@@ -449,3 +449,37 @@ def test_websocket_table_subscribe_limit(test_server):
     _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     assert response.client_received[0][1] == "PublicNames.table"
     assert closed_detected, "连接没有被服务器关闭"
+
+
+def test_check_length():
+    from hetu.server.receiver import check_length
+
+    # 闭区间内不报错
+    check_length("x", [1, 2, 3], 3, 3)
+    check_length("x", [1, 2, 3], 2, 5)
+    check_length("x", list(range(9)), 5, 9)  # range 订阅带 desc/force 共 9 项
+    # 区间外报错
+    with pytest.raises(ValueError, match="Invalid x message"):
+        check_length("x", [1, 2], 3, 5)
+    with pytest.raises(ValueError, match="got 6"):
+        check_length("x", [1, 2, 3, 4, 5, 6], 3, 5)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_invalid_sub_length_disconnects(test_server):
+    # 长度不合法的 sub 消息应被拒绝并断开连接
+    closed = False
+
+    async def routine(connect):
+        nonlocal closed
+        client1 = await connect()
+        with pytest.raises(ConnectionClosedError):
+            await client1.send(["sub", "PublicNames"])  # 缺少查询类型
+            await client1.recv()
+            await asyncio.sleep(0.3)
+            await client1.send(["sub", "PublicNames", "table"])
+            await client1.recv()
+        closed = True
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert closed, "连接没有被服务器关闭"
