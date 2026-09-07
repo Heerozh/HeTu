@@ -10,6 +10,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, final, override
 
+import msgpack
 import sqlalchemy as sa
 
 from ....common.multimap import MultiMap
@@ -38,6 +39,8 @@ class SQLMQClient(MQClient):
         self.subscribed = set()
         self.pulled_deque = MultiMap()
         self.pulled_set = set()
+        # 表级频道合并后的payload：channel -> 变动的row_id集合
+        self.pulled_payload: dict[str, set[str]] = {}
         self._last_notify_id = self._get_current_notify_id_sync()
         self._large_sub_warned = False
 
@@ -102,7 +105,7 @@ class SQLMQClient(MQClient):
                     )
                     self._large_sub_warned = True
 
-                stmt = sa.select(notify.c.id, notify.c.channel).where(
+                stmt = sa.select(notify.c.id, notify.c.channel, notify.c.payload).where(
                     notify.c.id > self._last_notify_id
                 )
                 if use_channel_filter:
@@ -126,9 +129,17 @@ class SQLMQClient(MQClient):
                         )
                     )
 
+                    payload = row.get("payload")
+                    if payload:
+                        self.pulled_payload.setdefault(channel_name, set()).update(
+                            str(i) for i in msgpack.unpackb(payload)
+                        )
+
                     dropped = set(self.pulled_deque.pop(0, time.time() - 120))
                     if dropped:
                         self.pulled_set -= dropped
+                        for ch in dropped:
+                            self.pulled_payload.pop(ch, None)
                         logger.warning(
                             _(
                                 "⚠️ [💾SQL] 订阅更新通知来不及处理，"
@@ -153,7 +164,7 @@ class SQLMQClient(MQClient):
         return subscribed_count <= MAX_CHANNELS_IN_FILTER
 
     @override
-    async def get_message(self) -> set[str]:
+    async def get_message(self) -> dict[str, set[str] | None]:
         pulled_deque = self.pulled_deque
         interval = 1 / self.UPDATE_FREQUENCY
 
@@ -164,7 +175,7 @@ class SQLMQClient(MQClient):
             rtn = set(pulled_deque.pop(0, time.time() - interval))
             if rtn:
                 self.pulled_set -= rtn
-                return rtn
+                return {ch: self.pulled_payload.pop(ch, None) for ch in rtn}
             await asyncio.sleep(interval)
 
     @property

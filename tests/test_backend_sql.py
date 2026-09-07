@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -157,6 +158,7 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeyp
         mq.subscribed.add(f"extra-{i}")
     mq.pulled_deque = MultiMap()
     mq.pulled_set = set()
+    mq.pulled_payload = {}
     mq._last_notify_id = 0
     mq._large_sub_warned = True
 
@@ -292,6 +294,7 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
     mq.subscribed = {"existing-channel"}
     mq.pulled_deque = MultiMap()
     mq.pulled_set = set()
+    mq.pulled_payload = {}
     mq._last_notify_id = 0
     mq._large_sub_warned = False
 
@@ -313,3 +316,50 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
 
     assert new_channel in mq.pulled_set
     assert mq._last_notify_id == 1
+
+
+def test_sql_notify_table_payload_column_upgrade(tmp_path):
+    """旧版本的通知表没有payload列，ensure_notify_payload_column_sync应补上且幂等"""
+    db_path = tmp_path / "notify_upgrade.sqlite3"
+    engine = sa.create_engine(f"sqlite:///{db_path.as_posix()}")
+    # 造一张旧结构的表
+    old_meta = sa.MetaData()
+    sa.Table(
+        SQLBackendClient.NOTIFY_TABLE_NAME,
+        old_meta,
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column("channel", sa.String(length=256), nullable=False, index=True),
+        sa.Column("created_at", sa.TIMESTAMP(), nullable=False, index=True),
+    )
+    old_meta.create_all(engine)
+    cols = {
+        c["name"]
+        for c in sa.inspect(engine).get_columns(SQLBackendClient.NOTIFY_TABLE_NAME)
+    }
+    assert "payload" not in cols
+
+    SQLBackendClient.ensure_notify_payload_column_sync(engine)
+    cols = {
+        c["name"]
+        for c in sa.inspect(engine).get_columns(SQLBackendClient.NOTIFY_TABLE_NAME)
+    }
+    assert "payload" in cols
+    # 幂等
+    SQLBackendClient.ensure_notify_payload_column_sync(engine)
+
+    # 新结构能正常读写payload
+    table = SQLBackendClient.notify_table(sa.MetaData())
+    with engine.begin() as conn:
+        conn.execute(
+            sa.insert(table),
+            [
+                {
+                    "channel": "c",
+                    "created_at": datetime.now(UTC),
+                    "payload": b"\x91\xa11",
+                }
+            ],
+        )
+        got = conn.execute(sa.select(table.c.payload)).scalar()
+    assert got == b"\x91\xa11"
+    engine.dispose()

@@ -25,10 +25,11 @@ logger = logging.getLogger("HeTu.root")
 
 class BaseSubscription:
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
-        channel收到通知后，前来调用此get_updated方法。
+        channel收到通知后，前来调用此get_updated方法。payload是该频道消息携带的数据，
+        行/索引频道为None，表级频道为变动的row_id集合。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
         """
         raise NotImplementedError
@@ -73,7 +74,7 @@ class RowSubscription(BaseSubscription):
             cls.__cache.set({})
 
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
@@ -130,7 +131,7 @@ class IndexSubscription(BaseSubscription):
         )
 
     async def get_updated(
-        self, channel
+        self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
@@ -470,13 +471,15 @@ class SubscriptionBroker:
                 return rtn
         else:
             updated_channels = await mq.get_message()
-        for channel in updated_channels:
+        for channel, payload in updated_channels.items():
             RowSubscription.clear_cache(channel)
             sub_ids = channel_subs.get(channel, [])
             for sub_id in sub_ids:
                 sub = self._subs[sub_id]
                 # 获取sub更新的行数据
-                new_chans, rem_chans, sub_updates = await sub.get_updated(channel)
+                new_chans, rem_chans, sub_updates = await sub.get_updated(
+                    channel, payload
+                )
                 # 如果有行添加或删除，订阅或取消订阅（各一次批量往返）
                 for new_chan in new_chans:
                     channel_subs.setdefault(new_chan, set()).add(sub_id)

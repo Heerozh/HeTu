@@ -365,6 +365,16 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     for push in pushes:
         assert push in json[1]
 
+    # 表级变更通知：每张被改动的表一条，payload为本事务碰到的row_id列表
+    touched: dict[bytes, set[bytes]] = {}
+    for push in json[1]:
+        if push[0] in (b"HSET", b"DEL"):
+            prefix, row_id = push[1].rsplit(b":id:", 1)
+            touched.setdefault(prefix + b":table", set()).add(row_id)
+    assert touched  # 本测试有insert/update/delete，必然有变动
+    published = {pub[0]: set(msgpack.unpackb(pub[1], raw=True)) for pub in json[3]}
+    assert published == touched
+
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):
     """测试client的commit(insert)/get"""
@@ -590,4 +600,71 @@ async def test_mq_client_batch_subscribe(filled_item_ref, mod_auto_backend):
     # 空调用不报错
     await mq.subscribe()
     await mq.unsubscribe()
+    await mq.close()
+
+
+async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
+    """表级频道：一个事务一条消息，payload是变动的row_id集合，跨事务按tick合并"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+
+    rows = await servant.range(filled_item_ref, "time", 110, 111, limit=100)
+    assert len(rows) == 2
+    table_channel = servant.table_channel(filled_item_ref)
+    row_channel = servant.row_channel(filled_item_ref, rows[0].id)
+    await mq.subscribe(table_channel, row_channel)
+
+    # 一个事务：insert 一行 + update 一行 + delete 一行
+    idmap = IdentityMap()
+    new_row = filled_item_ref.comp_cls.new_row()
+    new_row.name = "TblNew"
+    new_row.owner = 10
+    new_row.time = 999
+    idmap.add_insert(filled_item_ref, new_row)
+    idmap.add_clean(filled_item_ref, rows[0])
+    rows[0].qty = 1
+    idmap.update(filled_item_ref, rows[0])
+    idmap.add_clean(filled_item_ref, rows[1])
+    idmap.mark_deleted(filled_item_ref, rows[1].id)
+    await backend.master.commit(idmap)
+
+    try:
+        async with asyncio.timeout(1):
+            while True:
+                await mq.pull()
+    except TimeoutError:
+        pass
+
+    async with asyncio.timeout(0.5):
+        messages = await mq.get_message()
+
+    assert messages[table_channel] == {
+        str(new_row.id),
+        str(rows[0].id),
+        str(rows[1].id),
+    }
+    # 行频道没有payload
+    assert row_channel in messages and messages[row_channel] is None
+    # 取走后payload不残留
+    assert table_channel not in mq.pulled_payload  # type: ignore
+
+    # 取消订阅表级频道后不再收到
+    await mq.unsubscribe(table_channel)
+    idmap = IdentityMap()
+    rows[0]._version += 1
+    idmap.add_clean(filled_item_ref, rows[0])
+    rows[0].qty = 2
+    idmap.update(filled_item_ref, rows[0])
+    await backend.master.commit(idmap)
+    try:
+        async with asyncio.timeout(1):
+            while True:
+                await mq.pull()
+    except TimeoutError:
+        pass
+    async with asyncio.timeout(0.5):
+        messages = await mq.get_message()
+    assert table_channel not in messages
+    assert row_channel in messages
     await mq.close()

@@ -117,6 +117,13 @@ class BackendClient:
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
         raise NotImplementedError
 
+    def table_channel(self, table_ref: TableReference):
+        """
+        返回表级变更频道名。表内任何行 insert/update/delete，都会向该频道发送一条消息，
+        payload 为本次事务变动的 row_id（str）列表。一个事务一张表只发一条。
+        """
+        raise NotImplementedError
+
     def __init_subclass__(cls, **kwargs):
         """让继承子类自动注册alias"""
         super().__init_subclass__()
@@ -695,6 +702,7 @@ class MQClient:
         """
         从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
         该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
+        表级频道（table_channel）的消息还带有变动的row_id列表payload，需要按频道合并保存。
 
         消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
         此方法需要单独的协程反复调用，防止服务器也消息堆积。如果没有消息，则堵塞到永远。
@@ -702,10 +710,13 @@ class MQClient:
         # 必须合并消息，因为index更新时大都是2条一起的(remove/add)
         raise NotImplementedError
 
-    async def get_message(self) -> set[str]:
+    async def get_message(self) -> dict[str, set[str] | None]:
         """
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
         留1/UPDATE_FREQUENCY时间是为了消息的合批。
+
+        返回 {channel名: payload}。行/索引频道的payload为None；
+        表级频道的payload为这段时间内合并的变动row_id（str）集合。
 
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。

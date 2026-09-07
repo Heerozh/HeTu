@@ -145,6 +145,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
         return f"__keyspace@{self.dbi}__:{self.row_key(table_ref, row_id)}"
 
+    @override
+    def table_channel(self, table_ref: TableReference):
+        """
+        返回表级变更频道名。这是commit lua脚本主动PUBLISH的普通频道（非keyspace通知），
+        名字带{CLU}hash tag，cluster模式下AsyncKeyspacePubSub按slot路由订阅。
+        """
+        return f"{self.cluster_prefix(table_ref)}:table"
+
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
@@ -809,6 +817,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
+        # 表级变更通知：[channel, msgpack(row_id列表)]，一个事务一张表一条
+        publishes: list[list[str | bytes]] = []
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -817,6 +827,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
+            touched_ids: list[str] = []
             # insert
             for insert in inserts:
                 row_id = insert["id"]
@@ -825,6 +836,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _unique_meet(unique_fields, dtype_map, idx_prefix, insert)
                 _hset_key(key, 0, insert)
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
+                touched_ids.append(row_id)
             # update
             for old_row, new_row in zip(old_rows, new_rows):
                 row_id = old_row["id"]
@@ -835,6 +847,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _hset_key(key, old_version, new_row)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
+                touched_ids.append(row_id)
             # delete
             for delete in deletes:
                 # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
@@ -844,6 +857,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _version_must_match(key, old_version)
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
+                touched_ids.append(str(delete["id"]))
+            if touched_ids:
+                publishes.append(
+                    [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
+                )
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -852,7 +870,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
 
-        payload_json: bytes = msg_packer.pack([checks, pushes, deleted])  # type: ignore
+        payload_json: bytes = msg_packer.pack(  # type: ignore
+            [checks, pushes, deleted, publishes]
+        )
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 

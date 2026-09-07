@@ -13,6 +13,7 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
+import msgpack
 import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import event
@@ -257,6 +258,32 @@ class SQLBackendClient(BackendClient, alias="sql"):
             ),
             sa.Column("channel", sa.String(length=256), nullable=False, index=True),
             sa.Column("created_at", sa.TIMESTAMP(), nullable=False, index=True),
+            # 表级频道的payload：msgpack的row_id列表；行/索引频道为NULL
+            sa.Column("payload", sa.LargeBinary(), nullable=True),
+        )
+
+    @classmethod
+    def ensure_notify_payload_column_sync(cls, io: sa.Engine) -> None:
+        """
+        旧版本的通知表没有payload列，create_all(checkfirst)不会给已有表加列，这里补上。
+        """
+        inspector = sa.inspect(io)
+        if not inspector.has_table(cls.NOTIFY_TABLE_NAME):
+            return
+        columns = {c["name"] for c in inspector.get_columns(cls.NOTIFY_TABLE_NAME)}
+        if "payload" in columns:
+            return
+        col_type = sa.LargeBinary().compile(dialect=io.dialect)
+        with io.begin() as conn:
+            conn.execute(
+                sa.text(
+                    f"ALTER TABLE {cls.NOTIFY_TABLE_NAME} ADD COLUMN payload {col_type}"
+                )
+            )
+        logger.info(
+            _("[💾SQL] 通知表 {table} 已补充 payload 列").format(
+                table=cls.NOTIFY_TABLE_NAME
+            )
         )
 
     @classmethod
@@ -284,6 +311,10 @@ class SQLBackendClient(BackendClient, alias="sql"):
     @override
     def row_channel(self, table_ref: TableReference, row_id: int):
         return self.row_key(table_ref, row_id)
+
+    @override
+    def table_channel(self, table_ref: TableReference):
+        return f"{self.cluster_prefix(table_ref)}:table"
 
     def __init__(self, endpoint: str | list[str], is_servant, **kwargs):
         super().__init__(endpoint, is_servant, **kwargs)
@@ -348,6 +379,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         self.maintenance_lock_table(meta)
         try:
             meta.create_all(self.io, checkfirst=True)
+            self.ensure_notify_payload_column_sync(self.io)
         except sa_exc.DBAPIError as exc:
             if "already exists" in str(exc).lower():
                 # 可能是并发创建导致的，忽略
@@ -682,6 +714,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             for ref in refs:
                 self.component_table(ref, meta)
             meta.create_all(io, checkfirst=True)
+            self.ensure_notify_payload_column_sync(io)
 
     @overload
     async def range(
@@ -853,6 +886,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
         refs = list(dirties.keys())
         for attempt in range(2):
             channels: set[str] = set()
+            # 表级变更通知：ref -> 本事务变动的row_id列表
+            touched_ids: dict[TableReference, list[str]] = {}
             try:
                 async with self.aio.begin() as conn:
                     # 对纯读行加版本检查，防止事务依赖的陈旧读：
@@ -896,6 +931,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                            touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
                         _inserts,
@@ -937,6 +973,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             for index_name in updates:
                                 if index_name in indexes:
                                     channels.add(self.index_channel(ref, index_name))
+                            touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
                         inserts,
@@ -958,15 +995,23 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                            touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
-                        await conn.execute(
-                            sa.insert(notify_table),
-                            [
-                                {"channel": channel, "created_at": now_dt}
-                                for channel in sorted(channels)
-                            ],
-                        )
+                        notify_rows: list[dict[str, Any]] = [
+                            {"channel": channel, "created_at": now_dt, "payload": None}
+                            for channel in sorted(channels)
+                        ]
+                        # 表级频道：一个事务一张表一条，payload为变动row_id列表
+                        for ref, ids in touched_ids.items():
+                            notify_rows.append(
+                                {
+                                    "channel": self.table_channel(ref),
+                                    "created_at": now_dt,
+                                    "payload": msgpack.packb(ids),
+                                }
+                            )
+                        await conn.execute(sa.insert(notify_table), notify_rows)
 
                     if cleanup_due:
                         expire_at = now_dt - timedelta(seconds=self.NOTIFY_TTL_SECONDS)
