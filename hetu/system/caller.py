@@ -112,14 +112,16 @@ class SystemCaller:
                         ).format(sys_name=sys_name, uuid=uuid)
                     )
                     return None
-                # 执行
-                rtn = await sys.func(context, *args)
-                # 标记uuid已执行
+                # 标记uuid已执行。必须在执行System前写入：System内可以调用
+                # ctx.session_commit()提前结束事务，那时context.repo已被清空，事后再写锁
+                # 会KeyError；且提前提交的那个事务里没带上锁，uuid去重也会失效。
                 if uuid:
                     async with context.repo[SystemLock].upsert(uuid=uuid) as lock:
                         lock.caller = context.caller
                         lock.called = time.time()
                         lock.name = sys_name
+                # 执行
+                rtn = await sys.func(context, *args)
                 # 执行事务
                 await session.commit()
                 # logger.debug(f"✅ [📞System] 调用System成功: {sys_name}")
