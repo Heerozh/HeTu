@@ -9,6 +9,7 @@ import hashlib
 import logging
 import random
 import time
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -525,6 +526,41 @@ class SQLBackendClient(BackendClient, alias="sql"):
         if row is None:
             return None
         return self.row_decode_(table_ref.comp_cls, dict(row), row_format)
+
+    # 单条 IN 查询的参数上限，避免SQLite等数据库的参数数量限制
+    GET_MANY_CHUNK = 500
+
+    @override
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        self._ensure_open()
+        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
+        ids = [int(i) for i in row_ids]
+        if not ids:
+            return []
+        table = self.component_table(table_ref)
+        found: dict[int, Any] = {}
+        async with self.aio.connect() as conn:
+            for i in range(0, len(ids), self.GET_MANY_CHUNK):
+                chunk = ids[i : i + self.GET_MANY_CHUNK]
+                stmt = sa.select(table).where(table.c.id.in_(chunk))
+                try:
+                    rows = (await conn.execute(stmt)).mappings().all()
+                except sa_exc.DBAPIError as exc:
+                    if self._is_table_missing_error(exc):
+                        break
+                    raise
+                for row in rows:
+                    found[int(row["id"])] = dict(row)
+        comp_cls = table_ref.comp_cls
+        return [
+            self.row_decode_(comp_cls, found[i], row_format) if i in found else None
+            for i in ids
+        ]
 
     @classmethod
     def _normalize_range_bound(

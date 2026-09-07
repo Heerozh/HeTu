@@ -34,6 +34,7 @@
 import hashlib
 import logging
 import warnings
+from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -208,6 +209,31 @@ class BackendClient:
                 返回无类型的原始数据 (dict[str, str])
             - RowFormat.TYPED_DICT
                 返回符合Component定义的，有格式的dict类型。
+        """
+        raise NotImplementedError
+
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        """
+        批量获取多行数据，一次往返（或按块分批）读取，比循环调用 `get` 快得多。
+
+        Parameters
+        ----------
+        table_ref: TableReference
+            表信息，指定Component、实例名、分片簇id。
+        row_ids: Iterable[int]
+            row id主键列表。
+        row_format
+            返回数据解码格式，同 `get`，但不支持 `RowFormat.ID_LIST`。
+
+        Returns
+        -------
+        rows: list
+            与 `row_ids` 顺序一一对应，不存在的行位置为 None。
         """
         raise NotImplementedError
 

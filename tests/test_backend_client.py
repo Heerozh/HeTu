@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, TableReference
+from hetu.data.backend import Backend, RowFormat, TableReference
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
 
@@ -514,3 +514,57 @@ async def test_mq_client(filled_item_ref, mod_auto_backend):
         messages = await mq.get_message()
 
     assert channel_name in messages
+
+
+async def test_get_many(filled_item_ref, mod_auto_backend):
+    """测试get_many：顺序与入参一致，不存在的行为None，各row_format都可用"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+
+    rows = await servant.range(filled_item_ref, "time", 110, 120, limit=100)
+    ids = [int(r.id) for r in rows]
+    assert len(ids) == 11
+
+    # 混入不存在的id，且打乱顺序
+    query = [ids[3], 999999999, ids[0], ids[10], 888888888]
+    got = await servant.get_many(filled_item_ref, query)
+    assert len(got) == 5
+    assert got[1] is None and got[4] is None
+    assert got[0].id == ids[3] and got[2].id == ids[0] and got[3].id == ids[10]
+    assert got[0] == rows[3]
+
+    got = await servant.get_many(filled_item_ref, query, RowFormat.TYPED_DICT)
+    assert got[0]["id"] == ids[3] and got[0]["time"] == 113
+    assert got[1] is None
+
+    got = await servant.get_many(filled_item_ref, query, RowFormat.RAW)
+    assert got[0]["time"] == "113"
+
+    assert await servant.get_many(filled_item_ref, []) == []
+
+
+async def test_range_large(item_ref, mod_auto_backend):
+    """大结果集range：超过一个pipeline chunk的行数也能完整、有序读回"""
+    backend: Backend = mod_auto_backend()
+    n = 2500  # 超过 RedisBackendClient.RANGE_PIPELINE_CHUNK
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(item_ref.comp_cls)
+        for i in range(n):
+            row = item_ref.comp_cls.new_row()
+            row.name = f"L{i}"
+            row.owner = 77
+            row.time = 100000 + i
+            await repo.insert(row)
+    await backend.wait_for_synced()
+
+    rows = await backend.servant.range(item_ref, "owner", 77, limit=n + 10)
+    assert len(rows) == n
+    assert sorted(int(r.time) for r in rows) == list(range(100000, 100000 + n))
+
+    ids = await backend.servant.range(
+        item_ref, "time", 100000, 100000 + n, limit=n, row_format=RowFormat.ID_LIST
+    )
+    got = await backend.servant.get_many(item_ref, ids)
+    assert len(got) == n and all(r is not None for r in got)
+    assert [int(r.id) for r in got] == ids
