@@ -369,3 +369,76 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
         assert generator._next_id() is not None, (
             f"{label}时发号容量耗尽后睡10ms仍未恢复，说明起始时间戳被钳在了未来"
         )
+
+
+async def test_snowflake_lease_fence():
+    """发号围栏：租约超出安全期就拒绝发号，而不是继续发可能重复的ID"""
+    from hetu.common.snowflake_id import (
+        SnowflakeID,
+        WorkerKeeper,
+        WorkerLeaseExpired,
+    )
+
+    class FakeKeeper(WorkerKeeper):
+        pass
+
+    keeper = FakeKeeper()
+    generator = SnowflakeID()
+
+    # 安全期内正常发号
+    keeper.lease_deadline = time.monotonic() + 60
+    generator.init(worker_id=1, lease=keeper)
+    assert generator.next_id() > 0
+
+    # 超出安全期就拒绝。注意不能是 RaceCondition —— SystemCaller 会重试，而围栏跳闸后
+    # 重试多少次都是跳闸，只会空转到 max_retry
+    from hetu.data.backend.base import RaceCondition
+
+    keeper.lease_deadline = time.monotonic() - 0.001
+    with pytest.raises(WorkerLeaseExpired):
+        generator.next_id()
+    assert not issubclass(WorkerLeaseExpired, RaceCondition)
+
+    # 续约成功推进安全期后恢复发号
+    keeper.lease_deadline = time.monotonic() + 60
+    assert generator.next_id() > 0
+
+    # 不提供租约的分配器（开发模式）不启用围栏
+    keeper.lease_deadline = None
+    assert generator.next_id() > 0
+    generator.init(worker_id=1)  # 完全不传lease
+    assert generator.next_id() > 0
+
+
+@use_redis_family_backend_only
+async def test_redis_keeper_arms_fence(mod_auto_backend):
+    """Redis租约必须武装围栏，且安全期要留出余量、抢到的那一刻就生效"""
+    from hetu.data.backend.redis.worker_keeper import (
+        FENCE_MARGIN_SEC,
+        WORKER_ID_EXPIRE_SEC,
+        RedisWorkerKeeper,
+    )
+
+    redis = mod_auto_backend()
+    redis_client = redis.master.aio
+    keys = await redis_client.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    if keys:
+        await redis_client.delete(*keys)
+
+    keeper = RedisWorkerKeeper(600, redis_client)
+    assert keeper.lease_deadline is None  # 还没拿到id时围栏不该生效
+
+    await keeper.get_worker_id()
+    # 抢到就武装，不用等第一次续约（那要5秒后）
+    assert keeper.lease_deadline is not None
+    # 安全期必须早于Redis侧的过期时刻，留出余量给时钟漂移。用发起请求前的时刻算，所以
+    # 它一定不晚于 "现在 + TTL - 余量"
+    now = time.monotonic()
+    assert keeper.lease_deadline <= now + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+    assert keeper.lease_deadline > now
+
+    # 续约成功要推进安全期
+    old = keeper.lease_deadline
+    time.sleep(0.01)
+    await keeper.keep_alive()
+    assert keeper.lease_deadline > old

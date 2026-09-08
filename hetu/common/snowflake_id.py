@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from datetime import datetime
-from time import sleep, time
+from time import monotonic, sleep, time
 from typing import final
 
 from hetu.common.singleton import Singleton
@@ -35,6 +35,18 @@ SEQUENCE_MASK = -1 ^ (-1 << SEQUENCE_BITS)
 # TIMESTAMP_LEFT_SHIFT = SEQUENCE_BITS + WORKER_ID_BITS + DATACENTER_ID_BITS
 
 TIME_ROLLBACK_TOLERANCE_MS = 10_000  # 允许的时间回拨容忍度，单位毫秒
+
+
+class WorkerLeaseExpired(Exception):
+    """Worker ID 租约已超出安全期，继续发号可能产生重复雪花ID，因此拒绝发号。
+
+    **故意不继承 `RaceCondition`**：`SystemCaller` 只重试 `RaceCondition`，而围栏跳闸后
+    重试多少次都还是跳闸，只会空转到 max_retry 才失败。这个异常应当直接向上冒泡，让本次
+    System 调用明确失败。
+
+    Raised instead of minting a snowflake id whose worker id may no longer be exclusively
+    ours. Deliberately not a RaceCondition: retrying can't clear the fence.
+    """
 
 
 @final
@@ -64,8 +76,14 @@ class SnowflakeID(metaclass=Singleton):
         self.datacenter_id = -1
         self.sequence = 0
         self.last_timestamp = -1
+        self.lease: WorkerKeeper | None = None
 
-    def init(self, worker_id: int, last_timestamp: int = -1):
+    def init(
+        self,
+        worker_id: int,
+        last_timestamp: int = -1,
+        lease: WorkerKeeper | None = None,
+    ):
         """
         初始化雪花生成器。
 
@@ -78,6 +96,9 @@ class SnowflakeID(metaclass=Singleton):
         last_timestamp: int
             上次生成ID的时间戳 (毫秒)，用于防止重启时时间发生回拨造成的id重复.
             如果持久化的时间戳精度为10秒，建议传入时加上10000。
+        lease: WorkerKeeper | None
+            分配了 worker_id 的 keeper，用作发号围栏（见 `_next_id`）。传 None 或传一个
+            不提供租约的 keeper（如开发模式的 FixedWorkerKeeper），围栏就不启用。
         """
         if worker_id > MAX_WORKER_ID or worker_id < 0:
             raise ValueError(
@@ -92,6 +113,8 @@ class SnowflakeID(metaclass=Singleton):
         self.worker_id = worker_id
         self.sequence = 0
         self.last_timestamp = last_timestamp
+        # 每次init都重置围栏来源，避免单件在测试/嵌入场景里残留上一次的租约
+        self.lease = lease
 
         logger.info(
             _(
@@ -102,12 +125,45 @@ class SnowflakeID(metaclass=Singleton):
             )
         )
 
+    def _check_lease_fence(self) -> None:
+        """发号围栏：租约超出安全期就拒绝发号，而不是继续发可能重复的ID。
+
+        为什么需要它：WorkerKeeper 的续约检测是**事后**的。worker 长时间卡住（事件循环
+        被堵死、GC、网络分区）导致租约过期、被别的 worker 抢走之后，它苏醒过来到下一次
+        keep_alive 跑到之间还有最长一个续约周期，这期间它会拿着已经不属于自己的 worker_id
+        继续发号，产出和抢占方**字节相同**的雪花ID（sequence 每毫秒重置为0，两边各发第一个
+        就撞）。雪花ID是所有Component的主键，后果是 insert 撞主键、以及按id去重的
+        FutureCalls 被静默吞掉。
+
+        围栏把这个窗口关掉：只在"最近一次续约成功后的安全期内"才肯发号。安全期由
+        `WorkerKeeper.lease_deadline` 给出，算法见那里。keeper 不提供租约（开发模式）时
+        `lease_deadline` 恒为 None，围栏不启用。
+
+        这不引入新的故障模式：续约失败意味着后端master写不进去，而每一次 insert/update
+        都要写master——那时服务器本来就已经干不了活了。围栏只是把"静默产生重复主键"换成
+        "明确报错"。
+        """
+        lease = self.lease
+        if lease is None:
+            return
+        deadline = lease.lease_deadline
+        if deadline is None or monotonic() <= deadline:
+            return
+        raise WorkerLeaseExpired(
+            _(
+                "[❄️ID] Worker ID {worker_id} 的租约已超出安全期 {overdue:.1f} 秒，"
+                "拒绝发号以防产生重复ID。通常意味着本进程长时间卡住或后端连不上，"
+                "Worker 会在下一次续约时重启"
+            ).format(worker_id=self.worker_id, overdue=monotonic() - deadline)
+        )
+
     def _next_id(self) -> int | None:
         """
-        生成下一个 ID，超标时返回 None。
+        生成下一个 ID，超标时返回 None。租约超出安全期时抛 `WorkerLeaseExpired`。
         """
         worker_id = self.worker_id
         assert worker_id >= 0, _("SnowflakeID 未初始化，请先调用 init() 方法。")
+        self._check_lease_fence()
 
         timestamp = int(time() * 1000)
         last_timestamp = self.last_timestamp
@@ -183,7 +239,17 @@ class WorkerKeeper:
         cls.subclasses.append(cls)
 
     def __init__(self):
-        pass
+        # 租约安全期的截止时刻（time.monotonic() 秒）。在这之前可以确信没人能抢走本进程的
+        # worker_id，因此发号是安全的；超过它 `SnowflakeID` 就拒绝发号（见 _check_lease_fence）。
+        #
+        # None 表示"本分配器不提供租约"，围栏随之停用——开发模式的 FixedWorkerKeeper 用
+        # 本机进程序号，根本不存在被抢的概念，不需要也无法武装围栏。
+        #
+        # 算法（由提供租约的子类维护）：
+        #     lease_deadline = 发起续约前的 monotonic 时刻 + TTL - 余量
+        # 必须用**发起前**而不是完成后的时刻：请求在网络上飞的这段时间，数据库那边的
+        # 过期时间已经开始走了，用完成时刻算会高估自己的安全期。余量再覆盖两边时钟漂移。
+        self.lease_deadline: float | None = None
 
     async def get_worker_id(self) -> int:
         raise NotImplementedError

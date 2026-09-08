@@ -150,8 +150,9 @@ async def start_backends(app: Sanic):
     ts_keeper = SnowflakeTimestampKeeper(lease_tbl, worker_id)
     last_timestamp = await ts_keeper.load()
 
-    # 初始化雪花id生成器
-    SnowflakeID().init(worker_id, last_timestamp)
+    # 初始化雪花id生成器。传入keeper作为发号围栏：租约超出安全期就拒绝发号，防止本进程
+    # 卡住导致租约被抢走后还在用旧worker_id发出重复ID。见 SnowflakeID._check_lease_fence
+    SnowflakeID().init(worker_id, last_timestamp, lease=worker_keeper)
     app.ctx.__setattr__("worker_keeper", worker_keeper)
     app.ctx.__setattr__("snowflake_ts_keeper", ts_keeper)
 
@@ -316,6 +317,18 @@ async def worker_keeper_renewal(app: Sanic):
         except SystemExit:
             app.m.restart()
             break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            # 这个循环现在是发号围栏的心跳来源：它一旦静默死掉，围栏会在安全期后永久跳闸，
+            # worker 活着但再也发不出ID。而 app.add_task 注册的task被sanic一直持有引用，
+            # 连asyncio那句"Task exception was never retrieved"都不会打印。所以这里必须
+            # 兜住所有异常、打出来、继续下一轮
+            logger.exception(
+                _("❌ [📡WorkerKeeper] 续约异常，将重试: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+            )
 
 
 def worker_main(app_name, config) -> Sanic:

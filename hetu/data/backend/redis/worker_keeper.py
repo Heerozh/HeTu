@@ -1,4 +1,5 @@
 import logging
+from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
@@ -14,6 +15,9 @@ logger = logging.getLogger("HeTu.root")
 
 # 回收worker id的时间，超时则认为宕机
 WORKER_ID_EXPIRE_SEC = 60
+# 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
+# Redis 时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
+FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
 
 
 # 释放租约的 compare-and-delete：只删自己的那把。Redis 没有单条命令能做"值相符才删"
@@ -56,11 +60,12 @@ class RedisWorkerKeeper(WorkerKeeper):
 
     `SET key node_id NX EX ttl`（抢新id）本身就是原子的，不需要额外处理。
 
-    ## 还差一层：本地围栏（尚未实现）
+    ## 配套的本地围栏
 
-    上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 之间最多 5 秒，这期间
-    它照样拿旧 worker_id 发号。要真正没有窗口，还需要让 `SnowflakeID` 在"距上次续约成功
-    超过 TTL"时拒绝发号。TODO。
+    上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 跑到之间还有最长一个
+    续约周期，这期间它照样拿旧 worker_id 发号。所以每次确认"租约还是我的"时都会推进
+    `lease_deadline`（基类属性），`SnowflakeID` 在超过它之后直接拒绝发号，把这个窗口关掉。
+    见 `SnowflakeID._check_lease_fence`。
 
     Redis-native worker id lease. All three operations (renew / reuse / release) are
     compare-and-swap against the owner token, because lease takeover after expiry is a
@@ -88,13 +93,21 @@ class RedisWorkerKeeper(WorkerKeeper):
         return f"{self.worker_id_key}:{worker_id}"
 
     async def _getex_if_mine(self, worker_id: int) -> bool:
-        """原子地"取回旧值+续期"，并判断这把锁是不是自己的。见类文档。"""
+        """原子地"取回旧值+续期"，并判断这把锁是不是自己的。见类文档。
+
+        确认是自己的就顺手推进发号围栏的安全期。安全期用**发起请求前**的 monotonic 时刻
+        算——Redis 那边的 TTL 在我们发出命令的那一刻就开始走了，用返回后的时刻算会高估。
+        """
+        started_at = monotonic()
         value = await self.aio.getex(self._key(worker_id), ex=WORKER_ID_EXPIRE_SEC)
         if value is None:
             return False
         if isinstance(value, bytes):
             value = value.decode("ascii", errors="replace")
-        return value == self.node_id
+        if value != self.node_id:
+            return False
+        self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+        return True
 
     @override
     async def get_worker_id(self) -> int:
@@ -119,10 +132,15 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 尝试分配新的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
             # SET NX 本身就是原子的抢占，不需要额外的CAS
+            started_at = monotonic()
             result = await self.aio.set(
                 self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
             )
             if result:
+                # 抢到的这一刻就武装围栏，别等到第一次续约（那要5秒后）
+                self.lease_deadline = (
+                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+                )
                 logger.info(
                     _(
                         "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
