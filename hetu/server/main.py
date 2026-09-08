@@ -24,7 +24,7 @@ from ..data.backend.snowflake_timestamp import (
     TIMESTAMP_SAVE_INTERVAL,
     SnowflakeTimestampKeeper,
 )
-from ..data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+from ..data.backend.worker_keeper import WorkerLease, create_worker_keeper
 from ..endpoint import connection
 from ..i18n import _
 from ..manager import ComponentTableManager
@@ -125,9 +125,11 @@ async def start_backends(app: Sanic):
         backend.post_configure()
 
     # 在backend初始化完毕后，启动WorkerKeeper，分配Worker ID，并把Worker ID和上次时间戳传给雪花ID生成器
+    # 分配器按后端类型自动选：Redis后端用真租约（多机安全），SQL后端用本机进程序号
+    # （开发模式，单机安全）。见 create_worker_keeper
     lease_tbl = table_managers[app.config.INSTANCES[0]].get_table(WorkerLease)
     assert lease_tbl is not None
-    worker_keeper = GeneralWorkerKeeper(os.getpid(), lease_tbl)
+    worker_keeper = create_worker_keeper(lease_tbl.backend, os.getpid())
 
     # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
     while True:

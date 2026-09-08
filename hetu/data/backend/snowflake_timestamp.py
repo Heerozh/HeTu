@@ -88,13 +88,14 @@ class SnowflakeTimestampKeeper:
           让ID的时间戳"超前"也不能重复。**必须加上一个写入间隔**：水位每
           TIMESTAMP_SAVE_INTERVAL 秒才写一次，崩溃时最后那一个间隔内发出去的ID其时间戳
           已经超过了记录值，不补这一段就会把它们再发一遍。
-        * **水位为0（从没记录过）** → 返回当前时间，**不做任何钳制**。这个 worker_id 名下
-          从没发出过ID，也就没有可重复的时间戳，不需要保护。这里绝不能退化成"未知"去用
-          兜底值：那会让每次全新开服都白白背上一个几秒的降级窗口——时间戳被钳在同一毫秒，
-          总容量只剩4096个ID，超了就1ms一睡地空转，还每发一个ID刷一条回拨警告。
+        * **确认没有记录**（行不存在，或水位为0）→ 返回当前时间，**不做任何钳制**。这个
+          worker_id 名下从没发出过ID，也就没有可重复的时间戳，不需要保护。这里绝不能退化成
+          "未知"去用兜底值：那会让每次全新开服都白白背上一个几秒的降级窗口——时间戳被钳在
+          同一毫秒，总容量只剩4096个ID，超了就1ms一睡地空转，还每发一个ID刷一条回拨警告。
         * **读不出来（后端异常）** → 返回 -1，交给 `SnowflakeID.init` 自己的
-          `TIME_ROLLBACK_TOLERANCE_MS` 兜底。这才是真正"可能发过号但不知道发到哪"的情况，
-          值得付那个降级窗口的代价。注意不能返回当前时间——那等于把 init 的兜底废掉。
+          `TIME_ROLLBACK_TOLERANCE_MS` 兜底。注意"读到了空"和"读不出来"是两回事：前者是
+          确定的信息（没发过号），后者才是真正"可能发过号但不知道发到哪"，值得付降级窗口
+          的代价。这里返回当前时间会把 init 的兜底废掉。
 
         已知取舍：`hetu upgrade` 会 flush 掉 volatile 的 WorkerLease 表，水位丢失后也表现为
         0，从数据上无法和"首次开服"区分，此时会走不钳制的分支。选这一边是因为首次开服每次
@@ -113,11 +114,10 @@ class SnowflakeTimestampKeeper:
                 )
             )
             return -1
-        if row is None:
-            return -1
 
-        stored = int(row.last_timestamp)
-        if stored <= 0:  # 从没记录过，没有可重复的时间戳，不需要保护
+        # 行不存在 和 水位为0 是同一件事：确认没有记录过，不需要保护
+        stored = int(row.last_timestamp) if row is not None else 0
+        if stored <= 0:
             return now_ms
 
         watermark = stored + TIMESTAMP_SAVE_INTERVAL * 1000
@@ -133,24 +133,41 @@ class SnowflakeTimestampKeeper:
     async def save(self, last_timestamp: int) -> None:
         """把当前用到的时间戳写成高水位。无条件写，不做任何所有权校验（见类文档）。
 
-        ⚠️ 行必须已经存在：`direct_set` 在两种后端上行为不一致——Redis 是 `HSET`，键不存在
-        会顺手建；SQL 是 `UPDATE ... WHERE id=?`，行不存在就**静默无效**。目前这行总是由
-        `WorkerKeeper.get_worker_id()` 抢租约时先建出来，所以实际跑起来没问题。但这是本类
-        对租约仅剩的一点隐含依赖，将来 worker_id 改成部署侧直接指定、不再有租约行时必须
-        处理（要么让 SQL 的 direct_set 变成 upsert，要么开服时补一次插入）。
-        为了不让它悄无声息地失效，首次写入后会回读确认一次。
+        `direct_set` 在两种后端上行为不一致：Redis 是 `HSET`，键不存在会顺手建；SQL 是
+        `UPDATE ... WHERE id=?`，行不存在就**静默无效**。以前 SQL 那边靠
+        GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有任何人替本类建行，
+        所以首次写入后回读确认，缺行就自己补一次插入（只在进程内做一次）。
         """
         await self.table.direct_set(self.worker_id, last_timestamp=str(last_timestamp))
         if self._write_verified:
             return
         self._write_verified = True
+        if await self._row_exists():
+            return
+        await self._create_row(last_timestamp)
+
+    async def _row_exists(self) -> bool:
         row = await self.table.backend.master.get(
             self.table, self.worker_id, row_format=RowFormat.STRUCT
         )
-        if row is None:
-            logger.error(
-                _(
-                    "[❄️ID] 时间戳高水位写入未生效（worker_id={worker_id} 的行不存在），"
-                    "重启期间发生时钟回拨将无法防止ID重复"
-                ).format(worker_id=self.worker_id)
+        return row is not None
+
+    async def _create_row(self, last_timestamp: int) -> None:
+        """补建本 worker_id 的行。整个进程只会走一次，用事务无所谓开销。"""
+        from .worker_keeper import WorkerLease
+
+        try:
+            async with self.table.session() as session:
+                repo = session.using(WorkerLease)
+                row = WorkerLease.new_row(id_=self.worker_id)
+                row.last_timestamp = last_timestamp
+                await repo.insert(row)
+        except Exception as e:
+            # 并发下别的进程可能刚好也在补建（撞主键），或后端异常；两种都不致命——
+            # 最坏是这一轮水位没写上，下个周期 direct_set 就能生效了
+            logger.warning(
+                _("[❄️ID] 补建时间戳高水位行失败（下个周期会重试）: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
             )
+            self._write_verified = False

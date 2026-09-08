@@ -6,34 +6,36 @@
 """
 
 import logging
-from time import time
+import os
+import re
 from typing import TYPE_CHECKING, final, override
 
 import numpy as np
 
-from ...common.helper import get_machine_id
 from ...common.permission import Permission
 from ...common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 from ...i18n import _
 from ..component import BaseComponent, define_component, property_field
-from .base import RaceCondition
 
 if TYPE_CHECKING:
-    from .table import Table
+    from . import Backend
 
 logger = logging.getLogger("HeTu.root")
-
-WORKER_ID_EXPIRE_SEC = 60
 
 
 @define_component(namespace="core", permission=Permission.ADMIN, volatile=True)
 class WorkerLease(BaseComponent):
     """
-    通用 Worker ID 租约表（跨后端）。
+    Worker 相关的跨进程状态表。
 
     说明:
     - `id` 内置主键，直接使用 `worker_id`（0~1023）
-    - `expires_at` / `last_timestamp` 设计为非索引字段，便于 direct_set 续租
+    - `last_timestamp` 是雪花ID的时间戳高水位，由 `SnowflakeTimestampKeeper` 读写，
+      非索引字段以便 direct_set 直写
+    - `node_id` / `expires_at` 是已删除的 GeneralWorkerKeeper（基于本表做租约）留下的字段，
+      目前没有任何代码读写。**故意保留**：改字段会让 `check_and_create_new_tables` 判定
+      schema_mismatch，逼所有现网部署跑一次 `hetu upgrade`，为一次内部清理付这个代价不值。
+      将来若有别的迁移顺路带上即可。
     """
 
     node_id: str = property_field("", dtype="<U96")
@@ -42,150 +44,87 @@ class WorkerLease(BaseComponent):
 
 
 @final
-class GeneralWorkerKeeper(WorkerKeeper):
+class FixedWorkerKeeper(WorkerKeeper):
+    """开发模式的固定 Worker ID 分配器：直接用进程在本机内的序号，不做任何跨进程协调。
+
+    ## 适用范围
+
+    给 SQL 后端（SQLite/Postgres/MariaDB）用。这些后端在 HeTu 里本来就只推荐开发/调试或
+    极低订阅负载场景（订阅表性能不够，见 CONFIG_TEMPLATE 里 BACKENDS 的说明），而开发场景
+    的特征是**单机**——单机内 worker 序号天然唯一，不需要租约、不需要续约、不需要所有权
+    校验，也就不存在租约被抢导致雪花ID重复那一整类问题。
+
+    生产多机部署请用 Redis 后端，那里有 `RedisWorkerKeeper` 的真正租约。
+
+    ## id 从哪来
+
+    用 Sanic 给每个 worker 进程设的 `SANIC_WORKER_IDENTIFIER`（形如 "Srv 0"、"Srv 1"，
+    见 sanic/worker/process.py）。单进程模式下该变量不存在，退化为 0。
+
+    刻意**不做**成配置项：一旦允许手工指定，就会出现"一部分进程指定了、另一部分忘记指定"
+    的混用场景，而两种分配方式互相看不见对方占用了哪些 id，会静默撞车产生重复雪花ID——
+    那是现有的 CAS / 围栏等所有防护都拦不住的一类错误。
+
+    A dev-mode worker id allocator for SQL backends: it simply uses the process's index
+    within the machine, with no cross-process coordination at all. SQL backends are
+    dev-only in HeTu, and dev means single machine, where per-process indexes are already
+    unique. Use the Redis backend (and its real lease) for multi-machine production.
     """
-    基于通用Backend事务实现的 WorkerKeeper。
 
-    - 使用 `WorkerLease` 表保存租约（id=worker_id）
-    - `get_worker_id` 走事务，保证竞争时安全
-    - `keep_alive` / `release_worker_id` 使用 `direct_set`
-
-    此类的目的是：
-    1. 分配空余worker id，并让宕机的worker id会得到释放
-    2. 每几秒就储存每台服务器的时间，来减少重启时，发生时间回拨导致ID重复的风险。
-
-    服务器重启回拨(关闭期间发生时间回拨)的情况很少，但通过以下方式：
-    1. 保证机器ntp持续工作，回拨不超过10秒，这样限制每次重启等10秒以上可解决重启回拨问题。
-    2. 再加上本类的keep_alive持续记录服务器时间戳，保证记录间隔<=10秒。
-    虽然方式1已经可以解决此类问题，但方式2不依赖运维，可以让此问题透明。
-
-    通过
-        node_id = f"{get_machine_id()}:{pid}"
-        SET snowflake:worker:{worker_id} {node_id} NX EX WORKER_ID_EXPIRE_SEC
-    成功：拿到了 WorkerID = {worker_id}
-    失败：说明 ID 正在被别的机器占用，如果node_id不符，循环尝试 ID {worker_id + 1}。
-         直到1024次失败报错。
-
-    后台设置个5秒的Task持续续约此key
-    """
-
-    def __init__(self, pid: int, lease_table: Table):
-        """
-        初始化 GeneralWorkerKeeper。
-        注意PID决定了Worker ID的稳定性，如果每次重启PID都变，则可能每次重启都换一个Worker ID。
-        所以动态扩展的服务器建议从Docker中启动，可保证PID都是从1开始。
-        """
+    def __init__(self):
         super().__init__()
-        self.pid = pid
-        self.table = lease_table
         self.worker_id = -1
-        self.node_id = f"{get_machine_id()}:{pid}"
 
     @staticmethod
-    def _now_ms() -> int:
-        return int(time() * 1000)
-
-    @staticmethod
-    def _expire_ms() -> int:
-        return WORKER_ID_EXPIRE_SEC * 1000
-
-    async def _try_claim_worker_id(self, worker_id: int) -> bool:
-        for _attempt in range(5):
-            try:
-                async with self.table.session() as session:
-                    repo = session.using(WorkerLease)
-                    try:
-                        row = await repo.get(id=worker_id)
-                    except KeyError:  # 可能是direct set导致的副作用，写入了垃圾数据
-                        row = None
-                    now_ms = self._now_ms()
-
-                    if row is None:
-                        lease = WorkerLease.new_row(id_=worker_id)
-                        lease.node_id = self.node_id
-                        lease.expires_at = now_ms + self._expire_ms()
-                        # 不碰 last_timestamp：它是雪花ID的时间戳高水位，归
-                        # SnowflakeTimestampKeeper 管。抢租约时把它设成 now 等于伪造了一个
-                        # "已经发到现在"的水位，读回时再加上写入间隔补偿就会把起始时间戳推到
-                        # 未来，让每次开服都白白多出一个几秒的降级窗口（时间戳被钳在同一毫秒，
-                        # 容量只剩4096个ID且刷警告日志）。留字段默认值0表示"从没记录过"。
-                        # cold-start 时多个 worker 会竞争同一个 worker_id。上面的
-                        # get(id) 读空已登记 negative observation，故若此处 insert 在
-                        # get 与提交之间被并发抢占，会抛 RaceCondition（而非不可重试的
-                        # UniqueViolation），由下面的 except 重试，下一轮 get 读到对方
-                        # 的行后走「被占用」分支退让到下一个 id。
-                        await repo.insert(lease)
-                        return True
-
-                    if row.node_id == self.node_id or int(row.expires_at) <= now_ms:
-                        row.node_id = self.node_id
-                        row.expires_at = now_ms + self._expire_ms()
-                        # 同上，last_timestamp 原样保留（那是上次运行留下的真实水位）
-                        await repo.update(row)
-                        return True
-
-                    return False
-            except RaceCondition:
-                continue
-        return False
+    def _sanic_worker_index() -> int:
+        """从 Sanic 的 worker 标识里取出本进程在本机内的序号"""
+        ident = os.environ.get("SANIC_WORKER_IDENTIFIER", "")
+        match = re.search(r"(\d+)", ident)
+        return int(match.group(1)) if match else 0
 
     @override
     async def get_worker_id(self) -> int:
-        """
-        从Table中获取一个可用的 Worker ID。
-        采用从1到1023的顺序尝试获取Worker ID的方式
-        """
         if self.worker_id >= 0:
             return self.worker_id
 
-        for worker_id in range(0, MAX_WORKER_ID + 1):
-            if not await self._try_claim_worker_id(worker_id):
-                continue
-            self.worker_id = worker_id
-            logger.info(
-                _(
-                    "[❄️ID] [General] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
-                ).format(worker_id=worker_id, node_id=self.node_id)
+        worker_id = self._sanic_worker_index()
+        if worker_id > MAX_WORKER_ID:
+            raise KeyError(
+                _("Worker序号 {worker_id} 超出雪花ID上限 {max}").format(
+                    worker_id=worker_id, max=MAX_WORKER_ID
+                )
             )
-            return worker_id
-
-        raise KeyError(
+        self.worker_id = worker_id
+        logger.info(
             _(
-                "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
-            )
+                "[❄️ID] [开发模式] 使用本机进程序号作为 Worker ID: {worker_id}。"
+                "此模式只保证单机内不重复，多机部署请改用 Redis 后端"
+            ).format(worker_id=worker_id)
         )
+        return worker_id
 
     @override
     async def release_worker_id(self):
-        """
-        释放当前占用的 Worker ID。
-        """
-        worker_id = self.worker_id
-        if worker_id < 0:
-            return
-        await self.table.direct_set(worker_id, expires_at="0")
-        logger.info(
-            _("[❄️ID] [General] 释放 Worker ID: {worker_id}").format(worker_id=worker_id)
-        )
+        """无需释放：没有占用任何跨进程资源"""
 
     @override
     async def keep_alive(self):
-        """
-        续租 Worker ID 的有效期。
+        """无需续约：id 由本机进程序号决定，不会被别人抢走"""
 
-        ⚠️ 已知缺陷：这里是无条件 `direct_set`，**从不校验 node_id**。如果本进程长时间
-        卡住（超过 WORKER_ID_EXPIRE_SEC）导致租约过期并被别的 worker 抢走，这里依然会
-        "续约成功"，于是两个 worker 拿着同一个 Worker ID → 雪花ID重复。
-        修复需要 CAS（比较并交换）语义，见 `keep_alive` 的调用方注释。
 
-        时间戳高水位不再在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
-        只要单调max，两者并发语义相反，捆一起没必要。
-        """
-        worker_id = self.worker_id
-        if worker_id < 0:
-            worker_id = await self.get_worker_id()
+def create_worker_keeper(backend: Backend, pid: int) -> WorkerKeeper:
+    """按后端类型选 Worker ID 分配器。
 
-        now_ms = self._now_ms()
-        await self.table.direct_set(
-            worker_id, expires_at=str(now_ms + self._expire_ms())
-        )
+    * Redis 后端 → `RedisWorkerKeeper`，基于 Redis 原生命令的真正租约（多机安全）
+    * 其余（SQL 系）→ `FixedWorkerKeeper`，开发模式的本机序号分配（单机安全）
+
+    这里按后端而不是按配置项来选，是为了不给用户留"选错模式"的机会：能多机部署的后端
+    自动获得多机安全的分配器，只适合开发的后端自动获得零协调的分配器。
+    """
+    from .redis.client import RedisBackendClient
+    from .redis.worker_keeper import RedisWorkerKeeper
+
+    master = backend.master
+    if isinstance(master, RedisBackendClient):
+        return RedisWorkerKeeper(pid, master.aio)
+    return FixedWorkerKeeper()

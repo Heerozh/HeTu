@@ -1,5 +1,5 @@
 import logging
-from typing import TYPE_CHECKING, cast, final, override
+from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
@@ -16,27 +16,55 @@ logger = logging.getLogger("HeTu.root")
 WORKER_ID_EXPIRE_SEC = 60
 
 
+# 释放租约的 compare-and-delete：只删自己的那把。Redis 没有单条命令能做"值相符才删"
+# （GETDEL 会先删掉才让你看见值，来不及判断），所以用一条单 key 的 Lua——单 key 脚本在
+# Redis Cluster 下也安全。和 Redlock 的安全释放是同一个套路。
+LUA_RELEASE_IF_MINE = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+
+
 @final
 class RedisWorkerKeeper(WorkerKeeper):
     """
-    基于 Redis 的 Worker ID 管理器，目前有通用的，未使用此类。
+    基于 Redis 原生命令的 Worker ID 租约管理器，多机安全。生产环境（Redis 后端）走这条路。
+
     此类的目的是：
     1. 分配空余worker id，并让宕机的worker id会得到释放
-    2. 每几秒就储存每台服务器的时间，来减少重启时，发生时间回拨导致ID重复的风险。
+    2. 让"租约被别人抢走"这件事能被可靠检测到（否则两个 worker 拿同一个 id 会静默产生
+       重复雪花ID——雪花ID是所有Component的主键，后果是insert撞主键、以及按id去重的
+       FutureCalls被静默吞掉）
 
-    服务器重启回拨(关闭期间发生时间回拨)的情况很少，但通过以下方式：
-    1. 保证机器ntp持续工作，回拨不超过10秒，这样限制每次重启等10秒以上可解决重启回拨问题。
-    2. 再加上本类的keep_alive持续记录服务器时间戳，保证记录间隔<=10秒。
-    虽然方式1已经可以解决此类问题，但方式2不依赖运维，可以让此问题透明。
+    ## 三个操作都必须是 CAS（比较并交换），少一个都会漏
 
-    通过
-        node_id = f"{get_machine_id()}:{pid}"
-        SET snowflake:worker:{worker_id} {node_id} NX EX WORKER_ID_EXPIRE_SEC
-    成功：拿到了 WorkerID = {worker_id}
-    失败：说明 ID 正在被别的机器占用，如果node_id不符，循环尝试 ID {worker_id + 1}。
-         直到1024次失败报错。
+    「租约过期后被别的 worker 接手」是常态（宕机恢复就靠它），所以每个操作都得先确认
+    "这把锁还是我的"：
 
-    后台设置个5秒的Task持续续约此key
+    * **续约** 用 `GETEX key EX ttl`：一条原生命令，原子地"取回旧值 + 刷新过期时间"。
+      拿回来的值不是自己的 node_id 就说明被抢了，抛 SystemExit 让上层重启 worker。
+      不能用 `EXPIRE`——它只看 key 在不在、**不看 value**，key 被别人用 SET NX 抢走后
+      它照样返回1，恰恰漏掉会产生重复ID的那种情况。
+      副作用是"不是自己的"时会把对方的 TTL 也刷成满值，无害：对方本来每5秒就自己刷一次，
+      而我们这侧立刻退出，不会反复刷。
+    * **复用自己的id** 同样用 `GETEX`。原来是 `GET` 判断 node_id 后再 `EXPIRE`，两条命令
+      非原子——中间 key 可能过期并被别人抢走，然后我们给对方续了期还以为拿到了自己的 id。
+    * **释放** 用 LUA_RELEASE_IF_MINE。原来是无条件 `DEL`：如果自己的租约早已过期并被别人
+      接手，关服时会删掉**别人的**租约，对方瞬间变无主，第三个 worker 又能抢走同一个 id。
+
+    `SET key node_id NX EX ttl`（抢新id）本身就是原子的，不需要额外处理。
+
+    ## 还差一层：本地围栏（尚未实现）
+
+    上面的检测都是**事后**的：worker 冻结后醒来，到下一次 keep_alive 之间最多 5 秒，这期间
+    它照样拿旧 worker_id 发号。要真正没有窗口，还需要让 `SnowflakeID` 在"距上次续约成功
+    超过 TTL"时拒绝发号。TODO。
+
+    Redis-native worker id lease. All three operations (renew / reuse / release) are
+    compare-and-swap against the owner token, because lease takeover after expiry is a
+    normal event and an unchecked operation silently yields duplicate snowflake ids.
     """
 
     def __init__(
@@ -56,6 +84,18 @@ class RedisWorkerKeeper(WorkerKeeper):
         # 比如固定每个容器只启动一个worker，则pid是固定的1
         self.node_id = f"{get_machine_id()}:{pid}"
 
+    def _key(self, worker_id: int) -> str:
+        return f"{self.worker_id_key}:{worker_id}"
+
+    async def _getex_if_mine(self, worker_id: int) -> bool:
+        """原子地"取回旧值+续期"，并判断这把锁是不是自己的。见类文档。"""
+        value = await self.aio.getex(self._key(worker_id), ex=WORKER_ID_EXPIRE_SEC)
+        if value is None:
+            return False
+        if isinstance(value, bytes):
+            value = value.decode("ascii", errors="replace")
+        return value == self.node_id
+
     @override
     async def get_worker_id(self) -> int:
         """
@@ -63,14 +103,9 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         # 查找之前是否已经分配过自己的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
-            key = f"{self.worker_id_key}:{worker_id}"
-            # 判断node_id是否相同，相同则说明是容器重启，直接使用
-            if (existing_node_id := await self.aio.get(key)) is None:
-                continue
-            existing_node_id = cast(bytes, existing_node_id)
-            if existing_node_id.decode("ascii") != self.node_id:
-                continue
-            if await self.aio.expire(key, WORKER_ID_EXPIRE_SEC) != 1:
+            # node_id相同说明是容器重启，直接复用。GETEX一条命令原子完成"读值+续期"，
+            # 拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
+            if not await self._getex_if_mine(worker_id):
                 continue
             logger.info(
                 _(
@@ -83,10 +118,9 @@ class RedisWorkerKeeper(WorkerKeeper):
 
         # 尝试分配新的worker id
         for worker_id in range(0, MAX_WORKER_ID + 1):
-            key = f"{self.worker_id_key}:{worker_id}"
-            # 尝试设置键，NX 表示仅当键不存在时设置，EX 表示键过期时间
+            # SET NX 本身就是原子的抢占，不需要额外的CAS
             result = await self.aio.set(
-                key, self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
+                self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
             )
             if result:
                 logger.info(
@@ -106,40 +140,43 @@ class RedisWorkerKeeper(WorkerKeeper):
     @override
     async def release_worker_id(self):
         """
-        释放当前占用的 Worker ID。
+        释放当前占用的 Worker ID。只删自己那把（compare-and-delete，见类文档）。
         """
         if self.worker_id == -1:
             return
-        key = f"{self.worker_id_key}:{self.worker_id}"
-        await self.aio.delete(key)
-        logger.info(
-            _("[❄️ID] 释放 Worker ID: {worker_id}").format(worker_id=self.worker_id)
+        deleted = await self.aio.eval(
+            LUA_RELEASE_IF_MINE, 1, self._key(self.worker_id), self.node_id
         )
+        if deleted:
+            logger.info(
+                _("[❄️ID] 释放 Worker ID: {worker_id}").format(worker_id=self.worker_id)
+            )
+        else:
+            # 说明关服前租约就已经过期、并且被别的worker接手了。不能删，否则会把对方的
+            # 租约删掉，让第三个worker抢到同一个id
+            logger.warning(
+                _("[❄️ID] Worker ID {worker_id} 的租约已不属于本进程，跳过释放").format(
+                    worker_id=self.worker_id
+                )
+            )
 
     @override
     async def keep_alive(self):
         """
-        续租 Worker ID 的有效期。
-        续约失败则抛出异常，表示 Worker ID 可能中途被其他实例占用了。
+        续租 Worker ID 的有效期。用 `GETEX` 做 compare-and-expire，只有确认这把锁还是
+        自己的才算续约成功；被抢走或已消失则抛 SystemExit，由上层重启 worker。
         此方法需要每5秒调用1次。
 
-        ⚠️ 已知缺陷：`EXPIRE` 只看 key 在不在、**不看 value**，所以它只挡得住"租约过期
-        且没人接手"（key没了→返回0），挡不住"租约被别的 worker 用 SET NX 抢走"（key还在，
-        值是对方的 node_id → 照样返回1）。后者恰恰是会产生重复雪花ID的那种。
-        正确做法是 compare-and-expire，比如一条 `GETEX key EX ttl` 拿回旧值再比 node_id。
-
-        时间戳高水位不再在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
+        时间戳高水位不在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
         只要单调max，两者并发语义相反，捆一起没必要。
         """
         worker_id = self.worker_id
-        key = f"{self.worker_id_key}:{worker_id}"
-        # 刷新键的过期时间
-        resp = await self.aio.expire(key, WORKER_ID_EXPIRE_SEC)
-        if resp != 1:
+        if not await self._getex_if_mine(worker_id):
             logger.error(
                 _(
                     "[❄️ID] 续约 Worker ID {worker_id} 失败: "
-                    "可能已被其他实例占用，也可能是Redis负载过高来不及响应，将重启Worker..."
+                    "租约已不属于本进程（可能因本进程长时间卡住导致租约过期后被其他实例"
+                    "接手），继续发号会产生重复雪花ID，将重启Worker..."
                 ).format(worker_id=worker_id)
             )
             # 关闭Worker
