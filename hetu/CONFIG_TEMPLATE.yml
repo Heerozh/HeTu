@@ -50,6 +50,21 @@ WORKER_NUM: 4
 # （退出码非0），避免服务器静默挂起起不来。如果首次开服建表、播种数据本来就慢，请调大
 STARTUP_TIMEOUT: 60
 
+# 事件循环卡死检测的秒数，0为关闭（默认）。worker的事件循环连续这么久没转动，就把该进程的
+# 所有线程栈（faulthandler）和所有未完成协程的栈dump到 logs/hang_<pid>.log，并往stderr
+# 写一行提示。用于排查"某个worker突然不打日志了"这类偶发卡死：线程栈能看出是不是同步代码
+# 把loop堵死了，协程栈能看出是不是都卡在某个await上。开销是每worker一个线程+每秒一次心跳。
+#
+# 注意：Windows 上此项强制开启（配0或不配都按10秒算，只能调大调小、关不掉），因为 Sanic 在
+# Windows 多worker下有 accept 死锁——它把 Linux 的共享监听socket模型直接套用到 Windows，
+# 而 Windows 共享 socket 上的操作协调由涉及的进程自己负责，抢输的 worker 会真堵死在
+# accept() 里，整个事件循环停摆且一个字的日志都没有。此项修复不易，因为是模式错误。
+# 看门狗在那里既是唯一的诊断手段，也会自动自愈（往自己的监听端口发若干次一次性连接把它
+# 喂醒）。生产环境请跑在 Linux 上，那里不存在此问题。
+HANG_WATCHDOG_TIMEOUT: 0
+
+
+
 # 反正是Websocket，可以关了加性能
 ACCESS_LOG: false
 

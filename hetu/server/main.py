@@ -29,6 +29,7 @@ from ..system import SystemClusters
 from ..system.future import future_call_task
 from . import pipeline
 from . import websocket as _ws  # noqa: F401 (防止未使用警告)
+from .watchdog import hang_watchdog_task
 from .web import HETU_BLUEPRINT, web_root
 
 logger = logging.getLogger("HeTu.root")
@@ -44,7 +45,7 @@ DEFAULT_STARTUP_TIMEOUT = 60.0
 ACK_TIMEOUT_MARGIN = 10.0
 # "不限制"给sanic的阈值。sanic的单位是0.1秒，此值约3年，等同永不超时。
 # 注意不能给它0，0是"第一次轮询(0.1秒)就判定worker启动失败"，意思正好相反
-UNLIMITED_ACK_THRESHOLD = 10**9
+UNLIMITED_ACK_THRESHOLD = 10 ** 9
 
 
 def resolve_ack_threshold(config) -> int:
@@ -256,8 +257,8 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        # logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
-        # todo sanic bug: 来新连接时，其他worker的task会被暂停，导致续约失败
+        logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
+        # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
         except RedisConnectionError as e:
@@ -345,6 +346,8 @@ def worker_main(app_name, config) -> Sanic:
 
     # 启动未来调用worker
     app.add_task(future_call_task(app))
+    # 启动事件循环卡死检测，卡住时自动dump线程/协程栈到logs/hang_<pid>.log
+    app.add_task(hang_watchdog_task(app))
     # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
     app.add_task(worker_keeper_renewal(app))
 
