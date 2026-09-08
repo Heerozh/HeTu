@@ -236,13 +236,16 @@ async def test_snowflake_timestamp_keeper(
     pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
     now_ms = int(time.time() * 1000)
 
-    # 还没有任何记录时必须返回-1，让 SnowflakeID.init 用自己的
+    # 行都不存在（读不出来）时返回-1，让 SnowflakeID.init 用自己的
     # TIME_ROLLBACK_TOLERANCE_MS 兜底。返回当前时间会把那个兜底废掉，等于毫无回拨保护
     assert await SnowflakeTimestampKeeper(table, 7).load() == -1
 
     # 之后按真实流程来：行由 get_worker_id 抢租约时建出（见 save 的文档）
     worker_id = await GeneralWorkerKeeper(201, table).get_worker_id()
     ts_keeper = SnowflakeTimestampKeeper(table, worker_id)
+
+    # 行在、但从没记录过水位（首次开服）→ 直接用当前时间，绝不能钳制
+    assert abs(await ts_keeper.load() - now_ms) < 1000
 
     # 水位远低于当前时间（正常情况）→ 用当前时间
     await ts_keeper.save(now_ms - 60_000)
@@ -316,3 +319,40 @@ async def test_general_worker_keeper_concurrent_claim_race(
     loser_id = await loser.get_worker_id()
     assert winner.worker_id == winner_id
     assert loser_id != winner_id  # loser 没崩溃，且正确避开了被占用的 id
+
+
+async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
+    """回归：开服（首次和重启）都不该让雪花ID起始时间戳超前于当前时间。
+
+    超前会把时间戳钳在同一毫秒，总容量塌缩成4096个ID，发完就1ms一睡地空转直到墙钟追上，
+    期间还每发一个ID刷一条"时钟回拨"警告。曾因为抢租约时顺手把 last_timestamp 写成 now、
+    读回时又加了写入间隔补偿，导致每次开服都白背一个5秒降级窗口。
+    """
+    monkeypatch.chdir(tmp_path)
+    backend = mod_sqlite_backend()
+
+    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+    from hetu.data.backend.table import Table
+    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+
+    table = Table(WorkerLease, "pytest", 1, backend)
+
+    for label in ("首次开服", "重启"):
+        # 完整走一遍 worker_start 的流程：抢租约 → 读水位 → 初始化发号器
+        worker_id = await GeneralWorkerKeeper(301, table).get_worker_id()
+        loaded = await SnowflakeTimestampKeeper(table, worker_id).load()
+        now_ms = int(time.time() * 1000)
+        assert loaded - now_ms < 1000, f"{label}时发号器起始时间戳超前了"
+
+        # 判据不是"能连发多少个"——每毫秒4096本来就是硬上限，发多少取决于机器速度；
+        # 而是"耗尽后睡一下容量能不能恢复"：被钳在未来时，墙钟追上之前睡多久都恢复不了
+        generator = SnowflakeID()
+        generator.init(worker_id, loaded)
+        for _ in range(20000):
+            if generator._next_id() is None:
+                break
+        time.sleep(0.01)
+        assert generator._next_id() is not None, (
+            f"{label}时发号容量耗尽后睡10ms仍未恢复，说明起始时间戳被钳在了未来"
+        )

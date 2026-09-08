@@ -104,7 +104,11 @@ class GeneralWorkerKeeper(WorkerKeeper):
                         lease = WorkerLease.new_row(id_=worker_id)
                         lease.node_id = self.node_id
                         lease.expires_at = now_ms + self._expire_ms()
-                        lease.last_timestamp = now_ms
+                        # 不碰 last_timestamp：它是雪花ID的时间戳高水位，归
+                        # SnowflakeTimestampKeeper 管。抢租约时把它设成 now 等于伪造了一个
+                        # "已经发到现在"的水位，读回时再加上写入间隔补偿就会把起始时间戳推到
+                        # 未来，让每次开服都白白多出一个几秒的降级窗口（时间戳被钳在同一毫秒，
+                        # 容量只剩4096个ID且刷警告日志）。留字段默认值0表示"从没记录过"。
                         # cold-start 时多个 worker 会竞争同一个 worker_id。上面的
                         # get(id) 读空已登记 negative observation，故若此处 insert 在
                         # get 与提交之间被并发抢占，会抛 RaceCondition（而非不可重试的
@@ -116,7 +120,7 @@ class GeneralWorkerKeeper(WorkerKeeper):
                     if row.node_id == self.node_id or int(row.expires_at) <= now_ms:
                         row.node_id = self.node_id
                         row.expires_at = now_ms + self._expire_ms()
-                        row.last_timestamp = max(int(row.last_timestamp), now_ms)
+                        # 同上，last_timestamp 原样保留（那是上次运行留下的真实水位）
                         await repo.update(row)
                         return True
 

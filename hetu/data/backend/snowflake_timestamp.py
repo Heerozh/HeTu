@@ -81,17 +81,25 @@ class SnowflakeTimestampKeeper:
     async def load(self) -> int:
         """读回高水位，返回可直接传给 `SnowflakeID.init` 的起始时间戳。
 
-        返回值有两种：
+        三种情况：
 
-        * 读到了 → `max(水位 + 写入间隔, 当前时间)`。取 max 是因为水位只是个下界：正常情况
-          下当前时间早就超过它了，只有真的发生重启回拨时水位才更大，那时宁可让ID的时间戳
-          "超前"也不能重复。**必须加上一个写入间隔**：水位每
+        * **读到了有效水位** → `max(水位 + 写入间隔, 当前时间)`。取 max 是因为水位只是个
+          下界：正常情况下当前时间早就超过它了，只有真的发生重启回拨时水位才更大，那时宁可
+          让ID的时间戳"超前"也不能重复。**必须加上一个写入间隔**：水位每
           TIMESTAMP_SAVE_INTERVAL 秒才写一次，崩溃时最后那一个间隔内发出去的ID其时间戳
           已经超过了记录值，不补这一段就会把它们再发一遍。
-        * 读不到（首次开服 / 表被清过 / 后端暂时异常）→ 返回 -1，交给
-          `SnowflakeID.init` 自己的 `TIME_ROLLBACK_TOLERANCE_MS` 兜底（它会用
-          当前时间+10秒）。注意不能返回当前时间——那等于把 init 的兜底废掉，退化成完全
-          没有回拨保护。
+        * **水位为0（从没记录过）** → 返回当前时间，**不做任何钳制**。这个 worker_id 名下
+          从没发出过ID，也就没有可重复的时间戳，不需要保护。这里绝不能退化成"未知"去用
+          兜底值：那会让每次全新开服都白白背上一个几秒的降级窗口——时间戳被钳在同一毫秒，
+          总容量只剩4096个ID，超了就1ms一睡地空转，还每发一个ID刷一条回拨警告。
+        * **读不出来（后端异常）** → 返回 -1，交给 `SnowflakeID.init` 自己的
+          `TIME_ROLLBACK_TOLERANCE_MS` 兜底。这才是真正"可能发过号但不知道发到哪"的情况，
+          值得付那个降级窗口的代价。注意不能返回当前时间——那等于把 init 的兜底废掉。
+
+        已知取舍：`hetu upgrade` 会 flush 掉 volatile 的 WorkerLease 表，水位丢失后也表现为
+        0，从数据上无法和"首次开服"区分，此时会走不钳制的分支。选这一边是因为首次开服每次
+        新部署、每次开发都会发生，而"维护期间恰好又发生时钟回拨"是罕见组合，且有运维侧
+        "NTP只slew不step"兜底。
         """
         now_ms = self._now_ms()
         try:
@@ -108,7 +116,11 @@ class SnowflakeTimestampKeeper:
         if row is None:
             return -1
 
-        watermark = int(row.last_timestamp) + TIMESTAMP_SAVE_INTERVAL * 1000
+        stored = int(row.last_timestamp)
+        if stored <= 0:  # 从没记录过，没有可重复的时间戳，不需要保护
+            return now_ms
+
+        watermark = stored + TIMESTAMP_SAVE_INTERVAL * 1000
         if watermark > now_ms:
             logger.warning(
                 _(
