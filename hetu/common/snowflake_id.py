@@ -194,8 +194,12 @@ class WorkerKeeper:
         """
         raise NotImplementedError
 
-    async def get_last_timestamp(self) -> int:
-        raise NotImplementedError
+    async def keep_alive(self) -> None:
+        """续租 Worker ID。
 
-    async def keep_alive(self, last_timestamp: int) -> None:
+        注意：雪花ID的时间戳高水位（防重启回拨）**不在**这里，它由
+        `hetu.data.backend.snowflake_timestamp.SnowflakeTimestampKeeper` 独立负责。
+        两者的并发语义相反——租约要互斥、水位只要单调max——捆在一起会让一个零协调需求
+        背上强协调需求的复杂度，详见那个类的文档。
+        """
         raise NotImplementedError

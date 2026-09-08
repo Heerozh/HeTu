@@ -1,6 +1,4 @@
 import logging
-from datetime import datetime
-from time import time
 from typing import TYPE_CHECKING, cast, final, override
 
 import redis.asyncio
@@ -52,7 +50,6 @@ class RedisWorkerKeeper(WorkerKeeper):
         super().__init__()
         self.aio = aio
         self.worker_id_key = "snowflake:worker"
-        self.last_timestamp_key = "snowflake:last_timestamp"
         self.worker_id = -1
         # 机器码+pid组成的node_id。
         # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
@@ -120,30 +117,19 @@ class RedisWorkerKeeper(WorkerKeeper):
         )
 
     @override
-    async def get_last_timestamp(self) -> int:
+    async def keep_alive(self):
         """
-        从 Redis 中获取上次生成 ID 的时间戳。
-        """
-        key = f"{self.last_timestamp_key}:{self.node_id}"
-        last_timestamp = cast(bytes, await self.aio.get(key))
-        if last_timestamp is not None:
-            logger.info(
-                _("[❄️ID] 成功获取 {node_id} 持久化的 last_timestamp: {ts}").format(
-                    node_id=self.node_id,
-                    ts=f"{datetime.fromtimestamp(int(last_timestamp) / 1000):%Y-%m-%d %H:%M:%S}",
-                )
-            )
-            # 返回持久化的时间戳和当前时间的最大值，因为这是为了防止回拨，自然要取最大值
-            return max(int(last_timestamp), int(time() * 1000))
-        else:
-            return int(time() * 1000)
-
-    @override
-    async def keep_alive(self, last_timestamp: int):
-        """
-        续租 Worker ID 的有效期，并保存雪花ID上次生成用的时间戳。
+        续租 Worker ID 的有效期。
         续约失败则抛出异常，表示 Worker ID 可能中途被其他实例占用了。
-        此方法需要每5秒调用1次，因为回拨误差是10秒。
+        此方法需要每5秒调用1次。
+
+        ⚠️ 已知缺陷：`EXPIRE` 只看 key 在不在、**不看 value**，所以它只挡得住"租约过期
+        且没人接手"（key没了→返回0），挡不住"租约被别的 worker 用 SET NX 抢走"（key还在，
+        值是对方的 node_id → 照样返回1）。后者恰恰是会产生重复雪花ID的那种。
+        正确做法是 compare-and-expire，比如一条 `GETEX key EX ttl` 拿回旧值再比 node_id。
+
+        时间戳高水位不再在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
+        只要单调max，两者并发语义相反，捆一起没必要。
         """
         worker_id = self.worker_id
         key = f"{self.worker_id_key}:{worker_id}"
@@ -158,6 +144,3 @@ class RedisWorkerKeeper(WorkerKeeper):
             )
             # 关闭Worker
             raise SystemExit(_("Worker ID 续约失败，重启Worker..."))
-        # 记录last_timestamp到redis，防止重启回拨
-        ts_key = f"{self.last_timestamp_key}:{self.node_id}"
-        await self.aio.set(ts_key, last_timestamp, ex=86400)

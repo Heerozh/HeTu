@@ -16,7 +16,7 @@ from ...common.permission import Permission
 from ...common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 from ...i18n import _
 from ..component import BaseComponent, define_component, property_field
-from .base import RaceCondition, RowFormat
+from .base import RaceCondition
 
 if TYPE_CHECKING:
     from .table import Table
@@ -165,29 +165,17 @@ class GeneralWorkerKeeper(WorkerKeeper):
         )
 
     @override
-    async def get_last_timestamp(self) -> int:
+    async def keep_alive(self):
         """
-        从 Table 中获取上次生成 ID 的时间戳。
-        """
-        now_ms = self._now_ms()
-        worker_id = self.worker_id
-        if worker_id < 0:
-            return now_ms
+        续租 Worker ID 的有效期。
 
-        row = await self.table.backend.master.get(
-            self.table, worker_id, row_format=RowFormat.STRUCT
-        )
-        if row is None:
-            return now_ms
+        ⚠️ 已知缺陷：这里是无条件 `direct_set`，**从不校验 node_id**。如果本进程长时间
+        卡住（超过 WORKER_ID_EXPIRE_SEC）导致租约过期并被别的 worker 抢走，这里依然会
+        "续约成功"，于是两个 worker 拿着同一个 Worker ID → 雪花ID重复。
+        修复需要 CAS（比较并交换）语义，见 `keep_alive` 的调用方注释。
 
-        return max(int(row.last_timestamp), now_ms)
-
-    @override
-    async def keep_alive(self, last_timestamp: int):
-        """
-        续租 Worker ID 的有效期，并保存雪花ID上次生成用的时间戳。
-        续约失败则抛出异常，表示 Worker ID 可能中途被其他实例占用了。
-        此方法需要每5秒调用1次，因为回拨误差是10秒。
+        时间戳高水位不再在这里写，已拆给 `SnowflakeTimestampKeeper`：租约要互斥、水位
+        只要单调max，两者并发语义相反，捆一起没必要。
         """
         worker_id = self.worker_id
         if worker_id < 0:
@@ -195,7 +183,5 @@ class GeneralWorkerKeeper(WorkerKeeper):
 
         now_ms = self._now_ms()
         await self.table.direct_set(
-            worker_id,
-            expires_at=str(now_ms + self._expire_ms()),
-            last_timestamp=str(last_timestamp),
+            worker_id, expires_at=str(now_ms + self._expire_ms())
         )

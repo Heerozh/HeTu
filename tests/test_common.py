@@ -1,3 +1,4 @@
+import logging
 import time
 
 import numpy as np
@@ -180,11 +181,8 @@ async def test_redis_worker_keeper(mod_auto_backend):
         f"{worker_keeper2.worker_id_key}:{worker_id_2}", 20
     )
     assert expire <= 20
-    # 续约
-    ts = int(time.time() * 1000) + 1230
-    await worker_keeper2.keep_alive(ts)
-    last_ts = await worker_keeper2.get_last_timestamp()
-    assert last_ts == ts
+    # 续约（只管租约，时间戳高水位已拆给 SnowflakeTimestampKeeper）
+    await worker_keeper2.keep_alive()
     expire = await redis_client.ttl(f"{worker_keeper2.worker_id_key}:{worker_id_2}")
     assert expire > 60 - 1
 
@@ -193,6 +191,7 @@ async def test_general_worker_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     backend = mod_sqlite_backend()
 
+    from hetu.data.backend.base import RowFormat
     from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
     from hetu.data.backend.table import Table
 
@@ -210,10 +209,61 @@ async def test_general_worker_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     worker_id_2 = await worker_keeper2.get_worker_id()
     assert worker_id_2 == 1
 
-    ts = int(time.time() * 1000) + 1230
-    await worker_keeper2.keep_alive(ts)
-    last_ts = await worker_keeper2.get_last_timestamp()
-    assert last_ts == ts
+    # 续约只管租约，不再写时间戳高水位
+    await worker_keeper2.keep_alive()
+    row = await table.backend.master.get(
+        table, worker_id_2, row_format=RowFormat.STRUCT
+    )
+    assert row is not None
+    assert int(row.expires_at) > int(time.time() * 1000)
+
+
+async def test_snowflake_timestamp_keeper(
+    mod_sqlite_backend, monkeypatch, tmp_path, caplog
+):
+    """时间戳高水位：独立于租约的读写语义，只需要单调max"""
+    monkeypatch.chdir(tmp_path)
+    backend = mod_sqlite_backend()
+
+    from hetu.data.backend.snowflake_timestamp import (
+        TIMESTAMP_SAVE_INTERVAL,
+        SnowflakeTimestampKeeper,
+    )
+    from hetu.data.backend.table import Table
+    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+
+    table = Table(WorkerLease, "pytest", 1, backend)
+    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
+    now_ms = int(time.time() * 1000)
+
+    # 还没有任何记录时必须返回-1，让 SnowflakeID.init 用自己的
+    # TIME_ROLLBACK_TOLERANCE_MS 兜底。返回当前时间会把那个兜底废掉，等于毫无回拨保护
+    assert await SnowflakeTimestampKeeper(table, 7).load() == -1
+
+    # 之后按真实流程来：行由 get_worker_id 抢租约时建出（见 save 的文档）
+    worker_id = await GeneralWorkerKeeper(201, table).get_worker_id()
+    ts_keeper = SnowflakeTimestampKeeper(table, worker_id)
+
+    # 水位远低于当前时间（正常情况）→ 用当前时间
+    await ts_keeper.save(now_ms - 60_000)
+    assert await ts_keeper.load() >= now_ms
+
+    # 关键用例：水位高于当前时间（模拟重启期间时钟回拨），必须返回水位而不是当前时间，
+    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳
+    future_ms = now_ms + 30_000
+    await ts_keeper.save(future_ms)
+    assert await ts_keeper.load() == future_ms + pad_ms
+
+    # 崩溃时最后一个写入间隔内发出的ID其时间戳已超过记录值，读回时必须补上这一段
+    edge_ms = now_ms + 1000  # 水位仅略高于当前时间，不补就会重发这段时间的ID
+    await ts_keeper.save(edge_ms)
+    assert await ts_keeper.load() == edge_ms + pad_ms
+
+    # 写入不生效时必须报错而不是静默无效（SQL后端的direct_set是UPDATE，行不存在就什么都不做）
+    orphan = SnowflakeTimestampKeeper(table, 9)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        await orphan.save(future_ms)
+    assert any("高水位写入未生效" in r.message for r in caplog.records)
 
 
 async def test_general_worker_keeper_concurrent_claim_race(
