@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import time
 
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
@@ -199,6 +200,8 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         except ValueError:
             pass
         else:
+            # 断线System不走Endpoint，要自己打时间戳，否则是上一次rpc的时间（可能很久以前）
+            context.timestamp = time.time()
             try:
                 await system_caller.call(DISCONNECT_SYSTEM)
             except BaseException as e:

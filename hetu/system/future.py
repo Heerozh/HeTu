@@ -371,6 +371,8 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 执行
     ok = False
     res = None
+    # 未来调用不走Endpoint，请求时间戳要自己打，否则System读到的ctx.timestamp恒为0
+    caller.context.timestamp = time.time()
     try:
         if req_call_lock:
             res = await caller.call_(sys, *args, uuid=str(call.id))

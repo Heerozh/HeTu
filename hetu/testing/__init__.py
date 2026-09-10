@@ -15,6 +15,7 @@ unit-test their own `@define_system` / `@define_endpoint` logic.
 """
 
 import importlib
+import time
 import warnings
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, Literal
@@ -302,7 +303,8 @@ class Sandbox:
             address="sandbox",
             group="",
             user_data=user_data if user_data is not None else {},
-            timestamp=0,
+            # 绕过了Endpoint层，所以这里代替它打上请求时间戳，与生产的ctx.timestamp一致
+            timestamp=time.time(),
             request=None,  # type: ignore[arg-type]
             systems=None,  # type: ignore[arg-type]
         )

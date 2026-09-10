@@ -105,6 +105,43 @@ async def cancel_rls_comp_value_future(ctx: hetu.SystemContext, key):
     return await ctx.depend["cancel_future_call:copy1"](ctx, key)
 
 
+# --------- ctx.timestamp 测试用（endpoint / system / 未来调用 三条路径）---------
+
+# 测试用：记录每次System执行时看到的ctx.timestamp。未来调用是后台执行、返回值拿不到，
+# 所以用模块变量把System内部看到的值带出来（app.py每个test都会reload，不会跨test污染）
+CTX_TIMESTAMPS: list[float] = []
+
+
+@hetu.define_endpoint(namespace="pytest", permission=hetu.Permission.EVERYBODY)
+async def report_ctx_timestamp(ctx: hetu.EndpointContext):
+    """测试用：纯Endpoint，返回自己看到的ctx.timestamp"""
+    return float(ctx.timestamp)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(RLSComp,),
+    permission=hetu.Permission.EVERYBODY,
+    call_lock=True,
+)
+async def record_ctx_timestamp(ctx: hetu.SystemContext):
+    """测试用：记录并返回System内看到的ctx.timestamp（可被客户端调用，也可作未来调用目标）"""
+    CTX_TIMESTAMPS.append(float(ctx.timestamp))
+    return float(ctx.timestamp)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("create_future_call:copy1",),
+)
+async def record_ctx_timestamp_future(ctx: hetu.SystemContext):
+    """测试用：创建一个1秒后执行record_ctx_timestamp的未来调用"""
+    return await ctx.depend["create_future_call:copy1"](
+        ctx, -1, "record_ctx_timestamp", timeout=10, recurring=False
+    )
+
+
 # ---------------------------------
 
 
