@@ -8,19 +8,40 @@ import asyncio
 import logging
 import os
 import threading
+from contextlib import contextmanager
 from typing import Any
 
 import pytest
 from fixtures.backends import ALL_BACKENDS, backend_config_by_name
 from test_websocket import setup_websocket_proxy  # noqa: F401  ws 代理 fixture
 
-from hetu import headless
+from hetu import headless, webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import worker_main
 from hetu.system import SystemClusters
 
 logger = logging.getLogger("HeTu.root")
+
+
+@contextmanager
+def _preserve_loggers():
+    """worker_main 建 Sanic app 时会 dictConfig(LOGGING)，把 HeTu.replay 改成 ERROR 且
+    不 propagate；本模块按字母序排在别的依赖 caplog 抓 replay 日志的测试之前，退出时把
+    被改过的 logger 恢复原样，不把污染留给后面的测试。"""
+    names = (None, "HeTu.root", "HeTu.replay")
+    saved = {}
+    for name in names:
+        lg = logging.getLogger(name)
+        saved[name] = (lg.level, lg.propagate, list(lg.handlers))
+    try:
+        yield
+    finally:
+        for name, (level, propagate, handlers) in saved.items():
+            lg = logging.getLogger(name)
+            lg.setLevel(level)
+            lg.propagate = propagate
+            lg.handlers[:] = handlers
 
 
 @pytest.fixture(params=["redis", "sqlite"])
@@ -32,26 +53,37 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
 
     SystemClusters()._clear()
     EndpointDefines()._clear()
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
+    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    webext.clear()
     app_file = os.path.join(os.path.dirname(__file__), "app.py")
-    server = worker_main(
-        f"Hetu-headless-{backend_name}",
-        {
-            "APP_FILE": app_file,
-            "NAMESPACE": "pytest",
-            "INSTANCES": ["pytest_1"],
-            "LISTEN": "0.0.0.0:874",
-            "PACKET_LAYERS": [{"type": "jsonb"}, {"type": "zlib"}, {"type": "crypto"}],
-            "BACKENDS": {"main": config},
-            "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
-            "MAX_TABLE_SUBSCRIPTION": 1,
-            "LOGGING": DEFAULT_LOGGING_CONFIG,
-            "DEBUG": False,
-            "WORKER_NUM": 1,
-            "ACCESS_LOG": False,
-        },
-    )
-    yield server, config
-    server.stop()
+    with _preserve_loggers():
+        server = worker_main(
+            f"Hetu-headless-{backend_name}",
+            {
+                "APP_FILE": app_file,
+                "NAMESPACE": "pytest",
+                "INSTANCES": ["pytest_1"],
+                "LISTEN": "0.0.0.0:874",
+                "PACKET_LAYERS": [
+                    {"type": "jsonb"},
+                    {"type": "zlib"},
+                    {"type": "crypto"},
+                ],
+                "BACKENDS": {"main": config},
+                "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
+                "MAX_TABLE_SUBSCRIPTION": 1,
+                "LOGGING": DEFAULT_LOGGING_CONFIG,
+                "DEBUG": False,
+                "WORKER_NUM": 1,
+                "ACCESS_LOG": False,
+            },
+        )
+        try:
+            yield server, config
+        finally:
+            server.stop()
+            webext.clear()
 
 
 async def _drain(client, idle=0.8, total=6.0):
