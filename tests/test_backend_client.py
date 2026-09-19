@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RowFormat, TableReference
+from hetu.data.backend import Backend, RowFormat, Table, TableReference
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
 
@@ -551,6 +551,19 @@ async def test_get_many(filled_item_ref, mod_auto_backend):
     assert got[0]["time"] == "113"
 
     assert await servant.get_many(filled_item_ref, []) == []
+
+
+async def test_table_servant_get_many(filled_item_ref):
+    """Table.servant_get_many：与 servant_get / servant_range 同款绑定，供非事务批量读"""
+    tbl: Table = filled_item_ref
+    rows = await tbl.servant_range("time", 110, 120, limit=100)
+    ids = [int(r.id) for r in rows]
+    query = [ids[3], 999999999, ids[0]]
+    got = await tbl.servant_get_many(query)
+    assert [None if r is None else int(r.id) for r in got] == [ids[3], None, ids[0]]
+    assert got[0] == await tbl.servant_get(ids[3])
+    got_dict = await tbl.servant_get_many(query, RowFormat.TYPED_DICT)
+    assert got_dict[0]["time"] == 113 and got_dict[1] is None
 
 
 async def test_range_large(item_ref, mod_auto_backend):

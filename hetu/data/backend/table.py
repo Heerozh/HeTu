@@ -78,5 +78,10 @@ class Table(TableReference):
         return bind_first_arg_with_typehint(self.backend.servant.range, self)
 
     @property
+    def servant_get_many(self):
+        """按 id 列表批量读行（非事务，走 servant），与 `servant_get` 同款绑定"""
+        return bind_first_arg_with_typehint(self.backend.servant.get_many, self)
+
+    @property
     def direct_set(self):
         return bind_first_arg_with_typehint(self.backend.master.direct_set, self)
