@@ -329,10 +329,23 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
         )
 
     # 测试float索引的inf范围，model范围为0.0-2.4，共25个
+    # （MySQL/MariaDB 不接受 inf 绑定参数，后端须把 float 列的 ±inf 钳到 dtype 极值）
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
         np.testing.assert_array_almost_equal(
             (await item_repo.range(time=(-np.inf, np.inf), limit=99)).model,
+            np.arange(0, 2.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(1.05, np.inf), limit=99)).model,
+            np.arange(1.1, 2.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(-np.inf, 0.45), limit=99)).model,
+            np.arange(0, 0.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(-np.inf, np.inf), limit=99)).model,
             np.arange(0, 2.5, 0.1),
         )
 

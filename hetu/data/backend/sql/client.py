@@ -677,6 +677,24 @@ class SQLBackendClient(BackendClient, alias="sql"):
         right = cls._normalize_range_bound(dtype, right)
         return left, right, li, ri
 
+    def _clamp_float_inf(
+        self, dtype: np.dtype, left: Any, right: Any
+    ) -> tuple[Any, Any]:
+        """MySQL/MariaDB 不接受 ±inf 绑定参数（也存不下 inf），float 列的无穷边界钳到
+        dtype 极值，语义不变；其他方言原样支持 inf，不动。"""
+        if self.io.dialect.name != "mysql" or not np.issubdtype(
+            dtype.type, np.floating
+        ):
+            return left, right
+        limit = float(np.finfo(dtype).max)
+
+        def clamp(x):
+            if isinstance(x, float) and np.isinf(x):
+                return limit if x > 0 else -limit
+            return x
+
+        return clamp(left), clamp(right)
+
     def _is_unique_violation(self, exc: sa_exc.IntegrityError) -> bool:
         message = str(exc).lower()
         markers = (
@@ -803,6 +821,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             else (cast(Any, right) < cast(Any, left))
         ):
             raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
+        left, right = self._clamp_float_inf(dtype, left, right)
 
         table = self.component_table(table_ref)
         col = table.c[index_name]
