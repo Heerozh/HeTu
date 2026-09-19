@@ -1,7 +1,7 @@
 # 无服务器进程的表直读写客户端（`hetu.headless`）— 设计稿
 
 - 日期：2026-09-20
-- 状态：需求疑问（Q1–Q10）已与用户对齐，本稿待评审；评审通过后写实现计划
+- 状态：已实现（分支 `feat/headless-table-client`），§7 的新决定按本稿默认值落地
 - 影响范围：新增 `hetu/headless.py`；核心层小改（`Backend.post_configure` 增参、
   `TableMaintenance.read_meta` 接受名字、`Session` 增 `explicit_ids_only`、
   `Table.servant_get_many`、`BackendClientFactory` 懒注册）；`hetu.testing.Sandbox`
