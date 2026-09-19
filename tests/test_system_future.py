@@ -338,3 +338,37 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     # 目标 System 真的执行了：RLSComp.value = 100 + 4
     ok, _ = await executor.execute("test_rls_comp_value", 104)
     assert ok
+
+
+@pytest.mark.timeout(20)
+async def test_future_call_task_backs_off_on_persistent_error(
+    test_app, tbl_mgr, monkeypatch
+):
+    """后端已关闭（或任何持续报错）时，future_call_task 不能空转刷屏：
+    出错后要退避再重试（否则同步抛出的异常让循环永不挂起，事件循环被饿死，
+    Sanic 关服时连 CancelledError 都送不进去）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    from hetu.system import future
+
+    calls = {"n": 0}
+
+    async def broken_sleep_for_upcoming(_tbl):
+        calls["n"] += 1
+        raise ConnectionError("连接已关闭，已调用过close")
+
+    monkeypatch.setattr(future, "sleep_for_upcoming", broken_sleep_for_upcoming)
+    app = SimpleNamespace(
+        ctx=SimpleNamespace(table_managers={"server1": tbl_mgr}),
+        config={"NAMESPACE": "pytest"},
+    )
+    task = asyncio.create_task(future.future_call_task(app))
+    await asyncio.sleep(2.5)  # 若循环不让出，这一句永远回不来（timeout 兜底）
+    assert calls["n"] <= 4, calls  # 退避 1 s：2.5 s 内最多两三次
+    task.cancel()
+    try:  # 取消后要能及时退出（正常 break 返回，或抛 CancelledError 都算）
+        await asyncio.wait_for(task, 3)
+    except asyncio.CancelledError:
+        pass
+    assert task.done()
