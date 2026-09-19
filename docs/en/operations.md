@@ -188,6 +188,11 @@ When only the cluster grouping changes, no row data needs to move.
 `upgrade` renames the table to its new cluster id and you're done — there's
 no script to review and no risk of data loss.
 
+If any [`hetu.headless`](advanced.md#reading-and-writing-tables-from-a-non-server-process-hetuheadless)
+processes share the backend, restart them after the migration: they write
+under the cluster id they read at startup, and without a restart their rows
+would land under the old prefix.
+
 ### Schema changes — via a migration script
 
 When a `Component`'s schema changes, the first run of `upgrade` generates a

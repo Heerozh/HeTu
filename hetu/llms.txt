@@ -37,7 +37,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Advanced
 
-- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns
+- [Advanced](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/advanced.md): 项目进入真实阶段后会用到的特性——`System` copies（vertical sharding via tag suffixes）、FutureCalls（定时 / 周期 System 调用）、`call_lock`（幂等 System）、`on_disconnect` 生命周期 hook、Raw Endpoints（无事务 RPC）、custom pipeline layers、用于 range query 的 NumPy patterns、`hetu.headless`（非服务器进程直接读写组件表）
 
 ## Operations & Deployment
 
@@ -51,6 +51,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
 - [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition`
+- [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Sanic / System 直接读写组件表，写入走与 System 相同的提交路径
 
 ## For LLM-assisted Development
 
