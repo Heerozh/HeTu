@@ -32,13 +32,14 @@
 """
 
 import hashlib
+import importlib
 import logging
 import warnings
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, final, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
 
 import numpy as np
 
@@ -399,6 +400,14 @@ class BackendClient:
 class BackendClientFactory:
     _registry: dict[str, type[BackendClient]] = {}
 
+    # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
+    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会同时加载
+    # redis 与 sqlalchemy 两套重依赖。第三方后端仍靠显式 import 自己的模块注册。
+    _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
+        "redis": "hetu.data.backend.redis",
+        "sql": "hetu.data.backend.sql",
+    }
+
     @staticmethod
     def register(alias: str, client_cls: type[BackendClient]) -> None:
         BackendClientFactory._registry[alias.lower()] = client_cls
@@ -408,6 +417,10 @@ class BackendClientFactory:
         alias: str, endpoint: Any, is_servant, config: dict[str, Any]
     ) -> BackendClient:
         alias = alias.lower()
+        if alias not in BackendClientFactory._registry:
+            module = BackendClientFactory._BUILTIN_MODULES.get(alias)
+            if module:
+                importlib.import_module(module)
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
         return BackendClientFactory._registry[alias](endpoint, is_servant, **config)

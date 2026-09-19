@@ -5,8 +5,8 @@
 @email: heeroz@gmail.com
 """
 
-from . import redis as _  # noqa: F401,F811 注册redis后端，但不导出
-from . import sql as _  # noqa: F401,F811 注册sql后端，但不导出
+# 内置后端（redis / sql）不在此 eager import：BackendClientFactory 按 alias 懒加载，
+# 这样 `import hetu` 不会把 redis / sqlalchemy 一起拖进来（headless 进程只想认识其中一种）。
 from .base import (
     BackendClient,
     BackendClientFactory,
