@@ -69,3 +69,62 @@ def test_backend_factory_lazy_loads_builtin_alias(ses_redis_service, backend_nam
         "redis_pkg_after": True,
         "sqlalchemy": False,
     }
+
+
+@use_redis_backend_only
+def test_connect_resources(mod_test_app, mod_tbl_mgr, mod_backend_config, backend_name):
+    """验收 6 / R7：干净子进程里 connect 不 import sanic / sqlalchemy、不初始化
+    SnowflakeID、耗时 < 1 s、常驻内存增量 < 10 MB（相对已 import redis 后端的基线）。"""
+    out = _run_py(
+        """
+        import asyncio, json, sys, time
+        import hetu
+        import hetu.headless
+        import hetu.data.backend.redis  # 内存基线：含 redis 后端（懒加载后 import hetu 本身不含）
+        try:
+            import psutil
+        except ImportError:
+            psutil = None
+        rss = (lambda: psutil.Process().memory_info().rss) if psutil else (lambda: 0)
+        cfg = json.loads(sys.argv[1])
+
+        async def main():
+            before = rss()
+            t = time.perf_counter()
+            client = await hetu.headless.connect(
+                cfg, "server1", ["HeadlessCommand", "HeadlessSim"]
+            )
+            elapsed = time.perf_counter() - t
+            # 真用一下：不发号地写一行再读回
+            Sim = client.table("HeadlessSim").comp_cls
+            async with client.session("HeadlessSim") as s, s[Sim].upsert(id=-9001) as row:
+                row.system_id = 9001
+                row.owner_host = "subprocess"
+            row = await client.backend.master.get(client.table("HeadlessSim"), -9001)
+            after = rss()
+            await client.close()
+            from hetu.common.snowflake_id import SnowflakeID
+            print(json.dumps({
+                "sanic": "sanic" in sys.modules,
+                "sqlalchemy": "sqlalchemy" in sys.modules,
+                "connect_seconds": elapsed,
+                "rss_delta_mb": (after - before) / 1e6,
+                "rss_total_mb": after / 1e6,
+                "psutil": psutil is not None,
+                "worker_id": SnowflakeID().worker_id,
+                "host": str(row.owner_host),
+            }))
+
+        asyncio.run(main())
+        """,
+        json.dumps(mod_backend_config),
+    )
+    print(out)
+    assert out["sanic"] is False and out["sqlalchemy"] is False
+    assert out["worker_id"] == -1, "headless 不得初始化 SnowflakeID"
+    assert out["host"] == "subprocess"
+    assert out["connect_seconds"] < 1.0, out
+    if out["psutil"]:
+        # cluster 模式下 redis-py 每个节点各一套连接池，客户端对象本身就重一档
+        limit = 20 if mod_backend_config.get("raw_clustering") else 10
+        assert out["rss_delta_mb"] < limit, out
