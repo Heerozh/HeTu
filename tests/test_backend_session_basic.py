@@ -267,9 +267,10 @@ async def test_explicit_ids_only(item_ref, mod_auto_backend: Callable[..., Backe
         async with item_repo.upsert(name="exp7") as row:
             row.time = 77
 
-    rows = await backend.master.get_many(item_ref, [-7, -8])
-    assert rows[0] is not None and rows[0].time == 77
-    assert rows[1] is not None and rows[1].name == "exp8"
+    row7 = await backend.master.get(item_ref, -7)
+    row8 = await backend.master.get(item_ref, -8)
+    assert row7 is not None and row7.time == 77
+    assert row8 is not None and row8.name == "exp8"
 
     # 默认（服务器 / Sandbox）行为不变：upsert 其它 unique 字段未命中会发号新建
     async with backend.session("pytest", 1) as session:

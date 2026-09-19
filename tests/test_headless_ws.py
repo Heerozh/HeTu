@@ -8,6 +8,7 @@ import asyncio
 import logging
 import os
 import threading
+from typing import Any
 
 import pytest
 from fixtures.backends import ALL_BACKENDS, backend_config_by_name
@@ -109,7 +110,7 @@ def test_headless_writes_push_to_ws_subscribers(hl_server):
     server, config = hl_server
     steps = [threading.Event() for _ in range(3)]
     errors: list = []
-    collected: dict[str, dict] = {}
+    collected: dict[str, Any] = {}
 
     async def routine(connect):
         c = await connect()

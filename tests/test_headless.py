@@ -203,9 +203,10 @@ async def test_write_and_server_reads_back(hl, mod_test_app, mod_tbl_mgr):
             row.owner = 6
             row.name = "hl-6"
     server_tbl: Table = mod_tbl_mgr.get_table(app.PublicNames)
-    got = await server_tbl.backend.master.get_many(server_tbl, [-5, -6])
-    assert [str(r.name) for r in got] == ["hl-5", "hl-6"]
-    assert [int(r.owner) for r in got] == [5, 6]
+    got = [await server_tbl.backend.master.get(server_tbl, i) for i in (-5, -6)]
+    assert all(r is not None for r in got)
+    assert [str(r.name) for r in got if r is not None] == ["hl-5", "hl-6"]
+    assert [int(r.owner) for r in got if r is not None] == [5, 6]
 
 
 async def test_explicit_ids_only(hl, mod_test_app, monkeypatch):
@@ -360,6 +361,7 @@ def test_connect_in_thread_loop(mod_test_app, mod_tbl_mgr, mod_backend_config):
                         row.system_id = 303
                         row.owner_host = "thread"
                 row = await client.backend.master.get(client.table(Sim), -3003)
+                assert row is not None
                 result["host"] = str(row.owner_host)
                 await client.check_schema()
             finally:

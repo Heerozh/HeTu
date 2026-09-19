@@ -339,4 +339,6 @@ async def test_sandbox_is_a_headless_client(tmp_path):
         with pytest.raises(ValueError):
             sb.client.session(app.HeadlessCommand, app.PublicNames)
         tbl = sb.client.table(app.HeadlessSim)
-        assert tbl.cluster_id == sb.tbl_mgr.get_table(app.HeadlessSim).cluster_id
+        server_tbl = sb.tbl_mgr.get_table(app.HeadlessSim)
+        assert server_tbl is not None
+        assert tbl.cluster_id == server_tbl.cluster_id
