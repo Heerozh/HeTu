@@ -376,6 +376,13 @@ class SessionRepository:
             待插入的行数据，必须是 `c-struct` 格式。
         """
         assert row["_version"] == 0, "Insert row's _version must be 0."
+        if self._session.explicit_ids_only and int(row["id"]) == 0:
+            raise ValueError(
+                _(
+                    "{comp_name} 的 insert 行 id 为 0：本 Session 不发雪花号，"
+                    "请用 new_row(id_=...) 显式给出非零 id"
+                ).format(comp_name=self.ref.comp_cls.name_)
+            )
 
         # unique check
         conflict, is_race = await self.is_unique_conflicts(row, insert=True)
@@ -477,6 +484,21 @@ class UpsertContext:
             self.row_data = existing_row
             self.clean_data = existing_row.copy()
             self.insert = False
+        elif self.index_name == "id":
+            # 锚定主键：新行直接用锚定值做 id，不发雪花号（也就不依赖 SnowflakeID 初始化）
+            self.row_data = self.repo.ref.comp_cls.new_row(id_=int(self.query_value))
+            self.insert = True
+        elif self.repo.session.explicit_ids_only:
+            raise LookupError(
+                _(
+                    "{comp_name}.{index_name}={value} 不存在：本 Session 不发雪花号，"
+                    "upsert 只允许命中已有行，或改用 upsert(id=...) 显式给出 id"
+                ).format(
+                    comp_name=self.repo.ref.comp_cls.name_,
+                    index_name=self.index_name,
+                    value=self.query_value,
+                )
+            )
         else:
             self.row_data = self.repo.ref.comp_cls.new_row()
             self.row_data[self.index_name] = self.query_value

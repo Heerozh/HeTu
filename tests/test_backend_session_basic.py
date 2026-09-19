@@ -214,6 +214,72 @@ async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
             assert row.time == 4
 
 
+async def test_upsert_by_id_does_not_mint_snowflake(
+    item_ref, mod_auto_backend: Callable[..., Backend]
+):
+    """锚定 id 的 upsert 未命中时直接用锚定值建行，不消耗雪花号（默认模式下也如此）。"""
+    backend = mod_auto_backend()
+    before = (SnowflakeID().last_timestamp, SnowflakeID().sequence)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        item_repo = session.using(item_ref.comp_cls)
+        async with item_repo.upsert(id=-42) as row:
+            row.name = "byid"
+            row.time = 42
+    assert (SnowflakeID().last_timestamp, SnowflakeID().sequence) == before
+    row = await backend.master.get(item_ref, -42)
+    assert row is not None and row.name == "byid"
+
+
+async def test_explicit_ids_only(item_ref, mod_auto_backend: Callable[..., Backend]):
+    """explicit_ids_only=True（headless）：不发号——insert 必须带非零 id，
+    只有锚定 id 的 upsert 允许新建，锚定其它 unique 字段未命中就报错。"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        session.explicit_ids_only = True
+        item_repo = session.using(comp)
+
+        # insert：id == 0 明确报错，而不是静默发号
+        with pytest.raises(ValueError, match="id"):
+            await item_repo.insert(comp.new_row(id_=0))
+        # 显式 id 正常
+        row = comp.new_row(id_=-7)
+        row.name = "exp7"
+        row.time = 7
+        await item_repo.insert(row)
+
+        # upsert 锚定 id：未命中允许新建（不发号）
+        async with item_repo.upsert(id=-8) as row:
+            row.name = "exp8"
+            row.time = 8
+        # upsert 锚定 id == 0 也算没给 id
+        with pytest.raises(ValueError, match="id"):
+            async with item_repo.upsert(id=0) as row:
+                row.name = "zero"
+
+        # upsert 锚定其它 unique 字段：未命中 → 报错，命中 → 正常 update
+        with pytest.raises(LookupError):
+            async with item_repo.upsert(name="nope") as row:
+                row.time = 99
+        async with item_repo.upsert(name="exp7") as row:
+            row.time = 77
+
+    rows = await backend.master.get_many(item_ref, [-7, -8])
+    assert rows[0] is not None and rows[0].time == 77
+    assert rows[1] is not None and rows[1].name == "exp8"
+
+    # 默认（服务器 / Sandbox）行为不变：upsert 其它 unique 字段未命中会发号新建
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        assert session.explicit_ids_only is False
+        async with session.using(comp).upsert(name="auto") as row:
+            row.time = 100
+            assert row.id > 0
+
+
 async def test_range_interval(filled_item_ref, mod_auto_backend):
     """测试开闭区间"""
     backend: Backend = mod_auto_backend()
