@@ -312,3 +312,31 @@ async def test_sandbox_second_namespace_repoints_main(tmp_path):
         "pytest", app, db_path=str(tmp_path / "c.sqlite3")
     ) as sb3:
         assert await sb3.call_system("add_rls_comp_value", 1, caller=5, raw=True) == 101
+
+
+async def test_sandbox_is_a_headless_client(tmp_path):
+    """Sandbox 基于 hetu.headless.HeadlessClient：sb.client 暴露多表事务 / Table，
+    与 Sandbox 自己的 insert/get 看到同一份数据；Sandbox 允许自动发号。"""
+    from hetu.headless import HeadlessClient
+
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        assert isinstance(sb.client, HeadlessClient)
+        assert sb.client.instance == sb.instance_name
+        assert sb.client.backend is sb.backend
+
+        # 同簇多表事务（HeadlessCommand / HeadlessSim 被 push_headless_command 同时引用）
+        async with sb.client.session(app.HeadlessCommand, app.HeadlessSim) as s:
+            cmd = app.HeadlessCommand.new_row()  # Sandbox 已初始化雪花，可自动发号
+            cmd.system_id, cmd.seq, cmd.created_at = 1, 1, 1.0
+            await s[app.HeadlessCommand].insert(cmd)
+            async with s[app.HeadlessSim].upsert(system_id=1) as sim:  # 允许发号新建
+                sim.owner_host = "sandbox"
+        assert (await sb.must_get(app.HeadlessSim, system_id=1)).owner_host == "sandbox"
+        assert len(await sb.range(app.HeadlessCommand, "created_at", 0.0, 2.0)) == 1
+
+        # 跨簇仍然报错；Table 与 tbl_mgr 的一致
+        with pytest.raises(ValueError):
+            sb.client.session(app.HeadlessCommand, app.PublicNames)
+        tbl = sb.client.table(app.HeadlessSim)
+        assert tbl.cluster_id == sb.tbl_mgr.get_table(app.HeadlessSim).cluster_id

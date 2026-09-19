@@ -29,6 +29,7 @@ from ..endpoint.connection import elevate
 from ..endpoint.definer import EndpointDefines
 from ..endpoint.executor import EndpointExecutor
 from ..endpoint.response import RejectResponse, ResponseToClient
+from ..headless import HeadlessClient
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemContext
 from ..system.caller import SystemCaller
@@ -97,7 +98,10 @@ class Sandbox:
 
     两者的成功返回都过一遍与生产同款的 msgpack 往返（不可序列化的返回会在此抛错，与生产
     wire 一致）。`insert`/`upsert` 直接喂初始行（绕过 System，便于 seeding），`get`/`range`
-    直接读回组件表；二者都不做 RLS 检查。
+    直接读回组件表；二者都不做 RLS 检查。它们都是对 `client`（一个
+    `hetu.headless.HeadlessClient`）的薄包装：需要多表事务或 `Table` 时直接用
+    `sb.client.session(A, B)` / `sb.client.table(A)`。Sandbox 与 headless 的区别只在
+    它自己建簇、建表、初始化雪花 id、并能跑 System。
 
     注意 / Notes
     -----
@@ -114,6 +118,8 @@ class Sandbox:
     instance_name: str
     backend: Backend
     tbl_mgr: ComponentTableManager
+    client: HeadlessClient
+    """表直读写客户端：`get`/`range`/`insert`/`upsert` 都经它；多表事务用 `client.session`"""
 
     def __init__(
         self,
@@ -128,6 +134,14 @@ class Sandbox:
         self.instance_name = instance_name
         self.backend = backend
         self.tbl_mgr = tbl_mgr
+        # Sandbox = headless client + 簇 + 建表 + SystemCaller：数据读写全部复用 headless，
+        # 只是 Sandbox 已初始化雪花 id，允许 insert/upsert 自动发号（explicit_ids_only=False）
+        self.client = HeadlessClient(
+            backend,
+            instance_name,
+            [tbl for _comp, tbl in tbl_mgr.items()],
+            explicit_ids_only=False,
+        )
         # 与 server pipeline 同款 msgpack codec（见 hetu/server/pipeline/jsonb.py），
         # 用于 call/call_system 模拟真实 wire 序列化往返（见 _wire_roundtrip）。
         self._msg_encoder = msgspec.msgpack.Encoder()
@@ -194,14 +208,10 @@ class Sandbox:
             # → 仅重指 main（get_system 单参查询走 main 表），不清表不重建。
             SystemClusters().switch_main(namespace)
 
-        # 3. SQLite backend
+        # 3. SQLite backend；schema 检查直接给全部已定义组件，不依赖 SystemClusters
         config = {"type": "sql", "master": f"sqlite:///{db_path}", "servants": []}
         backend = Backend(config)
-        # SQL backend 的 schema 检查/支持表会用到 referred components，与内部 fixture 对齐
-        backend.master._get_referred_components = (  # type: ignore[method-assign]
-            lambda: ComponentDefines().get_all()
-        )
-        backend.post_configure()
+        backend.post_configure(ComponentDefines().get_all())
 
         # 4. 建表（与服务器启动同一调用，创建所有不存在的表，含 unique/index）
         tbl_mgr = ComponentTableManager(namespace, instance_name, {"default": backend})
@@ -343,12 +353,12 @@ class Sandbox:
 
     def _resolve_table(self, comp: Any) -> "Table":
         """把 Component 类或名字字符串解析为本沙盒的 `Table`。"""
-        table = self.tbl_mgr.get_table(comp)
-        if table is None:
+        try:
+            return self.client.table(comp)
+        except KeyError as e:
             raise ValueError(
                 f"找不到 Component：{comp!r}（是否在 components 中引用过？）"
-            )
-        return table
+            ) from e
 
     async def get(self, comp: Any, **query: Any) -> "np.record | None":
         """按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
@@ -358,9 +368,8 @@ class Sandbox:
         `must_get` 可免去 `is None` 判空、直接访问字段。
         """
         table = self._resolve_table(comp)
-        async with table.session() as session:
-            repo = session.using(table.comp_cls)
-            return await repo.get(**query)
+        async with self.client.session(table.comp_cls) as session:
+            return await session[table.comp_cls].get(**query)
 
     async def must_get(self, comp: Any, **query: Any) -> "np.record":
         """同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
@@ -392,9 +401,8 @@ class Sandbox:
         `desc=True` 降序。返回 `numpy.recarray`（c-struct array），无数据时为空数组。
         """
         table = self._resolve_table(comp)
-        async with table.session() as session:
-            repo = session.using(table.comp_cls)
-            return await repo.range(
+        async with self.client.session(table.comp_cls) as session:
+            return await session[table.comp_cls].range(
                 index_name, _left, _right, limit=limit, desc=desc, **kwargs
             )
 
@@ -422,8 +430,8 @@ class Sandbox:
             if name == "_version":
                 raise ValueError("_version 由引擎管理，insert 时不能设置")
             row[name] = value
-        async with table.session() as session:
-            await session.using(comp_cls).insert(row)
+        async with self.client.session(comp_cls) as session:
+            await session[comp_cls].insert(row)
         return int(row.id)
 
     @asynccontextmanager
@@ -441,11 +449,12 @@ class Sandbox:
         `repo.upsert(**anchor)` 的锚定语义。`comp` 可传 Component 类或其名字字符串。
         直接落库（绕过 System / 不做权限检查），便于测试喂初始行。
         """
-        table = self._resolve_table(comp)
-        async with table.session() as session:
-            repo = session.using(table.comp_cls)
-            async with repo.upsert(**anchor) as row:
-                yield row
+        comp_cls = self._resolve_table(comp).comp_cls
+        async with (
+            self.client.session(comp_cls) as session,
+            session[comp_cls].upsert(**anchor) as row,
+        ):
+            yield row
 
     async def flush(self) -> None:
         """清空本沙盒所有组件表的数据（测试间复用同一 backend 时用）。"""
@@ -456,7 +465,7 @@ class Sandbox:
 
     async def aclose(self) -> None:
         """关闭 backend 连接。"""
-        await self.backend.close()
+        await self.client.close()
 
     async def __aenter__(self) -> "Sandbox":
         return self
