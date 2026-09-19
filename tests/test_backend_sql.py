@@ -87,7 +87,7 @@ def test_sql_post_configure_runs_support_table_ddl_on_master():
 
     client._ensure_open.assert_called_once_with()
     client.ensure_support_tables_sync.assert_called_once_with()
-    client._schema_checking_for_sql.assert_called_once_with()
+    client._schema_checking_for_sql.assert_called_once_with(None)
 
 
 def test_sql_post_configure_skips_support_table_ddl_on_servant():
@@ -101,7 +101,7 @@ def test_sql_post_configure_skips_support_table_ddl_on_servant():
 
     client._ensure_open.assert_called_once_with()
     client.ensure_support_tables_sync.assert_not_called()
-    client._schema_checking_for_sql.assert_called_once_with()
+    client._schema_checking_for_sql.assert_called_once_with(None)
 
 
 @pytest.mark.asyncio
