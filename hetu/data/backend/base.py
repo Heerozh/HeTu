@@ -472,10 +472,20 @@ class TableMaintenance:
         raise NotImplementedError()
 
     def read_meta(
-        self, instance_name: str, comp_cls: type[BaseComponent]
+        self, instance_name: str, comp: type[BaseComponent] | str
     ) -> TableMeta | None:
-        """读取组件表在数据库中的meta信息，如果不存在则返回None"""
+        """读取组件表在数据库中的meta信息，如果不存在则返回None。
+
+        `comp` 可以是组件类，也可以只是组件名：meta 只按 `instance_name + 组件名` 定位，
+        不持有本地类定义的进程（如 headless client）按名字即可读到服务器写入的 schema
+        与 cluster_id。
+        """
         raise NotImplementedError
+
+    @staticmethod
+    def comp_name_of_(comp: type[BaseComponent] | str) -> str:
+        """内部方法，把组件类或组件名统一成组件名"""
+        return comp if isinstance(comp, str) else comp.name_
 
     def get_lock(self) -> AbstractContextManager:
         """获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁"""

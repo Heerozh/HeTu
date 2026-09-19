@@ -201,3 +201,14 @@ async def test_auto_migration(filled_item_ref, caplog):
         np.testing.assert_array_equal(
             (await repo.range("name", "Itm3")).time, [130, 131, 132, 133, 134]
         )
+
+
+async def test_read_meta_by_name(item_ref, mod_auto_backend):
+    """read_meta 接受组件类或组件名：不持有本地类定义的进程（headless）按名字读 meta。"""
+    maint = mod_auto_backend().get_table_maintenance()
+    by_cls = maint.read_meta(item_ref.instance_name, item_ref.comp_cls)
+    by_name = maint.read_meta(item_ref.instance_name, item_ref.comp_cls.name_)
+    assert by_cls is not None
+    assert by_cls == by_name
+    assert by_name.cluster_id == item_ref.cluster_id
+    assert maint.read_meta(item_ref.instance_name, "NoSuchComponent") is None
