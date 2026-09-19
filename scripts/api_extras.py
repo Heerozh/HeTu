@@ -15,6 +15,13 @@ EXTRAS: dict[str, str] = {
     "hetu.system.future.create_future_call": "system",
     "hetu.system.future.ensure_future_call": "system",
     "hetu.system.future.cancel_future_call": "system",
+    "hetu.headless.connect": "headless",
+    "hetu.headless.HeadlessClient": "headless",
+    "hetu.headless.HeadlessSession": "headless",
+    "hetu.headless.HeadlessError": "headless",
+    "hetu.headless.TableNotFound": "headless",
+    "hetu.headless.SchemaMismatch": "headless",
+    "hetu.headless.ClusterChanged": "headless",
 }
 
 # Topic mapping for items already in hetu.__all__. If a name from __all__ is
@@ -39,4 +46,4 @@ TOPIC_MAP: dict[str, str] = {
 }
 
 # Names from __all__ that the script intentionally skips (modules, not symbols).
-SKIP: set[str] = {"data", "system", "common", "endpoint", "webext"}
+SKIP: set[str] = {"data", "system", "common", "endpoint", "webext", "headless"}

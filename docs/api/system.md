@@ -261,7 +261,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:387`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L387)</small>
+<small>Source: [`hetu/data/backend/repo.py:394`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L394)</small>
 
 向Session中添加一行待更新数据。
 
@@ -287,7 +287,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:416`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L416)</small>
+<small>Source: [`hetu/data/backend/repo.py:423`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L423)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -322,7 +322,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:445`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L445)</small>
+<small>Source: [`hetu/data/backend/repo.py:452`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L452)</small>
 
 向Session中添加一行待删除数据。
 
@@ -606,6 +606,8 @@ Table表的地址信息加上所属的`Backend`，能够让你直接去数据库
 
 - **`backend`** (Backend) — 内部数据库连接管理实例
 
+- **`servant_get_many`** (Any) — 按 id 列表批量读行（非事务，走 servant），与 `servant_get` 同款绑定
+
 
 
 
@@ -626,7 +628,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:194`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L194)</small>
+<small>Source: [`hetu/data/backend/base.py:200`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L200)</small>
 
 从数据库直接获取单行数据。
 
@@ -671,7 +673,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:304`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L304)</small>
+<small>Source: [`hetu/data/backend/base.py:310`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L310)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -733,7 +735,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:373`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L373)</small>
+<small>Source: [`hetu/data/backend/base.py:379`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L379)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

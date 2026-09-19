@@ -63,6 +63,11 @@ TOPIC_META: dict[str, tuple[str, str, int]] = {
         "Schema 迁移脚本编写指南：默认迁移脚本模板与底层表维护方法。",
         60,
     ),
+    "headless": (
+        "Headless",
+        "无服务器进程的表直读写客户端：可信内部进程不经 Sanic / System 直接读写组件表。",
+        70,
+    ),
 }
 
 
