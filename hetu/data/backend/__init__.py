@@ -36,6 +36,11 @@ __all__ = [
 
 import asyncio
 import random
+from collections.abc import Iterable
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ..component import BaseComponent
 
 
 class Backend:
@@ -81,14 +86,21 @@ class Backend:
         for servant in self._servants:
             await servant.close()
 
-    def post_configure(self):
+    def post_configure(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         """
         对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
         此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
+
+        components: 要做 schema 检查的组件列表。None（服务器默认）表示取
+        `SystemClusters` 里所有被 System 引用的组件；不跑 System 的进程（headless
+        client、Sandbox、测试）显式传入自己关心的组件即可，无需构建簇。
         """
-        self._master.post_configure()
+        components = list(components) if components is not None else None
+        self._master.post_configure(components)
         for servant in self._servants:
-            servant.post_configure()
+            servant.post_configure(components)
 
     async def wait_for_synced(self) -> None:
         """

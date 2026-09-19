@@ -145,10 +145,15 @@ class BackendClient:
         """关闭数据库连接，释放资源。"""
         raise NotImplementedError
 
-    def post_configure(self) -> None:
+    def post_configure(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         """
         对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
         此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
+
+        components: 要做 schema 检查的组件列表；None 表示取 `SystemClusters` 里被 System
+        引用的全部组件（服务器默认）。
         """
         raise NotImplementedError
 

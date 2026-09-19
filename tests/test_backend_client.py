@@ -668,3 +668,50 @@ async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
     assert table_channel not in messages
     assert row_channel in messages
     await mq.close()
+
+
+async def test_post_configure_explicit_components(mod_auto_backend):
+    """post_configure(components=...) 用显式组件列表做 schema 检查，不依赖 SystemClusters。"""
+    import json
+
+    from hetu.data.component import BaseComponent
+
+    backend = mod_auto_backend("main")
+    # 一个索引列为复数 dtype 的组件；用 load_json 生成而不注册进 ComponentDefines，
+    # 避免污染其它 fixture 通过 ComponentDefines().get_all() 做的 mock。
+    bad_json = json.dumps(
+        {
+            "namespace": "pytest",
+            "name": "BadComplexIndex",
+            "permission": "USER",
+            "rls_compare": None,
+            "volatile": False,
+            "readonly": False,
+            "backend": "default",
+            "properties": {
+                "value": {
+                    "default": 0,
+                    "unique": False,
+                    "index": True,
+                    "dtype": "<c16",
+                },
+                "id": {"default": 0, "unique": True, "index": True, "dtype": "<i8"},
+                "_version": {
+                    "default": 0,
+                    "unique": False,
+                    "index": False,
+                    "dtype": "<i4",
+                },
+            },
+        }
+    )
+    bad_cls = BaseComponent.load_json(bad_json)
+
+    # 显式空列表：什么都不检查，正常返回；且不带参数的老用法仍可用
+    backend.post_configure(components=[])
+    backend.post_configure()
+    if isinstance(backend.master, RedisBackendClient):
+        with pytest.raises(ValueError):
+            backend.post_configure(components=[bad_cls])
+    else:
+        backend.post_configure(components=[bad_cls])  # SQL 系目前没有索引 dtype 限制

@@ -100,9 +100,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
         return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
 
-    def _schema_checking_for_sql(self):
+    def _schema_checking_for_sql(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ):
         """检查Component的schema定义，确保符合sql系列的要求"""
-        for comp_cls in self._get_referred_components():
+        if components is None:
+            components = self._get_referred_components()
+        for comp_cls in components:
             for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 如果有不支持的dtype，在这raise
@@ -388,12 +392,14 @@ class SQLBackendClient(BackendClient, alias="sql"):
             raise
 
     @override
-    def post_configure(self) -> None:
+    def post_configure(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         self._ensure_open()
         if not self.is_servant:
             self.ensure_support_tables_sync()
         # 提示用户schema定义是否符合sql要求
-        self._schema_checking_for_sql()
+        self._schema_checking_for_sql(components)
 
     @override
     async def is_synced(self, checkpoint: Any = None) -> tuple[bool, Any]:
