@@ -63,7 +63,9 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
             {
                 "APP_FILE": app_file,
                 "NAMESPACE": "pytest",
-                "INSTANCES": ["pytest_1"],
+                # 独立 instance：test_websocket 用 pytest_1，两个模块在 session 内不同时刻
+                # 建簇（全局 System 注册表会累积），同名 instance 会撞 cluster_mismatch
+                "INSTANCES": ["headless_ws"],
                 "LISTEN": "0.0.0.0:874",
                 "PACKET_LAYERS": [
                     {"type": "jsonb"},
@@ -105,7 +107,7 @@ def _headless_writer(config: dict, steps: list[threading.Event], errors: list):
     """独立线程 + 独立 event loop 里的 headless 进程：按 steps 逐步写三次"""
 
     async def main():
-        client = await headless.connect(config, "pytest_1", ["PublicNames"])
+        client = await headless.connect(config, "headless_ws", ["PublicNames"])
         Names = client.table("PublicNames").comp_cls  # 名字模式：本地零定义
         try:
             steps[0].wait(30)
@@ -172,7 +174,7 @@ def test_headless_writes_push_to_ws_subscribers(hl_server):
         writer.join(30)
         collected["writer_alive"] = writer.is_alive()
 
-    server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    server.test_client.websocket("/hetu/headless_ws", mimic=routine)
 
     assert not errors, errors
     assert collected["writer_alive"] is False
