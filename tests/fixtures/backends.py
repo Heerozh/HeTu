@@ -276,6 +276,36 @@ def backend_fixture_by_name(name: str, request):
         raise ValueError("Unknown db type: %s" % backend_name)
 
 
+def backend_config_by_name(name: str, request) -> dict:
+    """返回 config.yml 里 BACKENDS[x] 形状的 dict，供需要从配置自建连接的测试
+    （如 hetu.headless.connect、跨线程 event loop）使用。"""
+    if name == "redis":
+        redis_url, replica_url = request.getfixturevalue("ses_redis_service")
+        return {"type": "redis", "master": redis_url, "servants": [replica_url]}
+    elif name == "valkey":
+        redis_url, replica_url = request.getfixturevalue("ses_valkey_service")
+        return {"type": "redis", "master": redis_url, "servants": [replica_url]}
+    elif name == "redis_cluster":
+        redis_url = request.getfixturevalue("ses_redis_cluster_service")
+        return {
+            "type": "redis",
+            "master": redis_url,
+            "raw_clustering": True,
+            "servants": [],
+        }
+    elif name in ("postgres", "sqlite", "mariadb"):
+        dsn = request.getfixturevalue(f"ses_{name}_service")
+        return {"type": "sql", "master": dsn, "servants": []}
+    else:
+        raise ValueError(f"Unknown db type: {name}")
+
+
+@pytest.fixture(scope="module")
+def mod_backend_config(request, backend_name) -> dict:
+    """与 mod_auto_backend 指向同一个数据库的 BACKENDS[x] 配置 dict"""
+    return backend_config_by_name(backend_name, request)
+
+
 # 要测试新的backend，请添加backend到params中
 @pytest.fixture(scope="module")
 def mod_auto_backend(request, backend_name) -> Callable[..., Backend]:
