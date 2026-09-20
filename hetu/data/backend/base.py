@@ -32,13 +32,14 @@
 """
 
 import hashlib
+import importlib
 import logging
 import warnings
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Literal, final, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
 
 import numpy as np
 
@@ -144,10 +145,15 @@ class BackendClient:
         """关闭数据库连接，释放资源。"""
         raise NotImplementedError
 
-    def post_configure(self) -> None:
+    def post_configure(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         """
         对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
         此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
+
+        components: 要做 schema 检查的组件列表；None 表示取 `SystemClusters` 里被 System
+        引用的全部组件（服务器默认）。
         """
         raise NotImplementedError
 
@@ -399,6 +405,14 @@ class BackendClient:
 class BackendClientFactory:
     _registry: dict[str, type[BackendClient]] = {}
 
+    # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
+    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会同时加载
+    # redis 与 sqlalchemy 两套重依赖。第三方后端仍靠显式 import 自己的模块注册。
+    _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
+        "redis": "hetu.data.backend.redis",
+        "sql": "hetu.data.backend.sql",
+    }
+
     @staticmethod
     def register(alias: str, client_cls: type[BackendClient]) -> None:
         BackendClientFactory._registry[alias.lower()] = client_cls
@@ -408,6 +422,10 @@ class BackendClientFactory:
         alias: str, endpoint: Any, is_servant, config: dict[str, Any]
     ) -> BackendClient:
         alias = alias.lower()
+        if alias not in BackendClientFactory._registry:
+            module = BackendClientFactory._BUILTIN_MODULES.get(alias)
+            if module:
+                importlib.import_module(module)
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
         return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
@@ -454,10 +472,20 @@ class TableMaintenance:
         raise NotImplementedError()
 
     def read_meta(
-        self, instance_name: str, comp_cls: type[BaseComponent]
+        self, instance_name: str, comp: type[BaseComponent] | str
     ) -> TableMeta | None:
-        """读取组件表在数据库中的meta信息，如果不存在则返回None"""
+        """读取组件表在数据库中的meta信息，如果不存在则返回None。
+
+        `comp` 可以是组件类，也可以只是组件名：meta 只按 `instance_name + 组件名` 定位，
+        不持有本地类定义的进程（如 headless client）按名字即可读到服务器写入的 schema
+        与 cluster_id。
+        """
         raise NotImplementedError
+
+    @staticmethod
+    def comp_name_of_(comp: type[BaseComponent] | str) -> str:
+        """内部方法，把组件类或组件名统一成组件名"""
+        return comp if isinstance(comp, str) else comp.name_
 
     def get_lock(self) -> AbstractContextManager:
         """获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁"""

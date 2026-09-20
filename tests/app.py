@@ -233,6 +233,59 @@ async def set_public_name(ctx: hetu.SystemContext, owner, name):
         row.name = name
 
 
+# --------- headless（无服务器进程表直读写）测试用 ---------
+
+
+@hetu.define_component(namespace="pytest", force=True)
+class HeadlessCommand(hetu.BaseComponent):
+    """游戏服务器写、headless 进程轮询读的命令队列"""
+
+    system_id: np.int64 = hetu.property_field(0, index=True)
+    seq: np.int64 = hetu.property_field(0)
+    created_at: np.float64 = hetu.property_field(0, index=True)
+    payload: str = hetu.property_field("", dtype="U32")
+
+
+# core namespace：不被任何 app System 引用也会建簇 / 建表，镜像生产里 headless 三张表的定义方式
+@hetu.define_component(namespace="core", force=True)
+class HeadlessSim(hetu.BaseComponent):
+    """headless 进程与服务器双向读写的租约 / 状态行"""
+
+    system_id: np.int64 = hetu.property_field(0, unique=True)
+    epoch: np.int64 = hetu.property_field(0)
+    owner_host: str = hetu.property_field("", dtype="U64")
+
+
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.ADMIN,
+    components=(HeadlessCommand, HeadlessSim),  # 同时引用 → 两表同簇
+)
+async def push_headless_command(
+    ctx: hetu.SystemContext, system_id, seq, created_at, payload=""
+):
+    """服务器侧写一条命令，返回行 id"""
+    row = HeadlessCommand.new_row()
+    row.system_id = system_id
+    row.seq = seq
+    row.created_at = created_at
+    row.payload = payload
+    await ctx.repo[HeadlessCommand].insert(row)
+    return int(row.id)
+
+
+@hetu.define_system(
+    namespace="pytest", permission=hetu.Permission.ADMIN, components=(HeadlessSim,)
+)
+async def bump_headless_sim(ctx: hetu.SystemContext, system_id, host=""):
+    """服务器侧预建 / 更新租约行（epoch + 1），返回行 id"""
+    async with ctx.repo[HeadlessSim].upsert(system_id=system_id) as row:
+        row.epoch += 1
+        if host:
+            row.owner_host = host
+    return int(row.id)
+
+
 @hetu.define_system(
     namespace="pytest",
     permission=hetu.Permission.USER,

@@ -21,6 +21,7 @@ regeneration; update the docstring in the source file instead.
 | [Endpoint](endpoint.md) | EndpointContext, ResponseToClient, elevate |
 | [Exceptions](exceptions.md) | RaceCondition, UniqueViolation |
 | [Migration](migration.md) | TableMaintenance |
+| [Headless](headless.md) | ClusterChanged, HeadlessClient, HeadlessError, HeadlessSession, SchemaMismatch, TableNotFound, connect |
 
 
 See also: [Coverage report](_coverage.md) — APIs missing docstrings.

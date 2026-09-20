@@ -135,6 +135,8 @@ Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模�
 
 当仅集群分组发生变化时，无需移动行数据。`upgrade` 会将表重命名为新的集群 ID，至此完成——无需审核脚本，也无数据丢失风险。
 
+如果有 [`hetu.headless`](advanced.md#非服务器进程读写表hetuheadless) 进程连着同一个后端，迁移后要重启它们：它们按启动时读到的集群 ID 写表，不重启会把数据写到旧前缀下。
+
 ### Schema 变更 — 通过迁移脚本
 
 当 `Component` 的 schema 发生变化时，首次运行 `upgrade` 会在 `<your-app-dir>/maint/migration/` 下生成一个默认迁移脚本——每个 `Component` 对应一个文件，按 schema 哈希版本管理。接下来：

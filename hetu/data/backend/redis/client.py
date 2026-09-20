@@ -55,9 +55,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
 
-    def _schema_checking_for_redis(self):
+    def _schema_checking_for_redis(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ):
         """检查Component的schema定义，确保符合Redis的要求"""
-        for comp_cls in self._get_referred_components():
+        if components is None:
+            components = self._get_referred_components()
+        for comp_cls in components:
             for field, _is_str in comp_cls.indexes_.items():
                 dtype = comp_cls.dtype_map_[field]
                 # 索引不支持复数
@@ -256,7 +260,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.loop_id = 0
 
     @override
-    def post_configure(self) -> None:
+    def post_configure(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         """
         对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
         此项在服务器完全加载完毕后才会执行，在测试环境中，也是最后调用。
@@ -264,9 +270,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if self.is_servant:
             self.configure_servant()
         else:
-            self.configure_master()
+            self.configure_master(components)
 
-    def configure_master(self) -> None:
+    def configure_master(
+        self, components: Iterable[type[BaseComponent]] | None = None
+    ) -> None:
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
@@ -284,7 +292,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             Path(__file__).parent.resolve() / "commit_v2.lua"
         )
         # 提示用户schema定义是否符合redis要求，比如索引类型不能有复数等
-        self._schema_checking_for_redis()
+        self._schema_checking_for_redis(components)
 
     def configure_servant(self) -> None:
         if not self._ios:

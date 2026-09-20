@@ -50,6 +50,12 @@ class Session(AbstractAsyncContextManager):
         self._idmap = cast(IdentityMap, object())
         self._entered = False
         self.only_master = False
+        self.explicit_ids_only = False
+        """
+        为 True 时本 Session 不发雪花号：`insert` 的行 id 必须非零；`upsert` 只有锚定
+        `id=<非零显式值>` 时允许新建，锚定其他 unique 字段未命中则抛 `LookupError`。
+        供未初始化 `SnowflakeID` 的进程（headless client）使用，服务器与 Sandbox 保持 False。
+        """
 
         self.clean()
         # todo 要检测是否在session中又开了一个session，如果是，应该报错，毕竟嵌套session没意义

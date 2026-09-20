@@ -473,3 +473,9 @@ async def future_call_task(app):
                 exc=f"{type(e).__name__}:{e}"
             )
             logger.exception(err_msg)
+            # 出错后退避再重试：持续性错误（如关服时后端已关闭，_ensure_open 在任何 await
+            # 之前同步抛出）会让本循环永不挂起、饿死事件循环，连 Sanic 的取消都送不进来。
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                break

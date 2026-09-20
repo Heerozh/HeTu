@@ -143,7 +143,7 @@ class SQLTableMaintenance(TableMaintenance):
 
     @override
     def read_meta(
-        self, instance_name: str, comp_cls: type[BaseComponent]
+        self, instance_name: str, comp: type[BaseComponent] | str
     ) -> TableMaintenance.TableMeta | None:
         meta = self._safe_get_meta()
         with self.client.io.connect() as conn:
@@ -151,7 +151,7 @@ class SQLTableMaintenance(TableMaintenance):
                 conn.execute(
                     sa.select(meta).where(
                         meta.c.instance_name == instance_name,
-                        meta.c.comp_name == comp_cls.name_,
+                        meta.c.comp_name == self.comp_name_of_(comp),
                     )
                 )
                 .mappings()

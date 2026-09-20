@@ -214,6 +214,73 @@ async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
             assert row.time == 4
 
 
+async def test_upsert_by_id_does_not_mint_snowflake(
+    item_ref, mod_auto_backend: Callable[..., Backend]
+):
+    """锚定 id 的 upsert 未命中时直接用锚定值建行，不消耗雪花号（默认模式下也如此）。"""
+    backend = mod_auto_backend()
+    before = (SnowflakeID().last_timestamp, SnowflakeID().sequence)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        item_repo = session.using(item_ref.comp_cls)
+        async with item_repo.upsert(id=-42) as row:
+            row.name = "byid"
+            row.time = 42
+    assert (SnowflakeID().last_timestamp, SnowflakeID().sequence) == before
+    row = await backend.master.get(item_ref, -42)
+    assert row is not None and row.name == "byid"
+
+
+async def test_explicit_ids_only(item_ref, mod_auto_backend: Callable[..., Backend]):
+    """explicit_ids_only=True（headless）：不发号——insert 必须带非零 id，
+    只有锚定 id 的 upsert 允许新建，锚定其它 unique 字段未命中就报错。"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        session.explicit_ids_only = True
+        item_repo = session.using(comp)
+
+        # insert：id == 0 明确报错，而不是静默发号
+        with pytest.raises(ValueError, match="id"):
+            await item_repo.insert(comp.new_row(id_=0))
+        # 显式 id 正常
+        row = comp.new_row(id_=-7)
+        row.name = "exp7"
+        row.time = 7
+        await item_repo.insert(row)
+
+        # upsert 锚定 id：未命中允许新建（不发号）
+        async with item_repo.upsert(id=-8) as row:
+            row.name = "exp8"
+            row.time = 8
+        # upsert 锚定 id == 0 也算没给 id
+        with pytest.raises(ValueError, match="id"):
+            async with item_repo.upsert(id=0) as row:
+                row.name = "zero"
+
+        # upsert 锚定其它 unique 字段：未命中 → 报错，命中 → 正常 update
+        with pytest.raises(LookupError):
+            async with item_repo.upsert(name="nope") as row:
+                row.time = 99
+        async with item_repo.upsert(name="exp7") as row:
+            row.time = 77
+
+    row7 = await backend.master.get(item_ref, -7)
+    row8 = await backend.master.get(item_ref, -8)
+    assert row7 is not None and row7.time == 77
+    assert row8 is not None and row8.name == "exp8"
+
+    # 默认（服务器 / Sandbox）行为不变：upsert 其它 unique 字段未命中会发号新建
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        assert session.explicit_ids_only is False
+        async with session.using(comp).upsert(name="auto") as row:
+            row.time = 100
+            assert row.id > 0
+
+
 async def test_range_interval(filled_item_ref, mod_auto_backend):
     """测试开闭区间"""
     backend: Backend = mod_auto_backend()
@@ -263,10 +330,23 @@ async def test_range_infinite(filled_item_ref, mod_auto_backend):
         )
 
     # 测试float索引的inf范围，model范围为0.0-2.4，共25个
+    # （MySQL/MariaDB 不接受 inf 绑定参数，后端须把 float 列的 ±inf 钳到 dtype 极值）
     async with backend.session("pytest", 1) as session:
         item_repo = session.using(filled_item_ref.comp_cls)
         np.testing.assert_array_almost_equal(
             (await item_repo.range(time=(-np.inf, np.inf), limit=99)).model,
+            np.arange(0, 2.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(1.05, np.inf), limit=99)).model,
+            np.arange(1.1, 2.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(-np.inf, 0.45), limit=99)).model,
+            np.arange(0, 0.5, 0.1),
+        )
+        np.testing.assert_array_almost_equal(
+            (await item_repo.range(model=(-np.inf, np.inf), limit=99)).model,
             np.arange(0, 2.5, 0.1),
         )
 
