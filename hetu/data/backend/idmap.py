@@ -154,7 +154,9 @@ class IdentityMap:
 
         # recarray是基于ndarray的，传入参数可以用np.ndarray类型，返回值
         # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
-        return cast(np.record, cache[idx[0]]), states.get(row_id)
+        # 必须返回拷贝：结构化数组的标量下标是缓存本体的视图，直接交给调用方，调用方改字段
+        # 就把缓存里的"旧值"一起改了，之后 update/upsert 拿它与缓存比对会判成"没有变化"。
+        return cast(np.record, cache[idx[0]].copy()), states.get(row_id)
 
     def add_insert(self, table_ref: TableReference, row: np.record) -> None:
         """

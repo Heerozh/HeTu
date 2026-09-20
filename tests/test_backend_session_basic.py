@@ -281,6 +281,53 @@ async def test_explicit_ids_only(item_ref, mod_auto_backend: Callable[..., Backe
             assert row.id > 0
 
 
+async def test_cache_hit_row_is_a_copy(
+    item_ref, mod_auto_backend: Callable[..., Backend]
+):
+    """同一事务内第二次访问同一行会命中 IdentityMap 缓存，拿到的必须是拷贝而不是缓存视图，
+    否则改它等于改缓存里的"旧值"，update / upsert 会误报 No fields changed。
+    覆盖 get(id=) / get_by_id / upsert(id=) 三条命中缓存的路径。"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        row = comp.new_row()
+        row.name = "alias"
+        row.time = 900
+        row.qty = 1
+        await repo.insert(row)
+        rid = int(row.id)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        first = await repo.get(name="alias")  # 缓存未命中
+        assert first is not None and int(first.id) == rid
+
+        # get_by_id 命中缓存：改了不 update，缓存不能被污染
+        hit = await repo.get_by_id(rid)
+        assert hit is not None
+        hit.qty = 99
+        cached, _ = session.idmap.get(repo.ref, rid)
+        assert cached is not None and cached.qty == 1
+
+        # get(id=) 命中缓存 → 改 → update 要能判出变化
+        row = await repo.get(id=rid)
+        assert row is not None
+        row.qty = 2
+        await repo.update(row)
+        reread = await repo.get_by_id(rid)
+        assert reread is not None and reread.qty == 2
+
+        # upsert(id=) 命中缓存（内部走 get_by_id）→ 改 → 退出时 update
+        async with repo.upsert(id=rid) as r:
+            r.qty = 3
+
+    final = await backend.master.get(item_ref, rid)
+    assert final is not None and final.qty == 3 and final._version == 2
+
+
 async def test_range_interval(filled_item_ref, mod_auto_backend):
     """测试开闭区间"""
     backend: Backend = mod_auto_backend()

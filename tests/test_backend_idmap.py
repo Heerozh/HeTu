@@ -36,6 +36,32 @@ def test_add_clean_and_get(mod_item_model):
         id_map.add_clean(item_ref, row)
 
 
+def test_get_returns_copy_not_view(mod_item_model):
+    """get 返回的行必须是拷贝：numpy 结构化数组的标量下标是视图，直接返回会让调用方改字段
+    时把缓存里的"旧值"一起改掉，后续 update 的变化检测就判不出差异。"""
+    Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+    id_map = IdentityMap()
+
+    row = Item.new_row()
+    row.id = 100
+    row.qty = 1
+    id_map.add_clean(item_ref, row)
+
+    fetched, _ = id_map.get(item_ref, 100)
+    assert fetched is not None
+    fetched.qty = 7  # 改调用方拿到的行
+    again, _ = id_map.get(item_ref, 100)
+    assert again is not None
+    assert again.qty == 1  # 缓存里的值不能跟着变
+
+    # 正常 update 仍然生效（update 是显式写回）
+    fetched["_version"] = again["_version"]
+    id_map.update(item_ref, fetched)
+    updated, _ = id_map.get(item_ref, 100)
+    assert updated is not None and updated.qty == 7
+
+
 def test_add_wrong_component(mod_item_model, mod_rls_test_model):
     """测试添加错误组件类型报错"""
     item_ref = TableReference(mod_item_model, "TestServer", 1)
