@@ -1005,12 +1005,19 @@ class HubMQClient(MQClient):
             return
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        await self._hub.add(self, channel_names)
+        # 先记再等：等 ack 期间本连接可能又 unsubscribe/close 了其中的频道，由它们从
+        # subscribed 和 hub 里撤掉；add 返回后不能再把这些频道加回来
+        new = [name for name in channel_names if name not in self.subscribed]
+        self.subscribed.update(new)
+        try:
+            await self._hub.add(self, channel_names)
+        except BaseException:
+            self.subscribed.difference_update(new)
+            raise
         if self._closed:
             # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
             await self._hub.remove(self, channel_names)
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        self.subscribed.update(channel_names)
         if len(self.subscribed) > self.MAX_SUBSCRIBED:
             logger.warning(
                 f"⚠️ [{self.LOG_TAG}] 当前连接订阅数超过全局限制"

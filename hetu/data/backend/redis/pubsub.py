@@ -320,10 +320,12 @@ class AsyncKeyspacePubSub:
         for channel in channels:
             node_key = self._channel_node.pop(channel, "standalone")
             self._subscribed.discard(channel)
+            # SUBSCRIBE 还没 ack 就退订：让等它的人正常返回而不是报错。等的人就是刚撤了
+            # 自己登记的那个连接（hub 只在没人订时才退订），它的 subscribe 没有失败，
+            # 只是随后被自己的 unsub 覆盖了；报错会让 get_updates 把整个连接断掉
             pending = self._pending_subscribe.pop(channel, None)
             if pending is not None and not pending.done():
-                pending.set_exception(RedisConnectionError("unsubscribed"))
-                pending.exception()
+                pending.set_result(None)
             if node_key not in self.node_resources:
                 continue
             groups.setdefault(node_key, []).append(channel)

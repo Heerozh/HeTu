@@ -9,7 +9,6 @@ from collections.abc import AsyncIterator
 
 import pytest
 from redis.asyncio import Redis
-from redis.exceptions import ConnectionError as RedisConnectionError
 
 from hetu.data.backend.redis.mq import PubSubHub, RedisMQClient
 from hetu.data.backend.redis.pubsub import AsyncKeyspacePubSub
@@ -302,8 +301,8 @@ async def test_unsubscribe_before_subscribe_ack_leaves_no_stale_subscribed():
     u = asyncio.create_task(pubsub.unsubscribe("X"))
     await settle()
     assert node.commands == [("subscribe", ("X",)), ("unsubscribe", ("X",))]
-    with pytest.raises(RedisConnectionError):
-        await t
+    async with asyncio.timeout(1):
+        await t  # 退订让它正常返回，不报错
 
     node.ack("subscribe", "X")
     await settle()
@@ -348,3 +347,29 @@ async def test_resubscribe_while_unsubscribe_pending_sends_again():
         await t2
     assert "X" in pubsub.subscribed
     await pubsub.close()
+
+
+async def test_hub_unsubscribe_racing_own_pending_subscribe_does_not_raise():
+    """同一连接：subscribe 还在等 ack，另一个协程（客户端 unsub）把它退订了。
+    等 ack 的 subscribe 必须正常返回（否则 get_updates 会把整个连接断掉），
+    且不能把刚退掉的频道又记回 subscribed"""
+    hub, node = make_hub()
+    mq = RedisMQClient(hub)
+    t = asyncio.create_task(mq.subscribe("X"))
+    await settle()
+    assert node.sent("subscribe") == ["X"]
+    u = asyncio.create_task(mq.unsubscribe("X"))
+    await settle()
+    assert node.sent("unsubscribe") == ["X"]
+
+    async with asyncio.timeout(1):
+        await t
+    assert "X" not in mq.subscribed_channels
+    assert hub.subscriber_count("X") == 0
+
+    node.ack("subscribe", "X")
+    node.ack("unsubscribe", "X")
+    async with asyncio.timeout(1):
+        await u
+    assert "X" not in hub._pubsub.subscribed  # type: ignore[reportPrivateUsage]
+    await hub.close()
