@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+from collections import deque
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -10,7 +11,6 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql, postgresql
 
-from hetu.common.multimap import MultiMap
 from hetu.data.backend.sql import SQLBackendClient
 from hetu.data.backend.sql.mq import MAX_CHANNELS_IN_FILTER, SQLMQClient
 
@@ -156,7 +156,7 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeyp
     mq.subscribed = {target_channel}
     for i in range(MAX_CHANNELS_IN_FILTER):
         mq.subscribed.add(f"extra-{i}")
-    mq.pulled_deque = MultiMap()
+    mq.pulled_deque = deque()
     mq.pulled_set = set()
     mq.pulled_payload = {}
     mq._last_notify_id = 0
@@ -292,7 +292,7 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
     )
     # Start with one existing channel to ensure use_channel_filter is True
     mq.subscribed = {"existing-channel"}
-    mq.pulled_deque = MultiMap()
+    mq.pulled_deque = deque()
     mq.pulled_set = set()
     mq.pulled_payload = {}
     mq._last_notify_id = 0

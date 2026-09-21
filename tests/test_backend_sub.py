@@ -1,4 +1,3 @@
-import time
 from contextvars import ContextVar
 from typing import AsyncGenerator, cast
 
@@ -584,11 +583,11 @@ async def test_query_subscribe_rls_gain_without_index(
 
 @pytest.mark.timeout(30)
 async def test_mq_backlog(
-    monkeypatch, broker: SubscriptionBroker, filled_item_ref, mod_item_model, admin_ctx
+    broker: SubscriptionBroker, filled_item_ref, mod_item_model, admin_ctx
 ):
-    time_time = time.time
     # 测试mq消息堆积的情况
     backend = broker._backend
+    mq = broker._mq_client
 
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
@@ -602,9 +601,12 @@ async def test_mq_backlog(
         await repo.update(row)
     await backend.wait_for_synced()
     await broker.mq_pull()
+    assert len(mq.pulled_deque) == 1
 
-    # 2分钟后再次修改row1,row2，此时pull应该会删除前一个row1消息，放入后一个row1消息
-    monkeypatch.setattr(time, "time", lambda: time_time() + 200)
+    # 把这条消息的收到时刻拨回200秒前，模拟超过DROP_AFTER没人取的堆积；
+    # 再次修改row1、row2，此时pull应该会丢掉前一个row1消息，放入后一个row1消息
+    stale_at, stale_channel = mq.pulled_deque[0]
+    mq.pulled_deque[0] = (stale_at - 200, stale_channel)
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         row = await repo.get(time=110)
@@ -613,6 +615,8 @@ async def test_mq_backlog(
         await repo.update(row)
     await backend.wait_for_synced()
     await broker.mq_pull()
+    assert len(mq.pulled_deque) == 1
+    assert mq.pulled_deque[0][0] > stale_at  # 旧的被丢弃，新的row1消息重新入队
 
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
@@ -623,10 +627,12 @@ async def test_mq_backlog(
     await backend.wait_for_synced()
     await broker.mq_pull()
 
-    mq = broker._mq_client
-    monkeypatch.setattr(time, "time", lambda: time_time() + 210)
+    # get_message只取收到超过1/UPDATE_FREQUENCY的消息：把两条都拨回1秒前
+    for i, (received_at, channel) in enumerate(mq.pulled_deque):
+        mq.pulled_deque[i] = (received_at - 1, channel)
     notified_channels = await mq.get_message()
     assert len(notified_channels) == 2
+    assert not mq.pulled_deque and not mq.pulled_set
 
 
 # ============================ 整表订阅 ============================

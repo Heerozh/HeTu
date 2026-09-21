@@ -116,8 +116,11 @@ ws + pipeline 每帧约 130µs；同一订阅同 tick 的多行合成一帧，�
    生产需要在 `RedisBackendClient` 里把 `max_connections` 做成配置项。
 2. Windows 下 Sanic 强制 `WindowsSelectorEventLoopPolicy`，`select()` 上限 512 fd，
    单 worker 约 150~200 个连接就崩（"too many file descriptors in select()"）。Linux 无此问题。
-3. `RedisMQClient.pull` 每收一条消息都调一次 `MultiMap.pop(0, now-120)` 清旧消息，
-   空区间也要 ~10µs（sortedcontainers 切片），cProfile 里约占通知路径的 1/5~1/4；先 `peekitem(0)` 比较再 pop 即可。
+3. （已修）`RedisMQClient.pull` 每收一条消息都调一次 `MultiMap.pop(0, now-120)` 清旧消息，
+   空区间也要走两次 bisect + 两次 view 切片（timeit 实测 ~2µs，加 `MultiMap.add` ~1µs）。
+   本地队列只从最老一端弹出，已改成基类 `MQClient` 里的 `collections.deque` FIFO，
+   队头一次 O(1) 比较决定是否清旧。复测：hot20 场景 0.89 → 0.83 核，基线 181 → 169 µs/交付，
+   约省 3µs/通知（通知成本的 ~1/10；之前 cProfile 估的 1/4 偏高）。
 4. 索引频道是整个索引一个 zset（`{prefix}:index:{name}`），任何值的变动都广播给该索引全部
    range 订阅者。若要撑高频跨区的 AOI，要么按地图/区拆组件缩小 C_idx，要么引擎侧把索引频道
    按值分桶。

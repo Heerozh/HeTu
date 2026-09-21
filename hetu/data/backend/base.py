@@ -31,10 +31,13 @@
 
 """
 
+import asyncio
 import hashlib
 import importlib
 import logging
+import time
 import warnings
+from collections import deque
 from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
@@ -720,10 +723,24 @@ class MQClient:
     """
     连接到消息队列的客户端，每个用户连接一个实例。
     继承此类实现数据库写入通知和消息队列的结合。
+
+    本地消息队列由基类维护：子类的 `pull()` 收到通知后调 `push_pulled_()` 入队，
+    `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
     """
 
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
+    # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
+    DROP_AFTER = 120
+
+    def __init__(self) -> None:
+        # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
+        # (收到时刻 time.monotonic(), 频道名)，按收到时间入队
+        self.pulled_deque: deque[tuple[float, str]] = deque()
+        # 队列里已有的频道名，去重用
+        self.pulled_set: set[str] = set()
+        # 表级频道合并后的payload：channel -> 变动的row_id集合
+        self.pulled_payload: dict[str, set[str]] = {}
 
     async def close(self):
         raise NotImplementedError
@@ -740,6 +757,35 @@ class MQClient:
         # 必须合并消息，因为index更新时大都是2条一起的(remove/add)
         raise NotImplementedError
 
+    def push_pulled_(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
+        """
+        供子类 `pull()` 调用：把一条收到的通知放进本地队列（重复频道只保留最早那条，
+        以便下个tick就被取走），表级频道的 payload 按频道合并。
+        入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由子类打日志。
+
+        这是每条通知都走的热路径：常态下队头不会过期，只花一次 O(1) 的比较。
+        """
+        now = time.monotonic()
+        dropped = 0
+        dq = self.pulled_deque
+        if dq and dq[0][0] < now - self.DROP_AFTER:
+            cutoff = now - self.DROP_AFTER
+            while dq and dq[0][0] < cutoff:
+                stale = dq.popleft()[1]
+                self.pulled_set.discard(stale)
+                self.pulled_payload.pop(stale, None)
+                dropped += 1
+
+        # 先清旧再合并payload，这样本条消息的payload不会被上面的清理顺手删掉
+        if payload_ids is not None:
+            self.pulled_payload.setdefault(channel_name, set()).update(
+                str(i) for i in payload_ids
+            )
+        if channel_name not in self.pulled_set:
+            dq.append((now, channel_name))
+            self.pulled_set.add(channel_name)
+        return dropped
+
     async def get_message(self) -> dict[str, set[str] | None]:
         """
         pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
@@ -751,7 +797,23 @@ class MQClient:
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
-        raise NotImplementedError
+        dq = self.pulled_deque
+        interval = 1 / self.UPDATE_FREQUENCY
+        # 如果没数据，等待直到有数据
+        while not dq:
+            await asyncio.sleep(interval)
+
+        while True:
+            # 只取收到超过interval的数据，这样可以减少频繁更新；队列按时间有序，从队头取到不满足为止
+            cutoff = time.monotonic() - interval
+            rtn: dict[str, set[str] | None] = {}
+            while dq and dq[0][0] <= cutoff:
+                channel_name = dq.popleft()[1]
+                self.pulled_set.discard(channel_name)
+                rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+            if rtn:
+                return rtn
+            await asyncio.sleep(interval)
 
     async def subscribe(self, *channel_names: str) -> None:
         """订阅频道，可一次订阅多个，全部订阅成功后返回。实现应把多个频道合并成尽量少的往返。"""

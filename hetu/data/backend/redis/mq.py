@@ -5,14 +5,11 @@
 @email: heeroz@gmail.com
 """
 
-import asyncio
 import logging
-import time
 from typing import TYPE_CHECKING, final, override
 
 import msgpack
 
-from ....common.multimap import MultiMap
 from ....i18n import _
 from ..base import MQClient
 from .pubsub import AsyncKeyspacePubSub
@@ -42,10 +39,7 @@ class RedisMQClient(MQClient):
         self._mq = AsyncKeyspacePubSub(client.aio)
 
         self.subscribed = set()
-        self.pulled_deque = MultiMap()  # 可按时间查询的消息队列
-        self.pulled_set = set()  # 和pulled_deque内容保持一致的set，方便去重
-        # 表级频道合并后的payload：channel -> 变动的row_id集合
-        self.pulled_payload: dict[str, set[str]] = {}
+        super().__init__()  # 本地消息队列
 
     @override
     async def close(self):
@@ -87,70 +81,34 @@ class RedisMQClient(MQClient):
         * 超过2分钟前的消息会被丢弃，防止堆积
         """
 
-        # 获得更新得频道名，如果不在pulled列表中，才添加，列表按添加时间排序
+        # 获得更新的频道名，交给基类入队（去重、清旧）。这是每条通知都走的热路径
         msg = await self._mq.get_message()
 
         if msg is not None:
             channel_name = msg["channel"].decode()
-            logger.debug(
-                _("🔔 [💾Redis] 收到订阅更新通知: {channel_name}").format(
-                    channel_name=channel_name
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    _("🔔 [💾Redis] 收到订阅更新通知: {channel_name}").format(
+                        channel_name=channel_name
+                    )
                 )
-            )
             # 表级频道（非keyspace通知）带payload：msgpack的row_id列表，按频道合并
+            ids = None
             if not channel_name.startswith("__keyspace@"):
                 try:
                     ids = msgpack.unpackb(msg["data"])
                 except Exception:  # noqa: BLE001 非法payload当作无payload
                     ids = None
-                if isinstance(ids, list):
-                    self.pulled_payload.setdefault(channel_name, set()).update(
-                        str(i) for i in ids
-                    )
-            # 为防止deque数据堆积，pop旧消息（1970年到2分钟前），防止队列溢出
-            dropped = set(self.pulled_deque.pop(0, time.time() - 120))
+                if not isinstance(ids, list):
+                    ids = None
+            dropped = self.push_pulled_(channel_name, ids)
             if dropped:
-                self.pulled_set -= dropped
-                for ch in dropped:
-                    self.pulled_payload.pop(ch, None)
                 logger.warning(
                     _(
                         "⚠️ [💾Redis] 订阅更新通知来不及处理，"
-                        "丢弃了2分钟前的消息共{count}条"
-                    ).format(count=len(dropped))
+                        "丢弃了{seconds}秒前的消息共{count}条"
+                    ).format(seconds=self.DROP_AFTER, count=dropped)
                 )
-
-            # 判断是否已在deque中了，去重用。self.get_message也会自动去重，
-            # 但get_message一次只取部分(interval)消息，不能完全去重
-            if channel_name not in self.pulled_set:
-                self.pulled_deque.add(time.time(), channel_name)
-                self.pulled_set.add(channel_name)
-
-    @override
-    async def get_message(self) -> dict[str, set[str] | None]:
-        """
-        pop并返回之前pull()到本地的消息，只pop收到时间大于1/UPDATE_FREQUENCY的消息。
-        留1/UPDATE_FREQUENCY时间是为了消息的合批。
-
-        返回 {channel名: payload}，表级频道的payload为合并后的row_id集合，其余为None。
-        之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
-        如果没有消息，则堵塞到永远。
-        """
-        pulled_deque = self.pulled_deque
-
-        interval = 1 / self.UPDATE_FREQUENCY
-        # 如果没数据，等待直到有数据
-        while not pulled_deque:
-            await asyncio.sleep(interval)
-
-        while True:
-            # 只取超过interval的数据，这样可以减少频繁更新。set一下可以合并相同消息
-            rtn = set(pulled_deque.pop(0, time.time() - interval))
-            if rtn:
-                self.pulled_set -= rtn
-                # logger.debug(f"🔔 [💾Redis] 发送通知给客户端: {str(rtn)[0:100]}...")
-                return {ch: self.pulled_payload.pop(ch, None) for ch in rtn}
-            await asyncio.sleep(interval)
 
     @property
     @override

@@ -7,13 +7,11 @@
 
 import asyncio
 import logging
-import time
 from typing import TYPE_CHECKING, final, override
 
 import msgpack
 import sqlalchemy as sa
 
-from ....common.multimap import MultiMap
 from ....i18n import _
 from ..base import MQClient
 
@@ -37,10 +35,7 @@ class SQLMQClient(MQClient):
     def __init__(self, client: SQLBackendClient):
         self._client = client
         self.subscribed = set()
-        self.pulled_deque = MultiMap()
-        self.pulled_set = set()
-        # 表级频道合并后的payload：channel -> 变动的row_id集合
-        self.pulled_payload: dict[str, set[str]] = {}
+        super().__init__()  # 本地消息队列
         self._last_notify_id = self._get_current_notify_id_sync()
         self._large_sub_warned = False
 
@@ -130,26 +125,15 @@ class SQLMQClient(MQClient):
                     )
 
                     payload = row.get("payload")
-                    if payload:
-                        self.pulled_payload.setdefault(channel_name, set()).update(
-                            str(i) for i in msgpack.unpackb(payload)
-                        )
-
-                    dropped = set(self.pulled_deque.pop(0, time.time() - 120))
+                    ids = msgpack.unpackb(payload) if payload else None
+                    dropped = self.push_pulled_(channel_name, ids)
                     if dropped:
-                        self.pulled_set -= dropped
-                        for ch in dropped:
-                            self.pulled_payload.pop(ch, None)
                         logger.warning(
                             _(
                                 "⚠️ [💾SQL] 订阅更新通知来不及处理，"
-                                "丢弃了2分钟前的消息共{count}条"
-                            ).format(count=len(dropped))
+                                "丢弃了{seconds}秒前的消息共{count}条"
+                            ).format(seconds=self.DROP_AFTER, count=dropped)
                         )
-
-                    if channel_name not in self.pulled_set:
-                        self.pulled_deque.add(time.time(), channel_name)
-                        self.pulled_set.add(channel_name)
 
                 if has_subscribed_updates:
                     break
@@ -162,21 +146,6 @@ class SQLMQClient(MQClient):
     @staticmethod
     def _should_use_channel_in_filter(subscribed_count: int) -> bool:
         return subscribed_count <= MAX_CHANNELS_IN_FILTER
-
-    @override
-    async def get_message(self) -> dict[str, set[str] | None]:
-        pulled_deque = self.pulled_deque
-        interval = 1 / self.UPDATE_FREQUENCY
-
-        while not pulled_deque:
-            await asyncio.sleep(interval)
-
-        while True:
-            rtn = set(pulled_deque.pop(0, time.time() - interval))
-            if rtn:
-                self.pulled_set -= rtn
-                return {ch: self.pulled_payload.pop(ch, None) for ch in rtn}
-            await asyncio.sleep(interval)
 
     @property
     @override
