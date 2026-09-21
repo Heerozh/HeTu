@@ -25,6 +25,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    peel_bound_,
     sortable_token,
     to_sortable_bytes,
 )
@@ -589,18 +590,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        # 处理范围区间
-        def peel(x, _inclusive):
-            if type(x) in (str, bytes) and len(x) >= 1:
-                ch = x[0:1]  # bytes必须用范围切片
-                if ch in ("(", "[") or ch in (b"(", b"["):
-                    _inclusive = ch == "[" or ch == b"["
-                    x = x[1:]
-
-            return x, _inclusive
-
-        left, li = peel(left, True)
-        right, ri = peel(right, True)
+        # 处理范围区间：边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        left, li = peel_bound_(left)
+        right, ri = peel_bound_(right)
+        li = True if li is None else li
+        ri = True if ri is None else ri
         # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
         # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
         ls = b"\x00" if li else b"\x00\xff"

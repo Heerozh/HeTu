@@ -158,6 +158,23 @@ def sortable_token(sortable: bytes) -> str:
     return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
 
 
+def peel_bound_(
+    value: float | str | bytes | bool,
+) -> tuple[float | str | bytes | bool, bool | None]:
+    """
+    剥掉区间边界值开头的 `(` / `[` 前缀（str/bytes 才有），返回 (值, 是否闭区间)；
+    没有前缀时第二项为 None，由调用方按默认（闭区间）处理。
+    两个后端的 range_normalize_ 和 point_query_value_ 都用这一个，规则只写一处。
+    """
+    if isinstance(value, (str, bytes)) and len(value) >= 1:
+        ch = value[0:1]  # bytes 必须用范围切片
+        if ch in ("(", b"("):
+            return value[1:], False
+        if ch in ("[", b"["):
+            return value[1:], True
+    return value, None
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
@@ -203,22 +220,12 @@ class BackendClient:
         `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（int 索引传 ±inf、
         非法字符串）或 NaN 也返回 None，由调用方回退到整个索引的频道。
         """
-        if right is None:
-            right = left
-
-        def peel(x: Any) -> tuple[Any, bool]:
-            if type(x) in (str, bytes) and len(x) >= 1:
-                ch = x[0:1]
-                if ch in ("(", b"("):
-                    return None, False
-                if ch in ("[", b"["):
-                    x = x[1:]
-            return x, True
-
-        left, ok_left = peel(left)
-        right, ok_right = peel(right)
-        if not (ok_left and ok_right):
-            return None
+        left, left_inclusive = peel_bound_(left)
+        right, right_inclusive = (
+            (left, left_inclusive) if right is None else peel_bound_(right)
+        )
+        if left_inclusive is False or right_inclusive is False:
+            return None  # 开区间不算点查询
         try:
             left_value, right_value = dtype.type(left), dtype.type(right)
         except ValueError, OverflowError, TypeError:

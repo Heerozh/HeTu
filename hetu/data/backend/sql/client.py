@@ -26,6 +26,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    peel_bound_,
     sortable_token,
     to_sortable_bytes,
 )
@@ -681,16 +682,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        def peel(x, _inclusive):
-            if type(x) in (str, bytes) and len(x) >= 1:
-                ch = x[0:1]
-                if ch in ("(", "[") or ch in (b"(", b"["):
-                    _inclusive = ch == "[" or ch == b"["
-                    x = x[1:]
-            return x, _inclusive
-
-        left, li = peel(left, True)
-        right, ri = peel(right, True)
+        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        left, li = peel_bound_(left)
+        right, ri = peel_bound_(right)
+        li = True if li is None else li
+        ri = True if ri is None else ri
         if desc:
             li, ri = ri, li
 
