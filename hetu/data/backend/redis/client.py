@@ -24,6 +24,7 @@ from ..base import (
     BackendClient,
     RaceCondition,
     RowFormat,
+    UniqueViolation,
     sortable_token,
     to_sortable_bytes,
 )
@@ -786,27 +787,51 @@ class RedisBackendClient(BackendClient, alias="redis"):
         Exceptions
         --------
         RaceCondition
-            当提交数据时，发现数据已被其他事务修改，抛出此异常
+            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
+            观察其不存在的值（基于过期快照），可重试
+        UniqueViolation
+            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
         """
 
-        def _key_must_not_exist(_key: str):
-            """添加key must not exist的检查"""
-            checks.append(["NX", _key])
+        def _key_must_not_exist(_key: str, _race: bool, _label: str):
+            """添加key must not exist的检查（insert 主键）；_race 表示本事务曾 get 观察其不存在"""
+            (race_checks if _race else strict_checks).append(
+                ["NX", _key, "RACE" if _race else "UNIQUE", _label]
+            )
 
         def _version_must_match(_key: str, _old_version):
-            """添加version match的检查"""
-            checks.append(["VER", _key, _old_version])
+            """添加version match的检查，恒为竞态类"""
+            race_checks.append(["VER", _key, _old_version])
 
-        def _unique_meet(_unique_fields, _dtype_map, _idx_prefix, _row: dict[str, str]):
-            """添加unique索引检查"""
+        def _unique_meet(
+            _unique_fields,
+            _dtype_map,
+            _idx_prefix,
+            _row: dict[str, str],
+            _absent: set[str],
+            _comp_name: str,
+            _row_id: str,
+            _op: str,
+        ):
+            """添加unique索引检查；_absent 内的列冲突判竞态(RACE)，其余判确定性冲突(UNIQUE)"""
             for _field, _value in _row.items():
                 if _field in _unique_fields:
                     _idx_key = _idx_prefix + _field
                     _sortable_value = to_sortable_bytes(_dtype_map[_field].type(_value))
                     _start_val = b"[" + _sortable_value + b"\x00"
                     _end_val = b"[" + _sortable_value + b"\x00\xff"
-                    checks.append(["UNIQ", _idx_key, _start_val, _end_val])
+                    _race = _field in _absent
+                    (race_checks if _race else strict_checks).append(
+                        [
+                            "UNIQ",
+                            _idx_key,
+                            _start_val,
+                            _end_val,
+                            "RACE" if _race else "UNIQUE",
+                            f"{_comp_name}.{_field} id={_row_id} {_op}",
+                        ]
+                    )
 
         def _hset_key(_key, _old_version, _update: dict[str, str]):
             """添加hset的push命令"""
@@ -852,11 +877,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         first_ref = idmap.first_reference()
         assert first_ref is not None, "typing检查"
+        # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
+        absent_by_ref = idmap.get_absent_unique_fields()
 
         # 组合成checks/pushes命令表，减少lua脚本的复杂度
-        # checks有exists/unique/version
+        # checks有exists/unique/version，分两组：竞态类在前（VER、带 RACE 标记的 NX/UNIQ），
+        # 确定性类在后。Lua 首个失败即返回 → 同时存在两类冲突时 RACE 优先
+        # （保住 upsert 锚定列与其他 unique 列同时撞车时"重试后转 update"的语义）
         # pushes有hset/zadd/zrem/del
-        checks: list[list[str | bytes]] = []
+        race_checks: list[list[str | bytes]] = []
+        strict_checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
         # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。
@@ -871,13 +901,27 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
+            comp_name = comp_cls.name_
+            absent_rows = absent_by_ref.get(ref, {})
             touched_ids: list[str] = []
             # insert
             for insert in inserts:
                 row_id = insert["id"]
                 key = id_prefix + row_id
-                _key_must_not_exist(key)
-                _unique_meet(unique_fields, dtype_map, idx_prefix, insert)
+                absent = absent_rows.get(int(row_id), set())
+                _key_must_not_exist(
+                    key, "id" in absent, f"{comp_name}.id id={row_id} insert"
+                )
+                _unique_meet(
+                    unique_fields,
+                    dtype_map,
+                    idx_prefix,
+                    insert,
+                    absent,
+                    comp_name,
+                    row_id,
+                    "insert",
+                )
                 _hset_key(key, 0, insert)
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
                 touched_ids.append(row_id)
@@ -887,7 +931,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 key = id_prefix + row_id
                 old_version = old_row["_version"]
                 _version_must_match(key, old_version)
-                _unique_meet(unique_fields, dtype_map, idx_prefix, new_row)
+                _unique_meet(
+                    unique_fields,
+                    dtype_map,
+                    idx_prefix,
+                    new_row,
+                    absent_rows.get(int(row_id), set()),
+                    comp_name,
+                    row_id,
+                    "update",
+                )
                 _hset_key(key, old_version, new_row)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
@@ -916,6 +969,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
 
+        checks = race_checks + strict_checks
         payload_json: bytes = msg_packer.pack(  # type: ignore
             [checks, pushes, deleted, publishes]
         )
@@ -935,8 +989,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):
-                # unique违反就是index的竞态原因
-                raise RaceCondition(resp)
+                # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
+                raise UniqueViolation(resp)
             else:
                 raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
 

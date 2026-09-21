@@ -5,10 +5,12 @@
 #  @email: heeroz@gmail.com
 #  """
 import asyncio
+from typing import cast
 
 import msgpack
 import numpy as np
 import pytest
+from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, Table, TableReference
@@ -67,6 +69,9 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     checks = []
     pushes = []
 
+    def label(comp: str, field: str, rid, op: str) -> str:
+        return f"{comp}.{field} id={rid} {op}"
+
     # insert
     # 插入 item row1
     row = item_ref.comp_cls.new_row()
@@ -77,18 +82,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.add_insert(item_ref, row)
     # 插入的payload应该是这些check和push
     b_rowid = client.to_sortable_bytes(row.id)
-    checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        ["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"]
+        + ["UNIQUE", label("Item", "id", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:id"]
         + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
+        + ["UNIQUE", label("Item", "id", row.id, "insert")]
     )
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10\x00", b"[10\x00\xff"])
+    checks.append(
+        ["UNIQ", "pytest:Item:{CLU1}:index:name", b"[10\x00", b"[10\x00\xff"]
+        + ["UNIQUE", label("Item", "name", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:time"]
         + [
             b"[\x80\x00\x00\x00\x00\x00\x00\n\x00",
             b"[\x80\x00\x00\x00\x00\x00\x00\n\x00\xff",
         ]
+        + ["UNIQUE", label("Item", "time", row.id, "insert")]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -135,18 +148,26 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.add_insert(item_ref, row)
     # 插入的payload应该是这些check和push
     b_rowid = client.to_sortable_bytes(row.id)
-    checks.append(["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        ["NX", "pytest:Item:{CLU1}:id:" + f"{row.id}"]
+        + ["UNIQUE", label("Item", "id", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:id"]
         + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
+        + ["UNIQUE", label("Item", "id", row.id, "insert")]
     )
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11\x00", b"[11\x00\xff"])
+    checks.append(
+        ["UNIQ", "pytest:Item:{CLU1}:index:name", b"[11\x00", b"[11\x00\xff"]
+        + ["UNIQUE", label("Item", "name", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:Item:{CLU1}:index:time"]
         + [
             b"[\x80\x00\x00\x00\x00\x00\x00\x0b\x00",
             b"[\x80\x00\x00\x00\x00\x00\x00\x0b\x00\xff",
         ]
+        + ["UNIQUE", label("Item", "time", row.id, "insert")]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -189,10 +210,14 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.add_insert(rls_ref, row)
     # 插入的payload应该是这些check和push
     b_rowid = client.to_sortable_bytes(row.id)
-    checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        ["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"]
+        + ["UNIQUE", label("RLSTest", "id", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
         + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
+        + ["UNIQUE", label("RLSTest", "id", row.id, "insert")]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -219,10 +244,14 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.add_insert(rls_ref, row)
     # 插入的payload应该是这些check和push
     b_rowid = client.to_sortable_bytes(row.id)
-    checks.append(["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"])
+    checks.append(
+        ["NX", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}"]
+        + ["UNIQUE", label("RLSTest", "id", row.id, "insert")]
+    )
     checks.append(
         ["UNIQ", "pytest:RLSTest:{CLU1}:index:id"]
         + [b"[" + b_rowid + b"\x00", b"[" + b_rowid + b"\x00\xff"]
+        + ["UNIQUE", label("RLSTest", "id", row.id, "insert")]
     )
     pushes.append(
         ["HSET", "pytest:RLSTest:{CLU1}:id:" + f"{row.id}", "_version", "1"]
@@ -260,6 +289,7 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
             b"[\x80\x00\x00\x00\x00\x00\x00\x17\x00",
             b"[\x80\x00\x00\x00\x00\x00\x00\x17\x00\xff",
         ]
+        + ["UNIQUE", label("Item", "time", row.id, "update")]
     )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "17"]
@@ -286,7 +316,10 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     idmap.update(item_ref, row)
     # 更新的payload应该是这些check和push
     checks.append(["VER", "pytest:Item:{CLU1}:id:" + f"{row.id}", "233"])
-    checks.append(["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23\x00", b"[23\x00\xff"])
+    checks.append(
+        ["UNIQ", "pytest:Item:{CLU1}:index:name", b"[23\x00", b"[23\x00\xff"]
+        + ["UNIQUE", label("Item", "name", row.id, "update")]
+    )
     pushes.append(
         ["HSET", "pytest:Item:{CLU1}:id:" + f"{row.id}", "_version", "234"]
         + ["name", "23"]
@@ -387,6 +420,114 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     value_pubs = {c: ids for c, ids in published.items() if not c.endswith(b":table")}
     assert table_pubs == touched
     assert value_pubs == expected_values
+
+
+async def test_redis_commit_check_codes(mod_item_model):
+    """commit 的 NX/UNIQ 检查带 RACE/UNIQUE 标记：本事务曾 get 读空的列为 RACE，其余 UNIQUE；
+    payload 里竞态类（VER、RACE）全部排在确定性类之前（Lua 首个失败即返回 → RACE 优先）"""
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    client = RedisBackendClient.__new__(RedisBackendClient)
+    client.is_servant = False
+    idmap = IdentityMap()
+
+    # 行 A：get(id=)/get(name=) 读空后 insert → id/name 为 RACE，time 未观察 → UNIQUE
+    a = mod_item_model.new_row()
+    a.name, a.time = "A", 1
+    idmap.mark_absent(item_ref, "id", int(a.id))
+    idmap.mark_absent(item_ref, "name", "A")
+    idmap.add_insert(item_ref, a)
+    # 行 B：盲 insert → 全 UNIQUE
+    b = mod_item_model.new_row()
+    b.name, b.time = "B", 2
+    idmap.add_insert(item_ref, b)
+    # 行 C：clean 行改 time 为曾观察不存在的值 → time 为 RACE；VER 恒为竞态类
+    c = mod_item_model.new_row()
+    c.name, c.time = "C", 3
+    idmap.add_clean(item_ref, c)
+    idmap.mark_absent(item_ref, "time", 33)
+    c2, _ = idmap.get(item_ref, int(c.id))
+    assert c2 is not None
+    c2.time = 33
+    idmap.update(item_ref, c2)
+
+    captured = []
+
+    async def mock_lua_commit(keys, payload_json):
+        captured.append(msgpack.unpackb(payload_json[0], raw=True))
+        return b"committed"
+
+    client.lua_commit = mock_lua_commit
+    await client.commit(idmap)
+    checks = captured[0][0]
+
+    def codes(field, rid, op) -> set[bytes]:
+        lbl = f"Item.{field} id={rid} {op}".encode()
+        return {c[-2] for c in checks if c[0] in (b"NX", b"UNIQ") and c[-1] == lbl}
+
+    assert codes("id", a.id, "insert") == {b"RACE"}  # NX 与 UNIQ(id) 两条都是 RACE
+    assert codes("name", a.id, "insert") == {b"RACE"}
+    assert codes("time", a.id, "insert") == {b"UNIQUE"}
+    assert codes("id", b.id, "insert") == {b"UNIQUE"}
+    assert codes("name", b.id, "insert") == {b"UNIQUE"}
+    assert codes("time", b.id, "insert") == {b"UNIQUE"}
+    assert codes("time", c.id, "update") == {b"RACE"}
+    assert [chk for chk in checks if chk[0] == b"VER"]  # 行 C 的版本检查
+    # 竞态类全部在前
+    is_race = [chk[0] == b"VER" or chk[-2] == b"RACE" for chk in checks]
+    assert is_race == sorted(is_race, reverse=True)
+
+
+@use_redis_family_backend_only
+async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
+    """Lua 按 check 携带的 code 回显 RACE:/UNIQUE: 前缀 + label；
+    同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:（不依赖本地 IdentityMap 检查）"""
+    from hetu.data.backend.redis.client import msg_packer
+
+    backend: Backend = mod_auto_backend()
+    client = cast(RedisBackendClient, backend.master)
+    assert client.lua_commit is not None
+
+    # 准备一行 name="dup"
+    async with backend.session("pytest", 1) as session:
+        row = item_ref.comp_cls.new_row()
+        row.name = "dup"
+        row.time = 1
+        await session.using(item_ref.comp_cls).insert(row)
+
+    idx_key = client.index_key(item_ref, "name")
+    keys = [client.row_key(item_ref, 1)]
+
+    async def run(checks):
+        payload = msg_packer.pack([checks, [], {}, []])
+        return await client.lua_commit(keys, [payload])  # type: ignore
+
+    uniq = ["UNIQ", idx_key, b"[dup\x00", b"[dup\x00\xff"]
+    assert await run([uniq + ["RACE", "Item.name id=7 insert"]]) == (
+        b"RACE: Unique violation Item.name id=7 insert"
+    )
+    assert await run([uniq + ["UNIQUE", "Item.name id=7 update"]]) == (
+        b"UNIQUE: Unique violation Item.name id=7 update"
+    )
+    nx = ["NX", client.row_key(item_ref, int(row.id))]
+    assert await run([nx + ["UNIQUE", f"Item.id id={row.id} insert"]]) == (
+        f"UNIQUE: Key already exists Item.id id={row.id} insert".encode()
+    )
+    assert await run([nx + ["RACE", f"Item.id id={row.id} insert"]]) == (
+        f"RACE: Key already exists Item.id id={row.id} insert".encode()
+    )
+    # 去重兜底：第二条同 (索引, 值) 直接 UNIQUE:，即便值在库里不存在
+    fresh = ["UNIQ", idx_key, b"[nobody\x00", b"[nobody\x00\xff"]
+    resp = await run(
+        [
+            fresh + ["RACE", "Item.name id=1 insert"],
+            fresh + ["UNIQUE", "Item.name id=2 insert"],
+        ]
+    )
+    assert resp == (
+        b"UNIQUE: Duplicate unique value within transaction Item.name id=2 insert"
+    )
+    # 没有冲突：正常提交
+    assert await run([fresh + ["UNIQUE", "Item.name id=3 insert"]]) == b"committed"
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):

@@ -147,14 +147,17 @@ async def test_stale_read_race(item_ref, mod_auto_backend):
 
 
 async def test_unique_commit_race(item_ref, mod_auto_backend):
-    """测试服务器端提交时，牵涉unique的竞态检查。"""
+    """
+    提交时的 unique 冲突判定：盲写（本事务未曾 get 观察其不存在）撞上并发已提交的同值
+    → 确定性 UniqueViolation，不重试（重跑事务体只会再写同一个值）。
+    """
     import asyncio
 
-    from hetu.data.backend import RaceCondition
+    from hetu.data.backend import UniqueViolation
 
     backend: Backend = mod_auto_backend()
 
-    # 测试insert提交时unique的RaceCondition
+    # 测试insert提交时unique的确定性冲突
     async def insert_and_sleep(uni_val, sleep):
         async with backend.session("pytest", 1) as _session:
             _item_repo = _session.using(item_ref.comp_cls)
@@ -170,14 +173,14 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
     task2 = asyncio.create_task(insert_and_sleep(111112, 0.01))
     await asyncio.gather(task1, task2)
 
-    # 相同的time会竞态
+    # 相同的time：后提交者是确定性冲突
     task1 = asyncio.create_task(insert_and_sleep(222222, 0.1))
     task2 = asyncio.create_task(insert_and_sleep(222222, 0.01))
     await task2
-    with pytest.raises(RaceCondition, match="UNIQUE"):
+    with pytest.raises(UniqueViolation, match="UNIQUE"):
         await task1
 
-    # 测试update提交不同的key时unique竞态
+    # 测试update提交时把不同行改成同一个unique值：后提交者是确定性冲突
     async def update_and_sleep(name, sleep):
         async with backend.session("pytest", 1) as _session:
             _item_repo = _session.using(item_ref.comp_cls)
@@ -190,7 +193,7 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
     task1 = asyncio.create_task(update_and_sleep(111111, 0.1))
     task2 = asyncio.create_task(update_and_sleep(111112, 0.02))
     await task2
-    with pytest.raises(RaceCondition, match="UNIQUE"):
+    with pytest.raises(UniqueViolation, match="UNIQUE"):
         await task1
 
 
