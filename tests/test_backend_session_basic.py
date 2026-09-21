@@ -354,6 +354,61 @@ async def test_unique_explicit_id_pk_conflict(item_ref, mod_auto_backend):
             await repo.insert(r)
 
 
+async def test_get_negative_cache(item_ref, mod_auto_backend):
+    """get 读空后登记 absent，同一事务内再 get 同一值不再打远程；本地新 insert 的行优先；
+    非 unique 索引不登记；upsert 内部的二次 get 因此省一次往返"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with (
+            patch.object(master, "range", wraps=master.range) as m_range,
+            patch.object(master, "get", wraps=master.get) as m_get,
+        ):
+            # unique 列读空：第一次打远程，第二次命中 negative cache
+            assert await repo.get(name="nope") is None
+            assert m_range.call_count == 1
+            assert await repo.get(name="nope") is None
+            assert m_range.call_count == 1
+            # 主键同理
+            assert await repo.get(id=424242) is None
+            assert m_get.call_count == 1
+            assert await repo.get(id=424242) is None
+            assert m_get.call_count == 1
+            # 非 unique 索引读空不登记，每次都查
+            assert await repo.get(owner=777) is None
+            assert await repo.get(owner=777) is None
+            assert m_range.call_count == 3
+
+            # 本事务内 insert 曾观察不存在的值后，get 能读到（本地缓存先于 negative cache）
+            row = comp.new_row(id_=424242)
+            row.name, row.time = "nope", 1
+            await repo.insert(row)
+            got = await repo.get(name="nope")
+            assert got is not None and got.id == 424242
+            got = await repo.get(id=424242)
+            assert got is not None and got.name == "nope"
+            assert m_range.call_count == 3 and m_get.call_count == 1
+
+            # SystemLock 式：get 读空 + upsert 同一锚定值，只打一次远程
+            assert await repo.get(name="lock1") is None
+            async with repo.upsert(name="lock1") as lock:
+                lock.time = 2
+            assert m_range.call_count == 4
+
+    # 提交后的数据正确
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        assert (await repo.get(name="lock1")) is not None
+        assert (await repo.get(id=424242)) is not None
+
+
 async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):
     """测试upsert操作"""
     backend = mod_auto_backend()

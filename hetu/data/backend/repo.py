@@ -193,6 +193,8 @@ class SessionRepository:
         """
         从数据库获取单行数据，并放入Session缓存。
         推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
+        主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
+        None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
 
         Parameters
         ----------
@@ -229,28 +231,41 @@ class SessionRepository:
                 )
             )
 
+        idmap = self._session.idmap
         # 如果不是主键，直接用range方法
         if index_name != "id":
-            # 去cache查询
-            idmap = self._session.idmap
+            # 去cache查询（含本事务新 insert 的行，所以要先于 negative cache）
             rows = idmap.filter(self.ref, **{index_name: query_value})
             if len(rows) > 0:
                 return rows[0]
+
+            # negative cache：本事务已观察过该值不存在，事务内可重复读，不再打远程
+            # （upsert 内部会再 get 一次锚定值，SystemLock 等流程因此省一次往返）
+            is_unique = index_name in comp_cls.uniques_
+            if is_unique and idmap.observed_absent(self.ref, index_name, query_value):
+                return None
 
             # cache未命中，去数据库查询
             rows = await self.range(index_name, query_value, limit=1, desc=False)
             if rows.shape[0] > 0:
                 return rows[0]
-            # 等值查询unique列读空：登记negative observation，供insert/update判定竞态。
+            # 等值查询unique列读空：登记negative observation，供commit判定竞态。
             # （区间range查询不登记negative observation，区间无穷且本就不保证事务内可见性。）
-            if index_name in comp_cls.uniques_:
+            if is_unique:
                 idmap.mark_absent(self.ref, index_name, query_value)
             return None
         else:
-            row = await self.get_by_id(int(query_value))
+            row_id = int(query_value)
+            # 先查cache（含本事务新 insert 的行），再看 negative cache，最后才去数据库
+            row, row_stat = idmap.get(self.ref, row_id)
+            if row_stat is not None:
+                return None if row_stat == RowState.DELETE else row
+            if idmap.observed_absent(self.ref, "id", row_id):
+                return None
+            row = await self.get_by_id(row_id)
             if row is None:
                 # 主键id恒为unique，登记“本事务观察到该id不存在”
-                self._session.idmap.mark_absent(self.ref, "id", int(query_value))
+                idmap.mark_absent(self.ref, "id", row_id)
             return row
 
     async def range(
