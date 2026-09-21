@@ -1,0 +1,142 @@
+# 订阅预算测量结果（sub_budget.py / sub_budget_ws.py）
+
+回答的问题：预估 N 人在线时，每人给多少订阅合适？这和数据更新频率是什么关系？
+
+结论先行：**订阅数本身几乎不要钱，要钱的是"交付"**——一行被写一次 × 订阅了这行的连接数。
+预算要按"每秒交付数"来定，而不是按"每人几行"。另外 range 订阅有一个和 zone 划分无关的
+广播开销（索引任何写入 → 通知该索引的**全部** range 订阅者），是最容易踩的坑。
+
+## 环境
+
+- Windows 11，9950X3D（32 线程），Redis 8.10.1 跑在 Docker Desktop（WSL2），master + 1 replica
+- Python 3.14，redis-py 8.1.0 + hiredis 3.4.1，HeTu `perf/redis-rtt` @ 4b7402b
+- Docker on Windows 的网络栈让每次 Redis 往返都偏慢（HGETALL 在副本上约 45µs CPU），
+  Linux 裸机上 Redis 侧数字预计好 2~3 倍；Python 侧数字受影响较小
+
+## 成本模型
+
+一次写入 → Redis keyspace 通知 → 每个订阅了该行的连接各收到 1 条 pubsub 消息 →
+连接按 `UPDATE_FREQUENCY`（10Hz）tick 合批 → 每个变更行 1 次 HGETALL 重读 → 推给客户端。
+
+四种单位成本（订阅侧 worker 进程 CPU；Redis 副本 CPU 另列）：
+
+| 单位事件 | worker CPU | 副本 CPU | 说明 |
+|---|---|---|---|
+| **交付** 1 行更新给 1 个连接 | ~175µs（进程内）<br>~235µs（含 ws+jsonb+zlib+crypto） | 35~55µs | HGETALL 往返 + 解码 + 推送，含触发它的那 1 条通知。多进程满载时 225~280µs |
+| **通知** 1 条 pubsub 消息（含被合批丢掉的） | ~35µs | ~12µs | 高频写同一行时，客户端只拿到 ≤6 次/秒，但每条通知的解析成本照付 |
+| **索引写入** × 1 个 range 订阅者 | ~130µs | ~30µs | 2 条通知 + ZRANGE 重查；对该索引的**所有** range 订阅者广播 |
+| 静态：1 个 (频道, 订阅者) 对 | ~2.8KB 内存 | 160~220B | 每连接另有 ~170KB RSS；订阅 50 行的 range 约 14ms 建立 |
+
+合批效果：`UPDATE_FREQUENCY=10` 但 `get_message` 的窗口实际是 1~2 个 interval，
+实测同一行对同一连接**最高约 6 次/秒**交付（20 行 × 90Hz 写入 → 每 (行,连接) 6.2 次/秒）。
+
+## 天花板（本机）
+
+| 资源 | 100% 时 | 建议预算（≈60%，p99 延迟 < 250ms） |
+|---|---|---|
+| 1 个 worker 事件循环 | ~5.5k 交付/秒（进程内）<br>~5~6k 交付/秒（含 ws，靠 tick 合批多行一帧撑住） | **~3k 交付/秒** |
+| 1 个 Redis 副本 | ~27k 交付/秒（1.0 核，单线程） | **~15k 交付/秒**，即约 5 个满载 worker |
+| Redis master | 2.9k commit/秒 用 0.23 核 → ~78µs/commit | 与订阅无关，按写入量算 |
+
+超过 worker 预算的表现：交付率下降（合批吞掉）、写→客户端延迟从 ~160ms 涨到秒级、
+积压年龄（最老未处理通知）超过 1s；超过 2 分钟的通知会被 `RedisMQClient.pull` 丢弃。
+
+## 预算公式
+
+记：N 在线人数、S 每人订阅行数、F 每行写频率（Hz，有效值 ≤6）、
+K_r 订阅了行 r 的连接数（AOI 同屏人数）、W_idx 某索引每秒被改动次数、C_idx 该索引的 range 订阅者数。
+
+```
+D  = Σ_rows  min(F_r, 6) × K_r   ≈ N × S × F        # 每秒交付数（主开销）
+Nf = Σ_rows  F_r × K_r                               # 每秒 pubsub 通知数（不合批）
+I  = Σ_index W_idx × C_idx                           # 每秒 (索引写 × 订阅者)
+
+worker 核数 ≈ (D × 200µs + Nf × 35µs + I × 130µs) / 1e6 / 0.6   # 200 = 235 扣掉已含的 1 条通知
+副本个数    ≈ D / 15k
+```
+
+反过来给每人定预算：`每人每秒可收的行更新 ≈ 3000 × workers / N`，再拆成 S × F。
+
+### 算例
+
+- 32 worker、N=1000：每人 96 行更新/秒 → S=50 行 × F=2Hz，或 S=100 × 1Hz。
+- N=1000、S=50、F=1Hz（如 1Hz 位置同步）：D=50k/秒 → 约 20 个 worker 核、4 个副本。
+- 同上但 F=5Hz：D=250k/秒 → ~100 核 + 17 副本，不现实。高频位置同步不应逐行订阅推送，
+  应降 S（AOI 半径）、降 F（服务端节流/插值）或改走非订阅通道。
+- 同屏 M 人互相可见（每人都订阅这 M 行）：D = M² × F。M=100、F=1Hz 就是 1 万交付/秒 ≈ 2.4 核，按 60% 预算要 4 个 worker。
+- **索引陷阱**：1000 人都 range 订阅 `Position.zone`，每次 zone 变化 = 1000 × 130µs = 0.13 核·秒。
+  每秒 100 次跨区就要 13 个核，且每个 worker 上有多少 range 订阅者就要付多少。
+  实测 200 个订阅者、每秒 30 次跨区就把一个 worker 打满（延迟 p99 3.2s）。
+
+## 实测数据
+
+### 进程内（sub_budget.py，不含 ws）
+
+K = 扇出（每次写入通知的连接数）= conns/zones，每连接订阅 50 行。
+
+| tag | conns×procs | K | 写/秒 | 应交付/秒 | 通知/秒 | 交付/秒 | 交付率 | worker核/进程 | µs/交付 | 副本核 | p50 ms | p99 ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| K10_W300 | 200×1 | 10 | 297 | 2972 | 2985 | 2878 | 0.97 | 0.52 | 181 | 0.16 | 162 | 231 |
+| K10_W500 | 200×1 | 10 | 492 | 4918 | 4989 | 4720 | 0.96 | 0.85 | 179 | 0.25 | 175 | 371 |
+| K10_W1000 | 200×1 | 10 | 1010 | 10099 | 9990 | 4767 | 0.47 | 0.99 | 207 | 0.31 | 1568 | 3166 |
+| K10_W3000 | 200×1 | 10 | 2979 | 29795 | 29836 | 2624 | 0.09 | 0.98 | 372 | 0.42 | 2150 | 4399 |
+| K100_W100 | 200×1 | 100 | 100 | 9958 | 9979 | 5265 | 0.53 | 1.00 | 189 | 0.30 | 2404 | 5211 |
+| K10_hot20_W2000（20 行 90Hz） | 200×1 | 10 | 1799 | 17986 | 17865 | 1242 | 0.07 | 0.89 | 718 | 0.28 | 11* | 50* |
+| P4_K10_W1200 | 800×4 | 10 | 1199 | 11990 | 11984 | 11476 | 0.96 | 0.65 | 226 | 0.46 | 160 | 231 |
+| P8_K10_W2400 | 800×8 | 10 | 2431 | 24310 | 23948 | 22066 | 0.91 | 0.72 | 262 | 0.72 | 161 | 232 |
+| P16_K10_W4800 | 1600×16 | 10 | 2928 | 29278 | 28654 | 27366 | 0.94 | 0.48 | 278 | **1.01** | 228 | 379 |
+| K10_W300_move3（3% 写改 zone） | 200×1 | 10 | 297 | 2971 | 6087 | 2823 | 0.95 | 0.74 | 261 | 0.21 | 174 | 440 |
+| K10_W300_move10 | 200×1 | 10 | 298 | 2984 | 14731 | 2829 | 0.95 | 0.97 | 344 | 0.29 | 283 | 3205 |
+| K10_W300_move50 | 200×1 | 10 | 297 | 2971 | 60480 | 1093 | 0.37 | 0.99 | 904 | 0.25 | 3717 | 8765 |
+
+\* 热行的 ts 被后续写入覆盖，延迟测的是"最后一次写→交付"，偏小。
+
+- K10_W1000 与 K100_W100 应交付都是 1 万/秒，结果一致 → 成本按交付数算，与写入次数/扇出形状无关。
+- 通知成本：hot20 组 17.9k 通知/秒只交付 1.2k，CPU 仍 0.89 核 → 每条通知 ≈35µs。
+- P16 组副本 1.01 核 = 副本打满，积压最大 17s。
+- 静态（1000 连接 × 51 频道）：Redis 156B/(频道,订阅者)，Python 2.8KB/(频道,订阅者)，168KB RSS/连接，
+  订阅建立 14ms/连接。
+
+### 端到端（sub_budget_ws.py，真实 hetu 服务器 1 worker + jsonb/zlib/crypto ws 客户端）
+
+| tag | conns | 写/秒 | 应交付/秒 | 交付/秒 | 交付率 | 帧/秒 | 行/帧 | server 核 | µs/交付 | p50 ms | p99 ms |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| ws_K10_W300 | 120 | 297 | 2970 | 2769 | 0.93 | 1096 | 2.5 | 0.65 | 236 | 153 | 217 |
+| ws_K10_W500 | 120 | 492 | 4923 | 4435 | 0.90 | 1350 | 3.3 | 0.92 | 208 | 157 | 232 |
+| ws_K10_W800 | 120 | 783 | 7827 | 6101 | 0.78 | 552 | 11.1 | 0.99 | 163 | 437 | 944 |
+
+ws + pipeline 每帧约 130µs；同一订阅同 tick 的多行合成一帧，所以行越密每行摊得越少。
+
+## 顺带发现的问题
+
+1. **redis-py 8.0 起 async 连接池默认 `max_connections=100`（7.x 是 2**31）**，HeTu 没配置。
+   每个 ws 连接的 pubsub 常驻占 servant 池 1 条，加上 `get_updates` 的并发 HGETALL，
+   一个 worker **不到 100 个连接**就开始 `MaxConnectionsError` 断线（实测 80 连接一加负载就掉 60 个）。
+   pyproject 允许 `redis>=7,<9`，锁的是 8.1.0，升级时静默引入。两个 bench 脚本用 monkeypatch 绕过，
+   生产需要在 `RedisBackendClient` 里把 `max_connections` 做成配置项。
+2. Windows 下 Sanic 强制 `WindowsSelectorEventLoopPolicy`，`select()` 上限 512 fd，
+   单 worker 约 150~200 个连接就崩（"too many file descriptors in select()"）。Linux 无此问题。
+3. `RedisMQClient.pull` 每收一条消息都调一次 `MultiMap.pop(0, now-120)` 清旧消息，
+   空区间也要 ~10µs（sortedcontainers 切片），cProfile 里约占通知路径的 1/5~1/4；先 `peekitem(0)` 比较再 pop 即可。
+4. 索引频道是整个索引一个 zset（`{prefix}:index:{name}`），任何值的变动都广播给该索引全部
+   range 订阅者。若要撑高频跨区的 AOI，要么按地图/区拆组件缩小 C_idx，要么引擎侧把索引频道
+   按值分桶。
+
+## 复现
+
+```bash
+# 专用 Redis（会 FLUSHALL）
+docker network create hetu_bench_net
+docker run -d --name hetu_bench_redis --network hetu_bench_net --hostname redis-master -p 23400:6379 redis:latest
+docker run -d --name hetu_bench_redis_replica --network hetu_bench_net -p 23401:6379 redis:latest \
+    redis-server --replicaof redis-master 6379 --replica-read-only yes
+
+cd benchmark
+uv run python sub_budget.py --conns 200 --zones 20 --limit 50 --writes 300 --duration 15
+uv run python sub_budget.py --conns 800 --zones 80 --limit 50 --procs 4 --writes 1200 --writers 3
+uv run python sub_budget.py --conns 200 --zones 20 --limit 50 --writes 300 --move-ratio 0.03
+uv run python sub_budget_ws.py --conns 120 --zones 12 --limit 50 --writes 300 --duration 15
+```
+
+Windows 下 `asyncio.sleep` 粒度约 15ms，每个写协程最多 ~60 写/秒，要更高写入量请加 `--writer-coroutines`。
+Linux 上建议用 `sub_budget_ws.py --workers N` 直接测多 worker。
