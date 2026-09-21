@@ -797,7 +797,35 @@ class SQLBackendClient(BackendClient, alias="sql"):
         if race:
             raise RaceCondition("RACE: " + race[0])
         if strict:
+            # 与 Redis 一致：同时存在两类冲突时竞态优先。前置版本 SELECT 只覆盖纯读行，
+            # update 行的版本条件要到后面的 UPDATE 语句才检查，这里先核一遍：本事务读到的
+            # 行已经被别人改过的话报 RaceCondition 让上层重试（重跑事务体可能就不写那个值了），
+            # 而不是把确定性的 UniqueViolation 交给客户端
+            await self._raise_if_updates_stale(conn, dirties)
             raise UniqueViolation("UNIQUE: " + strict[0])
+
+    async def _raise_if_updates_stale(
+        self, conn: AsyncConnection, dirties: dict[TableReference, Any]
+    ) -> None:
+        """update 态的行有版本对不上（被并发改过/删掉）的就抛 RaceCondition"""
+        for ref, (_inserts, (old_rows, _new_rows), _deletes) in dirties.items():
+            if not old_rows:
+                continue
+            table = self.component_table(ref)
+            expected = {int(row["id"]): int(row["_version"]) for row in old_rows}
+            stmt = sa.select(table.c.id, table.c._version).where(
+                table.c.id.in_(list(expected))
+            )
+            found = {
+                int(_id): int(_ver) for _id, _ver in (await conn.execute(stmt)).all()
+            }
+            for row_id, version in expected.items():
+                actual = found.get(row_id)
+                if actual is None or actual != version:
+                    raise RaceCondition(
+                        f"Version mismatch on updated row id={row_id} "
+                        f"exp:{version} got:{actual}"
+                    )
 
     @staticmethod
     def _is_table_missing_error(exc: BaseException) -> bool:

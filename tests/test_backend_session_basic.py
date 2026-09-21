@@ -320,6 +320,39 @@ async def test_unique_race_has_priority_over_violation(item_ref, mod_auto_backen
             await s.using(comp).insert(r)
 
 
+async def test_unique_race_on_updated_row_has_priority(item_ref, mod_auto_backend):
+    """规则3 补充：本事务 update 的行在提交前被别人改过（版本过期）+ 盲 insert 撞既有 unique
+    值同时发生 → RaceCondition（重跑事务体可能就不写那个值了），而不是确定性 UniqueViolation"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:  # 既有 time=100；p 是待 update 的行
+        r = comp.new_row()
+        r.name, r.time = "a", 100
+        await s.using(comp).insert(r)
+        p = comp.new_row()
+        p.name, p.time = "p", 200
+        await s.using(comp).insert(p)
+    await backend.wait_for_synced()
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            p = await repo.get(name="p")
+            assert p is not None
+            async with backend.session("pytest", 1) as s2:  # 并发改了 p
+                repo2 = s2.using(comp)
+                p2 = await repo2.get(name="p")
+                assert p2 is not None
+                p2.qty = 7
+                await repo2.update(p2)
+            r = comp.new_row()
+            r.name, r.time = "fresh", 100  # time 确定性冲突
+            await repo.insert(r)
+            p.qty = 8
+            await repo.update(p)  # p 的版本已过期
+
+
 async def test_unique_explicit_id_pk_conflict(item_ref, mod_auto_backend):
     """规则4（headless）：显式 id 撞主键，无 get → UniqueViolation；先 get(id=) 读空再撞 → RaceCondition"""
     backend: Backend = mod_auto_backend()
