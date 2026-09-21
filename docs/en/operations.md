@@ -89,11 +89,12 @@ population while staying consistent.
 - Add as many `servants` as you need; each is a Redis read-only replica that
   syncs from the master.
 - Servants need `notify-keyspace-events` enabled (HeTu `CONFIG SET`s it at
-  startup when it has permission, and warns otherwise). It serves more than
-  client subscriptions: every logged-in connection also watches its own
-  `Connection` row, so when it gets kicked the server closes it proactively
-  and the RPC path no longer reads the row on every call; if a notification is
-  lost, `CONNECTION_ALIVE_RECHECK_INTERVAL` (default 5 s) re-checks as a fallback.
+  startup when it has permission, and warns otherwise).
+- Every logged-in connection also subscribes to the `Connection` table's
+  `owner == this user` index-value channel, so when it gets kicked the server
+  closes it proactively and the RPC path no longer reads the row on every
+  call; if a notification is lost, `CONNECTION_ALIVE_RECHECK_INTERVAL`
+  (default 5 s) re-checks as a fallback.
 - `servants` is optional. Leaving it empty puts you in single-master mode —
   fine for small games.
 - Set Redis `client-output-buffer-limit` on the servants conservatively;

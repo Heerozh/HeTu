@@ -130,8 +130,12 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             ),
         )
 
-        # 订阅本连接自己那行 Connection：被顶号（owner 被改）时收到通知才重查，RPC 路径上不再
-        # 每次读库；收到通知还主动从 master 核一次，被顶号就立刻断连，不用等它下次调用。
+        # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道，收到通知才重查，
+        # RPC 路径上不再每次读库；收到通知还主动从 master 核一次，被顶号就立刻断连，不用等它
+        # 下次调用。订索引值频道而不是本连接那行的行频道：行频道会被本连接自己的心跳
+        # HSET(last_active) 每 ENDPOINT_CALL_IDLE_TIMEOUT/5 秒触发一次，白白重查；而 owner 值
+        # 频道只在某行的 owner 从/到本用户变化、或带本用户的行增删时才有消息——正是被顶号
+        # （本行 owner 被改成 0）和别处登录本用户这两件事，心跳碰不到它。
         # 频道名与 hub 必须是同一个后端，否则保持每次都查
         conn_tbl = tbl_mgr.get_table(connection.Connection)
         if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
@@ -154,15 +158,23 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                         )
                     )
 
-            def on_conn_row_changed():
+            def on_owner_changed():
                 # 在 hub 的监听协程里同步调用：只置标记 + 起短任务，不能 await
                 mark_dirty()
                 request.app.add_task(recheck_alive())
 
-            await broker.watch_channel(
-                conn_tbl.backend.servant.row_channel(conn_tbl, context.connection_id),
-                on_conn_row_changed,
-            )
+            async def watch_owner(user_id: int):
+                # 登录的那次调用返回前订上；订阅生效之前就被顶号的话收不到通知，订上后主动核一次
+                assert broker is not None
+                await broker.watch_channel(
+                    conn_tbl.backend.servant.index_value_channel(
+                        conn_tbl, "owner", user_id
+                    ),
+                    on_owner_changed,
+                )
+                await recheck_alive()
+
+            endpoint_executor.on_elevated = watch_owner
 
         # 初始化push消息队列
         push_queue = asyncio.Queue(1024)

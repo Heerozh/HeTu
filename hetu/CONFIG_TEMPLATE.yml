@@ -76,9 +76,9 @@ WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ] # 0.5MB
 
 # 闲置多少秒未调用System/Endpoint则视为断线
 ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
-# 登录连接"是否被顶号"检查的兜底重查间隔（秒）。正常靠本连接 Connection 行的变更通知触发（被顶号时
-# 服务器会主动断开该连接），此间隔只在通知丢失（pubsub 缓冲溢出、节点切换、Redis 未开
-# notify-keyspace-events）时兜底；0 表示每次调用都查
+# 登录连接"是否被顶号"检查的兜底重查间隔（秒）。正常靠 Connection 表 owner 索引值频道的变更通知触发
+# （被顶号时服务器会主动断开该连接），此间隔只在通知丢失（pubsub 缓冲溢出、节点切换）时兜底；
+# 0 表示每次调用都查
 CONNECTION_ALIVE_RECHECK_INTERVAL: 5
 # 限制每个IP可以创建多少匿名连接（提权登陆后不受此限制）
 MAX_ANONYMOUS_CONNECTION_BY_IP: 10

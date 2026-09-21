@@ -269,6 +269,33 @@ def test_websocket_kick_connect(test_server):
     ], "最后一行没执行到"
 
 
+def test_websocket_kick_without_rpc_after_login(test_server):
+    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开"""
+
+    async def kick_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", 1])
+        await client2.recv()
+
+        # client1 没有任何后续调用，只能靠 owner 索引值频道的通知把它断开
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+            async with asyncio.timeout(3):
+                await client1.recv()
+        await client2.send(["rpc", "add_rls_comp_value", 2])
+        await client2.recv()
+
+    _, response = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=kick_routine
+    )
+    assert response.client_sent[-1] == ["rpc", "add_rls_comp_value", 2], (
+        "最后一行没执行到"
+    )
+
+
 @pytest.mark.timeout(20)
 def test_websocket_disconnect_system_called(test_server):
     user_id = 199991

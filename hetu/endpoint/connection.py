@@ -165,9 +165,11 @@ class ConnectionAliveChecker:
     两种模式：
 
     - 默认：登录用户每次调用都读一次 Connection 行（裸 executor / Sandbox / future call）。
-    - 通知模式（websocket 层 `enable_notify_mode()` 后）：ws 连接订阅了自己那行 Connection 的
-      变更通知，只在收到通知（脏标记）或距上次检查超过 `CONNECTION_ALIVE_RECHECK_INTERVAL`
-      时才读。RPC 路径上的那次读因此省掉；间隔是通知丢失时的兜底。
+    - 通知模式（websocket 层 `enable_notify_mode()` 后）：ws 连接登录后订阅了 Connection 表
+      "owner == 本用户" 的索引值频道（被顶号时本行 owner 被改，一定会通知到它；本连接自己的
+      心跳写 last_active 走行频道，碰不到它），只在收到通知（脏标记）或距上次检查超过
+      `CONNECTION_ALIVE_RECHECK_INTERVAL` 时才读。RPC 路径上的那次读因此省掉；
+      间隔是通知丢失时的兜底。
     """
 
     def __init__(self, tbl_mgr: ComponentTableManager):
@@ -176,7 +178,7 @@ class ConnectionAliveChecker:
         self.conn_tbl: Table = table
         self.last_active_cache = 0
         self._notify_mode = False
-        # 通知模式下：收到本连接 Connection 行的变更通知置位，下次 is_illegal 必查；
+        # 通知模式下：收到本用户 owner 索引值频道的通知置位，下次 is_illegal 必查；
         # 初值 True 让登录后的首个调用核一次（顺带确认副本已同步）
         self._dirty = True
         self._last_check = 0.0

@@ -1,3 +1,4 @@
+import asyncio
 import time
 
 import pytest
@@ -205,6 +206,85 @@ async def test_alive_checker_fallback_interval(
         monkeypatch.setattr(time, "time", lambda: time_time() + 4000)
         await executor.execute("add_rls_comp_value", 5)
         assert servant_reads() == 4  # 超过间隔读一次
+    await executor.terminate()
+
+
+async def test_on_elevated_hook_fires_once_per_login(mod_test_app, tbl_mgr, new_ctx):
+    """execute() 里登录成功（caller 0 → user_id）时在返回前 await 一次 on_elevated；
+    其他调用、重复登录（elevate 拒绝）都不触发"""
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    elevated: list[int] = []
+
+    async def on_elevated(user_id: int):
+        elevated.append(user_id)
+
+    executor.on_elevated = on_elevated
+    ok, _ = await executor.execute("add_rls_comp_value", 1)  # 未登录也能调的 endpoint
+    assert elevated == []
+    ok, _ = await executor.execute("login", 7)
+    assert ok
+    assert elevated == [7]
+    ok, _ = await executor.execute("add_rls_comp_value", 2)
+    assert ok
+    ok, _ = await executor.execute("login", 8)  # 已提权，elevate 返回 False
+    assert elevated == [7]
+    await executor.terminate()
+
+
+async def test_owner_value_channel_ignores_own_heartbeat(
+    mod_test_app, tbl_mgr, new_ctx
+):
+    """websocket 层订的是 Connection 表 owner==本用户 的索引值频道：本连接自己的心跳
+    （direct_set last_active）会通知行频道但碰不到它；被别的连接顶号时它一定收到通知"""
+    from hetu.data.backend.redis import RedisBackendClient
+    from hetu.data.sub import SubscriptionBroker
+
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    ok, _ = await executor.execute("login", 1)
+    assert ok
+    ctx = executor.context
+    conn_tbl = executor.alive_checker.conn_tbl
+    backend = conn_tbl.backend
+    broker = SubscriptionBroker(backend)
+    owner_hits: list[int] = []
+    row_hits: list[int] = []
+    await broker.watch_channel(
+        backend.servant.index_value_channel(conn_tbl, "owner", 1),
+        lambda: owner_hits.append(1),
+    )
+    await broker.watch_channel(
+        backend.servant.row_channel(conn_tbl, ctx.connection_id),
+        lambda: row_hits.append(1),
+    )
+
+    async def wait_hits(hits: list[int], count: int):
+        async with asyncio.timeout(3):
+            while len(hits) < count:
+                await asyncio.sleep(0.02)
+
+    # 每次调用都强制写一次心跳
+    for i in range(3):
+        executor.alive_checker.last_active_cache = 0
+        ok, _ = await executor.execute("add_rls_comp_value", i)
+        assert ok
+    if isinstance(backend.master, RedisBackendClient):
+        # Redis 的 keyspace 通知会把心跳的 HSET 打到行频道上（SQL 的 direct_set 不发通知）
+        await wait_hits(row_hits, 3)
+    await asyncio.sleep(0.3)
+    assert owner_hits == [], "心跳不该触发 owner 索引值频道"
+
+    # 被顶号：owner 从 1 改成 0
+    executor2 = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor2.initialize("")
+    ok, _ = await executor2.execute("login", 1)
+    assert ok
+    await wait_hits(owner_hits, 1)
+    assert await executor.alive_checker.kicked(ctx) is True
+
+    await broker.close()
+    await executor2.terminate()
     await executor.terminate()
 
 

@@ -7,6 +7,7 @@
 
 import inspect
 import logging
+from collections.abc import Awaitable, Callable
 from time import time as now
 from typing import TYPE_CHECKING
 
@@ -39,6 +40,9 @@ class EndpointExecutor:
         self.tbl_mgr = tbl_mgr
         self.alive_checker = ConnectionAliveChecker(self.tbl_mgr)
         self.context = context
+        # 某次调用里连接完成了登录（ctx.caller 从 0 变为 user_id）时，在该调用返回前 await 一次，
+        # 传入 user_id。websocket 层用它订阅"被顶号"通知（要登录后才知道订哪个频道）
+        self.on_elevated: Callable[[int], Awaitable[None]] | None = None
 
     async def initialize(self, address: str):
         """初始化连接，分配connection id，如果失败则raise异常"""
@@ -211,4 +215,9 @@ class EndpointExecutor:
                 return True, RejectResponse(e.code, e.reason)
 
         # 开始调用
-        return await self.execute_(ep, *args)
+        caller_before = self.context.caller
+        result = await self.execute_(ep, *args)
+        # 本次调用里登录成功了（elevate 是一次性的，caller 只会从 0 变成 user_id）
+        if self.on_elevated is not None and self.context.caller and not caller_before:
+            await self.on_elevated(self.context.caller)
+        return result
