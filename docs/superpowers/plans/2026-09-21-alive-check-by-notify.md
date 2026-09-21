@@ -25,7 +25,7 @@
 **Files:** `hetu/data/backend/base.py`（`MQClient.__init__` ~846、`push_pulled_` ~860）；
 `hetu/data/sub.py`（`SubscriptionBroker` ~289）；`tests/test_backend_pubsub_hub.py`（新增用例）。
 
-- [ ] **先写测试 `test_watch_channel_callback_bypasses_client_queue(filled_item_ref, mod_auto_backend)`**
+- [x] **先写测试 `test_watch_channel_callback_bypasses_client_queue(filled_item_ref, mod_auto_backend)`**
   （各后端参数化，仿 `test_hub_shared_subscription`）：`broker = SubscriptionBroker(backend)`；
   `channel = backend.servant.row_channel(ref, row_id)`（`row_id` 取 time=110 那行）；
   `hits = []`；`await broker.watch_channel(channel, lambda: hits.append(1))`；用 `_update_qty`
@@ -34,7 +34,7 @@
   `broker._mq_client.pulled_set` 不含 channel，且 `broker.get_updates(timeout=0.3)` 返回 `{}`；
   `await broker.close()` 后 hub 分发表里没有这个频道（`_hub(backend)._subs.get(channel)` 为空）；
   回调抛异常不影响后续通知（第二次 update 仍能到）。
-- [ ] **实现 `MQClient`**：
+- [x] **实现 `MQClient`**：
 
 ```python
 # __init__
@@ -58,7 +58,7 @@ if cb is not None:
 ```
 
   回调在 hub 的监听协程里同步执行，必须非阻塞（置标记 / `create_task`），docstring 写明。
-- [ ] **实现 `SubscriptionBroker.watch_channel`**：
+- [x] **实现 `SubscriptionBroker.watch_channel`**：
 
 ```python
 async def watch_channel(self, channel: str, callback: Callable[[], None]) -> None:
@@ -71,7 +71,7 @@ async def watch_channel(self, channel: str, callback: Callable[[], None]) -> Non
     await self._mq_client.subscribe(channel)
 ```
 
-- [ ] 验证：`HETU_TEST_BACKENDS=redis,sqlite ... pytest tests/test_backend_pubsub_hub.py tests/test_backend_sub.py -q`；
+- [x] 验证：`HETU_TEST_BACKENDS=redis,sqlite ... pytest tests/test_backend_pubsub_hub.py tests/test_backend_sub.py -q`；
   lint；commit `feat(sub): MQClient 内部关注频道，通知只回调不进推送队列；broker.watch_channel`。
 
 ---
@@ -82,7 +82,7 @@ async def watch_channel(self, channel: str, callback: Callable[[], None]) -> Non
 `hetu/server/main.py`（配置传递 ~364-370）；`hetu/CONFIG_TEMPLATE.yml`（`ENDPOINT_CALL_IDLE_TIMEOUT` 旁）；
 `tests/test_endpoint_connection.py`（新增用例）。
 
-- [ ] **先写测试**（裸 executor，`mod_test_app, tbl_mgr, new_ctx`，用 `unittest.mock.patch.object`
+- [x] **先写测试**（裸 executor，`mod_test_app, tbl_mgr, new_ctx`，用 `unittest.mock.patch.object`
   计数 `conn_tbl.backend.servant.get` / `.master.get`——注意 `Table.servant_get` 是 property 绑定，
   patch 的目标是 `backend.servant` 实例上的 `get`；`only_master` 不适用，`servant` 可能是随机，
   测试里 `backend = tbl.backend`，若 `backend._servants` 多个则全部 patch）：
@@ -97,7 +97,7 @@ async def watch_channel(self, channel: str, callback: Callable[[], None]) -> Non
   4. `test_alive_checker_kicked_by_master_read`：`await executor.alive_checker.kicked(ctx)`
      顶号前 False、顶号后 True，且它不写 last_active、不开 Session（patch `backend.session`
      断言未被调用）。
-- [ ] **实现**：
+- [x] **实现**：
 
 ```python
 CONNECTION_ALIVE_RECHECK_INTERVAL = 0  # 占位符，实际由Config里修改；通知模式下的兜底重查间隔（秒）
@@ -141,7 +141,7 @@ class ConnectionAliveChecker:
 
   `is_illegal`：`if caller and self._need_check(now):` → 先 `self._dirty = False; self._last_check = now`
   再 `servant_get`；其余（日志、`last_active` 节流写）不动。`now = time.time()` 提到最前复用。
-- [ ] **配置**：`CONFIG_TEMPLATE.yml` 在 `ENDPOINT_CALL_IDLE_TIMEOUT` 后加
+- [x] **配置**：`CONFIG_TEMPLATE.yml` 在 `ENDPOINT_CALL_IDLE_TIMEOUT` 后加
 
 ```yaml
 # 登录连接"是否被顶号"检查的兜底重查间隔（秒）。正常靠本连接 Connection 行的变更通知触发，
@@ -150,7 +150,7 @@ CONNECTION_ALIVE_RECHECK_INTERVAL: 5
 ```
 
   `main.py` 传递：`connection.CONNECTION_ALIVE_RECHECK_INTERVAL = config.get("CONNECTION_ALIVE_RECHECK_INTERVAL", 5)`。
-- [ ] 验证：`HETU_TEST_BACKENDS=redis,sqlite ... pytest tests/test_endpoint_connection.py tests/test_system_executor.py tests/test_testing_sandbox.py -q`；
+- [x] 验证：`HETU_TEST_BACKENDS=redis,sqlite ... pytest tests/test_endpoint_connection.py tests/test_system_executor.py tests/test_testing_sandbox.py -q`；
   lint；commit `perf(endpoint): ConnectionAliveChecker 通知模式——收到变更通知或超兜底间隔才读 Connection 行`。
 
 ---
@@ -160,7 +160,7 @@ CONNECTION_ALIVE_RECHECK_INTERVAL: 5
 **Files:** `hetu/server/websocket.py`（broker 创建之后 ~117-122）；`tests/test_websocket.py`
 （`test_websocket_kick_connect` ~238-270）。
 
-- [ ] **接线**（broker 创建后、起 task 前）：
+- [x] **接线**（broker 创建后、起 task 前）：
 
 ```python
 # 订阅本连接自己的 Connection 行：被顶号（owner 被改）时收到通知才重查，RPC 路径上不再每次读库；
@@ -192,12 +192,12 @@ if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
   （`ctx.caller` 在 commit 后才赋值，两种先后都安全）；`fail_connection` 对已关闭的 ws 无害；
   `add_task` 的短任务由 finally 里的 `purge_tasks()` 清理。频道名与 hub 必须同一后端，故有
   `backend is default_backend` 守卫，不满足就保持每次都查。
-- [ ] **调整 `test_websocket_kick_connect`**：被顶号后服务器会主动断连，原来"client1 需要调一次
+- [x] **调整 `test_websocket_kick_connect`**：被顶号后服务器会主动断连，原来"client1 需要调一次
   system 才发现被踢"的前提不再成立。改为：client2 登录并调一次 system 后，`await asyncio.sleep(0.5)`
   （SQL hub 轮询 0.1 s，留余量），然后 `with pytest.raises(ConnectionClosedError): await client1.send([... 4])`；
   删掉中间那次 `send([... 3])`；注释改为"被顶号后服务器收到 Connection 行变更通知主动断开"。
   末尾 `client_sent[-1] == [..., 4]` 断言保留。
-- [ ] 验证：`HETU_TEST_BACKENDS=redis ... pytest tests/test_websocket.py tests/test_headless_ws.py -q`
+- [x] 验证：`HETU_TEST_BACKENDS=redis ... pytest tests/test_websocket.py tests/test_headless_ws.py -q`
   （起服类测试，注意 `test-order-sensitivity` 记忆：单跑通过后收尾全量再跑一次）；lint；
   commit `perf(server): ws 连接订阅自己的 Connection 行，被顶号时通知触发重查并主动断连`。
 
@@ -205,11 +205,11 @@ if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
 
 ## Task 4: 收尾
 
-- [ ] `docs/zh/operations.md` "Redis 拓扑"或配置段补一句：连接存活检查依赖 keyspace 通知，未开
+- [x] `docs/zh/operations.md` "Redis 拓扑"或配置段补一句：连接存活检查依赖 keyspace 通知，未开
   `notify-keyspace-events` 时退化为 `CONNECTION_ALIVE_RECHECK_INTERVAL` 兜底；en 同步一句。
-- [ ] `todo.md` 第 6 条 `[x]`，写清最终方案与效果；建议顺序改为 `10/11 视需要`。
-- [ ] 全量回归：`HETU_TEST_BACKENDS=redis,redis_cluster,valkey,postgres,sqlite uv run --frozen pytest tests -q`。
-- [ ] commit `docs: 连接存活检查改为通知触发的说明；todo 更新`。
+- [x] `todo.md` 第 6 条 `[x]`，写清最终方案与效果；建议顺序改为 `10/11 视需要`。
+- [x] 全量回归：`HETU_TEST_BACKENDS=redis,redis_cluster,valkey,postgres,sqlite uv run --frozen pytest tests -q`。
+- [x] commit `docs: 连接存活检查改为通知触发的说明；todo 更新`。
 
 ---
 
