@@ -59,6 +59,9 @@ async def _client_main(url, zones, limit, ready, stop, window, result_q):
     lat: list[float] = []
     lat_seen = 0
 
+    def _bytes(data: str | bytes) -> bytes:
+        return data.encode() if isinstance(data, str) else data
+
     async def one_client(zone: int):
         nonlocal delivered, deleted, frames, lat_seen
         ws = await websockets.asyncio.client.connect(
@@ -74,7 +77,7 @@ async def _client_main(url, zones, limit, ready, stop, window, result_q):
         hs = [b""] * pipe.num_handshake_layers
         hs[-1] = pvt.public_key.encode()
         await ws.send(pipe.encode(None, hs))
-        reply = pipe.decode(None, await ws.recv())
+        reply = pipe.decode(None, _bytes(await ws.recv()))
         assert isinstance(reply, list)
         ctx, _ = pipe.handshake(reply)
         ctx[-1] = crypto.client_handshake(pvt.encode(), reply[-1])
@@ -84,15 +87,14 @@ async def _client_main(url, zones, limit, ready, stop, window, result_q):
                 ctx, ["sub", "Actor", "range", "zone", zone, None, limit, False, True]
             )
         )
-        msg = pipe.decode(ctx, await ws.recv())
-        assert isinstance(msg, list) and msg[0] == "sub" and len(msg[2]) == limit, msg[
-            :2
-        ]
+        msg = pipe.decode(ctx, _bytes(await ws.recv()))
+        assert isinstance(msg, list) and msg[0] == "sub", msg
+        assert len(msg[2]) == limit, msg[:2]
         with ready.get_lock():
             ready.value += 1
         try:
             async for raw in ws:
-                msg = pipe.decode(ctx, raw)
+                msg = pipe.decode(ctx, _bytes(raw))
                 if not isinstance(msg, list) or msg[0] != "updt":
                     continue
                 now = time.time()

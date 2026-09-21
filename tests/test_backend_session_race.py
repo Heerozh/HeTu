@@ -286,7 +286,8 @@ async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
             row = item_ref.comp_cls.new_row()
             row.name = "zrc"
             row.time = 7770002
-            await repo.insert(row)  # 远程已被占用且本事务曾观察其不存在 → commit 时判 Race
+            # 远程已被占用且本事务曾观察其不存在 → commit 时判 Race
+            await repo.insert(row)
 
     async def intruder_task():
         async with backend.session("pytest", 1) as session:

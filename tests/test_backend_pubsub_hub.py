@@ -58,9 +58,9 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
 
     hub = _hub(backend)
     pubsub = getattr(hub, "_pubsub", None)  # Redis 才有
+    real_subscribe = None if pubsub is None else pubsub.subscribe
     sends = 0
-    if pubsub is not None:
-        real_subscribe = pubsub.subscribe
+    if pubsub is not None and real_subscribe is not None:
 
         async def counting_subscribe(*channels):
             nonlocal sends
@@ -100,7 +100,7 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     await broker_b.close()
     assert hub.subscriber_count(channel) == 0
     assert channel not in hub.channels
-    if pubsub is not None:
+    if pubsub is not None and real_subscribe is not None:
         assert channel not in pubsub.subscribed
         pubsub.subscribe = real_subscribe
 

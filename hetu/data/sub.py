@@ -8,8 +8,9 @@
 import asyncio
 import logging
 from collections import Counter
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, Callable, Mapping, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 

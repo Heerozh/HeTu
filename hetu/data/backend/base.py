@@ -1066,7 +1066,9 @@ class HubMQClient(MQClient):
                 await self._hub.remove(self, channels)
             except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
                 logger.warning(
-                    f"⚠️ [{self.LOG_TAG}] 关闭连接时取消订阅失败：{type(e).__name__}:{e}"
+                    _("⚠️ [{tag}] 关闭连接时取消订阅失败：{err}").format(
+                        tag=self.LOG_TAG, err=f"{type(e).__name__}:{e}"
+                    )
                 )
 
     async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
@@ -1106,8 +1108,9 @@ class HubMQClient(MQClient):
             raise ConnectionError(_("连接已关闭，已调用过close"))
         if len(self.subscribed) > self.MAX_SUBSCRIBED:
             logger.warning(
-                f"⚠️ [{self.LOG_TAG}] 当前连接订阅数超过全局限制"
-                f"MAX_SUBSCRIBED={self.MAX_SUBSCRIBED}行，"
+                _(
+                    "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
+                ).format(tag=self.LOG_TAG, limit=self.MAX_SUBSCRIBED)
             )
 
     async def unsubscribe(self, *channel_names: str) -> None:
