@@ -67,14 +67,16 @@ async def register(
 
 
 async def finish(task: asyncio.Task, node: FakeNodePubSub):
-    """等 task 结束，期间把它发出的 UNSUBSCRIBE 都 ack 掉（否则要干等 5 秒超时）"""
-    acked = len(node.sent("unsubscribe"))
+    """等 task 结束，期间把它发出的 SUBSCRIBE/UNSUBSCRIBE 都 ack 掉（否则要干等超时）"""
+    acked = {"subscribe": len(node.sent("subscribe"))}
+    acked["unsubscribe"] = len(node.sent("unsubscribe"))
     async with asyncio.timeout(1):
         while not task.done():
-            sent = node.sent("unsubscribe")
-            for channel in sent[acked:]:
-                node.ack("unsubscribe", channel)
-            acked = len(sent)
+            for mtype, done in acked.items():
+                sent = node.sent(mtype)
+                for channel in sent[done:]:
+                    node.ack(mtype, channel)
+                acked[mtype] = len(sent)
             await asyncio.sleep(0.001)
     return task.result()
 
@@ -119,4 +121,60 @@ async def test_released_channel_resubscribed_during_tick_is_kept():
     assert node.sent("unsubscribe") == [], "X 又有人订了，不能退"
     assert "X" in mq.subscribed_channels
     assert broker._channel_subs["X"] == {"R"}  # type: ignore[reportPrivateUsage]
+    await close_all(broker, node)
+
+
+async def test_unsub_of_later_sub_in_snapshot_during_tick_is_skipped():
+    """两个订阅共享一个频道，tick 处理第一个时（查库中）客户端 unsub 了第二个：
+    第二个已从 _subs 弹掉，tick 应跳过它，而不是 KeyError 把连接断掉"""
+    broker, mq, node = make_broker()
+    subs = {"S1": FakeSub({"C"}), "S2": FakeSub({"C"})}
+    for sub_id, sub in subs.items():
+        await register(broker, node, sub_id, sub)
+        sub.updates = {sub_id: {"id": sub_id}}  # type: ignore[dict-item]
+        sub.gate.clear()
+
+    mq.push_pulled_("C", None)
+    tick = asyncio.create_task(broker.get_updates())
+    # 同一频道下订阅的处理顺序取决于 set 的迭代顺序：先等出来谁在查库，再 unsub 另一个
+    async with asyncio.timeout(1):
+        while not any(sub.entered.is_set() for sub in subs.values()):
+            await asyncio.sleep(0.001)
+    first_id = next(sub_id for sub_id, sub in subs.items() if sub.entered.is_set())
+    second_id = next(sub_id for sub_id in subs if sub_id != first_id)
+    await unsubscribe_and_ack(broker, node, second_id)  # C 还有人在订，不会真退
+    assert node.sent("unsubscribe") == []
+
+    subs[first_id].gate.set()
+    updates = await finish(tick, node)
+    assert updates == {first_id: subs[first_id].updates}
+    assert not subs[second_id].entered.is_set()
+    await close_all(broker, node)
+
+
+async def test_sub_unsubscribed_during_its_own_get_updated_leaves_no_trace():
+    """索引订阅查库期间被客户端 unsub：查库结果里的新增/移除行不能再记账
+    （否则给一个已不存在的订阅登记频道、还为它发 SUBSCRIBE），更新也不再推"""
+    broker, mq, node = make_broker()
+    s1 = FakeSub({"idx", "X"})
+    await register(broker, node, "S1", s1)
+    s1.new = {"Y"}
+    s1.rem = {"X"}
+    s1.updates = {7: {"id": 7}}
+    s1.gate.clear()
+
+    mq.push_pulled_("idx", None)
+    tick = asyncio.create_task(broker.get_updates())
+    async with asyncio.timeout(1):
+        await s1.entered.wait()
+    await unsubscribe_and_ack(broker, node, "S1")
+    assert sorted(node.sent("unsubscribe")) == ["X", "idx"]
+    assert "S1" not in broker._subs  # type: ignore[reportPrivateUsage]
+
+    s1.gate.set()
+    updates = await finish(tick, node)
+    assert updates == {}
+    assert "Y" not in node.sent("subscribe"), "为已不存在的订阅发了 SUBSCRIBE"
+    assert broker._channel_subs == {}  # type: ignore[reportPrivateUsage]
+    assert mq.subscribed_channels == set()
     await close_all(broker, node)

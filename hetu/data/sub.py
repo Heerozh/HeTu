@@ -710,12 +710,22 @@ class SubscriptionBroker:
         added: set[str] = set()
         released: set[str] = set()
         for channel, payload in updated_channels.items():
+            # 快照迭代：前面的 get_updated 是真正的 await，期间接收协程可能处理了客户端
+            # 对本快照里后面某个订阅的 unsub，它已经从 _subs 里弹掉了，跳过即可，
+            # 不能 KeyError 把整个连接断掉
             for sub_id in list(channel_subs.get(channel, ())):
-                sub = self._subs[sub_id]
+                sub = self._subs.get(sub_id)
+                if sub is None:
+                    continue
                 # 获取sub更新的行数据
                 new_chans, rem_chans, sub_updates = await sub.get_updated(
                     channel, payload
                 )
+                if self._subs.get(sub_id) is not sub:
+                    # 查库期间这个订阅被 unsub 了（或退了又用同一 id 重订成新对象）：
+                    # 它的频道已由 unsubscribe 从 channel_subs 里撤掉，这里再记账会把
+                    # 已经不存在的订阅登记回去，更新也不用再推
+                    continue
                 # 行进入/离开范围：先记账，订阅/退订留到tick末尾各一次批量往返
                 for new_chan in new_chans:
                     channel_subs.setdefault(new_chan, set()).add(sub_id)
