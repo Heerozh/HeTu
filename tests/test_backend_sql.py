@@ -149,8 +149,10 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode():
     mq = SQLMQClient(hub)
     # 直接登记订阅（不走 hub.add，它会先去查游标），订阅数超过阈值触发回退模式
     hub._subs[target_channel] = {mq}
+    hub._since[target_channel] = 0  # 登记完成的频道都有水位（add() 取的），这里直接给
     for i in range(MAX_CHANNELS_IN_FILTER):
         hub._subs[f"extra-{i}"] = {mq}
+        hub._since[f"extra-{i}"] = 0
     hub._large_sub_warned = True
 
     assert await hub.poll_once() == (1, 0)  # 第一批只有无关频道，游标照样前进
@@ -244,6 +246,7 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop():
             # On first call, return nothing and add a new subscription
             if calls["count"] == 1:
                 hub._subs[new_channel] = {mq}
+                hub._since[new_channel] = 0
                 return _FakeResult([])
             # On second call, simulate the DB having a message for the new channel
             # In the BUGGY version, the query's WHERE IN (...) clause will NOT include new_channel
@@ -273,6 +276,7 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop():
     mq = SQLMQClient(hub)
     # Start with one existing channel to ensure use_channel_filter is True
     hub._subs["existing-channel"] = {mq}
+    hub._since["existing-channel"] = 0
 
     # 第一轮：fake 在执行查询时新增了 new_channel 的订阅；第二轮的 IN 过滤必须包含它
     assert await hub.poll_once() == (0, 0)
@@ -335,3 +339,144 @@ def test_sql_notify_table_payload_column_upgrade_postgres(ses_postgres_service):
         _check_notify_payload_column_upgrade(engine)
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_concurrent_first_subscribers_keep_earliest_watermark():
+    """两个连接并发订阅同一个新频道：先登记再放游标，后到的不再各自查一次表尾把先到者的
+    水位抬高——否则先到者订阅之后、后到者查表尾之前提交的通知会被当成旧通知丢掉"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    gate = asyncio.Event()
+    max_ids = iter([10, 20])
+    queries = 0
+
+    async def fake_max_id():
+        nonlocal queries
+        queries += 1
+        await gate.wait()
+        return next(max_ids)
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]  轮询本身不测
+    mq_a, mq_b = SQLMQClient(hub), SQLMQClient(hub)
+    t_a = asyncio.create_task(mq_a.subscribe("C"))
+    await asyncio.sleep(0)
+    t_b = asyncio.create_task(mq_b.subscribe("C"))
+    await asyncio.sleep(0)
+    assert hub.subscriber_count("C") == 2, "登记应在等表尾之前完成"
+
+    gate.set()
+    async with asyncio.timeout(1):
+        await asyncio.gather(t_a, t_b)
+    assert queries == 1, "第二个订阅者应复用先到者的游标，不再查表尾"
+    assert hub._since["C"] == 10
+    assert hub._last_notify_id == 10
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_new_channel_while_polling_keeps_cursor():
+    """轮询已经在跑时新频道照样取表尾做水位（游标只随命中订阅频道的行前进，可能远落后于
+    表尾，不能拿它当水位重放旧通知），但不能动游标"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    max_ids = iter([100, 300])
+
+    async def fake_max_id():
+        return next(max_ids)
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]  轮询本身不测
+    mq = SQLMQClient(hub)
+    await mq.subscribe("A")
+    assert hub._since["A"] == 100 and hub._last_notify_id == 100
+    hub._last_notify_id = 105  # 轮询前进了一点，表尾已经到 300
+    await mq.subscribe("B")
+    assert hub._since["B"] == 300, "新频道的水位是表尾，不是游标"
+    assert hub._last_notify_id == 105, "轮询在跑，不能动游标"
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_watermark_survives_callers_cancellation():
+    """先到者等表尾时被取消（连接断了）：搭车登记的连接还等着这个水位，取水位不能跟着中断；
+    先到者只撤自己的登记"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    gate = asyncio.Event()
+
+    async def fake_max_id():
+        await gate.wait()
+        return 10
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]
+    mq_a, mq_b = SQLMQClient(hub), SQLMQClient(hub)
+    t_a = asyncio.create_task(mq_a.subscribe("C"))
+    await asyncio.sleep(0)
+    t_b = asyncio.create_task(mq_b.subscribe("C"))
+    await asyncio.sleep(0)
+    t_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t_a
+    assert hub._subs["C"] == {mq_b}
+    assert "C" not in hub._since
+
+    gate.set()
+    async with asyncio.timeout(1):
+        await t_b
+    assert hub._since["C"] == 10
+    assert mq_b.subscribed_channels == {"C"}
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_poll_skips_channel_without_watermark():
+    """已登记但水位还没取到的频道，轮询遇到它的通知先跳过（取水位与轮询互斥，取回的表尾
+    只会 >= 这些行的 id，本来就不属于它）"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, stmt):
+            return _FakeResult([{"id": 7, "channel": "C", "payload": None}])
+
+    class _FakeAio:
+        def connect(self):
+            return _FakeConn()
+
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=_FakeAio())  # type: ignore[arg-type]
+    )
+    mq = SQLMQClient(hub)
+    hub._subs["C"] = {mq}  # 登记了、水位还没到
+    fetched, hits = await hub.poll_once()
+    assert (fetched, hits) == (1, 0)
+    assert not mq.pulled_set
+    hub._since["C"] = 5
+    fetched, hits = await hub.poll_once()
+    assert (fetched, hits) == (1, 1)
+    assert "C" in mq.pulled_set
+    await hub.close()

@@ -35,14 +35,26 @@ class SQLNotifyHub:
     与 Redis pubsub 语义对齐，只消费订阅之后产生的通知：每个频道加入本进程时记下当时通知表的
     最大 id 作为水位，之前的通知不算它的（游标只随命中订阅频道的行前进，可能落后于表尾，
     新频道加入时不能把旧通知重放给它）。没有任何订阅时不轮询。
+
+    取水位和轮询互斥（同一把锁），水位读回来到记下之间轮询不会把这期间的通知消费掉；
+    同一频道先登记再取水位，并发的后来者看到已登记就不再取，先到者的水位说了算。
+    已知局限：max(id) 不是提交序（PostgreSQL/MariaDB 的自增 id 在事务提交前就分配），
+    先分配了较小 id、后于水位提交的通知会被当成旧通知，游标本身也有同样的窗口。
     """
 
     def __init__(self, client: SQLBackendClient):
         self._client = client
         self._subs: dict[str, set[MQClient]] = {}
-        # 频道加入 hub 时通知表的最大 id：id 不大于它的通知不属于该频道的订阅者
+        # 频道加入 hub 时通知表的最大 id：id 不大于它的通知不属于该频道的订阅者。
+        # 已登记但还没取到水位的频道不在这里，轮询遇到它的通知先跳过
         self._since: dict[str, int] = {}
         self._last_notify_id = 0
+        # 取水位与轮询互斥
+        self._lock = asyncio.Lock()
+        # 正在取水位的频道 → 取水位的任务：后来登记同一频道的连接等它，不再自己取；
+        # 任务不随调用方一起取消，close 时统一取消
+        self._placing: dict[str, asyncio.Task] = {}
+        self._tasks: set[asyncio.Task] = set()
         self._large_sub_warned = False
         self._task: asyncio.Task | None = None
         self._closed = False
@@ -63,25 +75,68 @@ class SQLNotifyHub:
             latest = (await conn.execute(sa.select(sa.func.max(table.c.id)))).scalar()
         return int(latest or 0)
 
+    def _polling(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def _place_watermark(self, channels: list[str]) -> None:
+        """给刚登记的频道取水位；轮询没在跑（此前本进程没人订阅）时把游标放到表尾并起轮询"""
+        try:
+            async with self._lock:
+                watermark = await self._get_current_notify_id()
+                for channel in channels:
+                    if channel in self._subs:  # 等水位期间订阅者可能已经全走了
+                        self._since[channel] = watermark
+                if not self._polling() and not self._closed:
+                    self._last_notify_id = watermark
+                    self._task = asyncio.create_task(self._run())
+        finally:
+            for channel in channels:
+                self._placing.pop(channel, None)
+
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
-        """登记 mq 对这些频道的订阅；本进程从无到有订阅时重置游标并启动轮询"""
+        """登记 mq 对这些频道的订阅，返回时水位已经记好（别人正在取的也等到取完）"""
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        channels = list(channels)
-        fresh = [channel for channel in channels if channel not in self._subs]
-        if fresh:
-            watermark = await self._get_current_notify_id()
-            if not self._subs:
-                self._last_notify_id = watermark
-            for channel in fresh:
-                self._since[channel] = watermark
+        # 先同步登记再取水位：取水位的 await 期间别的连接 add 同一频道时看到的是"已有人订"，
+        # 不会各自再查一次表尾、把先到者的水位抬高而漏掉中间发生的通知
+        fresh: list[str] = []
+        registered: list[str] = []
+        waits: set[asyncio.Task] = set()
         for channel in channels:
-            self._subs.setdefault(channel, set()).add(mq)
-        if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run())
+            subs = self._subs.get(channel)
+            if subs is None:
+                self._subs[channel] = {mq}
+                fresh.append(channel)
+                registered.append(channel)
+                continue
+            if mq not in subs:
+                subs.add(mq)
+                registered.append(channel)
+            placing = self._placing.get(channel)
+            if placing is not None:
+                waits.add(placing)  # 先到者正在取，等它
+        if fresh:
+            # 取水位放进独立 task：本调用方中途被取消（连接断了）也得把水位记下，
+            # 搭车登记的其他连接还等着它；调用方只撤自己的登记
+            task = asyncio.create_task(self._place_watermark(fresh))
+            task.add_done_callback(self._tasks.discard)
+            self._tasks.add(task)
+            for channel in fresh:
+                self._placing[channel] = task
+            waits.add(task)
+        if waits:
+            try:
+                # asyncio.wait 只旁观：本调用方被取消不会连带取消共享的取水位任务
+                done, _pending = await asyncio.wait(waits)
+                for task in done:
+                    task.result()
+            except BaseException:
+                self._release(mq, registered)
+                raise
+        elif not self._polling() and self._subs:
+            self._task = asyncio.create_task(self._run())  # 轮询意外退出了的兜底
 
-    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
-        """撤销 mq 对这些频道的订阅。本进程没人订阅了轮询任务会自己退出，别空转打 DB"""
+    def _release(self, mq: MQClient, channels: Iterable[str]) -> None:
         for channel in channels:
             subs = self._subs.get(channel)
             if subs is None:
@@ -90,6 +145,10 @@ class SQLNotifyHub:
             if not subs:
                 del self._subs[channel]
                 self._since.pop(channel, None)
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """撤销 mq 对这些频道的订阅。本进程没人订阅了轮询任务会自己退出，别空转打 DB"""
+        self._release(mq, channels)
 
     async def _stop_task(self) -> None:
         # 只在 close 时取消：在 SQL 语句执行中途取消会弄坏池里的连接
@@ -111,7 +170,7 @@ class SQLNotifyHub:
         回退到按 id 扫描模式时可能整批都是无关频道，命中为 0。
         """
         notify = self._client.notify_table()
-        async with self._client.aio.connect() as conn:
+        async with self._lock, self._client.aio.connect() as conn:
             channels = list(self._subs)
             use_channel_filter = self._should_use_channel_in_filter(len(channels))
             if not use_channel_filter and not self._large_sub_warned:
@@ -136,7 +195,9 @@ class SQLNotifyHub:
                 self._last_notify_id = msg_id
             channel_name = str(row["channel"])
             subs = self._subs.get(channel_name)
-            if not subs or msg_id <= self._since.get(channel_name, 0):
+            since = self._since.get(channel_name)
+            # 没水位 = 刚登记还没取到（取水位和本轮询互斥，它取回的 max(id) 只会 >= 本行）
+            if not subs or since is None or msg_id <= since:
                 continue
             hits += 1
             if logger.isEnabledFor(logging.DEBUG):
@@ -181,6 +242,12 @@ class SQLNotifyHub:
         self._closed = True
         self._subs.clear()
         self._since.clear()
+        tasks = [t for t in self._tasks if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
         await self._stop_task()
 
 
