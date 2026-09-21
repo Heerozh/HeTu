@@ -135,14 +135,14 @@ async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admi
     assert len(rows) == 25
     assert "_version" not in rows[0]
     assert sub_id == "Item.owner[10:None:1][:33]"
-    assert len(broker._subs[sub_id].channels) == 25 + 1  # 加1 index channel
+    assert len(broker._subs[sub_id].channels) == 25 + 1  # 加1 个索引值频道（点查询）
 
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
     assert type(idx_sub) is IndexSubscription
 
     assert len(idx_sub.row_subs) == 25
     assert idx_sub.last_range_result == {row["id"] for row in rows}
-    first_row_channel = next(iter(sorted(idx_sub.channels)))
+    first_row_channel = min(idx_sub.row_subs)
     assert idx_sub.row_subs[first_row_channel].row_id == rows[0]["id"]
     assert len(broker._mq_client.subscribed_channels) == 26
 
@@ -164,7 +164,8 @@ async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admi
 
     assert len(idx_sub.row_subs) == 0
     assert sub_id == "Item.owner[11:12:1][:55]"
-    assert len(broker._mq_client.subscribed_channels) == 26
+    # 25行 + 点查询的索引值频道 + 两个区间查询共用的整索引频道
+    assert len(broker._mq_client.subscribed_channels) == 27
 
 
 async def test_subscribe_mq_merge_message(
@@ -321,11 +322,13 @@ async def test_cancel_subscribe(broker: SubscriptionBroker, filled_item_ref, adm
 
     # 测试取消订阅
     assert len(broker._subs) == 4
-    assert len(broker._mq_client.subscribed_channels) == 26  # 25行+1个index
+    # 25行 + sub_10 的索引值频道 + sub_10_11/sub_11_12 共用的整索引频道
+    assert len(broker._mq_client.subscribed_channels) == 27
 
     await broker.unsubscribe(sub_10)
     assert len(broker._subs) == 3
-    assert len(broker._mq_client.subscribed_channels) == 26  # 其他sub依旧订阅所有行
+    # sub_10 的索引值频道释放了，其他sub依旧订阅所有行
+    assert len(broker._mq_client.subscribed_channels) == 26
 
     await broker.unsubscribe(sub_row)
     assert len(broker._subs) == 2
@@ -624,6 +627,195 @@ async def test_mq_backlog(
     assert not mq.pulled_deque and not mq.pulled_set
 
 
+# ============================ 点查询按值分频道 ============================
+
+
+def test_point_query_value():
+    """点查询判定：right 省略或与 left 相等；str 的 ( 前缀是开区间；转换失败/NaN 回退"""
+    import numpy as np
+
+    from hetu.data.backend import BackendClient
+
+    point = BackendClient.point_query_value_
+    i64 = np.dtype(np.int64)
+    assert point(i64, 10, None) == 10
+    assert point(i64, 10, 10) == 10
+    assert point(i64, "10", 10) == 10  # 按 dtype 规范化后比较
+    assert point(i64, 10, 11) is None
+    assert point(i64, float("inf"), None) is None  # int 索引传 inf 转换失败 → 回退
+    f32 = np.dtype(np.float32)
+    assert point(f32, float("nan"), None) is None
+    assert point(f32, 0.1, 0.1) == np.float32(0.1)
+    u8 = np.dtype("U8")
+    assert point(u8, "abc", None) == "abc"
+    assert point(u8, "[abc", "abc") == "abc"  # [ 前缀剥掉
+    assert point(u8, "(abc", "abc") is None  # ( 是开区间
+    assert point(u8, "abc", "(abc") is None
+    assert point(np.dtype(np.int8), True, None) == 1  # bool 字段定义时已转 int8
+
+
+async def test_subscribe_point_query_channel(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """点查询订"索引=该值"的频道，区间查询订整个索引的频道；同值不同 sub_id 共用一个频道"""
+    servant = broker._backend.servant
+    value_chan = servant.index_value_channel(filled_item_ref, "owner", 10)
+    index_chan = servant.index_channel(filled_item_ref, "owner")
+    assert value_chan != index_chan
+
+    sub_a, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_a and len(rows) == 25
+    idx_a = cast(IndexSubscription, broker._subs[sub_a])
+    assert idx_a.index_channel == value_chan
+    assert index_chan not in broker._mq_client.subscribed_channels
+
+    # right == left 也是点查询：sub_id 不同，频道相同
+    sub_b, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=10, limit=33
+    )
+    assert sub_b and sub_b != sub_a
+    assert cast(IndexSubscription, broker._subs[sub_b]).index_channel == value_chan
+    assert broker._channel_subs[value_chan] == {sub_a, sub_b}
+
+    # 区间查询订整个索引的频道
+    sub_c, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=33
+    )
+    assert sub_c
+    assert cast(IndexSubscription, broker._subs[sub_c]).index_channel == index_chan
+    # 25 行频道 + 1 值频道 + 1 整索引频道
+    assert len(broker._mq_client.subscribed_channels) == 27
+
+    # bool 索引字段（定义时转 int8）：True 和 1 是同一个频道
+    sub_d, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "used", True, limit=100
+    )
+    assert sub_d
+    assert cast(
+        IndexSubscription, broker._subs[sub_d]
+    ).index_channel == servant.index_value_channel(filled_item_ref, "used", 1)
+
+    # 值频道按引用计数释放
+    await broker.unsubscribe(sub_a)
+    assert value_chan in broker._mq_client.subscribed_channels
+    await broker.unsubscribe(sub_b)
+    assert value_chan not in broker._mq_client.subscribed_channels
+    assert index_chan in broker._mq_client.subscribed_channels
+
+
+async def test_subscribe_point_query_not_woken_by_other_values(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """别的 owner 的行增删不会叫醒点查询订阅；自己的值上有行进出才会"""
+    backend = broker._backend
+    sub_10, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    sub_10_11, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
+    )
+    assert sub_10 and sub_10_11
+
+    # 插入一行 owner=11：整索引频道叫醒区间订阅，点查询订阅 owner=10 不动
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = filled_item_ref.comp_cls.new_row()
+        row.name = "Other"
+        row.owner = 11
+        row.time = 999
+        await repo.insert(row)
+        new_id = row.id
+    updates = await broker.get_updates(timeout=2)
+    assert sub_10 not in updates
+    assert updates[sub_10_11][new_id]["owner"] == 11
+    assert await broker.get_updates(timeout=0.3) == {}
+
+    # 这行 owner 改成 10：进入了点查询的值，两个订阅都收到
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=new_id)
+        assert row
+        row.owner = 10
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=2)
+    assert updates[sub_10][new_id]["owner"] == 10
+    assert updates[sub_10_11][new_id]["owner"] == 10
+
+    # 删掉它：点查询订阅收到删除
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        assert await repo.get(id=new_id) is not None  # delete 要求行已在事务缓存里
+        repo.delete(new_id)
+    updates = await broker.get_updates(timeout=2)
+    assert updates[sub_10][new_id] is None
+    assert updates[sub_10_11][new_id] is None
+    assert len(broker._subs[sub_10].row_subs) == 25  # type: ignore
+
+
+async def test_subscribe_point_query_string(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """字符串索引的点查询：改名只叫醒旧值/新值的订阅者，( 前缀的开区间走整索引频道"""
+    backend = broker._backend
+    servant = backend.servant
+    sub_a, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "Itm10", limit=10
+    )
+    assert sub_a and len(rows) == 1
+    row_id = rows[0]["id"]
+    sub_b, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "Itm11", limit=10
+    )
+    assert sub_b and len(rows) == 1
+    # [ 前缀剥掉后与 "Itm10" 同频道；( 前缀是开区间，订整个索引的频道
+    sub_a2, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "[Itm10", limit=10
+    )
+    sub_c, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "(Itm10", right="Itm12", limit=10
+    )
+    assert sub_a2 and sub_c
+    assert {r["name"] for r in rows} == {"Itm11", "Itm12"}
+    assert (
+        cast(IndexSubscription, broker._subs[sub_a2]).index_channel
+        == cast(IndexSubscription, broker._subs[sub_a]).index_channel
+    )
+    assert cast(
+        IndexSubscription, broker._subs[sub_c]
+    ).index_channel == servant.index_channel(filled_item_ref, "name")
+
+    # Itm10 改名 Itm99：sub_a/sub_a2 收到删除，sub_b 不醒，区间 sub_c 被整索引频道叫醒但无变化
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(name="Itm10")
+        assert row
+        row.name = "Itm99"
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=2)
+    assert updates[sub_a][row_id] is None
+    assert updates[sub_a2][row_id] is None
+    assert sub_b not in updates
+    assert sub_c not in updates
+
+    # 订阅新名字能拿到这行；改回去后新名字的订阅收到删除、旧名字的订阅收到该行
+    sub_99, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "Itm99", limit=10
+    )
+    assert sub_99 and [r["id"] for r in rows] == [row_id]
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(name="Itm99")
+        assert row
+        row.name = "Itm10"
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=2)
+    assert updates[sub_99][row_id] is None
+    assert updates[sub_a][row_id]["name"] == "Itm10"
+    assert sub_b not in updates
+
+
 # ============================ 整表订阅 ============================
 
 
@@ -729,7 +921,7 @@ async def test_subscribe_table_coexist_range(
     sub_table, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
     assert sub_range and sub_table
     assert broker.count() == (0, 1, 1)
-    # 25行频道 + 1索引频道 + 1表级频道
+    # 25行频道 + 1索引值频道（点查询） + 1表级频道
     assert len(broker._mq_client.subscribed_channels) == 27
 
     async with backend.session("pytest", 1) as session:

@@ -83,10 +83,10 @@ if pushes then
 end
 
 -- ============================================================================
--- Phase 3: 表级变更通知 (整表订阅用)
+-- Phase 3: 表级 / 索引值频道通知 (整表订阅、点查询订阅用)
 -- ============================================================================
--- 行/索引的变更由 keyspace notification 自动发出；这里额外对每张被改动的表
--- PUBLISH 一条带 payload 的消息，payload 是 msgpack 的 row_id 列表。
+-- 行/整个索引的变更由 keyspace notification 自动发出；这里额外对每张被改动的表、
+-- 每个被改动的 (索引, 值) 各 PUBLISH 一条带 payload 的消息，payload 是 msgpack 的 row_id 列表。
 if publishes then
     for _, pub in ipairs(publishes) do
         -- pub 格式: [channel, packed_row_ids]

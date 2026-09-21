@@ -9,7 +9,6 @@ import asyncio
 import itertools
 import logging
 import random
-import struct
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
@@ -21,7 +20,13 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
-from ..base import BackendClient, RaceCondition, RowFormat
+from ..base import (
+    BackendClient,
+    RaceCondition,
+    RowFormat,
+    sortable_token,
+    to_sortable_bytes,
+)
 
 # from .batch import RedisBatchedClient
 
@@ -141,8 +146,26 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     @override
     def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        """返回整个索引的频道名（keyspace 通知）。该索引 zset 任何 ZADD/ZREM 都会通知到该频道"""
         return f"__keyspace@{self.dbi}__:{self.index_key(table_ref, index_name)}"
+
+    @classmethod
+    def value_channel_(cls, idx_key: str, sortable: bytes) -> str:
+        """`index_value_channel` 的内部形式：commit 里已经算好 sortable bytes 时直接拼，不重复编码"""
+        return f"{idx_key}:{sortable_token(sortable)}"
+
+    @override
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """
+        返回索引某一个值的频道名。这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace
+        通知），payload 为 msgpack 的 row_id 列表；名字带 {CLU} hash tag，cluster 模式下按 slot 路由。
+        """
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        return self.value_channel_(
+            self.index_key(table_ref, index_name), to_sortable_bytes(dtype.type(value))
+        )
 
     @override
     def row_channel(self, table_ref: TableReference, row_id: int):
@@ -167,37 +190,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             else:
                 aio.connection_pool.reset()
 
-    @staticmethod
-    def to_sortable_bytes(value: np.generic) -> bytes:
-        """将np类型的值转换为可排序的bytes，用于索引"""
-        dtype = value.dtype
-        if np.issubdtype(dtype, np.signedinteger):
-            data = value.item() + (1 << 63)
-            return struct.pack(">Q", data)
-        elif np.issubdtype(dtype, np.unsignedinteger):
-            return struct.pack(">Q", value)
-        elif np.issubdtype(dtype, np.floating):
-            double = value.item()
-            packed = struct.pack(">d", value)
-            [u64] = struct.unpack(">Q", packed)
-            # IEEE 754 浮点数排序调整
-            if double >= 0:
-                # 正数让符号位变1
-                u64 = u64 | (1 << 63)
-            else:
-                # 负数要全部取反，因为浮点负数是绝对值，变成int那种从0xFF递减
-                u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
-            return struct.pack(">Q", u64)
-        elif np.issubdtype(dtype, np.str_):
-            encoded = value.item().encode("utf-8")
-            # 变长类型把 0x00 转义成 0x00 0xff，使 member 的 value 段能用单个 0x00 自分隔
-            # （定长的数字/bool 不会和终止符混淆，无需转义）。详见 _exc_index/range_normalize_
-            return encoded.replace(b"\x00", b"\x00\xff")
-        elif np.issubdtype(dtype, np.bytes_):
-            return value.item().replace(b"\x00", b"\x00\xff")
-        elif np.issubdtype(dtype, np.bool_):
-            return b"\x01" if value else b"\x00"
-        assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+    # 索引 member 的值编码搬到了 base.py（两个后端共用来给索引值频道命名），这里保留同名别名
+    to_sortable_bytes = staticmethod(to_sortable_bytes)
 
     # ============ 主要方法 ============
 
@@ -614,8 +608,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             ls, rs = rs, ls
 
         # 二进制化。
-        b_left = b"[" + cls.to_sortable_bytes(dtype.type(left)) + ls
-        b_right = b"[" + cls.to_sortable_bytes(dtype.type(right)) + rs
+        b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
+        b_right = b"[" + to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right
 
     @staticmethod
@@ -809,9 +803,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for _field, _value in _row.items():
                 if _field in _unique_fields:
                     _idx_key = _idx_prefix + _field
-                    _sortable_value = self.to_sortable_bytes(
-                        _dtype_map[_field].type(_value)
-                    )
+                    _sortable_value = to_sortable_bytes(_dtype_map[_field].type(_value))
                     _start_val = b"[" + _sortable_value + b"\x00"
                     _end_val = b"[" + _sortable_value + b"\x00\xff"
                     checks.append(["UNIQ", _idx_key, _start_val, _end_val])
@@ -833,9 +825,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 if _field in _indexes:
                     _idx_key = _idx_prefix + _field
                     # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                    _sortable_value = self.to_sortable_bytes(
+                    _sortable_value = to_sortable_bytes(
                         _dtype_map[_field].type(_values[_field])
                     )
+                    # 点查询订阅者只订"索引=该值"的频道：insert/delete 记全部索引字段的值，
+                    # update 记变更字段的旧值(_add=False)和新值(_add=True)
+                    value_pubs.setdefault(
+                        self.value_channel_(_idx_key, _sortable_value), []
+                    ).append(_old["id"])
                     _member = _sortable_value + b"\x00" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能
@@ -862,8 +859,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
-        # 表级变更通知：[channel, msgpack(row_id列表)]，一个事务一张表一条
+        # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。
+        # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
         publishes: list[list[str | bytes]] = []
+        value_pubs: dict[str, list[str]] = {}
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -907,6 +906,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 publishes.append(
                     [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
                 )
+        for channel, ids in value_pubs.items():
+            publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。

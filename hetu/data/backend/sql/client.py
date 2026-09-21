@@ -21,7 +21,13 @@ from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from ....i18n import _
-from ..base import BackendClient, RaceCondition, RowFormat
+from ..base import (
+    BackendClient,
+    RaceCondition,
+    RowFormat,
+    sortable_token,
+    to_sortable_bytes,
+)
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
@@ -312,6 +318,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
     @override
     def index_channel(self, table_ref: TableReference, index_name: str):
         return self.index_key(table_ref, index_name)
+
+    @override
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """与 Redis 后端同一串名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        token = sortable_token(to_sortable_bytes(dtype.type(value)))
+        return f"{self.index_key(table_ref, index_name)}:{token}"
 
     @override
     def row_channel(self, table_ref: TableReference, row_id: int):
@@ -915,10 +930,25 @@ class SQLBackendClient(BackendClient, alias="sql"):
         now_dt = datetime.now(UTC).replace(tzinfo=None)
         cleanup_due = now_ts >= self._next_notify_cleanup_at
         refs = list(dirties.keys())
+
+        def _touch_value(
+            pubs: dict[str, list[str]],
+            ref: TableReference,
+            index_name: str,
+            value,
+            row_id,
+        ):
+            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id"""
+            channel = self.index_value_channel(ref, index_name, value)
+            pubs.setdefault(channel, []).append(str(row_id))
+
         for attempt in range(2):
             channels: set[str] = set()
             # 表级变更通知：ref -> 本事务变动的row_id列表
             touched_ids: dict[TableReference, list[str]] = {}
+            # 索引值频道通知：channel -> 本事务在该 (索引, 值) 上变动的row_id列表，
+            # insert/delete 记全部索引字段的值，update 记变更字段的旧值和新值
+            value_pubs: dict[str, list[str]] = {}
             try:
                 async with self.aio.begin() as conn:
                     # 对纯读行加版本检查，防止事务依赖的陈旧读：
@@ -962,6 +992,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                                _touch_value(
+                                    value_pubs,
+                                    ref,
+                                    index_name,
+                                    old_row[index_name],
+                                    row_id,
+                                )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
@@ -1004,6 +1041,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             for index_name in updates:
                                 if index_name in indexes:
                                     channels.add(self.index_channel(ref, index_name))
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        old_row[index_name],
+                                        row_id,
+                                    )
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        updates[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
@@ -1026,6 +1077,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                                _touch_value(
+                                    value_pubs,
+                                    ref,
+                                    index_name,
+                                    typed_row[index_name],
+                                    row_id,
+                                )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
@@ -1038,6 +1096,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             notify_rows.append(
                                 {
                                     "channel": self.table_channel(ref),
+                                    "created_at": now_dt,
+                                    "payload": msgpack.packb(ids),
+                                }
+                            )
+                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用
+                        for channel, ids in value_pubs.items():
+                            notify_rows.append(
+                                {
+                                    "channel": channel,
                                     "created_at": now_dt,
                                     "payload": msgpack.packb(ids),
                                 }

@@ -144,6 +144,7 @@ class IndexSubscription(BaseSubscription):
             self.rls_ctx = ctx
         else:
             self.rls_ctx = None
+        # 点查询时是"索引=该值"的频道，区间查询时是整个索引的频道；收到就重跑 range 比对
         self.index_channel = index_channel
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
@@ -448,6 +449,12 @@ class SubscriptionBroker:
 
         RLS权限介绍请看See Also的组件定义。
 
+        通知范围取决于查询形状：
+        - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`）只订"索引=该值"
+          的频道，只有这个值上有行进出、或某行该字段变成/不再是这个值时才会被唤醒；
+        - 区间查询订整个索引的频道，该索引上任何值的行增删/变更都会唤醒它重跑一次比对。
+          热索引（如所有玩家都订自己的背包）请尽量用点查询。
+
         Returns
         --------
         sub_id: str | None
@@ -497,7 +504,17 @@ class SubscriptionBroker:
             )
             return sub_id, rows
 
-        index_channel = servant.index_channel(table_ref, index_name)
+        # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道
+        # （index_name 已由上面的 servant.range 校验过存在）
+        point_value = BackendClient.point_query_value_(
+            table_ref.comp_cls.dtype_map_[index_name], left, right
+        )
+        if point_value is None:
+            index_channel = servant.index_channel(table_ref, index_name)
+        else:
+            index_channel = servant.index_value_channel(
+                table_ref, index_name, point_value
+            )
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
             table_ref,

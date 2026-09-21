@@ -12,6 +12,7 @@ import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, Table, TableReference
+from hetu.data.backend.base import sortable_token, to_sortable_bytes
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
 
@@ -372,8 +373,20 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
             prefix, row_id = push[1].rsplit(b":id:", 1)
             touched.setdefault(prefix + b":table", set()).add(row_id)
     assert touched  # 本测试有insert/update/delete，必然有变动
+    # 索引值变更通知：每个被 ZADD/ZREM 的 (索引, 值) 一条，payload为该值上变动的row_id列表
+    # （insert/delete 是全部索引字段，update 是变更字段的旧值+新值），从 push 反推期望值
+    expected_values: dict[bytes, set[bytes]] = {}
+    for push in json[1]:
+        if push[0] in (b"ZADD", b"ZREM"):
+            sortable, row_id = push[-1].rsplit(b"\x00", 1)
+            channel = push[1] + b":" + sortable_token(sortable).encode()
+            expected_values.setdefault(channel, set()).add(row_id)
+    assert expected_values
     published = {pub[0]: set(msgpack.unpackb(pub[1], raw=True)) for pub in json[3]}
-    assert published == touched
+    table_pubs = {c: ids for c, ids in published.items() if c.endswith(b":table")}
+    value_pubs = {c: ids for c, ids in published.items() if not c.endswith(b":table")}
+    assert table_pubs == touched
+    assert value_pubs == expected_values
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):
@@ -661,6 +674,74 @@ async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
         messages = await mq.get_message()
     assert table_channel not in messages
     assert row_channel in messages
+    await mq.close()
+
+
+def test_sortable_token():
+    """索引值频道的 token：数值 8 字节 → 16 位 hex，长字符串 → h + blake2b-128"""
+    assert RedisBackendClient.to_sortable_bytes is to_sortable_bytes
+    b_int = to_sortable_bytes(np.int64(10))
+    assert len(b_int) == 8 and sortable_token(b_int) == "800000000000000a"
+    assert sortable_token(to_sortable_bytes(np.int8(1))) == sortable_token(
+        to_sortable_bytes(np.int8(True))
+    )
+    short = to_sortable_bytes(np.str_("好" * 8))  # 24 字节
+    assert sortable_token(short) == short.hex()
+    long = to_sortable_bytes(np.str_("好" * 11))  # 33 字节
+    token = sortable_token(long)
+    assert token.startswith("h") and len(token) == 33
+    assert token != sortable_token(to_sortable_bytes(np.str_("好" * 11 + "!")))
+
+
+async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):
+    """索引值频道：只有该值上有行进出才有消息，payload是这些行的row_id；整索引频道不订就收不到"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+
+    rows = await servant.range(filled_item_ref, "time", 120, 121, limit=100)
+    assert len(rows) == 2
+    chan_10 = servant.index_value_channel(filled_item_ref, "owner", 10)
+    chan_11 = servant.index_value_channel(filled_item_ref, "owner", 11)
+    # 值先按 dtype 规范化，10 / "10" / 10.0 是同一个频道
+    assert chan_10 == servant.index_value_channel(filled_item_ref, "owner", "10")
+    assert chan_10 == servant.index_value_channel(filled_item_ref, "owner", 10.0)
+    assert chan_10 != chan_11
+    await mq.subscribe(chan_10, chan_11)
+
+    # 一个事务：rows[0] owner 10→11，删掉 rows[1]（owner 10），插入一行 owner=11
+    idmap = IdentityMap()
+    new_row = filled_item_ref.comp_cls.new_row()
+    new_row.name = "ValNew"
+    new_row.owner = 11
+    new_row.time = 999
+    idmap.add_insert(filled_item_ref, new_row)
+    idmap.add_clean(filled_item_ref, rows[0])
+    rows[0].owner = 11
+    idmap.update(filled_item_ref, rows[0])
+    idmap.add_clean(filled_item_ref, rows[1])
+    idmap.mark_deleted(filled_item_ref, rows[1].id)
+    await backend.master.commit(idmap)
+
+    await asyncio.sleep(0.5)
+    async with asyncio.timeout(2):
+        messages = await mq.get_message()
+    assert messages[chan_10] == {str(rows[0].id), str(rows[1].id)}
+    assert messages[chan_11] == {str(rows[0].id), str(new_row.id)}
+    assert servant.index_channel(filled_item_ref, "owner") not in messages
+    assert chan_10 not in mq.pulled_payload  # type: ignore
+
+    # 只改非索引字段：两个值频道都不该有消息
+    idmap = IdentityMap()
+    rows[0]._version += 1
+    idmap.add_clean(filled_item_ref, rows[0])
+    rows[0].qty = 2
+    idmap.update(filled_item_ref, rows[0])
+    await backend.master.commit(idmap)
+    await asyncio.sleep(0.5)
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.5):
+            await mq.get_message()
     await mq.close()
 
 

@@ -196,6 +196,15 @@ under one millisecond on the same VPC.
 Subscriptions are checked against the same permission system as `Systems`, so a
 client cannot subscribe to data it isn't allowed to see.
 
+What wakes a `range` up depends on the shape of the query. A **point query**
+(`high` omitted, or `low == high` — `owner=me`, `zone=z`) listens to the channel
+of that one index value and is only notified when a row enters or leaves that
+value (insert, delete, or a row's field changing to/from it). An **interval
+query** listens to the whole index and is woken by any change to any value of
+that index, re-running its comparison on the server. So for hot indexes such as
+"every player watches their own inventory", write a point query — other players
+picking up items will not touch you.
+
 ### When to use a table subscription
 
 `select` and `range` subscribe to one Redis channel **per row** on the server;

@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import importlib
 import logging
+import struct
 import time
 import warnings
 from collections import deque
@@ -104,6 +105,55 @@ class RowFormat(Enum):
     ID_LIST = 3  # 只返回list of row id，只能用于range查询
 
 
+def to_sortable_bytes(value: np.generic) -> bytes:
+    """
+    将np类型的值转换为可排序的bytes，用于索引。
+    Redis 后端用它做索引 zset 的 member，两个后端都用它给索引值频道命名（见 `sortable_token`）。
+    """
+    dtype = value.dtype
+    if np.issubdtype(dtype, np.signedinteger):
+        data = value.item() + (1 << 63)
+        return struct.pack(">Q", data)
+    elif np.issubdtype(dtype, np.unsignedinteger):
+        return struct.pack(">Q", value)
+    elif np.issubdtype(dtype, np.floating):
+        double = value.item()
+        packed = struct.pack(">d", value)
+        [u64] = struct.unpack(">Q", packed)
+        # IEEE 754 浮点数排序调整
+        if double >= 0:
+            # 正数让符号位变1
+            u64 = u64 | (1 << 63)
+        else:
+            # 负数要全部取反，因为浮点负数是绝对值，变成int那种从0xFF递减
+            u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
+        return struct.pack(">Q", u64)
+    elif np.issubdtype(dtype, np.str_):
+        encoded = value.item().encode("utf-8")
+        # 变长类型把 0x00 转义成 0x00 0xff，使 member 的 value 段能用单个 0x00 自分隔
+        # （定长的数字/bool 不会和终止符混淆，无需转义）。详见 _exc_index/range_normalize_
+        return encoded.replace(b"\x00", b"\x00\xff")
+    elif np.issubdtype(dtype, np.bytes_):
+        return value.item().replace(b"\x00", b"\x00\xff")
+    elif np.issubdtype(dtype, np.bool_):
+        return b"\x01" if value else b"\x00"
+    assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+
+
+def sortable_token(sortable: bytes) -> str:
+    """
+    索引值的 sortable bytes → 频道名里的 token。≤32 字节直接 hex（数值都是 8 字节，16 位 hex
+    可读且无歧义），更长的字符串取 blake2b-128 摘要并加 `h` 前缀（hex 里不会出现 h）。
+    commit 侧和订阅侧、两个后端都用这一个函数，保证同一个值落到同一个频道；摘要碰撞只会让
+    订阅者多做一次无害的重查，不会漏通知。
+
+    Channel-name token of an index value: hex for <=32 bytes, else 'h' + blake2b-128 hex.
+    """
+    if len(sortable) <= 32:
+        return sortable.hex()
+    return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
@@ -116,8 +166,61 @@ class BackendClient:
     """
 
     def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        """
+        返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
+        供区间订阅用；点查询请用 `index_value_channel`，免得被无关的值叫醒。
+        """
         raise NotImplementedError
+
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """
+        返回索引某一个值的频道名。只有 `index_name == value` 的行被 insert/delete，或某行该
+        字段从/到这个值变化时，commit 才向此频道发一条消息，payload 为本次事务变动的
+        row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
+        `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
+        （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
+
+        Channel of one index value: published on commit only when a row with that value is
+        inserted/deleted or a row's field changes from/to it (payload: touched row ids).
+        Point-query subscriptions use it instead of `index_channel`.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def point_query_value_(
+        dtype: np.dtype, left: Any, right: Any | None
+    ) -> np.generic | None:
+        """
+        判断 range 查询是否退化为点查询（right 省略或 left == right），是则返回按 dtype
+        规范化后的值，否则返回 None。与 `range_normalize_` 的 peel 规则一致：str/bytes 值的
+        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（int 索引传 ±inf、
+        非法字符串）或 NaN 也返回 None，由调用方回退到整个索引的频道。
+        """
+        if right is None:
+            right = left
+
+        def peel(x: Any) -> tuple[Any, bool]:
+            if type(x) in (str, bytes) and len(x) >= 1:
+                ch = x[0:1]
+                if ch in ("(", b"("):
+                    return None, False
+                if ch in ("[", b"["):
+                    x = x[1:]
+            return x, True
+
+        left, ok_left = peel(left)
+        right, ok_right = peel(right)
+        if not (ok_left and ok_right):
+            return None
+        try:
+            left_value, right_value = dtype.type(left), dtype.type(right)
+        except ValueError, OverflowError, TypeError:
+            return None
+        if left_value != right_value:  # NaN != NaN 也在这里回退
+            return None
+        return left_value
 
     def row_channel(self, table_ref: TableReference, row_id: int):
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
