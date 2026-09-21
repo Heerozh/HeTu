@@ -142,6 +142,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
                 }
             },
             "CLIENT_SEND_LIMITS": [[10, 1], [27, 5], [100, 50], [300, 300]],
+            "MAX_TABLE_SUBSCRIPTION": 1,
             "LOGGING": logging_cfg,
             "DEBUG": False,
             "WORKER_NUM": 4,
@@ -249,12 +250,11 @@ def test_websocket_kick_connect(test_server):
         await client2.send(["rpc", "add_rls_comp_value", 2])
         await client2.recv()
 
-        # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
-        # 需要调用一次system才能发现自己被踢掉了
-        await client1.send(["rpc", "add_rls_comp_value", 3])
+        # client2 顶掉了 client1：服务器收到 client1 那行 Connection 的变更通知后会
+        # 主动断开它，不用等 client1 再调一次 system。留点时间给通知（SQL hub 轮询 0.1s）
+        await asyncio.sleep(0.5)
 
         # 测试踢出成功
-        await asyncio.sleep(0.2)
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
@@ -267,6 +267,65 @@ def test_websocket_kick_connect(test_server):
         "add_rls_comp_value",
         4,
     ], "最后一行没执行到"
+
+
+def test_websocket_kick_without_rpc_after_login(test_server):
+    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开"""
+
+    async def kick_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", 1])
+        await client2.recv()
+
+        # client1 没有任何后续调用，只能靠 owner 索引值频道的通知把它断开
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+            async with asyncio.timeout(3):
+                await client1.recv()
+        await client2.send(["rpc", "add_rls_comp_value", 2])
+        await client2.recv()
+
+    _, response = test_server.test_client.websocket(
+        "/hetu/pytest_1", mimic=kick_routine
+    )
+    assert response.client_sent[-1] == ["rpc", "add_rls_comp_value", 2], (
+        "最后一行没执行到"
+    )
+
+
+@pytest.mark.timeout(60)
+def test_websocket_normal_logout_no_spurious_kick_log(test_server, caplog):
+    """已登录连接正常断开：拆连接时自己删了 Connection 行，删行的通知不能被当成"被顶号"记日志"""
+    user_id = 199993
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def routine(connect):
+        for _ in range(3):
+            client1 = await connect()
+            await client1.send(["rpc", "login", user_id])
+            await client1.recv()
+            await client1.send(["rpc", "add_rls_comp_value", 1])
+            await client1.recv()
+            await client1.close()
+
+            client2 = await connect()
+            for _ in range(
+                40
+            ):  # 等服务端把这条连接拆完（断线 System 跑过就说明拆到那一步了）
+                await client2.send(["rpc", "get_disconnect_count", user_id])
+                message = await client2.recv()
+                if message[1] >= 1:
+                    break
+                await asyncio.sleep(0.05)
+            await client2.close()
+            await asyncio.sleep(0.2)  # 留时间给删行之后可能冒出来的假顶号核查
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    kicked = [r.getMessage() for r in caplog.records if "已被顶号" in r.getMessage()]
+    assert kicked == [], f"正常断开被记成了顶号：{kicked}"
 
 
 @pytest.mark.timeout(20)
@@ -370,3 +429,149 @@ def test_call_flooding_lv2_flooding(test_server):
                     await asyncio.sleep(1)
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine_lv2)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_table_subscribe(test_server):
+    # 整表订阅：["sub", comp, "table"]，回包格式与range一致，之后按行收增量
+    async def routine(connect):
+        client1 = await connect()
+        # 先造两行
+        await client1.send(["rpc", "set_public_name", 1, "Alice"])
+        await client1.recv()
+        await client1.send(["rpc", "set_public_name", 2, "Bob"])
+        await client1.recv()
+
+        await client1.send(["sub", "PublicNames", "table"])
+        await client1.recv()  # ["sub", "PublicNames.table", [rows...]]
+
+        # 自己改名 -> 收到updt
+        await client1.send(["rpc", "set_public_name", 1, "Alice2"])
+        await client1.recv()  # rsp
+        await client1.recv()  # updt
+
+        # 别人改名/新增/删除 -> 也收到
+        client2 = await connect()
+        await client2.send(["rpc", "set_public_name", 3, "Carol"])
+        await client2.recv()
+        await asyncio.sleep(0.3)
+        await client1.recv()  # updt insert
+        await client2.send(["rpc", "set_public_name", 2, ""])
+        await client2.recv()
+        await asyncio.sleep(0.3)
+        await client1.recv()  # updt delete
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    # client_received 混有两个连接的rsp，按帧类型筛
+    subs = [m for m in response.client_received if m[0] == "sub"]
+    updts = [
+        {int(k): v for k, v in m[2].items()}
+        for m in response.client_received
+        if m[0] == "updt" and m[1] == "PublicNames.table"
+    ]
+    assert len(subs) == 1 and len(updts) == 3
+    sub_reply = subs[0]
+    assert sub_reply[1] == "PublicNames.table"
+    names = {row["owner"]: row["name"] for row in sub_reply[2]}
+    assert names == {1: "Alice", 2: "Bob"}
+    ids = {row["owner"]: row["id"] for row in sub_reply[2]}
+
+    # 自己改名
+    assert updts[0][ids[1]]["name"] == "Alice2"
+    # 别人新增
+    (row,) = updts[1].values()
+    assert row["owner"] == 3 and row["name"] == "Carol"
+    # 别人删除
+    assert updts[2] == {ids[2]: None}
+
+
+@pytest.mark.timeout(20)
+def test_websocket_table_subscribe_limit(test_server):
+    # MAX_TABLE_SUBSCRIPTION=1：未登录连接订第二张表时被断开
+    closed_detected = False
+
+    async def routine(connect):
+        nonlocal closed_detected
+        client1 = await connect()
+        await client1.send(["sub", "PublicNames", "table"])
+        await client1.recv()
+        await client1.send(["sub", "PublicConfig", "table"])
+        # 服务器可能先发回包再关闭，也可能直接关闭，之后任何收发都应失败
+        with pytest.raises(ConnectionClosedError):
+            await client1.recv()
+            await asyncio.sleep(0.3)
+            await client1.send(["sub", "PublicNames", "table"])
+            await client1.recv()
+        closed_detected = True
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert response.client_received[0][1] == "PublicNames.table"
+    assert closed_detected, "连接没有被服务器关闭"
+
+
+def test_check_length():
+    from hetu.server.receiver import check_length
+
+    # 闭区间内不报错
+    check_length("x", [1, 2, 3], 3, 3)
+    check_length("x", [1, 2, 3], 2, 5)
+    check_length("x", list(range(9)), 5, 9)  # range 订阅带 desc/force 共 9 项
+    # 区间外报错
+    with pytest.raises(ValueError, match="Invalid x message"):
+        check_length("x", [1, 2], 3, 5)
+    with pytest.raises(ValueError, match="got 6"):
+        check_length("x", [1, 2, 3, 4, 5, 6], 3, 5)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_invalid_sub_length_disconnects(test_server):
+    # 长度不合法的 sub 消息应被拒绝并断开连接
+    closed = False
+
+    async def routine(connect):
+        nonlocal closed
+        client1 = await connect()
+        with pytest.raises(ConnectionClosedError):
+            await client1.send(["sub", "PublicNames"])  # 缺少查询类型
+            await client1.recv()
+            await asyncio.sleep(0.3)
+            await client1.send(["sub", "PublicNames", "table"])
+            await client1.recv()
+        closed = True
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert closed, "连接没有被服务器关闭"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_setup_failure_deletes_connection_row(
+    monkeypatch, test_server, ses_redis_service
+):
+    """initialize() 落库之后初始化再出错（这里让订阅管理器构造失败）：连接断开，
+    且本连接那行 Connection 必须被删掉，不能永远留在库里（匿名连接数按 IP 计数）"""
+    import redis
+
+    class BrokenBroker:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("broker boom")
+
+    monkeypatch.setattr(websocket_server, "SubscriptionBroker", BrokenBroker)
+    r = redis.Redis.from_url(ses_redis_service[0])
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client1 = (
+            await connect()
+        )  # 握手在 initialize 之前，能成功；之后服务端初始化失败
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+            await client1.recv()
+        for _ in range(50):  # 等 finally 里的 terminate() 跑完
+            if len(r.keys(pattern)) == before:
+                break
+            await asyncio.sleep(0.05)
+        assert len(r.keys(pattern)) == before, (
+            "初始化失败的连接把 Connection 行留在库里了"
+        )
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)

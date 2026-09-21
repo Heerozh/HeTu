@@ -371,6 +371,8 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 执行
     ok = False
     res = None
+    # 未来调用不走Endpoint，请求时间戳要自己打，否则System读到的ctx.timestamp恒为0
+    caller.context.timestamp = time.time()
     try:
         if req_call_lock:
             res = await caller.call_(sys, *args, uuid=str(call.id))
@@ -471,3 +473,9 @@ async def future_call_task(app):
                 exc=f"{type(e).__name__}:{e}"
             )
             logger.exception(err_msg)
+            # 出错后退避再重试：持续性错误（如关服时后端已关闭，_ensure_open 在任何 await
+            # 之前同步抛出）会让本循环永不挂起、饿死事件循环，连 Sanic 的取消都送不进来。
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                break

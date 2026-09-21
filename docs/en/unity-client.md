@@ -134,15 +134,16 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 };
 ```
 
-## Subscriptions: `WatchRow` vs `WatchRange`
+## Subscriptions: `WatchRow` vs `WatchRange` vs `WatchTable`
 
-Both subscriptions are **live**: the server pushes deltas as the underlying
-rows change in Redis.
+All three subscriptions are **live**: the server pushes deltas as the
+underlying rows change in Redis.
 
 | API                                                     | Returns                                                     | Use it when                                                                                               |
 |---------------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
 | `WatchRow<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
 | `WatchRange<T>(index, left, right, limit, desc, force)` | `IndexSubscription<T>` (a dictionary of rows, kept in sync) | You want a window over an indexed column — nearby players, top-N leaderboard, the last 100 chat messages. |
+| `WatchTable<T>()`                                       | `IndexSubscription<T>` (the whole table, kept in sync)      | You want a whole "many rows, small rows, rarely change" table — all player names, the guild list, public config. |
 
 The `T` parameter is your strongly-typed `Component` class (see next section).
 Drop it for `DictComponent`, a string-keyed `Dictionary` you index manually.
@@ -150,6 +151,25 @@ Drop it for `DictComponent`, a string-keyed `Dictionary` you index manually.
 `WatchRange`'s `force=true` (default) keeps the subscription alive even if the
 initial query returns zero rows, so newly-inserted rows still trigger
 `OnInsert` / `ObserveAdd`. Set `force=false` if you not want subscript an empty query.
+
+`WatchTable` returns the very same `IndexSubscription<T>` as `WatchRange`, with
+identical events and R3 streams. The difference is on the server: `WatchRange`
+subscribes to one channel per row in the result set (thousands of rows means
+thousands of channels), while `WatchTable` listens to a single table-level
+channel no matter how many rows there are, so it does not count against the
+row-subscription quota. The trade-off is that **every** write to that table
+triggers a notification (filtered by permission before it reaches you), so keep
+using `WatchRange` for hot tables such as positions or HP. The server refuses
+tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default) and the call
+resolves to `null`.
+
+```csharp
+// Every player's name: thousands of rows, one subscription
+var names = await HeTuClient.Instance.WatchTable<PlayerNames>();
+names.OnInsert += (sub, id) => AddNameTag(sub.Rows[id]);
+names.OnUpdate += (sub, id) => RefreshNameTag(sub.Rows[id]);
+names.OnDelete += (sub, id) => RemoveNameTag(id);
+```
 
 ## Typed components vs `DictComponent`
 

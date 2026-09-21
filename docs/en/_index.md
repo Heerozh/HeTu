@@ -102,10 +102,21 @@ subscription. No schema migrations, no API gateway, no message broker.
     - Transactions use optimistic version locking and commit when the
       `System` function returns.
     - Any row that was read, or that is about to be written, raises a
-      conflict if another process/coroutine changes it underneath.
-        - Exception: `range()` queries don't lock the index, so other Systems adding,
-          removing, or reordering rows in the queried range won't raise a conflict. Use
-          `unique` constraint instead of index checks.
+      conflict if another process/coroutine changes it underneath. Rows the
+      transaction only *read* count too: commit verifies their versions, so a
+      transaction is never built on a stale read.
+        - Exception: `range()` locks the rows it returned, not the index itself.
+          A row another System *adds* into the queried range is a phantom — the
+          version check can't see it, so it raises no conflict. The rows the query
+          actually returned are checked like any other read: deleting one, or
+          moving one out of the range, does raise a conflict. Use a `unique`
+          constraint instead of index checks to guard against phantoms.
+        - Unique conflicts are checked at commit: if this transaction `get`-observed
+          the value as absent (e.g. the anchor field of an `upsert`, or an equality
+          `range`), the conflict counts as a race and is retried; otherwise it fails
+          with `UniqueViolation` and is not retried. To branch on "already exists"
+          inside a transaction, or to derive a unique value from a scan before
+          writing it, `get` the value first.
     - Any external or persistent side effect — updating `ctx` globals,
       writing to a file, sending a network call — must happen **after** the
       transaction commits. Otherwise the transaction may be discarded while

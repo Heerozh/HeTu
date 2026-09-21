@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -34,6 +35,32 @@ def test_add_clean_and_get(mod_item_model):
     # 验证重复添加报错
     with pytest.raises(ValueError, match="already exists"):
         id_map.add_clean(item_ref, row)
+
+
+def test_get_returns_copy_not_view(mod_item_model):
+    """get 返回的行必须是拷贝：numpy 结构化数组的标量下标是视图，直接返回会让调用方改字段
+    时把缓存里的"旧值"一起改掉，后续 update 的变化检测就判不出差异。"""
+    Item = mod_item_model
+    item_ref = TableReference(Item, "TestServer", 1)
+    id_map = IdentityMap()
+
+    row = Item.new_row()
+    row.id = 100
+    row.qty = 1
+    id_map.add_clean(item_ref, row)
+
+    fetched, _ = id_map.get(item_ref, 100)
+    assert fetched is not None
+    fetched.qty = 7  # 改调用方拿到的行
+    again, _ = id_map.get(item_ref, 100)
+    assert again is not None
+    assert again.qty == 1  # 缓存里的值不能跟着变
+
+    # 正常 update 仍然生效（update 是显式写回）
+    fetched["_version"] = again["_version"]
+    id_map.update(item_ref, fetched)
+    updated, _ = id_map.get(item_ref, 100)
+    assert updated is not None and updated.qty == 7
 
 
 def test_add_wrong_component(mod_item_model, mod_rls_test_model):
@@ -282,3 +309,58 @@ def test_filter(mod_item_model):
     assert len(rows) == 1
     assert rows[0]["id"] == 1
     assert rows[0]["name"] == "Item1"
+
+
+def test_get_absent_unique_fields(mod_item_model):
+    """commit 用：对待 INSERT/UPDATE 的行，返回其 unique 列中本事务曾 get 读空的列集合"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    assert idmap.get_absent_unique_fields() == {}
+
+    # 只有 absent 记录、没有缓存行 → 空（不能 KeyError）
+    idmap.mark_absent(ref, "name", "nobody")
+    assert idmap.get_absent_unique_fields() == {}
+
+    # get(id=100) / get(name="a") 读空后 insert 同值：id/name 命中，time 未观察
+    idmap.mark_absent(ref, "id", 100)
+    idmap.mark_absent(ref, "name", "a")
+    row = Item.new_row(id_=100)
+    row.name, row.time = "a", 1
+    idmap.add_insert(ref, row)
+    # 未观察过的 insert 行不出现
+    row2 = Item.new_row(id_=101)
+    row2.name, row2.time = "b", 2
+    idmap.add_insert(ref, row2)
+    # CLEAN 行即使值命中也不出现
+    row3 = Item.new_row(id_=102)
+    row3.name, row3.time = "c", 3
+    idmap.add_clean(ref, row3)
+    idmap.mark_absent(ref, "name", "c")
+    # UPDATE 行：改成曾观察不存在的 time
+    row4 = Item.new_row(id_=103)
+    row4.name, row4.time = "d", 4
+    idmap.add_clean(ref, row4)
+    idmap.mark_absent(ref, "time", 44)
+    row4, _ = idmap.get(ref, 103)
+    assert row4 is not None
+    row4.time = 44
+    idmap.update(ref, row4)
+    # DELETE 行不出现
+    row5 = Item.new_row(id_=104)
+    row5.name, row5.time = "e", 5
+    idmap.add_clean(ref, row5)
+    idmap.mark_absent(ref, "name", "e")
+    idmap.mark_deleted(ref, 104)
+
+    assert idmap.get_absent_unique_fields() == {
+        ref: {100: {"id", "name"}, 103: {"time"}}
+    }
+
+    # np 标量与 python 原生值归一化后能对上
+    idmap2 = IdentityMap()
+    idmap2.mark_absent(ref, "time", np.int64(7))
+    r = Item.new_row(id_=1)
+    r.time = 7
+    idmap2.add_insert(ref, r)
+    assert idmap2.get_absent_unique_fields() == {ref: {1: {"time"}}}

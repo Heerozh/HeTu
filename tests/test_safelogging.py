@@ -10,6 +10,7 @@ import yaml
 import hetu
 from hetu.common import yamlloader
 from hetu.safelogging.filter import ContextFilter
+from hetu.safelogging.formatter import ContextAutoFormatter
 
 
 def _make_record() -> logging.LogRecord:
@@ -81,3 +82,43 @@ def test_config_template_quiets_aiosqlite_logger():
     # 但 root 与 HeTu 自己的 logger 仍保持 DEBUG（不能误伤自己的日志）
     assert levels[loggers["root"]["level"]] == levels["DEBUG"]
     assert levels[loggers["HeTu.root"]["level"]] == levels["DEBUG"]
+
+
+def test_context_auto_formatter_keeps_record_ident():
+    """彩色 formatter 应使用 record 上由 ContextFilter 打好的 ident。
+
+    sanic 的 AutoFormatter 会用"本进程"的编号覆写它，而这个 formatter 跑在管理进程的
+    QueueListener 里，覆写后每个 worker 的日志都会显示成 Main。"""
+    record = _make_record()
+    record.ident = "Srv 3"
+
+    output = ContextAutoFormatter().format(record)
+
+    assert "Srv 3" in output
+    # 不能被就地改写，后面用 %(ident)s 的文本 formatter 还要读它
+    assert getattr(record, "ident", None) == "Srv 3"
+    # 只允许临时遮蔽，格式化完必须还原，不能污染下一条日志
+    assert "IDENT" not in ContextAutoFormatter().__dict__
+
+
+def test_context_auto_formatter_falls_back_to_process_ident():
+    """没经过 ContextFilter 的 record（如进程内直连的 handler）保持 sanic 原行为。"""
+    record = _make_record()
+
+    output = ContextAutoFormatter().format(record)
+
+    assert ContextAutoFormatter.IDENT in output
+
+
+def test_config_template_console_formatter_is_context_aware():
+    """模板里 console 挂在 QueueListener 上，就必须配 ident 安全的 formatter。"""
+    template = Path(hetu.__file__).parent / "CONFIG_TEMPLATE.yml"
+    config = yaml.load(template.read_text(encoding="utf-8"), yamlloader.Loader)
+    logging_config = config["LOGGING"]
+
+    # console 由队列的 listener 消费 = 在管理进程里格式化
+    assert "console" in logging_config["handlers"]["log_queue"]["handlers"]
+    console_formatter = logging_config["handlers"]["console"]["formatter"]
+    assert logging_config["formatters"][console_formatter]["class"] == (
+        "hetu.safelogging.formatter.ContextAutoFormatter"
+    )

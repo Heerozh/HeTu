@@ -50,6 +50,12 @@ class Session(AbstractAsyncContextManager):
         self._idmap = cast(IdentityMap, object())
         self._entered = False
         self.only_master = False
+        self.explicit_ids_only = False
+        """
+        为 True 时本 Session 不发雪花号：`insert` 的行 id 必须非零；`upsert` 只有锚定
+        `id=<非零显式值>` 时允许新建，锚定其他 unique 字段未命中则抛 `LookupError`。
+        供未初始化 `SnowflakeID` 的进程（headless client）使用，服务器与 Sandbox 保持 False。
+        """
 
         self.clean()
         # todo 要检测是否在session中又开了一个session，如果是，应该报错，毕竟嵌套session没意义
@@ -89,7 +95,10 @@ class Session(AbstractAsyncContextManager):
         Exceptions
         --------
         RaceCondition
-            当提交数据时，发现数据已被其他事务修改，抛出此异常
+            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
+            观察其不存在的值（基于过期快照），可重试
+        UniqueViolation
+            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
         """
         # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
         if self._idmap.is_dirty:

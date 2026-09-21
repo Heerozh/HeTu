@@ -11,7 +11,7 @@ MMO、多人联机、实时模拟与 AI Agent 持久化场景。
 - WebSocket 长连接与握手流程
 - 可插拔消息管道（默认：MessagePack + Zlib + Crypto）
 - System RPC 调用
-- 单行订阅（WatchRow）与范围订阅（WatchRange）
+- 单行订阅（WatchRow）、范围订阅（WatchRange）与整表订阅（WatchTable）
 - 可选逻辑会话层（自动重连、重新 bootstrap、自动恢复订阅）
 - 与 Unity 生命周期友好的异步 API
 - 可选 R3 响应式订阅支持
@@ -115,6 +115,7 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
   若该行后续不再满足原条件，订阅不会切换到新的匹配行；首次解析成功后，Session 重连也会按该行
   的 `id` 恢复，而不会重新执行最初的 first 查询。按主键时可直接使用 `WatchRow("id", rowId)`。
 - `WatchRange<T>(index, left, right, limit, desc = false, force = true, componentName = null)`
+- `WatchTable<T>(componentName = null)` — 整表订阅，服务端只占一个订阅，适合"行多、行小、很少变"的表
   ：持续观察索引范围。
 - `RowSubscription` / `IndexSubscription` 在 Session 断线期间会把 `IsStale` 置为 `true`，
   恢复完成后触发 `OnResynced`。

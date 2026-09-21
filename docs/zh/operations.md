@@ -73,12 +73,18 @@ backends:
 - 根据需要添加任意数量的 `servants`；每个都是一个从主节点同步的 Redis 只读副本。
 - `servants` 是可选的。留空即表示单主模式——适合小型游戏。
 - 请保守设置副本的 Redis `client-output-buffer-limit`；过大的缓冲区限制在订阅突发时可能导致 Redis 内存溢出（OOM）。
+- 副本需要开启 `notify-keyspace-events`（HeTu 启动时有权限就会自行 `CONFIG SET`，没权限会告警）。
+- 每个登录连接还订阅 `Connection` 表 `owner == 本用户` 的索引值频道，被顶号时服务器据此主动断开它，RPC 路径上
+  不再每次读库；通知丢失时由 `CONNECTION_ALIVE_RECHECK_INTERVAL`（默认 5 秒）兜底重查。
 
 **Redis 连接预算**
 
-- 副本连接数 ≈ HeTu ClientSDK 连接数（在线用户数）。
-- 主节点连接数 ≈ `workers × 每个 worker 的并发 System 调用数`。
-- Redis 单实例连接数上限约为 10K。如果您的并发在线用户数接近此值，请通过增加更多 `servants` 来扩展。
+- 每个工作进程对每台副本（集群模式下每个 Redis 节点）只保持**一条** pub/sub 连接，由它把通知分发给该进程的
+  全部 WebSocket 连接；另加一个有上限的短命读写连接池（`max_connections`，默认 64，满了排队）。
+  所以每台副本的连接数 ≈ `workers × (1 + max_connections)`，与在线用户数无关。
+- 主节点连接数同样 ≈ `workers × (1 + max_connections)`，池由该 worker 的所有并发 System 调用共享。
+- Redis 单实例连接数上限约为 10K，按默认值算一个实例可挂 ~150 个 worker。要扩展的是订阅**吞吐量**而不是
+  连接数：增加 `servants`，每个 worker 的 pub/sub 连接和读取会随机分摊到各副本上。
 
 ### 即插即用的替代方案
 
@@ -134,6 +140,8 @@ Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模�
 ### 集群重排 — 自动处理
 
 当仅集群分组发生变化时，无需移动行数据。`upgrade` 会将表重命名为新的集群 ID，至此完成——无需审核脚本，也无数据丢失风险。
+
+如果有 [`hetu.headless`](advanced.md#非服务器进程读写表hetuheadless) 进程连着同一个后端，迁移后要重启它们：它们按启动时读到的集群 ID 写表，不重启会把数据写到旧前缀下。
 
 ### Schema 变更 — 通过迁移脚本
 

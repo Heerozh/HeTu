@@ -46,8 +46,9 @@ class IdentityMap:
 
         # 本事务对“等值精确查询读到不存在”的观察记录（negative observation）。
         # {TableReference: {(index_name, normalized_value), ...}}
-        # 用途：insert/update 远程命中 unique 冲突时，若该列值在此集合内，说明本事务
-        # 是基于“它不存在”的过期快照做的决策，应判为 RaceCondition 而非 UniqueViolation。
+        # 用途：commit 时主键 / unique 冲突若命中此集合内的 (列, 值)，说明本事务是基于
+        # “它不存在”的过期快照做的决策，应判为 RaceCondition 而非 UniqueViolation
+        # （见 get_absent_unique_fields）。
         self._absent: dict[TableReference, set[tuple[str, object]]] = {}
 
         # 范围查询缓存
@@ -154,7 +155,9 @@ class IdentityMap:
 
         # recarray是基于ndarray的，传入参数可以用np.ndarray类型，返回值
         # 应该使用np.recarray类型以保留字段名访问特性(row.field_name)
-        return cast(np.record, cache[idx[0]]), states.get(row_id)
+        # 必须返回拷贝：结构化数组的标量下标是缓存本体的视图，直接交给调用方，调用方改字段
+        # 就把缓存里的"旧值"一起改了，之后 update/upsert 拿它与缓存比对会判成"没有变化"。
+        return cast(np.record, cache[idx[0]].copy()), states.get(row_id)
 
     def add_insert(self, table_ref: TableReference, row: np.record) -> None:
         """
@@ -277,6 +280,44 @@ class IdentityMap:
         if not absent:
             return False
         return (index_name, self._norm_value(value)) in absent
+
+    def get_absent_unique_fields(self) -> dict[TableReference, dict[int, set[str]]]:
+        """
+        对每个待 INSERT / UPDATE 的行，返回其 unique 列（含 id）中本事务曾观察"该值不存在"
+        （见 `mark_absent`）的列集合。commit 据此把主键 / unique 冲突判为 `RaceCondition`
+        （基于过期快照的乐观并发失败，重试可解）而非 `UniqueViolation`（确定性冲突）。
+
+        Returns
+        -------
+        {TableReference: {row_id: {field, ...}}}，没有 absent 列的行不出现。
+        """
+        ret: dict[TableReference, dict[int, set[str]]] = {}
+        for table_ref, absent in self._absent.items():
+            states = self._row_states.get(table_ref)
+            if not absent or not states:
+                continue
+            dirty_ids = [
+                row_id
+                for row_id, state in states.items()
+                if state == RowState.INSERT or state == RowState.UPDATE
+            ]
+            # 只查 absent 里出现过的 unique 列，通常 0~2 个
+            candidates = table_ref.comp_cls.uniques_ & {field for field, _ in absent}
+            if not dirty_ids or not candidates:
+                continue
+            cache = self._row_cache[table_ref]
+            rows_absent: dict[int, set[str]] = {}
+            for row in cache[np.isin(cache["id"], dirty_ids)]:
+                fields = {
+                    field
+                    for field in candidates
+                    if (field, self._norm_value(row[field])) in absent
+                }
+                if fields:
+                    rows_absent[int(row["id"])] = fields
+            if rows_absent:
+                ret[table_ref] = rows_absent
+        return ret
 
     def get_clean_row_keys(self) -> set[str]:
         """

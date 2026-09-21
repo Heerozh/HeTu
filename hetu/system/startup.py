@@ -13,6 +13,7 @@ worker starts, before it accepts connections.
 
 import asyncio
 import logging
+import time
 import uuid
 
 from ..i18n import _
@@ -87,6 +88,8 @@ async def run_startup_systems(
                     "🚀 [⚙️Startup] instance={instance} 执行启动System：{sys_name}"
                 ).format(instance=instance, sys_name=sys_name)
             )
+            # 同 exec_future_call：不走Endpoint的调用要自己打请求时间戳
+            context.timestamp = time.time()
             try:
                 async with asyncio.timeout_at(deadline):
                     await caller.call(sys_name, uuid=boot_uuid)

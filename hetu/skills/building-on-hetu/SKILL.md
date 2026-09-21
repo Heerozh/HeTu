@@ -144,6 +144,31 @@ Two ways to invoke your code:
   tables between tests.
 - One app/namespace per process; a `call_system` target must reference ≥1 Component.
 
+## Non-server processes (`hetu.headless`)
+
+A **trusted internal process that is not a HeTu app** (a standalone battle sim, a
+worker that only reads a command table and writes a report table) uses
+`hetu.headless` to touch component tables directly. (→ `headless.py`, `advanced.md`)
+
+```python
+client = await hetu.headless.connect(backend_cfg, instance="region-1",
+                                     components=[BattleCommand, "BattleReport"])
+rows = await client.table(BattleCommand).servant_range("created_at", since, float("inf"), limit=4096)
+async with client.session("BattleReport") as s:            # s[Comp] is a SessionRepository
+    async with s["BattleReport"].upsert(id=-report_key) as row:  # explicit id — headless never mints ids
+        row.kind = 1
+await client.close()
+```
+
+Writes go through the same `Session.commit()` path as Systems, so client
+subscriptions fire identically. It reads cluster ids/schemas from the server's table
+meta (tables must already exist; a mismatching local class raises `SchemaMismatch`),
+does **no** permission/RLS checks, and does not initialise SnowflakeID: `insert`
+needs `new_row(id_=...)` with a non-zero (by convention negative) id, and `upsert`
+only creates rows when anchored on `id=`. Components in one `session(...)` must be in
+one cluster; tables no System references go in `namespace="core"`. Call
+`client.check_schema()` periodically and restart after `hetu upgrade`.
+
 ## Client (Unity / C#)
 
 `hetu build` generates typed C# component classes from your definitions. The
@@ -174,8 +199,8 @@ via the `DictComponent` overload and casting yourself; no generated type require
   then read: `data/component.py` (components & fields), `system/definer.py`
   (Systems & clusters), `system/context.py` (`ctx` + repo), `endpoint/`
   (Endpoints, `elevate`), `data/backend/` (`SessionRepository` CRUD),
-  `testing/__init__.py` (`Sandbox` unit-test helper), `CONFIG_TEMPLATE.yml`
-  (every config key).
+  `testing/__init__.py` (`Sandbox` unit-test helper), `headless.py` (table client
+  for non-server processes), `CONFIG_TEMPLATE.yml` (every config key).
 - **Advanced** (`advanced.md`): scheduled `FutureCalls`, `call_lock` idempotency,
   the `on_disconnect` hook, per-connection limits, NumPy patterns over `range()`
   results, custom pipeline layers.

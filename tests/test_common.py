@@ -1,53 +1,9 @@
+import logging
 import time
 
-import numpy as np
 import pytest
 from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
-
-
-def test_multimap():
-    from hetu.common.multimap import MultiMap
-
-    primary = [2, 4, 1, 3, 3, 4, 2, 3]
-    second_ = [5, 3, 2, 1, 9, 8, 7, 6]
-    d = MultiMap()
-    for i, _ in enumerate(primary):
-        d.add(primary[i], second_[i])
-
-    # 测试查询
-    np.testing.assert_array_equal(d.iloc(d.index(2)), np.array([5, 7]))
-    np.testing.assert_array_equal(d.iloc(d.index(1)), np.array([2]))
-    sel = d.index(2)
-    np.testing.assert_array_equal(
-        d.iloc(slice(sel.stop - 1, sel.start - 1, -1)), np.array([7, 5])
-    )
-    assert d.count() == 8
-    assert d.count(0, 3) == 6
-    assert d.count(5) == 0
-    assert d.count(0) == 0
-    np.testing.assert_array_equal(d.query(0), [])
-    np.testing.assert_array_equal(d.query(1), [2])
-    np.testing.assert_array_equal(d.query(0, 3), [2, 5, 7, 1, 6, 9])
-    np.testing.assert_array_equal(d.query(3, 99), [1, 6, 9, 3, 8])
-    np.testing.assert_array_equal(d.query(99), [])
-
-    # 测试添加
-    d.add(2, 3)
-    d.add(2, 9)
-    np.testing.assert_array_equal(d.iloc(d.index(2)), np.array([3, 5, 7, 9]))
-
-    # 测试删除
-    d.remove(2, 5)
-    np.testing.assert_array_equal(d.iloc(d.index(2)), np.array([3, 7, 9]))
-
-    # 测试再次添加
-    d.add(2, 5)
-    np.testing.assert_array_equal(d.iloc(d.index(2)), np.array([3, 5, 7, 9]))
-
-    # 测试pop
-    np.testing.assert_array_equal(d.pop(2, 3), [3, 5, 7, 9, 1, 6, 9])
-    np.testing.assert_array_equal(d.query(2, 3), [])
 
 
 async def test_snowflake_id(monkeypatch):
@@ -180,89 +136,264 @@ async def test_redis_worker_keeper(mod_auto_backend):
         f"{worker_keeper2.worker_id_key}:{worker_id_2}", 20
     )
     assert expire <= 20
-    # 续约
-    ts = int(time.time() * 1000) + 1230
-    await worker_keeper2.keep_alive(ts)
-    last_ts = await worker_keeper2.get_last_timestamp()
-    assert last_ts == ts
+    # 续约（只管租约，时间戳高水位已拆给 SnowflakeTimestampKeeper）
+    await worker_keeper2.keep_alive()
     expire = await redis_client.ttl(f"{worker_keeper2.worker_id_key}:{worker_id_2}")
     assert expire > 60 - 1
 
 
-async def test_general_worker_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
-    monkeypatch.chdir(tmp_path)
-    backend = mod_sqlite_backend()
+@use_redis_family_backend_only
+async def test_redis_keeper_detects_stolen_lease(mod_auto_backend):
+    """续约必须能发现租约被别人抢走——这是会产生重复雪花ID的那种情况。
 
-    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
-    from hetu.data.backend.table import Table
+    修复前用的是 `EXPIRE`，它只看 key 在不在、不看 value，被 SET NX 抢走后照样返回1，
+    于是两个 worker 拿着同一个 Worker ID 继续发号。
+    """
+    redis = mod_auto_backend()
+    redis_client = redis.master.aio
+    keys = await redis_client.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    if keys:
+        await redis_client.delete(*keys)
 
-    table = Table(WorkerLease, "pytest", 1, backend)
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
 
-    worker_keeper = GeneralWorkerKeeper(101, table)
-    assert worker_keeper is not None
-    worker_id = await worker_keeper.get_worker_id()
-    assert worker_id == 0
-    assert await worker_keeper.get_worker_id() == worker_id
-    worker_keeper_again = GeneralWorkerKeeper(101, table)
-    assert await worker_keeper_again.get_worker_id() == worker_id
+    victim = RedisWorkerKeeper(500, redis_client)
+    worker_id = await victim.get_worker_id()
 
-    worker_keeper2 = GeneralWorkerKeeper(102, table)
-    worker_id_2 = await worker_keeper2.get_worker_id()
-    assert worker_id_2 == 1
+    # 正常情况下续约成功
+    await victim.keep_alive()
 
-    ts = int(time.time() * 1000) + 1230
-    await worker_keeper2.keep_alive(ts)
-    last_ts = await worker_keeper2.get_last_timestamp()
-    assert last_ts == ts
+    # 模拟：victim 卡住太久导致租约过期，thief 用 SET NX 抢走了同一个 id
+    await redis_client.delete(victim._key(worker_id))
+    thief = RedisWorkerKeeper(501, redis_client)
+    assert await thief.get_worker_id() == worker_id
+
+    # victim 醒来续约，必须发现自己已经不是持有者
+    with pytest.raises(SystemExit):
+        await victim.keep_alive()
+
+    # 而且不能把 thief 的租约刷掉或删掉
+    assert await redis_client.get(victim._key(worker_id)) is not None
+    await victim.release_worker_id()  # compare-and-delete：不是自己的就不该删
+    assert await redis_client.get(thief._key(worker_id)) is not None
+    await thief.keep_alive()  # thief 完全不受影响
 
 
-async def test_general_worker_keeper_concurrent_claim_race(
-    mod_sqlite_backend, monkeypatch, tmp_path
+async def test_fixed_worker_keeper(monkeypatch):
+    """开发模式分配器：用本机进程序号，零协调"""
+    from hetu.data.backend.worker_keeper import FixedWorkerKeeper
+
+    monkeypatch.delenv("SANIC_WORKER_IDENTIFIER", raising=False)
+    assert await FixedWorkerKeeper().get_worker_id() == 0  # 单进程模式
+
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 3")
+    keeper = FixedWorkerKeeper()
+    assert await keeper.get_worker_id() == 3
+    assert await keeper.get_worker_id() == 3  # 幂等
+
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv12")  # sanic对两位数不留空格
+    assert await FixedWorkerKeeper().get_worker_id() == 12
+
+    # 续约/释放都是空操作，不该抛异常
+    await keeper.keep_alive()
+    await keeper.release_worker_id()
+
+
+async def test_worker_keeper_factory_picks_by_backend(
+    mod_sqlite_backend, mod_auto_backend, monkeypatch, tmp_path
 ):
-    """
-    复现并回归：多个 worker 在 cold-start 时同时竞争同一个 worker_id。
+    """按后端类型自动选分配器，不给用户留选错模式的机会"""
+    monkeypatch.chdir(tmp_path)
+    from hetu.data.backend.redis.worker_keeper import RedisWorkerKeeper
+    from hetu.data.backend.worker_keeper import FixedWorkerKeeper, create_worker_keeper
 
-    输掉竞争的一方，其 `repo.insert()` 的 unique 预检查会读到对手刚提交的行而抛
-    `UniqueViolation`（`IndexError` 子类，**不是** `RaceCondition`）。修复前该异常会
-    逃出 `_try_claim_worker_id` 的 `except RaceCondition`，直接让 worker 启动失败；
-    修复后应作为竞态退让到下一个 id。
+    assert isinstance(create_worker_keeper(mod_sqlite_backend(), 1), FixedWorkerKeeper)
+
+    backend = mod_auto_backend()
+    expected = (
+        RedisWorkerKeeper
+        if type(backend.master).__name__ == "RedisBackendClient"
+        else FixedWorkerKeeper
+    )
+    assert isinstance(create_worker_keeper(backend, 1), expected)
+
+
+async def _raise_backend_error(*_args, **_kwargs):
+    raise ConnectionError("模拟后端读失败")
+
+
+def _make_lease_table(backend):
+    """建好 WorkerLease 的表。真实服务器里由 check_and_create_new_tables 在开服时建，
+    测试里直接构造 Table 不会碰数据库，而 direct_set 是裸 UPDATE，表不存在会直接报错。"""
+    from hetu.data.backend.table import Table
+    from hetu.data.backend.worker_keeper import WorkerLease
+
+    table = Table(WorkerLease, "pytest", 1, backend)
+    maint = table.backend.get_table_maintenance()
+    if maint.check_table(table)[0] == "not_exists":
+        maint.create_table(table)
+    return table
+
+
+async def test_snowflake_timestamp_keeper(
+    mod_sqlite_backend, monkeypatch, tmp_path, caplog
+):
+    """时间戳高水位：独立于租约的读写语义，只需要单调max"""
+    monkeypatch.chdir(tmp_path)
+    backend = mod_sqlite_backend()
+
+    from hetu.data.backend.snowflake_timestamp import (
+        TIMESTAMP_SAVE_INTERVAL,
+        SnowflakeTimestampKeeper,
+    )
+
+    table = _make_lease_table(backend)
+    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
+    now_ms = int(time.time() * 1000)
+    ts_keeper = SnowflakeTimestampKeeper(table, 7)
+
+    # "读到了空"（行不存在/水位为0）= 确认没发过号 → 用当前时间，绝不能钳制。
+    # 只有"读不出来"（后端异常）才该退化成 init 的兜底值，见 load 的文档
+    assert abs(await ts_keeper.load() - now_ms) < 1000
+
+    # SQL后端的 direct_set 是 UPDATE，行不存在就静默无效；GeneralWorkerKeeper 删掉后
+    # 没人替本类建行了，所以它必须自己补建，否则水位永远写不进去
+    await ts_keeper.save(now_ms - 60_000)
+    assert await ts_keeper.load() >= now_ms
+
+    # 后端读异常时才返回-1，把回拨保护交还给 SnowflakeID.init
+    broken = SnowflakeTimestampKeeper(table, 8)
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        monkeypatch.setattr(
+            type(table.backend.master),
+            "get",
+            _raise_backend_error,
+        )
+        assert await broken.load() == -1
+    monkeypatch.undo()
+
+    # 关键用例：水位高于当前时间（模拟重启期间时钟回拨），必须返回水位而不是当前时间，
+    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳
+    future_ms = now_ms + 30_000
+    await ts_keeper.save(future_ms)
+    assert await ts_keeper.load() == future_ms + pad_ms
+
+    # 崩溃时最后一个写入间隔内发出的ID其时间戳已超过记录值，读回时必须补上这一段
+    edge_ms = now_ms + 1000  # 水位仅略高于当前时间，不补就会重发这段时间的ID
+    await ts_keeper.save(edge_ms)
+    assert await ts_keeper.load() == edge_ms + pad_ms
+
+    # 补建是幂等的：同一个 worker_id 的第二个 keeper 实例不该因为撞主键而抛异常
+    second = SnowflakeTimestampKeeper(table, 7)
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        await second.save(edge_ms)
+    assert await second.load() == edge_ms + pad_ms
+
+
+async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
+    """回归：开服（首次和重启）都不该让雪花ID起始时间戳超前于当前时间。
+
+    超前会把时间戳钳在同一毫秒，总容量塌缩成4096个ID，发完就1ms一睡地空转直到墙钟追上，
+    期间还每发一个ID刷一条"时钟回拨"警告。曾因为抢租约时顺手把 last_timestamp 写成 now、
+    读回时又加了写入间隔补偿，导致每次开服都白背一个5秒降级窗口。
     """
     monkeypatch.chdir(tmp_path)
     backend = mod_sqlite_backend()
 
-    from hetu.data.backend.repo import SessionRepository
-    from hetu.data.backend.table import Table
-    from hetu.data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+    from hetu.data.backend.worker_keeper import create_worker_keeper
 
-    table = Table(WorkerLease, "pytest", 1, backend)
+    table = _make_lease_table(backend)
 
-    winner = GeneralWorkerKeeper(302, table)  # 抢先提交并占住争用 id 的 worker
-    loser = GeneralWorkerKeeper(301, table)  # get→insert 窗口里输掉争用 id 的 worker
+    for label in ("首次开服", "重启"):
+        # 完整走一遍 worker_start 的流程：分配id → 读水位 → 初始化发号器
+        worker_id = await create_worker_keeper(backend, 301).get_worker_id()
+        loaded = await SnowflakeTimestampKeeper(table, worker_id).load()
+        now_ms = int(time.time() * 1000)
+        assert loaded - now_ms < 1000, f"{label}时发号器起始时间戳超前了"
 
-    # winner 先正常占住一个 id 并提交（具体值取决于已占用情况，动态捕获）。
-    winner_id = await winner.get_worker_id()
+        # 判据不是"能连发多少个"——每毫秒4096本来就是硬上限，发多少取决于机器速度；
+        # 而是"耗尽后睡一下容量能不能恢复"：被钳在未来时，墙钟追上之前睡多久都恢复不了
+        generator = SnowflakeID()
+        generator.init(worker_id, loaded)
+        for _ in range(20000):
+            if generator._next_id() is None:
+                break
+        time.sleep(0.01)
+        assert generator._next_id() is not None, (
+            f"{label}时发号容量耗尽后睡10ms仍未恢复，说明起始时间戳被钳在了未来"
+        )
 
-    # 给 loser 注入一次性「陈旧读」：让它对争用 id 的第一次主键查询看不到 winner 刚提交的行，
-    # 精确还原 cold-start 时 get(空) 与对手 insert 提交之间的竞态窗口。
-    # 在 get_by_id 层致盲（直接返回 None、不读真实 DB）以免污染 idmap 缓存；
-    # 而 insert 的远程 unique 检查走 client.range 直查数据库，仍会读到 winner 的行。
-    real_get_by_id = SessionRepository.get_by_id
-    state = {"blinded": False}
 
-    async def get_by_id_blind_once(self, row_id):
-        if (
-            not state["blinded"]
-            and self.ref.comp_cls is WorkerLease
-            and int(row_id) == winner_id
-        ):
-            state["blinded"] = True
-            return None  # 假装没看到 winner 的行，制造 TOCTOU
-        return await real_get_by_id(self, row_id)
+async def test_snowflake_lease_fence():
+    """发号围栏：租约超出安全期就拒绝发号，而不是继续发可能重复的ID"""
+    from hetu.common.snowflake_id import (
+        SnowflakeID,
+        WorkerKeeper,
+        WorkerLeaseExpired,
+    )
 
-    monkeypatch.setattr(SessionRepository, "get_by_id", get_by_id_blind_once)
+    class FakeKeeper(WorkerKeeper):
+        pass
 
-    # 修复前：loser 的 insert(winner_id) 抛 UniqueViolation 逃逸，此处直接抛错。
-    # 修复后：视为竞态，退让到另一个 id。
-    loser_id = await loser.get_worker_id()
-    assert winner.worker_id == winner_id
-    assert loser_id != winner_id  # loser 没崩溃，且正确避开了被占用的 id
+    keeper = FakeKeeper()
+    generator = SnowflakeID()
+
+    # 安全期内正常发号
+    keeper.lease_deadline = time.monotonic() + 60
+    generator.init(worker_id=1, lease=keeper)
+    assert generator.next_id() > 0
+
+    # 超出安全期就拒绝。注意不能是 RaceCondition —— SystemCaller 会重试，而围栏跳闸后
+    # 重试多少次都是跳闸，只会空转到 max_retry
+    from hetu.data.backend.base import RaceCondition
+
+    keeper.lease_deadline = time.monotonic() - 0.001
+    with pytest.raises(WorkerLeaseExpired):
+        generator.next_id()
+    assert not issubclass(WorkerLeaseExpired, RaceCondition)
+
+    # 续约成功推进安全期后恢复发号
+    keeper.lease_deadline = time.monotonic() + 60
+    assert generator.next_id() > 0
+
+    # 不提供租约的分配器（开发模式）不启用围栏
+    keeper.lease_deadline = None
+    assert generator.next_id() > 0
+    generator.init(worker_id=1)  # 完全不传lease
+    assert generator.next_id() > 0
+
+
+@use_redis_family_backend_only
+async def test_redis_keeper_arms_fence(mod_auto_backend):
+    """Redis租约必须武装围栏，且安全期要留出余量、抢到的那一刻就生效"""
+    from hetu.data.backend.redis.worker_keeper import (
+        FENCE_MARGIN_SEC,
+        WORKER_ID_EXPIRE_SEC,
+        RedisWorkerKeeper,
+    )
+
+    redis = mod_auto_backend()
+    redis_client = redis.master.aio
+    keys = await redis_client.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    if keys:
+        await redis_client.delete(*keys)
+
+    keeper = RedisWorkerKeeper(600, redis_client)
+    assert keeper.lease_deadline is None  # 还没拿到id时围栏不该生效
+
+    await keeper.get_worker_id()
+    # 抢到就武装，不用等第一次续约（那要5秒后）
+    assert keeper.lease_deadline is not None
+    # 安全期必须早于Redis侧的过期时刻，留出余量给时钟漂移。用发起请求前的时刻算，所以
+    # 它一定不晚于 "现在 + TTL - 余量"
+    now = time.monotonic()
+    assert keeper.lease_deadline <= now + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+    assert keeper.lease_deadline > now
+
+    # 续约成功要推进安全期
+    old = keeper.lease_deadline
+    time.sleep(0.01)
+    await keeper.keep_alive()
+    assert keeper.lease_deadline > old

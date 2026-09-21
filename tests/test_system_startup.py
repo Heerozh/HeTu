@@ -102,6 +102,44 @@ async def test_run_startup_systems_same_boot_dedups(
         assert row.n == 1
 
 
+async def test_run_startup_systems_dedups_with_early_commit(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """System 按文档提前 `ctx.session_commit()` 结束事务后，`ctx.repo` 已被清空，
+    引擎不能再去里面写 uuid 锁（否则 KeyError）；锁必须随那次提前提交一起落库，
+    否则同 boot uuid 的去重会失效。"""
+    from hetu.manager import ComponentTableManager
+    from hetu.system.startup import run_startup_systems
+
+    @define_component(namespace="pytest", force=True)
+    class SeedCounter(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        n: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(SeedCounter,), on_start=True)
+    async def seed_counter_early_commit(ctx):
+        async with ctx.repo[SeedCounter].upsert(owner=1) as row:
+            row.n += 1
+        # on_start 文档推荐的用法：提前提交，用是否抛 RaceCondition 判断本 worker 是否抢到
+        await ctx.session_commit()
+
+    SystemClusters().build_clusters("pytest")
+
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-early")
+    # 同一 boot uuid 再来一次（模拟同次开服的另一个 worker），应被 uuid 去重
+    await run_startup_systems("pytest", {"server1": tbl_mgr}, "boot-early")
+
+    tbl = tbl_mgr.get_table(SeedCounter)
+    async with tbl.session() as session:
+        row = await session.using(SeedCounter).get(owner=1)
+        assert row is not None
+        assert row.n == 1
+
+
 async def test_run_startup_systems_per_instance_isolated(
     mod_auto_backend, new_component_env, new_clusters_env
 ):

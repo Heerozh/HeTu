@@ -35,6 +35,20 @@ namespace HeTu
         }
     }
 
+    /// <summary>
+    ///     内部信号：一次 watch 派发被底层取消（连接在飞行中断开，或派发那一刻
+    ///     物理层已不可用）。不会外泄给调用方，只用来把"取消"和"失败"区分开。
+    /// </summary>
+    internal sealed class WatchDispatchCanceledException : Exception
+    {
+        internal static readonly WatchDispatchCanceledException Instance = new();
+
+        private WatchDispatchCanceledException() : base(
+            "Watch dispatch was canceled by the transport.")
+        {
+        }
+    }
+
     internal interface IHeTuSessionTransport : IDisposable
     {
         event Action Connected;
@@ -69,6 +83,12 @@ namespace HeTu
             string componentName = null,
             IndexSubscription<T> reusable = null)
             where T : IBaseComponent;
+
+        void WatchTable<T>(
+            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            string componentName = null,
+            IndexSubscription<T> reusable = null)
+            where T : IBaseComponent;
     }
 
     internal interface IHeTuSessionScheduler
@@ -93,6 +113,7 @@ namespace HeTu
         private readonly TimeSpan _reconnectDelay;
         private readonly TimeSpan _maxReconnectDelay;
         private readonly int _maxReconnectAttempts;
+        private readonly TimeSpan _requestTimeout;
         private readonly IHeTuSessionScheduler _scheduler;
         private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
         private readonly Func<IHeTuSessionTransport> _transportFactory;
@@ -101,6 +122,7 @@ namespace HeTu
         private bool _closed;
         private int _consecutiveFailures;
         private TimeSpan _currentReconnectDelay;
+        private bool _handlingConnectionLoss;
         private bool _hasBeenReady;
         private Exception _lastFault;
         private IDisposable _scheduledReconnect;
@@ -113,7 +135,8 @@ namespace HeTu
             HeTuSessionBootstrap bootstrap = null,
             TimeSpan? reconnectDelay = null,
             TimeSpan? maxReconnectDelay = null,
-            int maxReconnectAttempts = 0)
+            int maxReconnectAttempts = 0,
+            TimeSpan? requestTimeout = null)
         {
             _transportFactory = transportFactory;
             _scheduler = scheduler;
@@ -123,6 +146,9 @@ namespace HeTu
             _maxReconnectDelay = maxReconnectDelay ?? _reconnectDelay;
             // 0 = 无限重试（旧行为）；正数 = 连续失败到此数即进入 Faulted 终态。
             _maxReconnectAttempts = maxReconnectAttempts;
+            // 单次请求（CallSystem / Watch）派发后多久没有任何回应就判定物理层不通。
+            // Zero = 不启用（旧行为，也是纯逻辑单测的默认）；Unity 门面默认 30s。
+            _requestTimeout = requestTimeout ?? TimeSpan.Zero;
             _currentReconnectDelay = _reconnectDelay;
             // 自订阅以追踪最近一次 Faulted 异常——WaitForReady / 后续重构都依赖
             // _lastFault 在 SetState(Faulted) 之前已被赋值。委托在构造时第一个挂上，
@@ -180,12 +206,17 @@ namespace HeTu
                     _pendingCalls.Dequeue().OnFailed, canceled);
 
             foreach (var pending in _inFlightCalls.ToArray())
+            {
+                pending.DisarmTimeout();
                 SafeInvokeUserCallback(pending.OnFailed, canceled);
+            }
+
             _inFlightCalls.Clear();
 
             foreach (var pending in _pendingWatches.ToArray())
             {
                 RemovePendingWatch(pending);
+                pending.DisarmTimeout();
                 pending.Fail(canceled);
             }
 
@@ -356,7 +387,12 @@ namespace HeTu
                     value,
                     (sub, canceled, ex) =>
                     {
-                        if (canceled) return;
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
                         if (ex != null) promise.TryFail(ex);
                         else promise.TryComplete(sub);
                     },
@@ -412,12 +448,71 @@ namespace HeTu
                     limit,
                     (sub, canceled, ex) =>
                     {
-                        if (canceled) return;
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
                         if (ex != null) promise.TryFail(ex);
                         else promise.TryComplete(sub);
                     },
                     desc,
                     force,
+                    componentName),
+                onCompleted,
+                onFailed);
+            AddPendingWatch(watch);
+            DispatchPendingIfReady(watch);
+        }
+
+        /// <summary>
+        ///     订阅整张表（见 HeTuClientBase.WatchTableSync）。断线重连后会自动重发 table
+        ///     订阅并用新快照做 diff，订阅对象保持同一个实例。
+        /// </summary>
+        public void WatchTable<T>(
+            string componentName,
+            Action<IndexSubscription<T>> onCompleted,
+            Action<Exception> onFailed)
+            where T : IBaseComponent
+        {
+            ThrowIfClosed();
+            componentName ??= typeof(T).Name;
+            var subId = HeTuClientBase.MakeTableSubId(componentName);
+
+            if (TryGetSubscription<IndexSubscription<T>>(subId, out var existing))
+            {
+                onCompleted(existing);
+                return;
+            }
+
+            if (_pendingWatchesByKey.TryGetValue(subId, out var pending))
+            {
+                if (pending is PendingWatch<IndexSubscription<T>> typed)
+                {
+                    typed.AddWaiter(onCompleted, onFailed);
+                    return;
+                }
+
+                throw new InvalidCastException(
+                    $"Subscription '{subId}' already exists with type {pending.DataType}.");
+            }
+
+            var watch = new PendingWatch<IndexSubscription<T>>(
+                subId,
+                typeof(T),
+                (tx, promise) => tx.WatchTable<T>(
+                    (sub, canceled, ex) =>
+                    {
+                        if (canceled)
+                        {
+                            promise.TryFail(WatchDispatchCanceledException.Instance);
+                            return;
+                        }
+
+                        if (ex != null) promise.TryFail(ex);
+                        else promise.TryComplete(sub);
+                    },
                     componentName),
                 onCompleted,
                 onFailed);
@@ -585,6 +680,8 @@ namespace HeTu
         private void DispatchCall(PendingCall pending)
         {
             _inFlightCalls.Add(pending);
+            pending.ArmTimeout(
+                ScheduleRequestTimeout("call " + pending.SystemName));
             _transport.CallSystem(
                 pending.SystemName,
                 pending.Args,
@@ -592,6 +689,7 @@ namespace HeTu
                 {
                     if (!_inFlightCalls.Remove(pending))
                         return;
+                    pending.DisarmTimeout();
 
                     switch (outcome)
                     {
@@ -672,6 +770,38 @@ namespace HeTu
             ScheduleReconnect();
         }
 
+        // 物理层与会话状态失配：会话自认为 Ready，但底层要么当场回绝了派发
+        // （canceled，典型是 Editor 关掉 Domain Reload 后停 Play，OnClose 没派发、
+        // State stale 在 Ready，WatchRangeSync 的 EnsureConnected 当场回绝），要么
+        // 收下了请求却永远不给回应（服务端那条连接的接收协程悄悄结束：TCP 仍
+        // ESTABLISHED、协议层 ping/pong 照常、客户端 socket 还是 Open，发出去的帧
+        // 却再没人消费）。两种情况都不会有任何事件把会话推向下一次 Ready —— 主动
+        // 走一次断线失败流程去重连，pending 的调用/订阅会在重连 Ready 后自动重投；
+        // 否则调用方的 await 永久挂起，而且两端一行错误日志都没有。
+        private void OnTransportUnresponsive(Exception fault)
+        {
+            if (_closed || _handlingConnectionLoss ||
+                State != HeTuSessionState.Ready)
+            {
+                return;
+            }
+
+            HandleSessionFailure(fault);
+        }
+
+        // 请求级超时定时器；_requestTimeout 为 Zero 时返回 null（不启用）。
+        private IDisposable ScheduleRequestTimeout(string what)
+        {
+            if (_requestTimeout <= TimeSpan.Zero)
+                return null;
+
+            return _scheduler.Schedule(
+                _requestTimeout,
+                () => OnTransportUnresponsive(new TimeoutException(
+                    $"No response for {what} within " +
+                    $"{_requestTimeout.TotalSeconds:F0}s; transport is unresponsive.")));
+        }
+
         private bool ExhaustedRetries()
         {
             _consecutiveFailures++;
@@ -694,14 +824,19 @@ namespace HeTu
                 SafeInvokeUserCallback(_pendingCalls.Dequeue().OnFailed, fault);
 
             foreach (var pending in _inFlightCalls.ToArray())
+            {
+                pending.DisarmTimeout();
                 SafeInvokeUserCallback<Exception>(
                     pending.OnFailed,
                     new CallOutcomeUnknownException(pending.SystemName));
+            }
+
             _inFlightCalls.Clear();
 
             foreach (var pending in _pendingWatches.ToArray())
             {
                 RemovePendingWatch(pending);
+                pending.DisarmTimeout();
                 pending.Fail(fault);
             }
 
@@ -715,19 +850,34 @@ namespace HeTu
 
         private void MarkConnectionLost(bool closeTransport)
         {
-            foreach (var pending in _inFlightCalls.ToArray())
-                SafeInvokeUserCallback<Exception>(
-                    pending.OnFailed,
-                    new CallOutcomeUnknownException(pending.SystemName));
-            _inFlightCalls.Clear();
+            // 关掉 transport 会让底层 ResponseQueue.CancelAll 把在飞的 watch 冲成
+            // canceled、绕回 OnWatchDispatchCanceled，而此刻 State 还停在 Ready
+            // （SetState(Reconnecting) 在后面才发生），得挡住它再递归进一次失败处理。
+            _handlingConnectionLoss = true;
+            try
+            {
+                foreach (var pending in _inFlightCalls.ToArray())
+                {
+                    pending.DisarmTimeout();
+                    SafeInvokeUserCallback<Exception>(
+                        pending.OnFailed,
+                        new CallOutcomeUnknownException(pending.SystemName));
+                }
 
-            foreach (var subscription in _subscriptions.Values.ToArray())
-                ((IRestorableSubscription)subscription).Suspend();
+                _inFlightCalls.Clear();
 
-            foreach (var pending in _pendingWatches)
-                pending.MarkRetryable();
+                foreach (var subscription in _subscriptions.Values.ToArray())
+                    ((IRestorableSubscription)subscription).Suspend();
 
-            CleanupTransport(closeTransport: closeTransport);
+                foreach (var pending in _pendingWatches)
+                    pending.MarkRetryable();
+
+                CleanupTransport(closeTransport: closeTransport);
+            }
+            finally
+            {
+                _handlingConnectionLoss = false;
+            }
         }
 
         private void ScheduleReconnect()
@@ -914,6 +1064,17 @@ namespace HeTu
             public object[] Args { get; }
             public Action<JsonObject> OnCompleted { get; }
             public Action<Exception> OnFailed { get; }
+
+            // 同 PendingWatch：请求级超时定时器，结算时必须 Disarm。
+            private IDisposable _timeout;
+
+            public void ArmTimeout(IDisposable timeout) => _timeout = timeout;
+
+            public void DisarmTimeout()
+            {
+                _timeout?.Dispose();
+                _timeout = null;
+            }
         }
 
         private abstract class PendingWatch
@@ -928,6 +1089,18 @@ namespace HeTu
             public Type DataType { get; }
             public bool IsInFlight { get; protected set; }
 
+            // 请求级超时定时器：收到回应 / 连接丢失 / 关闭时都要 Disarm，
+            // 否则迟到的定时器会把一条已经健康的连接误判成不通。
+            private IDisposable _timeout;
+
+            protected void ArmTimeout(IDisposable timeout) => _timeout = timeout;
+
+            public void DisarmTimeout()
+            {
+                _timeout?.Dispose();
+                _timeout = null;
+            }
+
             public abstract void Dispatch(
                 HeTuSessionClientBase owner,
                 IHeTuSessionTransport transport);
@@ -935,7 +1108,11 @@ namespace HeTu
             public abstract void Complete(BaseSubscription subscription);
             public abstract void Fail(Exception exception);
 
-            public void MarkRetryable() => IsInFlight = false;
+            public void MarkRetryable()
+            {
+                IsInFlight = false;
+                DisarmTimeout();
+            }
         }
 
         // Row/Range 唯一的差异是 transport.WatchRow vs transport.WatchRange 这一次
@@ -969,17 +1146,36 @@ namespace HeTu
                 IHeTuSessionTransport transport)
             {
                 IsInFlight = true;
+                ArmTimeout(owner.ScheduleRequestTimeout(
+                    "watch " + (Key ?? DataType.Name)));
                 var p = new Promise<TSub>();
                 _dispatch(transport, p);
                 p.Future
                     .Then(sub =>
                     {
                         IsInFlight = false;
+                        DisarmTimeout();
                         owner.CompletePending(this, sub);
                     })
                     .Catch(ex =>
                     {
                         IsInFlight = false;
+                        DisarmTimeout();
+                        // 取消不是失败：这条 watch 继续留在 _pendingWatches 里，
+                        // IsInFlight 已清掉，下一次 Ready 时 DispatchPendingWatches
+                        // 会重投。（早先这里连 promise 都不结算，IsInFlight 永远停
+                        // 在 true，watch 再也不会被派发 —— 调用方 await 永久挂起，
+                        // 而且服务器上看不到任何订阅请求。）
+                        if (ex is WatchDispatchCanceledException)
+                        {
+                            owner.OnTransportUnresponsive(
+                                new InvalidOperationException(
+                                    "Watch dispatch canceled while the session was " +
+                                    "Ready: transport is out of sync with session " +
+                                    "state."));
+                            return;
+                        }
+
                         owner.FailPending(this, ex);
                     });
             }

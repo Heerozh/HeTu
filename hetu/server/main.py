@@ -20,7 +20,11 @@ from sanic.worker.process import WorkerProcess
 from .. import webext
 from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
-from ..data.backend.worker_keeper import GeneralWorkerKeeper, WorkerLease
+from ..data.backend.snowflake_timestamp import (
+    TIMESTAMP_SAVE_INTERVAL,
+    SnowflakeTimestampKeeper,
+)
+from ..data.backend.worker_keeper import WorkerLease, create_worker_keeper
 from ..endpoint import connection
 from ..i18n import _
 from ..manager import ComponentTableManager
@@ -29,6 +33,7 @@ from ..system import SystemClusters
 from ..system.future import future_call_task
 from . import pipeline
 from . import websocket as _ws  # noqa: F401 (防止未使用警告)
+from .watchdog import hang_watchdog_task
 from .web import HETU_BLUEPRINT, web_root
 
 logger = logging.getLogger("HeTu.root")
@@ -120,9 +125,11 @@ async def start_backends(app: Sanic):
         backend.post_configure()
 
     # 在backend初始化完毕后，启动WorkerKeeper，分配Worker ID，并把Worker ID和上次时间戳传给雪花ID生成器
+    # 分配器按后端类型自动选：Redis后端用真租约（多机安全），SQL后端用本机进程序号
+    # （开发模式，单机安全）。见 create_worker_keeper
     lease_tbl = table_managers[app.config.INSTANCES[0]].get_table(WorkerLease)
     assert lease_tbl is not None
-    worker_keeper = GeneralWorkerKeeper(os.getpid(), lease_tbl)
+    worker_keeper = create_worker_keeper(lease_tbl.backend, os.getpid())
 
     # 获得分配的worker id，如果KeyError，说明反复宕机导致分配满了，要等60秒过期
     while True:
@@ -137,14 +144,31 @@ async def start_backends(app: Sanic):
                 )
             )
             await asyncio.sleep(1)
-    last_timestamp = await worker_keeper.get_last_timestamp()
 
-    # 初始化雪花id生成器
-    SnowflakeID().init(worker_id, last_timestamp)
+    # 时间戳高水位（防重启期间时钟回拨）和租约是两码事，独立取：租约要互斥、水位只要单调
+    # max，捆在一起会让零协调的需求背上强协调的复杂度。详见 SnowflakeTimestampKeeper。
+    ts_keeper = SnowflakeTimestampKeeper(lease_tbl, worker_id)
+    last_timestamp = await ts_keeper.load()
+
+    # 初始化雪花id生成器。传入keeper作为发号围栏：租约超出安全期就拒绝发号，防止本进程
+    # 卡住导致租约被抢走后还在用旧worker_id发出重复ID。见 SnowflakeID._check_lease_fence
+    SnowflakeID().init(worker_id, last_timestamp, lease=worker_keeper)
     app.ctx.__setattr__("worker_keeper", worker_keeper)
+    app.ctx.__setattr__("snowflake_ts_keeper", ts_keeper)
 
 
 async def close_backends(app: Sanic):
+    # 关服前最后写一次时间戳高水位，把"最后一次周期写~真正关服"这段没保护到的窗口收窄。
+    # 失败不能挡住关服流程，最多退化成少保护几秒（靠NTP只slew不step兜底）
+    try:
+        await app.ctx.snowflake_ts_keeper.save(SnowflakeID().last_timestamp)
+    except Exception as e:
+        logger.warning(
+            _("[❄️ID] 关服时写入时间戳高水位失败: {err}").format(
+                err=f"{type(e).__name__}:{e}"
+            )
+        )
+
     # 释放worker id
     await app.ctx.worker_keeper.release_worker_id()
 
@@ -252,14 +276,37 @@ async def worker_close(app):
     await close_backends(app)
 
 
+async def snowflake_timestamp_save(app: Sanic):
+    """周期性把雪花ID用到的时间戳写成高水位，防止重启期间时钟回拨导致ID重复。
+
+    刻意和 worker_keeper_renewal 分成两个task，而不是搭它的顺风车：租约续约是强协调
+    操作（失败=正确性事故，要重启worker），水位写入是零协调操作（失败=保护力度暂时下降，
+    无需任何动作）。分开后两者的存活互不牵连——租约那边死了水位照写，水位这边写不进去也
+    不影响租约。详见 SnowflakeTimestampKeeper 的文档。
+    """
+    while True:
+        await asyncio.sleep(TIMESTAMP_SAVE_INTERVAL)
+        try:
+            await app.ctx.snowflake_ts_keeper.save(SnowflakeID().last_timestamp)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            # 写不进去只是少一层重启回拨保护，不值得打断服务，下个周期再试
+            logger.warning(
+                _("[❄️ID] 写入时间戳高水位失败，将重试: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+            )
+
+
 async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        # logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
-        # todo sanic bug: 来新连接时，其他worker的task会被暂停，导致续约失败
+        logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
+        # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
         try:
-            await app.ctx.worker_keeper.keep_alive(SnowflakeID().last_timestamp)
+            await app.ctx.worker_keeper.keep_alive()
         except RedisConnectionError as e:
             logger.error(
                 _("❌ [📡WorkerKeeper] 续约失败，将重试: {err}").format(
@@ -269,6 +316,19 @@ async def worker_keeper_renewal(app: Sanic):
             continue
         except SystemExit:
             app.m.restart()
+            break
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            # 这个循环现在是发号围栏的心跳来源：它一旦静默死掉，围栏会在安全期后永久跳闸，
+            # worker 活着但再也发不出ID。而 app.add_task 注册的task被sanic一直持有引用，
+            # 连asyncio那句"Task exception was never retrieved"都不会打印。所以这里必须
+            # 兜住所有异常、打出来、继续下一轮
+            logger.exception(
+                _("❌ [📡WorkerKeeper] 续约异常，将重试: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+            )
 
 
 def worker_main(app_name, config) -> Sanic:
@@ -308,6 +368,9 @@ def worker_main(app_name, config) -> Sanic:
     connection.ENDPOINT_CALL_IDLE_TIMEOUT = config.get(
         "ENDPOINT_CALL_IDLE_TIMEOUT", 60 * 2
     )
+    connection.CONNECTION_ALIVE_RECHECK_INTERVAL = config.get(
+        "CONNECTION_ALIVE_RECHECK_INTERVAL", 5
+    )
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))
@@ -345,8 +408,12 @@ def worker_main(app_name, config) -> Sanic:
 
     # 启动未来调用worker
     app.add_task(future_call_task(app))
+    # 启动事件循环卡死检测，卡住时自动dump线程/协程栈到logs/hang_<pid>.log
+    app.add_task(hang_watchdog_task(app))
     # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
     app.add_task(worker_keeper_renewal(app))
+    # 启动雪花ID时间戳高水位记录，和上面的续约刻意分开，见函数文档
+    app.add_task(snowflake_timestamp_save(app))
 
     # 启动服务器监听
     app.blueprint(HETU_BLUEPRINT)

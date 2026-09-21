@@ -105,6 +105,43 @@ async def cancel_rls_comp_value_future(ctx: hetu.SystemContext, key):
     return await ctx.depend["cancel_future_call:copy1"](ctx, key)
 
 
+# --------- ctx.timestamp 测试用（endpoint / system / 未来调用 三条路径）---------
+
+# 测试用：记录每次System执行时看到的ctx.timestamp。未来调用是后台执行、返回值拿不到，
+# 所以用模块变量把System内部看到的值带出来（app.py每个test都会reload，不会跨test污染）
+CTX_TIMESTAMPS: list[float] = []
+
+
+@hetu.define_endpoint(namespace="pytest", permission=hetu.Permission.EVERYBODY)
+async def report_ctx_timestamp(ctx: hetu.EndpointContext):
+    """测试用：纯Endpoint，返回自己看到的ctx.timestamp"""
+    return float(ctx.timestamp)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(RLSComp,),
+    permission=hetu.Permission.EVERYBODY,
+    call_lock=True,
+)
+async def record_ctx_timestamp(ctx: hetu.SystemContext):
+    """测试用：记录并返回System内看到的ctx.timestamp（可被客户端调用，也可作未来调用目标）"""
+    CTX_TIMESTAMPS.append(float(ctx.timestamp))
+    return float(ctx.timestamp)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.EVERYBODY,
+    depends=("create_future_call:copy1",),
+)
+async def record_ctx_timestamp_future(ctx: hetu.SystemContext):
+    """测试用：创建一个1秒后执行record_ctx_timestamp的未来调用"""
+    return await ctx.depend["create_future_call:copy1"](
+        ctx, -1, "record_ctx_timestamp", timeout=10, recurring=False
+    )
+
+
 # ---------------------------------
 
 
@@ -159,6 +196,94 @@ class IndexComp1(hetu.BaseComponent):
 class IndexComp2(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
     name: str = hetu.property_field("", unique=True, dtype="U8")
+
+
+# --------- 整表订阅测试用：公开的"所有玩家名字"表 ---------
+
+
+@hetu.define_component(
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+)
+class PublicNames(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", dtype="U16")
+
+
+@hetu.define_component(
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+)
+class PublicConfig(hetu.BaseComponent):
+    key: str = hetu.property_field("", unique=True, dtype="U16")
+    value: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="pytest",
+    components=(PublicNames, PublicConfig),
+    permission=hetu.Permission.EVERYBODY,
+)
+async def set_public_name(ctx: hetu.SystemContext, owner, name):
+    """测试用：改名。name为空则删除该行"""
+    if name == "":
+        row = await ctx.repo[PublicNames].get(owner=owner)
+        if row is not None:
+            ctx.repo[PublicNames].delete(row.id)
+        return
+    async with ctx.repo[PublicNames].upsert(owner=owner) as row:
+        row.name = name
+
+
+# --------- headless（无服务器进程表直读写）测试用 ---------
+
+
+@hetu.define_component(namespace="pytest", force=True)
+class HeadlessCommand(hetu.BaseComponent):
+    """游戏服务器写、headless 进程轮询读的命令队列"""
+
+    system_id: np.int64 = hetu.property_field(0, index=True)
+    seq: np.int64 = hetu.property_field(0)
+    created_at: np.float64 = hetu.property_field(0, index=True)
+    payload: str = hetu.property_field("", dtype="U32")
+
+
+# core namespace：不被任何 app System 引用也会建簇 / 建表，镜像生产里 headless 三张表的定义方式
+@hetu.define_component(namespace="core", force=True)
+class HeadlessSim(hetu.BaseComponent):
+    """headless 进程与服务器双向读写的租约 / 状态行"""
+
+    system_id: np.int64 = hetu.property_field(0, unique=True)
+    epoch: np.int64 = hetu.property_field(0)
+    owner_host: str = hetu.property_field("", dtype="U64")
+
+
+@hetu.define_system(
+    namespace="pytest",
+    permission=hetu.Permission.ADMIN,
+    components=(HeadlessCommand, HeadlessSim),  # 同时引用 → 两表同簇
+)
+async def push_headless_command(
+    ctx: hetu.SystemContext, system_id, seq, created_at, payload=""
+):
+    """服务器侧写一条命令，返回行 id"""
+    row = HeadlessCommand.new_row()
+    row.system_id = system_id
+    row.seq = seq
+    row.created_at = created_at
+    row.payload = payload
+    await ctx.repo[HeadlessCommand].insert(row)
+    return int(row.id)
+
+
+@hetu.define_system(
+    namespace="pytest", permission=hetu.Permission.ADMIN, components=(HeadlessSim,)
+)
+async def bump_headless_sim(ctx: hetu.SystemContext, system_id, host=""):
+    """服务器侧预建 / 更新租约行（epoch + 1），返回行 id"""
+    async with ctx.repo[HeadlessSim].upsert(system_id=system_id) as row:
+        row.epoch += 1
+        if host:
+            row.owner_host = host
+    return int(row.id)
 
 
 @hetu.define_system(

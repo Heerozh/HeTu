@@ -226,7 +226,7 @@ async def my_system(ctx: hetu.SystemContext, ...):
 - **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）。
 - **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。
 - **`ctx.client_limits` / `ctx.server_limits`** —— `[max_count, window_seconds]` 对的列表。一旦超出任何一对，引擎就会断开连接。`elevate()` 会自动将这些限制乘以 10 倍，因此登录后的用户获得匿名连接所没有的余量。如果需要为机器人账户等自定义预算，可以在自己的逻辑中覆盖每个连接的设置。
-- **`ctx.max_row_sub` / `ctx.max_index_sub`** —— 活动 `Get` 和 `Range` 订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。
+- **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** —— 活动 `Get`、`Range` 和 `Table`（整表）订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。整表订阅的单表行数上限是全局配置 `MAX_TABLE_SUBSCRIPTION_ROWS`，不在 `ctx` 上。
 - **`ctx.race_count`** —— 当前事务的重试次数。用于退避非幂等副作用：`if ctx.race_count == 0: send_email(...)` 仅在第一次尝试时发送电子邮件。
 
 `ctx.timestamp` 在每次 `System`/`Endpoint` 调用开始时设置为 `time()`，因此可以安全地用作“现在”，无需重新读取时钟。
@@ -513,6 +513,85 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 - `id` 是为你生成的；切勿自己赋值。
 - `BaseComponent.new_row()` 在底层调用 `SnowflakeID().next_id()`。如果你批量插入，首选 `new_rows(N)` 以便所有 ID 来自同一个单调突发。
 - 时钟回滚保护意味着**时钟严重错误的服务器将拒绝发出 ID 并停止工作**。运行 NTP。如果你必须修复回滚，请重新启动受影响的工作器——管理者会自动重新播种时间戳。
+
+## 非服务器进程读写表（`hetu.headless`）
+
+有些进程需要和 HeTu 服务器共用同一个后端，却**不是** HeTu 应用：比如独立的战斗模拟进程——它不跑 Sanic、不定义 `System`、不收客户端连接，只想读一张命令表、写一张回报表、和服务器双向维护一张租约表。`hetu.headless` 就是给这类**可信内部进程**用的表直读写客户端。
+
+```python
+import hetu.headless
+
+client = await hetu.headless.connect(
+    backend_config,                      # config.yml 里 BACKENDS[x] 那个 dict，Redis 与 SQL 都支持
+    instance="my-region",                # INSTANCES 里的实例名，表按实例隔离
+    components=[BattleCommand, "BattleReport", BattleSim],  # 组件类或组件名，可混用
+)
+```
+
+它的原则只有一条：**写入走与 `System` 完全相同的 `Session.commit()` 提交路径**。表级 PUBLISH、keyspace 通知、乐观锁版本检查、unique 校验都在那一层，所以客户端的 `WatchRow` / `WatchRange` / 整表订阅，以及服务器自己的订阅和 FutureCall，都分不出一行是 `System` 写的还是 headless 进程写的。为此它**不做**的事同样明确：不 import sanic、不需要 app 文件、不建簇、不建表、不迁移、不发雪花 id、**不做权限 / RLS 检查**——把它当成一条可信的内部数据库连接，只给你自己的进程用。
+
+### 认表：cluster_id 与 schema 来自服务器 meta
+
+服务器建表时会把组件的 schema 和 `cluster_id` 写进表 meta。`connect()` 只读 meta，不本地重算簇：
+
+- 表不存在 → `TableNotFound`。建表 / 迁移权归服务器，先 `hetu start` 一次再连。
+- 传**组件类**：本地定义与 meta 比对**数据布局**——`namespace`、列名、dtype、unique、index——不一致抛 `SchemaMismatch`，异常消息逐条列出差异（方向为“服务器 -> 本地”）。`permission` / `rls_compare` / `volatile` 这类与 headless 无关的字段差异被忽略，`default` 差异只告警。
+- 传**组件名**：直接用 meta 里的 schema 生成类，进程里零共享代码；需要类时取 `client.table("BattleReport").comp_cls`，`new_row(id_=...)` 照常用。
+
+### 读：`Table.servant_*`
+
+`client.table(comp)` 返回的就是引擎的 `Table`，非事务读沿用它的 `servant_get` / `servant_range`，外加批量的 `servant_get_many(ids)`。轮询命令队列的写法：
+
+```python
+cmd_tbl = client.table(BattleCommand)
+rows = await cmd_tbl.servant_range("created_at", watermark - 2.0, float("inf"), limit=4096)
+for row in rows:
+    if row.seq > cursor[row.system_id]:   # 按每系 seq 去重
+        ...
+```
+
+注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用（MySQL / MariaDB 由引擎钳到 dtype 极值）。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+
+### 写：`client.session(*comps)`
+
+```python
+async with client.session(BattleReport, BattleSim) as s:
+    await s[BattleReport].insert(BattleReport.new_row(id_=-report_key(r)))
+    async with s[BattleSim].upsert(system_id=7) as sim:
+        sim.epoch += 1
+# 退出即 commit；RaceCondition 会抛出
+
+async for attempt in client.session(BattleSim).retry(5):   # 或让它自动重试
+    async with attempt as s:
+        ...
+```
+
+`s[Comp]` 就是引擎的 `SessionRepository`（`insert` / `update` / `upsert` / `delete` / `get` / `range`），没有第二套 API。几条规则：
+
+- **同簇**：一个事务里的组件必须属于同一个簇，否则 `ValueError`，绝不静默拆成两个事务。簇由服务器侧 `System` 的引用关系决定：想让几张表能在一个事务里写，就让服务器有一个 `System` 同时引用它们；不被任何 `System` 引用的表要定义成 `namespace="core"`（见上一节）。
+- **不发号**：headless 进程没有 worker id 租约，`connect()` 也不初始化 `SnowflakeID`。所以 `insert` 的行必须 `new_row(id_=...)` 显式给出非零 id（`id == 0` 直接报错）；`upsert` 只有锚定 `id=<显式值>` 时允许新建，锚定其它 unique 字段未命中会抛 `LookupError`——那种行由服务器 `System` 预建，headless 只更新。约定用**负数 id**：雪花 id 恒正，负数区专供 keyed 行（与 `ensure_future_call` 一致），例如 `id=-report_key`。
+- **幂等重发**：回报表用确定性 id 时，进程崩溃重启后重发同一批，写成 `upsert(id=-key)`——命中就走 update，字段没变连写都不写；`insert` 则会撞 `UniqueViolation` 让整批失败。
+- 事务内的读取默认只走 master（`only_master=True`）：headless 写量小，读副本省不了什么，却会把复制延迟变成 `RaceCondition` 空转。
+
+### 迁移与 `check_schema()`
+
+服务器 `hetu upgrade` 迁簇会把旧簇前缀下的**全部**键改名，包括 headless 之前写的行；但没重启的 headless 进程会继续写到旧前缀，成为服务器看不见的孤儿数据。运维规则是**迁簇 / 改 schema 后必须重启 headless 进程**；代码里再加一道保险：
+
+```python
+async def lease_loop():
+    while True:
+        await client.check_schema()  # TableNotFound / ClusterChanged / SchemaMismatch → 退出进程交给 supervisor 重启
+        async with client.session(BattleSim) as s:
+            async with s[BattleSim].upsert(system_id=sid) as row:
+                row.owner_host, row.lease_until = me, now + 30
+        await asyncio.sleep(10)
+```
+
+`check_schema()` 只报错不自动换 `cluster_id`——你手里拿着的 `Table` 是不可变的，静默换掉会让在飞的事务和缓存的表对象不一致。
+
+### 线程与 event loop
+
+headless 可以在非主线程的 event loop 上创建与使用，不依赖 Sanic；典型部署是 sim 线程跑同步 numpy 循环、HeTu 跑在旁边一个线程的 loop 上。唯一的约束：**`connect` / 使用 / `close` 必须在同一个 loop 上**（Redis 异步连接绑定 loop），一个 loop 一个 client。`await client.close()` 只关连接，无租约、无消息队列，进程被 kill 不留任何跨进程状态。
 
 ## 接下来去哪儿
 

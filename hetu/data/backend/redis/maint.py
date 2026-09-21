@@ -110,16 +110,11 @@ class RedisTableMaintenance(TableMaintenance):
 
     @override
     def read_meta(
-        self, instance_name: str, comp_cls: type[BaseComponent]
+        self, instance_name: str, comp: type[BaseComponent] | str
     ) -> TableMaintenance.TableMeta | None:
         """读取组件表的meta信息"""
-        key = self.meta_key(
-            TableReference(
-                comp_cls=comp_cls,
-                instance_name=instance_name,
-                cluster_id=0,  # cluster_id不影响meta读取
-            )
-        )
+        # meta key 只由 instance 与组件名组成（见 meta_key / table_prefix），与 cluster_id 无关
+        key = f"{instance_name}:{self.comp_name_of_(comp)}:meta"
 
         io = self.client.io
         meta = cast(dict, io.hgetall(key))

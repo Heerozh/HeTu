@@ -50,6 +50,21 @@ WORKER_NUM: 4
 # （退出码非0），避免服务器静默挂起起不来。如果首次开服建表、播种数据本来就慢，请调大
 STARTUP_TIMEOUT: 60
 
+# 事件循环卡死检测的秒数，0为关闭（默认）。worker的事件循环连续这么久没转动，就把该进程的
+# 所有线程栈（faulthandler）和所有未完成协程的栈dump到 logs/hang_<pid>.log，并往stderr
+# 写一行提示。用于排查"某个worker突然不打日志了"这类偶发卡死：线程栈能看出是不是同步代码
+# 把loop堵死了，协程栈能看出是不是都卡在某个await上。开销是每worker一个线程+每秒一次心跳。
+#
+# 注意：Windows 上此项强制开启（配0或不配都按10秒算，只能调大调小、关不掉），因为 Sanic 在
+# Windows 多worker下有 accept 死锁——它把 Linux 的共享监听socket模型直接套用到 Windows，
+# 而 Windows 共享 socket 上的操作协调由涉及的进程自己负责，抢输的 worker 会真堵死在
+# accept() 里，整个事件循环停摆且一个字的日志都没有。此项修复不易，因为是模式错误。
+# 看门狗在那里既是唯一的诊断手段，也会自动自愈（往自己的监听端口发若干次一次性连接把它
+# 喂醒）。生产环境请跑在 Linux 上，那里不存在此问题。
+HANG_WATCHDOG_TIMEOUT: 0
+
+
+
 # 反正是Websocket，可以关了加性能
 ACCESS_LOG: false
 
@@ -61,6 +76,10 @@ WEBSOCKET_MAX_SIZE: !eval [ 2 ** 19 ] # 0.5MB
 
 # 闲置多少秒未调用System/Endpoint则视为断线
 ENDPOINT_CALL_IDLE_TIMEOUT: !eval [ 60 * 2 ]
+# 登录连接"是否被顶号"检查的兜底重查间隔（秒）。正常靠 Connection 表 owner 索引值频道的变更通知触发
+# （被顶号时服务器会主动断开该连接），此间隔只在通知丢失（pubsub 缓冲溢出、节点切换）时兜底；
+# 0 表示每次调用都查
+CONNECTION_ALIVE_RECHECK_INTERVAL: 5
 # 限制每个IP可以创建多少匿名连接（提权登陆后不受此限制）
 MAX_ANONYMOUS_CONNECTION_BY_IP: 10
 
@@ -82,6 +101,12 @@ SERVER_SEND_LIMITS:
 MAX_ROW_SUBSCRIPTION: 10
 # 限制未登录客户端最大允许订阅的Index数(HeTuClientSDK.range)。每次range订阅+1。
 MAX_INDEX_SUBSCRIPTION: 1
+# 限制未登录客户端最大允许的整表订阅数(HeTuClientSDK.table)。每次table订阅+1，不计入行数限制。
+# elevate(登录提权)同样*50，或自己在任意System中修改 ctx.max_table_sub 值
+MAX_TABLE_SUBSCRIPTION: 1
+# 单次整表订阅允许的最大行数，超过则拒绝订阅。整表订阅只订一个频道，行数不受MAX_ROW_SUBSCRIPTION
+# 限制，但订阅者会收到该表所有写入的通知，所以只适合"行多、行小、很少变"的表（如所有玩家名字）
+MAX_TABLE_SUBSCRIPTION_ROWS: 100000
 
 # 消息流处理层，可以设置多层，按照顺序处理。
 # 如需自定义层，只要继承自hetu.server.pipeline.MessageProcessLayer，并定义alias，即可在这添加
@@ -132,6 +157,12 @@ BACKENDS:
     # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
     raw_clustering: false
+    # 每个工作进程对 master / 每台 servant 的异步连接池上限（Redis 后端）。池里只有短命的读写命令，
+    # 客户端订阅的 pubsub 走每个工作进程一条的独立连接，不占池，所以 Redis 连接数 ≈
+    # WORKER_NUM × (1 + max_connections)，与在线人数无关。池满时排队等待 pool_timeout 秒后报错。
+    # raw_clustering 模式下 redis-py 的每节点池只能设上限、满了直接报错，请酌情调大。
+    max_connections: 64
+    pool_timeout: 5
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:
@@ -207,7 +238,9 @@ LOGGING:
 
   formatters:
     colour: # 彩色格式
-      class: sanic.logging.formatter.AutoFormatter
+      # 不能用 sanic 的 AutoFormatter：它会把 record.ident 覆写成本进程的编号，而这个
+      # handler 跑在管理进程的 QueueListener 里，会导致所有 worker 的日志都显示 Main
+      class: hetu.safelogging.formatter.ContextAutoFormatter
     generic: # 文本格式
       format: "%(ident)s %(asctime)s %(levelname)-8s %(name)-12s %(ctx)-27s %(message)s"
       datefmt: "%Y-%m-%d %H:%M:%S %z"

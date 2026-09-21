@@ -350,9 +350,11 @@ What each field is for:
   10×, so post-login users get the headroom that anonymous connections
   don't. Override per-connection in your own logic if you need a custom
   budget for, say, a bot account.
-- **`ctx.max_row_sub` / `ctx.max_index_sub`** — caps on the number of
-  active `Get` and `Range` subscriptions. `elevate()` multiplies by 50×.
-  Tighten or widen as needed.
+- **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** — caps on
+  the number of active `Get`, `Range` and `Table` (whole-table) subscriptions.
+  `elevate()` multiplies by 50×. Tighten or widen as needed. The per-table row
+  cap for table subscriptions is the global `MAX_TABLE_SUBSCRIPTION_ROWS`
+  setting, not a `ctx` field.
 - **`ctx.race_count`** — current retry count for this transaction. Useful
   for backing off non-idempotent side-effects: `if ctx.race_count == 0:
   send_email(...)` runs the email only on the first attempt.
@@ -769,6 +771,85 @@ For your code, the practical implications are short:
   will refuse to issue ids and stall**. Run NTP. If you must fix a
   rollback, restart the affected workers — the keeper will reseed the
   timestamps automatically.
+
+## Reading and writing tables from a non-server process (`hetu.headless`)
+
+Some processes must share a backend with a HeTu server without *being* a HeTu app: a standalone battle simulation, say — it runs no Sanic, defines no `System`, accepts no client connections, and only wants to read a command table, write a report table, and maintain a lease table together with the server. `hetu.headless` is the table client for such **trusted internal processes**.
+
+```python
+import hetu.headless
+
+client = await hetu.headless.connect(
+    backend_config,                      # the BACKENDS[x] dict from config.yml; Redis and SQL both work
+    instance="my-region",                # an instance name from INSTANCES; tables are per instance
+    components=[BattleCommand, "BattleReport", BattleSim],  # classes or names, mixed freely
+)
+```
+
+It has exactly one principle: **writes go through the very same `Session.commit()` path a `System` uses**. Table-level PUBLISH, keyspace notifications, optimistic version checks and unique validation all live in that layer, so a client's `WatchRow` / `WatchRange` / table subscriptions — and the server's own subscriptions and FutureCalls — cannot tell whether a row was written by a `System` or by a headless process. What it deliberately does *not* do is just as clear: no sanic import, no app file, no cluster building, no table creation or migration, no snowflake ids, and **no permission / RLS checks** — treat it as a trusted internal database connection for your own processes only.
+
+### Resolving tables: cluster ids and schemas come from the server's meta
+
+When the server creates a table it stores the component's schema and `cluster_id` in the table meta. `connect()` only reads that meta; it never recomputes clusters locally:
+
+- Table missing → `TableNotFound`. Creating and migrating tables is the server's job; run `hetu start` once, then connect.
+- Passing a **component class**: the local definition is compared with the meta on **data layout** — `namespace`, column names, dtype, unique, index. Any difference raises `SchemaMismatch` whose message lists each difference (direction "server -> local"). Fields irrelevant to headless such as `permission` / `rls_compare` / `volatile` are ignored; a differing `default` only logs a warning.
+- Passing a **component name**: a class is generated from the schema in the meta, so the process shares no code at all; when you need the class, take `client.table("BattleReport").comp_cls` and use `new_row(id_=...)` as usual.
+
+### Reading: `Table.servant_*`
+
+`client.table(comp)` returns the engine's own `Table`. Non-transactional reads use its existing `servant_get` / `servant_range`, plus the batch `servant_get_many(ids)`. Polling a command queue looks like this:
+
+```python
+cmd_tbl = client.table(BattleCommand)
+rows = await cmd_tbl.servant_range("created_at", watermark - 2.0, float("inf"), limit=4096)
+for row in rows:
+    if row.seq > cursor[row.system_id]:   # de-duplicate by per-system seq
+        ...
+```
+
+Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend (on MySQL / MariaDB the engine clamps it to the dtype's max). `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
+
+### Writing: `client.session(*comps)`
+
+```python
+async with client.session(BattleReport, BattleSim) as s:
+    await s[BattleReport].insert(BattleReport.new_row(id_=-report_key(r)))
+    async with s[BattleSim].upsert(system_id=7) as sim:
+        sim.epoch += 1
+# leaving the block commits; RaceCondition propagates
+
+async for attempt in client.session(BattleSim).retry(5):   # or let it retry
+    async with attempt as s:
+        ...
+```
+
+`s[Comp]` is the engine's `SessionRepository` (`insert` / `update` / `upsert` / `delete` / `get` / `range`); there is no second API. The rules:
+
+- **Same cluster**: every component in one transaction must belong to the same cluster, otherwise `ValueError` — it is never silently split into two transactions. Clusters are decided by the `System` references on the server side: if several tables must be writable in one transaction, give the server a `System` that references all of them; tables referenced by no `System` must be defined with `namespace="core"` (see the previous section).
+- **No id minting**: a headless process holds no worker-id lease and `connect()` does not initialise `SnowflakeID`. So inserted rows must carry an explicit non-zero id via `new_row(id_=...)` (`id == 0` raises); `upsert` may create a row only when anchored on `id=<explicit value>`, while a miss on any other unique field raises `LookupError` — such rows are pre-created by a server `System` and headless only updates them. Use **negative ids** by convention: snowflake ids are always positive, the negative range is reserved for keyed rows (the same convention as `ensure_future_call`), e.g. `id=-report_key`.
+- **Idempotent resend**: with deterministic ids in a report table, a process that crashes and resends the same batch should use `upsert(id=-key)` — a hit becomes an update, and nothing is written if no field changed; `insert` would hit `UniqueViolation` and fail the whole batch.
+- Reads inside a transaction go to the master by default (`only_master=True`): a headless process writes little, reading replicas saves nothing, and replication lag would only turn into `RaceCondition` retries.
+
+### Migrations and `check_schema()`
+
+When the server's `hetu upgrade` reshuffles clusters it renames **every** key under the old cluster prefix, including rows headless wrote earlier; but a headless process that was not restarted keeps writing under the old prefix, producing orphan data the server never sees. The operational rule is **restart headless processes after a cluster reshuffle or schema change**; add a safety net in code as well:
+
+```python
+async def lease_loop():
+    while True:
+        await client.check_schema()  # TableNotFound / ClusterChanged / SchemaMismatch → exit and let the supervisor restart
+        async with client.session(BattleSim) as s:
+            async with s[BattleSim].upsert(system_id=sid) as row:
+                row.owner_host, row.lease_until = me, now + 30
+        await asyncio.sleep(10)
+```
+
+`check_schema()` only raises; it never swaps `cluster_id` behind your back — the `Table` objects you hold are immutable, and silently replacing them would leave in-flight transactions and cached tables inconsistent.
+
+### Threads and event loops
+
+Headless can be created and used on an event loop in a non-main thread and does not depend on Sanic; the typical deployment runs the sim thread as a synchronous numpy loop with HeTu on a loop in a side thread. The one constraint: **`connect`, use and `close` must happen on the same loop** (Redis async connections are bound to a loop) — one client per loop. `await client.close()` only closes connections; there is no lease and no message queue, so a killed process leaves no cross-process state behind.
 
 ## Where to next
 

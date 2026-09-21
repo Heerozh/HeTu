@@ -15,7 +15,7 @@ weight: 50
 RaceCondition
 ```
 
-<small>Source: [`hetu/data/backend/base.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L54)</small>
+<small>Source: [`hetu/data/backend/base.py:60`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L60)</small>
 
 
 **Bases:** `Exception`
@@ -27,8 +27,13 @@ RaceCondition
 常见触发场景包括：
 
 - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
-- 提交 `insert` / `update` 时，唯一索引在提交阶段被其他事务抢先占用；
-- `upsert` 发现锚定的unique索引已被并发事务插入；
+- 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
+  陈旧读（stale read）；纯读的行同样参与乐观锁校验；
+- 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
+  `get`（或等值 `range`）观察到该值不存在**（negative observation，见
+  `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
+  行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
+  [`UniqueViolation`](exceptions.md#uniqueviolation)；
 - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
 `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
@@ -53,26 +58,27 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:71`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L71)</small>
+<small>Source: [`hetu/data/backend/base.py:82`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L82)</small>
 
 
 **Bases:** `IndexError`
 
 
 
-唯一索引违反异常，表示当前Session提交前已确认写入会破坏unique约束。
+唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。
 
-`SessionRepository.insert(...)` 和 `SessionRepository.update(...)` 会在本地
-IdentityMap与远程数据库中检查unique字段；发现同事务内重复值，或数据库已有
-同值记录时抛出此异常。异常消息通常会包含冲突字段名，便于定位哪个unique索引
-发生冲突。
+判定在两处进行：
 
-此异常代表**确定性**的业务/数据冲突，不应被自动重试：本事务从未观察过该unique
-值不存在，却试图写入一个已存在的值（典型如“用户名已被占用”）。
+- `SessionRepository.insert(...)` / `update(...)`：只检查本地 IdentityMap，同一事务内
+  两行写入相同 unique 值时立即抛出（0 往返）；
+- `commit()`（`async with session` 退出、`SystemCaller` 提交、`ctx.session_commit()`）：
+  由后端原子检查主键与 unique 索引（本事务删除的行不算冲突）。数据库已有同值记录、且
+  本事务从未 `get` 观察过该值不存在时抛出此异常（典型如“用户名已被占用”）；若曾观察其
+  不存在，则改抛 [`RaceCondition`](exceptions.md#racecondition) 交由重试机制处理。同时存在两类冲突时竞态优先。
 
-与之相对：若本事务此前曾 `get` 观察到该值不存在、之后写入时却发现远程已被并发
-插入，则属于基于过期快照的乐观并发失败，会被转换为 [`RaceCondition`](exceptions.md#racecondition) 交由事务重试
-机制处理（由 negative observation 机制判定，`upsert` 的锚定字段冲突是其特例）。
+异常消息包含组件名、字段名、行 id 与操作（insert / update）。要在事务内对“已存在”
+分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用
+`SessionRepository.is_unique_conflicts` 提前检查。
 
 
 

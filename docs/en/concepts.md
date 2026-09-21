@@ -41,7 +41,7 @@ A few invariants that surprise new users:
   separate Component and join via `owner`.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
-  plus a uniqueness check on insert, and it implicitly turns on `index=True`.
+  plus a uniqueness check at commit, and it implicitly turns on `index=True`.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the
@@ -180,11 +180,13 @@ declare a single `System` that lists all of them in `components=` instead.
 
 ## Subscriptions
 
-Clients ask the server for live row data with two operations:
+Clients ask the server for live row data with three operations:
 
 - **`select(Component, key=value)`** — one row, looked up by a unique key.
 - **`range(Component, index, low, high, limit)`** — a sorted slice over an
   index, refreshed on every change.
+- **`table(Component)`** — the whole table: every row you are allowed to see
+  up front, then per-row deltas.
 
 Behind the scenes the `SubscriptionBroker` watches Redis pub/sub for row
 changes, filters them by the client's permission level, and pushes deltas
@@ -193,6 +195,35 @@ under one millisecond on the same VPC.
 
 Subscriptions are checked against the same permission system as `Systems`, so a
 client cannot subscribe to data it isn't allowed to see.
+
+What wakes a `range` up depends on the shape of the query. A **point query**
+(`high` omitted, or `low == high` — `owner=me`, `zone=z`) listens to the channel
+of that one index value and is only notified when a row enters or leaves that
+value (insert, delete, or a row's field changing to/from it). An **interval
+query** listens to the whole index and is woken by any change to any value of
+that index, re-running its comparison on the server. So for hot indexes such as
+"every player watches their own inventory", write a point query — other players
+picking up items will not touch you.
+
+### When to use a table subscription
+
+`select` and `range` subscribe to one Redis channel **per row** on the server;
+a result set of a few thousand rows means a few thousand channels, which is
+slow and eats into the per-connection quota. A table subscription takes a
+different route: on commit, the engine publishes one extra table-level
+notification per modified table carrying the list of changed `row_id`s, and a
+table subscription listens to that single channel — it counts as one
+subscription regardless of how many rows the table has.
+
+The trade-off is that the subscriber is notified about **every** write to
+that table (the server filters by RLS before pushing), so it only fits tables
+that are "many rows, small rows, rarely change" — all player names, the guild
+list, public config. Keep using `range` for hot tables (positions, HP). The
+server refuses tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by
+default); the per-connection count is capped by `MAX_TABLE_SUBSCRIPTION`.
+
+Unlike `range`, a table subscription reacts to RLS both ways: a row that loses
+permission is pushed as deleted, a row that gains it is pushed as added.
 
 ## Permissions
 
