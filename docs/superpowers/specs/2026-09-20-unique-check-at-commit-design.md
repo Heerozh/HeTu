@@ -32,7 +32,7 @@ update 的 unique 字段做 `UNIQ` 检查、对 insert 的主键做 `NX` 检查�
 
 1. 早失败（不用跑完 System 体）；
 2. 区分 `UniqueViolation`（确定性冲突，不重试）与 `RaceCondition`（重试）。commit 现在把
-   `UNIQUE` 一律映射成 `RaceCondition`（`client.py:899-901`），这之所以正确，全靠预检已
+   `UNIQUE` 一律映射成 `RaceCondition`（`client.py:937-939`），这之所以正确，全靠预检已
    把确定性冲突拦在前面。`test_unique_violate_bug` 就是这个区分没做好时"无限重试卡死"
    的历史。
 
@@ -66,21 +66,21 @@ check-then-insert 的惯用法（Django `get_or_create`、Rails `create_or_find_
 - `commit_v2.lua` Phase 1 顺序执行 checks，**遇到第一个失败就 return**；`UNIQ` 已处理
   `deleted`（本事务删除的行不算冲突，`commit_v2.lua:52-71`）。Phase 2 才执行 pushes。
 - `client.py:commit` 组 checks 的顺序：逐表 → insert（`NX`、`UNIQ`×字段）→ update（`VER`、
-  `UNIQ`×变更字段）→ delete（`VER`）→ 最后纯读行的 `VER`（`client.py:829-879`）。insert
+  `UNIQ`×变更字段）→ delete（`VER`）→ 最后纯读行的 `VER`（`client.py:867-917`）。insert
   的 `UNIQ` 覆盖含 `id` 在内的全部 unique 字段；update 只覆盖变更字段（`_unique_meet`
   只遍历 `_row.items()`）。
 - 字段迭代顺序 = `properties_` 顺序 = 按名排序（`component.py:194`；`get_dirty_rows`
   用 `row.dtype.names` 建 dict），所以同一行多列冲突时报出的字段名是确定的。
-- 响应映射在 `client.py:894-903`：`RACE*` → `RaceCondition`，`UNIQUE*` → `RaceCondition`，
+- 响应映射在 `client.py:932-941`：`RACE*` → `RaceCondition`，`UNIQUE*` → `RaceCondition`，
   其他 → `RuntimeError`。
-- `IdentityMap._absent`（`idmap.py:46-51`）以 `(index_name, 归一化值)` 记录 negative
+- `IdentityMap._absent`（`idmap.py:47-51`）以 `(index_name, 归一化值)` 记录 negative
   observation；`mark_absent` 只由等值精确 `get` 读空时调用（主键或 unique 列，
   `repo.py:242-248`）；`observed_absent` 做同样归一化后查集合。IdentityMap 持有 typed
   的 `np.record` 缓存行，能直接用 typed 值查 `_absent`，无需从 commit 的 str dict 反推。
-- SQL 后端的 commit（`sql/client.py:900-1063`）在 `aio.begin()` 事务里：先 SELECT 校验
+- SQL 后端的 commit（`sql/client.py:920-1140`）在 `aio.begin()` 事务里：先 SELECT 校验
   纯读行版本，**先执行 delete**（注释：避免 insert / update 撞上本事务将删除的数据），再
-  update、insert；`IntegrityError` 且是唯一冲突 → 一律 `RaceCondition`（`:989-991`、
-  `:1016-1018`）。unique 列在 SQL 表上有真实的 UNIQUE 约束（`:216`）。
+  update、insert；`IntegrityError` 且是唯一冲突 → 一律 `RaceCondition`（`:1031-1033`、
+  `:1072-1074`）。unique 列在 SQL 表上有真实的 UNIQUE 约束（`:222`）。
 - `RetryAttempt.__aexit__`（`session.py:158-176`）与 `SystemCaller.call_`
   （`caller.py:129-141`）只捕获 `RaceCondition`；`UniqueViolation` 直接向上冒泡——与今天
   从 `insert()` 抛出时的传播路径完全相同。
@@ -90,8 +90,11 @@ check-then-insert 的惯用法（Django `get_or_create`、Rails `create_or_find_
 - 仓库、docs、examples 中**没有** `try: await repo.insert(...) except UniqueViolation`
   这种在事务体内捕获的写法；文档惯用法是先 `get`（`docs/zh/_index.md:96`：防幻读用
   unique）。
+- `5975362` 起 commit 还为每个变动的 (索引, 值) 组一条 PUBLISH（`value_pubs`，由
+  `_exc_index` 顺带记录，Lua Phase 3 发出，供索引点查询订阅用）。它与 checks 无关，本 spec
+  不碰；但 `commit()` 的 helper 签名会同时被两件事改动，实现时注意别互相覆盖。
 - `tests/test_backend_client.py::test_redis_commit_payload` 用成员判断（`check in json[0]`）
-  逐条核对 checks / pushes 的元组格式，改格式必须同步改它；它不依赖顺序。
+  逐条核对 checks / pushes / publishes 的元组格式，改 checks 格式必须同步改它；它不依赖顺序。
 - `tests/test_backend_session_basic.py:141-144` mock 的 `_remote_has_unique_conflicts`
   是不存在的属性名（真名 `remote_has_unique_conflicts_`），从未生效。
 
@@ -171,7 +174,7 @@ end
 
 Phase 2 / 3 不动。
 
-**响应映射**（`client.py:894-903`）：
+**响应映射**（`client.py:932-941`）：
 
 ```python
 if resp.startswith("RACE"):
