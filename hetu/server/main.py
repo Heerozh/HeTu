@@ -368,6 +368,9 @@ def worker_main(app_name, config) -> Sanic:
     connection.ENDPOINT_CALL_IDLE_TIMEOUT = config.get(
         "ENDPOINT_CALL_IDLE_TIMEOUT", 60 * 2
     )
+    connection.CONNECTION_ALIVE_RECHECK_INTERVAL = config.get(
+        "CONNECTION_ALIVE_RECHECK_INTERVAL", 5
+    )
 
     # 加载web服务器
     app = Sanic(app_name, log_config=config.get("LOGGING", DEFAULT_LOGGING_CONFIG))

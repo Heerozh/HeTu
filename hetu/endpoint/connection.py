@@ -7,6 +7,7 @@
 
 import logging
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -28,6 +29,8 @@ replay = logging.getLogger("HeTu.replay")
 
 MAX_ANONYMOUS_CONNECTION_BY_IP = 0  # 占位符，实际由Config里修改
 ENDPOINT_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
+# 占位符，实际由Config里修改。通知模式下"是否被顶号"检查的兜底重查间隔（秒），0 = 每次调用都查
+CONNECTION_ALIVE_RECHECK_INTERVAL = 0
 
 
 @define_component(namespace="core", volatile=True, permission=Permission.ADMIN)
@@ -154,7 +157,17 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
 
 class ConnectionAliveChecker:
     """
-    连接合规性检查，主要检查连接是否存活
+    连接合规性检查（本连接是否已被顶号）。
+
+    **只做非事务的单 key 读写**（`servant_get` / `master.get` / `direct_set`），绝不开 Session：
+    它在 System 事务之外的 Endpoint 入口执行，开事务会造成嵌套。
+
+    两种模式：
+
+    - 默认：登录用户每次调用都读一次 Connection 行（裸 executor / Sandbox / future call）。
+    - 通知模式（websocket 层 `enable_notify_mode()` 后）：ws 连接订阅了自己那行 Connection 的
+      变更通知，只在收到通知（脏标记）或距上次检查超过 `CONNECTION_ALIVE_RECHECK_INTERVAL`
+      时才读。RPC 路径上的那次读因此省掉；间隔是通知丢失时的兜底。
     """
 
     def __init__(self, tbl_mgr: ComponentTableManager):
@@ -162,12 +175,52 @@ class ConnectionAliveChecker:
         assert table
         self.conn_tbl: Table = table
         self.last_active_cache = 0
+        self._notify_mode = False
+        # 通知模式下：收到本连接 Connection 行的变更通知置位，下次 is_illegal 必查；
+        # 初值 True 让登录后的首个调用核一次（顺带确认副本已同步）
+        self._dirty = True
+        self._last_check = 0.0
+
+    def enable_notify_mode(self) -> Callable[[], None]:
+        """
+        切到通知模式，返回给 `SubscriptionBroker.watch_channel` 的回调。回调只置脏标记，
+        可在后端通知接收器的监听协程里同步调用。
+        """
+        self._notify_mode = True
+
+        def on_change() -> None:
+            self._dirty = True
+
+        return on_change
+
+    def _need_check(self, now: float) -> bool:
+        if not self._notify_mode:
+            return True
+        return (
+            self._dirty or now - self._last_check >= CONNECTION_ALIVE_RECHECK_INTERVAL
+        )
+
+    async def kicked(self, ctx: Context) -> bool:
+        """
+        从 master 读一次本连接的 Connection 行，判断是否已被顶号（非事务、不写 last_active）。
+        给收到变更通知后的主动核查用；未登录的连接直接返回 False。
+        """
+        if not ctx.caller:
+            return False
+        conn_tbl = self.conn_tbl
+        conn = await conn_tbl.backend.master.get(
+            conn_tbl, ctx.connection_id, RowFormat.STRUCT
+        )
+        return conn is None or bool(conn.owner != ctx.caller)
 
     async def is_illegal(self, ctx: Context, ex_info: str):
         # 直接数据库检查connect数据是否是自己(可能被别人踢了)，以及要更新last activate
         conn_tbl = self.conn_tbl
         caller, conn_id = ctx.caller, ctx.connection_id
-        if caller:
+        now = time.time()
+        if caller and self._need_check(now):
+            self._dirty = False
+            self._last_check = now
             # 此方法无法通过事务，这里判断通过后可能有其他连接踢了你，等于同时可能有2个连接在执行1个用户的事务，但
             # 问题不大，因为事务是有冲突判断的。不冲突的事务就算一起执行也没啥问题。
             conn = await conn_tbl.servant_get(conn_id, RowFormat.STRUCT)
@@ -183,7 +236,6 @@ class ConnectionAliveChecker:
                 return True
 
         # idle时间内只往数据库写入5次last_active，防止批量操作时频繁更新
-        now = time.time()
         if now - self.last_active_cache > (ENDPOINT_CALL_IDLE_TIMEOUT / 5):
             await conn_tbl.direct_set(conn_id, last_active=str(now))
             self.last_active_cache = now

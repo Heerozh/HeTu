@@ -106,6 +106,157 @@ async def test_connect_kick_timeout(monkeypatch, mod_test_app, tbl_mgr, new_ctx)
     await executor1_timeout_replaced.terminate()
 
 
+def _patch_reads(stack, backend, conn_id: int):
+    """把 backend 所有 servant / master 的 get 包上计数，只数读 Connection 表 conn_id 那行的
+    次数（事务内别的读也走同一批 client，不能混进来），返回 (servant_reads, master_reads)"""
+    from unittest.mock import patch
+
+    def count(mocks):
+        return sum(
+            1
+            for m in mocks
+            for c in m.call_args_list
+            if c.args[0].comp_cls is connection.Connection and int(c.args[1]) == conn_id
+        )
+
+    servant_mocks = [
+        stack.enter_context(patch.object(c, "get", wraps=c.get))
+        for c in backend._servants
+    ]
+    master_mock = stack.enter_context(
+        patch.object(backend.master, "get", wraps=backend.master.get)
+    )
+    return (lambda: count(servant_mocks), lambda: count([master_mock]))
+
+
+async def test_alive_checker_default_checks_every_call(mod_test_app, tbl_mgr, new_ctx):
+    """没接通知的裸 executor：登录用户每次调用都读一次 Connection 行（原行为，回归护栏）"""
+    from contextlib import ExitStack
+
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    await executor.execute("login", 1)
+    backend = executor.alive_checker.conn_tbl.backend
+    with ExitStack() as stack:
+        servant_reads, _ = _patch_reads(stack, backend, executor.context.connection_id)
+        for i in range(3):
+            ok, _ = await executor.execute("add_rls_comp_value", i)
+            assert ok
+        assert servant_reads() == 3
+    await executor.terminate()
+
+
+async def test_alive_checker_notify_mode(monkeypatch, mod_test_app, tbl_mgr, new_ctx):
+    """通知模式：只在脏标记（收到本连接 Connection 行变更通知）时才读；被顶号后仍能检出"""
+    from contextlib import ExitStack
+
+    monkeypatch.setattr(connection, "CONNECTION_ALIVE_RECHECK_INTERVAL", 3600)
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    on_change = executor.alive_checker.enable_notify_mode()
+    await executor.execute("login", 1)
+    backend = executor.alive_checker.conn_tbl.backend
+    with ExitStack() as stack:
+        servant_reads, _ = _patch_reads(stack, backend, executor.context.connection_id)
+        for i in range(3):
+            ok, _ = await executor.execute("add_rls_comp_value", i)
+            assert ok
+        assert servant_reads() == 1  # 只有登录后首个调用核了一次
+        on_change()
+        ok, _ = await executor.execute("add_rls_comp_value", 9)
+        assert ok
+        assert servant_reads() == 2
+
+        # 被另一个连接顶号 → 通知置脏 → 下次调用检出
+        executor2 = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+        await executor2.initialize("")
+        await executor2.execute("login", 1)
+        await backend.wait_for_synced()
+        on_change()
+        ok, _ = await executor.execute("add_rls_comp_value", 10)
+        assert not ok
+        assert servant_reads() == 3
+    await executor2.terminate()
+    await executor.terminate()
+
+
+async def test_alive_checker_fallback_interval(
+    monkeypatch, mod_test_app, tbl_mgr, new_ctx
+):
+    """通知模式的兜底间隔：0 = 每次都读；超过间隔未读则读一次"""
+    from contextlib import ExitStack
+
+    time_time = time.time
+    monkeypatch.setattr(connection, "CONNECTION_ALIVE_RECHECK_INTERVAL", 0)
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    executor.alive_checker.enable_notify_mode()
+    await executor.execute("login", 1)
+    backend = executor.alive_checker.conn_tbl.backend
+    with ExitStack() as stack:
+        servant_reads, _ = _patch_reads(stack, backend, executor.context.connection_id)
+        for i in range(3):
+            await executor.execute("add_rls_comp_value", i)
+        assert servant_reads() == 3
+
+        monkeypatch.setattr(connection, "CONNECTION_ALIVE_RECHECK_INTERVAL", 3600)
+        await executor.execute("add_rls_comp_value", 4)
+        assert servant_reads() == 3  # 间隔内不读
+        monkeypatch.setattr(time, "time", lambda: time_time() + 4000)
+        await executor.execute("add_rls_comp_value", 5)
+        assert servant_reads() == 4  # 超过间隔读一次
+    await executor.terminate()
+
+
+async def test_alive_checker_kicked_by_master_read(mod_test_app, tbl_mgr, new_ctx):
+    """kicked()：从 master 读一次判断是否被顶号，不开 Session、不写 last_active"""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor.initialize("")
+    ctx = executor.context
+    checker = executor.alive_checker
+    backend = checker.conn_tbl.backend
+
+    # 未登录：直接 False，不读库
+    with ExitStack() as stack:
+        servant_reads, master_reads = _patch_reads(stack, backend, ctx.connection_id)
+        assert await checker.kicked(ctx) is False
+        assert servant_reads() == 0 and master_reads() == 0
+
+    await executor.execute("login", 1)
+
+    def guarded():
+        # kicked() 本身不开 Session、不写 last_active，只读 master
+        return (
+            patch.object(backend, "session", wraps=backend.session),
+            patch.object(checker.conn_tbl.backend.master, "direct_set"),
+        )
+
+    with ExitStack() as stack:
+        m_session, m_direct = (stack.enter_context(p) for p in guarded())
+        servant_reads, master_reads = _patch_reads(stack, backend, ctx.connection_id)
+        assert await checker.kicked(ctx) is False
+        assert master_reads() == 1 and servant_reads() == 0
+        m_session.assert_not_called()
+        m_direct.assert_not_called()
+
+    executor2 = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    await executor2.initialize("")
+    await executor2.execute("login", 1)  # 顶号（这里会开事务，放在守卫之外）
+
+    with ExitStack() as stack:
+        m_session, m_direct = (stack.enter_context(p) for p in guarded())
+        servant_reads, master_reads = _patch_reads(stack, backend, ctx.connection_id)
+        assert await checker.kicked(ctx) is True
+        assert master_reads() == 1 and servant_reads() == 0
+        m_session.assert_not_called()
+        m_direct.assert_not_called()
+    await executor2.terminate()
+    await executor.terminate()
+
+
 async def test_flood_detect(mod_test_app, tbl_mgr, caplog, new_ctx):
     connection.MAX_ANONYMOUS_CONNECTION_BY_IP = 3
 
