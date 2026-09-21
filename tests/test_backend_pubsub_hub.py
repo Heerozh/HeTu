@@ -108,7 +108,6 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
 async def test_hub_mq_client_close_releases_only_own(filled_item_ref, mod_auto_backend):
     """一个连接关闭只撤销自己的登记，不影响别的连接对同一频道的订阅"""
     backend: Backend = mod_auto_backend()
-    hub = _hub(backend)
     servant = backend.servant
     rows = await servant.range(filled_item_ref, "time", 110, 112, limit=10)
     channels = [servant.row_channel(filled_item_ref, r.id) for r in rows]
@@ -116,6 +115,7 @@ async def test_hub_mq_client_close_releases_only_own(filled_item_ref, mod_auto_b
 
     mq1 = backend.get_mq_client()
     mq2 = backend.get_mq_client()
+    hub = _hub(backend)  # hub 随第一个 mq_client 懒创建，不能依赖前面的测试建好它
     await mq1.subscribe(*channels)
     await mq2.subscribe(channels[0])
     assert hub.subscriber_count(channels[0]) == 2
