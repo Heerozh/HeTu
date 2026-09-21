@@ -93,6 +93,9 @@ end
 if publishes then
     for _, pub in ipairs(publishes) do
         -- pub 格式: [channel, packed_row_ids]
+        -- PUBLISH会在Redis cluster下，对所有node发送，而我们只需要"本分片"收到这条消息
+        -- SPUBLISH可以解决这个问题，但是订阅复杂度上升，且我们并不推荐cluster模式
+        -- 应使用proxy反代，就没有这个问题了
         redis_call("PUBLISH", pub[1], pub[2])
     end
 end
