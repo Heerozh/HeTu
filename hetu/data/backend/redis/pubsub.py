@@ -129,13 +129,17 @@ class AsyncKeyspacePubSub:
         assert node_key not in self.node_resources
         logger.info(f"Creating standalone connection for node: {node_key}")
 
-        # 为每个节点创建一个 Standalone 的 Redis Client
-        connection_kwargs = node.connection_kwargs.copy()
-        # 如果是 Cluster 模式下的 redis-py，有些参数可能需要清理，比如 'path' 用于 unix socket
-        if "path" in connection_kwargs:
-            del connection_kwargs["path"]
-
-        r_client = Redis(**connection_kwargs)
+        # 为每个节点创建一个 Standalone 的 Redis Client。
+        # ClusterNode.connection_kwargs 是给 Connection 的参数（host/port/ssl/auth 之外，
+        # redis-py 8.1 起还塞了 himport_registry 这类内部对象），不能直接喂给 Redis(...)，
+        # 会 TypeError；照 ClusterNode 自己建连接的方式，用它的 connection_class +
+        # connection_kwargs 另开一个只给 pubsub 用的小池（与 standalone_connect 同款）
+        pool = ConnectionPool(
+            connection_class=node.connection_class,
+            max_connections=2,
+            **node.connection_kwargs,
+        )
+        r_client = Redis.from_pool(pool)
         pubsub = r_client.pubsub()
 
         self.node_resources[node_key] = {
