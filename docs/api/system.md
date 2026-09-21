@@ -132,7 +132,7 @@ get(
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:187`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L187)</small>
+<small>Source: [`hetu/data/backend/repo.py:186`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L186)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
@@ -184,7 +184,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:271`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L271)</small>
+<small>Source: [`hetu/data/backend/repo.py:270`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L270)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -241,7 +241,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:403`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L403)</small>
+<small>Source: [`hetu/data/backend/repo.py:402`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L402)</small>
 
 向Session中添加一行待插入数据。
 
@@ -270,7 +270,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:442`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L442)</small>
+<small>Source: [`hetu/data/backend/repo.py:441`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L441)</small>
 
 向Session中添加一行待更新数据。
 
@@ -299,7 +299,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:478`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L478)</small>
+<small>Source: [`hetu/data/backend/repo.py:477`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L477)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -334,7 +334,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:507`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L507)</small>
+<small>Source: [`hetu/data/backend/repo.py:506`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L506)</small>
 
 向Session中添加一行待删除数据。
 

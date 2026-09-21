@@ -167,21 +167,20 @@ class SessionRepository:
         从数据库获取单行数据，并放入`Session`缓存。
         本指令如果命中缓存，不会去数据库查询。
         """
-        idmap = self._session.idmap
-        ref = self.ref
         # 主键查询，先查缓存
         row_id = cast(int, row_id)
-        row, row_stat = idmap.get(ref, row_id)
+        row, row_stat = self._session.idmap.get(self.ref, row_id)
         if row_stat is not None:
-            if row_stat == RowState.DELETE:
-                return None
-            else:
-                return row
+            return None if row_stat == RowState.DELETE else row
+        return await self._fetch_by_id(row_id)
 
-        # 缓存未命中，查询数据库
-        row = await self._session.master_or_servant.get(ref, row_id, RowFormat.STRUCT)
+    async def _fetch_by_id(self, row_id: int) -> np.record | None:
+        """缓存未命中：查数据库，读到就放进 Session 缓存"""
+        row = await self._session.master_or_servant.get(
+            self.ref, row_id, RowFormat.STRUCT
+        )
         if row is not None:
-            idmap.add_clean(ref, row)
+            self._session.idmap.add_clean(self.ref, row)
         return row
 
     async def get(
@@ -262,7 +261,7 @@ class SessionRepository:
                 return None if row_stat == RowState.DELETE else row
             if idmap.observed_absent(self.ref, "id", row_id):
                 return None
-            row = await self.get_by_id(row_id)
+            row = await self._fetch_by_id(row_id)
             if row is None:
                 # 主键id恒为unique，登记“本事务观察到该id不存在”
                 idmap.mark_absent(self.ref, "id", row_id)
