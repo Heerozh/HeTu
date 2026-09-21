@@ -185,6 +185,7 @@ class BackendClient:
         row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
         `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
+        id 索引没有值频道（commit 不发）：点查 id 请订行频道或整个 id 索引的频道。
 
         Channel of one index value: published on commit only when a row with that value is
         inserted/deleted or a row's field changes from/to it (payload: touched row ids).

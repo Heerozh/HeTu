@@ -410,7 +410,8 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     # （insert/delete 是全部索引字段，update 是变更字段的旧值+新值），从 push 反推期望值
     expected_values: dict[bytes, set[bytes]] = {}
     for push in json[1]:
-        if push[0] in (b"ZADD", b"ZREM"):
+        # id 索引例外：没人订 id 的值频道，commit 不发
+        if push[0] in (b"ZADD", b"ZREM") and not push[1].endswith(b":index:id"):
             sortable, row_id = push[-1].rsplit(b"\x00", 1)
             channel = push[1] + b":" + sortable_token(sortable).encode()
             expected_values.setdefault(channel, set()).add(row_id)
@@ -832,6 +833,34 @@ def test_sortable_token():
     token = sortable_token(long)
     assert token.startswith("h") and len(token) == 33
     assert token != sortable_token(to_sortable_bytes(np.str_("好" * 11 + "!")))
+
+
+async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):
+    """id 索引没有值频道：insert/delete 不再为"id=该值"发一条没人订的通知；
+    行频道和整个 id 索引的频道照常"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+
+    rows = await servant.range(filled_item_ref, "time", 122, 122, limit=1)
+    assert len(rows) == 1
+    row = rows[0]
+    id_value_chan = servant.index_value_channel(filled_item_ref, "id", row.id)
+    id_index_chan = servant.index_channel(filled_item_ref, "id")
+    row_chan = servant.row_channel(filled_item_ref, row.id)
+    await mq.subscribe(id_value_chan, id_index_chan, row_chan)
+
+    idmap = IdentityMap()
+    idmap.add_clean(filled_item_ref, row)
+    idmap.mark_deleted(filled_item_ref, row.id)
+    await backend.master.commit(idmap)
+
+    await asyncio.sleep(0.5)
+    async with asyncio.timeout(2):
+        messages = await mq.get_message()
+    assert row_chan in messages and id_index_chan in messages
+    assert id_value_chan not in messages
+    await mq.close()
 
 
 async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):

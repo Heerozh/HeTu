@@ -705,6 +705,44 @@ async def test_subscribe_point_query_channel(
     assert index_chan in broker._mq_client.subscribed_channels
 
 
+async def test_subscribe_point_query_on_id_uses_index_channel(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """id 没有值频道：点查 id 订整个 id 索引的频道，该 id 的行被插入/删除时照样能收到"""
+    servant = broker._backend.servant
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    rows = await servant.range(filled_item_ref, "time", 123, 123, limit=1)
+    assert len(rows) == 1
+    row_id = int(rows[0].id)
+
+    sub_id, got = await broker.subscribe_range(filled_item_ref, admin_ctx, "id", row_id)
+    assert sub_id and len(got) == 1
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert idx_sub.index_channel == servant.index_channel(filled_item_ref, "id")
+
+    # 删掉这行：通知从整个 id 索引的频道来，订阅报告该行没了
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert await repo.get(id=row_id) is not None  # delete 要先读进缓存
+        repo.delete(row_id)
+    async with asyncio.timeout(3):
+        updates = await broker.get_updates()
+    assert updates == {sub_id: {row_id: None}}
+
+    # 用同一个 id 插回来：又能收到
+    async with backend.session("pytest", 1) as session:
+        new_row = comp.new_row()
+        new_row.id = row_id
+        new_row.name = "IdBack"
+        new_row.time = 123
+        await session.using(comp).insert(new_row)
+    async with asyncio.timeout(3):
+        updates = await broker.get_updates()
+    assert set(updates[sub_id]) == {row_id}
+    assert updates[sub_id][row_id]["name"] == "IdBack"
+
+
 async def test_subscribe_point_query_not_woken_by_other_values(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):

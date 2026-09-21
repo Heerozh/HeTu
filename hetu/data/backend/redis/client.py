@@ -854,10 +854,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         _dtype_map[_field].type(_values[_field])
                     )
                     # 点查询订阅者只订"索引=该值"的频道：insert/delete 记全部索引字段的值，
-                    # update 记变更字段的旧值(_add=False)和新值(_add=True)
-                    value_pubs.setdefault(
-                        self.value_channel_(_idx_key, _sortable_value), []
-                    ).append(_old["id"])
+                    # update 记变更字段的旧值(_add=False)和新值(_add=True)。
+                    # id 例外：没人订"id=某值"的频道（点查 id 走行频道/整个 id 索引的频道），
+                    # 每次 insert/delete 都为它 PUBLISH 一条纯属浪费
+                    if _field != "id":
+                        value_pubs.setdefault(
+                            self.value_channel_(_idx_key, _sortable_value), []
+                        ).append(_old["id"])
                     _member = _sortable_value + b"\x00" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能

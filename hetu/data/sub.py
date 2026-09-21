@@ -514,11 +514,12 @@ class SubscriptionBroker:
             return sub_id, rows
 
         # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道
-        # （index_name 已由上面的 servant.range 校验过存在）
+        # （index_name 已由上面的 servant.range 校验过存在）。id 没有值频道（commit 不发，
+        # 省掉每次 insert/delete 一条通知），点查 id 也订整个 id 索引的频道
         point_value = BackendClient.point_query_value_(
             table_ref.comp_cls.dtype_map_[index_name], left, right
         )
-        if point_value is None:
+        if point_value is None or index_name == "id":
             index_channel = servant.index_channel(table_ref, index_name)
         else:
             index_channel = servant.index_value_channel(

@@ -1058,7 +1058,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             value,
             row_id,
         ):
-            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id"""
+            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id。
+            id 索引不记：点查 id 走行频道/整个 id 索引的频道，每次 insert/delete 都为它插一条
+            通知行纯属浪费"""
             channel = self.index_value_channel(ref, index_name, value)
             pubs.setdefault(channel, []).append(str(row_id))
 
@@ -1112,13 +1114,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                _touch_value(
-                                    value_pubs,
-                                    ref,
-                                    index_name,
-                                    old_row[index_name],
-                                    row_id,
-                                )
+                                if (
+                                    index_name != "id"
+                                ):  # 没人订 id 的值频道，见 _touch_value
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        old_row[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
@@ -1204,13 +1209,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                _touch_value(
-                                    value_pubs,
-                                    ref,
-                                    index_name,
-                                    typed_row[index_name],
-                                    row_id,
-                                )
+                                if (
+                                    index_name != "id"
+                                ):  # 没人订 id 的值频道，见 _touch_value
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        typed_row[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
