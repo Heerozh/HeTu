@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import SQLTableMaintenance
-    from .mq import SQLMQClient
+    from .mq import SQLMQClient, SQLNotifyHub
 
 logger = logging.getLogger("HeTu.root")
 
@@ -364,6 +364,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
             + self.NOTIFY_CLEANUP_INTERVAL
             + random.uniform(0.0, self.NOTIFY_CLEANUP_JITTER)
         )
+        # 本进程共享的通知表轮询器，首次 get_mq_client 时在事件循环里懒建
+        self._hub: SQLNotifyHub | None = None
 
     @property
     def io(self) -> sa.Engine:
@@ -417,6 +419,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             io.dispose()
         self._ios = []
 
+        if self._hub is not None:
+            hub, self._hub = self._hub, None
+            await hub.close()
         for aio in self._async_ios:
             await aio.dispose()
         self._async_ios = []
@@ -1104,7 +1109,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     @override
     def get_mq_client(self) -> SQLMQClient:
+        """
+        获取消息队列连接（每个用户连接一个）。本进程只有一个 `SQLNotifyHub`（一个通知表
+        轮询任务）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        """
         self._ensure_open()
-        from .mq import SQLMQClient
+        from .mq import SQLMQClient, SQLNotifyHub
 
-        return SQLMQClient(self)
+        if self._hub is None:
+            self._hub = SQLNotifyHub(self)
+        return SQLMQClient(self._hub)

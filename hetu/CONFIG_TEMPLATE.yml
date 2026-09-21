@@ -153,6 +153,12 @@ BACKENDS:
     # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
     raw_clustering: false
+    # 每个工作进程对 master / 每台 servant 的异步连接池上限（Redis 后端）。池里只有短命的读写命令，
+    # 客户端订阅的 pubsub 走每个工作进程一条的独立连接，不占池，所以 Redis 连接数 ≈
+    # WORKER_NUM × (1 + max_connections)，与在线人数无关。池满时排队等待 pool_timeout 秒后报错。
+    # raw_clustering 模式下 redis-py 的每节点池只能设上限、满了直接报错，请酌情调大。
+    max_connections: 64
+    pool_timeout: 5
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:

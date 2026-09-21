@@ -42,7 +42,7 @@ from collections.abc import Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, final, overload
 
 import numpy as np
 
@@ -724,7 +724,8 @@ class MQClient:
     连接到消息队列的客户端，每个用户连接一个实例。
     继承此类实现数据库写入通知和消息队列的结合。
 
-    本地消息队列由基类维护：子类的 `pull()` 收到通知后调 `push_pulled_()` 入队，
+    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
+    `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
     """
 
@@ -743,25 +744,16 @@ class MQClient:
         self.pulled_payload: dict[str, set[str]] = {}
 
     async def close(self):
-        raise NotImplementedError
-
-    async def pull(self) -> None:
-        """
-        从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
-        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
-        表级频道（table_channel）的消息还带有变动的row_id列表payload，需要按频道合并保存。
-
-        消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
-        此方法需要单独的协程反复调用，防止服务器也消息堆积。如果没有消息，则堵塞到永远。
-        """
-        # 必须合并消息，因为index更新时大都是2条一起的(remove/add)
+        """取消本连接的全部订阅并释放资源"""
         raise NotImplementedError
 
     def push_pulled_(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
         """
-        供子类 `pull()` 调用：把一条收到的通知放进本地队列（重复频道只保留最早那条，
-        以便下个tick就被取走），表级频道的 payload 按频道合并。
-        入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由子类打日志。
+        供后端的通知接收器调用：把一条收到的通知放进本地队列（重复频道只保留最早那条，
+        以便下个tick就被取走；index更新大都是remove/add两条一起来，靠这个合并），
+        表级频道的 payload 按频道合并。消息内容只有channel名：每行数据、每个Index都是
+        一个channel，该channel收到了任何消息都说明有数据更新。
+        入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由调用方打日志。
 
         这是每条通知都走的热路径：常态下队头不会过期，只花一次 O(1) 的比较。
         """
@@ -827,3 +819,75 @@ class MQClient:
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的频道名"""
         raise NotImplementedError
+
+
+class MQHub(Protocol):
+    """
+    每个进程共享的通知接收器：持有到后端的唯一订阅连接/轮询任务，维护"频道 → 本进程内
+    订阅了它的 MQClient"分发表，收到通知后调各 MQClient 的 `push_pulled_`。
+    `HubMQClient` 只依赖这两个方法。
+    """
+
+    async def add(self, mq: MQClient, channels: Iterable[str]) -> None: ...
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None: ...
+
+
+class HubMQClient(MQClient):
+    """
+    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录本连接订阅了哪些频道，
+    订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
+    """
+
+    # 单个连接订阅频道数的告警线；子类可覆盖
+    MAX_SUBSCRIBED = 5000
+    LOG_TAG = "MQ"
+
+    def __init__(self, hub: MQHub):
+        super().__init__()  # 本地消息队列
+        self._hub = hub
+        self.subscribed: set[str] = set()
+        self._closed = False
+
+    async def close(self):
+        """取消本连接的全部订阅。连接拆除路径上调用，后端出错也不抛"""
+        self._closed = True
+        if self.subscribed:
+            channels = self.subscribed
+            self.subscribed = set()
+            try:
+                await self._hub.remove(self, channels)
+            except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
+                logger.warning(
+                    f"⚠️ [{self.LOG_TAG}] 关闭连接时取消订阅失败：{type(e).__name__}:{e}"
+                )
+
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        await self._hub.add(self, channel_names)
+        if self._closed:
+            # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
+            await self._hub.remove(self, channel_names)
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        self.subscribed.update(channel_names)
+        if len(self.subscribed) > self.MAX_SUBSCRIBED:
+            logger.warning(
+                f"⚠️ [{self.LOG_TAG}] 当前连接订阅数超过全局限制"
+                f"MAX_SUBSCRIBED={self.MAX_SUBSCRIBED}行，"
+            )
+
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        self.subscribed.difference_update(channel_names)
+        await self._hub.remove(self, channel_names)
+
+    @property
+    def subscribed_channels(self) -> set[str]:
+        """返回当前连接订阅的所有频道名"""
+        return self.subscribed

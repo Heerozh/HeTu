@@ -95,10 +95,18 @@ population while staying consistent.
 
 **Redis connection budget**
 
-- Servant connections ≈ number of HeTu ClientSDK connections (online users).
-- Master connections ≈ `workers × concurrent System calls per worker`.
-- Redis caps at ~10K connections per instance. If your concurrent online
-  population gets close to that, scale out by adding more `servants`.
+- Each worker process keeps **one** pub/sub connection per servant (per Redis
+  node in cluster mode) that fans notifications out to all of its WebSocket
+  connections, plus a bounded pool of short-lived read/write connections
+  (`max_connections`, default 64, queued when full). So connections per
+  servant ≈ `workers × (1 + max_connections)` — independent of the number of
+  online users.
+- Master connections ≈ `workers × (1 + max_connections)` as well; the pool is
+  shared by all concurrent System calls of a worker.
+- Redis caps at ~10K connections per instance; with the defaults that is
+  ~150 workers per instance. Scale subscription *throughput* (not connections)
+  by adding `servants`: each worker's pub/sub connection and reads are spread
+  over them at random.
 
 ### Drop-in alternatives
 

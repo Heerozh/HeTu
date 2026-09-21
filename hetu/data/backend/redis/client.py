@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import RedisTableMaintenance
-    from .mq import RedisMQClient
+    from .mq import PubSubHub, RedisMQClient
 
 logger = logging.getLogger("HeTu.root")
 msg_packer = msgpack.Packer(use_bin_type=False)
@@ -160,6 +160,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
+        await self._close_hub()
         for aio in self._async_ios:
             if isinstance(aio, redis.asyncio.cluster.RedisCluster):
                 await aio.aclose()  # 未测试
@@ -201,8 +202,30 @@ class RedisBackendClient(BackendClient, alias="redis"):
     # ============ 主要方法 ============
 
     def __init__(
-        self, endpoint: str | list[str], is_servant, raw_clustering: bool = False
+        self,
+        endpoint: str | list[str],
+        is_servant,
+        raw_clustering: bool = False,
+        max_connections: int = 64,
+        pool_timeout: float | None = 5.0,
     ):
+        """
+        Parameters
+        ----------
+        endpoint
+            redis url 或 url 列表，见 CONFIG_TEMPLATE.yml 的 BACKENDS 段。
+        is_servant
+            是否为只读副本连接。
+        raw_clustering
+            是否为 Redis 原生集群模式。
+        max_connections
+            本进程对该地址的异步连接池上限。订阅的 pubsub 走每 worker 一条的独立连接
+            （见 PubSubHub），池里只有短命的读写命令，所以不需要很大。redis-py 8 起默认
+            只有 100，这里显式给出。standalone 模式下池满会排队；原生集群模式下 redis-py
+            每个节点的池只能设上限、满了直接抛 MaxConnectionsError，需要时请调大。
+        pool_timeout
+            standalone 模式下池满时排队等待的秒数，None 为一直等，超时抛 ConnectionError。
+        """
         super().__init__(endpoint, is_servant)
         self.raw_clustering = raw_clustering
         # redis的endpoint配置为url, 或list of url
@@ -223,13 +246,19 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     url, load_balancing_strategy=load_balancing_strategy
                 )
                 aio = redis.asyncio.cluster.RedisCluster.from_url(
-                    url, load_balancing_strategy=load_balancing_strategy
+                    url,
+                    load_balancing_strategy=load_balancing_strategy,
+                    max_connections=max_connections,
                 )
                 self._ios.append(io)
                 self._async_ios.append(aio)
             else:
                 self._ios.append(redis.Redis.from_url(url))
-                self._async_ios.append(redis.asyncio.Redis.from_url(url))
+                # 池满排队而不是抛 MaxConnectionsError；from_pool 让 client 接管池的关闭
+                pool = redis.asyncio.BlockingConnectionPool.from_url(
+                    url, max_connections=max_connections, timeout=pool_timeout
+                )
+                self._async_ios.append(redis.asyncio.Redis.from_pool(pool))
 
         # 取消，只在单机模式下有所增长
         # self._batched_aio = RedisBatchedClient(self._async_ios)
@@ -252,6 +281,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         self.lua_commit = None
+        # 本进程共享的 pubsub 分发器，首次 get_mq_client 时在事件循环里懒建
+        self._hub: PubSubHub | None = None
 
         # 限制aio运行的coroutine
         try:
@@ -375,9 +406,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
             io.close()
         self._ios = []
 
+        await self._close_hub()
         for aio in self._async_ios:
             await aio.aclose()
         self._async_ios = []
+
+    async def _close_hub(self):
+        if self._hub is not None:
+            hub, self._hub = self._hub, None
+            await hub.close()
 
     @overload
     @staticmethod
@@ -945,9 +982,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return RedisTableMaintenance(self)
 
     def get_mq_client(self) -> RedisMQClient:
-        """获取消息队列连接"""
+        """
+        获取消息队列连接（每个用户连接一个）。本进程对本地址只有一个 `PubSubHub`
+        （一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        """
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        from .mq import RedisMQClient
+        from .mq import PubSubHub, RedisMQClient
 
-        return RedisMQClient(self)
+        if self._hub is None:
+            self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
+        return RedisMQClient(self._hub)

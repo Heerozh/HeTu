@@ -250,32 +250,6 @@ async def client_handler(
                 pass  # 队列满时外层自然会被 Sanic 的连接关闭取消掉
 
 
-async def mq_puller(ws: Websocket, broker: SubscriptionBroker):
-    """消息队列拉取器，需要持续拉取，防止消息在队列服务器中积压"""
-    try:
-        while True:
-            await broker.mq_pull()
-    except asyncio.CancelledError:
-        pass
-    except RedisConnectionError as e:
-        logger.error(
-            _(
-                "❌ [📡WSMQPuller] Redis ConnectionError，断开连接: {err}"
-                "网络故障外的可能原因：连接来不及接受pubsub消息，积攒过多断开。"
-            ).format(err=f"{type(e).__name__}:{e}")
-        )
-        return ws.fail_connection()
-    except BaseException as e:
-        logger.exception(
-            _("❌ [📡WSMQPuller] 数据库Pull MQ消息时异常，异常：{err}").format(
-                err=f"{type(e).__name__}:{e}"
-            )
-        )
-        return ws.fail_connection()
-    finally:
-        pass
-
-
 async def subscription_handler(
     ws: Websocket, broker: SubscriptionBroker, push_queue: asyncio.Queue
 ):

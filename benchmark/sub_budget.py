@@ -83,27 +83,6 @@ async def _pin_actor(ctx: hetu.SystemContext):
 # ---------------------------------------------------------------------------
 
 
-def _unlock_redis_pool_limit(pool_size: int) -> None:
-    """
-    redis-py 8.x 的 async ConnectionPool 默认 max_connections=100，而每个 ws 连接的
-    pubsub 会常驻占用 servant 池里的 1 条连接，再加上 get_updates 的并发 HGETALL，
-    一个 worker 不到 100 个连接就会 MaxConnectionsError 断线。
-    HeTu 目前没有配置入口，这里 monkeypatch 默认值以便测量（本文件被 hetu start 当作
-    APP_FILE 加载时也会生效）；生产上应在 RedisBackendClient 里把该值做成配置项。
-    """
-    import redis.asyncio.connection as rac
-
-    orig_init = rac.ConnectionPool.__init__
-
-    def patched_init(self, connection_class=rac.Connection, max_connections=None, **kw):
-        orig_init(self, connection_class, max_connections or pool_size, **kw)
-
-    rac.ConnectionPool.__init__ = patched_init  # type: ignore[method-assign]
-
-
-_unlock_redis_pool_limit(int(os.getenv("HETU_BENCH_POOL_SIZE", "100000")))
-
-
 def setup_registry() -> None:
     logging.getLogger("HeTu.root").setLevel(logging.ERROR)
     logging.getLogger("hetu").setLevel(logging.ERROR)
@@ -298,7 +277,9 @@ async def _writer_main(
 class Stats:
     delivered: int = 0  # 交付的行更新数（一行推给一个连接算 1）
     deleted: int = 0  # 交付的行删除/离开范围数
-    notified: int = 0  # 收到的 pubsub 通知条数（含被合批掉的）
+    notified: int = (
+        0  # hub 从 Redis 收到的 pubsub 消息条数（含被合批掉的；一条可分发给多个连接）
+    )
     lat_samples: list[float] = field(default_factory=list)
     lat_seen: int = 0
     loop_lag: list[float] = field(default_factory=list)
@@ -357,10 +338,16 @@ async def _subscriber_main(args, proc_idx, zones, ready, go, stop, result_q):
     stats = Stats()
     running = True
 
-    async def puller(broker: SubscriptionBroker):
-        while running:
-            await broker.mq_pull()
-            stats.notified += 1
+    # 统计本进程 hub 从 Redis 收到的 pubsub 消息条数（一条消息可分发给本进程多个连接）
+    hub = backend._servants[0]._hub  # type: ignore[attr-defined]
+    assert hub is not None
+    hub_on_message = hub._on_message
+
+    def counting_on_message(msg):
+        stats.notified += 1
+        hub_on_message(msg)
+
+    hub._pubsub.on_message = counting_on_message
 
     async def consumer(broker: SubscriptionBroker):
         while running:
@@ -390,7 +377,6 @@ async def _subscriber_main(args, proc_idx, zones, ready, go, stop, result_q):
 
     tasks = [asyncio.create_task(sampler())]
     for b in brokers:
-        tasks.append(asyncio.create_task(puller(b)))
         tasks.append(asyncio.create_task(consumer(b)))
 
     with ready.get_lock():

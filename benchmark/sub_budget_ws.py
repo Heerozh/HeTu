@@ -11,8 +11,7 @@ sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 wor
     cd benchmark
     uv run python sub_budget_ws.py --conns 80 --zones 8 --limit 50 --writes 300 --duration 15
 
-注意：sub_budget.py 导入时会放开 redis-py 默认的 100 连接池上限（见 _unlock_redis_pool_limit），
-否则单 worker 不到 100 个 ws 连接就会因 MaxConnectionsError 断线。
+Redis 连接数：每个 worker 只有 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数无关。
 """
 
 import argparse

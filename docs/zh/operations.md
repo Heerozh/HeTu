@@ -76,9 +76,12 @@ backends:
 
 **Redis 连接预算**
 
-- 副本连接数 ≈ HeTu ClientSDK 连接数（在线用户数）。
-- 主节点连接数 ≈ `workers × 每个 worker 的并发 System 调用数`。
-- Redis 单实例连接数上限约为 10K。如果您的并发在线用户数接近此值，请通过增加更多 `servants` 来扩展。
+- 每个工作进程对每台副本（集群模式下每个 Redis 节点）只保持**一条** pub/sub 连接，由它把通知分发给该进程的
+  全部 WebSocket 连接；另加一个有上限的短命读写连接池（`max_connections`，默认 64，满了排队）。
+  所以每台副本的连接数 ≈ `workers × (1 + max_connections)`，与在线用户数无关。
+- 主节点连接数同样 ≈ `workers × (1 + max_connections)`，池由该 worker 的所有并发 System 调用共享。
+- Redis 单实例连接数上限约为 10K，按默认值算一个实例可挂 ~150 个 worker。要扩展的是订阅**吞吐量**而不是
+  连接数：增加 `servants`，每个 worker 的 pub/sub 连接和读取会随机分摊到各副本上。
 
 ### 即插即用的替代方案
 

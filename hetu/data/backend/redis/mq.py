@@ -6,112 +6,155 @@
 """
 
 import logging
-from typing import TYPE_CHECKING, final, override
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, final
 
 import msgpack
 
 from ....i18n import _
-from ..base import MQClient
+from ..base import HubMQClient, MQClient
 from .pubsub import AsyncKeyspacePubSub
 
 if TYPE_CHECKING:
-    from .client import RedisBackendClient
+    from redis.asyncio import Redis
+    from redis.asyncio.cluster import RedisCluster
 
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
 
 
-@final
-class RedisMQClient(MQClient):
+class PubSubHub:
     """
-    连接到消息队列的客户端，每个用户连接一个实例。
-    本客户端使用AsyncKeyspacePubSub，以redis的pubsub功能作为消息队列，redis的notify功能作为写入通知。
+    每个工作进程（每个 servant BackendClient）一个：唯一的 pubsub 连接（cluster 模式下每个
+    节点一条）+ "频道 → 本进程内订阅了它的连接" 的分发表。
+
+    以前是每个 ws 连接一条 pubsub 连接（Redis 连接数 = 在线人数，还各自解析每条消息），
+    现在 Redis 只推一次给本进程，这里按频道查表把通知直接塞进各连接的本地队列
+    （`MQClient.push_pulled_`），全程不 await、不经任何 asyncio.Queue。
+
+    分发表同时是引用计数：某频道第一个订阅者到来时才真的向 Redis 发 SUBSCRIBE，
+    最后一个走了才 UNSUBSCRIBE。
     """
 
-    def __init__(self, client: RedisBackendClient):
-        # 2种模式：
-        # a. 每个ws连接一个pubsub连接，分发交给servants，结构清晰，目前的模式，但网络占用高
-        # b. 每个worker一个pubsub连接，分发交给worker来做，这样连接数较少，但等于2套分发系统结构复杂
-        #    且这个方式如果redis维护变更了ip/集群规模等，整个服务会瘫痪，而a方式只要用户重连
-        # 这里采用a方式
-        self._client = client
-        # redis-py库 cluster模式的pubsub不支持异步，不支持gather消息，用自己写的
-        self._mq = AsyncKeyspacePubSub(client.aio)
-
-        self.subscribed = set()
-        super().__init__()  # 本地消息队列
-
-    @override
-    async def close(self):
-        return await self._mq.close()
-
-    @override
-    async def subscribe(self, *channel_names: str) -> None:
-        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
-        if not channel_names:
-            return
-        await self._mq.subscribe(*channel_names)
-        self.subscribed.update(channel_names)
-        if len(self.subscribed) > MAX_SUBSCRIBED:
-            # 抑制此警告可通过修改hetu.backend.redis.MAX_SUBSCRIBED参数
-            logger.warning(
-                f"⚠️ [💾Redis] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={MAX_SUBSCRIBED}行，"
-            )
-
-    @override
-    async def unsubscribe(self, *channel_names: str) -> None:
-        """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
-        if not channel_names:
-            return
-        await self._mq.unsubscribe(*channel_names)
-        self.subscribed.difference_update(channel_names)
-
-    @override
-    async def pull(self) -> None:
-        """
-        从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
-        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
-
-        这是一个阻塞函数，每个用户连接都需要单独运行一个协程来无限循环轮询它，以此来防止服务器消息堆积。
-        消息多时，如果几秒不调用，Redis都会崩。
-
-        Notes
-        -----
-        * pull下来的消息会合批（重复消息合并）
-        * 超过2分钟前的消息会被丢弃，防止堆积
-        """
-
-        # 获得更新的频道名，交给基类入队（去重、清旧）。这是每条通知都走的热路径
-        msg = await self._mq.get_message()
-
-        if msg is not None:
-            channel_name = msg["channel"].decode()
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    _("🔔 [💾Redis] 收到订阅更新通知: {channel_name}").format(
-                        channel_name=channel_name
-                    )
-                )
-            # 表级频道（非keyspace通知）带payload：msgpack的row_id列表，按频道合并
-            ids = None
-            if not channel_name.startswith("__keyspace@"):
-                try:
-                    ids = msgpack.unpackb(msg["data"])
-                except Exception:  # noqa: BLE001 非法payload当作无payload
-                    ids = None
-                if not isinstance(ids, list):
-                    ids = None
-            dropped = self.push_pulled_(channel_name, ids)
-            if dropped:
-                logger.warning(
-                    _(
-                        "⚠️ [💾Redis] 订阅更新通知来不及处理，"
-                        "丢弃了{seconds}秒前的消息共{count}条"
-                    ).format(seconds=self.DROP_AFTER, count=dropped)
-                )
+    def __init__(self, client: Redis | RedisCluster):
+        self._pubsub = AsyncKeyspacePubSub(client, on_message=self._on_message)
+        self._subs: dict[str, set[MQClient]] = {}
+        self._closed = False
 
     @property
-    @override
-    def subscribed_channels(self) -> set[str]:
-        """返回当前订阅的所有频道名"""
-        return self._mq.subscribed
+    def channels(self) -> set[str]:
+        """本进程当前向 Redis 订阅了的频道"""
+        return set(self._subs)
+
+    def subscriber_count(self, channel: str) -> int:
+        """某频道在本进程内的订阅连接数，测试用"""
+        return len(self._subs.get(channel, ()))
+
+    async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """
+        登记 mq 对这些频道的订阅。只有本进程内第一次出现的频道才向 Redis 发 SUBSCRIBE，
+        返回时这些频道都已经订阅生效（别人发出、尚未 ack 的也会等到 ack）。
+        """
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        channels = list(channels)
+        fresh = []
+        for channel in channels:
+            subs = self._subs.get(channel)
+            if subs is None:
+                self._subs[channel] = {mq}
+                fresh.append(channel)
+            else:
+                subs.add(mq)
+        try:
+            if fresh:
+                await self._pubsub.subscribe(*fresh)
+            # 别人先发出、还没 ack 的频道也要等到 ack；它们发送失败时这里一起抛
+            await self._pubsub.wait_subscribed(channels)
+        except BaseException:
+            # 本次发出的频道作废：连同期间搭车登记的其他连接一起撤销（它们在
+            # wait_subscribed 里会收到同样的异常），别让后来者以为已经订上了
+            for channel in fresh:
+                self._subs.pop(channel, None)
+            for channel in channels:
+                subs = self._subs.get(channel)
+                if subs is not None:
+                    subs.discard(mq)
+                    if not subs:
+                        del self._subs[channel]
+            raise
+        # 等待期间可能被别人的失败撤销了登记
+        for channel in channels:
+            if mq not in self._subs.get(channel, ()):
+                raise ConnectionError(
+                    _("频道 {channel} 订阅失败").format(channel=channel)
+                )
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """撤销 mq 对这些频道的订阅，本进程内没人再订的频道才向 Redis 发 UNSUBSCRIBE"""
+        gone = []
+        for channel in channels:
+            subs = self._subs.get(channel)
+            if subs is None:
+                continue
+            subs.discard(mq)
+            if not subs:
+                del self._subs[channel]
+                gone.append(channel)
+        if gone and not self._closed:
+            try:
+                await self._pubsub.unsubscribe(*gone)
+            except Exception as e:  # noqa: BLE001 本地已退订，Redis 侧失败只影响多收几条会被忽略的消息
+                logger.warning(
+                    _("⚠️ [💾Redis] 取消订阅 {count} 个频道失败：{err}").format(
+                        count=len(gone), err=f"{type(e).__name__}:{e}"
+                    )
+                )
+
+    def _on_message(self, msg: dict) -> None:
+        """AsyncKeyspacePubSub 的监听协程收到消息时同步调用，每条消息一次"""
+        channel_name = msg["channel"].decode()
+        subs = self._subs.get(channel_name)
+        if not subs:
+            return  # 刚退订、ack 还没回来的频道
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                _("🔔 [💾Redis] 收到订阅更新通知: {channel_name}").format(
+                    channel_name=channel_name
+                )
+            )
+        # 表级频道（非keyspace通知）带payload：msgpack的row_id列表
+        ids = None
+        if not channel_name.startswith("__keyspace@"):
+            try:
+                ids = msgpack.unpackb(msg["data"])
+            except Exception:  # noqa: BLE001 非法payload当作无payload
+                ids = None
+            if not isinstance(ids, list):
+                ids = None
+        dropped = 0
+        for mq in subs:
+            dropped += mq.push_pulled_(channel_name, ids)
+        if dropped:
+            logger.warning(
+                _(
+                    "⚠️ [💾Redis] 订阅更新通知来不及处理，"
+                    "丢弃了{seconds}秒前的消息共{count}条"
+                ).format(seconds=MQClient.DROP_AFTER, count=dropped)
+            )
+
+    async def close(self) -> None:
+        self._closed = True
+        self._subs.clear()
+        await self._pubsub.close()
+
+
+@final
+class RedisMQClient(HubMQClient):
+    """
+    每个用户连接一个实例：只是本连接订阅集合 + 本地消息队列，
+    真正的 Redis pubsub 由本进程共享的 `PubSubHub` 持有。
+    """
+
+    MAX_SUBSCRIBED = MAX_SUBSCRIBED
+    LOG_TAG = "💾Redis"

@@ -510,17 +510,8 @@ async def test_mq_client(filled_item_ref, mod_auto_backend):
     idmap.update(filled_item_ref, row)
     await backend.master.commit(idmap)
 
-    # 拉取消息(堵塞直到收到消息)
-    try:
-        async with asyncio.timeout(0.5):
-            # 多拉几次去掉服务器刚启动多余的消息
-            await mq.pull()
-            await mq.pull()
-            await mq.pull()
-    except TimeoutError:
-        pass
-
-    async with asyncio.timeout(0.5):
+    # 通知由后端 hub 在后台投递到本地队列，get_message 等到它到齐（同频道重复消息会合并）
+    async with asyncio.timeout(2):
         messages = await mq.get_message()
 
     assert channel_name in messages
@@ -642,14 +633,9 @@ async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
     idmap.mark_deleted(filled_item_ref, rows[1].id)
     await backend.master.commit(idmap)
 
-    try:
-        async with asyncio.timeout(1):
-            while True:
-                await mq.pull()
-    except TimeoutError:
-        pass
-
-    async with asyncio.timeout(0.5):
+    # 等 hub 把这个事务的通知都投递到本地队列
+    await asyncio.sleep(0.5)
+    async with asyncio.timeout(2):
         messages = await mq.get_message()
 
     assert messages[table_channel] == {
@@ -670,13 +656,8 @@ async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
     rows[0].qty = 2
     idmap.update(filled_item_ref, rows[0])
     await backend.master.commit(idmap)
-    try:
-        async with asyncio.timeout(1):
-            while True:
-                await mq.pull()
-    except TimeoutError:
-        pass
-    async with asyncio.timeout(0.5):
+    await asyncio.sleep(0.5)
+    async with asyncio.timeout(2):
         messages = await mq.get_message()
     assert table_channel not in messages
     assert row_channel in messages

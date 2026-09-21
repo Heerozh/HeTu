@@ -19,7 +19,7 @@ from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import PUSH_CLOSE, client_handler, mq_puller, subscription_handler
+from .receiver import PUSH_CLOSE, client_handler, subscription_handler
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -139,13 +139,10 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     )
     _forget = request.app.add_task(receiver_task, name=recv_task_id)
 
-    # 创建获得订阅推送通知的协程3,4,还有内部pubsub协程5
+    # 创建获得订阅推送通知的协程3（通知由本进程共享的 pubsub 分发器直接塞进 broker 的本地队列）
     subs_task_id = f"subs_receiver:{request.id}"
     subscript_task = subscription_handler(ws, broker, push_queue)
     _forget = request.app.add_task(subscript_task, name=subs_task_id)
-    puller_task_id = f"mq_puller:{request.id}"
-    puller_task = mq_puller(ws, broker)
-    _forget = request.app.add_task(puller_task, name=puller_task_id)
 
     # 删除当前长连接用不上的临时变量
     del namespace
@@ -194,7 +191,6 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         logger.info(close_msg)
         await request.app.cancel_task(recv_task_id, raise_exception=False)
         await request.app.cancel_task(subs_task_id, raise_exception=False)
-        await request.app.cancel_task(puller_task_id, raise_exception=False)
         try:
             system_caller.call_check(DISCONNECT_SYSTEM)
         except ValueError:

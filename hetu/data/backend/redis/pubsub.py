@@ -6,16 +6,26 @@
 """
 
 import asyncio
+import contextlib
 import logging
 from asyncio.queues import Queue
+from collections.abc import Callable, Iterable
 from functools import partial
 
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
+from redis.asyncio.connection import ConnectionPool
 from redis.cluster import LoadBalancingStrategy
+from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import SlotNotCoveredError
 
 logger = logging.getLogger(__name__)
+
+# 取消订阅等 ack 的上限；超时只记日志不报错（本地状态已经改完，多收几条消息会被上层忽略）
+UNSUBSCRIBE_ACK_TIMEOUT = 5.0
+# 节点失效后重新订阅的退避区间
+RESUBSCRIBE_BACKOFF_MIN = 0.5
+RESUBSCRIBE_BACKOFF_MAX = 5.0
 
 
 class AsyncKeyspacePubSub:
@@ -25,38 +35,65 @@ class AsyncKeyspacePubSub:
     * 自动总集所有Node的消息
     * 支持拓扑更新，自动跟随cluster的更改，不过有几秒延迟。
     * 支持任何精确频道，但不支持pattern订阅
+    * pubsub 走自建的独立连接（每节点一条），不占 client 的读写连接池
     """
 
-    def __init__(self, client: Redis | RedisCluster):
+    def __init__(
+        self,
+        client: Redis | RedisCluster,
+        on_message: Callable[[dict], None] | None = None,
+    ):
         """
         Parameters
         ----------
         client: redis.asyncio.Redis or redis.asyncio.cluster.RedisCluster
-            redis.asyncio.Redis 或 redis.asyncio.cluster.RedisCluster 实例
+            redis.asyncio.Redis 或 redis.asyncio.cluster.RedisCluster 实例。
+            只用来解析拓扑/取连接参数，pubsub 本身走本类自建的独立连接。
+        on_message
+            收到频道消息时在监听协程里直接同步调用的回调（每条消息一次，不能 await）。
+            不传则消息进 `message_queue`，由 `get_message()` 取。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
+        self.on_message = on_message
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
         # 已成功订阅的频道
         self._subscribed: set[str] = set()
-        self._pending_subscribe: set[str] = set()
-        self._pending_unsubscribe: set[str] = set()
+        # 已发出 SUBSCRIBE / UNSUBSCRIBE、尚未收到 ack 的频道，每个频道一个 future，
+        # ack 到了只唤醒等它的那几个调用方，不用广播
+        self._pending_subscribe: dict[str, asyncio.Future[None]] = {}
+        self._pending_unsubscribe: dict[str, asyncio.Future[None]] = {}
         # 每个频道订阅在哪个节点上，取消订阅时必须发回同一节点
         # （cluster模式下按ROUND_ROBIN选replica，两次解析可能得到不同节点）
         self._channel_node: dict[str, str] = {}
 
-        # 统一的消息队列
+        # 统一的消息队列（没有 on_message 回调时使用）
         self.message_queue: Queue[dict] = asyncio.Queue()
+
+        # 每个节点一把锁：redis-py 的 PubSub 首次 connect 不是并发安全的（同时几个 subscribe
+        # 会各自去池里拿连接），同一节点的 SUBSCRIBE/UNSUBSCRIBE 串行发
+        self._node_locks: dict[str, asyncio.Lock] = {}
 
         # 运行状态
         self._tasks: set[asyncio.Task] = set()
-        self._resubscribe_task = None
+        self._resubscribe_task: asyncio.Task | None = None
+        self._closed = False
 
-        # 订阅通知
-        self._subscribe_notify = asyncio.Condition()
+    def _node_lock(self, node_key: str) -> asyncio.Lock:
+        lock = self._node_locks.get(node_key)
+        if lock is None:
+            lock = self._node_locks[node_key] = asyncio.Lock()
+        return lock
+
+    def _spawn_listener(self, node_key: str, pubsub: PubSub):
+        """建立一个射后不管的task监听pubsub消息"""
+        task = asyncio.create_task(self._node_listener(pubsub))
+        task.add_done_callback(partial(self._on_node_listener_done, node_key))
+        # 如果不保存task，task不会执行会被gc
+        self._tasks.add(task)
 
     def standalone_connect(self):
         """
@@ -67,17 +104,22 @@ class AsyncKeyspacePubSub:
 
         logger.info("Setup standalone PubSub")
 
-        pubsub = self.main_client.pubsub()
+        # 与 cluster_connect 一样自建一条连接做 pubsub：pubsub 连接是常驻的，不能占用
+        # main_client 那个有上限的读写连接池。照抄它的连接参数（含 ssl/unix socket 的
+        # connection_class）另开一个只给 pubsub 用的小池
+        main_pool = self.main_client.connection_pool
+        pool = ConnectionPool(
+            connection_class=main_pool.connection_class,
+            max_connections=2,
+            **main_pool.connection_kwargs,
+        )
+        r_client = Redis.from_pool(pool)
+        pubsub = r_client.pubsub()
         self.node_resources["standalone"] = {
-            "client": self.main_client,
+            "client": r_client,
             "pubsub": pubsub,
         }
-
-        # 建立一个射后不管的task监听pubsub消息
-        task = asyncio.create_task(self._node_listener(pubsub))
-        task.add_done_callback(partial(self._on_node_listener_done, "standalone"))
-        # 如果不保存task，task不会执行会被gc
-        self._tasks.add(task)
+        self._spawn_listener("standalone", pubsub)
 
     def cluster_connect(self, node: ClusterNode):
         """
@@ -93,7 +135,6 @@ class AsyncKeyspacePubSub:
         if "path" in connection_kwargs:
             del connection_kwargs["path"]
 
-        # 这会导致每个mq client拥有自己独立的连接pool，问题不大因为订阅就是每个用户一个连接
         r_client = Redis(**connection_kwargs)
         pubsub = r_client.pubsub()
 
@@ -101,12 +142,7 @@ class AsyncKeyspacePubSub:
             "client": r_client,
             "pubsub": pubsub,
         }
-
-        # 建立一个射后不管的task监听pubsub消息
-        task = asyncio.create_task(self._node_listener(pubsub))
-        task.add_done_callback(partial(self._on_node_listener_done, node_key))
-        # 如果不保存task，task不会执行会被gc
-        self._tasks.add(task)
+        self._spawn_listener(node_key, pubsub)
 
     async def _resolve_node(self, channel: str) -> str:
         """
@@ -148,71 +184,143 @@ class AsyncKeyspacePubSub:
 
         return target_node_key
 
+    @staticmethod
+    def _fail_pending(pending: dict[str, asyncio.Future[None]], exc: BaseException):
+        for fut in pending.values():
+            if not fut.done():
+                fut.set_exception(exc)
+                fut.exception()  # 没人等的话别在 gc 时报 "never retrieved"
+        pending.clear()
+
     async def subscribe(self, *channels: str):
         """
-        精确订阅，可一次订阅多个频道，全部订阅成功后返回。
+        精确订阅，可一次订阅多个频道，全部订阅成功（收到 ack）后返回。
         根据 Channel 中的 Key 计算 Slot，路由到指定 Node 的 PubSub；
         同一 Node 的频道合并成一条 SUBSCRIBE 命令，N 个频道只需 O(节点数) 次往返。
         Channel 格式预期: __keyspace@<db>__:<keyname> 或任何带 {hash tag} 的频道名
         """
         if not channels:
             return
+        if self._closed:
+            raise RedisConnectionError("pubsub closed")
+        loop = asyncio.get_running_loop()
 
-        # 按目标节点分组
+        # 按目标节点分组；已经在等 ack 的频道（别的调用方发的）不再重复发，等它的 future 即可
         groups: dict[str, list[str]] = {}
-        for channel in channels:
-            node_key = await self._resolve_node(channel)
-            groups.setdefault(node_key, []).append(channel)
-            self._channel_node[channel] = node_key
+        futures: list[asyncio.Future[None]] = []
+        own: list[str] = []
+        try:
+            for channel in channels:
+                fut = self._pending_subscribe.get(channel)
+                if fut is None:
+                    if channel in self._subscribed:
+                        continue
+                    fut = loop.create_future()
+                    self._pending_subscribe[channel] = fut
+                    own.append(channel)
+                    node_key = await self._resolve_node(channel)
+                    groups.setdefault(node_key, []).append(channel)
+                    self._channel_node[channel] = node_key
+                futures.append(fut)
 
-        # 每个节点一条SUBSCRIBE命令
-        for node_key, group in groups.items():
-            ps = self.node_resources[node_key]["pubsub"]
-            await ps.subscribe(*group)
-            self._pending_subscribe.update(group)
+            # 每个节点一条SUBSCRIBE命令
+            for node_key, group in groups.items():
+                ps = self.node_resources[node_key]["pubsub"]
+                async with self._node_lock(node_key):
+                    await ps.subscribe(*group)
+        except BaseException as e:
+            # 发送失败：本次发出的频道作废，让等它们的人一起失败
+            for channel in own:
+                fut = self._pending_subscribe.pop(channel, None)
+                self._channel_node.pop(channel, None)
+                if fut is not None and not fut.done():
+                    fut.set_exception(e)
+                    fut.exception()  # 没人等的话别在 gc 时报 "never retrieved"
+            raise
 
         # 等message返回了才能算订阅成功
-        waiting = set(channels)
-        async with self._subscribe_notify:
-            await self._subscribe_notify.wait_for(
-                lambda: self._pending_subscribe.isdisjoint(waiting)
-            )
+        if futures:
+            await asyncio.gather(*futures)
+
+    async def wait_subscribed(self, channels: Iterable[str]):
+        """
+        等待这些频道的 SUBSCRIBE 都收到 ack（由其他调用方发出的也算）。
+        频道不在待确认集合里时立即返回；对应的 SUBSCRIBE 发送失败时抛出同样的异常。
+        """
+        futures = [
+            fut
+            for channel in channels
+            if (fut := self._pending_subscribe.get(channel)) is not None
+        ]
+        if futures:
+            await asyncio.gather(*futures)
 
     async def unsubscribe(self, *channels: str):
         """
-        取消订阅，可一次取消多个频道。发回各频道当初订阅的那个节点。
-        和 subscribe 一样，等 Redis 回 ack 后才返回，保证返回后不会再收到这些频道的消息。
+        取消订阅，可一次取消多个。发回各频道当初订阅的那个节点。
+        等 Redis 回 ack 后才返回，保证返回后不会再收到这些频道的消息；
+        ack 超过 UNSUBSCRIBE_ACK_TIMEOUT 没来只记日志，本地状态已经改完。
         """
+        if not channels:
+            return
+        if self._closed:
+            for channel in channels:
+                self._subscribed.discard(channel)
+                self._channel_node.pop(channel, None)
+            return
+        loop = asyncio.get_running_loop()
+
         groups: dict[str, list[str]] = {}
+        futures: list[asyncio.Future[None]] = []
         for channel in channels:
             node_key = self._channel_node.pop(channel, "standalone")
-            if node_key in self.node_resources:
-                groups.setdefault(node_key, []).append(channel)
             self._subscribed.discard(channel)
-            self._pending_subscribe.discard(channel)
+            pending = self._pending_subscribe.pop(channel, None)
+            if pending is not None and not pending.done():
+                pending.set_exception(RedisConnectionError("unsubscribed"))
+                pending.exception()
+            if node_key not in self.node_resources:
+                continue
+            groups.setdefault(node_key, []).append(channel)
+            fut = self._pending_unsubscribe.get(channel)
+            if fut is None:
+                fut = loop.create_future()
+                self._pending_unsubscribe[channel] = fut
+            futures.append(fut)
 
-        waiting: set[str] = set()
         for node_key, group in groups.items():
-            await self.node_resources[node_key]["pubsub"].unsubscribe(*group)
-            self._pending_unsubscribe.update(group)
-            waiting.update(group)
+            async with self._node_lock(node_key):
+                await self.node_resources[node_key]["pubsub"].unsubscribe(*group)
 
-        if waiting:
-            async with self._subscribe_notify:
-                await self._subscribe_notify.wait_for(
-                    lambda: self._pending_unsubscribe.isdisjoint(waiting)
+        if futures:
+            try:
+                async with asyncio.timeout(UNSUBSCRIBE_ACK_TIMEOUT):
+                    await asyncio.gather(*futures)
+            except TimeoutError:
+                logger.warning(
+                    f"UNSUBSCRIBE ack timeout after {UNSUBSCRIBE_ACK_TIMEOUT}s, "
+                    f"{len(futures)} channels"
                 )
 
     async def resubscribe_all(self):
         """
-        重新订阅所有频道，适用于拓扑变化后
+        节点失效后重新订阅所有已确认的频道，失败就退避重试直到成功或 close。
         """
-        current_subscriptions = list(self._subscribed | self._pending_subscribe)
+        current_subscriptions = list(self._subscribed)
         self._subscribed.clear()
-        self._pending_subscribe.clear()
-        self._pending_unsubscribe.clear()
         self._channel_node.clear()
-        await self.subscribe(*current_subscriptions)
+        backoff = RESUBSCRIBE_BACKOFF_MIN
+        while not self._closed:
+            try:
+                await self.subscribe(*current_subscriptions)
+                logger.info(f"Resubscribed {len(current_subscriptions)} channels")
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 网络/拓扑错误都要重试，不能让恢复流程死掉
+                logger.error(f"Resubscribe failed, retry in {backoff}s: {e}")
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, RESUBSCRIBE_BACKOFF_MAX)
 
     async def _node_listener(self, pubsub: PubSub):
         """
@@ -227,16 +335,22 @@ class AsyncKeyspacePubSub:
                         if mtype == "subscribe":
                             channel = message["channel"].decode()
                             self._subscribed.add(channel)
-                            self._pending_subscribe.discard(channel)
-                            async with self._subscribe_notify:
-                                self._subscribe_notify.notify_all()
+                            fut = self._pending_subscribe.pop(channel, None)
+                            if fut is not None and not fut.done():
+                                fut.set_result(None)
                         elif mtype == "unsubscribe":
                             channel = message["channel"].decode()
-                            self._pending_unsubscribe.discard(channel)
-                            async with self._subscribe_notify:
-                                self._subscribe_notify.notify_all()
+                            fut = self._pending_unsubscribe.pop(channel, None)
+                            if fut is not None and not fut.done():
+                                fut.set_result(None)
                         continue
-                    await self.message_queue.put(message)
+                    if self.on_message is None:
+                        await self.message_queue.put(message)
+                        continue
+                    try:
+                        self.on_message(message)
+                    except Exception:  # 一条消息处理失败不能拖死监听
+                        logger.exception("on_message callback failed")
 
             # 走到这里只可能是node没订阅任何频道
             await asyncio.sleep(0.25)  # 等待订阅建立
@@ -244,6 +358,8 @@ class AsyncKeyspacePubSub:
     def _on_node_listener_done(self, node_key, task):
         # task关闭说明链接断开了，node可能失效，移除资源。一般发生在数据库扩容/容灾。
         self._tasks.discard(task)
+        if self._closed:
+            return
         try:
             # 获取结果，如果有异常会在这里重新抛出
             task.result()
@@ -253,11 +369,25 @@ class AsyncKeyspacePubSub:
             return
         except Exception as e:
             logger.error(f"Listener error on node {node_key}: {e}")
-            # 断线处理
-            if node_key in self.node_resources:
-                del self.node_resources[node_key]
-            # 灾难恢复逻辑。如果不保存task，task不会执行会被gc
-            self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
+            # 断线处理：丢弃并尽力关掉失效节点的自建连接，等 ack 的调用方全部失败
+            res = self.node_resources.pop(node_key, None)
+            if res is not None:
+                dispose = asyncio.create_task(self._dispose_node(res))
+                dispose.add_done_callback(self._tasks.discard)
+                self._tasks.add(dispose)
+            exc = RedisConnectionError(f"pubsub node {node_key} lost")
+            self._fail_pending(self._pending_subscribe, exc)
+            self._fail_pending(self._pending_unsubscribe, exc)
+            # 灾难恢复逻辑（已有一个在退避重试中就不再起）。如果不保存task，task不会执行会被gc
+            if self._resubscribe_task is None or self._resubscribe_task.done():
+                self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
+
+    @staticmethod
+    async def _dispose_node(res: dict):
+        # 连接已坏，关不上也无所谓
+        for key in ("pubsub", "client"):
+            with contextlib.suppress(Exception):
+                await res[key].aclose()
 
     async def get_message(self):
         """
@@ -273,18 +403,23 @@ class AsyncKeyspacePubSub:
         """
         清理资源
         """
-        # 先关闭所有 PubSub 和 Client
+        self._closed = True
+        # 先停监听任务（否则关连接会触发 redis-py 的自动重连、甚至触发失效重订阅）
+        tasks = [t for t in self._tasks if not t.done()]
+        if self._resubscribe_task is not None and not self._resubscribe_task.done():
+            tasks.append(self._resubscribe_task)
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+        exc = RedisConnectionError("pubsub closed")
+        self._fail_pending(self._pending_subscribe, exc)
+        self._fail_pending(self._pending_unsubscribe, exc)
+
+        # 再关闭所有 PubSub 和自建的 Client
         for res in self.node_resources.values():
-            await res["pubsub"].close()
-            # 只有 Cluster 模式下创建了额外的 Client，需要关闭
-            if self.is_cluster:
-                await res["client"].aclose()
-
-        # 取消所有监听任务
-        for t in self._tasks:
-            if not t.done():
-                t.cancel()
-
+            await self._dispose_node(res)
         self.node_resources = {}
 
         logger.info("Resources closed.")
