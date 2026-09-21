@@ -120,6 +120,40 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         max_table_rows=request.app.config.get("MAX_TABLE_SUBSCRIPTION_ROWS", 100_000),
     )
 
+    # 订阅本连接自己那行 Connection：被顶号（owner 被改）时收到通知才重查，RPC 路径上不再
+    # 每次读库；收到通知还主动从 master 核一次，被顶号就立刻断连，不用等它下次调用。
+    # 频道名与 hub 必须是同一个后端，否则保持每次都查
+    conn_tbl = tbl_mgr.get_table(connection.Connection)
+    if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
+        alive_checker = endpoint_executor.alive_checker
+        mark_dirty = alive_checker.enable_notify_mode()
+
+        async def recheck_alive():
+            try:
+                if await alive_checker.kicked(context):
+                    close_msg = _(
+                        "⛓️ [📡WSConnect] 连接已被顶号，主动断开：{ctx}"
+                    ).format(ctx=context)
+                    replay.info(close_msg)
+                    logger.info(close_msg)
+                    ws.fail_connection()
+            except Exception as e:  # noqa: BLE001 读库失败不致命：兜底间隔和下次调用还会再查
+                logger.warning(
+                    _("⚠️ [📡WSConnect] 顶号核查读库失败：{err}").format(
+                        err=f"{type(e).__name__}:{e}"
+                    )
+                )
+
+        def on_conn_row_changed():
+            # 在 hub 的监听协程里同步调用：只置标记 + 起短任务，不能 await
+            mark_dirty()
+            request.app.add_task(recheck_alive())
+
+        await broker.watch_channel(
+            conn_tbl.backend.servant.row_channel(conn_tbl, context.connection_id),
+            on_conn_row_changed,
+        )
+
     # 初始化push消息队列
     push_queue = asyncio.Queue(1024)
 

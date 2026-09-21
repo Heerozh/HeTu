@@ -250,12 +250,11 @@ def test_websocket_kick_connect(test_server):
         await client2.send(["rpc", "add_rls_comp_value", 2])
         await client2.recv()
 
-        # 虽然上面的client2踢掉了client1，但是client1并不会主动断开连接，
-        # 需要调用一次system才能发现自己被踢掉了
-        await client1.send(["rpc", "add_rls_comp_value", 3])
+        # client2 顶掉了 client1：服务器收到 client1 那行 Connection 的变更通知后会
+        # 主动断开它，不用等 client1 再调一次 system。留点时间给通知（SQL hub 轮询 0.1s）
+        await asyncio.sleep(0.5)
 
         # 测试踢出成功
-        await asyncio.sleep(0.2)
         with pytest.raises(ConnectionClosedError):
             await client1.send(["rpc", "add_rls_comp_value", 4])
 
