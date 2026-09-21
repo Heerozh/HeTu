@@ -780,20 +780,36 @@ class SQLBackendClient(BackendClient, alias="sql"):
             table = self.component_table(ref)
             for field, by_value in wanted.items():
                 col = table.c[field]
+
+                def _classify(
+                    hit: tuple[int, bool, str],
+                    found_id: Any,
+                    _name: str = f"{comp_cls.name_}.{field}",
+                ) -> None:
+                    row_id, is_race, op = hit
+                    if op == "update" and int(found_id) == row_id:
+                        return  # 自身行：由 UPDATE 的版本条件报 Race
+                    msg = f"Unique violation {_name} id={row_id} {op}"
+                    (race if is_race else strict).append(msg)
+
                 stmt = sa.select(table.c.id, col).where(col.in_(list(by_value)))
+                unattributed = False
                 for found_id, found_value in (await conn.execute(stmt)).all():
                     hit = by_value.get(_norm(field, found_value))
                     if hit is None:
-                        # 数据库按自身相等语义命中但本地对不上（如大小写不敏感 collation）：
-                        # 只有一个候选时可归因；否则交给 UNIQUE 约束兜底
-                        if len(by_value) != 1:
-                            continue
-                        hit = next(iter(by_value.values()))
-                    row_id, is_race, op = hit
-                    if op == "update" and int(found_id) == row_id:
-                        continue  # 自身行：由 UPDATE 的版本条件报 Race
-                    msg = f"Unique violation {comp_cls.name_}.{field} id={row_id} {op}"
-                    (race if is_race else strict).append(msg)
+                        unattributed = True
+                        continue
+                    _classify(hit, found_id)
+                if unattributed:
+                    # 数据库按自身相等语义（如 MariaDB 默认的大小写不敏感 collation）命中了，
+                    # 但查回的值和本地哪个候选都对不上：逐个候选再问数据库，让它自己判定撞的
+                    # 是谁。不能放过去交给 UNIQUE 约束兜底——约束报的 IntegrityError 会被当成
+                    # RaceCondition 无限重试，而重试每次结果都一样
+                    for value, hit in by_value.items():
+                        probe = sa.select(table.c.id).where(col == value).limit(1)
+                        found = (await conn.execute(probe)).first()
+                        if found is not None:
+                            _classify(hit, found[0])
         if race:
             raise RaceCondition("RACE: " + race[0])
         if strict:

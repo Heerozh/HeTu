@@ -353,6 +353,55 @@ async def test_unique_race_on_updated_row_has_priority(item_ref, mod_auto_backen
             await repo.update(p)  # p 的版本已过期
 
 
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_unique_ci_collation_multi_candidate_is_deterministic(
+    monkeypatch, new_component_env, mod_auto_backend
+):
+    """SQL 后端遇到大小写不敏感 collation（MariaDB 默认；这里用 SQLite 的 NOCASE 模拟）：
+    一个事务盲 insert 两个不同的 name，其中一个按数据库的相等语义撞上既有行（'Alice' vs
+    'alice'）→ 必须是确定性 UniqueViolation、只跑一次；不能因为查回的值对不上本地候选就漏判，
+    交给 UNIQUE 约束报错后被当成 RaceCondition 反复重试"""
+    import sqlalchemy as sa
+    from fixtures.testdata import create_ref
+
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+    from hetu.data.backend.sql import client as sql_client
+
+    real_type = sql_client._numpy_to_sqla_type
+
+    def ci_type(dtype):
+        col_type = real_type(dtype)
+        if isinstance(col_type, sa.String):
+            return sa.String(length=col_type.length, collation="NOCASE")
+        return col_type
+
+    monkeypatch.setattr(sql_client, "_numpy_to_sqla_type", ci_type)
+
+    @define_component(namespace="pytest", permission=Permission.ADMIN)
+    class CIName(BaseComponent):
+        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
+        time: np.int64 = property_field(0, unique=True, index=True)
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(CIName, backend)  # 表在打了 collation 补丁之后建
+    async with backend.session("pytest", 1) as s:
+        r = CIName.new_row()
+        r.name, r.time = "alice", 300
+        await s.using(CIName).insert(r)
+
+    attempts = 0
+    with pytest.raises(UniqueViolation, match="name"):
+        async for attempt in backend.session("pytest", 1).retry(3):
+            async with attempt as s:
+                attempts += 1
+                repo = s.using(ref.comp_cls)
+                for name, t in (("Alice", 301), ("Bob", 302)):
+                    r = CIName.new_row()
+                    r.name, r.time = name, t
+                    await repo.insert(r)
+    assert attempts == 1
+
+
 async def test_unique_explicit_id_pk_conflict(item_ref, mod_auto_backend):
     """规则4（headless）：显式 id 撞主键，无 get → UniqueViolation；先 get(id=) 读空再撞 → RaceCondition"""
     backend: Backend = mod_auto_backend()
