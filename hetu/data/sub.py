@@ -82,14 +82,6 @@ class RowSubscription(BaseSubscription):
             cache = cls.reset_cache_()
         cache[channel] = row
 
-    @classmethod
-    def clear_cache(cls, channel):
-        cache = cls.__cache.get(None)
-        if cache:
-            cache.pop(channel, None)
-        else:
-            cls.__cache.set({})
-
     def decode_row_(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
         """按本订阅的RLS判定行是否可见：可见返回去掉_version的拷贝，不可见/不存在返回None"""
         if row is None:

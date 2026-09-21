@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from redis.asyncio.cluster import RedisCluster
 
 logger = logging.getLogger("HeTu.root")
-MAX_SUBSCRIBED = 5000
 
 
 class PubSubHub:
@@ -193,5 +192,4 @@ class RedisMQClient(HubMQClient):
     真正的 Redis pubsub 由本进程共享的 `PubSubHub` 持有。
     """
 
-    MAX_SUBSCRIBED = MAX_SUBSCRIBED
     LOG_TAG = "💾Redis"

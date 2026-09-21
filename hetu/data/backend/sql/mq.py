@@ -21,7 +21,6 @@ if TYPE_CHECKING:
     from .client import SQLBackendClient
 
 logger = logging.getLogger("HeTu.root")
-MAX_SUBSCRIBED = 5000
 PULL_BATCH_SIZE = 256
 # 轮询通知表失败后的退避区间（与 Redis pubsub 节点失效后的重订阅一致）
 POLL_BACKOFF_MIN = 0.5
@@ -289,5 +288,4 @@ class SQLMQClient(HubMQClient):
     通知表的轮询由本进程共享的 `SQLNotifyHub` 负责。
     """
 
-    MAX_SUBSCRIBED = MAX_SUBSCRIBED
     LOG_TAG = "💾SQL"
