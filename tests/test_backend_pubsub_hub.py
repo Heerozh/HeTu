@@ -180,3 +180,51 @@ async def test_watch_channel_callback_bypasses_client_queue(
 
     await broker.close()
     assert hub.subscriber_count(channel) == 0
+
+
+async def test_watch_and_client_subscription_share_channel(
+    filled_item_ref, mod_auto_backend
+):
+    """服务端关注（watch_channel）和客户端订阅落在同一频道：通知既回调也推给客户端；
+    客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
+    backend: Backend = mod_auto_backend()
+    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
+    ctx = _admin_ctx()
+    broker = SubscriptionBroker(backend)
+    hub = _hub(backend)
+    hits: list[int] = []
+
+    async def wait_hits(count: int):
+        async with asyncio.timeout(3):
+            while len(hits) < count:
+                await asyncio.sleep(0.02)
+
+    sub_id, row = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
+    assert sub_id and row
+    channel = cast(RowSubscription, broker._subs[sub_id]).channel
+    await broker.watch_channel(channel, lambda: hits.append(1))
+    assert hub.subscriber_count(channel) == 1  # 同一连接只登记一次
+
+    # 同一条变更：关注回调到了，客户端也照常收到 updt
+    await _update_qty(backend, filled_item_ref, 501)
+    await wait_hits(1)
+    updates = await _get_updates(broker)
+    assert updates[sub_id][row["id"]]["qty"] == 501
+
+    # 客户端退订：hub 里的登记还在，关注照常
+    await broker.unsubscribe(sub_id)
+    assert hub.subscriber_count(channel) == 1
+    await _update_qty(backend, filled_item_ref, 502)
+    await wait_hits(2)
+    assert await broker.get_updates(timeout=0.3) == {}  # 客户端不再收到
+
+    # 再订回来又能收到，关注也没丢
+    sub_id2, _ = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
+    assert sub_id2
+    await _update_qty(backend, filled_item_ref, 503)
+    await wait_hits(3)
+    updates = await _get_updates(broker)
+    assert updates[sub_id2][row["id"]]["qty"] == 503
+
+    await broker.close()
+    assert hub.subscriber_count(channel) == 0

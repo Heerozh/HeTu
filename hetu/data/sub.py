@@ -314,13 +314,12 @@ class SubscriptionBroker:
 
     async def watch_channel(self, channel: str, callback: Callable[[], None]) -> None:
         """
-        服务端内部关注一个频道（如本连接自己的 Connection 行）：收到通知只调 `callback`，
-        不推给客户端、不计入订阅数、不做权限检查。连接关闭时随 mq_client.close() 一起退订。
-        先登记再订阅，避免订阅生效到登记之间的消息落进客户端推送队列。
+        服务端内部关注一个频道（如本连接用户的 Connection owner 值频道）：收到通知调
+        `callback`，不计入订阅数、不做权限检查；客户端对同一频道的订阅/退订与之互不干扰。
+        连接关闭时随 mq_client.close() 一起退订。
         回调在后端通知接收器的监听协程里同步执行，必须非阻塞。
         """
-        self._mq_client.watch_(channel, callback)
-        await self._mq_client.subscribe(channel)
+        await self._mq_client.watch(channel, callback)
 
     def count(self) -> tuple[int, int, int]:
         """获取订阅数，返回 (row订阅数, index订阅数, table订阅数)"""

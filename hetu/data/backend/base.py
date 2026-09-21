@@ -852,24 +852,22 @@ class MQClient:
         self.pulled_set: set[str] = set()
         # 表级频道合并后的payload：channel -> 变动的row_id集合
         self.pulled_payload: dict[str, set[str]] = {}
-        # 服务端内部关注的频道：收到通知只同步回调，不进推送队列（见 watch_）
+        # 服务端内部关注的频道 → 回调（见 watch）
         self._watchers: dict[str, Callable[[], None]] = {}
 
     async def close(self):
         """取消本连接的全部订阅并释放资源"""
         raise NotImplementedError
 
-    def watch_(self, channel_name: str, callback: Callable[[], None]) -> None:
+    async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
         """
-        登记一个服务端内部关注的频道：该频道的通知只同步调用 `callback`，不进本地推送队列。
-        调用方自行 `subscribe`。回调在后端通知接收器的监听协程里执行，必须非阻塞
-        （置个标记 / create_task），不得 await、不得开事务。
+        服务端内部关注一个频道：订阅它，收到通知时同步调用 `callback`。与客户端订阅
+        （`subscribe`）互不干扰：同一频道客户端也订了的话通知照常入队，客户端 `unsubscribe`
+        它也不会把这里的关注退掉；只随 `close()` 一起退订。
+        回调在后端通知接收器的监听协程里执行，必须非阻塞（置个标记 / create_task），
+        不得 await、不得开事务。
         """
-        self._watchers[channel_name] = callback
-
-    def unwatch_(self, channel_name: str) -> None:
-        """取消 `watch_` 的登记（不退订，退订由调用方决定）"""
-        self._watchers.pop(channel_name, None)
+        raise NotImplementedError
 
     def push_pulled_(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
         """
@@ -878,7 +876,7 @@ class MQClient:
         表级频道的 payload 按频道合并。消息内容只有channel名：每行数据、每个Index都是
         一个channel，该channel收到了任何消息都说明有数据更新。
         入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由调用方打日志。
-        `watch_` 登记过的频道走回调，不入队。
+        `watch` 关注的频道先走回调；客户端没订它就到此为止，订了的话照常入队。
 
         这是每条通知都走的热路径：常态下队头不会过期，只花一次 O(1) 的比较。
         """
@@ -892,7 +890,8 @@ class MQClient:
                         channel=channel_name
                     )
                 )
-            return 0
+            if channel_name not in self.subscribed_channels:
+                return 0
 
         now = time.monotonic()
         dropped = 0
@@ -983,21 +982,42 @@ class HubMQClient(MQClient):
     def __init__(self, hub: MQHub):
         super().__init__()  # 本地消息队列
         self._hub = hub
+        # 客户端订阅的频道；服务端内部关注（watch）的频道另记一份，两者可以重叠：
+        # hub 按 MQClient 计数，同一频道只登记一次，所以客户端退订时要看它是不是还被关注着
         self.subscribed: set[str] = set()
+        self._watched: set[str] = set()
         self._closed = False
 
     async def close(self):
-        """取消本连接的全部订阅。连接拆除路径上调用，后端出错也不抛"""
+        """取消本连接的全部订阅（含内部关注的）。连接拆除路径上调用，后端出错也不抛"""
         self._closed = True
-        if self.subscribed:
-            channels = self.subscribed
-            self.subscribed = set()
+        channels = self.subscribed | self._watched
+        self.subscribed = set()
+        self._watched = set()
+        self._watchers.clear()
+        if channels:
             try:
                 await self._hub.remove(self, channels)
             except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
                 logger.warning(
                     f"⚠️ [{self.LOG_TAG}] 关闭连接时取消订阅失败：{type(e).__name__}:{e}"
                 )
+
+    async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        # 先登记回调再订阅：订阅生效到登记之间的通知不能落进客户端推送队列
+        self._watchers[channel_name] = callback
+        self._watched.add(channel_name)
+        try:
+            await self._hub.add(self, [channel_name])
+        except BaseException:
+            self._watched.discard(channel_name)
+            self._watchers.pop(channel_name, None)
+            raise
+        if self._closed:
+            await self._hub.remove(self, [channel_name])
+            raise ConnectionError(_("连接已关闭，已调用过close"))
 
     async def subscribe(self, *channel_names: str) -> None:
         """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
@@ -1029,7 +1049,10 @@ class HubMQClient(MQClient):
         if not channel_names:
             return
         self.subscribed.difference_update(channel_names)
-        await self._hub.remove(self, channel_names)
+        # 服务端还关注着的频道只是客户端不要了，hub 里的登记得留着
+        gone = [name for name in channel_names if name not in self._watched]
+        if gone:
+            await self._hub.remove(self, gone)
 
     @property
     def subscribed_channels(self) -> set[str]:
