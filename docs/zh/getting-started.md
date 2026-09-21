@@ -1,22 +1,21 @@
 ---
-title: "入门指南"
-description: "安装 HeTu，运行你的第一个服务器，并连接一个客户端。"
+title: "快速开始"
+description: "安装 HeTu，运行你的第一个服务器，并连接客户端。"
 type: docs
 weight: 10
 prev: /
 next: tutorial/chat-room
 ---
 
-本页面将带你从一个空目录开始，搭建一个运行中的 HeTu 服务器，并连接一个客户端。预计耗时约
-10–15 分钟。
+本页将带你从一个空目录开始，到一个运行中的 HeTu 服务器，并有一个客户端连接到它。预计大约需要 10–15 分钟。
 
-## 前提条件
+## 前置条件
 
-- **Python 3.14 或更新版本**。HeTu 使用了最新的类型特性和异步改进。旧版本无法运行。
-- **Redis（首次运行可选）**。内置了 SQLite 后端用于本地实验；在生产环境前不需要 Redis。
-- **一个 Unity 项目或其他受支持的 SDK** 用于客户端（本页面在代码片段中使用 Unity）。
+- **Python 3.14 或更高版本。** HeTu 使用了较新的类型特性和异步改进。旧版本无法运行。
+- **Redis（首次运行可选）。** 内置了 SQLite 后端用于本地实验；在上生产之前不需要 Redis。
+- **一个 Unity 项目，或其他受支持的 SDK** 用于客户端侧（本页的代码片段中使用 Unity）。
 
-## 1. 安装 `uv` 并创建一个项目
+## 1. 安装 `uv` 并创建项目
 
 推荐的包管理器是 `uv`。在 Windows 上：
 
@@ -30,7 +29,7 @@ winget install --id=astral-sh.uv -e
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-然后初始化一个项目：
+然后初始化项目：
 
 ```bash
 mkdir my-game-server && cd my-game-server
@@ -38,12 +37,23 @@ uv init --python "3.14"
 uv add hetudb
 ```
 
-之后，执行 `uv run hetu --help` 应该能打印出 HeTu 的 CLI 用法。
+之后，`uv run hetu --help` 应该会打印 HeTu 的 CLI 用法。
+
+### 或者：使用 `hetu init` 搭建项目
+
+为了避免手动设置，`hetu init` 命令会搭建一个可直接运行的项目——它会运行 `uv init`、添加 `hetudb` 依赖，并在 `src/` 下写入一个起始 `app.py`（一个最小的 `login` System 以及一个 `on_disconnect` 处理器）以及一个 `config.yml`：
+
+```bash
+uvx --from hetudb hetu init my-game-server
+cd my-game-server
+uv run hetu start --config=config.yml
+```
+
+`hetu init` 可以安全地重复运行：它会跳过任何已存在的文件，并且绝不会覆盖你的代码。生成的 `config.yml` 使用本地 SQLite 数据库，因此项目启动时不需要运行任何额外服务——生产环境请将其 `BACKENDS` 部分切换为 Redis。下面的编号演练会手动构建一个项目，这样你可以看到每一部分如何组合在一起。
 
 ## 2. 项目结构
 
-HeTu 项目使用 **src 布局**：你的应用代码位于 `src/` 下，这使导入清晰明确，并且使项目在
-Docker 镜像中准备好使用 `pip install .`（关于生产环境的故事请参见[运维](operations.md)）。
+HeTu 项目使用 **src-layout**：你的应用代码位于 `src/` 下，这能让导入保持明确，并使项目准备好用于 Docker 镜像中的 `pip install .`（生产环境相关内容见[运维](operations.md)）。
 
 ```
 my-game-server/
@@ -55,14 +65,14 @@ my-game-server/
     │    ├── systems.py
     │    ├── endpoints.py
     │    └── etc....
-    └── app.py          # 入口点
+    └── app.py          # entry point
 ```
 
-`uv init` 默认创建扁平布局，因此请创建 `src/` 目录并将 `hello.py`/`main.py`（或它生成的任何存根）移开。
+`uv init` 默认创建一个扁平布局，因此请创建 `src/` 目录，并将 `hello.py`/`main.py`（或它生成的任何桩文件）移开。
 
-## 3. 定义你的第一个组件和系统
+## 3. 定义你的第一个 Component 和 System
 
-将以下代码放入 `src/app.py`：
+将以下内容放入 `src/app.py`：
 
 ```python
 import hetu
@@ -85,11 +95,11 @@ async def say_hello(ctx: hetu.SystemContext, name: str):
     await ctx.repo[Greeting].insert(row)
 ```
 
-这就是整个服务器。`Greeting` 是一个类型化的表；`say_hello` 是一个 RPC 入口点，它向该表中插入一行。
+这就是整个服务器。`Greeting` 是一张带类型的表；`say_hello` 是一个 RPC 入口点，用于向其中插入一行。
 
 ## 4. 启动服务器
 
-对于仅限本地的运行，使用内置的 SQLite 后端：
+对于仅本地运行，使用捆绑的 SQLite 后端：
 
 ```bash
 uv run hetu start \
@@ -99,15 +109,16 @@ uv run hetu start \
   --instance=dev
 ```
 
-你应该会看到 Sanic 的启动横幅以及一行 `WebSocket listening on ws://0.0.0.0:2466`。
+你应该会看到 Sanic 的启动横幅以及一行 `WebSocket listening on
+ws://0.0.0.0:2466`。
 
-如果你想要使用 Redis（建议在首次运行后使用），请本地安装 Redis 并替换为：
+如果你想要改用 Redis（首次运行之后推荐），请在本地安装 Redis 并替换为：
 
 ```bash
 --db=redis://127.0.0.1:6379/0
 ```
 
-## 5. 从客户端调用你的系统
+## 5. 从客户端调用你的 System
 
 ### Unity (C#)
 
@@ -117,10 +128,10 @@ uv run hetu start \
 >
 > `https://github.com/Heerozh/HeTu.git?path=/ClientSDK/unity/cn.hetudb.clientsdk`
 
-然后在任何 MonoBehaviour 中：
+然后，在任意 MonoBehaviour 中：
 
 ```csharp
-// Connect 是一个阻塞的异步函数，所以我们使用 fire and forget。
+// Connect is a blocked async function, so we use fire and forget.
 _ = HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Hello");
 await HeTuClient.Instance.CallSystem("say_hello", "world");
 ```
@@ -131,14 +142,14 @@ await HeTuClient.Instance.CallSystem("say_hello", "world");
 
 ```csharp
 var sub = await HeTuClient.Instance.WatchRange<Greeting>("id", 0, long.MaxValue, 100);
-sub.AddTo(gameObject); // 别忘了！否则，当你停止播放时会收到关于 GC 泄漏的警告。
+sub.AddTo(gameObject); // dont forget! Otherwise, you will receive a warning about GC leaks when you stop playing.
 sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
 ```
 
-现在，每次新的 `say_hello` 调用都应该在 Unity 控制台中记录 `Hello, world!`。
+现在，每次新的 `say_hello` 调用都应该会在 Unity 控制台记录 `Hello, world!`。
 
-## 接下来做什么
+## 接下来
 
-- **[教程：聊天室](tutorial/chat-room.md)** —— 一个真实的多用户应用，用于练习订阅、权限和典型的项目结构。
-- **[概念](concepts.md)** —— 幕后实际发生了什么：ECS 集群、乐观事务、订阅代理。
-- **[运维](operations.md)** —— 当你准备好部署时。
+- **[教程：聊天室](tutorial/chat-room.md)** — 一个真实的、多用户应用，演练订阅、权限以及典型项目形态。
+- **[概念](concepts.md)** — 深入了解底层实际发生的事情：ECS 集群、乐观事务、订阅代理。
+- **[运维](operations.md)** — 当你准备好部署时。

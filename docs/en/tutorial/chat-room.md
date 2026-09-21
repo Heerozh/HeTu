@@ -64,7 +64,7 @@ class OnlineUser(hetu.BaseComponent):
     last_seen_ms: np.int64 = hetu.property_field(0)
 ```
 
-`unique=True` on `owner` and `name` enforces uniqueness at insert time and
+`unique=True` on `owner` and `name` enforces uniqueness at commit time and
 also creates a fast point-lookup index.
 
 ## Step 3 — `user_login` System

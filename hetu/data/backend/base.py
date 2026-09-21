@@ -31,11 +31,15 @@
 
 """
 
+import asyncio
 import hashlib
 import importlib
 import logging
+import struct
+import time
 import warnings
-from collections.abc import Iterable
+from collections import deque
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -62,8 +66,11 @@ class RaceCondition(Exception):
     - 提交 `update` / `delete` 时，目标行 `_version` 已变化或行已被删除；
     - 提交时，本事务只读过（未修改）的行 `_version` 已变化或行已被删除，即事务依赖了
       陈旧读（stale read）；纯读的行同样参与乐观锁校验；
-    - 提交 `insert` / `update` 时，唯一索引在提交阶段被其他事务抢先占用；
-    - `upsert` 发现锚定的unique索引已被并发事务插入；
+    - 提交 `insert` / `update` 时，主键或 unique 值已被其他事务占用，**且本事务此前曾
+      `get`（或等值 `range`）观察到该值不存在**（negative observation，见
+      `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
+      行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
+      `UniqueViolation`；
     - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
     `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
@@ -74,19 +81,20 @@ class RaceCondition(Exception):
 
 class UniqueViolation(IndexError):
     """
-    唯一索引违反异常，表示当前Session提交前已确认写入会破坏unique约束。
+    唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。
 
-    `SessionRepository.insert(...)` 和 `SessionRepository.update(...)` 会在本地
-    IdentityMap与远程数据库中检查unique字段；发现同事务内重复值，或数据库已有
-    同值记录时抛出此异常。异常消息通常会包含冲突字段名，便于定位哪个unique索引
-    发生冲突。
+    判定在两处进行：
 
-    此异常代表**确定性**的业务/数据冲突，不应被自动重试：本事务从未观察过该unique
-    值不存在，却试图写入一个已存在的值（典型如“用户名已被占用”）。
+    - `SessionRepository.insert(...)` / `update(...)`：只检查本地 IdentityMap，同一事务内
+      两行写入相同 unique 值时立即抛出（0 往返）；
+    - `commit()`（`async with session` 退出、`SystemCaller` 提交、`ctx.session_commit()`）：
+      由后端原子检查主键与 unique 索引（本事务删除的行不算冲突）。数据库已有同值记录、且
+      本事务从未 `get` 观察过该值不存在时抛出此异常（典型如“用户名已被占用”）；若曾观察其
+      不存在，则改抛 `RaceCondition` 交由重试机制处理。同时存在两类冲突时竞态优先。
 
-    与之相对：若本事务此前曾 `get` 观察到该值不存在、之后写入时却发现远程已被并发
-    插入，则属于基于过期快照的乐观并发失败，会被转换为 `RaceCondition` 交由事务重试
-    机制处理（由 negative observation 机制判定，`upsert` 的锚定字段冲突是其特例）。
+    异常消息包含组件名、字段名、行 id 与操作（insert / update）。要在事务内对“已存在”
+    分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用
+    `SessionRepository.is_unique_conflicts` 提前检查。
     """
 
     pass
@@ -101,6 +109,72 @@ class RowFormat(Enum):
     ID_LIST = 3  # 只返回list of row id，只能用于range查询
 
 
+def to_sortable_bytes(value: np.generic) -> bytes:
+    """
+    将np类型的值转换为可排序的bytes，用于索引。
+    Redis 后端用它做索引 zset 的 member，两个后端都用它给索引值频道命名（见 `sortable_token`）。
+    """
+    dtype = value.dtype
+    if np.issubdtype(dtype, np.signedinteger):
+        data = value.item() + (1 << 63)
+        return struct.pack(">Q", data)
+    elif np.issubdtype(dtype, np.unsignedinteger):
+        return struct.pack(">Q", value)
+    elif np.issubdtype(dtype, np.floating):
+        double = value.item()
+        packed = struct.pack(">d", value)
+        [u64] = struct.unpack(">Q", packed)
+        # IEEE 754 浮点数排序调整
+        if double >= 0:
+            # 正数让符号位变1
+            u64 = u64 | (1 << 63)
+        else:
+            # 负数要全部取反，因为浮点负数是绝对值，变成int那种从0xFF递减
+            u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
+        return struct.pack(">Q", u64)
+    elif np.issubdtype(dtype, np.str_):
+        encoded = value.item().encode("utf-8")
+        # 变长类型把 0x00 转义成 0x00 0xff，使 member 的 value 段能用单个 0x00 自分隔
+        # （定长的数字/bool 不会和终止符混淆，无需转义）。详见 _exc_index/range_normalize_
+        return encoded.replace(b"\x00", b"\x00\xff")
+    elif np.issubdtype(dtype, np.bytes_):
+        return value.item().replace(b"\x00", b"\x00\xff")
+    elif np.issubdtype(dtype, np.bool_):
+        return b"\x01" if value else b"\x00"
+    assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+
+
+def sortable_token(sortable: bytes) -> str:
+    """
+    索引值的 sortable bytes → 频道名里的 token。≤32 字节直接 hex（数值都是 8 字节，16 位 hex
+    可读且无歧义），更长的字符串取 blake2b-128 摘要并加 `h` 前缀（hex 里不会出现 h）。
+    commit 侧和订阅侧、两个后端都用这一个函数，保证同一个值落到同一个频道；摘要碰撞只会让
+    订阅者多做一次无害的重查，不会漏通知。
+
+    Channel-name token of an index value: hex for <=32 bytes, else 'h' + blake2b-128 hex.
+    """
+    if len(sortable) <= 32:
+        return sortable.hex()
+    return "h" + hashlib.blake2b(sortable, digest_size=16).hexdigest()
+
+
+def peel_bound_(
+    value: float | str | bytes | bool,
+) -> tuple[float | str | bytes | bool, bool | None]:
+    """
+    剥掉区间边界值开头的 `(` / `[` 前缀（str/bytes 才有），返回 (值, 是否闭区间)；
+    没有前缀时第二项为 None，由调用方按默认（闭区间）处理。
+    两个后端的 range_normalize_ 和 point_query_value_ 都用这一个，规则只写一处。
+    """
+    if isinstance(value, (str, bytes)) and len(value) >= 1:
+        ch = value[0:1]  # bytes 必须用范围切片
+        if ch in ("(", b"("):
+            return value[1:], False
+        if ch in ("[", b"["):
+            return value[1:], True
+    return value, None
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
@@ -113,8 +187,52 @@ class BackendClient:
     """
 
     def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        """
+        返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
+        供区间订阅用；点查询请用 `index_value_channel`，免得被无关的值叫醒。
+        """
         raise NotImplementedError
+
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """
+        返回索引某一个值的频道名。只有 `index_name == value` 的行被 insert/delete，或某行该
+        字段从/到这个值变化时，commit 才向此频道发一条消息，payload 为本次事务变动的
+        row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
+        `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
+        （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
+        id 索引没有值频道（commit 不发）：点查 id 请订行频道或整个 id 索引的频道。
+
+        Channel of one index value: published on commit only when a row with that value is
+        inserted/deleted or a row's field changes from/to it (payload: touched row ids).
+        Point-query subscriptions use it instead of `index_channel`.
+        """
+        raise NotImplementedError
+
+    @staticmethod
+    def point_query_value_(
+        dtype: np.dtype, left: Any, right: Any | None
+    ) -> np.generic | None:
+        """
+        判断 range 查询是否退化为点查询（right 省略或 left == right），是则返回按 dtype
+        规范化后的值，否则返回 None。与 `range_normalize_` 的 peel 规则一致：str/bytes 值的
+        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（int 索引传 ±inf、
+        非法字符串）或 NaN 也返回 None，由调用方回退到整个索引的频道。
+        """
+        left, left_inclusive = peel_bound_(left)
+        right, right_inclusive = (
+            (left, left_inclusive) if right is None else peel_bound_(right)
+        )
+        if left_inclusive is False or right_inclusive is False:
+            return None  # 开区间不算点查询
+        try:
+            left_value, right_value = dtype.type(left), dtype.type(right)
+        except ValueError, OverflowError, TypeError:
+            return None
+        if left_value != right_value:  # NaN != NaN 也在这里回退
+            return None
+        return left_value
 
     def row_channel(self, table_ref: TableReference, row_id: int):
         """返回行数据的频道名。如果行有变动，会通知到该频道"""
@@ -371,7 +489,10 @@ class BackendClient:
         Exceptions
         --------
         RaceCondition
-            当提交数据时，发现数据已被其他事务修改，抛出此异常
+            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
+            观察其不存在的值（基于过期快照），可重试
+        UniqueViolation
+            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
         """
         raise NotImplementedError
@@ -720,25 +841,89 @@ class MQClient:
     """
     连接到消息队列的客户端，每个用户连接一个实例。
     继承此类实现数据库写入通知和消息队列的结合。
+
+    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
+    `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
+    `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
     """
 
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
+    # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
+    DROP_AFTER = 120
+
+    def __init__(self) -> None:
+        # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
+        # (收到时刻 time.monotonic(), 频道名)，按收到时间入队
+        self.pulled_deque: deque[tuple[float, str]] = deque()
+        # 队列里已有的频道名，去重用
+        self.pulled_set: set[str] = set()
+        # 表级频道合并后的payload：channel -> 变动的row_id集合
+        self.pulled_payload: dict[str, set[str]] = {}
+        # 服务端内部关注的频道 → 回调（见 watch）
+        self._watchers: dict[str, Callable[[], None]] = {}
+        # 队列从空变为非空的信号：get_message 空闲时等它，而不是定时醒来看队列
+        self._arrived = asyncio.Event()
 
     async def close(self):
+        """取消本连接的全部订阅并释放资源"""
         raise NotImplementedError
 
-    async def pull(self) -> None:
+    async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
         """
-        从消息队列接收一条消息到本地队列，消息内容为channel名。每行数据，每个Index，都是一个channel。
-        该channel收到了任何消息都说明有数据更新，所以只需要保存channel名。
-        表级频道（table_channel）的消息还带有变动的row_id列表payload，需要按频道合并保存。
-
-        消息存放本地时，需要用时间作为索引，并且忽略重复的消息。存放前先把2分钟前的消息丢弃，防止堆积。
-        此方法需要单独的协程反复调用，防止服务器也消息堆积。如果没有消息，则堵塞到永远。
+        服务端内部关注一个频道：订阅它，收到通知时同步调用 `callback`。与客户端订阅
+        （`subscribe`）互不干扰：同一频道客户端也订了的话通知照常入队，客户端 `unsubscribe`
+        它也不会把这里的关注退掉；只随 `close()` 一起退订。
+        回调在后端通知接收器的监听协程里执行，必须非阻塞（置个标记 / create_task），
+        不得 await、不得开事务。
         """
-        # 必须合并消息，因为index更新时大都是2条一起的(remove/add)
         raise NotImplementedError
+
+    def push_pulled_(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
+        """
+        供后端的通知接收器调用：把一条收到的通知放进本地队列（重复频道只保留最早那条，
+        以便下个tick就被取走；index更新大都是remove/add两条一起来，靠这个合并），
+        表级频道的 payload 按频道合并。消息内容只有channel名：每行数据、每个Index都是
+        一个channel，该channel收到了任何消息都说明有数据更新。
+        入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由调用方打日志。
+        `watch` 关注的频道先走回调；客户端没订它就到此为止，订了的话照常入队。
+
+        这是每条通知都走的热路径：常态下队头不会过期，只花一次 O(1) 的比较。
+        """
+        callback = self._watchers.get(channel_name)
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # 别让一个回调拖垮通知接收器的监听协程
+                logger.exception(
+                    _("⚠️ [MQ] 频道 {channel} 的内部回调异常").format(
+                        channel=channel_name
+                    )
+                )
+            if channel_name not in self.subscribed_channels:
+                return 0
+
+        now = time.monotonic()
+        dropped = 0
+        dq = self.pulled_deque
+        if dq and dq[0][0] < now - self.DROP_AFTER:
+            cutoff = now - self.DROP_AFTER
+            while dq and dq[0][0] < cutoff:
+                stale = dq.popleft()[1]
+                self.pulled_set.discard(stale)
+                self.pulled_payload.pop(stale, None)
+                dropped += 1
+
+        # 先清旧再合并payload，这样本条消息的payload不会被上面的清理顺手删掉
+        if payload_ids is not None:
+            self.pulled_payload.setdefault(channel_name, set()).update(
+                str(i) for i in payload_ids
+            )
+        if channel_name not in self.pulled_set:
+            dq.append((now, channel_name))
+            self.pulled_set.add(channel_name)
+            self._arrived.set()
+        return dropped
 
     async def get_message(self) -> dict[str, set[str] | None]:
         """
@@ -751,7 +936,30 @@ class MQClient:
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
         """
-        raise NotImplementedError
+        dq = self.pulled_deque
+        interval = 1 / self.UPDATE_FREQUENCY
+        while True:
+            if not dq:
+                # 没数据就等 push_pulled_ 的信号。每个连接一个本协程，空闲时定时醒来看队列
+                # 是纯粹的底噪（每 1000 个空闲连接约占一个核的 1.6%），等信号则零成本。
+                # clear 与 wait 之间没有 await，不会漏掉中间到达的消息
+                self._arrived.clear()
+                await self._arrived.wait()
+                continue
+            # 只取收到超过interval的数据，这样可以减少频繁更新（合批）：队列按时间有序，
+            # 队头还没到时间就精确睡到那一刻，醒来再看一次队头（期间可能被 DROP_AFTER 清掉）
+            wait = dq[0][0] + interval - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+                continue
+            cutoff = time.monotonic() - interval
+            rtn: dict[str, set[str] | None] = {}
+            while dq and dq[0][0] <= cutoff:
+                channel_name = dq.popleft()[1]
+                self.pulled_set.discard(channel_name)
+                rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+            if rtn:
+                return rtn
 
     async def subscribe(self, *channel_names: str) -> None:
         """订阅频道，可一次订阅多个，全部订阅成功后返回。实现应把多个频道合并成尽量少的往返。"""
@@ -765,3 +973,167 @@ class MQClient:
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的频道名"""
         raise NotImplementedError
+
+
+class MQHub:
+    """
+    每个进程共享的通知接收器基类：持有到后端的唯一订阅连接/轮询任务，维护"频道 → 本进程内
+    订阅了它的 MQClient"分发表（同时是引用计数），收到通知后调各 MQClient 的 `push_pulled_`。
+    这里是与后端无关的登记/撤销/分发/后台任务簿记；后端实现 `add` / `remove` 和自己的收发。
+    `HubMQClient` 只依赖 `add` / `remove`。
+    """
+
+    def __init__(self) -> None:
+        self._subs: dict[str, set[MQClient]] = {}
+        # 后台任务（退订、取水位……）：不随调用方一起取消，保存引用免得被 gc，close 时统一取消
+        self._tasks: set[asyncio.Task] = set()
+        self._closed = False
+
+    @property
+    def channels(self) -> set[str]:
+        """本进程当前向后端订阅了的频道"""
+        return set(self._subs)
+
+    def subscriber_count(self, channel: str) -> int:
+        """某频道在本进程内的订阅连接数，测试用"""
+        return len(self._subs.get(channel, ()))
+
+    async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """登记 mq 对这些频道的订阅，返回时订阅已生效"""
+        raise NotImplementedError
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """撤销 mq 对这些频道的订阅，本进程内没人再订的频道才真正向后端退订"""
+        raise NotImplementedError
+
+    def _release(self, mq: MQClient, channels: Iterable[str]) -> list[str]:
+        """撤销 mq 对这些频道的登记，返回本进程内因此没人再订的频道"""
+        gone = []
+        for channel in channels:
+            subs = self._subs.get(channel)
+            if subs is None:
+                continue
+            subs.discard(mq)
+            if not subs:
+                del self._subs[channel]
+                self._on_channel_gone(channel)
+                gone.append(channel)
+        return gone
+
+    def _on_channel_gone(self, channel: str) -> None:
+        """某频道在本进程内没人订了：子类清理自己按频道记的状态"""
+
+    def _dispatch(self, channel_name: str, ids: list | None) -> int:
+        """把一条通知塞进本进程订阅了该频道的各连接的本地队列，返回丢弃的过期通知条数"""
+        dropped = 0
+        for mq in self._subs.get(channel_name, ()):
+            dropped += mq.push_pulled_(channel_name, ids)
+        return dropped
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(self._tasks.discard)
+        self._tasks.add(task)
+        return task
+
+    async def _cancel_tasks(self) -> None:
+        tasks = [t for t in self._tasks if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
+
+
+class HubMQClient(MQClient):
+    """
+    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录本连接订阅了哪些频道，
+    订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
+    """
+
+    # 单个连接订阅频道数的告警线；子类可覆盖
+    MAX_SUBSCRIBED = 5000
+    LOG_TAG = "MQ"
+
+    def __init__(self, hub: MQHub):
+        super().__init__()  # 本地消息队列
+        self._hub = hub
+        # 客户端订阅的频道；服务端内部关注（watch）的频道另记一份，两者可以重叠：
+        # hub 按 MQClient 计数，同一频道只登记一次，所以客户端退订时要看它是不是还被关注着
+        self.subscribed: set[str] = set()
+        self._watched: set[str] = set()
+        self._closed = False
+
+    async def close(self):
+        """取消本连接的全部订阅（含内部关注的）。连接拆除路径上调用，后端出错也不抛"""
+        self._closed = True
+        channels = self.subscribed | self._watched
+        self.subscribed = set()
+        self._watched = set()
+        self._watchers.clear()
+        if channels:
+            try:
+                await self._hub.remove(self, channels)
+            except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
+                logger.warning(
+                    _("⚠️ [{tag}] 关闭连接时取消订阅失败：{err}").format(
+                        tag=self.LOG_TAG, err=f"{type(e).__name__}:{e}"
+                    )
+                )
+
+    async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        # 先登记回调再订阅：订阅生效到登记之间的通知不能落进客户端推送队列
+        self._watchers[channel_name] = callback
+        self._watched.add(channel_name)
+        try:
+            await self._hub.add(self, [channel_name])
+        except BaseException:
+            self._watched.discard(channel_name)
+            self._watchers.pop(channel_name, None)
+            raise
+        if self._closed:
+            await self._hub.remove(self, [channel_name])
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+
+    async def subscribe(self, *channel_names: str) -> None:
+        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        # 先记再等：等 ack 期间本连接可能又 unsubscribe/close 了其中的频道，由它们从
+        # subscribed 和 hub 里撤掉；add 返回后不能再把这些频道加回来
+        new = [name for name in channel_names if name not in self.subscribed]
+        self.subscribed.update(new)
+        try:
+            await self._hub.add(self, channel_names)
+        except BaseException:
+            self.subscribed.difference_update(new)
+            raise
+        if self._closed:
+            # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
+            await self._hub.remove(self, channel_names)
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        if len(self.subscribed) > self.MAX_SUBSCRIBED:
+            logger.warning(
+                _(
+                    "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
+                ).format(tag=self.LOG_TAG, limit=self.MAX_SUBSCRIBED)
+            )
+
+    async def unsubscribe(self, *channel_names: str) -> None:
+        """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
+        if not channel_names:
+            return
+        self.subscribed.difference_update(channel_names)
+        # 服务端还关注着的频道只是客户端不要了，hub 里的登记得留着
+        gone = [name for name in channel_names if name not in self._watched]
+        if gone:
+            await self._hub.remove(self, gone)
+
+    @property
+    def subscribed_channels(self) -> set[str]:
+        """返回当前连接订阅的所有频道名"""
+        return self.subscribed

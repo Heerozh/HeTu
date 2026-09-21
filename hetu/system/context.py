@@ -43,8 +43,9 @@ class SystemContext(Context):
 
         Returns
         -------
-        如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition。
-        异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试。
+        如果有任何其他失败，抛出以下异常：redis.exceptions，RaceCondition，UniqueViolation。
+        异常一般无需特别处理，系统的默认处理方式为：遇到RaceCondition异常，上游系统会自动重试；
+        UniqueViolation 是确定性的主键 / unique 冲突（本事务未曾 `get` 观察其不存在），不重试。
         其他任何异常会记录日志并断开客户端连接。
         """
         first_repo = next(iter(self.repo.values()), None)

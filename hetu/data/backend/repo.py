@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from ...i18n import _
-from .base import RaceCondition, RowFormat, UniqueViolation
+from .base import BackendClient, RowFormat, UniqueViolation
 from .idmap import RowState
 from .table import TableReference
 
@@ -107,6 +107,11 @@ class SessionRepository:
         """
         检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
+        这是**可选的提前检查**（每个 unique 字段 1 次往返）：`insert` / `update` 默认不再
+        调用本方法，等价的判定在 `commit()` 时由后端原子执行（见
+        `IdentityMap.get_absent_unique_fields`）。想在事务体内提前失败、或据此分支时可
+        显式调用。
+
         Parameters
         ----------
         row : np.record
@@ -162,21 +167,20 @@ class SessionRepository:
         从数据库获取单行数据，并放入`Session`缓存。
         本指令如果命中缓存，不会去数据库查询。
         """
-        idmap = self._session.idmap
-        ref = self.ref
         # 主键查询，先查缓存
         row_id = cast(int, row_id)
-        row, row_stat = idmap.get(ref, row_id)
+        row, row_stat = self._session.idmap.get(self.ref, row_id)
         if row_stat is not None:
-            if row_stat == RowState.DELETE:
-                return None
-            else:
-                return row
+            return None if row_stat == RowState.DELETE else row
+        return await self._fetch_by_id(row_id)
 
-        # 缓存未命中，查询数据库
-        row = await self._session.master_or_servant.get(ref, row_id, RowFormat.STRUCT)
+    async def _fetch_by_id(self, row_id: int) -> np.record | None:
+        """缓存未命中：查数据库，读到就放进 Session 缓存"""
+        row = await self._session.master_or_servant.get(
+            self.ref, row_id, RowFormat.STRUCT
+        )
         if row is not None:
-            idmap.add_clean(ref, row)
+            self._session.idmap.add_clean(self.ref, row)
         return row
 
     async def get(
@@ -188,6 +192,8 @@ class SessionRepository:
         """
         从数据库获取单行数据，并放入Session缓存。
         推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
+        主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
+        None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
 
         Parameters
         ----------
@@ -224,28 +230,41 @@ class SessionRepository:
                 )
             )
 
+        idmap = self._session.idmap
         # 如果不是主键，直接用range方法
         if index_name != "id":
-            # 去cache查询
-            idmap = self._session.idmap
+            # 去cache查询（含本事务新 insert 的行，所以要先于 negative cache）
             rows = idmap.filter(self.ref, **{index_name: query_value})
             if len(rows) > 0:
                 return rows[0]
+
+            # negative cache：本事务已观察过该值不存在，事务内可重复读，不再打远程
+            # （upsert 内部会再 get 一次锚定值，SystemLock 等流程因此省一次往返）
+            is_unique = index_name in comp_cls.uniques_
+            if is_unique and idmap.observed_absent(self.ref, index_name, query_value):
+                return None
 
             # cache未命中，去数据库查询
             rows = await self.range(index_name, query_value, limit=1, desc=False)
             if rows.shape[0] > 0:
                 return rows[0]
-            # 等值查询unique列读空：登记negative observation，供insert/update判定竞态。
+            # 等值查询unique列读空：登记negative observation，供commit判定竞态。
             # （区间range查询不登记negative observation，区间无穷且本就不保证事务内可见性。）
-            if index_name in comp_cls.uniques_:
+            if is_unique:
                 idmap.mark_absent(self.ref, index_name, query_value)
             return None
         else:
-            row = await self.get_by_id(int(query_value))
+            row_id = int(query_value)
+            # 先查cache（含本事务新 insert 的行），再看 negative cache，最后才去数据库
+            row, row_stat = idmap.get(self.ref, row_id)
+            if row_stat is not None:
+                return None if row_stat == RowState.DELETE else row
+            if idmap.observed_absent(self.ref, "id", row_id):
+                return None
+            row = await self._fetch_by_id(row_id)
             if row is None:
                 # 主键id恒为unique，登记“本事务观察到该id不存在”
-                self._session.idmap.mark_absent(self.ref, "id", int(query_value))
+                idmap.mark_absent(self.ref, "id", row_id)
             return row
 
     async def range(
@@ -259,7 +278,7 @@ class SessionRepository:
     ) -> np.recarray:
         """
         从数据库查询索引，返回区间内数据，限制 `limit` 条。
-        本指令会去数据库执行 1+(limit-缓存命中) 次查询，至少要进行1次数据库查询。
+        本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
 
         与 `get` 不同，本方法的区间匹配只读取**已提交**的数据，不会读取当前事务中未提交
         的修改：当前事务内新 `insert` 的行、或索引字段被改动的行，不会反映在返回结果里
@@ -333,42 +352,61 @@ class SessionRepository:
             self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
         )
 
-        # 再根据 id 列表查询数据行，可以命中缓存
-        rows = []
+        # 等值点查（判定规则同订阅侧 point_query_value_）unique 列读空：与 get 一样登记
+        # negative observation，让"先 range 确认不存在再写"的写法撞车时判竞态而非
+        # UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内可见性。
+        if not row_ids and index_name in comp_cls.uniques_:
+            point = BackendClient.point_query_value_(
+                comp_cls.dtype_map_[index_name], _left, _right
+            )
+            if point is not None:
+                self._session.idmap.mark_absent(self.ref, index_name, point)
+
+        # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
+        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）
+        idmap = self._session.idmap
+        rows: list[np.record | None] = []
+        miss_slots: list[int] = []
+        miss_ids: list[int] = []
         for _id in row_ids:
-            if row := await self.get_by_id(_id):
+            row, row_stat = idmap.get(self.ref, _id)
+            if row_stat is None:
+                miss_slots.append(len(rows))
+                miss_ids.append(_id)
+                rows.append(None)  # 占位，保持索引顺序
+            elif row_stat != RowState.DELETE:
                 rows.append(row)
+        if miss_ids:
+            fetched = cast(
+                list[np.record | None],
+                await self._session.master_or_servant.get_many(
+                    self.ref, miss_ids, RowFormat.STRUCT
+                ),
+            )
+            # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过
+            found = [r for r in fetched if r is not None]
+            if found:
+                idmap.add_clean(
+                    self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
+                )
+            for slot, r in zip(miss_slots, fetched):
+                rows[slot] = r
+        result = [r for r in rows if r is not None]
 
         # 转换成 np.recarray 返回
-        if len(rows) == 0:
+        if len(result) == 0:
             return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
         else:
-            return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
-
-    @staticmethod
-    def _raise_unique_conflict(conflict: str, is_race: bool, op: str) -> None:
-        """
-        根据 `is_unique_conflicts` 的判定抛出合适的异常：
-
-        - `is_race` 为 True → `RaceCondition`：远程冲突命中了本事务曾观察其不存在的列，
-          属基于过期快照的乐观并发失败，重试后会读到对方的行并走正确分支；
-        - 否则 → `UniqueViolation`：确定性的业务/数据冲突（本地重复，或从未观察过其
-          不存在的远程既有冲突），重试无意义。
-        """
-        if is_race:
-            raise RaceCondition(
-                _(
-                    "{op} race: row.{field} 被并发事务抢占（本事务曾观察其不存在）"
-                ).format(op=op, field=conflict)
-            )
-        raise UniqueViolation(f"{op} failed: row.{conflict} violates a unique index.")
+            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes))
 
     async def insert(self, row: np.record) -> None:
         """
         向Session中添加一行待插入数据。
 
-        若插入会破坏unique约束：本事务此前曾 `get` 观察到该值不存在时抛 `RaceCondition`，
-        否则抛 `UniqueViolation`（见 `_raise_unique_conflict`）。
+        只在本地 IdentityMap 检查 unique：同一事务内已有同值行 → 立即抛 `UniqueViolation`。
+        与数据库既有数据的主键 / unique 冲突不在此检查（0 往返），由 `commit()` 原子判定：
+        本事务曾 `get` 观察该值不存在 → `RaceCondition`（自动重试），否则 → `UniqueViolation`。
+        要提前确认可调用 `is_unique_conflicts`。
 
         Parameters
         ----------
@@ -384,16 +422,28 @@ class SessionRepository:
                 ).format(comp_name=self.ref.comp_cls.name_)
             )
 
-        # unique check
-        conflict, is_race = await self.is_unique_conflicts(row, insert=True)
-        if conflict:
-            self._raise_unique_conflict(conflict, is_race, "Insert")
+        changed_fields = self._get_changed_fields(row)
+        assert "id" in changed_fields, _(
+            "session中已存在该row id({row_id})，插入操作必须没有旧数据。"
+        ).format(row_id=row.id)
+
+        # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
+        if field := self._local_has_unique_conflicts(
+            row, changed_fields & self.ref.comp_cls.uniques_
+        ):
+            raise UniqueViolation(
+                f"Insert failed: row.{field} violates a unique index "
+                "(duplicate within transaction)"
+            )
 
         self._session.idmap.add_insert(self.ref, row)
 
     async def update(self, row: np.record) -> None:
         """
         向Session中添加一行待更新数据。
+
+        只在本地 IdentityMap 检查 unique（同事务内重复 → 立即抛 `UniqueViolation`）；
+        与数据库既有数据的冲突由 `commit()` 判定，规则同 `insert`。
 
         Parameters
         ----------
@@ -413,10 +463,14 @@ class SessionRepository:
         if len(changed_fields) == 0:
             raise ValueError("No fields changed, cannot update.")
 
-        # unique check
-        conflict, is_race = await self.is_unique_conflicts(row)
-        if conflict:
-            self._raise_unique_conflict(conflict, is_race, "Update")
+        # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
+        if field := self._local_has_unique_conflicts(
+            row, changed_fields & self.ref.comp_cls.uniques_
+        ):
+            raise UniqueViolation(
+                f"Update failed: row.{field} violates a unique index "
+                "(duplicate within transaction)"
+            )
 
         self._session.idmap.update(self.ref, row)
 
@@ -510,9 +564,9 @@ class UpsertContext:
             assert self.row_data is not None
             if self.insert:
                 # 锚定字段在 __aenter__ 已 get 读空、并被登记为“观察不存在”。若提交前被
-                # 并发插入，insert 会据此把锚定字段的unique冲突判为 RaceCondition；而非
-                # 锚定的其他unique列冲突仍是确定性 UniqueViolation。
-                # 见 SessionRepository.insert / _raise_unique_conflict。
+                # 并发插入，commit 会据此把锚定字段的冲突判为 RaceCondition（重试后 get
+                # 命中转 update）；非锚定的其他unique列冲突仍是确定性 UniqueViolation。
+                # 见 IdentityMap.get_absent_unique_fields。
                 await self.repo.insert(self.row_data)
             else:
                 if self.row_data == self.clean_data:

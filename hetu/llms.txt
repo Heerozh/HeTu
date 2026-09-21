@@ -50,7 +50,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [Components](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/components.md): `BaseComponent` / `Permission`
 - [System](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/system.md): `SystemClusters` / `SystemContext`
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
-- [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition`
+- [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition` / `UniqueViolation`
 - [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Sanic / System 直接读写组件表，写入走与 System 相同的提交路径
 
 ## For LLM-assisted Development

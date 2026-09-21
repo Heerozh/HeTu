@@ -35,6 +35,7 @@ async def test_backend_redis_pubsub(mod_auto_backend):
     msg2 = await pubsub.get_message()
     assert msg1["data"] == b"1"
     assert msg2["data"] == b"2"
+    await pubsub.close()
 
 
 @use_redis_family_backend_only
@@ -84,4 +85,31 @@ async def test_backend_redis_pubsub_batch(mod_auto_backend):
         async with asyncio.timeout(0.5):
             await pubsub.get_message()
 
+    await pubsub.close()
+
+
+@use_redis_family_backend_only
+@pytest.mark.timeout(30)
+async def test_backend_redis_pubsub_concurrent_first_subscribe(mod_auto_backend):
+    """一个新建的 pubsub 被多个协程同时首次 subscribe：redis-py 的 PubSub 首次 connect 不是
+    并发安全的，AsyncKeyspacePubSub 要按节点串行发送，不能出现 MaxConnectionsError。"""
+    import asyncio
+
+    backend = mod_auto_backend()
+
+    from hetu.data.backend.redis.pubsub import AsyncKeyspacePubSub
+
+    client: RedisBackendClient = cast(RedisBackendClient, backend.master)
+    pubsub = AsyncKeyspacePubSub(client.aio)
+    channels = [f"first{{{i}}}" for i in range(50)]
+    await asyncio.gather(*(pubsub.subscribe(ch) for ch in channels))
+    assert set(channels) <= pubsub.subscribed
+    # 同一频道并发订阅只等一个 ack，也不报错
+    await asyncio.gather(*(pubsub.subscribe("first{0}") for _ in range(10)))
+
+    redis_client = client.io
+    redis_client.publish("first{7}", b"7")
+    async with asyncio.timeout(5):
+        msg = await pubsub.get_message()
+    assert msg["data"] == b"7"
     await pubsub.close()

@@ -18,17 +18,25 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy import exc as sa_exc
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from ....i18n import _
-from ..base import BackendClient, RaceCondition, RowFormat
+from ..base import (
+    BackendClient,
+    RaceCondition,
+    RowFormat,
+    UniqueViolation,
+    peel_bound_,
+    sortable_token,
+    to_sortable_bytes,
+)
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import SQLTableMaintenance
-    from .mq import SQLMQClient
+    from .mq import SQLMQClient, SQLNotifyHub
 
 logger = logging.getLogger("HeTu.root")
 
@@ -314,6 +322,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return self.index_key(table_ref, index_name)
 
     @override
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """与 Redis 后端同一串名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        token = sortable_token(to_sortable_bytes(dtype.type(value)))
+        return f"{self.index_key(table_ref, index_name)}:{token}"
+
+    @override
     def row_channel(self, table_ref: TableReference, row_id: int):
         return self.row_key(table_ref, row_id)
 
@@ -364,6 +381,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
             + self.NOTIFY_CLEANUP_INTERVAL
             + random.uniform(0.0, self.NOTIFY_CLEANUP_JITTER)
         )
+        # 本进程共享的通知表轮询器，首次 get_mq_client 时在事件循环里懒建
+        self._hub: SQLNotifyHub | None = None
 
     @property
     def io(self) -> sa.Engine:
@@ -417,6 +436,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             io.dispose()
         self._ios = []
 
+        if self._hub is not None:
+            hub, self._hub = self._hub, None
+            await hub.close()
         for aio in self._async_ios:
             await aio.dispose()
         self._async_ios = []
@@ -660,16 +682,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        def peel(x, _inclusive):
-            if type(x) in (str, bytes) and len(x) >= 1:
-                ch = x[0:1]
-                if ch in ("(", "[") or ch in (b"(", b"["):
-                    _inclusive = ch == "[" or ch == b"["
-                    x = x[1:]
-            return x, _inclusive
-
-        left, li = peel(left, True)
-        right, ri = peel(right, True)
+        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        left, li = peel_bound_(left)
+        right, ri = peel_bound_(right)
+        li = True if li is None else li
+        ri = True if ri is None else ri
         if desc:
             li, ri = ri, li
 
@@ -704,6 +721,123 @@ class SQLBackendClient(BackendClient, alias="sql"):
             "duplicate entry",
         )
         return any(marker in message for marker in markers)
+
+    async def _check_unique_conflicts(
+        self,
+        conn: AsyncConnection,
+        dirties: dict[TableReference, Any],
+        absent_by_ref: dict[TableReference, dict[int, set[str]]],
+    ) -> None:
+        """
+        commit 事务内的显式唯一性检查，在 delete 之后、update / insert 之前执行（与 Redis Lua
+        "checks 先于 pushes、本事务删除的行不算冲突"对齐：delete 已先执行，SELECT 自然看不到）。
+
+        insert 行查全部 unique 列（含 id），update 行只查变更的 unique 列，按 (ref, field)
+        分组各 SELECT 一次。update 行若查到的是自身（并发把本行改成了同值）则忽略，交给后面
+        UPDATE 的版本条件报 RaceCondition。汇总全部冲突：任一"本事务曾 get 观察其不存在"的列
+        → RaceCondition（RACE 优先，重试可解）；否则 → UniqueViolation（确定性，不重试）。
+        SELECT 与写入之间被并发抢先的窗口仍由 IntegrityError → RaceCondition 兜底。
+        """
+        race: list[str] = []
+        strict: list[str] = []
+        for ref, (inserts, (old_rows, new_rows), _deletes) in dirties.items():
+            comp_cls = ref.comp_cls
+            dtype_map = comp_cls.dtype_map_
+            absent_rows = absent_by_ref.get(ref, {})
+
+            def _norm(field: str, value: Any, _dtype_map=dtype_map) -> Any:
+                # 两侧都过一遍 dtype（float32 精度、np/py 标量）保证查回的值能对上本地 key
+                dtype = _dtype_map[field]
+                return dtype.type(self._coerce_scalar(dtype, value)).item()
+
+            # {field: {normalized_value: (row_id, is_race, op)}}
+            wanted: dict[str, dict[Any, tuple[int, bool, str]]] = {}
+            for row in inserts:
+                row_id = int(row["id"])
+                absent = absent_rows.get(row_id, set())
+                for field in sorted(comp_cls.uniques_):
+                    wanted.setdefault(field, {})[_norm(field, row[field])] = (
+                        row_id,
+                        field in absent,
+                        "insert",
+                    )
+            for old_row, changed in zip(old_rows, new_rows):
+                row_id = int(old_row["id"])
+                absent = absent_rows.get(row_id, set())
+                for field in sorted(comp_cls.uniques_):
+                    if field in changed:
+                        wanted.setdefault(field, {})[_norm(field, changed[field])] = (
+                            row_id,
+                            field in absent,
+                            "update",
+                        )
+            if not wanted:
+                continue
+            table = self.component_table(ref)
+            for field, by_value in wanted.items():
+                col = table.c[field]
+
+                def _classify(
+                    hit: tuple[int, bool, str],
+                    found_id: Any,
+                    _name: str = f"{comp_cls.name_}.{field}",
+                ) -> None:
+                    row_id, is_race, op = hit
+                    if op == "update" and int(found_id) == row_id:
+                        return  # 自身行：由 UPDATE 的版本条件报 Race
+                    msg = f"Unique violation {_name} id={row_id} {op}"
+                    (race if is_race else strict).append(msg)
+
+                stmt = sa.select(table.c.id, col).where(col.in_(list(by_value)))
+                unattributed = False
+                for found_id, found_value in (await conn.execute(stmt)).all():
+                    hit = by_value.get(_norm(field, found_value))
+                    if hit is None:
+                        unattributed = True
+                        continue
+                    _classify(hit, found_id)
+                if unattributed:
+                    # 数据库按自身相等语义（如 MariaDB 默认的大小写不敏感 collation）命中了，
+                    # 但查回的值和本地哪个候选都对不上：逐个候选再问数据库，让它自己判定撞的
+                    # 是谁。不能放过去交给 UNIQUE 约束兜底——约束报的 IntegrityError 会被当成
+                    # RaceCondition 无限重试，而重试每次结果都一样
+                    for value, hit in by_value.items():
+                        probe = sa.select(table.c.id).where(col == value).limit(1)
+                        found = (await conn.execute(probe)).first()
+                        if found is not None:
+                            _classify(hit, found[0])
+        if race:
+            raise RaceCondition("RACE: " + race[0])
+        if strict:
+            # 与 Redis 一致：同时存在两类冲突时竞态优先。前置版本 SELECT 只覆盖纯读行，
+            # update 行的版本条件要到后面的 UPDATE 语句才检查，这里先核一遍：本事务读到的
+            # 行已经被别人改过的话报 RaceCondition 让上层重试（重跑事务体可能就不写那个值了），
+            # 而不是把确定性的 UniqueViolation 交给客户端
+            await self._raise_if_updates_stale(conn, dirties)
+            raise UniqueViolation("UNIQUE: " + strict[0])
+
+    async def _raise_if_updates_stale(
+        self, conn: AsyncConnection, dirties: dict[TableReference, Any]
+    ) -> None:
+        """update 态的行有版本对不上（被并发改过/删掉）的就抛 RaceCondition"""
+        for ref, (_inserts, (old_rows, _new_rows), _deletes) in dirties.items():
+            if not old_rows:
+                continue
+            table = self.component_table(ref)
+            expected = {int(row["id"]): int(row["_version"]) for row in old_rows}
+            stmt = sa.select(table.c.id, table.c._version).where(
+                table.c.id.in_(list(expected))
+            )
+            found = {
+                int(_id): int(_ver) for _id, _ver in (await conn.execute(stmt)).all()
+            }
+            for row_id, version in expected.items():
+                actual = found.get(row_id)
+                if actual is None or actual != version:
+                    raise RaceCondition(
+                        f"Version mismatch on updated row id={row_id} "
+                        f"exp:{version} got:{actual}"
+                    )
 
     @staticmethod
     def _is_table_missing_error(exc: BaseException) -> bool:
@@ -904,16 +1038,35 @@ class SQLBackendClient(BackendClient, alias="sql"):
         dirties = idmap.get_dirty_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
+        # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
+        absent_by_ref = idmap.get_absent_unique_fields()
 
         notify_table = self.notify_table()
         now_ts = time.time()
         now_dt = datetime.now(UTC).replace(tzinfo=None)
         cleanup_due = now_ts >= self._next_notify_cleanup_at
         refs = list(dirties.keys())
+
+        def _touch_value(
+            pubs: dict[str, list[str]],
+            ref: TableReference,
+            index_name: str,
+            value,
+            row_id,
+        ):
+            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id。
+            id 索引不记：点查 id 走行频道/整个 id 索引的频道，每次 insert/delete 都为它插一条
+            通知行纯属浪费"""
+            channel = self.index_value_channel(ref, index_name, value)
+            pubs.setdefault(channel, []).append(str(row_id))
+
         for attempt in range(2):
             channels: set[str] = set()
             # 表级变更通知：ref -> 本事务变动的row_id列表
             touched_ids: dict[TableReference, list[str]] = {}
+            # 索引值频道通知：channel -> 本事务在该 (索引, 值) 上变动的row_id列表，
+            # insert/delete 记全部索引字段的值，update 记变更字段的旧值和新值
+            value_pubs: dict[str, list[str]] = {}
             try:
                 async with self.aio.begin() as conn:
                     # 对纯读行加版本检查，防止事务依赖的陈旧读：
@@ -957,7 +1110,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                                if (
+                                    index_name != "id"
+                                ):  # 没人订 id 的值频道，见 _touch_value
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        old_row[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
+
+                    # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
+                    await self._check_unique_conflicts(conn, dirties, absent_by_ref)
 
                     for ref, (
                         _inserts,
@@ -986,6 +1152,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             try:
                                 result = await conn.execute(stmt)
                             except sa_exc.IntegrityError as exc:
+                                # 只有 _check_unique_conflicts 的 SELECT 与写入之间被并发
+                                # 抢先才会到这里；重试后 SELECT 会给出确定判定，不会无限重试
                                 if self._is_unique_violation(exc):
                                     raise RaceCondition(
                                         f"UNIQUE violation: {exc}"
@@ -999,6 +1167,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             for index_name in updates:
                                 if index_name in indexes:
                                     channels.add(self.index_channel(ref, index_name))
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        old_row[index_name],
+                                        row_id,
+                                    )
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        updates[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
@@ -1013,6 +1195,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             try:
                                 await conn.execute(sa.insert(table).values(**typed_row))
                             except sa_exc.IntegrityError as exc:
+                                # 只有 _check_unique_conflicts 的 SELECT 与写入之间被并发
+                                # 抢先才会到这里；重试后 SELECT 会给出确定判定，不会无限重试
                                 if self._is_unique_violation(exc):
                                     raise RaceCondition(
                                         f"UNIQUE violation: {exc}"
@@ -1021,6 +1205,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
+                                if (
+                                    index_name != "id"
+                                ):  # 没人订 id 的值频道，见 _touch_value
+                                    _touch_value(
+                                        value_pubs,
+                                        ref,
+                                        index_name,
+                                        typed_row[index_name],
+                                        row_id,
+                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
@@ -1033,6 +1227,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             notify_rows.append(
                                 {
                                     "channel": self.table_channel(ref),
+                                    "created_at": now_dt,
+                                    "payload": msgpack.packb(ids),
+                                }
+                            )
+                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用
+                        for channel, ids in value_pubs.items():
+                            notify_rows.append(
+                                {
+                                    "channel": channel,
                                     "created_at": now_dt,
                                     "payload": msgpack.packb(ids),
                                 }
@@ -1104,7 +1307,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     @override
     def get_mq_client(self) -> SQLMQClient:
+        """
+        获取消息队列连接（每个用户连接一个）。本进程只有一个 `SQLNotifyHub`（一个通知表
+        轮询任务）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        """
         self._ensure_open()
-        from .mq import SQLMQClient
+        from .mq import SQLMQClient, SQLNotifyHub
 
-        return SQLMQClient(self)
+        if self._hub is None:
+            self._hub = SQLNotifyHub(self)
+        return SQLMQClient(self._hub)

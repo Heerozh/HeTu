@@ -81,7 +81,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `upsert`、`insert`、`delete`、`update_rows`）。
 - `Table` / `TableReference`：Component 到 backend 的映射，由
   `ComponentTableManager` 管理。
-- `MQClient`：每个连接一个 message queue，用于 subscription notification。
+- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个 worker
+  只有一个共享的通知接收器（Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub` 一个轮询任务）
+  按频道分发到各连接的队列。
 
 ### Server Layer (`hetu/server/`)
 

@@ -95,7 +95,10 @@ class Session(AbstractAsyncContextManager):
         Exceptions
         --------
         RaceCondition
-            当提交数据时，发现数据已被其他事务修改，抛出此异常
+            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
+            观察其不存在的值（基于过期快照），可重试
+        UniqueViolation
+            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
         """
         # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
         if self._idmap.is_dirty:

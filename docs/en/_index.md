@@ -111,6 +111,12 @@ subscription. No schema migrations, no API gateway, no message broker.
           actually returned are checked like any other read: deleting one, or
           moving one out of the range, does raise a conflict. Use a `unique`
           constraint instead of index checks to guard against phantoms.
+        - Unique conflicts are checked at commit: if this transaction `get`-observed
+          the value as absent (e.g. the anchor field of an `upsert`, or an equality
+          `range`), the conflict counts as a race and is retried; otherwise it fails
+          with `UniqueViolation` and is not retried. To branch on "already exists"
+          inside a transaction, or to derive a unique value from a scan before
+          writing it, `get` the value first.
     - Any external or persistent side effect — updating `ctx` globals,
       writing to a file, sending a network call — must happen **after** the
       transaction commits. Otherwise the transaction may be discarded while

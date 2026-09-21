@@ -9,7 +9,6 @@ import asyncio
 import itertools
 import logging
 import random
-import struct
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
@@ -21,7 +20,15 @@ import redis
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
-from ..base import BackendClient, RaceCondition, RowFormat
+from ..base import (
+    BackendClient,
+    RaceCondition,
+    RowFormat,
+    UniqueViolation,
+    peel_bound_,
+    sortable_token,
+    to_sortable_bytes,
+)
 
 # from .batch import RedisBatchedClient
 
@@ -35,7 +42,7 @@ if TYPE_CHECKING:
     from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import RedisTableMaintenance
-    from .mq import RedisMQClient
+    from .mq import PubSubHub, RedisMQClient
 
 logger = logging.getLogger("HeTu.root")
 msg_packer = msgpack.Packer(use_bin_type=False)
@@ -141,8 +148,26 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     @override
     def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回索引的频道名。如果索引有数据变动，会通知到该频道"""
+        """返回整个索引的频道名（keyspace 通知）。该索引 zset 任何 ZADD/ZREM 都会通知到该频道"""
         return f"__keyspace@{self.dbi}__:{self.index_key(table_ref, index_name)}"
+
+    @classmethod
+    def value_channel_(cls, idx_key: str, sortable: bytes) -> str:
+        """`index_value_channel` 的内部形式：commit 里已经算好 sortable bytes 时直接拼，不重复编码"""
+        return f"{idx_key}:{sortable_token(sortable)}"
+
+    @override
+    def index_value_channel(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """
+        返回索引某一个值的频道名。这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace
+        通知），payload 为 msgpack 的 row_id 列表；名字带 {CLU} hash tag，cluster 模式下按 slot 路由。
+        """
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        return self.value_channel_(
+            self.index_key(table_ref, index_name), to_sortable_bytes(dtype.type(value))
+        )
 
     @override
     def row_channel(self, table_ref: TableReference, row_id: int):
@@ -160,49 +185,43 @@ class RedisBackendClient(BackendClient, alias="redis"):
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
+        await self._close_hub()
         for aio in self._async_ios:
             if isinstance(aio, redis.asyncio.cluster.RedisCluster):
                 await aio.aclose()  # 未测试
             else:
                 aio.connection_pool.reset()
 
-    @staticmethod
-    def to_sortable_bytes(value: np.generic) -> bytes:
-        """将np类型的值转换为可排序的bytes，用于索引"""
-        dtype = value.dtype
-        if np.issubdtype(dtype, np.signedinteger):
-            data = value.item() + (1 << 63)
-            return struct.pack(">Q", data)
-        elif np.issubdtype(dtype, np.unsignedinteger):
-            return struct.pack(">Q", value)
-        elif np.issubdtype(dtype, np.floating):
-            double = value.item()
-            packed = struct.pack(">d", value)
-            [u64] = struct.unpack(">Q", packed)
-            # IEEE 754 浮点数排序调整
-            if double >= 0:
-                # 正数让符号位变1
-                u64 = u64 | (1 << 63)
-            else:
-                # 负数要全部取反，因为浮点负数是绝对值，变成int那种从0xFF递减
-                u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
-            return struct.pack(">Q", u64)
-        elif np.issubdtype(dtype, np.str_):
-            encoded = value.item().encode("utf-8")
-            # 变长类型把 0x00 转义成 0x00 0xff，使 member 的 value 段能用单个 0x00 自分隔
-            # （定长的数字/bool 不会和终止符混淆，无需转义）。详见 _exc_index/range_normalize_
-            return encoded.replace(b"\x00", b"\x00\xff")
-        elif np.issubdtype(dtype, np.bytes_):
-            return value.item().replace(b"\x00", b"\x00\xff")
-        elif np.issubdtype(dtype, np.bool_):
-            return b"\x01" if value else b"\x00"
-        assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+    # 索引 member 的值编码搬到了 base.py（两个后端共用来给索引值频道命名），这里保留同名别名
+    to_sortable_bytes = staticmethod(to_sortable_bytes)
 
     # ============ 主要方法 ============
 
     def __init__(
-        self, endpoint: str | list[str], is_servant, raw_clustering: bool = False
+        self,
+        endpoint: str | list[str],
+        is_servant,
+        raw_clustering: bool = False,
+        max_connections: int = 64,
+        pool_timeout: float | None = 5.0,
     ):
+        """
+        Parameters
+        ----------
+        endpoint
+            redis url 或 url 列表，见 CONFIG_TEMPLATE.yml 的 BACKENDS 段。
+        is_servant
+            是否为只读副本连接。
+        raw_clustering
+            是否为 Redis 原生集群模式。
+        max_connections
+            本进程对该地址的异步连接池上限。订阅的 pubsub 走每 worker 一条的独立连接
+            （见 PubSubHub），池里只有短命的读写命令，所以不需要很大。redis-py 8 起默认
+            只有 100，这里显式给出。standalone 模式下池满会排队；原生集群模式下 redis-py
+            每个节点的池只能设上限、满了直接抛 MaxConnectionsError，需要时请调大。
+        pool_timeout
+            standalone 模式下池满时排队等待的秒数，None 为一直等，超时抛 ConnectionError。
+        """
         super().__init__(endpoint, is_servant)
         self.raw_clustering = raw_clustering
         # redis的endpoint配置为url, 或list of url
@@ -223,13 +242,19 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     url, load_balancing_strategy=load_balancing_strategy
                 )
                 aio = redis.asyncio.cluster.RedisCluster.from_url(
-                    url, load_balancing_strategy=load_balancing_strategy
+                    url,
+                    load_balancing_strategy=load_balancing_strategy,
+                    max_connections=max_connections,
                 )
                 self._ios.append(io)
                 self._async_ios.append(aio)
             else:
                 self._ios.append(redis.Redis.from_url(url))
-                self._async_ios.append(redis.asyncio.Redis.from_url(url))
+                # 池满排队而不是抛 MaxConnectionsError；from_pool 让 client 接管池的关闭
+                pool = redis.asyncio.BlockingConnectionPool.from_url(
+                    url, max_connections=max_connections, timeout=pool_timeout
+                )
+                self._async_ios.append(redis.asyncio.Redis.from_pool(pool))
 
         # 取消，只在单机模式下有所增长
         # self._batched_aio = RedisBatchedClient(self._async_ios)
@@ -252,6 +277,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         self.lua_commit = None
+        # 本进程共享的 pubsub 分发器，首次 get_mq_client 时在事件循环里懒建
+        self._hub: PubSubHub | None = None
 
         # 限制aio运行的coroutine
         try:
@@ -375,9 +402,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
             io.close()
         self._ios = []
 
+        await self._close_hub()
         for aio in self._async_ios:
             await aio.aclose()
         self._async_ios = []
+
+    async def _close_hub(self):
+        if self._hub is not None:
+            hub, self._hub = self._hub, None
+            await hub.close()
 
     @overload
     @staticmethod
@@ -557,18 +590,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        # 处理范围区间
-        def peel(x, _inclusive):
-            if type(x) in (str, bytes) and len(x) >= 1:
-                ch = x[0:1]  # bytes必须用范围切片
-                if ch in ("(", "[") or ch in (b"(", b"["):
-                    _inclusive = ch == "[" or ch == b"["
-                    x = x[1:]
-
-            return x, _inclusive
-
-        left, li = peel(left, True)
-        right, ri = peel(right, True)
+        # 处理范围区间：边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        left, li = peel_bound_(left)
+        right, ri = peel_bound_(right)
+        li = True if li is None else li
+        ri = True if ri is None else ri
         # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
         # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
         ls = b"\x00" if li else b"\x00\xff"
@@ -577,8 +603,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             ls, rs = rs, ls
 
         # 二进制化。
-        b_left = b"[" + cls.to_sortable_bytes(dtype.type(left)) + ls
-        b_right = b"[" + cls.to_sortable_bytes(dtype.type(right)) + rs
+        b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
+        b_right = b"[" + to_sortable_bytes(dtype.type(right)) + rs
         return b_left, b_right
 
     @staticmethod
@@ -755,29 +781,51 @@ class RedisBackendClient(BackendClient, alias="redis"):
         Exceptions
         --------
         RaceCondition
-            当提交数据时，发现数据已被其他事务修改，抛出此异常
+            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
+            观察其不存在的值（基于过期快照），可重试
+        UniqueViolation
+            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
         """
 
-        def _key_must_not_exist(_key: str):
-            """添加key must not exist的检查"""
-            checks.append(["NX", _key])
+        def _key_must_not_exist(_key: str, _race: bool, _label: str):
+            """添加key must not exist的检查（insert 主键）；_race 表示本事务曾 get 观察其不存在"""
+            (race_checks if _race else strict_checks).append(
+                ["NX", _key, "RACE" if _race else "UNIQUE", _label]
+            )
 
         def _version_must_match(_key: str, _old_version):
-            """添加version match的检查"""
-            checks.append(["VER", _key, _old_version])
+            """添加version match的检查，恒为竞态类"""
+            race_checks.append(["VER", _key, _old_version])
 
-        def _unique_meet(_unique_fields, _dtype_map, _idx_prefix, _row: dict[str, str]):
-            """添加unique索引检查"""
+        def _unique_meet(
+            _unique_fields,
+            _dtype_map,
+            _idx_prefix,
+            _row: dict[str, str],
+            _absent: set[str],
+            _comp_name: str,
+            _row_id: str,
+            _op: str,
+        ):
+            """添加unique索引检查；_absent 内的列冲突判竞态(RACE)，其余判确定性冲突(UNIQUE)"""
             for _field, _value in _row.items():
                 if _field in _unique_fields:
                     _idx_key = _idx_prefix + _field
-                    _sortable_value = self.to_sortable_bytes(
-                        _dtype_map[_field].type(_value)
-                    )
+                    _sortable_value = to_sortable_bytes(_dtype_map[_field].type(_value))
                     _start_val = b"[" + _sortable_value + b"\x00"
                     _end_val = b"[" + _sortable_value + b"\x00\xff"
-                    checks.append(["UNIQ", _idx_key, _start_val, _end_val])
+                    _race = _field in _absent
+                    (race_checks if _race else strict_checks).append(
+                        [
+                            "UNIQ",
+                            _idx_key,
+                            _start_val,
+                            _end_val,
+                            "RACE" if _race else "UNIQUE",
+                            f"{_comp_name}.{_field} id={_row_id} {_op}",
+                        ]
+                    )
 
         def _hset_key(_key, _old_version, _update: dict[str, str]):
             """添加hset的push命令"""
@@ -796,9 +844,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 if _field in _indexes:
                     _idx_key = _idx_prefix + _field
                     # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                    _sortable_value = self.to_sortable_bytes(
+                    _sortable_value = to_sortable_bytes(
                         _dtype_map[_field].type(_values[_field])
                     )
+                    # 点查询订阅者只订"索引=该值"的频道：insert/delete 记全部索引字段的值，
+                    # update 记变更字段的旧值(_add=False)和新值(_add=True)。
+                    # id 例外：没人订"id=某值"的频道（点查 id 走行频道/整个 id 索引的频道），
+                    # 每次 insert/delete 都为它 PUBLISH 一条纯属浪费
+                    if _field != "id":
+                        value_pubs.setdefault(
+                            self.value_channel_(_idx_key, _sortable_value), []
+                        ).append(_old["id"])
                     _member = _sortable_value + b"\x00" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能
@@ -818,15 +874,22 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         first_ref = idmap.first_reference()
         assert first_ref is not None, "typing检查"
+        # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
+        absent_by_ref = idmap.get_absent_unique_fields()
 
         # 组合成checks/pushes命令表，减少lua脚本的复杂度
-        # checks有exists/unique/version
+        # checks有exists/unique/version，分两组：竞态类在前（VER、带 RACE 标记的 NX/UNIQ），
+        # 确定性类在后。Lua 首个失败即返回 → 同时存在两类冲突时 RACE 优先
+        # （保住 upsert 锚定列与其他 unique 列同时撞车时"重试后转 update"的语义）
         # pushes有hset/zadd/zrem/del
-        checks: list[list[str | bytes]] = []
+        race_checks: list[list[str | bytes]] = []
+        strict_checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
-        # 表级变更通知：[channel, msgpack(row_id列表)]，一个事务一张表一条
+        # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。
+        # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
         publishes: list[list[str | bytes]] = []
+        value_pubs: dict[str, list[str]] = {}
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -835,13 +898,27 @@ class RedisBackendClient(BackendClient, alias="redis"):
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
             dtype_map = comp_cls.dtype_map_
+            comp_name = comp_cls.name_
+            absent_rows = absent_by_ref.get(ref, {})
             touched_ids: list[str] = []
             # insert
             for insert in inserts:
                 row_id = insert["id"]
                 key = id_prefix + row_id
-                _key_must_not_exist(key)
-                _unique_meet(unique_fields, dtype_map, idx_prefix, insert)
+                absent = absent_rows.get(int(row_id), set())
+                _key_must_not_exist(
+                    key, "id" in absent, f"{comp_name}.id id={row_id} insert"
+                )
+                _unique_meet(
+                    unique_fields,
+                    dtype_map,
+                    idx_prefix,
+                    insert,
+                    absent,
+                    comp_name,
+                    row_id,
+                    "insert",
+                )
                 _hset_key(key, 0, insert)
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
                 touched_ids.append(row_id)
@@ -851,7 +928,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 key = id_prefix + row_id
                 old_version = old_row["_version"]
                 _version_must_match(key, old_version)
-                _unique_meet(unique_fields, dtype_map, idx_prefix, new_row)
+                _unique_meet(
+                    unique_fields,
+                    dtype_map,
+                    idx_prefix,
+                    new_row,
+                    absent_rows.get(int(row_id), set()),
+                    comp_name,
+                    row_id,
+                    "update",
+                )
                 _hset_key(key, old_version, new_row)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
@@ -870,6 +956,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 publishes.append(
                     [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
                 )
+        for channel, ids in value_pubs.items():
+            publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -878,6 +966,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
 
+        checks = race_checks + strict_checks
         payload_json: bytes = msg_packer.pack(  # type: ignore
             [checks, pushes, deleted, publishes]
         )
@@ -897,8 +986,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):
-                # unique违反就是index的竞态原因
-                raise RaceCondition(resp)
+                # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
+                raise UniqueViolation(resp)
             else:
                 raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
 
@@ -945,9 +1034,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return RedisTableMaintenance(self)
 
     def get_mq_client(self) -> RedisMQClient:
-        """获取消息队列连接"""
+        """
+        获取消息队列连接（每个用户连接一个）。本进程对本地址只有一个 `PubSubHub`
+        （一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        """
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        from .mq import RedisMQClient
+        from .mq import PubSubHub, RedisMQClient
 
-        return RedisMQClient(self)
+        if self._hub is None:
+            self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
+        return RedisMQClient(self._hub)

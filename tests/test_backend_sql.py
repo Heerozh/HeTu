@@ -10,9 +10,8 @@ import pytest
 import sqlalchemy as sa
 from sqlalchemy.dialects import mysql, postgresql
 
-from hetu.common.multimap import MultiMap
 from hetu.data.backend.sql import SQLBackendClient
-from hetu.data.backend.sql.mq import MAX_CHANNELS_IN_FILTER, SQLMQClient
+from hetu.data.backend.sql.mq import MAX_CHANNELS_IN_FILTER, SQLMQClient, SQLNotifyHub
 
 
 def test_sql_parse_engine_urls_auto_driver():
@@ -71,9 +70,9 @@ def test_sql_notify_table_channel_is_cross_dialect_text():
 
 
 def test_sql_mq_channel_filter_threshold():
-    assert SQLMQClient._should_use_channel_in_filter(1)
-    assert SQLMQClient._should_use_channel_in_filter(MAX_CHANNELS_IN_FILTER)
-    assert not SQLMQClient._should_use_channel_in_filter(MAX_CHANNELS_IN_FILTER + 1)
+    assert SQLNotifyHub._should_use_channel_in_filter(1)
+    assert SQLNotifyHub._should_use_channel_in_filter(MAX_CHANNELS_IN_FILTER)
+    assert not SQLNotifyHub._should_use_channel_in_filter(MAX_CHANNELS_IN_FILTER + 1)
 
 
 def test_sql_post_configure_runs_support_table_ddl_on_master():
@@ -105,7 +104,8 @@ def test_sql_post_configure_skips_support_table_ddl_on_servant():
 
 
 @pytest.mark.asyncio
-async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeypatch):
+async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode():
+    """回退到按id扫描模式时，查到一批全是无关频道不算命中（返回False），命中订阅才True"""
     notify_table = SQLBackendClient.notify_table(sa.MetaData())
     target_channel = "target-channel"
     responses = [
@@ -143,30 +143,25 @@ async def test_sql_mq_pull_waits_for_subscribed_channel_in_fallback_mode(monkeyp
         def connect(self):
             return _FakeConn()
 
-    async def _fast_sleep(_seconds: float):
-        return None
-
-    monkeypatch.setattr("hetu.data.backend.sql.mq.asyncio.sleep", _fast_sleep)
-
-    mq = object.__new__(SQLMQClient)
-    mq._client = SimpleNamespace(
-        notify_table=lambda: notify_table,
-        aio=_FakeAio(),
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=_FakeAio())  # type: ignore[arg-type]
     )
-    mq.subscribed = {target_channel}
+    mq = SQLMQClient(hub)
+    # 直接登记订阅（不走 hub.add，它会先去查游标），订阅数超过阈值触发回退模式
+    hub._subs[target_channel] = {mq}
+    hub._since[target_channel] = 0  # 登记完成的频道都有水位（add() 取的），这里直接给
     for i in range(MAX_CHANNELS_IN_FILTER):
-        mq.subscribed.add(f"extra-{i}")
-    mq.pulled_deque = MultiMap()
-    mq.pulled_set = set()
-    mq.pulled_payload = {}
-    mq._last_notify_id = 0
-    mq._large_sub_warned = True
+        hub._subs[f"extra-{i}"] = {mq}
+        hub._since[f"extra-{i}"] = 0
+    hub._large_sub_warned = True
 
-    await mq.pull()
-
-    assert calls["count"] >= 2
+    assert await hub.poll_once() == (1, 0)  # 第一批只有无关频道，游标照样前进
+    assert hub._last_notify_id == 1
+    assert not mq.pulled_set
+    assert await hub.poll_once() == (1, 1)
+    assert calls["count"] == 2
     assert target_channel in mq.pulled_set
-    assert mq._last_notify_id == 2
+    assert hub._last_notify_id == 2
 
 
 def test_sql_maintenance_get_lock_blocks_until_release(tmp_path):
@@ -221,7 +216,8 @@ def test_sql_maintenance_get_lock_blocks_until_release(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
+async def test_sql_mq_pull_updates_subscribed_channels_during_loop():
+    """每次轮询的 IN 过滤都要用最新的频道集合，轮询中途新增的订阅下一轮就能查到"""
     notify_table = SQLBackendClient.notify_table(sa.MetaData())
     new_channel = "new-channel"
 
@@ -249,7 +245,8 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
             calls["count"] += 1
             # On first call, return nothing and add a new subscription
             if calls["count"] == 1:
-                mq.subscribed.add(new_channel)
+                hub._subs[new_channel] = {mq}
+                hub._since[new_channel] = 0
                 return _FakeResult([])
             # On second call, simulate the DB having a message for the new channel
             # In the BUGGY version, the query's WHERE IN (...) clause will NOT include new_channel
@@ -273,49 +270,20 @@ async def test_sql_mq_pull_updates_subscribed_channels_during_loop(monkeypatch):
         def connect(self):
             return _FakeConn()
 
-    orig_sleep = asyncio.sleep
-
-    async def _fast_sleep(_seconds: float):
-        # Allow the loop to continue
-        await orig_sleep(0)
-        if calls["count"] > 10:  # Safety break
-            raise Exception(
-                "Looping too much - reproduction failed or stale channels used"
-            )
-
-    monkeypatch.setattr("hetu.data.backend.sql.mq.asyncio.sleep", _fast_sleep)
-
-    mq = object.__new__(SQLMQClient)
-    mq._client = SimpleNamespace(
-        notify_table=lambda: notify_table,
-        aio=_FakeAio(),
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=_FakeAio())  # type: ignore[arg-type]
     )
+    mq = SQLMQClient(hub)
     # Start with one existing channel to ensure use_channel_filter is True
-    mq.subscribed = {"existing-channel"}
-    mq.pulled_deque = MultiMap()
-    mq.pulled_set = set()
-    mq.pulled_payload = {}
-    mq._last_notify_id = 0
-    mq._large_sub_warned = False
+    hub._subs["existing-channel"] = {mq}
+    hub._since["existing-channel"] = 0
 
-    # Run pull. It should finish when it receives the message for new_channel.
-    # In the buggy version, it will loop indefinitely (or until our safety break)
-    # because the SQL query will never include 'new-channel' in its IN filter.
-    try:
-        await asyncio.wait_for(mq.pull(), timeout=2.0)
-    except asyncio.TimeoutError:
-        pytest.fail(
-            "Timed out! SQLMQClient.pull() did not pick up the new channel (BUG REPRODUCED)"
-        )
-    except Exception as e:
-        if "Looping too much" in str(e):
-            pytest.fail(
-                "SQLMQClient.pull() is stuck in a loop because it's using stale channels (BUG REPRODUCED)"
-            )
-        raise e
-
+    # 第一轮：fake 在执行查询时新增了 new_channel 的订阅；第二轮的 IN 过滤必须包含它
+    assert await hub.poll_once() == (0, 0)
+    assert await hub.poll_once() == (1, 1)
+    assert calls["count"] == 2
     assert new_channel in mq.pulled_set
-    assert mq._last_notify_id == 1
+    assert hub._last_notify_id == 1
 
 
 def _check_notify_payload_column_upgrade(engine):
@@ -371,3 +339,184 @@ def test_sql_notify_table_payload_column_upgrade_postgres(ses_postgres_service):
         _check_notify_payload_column_upgrade(engine)
     finally:
         engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_concurrent_first_subscribers_keep_earliest_watermark():
+    """两个连接并发订阅同一个新频道：先登记再放游标，后到的不再各自查一次表尾把先到者的
+    水位抬高——否则先到者订阅之后、后到者查表尾之前提交的通知会被当成旧通知丢掉"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    gate = asyncio.Event()
+    max_ids = iter([10, 20])
+    queries = 0
+
+    async def fake_max_id():
+        nonlocal queries
+        queries += 1
+        await gate.wait()
+        return next(max_ids)
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]  轮询本身不测
+    mq_a, mq_b = SQLMQClient(hub), SQLMQClient(hub)
+    t_a = asyncio.create_task(mq_a.subscribe("C"))
+    await asyncio.sleep(0)
+    t_b = asyncio.create_task(mq_b.subscribe("C"))
+    await asyncio.sleep(0)
+    assert hub.subscriber_count("C") == 2, "登记应在等表尾之前完成"
+
+    gate.set()
+    async with asyncio.timeout(1):
+        await asyncio.gather(t_a, t_b)
+    assert queries == 1, "第二个订阅者应复用先到者的游标，不再查表尾"
+    assert hub._since["C"] == 10
+    assert hub._last_notify_id == 10
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_new_channel_while_polling_keeps_cursor():
+    """轮询已经在跑时新频道照样取表尾做水位（游标只随命中订阅频道的行前进，可能远落后于
+    表尾，不能拿它当水位重放旧通知），但不能动游标"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    max_ids = iter([100, 300])
+
+    async def fake_max_id():
+        return next(max_ids)
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]  轮询本身不测
+    mq = SQLMQClient(hub)
+    await mq.subscribe("A")
+    assert hub._since["A"] == 100 and hub._last_notify_id == 100
+    hub._last_notify_id = 105  # 轮询前进了一点，表尾已经到 300
+    await mq.subscribe("B")
+    assert hub._since["B"] == 300, "新频道的水位是表尾，不是游标"
+    assert hub._last_notify_id == 105, "轮询在跑，不能动游标"
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_watermark_survives_callers_cancellation():
+    """先到者等表尾时被取消（连接断了）：搭车登记的连接还等着这个水位，取水位不能跟着中断；
+    先到者只撤自己的登记"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    gate = asyncio.Event()
+
+    async def fake_max_id():
+        await gate.wait()
+        return 10
+
+    hub._get_current_notify_id = fake_max_id  # type: ignore[method-assign]
+    hub._run = lambda: asyncio.sleep(3600)  # type: ignore[method-assign]
+    mq_a, mq_b = SQLMQClient(hub), SQLMQClient(hub)
+    t_a = asyncio.create_task(mq_a.subscribe("C"))
+    await asyncio.sleep(0)
+    t_b = asyncio.create_task(mq_b.subscribe("C"))
+    await asyncio.sleep(0)
+    t_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await t_a
+    assert hub._subs["C"] == {mq_b}
+    assert "C" not in hub._since
+
+    gate.set()
+    async with asyncio.timeout(1):
+        await t_b
+    assert hub._since["C"] == 10
+    assert mq_b.subscribed_channels == {"C"}
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_poll_skips_channel_without_watermark():
+    """已登记但水位还没取到的频道，轮询遇到它的通知先跳过（取水位与轮询互斥，取回的表尾
+    只会 >= 这些行的 id，本来就不属于它）"""
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+
+    class _FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def mappings(self):
+            return self
+
+        def all(self):
+            return self._rows
+
+    class _FakeConn:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def execute(self, stmt):
+            return _FakeResult([{"id": 7, "channel": "C", "payload": None}])
+
+    class _FakeAio:
+        def connect(self):
+            return _FakeConn()
+
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=_FakeAio())  # type: ignore[arg-type]
+    )
+    mq = SQLMQClient(hub)
+    hub._subs["C"] = {mq}  # 登记了、水位还没到
+    fetched, hits = await hub.poll_once()
+    assert (fetched, hits) == (1, 0)
+    assert not mq.pulled_set
+    hub._since["C"] = 5
+    fetched, hits = await hub.poll_once()
+    assert (fetched, hits) == (1, 1)
+    assert "C" in mq.pulled_set
+    await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_poll_failure_backs_off_and_throttles_logs(monkeypatch, caplog):
+    """轮询通知表失败：指数退避（0.5s 起、封顶 5s），栈只记第一次，之后一行一条，恢复记一条"""
+    import logging
+
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    hub._subs["C"] = {SQLMQClient(hub)}
+    hub._since["C"] = 0
+    outcomes = iter([Exception("db down")] * 6 + [(0, 0)] * 2)
+
+    async def fake_poll_once():
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 8:
+            hub._closed = True  # 够了，让 _run 退出
+
+    hub.poll_once = fake_poll_once  # type: ignore[method-assign]
+    monkeypatch.setattr("hetu.data.backend.sql.mq.asyncio.sleep", fake_sleep)
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+    async with asyncio.timeout(3):
+        await hub._run()
+
+    assert sleeps[:6] == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0], "指数退避并封顶"
+    records = [r for r in caplog.records if "轮询通知表" in r.getMessage()]
+    with_stack = [r for r in records if r.exc_info]
+    assert len(with_stack) == 1, "栈只记第一次"
+    assert sum(1 for r in records if r.levelno == logging.ERROR) == 6
+    assert sum(1 for r in records if "恢复" in r.getMessage()) == 1

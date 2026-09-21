@@ -189,7 +189,7 @@ session(
 
 开一个事务，声明本事务会碰的组件（必须同簇，否则 `ValueError`）。
 
-only_master: 事务内读取（get / range / unique 预检）是否只走 master，默认 True——
+only_master: 事务内读取（get / range）是否只走 master，默认 True——
 headless 写量小，读 replica 省不了什么，却会把复制延迟变成 [`RaceCondition`](exceptions.md#racecondition) 空转。
 轮询用的 `servant_*` 不受此影响。
 

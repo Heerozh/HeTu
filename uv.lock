@@ -930,7 +930,6 @@ dependencies = [
     { name = "pyyaml" },
     { name = "redis", extra = ["hiredis"] },
     { name = "sanic" },
-    { name = "sortedcontainers" },
     { name = "sqlalchemy" },
     { name = "tabulate" },
     { name = "tqdm" },
@@ -979,7 +978,6 @@ requires-dist = [
     { name = "pyyaml", specifier = "~=6.0" },
     { name = "redis", extras = ["hiredis"], specifier = ">=7,<9" },
     { name = "sanic", specifier = "~=25.3" },
-    { name = "sortedcontainers", specifier = "~=2.4" },
     { name = "sqlalchemy", specifier = ">=2.0.46" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "tqdm", specifier = ">=4.67.3" },
@@ -2480,15 +2478,6 @@ dependencies = [
     { name = "setuptools" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/ef/74/c7ba0eadc4946de73c7146d6750542fda9b47883e6aaedadef88c1aba94e/socketify-0.0.31.tar.gz", hash = "sha256:7502bed5b382e75f04ea3c6d6b53b76f27bb8653740db92e3f2b55fab388df20", size = 4872407, upload-time = "2024-10-29T19:15:57.411Z" }
-
-[[package]]
-name = "sortedcontainers"
-version = "2.4.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e8/c4/ba2f8066cceb6f23394729afe52f3bf7adec04bf9ed2c820b39e19299111/sortedcontainers-2.4.0.tar.gz", hash = "sha256:25caa5a06cc30b6b83d11423433f65d1f9d76c4c6a0c90e3379eaa43b9bfdb88", size = 30594, upload-time = "2021-05-16T22:03:42.897Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/46/9cb0e58b2deb7f82b84065f37f3bffeb12413f947f9388e4cac22c4621ce/sortedcontainers-2.4.0-py2.py3-none-any.whl", hash = "sha256:a163dcaede0f1c021485e957a39245190e74249897e2ae4b2aa38595db237ee0", size = 29575, upload-time = "2021-05-16T22:03:41.177Z" },
-]
 
 [[package]]
 name = "sqlalchemy"

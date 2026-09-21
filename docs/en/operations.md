@@ -88,6 +88,13 @@ population while staying consistent.
 
 - Add as many `servants` as you need; each is a Redis read-only replica that
   syncs from the master.
+- Servants need `notify-keyspace-events` enabled (HeTu `CONFIG SET`s it at
+  startup when it has permission, and warns otherwise).
+- Every logged-in connection also subscribes to the `Connection` table's
+  `owner == this user` index-value channel, so when it gets kicked the server
+  closes it proactively and the RPC path no longer reads the row on every
+  call; if a notification is lost, `CONNECTION_ALIVE_RECHECK_INTERVAL`
+  (default 5 s) re-checks as a fallback.
 - `servants` is optional. Leaving it empty puts you in single-master mode —
   fine for small games.
 - Set Redis `client-output-buffer-limit` on the servants conservatively;
@@ -95,10 +102,18 @@ population while staying consistent.
 
 **Redis connection budget**
 
-- Servant connections ≈ number of HeTu ClientSDK connections (online users).
-- Master connections ≈ `workers × concurrent System calls per worker`.
-- Redis caps at ~10K connections per instance. If your concurrent online
-  population gets close to that, scale out by adding more `servants`.
+- Each worker process keeps **one** pub/sub connection per servant (per Redis
+  node in cluster mode) that fans notifications out to all of its WebSocket
+  connections, plus a bounded pool of short-lived read/write connections
+  (`max_connections`, default 64, queued when full). So connections per
+  servant ≈ `workers × (1 + max_connections)` — independent of the number of
+  online users.
+- Master connections ≈ `workers × (1 + max_connections)` as well; the pool is
+  shared by all concurrent System calls of a worker.
+- Redis caps at ~10K connections per instance; with the defaults that is
+  ~150 workers per instance. Scale subscription *throughput* (not connections)
+  by adding `servants`: each worker's pub/sub connection and reads are spread
+  over them at random.
 
 ### Drop-in alternatives
 
