@@ -330,7 +330,7 @@ class AsyncKeyspacePubSub:
                 continue
             groups.setdefault(node_key, []).append(channel)
             fut = self._pending_unsubscribe.get(channel)
-            if fut is None:
+            if fut is None or fut.done():
                 fut = loop.create_future()
                 self._pending_unsubscribe[channel] = fut
             futures.append(fut)
@@ -341,8 +341,11 @@ class AsyncKeyspacePubSub:
 
         if futures:
             try:
+                # 超时只是本调用方不等了：wait_acks 不会取消 future，它们留在待确认表里
+                # 等 ack 真的来（或节点失效时被 _fail_pending 统一失败），之后再退订
+                # 同一频道的人复用它们也不会莫名收到 CancelledError
                 async with asyncio.timeout(UNSUBSCRIBE_ACK_TIMEOUT):
-                    await asyncio.gather(*futures)
+                    await self.wait_acks(futures)
             except TimeoutError:
                 logger.warning(
                     f"UNSUBSCRIBE ack timeout after {UNSUBSCRIBE_ACK_TIMEOUT}s, "

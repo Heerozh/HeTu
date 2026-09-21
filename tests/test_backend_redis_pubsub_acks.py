@@ -373,3 +373,30 @@ async def test_hub_unsubscribe_racing_own_pending_subscribe_does_not_raise():
         await u
     assert "X" not in hub._pubsub.subscribed  # type: ignore[reportPrivateUsage]
     await hub.close()
+
+
+async def test_unsubscribe_ack_timeout_keeps_shared_future_usable(monkeypatch):
+    """UNSUBSCRIBE 等 ack 超时：只是本调用方不等了，共享的 future 不能被取消后还留在
+    待确认表里，否则之后再退订同一频道的人会莫名收到 CancelledError"""
+    monkeypatch.setattr("hetu.data.backend.redis.pubsub.UNSUBSCRIBE_ACK_TIMEOUT", 0.05)
+    pubsub, node = make_pubsub()
+    t = asyncio.create_task(pubsub.subscribe("X"))
+    await settle()
+    node.ack("subscribe", "X")
+    async with asyncio.timeout(1):
+        await t
+
+    async with asyncio.timeout(1):
+        await pubsub.unsubscribe("X")  # 不投 ack，超时后只记日志正常返回
+    fut = pubsub._pending_unsubscribe["X"]  # type: ignore[reportPrivateUsage]
+    assert not fut.done(), "超时不能连带取消共享的 future"
+
+    # 再退订一次（如别的连接刚订上又退掉），ack 到了正常返回
+    u2 = asyncio.create_task(pubsub.unsubscribe("X"))
+    await settle()
+    assert not u2.done()
+    node.ack("unsubscribe", "X")
+    async with asyncio.timeout(1):
+        await u2
+    assert "X" not in pubsub._pending_unsubscribe  # type: ignore[reportPrivateUsage]
+    await pubsub.close()
