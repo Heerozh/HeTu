@@ -482,3 +482,37 @@ def test_websocket_invalid_sub_length_disconnects(test_server):
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     assert closed, "连接没有被服务器关闭"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_setup_failure_deletes_connection_row(
+    monkeypatch, test_server, ses_redis_service
+):
+    """initialize() 落库之后初始化再出错（这里让订阅管理器构造失败）：连接断开，
+    且本连接那行 Connection 必须被删掉，不能永远留在库里（匿名连接数按 IP 计数）"""
+    import redis
+
+    class BrokenBroker:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("broker boom")
+
+    monkeypatch.setattr(websocket_server, "SubscriptionBroker", BrokenBroker)
+    r = redis.Redis.from_url(ses_redis_service[0])
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client1 = (
+            await connect()
+        )  # 握手在 initialize 之前，能成功；之后服务端初始化失败
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+            await client1.recv()
+        for _ in range(50):  # 等 finally 里的 terminate() 跑完
+            if len(r.keys(pattern)) == before:
+                break
+            await asyncio.sleep(0.05)
+        assert len(r.keys(pattern)) == before, (
+            "初始化失败的连接把 Connection 行留在库里了"
+        )
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
