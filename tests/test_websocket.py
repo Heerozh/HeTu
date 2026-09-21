@@ -296,6 +296,38 @@ def test_websocket_kick_without_rpc_after_login(test_server):
     )
 
 
+@pytest.mark.timeout(60)
+def test_websocket_normal_logout_no_spurious_kick_log(test_server, caplog):
+    """已登录连接正常断开：拆连接时自己删了 Connection 行，删行的通知不能被当成"被顶号"记日志"""
+    user_id = 199993
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def routine(connect):
+        for _ in range(3):
+            client1 = await connect()
+            await client1.send(["rpc", "login", user_id])
+            await client1.recv()
+            await client1.send(["rpc", "add_rls_comp_value", 1])
+            await client1.recv()
+            await client1.close()
+
+            client2 = await connect()
+            for _ in range(
+                40
+            ):  # 等服务端把这条连接拆完（断线 System 跑过就说明拆到那一步了）
+                await client2.send(["rpc", "get_disconnect_count", user_id])
+                message = await client2.recv()
+                if message[1] >= 1:
+                    break
+                await asyncio.sleep(0.05)
+            await client2.close()
+            await asyncio.sleep(0.2)  # 留时间给删行之后可能冒出来的假顶号核查
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    kicked = [r.getMessage() for r in caplog.records if "已被顶号" in r.getMessage()]
+    assert kicked == [], f"正常断开被记成了顶号：{kicked}"
+
+
 @pytest.mark.timeout(20)
 def test_websocket_disconnect_system_called(test_server):
     user_id = 199991

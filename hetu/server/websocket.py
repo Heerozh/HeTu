@@ -121,6 +121,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     recv_task_id = f"client_handler:{request.id}"
     subs_task_id = f"subs_receiver:{request.id}"
     broker: SubscriptionBroker | None = None
+    closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
     try:
         # 初始化订阅管理器，一个连接一个订阅管理器
         broker = SubscriptionBroker(
@@ -144,7 +145,12 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
 
             async def recheck_alive():
                 try:
-                    if await alive_checker.kicked(context):
+                    kicked = await alive_checker.kicked(context)
+                    if closing:
+                        # 正常拆连接时自己删了本行，kicked() 读到 None 也算"被顶号"；
+                        # 核查发起于拆连接之前、读回来时已在拆的，别记假的顶号日志
+                        return
+                    if kicked:
                         close_msg = _(
                             "⛓️ [📡WSConnect] 连接已被顶号，主动断开：{ctx}"
                         ).format(ctx=context)
@@ -255,6 +261,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         # terminate() 就跑不到，Connection 行同样泄漏；shield 让本协程被取消时清理照常跑完。
         # 不登记进 app 的任务表：关服时 shutdown_tasks 会取消表里的任务，loop 却已经不转了，
         # 没法结束的任务会让它空转不退出
+        closing = True
         cleanup_task = asyncio.create_task(
             _cleanup_connection(
                 request,
@@ -293,6 +300,11 @@ async def _cleanup_connection(
     logger.info(close_msg)
     await request.app.cancel_task(recv_task_id, raise_exception=False)
     await request.app.cancel_task(subs_task_id, raise_exception=False)
+    # 先退订再删本连接的 Connection 行：删行会向 owner 索引值频道 PUBLISH（带本用户的行没了），
+    # 被顶号的 watcher 还挂着的话会收到它，主动核查读到行不存在就记一条假的"已被顶号"。
+    # 退订等到 UNSUBSCRIBE ack 才返回，之后的 DEL 通知 Redis 不会再投给本进程
+    if broker is not None:
+        await broker.close()
     try:
         system_caller.call_check(DISCONNECT_SYSTEM)
     except ValueError:
@@ -311,6 +323,4 @@ async def _cleanup_connection(
     try:
         await endpoint_executor.terminate()
     finally:
-        if broker is not None:
-            await broker.close()
         request.app.purge_tasks()
