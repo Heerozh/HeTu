@@ -279,7 +279,7 @@ class SessionRepository:
     ) -> np.recarray:
         """
         从数据库查询索引，返回区间内数据，限制 `limit` 条。
-        本指令会去数据库执行 1+(limit-缓存命中) 次查询，至少要进行1次数据库查询。
+        本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
 
         与 `get` 不同，本方法的区间匹配只读取**已提交**的数据，不会读取当前事务中未提交
         的修改：当前事务内新 `insert` 的行、或索引字段被改动的行，不会反映在返回结果里
@@ -363,17 +363,42 @@ class SessionRepository:
             if point is not None:
                 self._session.idmap.mark_absent(self.ref, index_name, point)
 
-        # 再根据 id 列表查询数据行，可以命中缓存
-        rows = []
+        # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
+        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）
+        idmap = self._session.idmap
+        rows: list[np.record | None] = []
+        miss_slots: list[int] = []
+        miss_ids: list[int] = []
         for _id in row_ids:
-            if row := await self.get_by_id(_id):
+            row, row_stat = idmap.get(self.ref, _id)
+            if row_stat is None:
+                miss_slots.append(len(rows))
+                miss_ids.append(_id)
+                rows.append(None)  # 占位，保持索引顺序
+            elif row_stat != RowState.DELETE:
                 rows.append(row)
+        if miss_ids:
+            fetched = cast(
+                list[np.record | None],
+                await self._session.master_or_servant.get_many(
+                    self.ref, miss_ids, RowFormat.STRUCT
+                ),
+            )
+            # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过
+            found = [r for r in fetched if r is not None]
+            if found:
+                idmap.add_clean(
+                    self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
+                )
+            for slot, r in zip(miss_slots, fetched):
+                rows[slot] = r
+        result = [r for r in rows if r is not None]
 
         # 转换成 np.recarray 返回
-        if len(rows) == 0:
+        if len(result) == 0:
             return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
         else:
-            return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
+            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes))
 
     async def insert(self, row: np.record) -> None:
         """
