@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+import asyncio
 import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, final
@@ -39,6 +40,8 @@ class PubSubHub:
     def __init__(self, client: Redis | RedisCluster):
         self._pubsub = AsyncKeyspacePubSub(client, on_message=self._on_message)
         self._subs: dict[str, set[MQClient]] = {}
+        # 后台退订任务（调用方被取消时不能停下来等 ack），保存引用免得被 gc
+        self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
     @property
@@ -57,41 +60,47 @@ class PubSubHub:
         """
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        channels = list(channels)
-        fresh = []
+        pubsub = self._pubsub
+        fresh: list[str] = []
+        piggyback: list[str] = []
+        # 本次新登记的频道；已登记过的重复 add 是幂等的，失败/取消时不能把它们也撤了
+        registered: list[str] = []
         for channel in channels:
             subs = self._subs.get(channel)
             if subs is None:
                 self._subs[channel] = {mq}
+                registered.append(channel)
                 fresh.append(channel)
-            else:
+                continue
+            if mq not in subs:
                 subs.add(mq)
+                registered.append(channel)
+            if pubsub.is_subscribing(channel):
+                piggyback.append(channel)
+            else:
+                # 有人登记了但 Redis 侧没在订：上一个发起者的 SUBSCRIBE 失败了、
+                # 等它的人还没来得及撤登记，得由本次重新发
+                fresh.append(channel)
+        # 别人先发出、还没 ack 的频道要等到 ack：future 现在就拿，等自己的 SUBSCRIBE
+        # 回来再拿的话，它们中途发送失败会被摘掉，就看不到那个失败了
+        acks = pubsub.pending_acks(piggyback)
         try:
             if fresh:
-                await self._pubsub.subscribe(*fresh)
-            # 别人先发出、还没 ack 的频道也要等到 ack；它们发送失败时这里一起抛
-            await self._pubsub.wait_subscribed(channels)
-        except BaseException:
-            # 本次发出的频道作废：连同期间搭车登记的其他连接一起撤销（它们在
-            # wait_subscribed 里会收到同样的异常），别让后来者以为已经订上了
-            for channel in fresh:
-                self._subs.pop(channel, None)
-            for channel in channels:
-                subs = self._subs.get(channel)
-                if subs is not None:
-                    subs.discard(mq)
-                    if not subs:
-                        del self._subs[channel]
+                await pubsub.subscribe(*fresh)
+            await pubsub.wait_acks(acks)
+        except asyncio.CancelledError:
+            # 本调用方自己被取消（连接在拆）：SUBSCRIBE 由 pubsub 层保证照常发出，
+            # 这里只撤自己的登记；撤完没人要的频道后台退订，取消流程不能停下来等 ack
+            self._release_in_background(mq, registered)
             raise
-        # 等待期间可能被别人的失败撤销了登记
-        for channel in channels:
-            if mq not in self._subs.get(channel, ()):
-                raise ConnectionError(
-                    _("频道 {channel} 订阅失败").format(channel=channel)
-                )
+        except BaseException:
+            # 发送失败（发起者和搭车者等的 future 都带着同样的异常，各撤各的登记）；
+            # 已发出去的频道撤完没人要就后台退订，别在 Redis 上留下没人收的订阅
+            self._release_in_background(mq, registered)
+            raise
 
-    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
-        """撤销 mq 对这些频道的订阅，本进程内没人再订的频道才向 Redis 发 UNSUBSCRIBE"""
+    def _release(self, mq: MQClient, channels: Iterable[str]) -> list[str]:
+        """撤销 mq 对这些频道的登记，返回本进程内因此没人再订的频道"""
         gone = []
         for channel in channels:
             subs = self._subs.get(channel)
@@ -101,15 +110,36 @@ class PubSubHub:
             if not subs:
                 del self._subs[channel]
                 gone.append(channel)
+        return gone
+
+    def _release_in_background(self, mq: MQClient, channels: Iterable[str]) -> None:
+        gone = self._release(mq, channels)
         if gone and not self._closed:
-            try:
-                await self._pubsub.unsubscribe(*gone)
-            except Exception as e:  # noqa: BLE001 本地已退订，Redis 侧失败只影响多收几条会被忽略的消息
-                logger.warning(
-                    _("⚠️ [💾Redis] 取消订阅 {count} 个频道失败：{err}").format(
-                        count=len(gone), err=f"{type(e).__name__}:{e}"
-                    )
+            task = asyncio.create_task(self._unsubscribe_later(gone))
+            task.add_done_callback(self._tasks.discard)
+            self._tasks.add(task)
+
+    async def _unsubscribe_later(self, channels: list[str]) -> None:
+        # 排队到真正跑起来之间可能又有人订了这些频道，那就不能退了
+        channels = [channel for channel in channels if channel not in self._subs]
+        if channels:
+            await self._unsubscribe(channels)
+
+    async def _unsubscribe(self, channels: list[str]) -> None:
+        try:
+            await self._pubsub.unsubscribe(*channels)
+        except Exception as e:  # noqa: BLE001 本地已退订，Redis 侧失败只影响多收几条会被忽略的消息
+            logger.warning(
+                _("⚠️ [💾Redis] 取消订阅 {count} 个频道失败：{err}").format(
+                    count=len(channels), err=f"{type(e).__name__}:{e}"
                 )
+            )
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """撤销 mq 对这些频道的订阅，本进程内没人再订的频道才向 Redis 发 UNSUBSCRIBE"""
+        gone = self._release(mq, channels)
+        if gone and not self._closed:
+            await self._unsubscribe(gone)
 
     def _on_message(self, msg: dict) -> None:
         """AsyncKeyspacePubSub 的监听协程收到消息时同步调用，每条消息一次"""
@@ -146,6 +176,13 @@ class PubSubHub:
     async def close(self) -> None:
         self._closed = True
         self._subs.clear()
+        # 后台退订等的 ack 不会再来了，别让它们在 pubsub 关闭时各报一条失败
+        tasks = [t for t in self._tasks if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
         await self._pubsub.close()
 
 

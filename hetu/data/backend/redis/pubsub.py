@@ -95,6 +95,13 @@ class AsyncKeyspacePubSub:
         # 如果不保存task，task不会执行会被gc
         self._tasks.add(task)
 
+    def _spawn(self, coro) -> asyncio.Task:
+        """射后不管的 task：保存引用免得被 gc，close 时统一取消"""
+        task = asyncio.create_task(coro)
+        task.add_done_callback(self._tasks.discard)
+        self._tasks.add(task)
+        return task
+
     def standalone_connect(self):
         """
         获取standalone的独立连接和pubsub
@@ -196,6 +203,20 @@ class AsyncKeyspacePubSub:
                 fut.exception()  # 没人等的话别在 gc 时报 "never retrieved"
         pending.clear()
 
+    @staticmethod
+    async def wait_acks(futures: list[asyncio.Future[None]]):
+        """
+        等一组 ack future 都完成，有失败的抛出其异常。
+        future 是共享的（同一频道的所有等待方等同一个），所以不能用 gather：gather 所在
+        的 task 被取消时会连带取消它等的 future，让别的等待方莫名其妙收到 CancelledError。
+        asyncio.wait 只旁观不插手，本调用方被取消时 future 原样留给其他人。
+        """
+        if not futures:
+            return
+        done, _ = await asyncio.wait(futures)
+        for fut in done:
+            fut.result()
+
     async def subscribe(self, *channels: str):
         """
         精确订阅，可一次订阅多个频道，全部订阅成功（收到 ack）后返回。
@@ -209,32 +230,52 @@ class AsyncKeyspacePubSub:
             raise RedisConnectionError("pubsub closed")
         loop = asyncio.get_running_loop()
 
-        # 按目标节点分组；已经在等 ack 的频道（别的调用方发的）不再重复发，等它的 future 即可
-        groups: dict[str, list[str]] = {}
+        # 已经在等 ack 的频道（别的调用方发的）不再重复发，等它的 future 即可；
+        # 本次要发的频道在任何 await 之前就挂上 future，之后来搭车的人才能马上拿到
         futures: list[asyncio.Future[None]] = []
         own: list[str] = []
+        for channel in channels:
+            fut = self._pending_subscribe.get(channel)
+            if fut is None:
+                if channel in self._subscribed:
+                    continue
+                fut = self._pending_subscribe[channel] = loop.create_future()
+                own.append(channel)
+            futures.append(fut)
+
+        # 发送放进独立 task 并 shield：future 是共享的，登记了就必须把 SUBSCRIBE 发出去
+        # （或明确失败），不能因为本调用方中途被取消（连接断了）就半途而废，
+        # 让搭车等 ack 的其他连接永远等不到
+        if own:
+            await asyncio.shield(self._spawn(self._send_subscribe(own)))
+
+        # 等message返回了才能算订阅成功
+        await self.wait_acks(futures)
+
+    async def _send_subscribe(self, channels: list[str]):
+        """按节点分组发 SUBSCRIBE；没发出去的频道作废，让等它们的人一起失败"""
+        sent: set[str] = set()
         try:
+            groups: dict[str, list[str]] = {}
             for channel in channels:
-                fut = self._pending_subscribe.get(channel)
-                if fut is None:
-                    if channel in self._subscribed:
-                        continue
-                    fut = loop.create_future()
-                    self._pending_subscribe[channel] = fut
-                    own.append(channel)
-                    node_key = await self._resolve_node(channel)
-                    groups.setdefault(node_key, []).append(channel)
-                    self._channel_node[channel] = node_key
-                futures.append(fut)
+                node_key = await self._resolve_node(channel)
+                groups.setdefault(node_key, []).append(channel)
+                self._channel_node[channel] = node_key
 
             # 每个节点一条SUBSCRIBE命令
             for node_key, group in groups.items():
                 ps = self.node_resources[node_key]["pubsub"]
                 async with self._node_lock(node_key):
                     await ps.subscribe(*group)
+                sent.update(group)
         except BaseException as e:
-            # 发送失败：本次发出的频道作废，让等它们的人一起失败
-            for channel in own:
+            # 共享的 future 里不能放 CancelledError（这里只会来自 close()），
+            # 否则别的等待方会误以为是自己被取消了
+            if isinstance(e, asyncio.CancelledError):
+                e = RedisConnectionError("pubsub closed")
+            for channel in channels:
+                if channel in sent:
+                    continue  # 已发出的照常等 ack
                 fut = self._pending_subscribe.pop(channel, None)
                 self._channel_node.pop(channel, None)
                 if fut is not None and not fut.done():
@@ -242,22 +283,21 @@ class AsyncKeyspacePubSub:
                     fut.exception()  # 没人等的话别在 gc 时报 "never retrieved"
             raise
 
-        # 等message返回了才能算订阅成功
-        if futures:
-            await asyncio.gather(*futures)
+    def is_subscribing(self, channel: str) -> bool:
+        """频道已订阅成功，或 SUBSCRIBE 已发出正在等 ack"""
+        return channel in self._subscribed or channel in self._pending_subscribe
 
-    async def wait_subscribed(self, channels: Iterable[str]):
+    def pending_acks(self, channels: Iterable[str]) -> list[asyncio.Future[None]]:
         """
-        等待这些频道的 SUBSCRIBE 都收到 ack（由其他调用方发出的也算）。
-        频道不在待确认集合里时立即返回；对应的 SUBSCRIBE 发送失败时抛出同样的异常。
+        这些频道里已发出 SUBSCRIBE、尚未 ack 的 future（别的调用方发的），
+        之后用 wait_acks 等它们。这是同步方法：调用方登记完自己后马上取，
+        才不会漏掉中途发送失败的（失败的 future 会从待确认表里摘掉，之后就看不到了）。
         """
-        futures = [
+        return [
             fut
             for channel in channels
             if (fut := self._pending_subscribe.get(channel)) is not None
         ]
-        if futures:
-            await asyncio.gather(*futures)
 
     async def unsubscribe(self, *channels: str):
         """
