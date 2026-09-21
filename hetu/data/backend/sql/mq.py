@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 logger = logging.getLogger("HeTu.root")
 MAX_SUBSCRIBED = 5000
 PULL_BATCH_SIZE = 256
+# 轮询通知表失败后的退避区间（与 Redis pubsub 节点失效后的重订阅一致）
+POLL_BACKOFF_MIN = 0.5
+POLL_BACKOFF_MAX = 5.0
 # 避免SQLite等数据库在IN参数过多时触发参数上限/编译开销问题。
 MAX_CHANNELS_IN_FILTER = 500
 
@@ -222,6 +225,7 @@ class SQLNotifyHub:
 
     async def _run(self) -> None:
         interval = 1 / MQClient.UPDATE_FREQUENCY
+        failures = 0
         while not self._closed:
             if not self._subs:
                 # 没人订阅了就退出；下次 add() 看到任务已结束会重新起（此处到 return 无 await）
@@ -231,9 +235,36 @@ class SQLNotifyHub:
                 fetched, _hits = await self.poll_once()
             except asyncio.CancelledError:
                 raise
-            except Exception:
-                logger.exception(_("❌ [💾SQL] 轮询通知表失败，稍后重试"))
-                fetched = 0
+            except Exception as e:
+                # 数据库不可用时按轮询节奏重试等于每秒几十次重连 + 几十条带栈日志，
+                # 每个 worker 都这样：指数退避，栈只在首次记，之后一行一条
+                failures += 1
+                backoff = min(POLL_BACKOFF_MIN * 2 ** (failures - 1), POLL_BACKOFF_MAX)
+                if failures == 1:
+                    logger.exception(
+                        _("❌ [💾SQL] 轮询通知表失败，{backoff}s 后重试").format(
+                            backoff=backoff
+                        )
+                    )
+                else:
+                    logger.error(
+                        _(
+                            "❌ [💾SQL] 轮询通知表连续失败 {count} 次，{backoff}s 后重试：{err}"
+                        ).format(
+                            count=failures,
+                            backoff=backoff,
+                            err=f"{type(e).__name__}:{e}",
+                        )
+                    )
+                await asyncio.sleep(backoff)
+                continue
+            if failures:
+                logger.info(
+                    _("✅ [💾SQL] 轮询通知表恢复，期间失败 {count} 次").format(
+                        count=failures
+                    )
+                )
+                failures = 0
             if fetched < PULL_BATCH_SIZE:
                 # 追平了（没查满一批）才歇一下；查满一批说明还有积压，立刻接着查
                 await asyncio.sleep(interval / 2)

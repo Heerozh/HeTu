@@ -480,3 +480,43 @@ async def test_sql_hub_poll_skips_channel_without_watermark():
     assert (fetched, hits) == (1, 1)
     assert "C" in mq.pulled_set
     await hub.close()
+
+
+@pytest.mark.asyncio
+async def test_sql_hub_poll_failure_backs_off_and_throttles_logs(monkeypatch, caplog):
+    """轮询通知表失败：指数退避（0.5s 起、封顶 5s），栈只记第一次，之后一行一条，恢复记一条"""
+    import logging
+
+    notify_table = SQLBackendClient.notify_table(sa.MetaData())
+    hub = SQLNotifyHub(
+        SimpleNamespace(notify_table=lambda: notify_table, aio=None)  # type: ignore[arg-type]
+    )
+    hub._subs["C"] = {SQLMQClient(hub)}
+    hub._since["C"] = 0
+    outcomes = iter([Exception("db down")] * 6 + [(0, 0)] * 2)
+
+    async def fake_poll_once():
+        outcome = next(outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) >= 8:
+            hub._closed = True  # 够了，让 _run 退出
+
+    hub.poll_once = fake_poll_once  # type: ignore[method-assign]
+    monkeypatch.setattr("hetu.data.backend.sql.mq.asyncio.sleep", fake_sleep)
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+    async with asyncio.timeout(3):
+        await hub._run()
+
+    assert sleeps[:6] == [0.5, 1.0, 2.0, 4.0, 5.0, 5.0], "指数退避并封顶"
+    records = [r for r in caplog.records if "轮询通知表" in r.getMessage()]
+    with_stack = [r for r in records if r.exc_info]
+    assert len(with_stack) == 1, "栈只记第一次"
+    assert sum(1 for r in records if r.levelno == logging.ERROR) == 6
+    assert sum(1 for r in records if "恢复" in r.getMessage()) == 1
