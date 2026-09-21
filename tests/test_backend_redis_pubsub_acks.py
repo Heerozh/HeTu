@@ -9,6 +9,7 @@ from collections.abc import AsyncIterator
 
 import pytest
 from redis.asyncio import Redis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from hetu.data.backend.redis.mq import PubSubHub, RedisMQClient
 from hetu.data.backend.redis.pubsub import AsyncKeyspacePubSub
@@ -290,3 +291,60 @@ async def test_hub_resends_for_channel_whose_subscribe_failed():
         await t_c
     assert mq_c.subscribed_channels == {"X"}
     await hub.close()
+
+
+async def test_unsubscribe_before_subscribe_ack_leaves_no_stale_subscribed():
+    """SUBSCRIBE 还没 ack 就退订：迟到的 subscribe ack 不能把频道重新算作已订阅，
+    否则下一个订阅者会被"已订阅"短路、不再发 SUBSCRIBE，永远收不到通知"""
+    pubsub, node = make_pubsub()
+    t = asyncio.create_task(pubsub.subscribe("X"))
+    await settle()
+    u = asyncio.create_task(pubsub.unsubscribe("X"))
+    await settle()
+    assert node.commands == [("subscribe", ("X",)), ("unsubscribe", ("X",))]
+    with pytest.raises(RedisConnectionError):
+        await t
+
+    node.ack("subscribe", "X")
+    await settle()
+    assert "X" not in pubsub.subscribed, "过时的 subscribe ack 被当真了"
+    node.ack("unsubscribe", "X")
+    async with asyncio.timeout(1):
+        await u
+    assert "X" not in pubsub.subscribed
+
+    # 下一个订阅者必须真的再发一次 SUBSCRIBE
+    t2 = asyncio.create_task(pubsub.subscribe("X"))
+    await settle()
+    assert node.sent("subscribe") == ["X", "X"]
+    node.ack("subscribe", "X")
+    async with asyncio.timeout(1):
+        await t2
+    assert "X" in pubsub.subscribed
+    await pubsub.close()
+
+
+async def test_resubscribe_while_unsubscribe_pending_sends_again():
+    """UNSUBSCRIBE 还没 ack 又订回来：要重新发 SUBSCRIBE，unsubscribe ack 不能把它抹掉"""
+    pubsub, node = make_pubsub()
+    t = asyncio.create_task(pubsub.subscribe("X"))
+    await settle()
+    node.ack("subscribe", "X")
+    async with asyncio.timeout(1):
+        await t
+    u = asyncio.create_task(pubsub.unsubscribe("X"))
+    await settle()
+    t2 = asyncio.create_task(pubsub.subscribe("X"))
+    await settle()
+    assert node.sent("subscribe") == ["X", "X"]
+
+    node.ack("unsubscribe", "X")
+    async with asyncio.timeout(1):
+        await u
+    await settle()
+    assert not t2.done()
+    node.ack("subscribe", "X")
+    async with asyncio.timeout(1):
+        await t2
+    assert "X" in pubsub.subscribed
+    await pubsub.close()

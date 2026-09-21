@@ -60,14 +60,15 @@ class AsyncKeyspacePubSub:
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
         self.node_resources: dict[str, dict] = {}
-        # 已成功订阅的频道
+        # 已成功订阅（收到 ack 且之后没发过 UNSUBSCRIBE）的频道
         self._subscribed: set[str] = set()
         # 已发出 SUBSCRIBE / UNSUBSCRIBE、尚未收到 ack 的频道，每个频道一个 future，
         # ack 到了只唤醒等它的那几个调用方，不用广播
         self._pending_subscribe: dict[str, asyncio.Future[None]] = {}
         self._pending_unsubscribe: dict[str, asyncio.Future[None]] = {}
-        # 每个频道订阅在哪个节点上，取消订阅时必须发回同一节点
-        # （cluster模式下按ROUND_ROBIN选replica，两次解析可能得到不同节点）
+        # 每个频道当前订阅在哪个节点上：取消订阅时必须发回同一节点
+        # （cluster模式下按ROUND_ROBIN选replica，两次解析可能得到不同节点）；
+        # 发 UNSUBSCRIBE 时摘掉，监听协程据此判断收到的 subscribe ack 是不是已经过时
         self._channel_node: dict[str, str] = {}
 
         # 统一的消息队列（没有 on_message 回调时使用）
@@ -90,7 +91,7 @@ class AsyncKeyspacePubSub:
 
     def _spawn_listener(self, node_key: str, pubsub: PubSub):
         """建立一个射后不管的task监听pubsub消息"""
-        task = asyncio.create_task(self._node_listener(pubsub))
+        task = asyncio.create_task(self._node_listener(node_key, pubsub))
         task.add_done_callback(partial(self._on_node_listener_done, node_key))
         # 如果不保存task，task不会执行会被gc
         self._tasks.add(task)
@@ -366,7 +367,7 @@ class AsyncKeyspacePubSub:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RESUBSCRIBE_BACKOFF_MAX)
 
-    async def _node_listener(self, pubsub: PubSub):
+    async def _node_listener(self, node_key: str, pubsub: PubSub):
         """
         单个节点的监听循环
         """
@@ -378,6 +379,13 @@ class AsyncKeyspacePubSub:
                     if mtype != "message":  # ignore_subscribe_messages
                         if mtype == "subscribe":
                             channel = message["channel"].decode()
+                            # 只认"该频道当前就订在本节点上"的 ack：SUBSCRIBE 还没 ack
+                            # 就被 unsubscribe() 的话，_channel_node 已经摘掉了它，
+                            # 这条迟到的 ack 不能把它重新算作已订阅（UNSUBSCRIBE 紧随
+                            # 其后，Redis 不会再推它的消息，之后的订阅者却会被"已订阅"
+                            # 短路而永远收不到通知）
+                            if self._channel_node.get(channel) != node_key:
+                                continue
                             self._subscribed.add(channel)
                             fut = self._pending_subscribe.pop(channel, None)
                             if fut is not None and not fut.done():
@@ -387,6 +395,9 @@ class AsyncKeyspacePubSub:
                             fut = self._pending_unsubscribe.pop(channel, None)
                             if fut is not None and not fut.done():
                                 fut.set_result(None)
+                            # 期间没有重新订阅的话，兜底保证它不在已订阅集合里
+                            if channel not in self._channel_node:
+                                self._subscribed.discard(channel)
                         continue
                     if self.on_message is None:
                         await self.message_queue.put(message)
