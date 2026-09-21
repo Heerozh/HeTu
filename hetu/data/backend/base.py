@@ -43,7 +43,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol, final, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
 
 import numpy as np
 
@@ -965,16 +965,74 @@ class MQClient:
         raise NotImplementedError
 
 
-class MQHub(Protocol):
+class MQHub:
     """
-    每个进程共享的通知接收器：持有到后端的唯一订阅连接/轮询任务，维护"频道 → 本进程内
-    订阅了它的 MQClient"分发表，收到通知后调各 MQClient 的 `push_pulled_`。
-    `HubMQClient` 只依赖这两个方法。
+    每个进程共享的通知接收器基类：持有到后端的唯一订阅连接/轮询任务，维护"频道 → 本进程内
+    订阅了它的 MQClient"分发表（同时是引用计数），收到通知后调各 MQClient 的 `push_pulled_`。
+    这里是与后端无关的登记/撤销/分发/后台任务簿记；后端实现 `add` / `remove` 和自己的收发。
+    `HubMQClient` 只依赖 `add` / `remove`。
     """
 
-    async def add(self, mq: MQClient, channels: Iterable[str]) -> None: ...
+    def __init__(self) -> None:
+        self._subs: dict[str, set[MQClient]] = {}
+        # 后台任务（退订、取水位……）：不随调用方一起取消，保存引用免得被 gc，close 时统一取消
+        self._tasks: set[asyncio.Task] = set()
+        self._closed = False
 
-    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None: ...
+    @property
+    def channels(self) -> set[str]:
+        """本进程当前向后端订阅了的频道"""
+        return set(self._subs)
+
+    def subscriber_count(self, channel: str) -> int:
+        """某频道在本进程内的订阅连接数，测试用"""
+        return len(self._subs.get(channel, ()))
+
+    async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """登记 mq 对这些频道的订阅，返回时订阅已生效"""
+        raise NotImplementedError
+
+    async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
+        """撤销 mq 对这些频道的订阅，本进程内没人再订的频道才真正向后端退订"""
+        raise NotImplementedError
+
+    def _release(self, mq: MQClient, channels: Iterable[str]) -> list[str]:
+        """撤销 mq 对这些频道的登记，返回本进程内因此没人再订的频道"""
+        gone = []
+        for channel in channels:
+            subs = self._subs.get(channel)
+            if subs is None:
+                continue
+            subs.discard(mq)
+            if not subs:
+                del self._subs[channel]
+                self._on_channel_gone(channel)
+                gone.append(channel)
+        return gone
+
+    def _on_channel_gone(self, channel: str) -> None:
+        """某频道在本进程内没人订了：子类清理自己按频道记的状态"""
+
+    def _dispatch(self, channel_name: str, ids: list | None) -> int:
+        """把一条通知塞进本进程订阅了该频道的各连接的本地队列，返回丢弃的过期通知条数"""
+        dropped = 0
+        for mq in self._subs.get(channel_name, ()):
+            dropped += mq.push_pulled_(channel_name, ids)
+        return dropped
+
+    def _spawn(self, coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        task.add_done_callback(self._tasks.discard)
+        self._tasks.add(task)
+        return task
+
+    async def _cancel_tasks(self) -> None:
+        tasks = [t for t in self._tasks if not t.done()]
+        for t in tasks:
+            t.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._tasks.clear()
 
 
 class HubMQClient(MQClient):

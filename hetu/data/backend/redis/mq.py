@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, final
 import msgpack
 
 from ....i18n import _
-from ..base import HubMQClient, MQClient
+from ..base import HubMQClient, MQClient, MQHub
 from .pubsub import AsyncKeyspacePubSub
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("HeTu.root")
 
 
-class PubSubHub:
+class PubSubHub(MQHub):
     """
     每个工作进程（每个 servant BackendClient）一个：唯一的 pubsub 连接（cluster 模式下每个
     节点一条）+ "频道 → 本进程内订阅了它的连接" 的分发表。
@@ -37,20 +37,8 @@ class PubSubHub:
     """
 
     def __init__(self, client: Redis | RedisCluster):
+        super().__init__()
         self._pubsub = AsyncKeyspacePubSub(client, on_message=self._on_message)
-        self._subs: dict[str, set[MQClient]] = {}
-        # 后台退订任务（调用方被取消时不能停下来等 ack），保存引用免得被 gc
-        self._tasks: set[asyncio.Task] = set()
-        self._closed = False
-
-    @property
-    def channels(self) -> set[str]:
-        """本进程当前向 Redis 订阅了的频道"""
-        return set(self._subs)
-
-    def subscriber_count(self, channel: str) -> int:
-        """某频道在本进程内的订阅连接数，测试用"""
-        return len(self._subs.get(channel, ()))
 
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
         """
@@ -98,25 +86,10 @@ class PubSubHub:
             self._release_in_background(mq, registered)
             raise
 
-    def _release(self, mq: MQClient, channels: Iterable[str]) -> list[str]:
-        """撤销 mq 对这些频道的登记，返回本进程内因此没人再订的频道"""
-        gone = []
-        for channel in channels:
-            subs = self._subs.get(channel)
-            if subs is None:
-                continue
-            subs.discard(mq)
-            if not subs:
-                del self._subs[channel]
-                gone.append(channel)
-        return gone
-
     def _release_in_background(self, mq: MQClient, channels: Iterable[str]) -> None:
         gone = self._release(mq, channels)
         if gone and not self._closed:
-            task = asyncio.create_task(self._unsubscribe_later(gone))
-            task.add_done_callback(self._tasks.discard)
-            self._tasks.add(task)
+            self._spawn(self._unsubscribe_later(gone))
 
     async def _unsubscribe_later(self, channels: list[str]) -> None:
         # 排队到真正跑起来之间可能又有人订了这些频道，那就不能退了
@@ -161,9 +134,7 @@ class PubSubHub:
                 ids = None
             if not isinstance(ids, list):
                 ids = None
-        dropped = 0
-        for mq in subs:
-            dropped += mq.push_pulled_(channel_name, ids)
+        dropped = self._dispatch(channel_name, ids)
         if dropped:
             logger.warning(
                 _(
@@ -176,12 +147,7 @@ class PubSubHub:
         self._closed = True
         self._subs.clear()
         # 后台退订等的 ack 不会再来了，别让它们在 pubsub 关闭时各报一条失败
-        tasks = [t for t in self._tasks if not t.done()]
-        for t in tasks:
-            t.cancel()
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        self._tasks.clear()
+        await self._cancel_tasks()
         await self._pubsub.close()
 
 
