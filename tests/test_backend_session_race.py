@@ -263,7 +263,7 @@ async def test_update_or_insert_race(item_ref, mod_auto_backend):
 
 async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
     """
-    泛化自 upsert 的特例：若本事务先 `get(unique)` 观察到该值不存在，之后 `insert`
+    泛化自 upsert 的特例：若本事务先 `get(unique)` 观察到该值不存在，之后 `commit`
     时却发现远程已被并发插入，应判为 `RaceCondition`（基于过期快照的乐观并发失败），
     而非不可重试的 `UniqueViolation`。
 
@@ -286,7 +286,7 @@ async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
             row = item_ref.comp_cls.new_row()
             row.name = "zrc"
             row.time = 7770002
-            await repo.insert(row)  # 远程已被占用，且本事务曾观察其不存在 → Race
+            await repo.insert(row)  # 远程已被占用且本事务曾观察其不存在 → commit 时判 Race
 
     async def intruder_task():
         async with backend.session("pytest", 1) as session:

@@ -13,7 +13,7 @@ from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, UniqueViolation
+from hetu.data.backend import Backend, RaceCondition, UniqueViolation
 from hetu.data.backend.session import Session
 
 SnowflakeID().init(1, 0)
@@ -137,12 +137,7 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
         row_ids.append(row.id)
         await item_repo.insert(row)
 
-        # 关掉remote unique check，只测本地
-        async def mock_remote_has_unique_conflicts(row, field):
-            assert False, "不应该调用远程unique检查"
-
-        item_repo._remote_has_unique_conflicts = mock_remote_has_unique_conflicts  # type: ignore
-
+        # 同事务内重复：本地 IdentityMap 检查，在 insert()/update() 处立即抛
         # update 重复time
         row.name = "Item2"
         row.owner = 2
@@ -164,29 +159,199 @@ async def test_insert_unique(item_ref, mod_auto_backend: Callable[..., Backend])
         with pytest.raises(UniqueViolation, match="time"):
             await item_repo.insert(row)
 
-    # 测试和数据库已有数据unique违反，依然是提交前报错（提交报错属于race范围）
-    async with backend.session("pytest", 1) as session:
-        session.only_master = True  # 强制master上读取，防止replica延迟导致测试不通过
-        item_repo = session.using(item_ref.comp_cls)
-        row = item_ref.comp_cls.new_row()
-        row.name = "Item2"
-        row.owner = 2
-        row.time = 999
-        with pytest.raises(UniqueViolation, match="name"):
+    # 与库中既有数据冲突：insert()/update() 不再预检，改由 commit（async with 退出）原子判定；
+    # 本事务未曾 get 观察其不存在 → 确定性 UniqueViolation，从 async with 退出处抛
+    with pytest.raises(UniqueViolation, match="name"):
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            item_repo = session.using(item_ref.comp_cls)
+            row = item_ref.comp_cls.new_row()
+            row.name = "Item2"
+            row.owner = 2
+            row.time = 999
+            await item_repo.insert(row)  # 此处不再抛
+
+    with pytest.raises(UniqueViolation, match="time"):
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            item_repo = session.using(item_ref.comp_cls)
+            row = item_ref.comp_cls.new_row()
+            row.name = "Item4"
+            row.time = 2
             await item_repo.insert(row)
 
-        row = item_ref.comp_cls.new_row()
-        row.name = "Item4"
-        row.time = 2
-        with pytest.raises(UniqueViolation, match="time"):
-            await item_repo.insert(row)
-
-        # 测试update
-        row = await item_repo.get(name="Item2")
-        assert row
-        row.time = 1
-        with pytest.raises(UniqueViolation, match="time"):
+    # update 改成既有 unique 值，同理在 commit 处抛
+    with pytest.raises(UniqueViolation, match="time"):
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            item_repo = session.using(item_ref.comp_cls)
+            row = await item_repo.get(name="Item2")
+            assert row
+            row.time = 1
             await item_repo.update(row)
+
+
+async def test_unique_blind_insert_is_violation_no_retry(item_ref, mod_auto_backend):
+    """规则1：盲 insert 既有 unique 值 → commit 抛 UniqueViolation；Session.retry 不重试"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "taken", 1
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    attempts = 0
+    with pytest.raises(UniqueViolation, match="name"):
+        async for attempt in backend.session("pytest", 1).retry(3):
+            async with attempt as s:
+                attempts += 1
+                r = comp.new_row()
+                r.name, r.time = "taken", 2
+                await s.using(comp).insert(r)  # 不在此抛
+    assert attempts == 1
+
+
+async def test_unique_after_get_none_is_race_and_retries(item_ref, mod_auto_backend):
+    """规则2：get(name=x) 读空 → 另一 session 插入 x → insert x：commit 判 RaceCondition；
+    Session.retry 包住则重试后 get 命中转 update，整体成功。"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def intrude(name: str, time: int):
+        async with backend.session("pytest", 1) as s:
+            r = comp.new_row()
+            r.name, r.time, r.qty = name, time, 1
+            await s.using(comp).insert(r)
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(name="x") is None
+            await intrude("x", 5001)
+            r = comp.new_row()
+            r.name, r.time = "x", 5002
+            await repo.insert(r)  # 不在此抛，commit 判 RACE
+
+    attempts = 0
+    async for attempt in backend.session("pytest", 1).retry(3):
+        async with attempt as s:
+            s.only_master = True
+            attempts += 1
+            repo = s.using(comp)
+            row = await repo.get(name="y")
+            if row is None:
+                await intrude("y", 5003)  # 只在第 1 轮抢先
+                row = comp.new_row()
+                row.name, row.time = "y", 5004
+                await repo.insert(row)
+            else:
+                row.qty = row.qty + 1
+                await repo.update(row)
+    assert attempts == 2
+    async with backend.session("pytest", 1) as s:
+        s.only_master = True
+        row = await s.using(comp).get(name="y")
+        assert row is not None and row.qty == 2
+
+
+async def test_unique_after_range_none_is_race(item_ref, mod_auto_backend):
+    """等值 range 读空与 get 一样登记 absent：撞车判 RaceCondition；区间 range 不登记"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def intrude(name: str, time: int):
+        async with backend.session("pytest", 1) as s:
+            r = comp.new_row()
+            r.name, r.time = name, time
+            await s.using(comp).insert(r)
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert (await repo.range(name=("x", "x"), limit=1)).shape[0] == 0
+            await intrude("x", 6001)
+            r = comp.new_row()
+            r.name, r.time = "x", 6002
+            await repo.insert(r)
+
+    # 对照：区间查询读空不算观察，盲写撞车是确定性冲突
+    with pytest.raises(UniqueViolation, match="time"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert (await repo.range(time=(0, 1000), limit=10)).shape[0] == 0
+            await intrude("z", 5)
+            r = comp.new_row()
+            r.name, r.time = "w", 5
+            await repo.insert(r)
+
+
+async def test_unique_race_has_priority_over_violation(item_ref, mod_auto_backend):
+    """规则3：锚定列 absent 冲突 + 其他 unique 列既有值同时冲突 → RaceCondition；
+    对照：只有非 absent 列冲突 → UniqueViolation。"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:  # 既有 time=100
+        r = comp.new_row()
+        r.name, r.time = "a", 100
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(name="anchor") is None
+            async with backend.session("pytest", 1) as s2:  # 并发插入 anchor
+                r2 = comp.new_row()
+                r2.name, r2.time = "anchor", 101
+                await s2.using(comp).insert(r2)
+            r = comp.new_row()
+            r.name, r.time = "anchor", 100  # name 竞态 + time 确定性冲突
+            await repo.insert(r)
+
+    with pytest.raises(UniqueViolation, match="time"):
+        async with backend.session("pytest", 1) as s:
+            r = comp.new_row()
+            r.name, r.time = "fresh", 100
+            await s.using(comp).insert(r)
+
+
+async def test_unique_explicit_id_pk_conflict(item_ref, mod_auto_backend):
+    """规则4（headless）：显式 id 撞主键，无 get → UniqueViolation；先 get(id=) 读空再撞 → RaceCondition"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        s.explicit_ids_only = True
+        r = comp.new_row(id_=-77)
+        r.name, r.time = "pk", 1
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    with pytest.raises(UniqueViolation, match=r"Item\.id"):
+        async with backend.session("pytest", 1) as s:
+            s.explicit_ids_only = True
+            r = comp.new_row(id_=-77)
+            r.name, r.time = "pk2", 2
+            await s.using(comp).insert(r)
+
+    with pytest.raises(RaceCondition, match=r"Item\.id"):
+        async with backend.session("pytest", 1) as s:
+            s.explicit_ids_only = True
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(id=-78) is None
+            async with backend.session("pytest", 1) as s2:  # 并发插入 -78
+                s2.explicit_ids_only = True
+                r2 = comp.new_row(id_=-78)
+                r2.name, r2.time = "pk3", 3
+                await s2.using(comp).insert(r2)
+            r = comp.new_row(id_=-78)
+            r.name, r.time = "pk4", 4
+            await repo.insert(r)
 
 
 async def test_upsert(item_ref, mod_auto_backend: Callable[..., Backend]):

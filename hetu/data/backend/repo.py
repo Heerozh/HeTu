@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from ...i18n import _
-from .base import RaceCondition, RowFormat, UniqueViolation
+from .base import RowFormat, UniqueViolation
 from .idmap import RowState
 from .table import TableReference
 
@@ -106,6 +106,11 @@ class SessionRepository:
     ) -> tuple[str | None, bool]:
         """
         检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
+
+        这是**可选的提前检查**（每个 unique 字段 1 次往返）：`insert` / `update` 默认不再
+        调用本方法，等价的判定在 `commit()` 时由后端原子执行（见
+        `IdentityMap.get_absent_unique_fields`）。想在事务体内提前失败、或据此分支时可
+        显式调用。
 
         Parameters
         ----------
@@ -333,6 +338,19 @@ class SessionRepository:
             self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
         )
 
+        # 等值点查（left == right 闭区间，不带 "("/"[" 前缀）unique 列读空：与 get 一样登记
+        # negative observation，让"先 range 确认不存在再写"的写法撞车时判竞态而非
+        # UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内可见性。
+        if (
+            not row_ids
+            and index_name in comp_cls.uniques_
+            and (_right is None or _left == _right)
+            and not (
+                isinstance(_left, (str, bytes)) and _left[:1] in ("(", "[", b"(", b"[")
+            )
+        ):
+            self._session.idmap.mark_absent(self.ref, index_name, _left)
+
         # 再根据 id 列表查询数据行，可以命中缓存
         rows = []
         for _id in row_ids:
@@ -345,30 +363,14 @@ class SessionRepository:
         else:
             return np.rec.array(np.stack(rows, dtype=comp_cls.dtypes))
 
-    @staticmethod
-    def _raise_unique_conflict(conflict: str, is_race: bool, op: str) -> None:
-        """
-        根据 `is_unique_conflicts` 的判定抛出合适的异常：
-
-        - `is_race` 为 True → `RaceCondition`：远程冲突命中了本事务曾观察其不存在的列，
-          属基于过期快照的乐观并发失败，重试后会读到对方的行并走正确分支；
-        - 否则 → `UniqueViolation`：确定性的业务/数据冲突（本地重复，或从未观察过其
-          不存在的远程既有冲突），重试无意义。
-        """
-        if is_race:
-            raise RaceCondition(
-                _(
-                    "{op} race: row.{field} 被并发事务抢占（本事务曾观察其不存在）"
-                ).format(op=op, field=conflict)
-            )
-        raise UniqueViolation(f"{op} failed: row.{conflict} violates a unique index.")
-
     async def insert(self, row: np.record) -> None:
         """
         向Session中添加一行待插入数据。
 
-        若插入会破坏unique约束：本事务此前曾 `get` 观察到该值不存在时抛 `RaceCondition`，
-        否则抛 `UniqueViolation`（见 `_raise_unique_conflict`）。
+        只在本地 IdentityMap 检查 unique：同一事务内已有同值行 → 立即抛 `UniqueViolation`。
+        与数据库既有数据的主键 / unique 冲突不在此检查（0 往返），由 `commit()` 原子判定：
+        本事务曾 `get` 观察该值不存在 → `RaceCondition`（自动重试），否则 → `UniqueViolation`。
+        要提前确认可调用 `is_unique_conflicts`。
 
         Parameters
         ----------
@@ -384,16 +386,28 @@ class SessionRepository:
                 ).format(comp_name=self.ref.comp_cls.name_)
             )
 
-        # unique check
-        conflict, is_race = await self.is_unique_conflicts(row, insert=True)
-        if conflict:
-            self._raise_unique_conflict(conflict, is_race, "Insert")
+        changed_fields = self._get_changed_fields(row)
+        assert "id" in changed_fields, _(
+            "session中已存在该row id({row_id})，插入操作必须没有旧数据。"
+        ).format(row_id=row.id)
+
+        # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
+        if field := self._local_has_unique_conflicts(
+            row, changed_fields & self.ref.comp_cls.uniques_
+        ):
+            raise UniqueViolation(
+                f"Insert failed: row.{field} violates a unique index "
+                "(duplicate within transaction)"
+            )
 
         self._session.idmap.add_insert(self.ref, row)
 
     async def update(self, row: np.record) -> None:
         """
         向Session中添加一行待更新数据。
+
+        只在本地 IdentityMap 检查 unique（同事务内重复 → 立即抛 `UniqueViolation`）；
+        与数据库既有数据的冲突由 `commit()` 判定，规则同 `insert`。
 
         Parameters
         ----------
@@ -413,10 +427,14 @@ class SessionRepository:
         if len(changed_fields) == 0:
             raise ValueError("No fields changed, cannot update.")
 
-        # unique check
-        conflict, is_race = await self.is_unique_conflicts(row)
-        if conflict:
-            self._raise_unique_conflict(conflict, is_race, "Update")
+        # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
+        if field := self._local_has_unique_conflicts(
+            row, changed_fields & self.ref.comp_cls.uniques_
+        ):
+            raise UniqueViolation(
+                f"Update failed: row.{field} violates a unique index "
+                "(duplicate within transaction)"
+            )
 
         self._session.idmap.update(self.ref, row)
 
@@ -510,9 +528,9 @@ class UpsertContext:
             assert self.row_data is not None
             if self.insert:
                 # 锚定字段在 __aenter__ 已 get 读空、并被登记为“观察不存在”。若提交前被
-                # 并发插入，insert 会据此把锚定字段的unique冲突判为 RaceCondition；而非
-                # 锚定的其他unique列冲突仍是确定性 UniqueViolation。
-                # 见 SessionRepository.insert / _raise_unique_conflict。
+                # 并发插入，commit 会据此把锚定字段的冲突判为 RaceCondition（重试后 get
+                # 命中转 update）；非锚定的其他unique列冲突仍是确定性 UniqueViolation。
+                # 见 IdentityMap.get_absent_unique_fields。
                 await self.repo.insert(self.row_data)
             else:
                 if self.row_data == self.clean_data:
