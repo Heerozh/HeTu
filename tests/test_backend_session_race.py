@@ -197,6 +197,40 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
         await task1
 
 
+async def test_update_to_value_set_by_concurrent_self_update_is_race(
+    item_ref, mod_auto_backend
+):
+    """
+    并发把本行改成了目标值：commit 的 unique 检查命中的是自身行，不能误判 UniqueViolation，
+    应由版本检查报 RaceCondition（Redis：VER 排在 UNIQ 前；SQL：SELECT 跳过自身 → UPDATE
+    rowcount 为 0）。
+    """
+    from hetu.data.backend import RaceCondition
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "self", 1
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    with pytest.raises(RaceCondition, match="Version"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            row = await s.using(comp).get(name="self")
+            assert row is not None
+            # 并发：另一事务先把同一行的 time 改成 5 并提交
+            async with backend.session("pytest", 1) as s2:
+                s2.only_master = True
+                r2 = await s2.using(comp).get(name="self")
+                assert r2 is not None
+                r2.time = 5
+                await s2.using(comp).update(r2)
+            row.time = 5
+            await s.using(comp).update(row)
+
+
 async def test_update_or_insert_race(item_ref, mod_auto_backend):
     import asyncio
 

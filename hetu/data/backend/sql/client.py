@@ -18,13 +18,14 @@ import numpy as np
 import sqlalchemy as sa
 from sqlalchemy import event
 from sqlalchemy import exc as sa_exc
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from ....i18n import _
 from ..base import (
     BackendClient,
     RaceCondition,
     RowFormat,
+    UniqueViolation,
     sortable_token,
     to_sortable_bytes,
 )
@@ -725,6 +726,79 @@ class SQLBackendClient(BackendClient, alias="sql"):
         )
         return any(marker in message for marker in markers)
 
+    async def _check_unique_conflicts(
+        self,
+        conn: AsyncConnection,
+        dirties: dict[TableReference, Any],
+        absent_by_ref: dict[TableReference, dict[int, set[str]]],
+    ) -> None:
+        """
+        commit 事务内的显式唯一性检查，在 delete 之后、update / insert 之前执行（与 Redis Lua
+        "checks 先于 pushes、本事务删除的行不算冲突"对齐：delete 已先执行，SELECT 自然看不到）。
+
+        insert 行查全部 unique 列（含 id），update 行只查变更的 unique 列，按 (ref, field)
+        分组各 SELECT 一次。update 行若查到的是自身（并发把本行改成了同值）则忽略，交给后面
+        UPDATE 的版本条件报 RaceCondition。汇总全部冲突：任一"本事务曾 get 观察其不存在"的列
+        → RaceCondition（RACE 优先，重试可解）；否则 → UniqueViolation（确定性，不重试）。
+        SELECT 与写入之间被并发抢先的窗口仍由 IntegrityError → RaceCondition 兜底。
+        """
+        race: list[str] = []
+        strict: list[str] = []
+        for ref, (inserts, (old_rows, new_rows), _deletes) in dirties.items():
+            comp_cls = ref.comp_cls
+            dtype_map = comp_cls.dtype_map_
+            absent_rows = absent_by_ref.get(ref, {})
+
+            def _norm(field: str, value: Any, _dtype_map=dtype_map) -> Any:
+                # 两侧都过一遍 dtype（float32 精度、np/py 标量）保证查回的值能对上本地 key
+                dtype = _dtype_map[field]
+                return dtype.type(self._coerce_scalar(dtype, value)).item()
+
+            # {field: {normalized_value: (row_id, is_race, op)}}
+            wanted: dict[str, dict[Any, tuple[int, bool, str]]] = {}
+            for row in inserts:
+                row_id = int(row["id"])
+                absent = absent_rows.get(row_id, set())
+                for field in sorted(comp_cls.uniques_):
+                    wanted.setdefault(field, {})[_norm(field, row[field])] = (
+                        row_id,
+                        field in absent,
+                        "insert",
+                    )
+            for old_row, changed in zip(old_rows, new_rows):
+                row_id = int(old_row["id"])
+                absent = absent_rows.get(row_id, set())
+                for field in sorted(comp_cls.uniques_):
+                    if field in changed:
+                        wanted.setdefault(field, {})[_norm(field, changed[field])] = (
+                            row_id,
+                            field in absent,
+                            "update",
+                        )
+            if not wanted:
+                continue
+            table = self.component_table(ref)
+            for field, by_value in wanted.items():
+                col = table.c[field]
+                stmt = sa.select(table.c.id, col).where(col.in_(list(by_value)))
+                for found_id, found_value in (await conn.execute(stmt)).all():
+                    hit = by_value.get(_norm(field, found_value))
+                    if hit is None:
+                        # 数据库按自身相等语义命中但本地对不上（如大小写不敏感 collation）：
+                        # 只有一个候选时可归因；否则交给 UNIQUE 约束兜底
+                        if len(by_value) != 1:
+                            continue
+                        hit = next(iter(by_value.values()))
+                    row_id, is_race, op = hit
+                    if op == "update" and int(found_id) == row_id:
+                        continue  # 自身行：由 UPDATE 的版本条件报 Race
+                    msg = f"Unique violation {comp_cls.name_}.{field} id={row_id} {op}"
+                    (race if is_race else strict).append(msg)
+        if race:
+            raise RaceCondition("RACE: " + race[0])
+        if strict:
+            raise UniqueViolation("UNIQUE: " + strict[0])
+
     @staticmethod
     def _is_table_missing_error(exc: BaseException) -> bool:
         if not isinstance(exc, sa_exc.DBAPIError):
@@ -924,6 +998,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
         dirties = idmap.get_dirty_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
+        # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
+        absent_by_ref = idmap.get_absent_unique_fields()
 
         notify_table = self.notify_table()
         now_ts = time.time()
@@ -1001,6 +1077,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                 )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
+                    # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
+                    await self._check_unique_conflicts(conn, dirties, absent_by_ref)
+
                     for ref, (
                         _inserts,
                         (old_rows, new_rows),
@@ -1028,6 +1107,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             try:
                                 result = await conn.execute(stmt)
                             except sa_exc.IntegrityError as exc:
+                                # 只有 _check_unique_conflicts 的 SELECT 与写入之间被并发
+                                # 抢先才会到这里；重试后 SELECT 会给出确定判定，不会无限重试
                                 if self._is_unique_violation(exc):
                                     raise RaceCondition(
                                         f"UNIQUE violation: {exc}"
@@ -1069,6 +1150,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             try:
                                 await conn.execute(sa.insert(table).values(**typed_row))
                             except sa_exc.IntegrityError as exc:
+                                # 只有 _check_unique_conflicts 的 SELECT 与写入之间被并发
+                                # 抢先才会到这里；重试后 SELECT 会给出确定判定，不会无限重试
                                 if self._is_unique_violation(exc):
                                     raise RaceCondition(
                                         f"UNIQUE violation: {exc}"
