@@ -39,7 +39,7 @@ import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -852,10 +852,24 @@ class MQClient:
         self.pulled_set: set[str] = set()
         # 表级频道合并后的payload：channel -> 变动的row_id集合
         self.pulled_payload: dict[str, set[str]] = {}
+        # 服务端内部关注的频道：收到通知只同步回调，不进推送队列（见 watch_）
+        self._watchers: dict[str, Callable[[], None]] = {}
 
     async def close(self):
         """取消本连接的全部订阅并释放资源"""
         raise NotImplementedError
+
+    def watch_(self, channel_name: str, callback: Callable[[], None]) -> None:
+        """
+        登记一个服务端内部关注的频道：该频道的通知只同步调用 `callback`，不进本地推送队列。
+        调用方自行 `subscribe`。回调在后端通知接收器的监听协程里执行，必须非阻塞
+        （置个标记 / create_task），不得 await、不得开事务。
+        """
+        self._watchers[channel_name] = callback
+
+    def unwatch_(self, channel_name: str) -> None:
+        """取消 `watch_` 的登记（不退订，退订由调用方决定）"""
+        self._watchers.pop(channel_name, None)
 
     def push_pulled_(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
         """
@@ -864,9 +878,22 @@ class MQClient:
         表级频道的 payload 按频道合并。消息内容只有channel名：每行数据、每个Index都是
         一个channel，该channel收到了任何消息都说明有数据更新。
         入队前先丢掉超过 `DROP_AFTER` 秒还没被取走的旧通知，返回丢弃的条数，由调用方打日志。
+        `watch_` 登记过的频道走回调，不入队。
 
         这是每条通知都走的热路径：常态下队头不会过期，只花一次 O(1) 的比较。
         """
+        callback = self._watchers.get(channel_name)
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # 别让一个回调拖垮通知接收器的监听协程
+                logger.exception(
+                    _("⚠️ [MQ] 频道 {channel} 的内部回调异常").format(
+                        channel=channel_name
+                    )
+                )
+            return 0
+
         now = time.monotonic()
         dropped = 0
         dq = self.pulled_deque

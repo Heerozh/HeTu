@@ -137,3 +137,46 @@ async def test_hub_mq_client_close_releases_only_own(filled_item_ref, mod_auto_b
 
     await mq2.close()
     assert hub.subscriber_count(channels[0]) == 0
+
+
+async def test_watch_channel_callback_bypasses_client_queue(
+    filled_item_ref, mod_auto_backend
+):
+    """broker.watch_channel：服务端内部关注的频道收到通知只回调，不进客户端推送队列；
+    回调异常不影响后续通知；连接关闭随 mq_client 一起退订"""
+    backend: Backend = mod_auto_backend()
+    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
+    servant = backend.servant
+    ref = filled_item_ref
+    row = await servant.get(ref, (await servant.range(ref, "time", 110, limit=1))[0].id)
+    assert row is not None
+    channel = servant.row_channel(ref, int(row.id))
+
+    broker = SubscriptionBroker(backend)  # hub 随第一个 mq_client 懒创建
+    hub = _hub(backend)
+    hits: list[int] = []
+
+    def on_change():
+        hits.append(1)
+        if len(hits) == 1:
+            raise RuntimeError("callback boom")  # 第一次故意抛，hub 不能因此停摆
+
+    await broker.watch_channel(channel, on_change)
+    assert hub.subscriber_count(channel) == 1
+
+    await _update_qty(backend, ref, 5)
+    async with asyncio.timeout(3):
+        while not hits:
+            await asyncio.sleep(0.02)
+    # 没进推送队列：客户端侧拿不到任何更新
+    assert channel not in broker._mq_client.pulled_set
+    assert await broker.get_updates(timeout=0.3) == {}
+
+    # 回调抛过异常后，后续通知照常到达
+    await _update_qty(backend, ref, 6)
+    async with asyncio.timeout(3):
+        while len(hits) < 2:
+            await asyncio.sleep(0.02)
+
+    await broker.close()
+    assert hub.subscriber_count(channel) == 0
