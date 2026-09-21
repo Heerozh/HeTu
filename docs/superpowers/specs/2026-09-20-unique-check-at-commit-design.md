@@ -1,7 +1,7 @@
 # unique 检查下沉到 commit（insert / update 不再远程预检）— 设计稿
 
 - 日期：2026-09-20
-- 状态：待用户确认设计，确认后写实现计划
+- 状态：已实施（实施计划：`docs/superpowers/plans/2026-09-21-unique-check-at-commit.md`）
 - 取代：同日的《unique 预检合批》设计稿（已废弃，未实施）
 - 影响范围：`hetu/data/backend/redis/commit_v2.lua`、`hetu/data/backend/redis/client.py`
   （commit）、`hetu/data/backend/sql/client.py`（commit）、`hetu/data/backend/idmap.py`
@@ -218,7 +218,8 @@ else:
 - `_raise_unique_conflict`：只剩本地路径使用，简化为直接抛 `UniqueViolation`（或删除，
   由实现决定）。
 - `UpsertContext.__aexit__` 里关于"锚定字段冲突判 Race"的注释改为指向 commit 的判定。
-- `get()` 不动：`mark_absent` 仍是标记的唯一来源。
+- `get()` 不动；等值 `range`（判定规则同订阅侧 `point_query_value_`）unique 列读空时也
+  `mark_absent`，与 `get` 对称，保住"用 range 做点查再写"的写法（实施时用户拍板补充）。
 
 ### 3.6 错误信息
 
@@ -304,6 +305,12 @@ else:
 
 - `test_insert_after_get_none_is_race`：断言不变（异常从 `async with` 出来），注释改为
   "commit 时判为 Race"。`test_update_or_insert_race`、`test_retry_generator` 不改。
+- `test_unique_commit_race`（规划时补列）：盲写撞并发提交，原期望 `RaceCondition(match="UNIQUE")`，
+  新规则下是 `UniqueViolation`——它是唯一要改期望类型的测试；旧行为也只是多浪费一次重试后同样失败。
+- 新增 `test_update_to_value_set_by_concurrent_self_update_is_race`：并发把本行改成目标值，
+  unique 检查命中自身行不得误判，应由版本检查报 `RaceCondition`。
+- 新增（`test_backend_session_basic.py`）`test_unique_after_range_none_is_race`：等值 `range`
+  读空登记 absent → 撞车判竞态；区间 `range` 不登记 → `UniqueViolation`。
 
 `tests/test_system_executor.py`
 

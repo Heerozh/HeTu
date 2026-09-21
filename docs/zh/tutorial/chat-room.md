@@ -62,7 +62,7 @@ class OnlineUser(hetu.BaseComponent):
     last_seen_ms: np.int64 = hetu.property_field(0)
 ```
 
-`owner` 和 `name` 上的 `unique=True` 在插入时强制唯一性，同时也创建了一个快速的点查找索引。
+`owner` 和 `name` 上的 `unique=True` 在提交时强制唯一性，同时也创建了一个快速的点查找索引。
 
 ## 第 3 步 — `user_login` 系统
 

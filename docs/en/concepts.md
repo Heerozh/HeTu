@@ -41,7 +41,7 @@ A few invariants that surprise new users:
   separate Component and join via `owner`.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
-  plus a uniqueness check on insert, and it implicitly turns on `index=True`.
+  plus a uniqueness check at commit, and it implicitly turns on `index=True`.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the

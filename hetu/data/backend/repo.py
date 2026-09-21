@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, cast
 import numpy as np
 
 from ...i18n import _
-from .base import RowFormat, UniqueViolation
+from .base import BackendClient, RowFormat, UniqueViolation
 from .idmap import RowState
 from .table import TableReference
 
@@ -338,18 +338,15 @@ class SessionRepository:
             self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
         )
 
-        # 等值点查（left == right 闭区间，不带 "("/"[" 前缀）unique 列读空：与 get 一样登记
+        # 等值点查（判定规则同订阅侧 point_query_value_）unique 列读空：与 get 一样登记
         # negative observation，让"先 range 确认不存在再写"的写法撞车时判竞态而非
         # UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内可见性。
-        if (
-            not row_ids
-            and index_name in comp_cls.uniques_
-            and (_right is None or _left == _right)
-            and not (
-                isinstance(_left, (str, bytes)) and _left[:1] in ("(", "[", b"(", b"[")
+        if not row_ids and index_name in comp_cls.uniques_:
+            point = BackendClient.point_query_value_(
+                comp_cls.dtype_map_[index_name], _left, _right
             )
-        ):
-            self._session.idmap.mark_absent(self.ref, index_name, _left)
+            if point is not None:
+                self._session.idmap.mark_absent(self.ref, index_name, point)
 
         # 再根据 id 列表查询数据行，可以命中缓存
         rows = []
