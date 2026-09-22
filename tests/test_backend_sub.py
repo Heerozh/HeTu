@@ -3,6 +3,7 @@ from typing import AsyncGenerator, cast
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
+from fixtures.read_counts import count_reads
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat
@@ -1158,28 +1159,6 @@ async def test_subscribe_table_large(broker: SubscriptionBroker, item_ref, admin
     assert all(r["qty"] == 77 for r in updates[sub_id].values())
 
 
-def _count_reads(stack, backend: Backend):
-    """把 master 与各 servant 的读方法都包上计数：plain = get / get_many，
-    authoritative = get_many_authoritative（Redis 的 get_authoritative 内部就是它）"""
-    from unittest.mock import patch
-
-    mocks = {}
-    for i, client in enumerate([backend.master, *backend._servants]):
-        for meth in ("get", "get_many", "get_many_authoritative"):
-            mocks[(i, meth)] = stack.enter_context(
-                patch.object(client, meth, wraps=getattr(client, meth))
-            )
-
-    def counts():
-        c = {"plain": 0, "authoritative": 0}
-        for (_, meth), m in mocks.items():
-            key = "authoritative" if meth == "get_many_authoritative" else "plain"
-            c[key] += m.call_count  # type: ignore[attr-defined]
-        return c
-
-    return counts
-
-
 async def _other_process_update(mod_backend_config, ref, qty: int):
     """用另一个 Backend（模拟别的 worker 进程）改 time=110 那行的 qty"""
     import copy
@@ -1222,7 +1201,7 @@ async def test_sub_push_uses_row_cache(
 
         await _other_process_update(mod_backend_config, filled_item_ref, 501)
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             updates_a = await broker_a.get_updates()
             after_a = counts()
             # 副本追上了是 1 次副本读；副本滞后则再补 1 次权威读
@@ -1241,7 +1220,7 @@ async def test_sub_push_uses_row_cache(
             r.qty = 502
             await repo.update(r)
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             updates_a = await broker_a.get_updates()
             updates_b = await broker_b.get_updates()
             assert counts() == {"plain": 0, "authoritative": 0}

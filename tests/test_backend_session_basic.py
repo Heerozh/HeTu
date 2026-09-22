@@ -11,6 +11,7 @@ from typing import Callable
 import numpy as np
 import pytest
 from fixtures.backends import use_redis_family_backend_only
+from fixtures.read_counts import count_reads
 from redis.asyncio.cluster import RedisCluster
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -1236,30 +1237,6 @@ def _admin_ctx():
     )
 
 
-def _count_reads(stack, backend: Backend):
-    """把 master 与各 servant 的读方法都包上计数，返回 counts() -> {"plain", "authoritative"}。
-    plain 是 get / get_many（事务直读或副本读），authoritative 只数 get_many_authoritative
-    （Redis 的 get_authoritative 内部就是它，一次逻辑权威读记 1）"""
-    from unittest.mock import patch
-
-    mocks: dict[tuple[int, str], object] = {}
-    clients = [backend.master, *backend._servants]
-    for i, client in enumerate(clients):
-        for meth in ("get", "get_many", "get_many_authoritative"):
-            mocks[(i, meth)] = stack.enter_context(
-                patch.object(client, meth, wraps=getattr(client, meth))
-            )
-
-    def counts():
-        c = {"plain": 0, "authoritative": 0}
-        for (_, meth), m in mocks.items():
-            key = "authoritative" if meth == "get_many_authoritative" else "plain"
-            c[key] += m.call_count  # type: ignore[attr-defined]
-        return c
-
-    return counts
-
-
 async def _first_row_id(backend: Backend, comp, **query) -> int:
     async with backend.session("pytest", 1) as session:
         session.only_master = True
@@ -1290,7 +1267,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
     broker = SubscriptionBroker(backend)
     try:
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             # subscribe_get 先订后读：那次权威读就是缓存的首次填充
             sub, _ = await broker.subscribe_get(
                 filled_item_ref, _admin_ctx(), "id", row_id
@@ -1347,7 +1324,7 @@ async def test_row_cache_range_partial_hit(filled_item_ref, mod_auto_backend):
         cache.activate(backend.master.row_channel(filled_item_ref, row_id), "test")
 
     with ExitStack() as stack:
-        counts = _count_reads(stack, backend)
+        counts = count_reads(stack, backend)
         # 预热：7 行 floor 未知走一次权威批读，3 行未激活走一次副本批读
         async with backend.session("pytest", 1) as session:
             got = await session.using(comp).range(time=(113, 122), limit=10)
@@ -1465,7 +1442,7 @@ async def test_row_cache_skips_volatile(filled_rls_ref, mod_auto_backend):
     cache.activate(channel, "test")
     try:
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             for _ in range(2):
                 async with backend.session("pytest", 1) as session:
                     got = await session.using(comp).get(id=row_id)
@@ -1502,7 +1479,7 @@ async def test_row_cache_delete(filled_item_ref, mod_auto_backend):
         cache.notify(channel, 0)  # 手动激活的频道没有 hub 订阅，模拟删除通知
         assert cache.floor(channel) is DELETED and cache.get(channel) is None
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             async with backend.session("pytest", 1) as session:
                 assert await session.using(comp).get(id=row_id) is None
             assert counts() == {"plain": 0, "authoritative": 1}
@@ -1532,7 +1509,7 @@ async def test_row_cache_disabled(
         assert sub
         try:
             with ExitStack() as stack:
-                counts = _count_reads(stack, backend2)
+                counts = count_reads(stack, backend2)
                 for _ in range(2):
                     async with backend2.session("pytest", 1) as session:
                         assert await session.using(comp).get(id=row_id) is not None
@@ -1572,7 +1549,7 @@ async def test_row_cache_write_through(
     broker = SubscriptionBroker(backend)
     try:
         with ExitStack() as stack:
-            counts = _count_reads(stack, backend)
+            counts = count_reads(stack, backend)
             # subscribe_get 先订后读：那次权威读就是缓存的首次填充，之后的 get 命中
             sub, _ = await broker.subscribe_get(
                 filled_item_ref, _admin_ctx(), "id", row_id
@@ -1616,7 +1593,7 @@ async def test_row_cache_write_through(
             assert cached is not None and cached.name == "WT"
             assert int(cached["_version"]) == 1
             with ExitStack() as stack:
-                counts = _count_reads(stack, backend)
+                counts = count_reads(stack, backend)
                 async with backend.session("pytest", 1) as session:
                     got = await session.using(comp).get(id=int(new_row.id))
                 assert got is not None and got.name == "WT"
