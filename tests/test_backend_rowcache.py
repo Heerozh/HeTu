@@ -127,18 +127,31 @@ def test_fill_rules(mod_item_model):
     # DELETED：副本读拒（副本可能还没删），权威读回的行收（重插 / 乱序）
     cache.notify(ch, 0)
     assert cache.get(ch) is None
-    assert cache.floor(ch) is DELETED
+    assert cache.floor(ch) is DELETED and cache.replica_floor(ch) is None
     assert cache.fill(lease, _row(mod_item_model, 1, 5), authoritative=False) is False
     assert cache.fill(lease, _row(mod_item_model, 1, 1), authoritative=True) is True
     assert cache.floor(ch) == 1
+    # 见过删除通知后本次激活周期内只信权威读：重插后版本从 1 重来，滞后副本上删除前的
+    # 旧行（v5）版本反而更高，floor 挡不住，副本读一律不收
+    cache.notify(ch, 2)
+    assert cache.get(ch) is None and cache.floor(ch) == 2
+    assert cache.replica_floor(ch) is None
+    assert cache.fill(lease, _row(mod_item_model, 1, 5), authoritative=False) is False
+    assert cache.fill(lease, _row(mod_item_model, 1, 2), authoritative=False) is False
+    assert cache.fill(lease, _row(mod_item_model, 1, 2), authoritative=True) is True
+    # 权威读仍受 floor 约束（读发生在更新的通知之前）
+    cache.notify(ch, 3)
+    assert cache.fill(lease, _row(mod_item_model, 1, 2), authoritative=True) is False
 
-    # 失活再激活：旧 lease 的代次过期
+    # 失活再激活：旧 lease 的代次过期，"只信权威读"也随之清掉
     cache.deactivate(ch, "hubA")
     cache.activate(ch, "hubA")
     assert cache.fill(lease, _row(mod_item_model, 1, 9), authoritative=True) is False
     new_lease = cache.lease(ch)
     assert new_lease is not None and new_lease.epoch != lease.epoch
     assert cache.fill(new_lease, _row(mod_item_model, 1, 9), authoritative=True)
+    assert cache.replica_floor(ch) == 9
+    assert cache.fill(new_lease, _row(mod_item_model, 1, 10), authoritative=False)
 
 
 def test_notify_rules(mod_item_model):
@@ -164,11 +177,15 @@ def test_notify_rules(mod_item_model):
     # 乱序到达的旧通知不降 floor
     cache.notify(ch, 2)
     assert cache.floor(ch) == 4
-    # 删除 → DELETED；之后的插入通知重置 floor
+    # 删除 → DELETED；之后的插入通知重置 floor，但副本读到本次激活结束前都不再可信
     cache.notify(ch, 0)
     assert cache.floor(ch) is DELETED
     cache.notify(ch, 1)
-    assert cache.floor(ch) == 1
+    assert cache.floor(ch) == 1 and cache.replica_floor(ch) is None
+    cache.clear()
+    cache.activate(ch, "hubA")
+    cache.notify(ch, 1)
+    assert cache.replica_floor(ch) == 1
 
 
 def test_put_committed(mod_item_model):
@@ -337,6 +354,60 @@ async def test_reader_get(mod_item_model, item_ref):
     got = await reader.get(item_ref, 1, fb)
     assert got is None
     assert master.calls["get_authoritative"] == 3 and cache.get(ch) is None
+
+
+async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
+    """同 id 删除后重插：版本从 1 重来，滞后副本上删除前的旧行（v7）比新一代（v2）版本高，
+    floor 挡不住。见过删除通知的频道本次激活周期内只走权威读，旧行进不了缓存也到不了调用方"""
+    old = _row(mod_item_model, 1, 7, qty=7)
+    master = FakeClient(mod_item_model, [old])
+    fallback = FakeClient(mod_item_model, [old])
+    fb = cast(BackendClient, fallback)
+    cache = RowCache()
+    reader = CachedRowReader(FakeBackend(cache, master))
+    ch = master.row_channel(item_ref, 1)
+    cache.activate(ch, "hub")
+    got = await reader.get(item_ref, 1, fb)
+    assert got is not None and got.qty == 7 and cache.floor(ch) == 7
+
+    # 别的进程：删除 → 重插(v1) → 更新(v2)；副本一直没追上，还是删除前的 v7
+    cache.notify(ch, 0)
+    new = _row(mod_item_model, 1, 2, qty=2)
+    master.rows[1] = new
+    cache.notify(ch, 1)
+    cache.notify(ch, 2)
+    fallback.stale[1] = old
+    assert cache.replica_floor(ch) is None
+    got = await reader.get(item_ref, 1, fb)
+    assert got is not None and got.qty == 2
+    assert fallback.calls["get"] == 0 and master.calls["get_authoritative"] == 2
+    cached = cache.get(ch)
+    assert cached is not None and cached.qty == 2 and cache.floor(ch) == 2
+    # 再更新(v3)：逐出后仍不碰副本，副本的 v7 旧行永远进不来
+    new._version = 3
+    new.qty = 3
+    cache.notify(ch, 3)
+    got = await reader.get(item_ref, 1, fb)
+    assert got is not None and got.qty == 3
+    assert fallback.calls["get"] == 0 and master.calls["get_authoritative"] == 3
+    # get_many 同样只走权威批读
+    cache.evict(ch)
+    got_many = await reader.get_many(item_ref, [1], fb)
+    assert got_many[0] is not None and got_many[0].qty == 3
+    assert fallback.calls["get_many"] == 0
+    assert master.calls["get_many_authoritative"] == 1
+
+    # 最后一个订阅者退订、下次激活：重新信副本（floor 又从未知开始）
+    cache.deactivate(ch, "hub")
+    cache.activate(ch, "hub")
+    fallback.stale.pop(1)
+    fallback.rows[1] = new
+    await reader.get(item_ref, 1, fb)  # 首次权威读
+    cache.notify(ch, 4)
+    new._version = 4
+    got = await reader.get(item_ref, 1, fb)
+    assert got is not None and got._version == 4
+    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 4
 
 
 async def test_reader_get_many(mod_item_model, item_ref):

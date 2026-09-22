@@ -11,6 +11,10 @@ ack 后把它"激活"，之后该行的每次变更都会以带版本号的通�
 缓存据此对每个激活行维护版本下限 floor（已知至少到达的版本），副本读回的行版本低于 floor 即判
 滞后、不入缓存，改走 master 上的权威读；写事务另有 commit 的 VER 检查兜底。不设 TTL。
 
+floor 靠 `_version` 单调才挡得住滞后副本，而同 id 删除后重插版本从 1 重来：滞后副本上删除前的
+旧行版本反而比新一代高，floor 挡不住。所以一个频道在本次激活周期内只要见过删除通知，之后就
+只信权威读（副本读回的行不再入缓存），直到最后一个订阅者退订、下次激活重新开始。
+
 事务读（`SessionRepository`）与订阅刷新（`SubscriptionBroker`）都经过 `CachedRowReader`，所以
 客户端收到的行与服务端事务读到的永远是同一份。设计稿：
 `docs/superpowers/specs/2026-09-22-row-cache-design.md`。
@@ -76,6 +80,7 @@ class RowCache:
     - `activate` / `deactivate`：hub 在 SUBSCRIBE ack 后 / 最后一个本地订阅者退订时调用，
       同一频道可由多个 hub（多 servant）各自激活，最后一个失活才清掉行与 floor。
     - `notify`：hub 收到带版本号的行通知时调用；版本高于缓存行则逐出，floor 单调抬升。
+      删除通知还把该频道标成"只信权威读"，直到本次激活结束。
     - `fill` / `put_committed`：读路径填充 / commit 写穿；都受 floor 约束。
     - 所有方法都是同步的纯 dict 操作，可以在 hub 的监听协程里直接调用。
     """
@@ -87,6 +92,9 @@ class RowCache:
         self._active: dict[str, set[Hashable]] = {}
         self._epoch: dict[str, int] = {}
         self._floor: dict[str, Floor] = {}
+        # 本次激活周期内收到过删除通知的频道：同 id 重插后版本从 1 重来，滞后副本上删除前的
+        # 旧行版本反而更高、floor 挡不住，所以这些频道的副本读一律不信
+        self._authoritative_only: set[str] = set()
         self._next_epoch = 0
 
     def __len__(self) -> int:
@@ -116,6 +124,7 @@ class RowCache:
         del self._active[channel]
         del self._epoch[channel]
         del self._floor[channel]
+        self._authoritative_only.discard(channel)
         self._drop(channel)
 
     def is_active(self, channel: str) -> bool:
@@ -131,12 +140,23 @@ class RowCache:
     def floor(self, channel: str) -> Floor:
         return self._floor.get(channel, UNKNOWN)
 
+    def replica_floor(self, channel: str) -> int | None:
+        """
+        读路径用：副本读可信时返回版本下限（读回的行不低于它才收），否则 None，只能权威读。
+        floor 未知 / 已删除，以及本次激活周期内见过删除通知的频道都不信副本。
+        """
+        if channel in self._authoritative_only:
+            return None
+        floor = self._floor.get(channel, UNKNOWN)
+        return floor if isinstance(floor, int) else None
+
     def clear(self) -> None:
         """全部失活并清空（hub 关闭 / 测试用）"""
         self._rows.clear()
         self._active.clear()
         self._epoch.clear()
         self._floor.clear()
+        self._authoritative_only.clear()
         self.stats.size = 0
 
     # ---------------------------------------------------------------- 读写
@@ -156,7 +176,7 @@ class RowCache:
         读路径把读回的行放进缓存。
         - lease 的代次已过期（退订又重订）→ 拒；
         - floor 已知：行版本低于 floor 说明读到的是滞后副本（或读发生在更新的通知之前）→ 拒；
-        - floor 未知 / 已删除：只接受权威读回的行。
+        - floor 未知 / 已删除、或本次激活周期内见过删除通知：只接受权威读回的行。
         通过则 floor 抬到该行版本。返回是否写入。
         """
         channel = lease.channel
@@ -179,6 +199,8 @@ class RowCache:
         if isinstance(floor, int):
             if version < floor:
                 return False
+            if not authoritative and channel in self._authoritative_only:
+                return False
         elif not authoritative:
             return False
         self._rows[channel] = cast(np.record, row.copy())
@@ -192,7 +214,8 @@ class RowCache:
     def notify(self, channel: str, version: int) -> None:
         """
         收到该行的变更通知（或 commit RACE 回显的 master 当前版本）。
-        `version` 为 0 表示删除：逐出并把 floor 置为已删除；否则版本高于缓存行才逐出，
+        `version` 为 0 表示删除：逐出、floor 置为已删除，并且本次激活周期内不再信副本读
+        （重插后版本从 1 重来，floor 挡不住滞后副本上的旧行）；否则版本高于缓存行才逐出，
         floor 取 max（多 hub 重复送达、乱序到达都幂等）。未激活的频道忽略。
         """
         floor = self._floor.get(channel)
@@ -201,6 +224,7 @@ class RowCache:
         if version == 0:
             self._drop(channel)
             self._floor[channel] = DELETED
+            self._authoritative_only.add(channel)
             return
         row = self._rows.get(channel)
         if row is not None and int(row["_version"]) < version:
@@ -251,13 +275,13 @@ class CachedRowReader:
         lease = cache.lease(channel)
         if lease is None:
             return await fallback.get(ref, row_id, RowFormat.STRUCT)  # 没人订：不缓存
-        floor = cache.floor(channel)
-        if isinstance(floor, int):
+        floor = cache.replica_floor(channel)
+        if floor is not None:
             row = await fallback.get(ref, row_id, RowFormat.STRUCT)
             # 副本滞后（版本低于已知下限，或该存在的行还读不到）→ 改走权威读
             authoritative = row is None or int(row["_version"]) < floor
         else:
-            authoritative = True  # floor 未知 / 已删除：只信权威读
+            authoritative = True  # floor 未知 / 已删除 / 见过删除通知：只信权威读
         if authoritative:
             cache.stats.authoritative_reads += 1
             row = await master.get_authoritative(ref, row_id)
@@ -275,8 +299,8 @@ class CachedRowReader:
             return cast(list[np.record | None], rows)
         master: BackendClient = self._backend.master
         result: list[np.record | None] = [None] * len(ids)
-        replica_idx: list[int] = []  # 未激活的 + floor 已知的：读副本
-        auth_idx: list[int] = []  # floor 未知 / 已删除的：权威读
+        replica_idx: list[int] = []  # 未激活的 + 副本可信的：读副本
+        auth_idx: list[int] = []  # floor 未知 / 已删除 / 见过删除通知的：权威读
         leases: dict[int, Lease] = {}
         floors: dict[int, int] = {}
         for i, row_id in enumerate(ids):
@@ -290,8 +314,8 @@ class CachedRowReader:
                 replica_idx.append(i)
                 continue
             leases[i] = lease
-            floor = cache.floor(channel)
-            if isinstance(floor, int):
+            floor = cache.replica_floor(channel)
+            if floor is not None:
                 floors[i] = floor
                 replica_idx.append(i)
             else:

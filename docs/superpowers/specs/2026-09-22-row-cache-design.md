@@ -169,8 +169,9 @@ floor ≥ 本进程已处理的该行最新通知的版本；
 1. **激活**（允许缓存）：仅当某个 hub 对该行频道的 SUBSCRIBE 已 ack、且频道仍在它的
    `_subs` 里。激活时 floor = 未知。
 2. **通知**：`(channel, version)` → 若 `version > 缓存行版本` 则逐出；`floor = max(floor,
-   version)`；删除（version 0）→ 逐出，floor = 已删除。
-3. **填充**：副本读只在 `floor` 已知且 `row._version ≥ floor` 时入缓存；floor 未知 / 已删除 /
+   version)`；删除（version 0）→ 逐出，floor = 已删除，并把该频道标成**只信权威读**直到本次
+   激活结束（同 id 重插后 `_version` 从 1 重来，滞后副本上删除前的旧行版本反而更高，floor 挡不住）。
+3. **填充**：副本读只在 `floor` 已知、频道未标只信权威读、且 `row._version ≥ floor` 时入缓存；floor 未知 / 已删除 /
    读回版本低于 floor 时改走权威读，权威读回的行无条件入缓存并把 floor 设为它的版本。
    填充还要求取 lease 时的激活代次仍当前（退订又重订的中间态不填）。
 4. **逐出**：通知（规则 2）、本进程 commit 的 RACE（逐出本事务全部行，冲突行的 floor 抬到
@@ -214,7 +215,8 @@ class RowCache:
     # 读路径
     def get(self, channel) -> np.record | None                # 命中返回 .copy()
     def lease(self, channel) -> Lease | None                  # 未激活返回 None
-    def floor(self, channel) -> int | UNKNOWN | DELETED       # 决定走副本读还是权威读
+    def floor(self, channel) -> int | UNKNOWN | DELETED       # 原始 floor
+    def replica_floor(self, channel) -> int | None             # 副本读可信才给 floor，否则权威读
     def fill(self, lease, row, *, authoritative: bool) -> bool
     # 写路径（commit）
     def put_committed(self, channel, row) -> None             # 写穿：激活中才存；floor = row._version
@@ -398,7 +400,7 @@ tick、只在一个连接内。进程缓存把这两个作用都覆盖了，而�
 | pubsub 节点失效 | `on_reset` 全部失活清空；`on_restored` 重新激活，floor 未知 → 权威读 |
 | `direct_set`（不动 `_version`，只能用于易失组件） | 不通知；易失组件不缓存，别的事务 VER 不受影响，无冲突 |
 | 行被删除 | 通知 0 → 逐出 + floor 已删除；副本仍读到旧行 → 权威读 → None → 事务看到不存在 |
-| 删除后同 id 重插（乱序到达） | floor 可能停在已删除 → 权威读回新行 → floor 修正为它的版本 |
+| 删除后同 id 重插 | 新一代版本从 1 重来，滞后副本上删除前的旧行版本更高、floor 挡不住 → 见过删除通知的频道本次激活周期内只走权威读，退订再订才重新信副本 |
 | `only_master` 事务 | 全程绕过 |
 | 用户就地改返回的行 | 返回的是副本，缓存不受影响 |
 | 通知乱序 / 多 hub 重复 | `max` 与逐出幂等；最坏 floor 暂时偏高，多一次权威读 |
