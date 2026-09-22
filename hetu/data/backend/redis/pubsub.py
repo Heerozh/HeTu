@@ -87,6 +87,10 @@ class AsyncKeyspacePubSub:
         # 会各自去池里拿连接），同一节点的 SUBSCRIBE/UNSUBSCRIBE 串行发
         self._node_locks: dict[str, asyncio.Lock] = {}
 
+        # 节点失效后要重新订阅的频道：失效时把已订阅集合整个并进来（拓扑可能变了，全部重订），
+        # 恢复流程跑着的时候又有节点失效会继续往里并；全部重订生效后清空
+        self._resubscribe_targets: set[str] = set()
+
         # 运行状态
         self._tasks: set[asyncio.Task] = set()
         self._resubscribe_task: asyncio.Task | None = None
@@ -302,6 +306,10 @@ class AsyncKeyspacePubSub:
         """频道已订阅成功，或 SUBSCRIBE 已发出正在等 ack"""
         return channel in self._subscribed or channel in self._pending_subscribe
 
+    def is_subscribed(self, channel: str) -> bool:
+        """频道已订阅成功（收到 ack、之后没退订、所在节点没失效）：此后它的消息不会漏"""
+        return channel in self._subscribed
+
     def pending_acks(self, channels: Iterable[str]) -> list[asyncio.Future[None]]:
         """
         这些频道里已发出 SUBSCRIBE、尚未 ack 的 future（别的调用方发的），
@@ -334,6 +342,7 @@ class AsyncKeyspacePubSub:
         for channel in channels:
             node_key = self._channel_node.pop(channel, "standalone")
             self._subscribed.discard(channel)
+            self._resubscribe_targets.discard(channel)  # 恢复流程跑着也别把它订回来
             # SUBSCRIBE 还没 ack 就退订：让等它的人正常返回而不是报错。等的人就是刚撤了
             # 自己登记的那个连接（hub 只在没人订时才退订），它的 subscribe 没有失败，
             # 只是随后被自己的 unsub 覆盖了；报错会让 get_updates 把整个连接断掉
@@ -368,24 +377,28 @@ class AsyncKeyspacePubSub:
 
     async def resubscribe_all(self):
         """
-        节点失效后重新订阅所有已确认的频道，失败就退避重试直到成功或 close。
+        节点失效后重新订阅 `_resubscribe_targets` 里的频道（失效时的全部已订阅频道），
+        失败就退避重试直到全部生效或 close。
         """
-        current_subscriptions = list(self._subscribed)
-        self._subscribed.clear()
-        self._channel_node.clear()
+        targets = self._resubscribe_targets
         backoff = RESUBSCRIBE_BACKOFF_MIN
         while not self._closed:
             try:
-                await self.subscribe(*current_subscriptions)
-                logger.info(f"Resubscribed {len(current_subscriptions)} channels")
-                self._callback(self.on_restored)
-                return
+                await self.subscribe(*targets)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 网络/拓扑错误都要重试，不能让恢复流程死掉
                 logger.error(f"Resubscribe failed, retry in {backoff}s: {e}")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RESUBSCRIBE_BACKOFF_MAX)
+                continue
+            # 等 ack 期间又有节点失效的话，它已把已订阅集合清掉、并回 targets：再来一轮，
+            # 直到 targets 全部订阅生效才算恢复
+            if targets <= self._subscribed:
+                logger.info(f"Resubscribed {len(targets)} channels")
+                targets.clear()
+                self._callback(self.on_restored)
+                return
 
     async def _node_listener(self, node_key: str, pubsub: PubSub):
         """
@@ -453,9 +466,18 @@ class AsyncKeyspacePubSub:
             exc = RedisConnectionError(f"pubsub node {node_key} lost")
             self._fail_pending(self._pending_subscribe, exc)
             self._fail_pending(self._pending_unsubscribe, exc)
-            # 灾难恢复逻辑（已有一个在退避重试中就不再起）。如果不保存task，task不会执行会被gc
+            # 该节点上已订阅生效的频道随连接一起没了。恢复流程重订全部频道（拓扑可能变了），
+            # 所以把已订阅集合整个并进重订名单并清空：清空后 is_subscribed 对它们为假，行缓存
+            # 不会把它们当有效订阅激活，subscribe() 也不会把它们当已订阅短路——恢复流程已在
+            # 跑时（多个节点接连失效）第二个节点上刚订好的频道以前正是这样被永远漏掉的
+            self._resubscribe_targets.update(self._subscribed)
+            self._subscribed.clear()
+            self._channel_node.clear()
+            # 每次节点失效都通知一次：恢复期间新激活的频道也可能正在这个节点上
+            self._callback(self.on_reset)
+            # 灾难恢复逻辑（已有一个在退避重试中就不再起，它会把新并进来的频道一起订上）。
+            # 如果不保存task，task不会执行会被gc
             if self._resubscribe_task is None or self._resubscribe_task.done():
-                self._callback(self.on_reset)
                 self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
 
     @staticmethod

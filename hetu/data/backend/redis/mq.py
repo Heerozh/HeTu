@@ -128,16 +128,22 @@ class PubSubHub(MQHub):
     # ------------------------------------------------------------ 行缓存钩子
 
     def _activate(self, channels: Iterable[str]) -> None:
-        """这些频道的订阅已 ack：其中的行频道在缓存里激活（仍在 _subs 里的才算）"""
+        """
+        把这些频道里的行频道在缓存里激活。只激活仍在 _subs 里、且 pubsub 层确认订阅已 ack
+        的：节点恢复期间别的连接刚发出 SUBSCRIBE 还没 ack 的频道也在 _subs 里，这时激活它，
+        ack 之前的写入就没有通知、缓存却当它有效；等它自己的 add 拿到 ack 再激活
+        """
         cache = self._row_cache
         if cache is None:
             return
         from .client import RedisBackendClient  # client 懒加载本模块，避免循环 import
 
+        pubsub = self._pubsub
         for channel in channels:
             if (
                 channel in self._subs
                 and channel not in self._active
+                and pubsub.is_subscribed(channel)
                 and RedisBackendClient.is_row_channel(channel)
             ):
                 self._active.add(channel)
@@ -163,7 +169,8 @@ class PubSubHub(MQHub):
         self._deactivate_all()
 
     def _on_restored(self) -> None:
-        """全部频道重新订阅生效：把仍有人订的行频道重新激活（floor 回到未知，下次走权威读）"""
+        """全部频道重新订阅生效：把仍有人订、且已 ack 的行频道重新激活（floor 回到未知，
+        下次走权威读）"""
         self._activate(list(self._subs))
 
     def _on_message(self, msg: dict) -> None:
