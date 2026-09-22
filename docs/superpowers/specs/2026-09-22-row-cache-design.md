@@ -187,7 +187,10 @@ floor ≥ 本进程已处理的该行最新通知的版本；
   带 `{CLU}` hash tag，`AsyncKeyspacePubSub` 按 slot 路由）。
 - `commit()` 组 `publishes` 时，每个 insert / update 行追加 `[row_channel, msgpack(new_version)]`，
   每个 delete 行追加 `[row_channel, msgpack(0)]`。Lua 不改。payload 是 msgpack 的**整数**，
-  与表级 / 值频道的 list payload 可区分。
+  与表级 / 值频道的 list payload 可区分。**行频道那批排在表级 / 索引值频道之前**：后两者
+  一到就把连接叫醒，醒来的整表 / 索引订阅要读这次变更的行，行还没逐出就会读到缓存里的
+  旧行且不会再被纠正；三类频道同属一个 `{CLU}` hash tag，同一条 pubsub 连接按发布顺序
+  投递，发布顺序即处理顺序。
 - `direct_set`：**不发通知**，docstring 与 `advanced.md` 从"不保证通知一致"改为"不通知"。
   它不动 `_version`，别的事务不会因它 RACE；易失组件不进缓存，所以缓存也不需要知道它。
 - `maint.upsert_row` / `delete_row`：不补通知——维护工具只在停服时使用，没有在线订阅者和缓存。

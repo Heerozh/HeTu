@@ -933,9 +933,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         strict_checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
-        # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。
+        # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。发布顺序即本进程的处理顺序，
+        # 行频道那批排在最前（见下面拼 publishes 处）。
         # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
         publishes: list[list[str | bytes]] = []
+        table_pubs: list[list[str | bytes]] = []
         value_pubs: dict[str, list[str]] = {}
         # 行频道通知：每行一条 (ref, row_id, 新 _version)，删除为 0。行订阅与 worker 行缓存靠它，
         # keyspace 事件不带内容，缓存无法判断一次副本读是否至少和通知一样新；
@@ -1005,15 +1007,20 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 row_pubs.append((ref, str(delete["id"]), 0))
                 touched_ids.append(str(delete["id"]))
             if touched_ids:
-                publishes.append(
+                table_pubs.append(
                     [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
                 )
-        for channel, ids in value_pubs.items():
-            publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
+        # 行频道的通知必须排在表级 / 索引值频道之前：后两者一到就把连接叫醒，醒来的
+        # 整表 / 索引订阅会去读这次变更的行，行还没逐出的话读到的是缓存里的旧行，而且
+        # 不会再有第二次通知来纠正。三类频道同属一个 {CLU} hash tag，同一条 pubsub 连接
+        # 按发布顺序投递，所以这个顺序就是本进程处理的顺序
         for ref, row_id, version in row_pubs:
             publishes.append(
                 [self.row_channel(ref, int(row_id)), msg_packer.pack(version)]  # type: ignore
             )
+        publishes.extend(table_pubs)
+        for channel, ids in value_pubs.items():
+            publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
