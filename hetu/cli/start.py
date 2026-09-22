@@ -127,7 +127,7 @@ class StartCommand(CommandInterface):
             const=1,
             help=_(
                 "开启debug模式，这会启动代码热更新，并显示更多的log信息。"
-                "如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90％。"
+                "如果设置为2，则对框架内核也启用debug模式，会开启Python协程的Debug模式，速度慢90%%。"
             ),
             default=0,
             metavar="0/1/2",

@@ -411,7 +411,7 @@ msgid ""
 msgstr ""
 "Enable debug mode. This will start code hot reloading and show more log "
 "information. If set to 2, debug mode is also enabled for the framework core,"
-" which activates Python coroutine Debug mode, slowing down by 90%."
+" which activates Python coroutine Debug mode, slowing down by 90%%."
 
 #: hetu/cli/start.py:139
 msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
