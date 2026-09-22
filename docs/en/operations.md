@@ -99,9 +99,15 @@ population while staying consistent.
   worker process subscribe to stay in process memory — transaction reads that hit
   it never touch the database, commits write through, and subscription pushes take
   rows from the same copy. The cache keeps a version floor per row from the
-  versioned row notifications; a replica read below the floor is detected as lag
-  and replaced by an **authoritative read** — a Lua `HGETALL` executed on the
-  master (`EVALSHA`). With a read/write-splitting proxy the proxy must route
+  versioned row notifications: after a row is subscribed, it only enters the cache
+  once this process writes it through on commit or its first change notification
+  arrives (which is what establishes the floor); until then reads go to a replica
+  exactly as they would with the cache off. A replica read below the floor is
+  detected as lag and replaced by an **authoritative read** — a Lua `HGETALL`
+  executed on the master (`EVALSHA`). Authoritative reads only happen for that lag
+  fallback (plus transaction retries after a version conflict, and same-id
+  reinserts after a delete); normal reads and writes never add master load for the
+  cache's sake. With a read/write-splitting proxy the proxy must route
   `EVAL` / `EVALSHA` to the master (every such proxy does, since scripts may
   write); a plain `HGETALL` would be sent to a replica and cannot serve as the
   authoritative read. Notifications are lost while a pubsub connection reconnects,

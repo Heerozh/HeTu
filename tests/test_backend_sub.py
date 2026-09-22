@@ -1250,7 +1250,16 @@ async def test_sub_push_stale_replica(
         assert sub and row
         row_id = row["id"]
         channel = backend.master.row_channel(filled_item_ref, row_id)
-        stale = cache.get(channel)  # subscribe_get 的首次权威读已填充
+        # 订阅时的读不入缓存（floor 未知）；用一次本进程的写把行写穿进缓存，
+        # 这份就是下面要冒充的"副本上的旧行"
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(filled_item_ref.comp_cls)
+            r = await repo.get(id=row_id)
+            assert r is not None
+            r.qty = 600
+            await repo.update(r)
+        await broker.get_updates(timeout=3)  # 消费掉自己那条通知
+        stale = cache.get(channel)
         assert stale is not None
 
         await _other_process_update(mod_backend_config, filled_item_ref, 601)
@@ -1283,8 +1292,9 @@ async def test_sub_push_stale_replica(
 async def test_subscribe_get_subscribes_before_read(
     filled_item_ref, filled_rls_ref, mod_auto_backend, admin_ctx, user_id10_ctx
 ):
-    """subscribe_get 先订后读：返回时行已在缓存（首次权威读）；行不存在 / 行级权限不过时
-    退订干净，hub 里没有残留频道"""
+    """subscribe_get 先订后读：订阅先生效，读与订之间的写入不会漏掉通知；那次读走副本、
+    不入缓存（floor 未知时无从判断够不够新，也不为此去打 master）；行不存在 / 行级权限
+    不过时退订干净，hub 里没有残留频道"""
     backend: Backend = mod_auto_backend()
     cache = backend.row_cache
     broker = SubscriptionBroker(backend)
@@ -1300,8 +1310,8 @@ async def test_subscribe_get_subscribes_before_read(
         assert sub2 and row2 == row
         if cache is not None:
             channel = backend.master.row_channel(filled_item_ref, row["id"])
-            cached = cache.get(channel)
-            assert cached is not None and cached.name == "Itm11"
+            assert cache.is_active(channel), "订阅生效：之后这行的变更都会通知到本进程"
+            assert cache.get(channel) is None, "floor 未知时读回的行不入缓存"
 
         hub = backend.servant._hub  # type: ignore[attr-defined]
         # 行不存在：不留订阅

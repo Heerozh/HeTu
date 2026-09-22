@@ -11,6 +11,11 @@ ack 后把它"激活"，之后该行的每次变更都会以带版本号的通�
 缓存据此对每个激活行维护版本下限 floor（已知至少到达的版本），副本读回的行版本低于 floor 即判
 滞后、不入缓存，改走 master 上的权威读；写事务另有 commit 的 VER 检查兜底。不设 TTL。
 
+行进缓存有两条路：本进程 commit 的写穿，以及**收到第一条通知之后**（floor 变成整数，副本读
+才校验得了）的副本读。刚激活、还没收到过通知的行（floor 未知）读回来照常返回给调用方，但不
+入缓存——无从判断这份副本够不够新，缓存下来就没有失效路径了；也不为了填缓存去打 master：
+项目的设计约束是能不读 master 就不读（CLAUDE.md），权威读只留给"副本确实滞后"的兜底。
+
 floor 靠 `_version` 单调才挡得住滞后副本，而同 id 删除后重插版本从 1 重来：滞后副本上删除前的
 旧行版本反而比新一代高，floor 挡不住。所以一个频道在本次激活周期内只要见过删除通知，之后就
 只信权威读（副本读回的行不再入缓存），直到最后一个订阅者退订、下次激活重新开始。
@@ -149,10 +154,17 @@ class RowCache:
         """
         return self._floor.get(channel) is DELETED
 
+    def needs_authoritative(self, channel: str) -> bool:
+        """
+        这个频道的副本读一概不可信，只能走 master 的权威读：本次激活周期内见过删除通知
+        （同 id 重插后版本从 1 重来，floor 挡不住滞后副本上删除前的旧行）。
+        """
+        return channel in self._authoritative_only
+
     def replica_floor(self, channel: str) -> int | None:
         """
-        读路径用：副本读可信时返回版本下限（读回的行不低于它才收），否则 None，只能权威读。
-        floor 未知 / 已删除，以及本次激活周期内见过删除通知的频道都不信副本。
+        读路径用：副本读回的行不低于这个版本才收进缓存；返回 None 表示 floor 还未知
+        （刚激活、还没收到过通知），此时读回的行无从判断够不够新，可以用但不能入缓存。
         """
         if channel in self._authoritative_only:
             return None
@@ -254,11 +266,12 @@ class RowCache:
 
 class CachedRowReader:
     """
-    事务与订阅共用的读路径：缓存命中直接返回；miss 时按 floor 决定读副本还是权威读，
-    读回的行填进缓存。`fallback` 是本次 miss 时读副本用的客户端（事务传
-    `session.master_or_servant`，订阅传 `backend.servant`）；权威读固定走
-    `backend.master.get_authoritative`（master 上执行的 Lua HGETALL，代理模式下唯一
-    一定被送到主节点的读）。返回的都是缓存外的独立 record，调用方可随意改。
+    事务与订阅共用的读路径：缓存命中直接返回；已知不存在的行直接给 None；其余读
+    `fallback`——本次 miss 时读副本用的客户端（事务传 `session.master_or_servant`，订阅传
+    `backend.servant`），读回的行够新才填进缓存。只有两种情况改走权威读：副本读回的版本低于
+    floor（确实滞后），以及频道见过删除通知（同 id 重插后副本上可能还是删除前的旧行）。
+    权威读固定走 `backend.master.get_authoritative`（master 上执行的 Lua HGETALL，代理模式下
+    唯一一定被送到主节点的读）。返回的都是缓存外的独立 record，调用方可随意改。
     """
 
     def __init__(self, backend: Any):
@@ -287,13 +300,16 @@ class CachedRowReader:
         if cache.is_absent(channel):
             cache.stats.absent_hits += 1
             return None  # 已知已删：删除通知本身就是权威的，0 往返
-        floor = cache.replica_floor(channel)
-        if floor is not None:
-            row = await fallback.get(ref, row_id, RowFormat.STRUCT)
-            # 副本滞后（版本低于已知下限，或该存在的行还读不到）→ 改走权威读
-            authoritative = row is None or int(row["_version"]) < floor
+        if cache.needs_authoritative(channel):
+            authoritative = True  # 见过删除通知：副本上可能是删除前的旧行，一概不信
         else:
-            authoritative = True  # floor 未知 / 已删除 / 见过删除通知：只信权威读
+            row = await fallback.get(ref, row_id, RowFormat.STRUCT)
+            floor = cache.replica_floor(channel)
+            # 副本滞后（版本低于已知下限，或该存在的行还读不到）→ 改走权威读；
+            # floor 还未知（刚订上、没收到过通知）→ 读回的行照用，只是不入缓存（fill 会拒）
+            authoritative = floor is not None and (
+                row is None or int(row["_version"]) < floor
+            )
         if authoritative:
             cache.stats.authoritative_reads += 1
             row = await master.get_authoritative(ref, row_id)
@@ -311,8 +327,8 @@ class CachedRowReader:
             return cast(list[np.record | None], rows)
         master: BackendClient = self._backend.master
         result: list[np.record | None] = [None] * len(ids)
-        replica_idx: list[int] = []  # 未激活的 + 副本可信的：读副本
-        auth_idx: list[int] = []  # floor 未知 / 已删除 / 见过删除通知的：权威读
+        replica_idx: list[int] = []  # 未激活的 + floor 未知的 + floor 已知的：读副本
+        auth_idx: list[int] = []  # 见过删除通知的：只能权威读
         leases: dict[int, Lease] = {}
         floors: dict[int, int] = {}
         for i, row_id in enumerate(ids):
@@ -329,12 +345,13 @@ class CachedRowReader:
                 cache.stats.absent_hits += 1
                 continue  # 已知已删：结果保持 None，不进任何一组
             leases[i] = lease
+            if cache.needs_authoritative(channel):
+                auth_idx.append(i)
+                continue
             floor = cache.replica_floor(channel)
             if floor is not None:
-                floors[i] = floor
-                replica_idx.append(i)
-            else:
-                auth_idx.append(i)
+                floors[i] = floor  # 有下限才能判滞后；没有就是照用不入缓存
+            replica_idx.append(i)
 
         stale_idx: list[int] = []
 
@@ -349,9 +366,9 @@ class CachedRowReader:
             )
             for i, row in zip(replica_idx, rows):
                 lease = leases.get(i)
-                if lease is not None and (
-                    row is None or int(row["_version"]) < floors[i]
-                ):
+                floor = floors.get(i)
+                # 有版本下限才判得了滞后；没有（floor 未知）就照用，fill 会拒掉不入缓存
+                if floor is not None and (row is None or int(row["_version"]) < floor):
                     stale_idx.append(i)
                     continue
                 if lease is not None and row is not None:

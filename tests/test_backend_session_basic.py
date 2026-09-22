@@ -1252,7 +1252,8 @@ async def _wait_until(pred, timeout: float = 3.0):
 
 
 async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
-    """订阅中的行：首个事务读走一次权威读并填充，之后的事务读 0 次远程；
+    """订阅中的行在收到第一条通知之前本进程对它一无所知，读走副本、不入缓存（不为了填缓存
+    去打 master）；本进程 commit 写穿之后才开始命中；
     only_master 的事务绕过缓存（不命中也不填充）；SQL 后端没有缓存，读仍每次远程"""
     from contextlib import ExitStack
 
@@ -1268,7 +1269,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
     try:
         with ExitStack() as stack:
             counts = count_reads(stack, backend)
-            # subscribe_get 先订后读：那次权威读就是缓存的首次填充
+            # subscribe_get 先订后读，那次读走副本；floor 还未知，读回的行不入缓存
             sub, _ = await broker.subscribe_get(
                 filled_item_ref, _admin_ctx(), "id", row_id
             )
@@ -1276,19 +1277,26 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
             async with backend.session("pytest", 1) as session:
                 got = await session.using(comp).get(id=row_id)
             assert got is not None and got.time == 110
-            if cache is None:
-                assert counts() == {"plain": 2, "authoritative": 0}  # 订阅 1 + 读 1
-            else:
-                assert counts() == {"plain": 0, "authoritative": 1}
-                assert cache.get(channel) is not None
+            # 有没有缓存都一样：订阅 1 次 + 读 1 次副本，不碰 master
+            assert counts() == {"plain": 2, "authoritative": 0}
+            if cache is not None:
+                assert cache.get(channel) is None
 
+            # 本进程改一次：commit 写穿把行放进缓存，之后的事务读 0 次远程
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                assert row is not None
+                row.qty = 31
+                await repo.update(row)
+            plain_after_write = counts()["plain"]
             async with backend.session("pytest", 1) as session:
                 got2 = await session.using(comp).get(id=row_id)
-            assert got2 is not None and got2 == got
+            assert got2 is not None and got2.qty == 31
             if cache is None:
-                assert counts() == {"plain": 3, "authoritative": 0}
+                assert counts()["plain"] == plain_after_write + 1
             else:
-                assert counts() == {"plain": 0, "authoritative": 1}
+                assert counts() == {"plain": plain_after_write, "authoritative": 0}
 
             # only_master：直读 master，不命中也不填充
             if cache is not None:
@@ -1297,10 +1305,8 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
                 session.only_master = True
                 got3 = await session.using(comp).get(id=row_id)
             assert got3 is not None
-            if cache is None:
-                assert counts() == {"plain": 4, "authoritative": 0}
-            else:
-                assert counts() == {"plain": 1, "authoritative": 1}
+            assert counts()["authoritative"] == 0
+            if cache is not None:
                 assert cache.get(channel) is None
     finally:
         await broker.close()
@@ -1320,22 +1326,25 @@ async def test_row_cache_range_partial_hit(filled_item_ref, mod_auto_backend):
     ids = [int(i) for i in rows.id]
     if cache is None:
         return
-    for row_id in ids[:7]:
-        cache.activate(backend.master.row_channel(filled_item_ref, row_id), "test")
+    # 激活 + 模拟收到一条通知：floor 变成整数，之后副本读回的行才能入缓存
+    for row_id, version in zip(ids[:7], rows["_version"][:7]):
+        ch = backend.master.row_channel(filled_item_ref, row_id)
+        cache.activate(ch, "test")
+        cache.notify(ch, int(version))
 
     with ExitStack() as stack:
         counts = count_reads(stack, backend)
-        # 预热：7 行 floor 未知走一次权威批读，3 行未激活走一次副本批读
+        # 预热：10 行一次副本批读（7 行版本不低于 floor → 入缓存，3 行未激活不入）
         async with backend.session("pytest", 1) as session:
             got = await session.using(comp).range(time=(113, 122), limit=10)
         assert [int(i) for i in got.id] == ids
-        assert counts() == {"plain": 1, "authoritative": 1}
+        assert counts() == {"plain": 1, "authoritative": 0}
         # 命中：只剩 3 行未激活的一次批读
         async with backend.session("pytest", 1) as session:
             got = await session.using(comp).range(time=(113, 122), limit=10)
         assert [int(i) for i in got.id] == ids
         assert list(got.time) == sorted(got.time)
-        assert counts() == {"plain": 2, "authoritative": 1}
+        assert counts() == {"plain": 2, "authoritative": 0}
     for row_id in ids[:7]:
         cache.deactivate(backend.master.row_channel(filled_item_ref, row_id), "test")
 
@@ -1358,8 +1367,13 @@ async def test_row_cache_stale_replica_goes_authoritative(
     try:
         async with backend.session("pytest", 1) as session:
             old = await session.using(comp).get(id=row_id)
-        assert old is not None and cache.get(channel) is not None
+        assert old is not None
         old_version = int(old["_version"])
+        # floor 未知时读回的行不入缓存；送一条通知让 floor 变成整数，缓存才开始收行
+        cache.notify(channel, old_version)
+        async with backend.session("pytest", 1) as session:
+            assert await session.using(comp).get(id=row_id) is not None
+        assert cache.get(channel) is not None
 
         # 真的改一次：master 上版本 +1，通知到达后缓存逐出、floor = 新版本
         async with backend.session("pytest", 1) as session:
@@ -1470,6 +1484,11 @@ async def test_row_cache_delete(filled_item_ref, mod_auto_backend):
     cache.activate(channel, "test")
     try:
         async with backend.session("pytest", 1) as session:
+            row = await session.using(comp).get(id=row_id)
+        assert row is not None
+        # floor 未知时读回的行不入缓存；送一条通知让 floor 变成整数，下次读才会填
+        cache.notify(channel, int(row["_version"]))
+        async with backend.session("pytest", 1) as session:
             assert await session.using(comp).get(id=row_id) is not None
         assert cache.get(channel) is not None
         async with backend.session("pytest", 1) as session:
@@ -1554,7 +1573,7 @@ async def test_row_cache_write_through(
     try:
         with ExitStack() as stack:
             counts = count_reads(stack, backend)
-            # subscribe_get 先订后读：那次权威读就是缓存的首次填充，之后的 get 命中
+            # subscribe_get 的那次读走副本、不入缓存；commit 写穿才把行放进缓存
             sub, _ = await broker.subscribe_get(
                 filled_item_ref, _admin_ctx(), "id", row_id
             )
@@ -1574,7 +1593,8 @@ async def test_row_cache_write_through(
             async with backend.session("pytest", 1) as session:
                 got = await session.using(comp).get(id=row_id)
             assert got is not None and got.qty == 42
-            assert counts() == {"plain": 0, "authoritative": 1}
+            # 订阅 1 次 + 读-改-写里的那次读 1 次，都走副本；写穿后这次 get 0 次远程
+            assert counts() == {"plain": 2, "authoritative": 0}
 
             # 自己那条通知（版本相等）到达后不逐出
             await backend.wait_for_synced()
@@ -1648,7 +1668,15 @@ async def test_row_cache_write_through_skips_subscription_gap(
     broker = SubscriptionBroker(backend)
     try:
         sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
-        assert sub and cache.get(channel) is not None
+        assert sub
+        # 订阅时的读不入缓存，先用一次本进程的写（commit 写穿）把行放进缓存
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=row_id)
+            assert row is not None
+            row.qty = 41
+            await repo.update(row)
+        assert cache.get(channel) is not None
 
         master = backend.master
         real_commit = master.lua_commit

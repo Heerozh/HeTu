@@ -240,6 +240,7 @@ async def test_row_cache_activation(
     两个 broker 退一个仍激活，最后一个退订才失活清行"""
     import copy
 
+    from hetu.data.backend.rowcache import UNKNOWN
     from hetu.data.sub import IndexSubscription, TableSubscription
 
     backend: Backend = mod_auto_backend()
@@ -254,9 +255,8 @@ async def test_row_cache_activation(
     channel = cast(RowSubscription, broker_a._subs[sub_a]).channel
     assert cache.is_active(channel)
     assert cache.lease(channel) is not None
-    # subscribe_get 先订后读：首次权威读已把行填进缓存，floor 就是它的版本
-    assert isinstance(cache.floor(channel), int)
-    assert cache.get(channel) is not None
+    # subscribe_get 那次读走副本、不入缓存：激活了但还什么都不知道
+    assert cache.floor(channel) is UNKNOWN and cache.get(channel) is None
 
     sub_r, _ = await broker_a.subscribe_range(
         filled_item_ref, ctx, "owner", 10, limit=5
@@ -270,11 +270,15 @@ async def test_row_cache_activation(
     tbl_sub = cast(TableSubscription, broker_a._subs[sub_t])
     assert not cache.is_active(tbl_sub.table_channel)
 
-    # 别的进程（另一个 Backend）改行：通知逐出缓存行，floor 抬到新版本
+    # 本进程写一次：commit 写穿把行放进缓存（订阅时的那次读不入缓存）
     row_id = int(row["id"])
+    await _update_qty(backend, filled_item_ref, 994)
+    await _get_updates(broker_a)
     rec = cache.get(channel)
     assert rec is not None
     old_version = int(rec["_version"])
+
+    # 别的进程（另一个 Backend）改行：通知逐出缓存行，floor 抬到新版本
     other = Backend(copy.deepcopy(mod_backend_config))
     other.post_configure(components=[filled_item_ref.comp_cls])
     try:
@@ -322,8 +326,11 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
     row_id = int(row["id"])
     hub = _hub(backend)
 
+    # 订阅时的读不入缓存，先用一次本进程的写（commit 写穿）把行放进缓存
+    await _update_qty(backend, filled_item_ref, 993)
+    await _get_updates(broker)
     # 直接调 hub 的钩子（模拟节点失效 / 恢复）
-    assert cache.get(channel) is not None  # subscribe_get 已填充
+    assert cache.get(channel) is not None
     hub._on_reset()
     assert not cache.is_active(channel) and cache.get(channel) is None
     hub._on_restored()
@@ -331,8 +338,10 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
 
     # 真实断连：关掉节点 pubsub 连接让监听协程异常 → on_reset → resubscribe_all → on_restored
     pubsub = hub._pubsub
-    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
-    assert rec is not None and cache.get(channel) is not None
+    # 重新激活后 floor 又是未知，读不入缓存；用一次本进程的写把行写穿回去
+    await _update_qty(backend, filled_item_ref, 995)
+    await _get_updates(broker)
+    assert cache.get(channel) is not None
     for res in list(pubsub.node_resources.values()):
         await res["pubsub"].connection.disconnect()
     await _wait_until(lambda: cache.get(channel) is None, timeout=5)
@@ -369,6 +378,9 @@ async def test_row_evicted_before_table_wakeup(
     assert sub_tbl
     channel = cast(RowSubscription, broker._subs[sub_row]).channel
     table_channel = backend.master.table_channel(filled_item_ref)
+    # 订阅时的读不入缓存，先用一次本进程的写（commit 写穿）把行放进缓存
+    await _update_qty(backend, filled_item_ref, 992)
+    await _get_updates(broker)
     assert cache.get(channel) is not None
 
     # 记录表级通知被塞进本连接队列（= 连接被叫醒）的那一刻，缓存里这行的样子

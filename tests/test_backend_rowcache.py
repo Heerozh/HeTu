@@ -323,19 +323,15 @@ async def test_reader_get(mod_item_model, item_ref):
     ch = master.row_channel(item_ref, 1)
     cache.activate(ch, "hub")
 
-    # 首次（floor 未知）：只走权威读并填充
+    # 首次（floor 未知，还没收到过任何通知）：读副本，照用但不入缓存——无从判断这份副本
+    # 够不够新，缓存下来就没有任何失效路径了；也没有理由为此去问 master
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 3
-    assert master.calls["get_authoritative"] == 1 and fallback.calls["get"] == 0
-    assert cache.floor(ch) == 3
-    # 命中：零调用，且是副本
-    got = await reader.get(item_ref, 1, fb)
-    assert got is not None
-    got.qty = 100
-    assert master.calls["get_authoritative"] == 1 and fallback.calls["get"] == 0
-    assert (await reader.get(item_ref, 1, fb)).qty == 3  # type: ignore[union-attr]
+    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 0
+    assert cache.get(ch) is None and cache.floor(ch) is UNKNOWN
 
-    # 通知到达（版本 4）：逐出；副本仍是旧行 → 识破滞后，改权威读
+    # 第一条通知到达（版本 4）：floor 变成整数，从此副本读能被校验、也能入缓存。
+    # 此刻副本还是旧行 → 识破滞后，改权威读
     rows[0]._version = 4
     rows[0].qty = 4
     master.rows[1] = rows[0]
@@ -343,10 +339,17 @@ async def test_reader_get(mod_item_model, item_ref):
     cache.notify(ch, 4)
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 4
-    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 2
+    assert fallback.calls["get"] == 2 and master.calls["get_authoritative"] == 1
     assert cache.floor(ch) == 4
     cached = cache.get(ch)
     assert cached is not None and cached.qty == 4
+
+    # 命中：零调用，且返回的是副本，改它不影响缓存
+    got = await reader.get(item_ref, 1, fb)
+    assert got is not None
+    got.qty = 100
+    assert fallback.calls["get"] == 2 and master.calls["get_authoritative"] == 1
+    assert (await reader.get(item_ref, 1, fb)).qty == 4  # type: ignore[union-attr]
 
     # 副本追上：副本读直接填充，不碰权威读
     cache.evict(ch)
@@ -354,14 +357,15 @@ async def test_reader_get(mod_item_model, item_ref):
     fallback.rows[1] = rows[0]
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 4
-    assert fallback.calls["get"] == 2 and master.calls["get_authoritative"] == 2
+    assert fallback.calls["get"] == 3 and master.calls["get_authoritative"] == 1
 
     # 删除通知：已知它不存在，直接返回 None，一次库都不打（副本还读得到旧行也无所谓）
     cache.notify(ch, 0)
     master.rows.pop(1)
     got = await reader.get(item_ref, 1, fb)
     assert got is None
-    assert master.calls["get_authoritative"] == 2 and cache.get(ch) is None
+    assert fallback.calls["get"] == 3 and master.calls["get_authoritative"] == 1
+    assert cache.get(ch) is None
 
 
 async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
@@ -375,6 +379,7 @@ async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
     reader = CachedRowReader(FakeBackend(cache, master))
     ch = master.row_channel(item_ref, 1)
     cache.activate(ch, "hub")
+    cache.notify(ch, 7)  # 收到过通知，floor 已知
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 7 and cache.floor(ch) == 7
 
@@ -388,7 +393,7 @@ async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
     assert cache.replica_floor(ch) is None
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 2
-    assert fallback.calls["get"] == 0 and master.calls["get_authoritative"] == 2
+    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 1
     cached = cache.get(ch)
     assert cached is not None and cached.qty == 2 and cache.floor(ch) == 2
     # 再更新(v3)：逐出后仍不碰副本，副本的 v7 旧行永远进不来
@@ -397,7 +402,7 @@ async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
     cache.notify(ch, 3)
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got.qty == 3
-    assert fallback.calls["get"] == 0 and master.calls["get_authoritative"] == 3
+    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 2
     # get_many 同样只走权威批读
     cache.evict(ch)
     got_many = await reader.get_many(item_ref, [1], fb)
@@ -410,12 +415,13 @@ async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
     cache.activate(ch, "hub")
     fallback.stale.pop(1)
     fallback.rows[1] = new
-    await reader.get(item_ref, 1, fb)  # 首次权威读
+    await reader.get(item_ref, 1, fb)  # floor 未知：副本读，不入缓存
     cache.notify(ch, 4)
     new._version = 4
     got = await reader.get(item_ref, 1, fb)
     assert got is not None and got._version == 4
-    assert fallback.calls["get"] == 1 and master.calls["get_authoritative"] == 4
+    # 这一轮两次读都走副本（第一次 floor 未知、第二次 floor=4 且副本已追上），不碰 master
+    assert fallback.calls["get"] == 3 and master.calls["get_authoritative"] == 2
 
 
 async def test_reader_get_many(mod_item_model, item_ref):
@@ -442,14 +448,15 @@ async def test_reader_get_many(mod_item_model, item_ref):
 
     got = await reader.get_many(item_ref, [1, 2, 3, 4, 5, 6], fb)
     assert [r.qty if r is not None else None for r in got] == [1, 2, 3, 4, 5, None]
-    # 副本批读一次（2、3、5），权威批读：首轮（4、6）+ 滞后补读（3）
+    # 副本批读一次（2、3、4、5），权威批读只为滞后的 3 补一次；6 已知不存在，不读
     assert fallback.calls["get_many"] == 1
-    assert master.calls["get_many_authoritative"] == 2
+    assert master.calls["get_many_authoritative"] == 1
     assert fallback.calls["get"] == 0 and master.calls["get_authoritative"] == 0
-    # 填充结果：2、3、4 入缓存，5 未激活不入，6 不存在
-    for i in (2, 3, 4):
+    # 填充结果：2、3 入缓存；4 的 floor 未知，读回的行照用但不入缓存；5 未激活不入；6 不存在
+    for i in (2, 3):
         cached = cache.get(chans[i])
         assert cached is not None and cached.qty == i
+    assert cache.get(chans[4]) is None and cache.floor(chans[4]) is UNKNOWN
     assert cache.get(chans[5]) is None and cache.get(chans[6]) is None
     assert cache.floor(chans[3]) == 2
 
@@ -480,13 +487,16 @@ async def test_reader_absent_row_needs_no_read(mod_item_model, item_ref):
     )
     assert fallback.calls["get"] == 0, "也不该打副本"
 
-    # 批读：已知不存在的行不进任何一组，其余照常
+    # 批读：已知不存在的行不进任何一组，其余照常（行 2 的 floor 未知 → 副本批读）
     got = await reader.get_many(item_ref, [1, 2], fb)
     assert got[0] is None and got[1] is not None
-    assert master.calls["get_many_authoritative"] == 1, "只该为行 2 读一次"
+    assert master.calls["get_many_authoritative"] == 0
+    assert fallback.calls["get_many"] == 1, "只该为行 2 读一次副本"
 
-    # 重新插入的通知到来后恢复正常（不再当它不存在）
+    # 重新插入的通知到来后恢复正常（不再当它不存在）。同 id 重插后副本可能还是删除前的
+    # 旧行，所以这一读仍走权威（见 needs_authoritative）
     cache.notify(ch1, 1)
     master.rows[1] = _row(mod_item_model, 1, 1, qty=11)
     got1 = await reader.get(item_ref, 1, fb)
     assert got1 is not None and got1.qty == 11
+    assert master.calls["get_authoritative"] == 1

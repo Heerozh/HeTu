@@ -48,8 +48,8 @@ commit 成功把新行写穿进缓存，同一连接反复读写同一行时只�
 
 | 操作（行已被本 worker 订阅） | 现在 RTT | 命令序列 | 本 spec 后 |
 |---|---:|---|---:|
-| `get(id)` 只读 System | 1 | HGETALL | **0** |
-| `get(id)` + update + commit，首次 | 2 | HGETALL + EVALSHA | 2（首次填充走权威读） |
+| `get(id)` 只读 System（缓存已填） | 1 | HGETALL | **0** |
+| `get(id)` + update + commit，首次 | 2 | HGETALL + EVALSHA | 2（读走副本，commit 写穿填缓存） |
 | `get(id)` + update + commit，之后每次 | 2 | HGETALL + EVALSHA | **1**（commit 写穿，下次命中） |
 | `get(owner=)`（非主键）+ update + commit | 3 | ZRANGE + HGETALL + EVALSHA | 2 |
 | `range(owner=)` 10 行只读 | 2 | ZRANGE + PIPELINE(10) | **1** |
@@ -57,7 +57,7 @@ commit 成功把新行写穿进缓存，同一连接反复读写同一行时只�
 | `insert` + commit | 1 | EVALSHA | 1（不变；写穿后再读命中） |
 | 未被订阅的行，任何操作 | — | — | 不变（miss 即今天的路径） |
 | 订阅推送：本 worker commit 改的行 | 每连接 1 | HGETALL / PIPELINE | **0**（写穿） |
-| 订阅推送：别的 worker 改的行，本 worker 有 N 个连接订着 | N | N 次 HGETALL / PIPELINE | **1**（首个填充，其余命中） |
+| 订阅推送：别的 worker 改的行，本 worker 有 N 个连接订着 | N | N 次 HGETALL / PIPELINE | **1**（首个读副本并填充，其余命中） |
 
 索引读（ZRANGE）不缓存，所以非主键 `get` / `range` 仍各付 1 次；这是有意的（§7）。
 
@@ -76,8 +76,12 @@ commit 成功把新行写穿进缓存，同一连接反复读写同一行时只�
   不是——`master:` 填的是代理地址，读写分离代理按命令类型分流，`HGETALL` 无论从哪个客户端
   对象发出都会被送到副本，协议上没有"这条读命令请走主节点"的写法，唯一一定被送到主节点的
   是脚本（代理无法判断脚本是否写）。客户端识别不了代理，而 EVALSHA 与 HGETALL 在真 master
-  上成本相同，所以不分拓扑一律用脚本。首次填充（floor 未知）与检测到滞后时使用；一行的订阅
-  生命周期内通常只发生一次。
+  上成本相同，所以不分拓扑一律用脚本。**只在检测到副本滞后时使用**（读回的版本低于 floor、
+  commit RACE 抬高 floor 之后的重试、以及同 id 重插后副本上可能还是删除前的旧行）。
+  floor 未知时（刚激活、还没收到过通知）**不走权威读**：那种读没法靠版本校验判断副本够不够
+  新，但也没有理由为此去问 master——读副本、照常返回、不入缓存即可，语义与关掉缓存时一样。
+  项目的设计约束是能不读 master 就不读（见 CLAUDE.md），预算由
+  `tests/test_master_read_budget.py` 守着。
 - **commit 写穿**：commit 成功后把本事务 insert / update 的新行（版本 +1）直接放进缓存（仅当
   该行在提交前已激活、且提交往返期间没失活过），floor 同步抬到新版本；自己那条通知到达时
   版本不高于缓存，不逐出。
@@ -172,8 +176,12 @@ floor ≥ 本进程已处理的该行最新通知的版本；
 2. **通知**：`(channel, version)` → 若 `version > 缓存行版本` 则逐出；`floor = max(floor,
    version)`；删除（version 0）→ 逐出，floor = 已删除，并把该频道标成**只信权威读**直到本次
    激活结束（同 id 重插后 `_version` 从 1 重来，滞后副本上删除前的旧行版本反而更高，floor 挡不住）。
-3. **填充**：副本读只在 `floor` 已知、频道未标只信权威读、且 `row._version ≥ floor` 时入缓存；floor 未知 /
-   读回版本低于 floor 时改走权威读，权威读回的行无条件入缓存并把 floor 设为它的版本。
+3. **填充**：副本读只在 `floor` 已知、频道未标只信权威读、且 `row._version ≥ floor` 时入缓存。
+   floor 未知时读回的行照常返回给调用方，但**不入缓存**（无从判断够不够新，缓存下来就没有
+   失效路径了）；读回版本低于 floor、或频道标了只信权威读时改走权威读，权威读回的行无条件
+   入缓存并把 floor 设为它的版本。
+   缓存因此由两条路填：本进程 commit 的写穿，以及收到第一条通知（floor 变成整数）之后的
+   副本读。
    填充还要求取 lease 时的激活代次仍当前（退订又重订的中间态不填）。
 4. **逐出**：通知（规则 2）、本进程 commit 的 RACE（逐出本事务全部行，冲突行的 floor 抬到
    Lua 回显的当前版本）、最后一个本地订阅者退订、pubsub 节点失效。commit 成功不逐出而是
@@ -294,13 +302,13 @@ if lease is None:
     return await fallback.get(ref, row_id, RowFormat.STRUCT)          # 没人订：不缓存
 if cache.is_absent(channel):
     return None                                                       # 已知已删：0 往返
-floor = cache.floor(channel)
-authoritative = floor is UNKNOWN
-if not authoritative:
-    row = await fallback.get(ref, row_id, RowFormat.STRUCT)
-    authoritative = row is not None and row._version < floor            # 副本滞后
-if authoritative:
+if cache.needs_authoritative(channel):                                # 删除后重插：副本不可信
     row = await backend.master.get_authoritative(ref, row_id)
+else:
+    row = await fallback.get(ref, row_id, RowFormat.STRUCT)
+    floor = cache.replica_floor(channel)          # None = floor 未知：照用但不入缓存
+    if floor is not None and (row is None or row._version < floor):   # 副本滞后
+        row = await backend.master.get_authoritative(ref, row_id)
 if row is not None:
     cache.fill(lease, row, authoritative=authoritative)
 return row
@@ -406,7 +414,7 @@ tick、只在一个连接内。进程缓存把这两个作用都覆盖了，而�
 | 同事务重复读同一行 | idmap 命中，缓存不参与（现状） |
 | 最后一个本地订阅者退订 | `_release` 同步失活 + 逐出，早于 UNSUBSCRIBE；此后的读不填充 |
 | 退订未 ack 时又有人订（搭车） | 新登记要等 ack 后才在 `add` 末尾激活（新代次）；旧 lease 作废 |
-| pubsub 节点失效 | `on_reset` 全部失活清空；`on_restored` 重新激活，floor 未知 → 权威读 |
+| pubsub 节点失效 | `on_reset` 全部失活清空；`on_restored` 重新激活，floor 回到未知 → 之后的读走副本、不入缓存，直到第一条通知或本进程写穿 |
 | `direct_set`（不动 `_version`，只能用于易失组件） | 不通知；易失组件不缓存，别的事务 VER 不受影响，无冲突 |
 | 行被删除 | 通知 0 → 逐出 + floor 已删除；之后读它直接返回 None，一次库都不打（删除通知和别的通知一样权威；副本那边可能还读得到旧行，正好不能信） |
 | 删除后同 id 重插 | 新一代版本从 1 重来，滞后副本上删除前的旧行版本更高、floor 挡不住 → 见过删除通知的频道本次激活周期内只走权威读，退订再订才重新信副本 |

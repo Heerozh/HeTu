@@ -366,10 +366,15 @@ async def test_row_cache_race_bumps_floor(item_ref, mod_auto_backend):
     cache.activate(race_channel, "test")
     cache.activate(clean_channel, "test")
     try:
-        # 预热两行
+        # 预热两行：floor 未知时读回的行不入缓存，先拿它们的版本各送一条通知把 floor 立起来
         async with backend.session("pytest", 1) as s:
             stale = await s.using(comp).get(id=race_id)
-            assert stale is not None
+            clean_row = await s.using(comp).get(id=clean_id)
+        assert stale is not None and clean_row is not None
+        cache.notify(race_channel, int(stale["_version"]))
+        cache.notify(clean_channel, int(clean_row["_version"]))
+        async with backend.session("pytest", 1) as s:
+            assert await s.using(comp).get(id=race_id) is not None
             assert await s.using(comp).get(id=clean_id) is not None
         assert cache.get(race_channel) is not None
         assert cache.get(clean_channel) is not None
