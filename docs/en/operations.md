@@ -88,8 +88,13 @@ population while staying consistent.
 
 - Add as many `servants` as you need; each is a Redis read-only replica that
   syncs from the master.
-- Servants need `notify-keyspace-events` enabled (HeTu `CONFIG SET`s it at
-  startup when it has permission, and warns otherwise).
+- Servants need `notify-keyspace-events` set to `Kz` (HeTu `CONFIG SET`s it at
+  startup when it has permission, and warns otherwise). Only index (zset) range
+  subscriptions still rely on keyspace events; row changes are PUBLISHed to the
+  row channel by the commit itself, carrying the row's new `_version`.
+  **Upgrade note**: older versions notified row changes via keyspace events, so
+  a new worker cannot see row updates written by an old one — upgrade every
+  writer (workers and headless processes) together.
 - Every logged-in connection also subscribes to the `Connection` table's
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every

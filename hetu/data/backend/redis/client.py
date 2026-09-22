@@ -169,8 +169,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     @override
     def row_channel(self, table_ref: TableReference, row_id: int):
-        """返回行数据的频道名。如果行有变动，会通知到该频道"""
-        return f"__keyspace@{self.dbi}__:{self.row_key(table_ref, row_id)}"
+        """
+        返回行数据的频道名（就是行 key，与 SQL 后端一致）。这是 commit lua 脚本主动 PUBLISH 的
+        普通频道（非 keyspace 通知），payload 是 msgpack 的整数：该行提交后的新 `_version`，
+        删除为 0。`direct_set` 不发通知。
+        """
+        return self.row_key(table_ref, row_id)
 
     @override
     def table_channel(self, table_ref: TableReference):
@@ -321,7 +325,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             raise ConnectionError(_("连接已关闭，已调用过close"))
             # 检查servants设置
 
-        target_keyspace = "Kghz"
+        # K=keyspace 频道前缀，z=索引 zset 的 ZADD/ZREM（范围订阅订整个索引的 keyspace 频道）。
+        # 行频道改由 commit 主动 PUBLISH 后，行 hash 的 h/g 事件没有订阅者，不再开
+        target_keyspace = "Kz"
         for i, io in enumerate(self._ios):
             try:
                 # 设置keyspace通知，先cast防止Awaitable类型检查报错
@@ -817,14 +823,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         ]
                     )
 
-        def _hset_key(_key, _old_version, _update: dict[str, str]):
-            """添加hset的push命令"""
+        def _hset_key(_key, _old_version, _update: dict[str, str]) -> int:
+            """添加hset的push命令，返回写入的新版本号"""
             # 版本+1
             _ver = int(_old_version) + 1
             _update.pop("_version", None)  # 无视用户传入的_version字段
             # 组合hset, 别忘记写_version
             _kvs = itertools.chain.from_iterable(_update.items())
             pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
+            return _ver
 
         def _exc_index(_indexes, _dtype_map, _idx_prefix, _old, _new, _add):
             """exchange index(zadd/zrem)的push命令"""
@@ -880,6 +887,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
         publishes: list[list[str | bytes]] = []
         value_pubs: dict[str, list[str]] = {}
+        # 行频道通知：每行一条，payload 是新 _version（删除为 0）。行订阅与 worker 行缓存靠它，
+        # keyspace 事件不带内容，缓存无法判断一次副本读是否至少和通知一样新
+        row_pubs: list[tuple[str, int]] = []
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -909,7 +919,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     row_id,
                     "insert",
                 )
-                _hset_key(key, 0, insert)
+                row_pubs.append((key, _hset_key(key, 0, insert)))
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
                 touched_ids.append(row_id)
             # update
@@ -928,7 +938,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     row_id,
                     "update",
                 )
-                _hset_key(key, old_version, new_row)
+                row_pubs.append((key, _hset_key(key, old_version, new_row)))
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
                 touched_ids.append(row_id)
@@ -941,6 +951,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _version_must_match(key, old_version)
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
+                row_pubs.append((key, 0))
                 touched_ids.append(str(delete["id"]))
             if touched_ids:
                 publishes.append(
@@ -948,6 +959,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 )
         for channel, ids in value_pubs.items():
             publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
+        for key, version in row_pubs:
+            # 行频道名就是行 key（row_channel），不必再算一遍
+            publishes.append([key, msg_packer.pack(version)])  # type: ignore
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -989,7 +1003,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
         注意此方法可能导致写入数据到已删除的行，请确保逻辑。
 
-        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性：
+        它不动 `_version`，别的事务的版本检查感知不到它（不会因它 RaceCondition），
+        同一字段与事务写入是后写覆盖；**不发变更通知**，订阅者看不到它的改动，
+        易失组件的行也不进 worker 行缓存。
         """
         assert "id" not in kwargs, "id不允许修改"
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"

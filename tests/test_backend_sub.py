@@ -109,7 +109,7 @@ async def test_redis_notify_configuration(mod_auto_backend):
     # 测试replica应该有通知
     replica_config = await servant.aio.config_get("notify-keyspace-events")
     replica_flags = replica_config["notify-keyspace-events"]
-    assert all(flag in replica_flags for flag in list("Kghz"))
+    assert all(flag in replica_flags for flag in list("Kz"))
 
 
 async def test_subscribe_get(broker: SubscriptionBroker, filled_item_ref, admin_ctx):

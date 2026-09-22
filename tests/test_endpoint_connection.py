@@ -236,8 +236,7 @@ async def test_owner_value_channel_ignores_own_heartbeat(
     mod_test_app, tbl_mgr, new_ctx
 ):
     """websocket 层订的是 Connection 表 owner==本用户 的索引值频道：本连接自己的心跳
-    （direct_set last_active）会通知行频道但碰不到它；被别的连接顶号时它一定收到通知"""
-    from hetu.data.backend.redis import RedisBackendClient
+    （direct_set last_active）不发通知、碰不到它；被别的连接顶号时它一定收到通知"""
     from hetu.data.sub import SubscriptionBroker
 
     executor = EndpointExecutor("pytest", tbl_mgr, new_ctx())
@@ -249,14 +248,9 @@ async def test_owner_value_channel_ignores_own_heartbeat(
     backend = conn_tbl.backend
     broker = SubscriptionBroker(backend)
     owner_hits: list[int] = []
-    row_hits: list[int] = []
     await broker.watch_channel(
         backend.servant.index_value_channel(conn_tbl, "owner", 1),
         lambda: owner_hits.append(1),
-    )
-    await broker.watch_channel(
-        backend.servant.row_channel(conn_tbl, ctx.connection_id),
-        lambda: row_hits.append(1),
     )
 
     async def wait_hits(hits: list[int], count: int):
@@ -269,9 +263,6 @@ async def test_owner_value_channel_ignores_own_heartbeat(
         executor.alive_checker.last_active_cache = 0
         ok, _ = await executor.execute("add_rls_comp_value", i)
         assert ok
-    if isinstance(backend.master, RedisBackendClient):
-        # Redis 的 keyspace 通知会把心跳的 HSET 打到行频道上（SQL 的 direct_set 不发通知）
-        await wait_hits(row_hits, 3)
     await asyncio.sleep(0.3)
     assert owner_hits == [], "心跳不该触发 owner 索引值频道"
 

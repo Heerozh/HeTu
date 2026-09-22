@@ -391,7 +391,7 @@ class GameLog(hetu.BaseComponent): ...
 
 ## 易失性组件
 
-`@define_component(volatile=True, ...)` 将一个 `Component` 标记为**易失性**：其行应在模式维护期间被清除，并且它们可以用于 `direct_set` 低级写入（引擎使用它进行快速非事务性更新，例如内置 `Connection` `Component` 上的 `last_active`）。
+`@define_component(volatile=True, ...)` 将一个 `Component` 标记为**易失性**：其行应在模式维护期间被清除，并且它们可以用于 `direct_set` 低级写入（引擎使用它进行快速非事务性更新，例如内置 `Connection` `Component` 上的 `last_active`）。`direct_set` 不改 `_version`、不发变更通知：别的事务不会因它冲突，订阅者也看不到它的改动；易失性组件的行也不进 worker 的行缓存。
 
 在以下情况使用易失性：
 
@@ -550,7 +550,7 @@ for row in rows:
         ...
 ```
 
-注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用（MySQL / MariaDB 由引擎钳到 dtype 极值）。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用（MySQL / MariaDB 由引擎钳到 dtype 极值）。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，也不发通知。
 
 ### 写：`client.session(*comps)`
 

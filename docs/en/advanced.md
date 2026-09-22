@@ -571,7 +571,10 @@ exists.
 its rows are intended to be cleared during schema maintenance, and they
 are eligible for `direct_set` low-level writes (used by the engine for
 fast non-transactional updates like `last_active` on the built-in
-`Connection` `Component`).
+`Connection` `Component`). `direct_set` neither bumps `_version` nor emits a
+change notification: other transactions never conflict with it, subscribers
+never see its writes, and rows of volatile components are never held in the
+worker row cache.
 
 Use volatile when:
 
@@ -808,7 +811,7 @@ for row in rows:
         ...
 ```
 
-Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend (on MySQL / MariaDB the engine clamps it to the dtype's max). `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
+Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend (on MySQL / MariaDB the engine clamps it to the dtype's max). `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and emits no notification.
 
 ### Writing: `client.session(*comps)`
 

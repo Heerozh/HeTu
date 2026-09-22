@@ -416,7 +416,20 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
             channel = push[1] + b":" + sortable_token(sortable).encode()
             expected_values.setdefault(channel, set()).add(row_id)
     assert expected_values
-    published = {pub[0]: set(msgpack.unpackb(pub[1], raw=True)) for pub in json[3]}
+    # 行频道通知：每个被 HSET/DEL 的行一条，payload 是该行的新 _version（msgpack int），
+    # 删除为 0；频道名就是行 key（commit 主动 PUBLISH，不再依赖 keyspace 事件）
+    expected_rows: dict[bytes, int] = {}
+    for push in json[1]:
+        if push[0] == b"HSET":
+            expected_rows[push[1]] = int(push[3])  # HSET key _version ver ...
+        elif push[0] == b"DEL":
+            expected_rows[push[1]] = 0
+    assert expected_rows
+    assert client.row_channel(item_ref, row.id).encode() in expected_rows
+    published_raw = {pub[0]: msgpack.unpackb(pub[1], raw=True) for pub in json[3]}
+    row_pubs = {c: v for c, v in published_raw.items() if isinstance(v, int)}
+    assert row_pubs == expected_rows
+    published = {c: set(v) for c, v in published_raw.items() if isinstance(v, list)}
     table_pubs = {c: ids for c, ids in published.items() if c.endswith(b":table")}
     value_pubs = {c: ids for c, ids in published.items() if not c.endswith(b":table")}
     assert table_pubs == touched

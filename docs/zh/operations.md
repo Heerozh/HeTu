@@ -73,7 +73,10 @@ backends:
 - 根据需要添加任意数量的 `servants`；每个都是一个从主节点同步的 Redis 只读副本。
 - `servants` 是可选的。留空即表示单主模式——适合小型游戏。
 - 请保守设置副本的 Redis `client-output-buffer-limit`；过大的缓冲区限制在订阅突发时可能导致 Redis 内存溢出（OOM）。
-- 副本需要开启 `notify-keyspace-events`（HeTu 启动时有权限就会自行 `CONFIG SET`，没权限会告警）。
+- 副本需要开启 `notify-keyspace-events`，值为 `Kz`（HeTu 启动时有权限就会自行 `CONFIG SET`，没权限会告警）。
+  只有索引（zset）的范围订阅还依赖 keyspace 事件；行变更由 commit 主动 PUBLISH 到行频道并附带新 `_version`。
+  **升级注意**：旧版本用 keyspace 事件通知行变更，新旧 worker 混跑时新 worker 收不到旧 worker 的行更新，
+  所有写入方（worker、headless 进程）必须一起升级。
 - 每个登录连接还订阅 `Connection` 表 `owner == 本用户` 的索引值频道，被顶号时服务器据此主动断开它，RPC 路径上
   不再每次读库；通知丢失时由 `CONNECTION_ALIVE_RECHECK_INTERVAL`（默认 5 秒）兜底重查。
 

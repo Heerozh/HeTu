@@ -507,7 +507,10 @@ class BackendClient:
         仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
         注意此方法可能导致写入数据到已删除的行，请确保逻辑。
 
-        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性：
+        它不动 `_version`，别的事务的版本检查感知不到它（不会因它 RaceCondition），
+        同一字段与事务写入是后写覆盖；**不发变更通知**，订阅者看不到它的改动，
+        易失组件的行也不进 worker 行缓存。
         """
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
         raise NotImplementedError
