@@ -172,7 +172,7 @@ floor ≥ 本进程已处理的该行最新通知的版本；
 2. **通知**：`(channel, version)` → 若 `version > 缓存行版本` 则逐出；`floor = max(floor,
    version)`；删除（version 0）→ 逐出，floor = 已删除，并把该频道标成**只信权威读**直到本次
    激活结束（同 id 重插后 `_version` 从 1 重来，滞后副本上删除前的旧行版本反而更高，floor 挡不住）。
-3. **填充**：副本读只在 `floor` 已知、频道未标只信权威读、且 `row._version ≥ floor` 时入缓存；floor 未知 / 已删除 /
+3. **填充**：副本读只在 `floor` 已知、频道未标只信权威读、且 `row._version ≥ floor` 时入缓存；floor 未知 /
    读回版本低于 floor 时改走权威读，权威读回的行无条件入缓存并把 floor 设为它的版本。
    填充还要求取 lease 时的激活代次仍当前（退订又重订的中间态不填）。
 4. **逐出**：通知（规则 2）、本进程 commit 的 RACE（逐出本事务全部行，冲突行的 floor 抬到
@@ -220,6 +220,7 @@ class RowCache:
     def get(self, channel) -> np.record | None                # 命中返回 .copy()
     def lease(self, channel) -> Lease | None                  # 未激活返回 None
     def floor(self, channel) -> int | UNKNOWN | DELETED       # 原始 floor
+    def is_absent(self, channel) -> bool                      # 已知该行不存在：读路径直接 None
     def replica_floor(self, channel) -> int | None             # 副本读可信才给 floor，否则权威读
     def fill(self, lease, row, *, authoritative: bool) -> bool
     # 写路径（commit）
@@ -291,8 +292,10 @@ if (row := cache.get(channel)) is not None:
 lease = cache.lease(channel)
 if lease is None:
     return await fallback.get(ref, row_id, RowFormat.STRUCT)          # 没人订：不缓存
+if cache.is_absent(channel):
+    return None                                                       # 已知已删：0 往返
 floor = cache.floor(channel)
-authoritative = floor is UNKNOWN or floor is DELETED
+authoritative = floor is UNKNOWN
 if not authoritative:
     row = await fallback.get(ref, row_id, RowFormat.STRUCT)
     authoritative = row is not None and row._version < floor            # 副本滞后
@@ -405,7 +408,7 @@ tick、只在一个连接内。进程缓存把这两个作用都覆盖了，而�
 | 退订未 ack 时又有人订（搭车） | 新登记要等 ack 后才在 `add` 末尾激活（新代次）；旧 lease 作废 |
 | pubsub 节点失效 | `on_reset` 全部失活清空；`on_restored` 重新激活，floor 未知 → 权威读 |
 | `direct_set`（不动 `_version`，只能用于易失组件） | 不通知；易失组件不缓存，别的事务 VER 不受影响，无冲突 |
-| 行被删除 | 通知 0 → 逐出 + floor 已删除；副本仍读到旧行 → 权威读 → None → 事务看到不存在 |
+| 行被删除 | 通知 0 → 逐出 + floor 已删除；之后读它直接返回 None，一次库都不打（删除通知和别的通知一样权威；副本那边可能还读得到旧行，正好不能信） |
 | 删除后同 id 重插 | 新一代版本从 1 重来，滞后副本上删除前的旧行版本更高、floor 挡不住 → 见过删除通知的频道本次激活周期内只走权威读，退订再订才重新信副本 |
 | `only_master` 事务 | 全程绕过 |
 | 用户就地改返回的行 | 返回的是副本，缓存不受影响 |

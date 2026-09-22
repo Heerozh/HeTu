@@ -1454,7 +1454,8 @@ async def test_row_cache_skips_volatile(filled_rls_ref, mod_auto_backend):
 
 
 async def test_row_cache_delete(filled_item_ref, mod_auto_backend):
-    """删除通知后：副本可能还读得到旧行，事务读改走权威读得到 None，缓存无行"""
+    """删除通知后：已知这行不存在，事务读直接得到 None，一次库都不打（副本那边可能还
+    读得到旧行，正好不能信）"""
     from contextlib import ExitStack
 
     backend: Backend = mod_auto_backend()
@@ -1482,7 +1483,10 @@ async def test_row_cache_delete(filled_item_ref, mod_auto_backend):
             counts = count_reads(stack, backend)
             async with backend.session("pytest", 1) as session:
                 assert await session.using(comp).get(id=row_id) is None
-            assert counts() == {"plain": 0, "authoritative": 1}
+            assert counts() == {"plain": 0, "authoritative": 0}, (
+                "已知不存在的行不该打库"
+            )
+            assert cache.stats.absent_hits > 0
         assert cache.get(channel) is None
     finally:
         cache.deactivate(channel, "test")

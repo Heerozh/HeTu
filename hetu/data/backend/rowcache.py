@@ -68,7 +68,9 @@ class Lease:
 @dataclass(slots=True)
 class RowCacheStats:
     hits: int = 0
-    misses: int = 0
+    misses: int = 0  # 行不在缓存里的读，含下面的 absent_hits
+    # 已知该行不存在（最近一次通知是删除），直接返回 None、没打库的读
+    absent_hits: int = 0
     authoritative_reads: int = 0  # 权威读的调用次数（批读算一次）
     size: int = 0
 
@@ -139,6 +141,13 @@ class RowCache:
 
     def floor(self, channel: str) -> Floor:
         return self._floor.get(channel, UNKNOWN)
+
+    def is_absent(self, channel: str) -> bool:
+        """
+        已知该行不存在：最近一次通知是删除。删除通知和别的通知一样权威（激活期间不漏），
+        所以读路径可以直接当 None 返回，不必打库——这是"负结果"的缓存。
+        """
+        return self._floor.get(channel) is DELETED
 
     def replica_floor(self, channel: str) -> int | None:
         """
@@ -275,6 +284,9 @@ class CachedRowReader:
         lease = cache.lease(channel)
         if lease is None:
             return await fallback.get(ref, row_id, RowFormat.STRUCT)  # 没人订：不缓存
+        if cache.is_absent(channel):
+            cache.stats.absent_hits += 1
+            return None  # 已知已删：删除通知本身就是权威的，0 往返
         floor = cache.replica_floor(channel)
         if floor is not None:
             row = await fallback.get(ref, row_id, RowFormat.STRUCT)
@@ -313,6 +325,9 @@ class CachedRowReader:
             if lease is None:
                 replica_idx.append(i)
                 continue
+            if cache.is_absent(channel):
+                cache.stats.absent_hits += 1
+                continue  # 已知已删：结果保持 None，不进任何一组
             leases[i] = lease
             floor = cache.replica_floor(channel)
             if floor is not None:

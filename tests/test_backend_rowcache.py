@@ -356,12 +356,12 @@ async def test_reader_get(mod_item_model, item_ref):
     assert got is not None and got.qty == 4
     assert fallback.calls["get"] == 2 and master.calls["get_authoritative"] == 2
 
-    # 删除通知：副本还读得到旧行 → 权威读 → None，缓存无行
+    # 删除通知：已知它不存在，直接返回 None，一次库都不打（副本还读得到旧行也无所谓）
     cache.notify(ch, 0)
     master.rows.pop(1)
     got = await reader.get(item_ref, 1, fb)
     assert got is None
-    assert master.calls["get_authoritative"] == 3 and cache.get(ch) is None
+    assert master.calls["get_authoritative"] == 2 and cache.get(ch) is None
 
 
 async def test_reader_delete_reinsert_stale_replica(mod_item_model, item_ref):
