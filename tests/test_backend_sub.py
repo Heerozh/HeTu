@@ -1,12 +1,11 @@
 import asyncio
-from contextvars import ContextVar
 from typing import AsyncGenerator, cast
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RowFormat
 from hetu.data.sub import (
     IndexSubscription,
     RowSubscription,
@@ -23,8 +22,6 @@ async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
 
     # 初始化订阅器
     broker = SubscriptionBroker(mod_auto_backend("main"))
-    # 清空row订阅缓存
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
 
     yield broker
 
@@ -279,16 +276,18 @@ async def test_row_subscribe_cache(
         row1_id = row.id
         await repo.update(row)
 
-    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version），按行频道存
+    # 检测行缓存：订阅中的行在进程行缓存里（原始 record，含 _version）。
+    # 本进程自己的 commit 写穿，get_updates 直接从缓存推，不用再读库
     await broker.get_updates()
-    # 由于不同backend的channel名不一样，使用dict的第一个channel
-    cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    first_channel = next(iter(cache.keys()))
-    assert cache[first_channel]["id"] == row1_id
-    assert cache[first_channel]["owner"] == 11
-    assert "_version" in cache[first_channel]
+    channel = backend.master.row_channel(filled_item_ref, row1_id)
+    cache = backend.row_cache
+    if cache is not None:
+        cached = cache.get(channel)
+        assert cached is not None
+        assert cached.id == row1_id and cached.owner == 11
+        assert "_version" in cached.dtype.names  # type: ignore[operator]
 
-    # 测试第二次更新cache是否清空了
+    # 测试第二次更新缓存是否跟着更新
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         row = await repo.get(time=110)
@@ -297,9 +296,9 @@ async def test_row_subscribe_cache(
         await repo.update(row)
 
     updates = await broker.get_updates()
-    # 每个tick重置缓存并重新预读，如果数据正确说明更新了
-    cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    assert cache[first_channel]["owner"] == 12
+    if cache is not None:
+        cached = cache.get(channel)
+        assert cached is not None and cached.owner == 12
     # 其他顺带检测
     assert len(updates) == 3
     assert updates[sub_row][row1_id]["owner"] == 12  # row订阅数据更新
@@ -1157,3 +1156,193 @@ async def test_subscribe_table_large(broker: SubscriptionBroker, item_ref, admin
     updates = await broker.get_updates()
     assert len(updates[sub_id]) == 50
     assert all(r["qty"] == 77 for r in updates[sub_id].values())
+
+
+def _count_reads(stack, backend: Backend):
+    """把 master 与各 servant 的读方法都包上计数：plain = get / get_many，
+    authoritative = get_many_authoritative（Redis 的 get_authoritative 内部就是它）"""
+    from unittest.mock import patch
+
+    mocks = {}
+    for i, client in enumerate([backend.master, *backend._servants]):
+        for meth in ("get", "get_many", "get_many_authoritative"):
+            mocks[(i, meth)] = stack.enter_context(
+                patch.object(client, meth, wraps=getattr(client, meth))
+            )
+
+    def counts():
+        c = {"plain": 0, "authoritative": 0}
+        for (_, meth), m in mocks.items():
+            key = "authoritative" if meth == "get_many_authoritative" else "plain"
+            c[key] += m.call_count  # type: ignore[attr-defined]
+        return c
+
+    return counts
+
+
+async def _other_process_update(mod_backend_config, ref, qty: int):
+    """用另一个 Backend（模拟别的 worker 进程）改 time=110 那行的 qty"""
+    import copy
+
+    other = Backend(copy.deepcopy(mod_backend_config))
+    other.post_configure(components=[ref.comp_cls])
+    try:
+        async with other.session("pytest", 1) as session:
+            repo = session.using(ref.comp_cls)
+            row = await repo.get(time=110)
+            assert row
+            row.qty = qty
+            await repo.update(row)
+        await other.wait_for_synced()
+    finally:
+        await other.close()
+
+
+async def test_sub_push_uses_row_cache(
+    filled_item_ref, mod_auto_backend, mod_backend_config, admin_ctx
+):
+    """订阅推送走进程行缓存：别的进程改行，本进程两个连接订着同一行，只有第一个刷新的读库，
+    第二个命中；本进程自己改行（commit 写穿）推送 0 次读；推送内容不含 _version"""
+    from contextlib import ExitStack
+
+    backend: Backend = mod_auto_backend()
+    if backend.row_cache is None:
+        return
+    broker_a = SubscriptionBroker(backend)
+    broker_b = SubscriptionBroker(backend)
+    try:
+        sub_a, row = await broker_a.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        sub_b, _ = await broker_b.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        assert sub_a and sub_b and row
+        row_id = row["id"]
+
+        await _other_process_update(mod_backend_config, filled_item_ref, 501)
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            updates_a = await broker_a.get_updates()
+            after_a = counts()
+            # 副本追上了是 1 次副本读；副本滞后则再补 1 次权威读
+            assert 1 <= after_a["plain"] + after_a["authoritative"] <= 2
+            updates_b = await broker_b.get_updates()
+            assert counts() == after_a  # 第二个连接命中缓存
+        assert updates_a[sub_a][row_id]["qty"] == 501
+        assert updates_b[sub_b][row_id] == updates_a[sub_a][row_id]
+        assert "_version" not in updates_a[sub_a][row_id]
+
+        # 本进程自己改：写穿，两个连接的推送都不读库
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(filled_item_ref.comp_cls)
+            r = await repo.get(time=110)
+            assert r
+            r.qty = 502
+            await repo.update(r)
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            updates_a = await broker_a.get_updates()
+            updates_b = await broker_b.get_updates()
+            assert counts() == {"plain": 0, "authoritative": 0}
+        assert updates_a[sub_a][row_id]["qty"] == 502
+        assert updates_b[sub_b][row_id]["qty"] == 502
+    finally:
+        await broker_a.close()
+        await broker_b.close()
+
+
+async def test_sub_push_stale_replica(
+    filled_item_ref, mod_auto_backend, mod_backend_config, admin_ctx
+):
+    """别的进程改行后副本还是旧行：推送识破滞后（版本低于通知），改权威读推新值"""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    broker = SubscriptionBroker(backend)
+    try:
+        sub, row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        assert sub and row
+        row_id = row["id"]
+        channel = backend.master.row_channel(filled_item_ref, row_id)
+        stale = cache.get(channel)  # subscribe_get 的首次权威读已填充
+        assert stale is not None
+
+        await _other_process_update(mod_backend_config, filled_item_ref, 601)
+        await wait_until(lambda: cache.get(channel) is None)
+
+        async def stale_get_many(ref, ids, row_format=RowFormat.STRUCT):
+            return [stale.copy() for _ in ids]
+
+        with ExitStack() as stack:
+            for client in [backend.master, *backend._servants]:
+                stack.enter_context(
+                    patch.object(client, "get_many", side_effect=stale_get_many)
+                )
+            auth = stack.enter_context(
+                patch.object(
+                    backend.master,
+                    "get_many_authoritative",
+                    wraps=backend.master.get_many_authoritative,
+                )
+            )
+            updates = await broker.get_updates()
+            assert auth.call_count == 1
+        assert updates[sub][row_id]["qty"] == 601
+        cached = cache.get(channel)
+        assert cached is not None and cached.qty == 601
+    finally:
+        await broker.close()
+
+
+async def test_subscribe_get_subscribes_before_read(
+    filled_item_ref, filled_rls_ref, mod_auto_backend, admin_ctx, user_id10_ctx
+):
+    """subscribe_get 先订后读：返回时行已在缓存（首次权威读）；行不存在 / 行级权限不过时
+    退订干净，hub 里没有残留频道"""
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    broker = SubscriptionBroker(backend)
+    try:
+        sub_by_id_row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm11"
+        )
+        sub1, row = sub_by_id_row
+        assert sub1 and row and "_version" not in row
+        sub2, row2 = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row["id"]
+        )
+        assert sub2 and row2 == row
+        if cache is not None:
+            channel = backend.master.row_channel(filled_item_ref, row["id"])
+            cached = cache.get(channel)
+            assert cached is not None and cached.name == "Itm11"
+
+        hub = backend.servant._hub  # type: ignore[attr-defined]
+        # 行不存在：不留订阅
+        assert await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", 987654321
+        ) == (None, None)
+        missing = backend.master.row_channel(filled_item_ref, 987654321)
+        assert hub is None or missing not in hub.channels
+        if cache is not None:
+            assert not cache.is_active(missing)
+        # 行级权限不过（RLS：friend == caller，行的 friend 是 11，caller 是 10）：不留订阅
+        assert await broker.subscribe_get(
+            filled_rls_ref, user_id10_ctx, "owner", 10
+        ) == (None, None)
+        if hub is not None:
+            assert not any(
+                ch.startswith(
+                    f"{filled_rls_ref.instance_name}:{filled_rls_ref.comp_name}:"
+                )
+                for ch in hub.channels
+            )
+    finally:
+        await broker.close()

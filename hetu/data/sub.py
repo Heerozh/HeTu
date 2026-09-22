@@ -9,8 +9,7 @@ import asyncio
 import logging
 from collections import Counter
 from collections.abc import Callable, Mapping
-from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -19,7 +18,7 @@ from hetu.data.component import Permission
 from hetu.i18n import _
 
 if TYPE_CHECKING:
-    from hetu.data.backend import Backend, TableReference
+    from hetu.data.backend import Backend, CachedRowReader, TableReference
     from hetu.endpoint import Context
 
 logger = logging.getLogger("HeTu.root")
@@ -27,14 +26,25 @@ logger = logging.getLogger("HeTu.root")
 
 class BaseSubscription:
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self,
+        channel: str,
+        payload: set[str] | None = None,
+        prefetched: Mapping[str, np.record | None] | None = None,
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。payload是该频道消息携带的数据，
-        行/索引频道为None，表级频道为变动的row_id集合。
+        行/索引频道为None，表级频道为变动的row_id集合。prefetched是本tick已批量读好的行
+        （{行频道: record | None}），命中就不用再读。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
         """
         raise NotImplementedError
+
+
+def _row_to_dict(comp_cls, row: np.record) -> dict[str, Any]:
+    """推给客户端的行：record 转 dict 并去掉内部的 _version"""
+    data = comp_cls.struct_to_dict(row)
+    data.pop("_version", None)
+    return data
 
     @property
     def channels(self) -> set[str]:
@@ -43,76 +53,57 @@ class BaseSubscription:
 
 
 class RowSubscription(BaseSubscription):
-    # 这是get_updates的cache：{行频道: 原始行dict（含_version）| None(行不存在)}。
-    # 每个tick开始时重置，tick内先由get_updates批量预读填充，多个订阅交叉命中同一行时
-    # 免去重复查询；缓存的是原始行，RLS由各订阅自己判定（同一连接可能挂着不同ctx的订阅）。
-    # get_updated是async的，可能会切换走，所以要用ContextVar隔离
-    __cache: ContextVar[dict] = ContextVar("user_row_cache")
+    """
+    单行订阅。行数据经 `CachedRowReader` 读取：本 worker 有订阅的行常驻进程行缓存
+    （`hetu.data.backend.rowcache`），本进程 commit 写穿的行推送 0 次读，别的进程改的行
+    每 worker 只读 1 次，其余连接命中。缓存里的是原始 record，RLS 由各订阅自己判定
+    （同一连接可能挂着不同 ctx 的订阅）。
+    """
 
     def __init__(
         self,
         table_ref: TableReference,
+        reader: CachedRowReader,
         servant: BackendClient,
         ctx: Context | None,
         channel: str,
         row_id: int,
     ):
         self.table_ref = table_ref
-        self.servant = servant
+        self.reader = reader
+        self.servant = servant  # 缓存 miss 时读副本用
         if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
         else:
             self.rls_ctx = None
         self.channel = channel
         self.row_id = row_id
-        if RowSubscription.__cache.get(None) is None:
-            RowSubscription.__cache.set({})
 
-    @classmethod
-    def reset_cache_(cls) -> dict:
-        """每个tick开始时调用：清空本任务的行缓存并返回它"""
-        cache: dict = {}
-        cls.__cache.set(cache)
-        return cache
-
-    @classmethod
-    def prefill_cache_(cls, channel: str, row: dict[str, Any] | None) -> None:
-        """get_updates批量预读后填充：row为None表示行不存在"""
-        cache = cls.__cache.get(None)
-        if cache is None:
-            cache = cls.reset_cache_()
-        cache[channel] = row
-
-    def decode_row_(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
-        """按本订阅的RLS判定行是否可见：可见返回去掉_version的拷贝，不可见/不存在返回None"""
+    def decode_row_(self, row: np.record | None) -> dict[str, Any] | None:
+        """按本订阅的RLS判定行是否可见：可见返回去掉_version的dict，不可见/不存在返回None"""
         if row is None:
             return None
         ctx = self.rls_ctx
         if ctx is not None and not ctx.rls_check(self.table_ref.comp_cls, row):
             return None
-        row = dict(row)  # 缓存里的原始行可能被别的订阅共用，不能就地改
-        row.pop("_version", None)
-        return row
+        return _row_to_dict(self.table_ref.comp_cls, row)
 
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self,
+        channel: str,
+        payload: set[str] | None = None,
+        prefetched: Mapping[str, np.record | None] | None = None,
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
         返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}
         """
-        # 如果订阅有交叉，这里会重复被调用，先看本tick的缓存（get_updates会批量预读填好；
-        # tick中途新建的行订阅不在预读范围内，这里兜底单行查询）
-        cache = RowSubscription.__cache.get(None)
-        if cache is None:
-            cache = RowSubscription.reset_cache_()
-        if channel in cache:
-            row = cache[channel]
+        # get_updates 会把本 tick 变更的行批量预读好；tick 中途新建的行订阅不在预读范围内，
+        # 这里兜底单行读（进程缓存命中就不打远程）
+        if prefetched is not None and channel in prefetched:
+            row = prefetched[channel]
         else:
-            row = await self.servant.get(
-                self.table_ref, self.row_id, RowFormat.TYPED_DICT
-            )
-            cache[channel] = row
+            row = await self.reader.get(self.table_ref, self.row_id, self.servant)
         return set(), set(), {self.row_id: self.decode_row_(row)}
 
     @property
@@ -125,6 +116,7 @@ class IndexSubscription(BaseSubscription):
     def __init__(
         self,
         table_ref: TableReference,
+        reader: CachedRowReader,
         servant: BackendClient,
         ctx: Context,
         index_channel: str,
@@ -132,6 +124,7 @@ class IndexSubscription(BaseSubscription):
         query_param: dict,
     ):
         self.table_ref = table_ref
+        self.reader = reader
         self.servant = servant
         if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
@@ -145,11 +138,14 @@ class IndexSubscription(BaseSubscription):
 
     def add_row_subscriber(self, channel, row_id):
         self.row_subs[channel] = RowSubscription(
-            self.table_ref, self.servant, self.rls_ctx, channel, row_id
+            self.table_ref, self.reader, self.servant, self.rls_ctx, channel, row_id
         )
 
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self,
+        channel: str,
+        payload: set[str] | None = None,
+        prefetched: Mapping[str, np.record | None] | None = None,
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
@@ -169,13 +165,9 @@ class IndexSubscription(BaseSubscription):
             new_chans = set()
             rem_chans = set()
             rtn: dict[int, dict[str, Any] | None] = {}
-            # 新进入范围的行一次批量读取（一次往返）
-            rows = cast(
-                list[dict[str, Any] | None],
-                await servant.get_many(ref, inserts, RowFormat.TYPED_DICT)
-                if inserts
-                else [],
-            )
+            # 新进入范围的行一次批量读取（一次往返；行频道要到 tick 末尾才订阅，
+            # 这次读在激活前，不会进缓存，下次通知时才填）
+            rows = await self.reader.get_many(ref, inserts, servant) if inserts else []
             for row_id, row in zip(inserts, rows):
                 if row is None:
                     self.last_range_result.remove(row_id)
@@ -183,7 +175,7 @@ class IndexSubscription(BaseSubscription):
                 new_chan_name = servant.row_channel(ref, row_id)
                 new_chans.add(new_chan_name)
                 row_sub = RowSubscription(
-                    ref, servant, self.rls_ctx, new_chan_name, row_id
+                    ref, self.reader, servant, self.rls_ctx, new_chan_name, row_id
                 )
                 self.row_subs[new_chan_name] = row_sub
                 # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
@@ -198,7 +190,9 @@ class IndexSubscription(BaseSubscription):
 
             return new_chans, rem_chans, rtn
         elif channel in self.row_subs:
-            return await self.row_subs[channel].get_updated(channel)
+            return await self.row_subs[channel].get_updated(
+                channel, payload, prefetched
+            )
         else:
             raise RuntimeError(
                 _("IndexSubscription收到了未知的channel消息: {channel}").format(
@@ -221,12 +215,14 @@ class TableSubscription(BaseSubscription):
     def __init__(
         self,
         table_ref: TableReference,
+        reader: CachedRowReader,
         servant: BackendClient,
         ctx: Context,
         table_channel: str,
         known_ids: set[int],
     ):
         self.table_ref = table_ref
+        self.reader = reader
         self.servant = servant
         if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
             self.rls_ctx = ctx
@@ -237,7 +233,10 @@ class TableSubscription(BaseSubscription):
         self.known_ids = known_ids
 
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self,
+        channel: str,
+        payload: set[str] | None = None,
+        prefetched: Mapping[str, np.record | None] | None = None,
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         表级频道收到通知后调用。payload是变动的row_id集合。
@@ -253,18 +252,15 @@ class TableSubscription(BaseSubscription):
             return set(), set(), {}
 
         ids = sorted(int(i) for i in payload)
-        rows = cast(
-            list[dict[str, Any] | None],
-            await self.servant.get_many(self.table_ref, ids, RowFormat.TYPED_DICT),
-        )
+        # 整表订阅的行没有行频道、不在缓存里激活，这里的 get_many 就是一次副本批读
+        rows = await self.reader.get_many(self.table_ref, ids, self.servant)
         comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
         known = self.known_ids
         rtn: dict[int, dict[str, Any] | None] = {}
         for row_id, row in zip(ids, rows):
             if row is not None and (ctx is None or ctx.rls_check(comp_cls, row)):
-                del row["_version"]
-                rtn[row_id] = row
+                rtn[row_id] = _row_to_dict(comp_cls, row)
                 known.add(row_id)
             elif row_id in known:
                 # 被删除，或失去RLS权限：客户端持有该行，需要通知删除
@@ -296,6 +292,7 @@ class SubscriptionBroker:
         """
         self._backend = backend
         self._mq_client = backend.get_mq_client()
+        self._reader = backend.row_reader
         self._max_table_rows = max_table_rows
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
@@ -376,40 +373,45 @@ class SubscriptionBroker:
             return None, None
 
         servant = self._backend.servant
+        comp_cls = table_ref.comp_cls
 
+        # 先定位 row_id（非主键只查索引，不读行）
         if index_name == "id":
-            row = await servant.get(table_ref, int(query_value), RowFormat.TYPED_DICT)
-            if row is None:
-                return None, None
+            row_id = int(query_value)
         else:
-            rows = await servant.range(
+            ids = await servant.range(
                 table_ref,
                 index_name,
                 query_value,
                 limit=1,
-                row_format=RowFormat.TYPED_DICT,
+                row_format=RowFormat.ID_LIST,
             )
-            if len(rows) == 0:
+            if len(ids) == 0:
                 return None, None
-            row = rows[0]
-            del row["_version"]
+            row_id = int(ids[0])
 
-        # 再次caller要对该row有权限
-        if not self._has_row_permission(table_ref, ctx, row):
-            return None, None
-
-        # 开始订阅
-        sub_id = self.make_query_id_(table_ref, "id", row["id"], None, 1, False)
+        sub_id = self.make_query_id_(table_ref, "id", row_id, None, 1, False)
+        channel_name = servant.row_channel(table_ref, row_id)
         if sub_id in self._subs:
             logger.warning(
                 _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
                     sub_id=sub_id
                 )
             )
-            return sub_id, row
+            row = await self._reader.get(table_ref, row_id, servant)
+            if row is None or not self._has_row_permission(table_ref, ctx, row):
+                return None, None
+            return sub_id, _row_to_dict(comp_cls, row)
 
-        channel_name = servant.row_channel(table_ref, row["id"])
+        # 先订后读：订阅生效后的读才能进进程行缓存（首次是权威读），
+        # 也不会漏掉"读与订之间"的写入
         await self._mq_client.subscribe(channel_name)
+        row = await self._reader.get(table_ref, row_id, servant)
+        # 行不存在，或 caller 对该行无权限：退订（同一连接别的订阅还在用这个频道就留着）
+        if row is None or not self._has_row_permission(table_ref, ctx, row):
+            if channel_name not in self._channel_subs:
+                await self._mq_client.unsubscribe(channel_name)
+            return None, None
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
                 sub_id=sub_id, channel_name=channel_name
@@ -417,11 +419,11 @@ class SubscriptionBroker:
         )
 
         self._subs[sub_id] = RowSubscription(
-            table_ref, servant, ctx, channel_name, row["id"]
+            table_ref, self._reader, servant, ctx, channel_name, row_id
         )
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         self._sub_counts[RowSubscription] += 1
-        return sub_id, row
+        return sub_id, _row_to_dict(comp_cls, row)
 
     async def subscribe_range(
         self,
@@ -521,6 +523,7 @@ class SubscriptionBroker:
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
             table_ref,
+            self._reader,
             servant,
             ctx,
             index_channel,
@@ -640,6 +643,7 @@ class SubscriptionBroker:
 
         self._subs[sub_id] = TableSubscription(
             table_ref,
+            self._reader,
             servant,
             ctx,
             table_channel,
@@ -696,9 +700,8 @@ class SubscriptionBroker:
         else:
             updated_channels = await mq.get_message()
 
-        # 本tick变更的行先按表分组一次批量读取，填进RowSubscription的缓存
-        RowSubscription.reset_cache_()
-        await self._prefetch_rows(updated_channels)
+        # 本tick变更的行先按表分组一次批量读取（进程行缓存命中的不打远程）
+        prefetched = await self._prefetch_rows(updated_channels)
 
         added: set[str] = set()
         released: set[str] = set()
@@ -712,7 +715,7 @@ class SubscriptionBroker:
                     continue
                 # 获取sub更新的行数据
                 new_chans, rem_chans, sub_updates = await sub.get_updated(
-                    channel, payload
+                    channel, payload, prefetched
                 )
                 if self._subs.get(sub_id) is not sub:
                     # 查库期间这个订阅被 unsub 了（或退了又用同一 id 重订成新对象）：
@@ -747,11 +750,15 @@ class SubscriptionBroker:
         await mq.unsubscribe(*to_unsubscribe)
         return rtn
 
-    async def _prefetch_rows(self, updated_channels: Mapping[str, Any]) -> None:
+    async def _prefetch_rows(
+        self, updated_channels: Mapping[str, Any]
+    ) -> dict[str, np.record | None]:
         """
-        本tick所有收到通知的行频道，按表分组各一次get_many，把原始行填进
-        RowSubscription的缓存，循环里的get_updated就不用逐行往返了。
+        本tick所有收到通知的行频道，按表分组各一次批量读（经进程行缓存：本进程写穿的行
+        与别的连接刚读过的行直接命中），返回 {行频道: record | None} 供各 get_updated 用，
+        循环里就不用逐行往返了。
         """
+        prefetched: dict[str, np.record | None] = {}
         by_table: dict[TableReference, tuple[list[str], list[int]]] = {}
         for channel in updated_channels:
             for sub_id in self._channel_subs.get(channel, ()):
@@ -767,14 +774,12 @@ class SubscriptionBroker:
                 channels, row_ids = by_table.setdefault(row_sub.table_ref, ([], []))
                 channels.append(channel)
                 row_ids.append(row_sub.row_id)
-                break  # 同一频道只需读一次，其他订阅共用缓存
+                break  # 同一频道只需读一次，其他订阅共用预读结果
         if not by_table:
-            return
+            return prefetched
         servant = self._backend.servant
         for table_ref, (channels, row_ids) in by_table.items():
-            rows = cast(
-                list[dict[str, Any] | None],
-                await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
-            )
+            rows = await self._reader.get_many(table_ref, row_ids, servant)
             for channel, row in zip(channels, rows):
-                RowSubscription.prefill_cache_(channel, row)
+                prefetched[channel] = row
+        return prefetched

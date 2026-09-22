@@ -4,7 +4,6 @@
 """
 
 import asyncio
-from contextvars import ContextVar
 from typing import cast
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -51,7 +50,6 @@ async def _get_updates(broker: SubscriptionBroker):
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     ctx = _admin_ctx()
     broker_a = SubscriptionBroker(backend)
     broker_b = SubscriptionBroker(backend)
@@ -145,7 +143,6 @@ async def test_watch_channel_callback_bypasses_client_queue(
     """broker.watch_channel：服务端内部关注的频道收到通知只回调，不进客户端推送队列；
     回调异常不影响后续通知；连接关闭随 mq_client 一起退订"""
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     servant = backend.servant
     ref = filled_item_ref
     row = await servant.get(ref, (await servant.range(ref, "time", 110, limit=1))[0].id)
@@ -188,7 +185,6 @@ async def test_watch_and_client_subscription_share_channel(
     """服务端关注（watch_channel）和客户端订阅落在同一频道：通知既回调也推给客户端；
     客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     ctx = _admin_ctx()
     broker = SubscriptionBroker(backend)
     hub = _hub(backend)
@@ -244,7 +240,6 @@ async def test_row_cache_activation(
     两个 broker 退一个仍激活，最后一个退订才失活清行"""
     import copy
 
-    from hetu.data.backend.rowcache import UNKNOWN
     from hetu.data.sub import IndexSubscription, TableSubscription
 
     backend: Backend = mod_auto_backend()
@@ -259,7 +254,9 @@ async def test_row_cache_activation(
     channel = cast(RowSubscription, broker_a._subs[sub_a]).channel
     assert cache.is_active(channel)
     assert cache.lease(channel) is not None
-    assert cache.floor(channel) is UNKNOWN
+    # subscribe_get 先订后读：首次权威读已把行填进缓存，floor 就是它的版本
+    assert isinstance(cache.floor(channel), int)
+    assert cache.get(channel) is not None
 
     sub_r, _ = await broker_a.subscribe_range(
         filled_item_ref, ctx, "owner", 10, limit=5
@@ -273,10 +270,10 @@ async def test_row_cache_activation(
     tbl_sub = cast(TableSubscription, broker_a._subs[sub_t])
     assert not cache.is_active(tbl_sub.table_channel)
 
-    # 填充后别的进程（另一个 Backend）改行：通知逐出缓存行，floor 抬到新版本
+    # 别的进程（另一个 Backend）改行：通知逐出缓存行，floor 抬到新版本
     row_id = int(row["id"])
-    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
-    assert rec is not None and cache.get(channel) is not None
+    rec = cache.get(channel)
+    assert rec is not None
     old_version = int(rec["_version"])
     other = Backend(copy.deepcopy(mod_backend_config))
     other.post_configure(components=[filled_item_ref.comp_cls])
@@ -326,8 +323,7 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
     hub = _hub(backend)
 
     # 直接调 hub 的钩子（模拟节点失效 / 恢复）
-    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
-    assert rec is not None and cache.get(channel) is not None
+    assert cache.get(channel) is not None  # subscribe_get 已填充
     hub._on_reset()
     assert not cache.is_active(channel) and cache.get(channel) is None
     hub._on_restored()
