@@ -39,17 +39,17 @@ class BaseSubscription:
         """
         raise NotImplementedError
 
+    @property
+    def channels(self) -> set[str]:
+        """返回当前订阅关注的频道们"""
+        raise NotImplementedError
+
 
 def _row_to_dict(comp_cls, row: np.record) -> dict[str, Any]:
     """推给客户端的行：record 转 dict 并去掉内部的 _version"""
     data = comp_cls.struct_to_dict(row)
     data.pop("_version", None)
     return data
-
-    @property
-    def channels(self) -> set[str]:
-        """返回当前订阅关注的频道们"""
-        raise NotImplementedError
 
 
 class RowSubscription(BaseSubscription):
