@@ -79,6 +79,12 @@ backends:
   所有写入方（worker、headless 进程）必须一起升级。
 - 每个登录连接还订阅 `Connection` 表 `owner == 本用户` 的索引值频道，被顶号时服务器据此主动断开它，RPC 路径上
   不再每次读库；通知丢失时由 `CONNECTION_ALIVE_RECHECK_INTERVAL`（默认 5 秒）兜底重查。
+- **worker 行缓存**（`row_cache`，默认开）：本工作进程有客户端订阅着的行常驻进程内存，事务读命中不打库、
+  commit 写穿、订阅推送也从缓存取行。缓存靠带版本号的行通知维持版本下限，副本读回的行版本低于下限即判滞后，
+  改走**权威读**——在主节点上执行的 Lua `HGETALL`（`EVALSHA`）。用读写分离代理时，代理必须把
+  `EVAL` / `EVALSHA` 送到主节点（做读写分离的代理都如此，脚本可能写）；普通 `HGETALL` 会被送到副本，不能当权威读。
+  pubsub 连接断开重连期间通知会丢，缓存随之清空、重新订阅后再逐行回填。`row_cache_max_rows` 限制常驻行数
+  （LRU，只丢行不丢订阅状态）；`row_cache: false` 可整体关掉，行为与旧版一致。
 
 **Redis 连接预算**
 

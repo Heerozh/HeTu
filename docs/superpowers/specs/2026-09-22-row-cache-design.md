@@ -1,7 +1,7 @@
 # 订阅驱动的 worker 行缓存（RowCache）— 设计稿
 
 - 日期：2026-09-22
-- 状态：实施中（第 3 版：行通知改为带版本号的 PUBLISH，以版本下限 + 权威读取代副本亲和；
+- 状态：已实施（第 3 版：行通知改为带版本号的 PUBLISH，以版本下限 + 权威读取代副本亲和；
   订阅推送与事务共用同一读路径，`RowSubscription` 的 per-tick 缓存并入进程缓存）
 - 取代：`hetu/data/backend/redis/batch.py` 里被否决的两个想法（短 TTL 缓存、跨请求合批），
   该文件与 `tests/test_backend_redis_batch.py` 随本 spec 删除，结论留档在新模块 docstring。

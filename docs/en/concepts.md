@@ -191,7 +191,10 @@ Clients ask the server for live row data with three operations:
 Behind the scenes the `SubscriptionBroker` watches Redis pub/sub for row
 changes, filters them by the client's permission level, and pushes deltas
 back over the websocket. Latency is dominated by Redis round-trip — typically
-under one millisecond on the same VPC.
+under one millisecond on the same VPC. Subscribed rows also live in the worker's
+row cache: changes committed by this process are written through and pushed
+directly, a row changed by another process is read once per worker, and
+transaction reads that hit the cache skip the database round-trip entirely.
 
 Subscriptions are checked against the same permission system as `Systems`, so a
 client cannot subscribe to data it isn't allowed to see.

@@ -124,6 +124,19 @@ subscription. No schema migrations, no API gateway, no message broker.
       `ctx.session_commit()` to commit early; on conflict it raises, so any
       code below it will not execute.
     - Use `ctx.race_count` to tell which retry attempt the current run is.
+* Freshness of transaction reads
+    - Rows that clients of this worker process subscribe to stay in process memory
+      (the worker row cache): transaction reads that hit it never touch the database,
+      commit writes the new row straight through, and subscription pushes take rows
+      from the same copy — what a client sees and what a server transaction reads are
+      always the same row.
+    - A cached row is never older than the latest change notification this process
+      handled for it (commits publish notifications carrying the row's version), so a
+      read-only `System` may see a value whose notification has not arrived yet — a
+      millisecond window, as fresh as the client's own subscription push. Writing
+      `System`s are unaffected: the version check at commit turns a stale read into a
+      conflict and retries. Use `only_master` when you need a strongly consistent read
+      (the headless client does so by default).
 * How to reduce transaction conflicts
     - The slower a `System` runs, the higher its conflict probability. If you
       need heavy computation inside a `System`, consider using `Endpoint` for more

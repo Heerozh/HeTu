@@ -95,6 +95,19 @@ population while staying consistent.
   **Upgrade note**: older versions notified row changes via keyspace events, so
   a new worker cannot see row updates written by an old one — upgrade every
   writer (workers and headless processes) together.
+- **Worker row cache** (`row_cache`, on by default): rows that clients of this
+  worker process subscribe to stay in process memory — transaction reads that hit
+  it never touch the database, commits write through, and subscription pushes take
+  rows from the same copy. The cache keeps a version floor per row from the
+  versioned row notifications; a replica read below the floor is detected as lag
+  and replaced by an **authoritative read** — a Lua `HGETALL` executed on the
+  master (`EVALSHA`). With a read/write-splitting proxy the proxy must route
+  `EVAL` / `EVALSHA` to the master (every such proxy does, since scripts may
+  write); a plain `HGETALL` would be sent to a replica and cannot serve as the
+  authoritative read. Notifications are lost while a pubsub connection reconnects,
+  so the cache is cleared then and refilled row by row after resubscribing.
+  `row_cache_max_rows` caps the resident rows (LRU; only rows are dropped, never
+  subscription state); `row_cache: false` turns it off, restoring the old behavior.
 - Every logged-in connection also subscribes to the `Connection` table's
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every

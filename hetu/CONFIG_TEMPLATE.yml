@@ -167,6 +167,15 @@ BACKENDS:
     # raw_clustering 模式下 redis-py 的每节点池只能设上限、满了直接报错，请酌情调大。
     max_connections: 64
     pool_timeout: 5
+    # worker 行缓存（Redis 后端）：本进程有客户端订阅着的行常驻进程内存，事务读命中 0 往返、
+    # commit 写穿后同一连接反复读写同一行只剩 commit 那 1 次往返、订阅推送也从缓存取行。
+    # 一致性靠 commit 发出的带版本号行通知 + 版本下限 + master 上的权威读，写事务另有乐观锁兜底；
+    # 只读事务可能读到"通知尚未到达"的旧值（毫秒级，与客户端订阅推送同等新鲜）。
+    # 易失（volatile）组件的行不缓存。关掉后行为与旧版一致（行通知照发）。
+    row_cache: true
+    # 缓存行数上限（LRU，只丢行不丢订阅状态）。上限 = 各连接订阅行数之和，每行约 0.3~0.5 KB，
+    # 默认 20 万行 ≈ 60~100 MB / 工作进程
+    row_cache_max_rows: 200000
 
 # 配置日志，格式https://docs.python.org/3/library/logging.config.html
 LOGGING:

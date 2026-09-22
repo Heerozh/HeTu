@@ -132,7 +132,7 @@ get(
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:186`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L186)</small>
+<small>Source: [`hetu/data/backend/repo.py:184`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L184)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
@@ -184,7 +184,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:270`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L270)</small>
+<small>Source: [`hetu/data/backend/repo.py:268`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L268)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -241,7 +241,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:402`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L402)</small>
+<small>Source: [`hetu/data/backend/repo.py:396`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L396)</small>
 
 向Session中添加一行待插入数据。
 
@@ -270,7 +270,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:441`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L441)</small>
+<small>Source: [`hetu/data/backend/repo.py:435`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L435)</small>
 
 向Session中添加一行待更新数据。
 
@@ -299,7 +299,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:477`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L477)</small>
+<small>Source: [`hetu/data/backend/repo.py:471`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L471)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -334,7 +334,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:506`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L506)</small>
+<small>Source: [`hetu/data/backend/repo.py:500`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L500)</small>
 
 向Session中添加一行待删除数据。
 
@@ -641,7 +641,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:318`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L318)</small>
+<small>Source: [`hetu/data/backend/base.py:326`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L326)</small>
 
 从数据库直接获取单行数据。
 
@@ -686,7 +686,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:428`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L428)</small>
+<small>Source: [`hetu/data/backend/base.py:453`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L453)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -748,7 +748,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:500`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L500)</small>
+<small>Source: [`hetu/data/backend/base.py:525`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L525)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
@@ -756,7 +756,10 @@ UNSAFE! 只用于易失数据! 不会做类型检查!
 仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
 注意此方法可能导致写入数据到已删除的行，请确保逻辑。
 
-一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性：
+它不动 `_version`，别的事务的版本检查感知不到它（不会因它 RaceCondition），
+同一字段与事务写入是后写覆盖；**不发变更通知**，订阅者看不到它的改动，
+易失组件的行也不进 worker 行缓存。
 
 
 

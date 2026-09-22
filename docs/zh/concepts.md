@@ -138,7 +138,7 @@ async def whoami(ctx: hetu.EndpointContext):
 - **`range(Component, index, low, high, limit)`** — 索引上的排序切片，每次更改都会刷新。
 - **`table(Component)`** — 整张表，一次拿到你有权限看到的全部行，之后按行收增量。
 
-在后台，`SubscriptionBroker` 监视 Redis 的发布/订阅以获取行更改，根据客户端的权限级别过滤它们，并通过 WebSocket 推送增量。延迟主要由 Redis 往返时间决定——在同一 VPC 上通常低于一毫秒。
+在后台，`SubscriptionBroker` 监视 Redis 的发布/订阅以获取行更改，根据客户端的权限级别过滤它们，并通过 WebSocket 推送增量。延迟主要由 Redis 往返时间决定——在同一 VPC 上通常低于一毫秒。被订阅的行同时常驻该工作进程的行缓存：本进程提交的改动直接写穿并推送，别的进程改的行每个工作进程只读一次，事务读命中缓存也不再往返数据库。
 
 订阅受与 `系统` 相同的权限系统检查，因此客户端无法订阅其无权查看的数据。
 
