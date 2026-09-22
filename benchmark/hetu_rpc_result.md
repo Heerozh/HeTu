@@ -3,12 +3,13 @@
 ## 运行命令
 
 ```
-uv run ya ya_hetu_rpc.py -n 1200 -t 1.1
+uv run ya ya_hetu_rpc.py -n 1200 -t 0.5
+# 时间太长可能内存不足
 ```
 
-Found 4 benchmark(s): benchmark_get, benchmark_get2_update2, benchmark_get_then_update,
+Found 4 benchmark (s): benchmark_get, benchmark_get2_update2, benchmark_get_then_update,
 benchmark_hello_world
-Running with 64 workers, 3 tasks per worker, for 1.1 minute(s)
+Running with 64 workers, 3 tasks per worker, for 1.1 minute (s)
 
 Running benchmark: benchmark_ge
 Using multiprocessing with 64 workers
@@ -45,7 +46,7 @@ Return Value Distribution Statistics:
 | 5 | benchmark_get_then_update | 0            |  996974 |      99.55 |
 | 6 | benchmark_get_then_update | 1            |    4493 |       0.45 |
 | 7 | benchmark_get_then_update | 2            |      21 |          0 |
-| 8 | benchmark_hello_world     | 世界收到         | 8448389 |        100 |
+| 8 | benchmark_hello_world     | 世界收到     | 8448389 |        100 |
 
 ================================================================================
 
@@ -82,7 +83,7 @@ Return Value Distribution Statistics:
 | 6 | benchmark_get_then_update | 1            |    12057 |       1.23 |
 | 7 | benchmark_get_then_update | 2            |      143 |       0.01 |
 | 8 | benchmark_get_then_update | 3            |        1 |          0 |
-| 9 | benchmark_hello_world     | 世界收到         | 36835753 |        100 |
+| 9 | benchmark_hello_world     | 世界收到     | 36835753 |        100 |
 
 ## debian13 ecs.c9ae.16xlarge 64核 + 阿里云Arm倚天Redis: redis.shard.small.2.ce 7.0.2.6 云原生 双节点高可用 默认设置
 
@@ -117,12 +118,12 @@ Return Value Distribution Statistics:
 | 6 | benchmark_get_then_update | 1            |     5616 |       1.14 |
 | 7 | benchmark_get_then_update | 2            |       92 |       0.02 |
 | 8 | benchmark_get_then_update | 3            |        2 |          0 |
-| 9 | benchmark_hello_world     | 世界收到         | 35780956 |        100 |
+| 9 | benchmark_hello_world     | 世界收到     | 35780956 |        100 |
 
 ## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis: redis.shard.small.2.ce 7.0.2.6 云原生 单节点 默认设置
 
-|                           | 手动记录CPU                 |
-|:--------------------------|:------------------------|
+|                           | 手动记录CPU               |
+|:--------------------------|:--------------------------|
 | benchmark_get             | 河图CPU 40% Redis CPU 95% |
 | benchmark_get2_update2    | 河图CPU 32% Redis CPU 98% |
 | benchmark_get_then_update | 河图CPU 42% Redis CPU 98% |
@@ -159,7 +160,7 @@ Return Value Distribution Statistics:
 | 6 | benchmark_get_then_update | 1            |    31126 |       1.32 |
 | 7 | benchmark_get_then_update | 2            |      365 |       0.02 |
 | 8 | benchmark_get_then_update | 3            |        8 |          0 |
-| 9 | benchmark_hello_world     | 世界收到         | 79135563 |        100 |
+| 9 | benchmark_hello_world     | 世界收到     | 79135563 |        100 |
 
 测试TTL `-n 1 -p 1`:
 
@@ -188,18 +189,18 @@ Return Value Distribution Statistics:
 | 0 | benchmark_get             | 0            |  375917 |        100 |
 | 1 | benchmark_get2_update2    | 0            |   54337 |        100 |
 | 2 | benchmark_get_then_update | 0            |   98766 |        100 |
-| 3 | benchmark_hello_world     | 世界收到         | 1974514 |        100 |
+| 3 | benchmark_hello_world     | 世界收到     | 1974514 |        100 |
 
 ================================================================================
 
 ## debian13 ecs.c9ae.16xlarge 64核 + 阿里云最低配Redis读写分离: redis.shard.with.proxy.small.ce 7.0.2.6 云原生 4节点 读写分离代理 默认设置
 
-|                           | 手动记录CPU                               |
-|:--------------------------|:--------------------------------------|
+|                           | 手动记录CPU                                    |
+|:--------------------------|:-----------------------------------------------|
 | benchmark_get             | 河图CPU 98% Redis主节点CPU 41% 只读节点CPU 48% |
 | benchmark_get2_update2    | 河图CPU 78% Redis主节点CPU 90% 只读节点CPU 60% |
 | benchmark_get_then_update | 河图CPU 88% Redis主节点CPU 97% 只读节点CPU 52% |
-| benchmark_hello_world     | 河图CPU 98% Redis主节点CPU 0%              |
+| benchmark_hello_world     | 河图CPU 98% Redis主节点CPU 0%                  |
 
 Average CPS (Calls Per Second) per Function:
 
@@ -233,9 +234,9 @@ Return Value Distribution Statistics:
 |  7 | benchmark_get_then_update | 1            |    41842 |       1.54 |
 |  8 | benchmark_get_then_update | 2            |      659 |       0.02 |
 |  9 | benchmark_get_then_update | 3            |       10 |          0 |
-| 10 | benchmark_hello_world     | 世界收到         | 36007652 |        100 |
+| 10 | benchmark_hello_world     | 世界收到     | 36007652 |        100 |
 
-## debian13 ecs.c8a.16xlarge 64核 + 阿里云Tair读写分离：tair.rdb.with.proxy.1g Tair 内存型 7.0(25.11.0.0) 云原生 4节点 读写分离代理 默认设置
+## debian13 ecs.c8a.16xlarge 64核 + 阿里云Tair读写分离：tair.rdb.with.proxy.1g Tair 内存型 7.0 (25.11.0.0) 云原生 4节点 读写分离代理 默认设置
 
 感觉不如原版？单机版Tair表现似乎更好。
 
@@ -271,5 +272,5 @@ Return Value Distribution Statistics:
 |  7 | benchmark_get_then_update | 2            |      589 |       0.03 |
 |  8 | benchmark_get_then_update | 3            |       13 |          0 |
 |  9 | benchmark_get_then_update | 4            |        1 |          0 |
-| 10 | benchmark_hello_world     | 世界收到         | 35728092 |        100 |
+| 10 | benchmark_hello_world     | 世界收到     | 35728092 |        100 |
 

@@ -248,31 +248,18 @@ docker run -it --rm -p 2466:2466 --name server_name app_image_name
 
 首先是安装 Python 高版本：
 
-国内用户：建议通过清华 miniconda 源安装。
-
-国际用户：uv
+国内用户：建议通过清华 uv 源安装。
 
 ```bash
-# 通过miniconda安装python 3.14
-mkdir -p ~/miniconda3
-wget https://mirrors.tuna.tsinghua.edu.cn/anaconda/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda3/miniconda.sh
-bash ~/miniconda3/miniconda.sh -b -u -p ~/miniconda3
-rm -rf ~/miniconda3/miniconda.sh
-~/miniconda3/bin/conda init bash
-exec bash
-
-
-# 然后创建新的Python环境：
-conda create -n hetu python=3.14
+# 设置清华源
+echo 'export UV_INDEX_URL=https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple' >> ~/.bashrc
+source ~/.bashrc
 
 # 进入项目目录
 cd your_app_directory
-# 每次执行python指令前都要执行此命令激活环境
-conda activate hetu
-# 根据项目pyproject.toml安装依赖，河图应该在其中
-pip install .
+
 # 启动河图，用 `python -O` 方式在生产环境启动，以去掉assert提升性能
-python -O -m hetu start --config=./config.yml
+uv run python -O -m hetu start --config=./config.yml
 ```
 
 ### Redis 部署
