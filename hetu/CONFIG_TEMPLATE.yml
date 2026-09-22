@@ -152,7 +152,11 @@ BACKENDS:
     # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库事务读负载
     # 只在填写了servants时有效，每台servant的读权重固定为1，
     master_weight: 1.0
-    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
+    # 指出Redis后端是原生集群模式。
+    # 不建议使用原生集群，一是表级订阅时Publish会全集群通知(为了兼容性尽量没使用SPublish)，
+    # 二是redis-py的pubsub对集群支持不佳，因此我们自己实现了一套PubSub，自己切换node。
+    # 推荐使用自切片redis proxy代理层来实现集群，自切片指的是redis不运行在cluster模式，
+    # 由代理自己根据keyslot来送达命令，包括SUBSCRIBE/Publish到对应切片。
     # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
     # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。
