@@ -52,6 +52,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
     # range/get_many 批量读行时，每个pipeline最多打包的HGETALL条数
     RANGE_PIPELINE_CHUNK = 1000
+    SUPPORTS_ROW_CACHE = True
 
     @staticmethod
     def _get_referred_components() -> list[type[BaseComponent]]:
@@ -139,6 +140,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
         """获取redis表行的key名"""
         return f"{cls.cluster_prefix(table_ref)}:id:{str(row_id)}"
+
+    @staticmethod
+    def is_row_channel(channel: str) -> bool:
+        """是不是行频道（行 key 形如 `...:id:<row_id>`；keyspace 前缀的是索引频道）"""
+        if channel.startswith("__keyspace@"):
+            return False
+        _, sep, tail = channel.rpartition(":id:")
+        return bool(sep) and tail.isdigit()
 
     @classmethod
     def index_key(cls, table_ref: TableReference, index_name: str) -> str:
@@ -1087,5 +1096,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         from .mq import PubSubHub, RedisMQClient
 
         if self._hub is None:
-            self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
+            # aio 会断言事件循环一致
+            self._hub = PubSubHub(self.aio, self.row_cache)
         return RedisMQClient(self._hub)

@@ -17,6 +17,7 @@ from .base import (
     UniqueViolation,
 )
 from .repo import SessionRepository
+from .rowcache import CachedRowReader, RowCache
 from .session import Session
 from .table import Table, TableReference
 
@@ -31,6 +32,8 @@ __all__ = [
     "Table",
     "TableReference",
     "MQClient",
+    "RowCache",
+    "CachedRowReader",
 ]
 
 
@@ -57,7 +60,15 @@ class Backend:
         extra_config = {
             k: v
             for k, v in config.items()
-            if k not in {"type", "master", "servants", "master_weight"}
+            if k
+            not in {
+                "type",
+                "master",
+                "servants",
+                "master_weight",
+                "row_cache",
+                "row_cache_max_rows",
+            }
         }
 
         # 如果未填写servants，则将master也作为servant使用(为了api统一)
@@ -80,6 +91,15 @@ class Backend:
         self._master_weight = config.get("master_weight", 1.0)
         self._all_clients = self._servants + [self._master]
         self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
+
+        # worker 行缓存：只缓存本进程有订阅的行，默认开启；后端不支持（SQL）时为 None
+        self.row_cache: RowCache | None = None
+        if config.get("row_cache", True) and self._master.SUPPORTS_ROW_CACHE:
+            self.row_cache = RowCache(config.get("row_cache_max_rows", 200_000))
+        for client in self._all_clients:
+            client.row_cache = self.row_cache
+        # 事务与订阅共用的读路径（缓存为 None 时全部退化为直接读）
+        self.row_reader = CachedRowReader(self)
 
     async def close(self):
         await self._master.close()

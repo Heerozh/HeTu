@@ -52,6 +52,7 @@ from ...i18n import _
 if TYPE_CHECKING:
     from ..component import BaseComponent
     from .idmap import IdentityMap
+    from .rowcache import RowCache
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -186,6 +187,10 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
+    # 后端是否参与 worker 行缓存（`hetu.data.backend.rowcache`）：需要 commit 发带版本号的
+    # 行通知、通知接收器把它交给缓存、以及 `get_authoritative` 真的到主节点
+    SUPPORTS_ROW_CACHE: ClassVar[bool] = False
+
     def index_channel(self, table_ref: TableReference, index_name: str):
         """
         返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
@@ -258,6 +263,8 @@ class BackendClient:
         """
         self.endpoint = endpoint
         self.is_servant = is_servant
+        # 本进程的行缓存，由 Backend 在建好客户端后挂上；None 表示不缓存
+        self.row_cache: RowCache | None = None
 
     async def close(self):
         """关闭数据库连接，释放资源。"""

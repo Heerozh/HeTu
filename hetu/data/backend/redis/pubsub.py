@@ -42,6 +42,8 @@ class AsyncKeyspacePubSub:
         self,
         client: Redis | RedisCluster,
         on_message: Callable[[dict], None] | None = None,
+        on_reset: Callable[[], None] | None = None,
+        on_restored: Callable[[], None] | None = None,
     ):
         """
         Parameters
@@ -52,10 +54,17 @@ class AsyncKeyspacePubSub:
         on_message
             收到频道消息时在监听协程里直接同步调用的回调（每条消息一次，不能 await）。
             不传则消息进 `message_queue`，由 `get_message()` 取。
+        on_reset
+            某个节点的连接断了、即将重新订阅全部频道时调用：断到恢复之间的消息已经丢了，
+            依赖通知的状态（如行缓存）要在这里作废。
+        on_restored
+            `resubscribe_all` 成功、所有频道重新订阅生效后调用。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
         self.on_message = on_message
+        self.on_reset = on_reset
+        self.on_restored = on_restored
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
@@ -364,6 +373,7 @@ class AsyncKeyspacePubSub:
             try:
                 await self.subscribe(*current_subscriptions)
                 logger.info(f"Resubscribed {len(current_subscriptions)} channels")
+                self._callback(self.on_restored)
                 return
             except asyncio.CancelledError:
                 raise
@@ -440,7 +450,18 @@ class AsyncKeyspacePubSub:
             self._fail_pending(self._pending_unsubscribe, exc)
             # 灾难恢复逻辑（已有一个在退避重试中就不再起）。如果不保存task，task不会执行会被gc
             if self._resubscribe_task is None or self._resubscribe_task.done():
+                self._callback(self.on_reset)
                 self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
+
+    @staticmethod
+    def _callback(cb: Callable[[], None] | None) -> None:
+        """调用 on_reset / on_restored；回调抛异常只记日志，不能拖死恢复流程"""
+        if cb is None:
+            return
+        try:
+            cb()
+        except Exception:
+            logger.exception("pubsub reset/restored callback failed")
 
     @staticmethod
     async def _dispose_node(res: dict):

@@ -8,7 +8,7 @@
 import asyncio
 import logging
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, final
+from typing import TYPE_CHECKING, final, override
 
 import msgpack
 
@@ -19,6 +19,8 @@ from .pubsub import AsyncKeyspacePubSub
 if TYPE_CHECKING:
     from redis.asyncio import Redis
     from redis.asyncio.cluster import RedisCluster
+
+    from ..rowcache import RowCache
 
 logger = logging.getLogger("HeTu.root")
 
@@ -36,9 +38,17 @@ class PubSubHub(MQHub):
     最后一个走了才 UNSUBSCRIBE。
     """
 
-    def __init__(self, client: Redis | RedisCluster):
+    def __init__(self, client: Redis | RedisCluster, row_cache: RowCache | None = None):
         super().__init__()
-        self._pubsub = AsyncKeyspacePubSub(client, on_message=self._on_message)
+        self._pubsub = AsyncKeyspacePubSub(
+            client,
+            on_message=self._on_message,
+            on_reset=self._on_reset,
+            on_restored=self._on_restored,
+        )
+        # 本进程的行缓存（None 表示不缓存）与本 hub 已在缓存里激活的行频道
+        self._row_cache = row_cache
+        self._active: set[str] = set()
 
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
         """
@@ -75,6 +85,8 @@ class PubSubHub(MQHub):
             if fresh:
                 await pubsub.subscribe(*fresh)
             await pubsub.wait_acks(acks)
+            # 订阅已生效：从现在起这些行的每次变更都会通知到本进程，缓存可以收留它们
+            self._activate(registered)
         except asyncio.CancelledError:
             # 本调用方自己被取消（连接在拆）：SUBSCRIBE 由 pubsub 层保证照常发出，
             # 这里只撤自己的登记；撤完没人要的频道后台退订，取消流程不能停下来等 ack
@@ -113,9 +125,63 @@ class PubSubHub(MQHub):
         if gone and not self._closed:
             await self._unsubscribe(gone)
 
+    # ------------------------------------------------------------ 行缓存钩子
+
+    def _activate(self, channels: Iterable[str]) -> None:
+        """这些频道的订阅已 ack：其中的行频道在缓存里激活（仍在 _subs 里的才算）"""
+        cache = self._row_cache
+        if cache is None:
+            return
+        from .client import RedisBackendClient  # client 懒加载本模块，避免循环 import
+
+        for channel in channels:
+            if (
+                channel in self._subs
+                and channel not in self._active
+                and RedisBackendClient.is_row_channel(channel)
+            ):
+                self._active.add(channel)
+                cache.activate(channel, self)
+
+    def _deactivate_all(self) -> None:
+        cache = self._row_cache
+        if cache is not None:
+            for channel in self._active:
+                cache.deactivate(channel, self)
+        self._active.clear()
+
+    @override
+    def _on_channel_gone(self, channel: str) -> None:
+        # 在 _release 里同步调用，先于 UNSUBSCRIBE 发出：退订 ack 前的读不能再填充
+        if channel in self._active:
+            self._active.discard(channel)
+            if self._row_cache is not None:
+                self._row_cache.deactivate(channel, self)
+
+    def _on_reset(self) -> None:
+        """pubsub 节点断了：断到恢复之间的通知已丢，本 hub 激活的行全部失活（缓存随之清掉）"""
+        self._deactivate_all()
+
+    def _on_restored(self) -> None:
+        """全部频道重新订阅生效：把仍有人订的行频道重新激活（floor 回到未知，下次走权威读）"""
+        self._activate(list(self._subs))
+
     def _on_message(self, msg: dict) -> None:
         """AsyncKeyspacePubSub 的监听协程收到消息时同步调用，每条消息一次"""
         channel_name = msg["channel"].decode()
+        # 非 keyspace 频道带 payload：表级 / 索引值频道是 msgpack 的 row_id 列表，
+        # 行频道是 msgpack 的整数——该行提交后的新 _version（0 表示删除），只给行缓存用
+        ids = None
+        if not channel_name.startswith("__keyspace@"):
+            try:
+                payload = msgpack.unpackb(msg["data"])
+            except Exception:  # noqa: BLE001 非法payload当作无payload
+                payload = None
+            if isinstance(payload, list):
+                ids = payload
+            elif isinstance(payload, int) and self._row_cache is not None:
+                # 先于 _subs 判断：刚退订的频道 notify 也无害（缓存里已没有它）
+                self._row_cache.notify(channel_name, payload)
         subs = self._subs.get(channel_name)
         if not subs:
             return  # 刚退订、ack 还没回来的频道
@@ -125,15 +191,6 @@ class PubSubHub(MQHub):
                     channel_name=channel_name
                 )
             )
-        # 表级频道（非keyspace通知）带payload：msgpack的row_id列表
-        ids = None
-        if not channel_name.startswith("__keyspace@"):
-            try:
-                ids = msgpack.unpackb(msg["data"])
-            except Exception:  # noqa: BLE001 非法payload当作无payload
-                ids = None
-            if not isinstance(ids, list):
-                ids = None
         dropped = self._dispatch(channel_name, ids)
         if dropped:
             logger.warning(
@@ -145,6 +202,7 @@ class PubSubHub(MQHub):
 
     async def close(self) -> None:
         self._closed = True
+        self._deactivate_all()
         self._subs.clear()
         # 后台退订等的 ack 不会再来了，别让它们在 pubsub 关闭时各报一条失败
         await self._cancel_tasks()

@@ -228,3 +228,106 @@ async def test_watch_and_client_subscription_share_channel(
 
     await broker.close()
     assert hub.subscriber_count(channel) == 0
+
+
+async def _wait_until(pred, timeout: float = 3.0):
+    async with asyncio.timeout(timeout):
+        while not pred():
+            await asyncio.sleep(0.01)
+
+
+async def test_row_cache_activation(filled_item_ref, mod_auto_backend):
+    """行频道在 SUBSCRIBE ack 后于 RowCache 激活（floor 未知），索引 / 值 / 表级频道不激活；
+    通知带版本：逐出缓存行并抬 floor；两个 broker 退一个仍激活，最后一个退订才失活清行"""
+    from hetu.data.backend.rowcache import UNKNOWN
+    from hetu.data.sub import IndexSubscription, TableSubscription
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    ctx = _admin_ctx()
+    broker_a = SubscriptionBroker(backend)
+    sub_a, row = await broker_a.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
+    assert sub_a and row
+    if cache is None:  # SQL 后端不参与行缓存
+        await broker_a.close()
+        return
+    channel = cast(RowSubscription, broker_a._subs[sub_a]).channel
+    assert cache.is_active(channel)
+    assert cache.lease(channel) is not None
+    assert cache.floor(channel) is UNKNOWN
+
+    sub_r, _ = await broker_a.subscribe_range(
+        filled_item_ref, ctx, "owner", 10, limit=5
+    )
+    assert sub_r
+    idx_sub = cast(IndexSubscription, broker_a._subs[sub_r])
+    assert not cache.is_active(idx_sub.index_channel)
+    assert all(cache.is_active(ch) for ch in idx_sub.row_subs)  # 范围内的行也激活
+    sub_t, _ = await broker_a.subscribe_table(filled_item_ref, ctx)
+    assert sub_t
+    tbl_sub = cast(TableSubscription, broker_a._subs[sub_t])
+    assert not cache.is_active(tbl_sub.table_channel)
+
+    # 填充后别的 session 改行：通知逐出缓存行，floor 抬到新版本
+    row_id = int(row["id"])
+    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
+    assert rec is not None and cache.get(channel) is not None
+    old_version = int(rec["_version"])
+    await _update_qty(backend, filled_item_ref, 995)
+    await _wait_until(lambda: cache.get(channel) is None)
+    assert cache.floor(channel) == old_version + 1
+    await _get_updates(broker_a)  # 消费掉通知
+
+    # 两个 broker 订同一行：退一个仍激活；最后一个退订才失活并清行
+    broker_b = SubscriptionBroker(backend)
+    sub_b, _ = await broker_b.subscribe_get(filled_item_ref, ctx, "id", row_id)
+    assert sub_b
+    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
+    assert rec is not None and cache.get(channel) is not None
+    await broker_a.close()
+    assert cache.is_active(channel) and cache.get(channel) is not None
+    await broker_b.close()
+    assert not cache.is_active(channel) and cache.get(channel) is None
+
+
+async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
+    """pubsub 节点失效：hub 把自己激活的频道全部失活（缓存清空）；恢复订阅后重新激活、
+    floor 回到未知；之后通知仍能到达"""
+    from hetu.data.backend.rowcache import UNKNOWN
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    ctx = _admin_ctx()
+    broker = SubscriptionBroker(backend)
+    sub, row = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
+    assert sub and row
+    channel = cast(RowSubscription, broker._subs[sub]).channel
+    row_id = int(row["id"])
+    hub = _hub(backend)
+
+    # 直接调 hub 的钩子（模拟节点失效 / 恢复）
+    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
+    assert rec is not None and cache.get(channel) is not None
+    hub._on_reset()
+    assert not cache.is_active(channel) and cache.get(channel) is None
+    hub._on_restored()
+    assert cache.is_active(channel) and cache.floor(channel) is UNKNOWN
+
+    # 真实断连：关掉节点 pubsub 连接让监听协程异常 → on_reset → resubscribe_all → on_restored
+    pubsub = hub._pubsub
+    rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
+    assert rec is not None and cache.get(channel) is not None
+    for res in list(pubsub.node_resources.values()):
+        await res["pubsub"].connection.disconnect()
+    await _wait_until(lambda: cache.get(channel) is None, timeout=5)
+    await _wait_until(
+        lambda: cache.is_active(channel) and channel in pubsub.subscribed, timeout=10
+    )
+    assert cache.floor(channel) is UNKNOWN
+    # 恢复后的通知照常到达
+    await _update_qty(backend, filled_item_ref, 994)
+    updates = await _get_updates(broker)
+    assert updates[sub][row_id]["qty"] == 994
+    await broker.close()
