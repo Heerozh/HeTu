@@ -30,8 +30,6 @@ from ..base import (
     to_sortable_bytes,
 )
 
-# from .batch import RedisBatchedClient
-
 if TYPE_CHECKING:
     import redis.asyncio
     import redis.asyncio.cluster
@@ -256,9 +254,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 )
                 self._async_ios.append(redis.asyncio.Redis.from_pool(pool))
 
-        # 取消，只在单机模式下有所增长
-        # self._batched_aio = RedisBatchedClient(self._async_ios)
-
         # 测试连接是否正常
         for i, io in enumerate(self._ios):
             try:
@@ -393,11 +388,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if not self._ios:
             return
 
-        # print("Batch量:次数 统计：")
-        # print(sorted(self._batched_aio._log.items()))
-        # ya_backend_upsert结果：
-        # [(1, 844), (2, 781), (3, 796), (4, 720), (5, 616), (6, 468), (7, 291), (8, 185), (9, 1)]
-
         for io in self._ios:
             io.close()
         self._ios = []
@@ -514,7 +504,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
         key = self.row_key(table_ref, row_id)
-        aio = self.aio  # self._batched_aio
+        aio = self.aio
         if row := await aio.hgetall(key):  # type: ignore
             return self.row_decode_(table_ref.comp_cls, row, row_format)
         else:
@@ -524,7 +514,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         """
         按块pipeline批量HGETALL，返回与row_ids顺序一致的raw dict列表，不存在的为空dict。
 
-        注意这与 batch.py 里被否决的跨请求自动合批不同：这里只是把**同一个逻辑操作**内部
+        注意这不是跨请求的自动合批（已否决）：只是把**同一个逻辑操作**内部
         的N次读取合并成 ceil(N/CHUNK) 次往返，不会让不相关的请求互相等待。
         同一张表的所有行key都带同一个 {CLU} hash tag，cluster模式下同slot，pipeline可直接用。
         """
@@ -736,7 +726,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
         idx_key = self.index_key(table_ref, index_name)
-        aio = self.aio  # self._batched_aio
+        aio = self.aio
 
         # 生成zrange命令
         comp_cls = table_ref.comp_cls
@@ -981,8 +971,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         resp = resp.decode("utf-8")  # type: ignore
 
         if resp != "committed":
-            # 把事务相关的key满门抄斩
-            # self._batched_aio.invalidate_cache(idmap.get_clean_row_keys())
             if resp.startswith("RACE"):
                 raise RaceCondition(resp)
             elif resp.startswith("UNIQUE"):
