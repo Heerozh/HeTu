@@ -145,3 +145,32 @@ async def test_push_refresh_budget(lb_backend, mod_backend_config, filled_item_r
     finally:
         await other.close()
         await broker.close()
+
+
+@use_redis_family_backend_only
+async def test_deleted_subscribed_row_read_budget(lb_backend, filled_item_ref):
+    """订阅中的行被删除后，服务端逻辑还在反复读它：删除通知本身就是权威的，
+    之后每次读都不该再打 master（也不该打副本）"""
+    comp = filled_item_ref.comp_cls
+    row_id = await _row_id(lb_backend, comp, time=123)
+    broker = SubscriptionBroker(lb_backend)
+    try:
+        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        assert sub
+        async with lb_backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            assert await repo.get(id=row_id)
+            repo.delete(row_id)
+
+        with ExitStack() as stack:
+            counts = count_reads(stack, lb_backend, include_range=True, by_role=True)
+            for _ in range(3):
+                async with lb_backend.session("pytest", 1) as session:
+                    assert await session.using(comp).get(id=row_id) is None
+            got = counts()
+            assert got["master"] == 0 and got["master_authoritative"] == 0, (
+                f"读已知不存在的行不该打 master：{got}"
+            )
+            assert got["plain"] == 0, f"也不该打副本：{got}"
+    finally:
+        await broker.close()

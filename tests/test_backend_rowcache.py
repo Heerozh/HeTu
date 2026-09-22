@@ -452,3 +452,41 @@ async def test_reader_get_many(mod_item_model, item_ref):
         assert cached is not None and cached.qty == i
     assert cache.get(chans[5]) is None and cache.get(chans[6]) is None
     assert cache.floor(chans[3]) == 2
+
+
+async def test_reader_absent_row_needs_no_read(mod_item_model, item_ref):
+    """订阅中的行被删除后：删除通知本身就是权威的，之后再读它不该打任何一次库——
+    以前每次读都是一发 master 权威读（还读不到东西），服务端逻辑每 tick 读一次就每 tick 一发"""
+    rows = [_row(mod_item_model, i, 1, qty=i) for i in (1, 2)]
+    master = FakeClient(mod_item_model, rows)
+    fallback = FakeClient(mod_item_model, rows)
+    fb = cast(BackendClient, fallback)
+    cache = RowCache()
+    reader = CachedRowReader(FakeBackend(cache, master))
+    ch1 = master.row_channel(item_ref, 1)
+    ch2 = master.row_channel(item_ref, 2)
+    for ch in (ch1, ch2):
+        cache.activate(ch, "hub")
+
+    # 行 1 被删除：通知到达，缓存记下"它不存在"
+    cache.notify(ch1, 0)
+    master.rows.pop(1)
+    before = dict(master.calls)
+
+    for _ in range(3):
+        assert await reader.get(item_ref, 1, fb) is None
+    assert dict(master.calls) == before, (
+        f"读已知不存在的行不该打 master：{master.calls}"
+    )
+    assert fallback.calls["get"] == 0, "也不该打副本"
+
+    # 批读：已知不存在的行不进任何一组，其余照常
+    got = await reader.get_many(item_ref, [1, 2], fb)
+    assert got[0] is None and got[1] is not None
+    assert master.calls["get_many_authoritative"] == 1, "只该为行 2 读一次"
+
+    # 重新插入的通知到来后恢复正常（不再当它不存在）
+    cache.notify(ch1, 1)
+    master.rows[1] = _row(mod_item_model, 1, 1, qty=11)
+    got1 = await reader.get(item_ref, 1, fb)
+    assert got1 is not None and got1.qty == 11
