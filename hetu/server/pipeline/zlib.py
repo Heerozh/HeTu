@@ -21,7 +21,8 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
     """
     使用 zlib 进行消息的流式压缩和解压缩。
 
-    注意：zlib 的字典功能依赖预共享字典，当前实现不做字典训练/协商。
+    注意：zlib 的预置字典必须两端逐字节一致，否则解压时 DICTID 校验失败。
+    本层不做字典训练，服务端用组件字段名生成字典，握手时下发给客户端。
     """
 
     @dataclass
@@ -74,9 +75,11 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
     def handshake(self, message: bytes) -> tuple[Any, bytes]:
         """
         连接前握手工作。
-        zlib 不做字典协商，忽略 message 并返回空字节。
+        字典协商：对端握手消息里带了字典就用对端的（客户端走此分支），否则用本地
+        由组件字段名生成的字典（服务端走此分支）；实际使用的字典回给对端。
         """
-        zdict = self.dict_message
+        # 不写回 self.dict_message：服务端 pipeline 是单例，各连接共用同一层实例
+        zdict = message or self.dict_message
 
         ctx = self.ZlibContext(
             compressor=zlib.compressobj(
@@ -84,7 +87,7 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
             ),
             decompressor=zlib.decompressobj(self.wbits, zdict=zdict),
         )
-        return ctx, self.dict_message or b""
+        return ctx, zdict
 
     @override
     def encode(self, layer_ctx: Any, message: JSONType | bytes) -> JSONType | bytes:

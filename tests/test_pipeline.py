@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+import zlib
 from typing import Any
 
 import pytest
@@ -120,6 +121,31 @@ def test_zlib_encode_decode_roundtrip(base_pipeline, mod_item_model):
 
     # 流式压缩应该会随着滑动窗口的建立，压缩比越来越好
     assert 0.5 > zlib_layer.encode_ratio > 0.1
+
+
+def test_zlib_dict_negotiation(base_pipeline):
+    """客户端进程没注册组件时字典和服务端不同，必须采纳握手时下发的服务端字典。"""
+    server_layer = pipeline.ZlibLayer(level=6)
+    client_layer = pipeline.ZlibLayer(level=6)
+    # 模拟客户端进程（如 benchmark 脚本）没加载 app，字典退化成只有默认词
+    client_layer.dict_message = b"updt"
+    assert client_layer.dict_message != server_layer.dict_message
+
+    server_ctx, reply = server_layer.handshake(b"")
+    assert reply == server_layer.dict_message
+    client_ctx, _ = client_layer.handshake(reply)
+
+    msg = b'["rpc", "just_get", 123]' * 4
+    assert server_layer.decode(server_ctx, client_layer.encode(client_ctx, msg)) == msg
+    assert client_layer.decode(client_ctx, server_layer.encode(server_ctx, msg)) == msg
+
+    # 反例：各用各的字典时，解压会在 DICTID 校验上失败
+    unnegotiated_ctx, _ = client_layer.handshake(b"")
+    fresh_server_ctx, _ = server_layer.handshake(b"")
+    with pytest.raises(zlib.error, match="zdict"):
+        server_layer.decode(
+            fresh_server_ctx, client_layer.encode(unnegotiated_ctx, msg)
+        )
 
 
 def test_brotli_encode_decode_roundtrip(base_pipeline, mod_item_model):
