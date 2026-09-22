@@ -149,5 +149,21 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Rule
 
-- Always use Context7 MCP when I need library/API documentation, code generation, setup
-  or configuration steps without me having to explicitly ask.
+设计约束：
+
+重要：架构受限Redis的master节点性能，尽可能不需要master读的地方都不要通过master，
+      使用master_or_servant随机选节点的方法，其中master被随机选中的概率是可调的。
+      比如事务中所有repo.get()读操作可以是servant读，如果读到了旧数据有乐观锁。
+
+这条约束由两个测试守着，新增直接读 master 的代码会挂在这里：
+
+- `tests/test_arch_master_reads.py`：扫 `hetu/` 下所有 `xxx.master.get/get_many/range/
+  get_authoritative(` 形态的直接 master 读，不在文件里的 `ALLOWED` 清单中就失败。确实必须读
+  master 的，把它加进清单并写明理由（当前 4 处：行缓存权威读、`only_master` 事务、雪花 ID 读
+  时钟水位、顶号核查）。
+- `tests/test_master_read_budget.py`：用 `master_weight: 0` 的 backend（加权随机永远选不中
+  master，于是 master 上剩下的读一定是代码显式指定的），钉死几条典型路径允许的 master 读
+  次数。改动读路径导致某条路多读一次 master 会在这里暴露。
+
+摸底用 `PYTHONPATH=tools uv run pytest tests/ -q -p master_read_audit`，它按调用点聚合出
+实际落到 master 上的读；用法见 `tools/master_read_audit.py` 文件头。
