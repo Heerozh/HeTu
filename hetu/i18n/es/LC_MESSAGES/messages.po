@@ -428,7 +428,7 @@ msgstr ""
 "Activar modo debug, esto iniciará la recarga en caliente de código y "
 "mostrará más información de log. Si se establece en 2, también se activa el "
 "modo debug para el núcleo del framework, lo que habilita el modo Debug de "
-"las corrutinas de Python, reduciendo la velocidad en un 90%."
+"las corrutinas de Python, reduciendo la velocidad en un 90%%."
 
 #: hetu/cli/start.py:139
 msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"

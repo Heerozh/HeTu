@@ -431,7 +431,7 @@ msgstr ""
 "Debug-Modus aktivieren. Dies startet Hot-Reloading von Code und zeigt mehr "
 "Log-Informationen an. Wenn auf 2 gesetzt, wird der Debug-Modus auch für das "
 "Framework-Kernel aktiviert, was den Python-Coroutine-Debug-Modus einschaltet"
-" und die Geschwindigkeit um 90% verringert."
+" und die Geschwindigkeit um 90%% verringert."
 
 #: hetu/cli/start.py:139
 msgid "证书目录，如果不设置则使用不安全的连接。不建议这里设置，请外加一层反向https代理。填入auto会生成自签https证书。"
