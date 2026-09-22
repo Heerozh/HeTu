@@ -303,7 +303,7 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
+        # logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
         # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive()
