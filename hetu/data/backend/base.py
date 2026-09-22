@@ -43,7 +43,7 @@ from collections.abc import Callable, Iterable
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, final, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast, final, overload
 
 import numpy as np
 
@@ -369,6 +369,23 @@ class BackendClient:
             与 `row_ids` 顺序一一对应，不存在的行位置为 None。
         """
         raise NotImplementedError
+
+    async def get_authoritative(
+        self, table_ref: TableReference, row_id: int
+    ) -> np.record | None:
+        """
+        权威读：保证在主节点上执行的单行读取（`RowFormat.STRUCT`），只能在 master 客户端上调用。
+        worker 行缓存在 floor 未知或识破副本滞后时用它。默认实现退化为 `get`；
+        有读写分离代理的后端要用脚本之类一定被送到主节点的方式覆盖它。
+        """
+        return await self.get(table_ref, row_id, RowFormat.STRUCT)
+
+    async def get_many_authoritative(
+        self, table_ref: TableReference, row_ids: Iterable[int]
+    ) -> list[np.record | None]:
+        """批量权威读，语义同 `get_authoritative`；返回与 `row_ids` 顺序一一对应"""
+        rows = await self.get_many(table_ref, row_ids, RowFormat.STRUCT)
+        return cast(list[np.record | None], rows)
 
     @overload
     async def range(
