@@ -7,9 +7,9 @@ master 读预算：本项目的设计约束是"能不读 master 的就不读 mas
 还发生的读一定是代码显式指定的（`only_master` 事务、行缓存权威读、顶号核查……），计数确定、
 不 flaky。哪些地方允许显式读 master 见 `test_arch_master_reads.py` 的清单。
 
-预算里的 `master_authoritative` 是行缓存的权威读（master 上的 Lua HGETALL）：spec 允许它在
-"floor 未知的首次填充"和"检测到副本滞后"两种情况下发生，并预期"一行的订阅生命周期内通常
-只发生一次"。这里的数字就是这句话的可执行版本。
+预算里的 `master_authoritative` 是行缓存的权威读（master 上的 Lua HGETALL），只在两种情况
+下发生：副本读回的版本低于已知下限（确实滞后），以及频道见过删除通知（同 id 重插后副本上
+可能还是删除前的旧行）。下面几条路径都不属于这两种，所以预算全是 0。
 """
 
 import copy
@@ -17,27 +17,14 @@ from contextlib import ExitStack
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
+from fixtures.contexts import admin_ctx_
 from fixtures.read_counts import count_reads
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.sub import SubscriptionBroker
-from hetu.system import SystemContext
 
 SnowflakeID().init(1, 0)
-
-
-def _admin_ctx() -> SystemContext:
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
 
 
 @pytest.fixture
@@ -93,7 +80,7 @@ async def test_subscribe_and_read_budget(lb_backend, filled_item_ref):
         with ExitStack() as stack:
             counts = count_reads(stack, lb_backend, include_range=True, by_role=True)
             sub, _ = await broker.subscribe_get(
-                filled_item_ref, _admin_ctx(), "id", row_id
+                filled_item_ref, admin_ctx_(), "id", row_id
             )
             assert sub
             got = counts()
@@ -109,7 +96,7 @@ async def test_subscribe_and_read_budget(lb_backend, filled_item_ref):
             )
 
             sub2, _ = await broker2.subscribe_get(
-                filled_item_ref, _admin_ctx(), "id", row_id
+                filled_item_ref, admin_ctx_(), "id", row_id
             )
             assert sub2
             got = counts()
@@ -130,7 +117,7 @@ async def test_push_refresh_budget(lb_backend, mod_backend_config, filled_item_r
     other = Backend(copy.deepcopy(mod_backend_config))
     other.post_configure(components=[comp])
     try:
-        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        sub, _ = await broker.subscribe_get(filled_item_ref, admin_ctx_(), "id", row_id)
         assert sub
         with ExitStack() as stack:
             counts = count_reads(stack, lb_backend, include_range=True, by_role=True)
@@ -160,7 +147,7 @@ async def test_deleted_subscribed_row_read_budget(lb_backend, filled_item_ref):
     row_id = await _row_id(lb_backend, comp, time=123)
     broker = SubscriptionBroker(lb_backend)
     try:
-        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        sub, _ = await broker.subscribe_get(filled_item_ref, admin_ctx_(), "id", row_id)
         assert sub
         async with lb_backend.session("pytest", 1) as session:
             repo = session.using(comp)

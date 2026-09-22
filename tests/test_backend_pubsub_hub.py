@@ -6,25 +6,13 @@
 import asyncio
 from typing import cast
 
+from fixtures.contexts import admin_ctx_, wait_until
+
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.sub import RowSubscription, SubscriptionBroker
-from hetu.system import SystemContext
 
 SnowflakeID().init(1, 0)
-
-
-def _admin_ctx() -> SystemContext:
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
 
 
 def _hub(backend: Backend):
@@ -50,7 +38,7 @@ async def _get_updates(broker: SubscriptionBroker):
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker_a = SubscriptionBroker(backend)
     broker_b = SubscriptionBroker(backend)
 
@@ -185,7 +173,7 @@ async def test_watch_and_client_subscription_share_channel(
     """服务端关注（watch_channel）和客户端订阅落在同一频道：通知既回调也推给客户端；
     客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
     backend: Backend = mod_auto_backend()
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     hub = _hub(backend)
     hits: list[int] = []
@@ -226,12 +214,6 @@ async def test_watch_and_client_subscription_share_channel(
     assert hub.subscriber_count(channel) == 0
 
 
-async def _wait_until(pred, timeout: float = 3.0):
-    async with asyncio.timeout(timeout):
-        while not pred():
-            await asyncio.sleep(0.01)
-
-
 async def test_row_cache_activation(
     filled_item_ref, mod_auto_backend, mod_backend_config
 ):
@@ -245,7 +227,7 @@ async def test_row_cache_activation(
 
     backend: Backend = mod_auto_backend()
     cache = backend.row_cache
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker_a = SubscriptionBroker(backend)
     sub_a, row = await broker_a.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub_a and row
@@ -285,7 +267,7 @@ async def test_row_cache_activation(
         await _update_qty(other, filled_item_ref, 995)
     finally:
         await other.close()
-    await _wait_until(lambda: cache.get(channel) is None)
+    await wait_until(lambda: cache.get(channel) is None)
     assert cache.floor(channel) == old_version + 1
     await _get_updates(broker_a)  # 消费掉通知
 
@@ -318,7 +300,7 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
     cache = backend.row_cache
     if cache is None:
         return
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     sub, row = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub and row
@@ -344,8 +326,8 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
     assert cache.get(channel) is not None
     for res in list(pubsub.node_resources.values()):
         await res["pubsub"].connection.disconnect()
-    await _wait_until(lambda: cache.get(channel) is None, timeout=5)
-    await _wait_until(
+    await wait_until(lambda: cache.get(channel) is None, timeout=5)
+    await wait_until(
         lambda: cache.is_active(channel) and channel in pubsub.subscribed, timeout=10
     )
     assert cache.floor(channel) is UNKNOWN
@@ -370,7 +352,7 @@ async def test_row_evicted_before_table_wakeup(
     cache = backend.row_cache
     if cache is None:  # SQL 后端不参与行缓存
         return
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     sub_row, row = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub_row and row
@@ -398,7 +380,7 @@ async def test_row_evicted_before_table_wakeup(
     try:
         with patch.object(mq, "push_pulled_", spy):
             await _update_qty(other, filled_item_ref, 993)
-            await _wait_until(lambda: len(seen) > 0, timeout=5)
+            await wait_until(lambda: len(seen) > 0, timeout=5)
     finally:
         await other.close()
     assert seen[0] is None, "表级通知叫醒连接时，这行必须已经被逐出"
@@ -414,7 +396,7 @@ async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend
     if pubsub is None:
         return  # SQL 后端没有 pubsub 连接
     broker = SubscriptionBroker(backend)
-    sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "name", "Itm10")
+    sub, _ = await broker.subscribe_get(filled_item_ref, admin_ctx_(), "name", "Itm10")
     assert sub
     try:
         for res in pubsub.node_resources.values():

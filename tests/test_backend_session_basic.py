@@ -11,6 +11,7 @@ from typing import Callable
 import numpy as np
 import pytest
 from fixtures.backends import use_redis_family_backend_only
+from fixtures.contexts import admin_ctx_
 from fixtures.read_counts import count_reads
 from redis.asyncio.cluster import RedisCluster
 
@@ -1222,33 +1223,12 @@ async def test_session_insert_then_upsert(item_ref, mod_auto_backend):
 # ------------------------------------------------------------ worker 行缓存
 
 
-def _admin_ctx():
-    from hetu.system import SystemContext
-
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
-
-
 async def _first_row_id(backend: Backend, comp, **query) -> int:
     async with backend.session("pytest", 1) as session:
         session.only_master = True
         row = await session.using(comp).get(**query)
         assert row is not None
         return int(row.id)
-
-
-async def _wait_until(pred, timeout: float = 3.0):
-    async with asyncio.timeout(timeout):
-        while not pred():
-            await asyncio.sleep(0.01)
 
 
 async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
@@ -1271,7 +1251,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
             counts = count_reads(stack, backend)
             # subscribe_get 先订后读，那次读走副本；floor 还未知，读回的行不入缓存
             sub, _ = await broker.subscribe_get(
-                filled_item_ref, _admin_ctx(), "id", row_id
+                filled_item_ref, admin_ctx_(), "id", row_id
             )
             assert sub
             async with backend.session("pytest", 1) as session:
@@ -1533,7 +1513,7 @@ async def test_row_cache_disabled(
         assert backend2.row_cache is None
         row_id = await _first_row_id(backend2, comp, time=115)
         broker = SubscriptionBroker(backend2)
-        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        sub, _ = await broker.subscribe_get(filled_item_ref, admin_ctx_(), "id", row_id)
         assert sub
         try:
             with ExitStack() as stack:
@@ -1580,7 +1560,7 @@ async def test_row_cache_write_through(
             counts = count_reads(stack, backend)
             # subscribe_get 的那次读走副本、不入缓存；commit 写穿才把行放进缓存
             sub, _ = await broker.subscribe_get(
-                filled_item_ref, _admin_ctx(), "id", row_id
+                filled_item_ref, admin_ctx_(), "id", row_id
             )
             assert sub
             async with backend.session("pytest", 1) as session:
@@ -1672,7 +1652,7 @@ async def test_row_cache_write_through_skips_subscription_gap(
     channel = backend.master.row_channel(filled_item_ref, row_id)
     broker = SubscriptionBroker(backend)
     try:
-        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        sub, _ = await broker.subscribe_get(filled_item_ref, admin_ctx_(), "id", row_id)
         assert sub
         # 订阅时的读不入缓存，先用一次本进程的写（commit 写穿）把行放进缓存
         async with backend.session("pytest", 1) as session:

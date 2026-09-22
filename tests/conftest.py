@@ -7,6 +7,7 @@ os.environ["LANG"] = "zh_CN.UTF-8"
 os.environ["LC_ALL"] = "zh_CN.UTF-8"
 
 from fixtures.backends import *
+from fixtures.contexts import *
 from fixtures.defines import *
 from fixtures.redis_service import *
 from fixtures.sql_service import *

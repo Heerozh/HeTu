@@ -3,6 +3,7 @@ from typing import AsyncGenerator, cast
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
+from fixtures.contexts import wait_until
 from fixtures.read_counts import count_reads
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -27,64 +28,6 @@ async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
     yield broker
 
     await broker.close()
-
-
-async def wait_until(pred, timeout: float = 2.0):
-    """等后端 hub 把通知投递到 mq 的本地队列：轮询直到 pred() 为真"""
-    async with asyncio.timeout(timeout):
-        while not pred():
-            await asyncio.sleep(0.01)
-
-
-@pytest.fixture
-async def admin_ctx():
-    """管理员权限的ctx（连接上下文）"""
-    from hetu.system import SystemContext
-
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
-
-
-@pytest.fixture
-async def user_id10_ctx():
-    """用户ID为10的ctx（连接上下文）"""
-    from hetu.system import SystemContext
-
-    return SystemContext(
-        caller=10,
-        connection_id=0,
-        address="NotSet",
-        group="",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
-
-
-@pytest.fixture
-async def user_id11_ctx():
-    """用户ID为11的ctx（连接上下文）"""
-    from hetu.system import SystemContext
-
-    return SystemContext(
-        caller=11,
-        connection_id=0,
-        address="NotSet",
-        group="",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
 
 
 @use_redis_family_backend_only
