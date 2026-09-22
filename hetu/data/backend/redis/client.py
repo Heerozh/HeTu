@@ -86,13 +86,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         ).format(comp_name=comp_cls.name_, field=field, dtype=dtype)
                     )
 
-    def load_commit_scripts(self, file: str | Path):
+    def _load_script(self, file: str | Path):
+        """把 Lua 脚本上传到 master 并注册成可 EVALSHA 调用的对象（commit / 权威读共用）"""
         assert self._async_ios, _("连接已关闭，已调用过close")
         assert self.is_servant is False, _(
-            "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
+            "Servant不允许加载Lua脚本，Lua脚本只能在Master上加载"
         )
         assert len(self._async_ios) == 1, _(
-            "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
+            "Lua脚本只能在Master上加载，但当前连接池中有多个服务器"
         )
         # read file to text
         with open(file, "r", encoding="utf-8") as f:
@@ -276,6 +277,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         self.lua_commit = None
+        self.lua_get_rows = None  # 权威读脚本（get_rows.lua），post_configure 时加载
         # 本进程共享的 pubsub 分发器，首次 get_mq_client 时在事件循环里懒建
         self._hub: PubSubHub | None = None
 
@@ -314,9 +316,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             assert redis_ver >= (7, 0), "Redis/Valkey 版本过低，至少需要7.0版本"
 
         # 加载lua脚本，注意redis-py的pipeline里不能用lua，会反复检测script exists性能极低
-        self.lua_commit = self.load_commit_scripts(
-            Path(__file__).parent.resolve() / "commit_v2.lua"
-        )
+        script_dir = Path(__file__).parent.resolve()
+        self.lua_commit = self._load_script(script_dir / "commit_v2.lua")
+        self.lua_get_rows = self._load_script(script_dir / "get_rows.lua")
         # 提示用户schema定义是否符合redis要求，比如索引类型不能有复数等
         self._schema_checking_for_redis(components)
 
@@ -549,6 +551,43 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.row_decode_(comp_cls, row, row_format) if row else None
             for row in await self._hgetall_many(key_prefix, row_ids)
         ]
+
+    @override
+    async def get_authoritative(
+        self, table_ref: TableReference, row_id: int
+    ) -> np.record | None:
+        rows = await self.get_many_authoritative(table_ref, [row_id])
+        return rows[0]
+
+    @override
+    async def get_many_authoritative(
+        self, table_ref: TableReference, row_ids: Iterable[int]
+    ) -> list[np.record | None]:
+        """
+        在 master 上执行 `get_rows.lua`（Lua HGETALL）批量读行。读写分离代理会把普通
+        HGETALL 送到副本，脚本才一定被送到主节点；redis-py cluster 同样把 EVALSHA 固定发主节点。
+        同一张表的行同 slot，一次 EVALSHA 多 key 即可，按 RANGE_PIPELINE_CHUNK 分块。
+        """
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        assert not self.is_servant, _("权威读只能在 master 客户端上执行")
+        assert self.lua_get_rows is not None, _(
+            "lua_get_rows脚本没有初始化，请先调用 post_configure"
+        )
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"
+        comp_cls = table_ref.comp_cls
+        result: list[np.record | None] = []
+        for chunk in itertools.batched(row_ids, self.RANGE_PIPELINE_CHUNK):
+            keys = [key_prefix + str(_id) for _id in chunk]
+            raws = cast(list[list[bytes]], await self.lua_get_rows(keys, []))
+            for raw in raws:
+                # Lua 里的 HGETALL 返回扁平的 [k1, v1, k2, v2, ...]，空表为 []
+                if not raw:
+                    result.append(None)
+                    continue
+                row = dict(zip(raw[0::2], raw[1::2]))
+                result.append(self.row_decode_(comp_cls, row, RowFormat.STRUCT))
+        return result
 
     @classmethod
     def range_normalize_(

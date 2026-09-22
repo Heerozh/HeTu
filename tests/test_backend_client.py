@@ -973,3 +973,45 @@ async def test_post_configure_explicit_components(mod_auto_backend):
             backend.post_configure(components=[bad_cls])
     else:
         backend.post_configure(components=[bad_cls])  # SQL 系目前没有索引 dtype 限制
+
+
+@use_redis_family_backend_only
+async def test_get_authoritative(filled_item_ref, mod_auto_backend):
+    """权威读：master 上执行的 Lua HGETALL，结果与 get / get_many 逐字段一致（含 _version），
+    不存在的行为 None、顺序与入参一致、超过分块大小也正确；servant 客户端不允许调用"""
+    backend: Backend = mod_auto_backend()
+    master = backend.master
+
+    rows = await master.range(filled_item_ref, "time", 110, 134, limit=100)
+    ids = [int(r.id) for r in rows]
+    assert len(ids) == 25
+
+    one = await master.get_authoritative(filled_item_ref, ids[3])
+    assert one is not None and one == rows[3]
+    assert one["_version"] == rows[3]["_version"]
+    assert await master.get_authoritative(filled_item_ref, 999999999) is None
+
+    query = [ids[3], 999999999, ids[0], ids[24], 888888888]
+    got = await master.get_many_authoritative(filled_item_ref, query)
+    assert [None if r is None else int(r.id) for r in got] == [
+        ids[3],
+        None,
+        ids[0],
+        ids[24],
+        None,
+    ]
+    assert got[0] == rows[3] and got[3] == rows[24]
+    assert await master.get_many_authoritative(filled_item_ref, []) == []
+
+    # 超过一次 EVALSHA 的分块大小也按块正确返回
+    client = cast(RedisBackendClient, master)
+    chunk = client.RANGE_PIPELINE_CHUNK
+    try:
+        client.RANGE_PIPELINE_CHUNK = 4
+        got = await master.get_many_authoritative(filled_item_ref, ids + [777777777])
+        assert [None if r is None else int(r.id) for r in got] == ids + [None]
+    finally:
+        client.RANGE_PIPELINE_CHUNK = chunk
+
+    with pytest.raises(AssertionError):
+        await backend.servant.get_authoritative(filled_item_ref, ids[0])
