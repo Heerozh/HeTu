@@ -135,6 +135,9 @@ BACKENDS:
     # 指定master服务器，只能一个地址
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
     #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
+    #        代理层（如云厂商的Redis代理版/集群代理版）多数不支持RESP3协议的HELLO命令，
+    #        启动时会报 ResponseError: unknown command，此时在url后追加 ?protocol=2
+    #        降级到RESP2即可，servants里的url也要一起加。河图没有用到RESP3独有特性。
     # 不建议生产环境使用关系数据库，因为订阅表性能不够，如果要提高性能还是要借助Redis或ZMQ等消息服务。
     # 开发环境可以用SQLite方便调试部署。
     # Postgres: postgresql://user:pass@localhost:5432/dbname

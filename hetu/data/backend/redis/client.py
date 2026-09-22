@@ -264,6 +264,23 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 raise ConnectionError(
                     _("无法连接到Redis数据库：{url}").format(url=self.urls[i])
                 ) from e
+            except redis.exceptions.ResponseError as e:
+                # redis-py 8 默认 RESP3，每条连接建立后先发 HELLO 握手，所以 PING 还没
+                # 发出就可能在这里失败。部分代理层（如云厂商的 Redis 代理版）不实现
+                # HELLO，回 unknown command，报错里看不出是哪个后端，这里补上提示。
+                if "unknown command" in str(e).lower():
+                    raise ConnectionError(
+                        _(
+                            "Redis数据库 {url} 不支持 HELLO 命令（RESP3 握手）。通常是前面"
+                            "挂了不支持 RESP3 的代理层，请在 url 后追加 ?protocol=2 降级到 "
+                            "RESP2，master 和 servants 都要加。"
+                        ).format(url=self.urls[i])
+                    ) from e
+                raise ConnectionError(
+                    _("连接Redis数据库 {url} 时服务端返回错误：{error}").format(
+                        url=self.urls[i], error=e
+                    )
+                ) from e
 
         # 获得db index
         if self.raw_clustering:
