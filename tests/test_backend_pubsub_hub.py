@@ -347,6 +347,52 @@ async def test_row_cache_pubsub_reset(filled_item_ref, mod_auto_backend):
     await broker.close()
 
 
+async def test_row_evicted_before_table_wakeup(
+    filled_item_ref, mod_auto_backend, mod_backend_config
+):
+    """同一次 commit 的通知里行频道那条必须排在表级 / 索引值频道之前：表级通知一到 hub 就
+    把连接叫醒，醒来的 TableSubscription / IndexSubscription 会去读这次变更的行，此时行还
+    没被逐出的话读到的是缓存里的旧行，推给客户端后也不会再有第二次通知来纠正。
+    现在这个顺序只靠 get_message 的 100ms 合批窗口挡着，事件循环卡一下就不成立"""
+    import copy
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:  # SQL 后端不参与行缓存
+        return
+    ctx = _admin_ctx()
+    broker = SubscriptionBroker(backend)
+    sub_row, row = await broker.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
+    assert sub_row and row
+    sub_tbl, _ = await broker.subscribe_table(filled_item_ref, ctx)
+    assert sub_tbl
+    channel = cast(RowSubscription, broker._subs[sub_row]).channel
+    table_channel = backend.master.table_channel(filled_item_ref)
+    assert cache.get(channel) is not None
+
+    # 记录表级通知被塞进本连接队列（= 连接被叫醒）的那一刻，缓存里这行的样子
+    mq = broker._mq_client
+    real_push = mq.push_pulled_
+    seen: list = []
+
+    def spy(channel_name, payload_ids):
+        if channel_name == table_channel:
+            seen.append(cache.get(channel))
+        return real_push(channel_name, payload_ids)
+
+    other = Backend(copy.deepcopy(mod_backend_config))
+    other.post_configure(components=[filled_item_ref.comp_cls])
+    try:
+        with patch.object(mq, "push_pulled_", spy):
+            await _update_qty(other, filled_item_ref, 993)
+            await _wait_until(lambda: len(seen) > 0, timeout=5)
+    finally:
+        await other.close()
+    assert seen[0] is None, "表级通知叫醒连接时，这行必须已经被逐出"
+    await broker.close()
+
+
 async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend):
     """pubsub 连接常驻只读，半开 TCP 连接只能靠内核 keepalive 判死：连接参数里必须显式开着，
     不依赖 redis-py 的版本默认值（7.x 默认关）"""
