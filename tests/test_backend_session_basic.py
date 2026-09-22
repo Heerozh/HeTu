@@ -5,6 +5,7 @@
 #  @email: heeroz@gmail.com
 #  """
 
+import asyncio
 from typing import Callable
 
 import numpy as np
@@ -1215,3 +1216,331 @@ async def test_session_insert_then_upsert(item_ref, mod_auto_backend):
             assert upserted_row.id == row.id
             assert upserted_row.time == 1
             assert context.insert is False
+
+
+# ------------------------------------------------------------ worker 行缓存
+
+
+def _admin_ctx():
+    from hetu.system import SystemContext
+
+    return SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="admin",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+
+
+def _count_reads(stack, backend: Backend):
+    """把 master 与各 servant 的读方法都包上计数，返回 counts() -> {"plain", "authoritative"}。
+    plain 是 get / get_many（事务直读或副本读），authoritative 只数 get_many_authoritative
+    （Redis 的 get_authoritative 内部就是它，一次逻辑权威读记 1）"""
+    from unittest.mock import patch
+
+    mocks: dict[tuple[int, str], object] = {}
+    clients = [backend.master, *backend._servants]
+    for i, client in enumerate(clients):
+        for meth in ("get", "get_many", "get_many_authoritative"):
+            mocks[(i, meth)] = stack.enter_context(
+                patch.object(client, meth, wraps=getattr(client, meth))
+            )
+
+    def counts():
+        c = {"plain": 0, "authoritative": 0}
+        for (_, meth), m in mocks.items():
+            key = "authoritative" if meth == "get_many_authoritative" else "plain"
+            c[key] += m.call_count  # type: ignore[attr-defined]
+        return c
+
+    return counts
+
+
+async def _first_row_id(backend: Backend, comp, **query) -> int:
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        row = await session.using(comp).get(**query)
+        assert row is not None
+        return int(row.id)
+
+
+async def _wait_until(pred, timeout: float = 3.0):
+    async with asyncio.timeout(timeout):
+        while not pred():
+            await asyncio.sleep(0.01)
+
+
+async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
+    """订阅中的行：首个事务读走一次权威读并填充，之后的事务读 0 次远程；
+    only_master 的事务绕过缓存（不命中也不填充）；SQL 后端没有缓存，读仍每次远程"""
+    from contextlib import ExitStack
+
+    from hetu.data.sub import SubscriptionBroker
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=110)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+
+    broker = SubscriptionBroker(backend)
+    sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+    assert sub
+    try:
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            async with backend.session("pytest", 1) as session:
+                got = await session.using(comp).get(id=row_id)
+            assert got is not None and got.time == 110
+            if cache is None:
+                assert counts() == {"plain": 1, "authoritative": 0}
+            else:
+                assert counts() == {"plain": 0, "authoritative": 1}
+                assert cache.get(channel) is not None
+
+            async with backend.session("pytest", 1) as session:
+                got2 = await session.using(comp).get(id=row_id)
+            assert got2 is not None and got2 == got
+            if cache is None:
+                assert counts() == {"plain": 2, "authoritative": 0}
+            else:
+                assert counts() == {"plain": 0, "authoritative": 1}
+
+            # only_master：直读 master，不命中也不填充
+            if cache is not None:
+                cache.evict(channel)
+            async with backend.session("pytest", 1) as session:
+                session.only_master = True
+                got3 = await session.using(comp).get(id=row_id)
+            assert got3 is not None
+            if cache is None:
+                assert counts() == {"plain": 3, "authoritative": 0}
+            else:
+                assert counts() == {"plain": 1, "authoritative": 1}
+                assert cache.get(channel) is None
+    finally:
+        await broker.close()
+
+
+async def test_row_cache_range_partial_hit(filled_item_ref, mod_auto_backend):
+    """range：订阅（激活）了 10 行中的 7 行并预热后，只对另外 3 行批量读一次，顺序与索引一致"""
+    from contextlib import ExitStack
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        rows = await session.using(comp).range(time=(113, 122), limit=10)
+    assert rows.shape[0] == 10
+    ids = [int(i) for i in rows.id]
+    if cache is None:
+        return
+    for row_id in ids[:7]:
+        cache.activate(backend.master.row_channel(filled_item_ref, row_id), "test")
+
+    with ExitStack() as stack:
+        counts = _count_reads(stack, backend)
+        # 预热：7 行 floor 未知走一次权威批读，3 行未激活走一次副本批读
+        async with backend.session("pytest", 1) as session:
+            got = await session.using(comp).range(time=(113, 122), limit=10)
+        assert [int(i) for i in got.id] == ids
+        assert counts() == {"plain": 1, "authoritative": 1}
+        # 命中：只剩 3 行未激活的一次批读
+        async with backend.session("pytest", 1) as session:
+            got = await session.using(comp).range(time=(113, 122), limit=10)
+        assert [int(i) for i in got.id] == ids
+        assert list(got.time) == sorted(got.time)
+        assert counts() == {"plain": 2, "authoritative": 1}
+    for row_id in ids[:7]:
+        cache.deactivate(backend.master.row_channel(filled_item_ref, row_id), "test")
+
+
+async def test_row_cache_stale_replica_goes_authoritative(
+    filled_item_ref, mod_auto_backend
+):
+    """floor 已知而副本读回的版本更低（滞后）→ 改走权威读，事务拿到新值、缓存存权威行"""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=112)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+    cache.activate(channel, "test")
+    try:
+        async with backend.session("pytest", 1) as session:
+            old = await session.using(comp).get(id=row_id)
+        assert old is not None and cache.get(channel) is not None
+        old_version = int(old["_version"])
+
+        # 真的改一次：master 上版本 +1，通知到达后缓存逐出、floor = 新版本
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            row = await repo.get(id=row_id)
+            assert row is not None
+            row.qty = 123
+            await repo.update(row)
+        # 通知只发给有订阅的频道；这里手动激活的没有 hub 订阅，直接模拟通知
+        cache.notify(channel, old_version + 1)
+        assert cache.get(channel) is None and cache.floor(channel) == old_version + 1
+
+        # 所有客户端的 get 都返回旧行（模拟副本滞后）
+        stale = old.copy()
+
+        async def stale_get(*args, **kwargs):
+            return stale.copy()
+
+        with ExitStack() as stack:
+            stale_mocks = [
+                stack.enter_context(patch.object(client, "get", side_effect=stale_get))
+                for client in [backend.master, *backend._servants]
+            ]
+            auth_mock = stack.enter_context(
+                patch.object(
+                    backend.master,
+                    "get_many_authoritative",
+                    wraps=backend.master.get_many_authoritative,
+                )
+            )
+            async with backend.session("pytest", 1) as session:
+                got = await session.using(comp).get(id=row_id)
+            assert got is not None and got.qty == 123
+            assert int(got["_version"]) == old_version + 1
+            assert sum(m.call_count for m in stale_mocks) == 1
+            assert auth_mock.call_count == 1
+        cached = cache.get(channel)
+        assert cached is not None and cached.qty == 123
+    finally:
+        cache.deactivate(channel, "test")
+
+
+async def test_row_cache_returns_copy(filled_item_ref, mod_auto_backend):
+    """命中返回的是副本：就地改行而不 update，下一个事务读到的仍是库里的值"""
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=114)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+    cache.activate(channel, "test")
+    try:
+        async with backend.session("pytest", 1) as session:
+            row = await session.using(comp).get(id=row_id)
+            assert row is not None
+            row.qty = 7777  # 不 update
+        async with backend.session("pytest", 1) as session:
+            again = await session.using(comp).get(id=row_id)
+        assert again is not None and again.qty == 999
+    finally:
+        cache.deactivate(channel, "test")
+
+
+async def test_row_cache_skips_volatile(filled_rls_ref, mod_auto_backend):
+    """易失组件（direct_set 的对象）的行不缓存：激活了也每次远程读"""
+    from contextlib import ExitStack
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = filled_rls_ref.comp_cls
+    assert comp.volatile_
+    row_id = await _first_row_id(backend, comp, owner=10)
+    channel = backend.master.row_channel(filled_rls_ref, row_id)
+    cache.activate(channel, "test")
+    try:
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            for _ in range(2):
+                async with backend.session("pytest", 1) as session:
+                    got = await session.using(comp).get(id=row_id)
+                assert got is not None
+            assert counts() == {"plain": 2, "authoritative": 0}
+            assert cache.get(channel) is None
+    finally:
+        cache.deactivate(channel, "test")
+
+
+async def test_row_cache_delete(filled_item_ref, mod_auto_backend):
+    """删除通知后：副本可能还读得到旧行，事务读改走权威读得到 None，缓存无行"""
+    from contextlib import ExitStack
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    from hetu.data.backend.rowcache import DELETED
+
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=134)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+    cache.activate(channel, "test")
+    try:
+        async with backend.session("pytest", 1) as session:
+            assert await session.using(comp).get(id=row_id) is not None
+        assert cache.get(channel) is not None
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            assert await repo.get(id=row_id) is not None
+            repo.delete(row_id)
+        cache.notify(channel, 0)  # 手动激活的频道没有 hub 订阅，模拟删除通知
+        assert cache.floor(channel) is DELETED and cache.get(channel) is None
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            async with backend.session("pytest", 1) as session:
+                assert await session.using(comp).get(id=row_id) is None
+            assert counts() == {"plain": 0, "authoritative": 1}
+        assert cache.get(channel) is None
+    finally:
+        cache.deactivate(channel, "test")
+
+
+async def test_row_cache_disabled(
+    filled_item_ref, mod_auto_backend, mod_backend_config
+):
+    """row_cache: false：Backend 没有缓存，订阅后事务读仍每次远程；行通知照发（订阅收得到）"""
+    from contextlib import ExitStack
+
+    from hetu.data.sub import SubscriptionBroker
+
+    comp = filled_item_ref.comp_cls
+    backend2 = Backend({**mod_backend_config, "row_cache": False})
+    backend2.post_configure(components=[comp])
+    try:
+        assert backend2.row_cache is None
+        row_id = await _first_row_id(backend2, comp, time=115)
+        broker = SubscriptionBroker(backend2)
+        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        assert sub
+        try:
+            with ExitStack() as stack:
+                counts = _count_reads(stack, backend2)
+                for _ in range(2):
+                    async with backend2.session("pytest", 1) as session:
+                        assert await session.using(comp).get(id=row_id) is not None
+                assert counts() == {"plain": 2, "authoritative": 0}
+            async with backend2.session("pytest", 1) as session:
+                session.only_master = True
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                assert row is not None
+                row.qty = 555
+                await repo.update(row)
+            async with asyncio.timeout(3):
+                updates = await broker.get_updates()
+            assert updates[sub][row_id]["qty"] == 555
+        finally:
+            await broker.close()
+    finally:
+        await backend2.close()

@@ -9,14 +9,19 @@ import asyncio
 from contextlib import AbstractAsyncContextManager
 from typing import TYPE_CHECKING, AsyncIterator, Callable, cast
 
-from .base import RaceCondition
+import numpy as np
+
+from .base import RaceCondition, RowFormat
 from .idmap import IdentityMap
 from .repo import SessionRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable
+
     from hetu.data.component import BaseComponent
 
     from . import Backend, BackendClient
+    from .table import TableReference
 
 
 class Session(AbstractAsyncContextManager):
@@ -87,6 +92,27 @@ class Session(AbstractAsyncContextManager):
     def idmap(self) -> IdentityMap:
         assert self._entered, "Session must be used in `async with` block"
         return self._idmap
+
+    async def read_row(self, ref: TableReference, row_id: int) -> np.record | None:
+        """
+        事务读单行：`only_master` 直读 master；否则走 `backend.row_reader`——本 worker
+        有客户端订阅着的行命中进程缓存（0 往返），miss 时读 `master_or_servant`，
+        副本滞后则改权威读。见 `hetu.data.backend.rowcache`。
+        """
+        if self.only_master:
+            return await self._master.get(ref, row_id, RowFormat.STRUCT)
+        return await self._backend.row_reader.get(ref, row_id, self.master_or_servant)
+
+    async def read_rows(
+        self, ref: TableReference, row_ids: Iterable[int]
+    ) -> list[np.record | None]:
+        """事务批量读行，语义同 `read_row`；返回与 `row_ids` 顺序一致，不存在为 None"""
+        if self.only_master:
+            rows = await self._master.get_many(ref, row_ids, RowFormat.STRUCT)
+            return cast(list[np.record | None], rows)
+        return await self._backend.row_reader.get_many(
+            ref, row_ids, self.master_or_servant
+        )
 
     async def commit(self) -> None:
         """

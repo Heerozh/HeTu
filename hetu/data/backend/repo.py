@@ -175,10 +175,8 @@ class SessionRepository:
         return await self._fetch_by_id(row_id)
 
     async def _fetch_by_id(self, row_id: int) -> np.record | None:
-        """缓存未命中：查数据库，读到就放进 Session 缓存"""
-        row = await self._session.master_or_servant.get(
-            self.ref, row_id, RowFormat.STRUCT
-        )
+        """Session 缓存未命中：经进程行缓存 / 数据库读取，读到就放进 Session 缓存"""
+        row = await self._session.read_row(self.ref, row_id)
         if row is not None:
             self._session.idmap.add_clean(self.ref, row)
         return row
@@ -363,7 +361,8 @@ class SessionRepository:
                 self._session.idmap.mark_absent(self.ref, index_name, point)
 
         # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
-        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）
+        # 未命中的 id 一次批量读回并放入缓存（N 行 1 次往返，而非逐行 get；
+        # 本 worker 有订阅的行还会命中进程行缓存，见 Session.read_rows）
         idmap = self._session.idmap
         rows: list[np.record | None] = []
         miss_slots: list[int] = []
@@ -377,12 +376,7 @@ class SessionRepository:
             elif row_stat != RowState.DELETE:
                 rows.append(row)
         if miss_ids:
-            fetched = cast(
-                list[np.record | None],
-                await self._session.master_or_servant.get_many(
-                    self.ref, miss_ids, RowFormat.STRUCT
-                ),
-            )
+            fetched = await self._session.read_rows(self.ref, miss_ids)
             # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过
             found = [r for r in fetched if r is not None]
             if found:
