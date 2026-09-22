@@ -406,23 +406,31 @@ class SubscriptionBroker:
         # 先订后读：订阅生效后的读才能进进程行缓存（首次是权威读），
         # 也不会漏掉"读与订之间"的写入
         await self._mq_client.subscribe(channel_name)
-        row = await self._reader.get(table_ref, row_id, servant)
-        # 行不存在，或 caller 对该行无权限：退订（同一连接别的订阅还在用这个频道就留着）
+        # 订阅一生效就同步登记，不能等读完：get_updates 的退订名单按 _channel_subs 定，
+        # 读是真正的 await，期间某个索引订阅把这行放出范围的话，没登记的频道会被它当作
+        # 没人要而退订，这里再登记上去的就是一个永远收不到通知的订阅。
+        # 读的这段时间里到达的通知会由 get_updates 照常推给这个订阅（客户端还没拿到
+        # sub_id 就忽略），无害
+        self._subs[sub_id] = RowSubscription(
+            table_ref, self._reader, servant, ctx, channel_name, row_id
+        )
+        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
+        self._sub_counts[RowSubscription] += 1
+        try:
+            row = await self._reader.get(table_ref, row_id, servant)
+        except BaseException:
+            await self.unsubscribe(sub_id)
+            raise
+        # 行不存在，或 caller 对该行无权限：撤销登记并退订（同一连接别的订阅还在用这个
+        # 频道就留着）
         if row is None or not self._has_row_permission(table_ref, ctx, row):
-            if channel_name not in self._channel_subs:
-                await self._mq_client.unsubscribe(channel_name)
+            await self.unsubscribe(sub_id)
             return None, None
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
                 sub_id=sub_id, channel_name=channel_name
             )
         )
-
-        self._subs[sub_id] = RowSubscription(
-            table_ref, self._reader, servant, ctx, channel_name, row_id
-        )
-        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
-        self._sub_counts[RowSubscription] += 1
         return sub_id, _row_to_dict(comp_cls, row)
 
     async def subscribe_range(

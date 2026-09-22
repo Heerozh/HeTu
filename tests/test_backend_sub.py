@@ -1346,3 +1346,64 @@ async def test_subscribe_get_subscribes_before_read(
             )
     finally:
         await broker.close()
+
+
+async def test_subscribe_get_registers_before_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """subscribe_get 订阅生效后必须先登记再读：读期间 get_updates 的 tick 把这行从某个索引
+    订阅的范围里放出去时，不能把这个刚订上的频道当没人要退掉——否则新订阅登记在一个连接
+    已不再订阅的频道上，之后永远收不到通知"""
+    from unittest.mock import patch
+
+    backend = broker._backend
+    sub_10, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_10
+    row_id = next(int(r["id"]) for r in rows if r["time"] == 110)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+
+    # 行离开 owner=10 的范围：通知进本连接队列，先不 tick
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=row_id)
+        assert row
+        row.owner = 11
+        await repo.update(row)
+
+    # 让 subscribe_get 的那次读卡住，在它卡住期间跑 tick
+    reader = broker._reader
+    real_get = reader.get
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_get(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await real_get(*args, **kwargs)
+
+    with patch.object(reader, "get", slow_get):
+        task = asyncio.create_task(
+            broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+        )
+        async with asyncio.timeout(5):
+            await entered.wait()
+            updates = await broker.get_updates()
+            assert updates[sub_10][row_id] is None  # sub_10 放掉了这行
+            release.set()
+            sub_row, row = await task
+    assert sub_row and row and row["owner"] == 11
+    assert channel in broker._mq_client.subscribed_channels
+    assert broker._channel_subs[channel] == {sub_row}
+
+    # 新订阅真的收得到后续变更
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=row_id)
+        assert row
+        row.qty = 123
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=3)
+    assert updates[sub_row][row_id]["qty"] == 123
