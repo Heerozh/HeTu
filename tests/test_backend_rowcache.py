@@ -191,12 +191,13 @@ def test_notify_rules(mod_item_model):
 def test_put_committed(mod_item_model):
     cache = RowCache()
     ch = "Item:id:1"
-    # 未激活：丢弃
-    assert cache.put_committed(ch, _row(mod_item_model, 1, 1)) is False
-    assert len(cache) == 0
+    # 未激活：提交前取不到凭据，无从写穿
+    assert cache.lease(ch) is None
 
     cache.activate(ch, "hubA")
-    assert cache.put_committed(ch, _row(mod_item_model, 1, 1, qty=1)) is True
+    lease = cache.lease(ch)
+    assert lease is not None
+    assert cache.put_committed(lease, _row(mod_item_model, 1, 1, qty=1)) is True
     assert cache.floor(ch) == 1
     got = cache.get(ch)
     assert got is not None and got.qty == 1
@@ -205,12 +206,19 @@ def test_put_committed(mod_item_model):
     assert cache.get(ch) is not None
     # 别人更高版本的通知先到：低版本的写穿不覆盖
     cache.notify(ch, 5)
-    assert cache.put_committed(ch, _row(mod_item_model, 1, 4)) is False
+    assert cache.put_committed(lease, _row(mod_item_model, 1, 4)) is False
     assert cache.get(ch) is None and cache.floor(ch) == 5
     # 删除后重插：DELETED 也能被写穿
     cache.notify(ch, 0)
-    assert cache.put_committed(ch, _row(mod_item_model, 1, 1)) is True
+    assert cache.put_committed(lease, _row(mod_item_model, 1, 1)) is True
     assert cache.floor(ch) == 1
+
+    # 提交往返期间失活过（最后一个订阅者退订、又有人订回来）：那段时间别人的写入没有
+    # 通知到本进程，提交前取的凭据代次已过期，写穿丢弃，留给下次的权威读
+    cache.deactivate(ch, "hubA")
+    cache.activate(ch, "hubA")
+    assert cache.put_committed(lease, _row(mod_item_model, 1, 2)) is False
+    assert cache.get(ch) is None and cache.floor(ch) is UNKNOWN
 
 
 def test_get_returns_copy_and_lru(mod_item_model):

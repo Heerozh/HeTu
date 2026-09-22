@@ -184,14 +184,14 @@ class RowCache:
             return False
         return self._store(channel, row, authoritative)
 
-    def put_committed(self, channel: str, row: np.record) -> bool:
+    def put_committed(self, lease: Lease, row: np.record) -> bool:
         """
         commit 成功后的写穿：本进程明知该行此刻在 master 上就是这个样子（版本已 +1）。
-        未激活的行直接丢弃；已有更高版本的通知先到则不覆盖。
+        `lease` 要在提交**之前**取：提交往返期间本频道失活过（最后一个订阅者退订、之后
+        又有人订回来）的话，那段时间别的进程写的行本进程没收到通知，此刻写穿的就可能是
+        过时的行，代次对不上直接丢弃，留给下次的权威读。已有更高版本的通知先到则不覆盖。
         """
-        if channel not in self._active:
-            return False
-        return self._store(channel, row, True)
+        return self.fill(lease, row, authoritative=True)
 
     def _store(self, channel: str, row: np.record, authoritative: bool) -> bool:
         version = int(row["_version"])

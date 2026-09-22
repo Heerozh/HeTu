@@ -79,7 +79,8 @@ commit 成功把新行写穿进缓存，同一连接反复读写同一行时只�
   上成本相同，所以不分拓扑一律用脚本。首次填充（floor 未知）与检测到滞后时使用；一行的订阅
   生命周期内通常只发生一次。
 - **commit 写穿**：commit 成功后把本事务 insert / update 的新行（版本 +1）直接放进缓存（仅当
-  该行已激活），floor 同步抬到新版本；自己那条通知到达时版本不高于缓存，不逐出。
+  该行在提交前已激活、且提交往返期间没失活过），floor 同步抬到新版本；自己那条通知到达时
+  版本不高于缓存，不逐出。
 - **易失（`volatile=True`）组件不缓存，`direct_set` 明确不发通知**：`direct_set` 只允许用于易失
   组件且不动 `_version`，别的事务的 VER 检查感知不到它，也就不会因它冲突；文档早已写明它
   "不保证通知一致"（`advanced.md:553`），SQL 后端从来不发。把它定成规则：易失组件的行不进
@@ -219,7 +220,7 @@ class RowCache:
     def replica_floor(self, channel) -> int | None             # 副本读可信才给 floor，否则权威读
     def fill(self, lease, row, *, authoritative: bool) -> bool
     # 写路径（commit）
-    def put_committed(self, channel, row) -> None             # 写穿：激活中才存；floor = row._version
+    def put_committed(self, lease, row) -> bool               # 写穿：凭据提交前取；floor = row._version
     def notify(self, channel, version: int) -> None           # 通知 / RACE 回显：见 §3.1 规则 2
     # hub
     def activate(self, channel, owner) / deactivate(self, channel, owner) / clear(self)
@@ -324,8 +325,10 @@ EVALSHA 多 key 即可，按 `RANGE_PIPELINE_CHUNK` 分块。
 **commit**（`redis/client.py`）：
 
 - 成功：对本事务 insert / update 的行，从 idmap 取类型化整行、`_version` 置为 `_hset_key`
-  算出的新版本，`row_cache.put_committed(channel, row)`；delete 行 `notify(channel, 0)`。
-  写穿只对已激活的行生效（`put_committed` 内部判断），未激活直接丢弃；易失组件的行从不激活。
+  算出的新版本，`row_cache.put_committed(lease, row)`；delete 行 `notify(channel, 0)`。
+  写穿的凭据（`lease`）在提交**之前**取：只对提交前已激活的行生效，且提交往返期间该频道
+  失活过（退订又重订，期间别的进程的写入没通知到本进程）就丢弃，留给下次的权威读；
+  易失组件的行从不激活。
 - `RACE`：`evict` 逐出 `dirties` ∪ `get_clean_rows()` 全部行（保留 floor）；若消息是
   `Version mismatch`，解析出
   key 与 `got:` 版本，对该行 `notify(channel, got)`（`got` 为 nil 即已删除 → 0）——重试时
@@ -434,7 +437,7 @@ tick、只在一个连接内。进程缓存把这两个作用都覆盖了，而�
 `tests/test_backend_rowcache.py`（新，纯单元，无后端）
 
 - `fill` 的三种判定（floor 未知 / 已知 / 已删除 × 权威 / 副本）；版本低于 floor 拒绝；
-  `notify` 的逐出与 floor 单调、0 哨兵、乱序幂等；`put_committed` 只对激活行生效且
+  `notify` 的逐出与 floor 单调、0 哨兵、乱序幂等；`put_committed` 只对凭据代次仍当前的行生效且
   自己的通知不逐出；失活再激活后旧 lease 作废；同频道两个 owner 一个失活不影响另一个；`get`
   返回副本；`clear`；stats。
 

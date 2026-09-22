@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
     from ...component import BaseComponent
     from ..idmap import IdentityMap
-    from ..rowcache import RowCache
+    from ..rowcache import Lease, RowCache
     from ..table import TableReference
     from .maint import RedisTableMaintenance
     from .mq import PubSubHub, RedisMQClient
@@ -1029,6 +1029,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
 
+        # 写穿的凭据必须在提交之前取：提交往返期间某个行频道失活过（最后一个订阅者退订、
+        # 之后又有人订回来），那段时间别的进程写的行本进程收不到通知，提交回来时写穿的
+        # 就可能是过时的行；代次变了 put_committed 会丢弃它
+        cache = self.row_cache
+        leases = self._write_through_leases(cache, row_pubs)
+
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
         assert self.lua_commit is not None, _(
             "lua_commit脚本没有初始化，请先调用 post_configure"
@@ -1036,10 +1042,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         resp = await self.lua_commit(keys, [payload_json])
         resp = resp.decode("utf-8")  # type: ignore
 
-        cache = self.row_cache
         if resp == "committed":
             if cache is not None:
-                self._write_through(cache, idmap, row_pubs)
+                self._write_through(cache, idmap, row_pubs, leases)
             return
         if resp.startswith("RACE"):
             if cache is not None:
@@ -1051,16 +1056,35 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
 
+    def _write_through_leases(
+        self,
+        cache: RowCache | None,
+        row_pubs: list[tuple[TableReference, str, int]],
+    ) -> dict[str, Lease]:
+        """提交前给要写穿的行频道各取一张填充凭据（激活中的才有），见 `commit` 的注释"""
+        leases: dict[str, Lease] = {}
+        if cache is None:
+            return leases
+        for ref, row_id, version in row_pubs:
+            if version == 0 or ref.comp_cls.volatile_:
+                continue  # 删除走 notify，易失组件不缓存
+            channel = self.row_channel(ref, int(row_id))
+            lease = cache.lease(channel)
+            if lease is not None:
+                leases[channel] = lease
+        return leases
+
     def _write_through(
         self,
         cache: RowCache,
         idmap: IdentityMap,
         row_pubs: list[tuple[TableReference, str, int]],
+        leases: dict[str, Lease],
     ) -> None:
         """
         commit 成功：本进程明知每个写入行此刻在 master 上的样子（idmap 里的整行 + 新版本），
-        直接写穿进行缓存，不必等副本的通知；删除的行按删除通知处理。只对激活（有人订阅）的
-        非易失组件的行生效。
+        直接写穿进行缓存，不必等副本的通知；删除的行按删除通知处理。只对提交前就激活
+        （有人订阅）、且提交期间没失活过的非易失组件的行生效。
         """
         for ref, row_id, version in row_pubs:
             if ref.comp_cls.volatile_:
@@ -1069,13 +1093,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
             if version == 0:
                 cache.notify(channel, 0)
                 continue
-            if not cache.is_active(channel):
-                continue  # 没人订：省掉一次 idmap 查找
-            row, _ = idmap.get(ref, int(row_id))  # 已是副本
+            lease = leases.get(channel)
+            if lease is None:
+                continue  # 提交前没人订：省掉一次 idmap 查找
+            row, _state = idmap.get(ref, int(row_id))  # 已是副本
             if row is None:
                 continue
             row["_version"] = version
-            cache.put_committed(channel, row)
+            cache.put_committed(lease, row)
 
     _VERSION_MISMATCH = re.compile(r"RACE: Version mismatch (\S+) exp:\S+ got:(\S+)")
 
