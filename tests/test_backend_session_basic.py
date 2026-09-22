@@ -1332,21 +1332,26 @@ async def test_row_cache_range_partial_hit(filled_item_ref, mod_auto_backend):
         cache.activate(ch, "test")
         cache.notify(ch, int(version))
 
-    with ExitStack() as stack:
-        counts = count_reads(stack, backend)
-        # 预热：10 行一次副本批读（7 行版本不低于 floor → 入缓存，3 行未激活不入）
-        async with backend.session("pytest", 1) as session:
-            got = await session.using(comp).range(time=(113, 122), limit=10)
-        assert [int(i) for i in got.id] == ids
-        assert counts() == {"plain": 1, "authoritative": 0}
-        # 命中：只剩 3 行未激活的一次批读
-        async with backend.session("pytest", 1) as session:
-            got = await session.using(comp).range(time=(113, 122), limit=10)
-        assert [int(i) for i in got.id] == ids
-        assert list(got.time) == sorted(got.time)
-        assert counts() == {"plain": 2, "authoritative": 0}
-    for row_id in ids[:7]:
-        cache.deactivate(backend.master.row_channel(filled_item_ref, row_id), "test")
+    try:
+        with ExitStack() as stack:
+            counts = count_reads(stack, backend)
+            # 预热：10 行一次副本批读（7 行版本不低于 floor → 入缓存，3 行未激活不入）
+            async with backend.session("pytest", 1) as session:
+                got = await session.using(comp).range(time=(113, 122), limit=10)
+            assert [int(i) for i in got.id] == ids
+            assert counts() == {"plain": 1, "authoritative": 0}
+            # 命中：只剩 3 行未激活的一次批读
+            async with backend.session("pytest", 1) as session:
+                got = await session.using(comp).range(time=(113, 122), limit=10)
+            assert [int(i) for i in got.id] == ids
+            assert list(got.time) == sorted(got.time)
+            assert counts() == {"plain": 2, "authoritative": 0}
+    finally:
+        # 断言失败也要收干净：backend 是模块级的，留着激活状态会带歪后面的行缓存测试
+        for row_id in ids[:7]:
+            cache.deactivate(
+                backend.master.row_channel(filled_item_ref, row_id), "test"
+            )
 
 
 async def test_row_cache_stale_replica_goes_authoritative(
