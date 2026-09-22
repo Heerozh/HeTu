@@ -69,7 +69,7 @@ HeadlessClient(
 无服务器进程的表直读写客户端，用 `connect()` 创建。
 
 - `table(comp)` → 现有 [`Table`](system.md#table)：非事务读走 `servant_get` / `servant_range` /
-  `servant_get_many`（`direct_set` 不保证通知一致，请勿使用）。
+  `servant_get_many`（`direct_set` 绕过事务、也不发通知，请勿使用）。
 - `session(*comps)` → [`HeadlessSession`](headless.md#headlesssession)：``s[Comp]`` 即现有 [`SessionRepository`](system.md#sessionrepository)，
   退出 ``async with`` 即 commit，提交路径与 System 完全相同。
 - 不发雪花号：`insert` 的行 id 必须非零，`upsert` 只在锚定 ``id=<显式值>`` 时允许新建。
