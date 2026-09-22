@@ -383,15 +383,26 @@ class BackendClient:
     ) -> np.record | None:
         """
         权威读：保证在主节点上执行的单行读取（`RowFormat.STRUCT`），只能在 master 客户端上调用。
-        worker 行缓存在 floor 未知或识破副本滞后时用它。默认实现退化为 `get`；
+        worker 行缓存识破副本滞后时用它。默认实现退化为 `get`；
         有读写分离代理的后端要用脚本之类一定被送到主节点的方式覆盖它。
+
+        Authoritative read: a single-row read (`RowFormat.STRUCT`) guaranteed to run on
+        the master, callable only on the master client. The worker row cache uses it
+        when it catches a replica lagging behind. The default implementation falls back
+        to `get`; backends that may sit behind a read/write-splitting proxy override it
+        with something the proxy always routes to the master, such as a script.
         """
         return await self.get(table_ref, row_id, RowFormat.STRUCT)
 
     async def get_many_authoritative(
         self, table_ref: TableReference, row_ids: Iterable[int]
     ) -> list[np.record | None]:
-        """批量权威读，语义同 `get_authoritative`；返回与 `row_ids` 顺序一一对应"""
+        """
+        批量权威读，语义同 `get_authoritative`；返回与 `row_ids` 顺序一一对应。
+
+        Authoritative batch read; same semantics as `get_authoritative`. The result
+        keeps the order of `row_ids`.
+        """
         rows = await self.get_many(table_ref, row_ids, RowFormat.STRUCT)
         return cast(list[np.record | None], rows)
 

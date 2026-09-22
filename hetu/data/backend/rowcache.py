@@ -90,6 +90,14 @@ class RowCache:
       删除通知还把该频道标成"只信权威读"，直到本次激活结束。
     - `fill` / `put_committed`：读路径填充 / commit 写穿；都受 floor 约束。
     - 所有方法都是同步的纯 dict 操作，可以在 hub 的监听协程里直接调用。
+
+    Process-wide cache of the rows this worker's clients subscribe to, keyed by row
+    channel (the Redis row key). A row is only cacheable while some hub reports its
+    SUBSCRIBE as acked (`activate`), so every later change arrives as a versioned
+    notification (`notify`) that evicts it. Each channel keeps a version floor — the
+    highest version this process knows about — and `fill` / `put_committed` refuse
+    anything below it. Every method is a plain synchronous dict operation, safe to
+    call from a hub's listener coroutine.
     """
 
     def __init__(self, max_rows: int = 200_000):
@@ -272,6 +280,16 @@ class CachedRowReader:
     floor（确实滞后），以及频道见过删除通知（同 id 重插后副本上可能还是删除前的旧行）。
     权威读固定走 `backend.master.get_authoritative`（master 上执行的 Lua HGETALL，代理模式下
     唯一一定被送到主节点的读）。返回的都是缓存外的独立 record，调用方可随意改。
+
+    The single read path shared by transactions and subscription refreshes. A cache hit
+    returns straight away; a row known to be deleted returns None without any round
+    trip; everything else reads `fallback` — the client used for replica reads
+    (`session.master_or_servant` for transactions, `backend.servant` for
+    subscriptions) — and is cached only if it is new enough. Only two cases escalate to
+    an authoritative read on the master: the replica came back below the version floor
+    (it is lagging), and the channel has seen a delete notification (after a same-id
+    reinsert the replica may still hold the pre-delete row). Returned records are
+    copies outside the cache, so callers may modify them freely.
     """
 
     def __init__(self, backend: Any):

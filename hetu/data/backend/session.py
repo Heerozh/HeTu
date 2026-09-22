@@ -98,6 +98,12 @@ class Session(AbstractAsyncContextManager):
         事务读单行：`only_master` 直读 master；否则走 `backend.row_reader`——本 worker
         有客户端订阅着的行命中进程缓存（0 往返），miss 时读 `master_or_servant`，
         副本滞后则改权威读。见 `hetu.data.backend.rowcache`。
+
+        Read one row inside the transaction. With `only_master` it goes straight to the
+        master; otherwise it goes through `backend.row_reader`: rows this worker's
+        clients subscribe to may be served from the process cache with no round trip,
+        a miss reads `master_or_servant`, and a lagging replica escalates to an
+        authoritative read. See `hetu.data.backend.rowcache`.
         """
         if self.only_master:
             return await self._master.get(ref, row_id, RowFormat.STRUCT)
@@ -106,7 +112,12 @@ class Session(AbstractAsyncContextManager):
     async def read_rows(
         self, ref: TableReference, row_ids: Iterable[int]
     ) -> list[np.record | None]:
-        """事务批量读行，语义同 `read_row`；返回与 `row_ids` 顺序一致，不存在为 None"""
+        """
+        事务批量读行，语义同 `read_row`；返回与 `row_ids` 顺序一致，不存在为 None。
+
+        Read several rows in one go; same semantics as `read_row`. The result keeps the
+        order of `row_ids`, with None for rows that do not exist.
+        """
         if self.only_master:
             rows = await self._master.get_many(ref, row_ids, RowFormat.STRUCT)
             return cast(list[np.record | None], rows)

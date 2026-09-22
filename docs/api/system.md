@@ -686,7 +686,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:453`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L453)</small>
+<small>Source: [`hetu/data/backend/base.py:464`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L464)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -748,7 +748,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:525`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L525)</small>
+<small>Source: [`hetu/data/backend/base.py:536`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L536)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
