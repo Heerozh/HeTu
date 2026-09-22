@@ -190,6 +190,8 @@ class BackendClient:
     # 后端是否参与 worker 行缓存（`hetu.data.backend.rowcache`）：需要 commit 发带版本号的
     # 行通知、通知接收器把它交给缓存、以及 `get_authoritative` 真的到主节点
     SUPPORTS_ROW_CACHE: ClassVar[bool] = False
+    # 本进程的行缓存，由 Backend 在建好客户端后挂上；None 表示不缓存
+    row_cache: RowCache | None = None
 
     def index_channel(self, table_ref: TableReference, index_name: str):
         """
@@ -263,8 +265,7 @@ class BackendClient:
         """
         self.endpoint = endpoint
         self.is_servant = is_servant
-        # 本进程的行缓存，由 Backend 在建好客户端后挂上；None 表示不缓存
-        self.row_cache: RowCache | None = None
+        self.row_cache = None
 
     async def close(self):
         """关闭数据库连接，释放资源。"""

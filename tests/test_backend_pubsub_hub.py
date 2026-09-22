@@ -236,9 +236,14 @@ async def _wait_until(pred, timeout: float = 3.0):
             await asyncio.sleep(0.01)
 
 
-async def test_row_cache_activation(filled_item_ref, mod_auto_backend):
+async def test_row_cache_activation(
+    filled_item_ref, mod_auto_backend, mod_backend_config
+):
     """行频道在 SUBSCRIBE ack 后于 RowCache 激活（floor 未知），索引 / 值 / 表级频道不激活；
-    通知带版本：逐出缓存行并抬 floor；两个 broker 退一个仍激活，最后一个退订才失活清行"""
+    别的进程写入的通知带版本：逐出缓存行并抬 floor；本进程写入则写穿；
+    两个 broker 退一个仍激活，最后一个退订才失活清行"""
+    import copy
+
     from hetu.data.backend.rowcache import UNKNOWN
     from hetu.data.sub import IndexSubscription, TableSubscription
 
@@ -268,15 +273,28 @@ async def test_row_cache_activation(filled_item_ref, mod_auto_backend):
     tbl_sub = cast(TableSubscription, broker_a._subs[sub_t])
     assert not cache.is_active(tbl_sub.table_channel)
 
-    # 填充后别的 session 改行：通知逐出缓存行，floor 抬到新版本
+    # 填充后别的进程（另一个 Backend）改行：通知逐出缓存行，floor 抬到新版本
     row_id = int(row["id"])
     rec = await backend.row_reader.get(filled_item_ref, row_id, backend.servant)
     assert rec is not None and cache.get(channel) is not None
     old_version = int(rec["_version"])
-    await _update_qty(backend, filled_item_ref, 995)
+    other = Backend(copy.deepcopy(mod_backend_config))
+    other.post_configure(components=[filled_item_ref.comp_cls])
+    try:
+        await _update_qty(other, filled_item_ref, 995)
+    finally:
+        await other.close()
     await _wait_until(lambda: cache.get(channel) is None)
     assert cache.floor(channel) == old_version + 1
     await _get_updates(broker_a)  # 消费掉通知
+
+    # 本进程自己改行：commit 写穿，通知到达后仍在
+    await _update_qty(backend, filled_item_ref, 996)
+    cached = cache.get(channel)
+    assert cached is not None and cached.qty == 996
+    assert int(cached["_version"]) == old_version + 2
+    await _get_updates(broker_a)
+    assert cache.get(channel) is not None
 
     # 两个 broker 订同一行：退一个仍激活；最后一个退订才失活并清行
     broker_b = SubscriptionBroker(backend)

@@ -1389,7 +1389,9 @@ async def test_row_cache_stale_replica_goes_authoritative(
             assert row is not None
             row.qty = 123
             await repo.update(row)
-        # 通知只发给有订阅的频道；这里手动激活的没有 hub 订阅，直接模拟通知
+        # 本进程自己的 commit 会写穿新行；这里要模拟的是"别的 worker 写的、通知已到"：
+        # 逐出后再送一条带新版本的通知
+        cache.evict(channel)
         cache.notify(channel, old_version + 1)
         assert cache.get(channel) is None and cache.floor(channel) == old_version + 1
 
@@ -1514,8 +1516,10 @@ async def test_row_cache_disabled(
 
     from hetu.data.sub import SubscriptionBroker
 
+    import copy
+
     comp = filled_item_ref.comp_cls
-    backend2 = Backend({**mod_backend_config, "row_cache": False})
+    backend2 = Backend({**copy.deepcopy(mod_backend_config), "row_cache": False})
     backend2.post_configure(components=[comp])
     try:
         assert backend2.row_cache is None
@@ -1544,3 +1548,91 @@ async def test_row_cache_disabled(
             await broker.close()
     finally:
         await backend2.close()
+
+
+async def test_row_cache_write_through(
+    filled_item_ref, filled_rls_ref, mod_auto_backend
+):
+    """commit 成功把新行写穿进缓存：同一连接读-改-写后，下一个事务 0 次远程读到新值；
+    自己那条通知到达后缓存仍在；insert 的行同样写穿；易失组件不写穿"""
+    from contextlib import ExitStack
+
+    from hetu.data.sub import SubscriptionBroker
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=116)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+    broker = SubscriptionBroker(backend)
+    sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+    assert sub
+    try:
+        with ExitStack() as stack:
+            counts = _count_reads(stack, backend)
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                assert row is not None
+                old_version = int(row["_version"])
+                row.qty = 42
+                await repo.update(row)
+            cached = cache.get(channel)
+            assert cached is not None and cached.qty == 42
+            assert int(cached["_version"]) == old_version + 1
+            assert cache.floor(channel) == old_version + 1
+
+            async with backend.session("pytest", 1) as session:
+                got = await session.using(comp).get(id=row_id)
+            assert got is not None and got.qty == 42
+            assert counts() == {"plain": 0, "authoritative": 1}
+
+            # 自己那条通知（版本相等）到达后不逐出
+            await backend.wait_for_synced()
+            updates = None
+            async with asyncio.timeout(3):
+                updates = await broker.get_updates()
+            assert updates[sub][row_id]["qty"] == 42
+            assert cache.get(channel) is not None
+            assert cache.floor(channel) == old_version + 1
+
+        # insert：id 在 new_row 时就定了，先激活再插入 → 写穿版本 1
+        new_row = comp.new_row()
+        new_row.name, new_row.time, new_row.owner = "WT", 999, 10
+        new_channel = backend.master.row_channel(filled_item_ref, int(new_row.id))
+        cache.activate(new_channel, "test")
+        try:
+            async with backend.session("pytest", 1) as session:
+                await session.using(comp).insert(new_row)
+            cached = cache.get(new_channel)
+            assert cached is not None and cached.name == "WT"
+            assert int(cached["_version"]) == 1
+            with ExitStack() as stack:
+                counts = _count_reads(stack, backend)
+                async with backend.session("pytest", 1) as session:
+                    got = await session.using(comp).get(id=int(new_row.id))
+                assert got is not None and got.name == "WT"
+                assert counts() == {"plain": 0, "authoritative": 0}
+        finally:
+            cache.deactivate(new_channel, "test")
+
+        # 易失组件：激活了也不写穿
+        vcomp = filled_rls_ref.comp_cls
+        vid = await _first_row_id(backend, vcomp, owner=10)
+        vchannel = backend.master.row_channel(filled_rls_ref, vid)
+        cache.activate(vchannel, "test")
+        try:
+            async with backend.session("pytest", 1) as session:
+                session.only_master = True
+                vrepo = session.using(vcomp)
+                vrow = await vrepo.get(id=vid)
+                assert vrow is not None
+                vrow.friend = 3
+                await vrepo.update(vrow)
+            assert cache.get(vchannel) is None
+        finally:
+            cache.deactivate(vchannel, "test")
+    finally:
+        await broker.close()

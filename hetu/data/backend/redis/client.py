@@ -9,6 +9,7 @@ import asyncio
 import itertools
 import logging
 import random
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
 
     from ...component import BaseComponent
     from ..idmap import IdentityMap
+    from ..rowcache import RowCache
     from ..table import TableReference
     from .maint import RedisTableMaintenance
     from .mq import PubSubHub, RedisMQClient
@@ -935,9 +937,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
         publishes: list[list[str | bytes]] = []
         value_pubs: dict[str, list[str]] = {}
-        # 行频道通知：每行一条，payload 是新 _version（删除为 0）。行订阅与 worker 行缓存靠它，
-        # keyspace 事件不带内容，缓存无法判断一次副本读是否至少和通知一样新
-        row_pubs: list[tuple[str, int]] = []
+        # 行频道通知：每行一条 (ref, row_id, 新 _version)，删除为 0。行订阅与 worker 行缓存靠它，
+        # keyspace 事件不带内容，缓存无法判断一次副本读是否至少和通知一样新；
+        # commit 成功后还据此把新行写穿进缓存
+        row_pubs: list[tuple[TableReference, str, int]] = []
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -967,7 +970,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     row_id,
                     "insert",
                 )
-                row_pubs.append((key, _hset_key(key, 0, insert)))
+                row_pubs.append((ref, row_id, _hset_key(key, 0, insert)))
                 _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
                 touched_ids.append(row_id)
             # update
@@ -986,7 +989,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     row_id,
                     "update",
                 )
-                row_pubs.append((key, _hset_key(key, old_version, new_row)))
+                row_pubs.append((ref, row_id, _hset_key(key, old_version, new_row)))
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
                 _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
                 touched_ids.append(row_id)
@@ -999,7 +1002,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _version_must_match(key, old_version)
                 _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
                 _del_key(key)
-                row_pubs.append((key, 0))
+                row_pubs.append((ref, str(delete["id"]), 0))
                 touched_ids.append(str(delete["id"]))
             if touched_ids:
                 publishes.append(
@@ -1007,9 +1010,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 )
         for channel, ids in value_pubs.items():
             publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
-        for key, version in row_pubs:
-            # 行频道名就是行 key（row_channel），不必再算一遍
-            publishes.append([key, msg_packer.pack(version)])  # type: ignore
+        for ref, row_id, version in row_pubs:
+            publishes.append(
+                [self.row_channel(ref, int(row_id)), msg_packer.pack(version)]  # type: ignore
+            )
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -1032,14 +1036,67 @@ class RedisBackendClient(BackendClient, alias="redis"):
         resp = await self.lua_commit(keys, [payload_json])
         resp = resp.decode("utf-8")  # type: ignore
 
-        if resp != "committed":
-            if resp.startswith("RACE"):
-                raise RaceCondition(resp)
-            elif resp.startswith("UNIQUE"):
-                # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
-                raise UniqueViolation(resp)
-            else:
-                raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
+        cache = self.row_cache
+        if resp == "committed":
+            if cache is not None:
+                self._write_through(cache, idmap, row_pubs)
+            return
+        if resp.startswith("RACE"):
+            if cache is not None:
+                self._evict_on_race(cache, idmap, dirties, resp)
+            raise RaceCondition(resp)
+        elif resp.startswith("UNIQUE"):
+            # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
+            raise UniqueViolation(resp)
+        else:
+            raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
+
+    def _write_through(
+        self,
+        cache: RowCache,
+        idmap: IdentityMap,
+        row_pubs: list[tuple[TableReference, str, int]],
+    ) -> None:
+        """
+        commit 成功：本进程明知每个写入行此刻在 master 上的样子（idmap 里的整行 + 新版本），
+        直接写穿进行缓存，不必等副本的通知；删除的行按删除通知处理。只对激活（有人订阅）的
+        非易失组件的行生效。
+        """
+        for ref, row_id, version in row_pubs:
+            if ref.comp_cls.volatile_:
+                continue
+            channel = self.row_channel(ref, int(row_id))
+            if version == 0:
+                cache.notify(channel, 0)
+                continue
+            if not cache.is_active(channel):
+                continue  # 没人订：省掉一次 idmap 查找
+            row, _ = idmap.get(ref, int(row_id))  # 已是副本
+            if row is None:
+                continue
+            row["_version"] = version
+            cache.put_committed(channel, row)
+
+    _VERSION_MISMATCH = re.compile(r"RACE: Version mismatch (\S+) exp:\S+ got:(\S+)")
+
+    def _evict_on_race(
+        self, cache: RowCache, idmap: IdentityMap, dirties: dict, resp: str
+    ) -> None:
+        """
+        commit 因竞态失败：本事务碰过的行（脏行 + 纯读行）全部逐出，重试不再吃到同一份旧数据；
+        Lua 回显了冲突行在 master 上的当前版本（`got:`）时把它的 floor 抬上去，重试必走权威读。
+        """
+        for ref, (inserts, (old_rows, _), deletes) in dirties.items():
+            for row in itertools.chain(inserts, old_rows, deletes):
+                cache.evict(self.row_channel(ref, int(row["id"])))
+        for ref, row_versions in idmap.get_clean_rows().items():
+            for row_id in row_versions:
+                cache.evict(self.row_channel(ref, row_id))
+        match = self._VERSION_MISMATCH.match(resp)
+        if match is not None:
+            key, got = match.group(1), match.group(2)
+            # 行 key 就是行频道；HGET 不到（行已删）时 Lua 回显 false
+            cache.notify(key, int(got) if got.isdigit() else 0)
 
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str

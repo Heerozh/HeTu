@@ -337,3 +337,87 @@ async def test_retry_generator(item_ref, mod_auto_backend):
 
     print("test_retry_generator retry:", retry)
     assert retry > 4  # 应该有重试发生
+
+
+async def test_row_cache_race_bumps_floor(item_ref, mod_auto_backend):
+    """commit 因 VER 失败：本事务碰过的行全部逐出，冲突行的 floor 抬到 Lua 回显的 master 当前
+    版本，重试时必走权威读并成功"""
+    from contextlib import ExitStack
+    from unittest.mock import patch
+
+    from hetu.data.backend import RaceCondition
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "race", 1
+        await s.using(comp).insert(r)
+        r2 = comp.new_row()
+        r2.name, r2.time = "clean", 2
+        await s.using(comp).insert(r2)
+    await backend.wait_for_synced()
+    race_id, clean_id = int(r.id), int(r2.id)
+    race_channel = backend.master.row_channel(item_ref, race_id)
+    clean_channel = backend.master.row_channel(item_ref, clean_id)
+    cache.activate(race_channel, "test")
+    cache.activate(clean_channel, "test")
+    try:
+        # 预热两行
+        async with backend.session("pytest", 1) as s:
+            stale = await s.using(comp).get(id=race_id)
+            assert stale is not None
+            assert await s.using(comp).get(id=clean_id) is not None
+        assert cache.get(race_channel) is not None
+        assert cache.get(clean_channel) is not None
+        floor_before = cache.floor(race_channel)
+        assert isinstance(floor_before, int)
+
+        with pytest.raises(RaceCondition, match="Version"):
+            async with backend.session("pytest", 1) as s:
+                row = await s.using(comp).get(id=race_id)  # 命中缓存
+                assert row is not None
+                assert await s.using(comp).get(id=clean_id) is not None  # 纯读行
+                # 并发：另一事务先改了同一行
+                async with backend.session("pytest", 1) as s2:
+                    s2.only_master = True
+                    other = await s2.using(comp).get(id=race_id)
+                    assert other is not None
+                    other.time = 5
+                    await s2.using(comp).update(other)
+                row.time = 6
+                await s.using(comp).update(row)
+        # 冲突行：逐出 + floor = master 当前版本；纯读行也逐出但 floor 不动
+        assert cache.get(race_channel) is None
+        assert cache.floor(race_channel) == floor_before + 1
+        assert cache.get(clean_channel) is None
+
+        # 重试：副本还是旧行（模拟滞后）也能识破——版本低于 floor → 权威读拿到新值并成功提交
+        async def stale_get(*args, **kwargs):
+            return stale.copy()
+
+        with ExitStack() as stack:
+            for client in [backend.master, *backend._servants]:
+                stack.enter_context(patch.object(client, "get", side_effect=stale_get))
+            auth_mock = stack.enter_context(
+                patch.object(
+                    backend.master,
+                    "get_many_authoritative",
+                    wraps=backend.master.get_many_authoritative,
+                )
+            )
+            async for attempt in backend.session("pytest", 1).retry(3):
+                async with attempt as s:
+                    row = await s.using(comp).get(id=race_id)
+                    assert row is not None and row.time == 5
+                    row.time = 6
+                    await s.using(comp).update(row)
+            assert auth_mock.call_count >= 1
+        cached = cache.get(race_channel)
+        assert cached is not None and cached.time == 6
+    finally:
+        cache.deactivate(race_channel, "test")
+        cache.deactivate(clean_channel, "test")
