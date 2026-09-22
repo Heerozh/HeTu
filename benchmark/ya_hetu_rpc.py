@@ -111,17 +111,22 @@ async def benchmark_get2_update2(connection):
 """
 cd benchmark/
 
-export REDIS_URL='redis://:@localhost:6379/0'
+export REDIS_URL='redis://:@localhost:6379/0?protocol=2'
 uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
 
-export HETU_HOST=ws://localhost:2466/hetu
+export HETU_HOST=ws://localhost:2466/hetu/bench
 
-# 启动 200 个并发用户
+# 启动 1200 个并发用户
 
-uv run ya ya_hetu_rpc.py -n 1800 -t 2
+uv run ya ya_hetu_rpc.py -n 1200 -t 0.5
 
 # 测试ttl
 
 uv run ya ya_hetu_rpc.py -n 1 -p 1 -t 2
+
+Windows:
+redis-server.exe
+redis-cli.exe config set protected-mode no
+uv run hetu start --app-file=./server/app.py --db="redis://:@172.29.0.1:6379/0" --namespace=bench --instance=bench --workers=40
 
 """
