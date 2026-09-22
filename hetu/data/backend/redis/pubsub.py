@@ -14,7 +14,7 @@ from functools import partial
 
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
-from redis.asyncio.connection import ConnectionPool
+from redis.asyncio.connection import Connection, ConnectionPool
 from redis.cluster import LoadBalancingStrategy
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import SlotNotCoveredError
@@ -26,6 +26,24 @@ UNSUBSCRIBE_ACK_TIMEOUT = 5.0
 # 节点失效后重新订阅的退避区间
 RESUBSCRIBE_BACKOFF_MIN = 0.5
 RESUBSCRIBE_BACKOFF_MAX = 5.0
+
+
+def _pubsub_pool(connection_class: type, connection_kwargs: dict) -> ConnectionPool:
+    """
+    只给 pubsub 用的小池。pubsub 连接常驻且只读不写：应用层没有任何往返，半开的 TCP
+    连接（NAT 超时、对端主机冻结，没有 FIN/RST）会让监听协程永远阻塞在读上，通知静默丢失，
+    行缓存里的行也就无从失效。redis-py 的 PubSub 自己不会周期 PING（health_check_interval
+    只在每次准备读之前检查一次，listen() 阻塞期间根本回不到那里），所以靠 TCP keepalive
+    让内核把半开连接判死：redis-py >= 8 默认开（idle 30s / interval 5s / 3 probes），这里
+    显式打开，不依赖版本默认值；URL 里明确配了 socket_keepalive 的仍按配置来。
+    unix socket 连接没有这个参数（也没有半开的问题）。
+    """
+    kwargs = dict(connection_kwargs)
+    if issubclass(connection_class, Connection):
+        kwargs.setdefault("socket_keepalive", True)
+    return ConnectionPool(
+        connection_class=connection_class, max_connections=2, **kwargs
+    )
 
 
 class AsyncKeyspacePubSub:
@@ -129,11 +147,7 @@ class AsyncKeyspacePubSub:
         # main_client 那个有上限的读写连接池。照抄它的连接参数（含 ssl/unix socket 的
         # connection_class）另开一个只给 pubsub 用的小池
         main_pool = self.main_client.connection_pool
-        pool = ConnectionPool(
-            connection_class=main_pool.connection_class,
-            max_connections=2,
-            **main_pool.connection_kwargs,
-        )
+        pool = _pubsub_pool(main_pool.connection_class, main_pool.connection_kwargs)
         r_client = Redis.from_pool(pool)
         pubsub = r_client.pubsub()
         self.node_resources["standalone"] = {
@@ -155,11 +169,7 @@ class AsyncKeyspacePubSub:
         # redis-py 8.1 起还塞了 himport_registry 这类内部对象），不能直接喂给 Redis(...)，
         # 会 TypeError；照 ClusterNode 自己建连接的方式，用它的 connection_class +
         # connection_kwargs 另开一个只给 pubsub 用的小池（与 standalone_connect 同款）
-        pool = ConnectionPool(
-            connection_class=node.connection_class,
-            max_connections=2,
-            **node.connection_kwargs,
-        )
+        pool = _pubsub_pool(node.connection_class, node.connection_kwargs)
         r_client = Redis.from_pool(pool)
         pubsub = r_client.pubsub()
 
