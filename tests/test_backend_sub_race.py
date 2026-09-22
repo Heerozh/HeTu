@@ -28,7 +28,7 @@ class FakeSub(BaseSubscription):
         self.updates: dict[int, dict[str, Any] | None] = {}
 
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self, channel: str, payload: set[str] | None = None, prefetched=None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         self.entered.set()
         await self.gate.wait()
@@ -45,7 +45,8 @@ def make_broker() -> tuple[SubscriptionBroker, RedisMQClient, FakeNodePubSub]:
     hub, node = make_hub()
     mq = RedisMQClient(hub)
     mq.UPDATE_FREQUENCY = 1000  # type: ignore[reportAttributeAccessIssue]  通知入队后马上能取走
-    backend = SimpleNamespace(get_mq_client=lambda: mq, servant=None)
+    # row_reader：真 Backend 上是 CachedRowReader；这里没有缓存也没有读，给个 None 占位即可
+    backend = SimpleNamespace(get_mq_client=lambda: mq, servant=None, row_reader=None)
     broker = SubscriptionBroker(cast(Backend, backend))
     return broker, mq, node
 

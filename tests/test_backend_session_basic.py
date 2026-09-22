@@ -1288,11 +1288,14 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
     channel = backend.master.row_channel(filled_item_ref, row_id)
 
     broker = SubscriptionBroker(backend)
-    sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
-    assert sub
     try:
         with ExitStack() as stack:
             counts = _count_reads(stack, backend)
+            # subscribe_get 先订后读：那次权威读就是缓存的首次填充
+            sub, _ = await broker.subscribe_get(
+                filled_item_ref, _admin_ctx(), "id", row_id
+            )
+            assert sub
             async with backend.session("pytest", 1) as session:
                 got = await session.using(comp).get(id=row_id)
             assert got is not None and got.time == 110
@@ -1567,11 +1570,14 @@ async def test_row_cache_write_through(
     row_id = await _first_row_id(backend, comp, time=116)
     channel = backend.master.row_channel(filled_item_ref, row_id)
     broker = SubscriptionBroker(backend)
-    sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
-    assert sub
     try:
         with ExitStack() as stack:
             counts = _count_reads(stack, backend)
+            # subscribe_get 先订后读：那次权威读就是缓存的首次填充，之后的 get 命中
+            sub, _ = await broker.subscribe_get(
+                filled_item_ref, _admin_ctx(), "id", row_id
+            )
+            assert sub
             async with backend.session("pytest", 1) as session:
                 repo = session.using(comp)
                 row = await repo.get(id=row_id)
