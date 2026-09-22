@@ -78,10 +78,12 @@ async def test_plain_transaction_read_never_touches_master(lb_backend, filled_it
 @use_redis_family_backend_only
 async def test_subscribe_and_read_budget(lb_backend, filled_item_ref):
     """
-    订阅一行再读它的 master 读预算：
-    - `subscribe_get` 本身：1 次权威读（floor 未知的首次填充，spec 允许）
-    - 之后的事务读：0（缓存命中）
-    - 同一行被同 worker 的第二个连接再订：0（已在缓存里）
+    订阅一行再读它：全程不该碰 master。
+
+    行刚订上时本进程对它一无所知（floor 未知），这种读没法靠版本校验判断副本够不够新，
+    但也没有任何理由去问 master——读副本、不入缓存即可，语义与没有缓存时完全一样。
+    缓存靠两条路填：本进程 commit 的写穿、以及收到第一条通知（floor 变成整数）之后的
+    副本读。权威读只留给"副本确实滞后"那一种情况。
     """
     comp = filled_item_ref.comp_cls
     row_id = await _row_id(lb_backend, comp, time=121)
@@ -95,22 +97,25 @@ async def test_subscribe_and_read_budget(lb_backend, filled_item_ref):
             )
             assert sub
             got = counts()
-            assert (got["master"], got["master_authoritative"]) == (0, 1), (
-                f"订阅时只允许一次权威读（首次填充）：{got}"
+            assert (got["master"], got["master_authoritative"]) == (0, 0), (
+                f"订阅时的那次读该走副本：{got}"
             )
 
             async with lb_backend.session("pytest", 1) as session:
                 assert await session.using(comp).get(id=row_id)
-            assert counts()["master_authoritative"] == 1, "缓存命中，不该再读 master"
+            got = counts()
+            assert (got["master"], got["master_authoritative"]) == (0, 0), (
+                f"刚订上、还没变更过的行，事务读也该走副本：{got}"
+            )
 
             sub2, _ = await broker2.subscribe_get(
                 filled_item_ref, _admin_ctx(), "id", row_id
             )
             assert sub2
-            assert counts()["master_authoritative"] == 1, (
-                "同一行的第二个订阅者应命中缓存"
+            got = counts()
+            assert (got["master"], got["master_authoritative"]) == (0, 0), (
+                f"第二个订阅者同样不该碰 master：{got}"
             )
-            assert counts()["master"] == 0
     finally:
         await broker.close()
         await broker2.close()
