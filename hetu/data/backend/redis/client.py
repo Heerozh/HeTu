@@ -1118,7 +1118,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         commit 因竞态失败：本事务碰过的行（脏行 + 纯读行）全部逐出，重试不再吃到同一份旧数据；
         Lua 回显了冲突行在 master 上的当前版本（`got:`）时把它的 floor 抬上去，重试必走权威读。
         """
-        for ref, (inserts, (old_rows, _), deletes) in dirties.items():
+        for ref, (inserts, (old_rows, _new_rows), deletes) in dirties.items():
             for row in itertools.chain(inserts, old_rows, deletes):
                 cache.evict(self.row_channel(ref, int(row["id"])))
         for ref, row_versions in idmap.get_clean_rows().items():
