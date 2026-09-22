@@ -1642,3 +1642,58 @@ async def test_row_cache_write_through(
             cache.deactivate(vchannel, "test")
     finally:
         await broker.close()
+
+
+@use_redis_family_backend_only
+async def test_row_cache_write_through_skips_subscription_gap(
+    filled_item_ref, mod_auto_backend
+):
+    """commit 的往返期间本地订阅断过（最后一个订阅者退订，之后又有人订回来）：这段时间
+    别的进程对该行的写入本 worker 收不到通知，而写穿只知道自己提交时那一瞬的样子，把它
+    补进缓存就可能是一份已经过时的行，且 floor 被抬到我们这个旧版本。写穿必须认提交前
+    取的激活代次，代次变了（中间失活过）就丢弃，让下次读走权威读"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.rowcache import UNKNOWN
+    from hetu.data.sub import SubscriptionBroker
+
+    backend: Backend = mod_auto_backend()
+    cache = backend.row_cache
+    if cache is None:
+        return
+    comp = filled_item_ref.comp_cls
+    row_id = await _first_row_id(backend, comp, time=117)
+    channel = backend.master.row_channel(filled_item_ref, row_id)
+    broker = SubscriptionBroker(backend)
+    try:
+        sub, _ = await broker.subscribe_get(filled_item_ref, _admin_ctx(), "id", row_id)
+        assert sub and cache.get(channel) is not None
+
+        master = backend.master
+        real_commit = master.lua_commit
+
+        async def commit_then_gap(*args, **kwargs):
+            resp = await real_commit(*args, **kwargs)
+            # 提交已在 master 上生效、本协程还没回来的这段时间里：最后一个订阅者退订
+            # （缓存失活、丢行、floor 没了），别的进程写了这行（通知没人收），之后又有
+            # 连接订回来（新代次、floor 未知）
+            owners = set(cache._active.get(channel, ()))  # type: ignore[reportPrivateUsage]
+            assert owners
+            for owner in owners:
+                cache.deactivate(channel, owner)
+            for owner in owners:
+                cache.activate(channel, owner)
+            return resp
+
+        with patch.object(master, "lua_commit", commit_then_gap):
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                assert row is not None
+                row.qty = 4242
+                await repo.update(row)
+
+        assert cache.get(channel) is None, "断过订阅的行不能靠写穿补回缓存"
+        assert cache.floor(channel) is UNKNOWN
+    finally:
+        await broker.close()
