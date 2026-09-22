@@ -1300,7 +1300,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
                 got = await session.using(comp).get(id=row_id)
             assert got is not None and got.time == 110
             if cache is None:
-                assert counts() == {"plain": 1, "authoritative": 0}
+                assert counts() == {"plain": 2, "authoritative": 0}  # 订阅 1 + 读 1
             else:
                 assert counts() == {"plain": 0, "authoritative": 1}
                 assert cache.get(channel) is not None
@@ -1309,7 +1309,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
                 got2 = await session.using(comp).get(id=row_id)
             assert got2 is not None and got2 == got
             if cache is None:
-                assert counts() == {"plain": 2, "authoritative": 0}
+                assert counts() == {"plain": 3, "authoritative": 0}
             else:
                 assert counts() == {"plain": 0, "authoritative": 1}
 
@@ -1321,7 +1321,7 @@ async def test_row_cache_hit_after_subscribe(filled_item_ref, mod_auto_backend):
                 got3 = await session.using(comp).get(id=row_id)
             assert got3 is not None
             if cache is None:
-                assert counts() == {"plain": 3, "authoritative": 0}
+                assert counts() == {"plain": 4, "authoritative": 0}
             else:
                 assert counts() == {"plain": 1, "authoritative": 1}
                 assert cache.get(channel) is None
