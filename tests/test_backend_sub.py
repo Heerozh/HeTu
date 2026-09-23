@@ -933,6 +933,71 @@ async def test_subscribe_point_query_string(
     await updates_until(broker, renamed_back)
 
 
+async def test_point_query_on_undeclared_index_falls_back(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
+):
+    """
+    索引没声明 point_sub：commit 不发它的值频道，点查询退化为订整个索引的频道（区间订阅的
+    行为，结果照样正确），同一组件的同一索引只警告一次
+    """
+    import logging
+
+    servant = broker._backend.servant
+    comp = filled_item_ref.comp_cls
+    assert "model" not in comp.point_subs_
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_a, rows = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "model", 0.5, limit=10
+        )
+        sub_b, _ = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "model", 0.6, limit=10
+        )
+    assert sub_a and sub_b and len(rows) == 1
+    index_chan = servant.index_channel(filled_item_ref, "model")
+    assert cast(IndexSubscription, broker._subs[sub_a]).index_channel == index_chan
+    assert cast(IndexSubscription, broker._subs[sub_b]).index_channel == index_chan
+    warns = [r for r in caplog.records if "point_sub" in r.getMessage()]
+    assert len(warns) == 1, [r.getMessage() for r in warns]
+    assert "model" in warns[0].getMessage()
+
+    # 功能不受影响：另一行的 model 改成 0.5 → 进入；再改走 → 离开
+    backend = broker._backend
+    other_id = None
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(name="Itm30")
+        assert row
+        other_id = int(row.id)
+        row.model = 0.5
+        await repo.update(row)
+
+    def moved_in(updates):
+        assert updates[sub_a][other_id]["model"] == pytest.approx(0.5)
+
+    await updates_until(broker, moved_in)
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=other_id)
+        assert row
+        row.model = 7.0
+        await repo.update(row)
+
+    def moved_out(updates):
+        assert updates[sub_a][other_id] is None
+
+    await updates_until(broker, moved_out)
+
+
+async def test_index_value_channel_requires_point_sub(mod_auto_backend, item_ref):
+    """值频道只给声明了 point_sub 的索引发：订一个没人会发的频道是 bug，直接报错"""
+    servant = mod_auto_backend().servant
+    assert "owner" in item_ref.comp_cls.point_subs_
+    servant.index_value_channel(item_ref, "owner", 10)
+    with pytest.raises(ValueError, match="point_sub"):
+        servant.index_value_channel(item_ref, "model", 0.5)
+
+
 # ============================ 整表订阅 ============================
 
 
@@ -1161,6 +1226,22 @@ async def test_subscribe_table_permission_denied(
     assert rows == []
     assert broker.count() == (0, 0, 0)
     assert len(broker._mq_client.subscribed_channels) == 0
+
+
+async def test_subscribe_table_requires_table_sub(
+    broker: SubscriptionBroker, filled_rls_ref, admin_ctx, caplog
+):
+    """组件没声明 table_sub：commit 不发它的表频道，整表订阅被拒绝，不占任何频道/计数"""
+    import logging
+
+    assert filled_rls_ref.comp_cls.table_sub_ is False
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_id, rows = await broker.subscribe_table(filled_rls_ref, admin_ctx)
+    assert sub_id is None
+    assert rows == []
+    assert broker.count() == (0, 0, 0)
+    assert len(broker._mq_client.subscribed_channels) == 0
+    assert any("table_sub" in r.getMessage() for r in caplog.records)
 
 
 async def test_subscribe_table_row_cap(mod_auto_backend, filled_item_ref, admin_ctx):
