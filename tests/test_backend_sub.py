@@ -577,7 +577,6 @@ async def test_query_subscribe_rls_lost_without_index(
     assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
-@pytest.mark.xfail(reason="已知缺陷，未来也许修也许不修", strict=True)
 async def test_query_subscribe_rls_gain_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
@@ -586,8 +585,9 @@ async def test_query_subscribe_rls_gain_without_index(
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
     # 默认数据是owner=10, friend=11
-    # todo 目前的设计是，rls获得并不能正确得到insert通知，除非订阅的正是rls属性自身（这里是friend）
-    #      未来如果有需要，可以专门做个rls属性watch，变化了则通知所有IndexSubscription检查rls
+    # 订阅时不可见的行不在初始行里；订阅生效后的补读重跑一次范围比对，把范围内不可见的行
+    # 也订上行频道（不推），之后它不经索引变化重新获得 RLS（改的不是被订阅的索引字段），
+    # 也能从行频道推出来。以前要等该索引下一次变动才会订上它们
 
     # 先预先取掉一行rls
     backend = broker._backend
@@ -610,6 +610,9 @@ async def test_query_subscribe_rls_gain_without_index(
     )
     assert sub_id
     assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
+    # 补读过后：不可见的 row4 也订上了，但不推给客户端
+    assert await settled_updates(broker, timeout=0.3) == {}
+    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 测试改回来是否重新出现
     async with backend.session("pytest", 1) as session:
@@ -619,7 +622,7 @@ async def test_query_subscribe_rls_gain_without_index(
         assert row4
         row4.friend = 11
         await repo.update(row4)
-    updates = await broker.get_updates(timeout=5)
+    updates = await settled_updates(broker, timeout=5)
     assert len(updates) == 1
     assert len(updates[sub_id]) == 1
     assert updates[sub_id][row4_id]["friend"] == 11
@@ -637,6 +640,8 @@ async def test_mq_backlog(
 
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
+    # 订阅生效后的补读先消化掉，下面直接看本地队列
+    assert await settled_updates(broker, timeout=0.3) == {}
 
     # 修改row1，并pull消息
     async with backend.session("pytest", 1) as session:
