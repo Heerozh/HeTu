@@ -40,6 +40,9 @@ LUA_PUBLISH = re.compile(r"\bS?PUBLISH\b", re.IGNORECASE)
 PY_PUBLISH = re.compile(
     r"\.\s*s?publish\s*\(|execute_command\(\s*[\"']S?PUBLISH", re.IGNORECASE
 )
+# 内嵌在 Python 字符串里、交给 eval / register_script 跑的 Lua（如 worker_keeper.py）：
+# redis.call / redis.pcall / 本地别名 redis_call 调 PUBLISH / SPUBLISH
+PY_LUA_PUBLISH = re.compile(r"p?call\s*\(\s*[\"']S?PUBLISH[\"']", re.IGNORECASE)
 
 # {(相对路径, 规范化后的整行代码): 理由}。key 不含行号，挪动代码不会误报
 ALLOWED_LUA: dict[tuple[str, str], str] = {
@@ -87,20 +90,47 @@ def test_lua_allowlist_has_no_stale_entries():
     assert not stale, f"ALLOWED_LUA 里这些调用点已经不在了，请删除或更新：{stale}"
 
 
+def _py_publishes(line: str) -> bool:
+    code = line.split("#", 1)[0]
+    # 内嵌 Lua 的注释是 --，去掉再比，免得注释里提到 PUBLISH 也算
+    return bool(PY_PUBLISH.search(code) or PY_LUA_PUBLISH.search(code.split("--")[0]))
+
+
 def test_python_does_not_publish_directly():
-    """Python 代码不直接发 PUBLISH：通知只能由 commit 的 Lua 按声明发"""
+    """
+    Python 代码不直接发 PUBLISH：通知只能由 commit 的 Lua 按声明发。
+    内嵌在 Python 字符串里、交给 eval / register_script 跑的 Lua 也不行
+    """
     hits = []
     for path in sorted(HETU_ROOT.rglob("*.py")):
         rel = path.relative_to(HETU_ROOT).as_posix()
         for lineno, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            code = line.split("#", 1)[0]
-            if PY_PUBLISH.search(code):
+            if _py_publishes(line):
                 hits.append(f"  {rel}:{lineno}  {line.strip()}")
     assert not hits, (
         "Python 里直接调用了 publish（详见本文件顶部说明）：\n" + "\n".join(hits)
     )
+
+
+def test_python_publish_patterns():
+    """守门的正则本身：这些写法都要认得出来，普通的 redis.call 不能误报"""
+    caught = [
+        'await r.publish("ch", "")',
+        "io.spublish(ch, b'')",
+        'await r.execute_command("PUBLISH", ch, "")',
+        "if redis.call('publish', KEYS[1], ARGV[1]) then",
+        'redis.pcall("SPUBLISH", ch, "")',
+        'redis_call("PUBLISH", ch, "")',
+    ]
+    ignored = [
+        "return redis.call('del', KEYS[1])",
+        "-- 这里不要 redis.call('PUBLISH', ch, '')",
+        "x = 1  # r.publish(ch) 已删除",
+    ]
+    assert [line for line in caught if not _py_publishes(line)] == []
+    assert [line for line in ignored if _py_publishes(line)] == []
 
 
 # ============================ 运行时 ============================
