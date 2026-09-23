@@ -1,4 +1,5 @@
 import asyncio
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import AsyncGenerator, cast
 from unittest.mock import patch
@@ -31,6 +32,60 @@ async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
     yield broker
 
     await broker.close()
+
+
+async def updates_until(
+    broker: SubscriptionBroker,
+    check: Callable[[dict[str, dict]], object],
+    merged: dict[str, dict] | None = None,
+    timeout: float = 10.0,
+) -> dict[str, dict]:
+    """
+    反复 get_updates，把各 tick 的结果按 sub_id / row_id 合并（后到的覆盖先到的），直到
+    check(merged) 里的断言全部通过；超时则再跑一次 check，抛出真正的断言错误。
+
+    一次写入会在行、索引、值等频道上各发一条通知，它们各自入队、各自等合批窗口：负载高时
+    （xdist、CI）会被拆到前后几个 tick，SQL 后端 0.1 秒一次的轮询也会把它们拆开，甚至晚到
+    下一步。而且不同频道推的东西不一样：行离开范围时，行频道先到只会推新的行数据，要等
+    索引/值频道到了才推 None、才撤掉 row_subs。所以只看单次 get_updates、或者只看某订阅
+    "出现了"都会偶发失败，要等到断言描述的最终状态。
+    """
+    merged = {} if merged is None else merged
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while True:
+        try:
+            check(merged)
+            return merged
+        except AssertionError, KeyError, TypeError:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise
+        for sub_id, rows in (await broker.get_updates(timeout=remaining)).items():
+            merged.setdefault(sub_id, {}).update(rows)
+
+
+async def tick_with(broker: SubscriptionBroker, *channels: str) -> dict[str, dict]:
+    """
+    等 channels 的通知都进了本连接的本地队列，再把队列里的通知都当作已过合批窗口（同
+    test_mq_backlog，拨回收到时间）跑一个 tick：这些频道保证在同一个 tick 里处理。
+    """
+    mq = broker._mq_client
+    await wait_until(lambda: all(ch in mq.pulled_set for ch in channels), timeout=10)
+    back = 1 / mq.UPDATE_FREQUENCY
+    for i, (received_at, channel) in enumerate(mq.pulled_deque):
+        mq.pulled_deque[i] = (received_at - back, channel)
+    return await broker.get_updates()
+
+
+async def count_notifications(broker: SubscriptionBroker, channel: str) -> list[None]:
+    """
+    关注频道：之后本连接每收到一条该频道的通知，返回的列表就多一个元素。同一频道在本地
+    队列里只占一项，要确定几次写入的通知都已到齐（从而落在同一个 tick）只能这样数。
+    """
+    seen: list[None] = []
+    await broker._mq_client.watch(channel, lambda: seen.append(None))
+    return seen
 
 
 @use_redis_family_backend_only
@@ -140,7 +195,13 @@ async def test_subscribe_mq_merge_message(
     backend = broker._backend
     mq = broker._mq_client
 
-    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_row, sub_data = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
+    )
+    assert sub_row and sub_data
+    seen = await count_notifications(
+        broker, backend.servant.row_channel(filled_item_ref, sub_data["id"])
+    )
 
     # 测试mq，2次消息应该只能获得1次合并的
     async with backend.session("pytest", 1) as session:
@@ -156,9 +217,10 @@ async def test_subscribe_mq_merge_message(
         assert row
         row.qty = 997
         await repo.update(row)
-    await backend.wait_for_synced()
+    # 通知由后端 hub 在后台直接塞进 mq 的本地队列：等两条都到了再取，负载高时第二条
+    # 可能晚于合批窗口才到，那就不是合批该管的了
+    await wait_until(lambda: len(seen) >= 2, timeout=10)
 
-    # 通知由后端 hub 在后台直接塞进 mq 的本地队列
     notified_channels = await mq.get_message()
     assert len(notified_channels) == 1
 
@@ -202,16 +264,17 @@ async def test_subscribe_updates(
         await repo.update(row)
 
     # 测试更新
-    updates = await broker.get_updates()
-    assert len(updates) == 4
-    assert updates[sub_row][row1_id]["owner"] == 11  # row订阅数据更新
-    assert updates[sub_10][row1_id] is None  # query 10删除了1
-    assert updates[sub_10_11][row1_id]["owner"] == 11  # query 10-11更新row数据
-    assert updates[sub_11_12][row1_id]["owner"] == 11  # query 11-12更新row数据
+    def check(updates):
+        assert len(updates) == 4
+        assert updates[sub_row][row1_id]["owner"] == 11  # row订阅数据更新
+        assert updates[sub_10][row1_id] is None  # query 10删除了1
+        assert updates[sub_10_11][row1_id]["owner"] == 11  # query 10-11更新row数据
+        assert updates[sub_11_12][row1_id]["owner"] == 11  # query 11-12更新row数据
+        # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
+        assert len(broker._subs[sub_10].row_subs) == 24  # type: ignore
+        assert len(broker._subs[sub_11_12].row_subs) == 1  # type: ignore
 
-    # 测试删掉的项目是否成功取消订阅，和增加的成功注册订阅
-    assert len(broker._subs[sub_10].row_subs) == 24  # type: ignore
-    assert len(broker._subs[sub_11_12].row_subs) == 1  # type: ignore
+    await updates_until(broker, check)
 
 
 async def test_row_subscribe_cache(
@@ -244,14 +307,22 @@ async def test_row_subscribe_cache(
         row1_id = row.id
         await repo.update(row)
 
-    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version），按行频道存
-    await broker.get_updates()
-    # 由于不同backend的channel名不一样，使用dict的第一个channel
+    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version），按行频道存。
+    # 缓存每个tick重置，所以要确定行频道的通知落在检查的这个tick里
+    row1_channel = backend.servant.row_channel(filled_item_ref, row1_id)
+    updates = await tick_with(broker, row1_channel)
     cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    first_channel = next(iter(cache.keys()))
-    assert cache[first_channel]["id"] == row1_id
-    assert cache[first_channel]["owner"] == 11
-    assert "_version" in cache[first_channel]
+    assert cache[row1_channel]["id"] == row1_id
+    assert cache[row1_channel]["owner"] == 11
+    assert "_version" in cache[row1_channel]
+
+    # 这次写入在索引、值频道上的通知可能还没处理：等 sub_10 放掉该行、sub_11_12 收进该行
+    # 再进下一步，否则它们留到下一步才推
+    def settled(updates):
+        assert updates[sub_10][row1_id] is None
+        assert updates[sub_11_12][row1_id]["owner"] == 11
+
+    await updates_until(broker, settled, merged=updates)
 
     # 测试第二次更新cache是否清空了
     async with backend.session("pytest", 1) as session:
@@ -261,16 +332,20 @@ async def test_row_subscribe_cache(
         row.owner = 12
         await repo.update(row)
 
-    updates = await broker.get_updates()
+    updates = await tick_with(broker, row1_channel)
     # 每个tick重置缓存并重新预读，如果数据正确说明更新了
     cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    assert cache[first_channel]["owner"] == 12
-    # 其他顺带检测
-    assert len(updates) == 3
-    assert updates[sub_row][row1_id]["owner"] == 12  # row订阅数据更新
-    assert sub_10 not in updates
-    assert updates[sub_10_11][row1_id] is None  # query 10-11删除了1
-    assert updates[sub_11_12][row1_id]["owner"] == 12  # query 11-12更新row数据
+    assert cache[row1_channel]["owner"] == 12
+
+    # 其他顺带检测：索引、值频道的通知可能晚一个tick才到，收齐再看
+    def check(updates):
+        assert len(updates) == 3
+        assert updates[sub_row][row1_id]["owner"] == 12  # row订阅数据更新
+        assert sub_10 not in updates
+        assert updates[sub_10_11][row1_id] is None  # query 10-11删除了1
+        assert updates[sub_11_12][row1_id]["owner"] == 12  # query 11-12更新row数据
+
+    await updates_until(broker, check, merged=updates)
 
 
 async def test_cancel_subscribe(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
@@ -397,9 +472,12 @@ async def test_query_subscribe_rls_lost(
         row.owner = 11
         row4_id = row.id
         await repo.update(row)
-    updates = await broker.get_updates()
-    assert len(updates[sub_id]) == 1
-    assert updates[sub_id][row4_id] is None
+
+    def check(updates):
+        assert len(updates[sub_id]) == 1
+        assert updates[sub_id][row4_id] is None
+
+    await updates_until(broker, check)
 
     # query订阅的原理是只订阅符合rls的行，但如果数值变了导致失去了某行rls并不会管，由行订阅执行处理
     # 所以注册数量25不变。（但是如果获得了新的rls会管）
@@ -438,11 +516,13 @@ async def test_query_subscribe_rls_gain(
         row.owner = 10
         row4_id = row.id
         await repo.update(row)
-    updates = await broker.get_updates()
-    assert len(updates[sub_id]) == 1
-    assert updates[sub_id][row4_id]["owner"] == 10
 
-    assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
+    def check_gain(updates):
+        assert len(updates[sub_id]) == 1
+        assert updates[sub_id][row4_id]["owner"] == 10
+        assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
+
+    await updates_until(broker, check_gain)
 
     # 测试insert新数据能否得到通知
     async with backend.session("pytest", 1) as session:
@@ -451,9 +531,12 @@ async def test_query_subscribe_rls_gain(
         new.owner = 10
         new_row_id = new.id
         await repo.insert(new)
-    updates = await broker.get_updates()
-    assert len(updates[sub_id]) == 1
-    assert updates[sub_id][new_row_id]["owner"] == 10
+
+    def check_insert(updates):
+        assert len(updates[sub_id]) == 1
+        assert updates[sub_id][new_row_id]["owner"] == 10
+
+    await updates_until(broker, check_insert)
 
 
 async def test_query_subscribe_rls_lost_without_index(
@@ -691,9 +774,11 @@ async def test_subscribe_point_query_on_id_uses_index_channel(
         repo = session.using(comp)
         assert await repo.get(id=row_id) is not None  # delete 要先读进缓存
         repo.delete(row_id)
-    async with asyncio.timeout(3):
-        updates = await broker.get_updates()
-    assert updates == {sub_id: {row_id: None}}
+
+    def deleted(updates):
+        assert updates == {sub_id: {row_id: None}}
+
+    await updates_until(broker, deleted)
 
     # 用同一个 id 插回来：又能收到
     async with backend.session("pytest", 1) as session:
@@ -702,10 +787,12 @@ async def test_subscribe_point_query_on_id_uses_index_channel(
         new_row.name = "IdBack"
         new_row.time = 123
         await session.using(comp).insert(new_row)
-    async with asyncio.timeout(3):
-        updates = await broker.get_updates()
-    assert set(updates[sub_id]) == {row_id}
-    assert updates[sub_id][row_id]["name"] == "IdBack"
+
+    def inserted(updates):
+        assert set(updates[sub_id]) == {row_id}
+        assert updates[sub_id][row_id]["name"] == "IdBack"
+
+    await updates_until(broker, inserted)
 
 
 async def test_subscribe_point_query_not_woken_by_other_values(
@@ -730,9 +817,12 @@ async def test_subscribe_point_query_not_woken_by_other_values(
         row.time = 999
         await repo.insert(row)
         new_id = row.id
-    updates = await broker.get_updates(timeout=2)
-    assert sub_10 not in updates
-    assert updates[sub_10_11][new_id]["owner"] == 11
+
+    def inserted(updates):
+        assert sub_10 not in updates
+        assert updates[sub_10_11][new_id]["owner"] == 11
+
+    await updates_until(broker, inserted)
     assert await broker.get_updates(timeout=0.3) == {}
 
     # 这行 owner 改成 10：进入了点查询的值，两个订阅都收到
@@ -742,19 +832,25 @@ async def test_subscribe_point_query_not_woken_by_other_values(
         assert row
         row.owner = 10
         await repo.update(row)
-    updates = await broker.get_updates(timeout=2)
-    assert updates[sub_10][new_id]["owner"] == 10
-    assert updates[sub_10_11][new_id]["owner"] == 10
+
+    def moved_in(updates):
+        assert updates[sub_10][new_id]["owner"] == 10
+        assert updates[sub_10_11][new_id]["owner"] == 10
+
+    await updates_until(broker, moved_in)
 
     # 删掉它：点查询订阅收到删除
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         assert await repo.get(id=new_id) is not None  # delete 要求行已在事务缓存里
         repo.delete(new_id)
-    updates = await broker.get_updates(timeout=2)
-    assert updates[sub_10][new_id] is None
-    assert updates[sub_10_11][new_id] is None
-    assert len(broker._subs[sub_10].row_subs) == 25  # type: ignore
+
+    def deleted(updates):
+        assert updates[sub_10][new_id] is None
+        assert updates[sub_10_11][new_id] is None
+        assert len(broker._subs[sub_10].row_subs) == 25  # type: ignore
+
+    await updates_until(broker, deleted)
 
 
 async def test_subscribe_point_query_string(
@@ -796,11 +892,14 @@ async def test_subscribe_point_query_string(
         assert row
         row.name = "Itm99"
         await repo.update(row)
-    updates = await broker.get_updates(timeout=2)
-    assert updates[sub_a][row_id] is None
-    assert updates[sub_a2][row_id] is None
-    assert sub_b not in updates
-    assert sub_c not in updates
+
+    def renamed(updates):
+        assert updates[sub_a][row_id] is None
+        assert updates[sub_a2][row_id] is None
+        assert sub_b not in updates
+        assert sub_c not in updates
+
+    await updates_until(broker, renamed)
 
     # 订阅新名字能拿到这行；改回去后新名字的订阅收到删除、旧名字的订阅收到该行
     sub_99, rows = await broker.subscribe_range(
@@ -813,10 +912,13 @@ async def test_subscribe_point_query_string(
         assert row
         row.name = "Itm10"
         await repo.update(row)
-    updates = await broker.get_updates(timeout=2)
-    assert updates[sub_99][row_id] is None
-    assert updates[sub_a][row_id]["name"] == "Itm10"
-    assert sub_b not in updates
+
+    def renamed_back(updates):
+        assert updates[sub_99][row_id] is None
+        assert updates[sub_a][row_id]["name"] == "Itm10"
+        assert sub_b not in updates
+
+    await updates_until(broker, renamed_back)
 
 
 # ============================ 整表订阅 ============================
@@ -882,6 +984,9 @@ async def test_subscribe_table_merge(
     backend = broker._backend
     sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
     assert sub_id
+    seen = await count_notifications(
+        broker, backend.servant.table_channel(filled_item_ref)
+    )
 
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
@@ -903,6 +1008,9 @@ async def test_subscribe_table_merge(
         assert row
         row.qty = 3
         await repo.update(row)
+    # 三个事务的通知都到了再取，才能确定它们合进了同一个tick：负载高时（SQL 后端的轮询
+    # 恰好切在事务之间时尤其如此）最后一条可能晚于合批窗口才到，那就不是合批该管的了
+    await wait_until(lambda: len(seen) >= 3, timeout=10)
 
     updates = await broker.get_updates()
     assert set(updates[sub_id].keys()) == {id_a, id_b}
@@ -934,9 +1042,12 @@ async def test_subscribe_table_coexist_range(
         row.qty = 7
         row_id = row.id
         await repo.update(row)
-    updates = await broker.get_updates()
-    assert updates[sub_range][row_id]["qty"] == 7
-    assert updates[sub_table][row_id]["qty"] == 7
+
+    def both(updates):
+        assert updates[sub_range][row_id]["qty"] == 7
+        assert updates[sub_table][row_id]["qty"] == 7
+
+    await updates_until(broker, both)
 
     # 取消range订阅，整表订阅不受影响
     await broker.unsubscribe(sub_range)
@@ -947,9 +1058,13 @@ async def test_subscribe_table_coexist_range(
         assert row
         row.qty = 8
         await repo.update(row)
-    updates = await broker.get_updates()
-    assert updates == {sub_table: {row_id: updates[sub_table][row_id]}}
-    assert updates[sub_table][row_id]["qty"] == 8
+
+    # 上一步行频道的通知可能才到，单独成一个没有订阅者的空 tick
+    def table_only(updates):
+        assert updates == {sub_table: {row_id: updates[sub_table][row_id]}}
+        assert updates[sub_table][row_id]["qty"] == 8
+
+    await updates_until(broker, table_only)
 
 
 async def test_subscribe_table_rls(
@@ -1194,10 +1309,14 @@ async def test_subscribe_get_registers_before_read(
         task = asyncio.create_task(
             broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
         )
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(15):
             await entered.wait()
-            updates = await broker.get_updates()
-            assert updates[sub_10][row_id] is None  # sub_10 放掉了这行
+
+            def released(updates):
+                assert updates[sub_10][row_id] is None  # sub_10 放掉了这行
+
+            # 行频道先到只会推新的行数据，值频道到了 sub_10 才放掉这行，可能要跑几个 tick
+            await updates_until(broker, released)
             release.set()
             sub_row, row = await task
     assert sub_row and row and row["owner"] == 11
@@ -1211,8 +1330,11 @@ async def test_subscribe_get_registers_before_read(
         assert row
         row.qty = 123
         await repo.update(row)
-    updates = await broker.get_updates(timeout=3)
-    assert updates[sub_row][row_id]["qty"] == 123
+
+    def changed(updates):
+        assert updates[sub_row][row_id]["qty"] == 123
+
+    await updates_until(broker, changed)
 
 
 async def test_subscribe_get_invisible_row_leaves_no_subscription(
