@@ -7,25 +7,13 @@ import asyncio
 from contextvars import ContextVar
 from typing import cast
 
+from fixtures.contexts import admin_ctx_
+
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.sub import RowSubscription, SubscriptionBroker
-from hetu.system import SystemContext
 
 SnowflakeID().init(1, 0)
-
-
-def _admin_ctx() -> SystemContext:
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
 
 
 def _hub(backend: Backend):
@@ -52,7 +40,7 @@ async def _get_updates(broker: SubscriptionBroker):
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker_a = SubscriptionBroker(backend)
     broker_b = SubscriptionBroker(backend)
 
@@ -189,7 +177,7 @@ async def test_watch_and_client_subscription_share_channel(
     客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
     backend: Backend = mod_auto_backend()
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     hub = _hub(backend)
     hits: list[int] = []
@@ -240,7 +228,7 @@ async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend
         if pubsub is None:
             return  # SQL 后端没有 pubsub 连接
         sub, _ = await broker.subscribe_get(
-            filled_item_ref, _admin_ctx(), "name", "Itm10"
+            filled_item_ref, admin_ctx_(), "name", "Itm10"
         )
         assert sub
         for res in pubsub.node_resources.values():
