@@ -44,8 +44,9 @@ logger = logging.getLogger("HeTu.root")
 def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
     dtype_type = dtype.type
 
-    if np.issubdtype(dtype_type, np.bool_):
-        return sa.Boolean()
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，走不到
+    # if np.issubdtype(dtype_type, np.bool_):
+    #     return sa.Boolean()
     if np.issubdtype(dtype_type, np.signedinteger):
         bits = dtype.itemsize * 8
         if bits <= 16:
@@ -467,15 +468,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
             await aio.dispose()
         self._async_ios = []
 
-    @staticmethod
-    def _coerce_bool(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, np.integer)):
-            return bool(value)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "t", "yes", "y"}
-        return bool(value)
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，用不到
+    # @staticmethod
+    # def _coerce_bool(value: Any) -> bool:
+    #     if isinstance(value, bool):
+    #         return value
+    #     if isinstance(value, (int, np.integer)):
+    #         return bool(value)
+    #     if isinstance(value, str):
+    #         return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+    #     return bool(value)
 
     @classmethod
     def _coerce_scalar(cls, dtype: np.dtype, value: Any) -> Any:
@@ -485,8 +487,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             value = value.tobytes()
 
         dtype_type = dtype.type
-        if np.issubdtype(dtype_type, np.bool_):
-            return cls._coerce_bool(value)
+        # bool 字段已被 define_component 转成 int8，此分支走不到
+        # if np.issubdtype(dtype_type, np.bool_):
+        #     return cls._coerce_bool(value)
         if np.issubdtype(dtype_type, np.integer):
             if isinstance(value, bytes):
                 value = value.decode("utf-8", "ignore")
@@ -666,8 +669,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                     value_type=type(value)
                 )
             )
-        if np.issubdtype(dtype_type, np.bool_):
-            return cls._coerce_bool(value)
+        # bool 字段已被 define_component 转成 int8，此分支走不到
+        # if np.issubdtype(dtype_type, np.bool_):
+        #     return cls._coerce_bool(value)
         if np.issubdtype(dtype_type, np.integer):
             return int(value)
         if np.issubdtype(dtype_type, np.floating):

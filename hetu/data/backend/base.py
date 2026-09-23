@@ -139,8 +139,9 @@ def to_sortable_bytes(value: np.generic) -> bytes:
         return encoded.replace(b"\x00", b"\x00\xff")
     elif np.issubdtype(dtype, np.bytes_):
         return value.item().replace(b"\x00", b"\x00\xff")
-    elif np.issubdtype(dtype, np.bool_):
-        return b"\x01" if value else b"\x00"
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，走不到
+    # elif np.issubdtype(dtype, np.bool_):
+    #     return b"\x01" if value else b"\x00"
     assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
 
 
