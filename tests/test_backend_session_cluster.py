@@ -1,3 +1,5 @@
+from fixtures.testdata import create_ref
+
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 
@@ -9,6 +11,9 @@ async def test_double_cluster(item_ref, mod_auto_backend):
 
     # 测试在2个cluster_id环境下的同时写入和读取，只测试结果是否正常，具体的各个node数据是否正确不做测试
     backend: Backend = mod_auto_backend()
+    # item_ref 只准备了 cluster 1 的表。cluster 2 的表可能是别的测试留下的旧结构（如
+    # test_migration 把 Item 迁到 cluster 2 并改了列），同样清成当前结构的空表
+    create_ref(item_ref.comp_cls, backend, cluster_id=2)
 
     async def upsert_owner(cluster_id, sleep):
         async with backend.session("pytest", cluster_id) as _session:

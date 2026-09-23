@@ -47,12 +47,12 @@ def def_rls_test():
     return RLSTest
 
 
-def create_ref(model, backend) -> TableReference:
+def create_ref(model, backend, cluster_id=1) -> TableReference:
     """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
     # 创建空表
     from hetu.data.backend import RaceCondition
 
-    model_ref = TableReference(model, "pytest", 1)
+    model_ref = TableReference(model, "pytest", cluster_id)
     table_maint = backend.get_table_maintenance()
     try:
         table_maint.create_table(model_ref)
