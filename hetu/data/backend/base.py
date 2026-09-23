@@ -646,6 +646,10 @@ class TableMaintenance:
         """实际重建组件表索引的逻辑实现，返回重建的行数"""
         raise NotImplementedError
 
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据"""
+        raise NotImplementedError
+
     # === === ===
 
     def __init__(self, master: BackendClient):
@@ -781,16 +785,43 @@ class TableMaintenance:
 
             # 准备和检测
             status = migrator.prepare()
-            if status == "unsafe":
-                if not force:
-                    return False
-            elif status == "skip":
-                return True
-
-            # 获取所有row id
-            row_ids = self.get_all_row_id(table_ref)
-            migrator.upgrade(row_ids, self)
+            if status == "unsafe" and not force:
+                return False
+            if status != "skip":
+                # 获取所有row id
+                row_ids = self.get_all_row_id(table_ref)
+                migrator.upgrade(row_ids, self)
+            self._finish_schema_migration(table_ref)
             return True
+
+    def _finish_schema_migration(self, table_ref: TableReference) -> None:
+        """
+        迁移脚本只管搬数据：dtype 没变的那几级（只改了 table_sub / point_sub、索引、权限等）
+        判 skip 不执行，表的 meta 还停在旧版本，check_table 会一直报 schema_mismatch。
+        这里把 meta 补写成当前定义；索引定义也变了的话（比如 point_sub 打开了 index），
+        先按当前定义重建索引。
+        """
+        from ..component import BaseComponent
+
+        comp_cls = table_ref.comp_cls
+        meta = self.read_meta(table_ref.instance_name, comp_cls)
+        assert meta
+        if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
+            return  # 迁移脚本已按当前定义重建了表
+        stored = BaseComponent.load_json(meta.json)
+        if (stored.indexes_, stored.uniques_) != (comp_cls.indexes_, comp_cls.uniques_):
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        self.do_update_meta_(table_ref)
+        logger.warning(
+            _(
+                "  ✔️ [💾MIGRATION][{comp_name}组件] 已把 schema 版本更新为当前定义"
+            ).format(comp_name=table_ref.comp_name)
+        )
 
     def flush(self, table_ref: TableReference, force=False) -> None:
         """

@@ -194,6 +194,17 @@ class RedisTableMaintenance(TableMaintenance):
         )
 
     @override
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据"""
+        json_ = table_ref.comp_cls.json_
+        meta = {
+            "json": json_,
+            "version": hashlib.md5(json_.encode("utf-8")).hexdigest(),
+            "cluster_id": table_ref.cluster_id,
+        }
+        self.client.io.hset(self.meta_key(table_ref), mapping=meta)
+
+    @override
     def do_drop_table_(self, table_ref: TableReference) -> int:
         """
         清空易失性组件表数据，force为True时强制清空任意组件表。
