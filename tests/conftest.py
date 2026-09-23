@@ -49,8 +49,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         group = item.nodeid.split("::", 1)[0]
         callspec = getattr(item, "callspec", None)
-        if callspec and "backend_name" in callspec.params:
-            group += ":" + callspec.params["backend_name"]
+        backend = callspec.params.get("backend_name") if callspec else None
+        # HETU_TEST_BACKENDS 把某个参数化列表滤空时，pytest 生成的跳过项参数是 NOTSET
+        if isinstance(backend, str):
+            group += ":" + backend
         item.add_marker(pytest.mark.xdist_group(group))
 
 
