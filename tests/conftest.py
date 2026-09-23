@@ -2,6 +2,8 @@ import logging
 import os
 import sys
 
+import pytest
+
 os.environ["LANGUAGE"] = "zh_CN"
 os.environ["LANG"] = "zh_CN.UTF-8"
 os.environ["LC_ALL"] = "zh_CN.UTF-8"
@@ -15,6 +17,18 @@ from fixtures.testapp import *
 from fixtures.testdata import *
 
 # set default lang
+
+
+@pytest.fixture(autouse=True, scope="module")
+def reset_snowflake_lease():
+    """
+    worker_main 起的服务会给进程级单例 SnowflakeID 挂上 WorkerKeeper 租约，服务停了就
+    不再续约，60 秒后同一进程里别的测试一发号就 WorkerLeaseExpired。串行时这类测试恰好
+    排在最后才没暴露；xdist 下 worker 跑测试文件的顺序不定，所以每个模块开始前清掉。
+    """
+    from hetu.common.snowflake_id import SnowflakeID
+
+    SnowflakeID().lease = None
 
 
 @pytest.fixture(autouse=True, scope="session")
