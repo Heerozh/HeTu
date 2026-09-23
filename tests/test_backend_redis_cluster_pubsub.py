@@ -113,3 +113,30 @@ async def test_backend_redis_pubsub_concurrent_first_subscribe(mod_auto_backend)
         msg = await pubsub.get_message()
     assert msg["data"] == b"7"
     await pubsub.close()
+
+
+@use_redis_family_backend_only
+@pytest.mark.timeout(30)
+async def test_backend_redis_pubsub_before_first_command(mod_backend_config):
+    """客户端上的第一件事是订阅（pubsub 替它解析集群节点）时，这个客户端之后的普通命令
+    也得能用。集群模式下不能跳过客户端自己的 initialize() 直接初始化 nodes_manager：那样
+    default_node 有了而命令解析器还是空的，redis-py 8 下它的第一条普通命令会在
+    _determine_slot 里报 "'AsyncCommandsParser' object has no attribute 'node'"。"""
+    import redis.asyncio
+    import redis.asyncio.cluster
+
+    from hetu.data.backend.redis.pubsub import AsyncKeyspacePubSub
+
+    # 全新的客户端，保证还没被任何命令初始化过
+    url = mod_backend_config["master"]
+    if mod_backend_config.get("raw_clustering"):
+        aio = redis.asyncio.cluster.RedisCluster.from_url(url)
+    else:
+        aio = redis.asyncio.Redis.from_url(url)
+    pubsub = AsyncKeyspacePubSub(aio)
+    try:
+        await pubsub.subscribe("fresh{1}")
+        assert await aio.hgetall("fresh{1}") == {}  # type: ignore[misc]
+    finally:
+        await pubsub.close()
+        await aio.aclose()

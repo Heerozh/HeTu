@@ -165,6 +165,11 @@ class AsyncKeyspacePubSub:
 
         if self.is_cluster:
             assert isinstance(self.main_client, RedisCluster)
+            # 客户端可能还没被任何命令初始化过（幂等，已初始化即返回）。不能跳过它直接
+            # 初始化 nodes_manager：那样 default_node 有了而命令解析器还是空的，之后该客户端
+            # 的第一条普通命令会在 _determine_slot 里报
+            # "'AsyncCommandsParser' object has no attribute 'node'"
+            await self.main_client.initialize()
             # 计算 Slot 和目标节点，如果找不到，说明node变更了，需要刷新拓扑
             slot = self.main_client.keyslot(channel)
             try:
