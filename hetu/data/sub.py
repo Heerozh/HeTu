@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 
-from hetu.data.backend import BackendClient, RowFormat
+from hetu.data.backend import BackendClient, MQClient, RowFormat
 from hetu.data.component import Permission
 from hetu.i18n import _
 
@@ -254,6 +254,7 @@ class TableSubscription(BaseSubscription):
         ctx: Context,
         table_channel: str,
         known_ids: set[int],
+        max_rows: int,
     ):
         self.table_ref = table_ref
         self.servant = servant
@@ -264,6 +265,8 @@ class TableSubscription(BaseSubscription):
         self.table_channel = table_channel
         # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知
         self.known_ids = known_ids
+        # 整表重同步（RESYNC）最多读多少行，同 subscribe_table 的上限
+        self.max_rows = max_rows
         # 上一批读过的可见行 → 内容指纹。不按行常驻（known_ids 已是每连接一份）：尾随重读
         # 就是紧接着的那一批，只要它读回的与上一批一样就不重复推
         self.last_read: dict[int, int | None] = {}
@@ -290,6 +293,8 @@ class TableSubscription(BaseSubscription):
         if self.pending is not None:
             self.pending.update(payload)
             return set(), set(), {}
+        if MQClient.RESYNC in payload:
+            return set(), set(), await self._resync()
 
         ids = sorted(int(i) for i in payload)
         rows = cast(
@@ -316,6 +321,46 @@ class TableSubscription(BaseSubscription):
                 known.discard(row_id)
             # 既不可见、客户端也从未持有的行：不推
         return set(), set(), rtn
+
+    async def _resync(self) -> dict[int, dict[str, Any] | None]:
+        """
+        这段时间的变更不可知（pubsub 断线重连，期间的通知全丢了）：整表重读，推所有可见行，
+        已知但读不到、或不再可见的行推 None。
+        """
+        rows = cast(
+            list[dict[str, Any]],
+            await self.servant.range(
+                self.table_ref,
+                "id",
+                float("-inf"),
+                float("inf"),
+                limit=self.max_rows,
+                row_format=RowFormat.TYPED_DICT,
+            ),
+        )
+        comp_cls = self.table_ref.comp_cls
+        ctx = self.rls_ctx
+        known = self.known_ids
+        rtn: dict[int, dict[str, Any] | None] = {}
+        seen: set[int] = set()
+        for row in rows:
+            row_id = int(row["id"])
+            seen.add(row_id)
+            if ctx is None or ctx.rls_check(comp_cls, row):
+                del row["_version"]
+                rtn[row_id] = row
+                known.add(row_id)
+            elif row_id in known:
+                rtn[row_id] = None
+                known.discard(row_id)
+        # 读满上限时后面可能还有行没读到（按 id 升序），只对读到的 id 范围内的已知行判删除
+        bound = max(seen) if seen and len(rows) >= self.max_rows else None
+        for row_id in known - seen:
+            if bound is None or row_id <= bound:
+                rtn[row_id] = None
+                known.discard(row_id)
+        self.last_read = {}
+        return rtn
 
     @property
     def channels(self) -> set[str]:
@@ -680,7 +725,9 @@ class SubscriptionBroker:
         # TableSubscription 攒着（pending），读完再重新入队
         table_channel = servant.table_channel(table_ref)
         await self._mq_client.subscribe(table_channel)
-        tbl_sub = TableSubscription(table_ref, servant, ctx, table_channel, set())
+        tbl_sub = TableSubscription(
+            table_ref, servant, ctx, table_channel, set(), self._max_table_rows
+        )
         tbl_sub.pending = set()
         self._subs[sub_id] = tbl_sub
         self._channel_subs.setdefault(table_channel, set()).add(sub_id)

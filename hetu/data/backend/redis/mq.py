@@ -38,7 +38,9 @@ class PubSubHub(MQHub):
 
     def __init__(self, client: Redis | RedisCluster):
         super().__init__()
-        self._pubsub = AsyncKeyspacePubSub(client, on_message=self._on_message)
+        self._pubsub = AsyncKeyspacePubSub(
+            client, on_message=self._on_message, on_resubscribed=self._on_resubscribed
+        )
 
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
         """
@@ -134,7 +136,23 @@ class PubSubHub(MQHub):
                 ids = None
             if not isinstance(ids, list):
                 ids = None
-        dropped = self._dispatch(channel_name, ids)
+        self._warn_dropped(self._dispatch(channel_name, ids))
+
+    def _on_resubscribed(self, channels: list[str]) -> None:
+        """
+        AsyncKeyspacePubSub 节点失效后全部重订生效时同步调用：失效到现在的写入都没有通知，
+        给仍有人订的频道各分发一条 `RESYNC`，各连接一个 interval 后补读（行 / 索引订阅
+        重读、重跑比对；整表订阅整表重同步）。服务端内部 watch 的回调也照常触发一次，
+        断线期间丢的顶号通知由此补查。
+        """
+        dropped = 0
+        for channel in channels:
+            if channel in self._subs:
+                dropped += self._dispatch(channel, [MQClient.RESYNC])
+        self._warn_dropped(dropped)
+
+    @staticmethod
+    def _warn_dropped(dropped: int) -> None:
         if dropped:
             logger.warning(
                 _(
