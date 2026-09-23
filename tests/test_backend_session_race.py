@@ -231,33 +231,27 @@ async def test_update_to_value_set_by_concurrent_self_update_is_race(
 
 
 async def test_update_or_insert_race(item_ref, mod_auto_backend):
-    import asyncio
-
     from hetu.data.backend import RaceCondition
 
     backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
     # 测试update_or_insert UniqueViolation是否转化为了RaceCondition
-    # 这其实是本地unique违反，但为了语义上正确，应该换成RaceCondition
-    async def main_task():
-        async with backend.session("pytest", 1) as session:
-            item_repo = session.using(item_ref.comp_cls)
-            async with item_repo.upsert(name="uni_vio") as row:
-                await asyncio.sleep(0.1)
-                row.qty = 1
-
-    async def trouble_task():
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            row = item_ref.comp_cls.new_row()
-            row.name = "uni_vio"
-            await _item_repo.insert(row)
-
-    task1 = asyncio.create_task(main_task())
-    task2 = asyncio.create_task(trouble_task())
-    await task2
+    # 这其实是本地unique违反，但为了语义上正确，应该换成RaceCondition。
+    # upsert 观察到不存在之后，另一个事务（内层）插入同名行并整个提交完，外层才提交
+    # （先后用嵌套 session 排定，不靠 sleep 时间差，见 test_version_race）
     with pytest.raises(RaceCondition):
-        await task1
+        async with (
+            backend.session("pytest", 1) as s1,
+            s1.using(comp).upsert(name="uni_vio") as row,
+        ):
+            async with backend.session("pytest", 1) as s2:
+                intruder = comp.new_row()
+                intruder.name = "uni_vio"
+                intruder.qty = 7
+                await s2.using(comp).insert(intruder)
+            row.qty = 1
+    assert (await _read_master(backend, comp, "uni_vio")).qty == 7
 
 
 async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
@@ -269,39 +263,31 @@ async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
     对照 `test_insert_unique`：未先 get、直接 insert 已存在数据，仍是确定性
     `UniqueViolation`。
     """
-    import asyncio
-
     from hetu.data.backend import RaceCondition
 
     backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
-    async def observer_task():
-        async with backend.session("pytest", 1) as session:
-            session.only_master = True  # 强制 master 读，避免 replica 延迟
-            repo = session.using(item_ref.comp_cls)
+    # 观察者（外层）先 get 到不存在；入侵者（内层）在其间插入并整个提交；观察者再插入
+    # （先后用嵌套 session 排定，不靠 sleep 时间差，见 test_version_race）
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as observer:
+            observer.only_master = True  # 强制 master 读，避免 replica 延迟
+            repo = observer.using(comp)
             # 观察到 name="zrc" 不存在
             assert await repo.get(name="zrc") is None
-            await asyncio.sleep(0.1)  # 让 intruder 抢先插入并提交
-            row = item_ref.comp_cls.new_row()
+            async with backend.session("pytest", 1) as intruder:
+                intruder.only_master = True
+                row = comp.new_row()
+                row.name = "zrc"
+                row.time = 7770001  # time 取不同值，确保冲突只发生在 name 上
+                await intruder.using(comp).insert(row)
+            row = comp.new_row()
             row.name = "zrc"
             row.time = 7770002
             # 远程已被占用且本事务曾观察其不存在 → commit 时判 Race
             await repo.insert(row)
-
-    async def intruder_task():
-        async with backend.session("pytest", 1) as session:
-            session.only_master = True
-            repo = session.using(item_ref.comp_cls)
-            row = item_ref.comp_cls.new_row()
-            row.name = "zrc"
-            row.time = 7770001  # time 取不同值，确保冲突只发生在 name 上
-            await repo.insert(row)
-
-    observer = asyncio.create_task(observer_task())
-    intruder = asyncio.create_task(intruder_task())
-    await intruder
-    with pytest.raises(RaceCondition):
-        await observer
+    assert (await _read_master(backend, comp, "zrc")).time == 7770001
 
 
 async def test_retry_generator(item_ref, mod_auto_backend):
