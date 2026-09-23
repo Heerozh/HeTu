@@ -933,6 +933,51 @@ async def test_subscribe_point_query_string(
     await updates_until(broker, renamed_back)
 
 
+async def test_point_query_leave_backfills_limit(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    值频道只发"进入"：点查询结果里的行离开（改走 / 删除）由它自己的行频道发现，重跑比对时
+    推 None、退订行频道，并把被 limit 截在外面的行补进来
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=5
+    )
+    assert sub_id and len(rows) == 5
+    first5 = [int(r["id"]) for r in rows]
+    # 与订阅同样的排序，拿到被 limit 截在外面的第 6、7 行
+    all_ids = [
+        int(i)
+        for i in await backend.servant.range(
+            filled_item_ref, "owner", 10, limit=100, row_format=RowFormat.ID_LIST
+        )
+    ]
+    assert all_ids[:5] == first5
+    sixth, seventh = all_ids[5], all_ids[6]
+    moved, deleted = first5[0], first5[1]
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=moved)
+        assert row
+        row.owner = 11
+        await repo.update(row)
+        assert await repo.get(id=deleted) is not None
+        repo.delete(deleted)
+
+    def left_and_backfilled(updates):
+        got = updates[sub_id]
+        assert got[moved] is None and got[deleted] is None
+        assert got[sixth]["owner"] == 10 and got[seventh]["owner"] == 10
+        idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+        assert idx_sub.last_range_result == set(first5[2:]) | {sixth, seventh}
+        assert len(idx_sub.row_subs) == 5
+
+    await updates_until(broker, left_and_backfilled)
+
+
 async def test_point_query_on_undeclared_index_falls_back(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):

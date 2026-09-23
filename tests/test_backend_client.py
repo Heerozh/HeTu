@@ -819,6 +819,35 @@ async def test_mq_client_table_channel(filled_item_ref, mod_auto_backend):
     await mq.close()
 
 
+async def test_mq_client_table_channel_requires_table_sub(
+    filled_rls_ref, mod_auto_backend
+):
+    """没声明 table_sub 的组件：commit 不发表频道，行频道照常"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    mq = backend.get_mq_client()
+    assert filled_rls_ref.comp_cls.table_sub_ is False
+
+    rows = await servant.range(filled_rls_ref, "owner", 10, limit=1)
+    assert len(rows) == 1
+    table_channel = servant.table_channel(filled_rls_ref)
+    row_channel = servant.row_channel(filled_rls_ref, rows[0].id)
+    await mq.subscribe(table_channel, row_channel)
+
+    idmap = IdentityMap()
+    idmap.add_clean(filled_rls_ref, rows[0])
+    rows[0].friend = 12
+    idmap.update(filled_rls_ref, rows[0])
+    await backend.master.commit(idmap)
+
+    await asyncio.sleep(0.5)
+    async with asyncio.timeout(2):
+        messages = await mq.get_message()
+    assert row_channel in messages
+    assert table_channel not in messages
+    await mq.close()
+
+
 def test_sortable_token():
     """索引值频道的 token：数值 8 字节 → 16 位 hex，长字符串 → h + blake2b-128"""
     assert RedisBackendClient.to_sortable_bytes is to_sortable_bytes
@@ -863,8 +892,25 @@ async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):
     await mq.close()
 
 
+def _raw_value_channel(ref, index_name: str, value) -> str:
+    """
+    按 commit 的命名规则拼值频道名。没声明 point_sub 的索引没有公开的值频道名
+    （index_value_channel 会拒绝），订它是为了证明 commit 没往那儿发
+    """
+    dtype = ref.comp_cls.dtype_map_[index_name]
+    token = sortable_token(to_sortable_bytes(dtype.type(value)))
+    return (
+        f"{ref.instance_name}:{ref.comp_cls.name_}:{{CLU{ref.cluster_id}}}"
+        f":index:{index_name}:{token}"
+    )
+
+
 async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):
-    """索引值频道：只有该值上有行进出才有消息，payload是这些行的row_id；整索引频道不订就收不到"""
+    """
+    索引值频道：只给声明了 point_sub 的索引发，而且只发"进入"（insert、字段改成该值）；
+    离开（delete、字段改走）不发，由订阅者订着的行频道发现。消息不带内容；整索引频道
+    不订就收不到
+    """
     backend: Backend = mod_auto_backend()
     servant = backend.servant
     mq = backend.get_mq_client()
@@ -873,13 +919,18 @@ async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):
     assert len(rows) == 2
     chan_10 = servant.index_value_channel(filled_item_ref, "owner", 10)
     chan_11 = servant.index_value_channel(filled_item_ref, "owner", 11)
-    # 值先按 dtype 规范化，10 / "10" / 10.0 是同一个频道
+    # 值先按 dtype 规范化，10 / "10" / 10.0 是同一个频道；命名规则与 commit 一致
     assert chan_10 == servant.index_value_channel(filled_item_ref, "owner", "10")
     assert chan_10 == servant.index_value_channel(filled_item_ref, "owner", 10.0)
+    assert chan_10 == _raw_value_channel(filled_item_ref, "owner", 10)
     assert chan_10 != chan_11
-    await mq.subscribe(chan_10, chan_11)
+    # model 没声明 point_sub：它的新旧值频道都不该有消息
+    assert "model" not in filled_item_ref.comp_cls.point_subs_
+    model_old = _raw_value_channel(filled_item_ref, "model", rows[0].model)
+    model_new = _raw_value_channel(filled_item_ref, "model", 9.5)
+    await mq.subscribe(chan_10, chan_11, model_old, model_new)
 
-    # 一个事务：rows[0] owner 10→11，删掉 rows[1]（owner 10），插入一行 owner=11
+    # 一个事务：rows[0] owner 10→11 且改 model，删掉 rows[1]（owner 10），插入一行 owner=11
     idmap = IdentityMap()
     new_row = filled_item_ref.comp_cls.new_row()
     new_row.name = "ValNew"
@@ -888,6 +939,7 @@ async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):
     idmap.add_insert(filled_item_ref, new_row)
     idmap.add_clean(filled_item_ref, rows[0])
     rows[0].owner = 11
+    rows[0].model = 9.5
     idmap.update(filled_item_ref, rows[0])
     idmap.add_clean(filled_item_ref, rows[1])
     idmap.mark_deleted(filled_item_ref, rows[1].id)
@@ -896,10 +948,13 @@ async def test_mq_client_index_value_channel(filled_item_ref, mod_auto_backend):
     await asyncio.sleep(0.5)
     async with asyncio.timeout(2):
         messages = await mq.get_message()
-    assert messages[chan_10] == {str(rows[0].id), str(rows[1].id)}
-    assert messages[chan_11] == {str(rows[0].id), str(new_row.id)}
+    # 进入 11 的两行（改过来的、新插入的）：一条消息，不带内容
+    assert chan_11 in messages and messages[chan_11] is None
+    # 离开 10（改走、删除）不发
+    assert chan_10 not in messages
+    assert model_old not in messages and model_new not in messages
     assert servant.index_channel(filled_item_ref, "owner") not in messages
-    assert chan_10 not in mq.pulled_payload  # type: ignore
+    assert chan_11 not in mq.pulled_payload  # type: ignore
 
     # 只改非索引字段：两个值频道都不该有消息
     idmap = IdentityMap()
