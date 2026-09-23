@@ -1093,7 +1093,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
         for attempt in range(2):
             channels: set[str] = set()
-            # 表级变更通知（只给声明了 table_sub 的组件）：ref -> 本事务变动的row_id列表
+            # 表级变更通知：ref -> 本事务变动的row_id列表。只有声明了 table_sub 的组件要用，
+            # 别的组件不收集
             touched_ids: dict[TableReference, list[str]] = {}
             # 索引值频道通知（不带 payload），一个事务每个 (索引, 值) 一条
             value_chans: set[str] = set()
@@ -1140,7 +1141,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
                     await self._check_unique_conflicts(conn, dirties, absent_by_ref)
@@ -1193,7 +1195,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                         index_name,
                                         updates[index_name],
                                     )
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
                         inserts,
@@ -1220,18 +1223,17 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                 _enter_value(
                                     value_chans, ref, index_name, typed_row[index_name]
                                 )
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
                         notify_rows: list[dict[str, Any]] = [
                             {"channel": channel, "created_at": now_dt, "payload": None}
                             for channel in sorted(channels)
                         ]
-                        # 表级频道：只给声明了 table_sub 的组件，一个事务一张表一条，
-                        # payload为变动row_id列表
+                        # 表级频道：只给声明了 table_sub 的组件（touched_ids 只收集了它们），
+                        # 一个事务一张表一条，payload为变动row_id列表
                         for ref, ids in touched_ids.items():
-                            if not ref.comp_cls.table_sub_:
-                                continue
                             notify_rows.append(
                                 {
                                     "channel": self.table_channel(ref),

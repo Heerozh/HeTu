@@ -948,7 +948,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
             dtype_map = comp_cls.dtype_map_
             comp_name = comp_cls.name_
             absent_rows = absent_by_ref.get(ref, {})
-            touched_ids: list[str] = []
             # insert
             for insert in inserts:
                 row_id = insert["id"]
@@ -971,7 +970,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(
                     indexes, point_subs, dtype_map, idx_prefix, insert, insert, True
                 )
-                touched_ids.append(row_id)
             # update
             for old_row, new_row in zip(old_rows, new_rows):
                 row_id = old_row["id"]
@@ -995,7 +993,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 _exc_index(
                     indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, True
                 )
-                touched_ids.append(row_id)
             # delete
             for delete in deletes:
                 # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
@@ -1007,11 +1004,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     indexes, point_subs, dtype_map, idx_prefix, delete, delete, False
                 )
                 _del_key(key)
-                touched_ids.append(str(delete["id"]))
-            if touched_ids and comp_cls.table_sub_:
-                table_pubs.append(
-                    [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
-                )
+            # 变动的 row_id 只有表频道要用：没声明 table_sub 的组件（绝大多数）不收集
+            if comp_cls.table_sub_:
+                touched_ids = [
+                    *(row["id"] for row in inserts),
+                    *(row["id"] for row in old_rows),
+                    *(str(row["id"]) for row in deletes),
+                ]
+                if touched_ids:
+                    ids_msg: bytes = msg_packer.pack(touched_ids)  # type: ignore
+                    table_pubs.append([self.table_channel(ref), ids_msg])
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
