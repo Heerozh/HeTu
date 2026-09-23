@@ -7,7 +7,8 @@ from unittest.mock import patch
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
-from fixtures.contexts import wait_until
+from fixtures.contexts import make_ctx, wait_until
+from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat
@@ -1750,3 +1751,409 @@ async def test_row_subscription_catches_up_after_pubsub_resubscribe(
         assert updates[sub_id][row["id"]]["qty"] == 66
 
     await updates_until(broker, caught_up)
+
+
+async def test_subscribe_table_resync_rls(
+    broker: SubscriptionBroker, filled_item_ref, user_id10_ctx
+):
+    """整表重同步也按 RLS 判定：断线期间失去可见性的已知行推 None、移出已知集合；
+    一直不可见的行（别人的）不推"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        other = comp.new_row()
+        other.name, other.owner, other.time = "Other", 11, 601
+        await session.using(comp).insert(other)
+        other_id = int(other.id)
+    await backend.wait_for_synced()
+
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, user_id10_ctx)
+    assert sub_id and len(rows) == 25
+    tbl_sub = cast(TableSubscription, broker._subs[sub_id])
+    lost: dict[str, int] = {}
+
+    async def write():
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(time=114)
+            assert row
+            row.owner = 11
+            lost["id"] = int(row.id)
+            await repo.update(row)
+            row = await repo.get(id=other_id)
+            assert row
+            row.qty = 5
+            await repo.update(row)
+
+    await _write_while_deaf(broker, tbl_sub.table_channel, write)
+    assert await broker.get_updates(timeout=0.3) == {}, "断线期间不该收到通知"
+    broker._mq_client.push_pulled_(tbl_sub.table_channel, [MQClient.RESYNC])
+
+    def resynced(updates):
+        assert updates[sub_id][lost["id"]] is None
+
+    updates = await updates_until(broker, resynced)
+    assert other_id not in updates[sub_id]
+    assert lost["id"] not in tbl_sub.known_ids and other_id not in tbl_sub.known_ids
+
+
+async def test_subscribe_table_resync_at_row_cap_keeps_unread_known_rows(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """整表重同步按 id 升序读满上限时，后面可能还有行没读到：读到的最大 id 之后的已知行
+    不能当作删除推 None，之前读不到的已知行照常判删"""
+    backend = mod_auto_backend("main")
+    comp = filled_item_ref.comp_cls
+    broker = SubscriptionBroker(backend, max_table_rows=25)
+    try:
+        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id and len(rows) == 25
+        ids = sorted(int(row["id"]) for row in rows)
+        tbl_sub = cast(TableSubscription, broker._subs[sub_id])
+
+        async def write():
+            # 删掉最小的已知行，再插两行 id 比所有已知行都小的：表里 26 行，重读只读到
+            # 前 25 行，最大的已知行 ids[-1] 落在上限之外
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                assert await repo.get(id=ids[0])
+                repo.delete(ids[0])
+                for i in (1, 2):
+                    row = comp.new_row(id_=i)
+                    row.name, row.owner, row.time = f"Low{i}", 10, 900 + i
+                    await repo.insert(row)
+
+        await _write_while_deaf(broker, tbl_sub.table_channel, write)
+        broker._mq_client.push_pulled_(tbl_sub.table_channel, [MQClient.RESYNC])
+
+        def resynced(updates):
+            assert updates[sub_id][ids[0]] is None
+            assert updates[sub_id][1]["name"] == "Low1"
+
+        updates = await updates_until(broker, resynced)
+        assert ids[-1] not in updates[sub_id], "上限之外没读到的行被当成删除了"
+        assert ids[-1] in tbl_sub.known_ids and ids[0] not in tbl_sub.known_ids
+    finally:
+        await broker.close()
+
+
+# ============ 权限、重复订阅、初始读失败回滚等边界 ============
+
+
+@pytest.fixture
+async def admin_only_ref(new_component_env, mod_auto_backend):
+    """ADMIN 权限的组件（只有管理员能读），建表并写一行 key=1"""
+    import numpy as np
+
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+    from hetu.data.backend import Table
+
+    @define_component(namespace="pytest", permission=Permission.ADMIN)
+    class AdminOnly(BaseComponent):
+        key: np.int64 = property_field(0, unique=True, index=True)
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(AdminOnly, backend)
+    async with backend.session("pytest", 1) as session:
+        row = AdminOnly.new_row()
+        row.key = 1
+        await session.using(AdminOnly).insert(row)
+    await backend.wait_for_synced()
+    return Table(AdminOnly, ref.instance_name, ref.cluster_id, backend)
+
+
+async def test_admin_component_rejects_non_admin(
+    broker: SubscriptionBroker, admin_only_ref, admin_ctx, user_id10_ctx
+):
+    """ADMIN 权限的组件：非管理员（已登录的也不行）的行、范围、整表订阅都拒绝，不读库、
+    不占频道和计数；管理员照常订阅"""
+    servant = broker._backend.servant
+    row_id = int((await servant.range(admin_only_ref, "key", 1, limit=1))[0].id)
+
+    for ctx in (user_id10_ctx, make_ctx()):
+        assert await broker.subscribe_get(admin_only_ref, ctx, "key", 1) == (None, None)
+        assert await broker.subscribe_get(admin_only_ref, ctx, "id", row_id) == (
+            None,
+            None,
+        )
+        assert await broker.subscribe_range(admin_only_ref, ctx, "key", 0, 9) == (
+            None,
+            [],
+        )
+        assert await broker.subscribe_table(admin_only_ref, ctx) == (None, [])
+    assert broker.count() == (0, 0, 0)
+    assert not broker._mq_client.subscribed_channels
+
+    sub_id, row = await broker.subscribe_get(admin_only_ref, admin_ctx, "key", 1)
+    assert sub_id and row and row["id"] == row_id
+
+
+async def test_anonymous_get_and_range_denied(
+    broker: SubscriptionBroker, filled_item_ref
+):
+    """未登录连接对非 EVERYBODY 组件的行订阅、范围订阅：拒绝，且不占用任何频道/计数
+    （整表订阅见 test_subscribe_table_permission_denied）"""
+    anon_ctx = make_ctx()
+    assert await broker.subscribe_get(filled_item_ref, anon_ctx, "time", 110) == (
+        None,
+        None,
+    )
+    assert await broker.subscribe_range(filled_item_ref, anon_ctx, "owner", 10) == (
+        None,
+        [],
+    )
+    assert broker.count() == (0, 0, 0)
+    assert not broker._mq_client.subscribed_channels
+
+
+async def test_subscribe_get_by_index_not_found(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """按非 id 索引订阅、没有匹配的行：回 (None, None)，不订任何频道"""
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "NoSuchItem"
+    )
+    assert sub_id is None and row is None
+    assert broker.count() == (0, 0, 0)
+    assert not broker._mq_client.subscribed_channels
+
+
+async def test_subscribe_get_duplicate_returns_latest_or_revokes(
+    broker: SubscriptionBroker, filled_item_ref, user_id10_ctx
+):
+    """重复订阅同一行：行仍可见时回同一 sub_id 和库里的最新行（不含 _version），不重复
+    计数；行已对 caller 不可见（失去 RLS）时回 (None, None)，并撤掉旧订阅"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, user_id10_ctx, "name", "Itm10"
+    )
+    assert sub_id and row
+    row_id = row["id"]
+
+    async def modify(**fields):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            target = await repo.get(id=row_id)
+            assert target
+            for key, value in fields.items():
+                setattr(target, key, value)
+            await repo.update(target)
+        await backend.wait_for_synced()
+
+    await modify(qty=5)
+    sub_again, row_again = await broker.subscribe_get(
+        filled_item_ref, user_id10_ctx, "id", row_id
+    )
+    assert sub_again == sub_id
+    assert row_again and row_again["qty"] == 5 and "_version" not in row_again
+    assert broker.count() == (1, 0, 0)
+
+    await modify(owner=11)
+    sub_lost, row_lost = await broker.subscribe_get(
+        filled_item_ref, user_id10_ctx, "id", row_id
+    )
+    assert sub_lost is None and row_lost is None
+    assert sub_id not in broker._subs
+    assert broker.count() == (0, 0, 0)
+    assert not broker._mq_client.subscribed_channels
+
+
+async def test_subscribe_get_read_failure_rolls_back(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """先订后读的那次读抛异常（如后端连接断了）：刚登记的订阅和频道撤干净，异常照抛"""
+    servant = broker._backend.servant
+    row_id = int((await servant.range(filled_item_ref, "time", 110, limit=1))[0].id)
+
+    with (
+        patch.object(servant, "get", side_effect=ConnectionError("read failed")),
+        pytest.raises(ConnectionError, match="read failed"),
+    ):
+        await broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    assert broker.count() == (0, 0, 0)
+    assert not broker._subs and not broker._channel_subs
+    assert not broker._mq_client.subscribed_channels
+
+
+async def test_subscribe_range_force_false_and_duplicate(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, user_id11_ctx
+):
+    """force=False 时没有（可见的）行就不订阅；默认 force=True 空结果也订。重复订阅同一
+    查询回同一 sub_id 和当前的行，不重复计数"""
+    assert await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 99, force=False
+    ) == (None, [])
+    # 有行，但对 caller 都不可见（RLS 过滤后为空）
+    assert await broker.subscribe_range(
+        filled_item_ref, user_id11_ctx, "owner", 10, force=False
+    ) == (None, [])
+    assert broker.count() == (0, 0, 0)
+    assert not broker._mq_client.subscribed_channels
+
+    sub_empty, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 99
+    )
+    assert sub_empty and rows == []
+
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    channels = set(broker._mq_client.subscribed_channels)
+    sub_again, rows_again = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_again == sub_id
+    assert {r["id"] for r in rows_again} == {r["id"] for r in rows}
+    assert "_version" not in rows_again[0]
+    assert broker.count() == (0, 2, 0)
+    assert set(broker._mq_client.subscribed_channels) == channels
+
+
+async def test_subscribe_table_duplicate_over_row_cap(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """重复整表订阅时表已超过行数上限：与首次订阅超限一样回 (None, [])"""
+    backend = mod_auto_backend("main")
+    broker = SubscriptionBroker(backend, max_table_rows=25)
+    try:
+        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id and len(rows) == 25
+        comp = filled_item_ref.comp_cls
+        async with backend.session("pytest", 1) as session:
+            row = comp.new_row()
+            row.name, row.owner, row.time = "Extra", 10, 700
+            await session.using(comp).insert(row)
+        await backend.wait_for_synced()
+
+        assert await broker.subscribe_table(filled_item_ref, admin_ctx) == (None, [])
+    finally:
+        await broker.close()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="BUG: 重复整表订阅超限时只回 (None, [])、没撤旧订阅：客户端拿到 None 就认为"
+    "没有订阅、不会再来 unsub，旧订阅和表频道一直挂到连接结束，还占着整表订阅数的名额",
+)
+async def test_subscribe_table_duplicate_over_row_cap_revokes_old_sub(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """重复整表订阅时表已超过行数上限：回 (None, []) 的同时要撤掉旧订阅
+    （同 subscribe_get 重复订阅时行已不可见）"""
+    backend = mod_auto_backend("main")
+    broker = SubscriptionBroker(backend, max_table_rows=25)
+    try:
+        sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id
+        comp = filled_item_ref.comp_cls
+        async with backend.session("pytest", 1) as session:
+            row = comp.new_row()
+            row.name, row.owner, row.time = "Extra", 10, 700
+            await session.using(comp).insert(row)
+        await backend.wait_for_synced()
+
+        assert await broker.subscribe_table(filled_item_ref, admin_ctx) == (None, [])
+        assert sub_id not in broker._subs
+        assert broker.count() == (0, 0, 0)
+        assert not broker._mq_client.subscribed_channels
+    finally:
+        await broker.close()
+
+
+async def test_subscribe_table_cancelled_during_initial_read_rolls_back(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅在初始全量读完成前被取消（连接断开）：已登记的订阅与频道撤干净"""
+    servant = broker._backend.servant
+    entered = asyncio.Event()
+
+    async def stuck_range(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    with patch.object(servant, "range", stuck_range):
+        task = asyncio.create_task(broker.subscribe_table(filled_item_ref, admin_ctx))
+        async with asyncio.timeout(5):
+            await entered.wait()
+        assert broker.count() == (0, 0, 1), "订阅应在读之前就已登记"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert broker.count() == (0, 0, 0)
+    assert not broker._subs and not broker._channel_subs
+    assert not broker._mq_client.subscribed_channels
+
+
+async def test_index_sub_skips_row_gone_before_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """范围比对发现新行，批量读时它已被删（range 与 get_many 之间）：不推、不订它的行频道，
+    也不记进上次的比对结果——之后它若还在范围里，下次比对照常当作新行推"""
+    backend = broker._backend
+    servant = backend.servant
+    comp = filled_item_ref.comp_cls
+    sub_id, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_id
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+
+    async with backend.session("pytest", 1) as session:
+        new = comp.new_row()
+        new.name, new.owner, new.time = "New", 10, 700
+        await session.using(comp).insert(new)
+        new_id = int(new.id)
+    new_channel = servant.row_channel(filled_item_ref, new_id)
+
+    real_get_many = servant.get_many
+    vanished: list[int] = []
+
+    async def get_many_vanished(ref, ids, *args, **kwargs):
+        rows = await real_get_many(ref, ids, *args, **kwargs)
+        if new_id in {int(i) for i in ids}:
+            vanished.append(new_id)
+        return [None if int(i) == new_id else r for i, r in zip(ids, rows)]
+
+    with patch.object(servant, "get_many", get_many_vanished):
+        async with asyncio.timeout(10):
+            while not vanished:
+                assert await broker.get_updates(timeout=0.5) == {}
+    assert new_id not in idx_sub.last_range_result
+    assert new_channel not in idx_sub.row_subs
+    assert new_channel not in broker._channel_subs
+
+    broker._mq_client.request_reread(idx_sub.index_channel)
+
+    def pushed(updates):
+        assert updates[sub_id][new_id]["name"] == "New"
+
+    await updates_until(broker, pushed)
+    assert new_channel in idx_sub.row_subs
+
+
+async def test_subscription_rejects_foreign_channel(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """订阅对象只认自己的频道：收到别的频道是分发记账错了，抛出而不是推错数据。
+    整表订阅收到空 payload（表级频道消息的 payload 非法时）什么也不读"""
+    tbl_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    idx_id, _ = await broker.subscribe_range(filled_item_ref, admin_ctx, "owner", 10)
+    tbl_sub = cast(TableSubscription, broker._subs[tbl_id])
+    idx_sub = cast(IndexSubscription, broker._subs[idx_id])
+
+    with pytest.raises(RuntimeError, match="bogus:channel"):
+        await tbl_sub.get_updated("bogus:channel", {"1"})
+    with pytest.raises(RuntimeError, match="bogus:channel"):
+        await idx_sub.get_updated("bogus:channel")
+
+    with patch.object(broker._backend.servant, "get_many") as get_many:
+        for payload in (None, set()):
+            assert await tbl_sub.get_updated(tbl_sub.table_channel, payload) == (
+                set(),
+                set(),
+                {},
+            )
+        get_many.assert_not_called()
