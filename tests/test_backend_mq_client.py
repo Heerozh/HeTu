@@ -4,6 +4,7 @@ MQClient 本地队列（get_message / push_pulled_）：空闲时不轮询，来
 """
 
 import asyncio
+import contextlib
 import time
 
 import pytest
@@ -114,6 +115,43 @@ async def test_merged_notification_gets_trailing_read():
         assert await mq.get_message() == {"A": None}, "合并进来的通知没有尾随重读"
     assert time.monotonic() - popped >= INTERVAL * 0.9
     await _expect_nothing(mq)  # 尾随那次之后没有新通知，就此结束
+    await hub.close()
+
+
+async def test_continuous_stream_does_not_starve_reads():
+    """不间断的写入流：尾随重读不能做成"来一条就重置计时"的防抖，否则写入不停就永远不读。
+    合并进来的通知只记时刻、不推后队头，写入期间照常每个 interval 读一次；写入停下后
+    再多读一次，且那次读晚于最后一条通知至少一个 interval，之后就安静了"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    t0 = time.monotonic()
+    pops: list[float] = []
+    last_push = 0.0
+
+    async def reader():
+        while True:
+            await mq.get_message()
+            pops.append(time.monotonic() - t0)
+
+    reading = asyncio.create_task(reader())
+    while time.monotonic() - t0 < 1.0:  # 每 10ms 一条，持续 1 秒
+        mq.push_pulled_("A", None)
+        last_push = time.monotonic() - t0
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(INTERVAL * 5)
+    reading.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await reading
+
+    during = [p for p in pops if p <= last_push]
+    after = [p for p in pops if p > last_push]
+    # 约每 interval 一次（理想 9 次），留足余量给全量跑时的 GC 停顿
+    assert len(during) >= 4, f"写入期间读被饿住了：{pops}"
+    assert after, "写入停下后没有尾随重读"
+    assert after[-1] - last_push >= INTERVAL * 0.9, (
+        f"最后一次读离最后一条通知太近：{pops}"
+    )
+    assert len(after) <= 2, f"写入停下后还在反复读：{pops}"
     await hub.close()
 
 
