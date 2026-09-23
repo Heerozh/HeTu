@@ -401,6 +401,9 @@ class SubscriptionBroker:
             )
             row = await servant.get(table_ref, row_id, RowFormat.TYPED_DICT)
             if row is None or not self._has_row_permission(table_ref, ctx, row):
+                # 行现在不可见（已删除 / 失去行级权限）：回 None 客户端就认为没有订阅、
+                # 不会再来 unsub，旧订阅得跟着撤掉，不然它和它的频道会挂到连接结束
+                await self.unsubscribe(sub_id)
                 return None, None
             del row["_version"]  # 内部版本号不推给客户端
             return sub_id, row

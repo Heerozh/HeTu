@@ -1232,3 +1232,33 @@ async def test_subscribe_get_invisible_row_leaves_no_subscription(
     hub = servant._hub  # type: ignore[attr-defined]
     for rid in (987654321, row_id):
         assert servant.row_channel(filled_item_ref, rid) not in hub.channels
+
+
+async def test_subscribe_get_duplicate_of_deleted_row_unsubscribes(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """重复订阅一个已经删掉的行：回 (None, None) 的同时得把旧订阅撤掉——客户端拿到 None 就
+    认为没有订阅、不会再 unsub，留着的话订阅和频道会挂到连接结束、计数也漂"""
+    backend = broker._backend
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
+    )
+    assert sub_id and row
+    row_id = row["id"]
+    channel = backend.servant.row_channel(filled_item_ref, row_id)
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        assert await repo.get(id=row_id)
+        repo.delete(row_id)
+    updates = await broker.get_updates(timeout=3)
+    assert updates[sub_id][row_id] is None
+
+    sub_again, row_again = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "id", row_id
+    )
+    assert sub_again is None and row_again is None
+    assert sub_id not in broker._subs
+    assert channel not in broker._channel_subs
+    assert channel not in broker._mq_client.subscribed_channels
+    assert broker.count() == (0, 0, 0)
