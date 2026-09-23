@@ -1,7 +1,7 @@
 # 订阅推送的尾随重读（trailing re-read）— 设计稿
 
 - 日期：2026-09-23
-- 状态：待实施
+- 状态：已实施（全后端全量测试通过）
 - 分支：`fix/sub-trailing-reread`（基于 dev `136f0c0`）
 - 取代：`perf/row-cache` 分支的"行频道改由 commit 主动 PUBLISH 并携带 `_version`"（8c47e074）。
   row-cache 分支已决定废弃，行缓存日后基于本 spec 重写（约束见 §7）。
@@ -103,6 +103,9 @@ row-cache 分支的做法是 commit 在 Lua 里对每个改动行 `PUBLISH 行�
 - `subscribe_get`：读完初始行、确认可见后，`request_reread(row_channel)`。
 - `subscribe_range`：订阅生效并登记后，`request_reread(index_channel, *row_channels)`——重跑一次
   range 比对（补上读与订之间进出范围的行），并重读各行（补上内容变化）。
+  副作用（有益）：初始行按 RLS 过滤过，重跑比对时范围内不可见的行会被当作"新进入"订上行频道
+  （只订不推），之后它不经索引变化重新获得 RLS 也能从行频道推出来。以前要等该索引下一次变动
+  才订上它们，`test_query_subscribe_rls_gain_without_index` 因此从已知缺陷（xfail）转正。
 - `subscribe_table`：整表重读太贵，不做补读，改成**先订阅、隔 T 再全量读**：
   1. 先查重复订阅（sub_id 固定为 `{comp}.table`），再 SUBSCRIBE、立即登记订阅，订阅进入
      "初始化中"：这期间 `get_updated` 不读库、不推送，只把通知带来的 row_id 攒进 `pending`
