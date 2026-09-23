@@ -19,6 +19,41 @@ from fixtures.testdata import *
 # set default lang
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_cmdline_main(config):
+    """`-n` 并行（pytest-xdist）且没指定 `--dist` 时，默认用 loadgroup 调度"""
+    if getattr(config.option, "numprocesses", None) and (
+        getattr(config.option, "dist", None) == "no"
+    ):
+        config.option.dist = "loadgroup"
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_configure_node(node):
+    """worker 只会从命令行参数解析 `--dist`，上面改的调度模式要另外传过去"""
+    node.workerinput["hetu_loadgroup"] = node.config.getvalue("dist") == "loadgroup"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    """
+    loadgroup 调度时以（测试文件, 后端）为单位分给 xdist worker：同一单位的测试在同一
+    worker 上连续跑完，模块级夹具不会在多个 worker 上重复初始化。每个 worker 是独立
+    进程，只启动自己用到的后端容器（见 fixtures/docker_infra.py）。
+    """
+    if getattr(config, "workerinput", {}).get("hetu_loadgroup"):
+        # xdist 自己的 collection 钩子看到这个开关，才会按 xdist_group 标记分组
+        config.option.loadgroup = True
+    if not getattr(config.option, "loadgroup", False):
+        return
+    for item in items:
+        group = item.nodeid.split("::", 1)[0]
+        callspec = getattr(item, "callspec", None)
+        if callspec and "backend_name" in callspec.params:
+            group += ":" + callspec.params["backend_name"]
+        item.add_marker(pytest.mark.xdist_group(group))
+
+
 @pytest.fixture(autouse=True, scope="module")
 def reset_snowflake_lease():
     """
