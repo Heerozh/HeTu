@@ -144,6 +144,20 @@ async def test_schema_guard(mod_test_app, mod_auto_backend, caplog):
     assert any("epoch" in rec.getMessage() for rec in caplog.records)
 
 
+async def test_schema_guard_notify_declarations(mod_test_app, mod_auto_backend):
+    """table_sub / point_sub 与服务器不一致 → SchemaMismatch：headless 写入走同一条
+    commit，声明少了就少发通知，服务器上的订阅会漏更新"""
+    Sim = mod_test_app.HeadlessSim
+    backend = mod_auto_backend()
+    for variant, needle in (
+        (_variant(Sim, table_sub=True), "table_sub"),
+        (_variant(Sim, properties={"system_id": {"point_sub": True}}), "point_sub"),
+    ):
+        with pytest.raises(headless.SchemaMismatch) as ei:
+            await headless.HeadlessClient.from_backend(backend, "server1", [variant])
+        assert needle in str(ei.value), (needle, str(ei.value))
+
+
 # ---------------------------------------------------------------- 读
 
 
