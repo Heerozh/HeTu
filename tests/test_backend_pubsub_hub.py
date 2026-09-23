@@ -228,3 +228,25 @@ async def test_watch_and_client_subscription_share_channel(
 
     await broker.close()
     assert hub.subscriber_count(channel) == 0
+
+
+async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend):
+    """pubsub 连接常驻只读，半开 TCP 连接只能靠内核 keepalive 判死：连接参数里必须显式开着，
+    不依赖 redis-py 的版本默认值（7.x 默认关）"""
+    backend: Backend = mod_auto_backend()
+    broker = SubscriptionBroker(backend)
+    try:
+        pubsub = getattr(_hub(backend), "_pubsub", None)
+        if pubsub is None:
+            return  # SQL 后端没有 pubsub 连接
+        sub, _ = await broker.subscribe_get(
+            filled_item_ref, _admin_ctx(), "name", "Itm10"
+        )
+        assert sub
+        for res in pubsub.node_resources.values():
+            conn = res["pubsub"].connection
+            assert conn is not None
+            if hasattr(conn, "socket_keepalive"):  # unix socket 连接没有
+                assert conn.socket_keepalive is True
+    finally:
+        await broker.close()
