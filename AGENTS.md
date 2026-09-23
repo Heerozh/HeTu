@@ -16,6 +16,7 @@ uv run pytest tests/         # 运行全部测试
 uv run pytest tests/test_backend_basic.py  # 运行单个测试文件
 uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
 uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
+uv run pytest -n 8 tests/     # 多进程并行测试（pytest-xdist）
 ```
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey/Postgres/MariaDB
@@ -23,6 +24,13 @@ uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 取值范围：`redis`、`valkey`、`redis_cluster`、`postgres`、`sqlite`、`mariadb`。
 未设置时跑全部后端；一般TDD时只需跑`redis`，CI 在 `push` 到非 `main`
 分支时也会限制为 `redis` 为了快速验证。
+
+测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
+worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /
+终端可以同时跑测试。`-n` 并行时默认按（测试文件, 后端）分组调度，每个 worker 只启动自己用到
+的后端；worker 多、机器忙时少数时序敏感的测试（订阅推送、sleep 精度）偶尔会抖，用 `--lf` 重跑
+确认。被强杀的测试进程留下的容器会在下次跑测试时自动回收（只回收属主进程已退出的）；手动
+清理：`docker rm -f $(docker ps -aq --filter label=hetu.test)`。
 
 ## Architecture
 
