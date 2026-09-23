@@ -190,11 +190,24 @@ Clients ask the server for live row data with three operations:
 
 Behind the scenes the `SubscriptionBroker` watches Redis pub/sub for row
 changes, filters them by the client's permission level, and pushes deltas
-back over the websocket. Latency is dominated by Redis round-trip — typically
-under one millisecond on the same VPC.
+back over the websocket. Pushes are batched every `1/UPDATE_FREQUENCY`
+(100 ms by default), so a change usually reaches the client within 100–200 ms.
 
 Subscriptions are checked against the same permission system as `Systems`, so a
 client cannot subscribe to data it isn't allowed to see.
+
+**Subscriptions are best-effort and eventually consistent.** Under normal load
+a client gets the latest data in about 99% of cases; when Redis is overloaded
+(replica replication lag above ~100 ms), a client may keep stale data until
+that row changes again. A notification only says "this row changed" and carries
+no content, so the server re-reads the row from a random replica, which is not
+necessarily the node that sent the notification. After every notification (and
+after a subscription becomes active or pub/sub reconnects) the server reads
+again at least one batching interval later; as long as replica lag stays within
+that interval, what it reads is the latest value. Make decisions that need
+strong consistency (spending currency, granting rewards, validation) inside a
+`System` — write transactions are guarded by optimistic locking — rather than
+relying on the subscription data a client holds.
 
 What wakes a `range` up depends on the shape of the query. A **point query**
 (`high` omitted, or `low == high` — `owner=me`, `zone=z`) listens to the channel
@@ -222,8 +235,9 @@ list, public config. Keep using `range` for hot tables (positions, HP). The
 server refuses tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by
 default); the per-connection count is capped by `MAX_TABLE_SUBSCRIPTION`.
 
-Unlike `range`, a table subscription reacts to RLS both ways: a row that loses
-permission is pushed as deleted, a row that gains it is pushed as added.
+A table subscription reacts to RLS both ways (a `range` does so only for rows
+inside its queried range): a row that loses permission is pushed as deleted, a
+row that gains it is pushed as added.
 
 ## Permissions
 

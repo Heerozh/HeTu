@@ -281,6 +281,13 @@ namespace HeTu
         ///     可使用`T`模板参数定义数据类型，不写就是默认`Dictionary{string, object}`类型。
         ///     使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
         ///     使用默认的Dictionary更自由灵活，但类型需要自行转换。
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
         /// </remarks>
         /// <code>
         /// // 使用示例
@@ -381,6 +388,13 @@ namespace HeTu
         ///     使用`T`模板时，对象定义要和服务器定义一致，可使用服务器端工具自动生成c#定义。
         ///     使用默认的Dictionary更自由灵活，但类型需要自行转换。
         ///     如果目标组件权限为Owner，则只能查询到`owner`属性==自己的行。
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
         /// </remarks>
         /// <code>
         /// //使用示例
@@ -473,6 +487,15 @@ namespace HeTu
         ///     用法与 WatchRange 完全一样（OnInsert/OnUpdate/OnDelete、ObserveAdd/ObserveRow）。
         ///     适合"行多、行小、很少变"的表，如所有玩家的名字；高频写入的表请用 WatchRange。
         /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
         /// <returns>整表订阅对象；无权限或行数超过服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>

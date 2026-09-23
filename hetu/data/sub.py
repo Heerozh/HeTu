@@ -371,6 +371,21 @@ class TableSubscription(BaseSubscription):
 class SubscriptionBroker:
     """
     Component的数据订阅和查询接口
+
+    订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况，客户端会在 1~2 个
+    `1/UPDATE_FREQUENCY`（默认 100~200ms）内收到最新数据；Redis 压力过大（副本复制延迟
+    超过约 100ms）时，客户端可能残留旧数据，直到该行下次变更。需要强一致的判断请放在
+    System 里读（写事务有乐观锁兜底），不要依赖客户端手里的订阅数据。
+    原因：通知不带内容，收到后去随机副本重读，发通知的节点和读的节点可能不是同一个。
+    每条通知之后，以及订阅生效、pubsub 断线重订生效之后，都至少隔一个 interval 再读一次
+    （见 `MQClient` 的尾随重读与 `request_reread`），副本复制延迟在这个预算内就一定读到
+    最新值。
+
+    Subscriptions are best-effort and eventually consistent: under normal load a client
+    gets the latest data in about 99% of cases, usually within one or two update ticks
+    (100-200 ms by default). When Redis is overloaded (replica lag above ~100 ms), a client
+    may keep stale data until that row changes again. Make decisions that need strong
+    consistency inside a System (write transactions are guarded by optimistic locking).
     """
 
     def __init__(self, backend: Backend, max_table_rows: int = 100_000):
@@ -452,6 +467,11 @@ class SubscriptionBroker:
         """
         获取并订阅单行数据。
         如果是重复订阅，会返回上一次订阅的sub_id。客户端应该写代码防止重复订阅。
+
+        推送是尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据
+        直到该行下次变更（见类说明）。
+        Best-effort, eventually consistent: ~99% of the time the latest data arrives; stale
+        data may remain under Redis overload until the row changes again (see the class doc).
 
         Returns
         --------
@@ -555,11 +575,17 @@ class SubscriptionBroker:
 
         Notes
         -----
-        订阅不会对RLS权限获得做出反应，由订阅时的RLS权限决定。
+        RLS 权限的得失：
         - 当某行已查询到的数据，失去RLS权限时，**会**收到该行被删除的通知
-        - 当某行不符合RLS权限的数据，获得RLS权限时，**不会**收到该行被添加的通知
+        - 范围内起初不可见的行，之后获得RLS权限时**会**推送该行：订阅生效后的补读会把
+          范围内不可见的行一并订上（只订不推）
 
         RLS权限介绍请看See Also的组件定义。
+
+        推送是尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据
+        直到该行下次变更（见类说明）。
+        Best-effort, eventually consistent: ~99% of the time the latest data arrives; stale
+        data may remain under Redis overload until the row changes again (see the class doc).
 
         通知范围取决于查询形状：
         - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`）只订"索引=该值"

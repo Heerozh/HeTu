@@ -139,6 +139,13 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 All three subscriptions are **live**: the server pushes deltas as the
 underlying rows change in Redis.
 
+> **Consistency note**: subscription pushes are best-effort and eventually
+> consistent. Under normal load you get the latest data in about 99% of cases
+> (usually within 100–200 ms of the change); when the server's Redis is
+> overloaded, stale data may remain until that row changes again. Use
+> subscription data for display; leave decisions that need strong consistency
+> — spending currency, granting rewards, validation — to a server `System`.
+
 | API                                                     | Returns                                                     | Use it when                                                                                               |
 |---------------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
 | `WatchRow<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
