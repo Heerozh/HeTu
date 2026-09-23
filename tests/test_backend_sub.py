@@ -1,4 +1,5 @@
 import asyncio
+import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from typing import AsyncGenerator, cast
@@ -9,7 +10,7 @@ from fixtures.backends import use_redis_family_backend_only
 from fixtures.contexts import settled_updates, wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RowFormat
 from hetu.data.backend.base import MQClient
 from hetu.data.sub import (
     IndexSubscription,
@@ -1471,3 +1472,176 @@ async def test_reinserted_row_with_restarted_version_is_pushed(
 
     updates = await settled_updates(broker, timeout=3)
     assert updates[sub_id][row_id]["name"] == "Reborn"
+
+
+# ====== 订阅生效后的补读：初始读落在还没应用某次写入的副本上，也不会一直旧 ======
+
+
+def _lagging_once(real, stale):
+    """包一个读方法：第一次调用返回 stale 的拷贝（落在滞后副本上），之后照常读"""
+    lagging = True
+
+    async def read(*args, **kwargs):
+        nonlocal lagging
+        if lagging:
+            lagging = False
+            return [dict(r) for r in stale] if isinstance(stale, list) else dict(stale)
+        return await real(*args, **kwargs)
+
+    return read
+
+
+async def test_subscribe_get_followup_reread_fixes_lagging_initial_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """订阅生效前的写入不会再有通知；初始读又落在还没应用它的副本上时，订阅生效后隔一个
+    interval 补读一次，客户端最终拿到新值"""
+    backend = broker._backend
+    servant = backend.servant
+    row_id = int((await servant.range(filled_item_ref, "time", 111))[0].id)
+    stale = await servant.get(filled_item_ref, row_id, RowFormat.TYPED_DICT)
+    assert stale and stale["qty"] == 999
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=row_id)
+        assert row
+        row.qty = 4321
+        await repo.update(row)
+    await backend.wait_for_synced()
+
+    with patch.object(servant, "get", _lagging_once(servant.get, stale)):
+        sub_id, row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row_id
+        )
+    assert sub_id and row and row["qty"] == 999
+    updates = await settled_updates(broker, timeout=1)
+    assert updates[sub_id][row_id]["qty"] == 4321
+
+
+async def test_subscribe_range_followup_reread_fixes_lagging_initial_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """subscribe_range 的初始读漏了新进入范围的行、读到了旧内容（先读后订的间隙，或落在
+    滞后副本上）：订阅生效后补读一次——重跑范围比对、重读各行"""
+    backend = broker._backend
+    servant = backend.servant
+    comp = filled_item_ref.comp_cls
+    stale_rows = await servant.range(
+        filled_item_ref, "owner", 10, limit=33, row_format=RowFormat.TYPED_DICT
+    )
+    assert len(stale_rows) == 25
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(time=110)
+        assert row
+        row.qty = 55
+        changed_id = row.id
+        await repo.update(row)
+        late = comp.new_row()
+        late.name, late.owner, late.time = "Late", 10, 700
+        await repo.insert(late)
+        late_id = late.id
+    await backend.wait_for_synced()
+
+    with patch.object(servant, "range", _lagging_once(servant.range, stale_rows)):
+        sub_id, rows = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "owner", 10, limit=33
+        )
+    assert sub_id and len(rows) == 25
+    assert late_id not in {r["id"] for r in rows}
+    updates = await settled_updates(broker, timeout=1)
+    assert updates[sub_id][changed_id]["qty"] == 55
+    assert updates[sub_id][late_id]["name"] == "Late"
+
+
+async def test_subscribe_table_initial_read_waits_lag_budget(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅不补读（整表重读太贵）：改为先订阅，生效后隔一个 interval 才全量读，
+    生效前在别的节点上已应用的写入这时副本也已应用"""
+    servant = broker._backend.servant
+    mq = broker._mq_client
+    acked_at: float | None = None
+    read_at: float | None = None
+    real_subscribe, real_range = mq.subscribe, servant.range
+
+    async def timed_subscribe(*channels):
+        nonlocal acked_at
+        await real_subscribe(*channels)
+        acked_at = time.monotonic()
+
+    async def timed_range(*args, **kwargs):
+        nonlocal read_at
+        read_at = read_at or time.monotonic()
+        return await real_range(*args, **kwargs)
+
+    with (
+        patch.object(mq, "subscribe", timed_subscribe),
+        patch.object(servant, "range", timed_range),
+    ):
+        sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id and len(rows) == 25
+    assert acked_at is not None and read_at is not None
+    assert read_at - acked_at >= INTERVAL * 0.9
+
+
+async def test_subscribe_table_defers_notifications_during_initial_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅初始化期间（已生效、初始全量读还没完成）弹出的通知不能被消费掉：客户端还没
+    拿到 sub_id 会丢弃那次推送，而初始读又未必包含那次写入。攒起来，初始读完成后重读"""
+    backend = broker._backend
+    servant = backend.servant
+    comp = filled_item_ref.comp_cls
+    stale_rows = await servant.range(
+        filled_item_ref,
+        "id",
+        float("-inf"),
+        float("inf"),
+        limit=100,
+        row_format=RowFormat.TYPED_DICT,
+    )
+    real_range = servant.range
+    reading = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_lagging_range(*args, **kwargs):
+        if not reading.is_set():  # 初始全量读：卡住，并且落在滞后副本上
+            reading.set()
+            await release.wait()
+            return [dict(r) for r in stale_rows]
+        return await real_range(*args, **kwargs)
+
+    with patch.object(servant, "range", slow_lagging_range):
+        task = asyncio.create_task(broker.subscribe_table(filled_item_ref, admin_ctx))
+        async with asyncio.timeout(3):
+            await reading.wait()
+        # 初始读卡着的时候有人改了一行
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(time=111)
+            assert row
+            row.qty = 31
+            id_a = row.id
+            await repo.update(row)
+        # 推送循环照常在跑：它弹出这条通知时订阅还在初始化
+        early = await broker.get_updates(timeout=0.5)
+        release.set()
+        sub_id, rows = await task
+    assert sub_id and early == {}
+    assert {r["id"]: r["qty"] for r in rows}[id_a] == 999  # 初始行是旧的
+    updates = await settled_updates(broker, timeout=2)
+    assert updates[sub_id][id_a]["qty"] == 31
+
+
+async def test_subscribe_followup_reread_pushes_nothing_when_fresh(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """初始读已经是最新时，补读读回的一样，不产生任何推送"""
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    sub_tbl, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_row and sub_10 and sub_tbl
+    assert await broker.get_updates(timeout=0.6) == {}
