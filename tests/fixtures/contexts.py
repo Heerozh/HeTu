@@ -55,8 +55,8 @@ def user_id11_ctx() -> SystemContext:
     return user_ctx_(11)
 
 
-async def wait_until(pred: Callable[[], bool], timeout: float = 3.0) -> None:
-    """轮询到 pred() 为真，超时抛 TimeoutError。
+async def wait_until(pred: Callable[[], object], timeout: float = 3.0) -> None:
+    """轮询到 pred() 为真（按真值判断，不要求返回 bool），超时抛 TimeoutError。
 
     用来等后端 hub 把通知投递到 mq 的本地队列这类"迟早会发生但没有钩子"的事。
     """
