@@ -10,6 +10,7 @@ from fixtures.contexts import settled_updates, wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
+from hetu.data.backend.base import MQClient
 from hetu.data.sub import (
     IndexSubscription,
     RowSubscription,
@@ -18,6 +19,7 @@ from hetu.data.sub import (
 )
 
 SnowflakeID().init(1, 0)
+INTERVAL = 1 / MQClient.UPDATE_FREQUENCY
 
 
 @pytest.fixture
@@ -1400,3 +1402,77 @@ async def test_subscribe_get_duplicate_of_deleted_row_unsubscribes(
     assert channel not in broker._channel_subs
     assert channel not in broker._mq_client.subscribed_channels
     assert broker.count() == (0, 0, 0)
+
+
+# ================= 重读去重：读回的与客户端已有的一样就不推 =================
+
+
+async def test_reread_of_unchanged_rows_pushes_nothing(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """补读、尾随重读大多读回客户端已有的数据：行订阅与范围订阅里的行都不该再推一遍"""
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_row and sub_10 and len(rows) == 25
+    mq = broker._mq_client
+    row_channel = cast(RowSubscription, broker._subs[sub_row]).channel
+    # 没有任何写入：各频道当作收到通知；过一会儿行频道再合并进一条，弹出时离它不足一个
+    # interval（弹出的时刻会比预定晚一点，挨得太近就不算），还会尾随重读一次
+    mq.request_reread(row_channel, *broker._subs[sub_10].channels)
+    await asyncio.sleep(INTERVAL * 0.6)
+    mq.request_reread(row_channel)
+    assert await broker.get_updates(timeout=0.6) == {}
+
+
+async def test_table_trailing_reread_pushes_no_duplicate(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅：合并进队头的消息触发尾随重读，读回的行与刚推过的一样，不重复推"""
+    backend = broker._backend
+    mq = broker._mq_client
+    sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id
+    table_channel = cast(TableSubscription, broker._subs[sub_id]).table_channel
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=111)
+        assert row
+        row.qty = 5
+        id_a = row.id
+        await repo.update(row)
+    await wait_until(lambda: table_channel in mq.pulled_set)
+    await asyncio.sleep(INTERVAL * 0.6)
+    mq.push_pulled_(table_channel, [id_a])  # 合并进队头 → 弹出后尾随重读 id_a
+
+    updates = await broker.get_updates(timeout=2)
+    assert updates[sub_id][id_a]["qty"] == 5
+    assert await broker.get_updates(timeout=0.6) == {}
+
+
+async def test_reinserted_row_with_restarted_version_is_pushed(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """同 id 删除后重插：_version 从 1 重来，与客户端手里的旧行版本号可能相同（刚插入、
+    没改过的行都是 1），去重不能只看版本号，内容不同就得推"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    row_id = int((await backend.servant.range(filled_item_ref, "time", 112))[0].id)
+    sub_id, row = await broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    assert sub_id and row and row["name"] == "Itm12"
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert await repo.get(id=row_id)
+        repo.delete(row_id)
+    async with backend.session("pytest", 1) as session:
+        reborn = comp.new_row()
+        reborn.id = row_id
+        reborn.name = "Reborn"
+        reborn.time = 112
+        await session.using(comp).insert(reborn)
+
+    updates = await settled_updates(broker, timeout=3)
+    assert updates[sub_id][row_id]["name"] == "Reborn"
