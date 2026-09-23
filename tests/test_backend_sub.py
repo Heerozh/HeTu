@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
-from fixtures.contexts import settled_updates, wait_until
+from fixtures.contexts import wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat
@@ -611,7 +611,7 @@ async def test_query_subscribe_rls_gain_without_index(
     assert sub_id
     assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
     # 补读过后：不可见的 row4 也订上了，但不推给客户端
-    assert await settled_updates(broker, timeout=0.3) == {}
+    assert await broker.get_updates(timeout=0.5) == {}
     assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
     # 测试改回来是否重新出现
@@ -622,11 +622,13 @@ async def test_query_subscribe_rls_gain_without_index(
         assert row4
         row4.friend = 11
         await repo.update(row4)
-    updates = await settled_updates(broker, timeout=5)
-    assert len(updates) == 1
-    assert len(updates[sub_id]) == 1
-    assert updates[sub_id][row4_id]["friend"] == 11
 
+    def gained(updates):
+        assert len(updates) == 1
+        assert len(updates[sub_id]) == 1
+        assert updates[sub_id][row4_id]["friend"] == 11
+
+    await updates_until(broker, gained)
     assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
@@ -641,7 +643,7 @@ async def test_mq_backlog(
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
     await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm11")
     # 订阅生效后的补读先消化掉，下面直接看本地队列
-    assert await settled_updates(broker, timeout=0.3) == {}
+    assert await broker.get_updates(timeout=0.5) == {}
 
     # 修改row1，并pull消息
     async with backend.session("pytest", 1) as session:
@@ -1475,8 +1477,10 @@ async def test_reinserted_row_with_restarted_version_is_pushed(
         reborn.time = 112
         await session.using(comp).insert(reborn)
 
-    updates = await settled_updates(broker, timeout=3)
-    assert updates[sub_id][row_id]["name"] == "Reborn"
+    def reborn_pushed(updates):
+        assert updates[sub_id][row_id]["name"] == "Reborn"
+
+    await updates_until(broker, reborn_pushed)
 
 
 # ====== 订阅生效后的补读：初始读落在还没应用某次写入的副本上，也不会一直旧 ======
@@ -1519,8 +1523,11 @@ async def test_subscribe_get_followup_reread_fixes_lagging_initial_read(
             filled_item_ref, admin_ctx, "id", row_id
         )
     assert sub_id and row and row["qty"] == 999
-    updates = await settled_updates(broker, timeout=1)
-    assert updates[sub_id][row_id]["qty"] == 4321
+
+    def caught_up(updates):
+        assert updates[sub_id][row_id]["qty"] == 4321
+
+    await updates_until(broker, caught_up)
 
 
 async def test_subscribe_range_followup_reread_fixes_lagging_initial_read(
@@ -1554,9 +1561,12 @@ async def test_subscribe_range_followup_reread_fixes_lagging_initial_read(
         )
     assert sub_id and len(rows) == 25
     assert late_id not in {r["id"] for r in rows}
-    updates = await settled_updates(broker, timeout=1)
-    assert updates[sub_id][changed_id]["qty"] == 55
-    assert updates[sub_id][late_id]["name"] == "Late"
+
+    def caught_up(updates):
+        assert updates[sub_id][changed_id]["qty"] == 55
+        assert updates[sub_id][late_id]["name"] == "Late"
+
+    await updates_until(broker, caught_up)
 
 
 async def test_subscribe_table_initial_read_waits_lag_budget(
@@ -1635,8 +1645,11 @@ async def test_subscribe_table_defers_notifications_during_initial_read(
         sub_id, rows = await task
     assert sub_id and early == {}
     assert {r["id"]: r["qty"] for r in rows}[id_a] == 999  # 初始行是旧的
-    updates = await settled_updates(broker, timeout=2)
-    assert updates[sub_id][id_a]["qty"] == 31
+
+    def caught_up(updates):
+        assert updates[sub_id][id_a]["qty"] == 31
+
+    await updates_until(broker, caught_up)
 
 
 async def test_subscribe_followup_reread_pushes_nothing_when_fresh(
@@ -1697,10 +1710,12 @@ async def test_subscribe_table_resync(
     assert await broker.get_updates(timeout=0.3) == {}, "断线期间不该收到通知"
     broker._mq_client.push_pulled_(table_channel, [MQClient.RESYNC])  # hub 重订后分发的
 
-    updates = await settled_updates(broker, timeout=2)
-    assert updates[sub_id][ids["a"]]["qty"] == 77
-    assert updates[sub_id][ids["b"]] is None
-    assert updates[sub_id][ids["c"]]["name"] == "New"
+    def resynced(updates):
+        assert updates[sub_id][ids["a"]]["qty"] == 77
+        assert updates[sub_id][ids["b"]] is None
+        assert updates[sub_id][ids["c"]]["name"] == "New"
+
+    await updates_until(broker, resynced)
     tbl_sub = cast(TableSubscription, broker._subs[sub_id])
     assert ids["b"] not in tbl_sub.known_ids and ids["c"] in tbl_sub.known_ids
 
@@ -1715,7 +1730,7 @@ async def test_row_subscription_catches_up_after_pubsub_resubscribe(
         filled_item_ref, admin_ctx, "name", "Itm10"
     )
     assert sub_id and row
-    assert await settled_updates(broker, timeout=0.3) == {}  # 订阅生效后的补读先消化掉
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
     channel = cast(RowSubscription, broker._subs[sub_id]).channel
 
     async def write():
@@ -1731,5 +1746,7 @@ async def test_row_subscription_catches_up_after_pubsub_resubscribe(
     hub = backend.servant._hub  # type: ignore[attr-defined]
     hub._on_resubscribed([channel])  # AsyncKeyspacePubSub 重订全部生效时的回调
 
-    updates = await settled_updates(broker, timeout=2)
-    assert updates[sub_id][row["id"]]["qty"] == 66
+    def caught_up(updates):
+        assert updates[sub_id][row["id"]]["qty"] == 66
+
+    await updates_until(broker, caught_up)
