@@ -1020,13 +1020,8 @@ async def test_subscribe_table_merge(
     assert set(updates[sub_id].keys()) == {id_a, id_b}
     assert updates[sub_id][id_a]["qty"] == 3
     assert updates[sub_id][id_b]["qty"] == 2
-    # 合并进来的消息离弹出不足一个 interval 时，它们的行会尾随重读一次（可能重复推送，
-    # 内容只能是最终值）；之后没有残留
-    updates = await broker.get_updates(timeout=0.3)
-    assert all(
-        row["qty"] == {id_a: 3, id_b: 2}[row_id]
-        for row_id, row in updates.get(sub_id, {}).items()
-    )
+    # 合并后没有残留：合并进来的消息离弹出不足一个 interval 时它们的行会尾随重读一次，
+    # 读回的与刚推过的一样，不重复推
     assert await broker.get_updates(timeout=0.3) == {}
 
 

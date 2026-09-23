@@ -24,6 +24,20 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+# 还不知道客户端持有什么内容（订阅已登记、初始行还没读回）：之后的任何读都照推
+UNKNOWN = object()
+
+
+def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
+    """
+    行内容的指纹（行不存在为 None），用来判断重读回来的是不是客户端已经持有的那份数据：
+    补读、尾随重读大多读回一样的内容，一样就不再推。
+    不能只比 _version：同 id 删除后重插时版本从 1 重来，而刚插入没改过的行都是 1。
+    原始行含 _version，字段顺序由 dtype 固定；子数组字段 item() 出来是 list、不能直接
+    hash，所以取 repr。
+    """
+    return None if row is None else hash(repr(row))
+
 
 class BaseSubscription:
     async def get_updated(
@@ -56,6 +70,7 @@ class RowSubscription(BaseSubscription):
         ctx: Context | None,
         channel: str,
         row_id: int,
+        pushed: int | None | object = UNKNOWN,
     ):
         self.table_ref = table_ref
         self.servant = servant
@@ -65,6 +80,8 @@ class RowSubscription(BaseSubscription):
             self.rls_ctx = None
         self.channel = channel
         self.row_id = row_id
+        # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推
+        self.pushed = pushed
         if RowSubscription.__cache.get(None) is None:
             RowSubscription.__cache.set({})
 
@@ -99,7 +116,8 @@ class RowSubscription(BaseSubscription):
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         """
         channel收到通知后，前来调用此get_updated方法。
-        返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}
+        返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}；读回的与客户端已持有的
+        一样时不返回任何更新。
         """
         # 如果订阅有交叉，这里会重复被调用，先看本tick的缓存（get_updates会批量预读填好；
         # tick中途新建的行订阅不在预读范围内，这里兜底单行查询）
@@ -113,6 +131,10 @@ class RowSubscription(BaseSubscription):
                 self.table_ref, self.row_id, RowFormat.TYPED_DICT
             )
             cache[channel] = row
+        fingerprint = row_fingerprint_(row)
+        if fingerprint == self.pushed:
+            return set(), set(), {}
+        self.pushed = fingerprint
         return set(), set(), {self.row_id: self.decode_row_(row)}
 
     @property
@@ -143,9 +165,11 @@ class IndexSubscription(BaseSubscription):
         self.row_subs: dict[str, RowSubscription] = {}
         self.last_range_result = last_range_result
 
-    def add_row_subscriber(self, channel, row_id):
+    def add_row_subscriber(
+        self, channel, row_id, pushed: int | None | object = UNKNOWN
+    ):
         self.row_subs[channel] = RowSubscription(
-            self.table_ref, self.servant, self.rls_ctx, channel, row_id
+            self.table_ref, self.servant, self.rls_ctx, channel, row_id, pushed
         )
 
     async def get_updated(
@@ -183,7 +207,12 @@ class IndexSubscription(BaseSubscription):
                 new_chan_name = servant.row_channel(ref, row_id)
                 new_chans.add(new_chan_name)
                 row_sub = RowSubscription(
-                    ref, servant, self.rls_ctx, new_chan_name, row_id
+                    ref,
+                    servant,
+                    self.rls_ctx,
+                    new_chan_name,
+                    row_id,
+                    row_fingerprint_(row),
                 )
                 self.row_subs[new_chan_name] = row_sub
                 # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
@@ -235,6 +264,9 @@ class TableSubscription(BaseSubscription):
         self.table_channel = table_channel
         # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知
         self.known_ids = known_ids
+        # 上一批读过的可见行 → 内容指纹。不按行常驻（known_ids 已是每连接一份）：尾随重读
+        # 就是紧接着的那一批，只要它读回的与上一批一样就不重复推
+        self.last_read: dict[int, int | None] = {}
 
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
@@ -260,9 +292,14 @@ class TableSubscription(BaseSubscription):
         comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
         known = self.known_ids
+        last_read = self.last_read
+        self.last_read = {}
         rtn: dict[int, dict[str, Any] | None] = {}
         for row_id, row in zip(ids, rows):
             if row is not None and (ctx is None or ctx.rls_check(comp_cls, row)):
+                fingerprint = self.last_read[row_id] = row_fingerprint_(row)
+                if row_id in known and last_read.get(row_id) == fingerprint:
+                    continue  # 上一批刚推过一模一样的（尾随重读）
                 del row["_version"]
                 rtn[row_id] = row
                 known.add(row_id)
@@ -417,9 +454,8 @@ class SubscriptionBroker:
         # 没人要而退订，这里再登记上去的就是一个永远收不到通知的订阅。
         # 读期间到达的通知会由 get_updates 照常推给这个订阅，客户端还没拿到 sub_id 会丢掉
         # 它：对应的写入早于这次读的，读回的行里已经有了
-        self._subs[sub_id] = RowSubscription(
-            table_ref, servant, ctx, channel_name, row_id
-        )
+        row_sub = RowSubscription(table_ref, servant, ctx, channel_name, row_id)
+        self._subs[sub_id] = row_sub
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
         self._sub_counts[RowSubscription] += 1
         try:
@@ -432,6 +468,8 @@ class SubscriptionBroker:
         if row is None or not self._has_row_permission(table_ref, ctx, row):
             await self.unsubscribe(sub_id)
             return None, None
+        # 客户端拿到的是这份初始行：读期间 tick 推过的会被还没拿到 sub_id 的客户端丢掉
+        row_sub.pushed = row_fingerprint_(row)
         del row["_version"]  # 内部版本号不推给客户端
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
@@ -502,6 +540,8 @@ class SubscriptionBroker:
         rows = await servant.range(
             table_ref, index_name, left, right, limit, desc, RowFormat.TYPED_DICT
         )
+        # 客户端拿到的是这些初始行：记下内容指纹，之后重读回来一样就不再推
+        pushed = {int(row["id"]): row_fingerprint_(row) for row in rows}
         for row in rows:
             del row["_version"]
 
@@ -549,7 +589,7 @@ class SubscriptionBroker:
         for row_id in row_ids:
             row_channel = servant.row_channel(table_ref, row_id)
             row_channels.append(row_channel)
-            idx_sub.add_row_subscriber(row_channel, row_id)
+            idx_sub.add_row_subscriber(row_channel, row_id, pushed[row_id])
         await self._mq_client.subscribe(index_channel, *row_channels)
         logger.debug(
             _("🆕 [📡Subscription] 订阅了索引: {sub_id} {index_channel}").format(
