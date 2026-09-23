@@ -995,7 +995,12 @@ class SubscriptionBroker:
         # 同一频道可能在本tick内既被一个订阅加入又被另一个释放，按最终状态定夺；
         # 已订阅过的频道重复subscribe是幂等的
         to_subscribe = [chan for chan in added if chan in channel_subs]
+        # 本连接原先没订着的（行进入范围时才订的行频道）：读这行在前、订阅生效在后，其间的写入
+        # 不会有通知，值频道又不发"离开"，行在这时被删 / 改走就再也发现不了。同订阅生效后的
+        # 补读，隔一个 interval 再读一次（读回一样就不推）
+        fresh = [chan for chan in to_subscribe if chan not in mq.subscribed_channels]
         await mq.subscribe(*to_subscribe)
+        mq.request_reread(*fresh)
         # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能处理了客户端的
         # 新订阅（subscribe_get 等），把刚释放的行频道又登记回来了——对 mq 来说该频道
         # 一直是订着的，那次 subscribe 不会有任何动作，这里按旧名单退订就会把新订阅
