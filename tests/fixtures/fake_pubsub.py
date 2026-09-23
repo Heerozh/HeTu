@@ -18,7 +18,7 @@ class FakeNodePubSub:
 
     def __init__(self):
         self.commands: list[tuple[str, tuple[str, ...]]] = []
-        self.inbox: asyncio.Queue[dict] = asyncio.Queue()
+        self.inbox: asyncio.Queue[dict | Exception] = asyncio.Queue()
         self.gate = asyncio.Event()
         self.gate.set()
         self.entered = asyncio.Event()  # 有调用方进入了 subscribe（可能卡在闸门上）
@@ -37,10 +37,17 @@ class FakeNodePubSub:
 
     async def listen(self) -> AsyncIterator[dict]:
         while True:
-            yield await self.inbox.get()
+            msg = await self.inbox.get()
+            if isinstance(msg, Exception):
+                raise msg  # 模拟连接断开：监听协程异常结束
+            yield msg
 
     def ack(self, mtype: str, channel: str):
         self.inbox.put_nowait({"type": mtype, "channel": channel.encode(), "data": 1})
+
+    def fail(self, exc: Exception | None = None):
+        """让监听协程以异常结束（节点失效）"""
+        self.inbox.put_nowait(exc or ConnectionError("node lost"))
 
     async def aclose(self):
         pass
