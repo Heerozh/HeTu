@@ -122,6 +122,9 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     subs_task_id = f"subs_receiver:{request.id}"
     broker: SubscriptionBroker | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
+    # 关服时要等本连接拆完再关后端，见 wait_connections_closed
+    _live_connections.add(current_task)
+    current_task.add_done_callback(_live_connections.discard)
     try:
         # 初始化订阅管理器，一个连接一个订阅管理器
         broker = SubscriptionBroker(
@@ -260,7 +263,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         # （connection_lost → 取消连接 task），要是正落在清理里的某个 await 上，后面的
         # terminate() 就跑不到，Connection 行同样泄漏；shield 让本协程被取消时清理照常跑完。
         # 不登记进 app 的任务表：关服时 shutdown_tasks 会取消表里的任务，loop 却已经不转了，
-        # 没法结束的任务会让它空转不退出
+        # 没法结束的任务会让它空转不退出。关服由 wait_connections_closed 等它跑完
         closing = True
         cleanup_task = asyncio.create_task(
             _cleanup_connection(
@@ -282,6 +285,43 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
 
 # 拆连接的清理任务：保持引用免得被 gc，跑完自动移除
 _cleanup_tasks: set[asyncio.Task] = set()
+# Connection 行已落库的连接协程，协程结束自动移除
+_live_connections: set[asyncio.Task] = set()
+
+
+async def wait_connections_closed(timeout: float) -> bool:
+    """
+    关服时等本进程的连接都拆完：连接协程结束、清理任务（断线 System、删 Connection 行）
+    跑完。超时返回 False。
+
+    清理任务没登记进 app 的任务表（见 websocket_connection 的 finally），Sanic 关服不等它；
+    直接关后端的话，它可能正停在写库事务中途，loop 一关就永远挂住：断线 System 没跑完、
+    Connection 行漏删；SQLite 后端还会被这个没提交的事务一直占着写锁，同进程之后的写入
+    全部 "database is locked"。
+
+    Wait until every connection of this process is torn down (on_disconnect called,
+    Connection row deleted) before the backends are closed. Returns False on timeout.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    # 连接协程被 Sanic 强关后才进 finally 建清理任务，所以每轮重新收集，直到两边都空。
+    # 别的 loop 上的任务（测试里之前起过的服务器）永远等不到，不算
+    while pending := {
+        task
+        for task in (*_live_connections, *_cleanup_tasks)
+        if not task.done() and task.get_loop() is loop
+    }:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning(
+                _(
+                    "⚠️ [📡Server] 关服时还有{count}个连接没拆完，已等待{timeout}秒，"
+                    "不再等待直接关闭后端"
+                ).format(count=len(pending), timeout=timeout)
+            )
+            return False
+        await asyncio.wait(pending, timeout=remaining)
+    return True
 
 
 async def _cleanup_connection(

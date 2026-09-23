@@ -580,3 +580,34 @@ def test_websocket_setup_failure_deletes_connection_row(
         )
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_waits_for_connection_cleanup(
+    monkeypatch, test_server, ses_redis_service
+):
+    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
+    里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
+    事务一直占着写锁，同进程之后的测试全部 database is locked"""
+    import redis
+
+    cleanup = websocket_server._cleanup_connection
+
+    async def slow_cleanup(*args, **kwargs):
+        await asyncio.sleep(0.5)  # 负载高时清理比停服慢
+        await cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(websocket_server, "_cleanup_connection", slow_cleanup)
+    r = redis.Redis.from_url(ses_redis_service[0])
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 199994])
+        await client1.recv()
+        # 返回后测试客户端关掉连接就停服，服务端的清理和停服同时进行
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    # 返回时服务器已经停了
+    assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
