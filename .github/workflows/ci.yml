@@ -43,7 +43,7 @@ jobs:
           export PYTHONPATH=$PWD/:$PYTHONPATH
           echo "PYTHONPATH=$PYTHONPATH"
           mkdir -p ./logs
-          pytest --cov-config=.coveragerc --cov=hetu tests/ ${{ env.CODECOV_ATS_TESTS }}
+          pytest -n 4 --cov-config=.coveragerc --cov=hetu tests/ ${{ env.CODECOV_ATS_TESTS }}
       - name: Upload coverage to Codecov
         if: ${{ github.event_name == 'pull_request' || github.ref == 'refs/heads/main' }}
         uses: codecov/codecov-action@v5

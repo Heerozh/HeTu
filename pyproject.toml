@@ -82,6 +82,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
     "sanic-testing>=24.6.0",
     "trustme>=1.2.1",

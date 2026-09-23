@@ -5,7 +5,6 @@
 #  @email: heeroz@gmail.com
 #  """
 
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,13 +15,9 @@ from hetu.data.backend import Table
 SnowflakeID().init(1, 0)
 
 
-async def test_migration_unique_violation(filled_item_ref, caplog):
-    # 假app文件
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    # 清理logs目录下所有maint文件
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+async def test_migration_unique_violation(filled_item_ref, caplog, tmp_path):
+    # 假app文件，迁移脚本会生成在它旁边的 maint/migration 目录
+    test_app_file = tmp_path / "test.py"
 
     # 测试自动迁移
     backend = filled_item_ref.backend
@@ -77,13 +72,10 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
         maint.rebuild_index(new_table)
 
 
-async def test_migration_add_unique_column(filled_item_ref, caplog):
+async def test_migration_add_unique_column(filled_item_ref, caplog, tmp_path):
     """为已有数据的表新增 unique 列：所有现有行会被填入相同默认值，自动迁移无法生成
     唯一值，应抛出可操作的报错（说明成因 + 两条修复建议）。"""
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+    test_app_file = tmp_path / "test.py"
 
     backend = filled_item_ref.backend
 
@@ -132,13 +124,9 @@ async def test_migration_add_unique_column(filled_item_ref, caplog):
     assert "unique" in msg
 
 
-async def test_auto_migration(filled_item_ref, caplog):
-    # 假app文件
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    # 清理logs目录下所有maint文件
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+async def test_auto_migration(filled_item_ref, caplog, tmp_path):
+    # 假app文件，迁移脚本会生成在它旁边的 maint/migration 目录
+    test_app_file = tmp_path / "test.py"
 
     # 测试自动迁移
     backend = filled_item_ref.backend

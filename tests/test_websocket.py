@@ -9,6 +9,7 @@ import sanic_testing.testing
 from nacl.public import PrivateKey
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
+from hetu import webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import pipeline, worker_main
@@ -114,6 +115,9 @@ def setup_websocket_proxy():
 def test_server(setup_websocket_proxy, ses_redis_service):
     SystemClusters()._clear()
     EndpointDefines()._clear()
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
+    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    webext.clear()
     import re
 
     match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])
@@ -153,6 +157,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
     yield server
 
     server.stop()
+    webext.clear()
 
 
 def test_websocket_started(test_server):

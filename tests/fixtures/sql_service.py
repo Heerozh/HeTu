@@ -1,12 +1,29 @@
-import time
 from pathlib import Path
 
-import docker
-import docker.errors
 import pytest
 import sqlalchemy as sa
-from docker.errors import NotFound
-from fixtures.docker_image import ensure_image
+from fixtures.docker_infra import (
+    LOCAL_RANDOM_PORT,
+    DockerStack,
+    docker_stack,
+    host_port,
+)
+
+
+def _wait_sql_ready(stack: DockerStack, sync_dsn: str, what: str, **connect_args):
+    """轮询到数据库能执行 select version() 为止"""
+    engine = sa.create_engine(sync_dsn, future=True, connect_args=connect_args)
+
+    def ready():
+        with engine.connect() as conn:
+            ver = conn.execute(sa.text("select version()")).scalar_one()
+        print(f"{what} version: {ver}")
+        return True
+
+    try:
+        stack.wait_until(ready, what, timeout=120)
+    finally:
+        engine.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -14,64 +31,24 @@ def ses_postgres_service():
     """
     启动postgres docker服务，测试结束后销毁服务
     """
-    try:
-        client = docker.from_env()
-    except docker.errors.DockerException:
-        return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+    with docker_stack("postgres") as stack:
+        container = stack.run(
+            "db",
+            "postgres:latest",
+            ports={"5432/tcp": LOCAL_RANDOM_PORT},
+            environment={
+                "POSTGRES_USER": "hetu",
+                "POSTGRES_PASSWORD": "hetu_test",
+                "POSTGRES_DB": "hetu_test",
+            },
+        )
+        addr = f"hetu:hetu_test@127.0.0.1:{host_port(container, '5432/tcp')}/hetu_test"
+        _wait_sql_ready(
+            stack, f"postgresql+psycopg://{addr}", "PostgreSQL", connect_timeout=2
+        )
+        print("⚠️ 已启动postgres docker.")
 
-    ensure_image(client, "postgres:latest")
-
-    container_name = "hetu_test_postgres"
-    port = 23520
-
-    # 先删除已启动的
-    try:
-        client.containers.get(container_name).kill()
-        client.containers.get(container_name).remove()
-    except docker.errors.NotFound, docker.errors.APIError:
-        pass
-
-    # 启动服务器
-    container = client.containers.run(
-        "postgres:latest",
-        detach=True,
-        ports={"5432/tcp": port},
-        name=container_name,
-        auto_remove=True,
-        environment={
-            "POSTGRES_USER": "hetu",
-            "POSTGRES_PASSWORD": "hetu_test",
-            "POSTGRES_DB": "hetu_test",
-        },
-    )
-
-    # 验证docker启动完毕
-    dsn = f"postgresql://hetu:hetu_test@127.0.0.1:{port}/hetu_test"
-    for _ in range(30):
-        try:
-            time.sleep(1)
-            sync_dsn = f"postgresql+psycopg://hetu:hetu_test@127.0.0.1:{port}/hetu_test"
-            engine = sa.create_engine(sync_dsn, future=True)
-            with engine.connect() as conn:
-                ver = conn.execute(sa.text("select version()")).scalar_one()
-                print(f"PostgreSQL version: {ver}")
-            engine.dispose()
-            break
-        except Exception:
-            pass
-    else:
-        raise Exception("PostgreSQL启动超时，无法连接")
-
-    print("⚠️ 已启动postgres docker.")
-
-    yield dsn
-
-    print("ℹ️ 清理postgres docker...")
-    try:
-        container.stop()
-        container.wait()
-    except NotFound, ImportError, docker.errors.APIError:
-        pass
+        yield f"postgresql://{addr}"
 
 
 @pytest.fixture(scope="session")
@@ -91,59 +68,20 @@ def ses_mariadb_service():
     """
     启动mariadb docker服务，测试结束后销毁服务
     """
-    try:
-        client = docker.from_env()
-    except docker.errors.DockerException:
-        return pytest.skip("请启动DockerDesktop或者Docker服务后再运行测试")
+    with docker_stack("mariadb") as stack:
+        container = stack.run(
+            "db",
+            "mariadb:latest",
+            ports={"3306/tcp": LOCAL_RANDOM_PORT},
+            environment={
+                "MARIADB_USER": "hetu",
+                "MARIADB_PASSWORD": "hetu_test",
+                "MARIADB_DATABASE": "hetu_test",
+                "MARIADB_ROOT_PASSWORD": "hetu_root",
+            },
+        )
+        addr = f"hetu:hetu_test@127.0.0.1:{host_port(container, '3306/tcp')}/hetu_test"
+        _wait_sql_ready(stack, f"mysql+pymysql://{addr}", "MariaDB", connect_timeout=2)
+        print("⚠️ 已启动mariadb docker.")
 
-    ensure_image(client, "mariadb:latest")
-
-    container_name = "hetu_test_mariadb"
-    port = 23530
-
-    try:
-        client.containers.get(container_name).kill()
-        client.containers.get(container_name).remove()
-    except docker.errors.NotFound, docker.errors.APIError:
-        pass
-
-    container = client.containers.run(
-        "mariadb:latest",
-        detach=True,
-        ports={"3306/tcp": port},
-        name=container_name,
-        auto_remove=True,
-        environment={
-            "MARIADB_USER": "hetu",
-            "MARIADB_PASSWORD": "hetu_test",
-            "MARIADB_DATABASE": "hetu_test",
-            "MARIADB_ROOT_PASSWORD": "hetu_root",
-        },
-    )
-
-    dsn = f"mysql://hetu:hetu_test@127.0.0.1:{port}/hetu_test"
-    for _ in range(40):
-        try:
-            time.sleep(1)
-            sync_dsn = f"mysql+pymysql://hetu:hetu_test@127.0.0.1:{port}/hetu_test"
-            engine = sa.create_engine(sync_dsn, future=True)
-            with engine.connect() as conn:
-                ver = conn.execute(sa.text("select version()")).scalar_one()
-                print(f"MariaDB version: {ver}")
-            engine.dispose()
-            break
-        except Exception:
-            pass
-    else:
-        raise Exception("MariaDB启动超时，无法连接")
-
-    print("⚠️ 已启动mariadb docker.")
-
-    yield dsn
-
-    print("ℹ️ 清理mariadb docker...")
-    try:
-        container.stop()
-        container.wait()
-    except NotFound, ImportError, docker.errors.APIError:
-        pass
+        yield f"mysql://{addr}"
