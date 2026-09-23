@@ -392,7 +392,7 @@ class SubscriptionBroker:
             if len(rows) == 0:
                 return None, None
             row = rows[0]
-            del row["_version"]
+        del row["_version"]  # 内部版本号不推给客户端
 
         # 再次caller要对该row有权限
         if not self._has_row_permission(table_ref, ctx, row):

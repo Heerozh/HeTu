@@ -70,6 +70,18 @@ async def test_subscribe_get(broker: SubscriptionBroker, filled_item_ref, admin_
     assert len(broker._mq_client.subscribed_channels) == 1
 
 
+async def test_subscribe_get_by_id(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """按 id 订阅：返回的行与按索引订阅一样，不含内部的 _version"""
+    servant = broker._backend.servant
+    row_id = int((await servant.range(filled_item_ref, "time", 110, limit=1))[0].id)
+    sub_id, row = await broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    assert sub_id and row
+    assert row["id"] == row_id and row["time"] == 110
+    assert "_version" not in row
+
+
 async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     """测试range订阅的返回值，和订阅管理器的私有值是否正常"""
     sub_id, rows = await broker.subscribe_range(
