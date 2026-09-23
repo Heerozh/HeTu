@@ -111,6 +111,14 @@ class LoopWatchdog:
 
     def _watch(self):
         while not self._stop_event.wait(self.interval):
+            loop = self._loop
+            if loop is not None and (loop.is_closed() or not loop.is_running()):
+                # 盯的事件循环已经不转了：sanic 停服时 shutdown_tasks(timeout=0) 只给心跳 task
+                # 打上取消标记就 stop loop，task 的 finally 里的 stop() 永远跑不到（测试里进程内
+                # 反复起停服务就是这样）。没有 loop 可盯就退出，不能对着它一直报卡死，更不能
+                # 把主线程之后在别的 loop 上的 accept 当成它的死锁去"自愈"。真卡死时 loop 还在
+                # run_forever 里（卡在某个回调上），is_running() 仍为真，不受影响
+                return
             stalled = time.monotonic() - self._last_beat
             if stalled < self.timeout:
                 if self._reported:
