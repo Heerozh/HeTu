@@ -7,7 +7,7 @@ import asyncio
 from contextvars import ContextVar
 from typing import cast
 
-from fixtures.contexts import admin_ctx_
+from fixtures.contexts import admin_ctx_, settled_updates
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
@@ -33,8 +33,7 @@ async def _update_qty(backend: Backend, ref, qty: int):
 
 
 async def _get_updates(broker: SubscriptionBroker):
-    async with asyncio.timeout(3):
-        return await broker.get_updates()
+    return await settled_updates(broker, timeout=3)
 
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):

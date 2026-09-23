@@ -63,8 +63,10 @@ def attach_fake_node(pubsub: AsyncKeyspacePubSub) -> FakeNodePubSub:
     return node
 
 
-def make_pubsub() -> tuple[AsyncKeyspacePubSub, FakeNodePubSub]:
-    pubsub = AsyncKeyspacePubSub(Redis(host="127.0.0.1", port=1))  # 只占位，不会连
+def make_pubsub(**kwargs) -> tuple[AsyncKeyspacePubSub, FakeNodePubSub]:
+    """kwargs 原样传给 AsyncKeyspacePubSub（如 on_message / on_resubscribed 回调）"""
+    # Redis 客户端只占位，不会连
+    pubsub = AsyncKeyspacePubSub(Redis(host="127.0.0.1", port=1), **kwargs)
     return pubsub, attach_fake_node(pubsub)
 
 

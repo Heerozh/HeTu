@@ -60,6 +60,7 @@ class AsyncKeyspacePubSub:
         self,
         client: Redis | RedisCluster,
         on_message: Callable[[dict], None] | None = None,
+        on_resubscribed: Callable[[list[str]], None] | None = None,
     ):
         """
         Parameters
@@ -70,10 +71,14 @@ class AsyncKeyspacePubSub:
         on_message
             收到频道消息时在监听协程里直接同步调用的回调（每条消息一次，不能 await）。
             不传则消息进 `message_queue`，由 `get_message()` 取。
+        on_resubscribed
+            节点失效后，恢复流程确认这批频道全部重订生效时同步调用一次，传入这批频道。
+            失效到恢复之间的通知全部丢失，上层据此补读。不能 await。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
         self.on_message = on_message
+        self.on_resubscribed = on_resubscribed
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
@@ -393,7 +398,14 @@ class AsyncKeyspacePubSub:
             # 直到 targets 全部订阅生效才算恢复
             if targets <= self._subscribed:
                 logger.info(f"Resubscribed {len(targets)} channels")
+                recovered = list(targets)
                 targets.clear()
+                # 失效到现在的通知都丢了，交给上层补读。回调出错不能拖垮恢复流程
+                if self.on_resubscribed is not None:
+                    try:
+                        self.on_resubscribed(recovered)
+                    except Exception:
+                        logger.exception("on_resubscribed callback failed")
                 return
 
     async def _node_listener(self, node_key: str, pubsub: PubSub):

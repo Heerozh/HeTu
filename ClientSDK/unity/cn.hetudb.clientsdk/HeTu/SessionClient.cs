@@ -248,6 +248,18 @@ namespace HeTu
             return AwaitFrom(tcs);
         }
 
+        /// <summary>
+        ///     订阅一行（见 <c>HeTuClient.WatchRow</c>），断线重连后由会话层自动恢复。
+        /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<RowSubscription<T>> WatchRow<T>(
 #else
@@ -266,6 +278,18 @@ namespace HeTu
             return AwaitFrom(tcs);
         }
 
+        /// <summary>
+        ///     订阅索引范围（见 <c>HeTuClient.WatchRange</c>），断线重连后由会话层自动恢复。
+        /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<IndexSubscription<T>> WatchRange<T>(
 #else
@@ -298,6 +322,15 @@ namespace HeTu
         ///     适合"行多、行小、很少变"的表；高频写入的表请用 <see cref="WatchRange{T}" />——
         ///     整表订阅者会收到该表**所有**写入的通知。
         /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
         /// <returns>整表订阅对象；无权限或行数超服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<IndexSubscription<T>> WatchTable<T>(
