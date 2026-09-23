@@ -4,6 +4,8 @@ import logging
 import zlib
 from typing import Any
 
+import msgspec
+import nacl.exceptions
 import pytest
 from nacl.public import PrivateKey
 
@@ -345,3 +347,134 @@ def test_crypto_handshake_failure_logs_masked_key_not_plaintext(caplog):
 
     assert pipeline.CryptoLayer.mask_auth_key(key) in caplog.text
     assert key not in caplog.text  # 完整明文绝不进日志
+
+
+# ---- Crypto 层对异常帧的拒绝 ----
+
+
+def _crypto_pair():
+    """握手好的一对加密上下文：(layer, 服务端ctx, 客户端ctx)"""
+    layer = pipeline.CryptoLayer()
+    client_private = PrivateKey.generate()
+    server_ctx, server_pub = layer.handshake(client_private.public_key.encode())
+    client_ctx = layer.client_handshake(client_private.encode(), server_pub)
+    return layer, server_ctx, client_ctx
+
+
+def test_crypto_handshake_rejects_empty_message(caplog):
+    layer = pipeline.CryptoLayer()
+    with (
+        caplog.at_level(logging.WARNING, logger="HeTu.root"),
+        pytest.raises(ValueError, match="unknown protocol"),
+    ):
+        layer.handshake(b"")
+    assert "握手异常" in caplog.text
+
+
+def test_crypto_decode_rejects_truncated_frame():
+    """不够一个 Poly1305 Tag（16 字节）的帧直接拒绝，且不消耗 nonce：后面的正常帧照常解开"""
+    layer, server_ctx, client_ctx = _crypto_pair()
+    with pytest.raises(ValueError, match="数据长度不足"):
+        layer.decode(server_ctx, b"\x00" * 15)
+    assert layer.decode(server_ctx, layer.encode(client_ctx, b"hello")) == b"hello"
+
+
+def test_crypto_decode_rejects_tampered_frame(caplog):
+    layer, server_ctx, client_ctx = _crypto_pair()
+    frame = bytearray(layer.encode(client_ctx, b"hello"))
+    frame[0] ^= 0xFF
+    with (
+        caplog.at_level(logging.ERROR, logger="HeTu.root"),
+        pytest.raises(nacl.exceptions.CryptoError),
+    ):
+        layer.decode(server_ctx, bytes(frame))
+    assert "解密验证失败" in caplog.text
+
+
+def test_crypto_decode_rejects_replayed_frame():
+    """nonce 按帧递增：截获的帧原样重放解不开"""
+    layer, server_ctx, client_ctx = _crypto_pair()
+    frame = layer.encode(client_ctx, b"hello")
+    assert layer.decode(server_ctx, frame) == b"hello"
+    with pytest.raises(nacl.exceptions.CryptoError):
+        layer.decode(server_ctx, frame)
+
+
+# ---- JsonB 层的编解码失败 ----
+
+
+def test_jsonb_decode_rejects_malformed_bytes(caplog):
+    layer = pipeline.JSONBinaryLayer()
+    with (
+        caplog.at_level(logging.ERROR, logger="HeTu.root"),
+        pytest.raises(msgspec.DecodeError),
+    ):
+        layer.decode(None, b"\xc1")  # msgpack 里从不使用的字节
+    assert "JSONB反序列化失败" in caplog.text
+
+
+def test_jsonb_encode_unsupported_type_raises(caplog):
+    layer = pipeline.JSONBinaryLayer()
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"), pytest.raises(TypeError):
+        layer.encode(None, ["rsp", object()])
+    assert "JSONB序列化失败" in caplog.text
+
+
+# ---- 禁用层 ----
+
+
+def _jsonb_zlib_pipe():
+    """jsonb + zlib 两层的管道和握手好的 pipe_ctx"""
+    pipe = pipeline.MessagePipeline()
+    pipe.add_layer(pipeline.JSONBinaryLayer())
+    zlib_layer = pipeline.ZlibLayer()
+    pipe.add_layer(zlib_layer)
+    zlib_ctx, _ = zlib_layer.handshake(b"")
+    return pipe, [None, zlib_ctx]
+
+
+def test_disabled_layer_skipped_in_encode():
+    """禁用压缩层后 encode 的输出就是 jsonb 那层的结果"""
+    pipe, ctx = _jsonb_zlib_pipe()
+    msg = ["rpc", "login", 1]
+    assert pipe.encode(ctx, msg) != msgspec.msgpack.encode(msg)  # 没禁用时压缩了
+    pipe.disable_layer(1)
+    assert pipe.encode(ctx, msg) == msgspec.msgpack.encode(msg)
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: decode 倒序遍历各层时拿倒序下标查 _disabled，跳过的是镜像位置的层",
+)
+def test_disabled_layer_skipped_in_decode():
+    pipe, ctx = _jsonb_zlib_pipe()
+    msg = ["rpc", "login", 1]
+    pipe.disable_layer(1)
+    assert pipe.decode(ctx, msgspec.msgpack.encode(msg)) == msg
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: 握手不给禁用层占 pipe_ctx 的位，encode 再按层下标取 ctx 就错位越界",
+)
+def test_disabled_layer_after_handshake():
+    """禁用中间的压缩层：禁用层不参与握手（客户端也不发它的握手消息），之后照常收发"""
+    server = pipeline.MessagePipeline()
+    server.add_layer(pipeline.JSONBinaryLayer())
+    server.add_layer(pipeline.ZlibLayer())
+    crypto = pipeline.CryptoLayer()
+    server.add_layer(crypto)
+    server.disable_layer(1)
+
+    client_private = PrivateKey.generate()
+    pipe_ctx, reply = server.handshake([client_private.public_key.encode()])
+    (server_pub,) = msgspec.msgpack.decode(reply)
+    client_ctx = crypto.client_handshake(client_private.encode(), server_pub)
+
+    msg = ["rsp", "ok"]
+    # 客户端 → 服务端
+    frame = crypto.encode(client_ctx, msgspec.msgpack.encode(msg))
+    assert server.decode(pipe_ctx, frame) == msg
+    # 服务端 → 客户端
+    frame = server.encode(pipe_ctx, msg)
+    assert msgspec.msgpack.decode(crypto.decode(client_ctx, frame)) == msg

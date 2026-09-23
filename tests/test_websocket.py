@@ -9,6 +9,7 @@ import sanic_testing.testing
 from nacl.public import PrivateKey
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
+import hetu
 from hetu import webext
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
@@ -546,6 +547,122 @@ def test_websocket_invalid_sub_length_disconnects(test_server):
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     assert closed, "连接没有被服务器关闭"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
+    """各种非法消息（release 模式）：发的那条连接被断开并记下原因，别的连接照常可用"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def send_raw(ws, data):
+        # 绕过客户端 pipeline，直接发原始帧
+        await type(ws).send(ws, data)
+
+    # 用例名 → (发送动作, 服务端记录的断开原因)
+    cases = {
+        "empty_frame": (lambda ws: send_raw(ws, b""), "收到空帧"),
+        "text_frame": (lambda ws: send_raw(ws, "hello"), "收到非二进制帧：str"),
+        "not_list": (lambda ws: ws.send({"rpc": "login"}), "Invalid message format"),
+        "unknown_msg_type": (lambda ws: ws.send(["bogus"]), "未知消息类型：bogus"),
+        "unknown_component": (
+            lambda ws: ws.send(["sub", "NoSuchComp", "table"]),
+            "订阅请求非法",
+        ),
+        "unknown_sub_op": (
+            lambda ws: ws.send(["sub", "PublicNames", "bogus"]),
+            "未知订阅操作：bogus",
+        ),
+        # 未登录调 USER 权限的 System：执行失败，release 模式直接断开、不回原因
+        "rpc_rejected": (
+            lambda ws: ws.send(["rpc", "add_rls_comp_value", 1]),
+            "rpc 调用失败",
+        ),
+    }
+    closed = []
+    healthy_ok = False
+
+    async def routine(connect):
+        nonlocal healthy_ok
+        healthy = await connect()
+        for name, (send_bad, _reason) in cases.items():
+            client = await connect()
+            with pytest.raises(ConnectionClosedError):
+                await send_bad(client)
+                await client.recv()
+            closed.append(name)
+        # 别的连接不受影响
+        await healthy.send(["rpc", "login", 1])
+        await healthy.recv()
+        healthy_ok = True
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert closed == list(cases), "有非法消息没让连接断开"
+    assert healthy_ok, "正常连接被连累了"
+    close_logs = [
+        r.getMessage() for r in caplog.records if "接收协程结束" in r.getMessage()
+    ]
+    for name, (_send_bad, reason) in cases.items():
+        assert any(reason in msg for msg in close_logs), f"{name} 没按预期原因断开"
+    assert any(
+        "不存在的Component名" in r.getMessage() and "NoSuchComp" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.timeout(20)
+def test_websocket_unsub_stops_updates(test_server):
+    """unsub 之后该订阅不再推 updt；同连接的其他订阅照常推"""
+    owner_a, owner_b = 7001, 7002
+    sub_ids = {}
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "set_public_name", owner_a, "A"])
+        await client1.recv()
+        await client1.send(["rpc", "set_public_name", owner_b, "B"])
+        await client1.recv()
+        for owner in (owner_a, owner_b):
+            await client1.send(["sub", "PublicNames", "get", "owner", owner])
+            sub_ids[owner] = (await client1.recv())[1]
+
+        await client1.send(["unsub", sub_ids[owner_a]])
+        # A 先改、B 后改：A 的订阅要是还在，它的 updt 会先于或随 B 的一起到
+        await client1.send(["rpc", "set_public_name", owner_a, "A2"])
+        await client1.send(["rpc", "set_public_name", owner_b, "B2"])
+        while True:
+            msg = await client1.recv()
+            if msg[0] == "updt" and msg[1] == sub_ids[owner_b]:
+                break
+        # 再多等一会儿，迟到的推送也要算上
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.3):
+                await client1.recv()
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert sub_ids[owner_a] and sub_ids[owner_b]
+    updts = [m for m in response.client_received if m[0] == "updt"]
+    assert [m[1] for m in updts] == [sub_ids[owner_b]], "退订后仍收到了推送"
+    (row,) = updts[0][2].values()
+    assert row["name"] == "B2"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_motd(test_server):
+    """motd 回一条明文文本帧欢迎语（不走 pipeline），之后连接照常可用"""
+    motd = None
+
+    async def routine(connect):
+        nonlocal motd
+        client1 = await connect()
+        await client1.send(["motd"])
+        # 欢迎语没经过 pipeline 编码，绕过客户端的解码直接收原始帧
+        motd = await type(client1).recv(client1)
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert motd == f"👋 Welcome to HeTu Database! v{hetu.__version__}"
+    assert response.client_received[-1] == ["rsp", {"id": 1}]
 
 
 @pytest.mark.timeout(20)
