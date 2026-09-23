@@ -90,8 +90,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `upsert`、`insert`、`delete`、`update_rows`）。
 - `Table` / `TableReference`：Component 到 backend 的映射，由
   `ComponentTableManager` 管理。
-- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个 worker
-  只有一个共享的通知接收器（Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub` 一个轮询任务）
+- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个
+  worker 只有一个共享的通知接收器
+  （Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub`  一个轮询任务）
   按频道分发到各连接的队列。
 
 ### Server Layer (`hetu/server/`)
@@ -157,24 +158,12 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Rule
 
-- Always use Context7 MCP when I need library/API documentation, code generation, setup
-  or configuration steps without me having to explicitly ask.
-
 设计约束：
 
-重要：架构受限Redis的master节点性能，尽可能不需要master读的地方都不要通过master，
-      使用master_or_servant随机选节点的方法，其中master被随机选中的概率是可调的。
-      比如事务中所有repo.get()读操作可以是servant读，如果读到了旧数据有乐观锁。
+重要：架构受限Redis的master节点性能，主要通过读写分离扩展性能。所以：
 
-这条约束由两个测试守着，新增直接读 master 的代码会挂在这里：
-
-- `tests/test_arch_master_reads.py`：扫 `hetu/` 下所有 `xxx.master.get/get_many/range(`
-  形态的直接 master 读，不在文件里的 `ALLOWED` 清单中就失败。确实必须读 master 的，把它加进
-  清单并写明理由（当前 2 处：雪花 ID 读时钟水位、顶号核查；`only_master` 事务经
-  `Session.master_or_servant` 属性切到 master，扫描看不到）。
-- `tests/test_master_read_budget.py`：用 `master_weight: 0` 的 backend（加权随机永远选不中
-  master，于是 master 上剩下的读一定是代码显式指定的），钉死几条典型路径允许的 master 读
-  次数。改动读路径导致某条路多读一次 master 会在这里暴露。
-
-摸底用 `PYTHONPATH=tools uv run pytest tests/ -q -p master_read_audit`，它按调用点聚合出
-实际落到 master 上的读；用法见 `tools/master_read_audit.py` 文件头。
+- 尽可能不要使用master的cpu，不需要master读的地方都不要通过master，
+  使用master_or_servant随机选节点的方法，其中master被随机选中的概率是可调的。
+  比如事务中所有repo.get ()读操作可以是servant读，如果读到了旧数据有乐观锁。
+  `tests/test_arch_master_reads.py` 负责守门，摸底用 `tools/master_read_audit`。
+- 副本间应隔离，不要使用会消耗所有副本甚至master cpu的指令，比如PUBLISH。
