@@ -978,6 +978,55 @@ async def test_point_query_leave_backfills_limit(
     await updates_until(broker, left_and_backfilled)
 
 
+async def test_point_query_row_leaving_before_its_channel_is_active(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    行进入点查询的结果后，它的行频道要到 tick 末尾才订上：读到这行之后、行频道生效之前它又
+    离开（这里是删除）的话，行频道的通知收不到，值频道又不发"离开"。行频道订上后得隔一个
+    interval 补读一次（同订阅生效后的补读），不然客户端一直留着这行
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    mq = broker._mq_client
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_id and len(rows) == 25
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        row.name, row.owner, row.time = "Blink", 10, 600
+        await session.using(comp).insert(row)
+        new_id = int(row.id)
+    new_chan = backend.servant.row_channel(filled_item_ref, new_id)
+    real_subscribe = mq.subscribe
+
+    async def delete_then_subscribe(*channels: str):
+        if new_chan in channels:  # tick 末尾订这行的行频道之前，它被删了
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                assert await repo.get(id=new_id) is not None
+                repo.delete(new_id)
+            await backend.wait_for_synced()
+        await real_subscribe(*channels)
+
+    def entered(updates):
+        assert updates[sub_id][new_id]["name"] == "Blink"
+
+    with patch.object(mq, "subscribe", delete_then_subscribe):
+        await updates_until(broker, entered)
+
+    def left(updates):
+        assert updates[sub_id][new_id] is None
+
+    await updates_until(broker, left, timeout=3)
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert new_id not in idx_sub.last_range_result
+    assert new_chan not in mq.subscribed_channels
+
+
 async def test_point_query_on_undeclared_index_falls_back(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
