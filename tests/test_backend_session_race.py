@@ -151,50 +151,50 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
     提交时的 unique 冲突判定：盲写（本事务未曾 get 观察其不存在）撞上并发已提交的同值
     → 确定性 UniqueViolation，不重试（重跑事务体只会再写同一个值）。
     """
-    import asyncio
-
     from hetu.data.backend import UniqueViolation
 
     backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
-    # 测试insert提交时unique的确定性冲突
-    async def insert_and_sleep(uni_val, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = item_ref.comp_cls.new_row()
-            _row.owner = 874233
-            _row.name = str(uni_val)
-            _row.time = uni_val
-            await _item_repo.insert(_row)
-            await asyncio.sleep(sleep)
+    # 两个事务的先后用嵌套 session 排定：外层先开事务写入，内层整个提交完，外层退出时才
+    # 提交。不能用两个协程靠 sleep 时间差排序——一次长 GC 冻住事件循环几百毫秒，醒来后
+    # 两边会几乎同时进入提交，外层的唯一性 SELECT 看不到内层还没提交完的行，只能撞上
+    # UNIQUE 约束变成 RaceCondition
+    async def insert_row(session, uni_val):
+        row = comp.new_row()
+        row.owner = 874233
+        row.name = str(uni_val)
+        row.time = uni_val
+        await session.using(comp).insert(row)
 
     # 测试insert不同的值应该没有竞态
-    task1 = asyncio.create_task(insert_and_sleep(111111, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(111112, 0.01))
-    await asyncio.gather(task1, task2)
+    async with backend.session("pytest", 1) as s1:
+        await insert_row(s1, 111111)
+        async with backend.session("pytest", 1) as s2:
+            await insert_row(s2, 111112)
 
     # 相同的time：后提交者是确定性冲突
-    task1 = asyncio.create_task(insert_and_sleep(222222, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(222222, 0.01))
-    await task2
     with pytest.raises(UniqueViolation, match="UNIQUE"):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            await insert_row(s1, 222222)
+            async with backend.session("pytest", 1) as s2:
+                await insert_row(s2, 222222)
 
     # 测试update提交时把不同行改成同一个unique值：后提交者是确定性冲突
-    async def update_and_sleep(name, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = await _item_repo.get(name=str(name))
-            assert _row
-            _row.time = 874233
-            await _item_repo.update(_row)
-            await asyncio.sleep(sleep)
+    await backend.wait_for_synced()
 
-    task1 = asyncio.create_task(update_and_sleep(111111, 0.1))
-    task2 = asyncio.create_task(update_and_sleep(111112, 0.02))
-    await task2
+    async def update_row(session, name):
+        repo = session.using(comp)
+        row = await repo.get(name=str(name))
+        assert row
+        row.time = 874233
+        await repo.update(row)
+
     with pytest.raises(UniqueViolation, match="UNIQUE"):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            await update_row(s1, 111111)
+            async with backend.session("pytest", 1) as s2:
+                await update_row(s2, 111112)
 
 
 async def test_update_to_value_set_by_concurrent_self_update_is_race(
