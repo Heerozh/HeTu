@@ -377,50 +377,64 @@ class SubscriptionBroker:
 
         servant = self._backend.servant
 
+        # 先定位 row_id（非主键只查索引，不读行）
         if index_name == "id":
-            row = await servant.get(table_ref, int(query_value), RowFormat.TYPED_DICT)
-            if row is None:
-                return None, None
+            row_id = int(query_value)
         else:
-            rows = await servant.range(
+            ids = await servant.range(
                 table_ref,
                 index_name,
                 query_value,
                 limit=1,
-                row_format=RowFormat.TYPED_DICT,
+                row_format=RowFormat.ID_LIST,
             )
-            if len(rows) == 0:
+            if len(ids) == 0:
                 return None, None
-            row = rows[0]
-        del row["_version"]  # 内部版本号不推给客户端
+            row_id = int(ids[0])
 
-        # 再次caller要对该row有权限
-        if not self._has_row_permission(table_ref, ctx, row):
-            return None, None
-
-        # 开始订阅
-        sub_id = self.make_query_id_(table_ref, "id", row["id"], None, 1, False)
+        sub_id = self.make_query_id_(table_ref, "id", row_id, None, 1, False)
         if sub_id in self._subs:
             logger.warning(
                 _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
                     sub_id=sub_id
                 )
             )
+            row = await servant.get(table_ref, row_id, RowFormat.TYPED_DICT)
+            if row is None or not self._has_row_permission(table_ref, ctx, row):
+                return None, None
+            del row["_version"]  # 内部版本号不推给客户端
             return sub_id, row
 
-        channel_name = servant.row_channel(table_ref, row["id"])
+        # 先订后读：读与订之间落下的写入，要么已经在读回的行里，要么随后有通知。
+        # 先读后订的话，它既不在读回的行里、也不会有通知，客户端一直拿着旧行
+        channel_name = servant.row_channel(table_ref, row_id)
         await self._mq_client.subscribe(channel_name)
+        # 订阅一生效就同步登记，不能等读完：get_updates 的退订名单按 _channel_subs 定，
+        # 读是真正的 await，期间某个索引订阅把这行放出范围的话，没登记的频道会被它当作
+        # 没人要而退订，这里再登记上去的就是一个永远收不到通知的订阅。
+        # 读期间到达的通知会由 get_updates 照常推给这个订阅，客户端还没拿到 sub_id 会丢掉
+        # 它：对应的写入早于这次读的，读回的行里已经有了
+        self._subs[sub_id] = RowSubscription(
+            table_ref, servant, ctx, channel_name, row_id
+        )
+        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
+        self._sub_counts[RowSubscription] += 1
+        try:
+            row = await servant.get(table_ref, row_id, RowFormat.TYPED_DICT)
+        except BaseException:
+            await self.unsubscribe(sub_id)
+            raise
+        # 行不存在，或 caller 对该行无权限：撤销登记并退订（同一连接别的订阅还在用这个
+        # 频道就留着）
+        if row is None or not self._has_row_permission(table_ref, ctx, row):
+            await self.unsubscribe(sub_id)
+            return None, None
+        del row["_version"]  # 内部版本号不推给客户端
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
                 sub_id=sub_id, channel_name=channel_name
             )
         )
-
-        self._subs[sub_id] = RowSubscription(
-            table_ref, servant, ctx, channel_name, row["id"]
-        )
-        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
-        self._sub_counts[RowSubscription] += 1
         return sub_id, row
 
     async def subscribe_range(

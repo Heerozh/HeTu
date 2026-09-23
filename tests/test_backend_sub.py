@@ -1,6 +1,7 @@
 import asyncio
 from contextvars import ContextVar
 from typing import AsyncGenerator, cast
+from unittest.mock import patch
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
@@ -1112,3 +1113,122 @@ async def test_subscribe_table_large(broker: SubscriptionBroker, item_ref, admin
     updates = await broker.get_updates()
     assert len(updates[sub_id]) == 50
     assert all(r["qty"] == 77 for r in updates[sub_id].values())
+
+
+async def test_subscribe_get_sees_write_before_subscription_active(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """SUBSCRIBE 生效之前落下的写入不能丢：先订后读，返回的行一定已经包含它。
+    先读后订的话，这次写入既不在读到的行里、也不会有通知，客户端一直拿着旧行"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    servant = backend.servant
+    row_id = int((await servant.range(filled_item_ref, "time", 111, limit=1))[0].id)
+
+    mq = broker._mq_client
+    real_subscribe = mq.subscribe
+
+    async def write_then_subscribe(*channels: str):
+        # 订阅生效之前，别的连接改了这行
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=row_id)
+            assert row
+            row.qty = 4321
+            await repo.update(row)
+        await backend.wait_for_synced()
+        await real_subscribe(*channels)
+
+    with patch.object(mq, "subscribe", write_then_subscribe):
+        sub_id, row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row_id
+        )
+    assert sub_id and row
+    assert row["qty"] == 4321
+
+
+async def test_subscribe_get_registers_before_read(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """subscribe_get 订阅生效后必须先登记再读：读期间 get_updates 的 tick 把这行从某个索引
+    订阅的范围里放出去时，不能把这个刚订上的频道当没人要退掉——否则新订阅登记在一个连接
+    已不再订阅的频道上，之后永远收不到通知"""
+    backend = broker._backend
+    servant = backend.servant
+    sub_10, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_10
+    row_id = next(r["id"] for r in rows if r["time"] == 110)
+    channel = servant.row_channel(filled_item_ref, row_id)
+
+    # 行离开 owner=10 的范围：通知进本连接队列，先不 tick
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=row_id)
+        assert row
+        row.owner = 11
+        await repo.update(row)
+
+    # 让 subscribe_get 的那次读卡住，在它卡住期间跑 tick
+    real_get = servant.get
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_get(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await real_get(*args, **kwargs)
+
+    with patch.object(servant, "get", slow_get):
+        task = asyncio.create_task(
+            broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+        )
+        async with asyncio.timeout(5):
+            await entered.wait()
+            updates = await broker.get_updates()
+            assert updates[sub_10][row_id] is None  # sub_10 放掉了这行
+            release.set()
+            sub_row, row = await task
+    assert sub_row and row and row["owner"] == 11
+    assert channel in broker._mq_client.subscribed_channels
+    assert broker._channel_subs[channel] == {sub_row}
+
+    # 新订阅真的收得到后续变更
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(id=row_id)
+        assert row
+        row.qty = 123
+        await repo.update(row)
+    updates = await broker.get_updates(timeout=3)
+    assert updates[sub_row][row_id]["qty"] == 123
+
+
+async def test_subscribe_get_invisible_row_leaves_no_subscription(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, user_id11_ctx
+):
+    """行不存在 / 行级权限不过（Item 的 RLS 是 owner == caller，行的 owner 都是 10）：
+    先订后读时刚订上的频道要退干净，不留订阅、不占计数"""
+    backend = broker._backend
+    servant = backend.servant
+    row_id = int((await servant.range(filled_item_ref, "time", 110, limit=1))[0].id)
+
+    invisible = [
+        (admin_ctx, "id", 987654321),  # 行不存在
+        (user_id11_ctx, "time", 110),  # 行级权限不过（按索引定位）
+        (user_id11_ctx, "id", row_id),  # 行级权限不过（按 id）
+    ]
+    for ctx, index_name, value in invisible:
+        sub_id, row = await broker.subscribe_get(
+            filled_item_ref, ctx, index_name, value
+        )
+        assert sub_id is None and row is None
+
+    assert not broker._mq_client.subscribed_channels
+    assert not broker._subs and not broker._channel_subs
+    assert broker.count() == (0, 0, 0)
+    hub = servant._hub  # type: ignore[attr-defined]
+    for rid in (987654321, row_id):
+        assert servant.row_channel(filled_item_ref, rid) not in hub.channels
