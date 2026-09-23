@@ -29,6 +29,7 @@ from ..base import (
     sortable_token,
     to_sortable_bytes,
 )
+from .pool import HeTuConnectionPool
 
 # from .batch import RedisBatchedClient
 
@@ -217,8 +218,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         max_connections
             本进程对该地址的异步连接池上限。订阅的 pubsub 走每 worker 一条的独立连接
             （见 PubSubHub），池里只有短命的读写命令，所以不需要很大。redis-py 8 起默认
-            只有 100，这里显式给出。standalone 模式下池满会排队；原生集群模式下 redis-py
-            每个节点的池只能设上限、满了直接抛 MaxConnectionsError，需要时请调大。
+            只有 100，这里显式给出。standalone 模式下池满会排队（见 HeTuConnectionPool，
+            没满时取/还连接不付排队的代价）；原生集群模式下 redis-py 每个节点的池只能设
+            上限、满了直接抛 MaxConnectionsError，需要时请调大。
         pool_timeout
             standalone 模式下池满时排队等待的秒数，None 为一直等，超时抛 ConnectionError。
         """
@@ -251,7 +253,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             else:
                 self._ios.append(redis.Redis.from_url(url))
                 # 池满排队而不是抛 MaxConnectionsError；from_pool 让 client 接管池的关闭
-                pool = redis.asyncio.BlockingConnectionPool.from_url(
+                pool = HeTuConnectionPool.from_url(
                     url, max_connections=max_connections, timeout=pool_timeout
                 )
                 self._async_ios.append(redis.asyncio.Redis.from_pool(pool))
@@ -520,7 +522,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             return None
 
-    async def _hgetall_many(self, key_prefix: str, row_ids: Iterable[int | str]):
+    async def _hgetall_many(
+        self, key_prefix: str, row_ids: Iterable[int | str]
+    ) -> list[dict]:
         """
         按块pipeline批量HGETALL，返回与row_ids顺序一致的raw dict列表，不存在的为空dict。
 
@@ -529,6 +533,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
         同一张表的所有行key都带同一个 {CLU} hash tag，cluster模式下同slot，pipeline可直接用。
         """
         aio = self.aio
+        if not isinstance(row_ids, (list, tuple)):
+            row_ids = list(row_ids)
+        if len(row_ids) == 1:
+            # 单行直接 HGETALL：redis-py 8 的 pipeline 有固定开销（建对象、HIMPORT 预处理、
+            # asyncio.shield 还连接），比单条命令贵一截，而 upsert、get(unique=) 每次都走这里
+            return [await aio.hgetall(key_prefix + str(row_ids[0]))]
         rows: list[dict] = []
         for chunk in itertools.batched(row_ids, self.RANGE_PIPELINE_CHUNK):
             async with aio.pipeline(transaction=False) as pipe:
