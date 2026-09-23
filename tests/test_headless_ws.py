@@ -88,14 +88,19 @@ def hl_server(request, setup_websocket_proxy):  # noqa: F811
             webext.clear()
 
 
-async def _drain(client, idle=0.8, total=6.0):
-    """收 updt 帧直到 idle 秒内没有新帧；按 sub_id 合并（后到的覆盖）。"""
+async def _drain(client, until=lambda merged: True, idle=0.8, total=10.0):
+    """
+    收 updt 帧，按 sub_id 合并（后到的覆盖）：先收到 until(merged) 为真，再收到 idle 秒内
+    没有新帧为止。headless 写入在另一个线程里，负载高时这一步的写入可能晚于 idle 才落库，
+    只按空闲判断会提前收工，帧落到下一步去。
+    """
     merged: dict[str, dict] = {}
     loop = asyncio.get_running_loop()
     deadline = loop.time() + total
     while loop.time() < deadline:
+        timeout = idle if until(merged) else deadline - loop.time()
         try:
-            msg = await asyncio.wait_for(client.recv(), timeout=idle)
+            msg = await asyncio.wait_for(client.recv(), timeout=timeout)
         except TimeoutError:
             break
         if msg[0] == "updt":
@@ -164,13 +169,36 @@ def test_headless_writes_push_to_ws_subscribers(hl_server):
             "alice": int(sub_get[2]["id"]),
         }
 
+        alice = collected["ids"]["alice"]
+        get_id, range_id, table_id = sub_get[1], sub_range[1], sub_table[1]
+
+        def row_of(merged, sub_id, row_id):
+            """该订阅收到的这一行：dict 是行数据，None 是删除，还没收到是 ..."""
+            return (merged.get(sub_id) or {}).get(row_id, ...)
+
+        def has_row(merged, sub_id, row_id, **fields):
+            row = row_of(merged, sub_id, row_id)
+            return isinstance(row, dict) and all(
+                row.get(k) == v for k, v in fields.items()
+            )
+
+        # 每一步要等到的帧，与下面的断言对应
+        untils = [
+            lambda m: all(
+                has_row(m, k, alice, name="Alice2")
+                for k in (get_id, range_id, table_id)
+            ),
+            lambda m: all(has_row(m, k, -2) for k in (range_id, table_id)),
+            lambda m: all(row_of(m, k, -2) is None for k in (range_id, table_id)),
+        ]
+
         writer = threading.Thread(
             target=_headless_writer, args=(config, steps, errors), daemon=True
         )
         writer.start()
         for i in range(3):
             steps[i].set()
-            collected[f"step{i}"] = await _drain(c)
+            collected[f"step{i}"] = await _drain(c, untils[i])
         writer.join(30)
         collected["writer_alive"] = writer.is_alive()
 
