@@ -102,7 +102,8 @@ class RowSubscription(BaseSubscription):
             self.rls_ctx = None
         self.channel = channel
         self.row_id = row_id
-        # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推
+        # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推。
+        # 客户端没有这行（行不存在，或 RLS 不可见）时为 None
         self.pushed = pushed
         if RowSubscription.__cache.get(None) is None:
             RowSubscription.__cache.set({})
@@ -155,11 +156,14 @@ class RowSubscription(BaseSubscription):
         一样时不返回任何更新。
         """
         row = await self.read_(channel)
-        fingerprint = row_fingerprint_(row)
+        visible = self.decode_row_(row)
+        # 不可见的行客户端没有，和行不存在一样记 None：它在不可见期间怎么变都不推，
+        # 推 None 等于把不可见行的 id 告诉了客户端
+        fingerprint = None if visible is None else row_fingerprint_(row)
         if fingerprint == self.pushed:
             return set(), set(), {}
         self.pushed = fingerprint
-        return set(), set(), {self.row_id: self.decode_row_(row)}
+        return set(), set(), {self.row_id: visible}
 
     @property
     def channels(self) -> set[str]:
@@ -263,24 +267,19 @@ class IndexSubscription(BaseSubscription):
                 continue  # 可能是刚添加就删了
             new_chan_name = servant.row_channel(ref, row_id)
             new_chans.add(new_chan_name)
-            row_sub = RowSubscription(
-                ref,
-                servant,
-                self.rls_ctx,
-                new_chan_name,
-                row_id,
-                row_fingerprint_(row),
-            )
+            row_sub = RowSubscription(ref, servant, self.rls_ctx, new_chan_name, row_id)
             self.row_subs[new_chan_name] = row_sub
             # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
             visible = row_sub.decode_row_(row)
+            row_sub.pushed = None if visible is None else row_fingerprint_(row)
             if visible is not None:
                 rtn[row_id] = visible
         for row_id in deletes:
-            rtn[row_id] = None
             rem_chan_name = servant.row_channel(ref, row_id)
             rem_chans.add(rem_chan_name)
-            self.row_subs.pop(rem_chan_name)
+            # 客户端手里没有这行的（RLS 不可见，或已经推过 None）离开时不推
+            if self.row_subs.pop(rem_chan_name).pushed is not None:
+                rtn[row_id] = None
 
         return new_chans, rem_chans, rtn
 
