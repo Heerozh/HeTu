@@ -973,7 +973,7 @@ requires-dist = [
     { name = "numpy", specifier = "~=2.3" },
     { name = "psycopg", specifier = ">=3.3.3" },
     { name = "psycopg-binary", specifier = ">=3.3.3" },
-    { name = "pymysql", specifier = ">=1.1.2" },
+    { name = "pymysql", specifier = ">=1.1.2,!=1.2.1,!=1.2.2" },
     { name = "pynacl", specifier = ">=1.6.2" },
     { name = "pyyaml", specifier = "~=6.0" },
     { name = "redis", extras = ["hiredis"], specifier = ">=7,<9" },

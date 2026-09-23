@@ -91,6 +91,28 @@ def _apply_sqlite_pragmas(dbapi_conn: Any, _rec: Any) -> None:
         cur.close()
 
 
+def _escape_bytes_hex(value: bytes) -> str:
+    return f"_binary X'{value.hex()}'"
+
+
+def _patch_aiomysql_escape_bytes() -> None:
+    """让 aiomysql 0.3.2 在 PyMySQL >= 1.2.3 下也能转义 bytes 参数。
+
+    aiomysql 0.3.2 转义 bytes 参数用的是 PyMySQL 的内部函数 `escape_bytes_prefixed`；
+    PyMySQL 1.2.1 的安全修复（GHSA-x4f8-9hx9-hpp9）删掉了它，1.2.3 为了让 aiomysql 能
+    import 又放回一个字符串占位，结果一有 bytes 参数就 `'str' object is not callable`。
+    这里照 aiomysql 自己的修复（aio-libs/aiomysql#1081，0.3.3）换成 16 进制字面量，
+    也就是 PyMySQL 1.2.1 修复后的做法。
+
+    只在认出那个字符串占位时才替换：PyMySQL 还是老版本（它仍是函数），或 aiomysql 已经
+    不再用这个名字（>= 0.3.3）时什么都不做。aiomysql 0.3.3 发布后可以删掉本函数。
+    """
+    import aiomysql.connection
+
+    if isinstance(getattr(aiomysql.connection, "escape_bytes_prefixed", None), str):
+        aiomysql.connection.escape_bytes_prefixed = _escape_bytes_hex  # pyright: ignore[reportAttributeAccessIssue]
+
+
 @final
 class SQLBackendClient(BackendClient, alias="sql"):
     """SQL后端连接与读写实现（SQLAlchemy Core）。"""
@@ -364,6 +386,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
             if io.dialect.name == "sqlite":
                 event.listen(io, "connect", _apply_sqlite_pragmas)
                 event.listen(aio.sync_engine, "connect", _apply_sqlite_pragmas)
+            if aio.dialect.driver == "aiomysql":
+                _patch_aiomysql_escape_bytes()
             self._ios.append(io)
             self._async_ios.append(aio)
 
