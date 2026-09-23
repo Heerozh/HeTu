@@ -933,6 +933,225 @@ async def test_subscribe_point_query_string(
     await updates_until(broker, renamed_back)
 
 
+async def test_point_query_leave_backfills_limit(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    值频道只发"进入"：点查询结果里的行离开（改走 / 删除）由它自己的行频道发现，重跑比对时
+    推 None、退订行频道，并把被 limit 截在外面的行补进来
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=5
+    )
+    assert sub_id and len(rows) == 5
+    first5 = [int(r["id"]) for r in rows]
+    # 与订阅同样的排序，拿到被 limit 截在外面的第 6、7 行
+    all_ids = [
+        int(i)
+        for i in await backend.servant.range(
+            filled_item_ref, "owner", 10, limit=100, row_format=RowFormat.ID_LIST
+        )
+    ]
+    assert all_ids[:5] == first5
+    sixth, seventh = all_ids[5], all_ids[6]
+    moved, deleted = first5[0], first5[1]
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=moved)
+        assert row
+        row.owner = 11
+        await repo.update(row)
+        assert await repo.get(id=deleted) is not None
+        repo.delete(deleted)
+
+    def left_and_backfilled(updates):
+        got = updates[sub_id]
+        assert got[moved] is None and got[deleted] is None
+        assert got[sixth]["owner"] == 10 and got[seventh]["owner"] == 10
+        idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+        assert idx_sub.last_range_result == set(first5[2:]) | {sixth, seventh}
+        assert len(idx_sub.row_subs) == 5
+
+    await updates_until(broker, left_and_backfilled)
+
+
+async def test_point_query_row_leaving_before_its_channel_is_active(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    行进入点查询的结果后，它的行频道要到 tick 末尾才订上：读到这行之后、行频道生效之前它又
+    离开（这里是删除）的话，行频道的通知收不到，值频道又不发"离开"。行频道订上后得隔一个
+    interval 补读一次（同订阅生效后的补读），不然客户端一直留着这行
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    mq = broker._mq_client
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_id and len(rows) == 25
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        row.name, row.owner, row.time = "Blink", 10, 600
+        await session.using(comp).insert(row)
+        new_id = int(row.id)
+    new_chan = backend.servant.row_channel(filled_item_ref, new_id)
+    real_subscribe = mq.subscribe
+
+    async def delete_then_subscribe(*channels: str):
+        if new_chan in channels:  # tick 末尾订这行的行频道之前，它被删了
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                assert await repo.get(id=new_id) is not None
+                repo.delete(new_id)
+            await backend.wait_for_synced()
+        await real_subscribe(*channels)
+
+    def entered(updates):
+        assert updates[sub_id][new_id]["name"] == "Blink"
+
+    with patch.object(mq, "subscribe", delete_then_subscribe):
+        await updates_until(broker, entered)
+
+    def left(updates):
+        assert updates[sub_id][new_id] is None
+
+    await updates_until(broker, left, timeout=3)
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert new_id not in idx_sub.last_range_result
+    assert new_chan not in mq.subscribed_channels
+
+
+async def _owner10_with_two_hidden_rows(
+    broker: SubscriptionBroker, rls_ref, ctx
+) -> tuple[IndexSubscription, list[int]]:
+    """
+    RLSTest 的点查询 owner=10（user 11 只看得到 friend == 11 的行，默认 25 行都是）：先藏起
+    两行再订阅。订阅生效后的补读会把这两行也订上行频道（等它们变得可见时要推），但不推
+    """
+    backend = broker._backend
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=2)
+        hidden = [int(r.id) for r in rows]
+        for row in rows:
+            row.friend = 12
+            await repo.update(row)
+    sub_id, visible = await broker.subscribe_range(rls_ref, ctx, "owner", 10, limit=33)
+    assert sub_id and len(visible) == 23
+    assert await broker.get_updates(timeout=0.5) == {}
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert len(idx_sub.row_subs) == 25
+    return idx_sub, hidden
+
+
+async def test_point_query_hidden_row_change_is_not_pushed(
+    broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
+):
+    """不可见的行客户端从没拿到过：它变了但仍不可见，不能推 None（等于把它的 id 告诉客户端）"""
+    idx_sub, (hidden, _) = await _owner10_with_two_hidden_rows(
+        broker, filled_rls_ref, user_id11_ctx
+    )
+    async with broker._backend.session("pytest", 1) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(id=hidden)
+        assert row
+        row.friend = 13  # 对 user 11 仍不可见
+        await repo.update(row)
+    assert await broker.get_updates(timeout=1) == {}
+    assert len(idx_sub.row_subs) == 25
+
+
+async def test_point_query_hidden_row_leaving_is_not_pushed(
+    broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
+):
+    """不可见的行离开点查询的值（改走 / 删除）：退订它的行频道，但不推 None"""
+    idx_sub, (moved, deleted) = await _owner10_with_two_hidden_rows(
+        broker, filled_rls_ref, user_id11_ctx
+    )
+    async with broker._backend.session("pytest", 1) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(id=moved)
+        assert row
+        row.owner = 12
+        await repo.update(row)
+        assert await repo.get(id=deleted) is not None
+        repo.delete(deleted)
+    assert await broker.get_updates(timeout=1) == {}
+    assert len(idx_sub.row_subs) == 23
+    assert idx_sub.last_range_result.isdisjoint({moved, deleted})
+
+
+async def test_point_query_on_undeclared_index_falls_back(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
+):
+    """
+    索引没声明 point_sub：commit 不发它的值频道，点查询退化为订整个索引的频道（区间订阅的
+    行为，结果照样正确），同一组件的同一索引只警告一次
+    """
+    import logging
+
+    servant = broker._backend.servant
+    comp = filled_item_ref.comp_cls
+    assert "model" not in comp.point_subs_
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_a, rows = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "model", 0.5, limit=10
+        )
+        sub_b, _ = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "model", 0.6, limit=10
+        )
+    assert sub_a and sub_b and len(rows) == 1
+    index_chan = servant.index_channel(filled_item_ref, "model")
+    assert cast(IndexSubscription, broker._subs[sub_a]).index_channel == index_chan
+    assert cast(IndexSubscription, broker._subs[sub_b]).index_channel == index_chan
+    warns = [r for r in caplog.records if "point_sub" in r.getMessage()]
+    assert len(warns) == 1, [r.getMessage() for r in warns]
+    assert "model" in warns[0].getMessage()
+
+    # 功能不受影响：另一行的 model 改成 0.5 → 进入；再改走 → 离开
+    backend = broker._backend
+    other_id = None
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(name="Itm30")
+        assert row
+        other_id = int(row.id)
+        row.model = 0.5
+        await repo.update(row)
+
+    def moved_in(updates):
+        assert updates[sub_a][other_id]["model"] == pytest.approx(0.5)
+
+    await updates_until(broker, moved_in)
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=other_id)
+        assert row
+        row.model = 7.0
+        await repo.update(row)
+
+    def moved_out(updates):
+        assert updates[sub_a][other_id] is None
+
+    await updates_until(broker, moved_out)
+
+
+async def test_index_value_channel_requires_point_sub(mod_auto_backend, item_ref):
+    """值频道只给声明了 point_sub 的索引发：订一个没人会发的频道是 bug，直接报错"""
+    servant = mod_auto_backend().servant
+    assert "owner" in item_ref.comp_cls.point_subs_
+    servant.index_value_channel(item_ref, "owner", 10)
+    with pytest.raises(ValueError, match="point_sub"):
+        servant.index_value_channel(item_ref, "model", 0.5)
+
+
 # ============================ 整表订阅 ============================
 
 
@@ -1161,6 +1380,22 @@ async def test_subscribe_table_permission_denied(
     assert rows == []
     assert broker.count() == (0, 0, 0)
     assert len(broker._mq_client.subscribed_channels) == 0
+
+
+async def test_subscribe_table_requires_table_sub(
+    broker: SubscriptionBroker, filled_rls_ref, admin_ctx, caplog
+):
+    """组件没声明 table_sub：commit 不发它的表频道，整表订阅被拒绝，不占任何频道/计数"""
+    import logging
+
+    assert filled_rls_ref.comp_cls.table_sub_ is False
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_id, rows = await broker.subscribe_table(filled_rls_ref, admin_ctx)
+    assert sub_id is None
+    assert rows == []
+    assert broker.count() == (0, 0, 0)
+    assert len(broker._mq_client.subscribed_channels) == 0
+    assert any("table_sub" in r.getMessage() for r in caplog.records)
 
 
 async def test_subscribe_table_row_cap(mod_auto_backend, filled_item_ref, admin_ctx):

@@ -197,18 +197,31 @@ class BackendClient:
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
         """
-        返回索引某一个值的频道名。只有 `index_name == value` 的行被 insert/delete，或某行该
-        字段从/到这个值变化时，commit 才向此频道发一条消息，payload 为本次事务变动的
-        row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
-        `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
+        返回索引某一个值的频道名。只有声明了 `point_sub` 的索引才有值频道（commit 只给它们
+        发），未声明的索引调用会抛 `ValueError`——订一个永远没人发的频道只会静默收不到通知。
+        只在有行"进入"这个值时（insert，或某行该字段改成这个值），commit 才向此频道发一条
+        消息，消息不带内容；一个事务每个 (索引, 值) 只发一条。行"离开"（delete、字段改走）
+        不发：点查询订阅本来就订着结果里每一行的行频道，由它发现（见 IndexSubscription）。
+        点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
-        id 索引没有值频道（commit 不发）：点查 id 请订行频道或整个 id 索引的频道。
+        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
 
-        Channel of one index value: published on commit only when a row with that value is
-        inserted/deleted or a row's field changes from/to it (payload: touched row ids).
-        Point-query subscriptions use it instead of `index_channel`.
+        Channel of one index value, only for indexes declared with `point_sub` (raises
+        `ValueError` otherwise). Point-query subscriptions use it instead of
+        `index_channel` so writes to other values don't wake them up.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def require_point_sub_(table_ref: TableReference, index_name: str) -> None:
+        """内部方法：索引没有声明 point_sub（commit 不发它的值频道）时抛 ValueError"""
+        if index_name not in table_ref.comp_cls.point_subs_:
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 没有声明 point_sub，commit 不会发它的值频道；"
+                    "请在 property_field 里加 point_sub=True"
+                ).format(comp_name=table_ref.comp_name, index_name=index_name)
+            )
 
     @staticmethod
     def point_query_value_(
@@ -240,8 +253,13 @@ class BackendClient:
 
     def table_channel(self, table_ref: TableReference):
         """
-        返回表级变更频道名。表内任何行 insert/update/delete，都会向该频道发送一条消息，
-        payload 为本次事务变动的 row_id（str）列表。一个事务一张表只发一条。
+        返回表级变更频道名。只有声明了 `table_sub` 的组件，commit 才向它发消息：表内任何行
+        insert/update/delete，一个事务一张表发一条，payload 为本次事务变动的 row_id（str）列表。
+
+        Channel of table-level changes. Commits publish to it only for components
+        declared with `table_sub`: one message per transaction per table (any insert,
+        update or delete), whose payload is the list of row ids (str) that transaction
+        changed.
         """
         raise NotImplementedError
 
@@ -628,6 +646,10 @@ class TableMaintenance:
         """实际重建组件表索引的逻辑实现，返回重建的行数"""
         raise NotImplementedError
 
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据"""
+        raise NotImplementedError
+
     # === === ===
 
     def __init__(self, master: BackendClient):
@@ -763,16 +785,43 @@ class TableMaintenance:
 
             # 准备和检测
             status = migrator.prepare()
-            if status == "unsafe":
-                if not force:
-                    return False
-            elif status == "skip":
-                return True
-
-            # 获取所有row id
-            row_ids = self.get_all_row_id(table_ref)
-            migrator.upgrade(row_ids, self)
+            if status == "unsafe" and not force:
+                return False
+            if status != "skip":
+                # 获取所有row id
+                row_ids = self.get_all_row_id(table_ref)
+                migrator.upgrade(row_ids, self)
+            self._finish_schema_migration(table_ref)
             return True
+
+    def _finish_schema_migration(self, table_ref: TableReference) -> None:
+        """
+        迁移脚本只管搬数据：dtype 没变的那几级（只改了 table_sub / point_sub、索引、权限等）
+        判 skip 不执行，表的 meta 还停在旧版本，check_table 会一直报 schema_mismatch。
+        这里把 meta 补写成当前定义；索引定义也变了的话（比如 point_sub 打开了 index），
+        先按当前定义重建索引。
+        """
+        from ..component import BaseComponent
+
+        comp_cls = table_ref.comp_cls
+        meta = self.read_meta(table_ref.instance_name, comp_cls)
+        assert meta
+        if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
+            return  # 迁移脚本已按当前定义重建了表
+        stored = BaseComponent.load_json(meta.json)
+        if (stored.indexes_, stored.uniques_) != (comp_cls.indexes_, comp_cls.uniques_):
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        self.do_update_meta_(table_ref)
+        logger.warning(
+            _(
+                "  ✔️ [💾MIGRATION][{comp_name}组件] 已把 schema 版本更新为当前定义"
+            ).format(comp_name=table_ref.comp_name)
+        )
 
     def flush(self, table_ref: TableReference, force=False) -> None:
         """

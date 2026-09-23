@@ -42,6 +42,9 @@ A few invariants that surprise new users:
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.
+  `point_sub=True` declares that the index supports efficient point
+  subscriptions (see [Subscriptions](#subscriptions)); it also implies
+  `index=True`.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the
@@ -210,13 +213,28 @@ strong consistency (spending currency, granting rewards, validation) inside a
 relying on the subscription data a client holds.
 
 What wakes a `range` up depends on the shape of the query. A **point query**
-(`high` omitted, or `low == high` — `owner=me`, `zone=z`) listens to the channel
-of that one index value and is only notified when a row enters or leaves that
-value (insert, delete, or a row's field changing to/from it). An **interval
-query** listens to the whole index and is woken by any change to any value of
-that index, re-running its comparison on the server. So for hot indexes such as
-"every player watches their own inventory", write a point query — other players
-picking up items will not touch you.
+(`high` omitted, or `low == high` — `owner=me`, `zone=z`) on an index declared
+with `point_sub=True` listens to the channel of that one index value and is only
+notified when a row enters or leaves that value (insert, delete, or a row's
+field changing to/from it). An **interval query**, and a point query on an index
+without `point_sub`, listens to the whole index and is woken by any change to
+any value of that index, re-running its comparison on the server (the server
+logs a warning once when a point query lands here). So for hot indexes such as
+"every player watches their own inventory", declare `point_sub=True` and write
+a point query — other players picking up items will not touch you:
+
+```python
+@hetu.define_component(namespace="Game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, point_sub=True)
+    qty: np.int32 = hetu.property_field(1)
+```
+
+The cost of `point_sub`: every time a row *enters* a value (an insert, or the
+field changing to that value) the commit sends one extra notification (a Redis
+PUBLISH, which is replicated to every replica). Rows leaving a value need no
+notification — the subscriber already watches that row. Declare it only on
+indexes that are actually point-subscribed.
 
 ### When to use a table subscription
 
@@ -227,6 +245,19 @@ different route: on commit, the engine publishes one extra table-level
 notification per modified table carrying the list of changed `row_id`s, and a
 table subscription listens to that single channel — it counts as one
 subscription regardless of how many rows the table has.
+
+That notification costs a Redis PUBLISH (replicated to every replica) on every
+commit, so it is only sent for components declared with `table_sub=True`;
+table subscriptions on other components are rejected:
+
+```python
+@hetu.define_component(
+    namespace="Game", permission=hetu.Permission.EVERYBODY, table_sub=True
+)
+class PlayerName(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", dtype="U16")
+```
 
 The trade-off is that the subscriber is notified about **every** write to
 that table (the server filters by RLS before pushing), so it only fits tables

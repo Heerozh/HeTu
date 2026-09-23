@@ -134,12 +134,14 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             ),
         )
 
-        # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道，收到通知才重查，
-        # RPC 路径上不再每次读库；收到通知还主动从 master 核一次，被顶号就立刻断连，不用等它
-        # 下次调用。订索引值频道而不是本连接那行的行频道：行频道会被本连接自己的心跳
-        # HSET(last_active) 每 ENDPOINT_CALL_IDLE_TIMEOUT/5 秒触发一次，白白重查；而 owner 值
-        # 频道只在某行的 owner 从/到本用户变化、或带本用户的行增删时才有消息——正是被顶号
-        # （本行 owner 被改成 0）和别处登录本用户这两件事，心跳碰不到它。
+        # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道（owner 声明了
+        # point_sub），收到通知才重查，RPC 路径上不再每次读库；收到通知还主动从 master 核一次，
+        # 被顶号就立刻断连，不用等它下次调用。订索引值频道而不是本连接那行的行频道：行频道会被
+        # 本连接自己的心跳 HSET(last_active) 每 ENDPOINT_CALL_IDLE_TIMEOUT/5 秒触发一次，白白
+        # 重查；值频道只在有行"进入"本用户时才有消息（commit 只发进入），心跳碰不到它。顶号正是
+        # 这样：别处登录的 elevate() 在同一个事务里把本行 owner 改成 0（离开，不发）、把新连接
+        # 那行 owner 改成本用户（进入，发）。只把本行 owner 改走、或删掉本行而没有行进入本用户，
+        # 不会有通知，要等下次调用时按 CONNECTION_ALIVE_RECHECK_INTERVAL 兜底重查。
         # 频道名与 hub 必须是同一个后端，否则保持每次都查
         conn_tbl = tbl_mgr.get_table(connection.Connection)
         if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
@@ -340,9 +342,10 @@ async def _cleanup_connection(
     logger.info(close_msg)
     await request.app.cancel_task(recv_task_id, raise_exception=False)
     await request.app.cancel_task(subs_task_id, raise_exception=False)
-    # 先退订再删本连接的 Connection 行：删行会向 owner 索引值频道 PUBLISH（带本用户的行没了），
-    # 被顶号的 watcher 还挂着的话会收到它，主动核查读到行不存在就记一条假的"已被顶号"。
-    # 退订等到 UNSUBSCRIBE ack 才返回，之后的 DEL 通知 Redis 不会再投给本进程
+    # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
+    # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
+    # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
+    # 退订等到 UNSUBSCRIBE ack 才返回，之后的通知 Redis 不会再投给本进程
     if broker is not None:
         await broker.close()
     try:

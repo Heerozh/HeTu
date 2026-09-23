@@ -127,11 +127,13 @@ class PubSubHub(MQHub):
                     channel_name=channel_name
                 )
             )
-        # 表级频道（非keyspace通知）带payload：msgpack的row_id列表
+        # 表级频道（非keyspace通知）带payload：msgpack的row_id列表；值频道的消息是空串，
+        # 直接当作无payload
         ids = None
-        if not channel_name.startswith("__keyspace@"):
+        data = msg["data"]
+        if data and not channel_name.startswith("__keyspace@"):
             try:
-                ids = msgpack.unpackb(msg["data"])
+                ids = msgpack.unpackb(data)
             except Exception:  # noqa: BLE001 非法payload当作无payload
                 ids = None
             if not isinstance(ids, list):
