@@ -960,3 +960,58 @@ async def test_post_configure_explicit_components(mod_auto_backend):
             backend.post_configure(components=[bad_cls])
     else:
         backend.post_configure(components=[bad_cls])  # SQL 系目前没有索引 dtype 限制
+
+
+async def test_client_rejects_unknown_index(item_ref, mod_auto_backend):
+    """range 用组件没有的索引名（qty 是普通字段）直接 ValueError，不去库里查"""
+    backend: Backend = mod_auto_backend()
+    with pytest.raises(ValueError, match="没有索引"):
+        await backend.servant.range(item_ref, "qty", 0, 10)
+    with pytest.raises(ValueError, match="没有索引"):
+        await backend.servant.range(item_ref, "not_a_field", 0, 10)
+
+
+async def test_commit_without_dirty_rows(mod_auto_backend):
+    """client.commit 收到没有任何改动的 IdentityMap 是调用方的错（Session 会先判 is_dirty）"""
+    backend: Backend = mod_auto_backend()
+    idmap = IdentityMap()
+    with pytest.raises(ValueError, match="没有脏数据"):
+        await backend.master.commit(idmap)
+
+
+async def test_repo_rejects_invalid_args(filled_item_ref, mod_auto_backend):
+    """SessionRepository 的参数校验：查不存在的索引、update 改 _version、update 什么都没改"""
+    backend: Backend = mod_auto_backend()
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="没有叫 qty 的索引"):
+            await repo.get(qty=999)
+        with pytest.raises(ValueError, match="没有叫 qty 的索引"):
+            await repo.range("qty", 0, 10)
+
+        row = await repo.get(time=110)
+        assert row is not None
+        with pytest.raises(ValueError, match="No fields changed"):
+            await repo.update(row)
+        row._version += 1
+        with pytest.raises(ValueError, match="_version"):
+            await repo.update(row)
+        # 校验失败不留脏数据：退出 async with 时没有东西要提交
+        assert not session.idmap.is_dirty
+
+
+async def test_client_calls_after_close(item_ref, mod_auto_backend):
+    """backend close 之后，client 的读和取维护对象都抛 ConnectionError，不是底层驱动的怪异报错"""
+    backend: Backend = mod_auto_backend("closed_client")
+    master, servant = backend.master, backend.servant
+    await backend.close()
+
+    with pytest.raises(ConnectionError):
+        await servant.get(item_ref, 1)
+    with pytest.raises(ConnectionError):
+        await servant.get_many(item_ref, [1, 2])
+    with pytest.raises(ConnectionError):
+        await servant.range(item_ref, "time", 0, 10)
+    with pytest.raises(ConnectionError):
+        master.get_table_maintenance()

@@ -1215,3 +1215,289 @@ async def test_session_insert_then_upsert(item_ref, mod_auto_backend):
             assert upserted_row.id == row.id
             assert upserted_row.time == 1
             assert context.insert is False
+
+
+# ============ is_unique_conflicts：可选的提前 unique 检查 ============
+
+
+async def test_is_unique_conflicts_local_and_remote(item_ref, mod_auto_backend):
+    """同事务内已有同值行、库里已有同值行，都是确定性冲突 (field, False)；
+    都不撞时返回 (None, False)"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "remote", 1
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        repo = s.using(comp)
+        local = comp.new_row()
+        local.name, local.time = "local", 2
+        await repo.insert(local)
+
+        row = comp.new_row()
+        row.name, row.time = "local", 3  # 撞本事务刚 insert 的行
+        assert await repo.is_unique_conflicts(row, insert=True) == ("name", False)
+        row.name, row.time = "fresh", 1  # 撞库里既有的行
+        assert await repo.is_unique_conflicts(row, insert=True) == ("time", False)
+        row.name, row.time = "fresh", 4
+        assert await repo.is_unique_conflicts(row, insert=True) == (None, False)
+
+
+async def test_is_unique_conflicts_observed_absent_is_race(item_ref, mod_auto_backend):
+    """本事务 get 观察到某值不存在、之后被别人写入：判为竞态 (field, True)；另一列同时
+    是确定性冲突时也优先判竞态。与 commit 时的判定一致"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:  # 既有 time=100
+        r = comp.new_row()
+        r.name, r.time = "a", 100
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert await repo.get(name="anchor") is None
+            async with backend.session("pytest", 1) as s2:  # 并发插入 anchor
+                r2 = comp.new_row()
+                r2.name, r2.time = "anchor", 101
+                await s2.using(comp).insert(r2)
+
+            row = comp.new_row()
+            row.name, row.time = "anchor", 102
+            assert await repo.is_unique_conflicts(row, insert=True) == ("name", True)
+            row.time = 100  # time 也撞既有行（确定性），仍优先判竞态
+            assert await repo.is_unique_conflicts(row, insert=True) == ("name", True)
+            await repo.insert(row)  # commit 也判 RaceCondition
+
+
+async def test_is_unique_conflicts_ignores_rows_deleted_in_session(
+    item_ref, mod_auto_backend
+):
+    """本事务已 delete 的行占着的 unique 值不算冲突（本地、远程都不算），之后照常插入"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "old", 20
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        repo = s.using(comp)
+        old = await repo.get(name="old")
+        assert old is not None
+        repo.delete(old.id)
+
+        row = comp.new_row()
+        row.name, row.time = "old", 20
+        assert await repo.is_unique_conflicts(row, insert=True) == (None, False)
+        await repo.insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        got = await s.using(comp).get(name="old")
+        assert got is not None and got.id == row.id
+
+
+async def test_is_unique_conflicts_update(item_ref, mod_auto_backend):
+    """update 只检查改动了的 unique 列；insert 参数与行是否已在 Session 中不符时断言失败"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        for name, time in (("a", 1), ("b", 2)):
+            r = comp.new_row()
+            r.name, r.time = name, time
+            await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as s:
+        repo = s.using(comp)
+        row = await repo.get(name="b")
+        assert row is not None
+        row.qty = 5  # 只改非 unique 列：没有要查的列
+        assert await repo.is_unique_conflicts(row) == (None, False)
+        row.time = 1  # 改成 a 占着的值
+        assert await repo.is_unique_conflicts(row) == ("time", False)
+
+        # 行已在 Session 中却当插入检查、新行却当更新检查
+        with pytest.raises(AssertionError):
+            await repo.is_unique_conflicts(row, insert=True)
+        with pytest.raises(AssertionError):
+            await repo.is_unique_conflicts(comp.new_row())
+
+
+# ============ Session.retry：遇到竞态自动重试 ============
+
+
+def _no_db_session() -> Session:
+    """不连数据库的 Session：事务体不读写时，retry 的控制流与后端无关"""
+    backend = Backend.__new__(Backend)
+    backend._master = None  # type: ignore
+    return Session(backend, "pytest", 1)
+
+
+@pytest.fixture
+def backoff_sleeps(monkeypatch) -> list[float]:
+    """记下 retry 每次退避要 sleep 的秒数，不真睡。只替换 session 模块里的 asyncio，
+    别的协程照常 sleep"""
+    from types import SimpleNamespace
+
+    from hetu.data.backend import session as session_mod
+
+    delays: list[float] = []
+
+    async def fake_sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(session_mod, "asyncio", SimpleNamespace(sleep=fake_sleep))
+    return delays
+
+
+async def test_retry_body_race_exhausted(backoff_sleeps):
+    """事务体一直抛 RaceCondition：前几次被吞掉、按指数退避重试，最后一次原样抛出"""
+    counts = []
+    with pytest.raises(RaceCondition, match="body"):
+        async for attempt in _no_db_session().retry(3):
+            async with attempt:
+                counts.append(attempt.count)
+                raise RaceCondition("body")
+    assert counts == [1, 2, 3]
+    assert backoff_sleeps == [0.1, 0.2]
+
+
+async def test_retry_stops_after_success(backoff_sleeps):
+    """某次成功提交后不再重试"""
+    attempts = 0
+    async for attempt in _no_db_session().retry(5):
+        async with attempt:
+            attempts += 1
+            if attempts < 3:
+                raise RaceCondition("body")
+    assert attempts == 3
+    assert backoff_sleeps == [0.1, 0.2]
+
+
+async def test_retry_other_exception_not_retried(backoff_sleeps):
+    """RaceCondition 以外的异常不重试，直接抛出"""
+    attempts = 0
+    with pytest.raises(ValueError, match="boom"):
+        async for attempt in _no_db_session().retry(3):
+            async with attempt:
+                attempts += 1
+                raise ValueError("boom")
+    assert attempts == 1
+    assert backoff_sleeps == []
+
+
+async def test_retry_backoff_options(backoff_sleeps):
+    """次数必须 > 0；backoff 为 None 或返回 0 时重试前不 sleep"""
+    from hetu.data.backend.session import AsyncSessionRetryGenerator
+
+    with pytest.raises(ValueError, match="times"):
+        _no_db_session().retry(0)
+
+    for backoff in (None, lambda _i: 0):
+        attempts = 0
+        retry = AsyncSessionRetryGenerator(
+            session=_no_db_session(), times=2, backoff=backoff
+        )
+        async for attempt in retry:
+            async with attempt:
+                attempts += 1
+                if attempts == 1:
+                    raise RaceCondition("body")
+        assert attempts == 2
+    assert backoff_sleeps == []
+
+
+async def test_retry_commit_race_exhausted(item_ref, mod_auto_backend, backoff_sleeps):
+    """每次提交前都被别人抢先改了同一行，commit 一直 RaceCondition：重试耗尽后抛
+    RuntimeError，__cause__ 是最后一次的 RaceCondition"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as s:
+        r = comp.new_row()
+        r.name, r.time = "p", 1
+        await s.using(comp).insert(r)
+    await backend.wait_for_synced()
+
+    attempts = 0
+    with pytest.raises(RuntimeError, match="Exceeded maximum retry") as exc_info:
+        async for attempt in backend.session("pytest", 1).retry(3):
+            async with attempt as s:
+                attempts += 1
+                repo = s.using(comp)
+                row = await repo.get(name="p")
+                assert row is not None
+                async with backend.session("pytest", 1) as s2:  # 抢先改掉同一行
+                    s2.only_master = True
+                    repo2 = s2.using(comp)
+                    row2 = await repo2.get(name="p")
+                    assert row2 is not None
+                    row2.qty = row2.qty + 1
+                    await repo2.update(row2)
+                row.qty = 100
+                await repo.update(row)
+    assert attempts == 3
+    assert isinstance(exc_info.value.__cause__, RaceCondition)
+    assert backoff_sleeps == [0.1, 0.2]
+
+
+# ============ ctx.session_discard：System 内提前放弃事务 ============
+
+
+async def test_system_session_discard(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """System 里写入后调用 `ctx.session_discard()`：写入全部放弃不落库，`ctx.repo` 被清空"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, SystemContext, define_system
+    from hetu.system.caller import SystemCaller
+
+    @define_component(namespace="pytest", force=True)
+    class DiscardComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    repo_after_discard = []
+
+    @define_system(namespace="pytest", components=(DiscardComp,))
+    async def write_then_discard(ctx, owner):
+        row = DiscardComp.new_row()
+        row.owner = owner
+        await ctx.repo[DiscardComp].insert(row)
+        await ctx.session_discard()
+        repo_after_discard.append(dict(ctx.repo))
+        return "done"
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    ctx = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    ctx.systems = SystemCaller("pytest", tbl_mgr, ctx)
+    sys_def = SystemClusters().get_system("write_then_discard", namespace="pytest")
+    assert sys_def is not None
+    assert await ctx.systems.call_(sys_def, 7) == "done"
+    assert repo_after_discard == [{}]
+
+    await backend.wait_for_synced()
+    tbl = tbl_mgr.get_table(DiscardComp)
+    assert tbl is not None
+    async with tbl.session() as session:
+        assert await session.using(DiscardComp).get(owner=7) is None
