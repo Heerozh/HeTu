@@ -397,3 +397,71 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     time.sleep(0.01)
     await keeper.keep_alive()
     assert keeper.lease_deadline > old
+
+
+def test_batched():
+    from hetu.common.helper import batched
+
+    assert list(batched("ABCDEFG", 3)) == [("A", "B", "C"), ("D", "E", "F"), ("G",)]
+    with pytest.raises(ValueError):
+        list(batched([1, 2], 0))
+
+
+def _fake_fs(monkeypatch, files: dict[str, str | Exception]):
+    """让 helper 看到的文件系统只有 files：值为内容，或读取时抛出的异常"""
+    import io
+    from types import SimpleNamespace
+
+    from hetu.common import helper
+
+    def fake_open(path, *args, **kwargs):
+        content = files[path]
+        if isinstance(content, Exception):
+            raise content
+        return io.StringIO(content)
+
+    # 只换 helper 模块里的 os 引用，不动全进程的 os.path.exists
+    fake_path = SimpleNamespace(exists=lambda p: p in files)
+    monkeypatch.setattr(helper, "os", SimpleNamespace(path=fake_path))
+    monkeypatch.setattr(helper, "open", fake_open, raising=False)
+
+
+@pytest.mark.parametrize(
+    "files, expected",
+    [
+        ({}, False),
+        ({"/.dockerenv": ""}, True),
+        ({"/run/.containerenv": ""}, True),
+        ({"/proc/1/cgroup": "0::/kubepods/besteffort/pod1234\n"}, True),
+        ({"/proc/1/cgroup": "12:cpu:/docker/abcdef\n"}, True),
+        ({"/proc/1/cgroup": "0::/system.slice/containerd.service\n"}, True),
+        ({"/proc/1/cgroup": "0::/init.scope\n"}, False),
+        # 读不了 cgroup 不能让启动崩掉，当作非容器
+        ({"/proc/1/cgroup": PermissionError("denied")}, False),
+    ],
+)
+def test_is_container_env(monkeypatch, files, expected):
+    from hetu.common.helper import is_container_env
+
+    _fake_fs(monkeypatch, files)
+    assert is_container_env() is expected
+
+
+def test_get_machine_id(monkeypatch):
+    """机器ID是 Redis worker 租约 node_id 的一部分：容器环境用 /etc/hostname，
+    /etc/hostname 读不到时回退 socket.gethostname()；非容器用 MAC 的十六进制"""
+    import socket
+    import uuid
+
+    from hetu.common.helper import get_machine_id
+
+    _fake_fs(monkeypatch, {"/.dockerenv": "", "/etc/hostname": "pod-7f9c\n"})
+    assert get_machine_id() == "pod-7f9c"
+
+    _fake_fs(monkeypatch, {"/.dockerenv": "", "/etc/hostname": OSError("gone")})
+    monkeypatch.setattr(socket, "gethostname", lambda: "fallback-host")
+    assert get_machine_id() == "fallback-host"
+
+    _fake_fs(monkeypatch, {})
+    monkeypatch.setattr(uuid, "getnode", lambda: 0x1A2B3C4D5E6F)
+    assert get_machine_id() == "1a2b3c4d5e6f"

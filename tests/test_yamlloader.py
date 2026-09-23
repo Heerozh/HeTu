@@ -85,3 +85,69 @@ def test_eval_tag_still_works():
     # 覆盖 str 构造器后，!eval 标签不受影响
     cfg = _load("size: !eval [ 2 ** 19 ]\n")
     assert cfg["size"] == 2**19
+
+
+def test_eval_tag_requires_sequence():
+    with pytest.raises(yaml.constructor.ConstructorError, match="expected a sequence"):
+        _load("size: !eval 2 ** 19\n")
+
+
+def _load_file(path):
+    # 从真实文件加载：!include 相对文件所在目录解析
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.load(f, yamlloader.Loader)
+
+
+def test_include_by_extension(tmp_path, monkeypatch):
+    """!include 按扩展名解析：yaml/yml 递归按本 Loader 加载，json 按 json，其他原样文本；
+    路径相对当前文件所在目录，被引入的 yaml 里的 !include 相对它自己的目录"""
+    monkeypatch.setenv("HETU_TEST_INC", "from-env")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "backend.yml").write_text(
+        "type: Redis\nmaster: ${HETU_TEST_INC}\nextra: !include extra.json\n",
+        encoding="utf-8",
+    )
+    (sub / "extra.json").write_text(
+        '{"weight": 3, "tags": ["a", "b"]}', encoding="utf-8"
+    )
+    (tmp_path / "limits.json").write_text("[[10, 1], [27, 5]]", encoding="utf-8")
+    (tmp_path / "motd.txt").write_text("line1\nline2\n", encoding="utf-8")
+    main = tmp_path / "config.yml"
+    main.write_text(
+        "BACKEND: !include sub/backend.yml\n"
+        "LIMITS: !include limits.json\n"
+        "MOTD: !include motd.txt\n",
+        encoding="utf-8",
+    )
+
+    cfg = _load_file(main)
+    assert cfg["BACKEND"] == {
+        "type": "Redis",
+        "master": "from-env",
+        "extra": {"weight": 3, "tags": ["a", "b"]},
+    }
+    assert cfg["LIMITS"] == [[10, 1], [27, 5]]
+    assert cfg["MOTD"] == "line1\nline2\n"
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="BUG: !include 用 open() 默认编码读文件，主配置却按 utf-8 读（cli/start.py）；"
+    "中文 Windows 未开 UTF-8 模式时默认编码是 gbk，被引入文件里的中文会乱码或解码失败",
+)
+def test_include_reads_utf8_regardless_of_locale(tmp_path, monkeypatch):
+    real_open = open
+
+    def gbk_default_open(file, mode="r", *args, encoding=None, **kwargs):
+        # 模拟中文 Windows 未开 UTF-8 模式：文本模式不指定编码时按 gbk
+        if "b" not in mode and encoding is None:
+            encoding = "gbk"
+        return real_open(file, mode, *args, encoding=encoding, **kwargs)
+
+    monkeypatch.setattr(yamlloader, "open", gbk_default_open, raising=False)
+    (tmp_path / "names.yml").write_text("name: 河图服务器\n", encoding="utf-8")
+    main = tmp_path / "config.yml"
+    main.write_text("SERVER: !include names.yml\n", encoding="utf-8")
+
+    assert _load_file(main)["SERVER"] == {"name": "河图服务器"}
