@@ -202,7 +202,7 @@ class IndexComp2(hetu.BaseComponent):
 
 
 @hetu.define_component(
-    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY, table_sub=True
 )
 class PublicNames(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
@@ -210,7 +210,7 @@ class PublicNames(hetu.BaseComponent):
 
 
 @hetu.define_component(
-    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY
+    namespace="pytest", force=True, permission=hetu.Permission.EVERYBODY, table_sub=True
 )
 class PublicConfig(hetu.BaseComponent):
     key: str = hetu.property_field("", unique=True, dtype="U16")

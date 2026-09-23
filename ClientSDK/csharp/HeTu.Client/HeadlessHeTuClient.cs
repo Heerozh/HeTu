@@ -133,7 +133,7 @@ namespace HeTu
             return tcs.Task;
         }
 
-        /// <summary>整表订阅，见 HeTuClientBase.WatchTableSync。无权限或行数超限时结果为 null。</summary>
+        /// <summary>整表订阅，见 HeTuClientBase.WatchTableSync。服务端组件没声明 table_sub、无权限或行数超限时结果为 null。</summary>
         /// <remarks>
         ///     推送是尽力而为的最终一致：约 99% 的情况收到最新数据，服务端 Redis 压力过大时
         ///     可能残留旧数据直到该行下次变更。Best-effort, eventually consistent (~99%).

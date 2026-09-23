@@ -7,6 +7,7 @@ import asyncio
 from contextvars import ContextVar
 from typing import cast
 
+from fixtures.backends import use_redis_family_backend_only
 from fixtures.contexts import admin_ctx_, settled_updates
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -34,6 +35,27 @@ async def _update_qty(backend: Backend, ref, qty: int):
 
 async def _get_updates(broker: SubscriptionBroker):
     return await settled_updates(broker, timeout=3)
+
+
+@use_redis_family_backend_only
+async def test_hub_empty_message_skips_unpack(filled_item_ref, mod_auto_backend):
+    """值频道的消息是空串：hub 直接当作无 payload，不走 msgpack 解包（以前会抛一次异常再兜住）"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.redis import mq as redis_mq
+
+    backend: Backend = mod_auto_backend()
+    mq = backend.get_mq_client()
+    chan = backend.servant.index_value_channel(filled_item_ref, "owner", 10)
+    await mq.subscribe(chan)
+    hub = _hub(backend)
+    unpackb = redis_mq.msgpack.unpackb
+    with patch.object(redis_mq.msgpack, "unpackb", wraps=unpackb) as spy:
+        hub._on_message({"type": "message", "channel": chan.encode(), "data": b""})
+    assert spy.call_count == 0
+    assert chan in mq.pulled_set  # type: ignore[attr-defined]
+    assert chan not in mq.pulled_payload  # type: ignore[attr-defined]
+    await mq.close()
 
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):

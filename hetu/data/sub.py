@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
@@ -26,6 +27,27 @@ logger = logging.getLogger("HeTu.root")
 
 # 还不知道客户端持有什么内容（订阅已登记、初始行还没读回）：之后的任何读都照推
 UNKNOWN = object()
+
+# 点查询落在没声明 point_sub 的索引上时已经警告过的：组件类 → {索引名}。按类记（不按名字），
+# 测试里同名组件每次重定义都是新类；弱引用，组件类被重定义回收后自动清掉
+_point_sub_warned: weakref.WeakKeyDictionary[type, set[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def warn_point_sub_fallback_(table_ref: TableReference, index_name: str) -> None:
+    """点查询退化为区间订阅时警告，每个组件类的每个索引只警告一次"""
+    warned = _point_sub_warned.setdefault(table_ref.comp_cls, set())
+    if index_name in warned:
+        return
+    warned.add(index_name)
+    logger.warning(
+        _(
+            "⚠️ [📡Subscription] {comp_name}.{index_name} 没有声明 point_sub，"
+            "点查询订阅退化为区间订阅：该索引上任何写入都会叫醒它重跑比对。"
+            "需要高效点订阅请在 property_field 里加 point_sub=True"
+        ).format(comp_name=table_ref.comp_name, index_name=index_name)
+    )
 
 
 def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
@@ -80,7 +102,8 @@ class RowSubscription(BaseSubscription):
             self.rls_ctx = None
         self.channel = channel
         self.row_id = row_id
-        # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推
+        # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推。
+        # 客户端没有这行（行不存在，或 RLS 不可见）时为 None
         self.pushed = pushed
         if RowSubscription.__cache.get(None) is None:
             RowSubscription.__cache.set({})
@@ -111,6 +134,19 @@ class RowSubscription(BaseSubscription):
         row.pop("_version", None)
         return row
 
+    async def read_(self, channel: str) -> dict[str, Any] | None:
+        """读本行的原始行（含 _version，不做 RLS 判定），行不存在为 None"""
+        # 如果订阅有交叉，这里会重复被调用，先看本tick的缓存（get_updates会批量预读填好；
+        # tick中途新建的行订阅不在预读范围内，这里兜底单行查询）
+        cache = RowSubscription.__cache.get(None)
+        if cache is None:
+            cache = RowSubscription.reset_cache_()
+        if channel in cache:
+            return cache[channel]
+        row = await self.servant.get(self.table_ref, self.row_id, RowFormat.TYPED_DICT)
+        cache[channel] = row
+        return row
+
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
@@ -119,23 +155,15 @@ class RowSubscription(BaseSubscription):
         返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}；读回的与客户端已持有的
         一样时不返回任何更新。
         """
-        # 如果订阅有交叉，这里会重复被调用，先看本tick的缓存（get_updates会批量预读填好；
-        # tick中途新建的行订阅不在预读范围内，这里兜底单行查询）
-        cache = RowSubscription.__cache.get(None)
-        if cache is None:
-            cache = RowSubscription.reset_cache_()
-        if channel in cache:
-            row = cache[channel]
-        else:
-            row = await self.servant.get(
-                self.table_ref, self.row_id, RowFormat.TYPED_DICT
-            )
-            cache[channel] = row
-        fingerprint = row_fingerprint_(row)
+        row = await self.read_(channel)
+        visible = self.decode_row_(row)
+        # 不可见的行客户端没有，和行不存在一样记 None：它在不可见期间怎么变都不推，
+        # 推 None 等于把不可见行的 id 告诉了客户端
+        fingerprint = None if visible is None else row_fingerprint_(row)
         if fingerprint == self.pushed:
             return set(), set(), {}
         self.pushed = fingerprint
-        return set(), set(), {self.row_id: self.decode_row_(row)}
+        return set(), set(), {self.row_id: visible}
 
     @property
     def channels(self) -> set[str]:
@@ -152,6 +180,7 @@ class IndexSubscription(BaseSubscription):
         index_channel: str,
         last_range_result,
         query_param: dict,
+        point_value: np.generic | None = None,
     ):
         self.table_ref = table_ref
         self.servant = servant
@@ -164,6 +193,9 @@ class IndexSubscription(BaseSubscription):
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
         self.last_range_result = last_range_result
+        # 订的是值频道时为该值（已按 dtype 规范化），否则 None。值频道只在有行"进入"时才有
+        # 通知，行"离开"（删除、字段改走）要靠结果里各行的行频道发现，见 get_updated
+        self.point_value = point_value
 
     def add_row_subscriber(
         self, channel, row_id, pushed: int | None | object = UNKNOWN
@@ -179,61 +211,77 @@ class IndexSubscription(BaseSubscription):
         channel收到通知后，前来调用此get_updated方法。
         返回 {需要新订阅的频道}, {需要取消订阅的频道}, {变更的row_id: 行数据，None表示删除}
         """
-        servant = self.servant
-        ref = self.table_ref
         if channel == self.index_channel:
-            # 查询index更新，比较row_id是否有变化
-            row_ids = await servant.range(
-                ref, **self.query_param, row_format=RowFormat.ID_LIST
-            )
-            row_ids = set(row_ids)
-            inserts = list(row_ids - self.last_range_result)
-            deletes = self.last_range_result - row_ids
-            self.last_range_result = row_ids
-            new_chans = set()
-            rem_chans = set()
-            rtn: dict[int, dict[str, Any] | None] = {}
-            # 新进入范围的行一次批量读取（一次往返）
-            rows = cast(
-                list[dict[str, Any] | None],
-                await servant.get_many(ref, inserts, RowFormat.TYPED_DICT)
-                if inserts
-                else [],
-            )
-            for row_id, row in zip(inserts, rows):
-                if row is None:
-                    self.last_range_result.remove(row_id)
-                    continue  # 可能是刚添加就删了
-                new_chan_name = servant.row_channel(ref, row_id)
-                new_chans.add(new_chan_name)
-                row_sub = RowSubscription(
-                    ref,
-                    servant,
-                    self.rls_ctx,
-                    new_chan_name,
-                    row_id,
-                    row_fingerprint_(row),
-                )
-                self.row_subs[new_chan_name] = row_sub
-                # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
-                visible = row_sub.decode_row_(row)
-                if visible is not None:
-                    rtn[row_id] = visible
-            for row_id in deletes:
-                rtn[row_id] = None
-                rem_chan_name = servant.row_channel(ref, row_id)
-                rem_chans.add(rem_chan_name)
-                self.row_subs.pop(rem_chan_name)
-
-            return new_chans, rem_chans, rtn
-        elif channel in self.row_subs:
-            return await self.row_subs[channel].get_updated(channel)
-        else:
+            return await self._rerange()
+        row_sub = self.row_subs.get(channel)
+        if row_sub is None:
             raise RuntimeError(
                 _("IndexSubscription收到了未知的channel消息: {channel}").format(
                     channel=channel
                 )
             )
+        if self.point_value is not None and self._left_(await row_sub.read_(channel)):
+            # 值频道只在有行"进入"时才有通知：这行离开了该值（删除 / 字段改走）只能在这里
+            # 发现。重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
+            new_chans, rem_chans, rtn = await self._rerange()
+            if channel in self.row_subs:
+                # 重跑后它仍在结果里（读到的索引与行不是同一时刻的）：照常推行更新
+                rtn.update((await row_sub.get_updated(channel))[2])
+            return new_chans, rem_chans, rtn
+        return await row_sub.get_updated(channel)
+
+    def _left_(self, row: dict[str, Any] | None) -> bool:
+        """值频道点查询：读回的原始行是否已不在该值上（行不存在，或字段不等于该值）"""
+        if row is None:
+            return True
+        index_name = self.query_param["index_name"]
+        dtype = self.table_ref.comp_cls.dtype_map_[index_name]
+        return dtype.type(row[index_name]) != self.point_value
+
+    async def _rerange(
+        self,
+    ) -> tuple[set[str], set[str], dict[int, dict[str, Any] | None]]:
+        """重跑 range，与上次结果比对：新进入的行订上行频道并推送，离开的行推 None 并退订"""
+        servant = self.servant
+        ref = self.table_ref
+        row_ids = await servant.range(
+            ref, **self.query_param, row_format=RowFormat.ID_LIST
+        )
+        row_ids = set(row_ids)
+        inserts = list(row_ids - self.last_range_result)
+        deletes = self.last_range_result - row_ids
+        self.last_range_result = row_ids
+        new_chans = set()
+        rem_chans = set()
+        rtn: dict[int, dict[str, Any] | None] = {}
+        # 新进入范围的行一次批量读取（一次往返）
+        rows = cast(
+            list[dict[str, Any] | None],
+            await servant.get_many(ref, inserts, RowFormat.TYPED_DICT)
+            if inserts
+            else [],
+        )
+        for row_id, row in zip(inserts, rows):
+            if row is None:
+                self.last_range_result.remove(row_id)
+                continue  # 可能是刚添加就删了
+            new_chan_name = servant.row_channel(ref, row_id)
+            new_chans.add(new_chan_name)
+            row_sub = RowSubscription(ref, servant, self.rls_ctx, new_chan_name, row_id)
+            self.row_subs[new_chan_name] = row_sub
+            # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
+            visible = row_sub.decode_row_(row)
+            row_sub.pushed = None if visible is None else row_fingerprint_(row)
+            if visible is not None:
+                rtn[row_id] = visible
+        for row_id in deletes:
+            rem_chan_name = servant.row_channel(ref, row_id)
+            rem_chans.add(rem_chan_name)
+            # 客户端手里没有这行的（RLS 不可见，或已经推过 None）离开时不推
+            if self.row_subs.pop(rem_chan_name).pushed is not None:
+                rtn[row_id] = None
+
+        return new_chans, rem_chans, rtn
 
     @property
     def channels(self) -> set[str]:
@@ -588,10 +636,16 @@ class SubscriptionBroker:
         data may remain under Redis overload until the row changes again (see the class doc).
 
         通知范围取决于查询形状：
-        - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`）只订"索引=该值"
-          的频道，只有这个值上有行进出、或某行该字段变成/不再是这个值时才会被唤醒；
-        - 区间查询订整个索引的频道，该索引上任何值的行增删/变更都会唤醒它重跑一次比对。
-          热索引（如所有玩家都订自己的背包）请尽量用点查询。
+        - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`），且索引声明了
+          `point_sub`：只订"索引=该值"的频道，只有这个值上有行进出时才会被唤醒；
+        - 区间查询，或索引没有声明 `point_sub` 的点查询：订整个索引的频道，该索引上任何值的
+          行增删/变更都会唤醒它重跑一次比对（点查询落到这里时服务器会警告一次）。
+          热索引（如所有玩家都订自己的背包）请用点查询，并给索引声明 `point_sub=True`。
+
+        Point queries (`right` omitted or equal to `left`) on an index declared with
+        `point_sub` only wake up when rows enter or leave that value. Range queries, and
+        point queries on undeclared indexes (warned once), wake up on any write to the
+        index.
 
         Returns
         --------
@@ -645,17 +699,21 @@ class SubscriptionBroker:
             return sub_id, rows
 
         # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道
-        # （index_name 已由上面的 servant.range 校验过存在）。id 没有值频道（commit 不发，
-        # 省掉每次 insert/delete 一条通知），点查 id 也订整个 id 索引的频道
+        # （index_name 已由上面的 servant.range 校验过存在）。值频道只有声明了 point_sub 的
+        # 索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引的频道并警告一次。
+        # id 不能声明 point_sub，点查 id 也订整个 id 索引的频道（该用 subscribe_get）
         point_value = BackendClient.point_query_value_(
             table_ref.comp_cls.dtype_map_[index_name], left, right
         )
-        if point_value is None or index_name == "id":
-            index_channel = servant.index_channel(table_ref, index_name)
-        else:
+        if point_value is not None and index_name in table_ref.comp_cls.point_subs_:
             index_channel = servant.index_value_channel(
                 table_ref, index_name, point_value
             )
+        else:
+            if point_value is not None and index_name != "id":
+                warn_point_sub_fallback_(table_ref, index_name)
+            index_channel = servant.index_channel(table_ref, index_name)
+            point_value = None  # 订的是整个索引的频道，离开会由它通知
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
             table_ref,
@@ -664,6 +722,7 @@ class SubscriptionBroker:
             index_channel,
             row_ids,
             dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc),
+            point_value,
         )
         # 索引频道 + 每行的行频道（行变更时才能收到消息）一次批量订阅
         row_channels = []
@@ -704,6 +763,11 @@ class SubscriptionBroker:
         代价是每个整表订阅者会收到该表**所有**写入的通知（服务端按RLS过滤后再推），
         所以高频写入的表请继续用 `subscribe_range`。
 
+        组件必须声明 `table_sub=True`（`define_component` 的参数）：commit 只给声明了的组件
+        发表频道，未声明的组件整表订阅会被拒绝（返回 None）。
+        The component must be declared with `table_sub=True`; otherwise the subscription
+        is rejected, since commits only publish table channels for declared components.
+
         Notes
         -----
         与 `subscribe_range` 不同，整表订阅对RLS权限的得失都会做出反应：
@@ -713,8 +777,8 @@ class SubscriptionBroker:
         Returns
         --------
         sub_id: str | None
-            订阅id，后续通过该id获取更新。如果无整表权限，或表行数超过
-            `max_table_rows`，返回None。
+            订阅id，后续通过该id获取更新。如果组件没有声明 `table_sub`、无整表权限，
+            或表行数超过 `max_table_rows`，返回None。
         rows: list[dict[str, Any]]
             caller可见的全部行数据。
 
@@ -722,6 +786,15 @@ class SubscriptionBroker:
         --------
         subscribe_range : 范围订阅
         """
+        # 没声明 table_sub 的组件，commit 不发表频道：订上了也永远收不到通知
+        if not table_ref.comp_cls.table_sub_:
+            logger.warning(
+                _(
+                    "⚠️ [📡Subscription] {comp_name} 没有声明 table_sub，不允许整表订阅；"
+                    "需要的话请在 define_component 里加 table_sub=True，caller：{caller}"
+                ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
+            )
+            return None, []
         # 首先caller要对整个表有权限
         if not self._has_table_permission(table_ref, ctx):
             logger.warning(
@@ -921,7 +994,12 @@ class SubscriptionBroker:
         # 同一频道可能在本tick内既被一个订阅加入又被另一个释放，按最终状态定夺；
         # 已订阅过的频道重复subscribe是幂等的
         to_subscribe = [chan for chan in added if chan in channel_subs]
+        # 本连接原先没订着的（行进入范围时才订的行频道）：读这行在前、订阅生效在后，其间的写入
+        # 不会有通知，值频道又不发"离开"，行在这时被删 / 改走就再也发现不了。同订阅生效后的
+        # 补读，隔一个 interval 再读一次（读回一样就不推）
+        fresh = [chan for chan in to_subscribe if chan not in mq.subscribed_channels]
         await mq.subscribe(*to_subscribe)
+        mq.request_reread(*fresh)
         # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能处理了客户端的
         # 新订阅（subscribe_get 等），把刚释放的行频道又登记回来了——对 mq 来说该频道
         # 一直是订着的，那次 subscribe 不会有任何动作，这里按旧名单退订就会把新订阅

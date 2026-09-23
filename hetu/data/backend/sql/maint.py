@@ -285,6 +285,25 @@ class SQLTableMaintenance(TableMaintenance):
             )
 
     @override
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据"""
+        meta = self._safe_get_meta()
+        json_ = table_ref.comp_cls.json_
+        with self.client.io.begin() as conn:
+            conn.execute(
+                sa.update(meta)
+                .where(
+                    meta.c.instance_name == table_ref.instance_name,
+                    meta.c.comp_name == table_ref.comp_name,
+                )
+                .values(
+                    json=json_,
+                    version=hashlib.md5(json_.encode("utf-8")).hexdigest(),
+                    cluster_id=table_ref.cluster_id,
+                )
+            )
+
+    @override
     def do_drop_table_(self, table_ref: TableReference) -> int:
         table = self._safe_get_table(table_ref)
         meta = self._safe_get_meta()

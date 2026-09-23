@@ -5,12 +5,13 @@ local string_match = string.match
 local ipairs = ipairs
 
 -- ARGV[1] 是 msgpack 序列化的 payload
--- 结构: [ [checks...], [pushes...], {deleted...}, [publishes...] ]
+-- 结构: [ [checks...], [pushes...], {deleted...}, [table_pubs...], [value_chans...] ]
 local payload = cmsgpack.unpack(ARGV[1])
 local checks = payload[1]
 local pushes = payload[2]
 local deleted = payload[3]
-local publishes = payload[4]
+local table_pubs = payload[4]
+local value_chans = payload[5]
 
 -- ============================================================================
 -- Phase 1: Checks
@@ -86,17 +87,24 @@ if pushes then
 end
 
 -- ============================================================================
--- Phase 3: 表级 / 索引值频道通知 (整表订阅、点查询订阅用)
+-- Phase 3: 表频道 / 索引值频道通知（整表订阅、点查询订阅用）
 -- ============================================================================
--- 行/整个索引的变更由 keyspace notification 自动发出；这里额外对每张被改动的表、
--- 每个被改动的 (索引, 值) 各 PUBLISH 一条带 payload 的消息，payload 是 msgpack 的 row_id 列表。
-if publishes then
-    for _, pub in ipairs(publishes) do
-        -- pub 格式: [channel, packed_row_ids]
-        -- PUBLISH会在Redis cluster下，对所有node发送，而我们只需要"本分片"收到这条消息
-        -- SPUBLISH可以解决这个问题，但是订阅复杂度上升，且我们并不推荐cluster模式
-        -- 应使用proxy反代，就没有这个问题了
+-- 行 / 整个索引的变更由各副本应用写入时自己产生 keyspace 通知，不占 master。
+-- 这里的 PUBLISH 很贵：master 上每条约 1 万条指令（redis.call 调度 + 强制写进复制流 +
+-- payload 搬运），而且每个副本都要再执行一遍（数据见 benchmark/redis_publish_cost_result.md）。
+-- 所以只保留这两个调用点，Python 侧只给声明了的组件 / 索引准备数据：
+-- - 表频道：table_sub 组件，一个事务一张表一条，消息是 msgpack 的 row_id 列表；
+-- - 值频道：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条，消息为空串。
+-- 不要在这里加新的调用点、也不要往消息里塞内容：tests/test_arch_publish.py 守门。
+-- （原生 cluster 下 PUBLISH 会经 cluster bus 发到所有节点；推荐用 proxy 反代，没有这个问题）
+if table_pubs then
+    for _, pub in ipairs(table_pubs) do
         redis_call("PUBLISH", pub[1], pub[2])
+    end
+end
+if value_chans then
+    for _, ch in ipairs(value_chans) do
+        redis_call("PUBLISH", ch, "")
     end
 end
 

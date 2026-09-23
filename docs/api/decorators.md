@@ -22,10 +22,11 @@ define_component(
     volatile=False,
     backend: str = 'default',
     rls_compare: tuple[str, str, str] | None = None,
+    table_sub: bool = False,
 ) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:371`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L371)</small>
+<small>Source: [`hetu/data/component.py:402`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L402)</small>
 
 
 
@@ -58,6 +59,14 @@ define_component(
 - rls_compare[2]: Context属性名字符串，或Context.user_data的key名
 
 只有operator比较后返回True时允许读取此行。如果属性不存在，按nan处理（无法和任何值比较）。
+
+- **`table_sub`** (Any) — 是否允许整表订阅（客户端 `WatchTable` / `subscribe_table`）。开启后该组件的每次
+commit 都要多发一条表频道 PUBLISH（一个事务一张表一条），所以只给"行多、行小、很少变"
+的冷表开，如所有玩家的名字；未开启的组件，整表订阅会被拒绝。
+
+Allow whole-table subscriptions. Every commit touching this component then sends
+one table-channel PUBLISH, so enable it only for cold tables; whole-table
+subscriptions on other components are rejected.
 
 - **`force`** (Any) — 强制覆盖同名Component，单元测试用。
 
@@ -93,9 +102,10 @@ define_component(
 
 
 ### Notes
-`property_field(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
+`property_field(default, unique, index, dtype, point_sub)` 是Component的属性定义，可定义默认值和数据类型。
     - `index` 表示此属性开启索引；
-    - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
+    - `unique` 表示属性值必须唯一，启动此项默认会同时打开index；
+    - `point_sub` 表示此索引支持高效点订阅，启动此项默认会同时打开index。
 
 .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
@@ -420,10 +430,11 @@ property_field(
     unique: bool = False,
     index: bool | None = None,
     dtype: str | type = '',
+    point_sub: bool = False,
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:51`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L51)</small>
+<small>Source: [`hetu/data/component.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L54)</small>
 
 
 
@@ -442,17 +453,28 @@ HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullab
 
 - **`index`** (bool | None, default `None`) — 是否建立索引。
 
-- `None` 表示沿用 `unique` 的值；
+- `None` 表示沿用 `unique or point_sub` 的值；
 - `False` 表示不建立普通索引；
 - `True` 表示建立普通索引。
 
-当 `unique=True` 时，即使显式传入 `False`，后续定义阶段也会被强制修正为
-`True`。
+当 `unique=True` 或 `point_sub=True` 时，即使显式传入 `False`，后续定义阶段
+也会被强制修正为 `True`。
 
 - **`dtype`** (str | type, default `""`) — 字段数据类型。留空时默认使用属性的 type hint。
 
 推荐使用长度明确的 NumPy dtype，例如 `np.int64`、`np.float32`、
 `"U8"`、`"<U32"`。字符串类型需要显式指定长度。
+
+- **`point_sub`** (bool, default `False`) — 该索引是否支持高效点订阅。开启后，点查询订阅（`range(Comp, field=v)`，省略
+`right` 或 `left == right`）只在有行进入 / 离开 `v` 时被叫醒；代价是每次有行
+"进入"某个值（insert、或字段改成该值），commit 都要多发一条 PUBLISH。
+不开启时，该索引上的点查询订阅退化为区间订阅：该索引任何写入都会叫醒它（服务器会
+打印警告）。常用于 `owner`、`zone` 这类"每人只订自己那个值"的索引。
+
+Whether point subscriptions on this index are efficient: a point query
+subscription only wakes up when rows enter or leave its value, at the cost of
+one PUBLISH per "enter" on commit. Without it, point subscriptions fall back to
+range-subscription behavior (woken by any write to the index) with a warning.
 
 
 
@@ -489,7 +511,7 @@ HeTu 的 Component 使用 c-struct like 的定长数据模型，不支持 nullab
 - 字段名是否合法；
 - `default` 与 `dtype` 是否兼容；
 - `dtype` 是否可用于 NumPy structured array；
-- `unique/index` 组合是否合法。
+- `unique/index/point_sub` 组合是否合法。
 
 
 

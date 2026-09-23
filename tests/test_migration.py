@@ -191,6 +191,64 @@ async def test_auto_migration(filled_item_ref, caplog, tmp_path):
         )
 
 
+async def test_migration_declaration_only(filled_item_ref, tmp_path):
+    """
+    只改声明、dtype 不变（table_sub / point_sub，同理只改 index、权限）：迁移脚本判 skip、
+    不用搬数据，但 meta 要写成新定义，否则服务器一直报 schema_mismatch 拒绝启动、upgrade
+    又什么都不做。给没索引的字段加 point_sub 会打开 index，这个索引也要建出来。
+    """
+    test_app_file = tmp_path / "test.py"
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    # dtype 与原 Item 完全一致：去掉 table_sub，model 加 point_sub（本来就有索引），
+    # qty 加 point_sub（本来没有索引，会打开 index）
+    @define_component(namespace="pytest", permission=Permission.OWNER)
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
+        model: np.float32 = property_field(0, unique=False, index=True, point_sub=True)
+        qty: np.int16 = property_field(1, unique=False, point_sub=True)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
+
+    import json
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed_new_item_cls,
+        filled_item_ref.instance_name,
+        filled_item_ref.cluster_id,
+        backend,
+    )
+
+    maint = backend.get_table_maintenance()
+    tbl_status, old_meta = maint.check_table(new_table)
+    assert tbl_status == "schema_mismatch"
+
+    assert maint.migration_schema(test_app_file, new_table, old_meta)
+    assert maint.check_table(new_table)[0] == "ok"
+
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(renamed_new_item_cls)
+        # 数据原样保留；qty 新开的索引要能查到已有的 25 行
+        assert (await repo.get(time=111)).name == "Itm11"
+        assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
+
+
 async def test_read_meta_by_name(item_ref, mod_auto_backend):
     """read_meta 接受组件类或组件名：不持有本地类定义的进程（headless）按名字读 meta。"""
     maint = mod_auto_backend().get_table_maintenance()
