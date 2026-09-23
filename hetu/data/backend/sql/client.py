@@ -1079,26 +1079,19 @@ class SQLBackendClient(BackendClient, alias="sql"):
         cleanup_due = now_ts >= self._next_notify_cleanup_at
         refs = list(dirties.keys())
 
-        def _touch_value(
-            pubs: dict[str, list[str]],
-            ref: TableReference,
-            index_name: str,
-            value,
-            row_id,
-        ):
-            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id。
-            id 索引不记：点查 id 走行频道/整个 id 索引的频道，每次 insert/delete 都为它插一条
-            通知行纯属浪费"""
-            channel = self.value_channel_(ref, index_name, value)
-            pubs.setdefault(channel, []).append(str(row_id))
+        def _enter_value(chans: set[str], ref: TableReference, index_name: str, value):
+            """记一条索引值频道通知：有行"进入"了该 (索引, 值)（insert、或字段改成该值）。
+            只给声明了 point_sub 的索引记（与 Redis 后端同语义）：离开由订阅者订着的行频道
+            发现，不用记；没声明的索引没人订它的值频道"""
+            if index_name in ref.comp_cls.point_subs_:
+                chans.add(self.value_channel_(ref, index_name, value))
 
         for attempt in range(2):
             channels: set[str] = set()
-            # 表级变更通知：ref -> 本事务变动的row_id列表
+            # 表级变更通知（只给声明了 table_sub 的组件）：ref -> 本事务变动的row_id列表
             touched_ids: dict[TableReference, list[str]] = {}
-            # 索引值频道通知：channel -> 本事务在该 (索引, 值) 上变动的row_id列表，
-            # insert/delete 记全部索引字段的值，update 记变更字段的旧值和新值
-            value_pubs: dict[str, list[str]] = {}
+            # 索引值频道通知（不带 payload），一个事务每个 (索引, 值) 一条
+            value_chans: set[str] = set()
             try:
                 async with self.aio.begin() as conn:
                     # 对纯读行加版本检查，防止事务依赖的陈旧读：
@@ -1142,16 +1135,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                if (
-                                    index_name != "id"
-                                ):  # 没人订 id 的值频道，见 _touch_value
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        old_row[index_name],
-                                        row_id,
-                                    )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
@@ -1199,19 +1182,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             for index_name in updates:
                                 if index_name in indexes:
                                     channels.add(self.index_channel(ref, index_name))
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        old_row[index_name],
-                                        row_id,
-                                    )
-                                    _touch_value(
-                                        value_pubs,
+                                    _enter_value(
+                                        value_chans,
                                         ref,
                                         index_name,
                                         updates[index_name],
-                                        row_id,
                                     )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
@@ -1237,16 +1212,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                if (
-                                    index_name != "id"
-                                ):  # 没人订 id 的值频道，见 _touch_value
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        typed_row[index_name],
-                                        row_id,
-                                    )
+                                _enter_value(
+                                    value_chans, ref, index_name, typed_row[index_name]
+                                )
                             touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
@@ -1254,8 +1222,11 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             {"channel": channel, "created_at": now_dt, "payload": None}
                             for channel in sorted(channels)
                         ]
-                        # 表级频道：一个事务一张表一条，payload为变动row_id列表
+                        # 表级频道：只给声明了 table_sub 的组件，一个事务一张表一条，
+                        # payload为变动row_id列表
                         for ref, ids in touched_ids.items():
+                            if not ref.comp_cls.table_sub_:
+                                continue
                             notify_rows.append(
                                 {
                                     "channel": self.table_channel(ref),
@@ -1263,13 +1234,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                     "payload": msgpack.packb(ids),
                                 }
                             )
-                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用
-                        for channel, ids in value_pubs.items():
+                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用，不带 payload
+                        for channel in sorted(value_chans):
                             notify_rows.append(
                                 {
                                     "channel": channel,
                                     "created_at": now_dt,
-                                    "payload": msgpack.packb(ids),
+                                    "payload": None,
                                 }
                             )
                         await conn.execute(sa.insert(notify_table), notify_rows)

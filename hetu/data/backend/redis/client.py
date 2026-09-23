@@ -868,7 +868,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
             _kvs = itertools.chain.from_iterable(_update.items())
             pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
 
-        def _exc_index(_indexes, _dtype_map, _idx_prefix, _old, _new, _add):
+        def _exc_index(
+            _indexes, _point_subs, _dtype_map, _idx_prefix, _old, _new, _add
+        ):
             """exchange index(zadd/zrem)的push命令"""
             _b_row_id = _old["id"].encode("ascii")
             _values = _new if _add else _old
@@ -879,14 +881,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     _sortable_value = to_sortable_bytes(
                         _dtype_map[_field].type(_values[_field])
                     )
-                    # 点查询订阅者只订"索引=该值"的频道：insert/delete 记全部索引字段的值，
-                    # update 记变更字段的旧值(_add=False)和新值(_add=True)。
-                    # id 例外：没人订"id=某值"的频道（点查 id 走行频道/整个 id 索引的频道），
-                    # 每次 insert/delete 都为它 PUBLISH 一条纯属浪费
-                    if _field != "id":
-                        value_pubs.setdefault(
-                            self.value_channel_(_idx_key, _sortable_value), []
-                        ).append(_old["id"])
+                    # 值频道只给声明了 point_sub 的索引、只记"进入"（insert 的值、update 的
+                    # 新值）：离开（delete、改走）由订阅者订着的行频道发现，不用发。
+                    # 同一 (索引, 值) 一个事务只发一条
+                    if _add and _field in _point_subs:
+                        value_chans[self.value_channel_(_idx_key, _sortable_value)] = (
+                            None
+                        )
                     _member = _sortable_value + b"\x00" + _b_row_id
                     if _add:
                         # score统一用0，因为我们不需要score排序功能
@@ -918,10 +919,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         strict_checks: list[list[str | bytes]] = []
         pushes: list[list[str | bytes]] = []
         deleted: dict[str, bool] = {}
-        # 主动 PUBLISH 的通知：[channel, msgpack(row_id列表)]。
-        # 表级频道一个事务一张表一条；索引值频道一个事务每个 (索引, 值) 一条（见 _exc_index）
-        publishes: list[list[str | bytes]] = []
-        value_pubs: dict[str, list[str]] = {}
+        # 主动 PUBLISH 的通知只有两种，都只给声明了的组件/索引发（PUBLISH 很贵，见
+        # benchmark/redis_publish_cost_result.md；tests/test_arch_publish.py 守门，别往这里
+        # 加新通知、也别往消息里塞内容）：
+        # - 表频道 [channel, msgpack(row_id列表)]：table_sub 组件，一个事务一张表一条
+        # - 值频道 channel（消息为空串）：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条
+        table_pubs: list[list[str | bytes]] = []
+        value_chans: dict[str, None] = {}  # 有序去重
 
         for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
             id_prefix = self.cluster_prefix(ref) + ":id:"
@@ -929,6 +933,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             comp_cls = ref.comp_cls
             unique_fields = comp_cls.uniques_
             indexes = comp_cls.indexes_
+            point_subs = comp_cls.point_subs_
             dtype_map = comp_cls.dtype_map_
             comp_name = comp_cls.name_
             absent_rows = absent_by_ref.get(ref, {})
@@ -952,7 +957,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     "insert",
                 )
                 _hset_key(key, 0, insert)
-                _exc_index(indexes, dtype_map, idx_prefix, insert, insert, _add=True)
+                _exc_index(
+                    indexes, point_subs, dtype_map, idx_prefix, insert, insert, True
+                )
                 touched_ids.append(row_id)
             # update
             for old_row, new_row in zip(old_rows, new_rows):
@@ -971,8 +978,12 @@ class RedisBackendClient(BackendClient, alias="redis"):
                     "update",
                 )
                 _hset_key(key, old_version, new_row)
-                _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=False)
-                _exc_index(indexes, dtype_map, idx_prefix, old_row, new_row, _add=True)
+                _exc_index(
+                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, False
+                )
+                _exc_index(
+                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, True
+                )
                 touched_ids.append(row_id)
             # delete
             for delete in deletes:
@@ -981,15 +992,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 key = id_prefix + str(delete["id"])
                 old_version = delete["_version"]
                 _version_must_match(key, old_version)
-                _exc_index(indexes, dtype_map, idx_prefix, delete, delete, _add=False)
+                _exc_index(
+                    indexes, point_subs, dtype_map, idx_prefix, delete, delete, False
+                )
                 _del_key(key)
                 touched_ids.append(str(delete["id"]))
-            if touched_ids:
-                publishes.append(
+            if touched_ids and comp_cls.table_sub_:
+                table_pubs.append(
                     [self.table_channel(ref), msg_packer.pack(touched_ids)]  # type: ignore
                 )
-        for channel, ids in value_pubs.items():
-            publishes.append([channel, msg_packer.pack(ids)])  # type: ignore
 
         # 对纯读行加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
@@ -1000,7 +1011,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         checks = race_checks + strict_checks
         payload_json: bytes = msg_packer.pack(  # type: ignore
-            [checks, pushes, deleted, publishes]
+            [checks, pushes, deleted, table_pubs, list(value_chans)]
         )
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]

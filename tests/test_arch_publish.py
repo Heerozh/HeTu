@@ -74,8 +74,9 @@ def test_lua_publish_call_sites_are_allowlisted():
         for rel, code, lineno in _lua_hits()
         if (rel, code) not in ALLOWED_LUA
     ]
-    assert not unlisted, "发现未登记的 PUBLISH 调用点（详见本文件顶部说明）：\n" + "\n".join(
-        f"  {rel}:{lineno}  {code}" for rel, code, lineno in unlisted
+    assert not unlisted, (
+        "发现未登记的 PUBLISH 调用点（详见本文件顶部说明）：\n"
+        + "\n".join(f"  {rel}:{lineno}  {code}" for rel, code, lineno in unlisted)
     )
 
 
@@ -97,8 +98,8 @@ def test_python_does_not_publish_directly():
             code = line.split("#", 1)[0]
             if PY_PUBLISH.search(code):
                 hits.append(f"  {rel}:{lineno}  {line.strip()}")
-    assert not hits, "Python 里直接调用了 publish（详见本文件顶部说明）：\n" + "\n".join(
-        hits
+    assert not hits, (
+        "Python 里直接调用了 publish（详见本文件顶部说明）：\n" + "\n".join(hits)
     )
 
 
@@ -185,7 +186,9 @@ async def test_commit_publish_budget(mod_auto_backend, mod_publish_refs):
         repo.delete(ids["plain"])
 
     for write in (plain_insert, plain_move, plain_tag, plain_delete):
-        assert await published(write) == 0, f"{write.__name__}：没声明的组件不该发 PUBLISH"
+        assert await published(write) == 0, (
+            f"{write.__name__}：没声明的组件不该发 PUBLISH"
+        )
 
     async def decl_insert(s):
         row = Decl.new_row()
@@ -278,7 +281,9 @@ async def test_commit_publish_messages_are_minimal(mod_auto_backend, mod_publish
     finally:
         ps.close()
 
-    assert got.get(value_chan) == b"", f"值频道的消息必须是空串：{got.get(value_chan)!r}"
+    assert got.get(value_chan) == b"", (
+        f"值频道的消息必须是空串：{got.get(value_chan)!r}"
+    )
     ids = msgpack.unpackb(got[table_chan])
     assert isinstance(ids, list) and all(isinstance(i, str) for i in ids), ids
     assert sorted(ids) == sorted(new_ids)

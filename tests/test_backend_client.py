@@ -399,28 +399,32 @@ async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
     for push in pushes:
         assert push in json[1]
 
-    # 表级变更通知：每张被改动的表一条，payload为本事务碰到的row_id列表
+    # 表频道：只给声明了 table_sub 的组件（Item 声明了，RLSTest 没有），每张表一条，
+    # payload 为本事务碰到的 row_id 列表
+    assert item_ref.comp_cls.table_sub_ and not rls_ref.comp_cls.table_sub_
     touched: dict[bytes, set[bytes]] = {}
     for push in json[1]:
-        if push[0] in (b"HSET", b"DEL"):
+        if push[0] in (b"HSET", b"DEL") and push[1].startswith(b"pytest:Item:"):
             prefix, row_id = push[1].rsplit(b":id:", 1)
             touched.setdefault(prefix + b":table", set()).add(row_id)
     assert touched  # 本测试有insert/update/delete，必然有变动
-    # 索引值变更通知：每个被 ZADD/ZREM 的 (索引, 值) 一条，payload为该值上变动的row_id列表
-    # （insert/delete 是全部索引字段，update 是变更字段的旧值+新值），从 push 反推期望值
-    expected_values: dict[bytes, set[bytes]] = {}
-    for push in json[1]:
-        # id 索引例外：没人订 id 的值频道，commit 不发
-        if push[0] in (b"ZADD", b"ZREM") and not push[1].endswith(b":index:id"):
-            sortable, row_id = push[-1].rsplit(b"\x00", 1)
-            channel = push[1] + b":" + sortable_token(sortable).encode()
-            expected_values.setdefault(channel, set()).add(row_id)
-    assert expected_values
-    published = {pub[0]: set(msgpack.unpackb(pub[1], raw=True)) for pub in json[3]}
-    table_pubs = {c: ids for c, ids in published.items() if c.endswith(b":table")}
-    value_pubs = {c: ids for c, ids in published.items() if not c.endswith(b":table")}
+    table_pubs = {pub[0]: set(msgpack.unpackb(pub[1], raw=True)) for pub in json[3]}
     assert table_pubs == touched
-    assert value_pubs == expected_values
+    # 值频道：只给声明了 point_sub 的索引，只发"进入"——从 ZADD 的 push 反推 (索引, 值)，
+    # ZREM（离开）不发；一个事务每个 (索引, 值) 一条，不带内容
+    point_sub_keys = {
+        f"{ref.instance_name}:{ref.comp_cls.name_}:{{CLU1}}:index:{field}".encode()
+        for ref in (item_ref, rls_ref)
+        for field in ref.comp_cls.point_subs_
+    }
+    expected_values: set[bytes] = set()
+    for push in json[1]:
+        if push[0] == b"ZADD" and push[1] in point_sub_keys:
+            sortable, _row_id = push[-1].rsplit(b"\x00", 1)
+            expected_values.add(push[1] + b":" + sortable_token(sortable).encode())
+    assert expected_values
+    assert len(json[4]) == len(set(json[4]))
+    assert set(json[4]) == expected_values
 
 
 async def test_redis_commit_check_codes(mod_item_model):
