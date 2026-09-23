@@ -1,5 +1,3 @@
-import socket
-import sys
 from typing import cast
 
 import docker.errors
@@ -72,31 +70,11 @@ def ses_valkey_service():
         yield _start_replicated(stack, "valkey/valkey:latest", "valkey-server")
 
 
-def _patch_host_docker_internal():
-    """
-    在Linux下(如GitHub Actions)，host.docker.internal默认无法解析，
-    这里通过Monkey Patch让本进程也能将其解析为127.0.0.1
-    """
-    if not sys.platform.startswith("linux"):
-        return
-    _getaddrinfo = socket.getaddrinfo
-    if getattr(_getaddrinfo, "hetu_patched", False):
-        return
-
-    def new_getaddrinfo(host, *args, **kwargs):
-        if host == "host.docker.internal":
-            host = "127.0.0.1"
-        return _getaddrinfo(host, *args, **kwargs)
-
-    new_getaddrinfo.hetu_patched = True  # type: ignore
-    socket.getaddrinfo = new_getaddrinfo
-
-
 def _start_cluster_nodes(stack: DockerStack, nodes: int) -> list[int]:
     """
-    启动 cluster 节点，返回各节点端口。节点对外宣告 host.docker.internal:端口，
-    客户端按宣告的地址重定向，所以容器内监听端口必须等于宿主机端口，没法让 docker
-    随机分配，只能自己挑空闲端口；挑完到 docker 占住之间可能被别人抢走，冲突时重试。
+    启动 cluster 节点，返回各节点端口。节点对外宣告 127.0.0.1:端口，客户端按宣告的
+    地址重定向，所以容器内监听端口必须等于宿主机端口，没法让 docker 随机分配，只能
+    自己挑空闲端口；挑完到 docker 占住之间可能被别人抢走，冲突时重试。
     """
     for attempt in range(3):
         ports = free_ports(nodes)
@@ -105,8 +83,7 @@ def _start_cluster_nodes(stack: DockerStack, nodes: int) -> list[int]:
                 stack.run(
                     f"node{i}",
                     "redis:latest",
-                    ports={f"{port}/tcp": port},
-                    extra_hosts={"host.docker.internal": "host-gateway"},
+                    ports={f"{port}/tcp": ("127.0.0.1", port)},
                     command=[
                         "redis-server",
                         f"--port {port}",
@@ -116,7 +93,10 @@ def _start_cluster_nodes(stack: DockerStack, nodes: int) -> list[int]:
                         "--appendonly yes",
                         # 总线只在容器网络内使用，端口固定即可（默认 port+10000 可能越界）
                         "--cluster-port 16379",
-                        "--cluster-announce-hostname host.docker.internal",
+                        # 只影响返回给客户端的地址（MOVED、CLUSTER SLOTS），节点间总线
+                        # 仍走容器 IP。测试客户端都在宿主机上，宣告 127.0.0.1 不依赖 DNS，
+                        # 测试起的子进程也能直连（宣告 host.docker.internal 时要打补丁解析）
+                        "--cluster-announce-hostname 127.0.0.1",
                         "--cluster-preferred-endpoint-type hostname",
                         f"--cluster-announce-port {port}",
                     ],
@@ -138,8 +118,6 @@ def ses_redis_cluster_service():
     import redis
     from redis.cluster import RedisCluster
 
-    _patch_host_docker_internal()
-
     with docker_stack("cluster") as stack:
         # 使用 3 个主节点 (最简集群模式)
         ports = _start_cluster_nodes(stack, 3)
@@ -152,13 +130,8 @@ def ses_redis_cluster_service():
 
         stack.wait_until(nodes_up, "Redis Cluster 节点")
 
-        # 在第一个节点内部执行 cluster create 命令。
-        # 注意：这里必须使用容器间的内部 IP，不能用 host.docker.internal。
-        # 因为该命令在容器内运行，若连 host.docker.internal 需经宿主机 hairpin NAT
-        # 回环，在无 Docker Desktop 的 Linux 上(如本地环境)会超时(Connection timed
-        # out)；GitHub Actions 的网络恰好允许 hairpin 才没暴露此问题。用内部 IP 走
-        # 容器网络直连即可，节点仍通过 --cluster-announce-hostname 对外宣告 hostname，
-        # 不影响宿主机上的测试客户端访问。
+        # 在第一个节点内部执行 cluster create 命令，节点地址必须用容器 IP：命令在容器
+        # 里运行，宣告的 127.0.0.1 在容器里指的是它自己。
         addrs = [
             f"{container_ip(c)}:{port}" for c, port in zip(stack.containers, ports)
         ]
