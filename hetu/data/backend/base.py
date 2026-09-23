@@ -255,6 +255,11 @@ class BackendClient:
         """
         返回表级变更频道名。只有声明了 `table_sub` 的组件，commit 才向它发消息：表内任何行
         insert/update/delete，一个事务一张表发一条，payload 为本次事务变动的 row_id（str）列表。
+
+        Channel of table-level changes. Commits publish to it only for components
+        declared with `table_sub`: one message per transaction per table (any insert,
+        update or delete), whose payload is the list of row ids (str) that transaction
+        changed.
         """
         raise NotImplementedError
 

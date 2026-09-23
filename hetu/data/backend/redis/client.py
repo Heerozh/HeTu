@@ -163,6 +163,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         返回索引某一个值的频道名（只有声明了 point_sub 的索引才有，否则抛 ValueError）。
         这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace 通知）；名字带 {CLU}
         hash tag，cluster 模式下按 slot 路由。
+
+        Channel of one index value (only for indexes declared with `point_sub`, raises
+        `ValueError` otherwise). A plain channel PUBLISHed by the commit Lua script, not
+        a keyspace notification; the name carries the {CLU} hash tag, so cluster mode
+        routes it by slot.
         """
         self.require_point_sub_(table_ref, index_name)
         dtype = table_ref.comp_cls.dtype_map_[index_name]
@@ -181,6 +186,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         返回表级变更频道名。这是commit lua脚本主动PUBLISH的普通频道（非keyspace通知），
         只给声明了 table_sub 的组件发；名字带{CLU}hash tag，cluster模式下
         AsyncKeyspacePubSub按slot路由订阅。
+
+        Channel of table-level changes: a plain channel PUBLISHed by the commit Lua
+        script (not a keyspace notification), only for components declared with
+        `table_sub`. The name carries the {CLU} hash tag, so in cluster mode
+        AsyncKeyspacePubSub routes the subscription by slot.
         """
         return f"{self.cluster_prefix(table_ref)}:table"
 

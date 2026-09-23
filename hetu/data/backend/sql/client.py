@@ -347,7 +347,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def index_value_channel(
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
-        """只有声明了 point_sub 的索引才有值频道，否则抛 ValueError（见基类）"""
+        """
+        只有声明了 point_sub 的索引才有值频道，否则抛 ValueError（见基类）。
+
+        Only indexes declared with `point_sub` have value channels; raises `ValueError`
+        otherwise (see the base class).
+        """
         self.require_point_sub_(table_ref, index_name)
         return self.value_channel_(table_ref, index_name, value)
 
