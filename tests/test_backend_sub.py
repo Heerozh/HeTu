@@ -1650,3 +1650,86 @@ async def test_subscribe_followup_reread_pushes_nothing_when_fresh(
     sub_tbl, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
     assert sub_row and sub_10 and sub_tbl
     assert await broker.get_updates(timeout=0.6) == {}
+
+
+# ====== pubsub 断线重订：这段时间的写入没有通知，重订生效后 RESYNC 补读 ======
+
+
+async def _write_while_deaf(broker: SubscriptionBroker, channel: str, write):
+    """模拟断线：本连接暂时退订 channel，期间的写入收不到通知，然后订回来"""
+    mq = broker._mq_client
+    await mq.unsubscribe(channel)
+    await write()
+    await broker._backend.wait_for_synced()
+    await mq.subscribe(channel)
+
+
+async def test_subscribe_table_resync(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """整表订阅收到 RESYNC（这段时间的变更不可知）：整表重读，推所有可见行，已知但
+    读不到的行推 None"""
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert sub_id and len(rows) == 25
+    table_channel = cast(TableSubscription, broker._subs[sub_id]).table_channel
+    ids: dict[str, int] = {}
+
+    async def write():
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(time=111)
+            assert row
+            row.qty = 77
+            ids["a"] = row.id
+            await repo.update(row)
+            gone = await repo.get(time=112)
+            assert gone
+            ids["b"] = gone.id
+            repo.delete(gone.id)
+            new = comp.new_row()
+            new.name, new.owner, new.time = "New", 10, 800
+            await repo.insert(new)
+            ids["c"] = new.id
+
+    await _write_while_deaf(broker, table_channel, write)
+    assert await broker.get_updates(timeout=0.3) == {}, "断线期间不该收到通知"
+    broker._mq_client.push_pulled_(table_channel, [MQClient.RESYNC])  # hub 重订后分发的
+
+    updates = await settled_updates(broker, timeout=2)
+    assert updates[sub_id][ids["a"]]["qty"] == 77
+    assert updates[sub_id][ids["b"]] is None
+    assert updates[sub_id][ids["c"]]["name"] == "New"
+    tbl_sub = cast(TableSubscription, broker._subs[sub_id])
+    assert ids["b"] not in tbl_sub.known_ids and ids["c"] in tbl_sub.known_ids
+
+
+@use_redis_family_backend_only
+async def test_row_subscription_catches_up_after_pubsub_resubscribe(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """行订阅：断线重订期间的写入没有通知，重订全部生效后 hub 分发 RESYNC，补读追上"""
+    backend = broker._backend
+    sub_id, row = await broker.subscribe_get(
+        filled_item_ref, admin_ctx, "name", "Itm10"
+    )
+    assert sub_id and row
+    assert await settled_updates(broker, timeout=0.3) == {}  # 订阅生效后的补读先消化掉
+    channel = cast(RowSubscription, broker._subs[sub_id]).channel
+
+    async def write():
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(filled_item_ref.comp_cls)
+            target = await repo.get(id=row["id"])
+            assert target
+            target.qty = 66
+            await repo.update(target)
+
+    await _write_while_deaf(broker, channel, write)
+    assert await broker.get_updates(timeout=0.3) == {}, "断线期间不该收到通知"
+    hub = backend.servant._hub  # type: ignore[attr-defined]
+    hub._on_resubscribed([channel])  # AsyncKeyspacePubSub 重订全部生效时的回调
+
+    updates = await settled_updates(broker, timeout=2)
+    assert updates[sub_id][row["id"]]["qty"] == 66
