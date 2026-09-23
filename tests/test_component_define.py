@@ -221,7 +221,7 @@ def test_point_sub_define(new_component_env, caplog):
     class PointComp(BaseComponent):
         owner: np.int64 = property_field(0, point_sub=True)
         zone: np.int32 = property_field(0, index=True, point_sub=True)
-        name: "U8" = property_field("", unique=True, point_sub=True)  # noqa: F821
+        name: str = property_field("", unique=True, dtype="U8", point_sub=True)
         level: np.int32 = property_field(0, index=True)
 
     assert PointComp.point_subs_ == frozenset({"owner", "zone", "name"})
@@ -240,7 +240,7 @@ def test_point_sub_define(new_component_env, caplog):
 def test_table_sub_define(new_component_env):
     @define_component(namespace="pytest", force=True, table_sub=True)
     class TableComp(BaseComponent):
-        name: "U8" = property_field("")  # noqa: F821
+        name: str = property_field("", dtype="U8")
 
     assert TableComp.table_sub_ is True
 
