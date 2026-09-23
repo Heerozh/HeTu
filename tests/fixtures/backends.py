@@ -16,7 +16,7 @@ async def mod_redis_backend(ses_redis_service):
     backends = {}
 
     # 支持创建多个backend连接
-    def _create_redis_backend(key="main", port=23318):
+    def _create_redis_backend(key="main"):
         if key in backends:
             _backend = backends[key]
         else:
@@ -57,7 +57,7 @@ async def mod_valkey_backend(ses_valkey_service):
     backends = {}
 
     # 支持创建多个backend连接
-    def _create_valkey_backend(key="main", port=23418):
+    def _create_valkey_backend(key="main"):
         if key in backends:
             _backend = backends[key]
         else:
@@ -98,7 +98,7 @@ async def mod_redis_cluster_backend(ses_redis_cluster_service):
     backends = {}
 
     # 支持创建多个backend连接
-    def _create_redis_backend(key="main", port=23318):
+    def _create_redis_backend(key="main"):
         if key in backends:
             _backend = backends[key]
         else:
