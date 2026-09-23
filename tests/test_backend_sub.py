@@ -1027,6 +1027,66 @@ async def test_point_query_row_leaving_before_its_channel_is_active(
     assert new_chan not in mq.subscribed_channels
 
 
+async def _owner10_with_two_hidden_rows(
+    broker: SubscriptionBroker, rls_ref, ctx
+) -> tuple[IndexSubscription, list[int]]:
+    """
+    RLSTest 的点查询 owner=10（user 11 只看得到 friend == 11 的行，默认 25 行都是）：先藏起
+    两行再订阅。订阅生效后的补读会把这两行也订上行频道（等它们变得可见时要推），但不推
+    """
+    backend = broker._backend
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=2)
+        hidden = [int(r.id) for r in rows]
+        for row in rows:
+            row.friend = 12
+            await repo.update(row)
+    sub_id, visible = await broker.subscribe_range(rls_ref, ctx, "owner", 10, limit=33)
+    assert sub_id and len(visible) == 23
+    assert await broker.get_updates(timeout=0.5) == {}
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert len(idx_sub.row_subs) == 25
+    return idx_sub, hidden
+
+
+async def test_point_query_hidden_row_change_is_not_pushed(
+    broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
+):
+    """不可见的行客户端从没拿到过：它变了但仍不可见，不能推 None（等于把它的 id 告诉客户端）"""
+    idx_sub, (hidden, _) = await _owner10_with_two_hidden_rows(
+        broker, filled_rls_ref, user_id11_ctx
+    )
+    async with broker._backend.session("pytest", 1) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(id=hidden)
+        assert row
+        row.friend = 13  # 对 user 11 仍不可见
+        await repo.update(row)
+    assert await broker.get_updates(timeout=1) == {}
+    assert len(idx_sub.row_subs) == 25
+
+
+async def test_point_query_hidden_row_leaving_is_not_pushed(
+    broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
+):
+    """不可见的行离开点查询的值（改走 / 删除）：退订它的行频道，但不推 None"""
+    idx_sub, (moved, deleted) = await _owner10_with_two_hidden_rows(
+        broker, filled_rls_ref, user_id11_ctx
+    )
+    async with broker._backend.session("pytest", 1) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        row = await repo.get(id=moved)
+        assert row
+        row.owner = 12
+        await repo.update(row)
+        assert await repo.get(id=deleted) is not None
+        repo.delete(deleted)
+    assert await broker.get_updates(timeout=1) == {}
+    assert len(idx_sub.row_subs) == 23
+    assert idx_sub.last_range_result.isdisjoint({moved, deleted})
+
+
 async def test_point_query_on_undeclared_index_falls_back(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
