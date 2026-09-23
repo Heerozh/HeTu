@@ -1,7 +1,7 @@
 # 通知按声明发送（`table_sub` / `point_sub`）— 设计稿
 
 - 日期：2026-09-24
-- 状态：设计中
+- 状态：已实施（实测见 §10）
 - 分支：`perf/publish-opt-in`（基于 dev `95f690a`）
 - 依据：`benchmark/redis_publish_cost_result.md`（PUBLISH / payload / keyspace 通知的成本与使用规则）
 - 影响范围：`hetu/data/component.py`（两个声明）、`hetu/data/backend/redis/client.py` +
@@ -82,6 +82,8 @@
   headless 写入走同一条 `Session.commit()`，声明对不上会漏发通知。
   - 改声明就是 schema 变更（`json_` 的 md5 变了），要跑一次 `hetu upgrade`。
   - `load_json` 读不到这两个键时按 `False` 处理，只为了迁移路径读旧 meta。
+  - headless 传本地类时，这两个声明与服务器 meta 不一致也报 `SchemaMismatch`：声明少了，
+    headless 的写入就会少发通知，服务器上的订阅会漏更新。
 - core 组件 `Connection.owner` 声明 `point_sub=True`（顶号检测用，见 §3.5）。
 
 ### 3.2 commit 发什么（Redis）
@@ -279,3 +281,24 @@ payload 为 NULL。行频道行与整索引频道行不变——它们是 keyspa
   区间查询，要改存储、迁移和 unique 检查。本设计的开销不够时再考虑。
 - **E. worker 收整表行事件、自己按值分拣。** master 零成本，但每个有点查询的 worker 都要收、都要读
   这张表的每一次写入，而点查询恰恰用在热表上；Connection 的心跳（direct_set）也会被带回来。
+
+## 10. 实测（实施后）
+
+Docker/WSL2，master 挂 1 个副本，master 主线程 µs/commit，只看相对值；Linux 上请用
+`benchmark/redis_commit_cost.py replay` 复测后更新 `benchmark/redis_publish_cost_result.md`。
+
+`redis_commit_cost.py replay`（新增 `optin` / `optin_val` 两个变体，两轮平均）：
+
+| rows | old | main（现状） | optin（未声明） | optin_val（每行 1 条扁平值频道） |
+|---:|---:|---:|---:|---:|
+| 1 | 4.29 | 5.34 | 4.36（−18%） | 5.27 |
+| 2 | 6.74 | 8.36 | 6.69（−20%） | 8.01 |
+
+- 没声明 `table_sub` / `point_sub` 的组件（绝大多数写入）回到 old 的水平。
+- `optin_val` 与 `main` 不是严格的格式对照：`main` 的表频道名每次相同，`optin_val` 的值频道名
+  每行不同。
+
+严格对照（同一批 key、同一种频道命名，交错运行，新旧 Lua 各一份）：单条通知在 commit 上的增量，
+扁平格式（只传频道名、消息为空串）+0.46~0.49µs，现状格式 `[频道, msgpack(ids)]` +1.02µs。
+
+回归：Redis 后端全量测试通过（464 passed / 2 skipped）。

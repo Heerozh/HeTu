@@ -132,7 +132,11 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 区别在服务端：`Range` 为结果集里的每一行各订阅一个频道，几千行就是几千个频道；`Table`
 不管多少行都只订一个表级频道，所以不计入行订阅配额。代价是该表**任何**写入都会触发一次
 通知（服务端按权限过滤后再推），所以高频写入的表（位置、血量）请用 `Range`。
-服务端拒绝行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表，此时返回 `null`。
+服务端组件要声明 `table_sub=True`（见[概念 · 订阅](concepts.md#何时用整表订阅)），没声明的表、
+以及行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表都会拒绝整表订阅，此时返回 `null`。
+
+`Range` 的点查询（`left == right`，如 `WatchRange<Item>("owner", myId, myId, 100)`）要高效，
+服务端对应的索引要声明 `point_sub=True`，否则该索引上任何写入都会让服务端重跑一次比对。
 
 ```csharp
 // 所有玩家的名字：几千行，一个订阅

@@ -199,9 +199,10 @@ class BackendClient:
         """
         返回索引某一个值的频道名。只有声明了 `point_sub` 的索引才有值频道（commit 只给它们
         发），未声明的索引调用会抛 `ValueError`——订一个永远没人发的频道只会静默收不到通知。
-        只有 `index_name == value` 的行被 insert/delete，或某行该字段从/到这个值变化时，
-        commit 才向此频道发一条消息；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
-        `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
+        只在有行"进入"这个值时（insert，或某行该字段改成这个值），commit 才向此频道发一条
+        消息，消息不带内容；一个事务每个 (索引, 值) 只发一条。行"离开"（delete、字段改走）
+        不发：点查询订阅本来就订着结果里每一行的行频道，由它发现（见 IndexSubscription）。
+        点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
         id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
 

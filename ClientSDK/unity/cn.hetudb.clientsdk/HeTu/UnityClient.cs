@@ -498,7 +498,7 @@ namespace HeTu
         /// </remarks>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
-        /// <returns>整表订阅对象；无权限或行数超过服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
+        /// <returns>整表订阅对象；服务端组件没声明 table_sub、无权限或行数超过服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
         /// <code>
         /// var names = await HeTuClient.Instance.WatchTable&lt;PlayerNames&gt;();
         /// names.OnUpdate += (sub, rowID) => Debug.Log(sub.Rows[rowID].name);

@@ -64,7 +64,8 @@ INSTANCE = "subbench"
 class Actor(hetu.BaseComponent):
     """模拟场景里的一个可见实体：zone 索引用于 AOI 订阅，x/y/hp 是被更新的字段"""
 
-    zone: np.int32 = hetu.property_field(0, index=True)
+    # point_sub：每个连接点查询订阅自己的 zone，只被本 zone 的进出叫醒
+    zone: np.int32 = hetu.property_field(0, index=True, point_sub=True)
     x: np.float32 = hetu.property_field(0)
     y: np.float32 = hetu.property_field(0)
     hp: np.int32 = hetu.property_field(100)

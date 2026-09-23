@@ -166,9 +166,16 @@ thousands of channels), while `WatchTable` listens to a single table-level
 channel no matter how many rows there are, so it does not count against the
 row-subscription quota. The trade-off is that **every** write to that table
 triggers a notification (filtered by permission before it reaches you), so keep
-using `WatchRange` for hot tables such as positions or HP. The server refuses
-tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default) and the call
-resolves to `null`.
+using `WatchRange` for hot tables such as positions or HP. The server component
+must be declared with `table_sub=True` (see
+[Concepts · Subscriptions](concepts.md#when-to-use-a-table-subscription)); the
+server refuses undeclared tables and tables larger than
+`MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default), and the call resolves to `null`.
+
+For a `WatchRange` point query (`left == right`, e.g.
+`WatchRange<Item>("owner", myId, myId, 100)`) to be efficient, declare the
+server-side index with `point_sub=True`; otherwise any write to that index makes
+the server re-run the comparison.
 
 ```csharp
 // Every player's name: thousands of rows, one subscription

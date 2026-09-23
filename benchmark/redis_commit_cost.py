@@ -5,10 +5,14 @@
 
   replay  用 pipeline 批量回放与 HeTu 同构的 commit_v2.lua 调用（摊薄网络系统调用，让主线程
           被 EVALSHA 本身占满），比较不同版本 commit payload 的每次 commit 主线程 CPU：
-            old : VER + HSET                                   （f9b6493，无 PUBLISH）
-            main: VER + HSET + PUBLISH 表频道                   （main）
-            head: VER + HSET + PUBLISH 行频道 + PUBLISH 表频道   （perf/row-cache）
+            old      : VER + HSET                                   （f9b6493，无 PUBLISH）
+            main     : VER + HSET + PUBLISH 表频道                   （PR #136 起每次 commit 都发）
+            head     : VER + HSET + PUBLISH 行频道 + PUBLISH 表频道   （perf/row-cache）
+            optin    : VER + HSET，没声明 table_sub / point_sub 的组件（perf/publish-opt-in）
+            optin_val: optin + 每行一条扁平的值频道 PUBLISH（point_sub 索引有行"进入"时）
           rows=1 对应 get_then_update 的一次 commit，rows=2 对应 get2_update2。
+          payload 按 perf/publish-opt-in 之后的格式 [checks, pushes, deleted, table_pubs,
+          value_chans]；old/main/head 的通知放在 table_pubs 里，与 Lua 的表频道调用点同一格式。
           测试 key 前缀为 hetu_probe:，结束后删除；notify-keyspace-events 结束后恢复原值。
           请对一个没有业务流量的 Redis 跑（会把主线程压满几十秒）。
 
@@ -115,15 +119,19 @@ def row_key(t: int, i: int) -> str:
 
 def payload(variant: str, rows: int, i: int) -> bytes:
     pack = lambda o: msgpack.packb(o, use_bin_type=False)  # 与 HeTu 的 Packer 一致
-    checks, pushes, pubs_row, pubs_tbl = [], [], [], []
+    checks, pushes, pubs_row, pubs_tbl, value_chans = [], [], [], [], []
     for t in range(rows):
         key = row_key(t, i)
         checks.append(["VER", key, "2"])
         pushes.append(["HSET", key, "_version", "2", "name", "XYZ"])
         pubs_row.append([key, pack(3)])
         pubs_tbl.append([f"{TABLES[t]}:table", pack([str(rid(i))])])
-    pubs = {"old": [], "main": pubs_tbl, "head": pubs_row + pubs_tbl}[variant]
-    return pack([checks, pushes, {}, pubs])
+        # 值频道名与 HeTu 同形：{prefix}:index:{字段}:{16 位 hex 的 sortable token}
+        value_chans.append(f"{TABLES[t]}:index:owner:{(1 << 63) + i:016x}")
+    pubs = {"main": pubs_tbl, "head": pubs_row + pubs_tbl}.get(variant, [])
+    if variant != "optin_val":
+        value_chans = []
+    return pack([checks, pushes, {}, pubs, value_chans])
 
 
 def replay_worker(args) -> int:
@@ -184,7 +192,14 @@ def replay(url: str, seconds: float, procs: int) -> None:
                     got += s.recv(65536)
                 pipe = []
     sha = cmd(s, "SCRIPT", "LOAD", LUA_PATH.read_bytes()).split(b"\r\n")[1].decode()
-    combos = [("old", "Kghz"), ("main", "Kghz"), ("head", "Kz"), ("head", "Kghz")]
+    combos = [
+        ("old", "Kghz"),
+        ("main", "Kghz"),
+        ("optin", "Kghz"),
+        ("optin_val", "Kghz"),
+        ("head", "Kz"),
+        ("head", "Kghz"),
+    ]
     print(f"原 notify-keyspace-events = {orig_ks!r}\n")
     print(
         "| rows | payload | keyspace | commits/s | 主线程 us/commit | evalsha usec_per_call |"

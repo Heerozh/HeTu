@@ -331,7 +331,7 @@ namespace HeTu
         ///     above ~100 ms), stale data may remain until the row changes again.
         ///     Make strongly consistent decisions in a server System.
         /// </remarks>
-        /// <returns>整表订阅对象；无权限或行数超服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
+        /// <returns>整表订阅对象；服务端组件没声明 table_sub、无权限或行数超服务端 MAX_TABLE_SUBSCRIPTION_ROWS 时为 null。</returns>
 #if UNITY_6000_0_OR_NEWER
         public Awaitable<IndexSubscription<T>> WatchTable<T>(
 #else

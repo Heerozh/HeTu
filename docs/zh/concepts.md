@@ -30,7 +30,7 @@ class ChatMessage(hetu.BaseComponent):
 
 - **字符串是固定宽度的。** `dtype="U256"` 是一个 256 字符的 UTF-32 列；更长的值会被截断。这是使用类 NumPy C 结构存储的代价。
 - **没有空值。** 每一列都有默认值；您无法判断某个值是“已设置”还是“仍为默认值”。如果您需要可选数据，请将其拆分为单独的组件，并通过 `owner` 进行连接。
-- **一种索引类型，两种风格。** 索引始终是有序集合，支持 `range()` 查询和订阅。`unique=True` 是相同的排序索引，外加提交时的唯一性检查，同时隐式开启 `index=True`。
+- **一种索引类型，两种风格。** 索引始终是有序集合，支持 `range()` 查询和订阅。`unique=True` 是相同的排序索引，外加提交时的唯一性检查，同时隐式开启 `index=True`。`point_sub=True` 声明这个索引支持高效点订阅（见[订阅](#订阅)），同样隐式开启 `index=True`。
 - **`namespace=` 只是一个标签。** 任何字符串都可以。运行中的服务器在启动时绑定到恰好一个命名空间（`--namespace`），并且只加载该命名空间的 `系统` 和 `端点`；如果这些 `系统` 引用了其他命名空间的 `组件`，则这些组件也会随之加载。要托管多个命名空间，请启动多台服务器。
 
 ## 系统
@@ -150,16 +150,40 @@ async def whoami(ctx: hetu.EndpointContext):
 兜底——不要依赖客户端手里的订阅数据。
 
 `range` 被叫醒的范围取决于查询形状：**点查询**（省略 `high`，或 `low == high`，如
-`owner=我`、`zone=z`）只订"索引 = 这个值"的频道，只有这个值上有行进出（插入、删除、某行的该字段
-变成或不再是这个值）才会通知；**区间查询**订整个索引的频道，该索引上任何值的行增删或变更都会
-唤醒它在服务端重跑一次比对。所以像"每个玩家订自己的背包"这种热索引，请写成点查询，别人捡道具
-不会打扰到你。
+`owner=我`、`zone=z`）在索引声明了 `point_sub=True` 时只订"索引 = 这个值"的频道，只有这个值上
+有行进出（插入、删除、某行的该字段变成或不再是这个值）才会通知；**区间查询**、以及没声明
+`point_sub` 的索引上的点查询，订整个索引的频道，该索引上任何值的行增删或变更都会唤醒它在服务端
+重跑一次比对（点查询落到这里时服务器会打一次警告）。所以像"每个玩家订自己的背包"这种热索引，
+请给它声明 `point_sub=True` 并写成点查询，别人捡道具不会打扰到你：
+
+```python
+@hetu.define_component(namespace="Game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, point_sub=True)
+    qty: np.int32 = hetu.property_field(1)
+```
+
+`point_sub` 的代价：每次有行"进入"某个值（插入，或该字段改成这个值），提交事务时要多发一条
+通知（一次 Redis PUBLISH，会复制到所有副本）；行离开这个值不用发，由订阅者订着的那一行自己发现。
+所以只给真正会被点查询订阅的索引声明。
 
 ### 何时用整表订阅
 
 `select` 和 `range` 在服务端为**每一行**各订阅一个 Redis 频道，几千行的结果集就是几千个频道，
-既慢又占用连接配额。整表订阅走的是另一条路：提交事务时，引擎对每张被改动的表额外发一条
-带 `row_id` 列表的表级通知，整表订阅只订这一个频道，不管表有多少行都只算一个订阅。
+既慢又占用连接配额。整表订阅走的是另一条路：提交事务时，引擎对被改动的表额外发一条带 `row_id`
+列表的表级通知，整表订阅只订这一个频道，不管表有多少行都只算一个订阅。
+
+这条表级通知每次提交都要付出一次 Redis PUBLISH（会复制到所有副本），所以只给在组件上声明了
+`table_sub=True` 的表发；没声明的组件，整表订阅会被拒绝：
+
+```python
+@hetu.define_component(
+    namespace="Game", permission=hetu.Permission.EVERYBODY, table_sub=True
+)
+class PlayerName(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", dtype="U16")
+```
 
 代价是订阅者会收到该表**所有**写入的通知（服务端按 RLS 过滤后再推给客户端），
 所以它只适合"行多、行小、很少变"的表——所有玩家的名字、公会列表、公开配置。

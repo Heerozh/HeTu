@@ -179,7 +179,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
     def table_channel(self, table_ref: TableReference):
         """
         返回表级变更频道名。这是commit lua脚本主动PUBLISH的普通频道（非keyspace通知），
-        名字带{CLU}hash tag，cluster模式下AsyncKeyspacePubSub按slot路由订阅。
+        只给声明了 table_sub 的组件发；名字带{CLU}hash tag，cluster模式下
+        AsyncKeyspacePubSub按slot路由订阅。
         """
         return f"{self.cluster_prefix(table_ref)}:table"
 
