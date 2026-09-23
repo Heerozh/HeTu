@@ -197,18 +197,30 @@ class BackendClient:
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
         """
-        返回索引某一个值的频道名。只有 `index_name == value` 的行被 insert/delete，或某行该
-        字段从/到这个值变化时，commit 才向此频道发一条消息，payload 为本次事务变动的
-        row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
+        返回索引某一个值的频道名。只有声明了 `point_sub` 的索引才有值频道（commit 只给它们
+        发），未声明的索引调用会抛 `ValueError`——订一个永远没人发的频道只会静默收不到通知。
+        只有 `index_name == value` 的行被 insert/delete，或某行该字段从/到这个值变化时，
+        commit 才向此频道发一条消息；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
         `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
-        id 索引没有值频道（commit 不发）：点查 id 请订行频道或整个 id 索引的频道。
+        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
 
-        Channel of one index value: published on commit only when a row with that value is
-        inserted/deleted or a row's field changes from/to it (payload: touched row ids).
-        Point-query subscriptions use it instead of `index_channel`.
+        Channel of one index value, only for indexes declared with `point_sub` (raises
+        `ValueError` otherwise). Point-query subscriptions use it instead of
+        `index_channel` so writes to other values don't wake them up.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def require_point_sub_(table_ref: TableReference, index_name: str) -> None:
+        """内部方法：索引没有声明 point_sub（commit 不发它的值频道）时抛 ValueError"""
+        if index_name not in table_ref.comp_cls.point_subs_:
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 没有声明 point_sub，commit 不会发它的值频道；"
+                    "请在 property_field 里加 point_sub=True"
+                ).format(comp_name=table_ref.comp_name, index_name=index_name)
+            )
 
     @staticmethod
     def point_query_value_(
@@ -240,8 +252,8 @@ class BackendClient:
 
     def table_channel(self, table_ref: TableReference):
         """
-        返回表级变更频道名。表内任何行 insert/update/delete，都会向该频道发送一条消息，
-        payload 为本次事务变动的 row_id（str）列表。一个事务一张表只发一条。
+        返回表级变更频道名。只有声明了 `table_sub` 的组件，commit 才向它发消息：表内任何行
+        insert/update/delete，一个事务一张表发一条，payload 为本次事务变动的 row_id（str）列表。
         """
         raise NotImplementedError
 

@@ -347,7 +347,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def index_value_channel(
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
-        """与 Redis 后端同一串名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
+        """只有声明了 point_sub 的索引才有值频道，否则抛 ValueError（见基类）"""
+        self.require_point_sub_(table_ref, index_name)
+        return self.value_channel_(table_ref, index_name, value)
+
+    def value_channel_(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """`index_value_channel` 的内部形式，不检查声明（commit 用）。与 Redis 后端同一串
+        名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
         dtype = table_ref.comp_cls.dtype_map_[index_name]
         token = sortable_token(to_sortable_bytes(dtype.type(value)))
         return f"{self.index_key(table_ref, index_name)}:{token}"
@@ -1081,7 +1089,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id。
             id 索引不记：点查 id 走行频道/整个 id 索引的频道，每次 insert/delete 都为它插一条
             通知行纯属浪费"""
-            channel = self.index_value_channel(ref, index_name, value)
+            channel = self.value_channel_(ref, index_name, value)
             pubs.setdefault(channel, []).append(str(row_id))
 
         for attempt in range(2):

@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
@@ -26,6 +27,27 @@ logger = logging.getLogger("HeTu.root")
 
 # 还不知道客户端持有什么内容（订阅已登记、初始行还没读回）：之后的任何读都照推
 UNKNOWN = object()
+
+# 点查询落在没声明 point_sub 的索引上时已经警告过的：组件类 → {索引名}。按类记（不按名字），
+# 测试里同名组件每次重定义都是新类；弱引用，组件类被重定义回收后自动清掉
+_point_sub_warned: weakref.WeakKeyDictionary[type, set[str]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def warn_point_sub_fallback_(table_ref: TableReference, index_name: str) -> None:
+    """点查询退化为区间订阅时警告，每个组件类的每个索引只警告一次"""
+    warned = _point_sub_warned.setdefault(table_ref.comp_cls, set())
+    if index_name in warned:
+        return
+    warned.add(index_name)
+    logger.warning(
+        _(
+            "⚠️ [📡Subscription] {comp_name}.{index_name} 没有声明 point_sub，"
+            "点查询订阅退化为区间订阅：该索引上任何写入都会叫醒它重跑比对。"
+            "需要高效点订阅请在 property_field 里加 point_sub=True"
+        ).format(comp_name=table_ref.comp_name, index_name=index_name)
+    )
 
 
 def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
@@ -588,10 +610,16 @@ class SubscriptionBroker:
         data may remain under Redis overload until the row changes again (see the class doc).
 
         通知范围取决于查询形状：
-        - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`）只订"索引=该值"
-          的频道，只有这个值上有行进出、或某行该字段变成/不再是这个值时才会被唤醒；
-        - 区间查询订整个索引的频道，该索引上任何值的行增删/变更都会唤醒它重跑一次比对。
-          热索引（如所有玩家都订自己的背包）请尽量用点查询。
+        - 点查询（省略 `right`，或 `left == right`，如 `owner=me`、`zone=z`），且索引声明了
+          `point_sub`：只订"索引=该值"的频道，只有这个值上有行进出时才会被唤醒；
+        - 区间查询，或索引没有声明 `point_sub` 的点查询：订整个索引的频道，该索引上任何值的
+          行增删/变更都会唤醒它重跑一次比对（点查询落到这里时服务器会警告一次）。
+          热索引（如所有玩家都订自己的背包）请用点查询，并给索引声明 `point_sub=True`。
+
+        Point queries (`right` omitted or equal to `left`) on an index declared with
+        `point_sub` only wake up when rows enter or leave that value. Range queries, and
+        point queries on undeclared indexes (warned once), wake up on any write to the
+        index.
 
         Returns
         --------
@@ -645,17 +673,20 @@ class SubscriptionBroker:
             return sub_id, rows
 
         # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道
-        # （index_name 已由上面的 servant.range 校验过存在）。id 没有值频道（commit 不发，
-        # 省掉每次 insert/delete 一条通知），点查 id 也订整个 id 索引的频道
+        # （index_name 已由上面的 servant.range 校验过存在）。值频道只有声明了 point_sub 的
+        # 索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引的频道并警告一次。
+        # id 不能声明 point_sub，点查 id 也订整个 id 索引的频道（该用 subscribe_get）
         point_value = BackendClient.point_query_value_(
             table_ref.comp_cls.dtype_map_[index_name], left, right
         )
-        if point_value is None or index_name == "id":
-            index_channel = servant.index_channel(table_ref, index_name)
-        else:
+        if point_value is not None and index_name in table_ref.comp_cls.point_subs_:
             index_channel = servant.index_value_channel(
                 table_ref, index_name, point_value
             )
+        else:
+            if point_value is not None and index_name != "id":
+                warn_point_sub_fallback_(table_ref, index_name)
+            index_channel = servant.index_channel(table_ref, index_name)
         row_ids = {int(row["id"]) for row in rows}
         idx_sub = IndexSubscription(
             table_ref,
@@ -704,6 +735,11 @@ class SubscriptionBroker:
         代价是每个整表订阅者会收到该表**所有**写入的通知（服务端按RLS过滤后再推），
         所以高频写入的表请继续用 `subscribe_range`。
 
+        组件必须声明 `table_sub=True`（`define_component` 的参数）：commit 只给声明了的组件
+        发表频道，未声明的组件整表订阅会被拒绝（返回 None）。
+        The component must be declared with `table_sub=True`; otherwise the subscription
+        is rejected, since commits only publish table channels for declared components.
+
         Notes
         -----
         与 `subscribe_range` 不同，整表订阅对RLS权限的得失都会做出反应：
@@ -713,8 +749,8 @@ class SubscriptionBroker:
         Returns
         --------
         sub_id: str | None
-            订阅id，后续通过该id获取更新。如果无整表权限，或表行数超过
-            `max_table_rows`，返回None。
+            订阅id，后续通过该id获取更新。如果组件没有声明 `table_sub`、无整表权限，
+            或表行数超过 `max_table_rows`，返回None。
         rows: list[dict[str, Any]]
             caller可见的全部行数据。
 
@@ -722,6 +758,15 @@ class SubscriptionBroker:
         --------
         subscribe_range : 范围订阅
         """
+        # 没声明 table_sub 的组件，commit 不发表频道：订上了也永远收不到通知
+        if not table_ref.comp_cls.table_sub_:
+            logger.warning(
+                _(
+                    "⚠️ [📡Subscription] {comp_name} 没有声明 table_sub，不允许整表订阅；"
+                    "需要的话请在 define_component 里加 table_sub=True，caller：{caller}"
+                ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
+            )
+            return None, []
         # 首先caller要对整个表有权限
         if not self._has_table_permission(table_ref, ctx):
             logger.warning(

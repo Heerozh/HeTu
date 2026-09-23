@@ -160,9 +160,11 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
         """
-        返回索引某一个值的频道名。这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace
-        通知），payload 为 msgpack 的 row_id 列表；名字带 {CLU} hash tag，cluster 模式下按 slot 路由。
+        返回索引某一个值的频道名（只有声明了 point_sub 的索引才有，否则抛 ValueError）。
+        这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace 通知）；名字带 {CLU}
+        hash tag，cluster 模式下按 slot 路由。
         """
+        self.require_point_sub_(table_ref, index_name)
         dtype = table_ref.comp_cls.dtype_map_[index_name]
         return self.value_channel_(
             self.index_key(table_ref, index_name), to_sortable_bytes(dtype.type(value))

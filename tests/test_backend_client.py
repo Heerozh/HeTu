@@ -836,7 +836,7 @@ def test_sortable_token():
 
 
 async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):
-    """id 索引没有值频道：insert/delete 不再为"id=该值"发一条没人订的通知；
+    """id 索引没有值频道（不能声明 point_sub），要它的名字直接报错；
     行频道和整个 id 索引的频道照常"""
     backend: Backend = mod_auto_backend()
     servant = backend.servant
@@ -845,10 +845,11 @@ async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):
     rows = await servant.range(filled_item_ref, "time", 122, 122, limit=1)
     assert len(rows) == 1
     row = rows[0]
-    id_value_chan = servant.index_value_channel(filled_item_ref, "id", row.id)
+    with pytest.raises(ValueError, match="point_sub"):
+        servant.index_value_channel(filled_item_ref, "id", row.id)
     id_index_chan = servant.index_channel(filled_item_ref, "id")
     row_chan = servant.row_channel(filled_item_ref, row.id)
-    await mq.subscribe(id_value_chan, id_index_chan, row_chan)
+    await mq.subscribe(id_index_chan, row_chan)
 
     idmap = IdentityMap()
     idmap.add_clean(filled_item_ref, row)
@@ -859,7 +860,6 @@ async def test_mq_client_no_id_value_channel(filled_item_ref, mod_auto_backend):
     async with asyncio.timeout(2):
         messages = await mq.get_message()
     assert row_chan in messages and id_index_chan in messages
-    assert id_value_chan not in messages
     await mq.close()
 
 
