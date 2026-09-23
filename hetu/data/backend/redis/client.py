@@ -342,26 +342,39 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         target_keyspace = "Kghz"
         for i, io in enumerate(self._ios):
-            try:
-                # 设置keyspace通知，先cast防止Awaitable类型检查报错
-                notify_config = cast(dict, io.config_get("notify-keyspace-events"))
-                db_keyspace = notify_config["notify-keyspace-events"]
-                db_keyspace = db_keyspace.replace("A", "g$lshztxed")
-                db_keyspace_new = db_keyspace
-                for flag in list(target_keyspace):
-                    if flag not in db_keyspace:
-                        db_keyspace_new += flag
-                if db_keyspace_new != db_keyspace:
-                    io.config_set("notify-keyspace-events", db_keyspace_new)
-            except (
-                redis.exceptions.NoPermissionError,
-                redis.exceptions.ResponseError,
-            ):
-                msg = _(
-                    "⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将"
-                    "不起效。可手动设置配置文件：notify-keyspace-events={keyspace}"
-                ).format(url=self.urls[i], keyspace=target_keyspace)
-                logger.warning(msg)
+            # keyspace 通知只在 key 所在的节点本地产生、只推给连在该节点上的订阅者。集群客户端
+            # 的 CONFIG GET/SET 只会发到默认节点，所以要逐个节点设置（主从都要，pubsub 可能
+            # 订在从节点上），否则落在别的分片上的行 / 索引永远收不到通知
+            if isinstance(io, redis.cluster.RedisCluster):
+                node_ios = [
+                    (f"{self.urls[i]} ({node.name})", io.get_redis_connection(node))
+                    for node in io.get_nodes()
+                ]
+            else:
+                node_ios = [(self.urls[i], io)]
+            for url, node_io in node_ios:
+                try:
+                    # 设置keyspace通知，先cast防止Awaitable类型检查报错
+                    notify_config = cast(
+                        dict, node_io.config_get("notify-keyspace-events")
+                    )
+                    db_keyspace = notify_config["notify-keyspace-events"]
+                    db_keyspace = db_keyspace.replace("A", "g$lshztxed")
+                    db_keyspace_new = db_keyspace
+                    for flag in list(target_keyspace):
+                        if flag not in db_keyspace:
+                            db_keyspace_new += flag
+                    if db_keyspace_new != db_keyspace:
+                        node_io.config_set("notify-keyspace-events", db_keyspace_new)
+                except (
+                    redis.exceptions.NoPermissionError,
+                    redis.exceptions.ResponseError,
+                ):
+                    msg = _(
+                        "⚠️ [💾Redis] 无权限调用数据库{url}的config_set命令，数据订阅将"
+                        "不起效。可手动设置配置文件：notify-keyspace-events={keyspace}"
+                    ).format(url=url, keyspace=target_keyspace)
+                    logger.warning(msg)
             # 检查是否是replica模式(目前是把master也当servent的，这个检查不行，对只有master的配置会报错）
             # db_replica = cast(dict, io.config_get("replica-read-only"))
             # if db_replica.get("replica-read-only") != "yes":

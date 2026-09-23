@@ -50,10 +50,19 @@ async def test_redis_notify_configuration(mod_auto_backend):
             master.io.config_get("notify-keyspace-events")["notify-keyspace-events"]  # type: ignore
             == ""
         )
-    # 测试replica应该有通知
-    replica_config = await servant.aio.config_get("notify-keyspace-events")
-    replica_flags = replica_config["notify-keyspace-events"]
-    assert all(flag in replica_flags for flag in list("Kghz"))
+    # 测试replica应该有通知。keyspace 通知只在 key 所在节点本地产生，集群模式下每个节点
+    # （主从都算，订阅可能连在从节点上）都得开，只开默认节点的话别的分片上的行收不到通知
+    from redis.cluster import RedisCluster
+
+    io = servant.io
+    if isinstance(io, RedisCluster):
+        nodes = [(node.name, io.get_redis_connection(node)) for node in io.get_nodes()]
+    else:
+        nodes = [("standalone", io)]
+    for name, node_io in nodes:
+        config = cast(dict, node_io.config_get("notify-keyspace-events"))
+        flags = config["notify-keyspace-events"]
+        assert all(flag in flags for flag in "Kghz"), f"{name}: {flags!r}"
 
 
 async def test_subscribe_get(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
