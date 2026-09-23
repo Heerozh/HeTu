@@ -420,11 +420,6 @@ async def test_manager_migrates_cluster_and_schema_in_one_run(
     assert row is not None and row.v == 7
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: 只改权限（json 变、dtype 不变）时迁移脚本 prepare 返回 skip，"
-    "migration_schema 直接返回 True 却不更新 meta 版本，表永远是 schema_mismatch",
-)
 async def test_manager_permission_only_change(
     mod_auto_backend, new_component_env, new_clusters_env, tmp_path
 ):
