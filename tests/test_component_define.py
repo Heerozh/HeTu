@@ -201,3 +201,87 @@ def test_unique_index_false(new_component_env, caplog):
         a: np.int64 = property_field(0, unique=True)
 
     assert "index" not in caplog.text
+
+
+def test_notify_declarations_default_off(new_component_env):
+    """不声明时：不允许整表订阅、没有支持点订阅的索引"""
+
+    @define_component(namespace="pytest", force=True)
+    class PlainComp(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+
+    assert PlainComp.table_sub_ is False
+    assert PlainComp.point_subs_ == frozenset()
+
+
+def test_point_sub_define(new_component_env, caplog):
+    """point_sub 强制打开 index（同 unique）；显式 index=False 时警告并修正"""
+
+    @define_component(namespace="pytest", force=True)
+    class PointComp(BaseComponent):
+        owner: np.int64 = property_field(0, point_sub=True)
+        zone: np.int32 = property_field(0, index=True, point_sub=True)
+        name: "U8" = property_field("", unique=True, point_sub=True)  # noqa: F821
+        level: np.int32 = property_field(0, index=True)
+
+    assert PointComp.point_subs_ == frozenset({"owner", "zone", "name"})
+    assert {"owner", "zone", "name", "level"} <= set(PointComp.indexes_)
+    assert "point_sub" not in caplog.text
+
+    @define_component(namespace="pytest", force=True)
+    class PointComp(BaseComponent):
+        owner: np.int64 = property_field(0, index=False, point_sub=True)
+
+    assert "point_sub" in caplog.text
+    assert "owner" in PointComp.indexes_
+    assert PointComp.point_subs_ == frozenset({"owner"})
+
+
+def test_table_sub_define(new_component_env):
+    @define_component(namespace="pytest", force=True, table_sub=True)
+    class TableComp(BaseComponent):
+        name: "U8" = property_field("")  # noqa: F821
+
+    assert TableComp.table_sub_ is True
+
+
+def test_notify_declarations_in_schema(new_component_env):
+    """两个声明写进组件 schema：load_json、duplicate 还原；headless 按名字从 meta 还原也靠它"""
+    import json
+
+    @define_component(namespace="pytest", force=True, table_sub=True)
+    class DeclComp(BaseComponent):
+        owner: np.int64 = property_field(0, point_sub=True)
+        level: np.int32 = property_field(0, index=True)
+
+    data = json.loads(DeclComp.json_)
+    assert data["table_sub"] is True
+    assert data["properties"]["owner"]["point_sub"] is True
+    assert data["properties"]["level"]["point_sub"] is False
+
+    loaded = BaseComponent.load_json(DeclComp.json_)
+    assert loaded.table_sub_ is True
+    assert loaded.point_subs_ == frozenset({"owner"})
+
+    copy = DeclComp.duplicate("pytest", "copy")
+    assert copy.table_sub_ is True
+    assert copy.point_subs_ == frozenset({"owner"})
+
+
+def test_load_json_without_notify_keys(new_component_env):
+    """迁移路径会读旧 meta：没有这两个键时按未声明处理"""
+    import json
+
+    @define_component(namespace="pytest", force=True, table_sub=True)
+    class OldComp(BaseComponent):
+        owner: np.int64 = property_field(0, point_sub=True)
+
+    data = json.loads(OldComp.json_)
+    del data["table_sub"]
+    for prop in data["properties"].values():
+        del prop["point_sub"]
+
+    loaded = BaseComponent.load_json(json.dumps(data))
+    assert loaded.table_sub_ is False
+    assert loaded.point_subs_ == frozenset()
+    assert "owner" in loaded.indexes_
