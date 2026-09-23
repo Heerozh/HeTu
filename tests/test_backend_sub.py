@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
-from fixtures.contexts import wait_until
+from fixtures.contexts import settled_updates, wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
@@ -224,9 +224,11 @@ async def test_subscribe_mq_merge_message(
     notified_channels = await mq.get_message()
     assert len(notified_channels) == 1
 
-    # 测试更新消息能否获得，因为我get_message取掉了，应该没有了
-    updates = await broker.get_updates(timeout=0.1)
-    assert len(updates) == 0
+    # 通知已被上面取掉。第二条是合并进来的：它离弹出不足一个 interval 时（取决于两次提交
+    # 花了多久）会补排一次尾随重读，读到的只能是最终值；之后不会再有别的
+    updates = await broker.get_updates(timeout=0.3)
+    assert all(r["qty"] == 997 for rows in updates.values() for r in rows.values())
+    assert await broker.get_updates(timeout=0.3) == {}
 
 
 async def test_subscribe_updates(
@@ -1016,9 +1018,14 @@ async def test_subscribe_table_merge(
     assert set(updates[sub_id].keys()) == {id_a, id_b}
     assert updates[sub_id][id_a]["qty"] == 3
     assert updates[sub_id][id_b]["qty"] == 2
-    # 合并后没有残留
+    # 合并进来的消息离弹出不足一个 interval 时，它们的行会尾随重读一次（可能重复推送，
+    # 内容只能是最终值）；之后没有残留
     updates = await broker.get_updates(timeout=0.3)
-    assert updates == {}
+    assert all(
+        row["qty"] == {id_a: 3, id_b: 2}[row_id]
+        for row_id, row in updates.get(sub_id, {}).items()
+    )
+    assert await broker.get_updates(timeout=0.3) == {}
 
 
 async def test_subscribe_table_coexist_range(

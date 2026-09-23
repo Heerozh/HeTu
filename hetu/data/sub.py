@@ -685,7 +685,13 @@ class SubscriptionBroker:
         """
         pop后端通知接收器推到本连接本地队列的数据更新通知，然后通过查询数据库取出最新的值，并返回。
         返回值为dict: key是sub_id；value是更新的行数据，value格式为dict：key是row_id，value是数据库raw值。
-        timeout参数主要给单元测试用，None时堵塞到有消息，否则等待timeout秒。
+        timeout参数主要给单元测试用，None时堵塞到有更新，否则最多等待timeout秒（总时长），
+        到时返回空dict。
+
+        一批通知读下来可能没有任何要推给客户端的变化（尾随重读、订阅生效后的补读读回的与
+        客户端已有的一样，或变化的行对本连接不可见），这时继续等下一批，不返回空结果。
+        一次写入引起的推送也可能分在几批里：合并进队头的通知会在一个 interval 后尾随重读，
+        它和别的频道的通知谁先弹出取决于时序。
 
         遇到消息堆积会丢弃通知。
 
@@ -700,18 +706,24 @@ class SubscriptionBroker:
                   这服务器端要多做2个方法，此方法还要另外专门做权限的判断，代码想必不会简洁
             都不怎么好，还是先多测试架构，减少丢失的可能性
         """
+        loop = asyncio.get_running_loop()
+        deadline = None if timeout is None else loop.time() + timeout
+        while True:
+            try:
+                async with asyncio.timeout_at(deadline):
+                    updated_channels = await self._mq_client.get_message()
+            except TimeoutError:
+                return {}
+            if rtn := await self._apply_notifications(updated_channels):
+                return rtn
+
+    async def _apply_notifications(
+        self, updated_channels: Mapping[str, set[str] | None]
+    ) -> dict[str, dict[str, dict]]:
+        """处理一批弹出的通知：重读变更、维护范围进出的频道订阅，返回要推给客户端的更新"""
         mq = self._mq_client
         channel_subs = self._channel_subs
-
         rtn = {}
-        if timeout is not None:
-            try:
-                async with asyncio.timeout(timeout):
-                    updated_channels = await mq.get_message()
-            except TimeoutError:
-                return rtn
-        else:
-            updated_channels = await mq.get_message()
 
         # 本tick变更的行先按表分组一次批量读取，填进RowSubscription的缓存
         RowSubscription.reset_cache_()

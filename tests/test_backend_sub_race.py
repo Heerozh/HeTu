@@ -41,6 +41,10 @@ class FakeSub(BaseSubscription):
         return set(self._channels)
 
 
+# 一个 tick：get_updates 碰到没有任何更新的批次会接着等下一批，给个总时长让它结束
+TICK = 0.3
+
+
 def make_broker() -> tuple[SubscriptionBroker, RedisMQClient, FakeNodePubSub]:
     hub, node = make_hub()
     mq = RedisMQClient(hub)
@@ -105,7 +109,7 @@ async def test_released_channel_resubscribed_during_tick_is_kept():
 
     mq.push_pulled_("idx1", None)
     mq.push_pulled_("idx2", None)
-    tick = asyncio.create_task(broker.get_updates())
+    tick = asyncio.create_task(broker.get_updates(timeout=TICK))
     async with asyncio.timeout(1):
         while "Y" not in node.sent("subscribe"):
             await asyncio.sleep(0.001)
@@ -135,7 +139,7 @@ async def test_unsub_of_later_sub_in_snapshot_during_tick_is_skipped():
         sub.gate.clear()
 
     mq.push_pulled_("C", None)
-    tick = asyncio.create_task(broker.get_updates())
+    tick = asyncio.create_task(broker.get_updates(timeout=TICK))
     # 同一频道下订阅的处理顺序取决于 set 的迭代顺序：先等出来谁在查库，再 unsub 另一个
     async with asyncio.timeout(1):
         while not any(sub.entered.is_set() for sub in subs.values()):
@@ -164,7 +168,7 @@ async def test_sub_unsubscribed_during_its_own_get_updated_leaves_no_trace():
     s1.gate.clear()
 
     mq.push_pulled_("idx", None)
-    tick = asyncio.create_task(broker.get_updates())
+    tick = asyncio.create_task(broker.get_updates(timeout=TICK))
     async with asyncio.timeout(1):
         await s1.entered.wait()
     await unsubscribe_and_ack(broker, node, "S1")

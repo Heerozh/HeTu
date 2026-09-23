@@ -845,12 +845,20 @@ class MQClient:
     本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
     `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
+
+    尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是
+    同一个。所以每条通知之后至少隔一个 interval（1/UPDATE_FREQUENCY）才读，这个 interval
+    同时是副本复制延迟的预算：单条通知入队后要等 interval 才弹出，天然满足；合并进队头的
+    通知离弹出可能不足 interval，弹出时再给它补排一次（见 `get_message`）。复制延迟超过
+    预算（Redis 压力过大）时仍可能读到旧值，所以订阅推送是尽力而为的最终一致。
     """
 
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
     # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
     DROP_AFTER = 120
+    # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
+    RESYNC = "*"
 
     def __init__(self) -> None:
         # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
@@ -860,6 +868,10 @@ class MQClient:
         self.pulled_set: set[str] = set()
         # 表级频道合并后的payload：channel -> 变动的row_id集合
         self.pulled_payload: dict[str, set[str]] = {}
+        # 频道已在队列里时又来的通知（被合并）：最近一条的收到时刻，尾随重读的依据
+        self._late: dict[str, float] = {}
+        # 以及这些迟到通知带来的 row_id（表级频道）：尾随重读只需要重读它们
+        self._late_payload: dict[str, set[str]] = {}
         # 服务端内部关注的频道 → 回调（见 watch）
         self._watchers: dict[str, Callable[[], None]] = {}
         # 队列从空变为非空的信号：get_message 空闲时等它，而不是定时醒来看队列
@@ -902,7 +914,26 @@ class MQClient:
                 )
             if channel_name not in self.subscribed_channels:
                 return 0
+        return self._enqueue(channel_name, payload_ids)
 
+    def request_reread(
+        self, *channel_names: str, payload: Iterable[Any] | None = None
+    ) -> None:
+        """
+        把这些频道当作刚收到一条通知放进本地队列（不触发 `watch` 回调），interval 后照常
+        弹出、重读。用于订阅生效后的补读：生效之前已在别的节点上应用、读到的副本却还没应用
+        的写入，既不在初始读回的行里，也不会再有通知。
+
+        Queue the channels as if they had just been notified (``watch`` callbacks are not
+        fired), so they are re-read one interval later. Used right after a subscription
+        becomes active: a write that another node applied before that moment, but the
+        replica we read from had not, is neither in the initial rows nor notified again.
+        """
+        for channel_name in channel_names:
+            self._enqueue(channel_name, payload)
+
+    def _enqueue(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
+        """放进本地队列（同频道合并），返回因 `DROP_AFTER` 丢弃的旧通知条数"""
         now = time.monotonic()
         dropped = 0
         dq = self.pulled_deque
@@ -912,17 +943,24 @@ class MQClient:
                 stale = dq.popleft()[1]
                 self.pulled_set.discard(stale)
                 self.pulled_payload.pop(stale, None)
+                self._late.pop(stale, None)
+                self._late_payload.pop(stale, None)
                 dropped += 1
 
+        ids = None if payload_ids is None else {str(i) for i in payload_ids}
         # 先清旧再合并payload，这样本条消息的payload不会被上面的清理顺手删掉
-        if payload_ids is not None:
-            self.pulled_payload.setdefault(channel_name, set()).update(
-                str(i) for i in payload_ids
-            )
+        if ids is not None:
+            self.pulled_payload.setdefault(channel_name, set()).update(ids)
         if channel_name not in self.pulled_set:
             dq.append((now, channel_name))
             self.pulled_set.add(channel_name)
             self._arrived.set()
+        else:
+            # 合并进已在队列里的那条：弹出时可能离这条不足一个 interval，记下来由
+            # get_message 决定要不要补排尾随重读
+            self._late[channel_name] = now
+            if ids is not None:
+                self._late_payload.setdefault(channel_name, set()).update(ids)
         return dropped
 
     async def get_message(self) -> dict[str, set[str] | None]:
@@ -932,6 +970,9 @@ class MQClient:
 
         返回 {channel名: payload}。行/索引频道的payload为None；
         表级频道的payload为这段时间内合并的变动row_id（str）集合。
+
+        弹出的频道若有合并进来、且离现在不足 interval 的通知，会以现在的时刻重新入队，
+        interval 后再弹出一次（尾随重读，见类注释）。
 
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
@@ -954,10 +995,25 @@ class MQClient:
                 continue
             cutoff = time.monotonic() - interval
             rtn: dict[str, set[str] | None] = {}
+            trailing: list[tuple[str, set[str] | None]] = []
             while dq and dq[0][0] <= cutoff:
                 channel_name = dq.popleft()[1]
                 self.pulled_set.discard(channel_name)
                 rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+                late = self._late.pop(channel_name, None)
+                late_ids = self._late_payload.pop(channel_name, None)
+                if late is not None and late > cutoff:
+                    trailing.append((channel_name, late_ids))
+            # 合并进来的通知离这次读不足一个 interval：读可能落在还没应用它的副本上，它的
+            # 通知却已经合并掉了。重新入队，interval 后再读一次。用现在的时刻而不是迟到那条
+            # 的时刻，队列才保持按时间有序；持续写入时它正好顶替下一批的队头，读的次数不变
+            if trailing:
+                now = time.monotonic()
+                for channel_name, late_ids in trailing:
+                    dq.append((now, channel_name))
+                    self.pulled_set.add(channel_name)
+                    if late_ids is not None:
+                        self.pulled_payload[channel_name] = late_ids
             if rtn:
                 return rtn
 

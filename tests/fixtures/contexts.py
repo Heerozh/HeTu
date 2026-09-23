@@ -10,6 +10,8 @@ from collections.abc import Callable
 
 import pytest
 
+from hetu.data.backend.base import MQClient
+from hetu.data.sub import SubscriptionBroker
 from hetu.system import SystemContext
 
 
@@ -63,3 +65,19 @@ async def wait_until(pred: Callable[[], object], timeout: float = 3.0) -> None:
     async with asyncio.timeout(timeout):
         while not pred():
             await asyncio.sleep(0.01)
+
+
+async def settled_updates(broker: SubscriptionBroker, timeout: float = 5.0) -> dict:
+    """等订阅推送安静下来，返回期间全部推送合并后的结果 {sub_id: {row_id: 最后推的行}}。
+
+    一次写入引起的推送可能分几批到：合并进队头的通知会在一个 interval 后尾随重读，订阅
+    生效后也会补读一次，它们和下一轮写入的通知谁先弹出取决于时序。断言"写入之后客户端
+    最终看到什么"时用它，别假设一次 get_updates 就拿全。第一批最多等 timeout 秒，之后
+    连续 2.5 个 interval 没有新推送就算安静。
+    """
+    updates = await broker.get_updates(timeout=timeout)
+    quiet = 2.5 / MQClient.UPDATE_FREQUENCY
+    while more := await broker.get_updates(timeout=quiet):
+        for sub_id, rows in more.items():
+            updates.setdefault(sub_id, {}).update(rows)
+    return updates
