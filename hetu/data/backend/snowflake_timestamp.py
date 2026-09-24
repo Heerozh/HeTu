@@ -72,7 +72,8 @@ class SnowflakeTimestampKeeper:
     def __init__(self, table: Table, worker_id: int):
         self.table = table
         self.worker_id = worker_id
-        self._write_verified = False
+        # 已确认本 worker_id 的行存在，之后 save 只需 direct_set
+        self._row_ready = False
 
     @staticmethod
     def _now_ms() -> int:
@@ -104,9 +105,13 @@ class SnowflakeTimestampKeeper:
         """
         now_ms = self._now_ms()
         try:
+            # 按 RAW 读：旧版本在 Redis 上留下过缺 id 的残缺行（见 save），
+            # 按 STRUCT 读会 KeyError；它的 last_timestamp 照样是有效的水位
             row = await self.table.backend.master.get(
-                self.table, self.worker_id, row_format=RowFormat.STRUCT
+                self.table, self.worker_id, row_format=RowFormat.RAW
             )
+            # 行不存在 和 水位为0 是同一件事：确认没有记录过，不需要保护
+            stored = int(row.get("last_timestamp") or 0) if row is not None else 0
         except Exception as e:  # 开服阶段不能因为读不到水位就起不来
             logger.warning(
                 _("[❄️ID] 读取时间戳高水位失败，退化为固定容忍度: {err}").format(
@@ -115,8 +120,6 @@ class SnowflakeTimestampKeeper:
             )
             return -1
 
-        # 行不存在 和 水位为0 是同一件事：确认没有记录过，不需要保护
-        stored = int(row.last_timestamp) if row is not None else 0
         if stored <= 0:
             return now_ms
 
@@ -133,22 +136,24 @@ class SnowflakeTimestampKeeper:
     async def save(self, last_timestamp: int) -> None:
         """把当前用到的时间戳写成高水位。无条件写，不做任何所有权校验（见类文档）。
 
-        `direct_set` 在两种后端上行为不一致：Redis 是 `HSET`，键不存在会顺手建；SQL 是
-        `UPDATE ... WHERE id=?`，行不存在就**静默无效**。以前 SQL 那边靠
-        GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有任何人替本类建行，
-        所以首次写入后回读确认，缺行就自己补一次插入（只在进程内做一次）。
+        行必须先存在，才能 `direct_set`。它在两种后端上对缺行的行为不一样，但都不对：
+        Redis 是 `HSET`，会建出一个只有 `last_timestamp`、缺 `id` 等字段的残缺 hash，
+        之后按 STRUCT 读这行就 KeyError；SQL 是 `UPDATE ... WHERE id=?`，**静默无效**。
+        以前 SQL 那边靠 GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有
+        任何人替本类建行，所以首次写入前先确认行在不在，缺行就自己补建（只在进程内做一次）。
         """
+        if not self._row_ready:
+            if not await self._row_exists():
+                await self._create_row(last_timestamp)
+                return
+            self._row_ready = True
         await self.table.direct_set(self.worker_id, last_timestamp=str(last_timestamp))
-        if self._write_verified:
-            return
-        self._write_verified = True
-        if await self._row_exists():
-            return
-        await self._create_row(last_timestamp)
 
     async def _row_exists(self) -> bool:
+        # 按 RAW 读：旧版本留下的残缺行（缺 id）按 STRUCT 读会 KeyError。它照样能存水位
+        # （load 也按 RAW 读），算作已存在，接着 direct_set 就行
         row = await self.table.backend.master.get(
-            self.table, self.worker_id, row_format=RowFormat.STRUCT
+            self.table, self.worker_id, row_format=RowFormat.RAW
         )
         return row is not None
 
@@ -164,10 +169,11 @@ class SnowflakeTimestampKeeper:
                 await repo.insert(row)
         except Exception as e:
             # 并发下别的进程可能刚好也在补建（撞主键），或后端异常；两种都不致命——
-            # 最坏是这一轮水位没写上，下个周期 direct_set 就能生效了
+            # 最坏是这一轮水位没写上，下个周期重新确认：行已被别人建好就直接 direct_set
             logger.warning(
                 _("[❄️ID] 补建时间戳高水位行失败（下个周期会重试）: {err}").format(
                     err=f"{type(e).__name__}:{e}"
                 )
             )
-            self._write_verified = False
+            return
+        self._row_ready = True
