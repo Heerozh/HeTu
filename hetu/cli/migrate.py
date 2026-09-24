@@ -73,11 +73,20 @@ class MigrateCommand(CommandInterface):
             default=False,
             help=_("强制执行升级迁移，丢弃无法迁移的数据。请勿在生产环境使用此选项！"),
         )
+        parser_migrate.add_argument(
+            "--no-rebuild-index",
+            action="store_true",
+            default=False,
+            help=_(
+                "跳过重建索引。默认每次升级都按行数据重建持久组件的索引、修掉索引残留，"
+                "数据量大时较慢"
+            ),
+        )
 
         pass
 
     @classmethod
-    def run(cls, config: dict, yes, drop_data):
+    def run(cls, config: dict, yes, drop_data, rebuild_index=True):
         # 创建后端连接池
         from ..data.backend import Backend
         from ..manager import ComponentTableManager
@@ -157,6 +166,14 @@ class MigrateCommand(CommandInterface):
             )
             tbl_mgr.flush_volatile()
 
+            if rebuild_index:
+                print(
+                    _("🔧 正在重建 {instance_name} 服的索引...").format(
+                        instance_name=instance_name
+                    )
+                )
+                tbl_mgr.rebuild_index_all()
+
             print(
                 _("✅  {instance_name} 服升级迁移完成！").format(
                     instance_name=instance_name
@@ -190,4 +207,4 @@ class MigrateCommand(CommandInterface):
             assert args.namespace, _("namespace参数不能为空，建议用--config参数")
             assert args.instance, _("instance参数不能为空，建议用--config参数")
             assert args.app_file, _("app_file参数不能为空，建议用--config参数")
-        return cls.run(config, args.y, args.drop_data)
+        return cls.run(config, args.y, args.drop_data, not args.no_rebuild_index)

@@ -316,9 +316,20 @@ Extra flags that apply to both modes:
 - `-y` — skip the data-backup confirmation prompt (use in CI/CD).
 - `--drop-data` — force-migrate by discarding data that cannot be migrated.
   **Do not use in production.**
+- `--no-rebuild-index` — skip rebuilding indexes (see below).
 
 If you do not run `upgrade`, `hetu start` will refuse to launch when it sees
 a schema mismatch.
+
+By default every `upgrade` rebuilds the indexes of persistent `Component`s
+from the row data, which repairs leftover index entries — for example, a
+maintenance script deleted a row but not its index entry, the server log
+reports that the index and the row data don't match, and every `System` that
+reads that row keeps retrying. Run it with the servers **stopped** (writes
+between scanning the rows and replacing the index would be lost). Each index is
+built in full before it atomically replaces the old one, so a failed rebuild
+leaves the old index untouched. With a lot of data the rebuild is slow; pass
+`--no-rebuild-index` to skip it.
 
 ### `hetu build`
 

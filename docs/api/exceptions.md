@@ -62,7 +62,7 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:86`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L86)</small>
+<small>Source: [`hetu/data/backend/base.py:109`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L109)</small>
 
 
 **Bases:** `IndexError`

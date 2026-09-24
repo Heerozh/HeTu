@@ -227,9 +227,17 @@ class RedisTableMaintenance(TableMaintenance):
         io.delete(self.meta_key(table_ref))
         return len(del_keys)
 
+    # 重建索引时每批读多少行、写多少个 member：几百万行塞进一条命令，客户端和 Redis 都要占
+    # 一大块内存
+    REBUILD_BATCH = 10000
+
     @override
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
-        """重建组件表的索引数据"""
+        """
+        按行数据重建组件表的索引，返回行数。每个索引先建到临时 key，建好、unique 检查通过后
+        再 RENAME 覆盖旧索引：中途失败（中断、超时、unique 冲突）旧索引原样保留，不会留下
+        空的或半截的索引。表里一行都没有时，索引里剩下的都是残留，直接删掉。
+        """
         from .client import RedisBackendClient
 
         io = self.client.io
@@ -238,46 +246,40 @@ class RedisTableMaintenance(TableMaintenance):
             target_nodes=RedisCluster.PRIMARIES,
         )
         keys = cast(list[bytes], keys)
-        if len(keys) == 0:
-            return 0
+        comp_cls = table_ref.comp_cls
 
-        for idx_name, _ in table_ref.comp_cls.indexes_.items():
+        for idx_name in comp_cls.indexes_:
             idx_key = self.client.index_key(table_ref, idx_name)
-            # 先删除所有_idx_key开头的索引
-            io.delete(idx_key)
-            # 重建所有索引，不管unique还是index都是sset
-            pipe = io.pipeline()
-            b_row_ids: list[bytes] = []
-            for key in keys:
-                row_id = key.split(b":")[-1]
-                b_row_ids.append(row_id)
-                pipe.hget(key.decode(), idx_name)
-            values: list[bytes] = pipe.execute()
-            # 把values按dtype转换下
-            struct = table_ref.comp_cls.new_row()
-            scalers: list[np.generic] = [np.str_()] * len(values)
-            for i, v in enumerate(values):
-                struct[idx_name] = v.decode()
-                scalers[i] = struct[idx_name]
-
-            # 建立redis索引
-            def get_member(_value: np.generic, _b_row_id) -> bytes:
-                _sortable_value = RedisBackendClient.to_sortable_bytes(_value)
-                return _sortable_value + b"\x00" + _b_row_id
-
-            io.zadd(
-                idx_key,
-                {
-                    get_member(scaler, b_row_id): 0
-                    for b_row_id, scaler in zip(b_row_ids, scalers)
-                },
-            )
-
-            # 检测是否有unique违反
-            if idx_name in table_ref.comp_cls.uniques_:
-                if len(values) != len(set(values)):
-                    raise RuntimeError(
-                        f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时发现违反unique约束，"
-                        f"可能是迁移时缩短了值类型、或新增了Unique标记导致。"
-                    )
+            if not keys:
+                io.delete(idx_key)
+                continue
+            # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id。临时 key 带同一个
+            # {CLU} hash tag，cluster 模式下和索引同 slot，才能 RENAME
+            tmp_key = f"{idx_key}:rebuilding"
+            io.delete(tmp_key)  # 上次中断留下的
+            is_unique = idx_name in comp_cls.uniques_
+            seen: set[bytes] = set()
+            struct = comp_cls.new_row()
+            for chunk in batched(keys, self.REBUILD_BATCH):
+                pipe = io.pipeline()
+                for key in chunk:
+                    pipe.hget(key.decode(), idx_name)
+                values: list[bytes] = pipe.execute()
+                members: dict[bytes, int] = {}
+                for key, value in zip(chunk, values):
+                    if is_unique:
+                        if value in seen:
+                            io.delete(tmp_key)
+                            raise RuntimeError(
+                                f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时"
+                                f"发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
+                                f"Unique标记导致。"
+                            )
+                        seen.add(value)
+                    # 按 dtype 转换后再算 sortable bytes，与 commit 写索引时一致
+                    struct[idx_name] = value.decode()
+                    sortable = RedisBackendClient.to_sortable_bytes(struct[idx_name])
+                    members[sortable + b"\x00" + key.split(b":")[-1]] = 0
+                io.zadd(tmp_key, members)
+            io.rename(tmp_key, idx_key)
         return len(keys)

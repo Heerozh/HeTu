@@ -121,6 +121,16 @@ class ComponentTableManager:
                 maint = tbl.backend.get_table_maintenance()
                 maint.flush(tbl)
 
+    def rebuild_index_all(self):
+        """
+        按行数据重建所有持久组件的索引，修掉索引残留；易失组件会被清空，不用重建。
+        扫描行与覆盖索引之间的写入会丢，必须停服执行，由 `hetu upgrade` 调用。
+        """
+        for comp, tbl in self._tables.items():
+            if not comp.volatile_:
+                maint = tbl.backend.get_table_maintenance()
+                maint.rebuild_index(tbl)
+
     def _flush_all(self, force=False):
         """测试用，清空所有数据"""
         for tbl in self._tables.values():

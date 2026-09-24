@@ -692,7 +692,10 @@ class TableMaintenance:
         raise NotImplementedError
 
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
-        """实际重建组件表索引的逻辑实现，返回重建的行数"""
+        """
+        实际重建组件表索引的逻辑实现，返回重建的行数。要按行数据整个重建（行已不存在的
+        索引残留要清掉），并且原子替换：中途失败时旧索引原样保留。
+        """
         raise NotImplementedError
 
     def do_update_meta_(self, table_ref: TableReference) -> None:
@@ -905,7 +908,10 @@ class TableMaintenance:
             )
 
     def rebuild_index(self, table_ref: TableReference) -> None:
-        """重建组件表的索引数据"""
+        """
+        按行数据重建组件表的索引，修掉索引残留。扫描行与覆盖索引之间的写入会丢，必须停服
+        执行（`hetu upgrade` 默认会调用）。
+        """
         logger.info(
             _("  ➖ [💾TABLE_MAINT][{comp_name}组件] 正在重建索引...").format(
                 comp_name=table_ref.comp_name

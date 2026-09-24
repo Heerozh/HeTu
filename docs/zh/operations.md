@@ -223,8 +223,14 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 
 - `-y` — 跳过数据备份确认提示（用于 CI/CD）。
 - `--drop-data` — 通过丢弃无法迁移的数据强制迁移。**请勿在生产环境中使用。**
+- `--no-rebuild-index` — 跳过重建索引（见下）。
 
 如果您不运行 `upgrade`，`hetu start` 在检测到 schema 不匹配时会拒绝启动。
+
+`upgrade` 默认每次都按行数据重建持久 `Component` 的索引，修掉索引残留：比如维护脚本只删了行、没删
+索引，服务器日志会报"索引和行数据对不上"，读到这一行的 `System` 一直重试。重建要**停服**执行（扫描行
+与覆盖索引之间的写入会丢），每个索引建好后才原子替换旧索引，中途失败旧索引原样保留。数据量大时重建较慢，
+可以用 `--no-rebuild-index` 跳过。
 
 ### `hetu build`
 
