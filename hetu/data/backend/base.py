@@ -187,6 +187,10 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
+    # 表级频道名的后缀，各后端的 table_channel 都是 cluster_prefix 加它；通知接收器靠它认出
+    # 哪些频道的 payload 是 row_id 集合
+    TABLE_CHANNEL_SUFFIX = ":table"
+
     def index_channel(self, table_ref: TableReference, index_name: str):
         """
         返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
