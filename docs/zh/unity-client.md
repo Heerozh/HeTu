@@ -135,6 +135,17 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 服务端组件要声明 `table_sub=True`（见[概念 · 订阅](concepts.md#何时用整表订阅)），没声明的表、
 以及行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表都会拒绝整表订阅，此时返回 `null`。
 
+整表订阅在订阅生效后约 100ms（一个推送间隔）才读数据，确保读到的副本已经跟上。要订好几张表时，
+先把请求都发出去再逐个 `await`，服务端会让它们一起等；一个一个 `await` 就是每张表各等一次：
+
+```csharp
+// 登录后订几张表：先都发出去，再 await
+var namesTask = HeTuClient.Instance.WatchTable<PlayerNames>();
+var guildsTask = HeTuClient.Instance.WatchTable<GuildList>();
+var names = await namesTask;
+var guilds = await guildsTask;
+```
+
 `Range` 的点查询（`left == right`，如 `WatchRange<Item>("owner", myId, myId, 100)`）要高效，
 服务端对应的索引要声明 `point_sub=True`，否则该索引上任何写入都会让服务端重跑一次比对。
 
