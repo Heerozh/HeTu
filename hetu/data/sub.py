@@ -25,7 +25,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
-# 还不知道客户端持有什么内容（订阅已登记、初始行还没读回）：之后的任何读都照推
+# 还不知道客户端持有什么内容（订阅已登记、初始行还没读回；或读期间已有推送，客户端最终
+# 持有哪份说不准）：之后的任何读都照推
 UNKNOWN = object()
 
 # 点查询落在没声明 point_sub 的索引上时已经警告过的：组件类 → {索引名}。按类记（不按名字），
@@ -572,8 +573,8 @@ class SubscriptionBroker:
         # 订阅一生效就同步登记，不能等读完：get_updates 的退订名单按 _channel_subs 定，
         # 读是真正的 await，期间某个索引订阅把这行放出范围的话，没登记的频道会被它当作
         # 没人要而退订，这里再登记上去的就是一个永远收不到通知的订阅。
-        # 读期间到达的通知会由 get_updates 照常推给这个订阅，客户端还没拿到 sub_id 会丢掉
-        # 它：对应的写入早于这次读的，读回的行里已经有了
+        # 读期间到达的通知会由 get_updates 照常推给这个订阅，那次推送可能先于、也可能晚于
+        # sub 回复送达，见读完后对 pushed 的处理
         row_sub = RowSubscription(table_ref, servant, ctx, channel_name, row_id)
         self._subs[sub_id] = row_sub
         self._channel_subs.setdefault(channel_name, set()).add(sub_id)
@@ -588,8 +589,14 @@ class SubscriptionBroker:
         if row is None or not self._has_row_permission(table_ref, ctx, row):
             await self.unsubscribe(sub_id)
             return None, None
-        # 客户端拿到的是这份初始行：读期间 tick 推过的会被还没拿到 sub_id 的客户端丢掉
-        row_sub.pushed = row_fingerprint_(row)
+        if row_sub.pushed is UNKNOWN:
+            # 读期间没有 tick 碰过这个订阅：客户端拿到的就是这份初始行
+            row_sub.pushed = row_fingerprint_(row)
+        else:
+            # 读期间已有 tick 替它算好了推送。那次推送先于 sub 回复送达的话，客户端还没有
+            # sub_id 会丢掉它；晚于回复的话会盖掉回复里的行——客户端最终持有哪份说不准，
+            # 保持 UNKNOWN，让下面的补读无条件推一次最新的
+            row_sub.pushed = UNKNOWN
         # 订阅生效前已在别的节点上应用、这次读到的副本却还没应用的写入，不会再有通知：
         # 隔一个 interval 补读一次（读回一样就不推）
         self._mq_client.request_reread(channel_name)
