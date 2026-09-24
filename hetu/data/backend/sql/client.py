@@ -1125,7 +1125,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
         精确集合也顺带覆盖了读取中途行被改走的情况，不用再核对读取一致性。
 
         只保护返回行的观察（get 命中）不重跑查询，只核对读回的行仍满足查询（取行前没被
-        改走），与 Redis 核对 member 对齐。
+        改走），与 Redis 核对 member 对齐。先在本地比较，比不上再以数据库的相等语义为准：
+        行是数据库按它自己的规则命中的（如 MariaDB 默认大小写不敏感的 collation），Python
+        的 != 不能直接判竞态，否则重试每次读到的都一样，会一直重试到上限。
         """
         for ref, observations in idmap.range_observations().items():
             for obs in observations:
@@ -1133,10 +1135,19 @@ class SQLBackendClient(BackendClient, alias="sql"):
                     for row_id in obs.ids:
                         row = idmap.db_row(ref, row_id)
                         if (
-                            row is not None
-                            and obs.point is not None
-                            and row[obs.index_name] != obs.point
+                            row is None
+                            or obs.point is None
+                            or row[obs.index_name] == obs.point
                         ):
+                            continue
+                        # 用读取时的同一条查询加上 id 问数据库。库里这一行若已不是读到的
+                        # 那一版，版本校验照样会判竞态，所以问现在的库就行
+                        left, right, _limit, desc = obs.bounds
+                        stmt = self._range_stmt(
+                            ref, obs.index_name, left, right, 1, desc, True
+                        )
+                        probe = stmt.where(stmt.selected_columns.id == row_id)
+                        if (await conn.execute(probe)).first() is None:
                             raise RaceCondition(
                                 f"RACE: Inconsistent range read {ref.comp_cls.name_}"
                                 f".{obs.index_name} id={row_id}"
