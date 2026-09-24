@@ -389,11 +389,6 @@ async def test_manager_create_or_migrate_all(
     assert row is not None and "v" not in row.dtype.names
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: create_or_migrate_all 每张表只按 check_table 的一个状态处理一步，cluster "
-    "和 schema 同时变的表迁完 cluster 就停，要再跑一次 upgrade",
-)
 async def test_manager_migrates_cluster_and_schema_in_one_run(
     mod_auto_backend, new_component_env, new_clusters_env, tmp_path
 ):
