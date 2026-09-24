@@ -436,6 +436,11 @@ transaction inserts a row for the same player in the meantime, or this
 `range` read from a replica that hadn't caught up yet, the commit is treated
 as a race; the retried `System` reads that row and takes the `update` branch.
 
+The same goes for `get`: inserting after a `get` on a non-unique field came
+back empty is checked at commit too. When `get` finds a row, only that
+returned row is guarded; rows with the same value inserted afterwards don't
+count as a conflict.
+
 Two things to watch:
 
 - **Read it all.** A truncated read (as many rows as `limit`) only guards the
