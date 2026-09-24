@@ -337,16 +337,12 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 
 ## 5. 代价
 
-- **master（Redis）**：每个需校验的观察多一条 `CNT`，包括一次 `redis.call` 调度（约 3k 指令）、
-  跳表 O(log N)、payload 里几个短字符串，合计约 1 万条指令量级。对单行 commit（6.7~8.5 万）是
-  +10%~20% 量级，**待实测**。
-  - 只有"写事务 + 做了 S1 / S2 覆盖不到的 range"才付。
+- **master（Redis）**：每个需校验的观察多一条 `CNT`。实测（§10）每条约 +1.3 µs 主线程时间，
+  单行 commit 从 3.6 µs 涨到 4.9 µs（+36%），比设计时估的 +10%~20% 高。成本主要是每次
+  `redis.call` 的固定开销，和一条 `VER` / `UNIQ` 同量级，换命令、去 label 都省不下来，只能少发。
+  - 只有"写事务 + 做了 S1 / S2 覆盖不到的 range"才付：显式 `range`、非 unique 列的 `get`。
   - 扫描型事务本来就为每个读到的行付一条 `VER`，多一条 `CNT` 占比很小。
-  - S1 / S2 覆盖的常见形状为 0。
-  - 可选优化：`label` 不进 payload，由 Lua 返回失败检查的序号、Python 还原定位串，省一个字符串；
-    用 benchmark 决定要不要做。
-  - 实施时按报告规则 5，在 `redis_commit_cost.py replay` 里加一个带 `CNT` 的变体，与 `optin` 对比，
-    数字写进 §10。
+  - S1 / S2 覆盖的常见形状（`get(unique=)` → update、`upsert`、SystemLock）为 0。
 - **worker（Redis）**：写事务 commit 前，对观察到的每行算一次 `to_sortable_bytes` 并比较，O(k)。
   只读事务不付。
 - **SQL**：每个观察在提交事务里重跑一次 id 查询，O(log N + k)。
@@ -450,9 +446,38 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 3. **做 S2**：它覆盖了 SystemLock 与 upsert 插入这些高频路径。
 4. **§3.9 的 desc 修复**不单独提 PR，在本分支顺手修掉。
 
-## 10. 实测（实施后补）
+## 10. 实测
 
-`redis_commit_cost.py replay`：`optin` vs `optin + 1 CNT` 的每次 commit 主线程 µs / 指令数。
+`benchmark/redis_commit_cost.py replay`，Redis 8.10.2（`redis:latest` 镜像，Docker Desktop / WSL2），
+4 个进程、每组 5 秒；笔记本上测的，只看相对值。`optin_cnt` 是 `optin` 加每行一条 `CNT`，形状同
+"非 unique 列 `get` 命中后 update"（limit=1 截断读，上界是命中行的 member），owner 索引 3 万个 member。
+
+| rows | payload | 主线程 µs/commit | 比 optin |
+|---:|:---|---:|---:|
+| 1 | optin | 3.62 | — |
+| 1 | optin_cnt | 4.92 | +1.30（+36%） |
+| 2 | optin | 5.51 | — |
+| 2 | optin_cnt（2 条） | 8.07 | +2.56（+46%） |
+
+另做了一组对比（临时 Lua，未合入），单行 commit、相对 optin 的增量：
+
+| 检查 | 增量 µs |
+|:---|---:|
+| `CNT`，limit=1 截断读命中（计数 1） | +1.30 |
+| 同上，label 传空串 | +1.26 |
+| 同一观察改成 `ZRANGE ... BYLEX LIMIT 0 1` 查"命中行之前的缺口为空" | +1.32 |
+| `CNT`，读空（计数 0） | +0.88 |
+| 读空改成 `ZRANGE ... LIMIT 0 1` | +1.10 |
+
+结论：
+
+- 成本主要在每次 `redis.call` 的固定开销，不在跳表查找；`ZRANGE LIMIT 0 1` 只找一端也不省，
+  还要建回复数组，反而更贵。label 不进 payload 只省约 0.04 µs，不做。
+- 能做的是少发。S1 / S2 已覆盖 unique 点查。**待定的进一步优化（S3）**：非 unique 列的 `get` 命中
+  时只保护返回的那一行，不再发 `CNT`。`get` 的约定本来就是"返回一行匹配的"，那一行由 `VER` 管；
+  这条 `CNT` 只在有同值新行排到命中行前面时才失败，雪花 id 单调递增，实际几乎不发生，却每次都付
+  1.3 µs。读空仍然要校验（"get 为 None 就 insert"靠它）。代价是 `get` 命中的语义从"第一行"放宽成
+  "某一行"。
 
 ## 11. 主要改动文件清单
 
