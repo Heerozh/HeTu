@@ -126,12 +126,14 @@ class SystemCaller:
                 await session.commit()
                 # logger.debug(f"✅ [📞System] 调用System成功: {sys_name}")
                 return rtn
-            except RaceCondition:
+            except RaceCondition as e:
                 context.race_count += 1
                 # 重试时sleep一段时间，可降低再次冲突率约90%。
                 # delay增加会降低冲突率，但也会增加rtt波动。除1:-94%, 2:-91%, 5: -87%, 10: -85%
                 delay = random.random() / 5
-                replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry")
+                # 带上冲突原因（如 "Range changed Item.owner"），方便从日志里找出冲突多的
+                # 区间，判断要不要给那次 range 关掉 phantom_check
+                replay.info(f"[RaceCondition][{sys_name}]{delay:.3f}s retry: {e}")
                 logger.debug(
                     _(
                         "🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
