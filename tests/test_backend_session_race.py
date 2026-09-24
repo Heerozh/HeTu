@@ -639,6 +639,75 @@ async def test_nonunique_get_none_then_insert_is_race(item_ref, mod_auto_backend
             await repo.insert(_item(comp, owner=9, time=2, name="mine"))
 
 
+async def test_nonunique_get_skips_row_deleted_in_txn(item_ref, mod_auto_backend):
+    """非 unique 列 get：索引里排在前面的同值行已被本事务删掉，要返回后面那行匹配的。
+    返回 None 的话，"get 为 None 就 insert"会插出重复"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        _item(comp, owner=5, time=1, name="x"),
+        _item(comp, owner=5, time=2, name="y"),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        first = await repo.get(owner=5)
+        assert first is not None
+        repo.delete(int(first.id))
+        second = await repo.get(owner=5)
+        assert second is not None and second.id != first.id
+
+
+async def test_get_skips_row_moved_in_txn(item_ref, mod_auto_backend):
+    """本事务把命中的行改走了索引值：再 get 旧值不能返回它（它已经不匹配了），要返回别的
+    匹配行；unique 列没有别的匹配行，读空"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        _item(comp, owner=5, time=1, name="x"),
+        _item(comp, owner=5, time=2, name="y"),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        first = await repo.get(owner=5)
+        assert first is not None
+        old_name = str(first.name)
+        first.owner, first.name = 6, "moved"
+        await repo.update(first)
+        second = await repo.get(owner=5)
+        assert second is not None and second.owner == 5 and second.id != first.id
+        assert await repo.get(name=old_name) is None
+
+
+async def test_nonunique_get_none_after_deleting_all_then_insert_is_race(
+    item_ref, mod_auto_backend
+):
+    """本事务删掉了这个值上仅有的一行，get 读空后插入，被并发插入同值的行 → 判竞态。
+    读空要校验整个值上没有别的行，不能只看到被删的那一行为止"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, owner=5, time=1, name="x"))
+
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            row = await repo.get(owner=5)
+            assert row is not None
+            repo.delete(int(row.id))
+            assert await repo.get(owner=5) is None
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, owner=5, time=2, name="z"))
+            await repo.insert(_item(comp, owner=5, time=3, name="w"))
+
+
 async def test_nonunique_get_hit_then_insert_after_no_race(item_ref, mod_auto_backend):
     """非 unique 列 get 命中是 limit=1 的截断读：新插入的同值行（id 更大）排在它后面，不算冲突"""
     backend: Backend = mod_auto_backend()
