@@ -100,6 +100,25 @@ class MigrateCommand(CommandInterface):
             if "default" not in backends:
                 backends["default"] = backends[name]
 
+        # 有服务器在跑时不能升级：迁移、清空易失表、重建索引在线执行都会写坏数据。
+        # 靠 worker 租约判断，SQL 后端没有租约，看不出来
+        from ..data.backend import worker_keeper
+
+        live: set[int] = set()
+        for backend in set(backends.values()):
+            live.update(worker_keeper.live_worker_ids(backend))
+        if live:
+            from ..data.backend.redis.worker_keeper import WORKER_ID_EXPIRE_SEC
+
+            print(
+                _(
+                    "❌ 检测到还有服务器在运行（持有 Worker ID 租约：{ids}），请先停服再升级："
+                    "迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常"
+                    "退出的，等租约过期（最多 {ttl} 秒）后再试。"
+                ).format(ids=sorted(live), ttl=WORKER_ID_EXPIRE_SEC)
+            )
+            sys.exit(1)
+
         # 加载玩家的app文件
         spec = importlib.util.spec_from_file_location("HeTuApp", config["APP_FILE"])
         assert spec and spec.loader, _("无法加载app文件 {app_file}").format(

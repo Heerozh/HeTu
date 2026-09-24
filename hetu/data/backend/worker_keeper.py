@@ -128,3 +128,18 @@ def create_worker_keeper(backend: Backend, pid: int) -> WorkerKeeper:
     if isinstance(master, RedisBackendClient):
         return RedisWorkerKeeper(pid, master.aio)
     return FixedWorkerKeeper()
+
+
+def live_worker_ids(backend: Backend) -> list[int]:
+    """
+    这个后端上还持有租约的 worker id，非空就说明有服务器在跑（或者异常退出后租约还没
+    过期）。`hetu upgrade` 据此拒绝在线执行。SQL 后端没有租约（见 `FixedWorkerKeeper`），
+    看不出来，返回空列表。
+    """
+    from .redis.client import RedisBackendClient
+    from .redis.worker_keeper import live_worker_ids as redis_live_worker_ids
+
+    master = backend.master
+    if isinstance(master, RedisBackendClient):
+        return redis_live_worker_ids(master.io)
+    return []

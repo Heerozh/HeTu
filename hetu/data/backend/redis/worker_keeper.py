@@ -15,6 +15,8 @@ logger = logging.getLogger("HeTu.root")
 
 # 回收worker id的时间，超时则认为宕机
 WORKER_ID_EXPIRE_SEC = 60
+# 租约 key 的前缀，完整 key 是 f"{WORKER_ID_KEY}:{worker_id}"
+WORKER_ID_KEY = "snowflake:worker"
 # 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
 # Redis 时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
 FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
@@ -29,6 +31,17 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+
+
+def live_worker_ids(io: redis.Redis | redis.RedisCluster) -> list[int]:
+    """
+    还持有租约的 worker id：服务器在跑，或者异常退出后租约还没过期（最多
+    WORKER_ID_EXPIRE_SEC 秒）。一次 pipeline 查完所有 id，cluster 下按 slot 分发。
+    """
+    pipe = io.pipeline()
+    for worker_id in range(MAX_WORKER_ID + 1):
+        pipe.exists(f"{WORKER_ID_KEY}:{worker_id}")
+    return [worker_id for worker_id, alive in enumerate(pipe.execute()) if alive]
 
 
 @final
@@ -82,7 +95,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         super().__init__()
         self.aio = aio
-        self.worker_id_key = "snowflake:worker"
+        self.worker_id_key = WORKER_ID_KEY
         self.worker_id = -1
         # 机器码+pid组成的node_id。
         # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变

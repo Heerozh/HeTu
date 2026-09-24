@@ -331,6 +331,14 @@ built in full before it atomically replaces the old one, so a failed rebuild
 leaves the old index untouched. With a lot of data the rebuild is slow; pass
 `--no-rebuild-index` to skip it.
 
+Before doing anything, `upgrade` checks whether any server is still running
+(on Redis backends, from the worker leases) and exits with code 1 if so,
+leaving everything untouched: migrating, wiping volatile tables and rebuilding
+indexes all corrupt data while servers are running. If a server crashed, wait
+for its lease to expire (at most 60 seconds) and try again. SQL backends have
+no leases, so the check can't see them; make sure the servers are stopped
+yourself.
+
 ### `hetu build`
 
 Generates client-side SDK code (typed C# classes) from your server-side
