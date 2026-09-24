@@ -1,9 +1,13 @@
 import logging
 import time
+from typing import Any
 
 import pytest
 from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
+
+# 导入即注册 core 组件 WorkerLease，必须赶在 mod_test_app 建簇之前，不然簇里没有它
+from hetu.server.main import close_backends, start_backends
 
 
 async def test_snowflake_id(monkeypatch):
@@ -277,21 +281,26 @@ async def test_snowflake_timestamp_keeper(
     monkeypatch.undo()
 
     # 关键用例：水位高于当前时间（模拟重启期间时钟回拨），必须返回水位而不是当前时间，
-    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳
+    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳。save 写的是正常关服的
+    # 精确值，原样读回，不再补写入间隔
     future_ms = now_ms + 30_000
     await ts_keeper.save(future_ms)
-    assert await ts_keeper.load() == future_ms + pad_ms
+    assert await ts_keeper.load() == future_ms
 
-    # 崩溃时最后一个写入间隔内发出的ID其时间戳已超过记录值，读回时必须补上这一段
-    edge_ms = now_ms + 1000  # 水位仅略高于当前时间，不补就会重发这段时间的ID
-    await ts_keeper.save(edge_ms)
-    assert await ts_keeper.load() == edge_ms + pad_ms
+    # 周期写入的预留值往前多留一个间隔：崩溃前最后那段发出的ID来不及记录，靠它兜住
+    await ts_keeper.reserve(future_ms)
+    assert await ts_keeper.load() == future_ms + pad_ms
+    # 空闲时 last_timestamp 早就落后于当前时间，要按当前时间预留，否则盖不住接下来发的ID
+    before_ms = int(time.time() * 1000)
+    await ts_keeper.reserve(before_ms - 60_000)
+    reserved = await ts_keeper.load()
+    assert before_ms + pad_ms <= reserved <= int(time.time() * 1000) + pad_ms
 
     # 补建是幂等的：同一个 worker_id 的第二个 keeper 实例不该因为撞主键而抛异常
     second = SnowflakeTimestampKeeper(table, 7)
     with caplog.at_level(logging.WARNING, logger="HeTu.root"):
-        await second.save(edge_ms)
-    assert await second.load() == edge_ms + pad_ms
+        await second.save(future_ms)
+    assert await second.load() == future_ms
 
 
 @use_redis_family_backend_only
@@ -300,14 +309,10 @@ async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     last_timestamp、缺 id 的残缺 hash：之后按 STRUCT 读就 KeyError，每次重启 load 都
     退化成固定容忍度。已部署的库里还留着这种行，load 要照样读出它的水位，save 照常写"""
     from hetu.data.backend import RowFormat
-    from hetu.data.backend.snowflake_timestamp import (
-        TIMESTAMP_SAVE_INTERVAL,
-        SnowflakeTimestampKeeper,
-    )
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
 
     backend = mod_auto_backend()
     table = _make_lease_table(backend)
-    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
     worker_id = 9
     # 高于当前时间，才看得出读回的是不是这个水位
     stored = int(time.time() * 1000) + 30_000
@@ -317,10 +322,10 @@ async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     assert raw is not None and "id" not in raw
 
     keeper = SnowflakeTimestampKeeper(table, worker_id)
-    assert await keeper.load() == stored + pad_ms
+    assert await keeper.load() == stored
     await keeper.save(stored + 1)
     restarted = SnowflakeTimestampKeeper(table, worker_id)
-    assert await restarted.load() == stored + 1 + pad_ms
+    assert await restarted.load() == stored + 1
 
 
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
@@ -357,6 +362,59 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
         assert generator._next_id() is not None, (
             f"{label}时发号容量耗尽后睡10ms仍未恢复，说明起始时间戳被钳在了未来"
         )
+
+
+def _server_app(backend_config: dict) -> Any:
+    """够 start_backends/close_backends 用的最小 app 替身（config 要能按属性读）"""
+    from types import SimpleNamespace
+
+    class Config(dict):
+        __getattr__ = dict.__getitem__
+
+    config = Config(
+        NAMESPACE="pytest",
+        # 独立 instance：别的模块在 server1 等 instance 上按各自的簇建过表，同名会撞
+        # cluster_mismatch
+        INSTANCES=["snowflake_restart"],
+        BACKENDS={"main": backend_config},
+    )
+    return SimpleNamespace(config=config, ctx=SimpleNamespace(), stop=lambda: None)
+
+
+async def test_restart_resumes_from_snowflake_watermark(
+    mod_test_app, mod_backend_config
+):
+    """开关服的水位接线：正常关服后马上重启不该被钳在未来，崩溃后重启要从开服时预留的
+    水位接着发。
+
+    以前补偿在读端，一律补一个写入间隔：正常关服后5秒内重启也被钳在未来，关服又把钳住
+    的值原样写回，连续快速重启越推越远——test_websocket 每个用例起停一次服务器，跑完
+    超前一分钟，漏给同进程后面的用例，每发一个号刷一条"时钟回拨"告警。
+    """
+    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.data.backend.snowflake_timestamp import TIMESTAMP_SAVE_INTERVAL
+
+    generator = SnowflakeID()
+    for label in ("首次开服", "正常关服后重启", "再次重启"):
+        app = _server_app(mod_backend_config)
+        await start_backends(app)
+        ahead = generator.last_timestamp - int(time.time() * 1000)
+        assert ahead < 1000, f"{label}时发号器起始时间戳超前了 {ahead} 毫秒"
+        generator.next_id()
+        await close_backends(app)
+
+    # 崩溃：不走 close_backends 直接断开。开服时预留的水位盖住了崩溃前发出的所有ID，
+    # 重启必须从它接着发，停机期间时钟被拨回也不会重复
+    boot_ms = int(time.time() * 1000)
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    generator.next_id()
+    await app.ctx.default_backend.close()
+
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
+    await close_backends(app)
 
 
 async def test_snowflake_lease_fence():

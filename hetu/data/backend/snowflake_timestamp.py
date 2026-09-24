@@ -18,9 +18,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
-# 高水位的写入间隔（秒）。它决定了"重启回拨"最多能有多大：关服前最后一次写入到真正关服
-# 之间的这段时间是保护不到的，所以这个值必须小于运维保证的最大时钟回拨量（NTP正常工作时
-# 通常远小于1秒）。5秒是留了足够余量的取值。
+# 高水位的写入间隔（秒）。周期写入每次都往前预留一个间隔（见 SnowflakeTimestampKeeper），
+# 所以它也是崩溃后重启最长要背的钳制窗口：窗口内时间戳钳在同一毫秒，只能发4096个ID。
+# 在写master的频率和这个窗口之间折中，5秒两头都不贵。正常关服写的是精确值，不受它影响。
 TIMESTAMP_SAVE_INTERVAL = 5
 
 
@@ -55,12 +55,28 @@ class SnowflakeTimestampKeeper:
        回拨后的时间重新发号，撞上关服前已经用过的时间戳 → 重复ID。**这是本类唯一要解决的**，
        而它每 TIMESTAMP_SAVE_INTERVAL 秒一次的粗粒度就够了。
 
+    ## 预留值与精确值
+
+    存储里的水位有两种来源，读回时一视同仁地取 `max(水位, 当前时间)`：
+
+    * **预留值**（`reserve`，开服发号前写一次，之后每 TIMESTAMP_SAVE_INTERVAL 秒一次）：
+      `max(last_timestamp, 当前时间) + 一个写入间隔`。进程随时可能崩溃，崩溃前最后那段
+      发出去的ID来不及记录，靠的就是这个"下次写入前不会超过它"的上界。
+    * **精确值**（`save`，正常关服时）：之后不再发号，最后用到的时间戳就是真实上界，
+      下次开服从这里接着发，不用再背预留的那一段。
+
+    补偿只能放在写端，因为只有写的时候知道这个值是哪一种。以前放在读端，一律补一个写入
+    间隔：正常关服后5秒内重启也被钳在未来，关服又把钳住的值原样写回，连续快速重启就一次
+    推5秒地越推越远。
+
     ## 单写者假设
 
-    `save` 是无条件写（last-writer-wins），不是原子的 max。正常情况下同一个 worker_id 只有
-    一个写者，而单个写者写出的 `SnowflakeID.last_timestamp` 本身就是单调递增的，所以存储里
-    的值也是单调的。只有在"两个进程拿着同一个 worker_id"时水位才可能被写低——而那个场景本身
-    已经在产生重复ID了，是 WorkerKeeper 那边要解决的问题，不该由本类兜底。
+    `save`/`reserve` 都是无条件写（last-writer-wins），不是原子的 max。正常情况下同一个
+    worker_id 只有一个写者，而它每次写入的值都不低于此前发出过的所有ID的时间戳（精确值就是
+    `last_timestamp`，预留值还往前多留了一段），所以后写的覆盖先写的不会漏掉任何已发出的
+    ID，关服那次从预留值落回精确值也是如此。只有在"两个进程拿着同一个 worker_id"时水位才
+    可能被写低——而那个场景本身已经在产生重复ID了，是 WorkerKeeper 那边要解决的问题，不该
+    由本类兜底。
 
     Persists the high-water mark of timestamps consumed by the snowflake ID generator, so
     a clock that went backwards while the server was down can't cause ID reuse. Kept
@@ -84,11 +100,10 @@ class SnowflakeTimestampKeeper:
 
         三种情况：
 
-        * **读到了有效水位** → `max(水位 + 写入间隔, 当前时间)`。取 max 是因为水位只是个
-          下界：正常情况下当前时间早就超过它了，只有真的发生重启回拨时水位才更大，那时宁可
-          让ID的时间戳"超前"也不能重复。**必须加上一个写入间隔**：水位每
-          TIMESTAMP_SAVE_INTERVAL 秒才写一次，崩溃时最后那一个间隔内发出去的ID其时间戳
-          已经超过了记录值，不补这一段就会把它们再发一遍。
+        * **读到了有效水位** → `max(水位, 当前时间)`。水位只是个下界：正常情况下当前时间
+          早就超过它了，只有上个进程没正常关服（它预留的那一段还没过完）或者重启期间时钟被
+          拨回时水位才更大，那时宁可让ID的时间戳"超前"也不能重复。这里**不再**补写入间隔，
+          补偿在写端做：读端分不出水位是预留值还是精确值（见类文档）。
         * **确认没有记录**（行不存在，或水位为0）→ 返回当前时间，**不做任何钳制**。这个
           worker_id 名下从没发出过ID，也就没有可重复的时间戳，不需要保护。这里绝不能退化成
           "未知"去用兜底值：那会让每次全新开服都白白背上一个几秒的降级窗口——时间戳被钳在
@@ -123,18 +138,29 @@ class SnowflakeTimestampKeeper:
         if stored <= 0:
             return now_ms
 
-        watermark = stored + TIMESTAMP_SAVE_INTERVAL * 1000
-        if watermark > now_ms:
+        if stored > now_ms:
             logger.warning(
                 _(
-                    "[❄️ID] 检测到重启期间时钟回拨了 {ms} 毫秒，"
-                    "已按记录的高水位继续发号，避免ID重复"
-                ).format(ms=watermark - now_ms)
+                    "[❄️ID] 记录的高水位比当前时间超前 {ms} 毫秒（上次未正常关服，"
+                    "或重启期间时钟回拨），已从高水位继续发号，避免ID重复"
+                ).format(ms=stored - now_ms)
             )
-        return max(watermark, now_ms)
+        return max(stored, now_ms)
+
+    async def reserve(self, last_timestamp: int) -> None:
+        """往前预留一段写成水位：`max(last_timestamp, 当前时间) + 一个写入间隔`。
+
+        开服发号前写一次，之后每 TIMESTAMP_SAVE_INTERVAL 秒写一次，所以两次写入之间发出的
+        ID都不会超过它（事件循环卡住、写入晚到的那一小段除外），进程在这期间崩溃，下次开服
+        从这里接着发就不会重复。取 max 是因为空闲时 `last_timestamp` 可能早就落后于当前
+        时间，只按它预留，盖不住接下来发出的ID。
+        """
+        reserved = max(last_timestamp, self._now_ms()) + TIMESTAMP_SAVE_INTERVAL * 1000
+        await self.save(reserved)
 
     async def save(self, last_timestamp: int) -> None:
-        """把当前用到的时间戳写成高水位。无条件写，不做任何所有权校验（见类文档）。
+        """把 `last_timestamp` 原样写成水位（精确值），用于正常关服：调用方保证之后不会再
+        发出时间戳更大的ID，周期写入要用 `reserve`。无条件写，不做任何所有权校验（见类文档）。
 
         行必须先存在，才能 `direct_set`。它在两种后端上对缺行的行为不一样，但都不对：
         Redis 是 `HSET`，会建出一个只有 `last_timestamp`、缺 `id` 等字段的残缺 hash，
