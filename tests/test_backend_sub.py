@@ -2370,54 +2370,60 @@ async def test_subscribe_range_force_false_and_duplicate(
     assert set(broker._mq_client.subscribed_channels) == channels
 
 
-async def test_subscribe_table_duplicate_over_row_cap(
+async def _overfill_item_table(backend, item_ref):
+    """filled_item_ref 有 25 行，再插一行让它超过 max_table_rows=25"""
+    comp = item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        row.name, row.owner, row.time = "Extra", 10, 700
+        await session.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+
+async def test_subscribe_table_duplicate_over_row_cap_revokes_old_sub(
     mod_auto_backend, filled_item_ref, admin_ctx
 ):
-    """重复整表订阅时表已超过行数上限：与首次订阅超限一样回 (None, [])"""
+    """重复整表订阅时表已超过行数上限：与首次订阅超限一样回 (None, [])，并撤掉旧订阅。
+    客户端拿到 None 就认为没有订阅、不会再来 unsub（同 subscribe_get 重复订阅时行已
+    不可见），不撤的话旧订阅和表频道会挂到连接结束，还占着整表订阅数的名额"""
     backend = mod_auto_backend("main")
     broker = SubscriptionBroker(backend, max_table_rows=25)
     try:
         sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
         assert sub_id and len(rows) == 25
-        comp = filled_item_ref.comp_cls
-        async with backend.session("pytest", 1) as session:
-            row = comp.new_row()
-            row.name, row.owner, row.time = "Extra", 10, 700
-            await session.using(comp).insert(row)
-        await backend.wait_for_synced()
-
-        assert await broker.subscribe_table(filled_item_ref, admin_ctx) == (None, [])
-    finally:
-        await broker.close()
-
-
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="BUG: 重复整表订阅超限时只回 (None, [])、没撤旧订阅：客户端拿到 None 就认为"
-    "没有订阅、不会再来 unsub，旧订阅和表频道一直挂到连接结束，还占着整表订阅数的名额",
-)
-async def test_subscribe_table_duplicate_over_row_cap_revokes_old_sub(
-    mod_auto_backend, filled_item_ref, admin_ctx
-):
-    """重复整表订阅时表已超过行数上限：回 (None, []) 的同时要撤掉旧订阅
-    （同 subscribe_get 重复订阅时行已不可见）"""
-    backend = mod_auto_backend("main")
-    broker = SubscriptionBroker(backend, max_table_rows=25)
-    try:
-        sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
-        assert sub_id
-        comp = filled_item_ref.comp_cls
-        async with backend.session("pytest", 1) as session:
-            row = comp.new_row()
-            row.name, row.owner, row.time = "Extra", 10, 700
-            await session.using(comp).insert(row)
-        await backend.wait_for_synced()
+        await _overfill_item_table(backend, filled_item_ref)
 
         assert await broker.subscribe_table(filled_item_ref, admin_ctx) == (None, [])
         assert sub_id not in broker._subs
         assert broker.count() == (0, 0, 0)
         assert not broker._mq_client.subscribed_channels
+    finally:
+        await broker.close()
+
+
+async def test_subscribe_table_duplicate_over_row_cap_spares_new_sub(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """重复整表订阅的后半段（服务器里在后台跑）重读完之前，旧订阅已被退订、同一 sub_id
+    又登记了新的订阅：重读发现超限时只撤它认出的那个旧订阅，新登记的不能被它撤掉"""
+    backend = mod_auto_backend("main")
+    broker = SubscriptionBroker(backend, max_table_rows=25)
+    try:
+        sub_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+        assert sub_id
+        await _overfill_item_table(backend, filled_item_ref)
+
+        reread = await broker.begin_subscribe_table(filled_item_ref, admin_ctx)
+        # 后半段还没跑，接收协程先处理了客户端的 unsub 和新的 sub
+        await broker.unsubscribe(sub_id)
+        finish_new = await broker.begin_subscribe_table(filled_item_ref, admin_ctx)
+        new_sub = broker._subs[sub_id]
+
+        assert await reread == (None, [])
+        assert broker._subs.get(sub_id) is new_sub, "新登记的订阅被旧的重读撤掉了"
+        # 新订阅自己的后半段照常收尾：表超限，它自己撤掉
+        assert await finish_new == (None, [])
+        assert broker.count() == (0, 0, 0)
     finally:
         await broker.close()
 
