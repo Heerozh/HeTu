@@ -5,6 +5,7 @@ MQClient 本地队列（get_message / push_pulled_）：空闲时不轮询，来
 
 import asyncio
 import contextlib
+import logging
 import time
 
 import pytest
@@ -224,4 +225,21 @@ async def test_drop_after_clears_late_state(monkeypatch):
     await asyncio.sleep(INTERVAL)
     assert mq.push_pulled_("B", None) == 1  # A 被当作积压丢弃
     assert "A" not in mq._late and "A" not in mq._late_payload
+    await hub.close()
+
+
+async def test_request_reread_warns_dropped_backlog(monkeypatch, caplog):
+    """request_reread 入队时同样会清掉积压超过 DROP_AFTER 的旧通知：清掉了就得和收到通知时
+    一样打积压警告，不能悄悄丢"""
+    monkeypatch.setattr(MQClient, "DROP_AFTER", INTERVAL * 0.5)
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("A", None)
+    await asyncio.sleep(INTERVAL)
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        mq.request_reread("B")
+    assert "A" not in mq.pulled_set  # A 被当作积压丢弃
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1, "积压的通知被丢弃了却没有警告"
+    assert "💾Redis" in warns[0].getMessage()
     await hub.close()
