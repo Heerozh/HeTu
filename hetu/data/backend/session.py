@@ -96,7 +96,7 @@ class Session(AbstractAsyncContextManager):
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了，可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
         """

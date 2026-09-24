@@ -16,6 +16,7 @@ next: operations
 - **[原始 `Endpoints`](#原始endpoints多system或非数据库rpc)** —— 无事务的 RPC 处理器，用于非数据库工作或独立调用多个 `System`。
 - **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 提升管理员权限，以及速率限制覆盖。
 - **[提前 `session_commit` / `session_discard`](#提前-session_commit--session_discard)** —— 在 `System` 主体返回之前提交（或放弃）事务。
+- **[查不到就插入](#查不到就插入两种写法)** —— `range` 的区间校验（防幻读），以及热路径上更省的 unique 锚定 + `upsert` 写法。
 - **[用于范围查询的 NumPy 模式](#用于范围查询的-numpy-模式)** —— 广播、布尔掩码、聚合，以及将两个查询在内存中合并而非循环。
 - **[多后端](#多后端per-component)** —— 通过 `backend=` 将选定的 `Components` 固定到单独的数据库。
 - **[易失性组件](#易失性组件)** —— `volatile=True` 用于在模式维护时应被清除的状态。
@@ -252,6 +253,82 @@ async def long_running(ctx: hetu.SystemContext, ...):
 - **`session_commit` 之后的操作不会在 `RaceCondition` 时重试。** 只有提交前的主体部分参与 HeTu 的乐观重试。如果提交后的工作失败，你需要自行恢复。
 
 `session_discard()` 格式相同，但会丢弃所有内容。当 `System` 提前确定正确的答案是“什么也不做”并且希望完全跳过提交时，使用它。
+
+## 查不到就插入：两种写法
+
+"每个玩家每种道具一行，没有就插入、有就加数量"是最常见的写法。HeTu 里有两种写对的方式。
+
+### 朴素写法：`range` 读完再决定
+
+```python
+import hetu
+import numpy as np
+
+
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    items = await ctx.repo[Item].range(owner=(ctx.caller, ctx.caller), limit=-1)
+    hit = items[items.template == tpl]
+    if len(hit) == 0:
+        row = Item.new_row()
+        row.owner, row.template, row.qty = ctx.caller, tpl, n
+        await ctx.repo[Item].insert(row)
+    else:
+        row = hit[0]
+        row.qty += n
+        await ctx.repo[Item].update(row)
+```
+
+这样写是安全的：`range` 读过的区间会在提交时校验。别的事务在这期间给同一个玩家插了一行，或者这次
+`range` 读到的是还没同步的副本，提交都会判竞态；`System` 重试时读到那一行，改走 `update`。
+
+两个注意点：
+
+- **读全。** 截断读（返回行数等于 `limit`）只保护读到的前 `limit` 行，没读到的行会被当成不存在。判断
+  "有没有"时用 `limit=-1`，或确认返回行数小于 `limit`。
+- **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
+  整个背包付费。
+
+### 热路径：unique 锚定 + `upsert`
+
+给组合键建一个 unique 字段，用 `upsert` 锚定它，事务只碰一行：
+
+```python
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
+        item.owner, item.template = ctx.caller, tpl
+        item.qty += n
+```
+
+两个事务同时走到插入分支时，后提交的那个撞上 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
+代价是多一个 unique 索引；道具换主人时要同步改 `slot`；给已有数据加这个字段时要先回填。
+
+### 关掉区间校验
+
+读写频繁的区间、且逻辑不依赖"区间里没有别的行"时，比如读最新 N 条消息再插一条，每条新消息都会让并发的
+事务判竞态、白白重试。这种 `range` 传 `phantom_check=False`：返回的行照样参与版本校验，只是不管区间里
+新增的行。`replay.log` 里的 `[RaceCondition]` 行带着冲突原因（如 `Range changed Item.owner`），可以据此
+找出冲突多的区间。
 
 ## 用于范围查询的 NumPy 模式
 
