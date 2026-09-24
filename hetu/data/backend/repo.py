@@ -417,7 +417,9 @@ class SessionRepository:
             idmap.mark_absent(self.ref, index_name, point)
 
         # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
-        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）
+        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）。
+        # 取行和查 id 用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对
+        # 会把这种滞后误判成竞态
         rows: list[np.record | None] = []
         miss_slots: list[int] = []
         miss_ids: list[int] = []
@@ -433,9 +435,7 @@ class SessionRepository:
         if miss_ids:
             fetched = cast(
                 list[np.record | None],
-                await self._session.master_or_servant.get_many(
-                    self.ref, miss_ids, RowFormat.STRUCT
-                ),
+                await client.get_many(self.ref, miss_ids, RowFormat.STRUCT),
             )
             # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
             found = [r for r in fetched if r is not None]
