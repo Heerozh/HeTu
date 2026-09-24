@@ -614,6 +614,54 @@ async def test_nonunique_get_hit_then_insert_after_no_race(item_ref, mod_auto_ba
         await repo.update(row)
 
 
+async def test_nonunique_get_hit_ignores_rows_sorting_before(
+    item_ref, mod_auto_backend
+):
+    """get 命中只保护返回的那一行：之后插入的同值行即使排在它前面（id 更小），也不算冲突。
+    get 的约定是"返回一行匹配的"，不是"第一行"；省掉这次区间校验（每次约 1.3µs master）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    hit = _item(comp, owner=2, time=1, name="hit")
+    await _insert_rows(backend, comp, hit)
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        row = await repo.get(owner=2)
+        assert row is not None and row.id == hit.id
+        async with backend.session("pytest", 1) as s2:
+            # 位数相同、数值更小：两个后端都排在命中行前面
+            before = _item(comp, owner=2, time=2, name="before", id_=int(hit.id) - 1)
+            await s2.using(comp).insert(before)
+        row.qty = 3
+        await repo.update(row)
+
+
+async def test_nonunique_get_hit_moved_while_reading_is_race(
+    item_ref, mod_auto_backend
+):
+    """get 命中仍要核对读取一致性：取行前命中的行被改走（读回的行已不满足查询），写事务判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=2, time=1, name="a")
+    await _insert_rows(backend, comp, a)
+
+    async def move_a(session):
+        repo = session.using(comp)
+        row = await repo.get(id=int(a.id))
+        assert row is not None
+        row.owner = 20
+        await repo.update(row)
+
+    with pytest.raises(RaceCondition, match="Inconsistent|Range"):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            with _intrude_before_get_many(backend, move_a):
+                row = await repo.get(owner=2)
+            assert row is not None and row.owner == 20  # 读回的已经被改走了
+            await repo.insert(_item(comp, owner=9, time=3, name="c"))
+
+
 async def test_range_float_index_truncated_commits(item_ref, mod_auto_backend):
     """float32 索引上的截断读，没有并发写时一次提交成功（不能拿读回的浮点值做等值比较，
     MariaDB 的单精度 FLOAT 会对不上，变成永远失败的重试）"""

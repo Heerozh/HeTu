@@ -484,8 +484,8 @@ async def test_redis_commit_check_codes(mod_item_model):
 
 async def test_range_observations_to_check(mod_item_model):
     """哪些 range 观察要单独校验区间：unique 点查命中（该行有数据库态）、读空后本事务写入该值
-    （insert 或 update 改成该值，且没删掉数据库态为该值的行）由已有检查覆盖，其余都要；
-    完全相同的观察只留一条"""
+    （insert 或 update 改成该值，且没删掉数据库态为该值的行）由已有检查覆盖，get 命中只保护
+    返回的行，其余都要；完全相同的观察只留一条"""
     from hetu.data.backend.idmap import RangeObservation
 
     item_ref = TableReference(mod_item_model, "pytest", 1)
@@ -531,14 +531,17 @@ async def test_range_observations_to_check(mod_item_model):
     # 非 unique 列（没有 point）、区间读：要校验
     nonunique = observe("owner", None, [int(hit.id)])
     ranged = observe("time", None)
+    # get 命中：只保护返回的那一行，不校验区间
+    got = RangeObservation("owner", [int(hit.id)], ("got",), [], 7, rows_only=True)
+    idmap.add_range_observation(item_ref, got)
 
     # 完全相同的观察去重
     observe("owner", None, [int(hit.id)])
-    assert len(idmap.range_observations()[item_ref]) == 7
+    assert len(idmap.range_observations()[item_ref]) == 8
 
     to_check = {id(obs) for obs in idmap.range_observations_to_check()[item_ref]}
     assert to_check == {id(absent_only), id(contradicted), id(nonunique), id(ranged)}
-    assert not {id(s1), id(s2_insert), id(s2_update)} & to_check
+    assert not {id(s1), id(s2_insert), id(s2_update), id(got)} & to_check
 
 
 @use_redis_family_backend_only
@@ -700,7 +703,7 @@ async def test_redis_range_check_payload(item_ref, mod_auto_backend):
         assert "race" in kinds and "strict" in kinds
         assert kinds == sorted(kinds, key=order.index)
 
-        # 非 unique 列 get 命中：limit=1 的截断读，上界收到命中行的 member
+        # 非 unique 列 get 命中：只保护返回的那一行（VER），不带 CNT
         async with backend.session("pytest", 1) as session:
             session.only_master = True
             repo = session.using(comp)
@@ -708,10 +711,18 @@ async def test_redis_range_check_payload(item_ref, mod_auto_backend):
             assert row is not None
             row.qty = 9
             await repo.update(row)
-        lo, _ = client.range_normalize_(dtypes["owner"], 1, 1, False)
-        assert cnt_checks() == [
-            [b"CNT", owner_key, lo, b"[" + member("owner", row), 1, b"Item.owner"]
-        ]
+        assert cnt_checks() == []
+
+        # 非 unique 列 get 读空再插入：要校验这个值上仍然没有行（计数 0）
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            assert await repo.get(owner=404) is None
+            new = comp.new_row()
+            new.owner, new.time, new.name = 404, 404, "n404"
+            await repo.insert(new)
+        lo, hi = client.range_normalize_(dtypes["owner"], 404, 404, False)
+        assert cnt_checks() == [[b"CNT", owner_key, lo, hi, 0, b"Item.owner"]]
 
         # 降序截断：下界收到最后一个（最小的）member，上界是查询上界
         async with backend.session("pytest", 1) as session:
