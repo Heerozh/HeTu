@@ -7,6 +7,7 @@
 
 import asyncio
 import logging
+from collections.abc import Awaitable
 from typing import TYPE_CHECKING, Any
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -84,11 +85,44 @@ async def rpc(
     return True
 
 
+def defer_sub_reply_(
+    finish: Awaitable[tuple[str | None, list[dict]]], deferred: set[asyncio.Task]
+) -> asyncio.Future:
+    """
+    后台跑完订阅的后半段，结果填进返回的占位。占位放进 push_queue，发送循环按顺序等它填好：
+    回复没有请求 id、SDK 按顺序对应，排在它后面的回复都跟着等。任务登记在 deferred 里，
+    连接拆掉时由接收协程取消
+    """
+    reply = asyncio.get_running_loop().create_future()
+
+    async def fill():
+        try:
+            sub_id, rows = await finish
+        except Exception as e:  # noqa: BLE001 交给发送循环，它等到占位时抛出、记日志、断开
+            if not reply.done():
+                reply.set_exception(e)
+        else:
+            if not reply.done():  # 发送循环被取消时，它在等的占位也跟着被取消了
+                reply.set_result(["sub", sub_id, rows])
+
+    def settle(task: asyncio.Task):
+        deferred.discard(task)
+        # 被取消（连接在拆）：占位一起作废。还没开始跑就被取消的话，fill 里一行都不会执行
+        if not reply.done():
+            reply.cancel()
+
+    task = asyncio.create_task(fill())
+    deferred.add(task)
+    task.add_done_callback(settle)
+    return reply
+
+
 async def sub_call(
     data: list,
     executor: EndpointExecutor,
     broker: SubscriptionBroker,
     push_queue: asyncio.Queue,
+    deferred: set[asyncio.Task],
 ) -> bool:
     """处理Client SDK调用订阅的命令"""
     ctx = executor.context
@@ -105,6 +139,7 @@ async def sub_call(
 
     sub_id = None
     sub_data: dict[str, Any] | list[dict] | None = None
+    deferred_reply: asyncio.Future | None = None
     match data[2]:
         case "get":
             check_length("get", data, 5, 5)
@@ -115,14 +150,17 @@ async def sub_call(
             sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
         case "table":  # sub component_name table
             check_length("table", data, 3, 3)
-            sub_id, sub_data = await broker.subscribe_table(table, ctx)
+            # 前半段（检查、订阅、登记）在这里做完，下面的订阅数检查照常；后半段要先等
+            # 一个 interval 再全量读，交给后台，接收协程接着处理下一条消息
+            finish = await broker.begin_subscribe_table(table, ctx)
+            deferred_reply = defer_sub_reply_(finish, deferred)
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
         case _:
             raise ValueError(_(" [非法操作] 未知订阅操作：{op}").format(op=data[2]))
 
-    reply = ["sub", sub_id, sub_data]
+    reply = ["sub", sub_id, sub_data] if deferred_reply is None else deferred_reply
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
@@ -157,6 +195,8 @@ async def client_handler(
     ctx = executor.context
     last_data = None
     cancelled = False
+    # 在后台跑后半段的订阅（整表订阅等全量读），连接拆掉时一起取消
+    deferred: set[asyncio.Task] = set()
     # async for 正常跑完 = 对端把连接关了；其余出口在各自分支里改写此原因
     exit_reason = _("对端关闭了连接")
     try:
@@ -191,7 +231,9 @@ async def client_handler(
                         exit_reason = _("rpc 调用失败")
                         return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...
-                    sub_ok = await sub_call(last_data, executor, broker, push_queue)
+                    sub_ok = await sub_call(
+                        last_data, executor, broker, push_queue, deferred
+                    )
                     if not sub_ok:
                         if debug:
                             await push_queue.put(BAD_SUBS)
@@ -232,6 +274,9 @@ async def client_handler(
         logger.exception(err_msg)
         return ws.fail_connection()
     finally:
+        # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）
+        for task in list(deferred):
+            task.cancel()
         # 除了被取消（连接本来就在拆），任何退出路径都必须把连接一起拆掉并留下日志。
         # 否则连接会变成"半死"：外层 websocket_connection 还阻塞在 push_queue.get()
         # 上，谁也不知道接收协程没了 —— TCP 仍 ESTABLISHED、协议层 ping/pong 照常、

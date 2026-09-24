@@ -9,7 +9,7 @@ import asyncio
 import logging
 import weakref
 from collections import Counter
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final, cast
 
@@ -828,6 +828,24 @@ class SubscriptionBroker:
         See Also
         --------
         subscribe_range : 范围订阅
+        begin_subscribe_table : 拆成两段的写法（服务器的接收协程用它）
+        """
+        return await (await self.begin_subscribe_table(table_ref, ctx))
+
+    async def begin_subscribe_table(
+        self, table_ref: TableReference, ctx: Context
+    ) -> Coroutine[Any, Any, tuple[str | None, list[dict]]]:
+        """
+        `subscribe_table` 的前半段：检查、订阅表级频道、登记（重复订阅也在这里认出来）。
+        返回后半段的协程，await 它得到与 `subscribe_table` 一样的 (sub_id, rows)。
+        后半段要先等一个 interval 再全量读（复制延迟预算），拆开是为了让服务器的接收协程
+        登记完就去处理下一条消息，后半段交给后台任务。返回的协程必须 await 完或者取消，
+        否则订阅一直停在初始化中。
+
+        The first half of `subscribe_table`: checks, subscribing to the table channel and
+        registering. Returns a coroutine for the second half (wait one interval, then read
+        the whole table), so that the server's receiver can handle the next message
+        meanwhile. The coroutine must be awaited or cancelled.
         """
         # 没声明 table_sub 的组件，commit 不发表频道：订上了也永远收不到通知
         if not table_ref.comp_cls.table_sub_:
@@ -837,7 +855,7 @@ class SubscriptionBroker:
                     "需要的话请在 define_component 里加 table_sub=True，caller：{caller}"
                 ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
             )
-            return None, []
+            return self._settled(None, [])
         # 首先caller要对整个表有权限
         if not self._has_table_permission(table_ref, ctx):
             logger.warning(
@@ -846,7 +864,7 @@ class SubscriptionBroker:
                     "检查是否非法调用，caller：{caller}"
                 ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
             )
-            return None, []
+            return self._settled(None, [])
 
         servant = self._backend.servant
         sub_id = f"{table_ref.comp_name}.table"
@@ -856,12 +874,7 @@ class SubscriptionBroker:
                     sub_id=sub_id
                 )
             )
-            rows = await self._read_whole_table(table_ref, ctx, servant)
-            if rows is None:
-                return None, []
-            for row in rows:
-                del row["_version"]
-            return sub_id, rows
+            return self._reread_table(table_ref, ctx, sub_id)
 
         # 先订阅、一生效就登记（同 subscribe_get）。初始全量读完成之前弹出的通知由
         # TableSubscription 攒着（pending），读完再重新入队
@@ -873,26 +886,55 @@ class SubscriptionBroker:
         self._subs[sub_id] = tbl_sub
         self._channel_subs.setdefault(table_channel, set()).add(sub_id)
         self._sub_counts[TableSubscription] += 1
+        return self._finish_subscribe_table(ctx, sub_id, tbl_sub)
+
+    @staticmethod
+    async def _settled(
+        sub_id: str | None, rows: list[dict]
+    ) -> tuple[str | None, list[dict]]:
+        """前半段就有结果时的后半段"""
+        return sub_id, rows
+
+    async def _reread_table(
+        self, table_ref: TableReference, ctx: Context, sub_id: str
+    ) -> tuple[str | None, list[dict]]:
+        """重复整表订阅：已有的订阅照旧，只把当前可见的行再读一遍返回"""
+        rows = await self._read_whole_table(table_ref, ctx, self._backend.servant)
+        if rows is None:
+            return None, []
+        for row in rows:
+            del row["_version"]
+        return sub_id, rows
+
+    async def _finish_subscribe_table(
+        self, ctx: Context, sub_id: str, tbl_sub: TableSubscription
+    ) -> tuple[str | None, list[dict]]:
+        """整表订阅的后半段：隔一个 interval 全量读，完成初始化"""
         try:
             # 整表重读太贵，不做补读：订阅生效后隔一个 interval 才全量读。生效前已在别的
             # 节点上应用的写入不会再有通知，隔这一下，读到的副本也已应用（复制延迟在预算内）
             await asyncio.sleep(1 / self._mq_client.UPDATE_FREQUENCY)
-            rows = await self._read_whole_table(table_ref, ctx, servant)
+            rows = await self._read_whole_table(tbl_sub.table_ref, ctx, tbl_sub.servant)
         except BaseException:
-            await self.unsubscribe(sub_id)
+            if self._subs.get(sub_id) is tbl_sub:
+                await self.unsubscribe(sub_id)
             raise
+        if self._subs.get(sub_id) is not tbl_sub:
+            # 等的这段时间里被退订了（后半段在后台跑，接收协程照常处理 unsub）：
+            # 这个 sub_id 可能已经重新登记给了新的订阅，别去动它
+            return None, []
         if rows is None:  # 超过行数上限
             await self.unsubscribe(sub_id)
             return None, []
 
         # 初始化期间攒下的通知重新入队重读；初始读已经包含的（读回一样）不再推
         if pending := tbl_sub.finish_init_(rows):
-            self._mq_client.request_reread(table_channel, payload=pending)
+            self._mq_client.request_reread(tbl_sub.table_channel, payload=pending)
         for row in rows:
             del row["_version"]
         logger.debug(
             _("🆕 [📡Subscription] 订阅了整表: {sub_id} {table_channel}").format(
-                sub_id=sub_id, table_channel=table_channel
+                sub_id=sub_id, table_channel=tbl_sub.table_channel
             )
         )
         return sub_id, rows

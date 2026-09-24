@@ -229,6 +229,19 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 # 的清理，否则本协程会一直阻塞在 get() 上，连接半死不活地挂着
                 if reply is PUSH_CLOSE:
                     break
+                if isinstance(reply, asyncio.Future):
+                    # 在后台完成的订阅（整表订阅）占住的回复位：等它填好再发。回复没有
+                    # 请求 id、SDK 按顺序对应，排在它后面的回复都得跟着等
+                    try:
+                        reply = await reply
+                    except Exception as e:
+                        err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
+                            err=f"{type(e).__name__}:{e}"
+                        )
+                        replay.info(err_msg)
+                        logger.exception(err_msg)
+                        ws.fail_connection()
+                        break
                 # 如果关闭了replay，为了速度不执行下面的字符串序列化
                 if replay.level < logging.ERROR:
                     replay.debug(">>> " + str(reply))
