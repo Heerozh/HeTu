@@ -267,3 +267,60 @@ async def test_clean_expired_call_locks(monkeypatch, mod_test_app, tbl_mgr, exec
         "called", left=0, right=0xFFFFFFFF, limit=1, row_format=RowFormat.RAW
     )
     assert len(rows) == 0
+
+
+def _stuck_on(monkeypatch, row_ids) -> None:
+    """让每次提交都抛 InconsistentRangeRead（id 依次取自 row_ids），create_row 最多重试 8 次"""
+    from hetu.data.backend import InconsistentRangeRead
+    from hetu.data.backend.session import Session
+    from hetu.system import SystemClusters
+
+    ids = iter(row_ids)
+
+    async def commit(self):
+        raise InconsistentRangeRead("IndexComp1", "owner", next(ids))
+
+    monkeypatch.setattr(Session, "commit", commit)
+    system = SystemClusters().get_system("create_row")
+    assert system
+    monkeypatch.setattr(system, "max_retry", 8)
+
+
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_stuck_index_row_logs_error(
+    mod_test_app, tbl_mgr, new_ctx, monkeypatch, caplog
+):
+    """同一行连续多次 InconsistentRangeRead：多半是索引里残留了与行数据不一致的项（数据
+    错误），重试不会自愈。打一条 error 告诉运维怎么修，一次调用只打一次"""
+    import random
+
+    from hetu.system.caller import SystemCaller
+
+    row_id = random.randrange(1, 2**62)  # 每次跑换一个 id，不受同一行日志限频的影响
+    _stuck_on(monkeypatch, [row_id] * 8)
+    caller = SystemCaller("pytest", tbl_mgr, new_ctx())
+    with caplog.at_level(logging.ERROR, logger="HeTu"), pytest.raises(RuntimeError):
+        await caller.call("create_row", 1, 2, "a")
+
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1, errors
+    assert "IndexComp1.owner" in errors[0] and str(row_id) in errors[0]
+    assert "hetu upgrade" in errors[0]
+
+
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_race_on_different_rows_no_stuck_log(
+    mod_test_app, tbl_mgr, new_ctx, monkeypatch, caplog
+):
+    """每次对不上的是不同的行：正常的竞态，不打 error"""
+    import random
+
+    from hetu.system.caller import SystemCaller
+
+    base = random.randrange(1, 2**62)
+    _stuck_on(monkeypatch, [base + i for i in range(8)])
+    caller = SystemCaller("pytest", tbl_mgr, new_ctx())
+    with caplog.at_level(logging.ERROR, logger="HeTu"), pytest.raises(RuntimeError):
+        await caller.call("create_row", 1, 2, "a")
+
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]

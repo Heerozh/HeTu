@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import pytest
+from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
@@ -607,6 +608,30 @@ async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend)
             rows = await s1.using(comp).range(owner=(6, 6), limit=-1)
     assert len(rows) == 1
     assert {name for name, _ in reads} == {"A"}, reads
+
+
+@use_redis_family_backend_only
+async def test_orphan_index_member_raises_inconsistent_range_read(
+    item_ref, mod_auto_backend
+):
+    """索引里残留了已经不存在的行（比如维护脚本只删了行 key、没删索引）：range 读到它的
+    写事务抛 InconsistentRangeRead，带上组件、索引和 id，上层据此判断是不是一直卡在同一行"""
+    from hetu.data.backend import InconsistentRangeRead
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    ghost = _item(comp, owner=6, time=1, name="ghost")
+    await _insert_rows(backend, comp, ghost)
+    backend.get_table_maintenance().delete_row(item_ref, int(ghost.id))
+    await backend.wait_for_synced()
+
+    with pytest.raises(InconsistentRangeRead) as exc_info:
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            assert len(await repo.range(owner=(6, 6), limit=-1)) == 0
+            await repo.insert(_item(comp, owner=9, time=2, name="mine"))
+    err = exc_info.value
+    assert (err.comp_name, err.index_name, err.row_id) == ("Item", "owner", ghost.id)
 
 
 async def test_range_reread_after_phantom_is_race(item_ref, mod_auto_backend):
