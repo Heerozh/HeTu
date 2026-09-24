@@ -157,30 +157,56 @@ async def test_uint64_above_int64_max(
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="BUG: IdentityMap.get_dirty_rows 用 str() 序列化行值，bytes 字段被存成 "
-    "\"b'...'\" 这种 repr 文本，读回来多了 b'' 外壳",
-)
+BIN = b"\xff\x80\x00\xfe"  # 不是合法 UTF-8，中间还有 \x00
+
+
 async def test_bytes_roundtrip(blob_ref, mod_auto_backend):
-    """bytes 字段原样往返，中间的 \\x00 不丢"""
+    """bytes 字段原样往返：中间的 \\x00、不是合法 UTF-8 的字节都不丢，
+    STRUCT / TYPED_DICT / get_many 都一样"""
     backend: Backend = mod_auto_backend()
     comp = blob_ref.comp_cls
-    (row_id,) = await _insert(backend, comp, tag=[b"a\x00b"])
+    tags = [b"a\x00b", BIN, "河图".encode()]
+    ids = await _insert(backend, comp, tag=tags)
     servant = backend.servant
 
-    assert (await servant.get(blob_ref, row_id)).tag == b"a\x00b"
-    typed = await servant.get(blob_ref, row_id, RowFormat.TYPED_DICT)
-    assert typed["tag"] == b"a\x00b"
+    for row_id, tag in zip(ids, tags):
+        assert (await servant.get(blob_ref, row_id)).tag == tag
+        typed = await servant.get(blob_ref, row_id, RowFormat.TYPED_DICT)
+        assert typed["tag"] == tag
+    rows = await servant.get_many(blob_ref, ids, RowFormat.TYPED_DICT)
+    assert [row["tag"] for row in rows] == tags
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=AssertionError,
-    reason="BUG: bytes 字段按 repr 文本入库（见 test_bytes_roundtrip），"
-    "按真实值查索引查不到",
-)
+async def test_bytes_index_follows_update_and_delete(blob_ref, mod_auto_backend):
+    """bytes 字段改值、删行后索引跟着变：旧索引项要按真实字节撤掉，删掉后同值还能再插"""
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, tag=[BIN])
+    servant = backend.servant
+    new_tag = b"\x01new\xff"
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=row_id)
+        assert row is not None
+        row.tag = new_tag
+        await repo.update(row)
+    await backend.wait_for_synced()
+    assert len(await servant.range(blob_ref, "tag", BIN)) == 0
+    rows = await servant.range(blob_ref, "tag", new_tag)
+    assert [int(r.id) for r in rows] == [row_id]
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert await repo.get(id=row_id) is not None
+        repo.delete(row_id)
+    await backend.wait_for_synced()
+    assert len(await servant.range(blob_ref, "tag", new_tag)) == 0
+    # unique 索引里的旧项撤干净了：同值可以再插
+    (again,) = await _insert(backend, comp, tag=[new_tag])
+    assert (await servant.get(blob_ref, again)).tag == new_tag
+
+
 async def test_bytes_index_range(blob_ref, mod_auto_backend):
     """bytes 索引按字节序：含 \\x00 的值夹在前缀和更大的值之间；点查只中那一行"""
     backend: Backend = mod_auto_backend()

@@ -1051,7 +1051,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
 
     def _dirty_to_typed_update(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key, value in dirty.items():
@@ -1061,7 +1061,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return ret
 
     def _dirty_to_typed_insert(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key in comp_cls.prop_idx_map_:

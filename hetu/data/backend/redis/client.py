@@ -473,10 +473,16 @@ class RedisBackendClient(BackendClient, alias="redis"):
         comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         """将redis获取的行byte数据解码为指定格式"""
-        row_decoded = {
+        row_decoded: dict[str, str | bytes] = {
             k.decode("utf-8", "ignore"): v.decode("utf-8", "ignore")
             for k, v in row.items()
         }
+        if fmt is not RowFormat.RAW:
+            # bytes 字段用原始字节：utf-8 解码会丢掉不合法的字节，
+            # 非 ASCII 的 str 也存不进 S 类型。RAW 格式照旧一律是 str
+            for name in comp_cls.bytes_fields_:
+                if (raw := row.get(name.encode())) is not None:
+                    row_decoded[name] = raw
         match fmt:
             case RowFormat.RAW:
                 return row_decoded
@@ -845,7 +851,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             _unique_fields,
             _dtype_map,
             _idx_prefix,
-            _row: dict[str, str],
+            _row: dict[str, str | bytes],
             _absent: set[str],
             _comp_name: str,
             _row_id: str,
@@ -870,7 +876,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         ]
                     )
 
-        def _hset_key(_key, _old_version, _update: dict[str, str]):
+        def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
             """添加hset的push命令"""
             # 版本+1
             _ver = int(_old_version) + 1
@@ -950,7 +956,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             absent_rows = absent_by_ref.get(ref, {})
             # insert
             for insert in inserts:
-                row_id = insert["id"]
+                row_id = str(insert["id"])
                 key = id_prefix + row_id
                 absent = absent_rows.get(int(row_id), set())
                 _key_must_not_exist(
@@ -972,7 +978,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 )
             # update
             for old_row, new_row in zip(old_rows, new_rows):
-                row_id = old_row["id"]
+                row_id = str(old_row["id"])
                 key = id_prefix + row_id
                 old_version = old_row["_version"]
                 _version_must_match(key, old_version)

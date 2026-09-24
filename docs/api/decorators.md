@@ -26,7 +26,7 @@ define_component(
 ) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:402`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L402)</small>
+<small>Source: [`hetu/data/component.py:406`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L406)</small>
 
 
 
