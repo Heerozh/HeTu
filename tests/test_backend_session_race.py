@@ -662,6 +662,54 @@ async def test_nonunique_get_hit_moved_while_reading_is_race(
             await repo.insert(_item(comp, owner=9, time=3, name="c"))
 
 
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_get_hit_ci_collation_commits(
+    monkeypatch, new_component_env, mod_auto_backend
+):
+    """SQL 后端 get 命中的行是数据库按自身相等语义找到的（MariaDB 默认大小写不敏感的
+    collation；这里用 SQLite 的 NOCASE 模拟）：get(name="Alice") 命中 "alice" 后写入要能提交，
+    不能因为 Python 里 "alice" != "Alice" 判竞态——重试每次读到的都一样，会一直重试到上限"""
+    import numpy as np
+    import sqlalchemy as sa
+    from fixtures.testdata import create_ref
+
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+    from hetu.data.backend.sql import client as sql_client
+
+    real_type = sql_client._numpy_to_sqla_type
+
+    def ci_type(dtype):
+        col_type = real_type(dtype)
+        if isinstance(col_type, sa.String):
+            return sa.String(length=col_type.length, collation="NOCASE")
+        return col_type
+
+    monkeypatch.setattr(sql_client, "_numpy_to_sqla_type", ci_type)
+
+    @define_component(namespace="pytest", permission=Permission.ADMIN)
+    class CIName(BaseComponent):
+        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
+        qty: np.int16 = property_field(0)
+
+    backend: Backend = mod_auto_backend()
+    create_ref(CIName, backend)  # 表在打了 collation 补丁之后建
+    async with backend.session("pytest", 1) as s:
+        r = CIName.new_row()
+        r.name = "alice"
+        await s.using(CIName).insert(r)
+
+    async with backend.session("pytest", 1) as s:
+        repo = s.using(CIName)
+        row = await repo.get(name="Alice")
+        assert row is not None and row.name == "alice"
+        row.qty = 5
+        await repo.update(row)
+
+    async with backend.session("pytest", 1) as s:
+        row = await s.using(CIName).get(name="alice")
+        assert row is not None and row.qty == 5
+
+
 async def test_range_float_index_truncated_commits(item_ref, mod_auto_backend):
     """float32 索引上的截断读，没有并发写时一次提交成功（不能拿读回的浮点值做等值比较，
     MariaDB 的单精度 FLOAT 会对不上，变成永远失败的重试）"""
