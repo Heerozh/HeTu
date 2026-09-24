@@ -627,3 +627,40 @@ def test_upgrade_rebuilds_index_by_default(monkeypatch):
     MigrateCommand.execute(index.parser.parse_args(base))
     MigrateCommand.execute(index.parser.parse_args([*base, "--no-rebuild-index"]))
     assert passed == [True, False]
+
+
+@use_redis_family_backend_only
+async def test_live_worker_ids_sees_unexpired_leases(mod_auto_backend):
+    """upgrade 靠 worker 租约判断服务器还在不在跑：没过期的租约都算"""
+    from hetu.data.backend.worker_keeper import live_worker_ids
+
+    backend = mod_auto_backend()
+    io = backend.master.io
+    key = "snowflake:worker:1023"  # 最后一个 id，别的测试起的服务一般占不到
+    io.delete(key)
+    assert 1023 not in live_worker_ids(backend)
+    io.set(key, "pytest-node", ex=60)
+    try:
+        assert 1023 in live_worker_ids(backend)
+    finally:
+        io.delete(key)
+
+
+def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):
+    """还有服务器持有 worker 租约时 upgrade 以退出码 1 退出：迁移、清空易失表、重建索引
+    在服务器运行时执行都会写坏数据。在加载 app 之前就退出，什么都没动"""
+    from hetu.cli.migrate import MigrateCommand
+    from hetu.data.backend import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "live_worker_ids", lambda backend: [3])
+    db = (tmp_path / "db.sqlite3").as_posix()
+    config = {
+        "APP_FILE": str(tmp_path / "no_such_app.py"),
+        "NAMESPACE": "ns",
+        "INSTANCES": ["s1"],
+        "BACKENDS": {"SQLite": {"type": "sql", "master": f"sqlite:///{db}"}},
+    }
+    with pytest.raises(SystemExit) as exc_info:
+        MigrateCommand.run(config, True, False)
+    assert exc_info.value.code == 1
+    assert "3" in capsys.readouterr().out
