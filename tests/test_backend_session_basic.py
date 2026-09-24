@@ -734,10 +734,8 @@ async def test_range_interval_desc(filled_item_ref, mod_auto_backend):
             range(114, 110, -1),
         )
         # 字符串索引同理
-        assert list((await item_repo.range(name=("(Itm10", "Itm12"), desc=True)).name) == [
-            "Itm12",
-            "Itm11",
-        ]
+        rows = await item_repo.range(name=("(Itm10", "Itm12"), desc=True)
+        assert list(rows.name) == ["Itm12", "Itm11"]
 
 
 async def test_range_infinite(filled_item_ref, mod_auto_backend):

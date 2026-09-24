@@ -727,13 +727,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间。desc 时上面已把值换过来，li / ri
+        # 跟着各自的值走（left 是上界、right 是下界），不能再交换
         left, li = peel_bound_(left)
         right, ri = peel_bound_(right)
         li = True if li is None else li
         ri = True if ri is None else ri
-        if desc:
-            li, ri = ri, li
 
         left = cls._normalize_range_bound(dtype, left)
         right = cls._normalize_range_bound(dtype, right)

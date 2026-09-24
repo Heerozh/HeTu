@@ -646,10 +646,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         ri = True if ri is None else ri
         # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
         # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
-        ls = b"\x00" if li else b"\x00\xff"
-        rs = b"\x00\xff" if ri else b"\x00"
+        # 后缀按上界 / 下界的角色取：desc 时上面已把值换过来，left 是上界、right 是下界，
+        # li / ri 也跟着各自的值走
         if desc:
-            ls, rs = rs, ls
+            ls = b"\x00\xff" if li else b"\x00"
+            rs = b"\x00" if ri else b"\x00\xff"
+        else:
+            ls = b"\x00" if li else b"\x00\xff"
+            rs = b"\x00\xff" if ri else b"\x00"
 
         # 二进制化。
         b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
