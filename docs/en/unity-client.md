@@ -172,6 +172,19 @@ must be declared with `table_sub=True` (see
 server refuses undeclared tables and tables larger than
 `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default), and the call resolves to `null`.
 
+A table subscription reads its rows about 100 ms (one push interval) after it
+becomes active, so that the replica it reads from has caught up. To subscribe to
+several tables, send all the calls first and then await them: the server lets
+them wait together, whereas awaiting one at a time pays the wait once per table.
+
+```csharp
+// Several tables after login: send them all, then await
+var namesTask = HeTuClient.Instance.WatchTable<PlayerNames>();
+var guildsTask = HeTuClient.Instance.WatchTable<GuildList>();
+var names = await namesTask;
+var guilds = await guildsTask;
+```
+
 For a `WatchRange` point query (`left == right`, e.g.
 `WatchRange<Item>("owner", myId, myId, 100)`) to be efficient, declare the
 server-side index with `point_sub=True`; otherwise any write to that index makes

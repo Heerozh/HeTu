@@ -187,6 +187,10 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
+    # 表级频道名的后缀，各后端的 table_channel 都是 cluster_prefix 加它；通知接收器靠它认出
+    # 哪些频道的 payload 是 row_id 集合
+    TABLE_CHANNEL_SUFFIX = ":table"
+
     def index_channel(self, table_ref: TableReference, index_name: str):
         """
         返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
@@ -909,6 +913,8 @@ class MQClient:
     DROP_AFTER = 120
     # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
     RESYNC = "*"
+    # 日志里的后端标签，后端实现覆盖
+    LOG_TAG = "MQ"
 
     def __init__(self) -> None:
         # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
@@ -979,8 +985,15 @@ class MQClient:
         becomes active: a write that another node applied before that moment, but the
         replica we read from had not, is neither in the initial rows nor notified again.
         """
+        dropped = 0
         for channel_name in channel_names:
-            self._enqueue(channel_name, payload)
+            dropped += self._enqueue(channel_name, payload)
+        if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
+            logger.warning(
+                _(
+                    "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
+                ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
+            )
 
     def _enqueue(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
         """放进本地队列（同频道合并），返回因 `DROP_AFTER` 丢弃的旧通知条数"""
@@ -1049,11 +1062,16 @@ class MQClient:
             while dq and dq[0][0] <= cutoff:
                 channel_name = dq.popleft()[1]
                 self.pulled_set.discard(channel_name)
-                rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+                payload = self.pulled_payload.pop(channel_name, None)
+                rtn[channel_name] = payload
                 late = self._late.pop(channel_name, None)
                 late_ids = self._late_payload.pop(channel_name, None)
                 if late is not None and late > cutoff:
                     trailing.append((channel_name, late_ids))
+                    if payload and late_ids and self.RESYNC in late_ids:
+                        # 整表重同步是整表重读、全量重推：迟到的 RESYNC 这次读还不满预算，
+                        # 只留给尾随重读做一次，这次只读原有的 row_id
+                        payload.discard(self.RESYNC)
             # 合并进来的通知离这次读不足一个 interval：读可能落在还没应用它的副本上，它的
             # 通知却已经合并掉了。重新入队，interval 后再读一次。用现在的时刻而不是迟到那条
             # 的时刻，队列才保持按时间有序；持续写入时它正好顶替下一批的队头，读的次数不变
@@ -1159,7 +1177,6 @@ class HubMQClient(MQClient):
 
     # 单个连接订阅频道数的告警线；子类可覆盖
     MAX_SUBSCRIBED = 5000
-    LOG_TAG = "MQ"
 
     def __init__(self, hub: MQHub):
         super().__init__()  # 本地消息队列

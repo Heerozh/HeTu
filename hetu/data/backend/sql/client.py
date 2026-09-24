@@ -372,7 +372,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     @override
     def table_channel(self, table_ref: TableReference):
-        return f"{self.cluster_prefix(table_ref)}:table"
+        return f"{self.cluster_prefix(table_ref)}{self.TABLE_CHANNEL_SUFFIX}"
 
     def __init__(self, endpoint: str | list[str], is_servant, **kwargs):
         super().__init__(endpoint, is_servant, **kwargs)

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, final
 import msgpack
 
 from ....i18n import _
-from ..base import HubMQClient, MQClient, MQHub
+from ..base import BackendClient, HubMQClient, MQClient, MQHub
 from .pubsub import AsyncKeyspacePubSub
 
 if TYPE_CHECKING:
@@ -143,15 +143,24 @@ class PubSubHub(MQHub):
     def _on_resubscribed(self, channels: list[str]) -> None:
         """
         AsyncKeyspacePubSub 节点失效后全部重订生效时同步调用：失效到现在的写入都没有通知，
-        给仍有人订的频道各分发一条 `RESYNC`，各连接一个 interval 后补读（行 / 索引订阅
-        重读、重跑比对；整表订阅整表重同步）。服务端内部 watch 的回调也照常触发一次，
-        断线期间丢的顶号通知由此补查。
+        给仍有人订的频道各分发一条通知，各连接一个 interval 后补读（行 / 索引订阅重读、
+        重跑比对；整表订阅整表重同步）。只有表级频道带 `RESYNC`：它的 payload 本来就是
+        row_id 集合，整表订阅靠这个标记整表重读；行 / 索引（含值）频道照约定 payload 为 None。
+        服务端内部 watch 的回调也照常触发一次，断线期间丢的顶号通知由此补查。
         """
         dropped = 0
         for channel in channels:
             if channel in self._subs:
-                dropped += self._dispatch(channel, [MQClient.RESYNC])
+                ids = [MQClient.RESYNC] if self._is_table_channel(channel) else None
+                dropped += self._dispatch(channel, ids)
         self._warn_dropped(dropped)
+
+    @staticmethod
+    def _is_table_channel(channel: str) -> bool:
+        """表级频道（commit 主动 PUBLISH，payload 是 row_id 列表）；行 / 索引是 keyspace 通知"""
+        return not channel.startswith("__keyspace@") and channel.endswith(
+            BackendClient.TABLE_CHANNEL_SUFFIX
+        )
 
     @staticmethod
     def _warn_dropped(dropped: int) -> None:

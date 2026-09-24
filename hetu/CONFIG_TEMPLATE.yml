@@ -135,19 +135,17 @@ BACKENDS:
     type: Redis
     # 指定master服务器，只能一个地址
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
-    #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
-    #        代理层（如云厂商的Redis代理版/集群代理版）多数不支持RESP3协议的HELLO命令，
-    #        启动时会报 ResponseError: unknown command，此时在url后追加 ?protocol=2
-    #        降级到RESP2即可，servants里的url也要一起加。河图没有用到RESP3独有特性。
-    # 不建议生产环境使用关系数据库，因为订阅表性能不够，如果要提高性能还是要借助Redis或ZMQ等消息服务。
-    # 开发环境可以用SQLite方便调试部署。
-    # Postgres: postgresql://user:pass@localhost:5432/dbname
+    #        要求Redis >= 7.0（推荐>=8.8有通知快速路径）。
+    #        但广泛兼容Forks: Valkey(推荐>=9.2有通知快速路径), Tair等；支持redis代理层。
+    #        代理层多数不支持RESP3协议，启动时会报 ResponseError: unknown command，
+    #        此时在url后追加 ?protocol=2 降级。河图没有用到RESP3独有特性。
+    # SQL仅限开发环境，主要为了SQLite方便，生产环境订阅表性能不够。
     # SQLite:   sqlite:///./data/hetu.sqlite3
-    # MariaDB:  mysql://user:pass@localhost:3306/dbname
     master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。
+    # 生产环境下要么代理层后有至少一个只读节点，要么这里至少填一个。
     # Redis:
     #  - redis下，servant就是只读replica服务器
     #  - 开启redis原生集群模式的无需填写此项，可自动生效，因为原生集群会自动加载replica地址

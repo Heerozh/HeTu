@@ -5,6 +5,7 @@ MQClient 本地队列（get_message / push_pulled_）：空闲时不轮询，来
 
 import asyncio
 import contextlib
+import logging
 import time
 
 import pytest
@@ -193,6 +194,37 @@ async def test_trailing_read_carries_only_late_payload():
     await hub.close()
 
 
+async def test_merged_resync_is_left_to_trailing_read():
+    """RESYNC 合并进已在队列里的表级频道：这次弹出离它不足一个 interval，整表重同步只留给
+    尾随重读做一次（那时已过复制延迟预算），这次只重读原有的 row_id。两次都带 RESYNC
+    就是两遍整表重读、全量重推"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("T", ["1"])
+    await asyncio.sleep(INTERVAL * 0.5)
+    mq.push_pulled_("T", [MQClient.RESYNC])  # 合并进队头
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {"1"}}
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {MQClient.RESYNC}}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
+async def test_merged_resync_old_enough_resyncs_in_this_read():
+    """合并进来的 RESYNC 到弹出时已经超过一个 interval（取得晚）：这次读已经满足预算，
+    就在这次整表重同步，不补排"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("T", ["1"])
+    mq.push_pulled_("T", [MQClient.RESYNC])
+    await asyncio.sleep(INTERVAL * 2.5)
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {"1", MQClient.RESYNC}}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
 async def test_request_reread():
     """request_reread：当作刚收到通知放进本地队列，interval 后弹出；不触发 watch 回调"""
     hub, node = make_hub()
@@ -224,4 +256,21 @@ async def test_drop_after_clears_late_state(monkeypatch):
     await asyncio.sleep(INTERVAL)
     assert mq.push_pulled_("B", None) == 1  # A 被当作积压丢弃
     assert "A" not in mq._late and "A" not in mq._late_payload
+    await hub.close()
+
+
+async def test_request_reread_warns_dropped_backlog(monkeypatch, caplog):
+    """request_reread 入队时同样会清掉积压超过 DROP_AFTER 的旧通知：清掉了就得和收到通知时
+    一样打积压警告，不能悄悄丢"""
+    monkeypatch.setattr(MQClient, "DROP_AFTER", INTERVAL * 0.5)
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("A", None)
+    await asyncio.sleep(INTERVAL)
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        mq.request_reread("B")
+    assert "A" not in mq.pulled_set  # A 被当作积压丢弃
+    warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warns) == 1, "积压的通知被丢弃了却没有警告"
+    assert "💾Redis" in warns[0].getMessage()
     await hub.close()

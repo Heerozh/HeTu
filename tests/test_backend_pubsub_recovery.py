@@ -127,18 +127,28 @@ async def test_resubscribe_reports_recovered_channels():
     await pubsub.close()
 
 
+# 按真实命名：行、索引是 keyspace 通知；值频道、表级频道是 commit 主动 PUBLISH 的普通频道
+KS_ROW = "__keyspace@0__:pytest:Item:{CLU1}:id:1"
+KS_INDEX = "__keyspace@0__:pytest:Item:{CLU1}:index:owner"
+VALUE = "pytest:Item:{CLU1}:index:owner:800000000000000a"
+TABLE = "pytest:Item:{CLU1}:table"
+
+
 async def test_hub_dispatches_resync_after_resubscribe():
-    """hub 收到重订生效的回调：给仍有人订的频道各分发一条 RESYNC，各连接 interval 后重读；
-    服务端内部 watch 的频道回调也照常触发（断线期间丢的顶号通知由此补查一次）"""
+    """hub 收到重订生效的回调：给仍有人订的频道各分发一条通知，各连接 interval 后重读。
+    只有表级频道带 RESYNC（它的 payload 本来就是 row_id 集合，整表订阅据此整表重同步）；
+    行 / 索引 / 值频道的 payload 照约定是 None。服务端内部 watch 的频道回调也照常触发
+    （断线期间丢的顶号通知由此补查一次）"""
     hub, node = make_hub()
     mq = RedisMQClient(hub)
     fired: list[str] = []
+    channels = (KS_ROW, KS_INDEX, VALUE, TABLE)
     t = asyncio.gather(
-        mq.subscribe(ROW_A), mq.watch(ROW_B, lambda: fired.append(ROW_B))
+        mq.subscribe(*channels), mq.watch(ROW_B, lambda: fired.append(ROW_B))
     )
     await settle()
-    node.ack("subscribe", ROW_A)
-    node.ack("subscribe", ROW_B)
+    for channel in (*channels, ROW_B):
+        node.ack("subscribe", channel)
     async with asyncio.timeout(1):
         await t
 
@@ -146,11 +156,16 @@ async def test_hub_dispatches_resync_after_resubscribe():
     await settle()
     node2 = attach_fake_node(hub._pubsub)  # type: ignore[reportPrivateUsage]
     async with asyncio.timeout(3):
-        while sorted(node2.sent("subscribe")) != [ROW_A, ROW_B]:
+        while sorted(node2.sent("subscribe")) != sorted((*channels, ROW_B)):
             await asyncio.sleep(0.05)
-    node2.ack("subscribe", ROW_A)
-    node2.ack("subscribe", ROW_B)
+    for channel in (*channels, ROW_B):
+        node2.ack("subscribe", channel)
     async with asyncio.timeout(1):
-        assert await mq.get_message() == {ROW_A: {MQClient.RESYNC}}
+        assert await mq.get_message() == {
+            KS_ROW: None,
+            KS_INDEX: None,
+            VALUE: None,
+            TABLE: {MQClient.RESYNC},
+        }
     assert fired == [ROW_B]
     await hub.close()

@@ -192,7 +192,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         `table_sub`. The name carries the {CLU} hash tag, so in cluster mode
         AsyncKeyspacePubSub routes the subscription by slot.
         """
-        return f"{self.cluster_prefix(table_ref)}:table"
+        return f"{self.cluster_prefix(table_ref)}{self.TABLE_CHANNEL_SUFFIX}"
 
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
