@@ -1088,6 +1088,47 @@ async def test_point_query_hidden_row_leaving_is_not_pushed(
     assert idx_sub.last_range_result.isdisjoint({moved, deleted})
 
 
+async def test_range_query_hidden_rows_are_not_pushed(
+    broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
+):
+    """
+    区间查询（订整个索引的频道，不走值频道）同理：订阅生效后的补读把范围内不可见的行也订上
+    行频道，它们在不可见期间变化、离开范围（改走 / 删除）都不能推 None
+    """
+    backend = broker._backend
+    comp = filled_rls_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        rows = await repo.range(id=(0, float("inf")), limit=3)
+        changed, moved, deleted = (int(r.id) for r in rows)
+        for row in rows:
+            row.friend = 12
+            await repo.update(row)
+    sub_id, visible = await broker.subscribe_range(
+        filled_rls_ref, user_id11_ctx, "owner", 9, 10, limit=33
+    )
+    assert sub_id and len(visible) == 22
+    assert await broker.get_updates(timeout=0.5) == {}
+    idx_sub = cast(IndexSubscription, broker._subs[sub_id])
+    assert idx_sub.point_value is None and len(idx_sub.row_subs) == 25
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=changed)
+        assert row
+        row.friend = 13  # 对 user 11 仍不可见
+        await repo.update(row)
+        row = await repo.get(id=moved)
+        assert row
+        row.owner = 12  # 离开 [9, 10]
+        await repo.update(row)
+        assert await repo.get(id=deleted) is not None
+        repo.delete(deleted)
+    assert await broker.get_updates(timeout=1) == {}
+    assert len(idx_sub.row_subs) == 23
+    assert idx_sub.last_range_result.isdisjoint({moved, deleted})
+
+
 async def test_point_query_on_undeclared_index_falls_back(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
