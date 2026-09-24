@@ -1626,6 +1626,90 @@ async def test_subscribe_get_registers_before_read(
     await updates_until(broker, changed)
 
 
+async def test_subscribe_get_reply_not_overtaken_by_older_inflight_push(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    subscribe_get 登记后、读回之前，一个 tick 已经拿更早预读的旧行替这个新订阅算好了推送，
+    却在 sub 回复发出之后才送达：客户端最终手里是旧行。之后的补读、通知读回的都和回复里的
+    一样（pushed 记的是回复那份），去重把纠正挡掉，客户端一直停在旧行，直到这行再变
+    """
+    backend = broker._backend
+    servant = backend.servant
+    mq = broker._mq_client
+    comp = filled_item_ref.comp_cls
+    sub_10, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    assert sub_10
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+    row_id = next(r["id"] for r in rows if r["time"] == 111)
+
+    async def set_qty(qty: int):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=row_id)
+            assert row
+            row.qty = qty
+            await repo.update(row)
+        await backend.wait_for_synced()
+
+    # sub_10 订着这行的行频道：这次写入的通知进本连接队列，先不 tick
+    await set_qty(5)
+
+    # subscribe_get 登记完，卡在读上
+    real_get = servant.get
+    reading = asyncio.Event()
+    release_read = asyncio.Event()
+
+    async def slow_get(*args, **kwargs):
+        if not reading.is_set():
+            reading.set()
+            await release_read.wait()
+        return await real_get(*args, **kwargs)
+
+    # tick 算完各订阅的推送、到末尾批量订阅时卡住：推送还没交给客户端
+    real_subscribe = mq.subscribe
+    computed = asyncio.Event()
+    release_tick = asyncio.Event()
+
+    async def slow_subscribe(*channels: str):
+        computed.set()
+        await release_tick.wait()
+        await real_subscribe(*channels)
+
+    try:
+        async with asyncio.timeout(15):
+            with patch.object(servant, "get", slow_get):
+                get_task = asyncio.create_task(
+                    broker.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+                )
+                await reading.wait()
+                with patch.object(mq, "subscribe", slow_subscribe):
+                    tick = asyncio.create_task(broker.get_updates(timeout=10))
+                    await computed.wait()
+                    await set_qty(6)  # subscribe_get 读回之前又写了一次
+                    release_read.set()
+                    sub_row, row = await get_task  # sub 回复先发给客户端
+                    release_tick.set()
+                    pushed = await tick  # tick 的推送随后才送达
+    finally:
+        release_read.set()
+        release_tick.set()
+    assert sub_row and row and row["qty"] == 6
+    assert pushed[sub_10][row_id]["qty"] == 5  # 这个 tick 确实是在订阅读期间处理的
+
+    # 客户端按收到的先后应用：先是 sub 回复，再是 tick 的推送
+    client: dict[str, dict] = {sub_row: {row_id: row}}
+    for sub_id, sub_rows in pushed.items():
+        client.setdefault(sub_id, {}).update(sub_rows)
+
+    def caught_up(updates):
+        assert updates[sub_row][row_id]["qty"] == 6
+
+    await updates_until(broker, caught_up, merged=client, timeout=3)
+
+
 async def test_subscribe_get_invisible_row_leaves_no_subscription(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, user_id11_ctx
 ):
