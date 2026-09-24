@@ -11,7 +11,7 @@ import weakref
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 
@@ -25,9 +25,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+
+class _Unknown:
+    """RowSubscription.pushed 的哨兵类型，见 UNKNOWN"""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNKNOWN"
+
+
 # 还不知道客户端持有什么内容（订阅已登记、初始行还没读回；或读期间已有推送，客户端最终
 # 持有哪份说不准）：之后的任何读都照推
-UNKNOWN = object()
+UNKNOWN: Final = _Unknown()
 
 # 点查询落在没声明 point_sub 的索引上时已经警告过的：组件类 → {索引名}。按类记（不按名字），
 # 测试里同名组件每次重定义都是新类；弱引用，组件类被重定义回收后自动清掉
@@ -49,6 +59,24 @@ def warn_point_sub_fallback_(table_ref: TableReference, index_name: str) -> None
             "需要高效点订阅请在 property_field 里加 point_sub=True"
         ).format(comp_name=table_ref.comp_name, index_name=index_name)
     )
+
+
+async def read_whole_table_(
+    servant: BackendClient, table_ref: TableReference, max_rows: int
+) -> tuple[list[dict[str, Any]], bool]:
+    """
+    整表读：按 id 升序读原始行（含 _version，不做 RLS 判定），最多 max_rows 行。多读一行
+    看后面还有没有，返回 (行, 是否超过上限被截断)。id 是每个 Component 隐式的 unique 索引
+    """
+    rows = await servant.range(
+        table_ref,
+        "id",
+        float("-inf"),
+        float("inf"),
+        limit=max_rows + 1,
+        row_format=RowFormat.TYPED_DICT,
+    )
+    return rows[:max_rows], len(rows) > max_rows
 
 
 def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
@@ -93,7 +121,7 @@ class RowSubscription(BaseSubscription):
         ctx: Context | None,
         channel: str,
         row_id: int,
-        pushed: int | None | object = UNKNOWN,
+        pushed: int | _Unknown | None = UNKNOWN,
     ):
         self.table_ref = table_ref
         self.servant = servant
@@ -105,7 +133,7 @@ class RowSubscription(BaseSubscription):
         self.row_id = row_id
         # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推。
         # 客户端没有这行（行不存在，或 RLS 不可见）时为 None
-        self.pushed = pushed
+        self.pushed: int | _Unknown | None = pushed
         if RowSubscription.__cache.get(None) is None:
             RowSubscription.__cache.set({})
 
@@ -198,9 +226,8 @@ class IndexSubscription(BaseSubscription):
         # 通知，行"离开"（删除、字段改走）要靠结果里各行的行频道发现，见 get_updated
         self.point_value = point_value
 
-    def add_row_subscriber(
-        self, channel, row_id, pushed: int | None | object = UNKNOWN
-    ):
+    def add_row_subscriber(self, channel: str, row_id: int, pushed: int | None):
+        """登记初始结果里的一行，pushed 是客户端拿到的那份的指纹"""
         self.row_subs[channel] = RowSubscription(
             self.table_ref, self.servant, self.rls_ctx, channel, row_id, pushed
         )
@@ -302,9 +329,9 @@ class TableSubscription(BaseSubscription):
         servant: BackendClient,
         ctx: Context,
         table_channel: str,
-        known_ids: set[int],
         max_rows: int,
     ):
+        """建好时处于初始化中，初始全量读完成后调 `finish_init_`"""
         self.table_ref = table_ref
         self.servant = servant
         if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
@@ -312,8 +339,9 @@ class TableSubscription(BaseSubscription):
         else:
             self.rls_ctx = None
         self.table_channel = table_channel
-        # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知
-        self.known_ids = known_ids
+        # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知；
+        # 初始化完成时由初始行填上
+        self.known_ids: set[int] = set()
         # 整表重同步（RESYNC）最多读多少行，同 subscribe_table 的上限
         self.max_rows = max_rows
         # 上一批读过的可见行 → 内容指纹。不按行常驻（known_ids 已是每连接一份）：尾随重读
@@ -322,7 +350,23 @@ class TableSubscription(BaseSubscription):
         # 初始化中（订阅已生效、初始全量读还没完成）为 set：这期间弹出的通知不读库也不推，
         # 只把 row_id 攒在这里，初始读完成后重新入队——客户端还没拿到 sub_id，推了会被
         # 丢掉，而初始读又未必包含这些写入。初始化完成后为 None
-        self.pending: set[str] | None = None
+        self.pending: set[str] | None = set()
+
+    def finish_init_(self, rows: list[dict[str, Any]]) -> set[str]:
+        """
+        初始全量读完成（rows 为客户端将拿到的行，含 _version）：记下客户端持有的行，退出
+        初始化。返回初始化期间攒下的 row_id，调用方要把它们重新入队重读；初始读已经包含的
+        读回一样，不会再推
+        """
+        assert self.pending is not None, "重复完成初始化"
+        pending, self.pending = self.pending, None
+        self.known_ids = {int(row["id"]) for row in rows}
+        self.last_read = {
+            int(row["id"]): row_fingerprint_(row)
+            for row in rows
+            if str(row["id"]) in pending
+        }
+        return pending
 
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
@@ -376,16 +420,8 @@ class TableSubscription(BaseSubscription):
         这段时间的变更不可知（pubsub 断线重连，期间的通知全丢了）：整表重读，推所有可见行，
         已知但读不到、或不再可见的行推 None。
         """
-        rows = cast(
-            list[dict[str, Any]],
-            await self.servant.range(
-                self.table_ref,
-                "id",
-                float("-inf"),
-                float("inf"),
-                limit=self.max_rows,
-                row_format=RowFormat.TYPED_DICT,
-            ),
+        rows, truncated = await read_whole_table_(
+            self.servant, self.table_ref, self.max_rows
         )
         comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
@@ -402,8 +438,8 @@ class TableSubscription(BaseSubscription):
             elif row_id in known:
                 rtn[row_id] = None
                 known.discard(row_id)
-        # 读满上限时后面可能还有行没读到（按 id 升序），只对读到的 id 范围内的已知行判删除
-        bound = max(seen) if seen and len(rows) >= self.max_rows else None
+        # 超过上限时后面还有行没读到（按 id 升序），只对读到的 id 范围内的已知行判删除
+        bound = max(seen) if seen and truncated else None
         for row_id in known - seen:
             if bound is None or row_id <= bound:
                 rtn[row_id] = None
@@ -832,9 +868,8 @@ class SubscriptionBroker:
         table_channel = servant.table_channel(table_ref)
         await self._mq_client.subscribe(table_channel)
         tbl_sub = TableSubscription(
-            table_ref, servant, ctx, table_channel, set(), self._max_table_rows
+            table_ref, servant, ctx, table_channel, self._max_table_rows
         )
-        tbl_sub.pending = set()
         self._subs[sub_id] = tbl_sub
         self._channel_subs.setdefault(table_channel, set()).add(sub_id)
         self._sub_counts[TableSubscription] += 1
@@ -850,15 +885,8 @@ class SubscriptionBroker:
             await self.unsubscribe(sub_id)
             return None, []
 
-        pending, tbl_sub.pending = tbl_sub.pending, None
-        tbl_sub.known_ids = {int(row["id"]) for row in rows}
-        if pending:
-            # 初始化期间攒下的通知重新入队重读；初始读已经包含的（读回一样）不再推
-            tbl_sub.last_read = {
-                int(row["id"]): row_fingerprint_(row)
-                for row in rows
-                if str(row["id"]) in pending
-            }
+        # 初始化期间攒下的通知重新入队重读；初始读已经包含的（读回一样）不再推
+        if pending := tbl_sub.finish_init_(rows):
             self._mq_client.request_reread(table_channel, payload=pending)
         for row in rows:
             del row["_version"]
@@ -874,16 +902,8 @@ class SubscriptionBroker:
     ) -> list[dict[str, Any]] | None:
         """全量读取 caller 可见的行（含 _version）；超过 max_table_rows 返回 None"""
         max_rows = self._max_table_rows
-        # 全量读取：id是每个Component的隐式unique索引，多读1行用于判断是否超限
-        rows = await servant.range(
-            table_ref,
-            "id",
-            float("-inf"),
-            float("inf"),
-            limit=max_rows + 1,
-            row_format=RowFormat.TYPED_DICT,
-        )
-        if len(rows) > max_rows:
+        rows, truncated = await read_whole_table_(servant, table_ref, max_rows)
+        if truncated:
             logger.warning(
                 _(
                     "⚠️ [📡Subscription] {comp_name}整表订阅行数超过限制"
