@@ -707,6 +707,39 @@ async def test_range_interval(filled_item_ref, mod_auto_backend):
         )
 
 
+async def test_range_interval_desc(filled_item_ref, mod_auto_backend):
+    """降序的开闭区间与升序相同、只是顺序相反：两端开闭不同时不能互换"""
+    backend: Backend = mod_auto_backend()
+
+    # time范围为110-134，name为Itm10-Itm34，见test_data.py的filled_item_ref夹具
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(110, 115), desc=True)).time,
+            range(115, 109, -1),
+        )
+        # 左闭右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("[110", "(115"), desc=True)).time,
+            range(114, 109, -1),
+        )
+        # 左开右闭
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "[115"), desc=True)).time,
+            range(115, 110, -1),
+        )
+        # 左开右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "(115"), desc=True)).time,
+            range(114, 110, -1),
+        )
+        # 字符串索引同理
+        assert list((await item_repo.range(name=("(Itm10", "Itm12"), desc=True)).name) == [
+            "Itm12",
+            "Itm11",
+        ]
+
+
 async def test_range_infinite(filled_item_ref, mod_auto_backend):
     """测试np.inf作为范围值"""
     backend: Backend = mod_auto_backend()
