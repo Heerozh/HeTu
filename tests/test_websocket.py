@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 from typing import Callable, cast
@@ -11,6 +12,7 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
 import hetu
 from hetu import webext
+from hetu.data import sub as sub_module
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import pipeline, worker_main
@@ -513,6 +515,191 @@ def test_websocket_table_subscribe_limit(test_server):
     _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     assert response.client_received[0][1] == "PublicNames.table"
     assert closed_detected, "连接没有被服务器关闭"
+
+
+# ==== 整表订阅要先等一个 interval 再全量读（复制延迟预算），等待不能堵住接收协程 ====
+
+
+@pytest.mark.timeout(30)
+def test_websocket_table_subscribe_does_not_block_following_messages(
+    monkeypatch, test_server
+):
+    """整表订阅在等全量读的时候，后面的消息照常执行（另一个连接能先看到后面那个 RPC 的
+    写入）；回复没有请求 id、SDK 按顺序对应，所以回复仍按请求顺序送达"""
+    real_read = sub_module.read_whole_table_
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_read(*args, **kwargs):
+        gate["reading"].set()
+        await gate["release"].wait()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        watcher = await connect()
+        await watcher.send(["sub", "PublicNames", "range", "owner", 8001, 8002])
+        watch_id = (await watcher.recv())[1]
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 整表订阅卡在全量读上
+            await client.send(["rpc", "set_public_name", 8001, "Early"])
+            try:
+                async with asyncio.timeout(5):
+                    result["early"] = await watcher.recv()
+            except TimeoutError:
+                result["early"] = None
+        finally:
+            gate["release"].set()
+        order = []
+        async with asyncio.timeout(5):
+            while len(order) < 2:
+                msg = await client.recv()
+                if msg[0] in ("sub", "rsp"):
+                    order.append(msg[0])
+        result["order"] = order
+        result["watch_id"] = watch_id
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["early"], "整表订阅在等全量读，后面的 RPC 没被执行"
+    assert result["early"][:2] == ["updt", result["watch_id"]]
+    assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_table_subscribes_wait_concurrently(monkeypatch, test_server):
+    """连着发两个整表订阅：第二个不用排在第一个的等待和全量读后面（登录时常一次订好几张
+    表，串行就是每张一个 interval）；回复仍按请求顺序"""
+    real_read = sub_module.read_whole_table_
+    release: dict[str, asyncio.Event] = {}
+    reads: list[str] = []
+
+    async def gated_read(servant, table_ref, max_rows):
+        reads.append(table_ref.comp_name)
+        if len(reads) == 1:  # 先读的那张表卡住
+            await release["event"].wait()
+        return await real_read(servant, table_ref, max_rows)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        release["event"] = asyncio.Event()
+        client = await connect()
+        await client.send(["rpc", "login", 7101])  # 登录后整表订阅数上限才够两张
+        await client.recv()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            await client.send(["sub", "PublicConfig", "table"])
+            try:
+                async with asyncio.timeout(5):
+                    while len(reads) < 2:
+                        await asyncio.sleep(0.01)
+                result["concurrent"] = True
+            except TimeoutError:
+                result["concurrent"] = False
+        finally:
+            release["event"].set()
+        replies = []
+        async with asyncio.timeout(5):
+            while len(replies) < 2:
+                msg = await client.recv()
+                if msg[0] == "sub":
+                    replies.append(msg[1])
+        result["replies"] = replies
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["concurrent"], "第二个整表订阅排在了第一个的等待后面"
+    assert result["replies"] == ["PublicNames.table", "PublicConfig.table"]
+
+
+@pytest.mark.timeout(30)
+def test_websocket_disconnect_while_table_subscribe_waits(monkeypatch, test_server):
+    """整表订阅等全量读期间客户端断开：等待中的后半段要跟着连接一起取消，不能挂在后台"""
+    real_read = sub_module.read_whole_table_
+    state: dict[str, asyncio.Event] = {}
+
+    async def gated_read(*args, **kwargs):
+        state["reading"].set()
+        try:
+            await state["release"].wait()
+        except asyncio.CancelledError:
+            state["cancelled"].set()
+            raise
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        for name in ("reading", "release", "cancelled"):
+            state[name] = asyncio.Event()
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            async with asyncio.timeout(5):
+                await state["reading"].wait()
+            await client.close()
+            try:
+                async with asyncio.timeout(5):
+                    await state["cancelled"].wait()
+                result["cancelled"] = True
+            except TimeoutError:
+                result["cancelled"] = False
+        finally:
+            state["release"].set()
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["cancelled"], "断线后整表订阅的后半段还挂在后台"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_duplicate_table_subscribe_while_waiting(monkeypatch, test_server):
+    """整表订阅等全量读期间又订同一张表：认得出是重复订阅、不重复登记（未登录上限 1 张，
+    重复登记会超限断线）；两个回复按顺序送达，连接照常可用"""
+    real_read = sub_module.read_whole_table_
+    state: dict[str, asyncio.Event] = {}
+    reads: list[None] = []
+
+    async def gated_read(*args, **kwargs):
+        reads.append(None)
+        await state["release"].wait()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        state["release"] = asyncio.Event()
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            await client.send(["sub", "PublicNames", "table"])
+            # 等两次全量读都卡上（第一个的后半段 + 重复订阅的那次读）；串行处理时第二条
+            # 要等第一条读完才轮到，等不到也照样放行，只看最终结果
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(3):
+                    while len(reads) < 2:
+                        await asyncio.sleep(0.01)
+        finally:
+            state["release"].set()
+        replies = []
+        async with asyncio.timeout(5):
+            while len(replies) < 2:
+                msg = await client.recv()
+                if msg[0] == "sub":
+                    replies.append(msg[1])
+            await client.send(["rpc", "set_public_name", 7201, "Dup"])
+            while (await client.recv())[0] != "rsp":
+                pass
+        result["replies"] = replies
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result.get("replies") == ["PublicNames.table", "PublicNames.table"]
 
 
 def test_check_length():
