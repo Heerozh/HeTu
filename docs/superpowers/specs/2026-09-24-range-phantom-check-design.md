@@ -270,6 +270,13 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 `get(uuid=)` + `upsert(uuid=)`，这些形状的 commit 因此不增加 master 开销。§3.2 (b) 的核对与
 `missing` 判定对所有观察照做（只花 worker）。
 
+**S3 `get` 命中只保护返回的那一行**（实施后按实测追加，§10；unique 列与非 unique 列都适用，
+两个后端都适用）：`get` 的约定是"返回一行匹配的"，不是"第一行"。命中时观察标成 `rows_only`：
+Redis 不发 CNT，SQL 不重跑查询，改为核对读回的行仍满足查询（对应 Redis 的 (b)）。那一行由 `VER`
+保护；之后再插入的同值行，即使排在它前面也不算冲突。原来这条 CNT 只在同值新行排到命中行前面时
+才失败，雪花 id 单调递增，实际几乎不发生，却每次都要付。`get` 读空仍按计数 0 校验，"get 为 None
+就 insert"照样安全。显式的 `range(..., limit=1)` 不受影响，仍按截断读校验。
+
 ### 3.8 关闭开关与框架内部调用点
 
 - `new_connection`（`connection.py:61`）→ `phantom_check=False`：
@@ -326,6 +333,8 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 | 热点区间：读最新 N 条再插入 | 通过 | RACE 增多 → `phantom_check=False` |
 | `get(unique=)` → update / `upsert` / SystemLock | 现有规则 | 不变，且不加 CNT（S1 / S2） |
 | 非 unique 列 `get` 为 None → insert | 并发下重复 | RACE → 重试 |
+| `get` 命中 → update，之后有同值新行排到它前面 | 通过 | 通过（S3，只保护返回的行） |
+| `get` 命中的行在取行前被改走 | 返回了不满足查询的行 | 写事务 RACE（读取一致性核对照做） |
 | 过时区间 + 盲写撞 unique | `UniqueViolation` | 先 RACE 重试一次，区间一致后再 `UniqueViolation` |
 | 盲插已存在的显式 id，同时 range 到它 | `UniqueViolation` | 同（INSERT 行不参与 (b) 核对） |
 
@@ -338,15 +347,17 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 
 ## 5. 代价
 
-- **master（Redis）**：每个需校验的观察多一条 `CNT`。实测（§10）每条约 +1.3 µs 主线程时间，
-  单行 commit 从 3.6 µs 涨到 4.9 µs（+36%），比设计时估的 +10%~20% 高。成本主要是每次
-  `redis.call` 的固定开销，和一条 `VER` / `UNIQ` 同量级，换命令、去 label 都省不下来，只能少发。
-  - 只有"写事务 + 做了 S1 / S2 覆盖不到的 range"才付：显式 `range`、非 unique 列的 `get`。
-  - 扫描型事务本来就为每个读到的行付一条 `VER`，多一条 `CNT` 占比很小。
-  - S1 / S2 覆盖的常见形状（`get(unique=)` → update、`upsert`、SystemLock）为 0。
+- **master（Redis）**：每个需校验的观察多一条 `CNT`。实测（§10）每条约 +0.9~1.3 µs 主线程时间，
+  成本主要是每次 `redis.call` 的固定开销，和一条 `VER` / `UNIQ` 同量级，换命令、去 label 都省不
+  下来，只能少发。按形状看：
+  - "range 读空 → insert"+9%，"range 读 20 行 → 改一行"+8%：这两种正是防幻读要保护的，commit
+    本来就重（插入要做主键 / unique 检查、写多个索引；扫描每读一行就有一条 `VER`）。
+  - 最轻的 commit 加一条 CNT 是 +37%，对应 limit=1 截断读命中；`get` 命中由 S3 免掉，只剩显式
+    `range(..., limit=1)` 会付。
+  - `get(id=)`、`get(unique=)` / `get` 命中 → update、`upsert`、SystemLock 为 0（S1 / S2 / S3）。
 - **worker（Redis）**：写事务 commit 前，对观察到的每行算一次 `to_sortable_bytes` 并比较，O(k)。
   只读事务不付。
-- **SQL**：每个观察在提交事务里重跑一次 id 查询，O(log N + k)。
+- **SQL**：每个观察在提交事务里重跑一次 id 查询，O(log N + k)；`get` 命中只核对读回的行，不重跑。
 - **往返不变**：Redis 仍是一次 EVALSHA，SQL 仍是一个提交事务。
 
 ## 6. 用户可见变化与文档
@@ -429,8 +440,8 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 - **Redis 不在 Lua 里精确比对 member 集合**：那样可以省掉 §3.2 (b)，但 master 要多花 O(k)（ZRANGE +
   k 次比较 + payload 带 k 个 member）。本项目 master CPU 是瓶颈，所以把 O(k) 放到 worker，master 只做
   O(log N)。
-- **`get()` 不开放开关**：unique 列由 S1 / S2 覆盖；非 unique 列的 `get` 是 `limit=1` 的截断读，只有插入
-  排在第一行之前才冲突，很少发生。有需要再加。
+- **`get()` 不开放开关**：命中只保护返回的那一行（S3），不付 CNT；读空的校验正是"get 为 None 就
+  insert"要的。没有需要关的场景。
 - **不改默认 `limit=10`**：截断导致的漏查是单线程下的确定性 bug，本检查救不了，靠文档（§6）。以后可以
   考虑在"写事务里截断读之后、往同一区间插入"时打 debug 警告。
 - **不做组合 unique 索引**：与本 spec 正交；unique 锚定 + `upsert` 已能表达"每人每模板一行"。
@@ -443,15 +454,18 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 ## 9. 已定事项
 
 1. **默认开启**：重复发道具是悄无声息的经济 bug，多出来的重试至少能在慢日志的 race_count 里看到。
+   实测后（§10）曾考虑改成默认关，结论维持默认开：真正要防幻读的形状只多 8%~9%；只有纯成本的
+   `get` 命中由 S3 去掉。
 2. **参数名** `phantom_check`。
 3. **做 S2**：它覆盖了 SystemLock 与 upsert 插入这些高频路径。
 4. **§3.9 的 desc 修复**不单独提 PR，在本分支顺手修掉。
+5. **做 S3**（§3.7）：`get` 命中只保护返回的那一行。
 
 ## 10. 实测
 
 `benchmark/redis_commit_cost.py replay`，Redis 8.10.2（`redis:latest` 镜像，Docker Desktop / WSL2），
-4 个进程、每组 5 秒；笔记本上测的，只看相对值。`optin_cnt` 是 `optin` 加每行一条 `CNT`，形状同
-"非 unique 列 `get` 命中后 update"（limit=1 截断读，上界是命中行的 member），owner 索引 3 万个 member。
+4 个进程、每组 5 秒；笔记本上测的，只看相对值。owner 索引 3 万个 member。`optin_cnt` 是 `optin`
+加每行一条 `CNT`，形状是 limit=1 截断读命中（上界是命中行的 member）。
 
 | rows | payload | 主线程 µs/commit | 比 optin |
 |---:|:---|---:|---:|
@@ -459,6 +473,13 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 | 1 | optin_cnt | 4.92 | +1.30（+36%） |
 | 2 | optin | 5.51 | — |
 | 2 | optin_cnt（2 条） | 8.07 | +2.56（+46%） |
+
+区间校验真正会付费的形状（`ins*` / `scan20*`，只跑 rows=1），各自不带 / 带一条 `CNT`：
+
+| 形状 | 不带 | 带 CNT | 增量 |
+|:---|---:|---:|---:|
+| range 读空 → insert（NX + 2 条 UNIQ + 写整行 + 3 个索引） | 9.66 | 10.57 | +0.91（+9%） |
+| range 读 20 行 → update 其中一行（20 条 VER） | 15.65 | 16.94 | +1.29（+8%） |
 
 另做了一组对比（临时 Lua，未合入），单行 commit、相对 optin 的增量：
 
@@ -474,11 +495,8 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 
 - 成本主要在每次 `redis.call` 的固定开销，不在跳表查找；`ZRANGE LIMIT 0 1` 只找一端也不省，
   还要建回复数组，反而更贵。label 不进 payload 只省约 0.04 µs，不做。
-- 能做的是少发。S1 / S2 已覆盖 unique 点查。**待定的进一步优化（S3）**：非 unique 列的 `get` 命中
-  时只保护返回的那一行，不再发 `CNT`。`get` 的约定本来就是"返回一行匹配的"，那一行由 `VER` 管；
-  这条 `CNT` 只在有同值新行排到命中行前面时才失败，雪花 id 单调递增，实际几乎不发生，却每次都付
-  1.3 µs。读空仍然要校验（"get 为 None 就 insert"靠它）。代价是 `get` 命中的语义从"第一行"放宽成
-  "某一行"。
+- 能做的是少发。S1 / S2 覆盖 unique 点查；`get` 命中那条 +37% 的 CNT 几乎从不失败，是纯成本，
+  由 S3 去掉（§3.7）。剩下真正要防幻读的形状只多 8%~9%，所以维持默认开启（§9）。
 
 ## 11. 主要改动文件清单
 
