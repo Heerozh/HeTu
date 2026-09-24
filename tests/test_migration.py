@@ -8,6 +8,7 @@
 
 import numpy as np
 import pytest
+from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -494,3 +495,135 @@ async def test_manager_flush_volatile(
     keep = tm.get_table(MgrKeep)
     with pytest.raises(ValueError):
         keep.backend.get_table_maintenance().flush(keep)
+
+
+# ---------------------------------------------------------------------------
+# 重建索引：`hetu upgrade` 默认每次都按行数据重建持久组件的索引，修掉索引残留
+# ---------------------------------------------------------------------------
+
+
+async def _insert_items(backend, comp, *fields):
+    """插入 Item 行，fields 每项是 (owner, time, name)，返回插入的行"""
+    rows = []
+    async with backend.session("pytest", 1) as session:
+        for owner, time_, name in fields:
+            row = comp.new_row()
+            row.owner, row.time, row.name = owner, time_, name
+            await session.using(comp).insert(row)
+            rows.append(row)
+    await backend.wait_for_synced()
+    return rows
+
+
+@use_redis_family_backend_only
+async def test_rebuild_index_removes_orphans(item_ref, mod_auto_backend):
+    """重建按行数据来：索引里残留的、行已经不存在的项被清掉；表里一行都不剩时也要清"""
+    from hetu.data.backend.redis import RedisBackendClient
+
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    io = backend.master.io
+    idx_key = RedisBackendClient.index_key(item_ref, "owner")
+    x, y = await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
+
+    maint.delete_row(item_ref, int(x.id))  # 只删行 key，owner 索引里留下 x
+    maint.rebuild_index(item_ref)
+    members = io.zrange(idx_key, 0, -1)
+    assert [m.rsplit(b"\x00", 1)[-1] for m in members] == [str(y.id).encode()]
+
+    maint.delete_row(item_ref, int(y.id))  # 表空了，索引里只剩残留
+    maint.rebuild_index(item_ref)
+    assert io.zrange(idx_key, 0, -1) == []
+
+
+@use_redis_family_backend_only
+async def test_rebuild_index_failure_keeps_old_index(item_ref, mod_auto_backend):
+    """重建中途失败（这里是行数据违反 unique）：旧索引原样保留，不能留下空的或半截的
+    索引——每次 hetu upgrade 都重建，失败后照样得能起服"""
+    from hetu.data.backend.redis import RedisBackendClient
+
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    io = backend.master.io
+    _a, b = await _insert_items(backend, item_ref.comp_cls, (1, 1, "a"), (1, 2, "b"))
+    io.hset(RedisBackendClient.row_key(item_ref, int(b.id)), "name", "a")
+
+    idx_key = RedisBackendClient.index_key(item_ref, "name")
+    before = io.zrange(idx_key, 0, -1)
+    with pytest.raises(RuntimeError, match="unique"):
+        maint.rebuild_index(item_ref)
+    assert io.zrange(idx_key, 0, -1) == before
+
+
+@use_redis_family_backend_only
+async def test_manager_rebuild_index_all(
+    mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
+):
+    """`hetu upgrade` 默认重建所有持久组件的索引，索引残留因此清掉；易失组件随后会被清空，
+    不用重建"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.data.backend.base import TableMaintenance
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    @define_component(namespace="pytest", force=True)
+    class MgrKeep(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_component(namespace="pytest", force=True, volatile=True)
+    class MgrTemp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_system(namespace="pytest", components=(MgrKeep, MgrTemp))
+    async def mgr_use_keep_temp(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tm = ComponentTableManager("pytest", "mgr_rebuild", {"default": backend})
+    assert tm.check_and_create_new_tables() is True
+    await _insert_owner(tm, MgrKeep, 1)
+    await backend.wait_for_synced()
+    keep = tm.get_table(MgrKeep)
+    row = await _get_owner(tm, MgrKeep, 1)
+    keep.backend.get_table_maintenance().delete_row(keep, int(row.id))  # 索引残留
+    await backend.wait_for_synced()
+
+    rebuilt = []
+    real_rebuild = TableMaintenance.rebuild_index
+
+    def spy(self, table_ref):
+        rebuilt.append(table_ref.comp_name)
+        return real_rebuild(self, table_ref)
+
+    monkeypatch.setattr(TableMaintenance, "rebuild_index", spy)
+    tm.rebuild_index_all()
+    assert "MgrKeep" in rebuilt and "MgrTemp" not in rebuilt
+    await backend.wait_for_synced()
+
+    # 残留清掉了：读空后插入同值能提交（残留还在时每次都抛 InconsistentRangeRead）
+    async with keep.session() as session:
+        repo = session.using(MgrKeep)
+        assert await repo.get(owner=1) is None
+        new_row = MgrKeep.new_row()
+        new_row.owner = 1
+        await repo.insert(new_row)
+
+
+def test_upgrade_rebuilds_index_by_default(monkeypatch):
+    """hetu upgrade 默认重建索引，--no-rebuild-index 关掉"""
+    from hetu.cli import CommandIndex
+    from hetu.cli.migrate import MigrateCommand
+
+    passed = []
+
+    def fake_run(cls, config, yes, drop_data, rebuild_index=True):
+        passed.append(rebuild_index)
+
+    monkeypatch.setattr(MigrateCommand, "run", classmethod(fake_run))
+    index = CommandIndex()
+    index.register()
+    base = ["upgrade", "--app-file", "app.py", "--namespace", "ns", "--instance", "s1"]
+    MigrateCommand.execute(index.parser.parse_args(base))
+    MigrateCommand.execute(index.parser.parse_args([*base, "--no-rebuild-index"]))
+    assert passed == [True, False]
