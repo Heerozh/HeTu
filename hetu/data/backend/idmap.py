@@ -428,6 +428,33 @@ class IdentityMap:
         """
         return self._row_clean.get(table_ref, {}).get(row_id)
 
+    def moved_away(self, table_ref: TableReference, index_name: str) -> set[int]:
+        """
+        本事务删掉的行、以及改了 `index_name` 列的行的 id。提交前数据库索引里它们还在原来
+        的值上，按这个索引查数据库会读到，但本事务眼里它们已经不在那个值上了。本事务新
+        insert 的行数据库里没有，不算。
+        """
+        states = self._row_states.get(table_ref)
+        if not states:
+            return set()
+        clean_rows = self._row_clean[table_ref]
+        moved: set[int] = set()
+        updated: list[int] = []
+        for row_id, state in states.items():
+            if row_id not in clean_rows:
+                continue
+            if state == RowState.DELETE:
+                moved.add(int(row_id))
+            elif state == RowState.UPDATE:
+                updated.append(row_id)
+        if updated:
+            cache = self._row_cache[table_ref]
+            for row in cache[np.isin(cache["id"], updated)]:
+                row_id = int(row["id"])
+                if row[index_name] != clean_rows[row_id][index_name]:
+                    moved.add(row_id)
+        return moved
+
     def _implied_by_unique(
         self,
         table_ref: TableReference,

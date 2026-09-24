@@ -194,6 +194,7 @@ class SessionRepository:
         推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
         主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
         None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
+        结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
 
         非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
         副本）判 `RaceCondition`，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回
@@ -248,10 +249,16 @@ class SessionRepository:
             if is_unique and idmap.observed_absent(self.ref, index_name, query_value):
                 return None
 
-            # cache未命中，去数据库查询
+            # cache未命中，去数据库查询。本事务删掉的、改走了这个索引值的行，提交前还在数据库
+            # 索引的原值上，会占掉读到的名额：多读这么多行，剩下的里面才一定有真匹配的（如果
+            # 有）；读空时也就读全了这个值，校验的是整个值上没有别的行
+            moved = idmap.moved_away(self.ref, index_name)
             rows, obs = await self._range_rows(
-                index_name, query_value, None, 1, False, True
+                index_name, query_value, None, 1 + len(moved), False, True
             )
+            if moved:
+                # 删掉的 _range_rows 已经排除了，改走的也去掉：它们已经不匹配这个值了
+                rows = rows[~np.isin(rows.id, list(moved))]
             if obs is not None:
                 # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值
                 # 新行排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
@@ -301,9 +308,10 @@ class SessionRepository:
         `RaceCondition`，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
         的写法是安全的。只读事务不提交，不受影响。
 
-        截断读（返回行数 == `limit`）只保护看到的前 `limit` 行：区间里排在最后一个返回行
+        截断读（数据库返回了 `limit` 行）只保护看到的前 `limit` 行：区间里排在最后一个返回行
         之后的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
-        （`limit=-1`，或确认返回行数 < `limit`），否则没读到的行会被当成不存在。
+        （`limit=-1`），否则没读到的行会被当成不存在。本事务删掉的行不在返回结果里、却占着
+        `limit` 的名额，所以返回行数少于 `limit` 不代表读全了。
 
         Parameters
         ----------

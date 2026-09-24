@@ -443,10 +443,11 @@ count as a conflict.
 
 Two things to watch:
 
-- **Read it all.** A truncated read (as many rows as `limit`) only guards the
-  first `limit` rows it saw; rows it didn't read are treated as missing.
-  When checking whether something exists, use `limit=-1`, or make sure fewer
-  than `limit` rows came back.
+- **Read it all.** A truncated read (the database returned `limit` rows) only
+  guards the first `limit` rows it saw; rows it didn't read are treated as
+  missing. When checking whether something exists, use `limit=-1`. Rows this
+  transaction deleted are left out of the result but still take up `limit`
+  slots, so getting fewer than `limit` rows back doesn't mean you read it all.
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.

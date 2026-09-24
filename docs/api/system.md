@@ -138,6 +138,7 @@ get(
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
 主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
 None（不再查询数据库），commit 时若该值已被并发写入则判为 [`RaceCondition`](exceptions.md#racecondition) 重试。
+结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
 
 非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
 副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回
@@ -189,7 +190,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:281`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L281)</small>
+<small>Source: [`hetu/data/backend/repo.py:288`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L288)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -203,9 +204,10 @@ range(
 [`RaceCondition`](exceptions.md#racecondition)，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
 的写法是安全的。只读事务不提交，不受影响。
 
-截断读（返回行数 == `limit`）只保护看到的前 `limit` 行：区间里排在最后一个返回行
+截断读（数据库返回了 `limit` 行）只保护看到的前 `limit` 行：区间里排在最后一个返回行
 之后的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
-（`limit=-1`，或确认返回行数 < `limit`），否则没读到的行会被当成不存在。
+（`limit=-1`），否则没读到的行会被当成不存在。本事务删掉的行不在返回结果里、却占着
+`limit` 的名额，所以返回行数少于 `limit` 不代表读全了。
 
 
 **Parameters**
@@ -259,7 +261,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:463`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L463)</small>
+<small>Source: [`hetu/data/backend/repo.py:471`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L471)</small>
 
 向Session中添加一行待插入数据。
 
@@ -288,7 +290,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:502`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L502)</small>
+<small>Source: [`hetu/data/backend/repo.py:510`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L510)</small>
 
 向Session中添加一行待更新数据。
 
@@ -317,7 +319,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:538`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L538)</small>
+<small>Source: [`hetu/data/backend/repo.py:546`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L546)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -352,7 +354,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:567`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L567)</small>
+<small>Source: [`hetu/data/backend/repo.py:575`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L575)</small>
 
 向Session中添加一行待删除数据。
 
