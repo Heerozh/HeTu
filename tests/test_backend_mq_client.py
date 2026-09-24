@@ -194,6 +194,37 @@ async def test_trailing_read_carries_only_late_payload():
     await hub.close()
 
 
+async def test_merged_resync_is_left_to_trailing_read():
+    """RESYNC 合并进已在队列里的表级频道：这次弹出离它不足一个 interval，整表重同步只留给
+    尾随重读做一次（那时已过复制延迟预算），这次只重读原有的 row_id。两次都带 RESYNC
+    就是两遍整表重读、全量重推"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("T", ["1"])
+    await asyncio.sleep(INTERVAL * 0.5)
+    mq.push_pulled_("T", [MQClient.RESYNC])  # 合并进队头
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {"1"}}
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {MQClient.RESYNC}}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
+async def test_merged_resync_old_enough_resyncs_in_this_read():
+    """合并进来的 RESYNC 到弹出时已经超过一个 interval（取得晚）：这次读已经满足预算，
+    就在这次整表重同步，不补排"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    mq.push_pulled_("T", ["1"])
+    mq.push_pulled_("T", [MQClient.RESYNC])
+    await asyncio.sleep(INTERVAL * 2.5)
+    async with asyncio.timeout(1):
+        assert await mq.get_message() == {"T": {"1", MQClient.RESYNC}}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
 async def test_request_reread():
     """request_reread：当作刚收到通知放进本地队列，interval 后弹出；不触发 watch 回调"""
     hub, node = make_hub()
