@@ -139,8 +139,9 @@ def to_sortable_bytes(value: np.generic) -> bytes:
         return encoded.replace(b"\x00", b"\x00\xff")
     elif np.issubdtype(dtype, np.bytes_):
         return value.item().replace(b"\x00", b"\x00\xff")
-    elif np.issubdtype(dtype, np.bool_):
-        return b"\x01" if value else b"\x00"
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，走不到
+    # elif np.issubdtype(dtype, np.bool_):
+    #     return b"\x01" if value else b"\x00"
     assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
 
 
@@ -186,6 +187,10 @@ class BackendClient:
     继承此类，完善所有NotImplementedError的方法。
     """
 
+    # 表级频道名的后缀，各后端的 table_channel 都是 cluster_prefix 加它；通知接收器靠它认出
+    # 哪些频道的 payload 是 row_id 集合
+    TABLE_CHANNEL_SUFFIX = ":table"
+
     def index_channel(self, table_ref: TableReference, index_name: str):
         """
         返回整个索引的频道名。该索引上任何值的行增删、任何一行该字段的变更都会通知到该频道，
@@ -197,18 +202,31 @@ class BackendClient:
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
         """
-        返回索引某一个值的频道名。只有 `index_name == value` 的行被 insert/delete，或某行该
-        字段从/到这个值变化时，commit 才向此频道发一条消息，payload 为本次事务变动的
-        row_id（str）列表；一个事务每个 (索引, 值) 只发一条。点查询订阅用它代替
-        `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
+        返回索引某一个值的频道名。只有声明了 `point_sub` 的索引才有值频道（commit 只给它们
+        发），未声明的索引调用会抛 `ValueError`——订一个永远没人发的频道只会静默收不到通知。
+        只在有行"进入"这个值时（insert，或某行该字段改成这个值），commit 才向此频道发一条
+        消息，消息不带内容；一个事务每个 (索引, 值) 只发一条。行"离开"（delete、字段改走）
+        不发：点查询订阅本来就订着结果里每一行的行频道，由它发现（见 IndexSubscription）。
+        点查询订阅用它代替 `index_channel`，别的值的变动不会打扰。value 先按组件 dtype 规范化
         （`dtype.type(value)`），所以 10、"10"、10.0 得到同一个频道。
-        id 索引没有值频道（commit 不发）：点查 id 请订行频道或整个 id 索引的频道。
+        id 索引没有值频道：点查 id 请订行频道或整个 id 索引的频道。
 
-        Channel of one index value: published on commit only when a row with that value is
-        inserted/deleted or a row's field changes from/to it (payload: touched row ids).
-        Point-query subscriptions use it instead of `index_channel`.
+        Channel of one index value, only for indexes declared with `point_sub` (raises
+        `ValueError` otherwise). Point-query subscriptions use it instead of
+        `index_channel` so writes to other values don't wake them up.
         """
         raise NotImplementedError
+
+    @staticmethod
+    def require_point_sub_(table_ref: TableReference, index_name: str) -> None:
+        """内部方法：索引没有声明 point_sub（commit 不发它的值频道）时抛 ValueError"""
+        if index_name not in table_ref.comp_cls.point_subs_:
+            raise ValueError(
+                _(
+                    "{comp_name}.{index_name} 没有声明 point_sub，commit 不会发它的值频道；"
+                    "请在 property_field 里加 point_sub=True"
+                ).format(comp_name=table_ref.comp_name, index_name=index_name)
+            )
 
     @staticmethod
     def point_query_value_(
@@ -240,8 +258,13 @@ class BackendClient:
 
     def table_channel(self, table_ref: TableReference):
         """
-        返回表级变更频道名。表内任何行 insert/update/delete，都会向该频道发送一条消息，
-        payload 为本次事务变动的 row_id（str）列表。一个事务一张表只发一条。
+        返回表级变更频道名。只有声明了 `table_sub` 的组件，commit 才向它发消息：表内任何行
+        insert/update/delete，一个事务一张表发一条，payload 为本次事务变动的 row_id（str）列表。
+
+        Channel of table-level changes. Commits publish to it only for components
+        declared with `table_sub`: one message per transaction per table (any insert,
+        update or delete), whose payload is the list of row ids (str) that transaction
+        changed.
         """
         raise NotImplementedError
 
@@ -628,6 +651,10 @@ class TableMaintenance:
         """实际重建组件表索引的逻辑实现，返回重建的行数"""
         raise NotImplementedError
 
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据"""
+        raise NotImplementedError
+
     # === === ===
 
     def __init__(self, master: BackendClient):
@@ -763,16 +790,43 @@ class TableMaintenance:
 
             # 准备和检测
             status = migrator.prepare()
-            if status == "unsafe":
-                if not force:
-                    return False
-            elif status == "skip":
-                return True
-
-            # 获取所有row id
-            row_ids = self.get_all_row_id(table_ref)
-            migrator.upgrade(row_ids, self)
+            if status == "unsafe" and not force:
+                return False
+            if status != "skip":
+                # 获取所有row id
+                row_ids = self.get_all_row_id(table_ref)
+                migrator.upgrade(row_ids, self)
+            self._finish_schema_migration(table_ref)
             return True
+
+    def _finish_schema_migration(self, table_ref: TableReference) -> None:
+        """
+        迁移脚本只管搬数据：dtype 没变的那几级（只改了 table_sub / point_sub、索引、权限等）
+        判 skip 不执行，表的 meta 还停在旧版本，check_table 会一直报 schema_mismatch。
+        这里把 meta 补写成当前定义；索引定义也变了的话（比如 point_sub 打开了 index），
+        先按当前定义重建索引。
+        """
+        from ..component import BaseComponent
+
+        comp_cls = table_ref.comp_cls
+        meta = self.read_meta(table_ref.instance_name, comp_cls)
+        assert meta
+        if meta.version == hashlib.md5(comp_cls.json_.encode("utf-8")).hexdigest():
+            return  # 迁移脚本已按当前定义重建了表
+        stored = BaseComponent.load_json(meta.json)
+        if (stored.indexes_, stored.uniques_) != (comp_cls.indexes_, comp_cls.uniques_):
+            self.do_rebuild_index_(table_ref)
+            logger.warning(
+                _(
+                    "  ✔️ [💾MIGRATION][{comp_name}组件] 索引定义有变更，已重建Index"
+                ).format(comp_name=table_ref.comp_name)
+            )
+        self.do_update_meta_(table_ref)
+        logger.warning(
+            _(
+                "  ✔️ [💾MIGRATION][{comp_name}组件] 已把 schema 版本更新为当前定义"
+            ).format(comp_name=table_ref.comp_name)
+        )
 
     def flush(self, table_ref: TableReference, force=False) -> None:
         """
@@ -845,12 +899,22 @@ class MQClient:
     本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
     `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
+
+    尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是
+    同一个。所以每条通知之后至少隔一个 interval（1/UPDATE_FREQUENCY）才读，这个 interval
+    同时是副本复制延迟的预算：单条通知入队后要等 interval 才弹出，天然满足；合并进队头的
+    通知离弹出可能不足 interval，弹出时再给它补排一次（见 `get_message`）。复制延迟超过
+    预算（Redis 压力过大）时仍可能读到旧值，所以订阅推送是尽力而为的最终一致。
     """
 
     # todo 加入到config中去，设置服务器的通知tick
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
     # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
     DROP_AFTER = 120
+    # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
+    RESYNC = "*"
+    # 日志里的后端标签，后端实现覆盖
+    LOG_TAG = "MQ"
 
     def __init__(self) -> None:
         # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
@@ -860,6 +924,10 @@ class MQClient:
         self.pulled_set: set[str] = set()
         # 表级频道合并后的payload：channel -> 变动的row_id集合
         self.pulled_payload: dict[str, set[str]] = {}
+        # 频道已在队列里时又来的通知（被合并）：最近一条的收到时刻，尾随重读的依据
+        self._late: dict[str, float] = {}
+        # 以及这些迟到通知带来的 row_id（表级频道）：尾随重读只需要重读它们
+        self._late_payload: dict[str, set[str]] = {}
         # 服务端内部关注的频道 → 回调（见 watch）
         self._watchers: dict[str, Callable[[], None]] = {}
         # 队列从空变为非空的信号：get_message 空闲时等它，而不是定时醒来看队列
@@ -902,7 +970,33 @@ class MQClient:
                 )
             if channel_name not in self.subscribed_channels:
                 return 0
+        return self._enqueue(channel_name, payload_ids)
 
+    def request_reread(
+        self, *channel_names: str, payload: Iterable[Any] | None = None
+    ) -> None:
+        """
+        把这些频道当作刚收到一条通知放进本地队列（不触发 `watch` 回调），interval 后照常
+        弹出、重读。用于订阅生效后的补读：生效之前已在别的节点上应用、读到的副本却还没应用
+        的写入，既不在初始读回的行里，也不会再有通知。
+
+        Queue the channels as if they had just been notified (``watch`` callbacks are not
+        fired), so they are re-read one interval later. Used right after a subscription
+        becomes active: a write that another node applied before that moment, but the
+        replica we read from had not, is neither in the initial rows nor notified again.
+        """
+        dropped = 0
+        for channel_name in channel_names:
+            dropped += self._enqueue(channel_name, payload)
+        if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
+            logger.warning(
+                _(
+                    "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
+                ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
+            )
+
+    def _enqueue(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
+        """放进本地队列（同频道合并），返回因 `DROP_AFTER` 丢弃的旧通知条数"""
         now = time.monotonic()
         dropped = 0
         dq = self.pulled_deque
@@ -912,17 +1006,24 @@ class MQClient:
                 stale = dq.popleft()[1]
                 self.pulled_set.discard(stale)
                 self.pulled_payload.pop(stale, None)
+                self._late.pop(stale, None)
+                self._late_payload.pop(stale, None)
                 dropped += 1
 
+        ids = None if payload_ids is None else {str(i) for i in payload_ids}
         # 先清旧再合并payload，这样本条消息的payload不会被上面的清理顺手删掉
-        if payload_ids is not None:
-            self.pulled_payload.setdefault(channel_name, set()).update(
-                str(i) for i in payload_ids
-            )
+        if ids is not None:
+            self.pulled_payload.setdefault(channel_name, set()).update(ids)
         if channel_name not in self.pulled_set:
             dq.append((now, channel_name))
             self.pulled_set.add(channel_name)
             self._arrived.set()
+        else:
+            # 合并进已在队列里的那条：弹出时可能离这条不足一个 interval，记下来由
+            # get_message 决定要不要补排尾随重读
+            self._late[channel_name] = now
+            if ids is not None:
+                self._late_payload.setdefault(channel_name, set()).update(ids)
         return dropped
 
     async def get_message(self) -> dict[str, set[str] | None]:
@@ -932,6 +1033,9 @@ class MQClient:
 
         返回 {channel名: payload}。行/索引频道的payload为None；
         表级频道的payload为这段时间内合并的变动row_id（str）集合。
+
+        弹出的频道若有合并进来、且离现在不足 interval 的通知，会以现在的时刻重新入队，
+        interval 后再弹出一次（尾随重读，见类注释）。
 
         之后SubscriptionBroker会对该消息进行分析，并重新读取数据库获数据。
         如果没有消息，则堵塞到永远。
@@ -954,10 +1058,30 @@ class MQClient:
                 continue
             cutoff = time.monotonic() - interval
             rtn: dict[str, set[str] | None] = {}
+            trailing: list[tuple[str, set[str] | None]] = []
             while dq and dq[0][0] <= cutoff:
                 channel_name = dq.popleft()[1]
                 self.pulled_set.discard(channel_name)
-                rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+                payload = self.pulled_payload.pop(channel_name, None)
+                rtn[channel_name] = payload
+                late = self._late.pop(channel_name, None)
+                late_ids = self._late_payload.pop(channel_name, None)
+                if late is not None and late > cutoff:
+                    trailing.append((channel_name, late_ids))
+                    if payload and late_ids and self.RESYNC in late_ids:
+                        # 整表重同步是整表重读、全量重推：迟到的 RESYNC 这次读还不满预算，
+                        # 只留给尾随重读做一次，这次只读原有的 row_id
+                        payload.discard(self.RESYNC)
+            # 合并进来的通知离这次读不足一个 interval：读可能落在还没应用它的副本上，它的
+            # 通知却已经合并掉了。重新入队，interval 后再读一次。用现在的时刻而不是迟到那条
+            # 的时刻，队列才保持按时间有序；持续写入时它正好顶替下一批的队头，读的次数不变
+            if trailing:
+                now = time.monotonic()
+                for channel_name, late_ids in trailing:
+                    dq.append((now, channel_name))
+                    self.pulled_set.add(channel_name)
+                    if late_ids is not None:
+                        self.pulled_payload[channel_name] = late_ids
             if rtn:
                 return rtn
 
@@ -1053,7 +1177,6 @@ class HubMQClient(MQClient):
 
     # 单个连接订阅频道数的告警线；子类可覆盖
     MAX_SUBSCRIBED = 5000
-    LOG_TAG = "MQ"
 
     def __init__(self, hub: MQHub):
         super().__init__()  # 本地消息队列

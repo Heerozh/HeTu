@@ -1,12 +1,14 @@
 # 测试河图的性能
 
-from typing import cast
 import os
-import websockets
-import msgspec
 import random
 import string
+from typing import cast
+
+import msgspec
+import websockets
 from nacl.public import PrivateKey
+
 from hetu.server import pipeline
 
 msg_encoder = msgspec.msgpack.Encoder()
@@ -15,7 +17,7 @@ buffer = bytearray()
 
 # Configuration
 # 可以通过环境变量配置Redis连接
-HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466/hetu")
+HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466/hetu/bench")
 
 
 # Data Scale
@@ -39,27 +41,26 @@ def encode_message(message: list | dict) -> bytes:
 # === 夹具 ===
 
 
+def _bytes(data: str | bytes) -> bytes:
+    return data.encode() if isinstance(data, str) else data
+
+
 async def connection():
     ws = await websockets.connect(HETU_URL)
 
     # 设置管道
     client_pipe = pipeline.MessagePipeline()
-    client_pipe.add_layer(pipeline.LimitCheckerLayer())
     client_pipe.add_layer(pipeline.JSONBinaryLayer())
-    client_pipe.add_layer(pipeline.ZstdLayer())
+    client_pipe.add_layer(pipeline.ZlibLayer())
     crypto_layer = pipeline.CryptoLayer()
     client_pipe.add_layer(crypto_layer)
-    pipe_ctx = None
-    # 生成密钥对
+    # 握手（与 tests/test_websocket.py 一致）
     private_key = PrivateKey.generate()
-    public_key = private_key.public_key
-    handshake_msg = [b""] * 4
-    handshake_msg[-1] = public_key.encode()
-    # 握手
+    handshake_msg = [b""] * client_pipe.num_handshake_layers
+    handshake_msg[-1] = private_key.public_key.encode()
     await ws.send(client_pipe.encode(None, handshake_msg))
-    data = cast(bytes, await ws.recv())
-    peer_handshake = client_pipe.decode(None, data)
-    assert type(peer_handshake) is list
+    peer_handshake = client_pipe.decode(None, _bytes(await ws.recv()))
+    assert isinstance(peer_handshake, list)
     ctx, _ = client_pipe.handshake(peer_handshake)
     ctx[-1] = crypto_layer.client_handshake(private_key.encode(), peer_handshake[-1])
 
@@ -110,17 +111,22 @@ async def benchmark_get2_update2(connection):
 """
 cd benchmark/
 
-export REDIS_URL='redis://:@localhost:6379/0'
+export REDIS_URL='redis://:@localhost:6379/0?protocol=2'
 uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
 
-export HETU_HOST=ws://localhost:2466/hetu
+export HETU_HOST=ws://localhost:2466/hetu/bench
 
-# 启动 200 个并发用户
+# 启动 1200 个并发用户
 
-uv run ya ya_hetu_rpc.py -n 1800 -t 2
+uv run ya ya_hetu_rpc.py -n 1200 -t 0.5
 
 # 测试ttl
 
 uv run ya ya_hetu_rpc.py -n 1 -p 1 -t 2
+
+Windows:
+redis-server.exe
+redis-cli.exe config set protected-mode no
+uv run hetu start --app-file=./server/app.py --db="redis://:@172.29.0.1:6379/0" --namespace=bench --instance=bench --workers=40
 
 """

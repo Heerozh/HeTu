@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import sqlalchemy as sa
+from fixtures.backends import SQL_BACKENDS
 from sqlalchemy.dialects import mysql, postgresql
 
 from hetu.data.backend.sql import SQLBackendClient
@@ -520,3 +521,45 @@ async def test_sql_hub_poll_failure_backs_off_and_throttles_logs(monkeypatch, ca
     assert len(with_stack) == 1, "栈只记第一次"
     assert sum(1 for r in records if r.levelno == logging.ERROR) == 6
     assert sum(1 for r in records if "恢复" in r.getMessage()) == 1
+
+
+@pytest.mark.parametrize(
+    "backend_name", [b for b in SQL_BACKENDS if b == "mariadb"], indirect=True
+)
+async def test_sql_mariadb_bytes_param_roundtrip(mod_backend_config):
+    """bytes 参数经 aiomysql 转义后原样读回。aiomysql 0.3.2 转义 bytes 用的 PyMySQL 内部
+    函数从 PyMySQL 1.2.1 起没了（1.2.3 只剩字符串占位），一有 bytes 参数就
+    TypeError: 'str' object is not callable"""
+    client = SQLBackendClient(mod_backend_config["master"], False)
+    payload = b"foo'bar\x00\\\xff"
+    try:
+        async with client.aio.connect() as conn:
+            result = await conn.execute(sa.text("SELECT :p"), {"p": payload})
+            assert result.scalar_one() == payload
+    finally:
+        await client.close()
+
+
+def test_aiomysql_escape_bytes_patch_only_replaces_placeholder(monkeypatch):
+    """垫片只替换 PyMySQL>=1.2.3 留下的字符串占位；老 PyMySQL（它还是函数）或 aiomysql
+    已经不再用这个名字（>=0.3.3）时什么都不动"""
+    import aiomysql.connection as aiomysql_conn
+
+    from hetu.data.backend.sql.client import _patch_aiomysql_escape_bytes
+
+    monkeypatch.setattr(
+        aiomysql_conn, "escape_bytes_prefixed", "DO NOT IMPORT THIS!!!", raising=False
+    )
+    _patch_aiomysql_escape_bytes()
+    assert aiomysql_conn.escape_bytes_prefixed(b"a'b") == "_binary X'612762'"
+
+    def original(value: bytes) -> str:
+        return "untouched"
+
+    monkeypatch.setattr(aiomysql_conn, "escape_bytes_prefixed", original)
+    _patch_aiomysql_escape_bytes()
+    assert aiomysql_conn.escape_bytes_prefixed is original
+
+    monkeypatch.delattr(aiomysql_conn, "escape_bytes_prefixed")
+    _patch_aiomysql_escape_bytes()
+    assert not hasattr(aiomysql_conn, "escape_bytes_prefixed")

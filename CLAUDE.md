@@ -18,6 +18,7 @@ uv run pytest tests/         # 运行全部测试
 uv run pytest tests/test_backend_basic.py  # 运行单个测试文件
 uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
 uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
+uv run pytest -n 8 tests/     # 多进程并行测试（pytest-xdist）
 ```
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey/Postgres/MariaDB 容器；SQLite 后端无需
@@ -25,6 +26,13 @@ Docker）。`HETU_TEST_BACKENDS` 接受逗号分隔的子集， 取值范围：`
 `redis_cluster`、`postgres`、`sqlite`、`mariadb`。 未设置时跑全部后端；一般TDD时只需跑`redis`
 ，CI 在 `push` 到非 `main`
 分支时也会限制为 `redis` 为了快速验证。
+
+测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
+worker）用带会话 ID 的容器名、docker 随机分配的端口启动自己的一套容器，所以多个 worktree /
+终端可以同时跑测试。`-n` 并行时默认按（测试文件, 后端）分组调度，每个 worker 只启动自己用到
+的后端；worker 多、机器忙时少数时序敏感的测试（订阅推送、sleep 精度）偶尔会抖，用 `--lf` 重跑
+确认。被强杀的测试进程留下的容器会在下次跑测试时自动回收（只回收属主进程已退出的）；手动
+清理：`docker rm -f $(docker ps -aq --filter label=hetu.test)`。
 
 ## Architecture
 
@@ -82,8 +90,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `upsert`、`insert`、`delete`、`update_rows`）。
 - `Table` / `TableReference`：Component 到 backend 的映射，由
   `ComponentTableManager` 管理。
-- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个 worker
-  只有一个共享的通知接收器（Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub` 一个轮询任务）
+- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个
+  worker 只有一个共享的通知接收器
+  （Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub`  一个轮询任务）
   按频道分发到各连接的队列。
 
 ### Server Layer (`hetu/server/`)
@@ -149,5 +158,12 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 
 ## Rule
 
-- Always use Context7 MCP when I need library/API documentation, code generation, setup
-  or configuration steps without me having to explicitly ask.
+设计约束：
+
+重要：架构受限Redis的master节点性能，主要通过读写分离扩展性能。所以：
+
+- 尽可能不要使用master的cpu，不需要master读的地方都不要通过master，
+  使用master_or_servant随机选节点的方法，其中master被随机选中的概率是可调的。
+  比如事务中所有repo.get ()读操作可以是servant读，如果读到了旧数据有乐观锁。
+  `tests/test_arch_master_reads.py` 负责守门，摸底用 `tools/master_read_audit`。
+- 副本间应隔离，不要使用会消耗所有副本甚至master cpu的指令，比如PUBLISH。

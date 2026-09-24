@@ -47,12 +47,16 @@ class Property:
     dtype: str | type = ""
     """字段数据类型。建议使用长度明确的NumPy dtype；留空时由type hint推导。"""
 
+    point_sub: bool = False
+    """是否支持高效点订阅（该索引的"值频道"）。开启后强制启用 `index`。"""
+
 
 def property_field(
     default: Any,
     unique: bool = False,
     index: bool | None = None,
     dtype: str | type = "",
+    point_sub: bool = False,
 ) -> Any:
     """
     Define a Component field declaration helper.
@@ -78,17 +82,28 @@ def property_field(
     index : bool | None, default None
         是否建立索引。
 
-        - `None` 表示沿用 `unique` 的值；
+        - `None` 表示沿用 `unique or point_sub` 的值；
         - `False` 表示不建立普通索引；
         - `True` 表示建立普通索引。
 
-        当 `unique=True` 时，即使显式传入 `False`，后续定义阶段也会被强制修正为
-        `True`。
+        当 `unique=True` 或 `point_sub=True` 时，即使显式传入 `False`，后续定义阶段
+        也会被强制修正为 `True`。
     dtype : str | type, default ""
         字段数据类型。留空时默认使用属性的 type hint。
 
         推荐使用长度明确的 NumPy dtype，例如 `np.int64`、`np.float32`、
         `"U8"`、`"<U32"`。字符串类型需要显式指定长度。
+    point_sub : bool, default False
+        该索引是否支持高效点订阅。开启后，点查询订阅（`range(Comp, field=v)`，省略
+        `right` 或 `left == right`）只在有行进入 / 离开 `v` 时被叫醒；代价是每次有行
+        "进入"某个值（insert、或字段改成该值），commit 都要多发一条 PUBLISH。
+        不开启时，该索引上的点查询订阅退化为区间订阅：该索引任何写入都会叫醒它（服务器会
+        打印警告）。常用于 `owner`、`zone` 这类"每人只订自己那个值"的索引。
+
+        Whether point subscriptions on this index are efficient: a point query
+        subscription only wakes up when rows enter or leave its value, at the cost of
+        one PUBLISH per "enter" on commit. Without it, point subscriptions fall back to
+        range-subscription behavior (woken by any write to the index) with a warning.
 
     Returns
     -------
@@ -105,11 +120,13 @@ def property_field(
     - 字段名是否合法；
     - `default` 与 `dtype` 是否兼容；
     - `dtype` 是否可用于 NumPy structured array；
-    - `unique/index` 组合是否合法。
+    - `unique/index/point_sub` 组合是否合法。
     """
     if index is None:
-        index = unique
-    return Property(default=default, unique=unique, index=index, dtype=dtype)
+        index = unique or point_sub
+    return Property(
+        default=default, unique=unique, index=index, dtype=dtype, point_sub=point_sub
+    )
 
 
 class BaseComponent:
@@ -124,12 +141,17 @@ class BaseComponent:
     volatile_: bool = False  # 易失标记，此标记的Component每次维护会清空数据
     readonly_: bool = False  # 只读标记，暂无作用
     backend_: str  # 自定义该Component由哪个后端(数据库)负责储存和查询
+    # 通知按声明发送：只有声明了的组件/索引，commit 才发表频道/值频道（PUBLISH 很贵，
+    # 见 benchmark/redis_publish_cost_result.md）
+    table_sub_: bool = False  # 允许整表订阅，commit 发表频道
+    point_subs_: frozenset[str] = frozenset()  # 支持高效点订阅的索引，commit 发值频道
     # ------------------------------内部变量-------------------------------
     dtypes: np.dtype  # np structured dtype
     """组件的numpy格式的dtype信息"""
     default_row_: np.recarray  # 默认空数据行
     prop_idx_map_: dict[str, int]  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
+    bytes_fields_: frozenset[str]  # bytes（S 类型）属性名，后端要原样读写字节
     uniques_: set[str]  # 唯一索引的属性名集合
     indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
     json_: str  # Component定义的json字符串
@@ -146,6 +168,7 @@ class BaseComponent:
         readonly,
         backend,
         rls_compare,
+        table_sub=False,
     ):
         return json.dumps(
             {
@@ -156,6 +179,7 @@ class BaseComponent:
                 "volatile": bool(volatile),
                 "readonly": bool(readonly),
                 "backend": str(backend),
+                "table_sub": bool(table_sub),
                 "properties": {
                     name: {
                         "default": (
@@ -166,6 +190,7 @@ class BaseComponent:
                         "unique": bool(prop.unique),
                         "index": bool(prop.index),
                         "dtype": np.dtype(prop.dtype).str,
+                        "point_sub": bool(prop.point_sub),
                     }
                     for name, prop in properties.items()
                 },
@@ -188,6 +213,8 @@ class BaseComponent:
         comp.volatile_ = bool(data["volatile"])
         comp.readonly_ = bool(data["readonly"])
         comp.backend_ = str(data["backend"])
+        # 旧 meta（迁移路径会读）没有这个键，按未声明处理；属性的 point_sub 同理由 Property 默认值兜底
+        comp.table_sub_ = bool(data.get("table_sub", False))
         comp.properties_ = [
             (name, Property(**prop)) for name, prop in data["properties"].items()
         ]
@@ -213,12 +240,18 @@ class BaseComponent:
             for name, prop in comp.properties_
             if prop.unique or prop.index
         }
+        comp.point_subs_ = frozenset(
+            name for name, prop in comp.properties_ if prop.point_sub
+        )
 
         comp.prop_idx_map_ = {}
         comp.dtype_map_ = {}
         for name, prop in comp.properties_:
             comp.prop_idx_map_[name] = len(comp.prop_idx_map_)
             comp.dtype_map_[name] = np.dtype(prop.dtype)
+        comp.bytes_fields_ = frozenset(
+            name for name, dtype in comp.dtype_map_.items() if dtype.kind == "S"
+        )
 
         return comp
 
@@ -354,6 +387,7 @@ def define_component(
     # readonly: bool = False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
+    table_sub: bool = False,
 ) -> type[BaseComponent]: ...
 @overload
 def define_component(
@@ -367,6 +401,7 @@ def define_component(
     # readonly: bool = False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
+    table_sub: bool = False,
 ) -> Callable[[type[BaseComponent]], type[BaseComponent]]: ...
 def define_component(
     _cls=None,
@@ -379,6 +414,7 @@ def define_component(
     # readonly=False,
     backend: str = "default",
     rls_compare: tuple[str, str, str] | None = None,
+    table_sub: bool = False,
 ) -> Callable[[type[BaseComponent]], type[BaseComponent]] | type[BaseComponent]:
     """
     定义Component组件的schema模型
@@ -422,6 +458,14 @@ def define_component(
         - rls_compare[2]: Context属性名字符串，或Context.user_data的key名
 
         只有operator比较后返回True时允许读取此行。如果属性不存在，按nan处理（无法和任何值比较）。
+    table_sub: bool
+        是否允许整表订阅（客户端 `WatchTable` / `subscribe_table`）。开启后该组件的每次
+        commit 都要多发一条表频道 PUBLISH（一个事务一张表一条），所以只给"行多、行小、很少变"
+        的冷表开，如所有玩家的名字；未开启的组件，整表订阅会被拒绝。
+
+        Allow whole-table subscriptions. Every commit touching this component then sends
+        one table-channel PUBLISH, so enable it only for cold tables; whole-table
+        subscriptions on other components are rejected.
     force: bool
         强制覆盖同名Component，单元测试用。
     _cls: class
@@ -433,9 +477,10 @@ def define_component(
 
     Notes
     -----
-    `property_field(default, unique, index, dtype)` 是Component的属性定义，可定义默认值和数据类型。
+    `property_field(default, unique, index, dtype, point_sub)` 是Component的属性定义，可定义默认值和数据类型。
         - `index` 表示此属性开启索引；
-        - `unique` 表示属性值必须唯一，启动此项默认会同时打开index。
+        - `unique` 表示属性值必须唯一，启动此项默认会同时打开index；
+        - `point_sub` 表示此索引支持高效点订阅，启动此项默认会同时打开index。
 
     .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
@@ -484,6 +529,15 @@ def define_component(
                         "index不能设置为False。"
                     ).format(cname=cname, fname=fname)
                 )
+            prop.index = True
+        # 开启point_sub时，同样强制index为True（值频道是索引的"某个值"）
+        if prop.point_sub and not prop.index:
+            logger.warning(
+                _(
+                    "⚠️ [🛠️Define] {cname}.{fname}属性设置为point_sub时，"
+                    "index不能设置为False。"
+                ).format(cname=cname, fname=fname)
+            )
             prop.index = True
         # 判断default值必须设置
         assert prop.default is not None, _(
@@ -615,6 +669,7 @@ def define_component(
             False,
             backend,
             rls_compare,
+            table_sub,
         )
         cls.load_json(json_str)
 

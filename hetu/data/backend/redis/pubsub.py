@@ -14,7 +14,7 @@ from functools import partial
 
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
-from redis.asyncio.connection import ConnectionPool
+from redis.asyncio.connection import Connection, ConnectionPool
 from redis.cluster import LoadBalancingStrategy
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import SlotNotCoveredError
@@ -26,6 +26,24 @@ UNSUBSCRIBE_ACK_TIMEOUT = 5.0
 # 节点失效后重新订阅的退避区间
 RESUBSCRIBE_BACKOFF_MIN = 0.5
 RESUBSCRIBE_BACKOFF_MAX = 5.0
+
+
+def _pubsub_pool(connection_class: type, connection_kwargs: dict) -> ConnectionPool:
+    """
+    只给 pubsub 用的小池。pubsub 连接常驻且只读不写：应用层没有任何往返，半开的 TCP
+    连接（NAT 超时、对端主机冻结，没有 FIN/RST）会让监听协程永远阻塞在读上，通知静默丢失。
+    redis-py 的 PubSub 自己不会周期 PING（health_check_interval 只在每次准备读之前检查
+    一次，listen() 阻塞期间根本回不到那里），所以靠 TCP keepalive 让内核把半开连接判死：
+    redis-py >= 8 默认开（idle 30s / interval 5s / 3 probes），这里显式打开，不依赖版本
+    默认值；URL 里明确配了 socket_keepalive 的仍按配置来。
+    unix socket 连接没有这个参数（也没有半开的问题）。
+    """
+    kwargs = dict(connection_kwargs)
+    if issubclass(connection_class, Connection):
+        kwargs.setdefault("socket_keepalive", True)
+    return ConnectionPool(
+        connection_class=connection_class, max_connections=2, **kwargs
+    )
 
 
 class AsyncKeyspacePubSub:
@@ -42,6 +60,7 @@ class AsyncKeyspacePubSub:
         self,
         client: Redis | RedisCluster,
         on_message: Callable[[dict], None] | None = None,
+        on_resubscribed: Callable[[list[str]], None] | None = None,
     ):
         """
         Parameters
@@ -52,10 +71,14 @@ class AsyncKeyspacePubSub:
         on_message
             收到频道消息时在监听协程里直接同步调用的回调（每条消息一次，不能 await）。
             不传则消息进 `message_queue`，由 `get_message()` 取。
+        on_resubscribed
+            节点失效后，恢复流程确认这批频道全部重订生效时同步调用一次，传入这批频道。
+            失效到恢复之间的通知全部丢失，上层据此补读。不能 await。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
         self.on_message = on_message
+        self.on_resubscribed = on_resubscribed
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
@@ -77,6 +100,10 @@ class AsyncKeyspacePubSub:
         # 每个节点一把锁：redis-py 的 PubSub 首次 connect 不是并发安全的（同时几个 subscribe
         # 会各自去池里拿连接），同一节点的 SUBSCRIBE/UNSUBSCRIBE 串行发
         self._node_locks: dict[str, asyncio.Lock] = {}
+
+        # 节点失效后要重新订阅的频道：失效时把已订阅集合整个并进来（拓扑可能变了，全部重订），
+        # 恢复流程跑着的时候又有节点失效会继续往里并；全部重订生效后清空
+        self._resubscribe_targets: set[str] = set()
 
         # 运行状态
         self._tasks: set[asyncio.Task] = set()
@@ -116,11 +143,7 @@ class AsyncKeyspacePubSub:
         # main_client 那个有上限的读写连接池。照抄它的连接参数（含 ssl/unix socket 的
         # connection_class）另开一个只给 pubsub 用的小池
         main_pool = self.main_client.connection_pool
-        pool = ConnectionPool(
-            connection_class=main_pool.connection_class,
-            max_connections=2,
-            **main_pool.connection_kwargs,
-        )
+        pool = _pubsub_pool(main_pool.connection_class, main_pool.connection_kwargs)
         r_client = Redis.from_pool(pool)
         pubsub = r_client.pubsub()
         self.node_resources["standalone"] = {
@@ -142,11 +165,7 @@ class AsyncKeyspacePubSub:
         # redis-py 8.1 起还塞了 himport_registry 这类内部对象），不能直接喂给 Redis(...)，
         # 会 TypeError；照 ClusterNode 自己建连接的方式，用它的 connection_class +
         # connection_kwargs 另开一个只给 pubsub 用的小池（与 standalone_connect 同款）
-        pool = ConnectionPool(
-            connection_class=node.connection_class,
-            max_connections=2,
-            **node.connection_kwargs,
-        )
+        pool = _pubsub_pool(node.connection_class, node.connection_kwargs)
         r_client = Redis.from_pool(pool)
         pubsub = r_client.pubsub()
 
@@ -165,6 +184,11 @@ class AsyncKeyspacePubSub:
 
         if self.is_cluster:
             assert isinstance(self.main_client, RedisCluster)
+            # 客户端可能还没被任何命令初始化过（幂等，已初始化即返回）。不能跳过它直接
+            # 初始化 nodes_manager：那样 default_node 有了而命令解析器还是空的，之后该客户端
+            # 的第一条普通命令会在 _determine_slot 里报
+            # "'AsyncCommandsParser' object has no attribute 'node'"
+            await self.main_client.initialize()
             # 计算 Slot 和目标节点，如果找不到，说明node变更了，需要刷新拓扑
             slot = self.main_client.keyslot(channel)
             try:
@@ -320,6 +344,7 @@ class AsyncKeyspacePubSub:
         for channel in channels:
             node_key = self._channel_node.pop(channel, "standalone")
             self._subscribed.discard(channel)
+            self._resubscribe_targets.discard(channel)  # 恢复流程跑着也别把它订回来
             # SUBSCRIBE 还没 ack 就退订：让等它的人正常返回而不是报错。等的人就是刚撤了
             # 自己登记的那个连接（hub 只在没人订时才退订），它的 subscribe 没有失败，
             # 只是随后被自己的 unsub 覆盖了；报错会让 get_updates 把整个连接断掉
@@ -354,23 +379,34 @@ class AsyncKeyspacePubSub:
 
     async def resubscribe_all(self):
         """
-        节点失效后重新订阅所有已确认的频道，失败就退避重试直到成功或 close。
+        节点失效后重新订阅 `_resubscribe_targets` 里的频道（失效时的全部已订阅频道），
+        失败就退避重试直到全部生效或 close。
         """
-        current_subscriptions = list(self._subscribed)
-        self._subscribed.clear()
-        self._channel_node.clear()
+        targets = self._resubscribe_targets
         backoff = RESUBSCRIBE_BACKOFF_MIN
         while not self._closed:
             try:
-                await self.subscribe(*current_subscriptions)
-                logger.info(f"Resubscribed {len(current_subscriptions)} channels")
-                return
+                await self.subscribe(*targets)
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001 网络/拓扑错误都要重试，不能让恢复流程死掉
                 logger.error(f"Resubscribe failed, retry in {backoff}s: {e}")
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, RESUBSCRIBE_BACKOFF_MAX)
+                continue
+            # 等 ack 期间又有节点失效的话，它已把已订阅集合清掉、并回 targets：再来一轮，
+            # 直到 targets 全部订阅生效才算恢复
+            if targets <= self._subscribed:
+                logger.info(f"Resubscribed {len(targets)} channels")
+                recovered = list(targets)
+                targets.clear()
+                # 失效到现在的通知都丢了，交给上层补读。回调出错不能拖垮恢复流程
+                if self.on_resubscribed is not None:
+                    try:
+                        self.on_resubscribed(recovered)
+                    except Exception:
+                        logger.exception("on_resubscribed callback failed")
+                return
 
     async def _node_listener(self, node_key: str, pubsub: PubSub):
         """
@@ -438,7 +474,15 @@ class AsyncKeyspacePubSub:
             exc = RedisConnectionError(f"pubsub node {node_key} lost")
             self._fail_pending(self._pending_subscribe, exc)
             self._fail_pending(self._pending_unsubscribe, exc)
-            # 灾难恢复逻辑（已有一个在退避重试中就不再起）。如果不保存task，task不会执行会被gc
+            # 该节点上已订阅生效的频道随连接一起没了。恢复流程重订全部频道（拓扑可能变了），
+            # 所以把已订阅集合整个并进重订名单并清空：清空后 subscribe() 不会把它们当已订阅
+            # 短路——恢复流程已在跑时（多个节点接连失效）第二个节点上刚订好的频道以前正是
+            # 这样被永远漏掉的
+            self._resubscribe_targets.update(self._subscribed)
+            self._subscribed.clear()
+            self._channel_node.clear()
+            # 灾难恢复逻辑（已有一个在退避重试中就不再起，它会把新并进来的频道一起订上）。
+            # 如果不保存task，task不会执行会被gc
             if self._resubscribe_task is None or self._resubscribe_task.done():
                 self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
 

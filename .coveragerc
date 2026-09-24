@@ -20,4 +20,5 @@ exclude_lines =
     pragma: no cover
     TYPE_CHECKING
     raise NotImplementedError
+    @overload
 skip_empty = True

@@ -90,6 +90,16 @@ population while staying consistent.
   syncs from the master.
 - Servants need `notify-keyspace-events` enabled (HeTu `CONFIG SET`s it at
   startup when it has permission, and warns otherwise).
+- **Replication lag budget**: a subscription notification carries no content,
+  so the server re-reads the row from a replica (chosen by the proxy in a proxy
+  topology). After every notification, and after a subscription becomes active
+  or pub/sub reconnects, the server reads again at least `1/UPDATE_FREQUENCY`
+  (100 ms by default) later, so as long as replica lag stays below that, clients
+  always end up with the latest value. When lag exceeds it (replica CPU
+  saturated, full resync, network hiccups), a client may keep stale data until
+  that row changes again — which is why subscription pushes are only guaranteed
+  to be up to date in about 99% of cases. Monitor replica replication lag (e.g.
+  the "sync delay" metric in your cloud console) and keep it well below 100 ms.
 - Every logged-in connection also subscribes to the `Connection` table's
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every

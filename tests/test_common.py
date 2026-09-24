@@ -6,6 +6,20 @@ from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 
+@pytest.fixture(autouse=True)
+def _restore_snowflake_state():
+    """本文件的用例会重新 init 单件 SnowflakeID：不传 last_timestamp 时它被设成当前时间
+    加 10 秒（防重启回拨）。不恢复的话，同一 worker 上 10 秒内后跑的用例一发号就多打一条
+    "时钟回拨"告警，断言日志条数的用例（test_system_executor::test_slow_log）就会挂"""
+    from hetu.common.snowflake_id import SnowflakeID
+
+    generator = SnowflakeID()
+    saved = dict(vars(generator))
+    yield
+    vars(generator).clear()
+    vars(generator).update(saved)
+
+
 async def test_snowflake_id(monkeypatch):
     from hetu.common.snowflake_id import SnowflakeID
 
@@ -236,11 +250,11 @@ def _make_lease_table(backend):
 
 
 async def test_snowflake_timestamp_keeper(
-    mod_sqlite_backend, monkeypatch, tmp_path, caplog
+    mod_auto_backend, monkeypatch, tmp_path, caplog
 ):
     """时间戳高水位：独立于租约的读写语义，只需要单调max"""
     monkeypatch.chdir(tmp_path)
-    backend = mod_sqlite_backend()
+    backend = mod_auto_backend()
 
     from hetu.data.backend.snowflake_timestamp import (
         TIMESTAMP_SAVE_INTERVAL,
@@ -256,9 +270,13 @@ async def test_snowflake_timestamp_keeper(
     # 只有"读不出来"（后端异常）才该退化成 init 的兜底值，见 load 的文档
     assert abs(await ts_keeper.load() - now_ms) < 1000
 
-    # SQL后端的 direct_set 是 UPDATE，行不存在就静默无效；GeneralWorkerKeeper 删掉后
-    # 没人替本类建行了，所以它必须自己补建，否则水位永远写不进去
+    # 首次写入前必须先把行建好（GeneralWorkerKeeper 删掉后没人替本类建行了）：
+    # SQL 的 direct_set 是 UPDATE，缺行静默无效；Redis 的是 HSET，缺行会建出
+    # 只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT 读它就 KeyError
+    # （开服后每个 worker 都报一次）
     await ts_keeper.save(now_ms - 60_000)
+    row = await backend.master.get(table, 7)
+    assert row is not None and row.id == 7 and row.last_timestamp == now_ms - 60_000
     assert await ts_keeper.load() >= now_ms
 
     # 后端读异常时才返回-1，把回拨保护交还给 SnowflakeID.init
@@ -288,6 +306,35 @@ async def test_snowflake_timestamp_keeper(
     with caplog.at_level(logging.WARNING, logger="HeTu.root"):
         await second.save(edge_ms)
     assert await second.load() == edge_ms + pad_ms
+
+
+@use_redis_family_backend_only
+async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
+    """旧版本的 save 先 direct_set 再确认行在不在，Redis 上给缺行建出了只有
+    last_timestamp、缺 id 的残缺 hash：之后按 STRUCT 读就 KeyError，每次重启 load 都
+    退化成固定容忍度。已部署的库里还留着这种行，load 要照样读出它的水位，save 照常写"""
+    from hetu.data.backend import RowFormat
+    from hetu.data.backend.snowflake_timestamp import (
+        TIMESTAMP_SAVE_INTERVAL,
+        SnowflakeTimestampKeeper,
+    )
+
+    backend = mod_auto_backend()
+    table = _make_lease_table(backend)
+    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
+    worker_id = 9
+    # 高于当前时间，才看得出读回的是不是这个水位
+    stored = int(time.time() * 1000) + 30_000
+    # 旧版本就是这样建出残缺行的：行还不存在时直接 direct_set
+    await table.direct_set(worker_id, last_timestamp=str(stored))
+    raw = await backend.master.get(table, worker_id, RowFormat.RAW)
+    assert raw is not None and "id" not in raw
+
+    keeper = SnowflakeTimestampKeeper(table, worker_id)
+    assert await keeper.load() == stored + pad_ms
+    await keeper.save(stored + 1)
+    restarted = SnowflakeTimestampKeeper(table, worker_id)
+    assert await restarted.load() == stored + 1 + pad_ms
 
 
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
@@ -397,3 +444,71 @@ async def test_redis_keeper_arms_fence(mod_auto_backend):
     time.sleep(0.01)
     await keeper.keep_alive()
     assert keeper.lease_deadline > old
+
+
+def test_batched():
+    from hetu.common.helper import batched
+
+    assert list(batched("ABCDEFG", 3)) == [("A", "B", "C"), ("D", "E", "F"), ("G",)]
+    with pytest.raises(ValueError):
+        list(batched([1, 2], 0))
+
+
+def _fake_fs(monkeypatch, files: dict[str, str | Exception]):
+    """让 helper 看到的文件系统只有 files：值为内容，或读取时抛出的异常"""
+    import io
+    from types import SimpleNamespace
+
+    from hetu.common import helper
+
+    def fake_open(path, *args, **kwargs):
+        content = files[path]
+        if isinstance(content, Exception):
+            raise content
+        return io.StringIO(content)
+
+    # 只换 helper 模块里的 os 引用，不动全进程的 os.path.exists
+    fake_path = SimpleNamespace(exists=lambda p: p in files)
+    monkeypatch.setattr(helper, "os", SimpleNamespace(path=fake_path))
+    monkeypatch.setattr(helper, "open", fake_open, raising=False)
+
+
+@pytest.mark.parametrize(
+    "files, expected",
+    [
+        ({}, False),
+        ({"/.dockerenv": ""}, True),
+        ({"/run/.containerenv": ""}, True),
+        ({"/proc/1/cgroup": "0::/kubepods/besteffort/pod1234\n"}, True),
+        ({"/proc/1/cgroup": "12:cpu:/docker/abcdef\n"}, True),
+        ({"/proc/1/cgroup": "0::/system.slice/containerd.service\n"}, True),
+        ({"/proc/1/cgroup": "0::/init.scope\n"}, False),
+        # 读不了 cgroup 不能让启动崩掉，当作非容器
+        ({"/proc/1/cgroup": PermissionError("denied")}, False),
+    ],
+)
+def test_is_container_env(monkeypatch, files, expected):
+    from hetu.common.helper import is_container_env
+
+    _fake_fs(monkeypatch, files)
+    assert is_container_env() is expected
+
+
+def test_get_machine_id(monkeypatch):
+    """机器ID是 Redis worker 租约 node_id 的一部分：容器环境用 /etc/hostname，
+    /etc/hostname 读不到时回退 socket.gethostname()；非容器用 MAC 的十六进制"""
+    import socket
+    import uuid
+
+    from hetu.common.helper import get_machine_id
+
+    _fake_fs(monkeypatch, {"/.dockerenv": "", "/etc/hostname": "pod-7f9c\n"})
+    assert get_machine_id() == "pod-7f9c"
+
+    _fake_fs(monkeypatch, {"/.dockerenv": "", "/etc/hostname": OSError("gone")})
+    monkeypatch.setattr(socket, "gethostname", lambda: "fallback-host")
+    assert get_machine_id() == "fallback-host"
+
+    _fake_fs(monkeypatch, {})
+    monkeypatch.setattr(uuid, "getnode", lambda: 0x1A2B3C4D5E6F)
+    assert get_machine_id() == "1a2b3c4d5e6f"

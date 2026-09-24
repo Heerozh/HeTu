@@ -40,7 +40,10 @@ dependencies = [
     "numpy~=2.3",
     "psycopg>=3.3.3",
     "psycopg-binary>=3.3.3",
-    "pymysql>=1.1.2",
+    # 1.2.1/1.2.2 删掉了 aiomysql 0.3.2 要 import 的内部函数（连 import 都失败）；
+    # >=1.2.3 由 sql/client.py 的 _patch_aiomysql_escape_bytes 兜底（aio-libs/aiomysql#1080）。
+    # aiomysql 0.3.3 发布后改成 aiomysql>=0.3.3，这两处排除和那个垫片都可以删
+    "pymysql>=1.1.2,!=1.2.1,!=1.2.2",
     "pynacl>=1.6.2",
     "pyyaml~=6.0",
     "redis[hiredis]>=7,<9",
@@ -79,6 +82,7 @@ dev = [
     "pytest-benchmark>=5.2.3",
     "pytest-cov>=7.0.0",
     "pytest-timeout>=2.4.0",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.14.6",
     "sanic-testing>=24.6.0",
     "trustme>=1.2.1",

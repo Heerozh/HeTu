@@ -103,6 +103,7 @@ MAX_ROW_SUBSCRIPTION: 10
 MAX_INDEX_SUBSCRIPTION: 1
 # 限制未登录客户端最大允许的整表订阅数(HeTuClientSDK.table)。每次table订阅+1，不计入行数限制。
 # elevate(登录提权)同样*50，或自己在任意System中修改 ctx.max_table_sub 值
+# 只有 define_component 声明了 table_sub=True 的组件才允许整表订阅
 MAX_TABLE_SUBSCRIPTION: 1
 # 单次整表订阅允许的最大行数，超过则拒绝订阅。整表订阅只订一个频道，行数不受MAX_ROW_SUBSCRIPTION
 # 限制，但订阅者会收到该表所有写入的通知，所以只适合"行多、行小、很少变"的表（如所有玩家名字）
@@ -134,16 +135,17 @@ BACKENDS:
     type: Redis
     # 指定master服务器，只能一个地址
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
-    #        要求Redis >= 7.0。但广泛兼容Forks: Valkey, Tair等；支持redis代理层。
-    # 不建议生产环境使用关系数据库，因为订阅表性能不够，如果要提高性能还是要借助Redis或ZMQ等消息服务。
-    # 开发环境可以用SQLite方便调试部署。
-    # Postgres: postgresql://user:pass@localhost:5432/dbname
+    #        要求Redis >= 7.0（推荐>=8.8有通知快速路径）。
+    #        但广泛兼容Forks: Valkey(推荐>=9.2有通知快速路径), Tair等；支持redis代理层。
+    #        代理层多数不支持RESP3协议，启动时会报 ResponseError: unknown command，
+    #        此时在url后追加 ?protocol=2 降级。河图没有用到RESP3独有特性。
+    # SQL仅限开发环境，主要为了SQLite方便，生产环境订阅表性能不够。
     # SQLite:   sqlite:///./data/hetu.sqlite3
-    # MariaDB:  mysql://user:pass@localhost:3306/dbname
     master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
     # 订阅读，就是客户端SDK的数据订阅，永远只在随机servants上进行。
+    # 生产环境下要么代理层后有至少一个只读节点，要么这里至少填一个。
     # Redis:
     #  - redis下，servant就是只读replica服务器
     #  - 开启redis原生集群模式的无需填写此项，可自动生效，因为原生集群会自动加载replica地址
@@ -152,7 +154,12 @@ BACKENDS:
     # 主数据库事务读权重。提高此值减少事务冲突概率，降低此值减少主数据库事务读负载
     # 只在填写了servants时有效，每台servant的读权重固定为1，
     master_weight: 1.0
-    # 指出Redis后端是原生集群模式。不建议使用此项，而是加一层redis proxy代理层，由它控制分片和集群。
+    # 指出Redis后端是原生集群模式。
+    # 不建议使用原生集群，一是表频道/值频道的Publish（只有声明了table_sub/point_sub的组件/索引
+    # 才发）会全集群通知(为了兼容性尽量没使用SPublish)，
+    # 二是redis-py的pubsub对集群支持不佳，因此我们自己实现了一套PubSub，自己切换node。
+    # 推荐使用自切片redis proxy代理层来实现集群，自切片指的是redis不运行在cluster模式，
+    # 由代理自己根据keyslot来送达命令，包括SUBSCRIBE/Publish到对应切片。
     # 河图天然支持分片，所有的key都带有Redis协议的Hash tags，自动根据System的component定义，计算
     # 数据隔离，把隔离的数据分配到不同的分片上，提升写入性能。
     # 只有在master写入负载过高时再考虑集群，因为读负载全可通过servants分担，文档有全面的负载压测数据。

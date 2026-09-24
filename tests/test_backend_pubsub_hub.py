@@ -7,25 +7,14 @@ import asyncio
 from contextvars import ContextVar
 from typing import cast
 
+from fixtures.backends import use_redis_family_backend_only
+from fixtures.contexts import admin_ctx_, settled_updates
+
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.sub import RowSubscription, SubscriptionBroker
-from hetu.system import SystemContext
 
 SnowflakeID().init(1, 0)
-
-
-def _admin_ctx() -> SystemContext:
-    return SystemContext(
-        caller=0,
-        connection_id=0,
-        address="NotSet",
-        group="admin",
-        user_data={},
-        timestamp=0,
-        request=None,  # type: ignore
-        systems=None,  # type: ignore
-    )
 
 
 def _hub(backend: Backend):
@@ -45,14 +34,34 @@ async def _update_qty(backend: Backend, ref, qty: int):
 
 
 async def _get_updates(broker: SubscriptionBroker):
-    async with asyncio.timeout(3):
-        return await broker.get_updates()
+    return await settled_updates(broker, timeout=3)
+
+
+@use_redis_family_backend_only
+async def test_hub_empty_message_skips_unpack(filled_item_ref, mod_auto_backend):
+    """值频道的消息是空串：hub 直接当作无 payload，不走 msgpack 解包（以前会抛一次异常再兜住）"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.redis import mq as redis_mq
+
+    backend: Backend = mod_auto_backend()
+    mq = backend.get_mq_client()
+    chan = backend.servant.index_value_channel(filled_item_ref, "owner", 10)
+    await mq.subscribe(chan)
+    hub = _hub(backend)
+    unpackb = redis_mq.msgpack.unpackb
+    with patch.object(redis_mq.msgpack, "unpackb", wraps=unpackb) as spy:
+        hub._on_message({"type": "message", "channel": chan.encode(), "data": b""})
+    assert spy.call_count == 0
+    assert chan in mq.pulled_set  # type: ignore[attr-defined]
+    assert chan not in mq.pulled_payload  # type: ignore[attr-defined]
+    await mq.close()
 
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker_a = SubscriptionBroker(backend)
     broker_b = SubscriptionBroker(backend)
 
@@ -189,7 +198,7 @@ async def test_watch_and_client_subscription_share_channel(
     客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
     backend: Backend = mod_auto_backend()
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
-    ctx = _admin_ctx()
+    ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     hub = _hub(backend)
     hits: list[int] = []
@@ -228,3 +237,25 @@ async def test_watch_and_client_subscription_share_channel(
 
     await broker.close()
     assert hub.subscriber_count(channel) == 0
+
+
+async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend):
+    """pubsub 连接常驻只读，半开 TCP 连接只能靠内核 keepalive 判死：连接参数里必须显式开着，
+    不依赖 redis-py 的版本默认值（7.x 默认关）"""
+    backend: Backend = mod_auto_backend()
+    broker = SubscriptionBroker(backend)
+    try:
+        pubsub = getattr(_hub(backend), "_pubsub", None)
+        if pubsub is None:
+            return  # SQL 后端没有 pubsub 连接
+        sub, _ = await broker.subscribe_get(
+            filled_item_ref, admin_ctx_(), "name", "Itm10"
+        )
+        assert sub
+        for res in pubsub.node_resources.values():
+            conn = res["pubsub"].connection
+            assert conn is not None
+            if hasattr(conn, "socket_keepalive"):  # unix socket 连接没有
+                assert conn.socket_keepalive is True
+    finally:
+        await broker.close()

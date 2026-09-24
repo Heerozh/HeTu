@@ -15,15 +15,17 @@ def def_item():
 
     global Item
 
-    @define_component(namespace="pytest", permission=Permission.OWNER)
+    # 订阅测试的主力组件：整表订阅、owner/name/used 上的点查询都在用，所以声明了
+    # table_sub 与 point_sub；model、time 故意不声明（未声明时的行为也要覆盖到）
+    @define_component(namespace="pytest", permission=Permission.OWNER, table_sub=True)
     class Item(BaseComponent):
-        owner: np.int64 = property_field(0, unique=False, index=True)
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
         model: np.float32 = property_field(0, unique=False, index=True)
         qty: np.int16 = property_field(1, unique=False, index=False)
         level: np.int8 = property_field(1, unique=False, index=False)
         time: np.int64 = property_field(0, unique=True, index=True)
-        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
-        used: bool = property_field(False, unique=False, index=True)
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
 
     return Item
 
@@ -41,18 +43,19 @@ def def_rls_test():
         rls_compare=("eq", "friend", "caller"),
     )
     class RLSTest(BaseComponent):
-        owner: np.int64 = property_field(0, unique=False, index=True)
+        # 点查询 owner=x 在用；故意不声明 table_sub（整表订阅被拒的用例用它）
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
         friend: np.int8 = property_field(1, unique=False, index=False)
 
     return RLSTest
 
 
-def create_ref(model, backend) -> TableReference:
+def create_ref(model, backend, cluster_id=1) -> TableReference:
     """定义测试用的Item组件模型，创建空表，返回模型引用类。"""
     # 创建空表
     from hetu.data.backend import RaceCondition
 
-    model_ref = TableReference(model, "pytest", 1)
+    model_ref = TableReference(model, "pytest", cluster_id)
     table_maint = backend.get_table_maintenance()
     try:
         table_maint.create_table(model_ref)

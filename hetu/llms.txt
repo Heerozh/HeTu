@@ -29,7 +29,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Concepts
 
-- [Concepts](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/concepts.md): HeTu 的 ECS 心智模型——Component（NumPy structured array 表）、System（事务函数）、`unique` / `index`、权限级别 EVERYBODY / USER / OWNER / RLS / ADMIN、co-location cluster 规则、Subscription（RowSubscription / IndexSubscription）推送链路、optimistic concurrency 与 `RaceCondition` 自动重试
+- [Concepts](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/concepts.md): HeTu 的 ECS 心智模型——Component（NumPy structured array 表）、System（事务函数）、`unique` / `index`、权限级别 EVERYBODY / USER / OWNER / RLS / ADMIN、co-location cluster 规则、Subscription（RowSubscription / IndexSubscription）推送链路与一致性保证（尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据直到该行下次变更，强一致判断放在 System 里）、optimistic concurrency 与 `RaceCondition` 自动重试
 
 ## Client SDK
 
@@ -41,7 +41,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Operations & Deployment
 
-- [Operations](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/operations.md): 生产部署——Docker 部署（`heerozh/hetu:latest` / 阿里云上海镜像）、pip + miniconda 原生部署（约比 Docker 高 20% 性能）、Redis 拓扑（master + servant 读写分离、Redis Cluster）、Caddy 反向代理 + Docker Swarm 自动负载均衡、`hetu` CLI（`start` / `build` / `upgrade`）
+- [Operations](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/operations.md): 生产部署——Docker 部署（`heerozh/hetu:latest` / 阿里云上海镜像）、pip + miniconda 原生部署（约比 Docker 高 20% 性能）、Redis 拓扑（master + servant 读写分离、Redis Cluster、订阅的副本复制延迟预算 100ms）、Caddy 反向代理 + Docker Swarm 自动负载均衡、`hetu` CLI（`start` / `build` / `upgrade`）
 
 ## API Reference
 

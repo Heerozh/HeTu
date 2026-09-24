@@ -85,6 +85,9 @@ class SQLTableMaintenance(TableMaintenance):
         table = self._safe_get_table(ref)
         dtype = comp_cls.dtype_map_[index_name]
         left, right, li, ri = self.client.range_normalize_(dtype, left, right, False)
+        left, right, li, ri = self.client.clamp_uint64_bounds_(
+            dtype, left, right, li, ri, False
+        )
         col = table.c[index_name]
         cond_left = col >= left if li else col > left
         cond_right = col <= right if ri else col < right
@@ -281,6 +284,25 @@ class SQLTableMaintenance(TableMaintenance):
                     version=hashlib.md5(to_.comp_cls.json_.encode("utf-8")).hexdigest(),
                     cluster_id=to_.cluster_id,
                     extra_json="{}",
+                )
+            )
+
+    @override
+    def do_update_meta_(self, table_ref: TableReference) -> None:
+        """把组件表的meta改写成table_ref的定义，不动表数据"""
+        meta = self._safe_get_meta()
+        json_ = table_ref.comp_cls.json_
+        with self.client.io.begin() as conn:
+            conn.execute(
+                sa.update(meta)
+                .where(
+                    meta.c.instance_name == table_ref.instance_name,
+                    meta.c.comp_name == table_ref.comp_name,
+                )
+                .values(
+                    json=json_,
+                    version=hashlib.md5(json_.encode("utf-8")).hexdigest(),
+                    cluster_id=table_ref.cluster_id,
                 )
             )
 

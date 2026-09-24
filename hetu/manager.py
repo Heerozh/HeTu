@@ -61,23 +61,26 @@ class ComponentTableManager:
 
     def create_or_migrate_all(self, app_file: str, force=False) -> bool:
         """
-        创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则raise异常。
+        创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则返回False。
         此时要么写迁移脚本，要么用cli强制迁移。
         """
         for _key, tbl in self._tables.items():
             maint = tbl.backend.get_table_maintenance()
             tbl_status, old_meta = maint.check_table(tbl)
-            match tbl_status:
-                case "not_exists":
-                    maint.create_table(tbl)
-                case "schema_mismatch":
-                    assert old_meta
-                    if not maint.migration_schema(app_file, tbl, old_meta, force=force):
-                        return False
-                case "cluster_mismatch":
-                    assert old_meta
-                    # 非持久化的Component也需要cluster迁移，不然数据就永远的留在了数据库中
-                    maint.migration_cluster_id(tbl, old_meta)
+            if tbl_status == "not_exists":
+                maint.create_table(tbl)
+                continue
+            if tbl_status == "cluster_mismatch":
+                assert old_meta
+                # 非持久化的Component也需要cluster迁移，不然数据就永远的留在了数据库中
+                maint.migration_cluster_id(tbl, old_meta)
+                # cluster 迁移只按旧定义搬 key、不动 schema：schema 也变了的话表现在是
+                # schema_mismatch，接着迁，不然 upgrade 报成功、表却还停在旧 schema
+                tbl_status, old_meta = maint.check_table(tbl)
+            if tbl_status == "schema_mismatch":
+                assert old_meta
+                if not maint.migration_schema(app_file, tbl, old_meta, force=force):
+                    return False
         return True
 
     def check_and_create_new_tables(self) -> bool:

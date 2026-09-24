@@ -39,9 +39,16 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
+- **SQL backends cannot store a uint64 above `2**63 - 1`.** On the SQL
+  backends (SQLite / PostgreSQL / MariaDB) unsigned integers live in BIGINT
+  columns: committing a larger value is rejected with a `ValueError`, and range
+  bounds beyond it are clamped. The Redis backend has no such limit.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.
+  `point_sub=True` declares that the index supports efficient point
+  subscriptions (see [Subscriptions](#subscriptions)); it also implies
+  `index=True`.
 - **`namespace=` is just a label.** Any string works. A running server binds
   to exactly one namespace at startup (`--namespace`) and only its `Systems`
   and `Endpoints` are loaded; `Components` from any namespace come along for the
@@ -190,20 +197,48 @@ Clients ask the server for live row data with three operations:
 
 Behind the scenes the `SubscriptionBroker` watches Redis pub/sub for row
 changes, filters them by the client's permission level, and pushes deltas
-back over the websocket. Latency is dominated by Redis round-trip — typically
-under one millisecond on the same VPC.
+back over the websocket. Pushes are batched every `1/UPDATE_FREQUENCY`
+(100 ms by default), so a change usually reaches the client within 100–200 ms.
 
 Subscriptions are checked against the same permission system as `Systems`, so a
 client cannot subscribe to data it isn't allowed to see.
 
+**Subscriptions are best-effort and eventually consistent.** Under normal load
+a client gets the latest data in about 99% of cases; when Redis is overloaded
+(replica replication lag above ~100 ms), a client may keep stale data until
+that row changes again. A notification only says "this row changed" and carries
+no content, so the server re-reads the row from a random replica, which is not
+necessarily the node that sent the notification. After every notification (and
+after a subscription becomes active or pub/sub reconnects) the server reads
+again at least one batching interval later; as long as replica lag stays within
+that interval, what it reads is the latest value. Make decisions that need
+strong consistency (spending currency, granting rewards, validation) inside a
+`System` — write transactions are guarded by optimistic locking — rather than
+relying on the subscription data a client holds.
+
 What wakes a `range` up depends on the shape of the query. A **point query**
-(`high` omitted, or `low == high` — `owner=me`, `zone=z`) listens to the channel
-of that one index value and is only notified when a row enters or leaves that
-value (insert, delete, or a row's field changing to/from it). An **interval
-query** listens to the whole index and is woken by any change to any value of
-that index, re-running its comparison on the server. So for hot indexes such as
-"every player watches their own inventory", write a point query — other players
-picking up items will not touch you.
+(`high` omitted, or `low == high` — `owner=me`, `zone=z`) on an index declared
+with `point_sub=True` listens to the channel of that one index value and is only
+notified when a row enters or leaves that value (insert, delete, or a row's
+field changing to/from it). An **interval query**, and a point query on an index
+without `point_sub`, listens to the whole index and is woken by any change to
+any value of that index, re-running its comparison on the server (the server
+logs a warning once when a point query lands here). So for hot indexes such as
+"every player watches their own inventory", declare `point_sub=True` and write
+a point query — other players picking up items will not touch you:
+
+```python
+@hetu.define_component(namespace="Game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, point_sub=True)
+    qty: np.int32 = hetu.property_field(1)
+```
+
+The cost of `point_sub`: every time a row *enters* a value (an insert, or the
+field changing to that value) the commit sends one extra notification (a Redis
+PUBLISH, which is replicated to every replica). Rows leaving a value need no
+notification — the subscriber already watches that row. Declare it only on
+indexes that are actually point-subscribed.
 
 ### When to use a table subscription
 
@@ -215,6 +250,19 @@ notification per modified table carrying the list of changed `row_id`s, and a
 table subscription listens to that single channel — it counts as one
 subscription regardless of how many rows the table has.
 
+That notification costs a Redis PUBLISH (replicated to every replica) on every
+commit, so it is only sent for components declared with `table_sub=True`;
+table subscriptions on other components are rejected:
+
+```python
+@hetu.define_component(
+    namespace="Game", permission=hetu.Permission.EVERYBODY, table_sub=True
+)
+class PlayerName(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, unique=True)
+    name: str = hetu.property_field("", dtype="U16")
+```
+
 The trade-off is that the subscriber is notified about **every** write to
 that table (the server filters by RLS before pushing), so it only fits tables
 that are "many rows, small rows, rarely change" — all player names, the guild
@@ -222,8 +270,9 @@ list, public config. Keep using `range` for hot tables (positions, HP). The
 server refuses tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by
 default); the per-connection count is capped by `MAX_TABLE_SUBSCRIPTION`.
 
-Unlike `range`, a table subscription reacts to RLS both ways: a row that loses
-permission is pushed as deleted, a row that gains it is pushed as added.
+A table subscription reacts to RLS both ways (a `range` does so only for rows
+inside its queried range): a row that loses permission is pushed as deleted, a
+row that gains it is pushed as added.
 
 ## Permissions
 

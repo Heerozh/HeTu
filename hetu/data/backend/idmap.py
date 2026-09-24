@@ -26,6 +26,15 @@ class RowState(Enum):
     DELETE = 3  # 需从数据库删除
 
 
+def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | bytes]:
+    """整行转成提交用的 {字段: 值}：一律 str()，bytes 字段原样保留字节"""
+    assert row.dtype.names  # for type checker, could be removed by python -O
+    ret: dict[str, str | bytes] = dict(zip(row.dtype.names, map(str, row.item())))
+    for name in bytes_fields:
+        ret[name] = bytes(row[name])
+    return ret
+
+
 class IdentityMap:
     """
     用于缓存和管理事务中的对象。
@@ -319,18 +328,6 @@ class IdentityMap:
                 ret[table_ref] = rows_absent
         return ret
 
-    def get_clean_row_keys(self) -> set[str]:
-        """
-        获取所有源干净行数据。如果遇到事务冲突，能知道是哪些干净数据其实已经失效了。
-        """
-        from hetu.data.backend.redis.client import RedisBackendClient
-
-        return {
-            RedisBackendClient.row_key(ref, row_id)
-            for ref, dat in self._row_clean.items()
-            for row_id in dat.keys()
-        }
-
     def get_clean_rows(self) -> dict["TableReference", dict[int, str]]:
         """
         返回当前仍处于CLEAN状态的行（被读取但未被修改/删除/重新插入），
@@ -361,14 +358,15 @@ class IdentityMap:
     ) -> dict[
         TableReference,
         tuple[
-            list[dict[str, str]],
-            tuple[list[dict[str, str]], list[dict[str, str]]],
-            list[dict[str, str]],
+            list[dict[str, str | bytes]],
+            tuple[list[dict[str, str | bytes]], list[dict[str, str | bytes]]],
+            list[dict[str, str | bytes]],
         ],
     ]:
         """
         返回所有脏对象的列表，用来提交给数据库，按INSERT、UPDATE、DELETE状态分开。
-        既然是提交给数据库用，所以返回的数据都是str类型
+        既然是提交给数据库用，所以返回的数据都是str类型；只有 bytes（S 类型）字段
+        是原样的 bytes，str() 会把它变成 "b'...'" 这种 repr 文本
 
         Returns
         -------
@@ -384,6 +382,7 @@ class IdentityMap:
             inserts, updates, deletes = [], ([], []), []
 
             cache = self._row_cache[table_ref]
+            bytes_fields = table_ref.comp_cls.bytes_fields_
 
             # 收集各状态的行ID
             insert_ids = [
@@ -399,10 +398,7 @@ class IdentityMap:
             # 从缓存中获取对应的行数据
             if insert_ids:
                 mask = np.isin(cache["id"], insert_ids)
-                inserts = [
-                    dict(zip(row.dtype.names, map(str, row.item())))
-                    for row in cache[mask]
-                ]
+                inserts = [_row_to_db(row, bytes_fields) for row in cache[mask]]
 
             if update_ids:
                 clean_cache = self._row_clean[table_ref]
@@ -413,12 +409,14 @@ class IdentityMap:
                 updates = (old_rows, new_rows)
                 for row in cache[mask]:
                     old = clean_cache[row.id]
-                    changed_fields = {
-                        field: str(row[field])
+                    changed_fields: dict[str, str | bytes] = {
+                        field: bytes(row[field])
+                        if field in bytes_fields
+                        else str(row[field])
                         for field in row.dtype.names
                         if row[field] != old[field]
                     }
-                    old_dict = dict(zip(old.dtype.names, map(str, old.item())))  # type: ignore
+                    old_dict = _row_to_db(old, bytes_fields)  # type: ignore
                     if changed_fields:
                         old_rows.append(old_dict)
                         new_rows.append(changed_fields)
@@ -426,10 +424,7 @@ class IdentityMap:
             if delete_ids:
                 # DELETE只需要ID列表
                 mask = np.isin(cache["id"], delete_ids)
-                deletes = [
-                    dict(zip(row.dtype.names, map(str, row.item())))
-                    for row in cache[mask]
-                ]
+                deletes = [_row_to_db(row, bytes_fields) for row in cache[mask]]
 
             ret[table_ref] = (inserts, updates, deletes)
 

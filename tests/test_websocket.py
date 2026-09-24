@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import logging
 import os
 from typing import Callable, cast
@@ -9,6 +10,9 @@ import sanic_testing.testing
 from nacl.public import PrivateKey
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 
+import hetu
+from hetu import webext
+from hetu.data import sub as sub_module
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import pipeline, worker_main
@@ -114,6 +118,9 @@ def setup_websocket_proxy():
 def test_server(setup_websocket_proxy, ses_redis_service):
     SystemClusters()._clear()
     EndpointDefines()._clear()
+    # webext 注册表按 模块名.函数名 记路由：别的测试 `import app` 过之后再由 worker_main
+    # 以 HeTuApp 之名 exec 同一个文件，同一 uri 就会注册两次撞 RouteExists，先清掉
+    webext.clear()
     import re
 
     match = re.match(r"redis://127\.0\.0\.1:(\d+)/0", ses_redis_service[0])
@@ -153,6 +160,7 @@ def test_server(setup_websocket_proxy, ses_redis_service):
     yield server
 
     server.stop()
+    webext.clear()
 
 
 def test_websocket_started(test_server):
@@ -509,6 +517,191 @@ def test_websocket_table_subscribe_limit(test_server):
     assert closed_detected, "连接没有被服务器关闭"
 
 
+# ==== 整表订阅要先等一个 interval 再全量读（复制延迟预算），等待不能堵住接收协程 ====
+
+
+@pytest.mark.timeout(30)
+def test_websocket_table_subscribe_does_not_block_following_messages(
+    monkeypatch, test_server
+):
+    """整表订阅在等全量读的时候，后面的消息照常执行（另一个连接能先看到后面那个 RPC 的
+    写入）；回复没有请求 id、SDK 按顺序对应，所以回复仍按请求顺序送达"""
+    real_read = sub_module.read_whole_table_
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_read(*args, **kwargs):
+        gate["reading"].set()
+        await gate["release"].wait()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        watcher = await connect()
+        await watcher.send(["sub", "PublicNames", "range", "owner", 8001, 8002])
+        watch_id = (await watcher.recv())[1]
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 整表订阅卡在全量读上
+            await client.send(["rpc", "set_public_name", 8001, "Early"])
+            try:
+                async with asyncio.timeout(5):
+                    result["early"] = await watcher.recv()
+            except TimeoutError:
+                result["early"] = None
+        finally:
+            gate["release"].set()
+        order = []
+        async with asyncio.timeout(5):
+            while len(order) < 2:
+                msg = await client.recv()
+                if msg[0] in ("sub", "rsp"):
+                    order.append(msg[0])
+        result["order"] = order
+        result["watch_id"] = watch_id
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["early"], "整表订阅在等全量读，后面的 RPC 没被执行"
+    assert result["early"][:2] == ["updt", result["watch_id"]]
+    assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_table_subscribes_wait_concurrently(monkeypatch, test_server):
+    """连着发两个整表订阅：第二个不用排在第一个的等待和全量读后面（登录时常一次订好几张
+    表，串行就是每张一个 interval）；回复仍按请求顺序"""
+    real_read = sub_module.read_whole_table_
+    release: dict[str, asyncio.Event] = {}
+    reads: list[str] = []
+
+    async def gated_read(servant, table_ref, max_rows):
+        reads.append(table_ref.comp_name)
+        if len(reads) == 1:  # 先读的那张表卡住
+            await release["event"].wait()
+        return await real_read(servant, table_ref, max_rows)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        release["event"] = asyncio.Event()
+        client = await connect()
+        await client.send(["rpc", "login", 7101])  # 登录后整表订阅数上限才够两张
+        await client.recv()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            await client.send(["sub", "PublicConfig", "table"])
+            try:
+                async with asyncio.timeout(5):
+                    while len(reads) < 2:
+                        await asyncio.sleep(0.01)
+                result["concurrent"] = True
+            except TimeoutError:
+                result["concurrent"] = False
+        finally:
+            release["event"].set()
+        replies = []
+        async with asyncio.timeout(5):
+            while len(replies) < 2:
+                msg = await client.recv()
+                if msg[0] == "sub":
+                    replies.append(msg[1])
+        result["replies"] = replies
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["concurrent"], "第二个整表订阅排在了第一个的等待后面"
+    assert result["replies"] == ["PublicNames.table", "PublicConfig.table"]
+
+
+@pytest.mark.timeout(30)
+def test_websocket_disconnect_while_table_subscribe_waits(monkeypatch, test_server):
+    """整表订阅等全量读期间客户端断开：等待中的后半段要跟着连接一起取消，不能挂在后台"""
+    real_read = sub_module.read_whole_table_
+    state: dict[str, asyncio.Event] = {}
+
+    async def gated_read(*args, **kwargs):
+        state["reading"].set()
+        try:
+            await state["release"].wait()
+        except asyncio.CancelledError:
+            state["cancelled"].set()
+            raise
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        for name in ("reading", "release", "cancelled"):
+            state[name] = asyncio.Event()
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            async with asyncio.timeout(5):
+                await state["reading"].wait()
+            await client.close()
+            try:
+                async with asyncio.timeout(5):
+                    await state["cancelled"].wait()
+                result["cancelled"] = True
+            except TimeoutError:
+                result["cancelled"] = False
+        finally:
+            state["release"].set()
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["cancelled"], "断线后整表订阅的后半段还挂在后台"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_duplicate_table_subscribe_while_waiting(monkeypatch, test_server):
+    """整表订阅等全量读期间又订同一张表：认得出是重复订阅、不重复登记（未登录上限 1 张，
+    重复登记会超限断线）；两个回复按顺序送达，连接照常可用"""
+    real_read = sub_module.read_whole_table_
+    state: dict[str, asyncio.Event] = {}
+    reads: list[None] = []
+
+    async def gated_read(*args, **kwargs):
+        reads.append(None)
+        await state["release"].wait()
+        return await real_read(*args, **kwargs)
+
+    monkeypatch.setattr(sub_module, "read_whole_table_", gated_read)
+    result = {}
+
+    async def routine(connect):
+        state["release"] = asyncio.Event()
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "table"])
+            await client.send(["sub", "PublicNames", "table"])
+            # 等两次全量读都卡上（第一个的后半段 + 重复订阅的那次读）；串行处理时第二条
+            # 要等第一条读完才轮到，等不到也照样放行，只看最终结果
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(3):
+                    while len(reads) < 2:
+                        await asyncio.sleep(0.01)
+        finally:
+            state["release"].set()
+        replies = []
+        async with asyncio.timeout(5):
+            while len(replies) < 2:
+                msg = await client.recv()
+                if msg[0] == "sub":
+                    replies.append(msg[1])
+            await client.send(["rpc", "set_public_name", 7201, "Dup"])
+            while (await client.recv())[0] != "rsp":
+                pass
+        result["replies"] = replies
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result.get("replies") == ["PublicNames.table", "PublicNames.table"]
+
+
 def test_check_length():
     from hetu.server.receiver import check_length
 
@@ -544,6 +737,122 @@ def test_websocket_invalid_sub_length_disconnects(test_server):
 
 
 @pytest.mark.timeout(20)
+def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
+    """各种非法消息（release 模式）：发的那条连接被断开并记下原因，别的连接照常可用"""
+    caplog.set_level(logging.INFO, logger="HeTu.root")
+
+    async def send_raw(ws, data):
+        # 绕过客户端 pipeline，直接发原始帧
+        await type(ws).send(ws, data)
+
+    # 用例名 → (发送动作, 服务端记录的断开原因)
+    cases = {
+        "empty_frame": (lambda ws: send_raw(ws, b""), "收到空帧"),
+        "text_frame": (lambda ws: send_raw(ws, "hello"), "收到非二进制帧：str"),
+        "not_list": (lambda ws: ws.send({"rpc": "login"}), "Invalid message format"),
+        "unknown_msg_type": (lambda ws: ws.send(["bogus"]), "未知消息类型：bogus"),
+        "unknown_component": (
+            lambda ws: ws.send(["sub", "NoSuchComp", "table"]),
+            "订阅请求非法",
+        ),
+        "unknown_sub_op": (
+            lambda ws: ws.send(["sub", "PublicNames", "bogus"]),
+            "未知订阅操作：bogus",
+        ),
+        # 未登录调 USER 权限的 System：执行失败，release 模式直接断开、不回原因
+        "rpc_rejected": (
+            lambda ws: ws.send(["rpc", "add_rls_comp_value", 1]),
+            "rpc 调用失败",
+        ),
+    }
+    closed = []
+    healthy_ok = False
+
+    async def routine(connect):
+        nonlocal healthy_ok
+        healthy = await connect()
+        for name, (send_bad, _reason) in cases.items():
+            client = await connect()
+            with pytest.raises(ConnectionClosedError):
+                await send_bad(client)
+                await client.recv()
+            closed.append(name)
+        # 别的连接不受影响
+        await healthy.send(["rpc", "login", 1])
+        await healthy.recv()
+        healthy_ok = True
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert closed == list(cases), "有非法消息没让连接断开"
+    assert healthy_ok, "正常连接被连累了"
+    close_logs = [
+        r.getMessage() for r in caplog.records if "接收协程结束" in r.getMessage()
+    ]
+    for name, (_send_bad, reason) in cases.items():
+        assert any(reason in msg for msg in close_logs), f"{name} 没按预期原因断开"
+    assert any(
+        "不存在的Component名" in r.getMessage() and "NoSuchComp" in r.getMessage()
+        for r in caplog.records
+    )
+
+
+@pytest.mark.timeout(20)
+def test_websocket_unsub_stops_updates(test_server):
+    """unsub 之后该订阅不再推 updt；同连接的其他订阅照常推"""
+    owner_a, owner_b = 7001, 7002
+    sub_ids = {}
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "set_public_name", owner_a, "A"])
+        await client1.recv()
+        await client1.send(["rpc", "set_public_name", owner_b, "B"])
+        await client1.recv()
+        for owner in (owner_a, owner_b):
+            await client1.send(["sub", "PublicNames", "get", "owner", owner])
+            sub_ids[owner] = (await client1.recv())[1]
+
+        await client1.send(["unsub", sub_ids[owner_a]])
+        # A 先改、B 后改：A 的订阅要是还在，它的 updt 会先于或随 B 的一起到
+        await client1.send(["rpc", "set_public_name", owner_a, "A2"])
+        await client1.send(["rpc", "set_public_name", owner_b, "B2"])
+        while True:
+            msg = await client1.recv()
+            if msg[0] == "updt" and msg[1] == sub_ids[owner_b]:
+                break
+        # 再多等一会儿，迟到的推送也要算上
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.3):
+                await client1.recv()
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert sub_ids[owner_a] and sub_ids[owner_b]
+    updts = [m for m in response.client_received if m[0] == "updt"]
+    assert [m[1] for m in updts] == [sub_ids[owner_b]], "退订后仍收到了推送"
+    (row,) = updts[0][2].values()
+    assert row["name"] == "B2"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_motd(test_server):
+    """motd 回一条明文文本帧欢迎语（不走 pipeline），之后连接照常可用"""
+    motd = None
+
+    async def routine(connect):
+        nonlocal motd
+        client1 = await connect()
+        await client1.send(["motd"])
+        # 欢迎语没经过 pipeline 编码，绕过客户端的解码直接收原始帧
+        motd = await type(client1).recv(client1)
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+    _, response = test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert motd == f"👋 Welcome to HeTu Database! v{hetu.__version__}"
+    assert response.client_received[-1] == ["rsp", {"id": 1}]
+
+
+@pytest.mark.timeout(20)
 def test_websocket_setup_failure_deletes_connection_row(
     monkeypatch, test_server, ses_redis_service
 ):
@@ -575,3 +884,34 @@ def test_websocket_setup_failure_deletes_connection_row(
         )
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(30)
+def test_shutdown_waits_for_connection_cleanup(
+    monkeypatch, test_server, ses_redis_service
+):
+    """关服要等连接拆完（断线 System、删 Connection 行）再关后端。清理任务不在 Sanic 的任务表
+    里，不等的话 loop 一关它就永远挂住：Connection 行留在库里；SQLite 后端还会被它没提交的
+    事务一直占着写锁，同进程之后的测试全部 database is locked"""
+    import redis
+
+    cleanup = websocket_server._cleanup_connection
+
+    async def slow_cleanup(*args, **kwargs):
+        await asyncio.sleep(0.5)  # 负载高时清理比停服慢
+        await cleanup(*args, **kwargs)
+
+    monkeypatch.setattr(websocket_server, "_cleanup_connection", slow_cleanup)
+    r = redis.Redis.from_url(ses_redis_service[0])
+    pattern = "pytest_1:Connection:*:id:*"
+    before = len(r.keys(pattern))
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 199994])
+        await client1.recv()
+        # 返回后测试客户端关掉连接就停服，服务端的清理和停服同时进行
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    # 返回时服务器已经停了
+    assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"

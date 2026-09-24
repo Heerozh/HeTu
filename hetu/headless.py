@@ -127,9 +127,11 @@ def _schema_diff(
 ) -> tuple[list[str], list[str]]:
     """比对本地组件类与服务器 meta 的定义，返回 ``(必须一致的差异, 只告警的差异)``。
 
-    只比数据布局：``namespace``（SQL 表名含它）和 ``properties`` 的列名 / dtype / unique /
-    index；``default`` 差异只告警；``permission / rls_compare / volatile / readonly /
-    backend`` 与 headless 无关，忽略。差异行方向为 ``服务器 -> 本地``。
+    比数据布局：``namespace``（SQL 表名含它）和 ``properties`` 的列名 / dtype / unique /
+    index；以及通知声明 ``table_sub`` / 各列 ``point_sub``——headless 写入走同一条
+    commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新。``default`` 差异只告警；
+    ``permission / rls_compare / volatile / readonly / backend`` 与 headless 无关，忽略。
+    差异行方向为 ``服务器 -> 本地``。
     """
     local_d = json.loads(local.json_)
     remote_d = json.loads(meta_json)
@@ -137,6 +139,13 @@ def _schema_diff(
     warns: list[str] = []
     if local_d["namespace"] != remote_d["namespace"]:
         errors.append(f"namespace: {remote_d['namespace']} -> {local_d['namespace']}")
+    # 旧 meta 没有这两个键：按未声明比
+    local_ts, remote_ts = (
+        local_d.get("table_sub", False),
+        remote_d.get("table_sub", False),
+    )
+    if local_ts != remote_ts:
+        errors.append(f"table_sub: {remote_ts} -> {local_ts}")
     local_p = local_d["properties"]
     remote_p = remote_d["properties"]
     for col in sorted(set(local_p) | set(remote_p)):
@@ -146,11 +155,11 @@ def _schema_diff(
         if col not in local_p:
             errors.append(f"- col {col} ({remote_p[col]['dtype']})")
             continue
-        for key in ("dtype", "unique", "index"):
-            if local_p[col][key] != remote_p[col][key]:
-                errors.append(
-                    f"~ col {col}.{key}: {remote_p[col][key]} -> {local_p[col][key]}"
-                )
+        for key in ("dtype", "unique", "index", "point_sub"):
+            local_v = local_p[col].get(key, False)
+            remote_v = remote_p[col].get(key, False)
+            if local_v != remote_v:
+                errors.append(f"~ col {col}.{key}: {remote_v} -> {local_v}")
         if local_p[col]["default"] != remote_p[col]["default"]:
             warns.append(
                 f"~ col {col}.default: {remote_p[col]['default']!r} -> "

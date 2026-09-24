@@ -426,6 +426,15 @@ namespace HeTu
         ///     先按条件找出第一行，随后按这行RowID订阅。
         ///     (按RowID订阅的快速模式，不处理索引值的变化)
         /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="index">索引字段名。</param>
         /// <param name="value">索引值。</param>
@@ -530,6 +539,15 @@ namespace HeTu
         /// <summary>
         ///     订阅索引范围数据。（Range)
         /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="index">索引字段名。</param>
         /// <param name="left">范围左边界。</param>
@@ -647,8 +665,19 @@ namespace HeTu
         ///     与 WatchRange 语义独立：不管表有多少行，服务端只占一个订阅、只订一个频道，
         ///     初始返回你有权限看到的全部行，之后按行推送增量。适合"行多、行小、很少变"的表，
         ///     如所有玩家的名字。代价是该表任何写入都会触发通知，高频写入的表请用 WatchRange。
-        ///     服务端按 MAX_TABLE_SUBSCRIPTION_ROWS 限制行数，超过则返回 null。
+        ///     服务端组件必须声明 table_sub=True，否则返回 null；服务端还按
+        ///     MAX_TABLE_SUBSCRIPTION_ROWS 限制行数，超过也返回 null。
+        ///     The server component must be declared with table_sub=True, otherwise null.
         /// </summary>
+        /// <remarks>
+        ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据；
+        ///     服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，可能残留旧数据，
+        ///     直到该行下次变更。需要强一致的判断请放在服务端 System 里。
+        ///     Best-effort and eventually consistent: about 99% of the time you get
+        ///     the latest data; when the server's Redis is overloaded (replica lag
+        ///     above ~100 ms), stale data may remain until the row changes again.
+        ///     Make strongly consistent decisions in a server System.
+        /// </remarks>
         /// <typeparam name="T">组件类型。</typeparam>
         /// <param name="onResponse">回调：订阅对象、是否取消、异常信息。</param>
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>

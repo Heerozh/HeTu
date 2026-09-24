@@ -139,6 +139,13 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 All three subscriptions are **live**: the server pushes deltas as the
 underlying rows change in Redis.
 
+> **Consistency note**: subscription pushes are best-effort and eventually
+> consistent. Under normal load you get the latest data in about 99% of cases
+> (usually within 100–200 ms of the change); when the server's Redis is
+> overloaded, stale data may remain until that row changes again. Use
+> subscription data for display; leave decisions that need strong consistency
+> — spending currency, granting rewards, validation — to a server `System`.
+
 | API                                                     | Returns                                                     | Use it when                                                                                               |
 |---------------------------------------------------------|-------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
 | `WatchRow<T>(index, value)`                             | `RowSubscription<T>` (one row, or `null` if no row matched) | You want exactly one row by a unique key — your own HP, your own inventory record.                        |
@@ -159,9 +166,29 @@ thousands of channels), while `WatchTable` listens to a single table-level
 channel no matter how many rows there are, so it does not count against the
 row-subscription quota. The trade-off is that **every** write to that table
 triggers a notification (filtered by permission before it reaches you), so keep
-using `WatchRange` for hot tables such as positions or HP. The server refuses
-tables larger than `MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default) and the call
-resolves to `null`.
+using `WatchRange` for hot tables such as positions or HP. The server component
+must be declared with `table_sub=True` (see
+[Concepts · Subscriptions](concepts.md#when-to-use-a-table-subscription)); the
+server refuses undeclared tables and tables larger than
+`MAX_TABLE_SUBSCRIPTION_ROWS` (100k by default), and the call resolves to `null`.
+
+A table subscription reads its rows about 100 ms (one push interval) after it
+becomes active, so that the replica it reads from has caught up. To subscribe to
+several tables, send all the calls first and then await them: the server lets
+them wait together, whereas awaiting one at a time pays the wait once per table.
+
+```csharp
+// Several tables after login: send them all, then await
+var namesTask = HeTuClient.Instance.WatchTable<PlayerNames>();
+var guildsTask = HeTuClient.Instance.WatchTable<GuildList>();
+var names = await namesTask;
+var guilds = await guildsTask;
+```
+
+For a `WatchRange` point query (`left == right`, e.g.
+`WatchRange<Item>("owner", myId, myId, 100)`) to be efficient, declare the
+server-side index with `point_sub=True`; otherwise any write to that index makes
+the server re-run the comparison.
 
 ```csharp
 // Every player's name: thousands of rows, one subscription

@@ -1,4 +1,7 @@
+import logging
 import time
+
+import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -196,6 +199,125 @@ async def test_build_future_row_validation(test_app, new_ctx):
     # 未开 call_lock 的 System（test_rls_comp_value 未设 call_lock=True）
     with pytest.raises(RuntimeError):
         _build_future_row(ctx, -1, "test_rls_comp_value", (1,), timeout=10)
+
+
+async def test_build_future_row_rejects_unstorable_args(test_app, new_ctx):
+    """args 以 repr 存进 <U1024 字段、执行时 literal_eval 还原：超长的存不下，
+    还原不回来的（如直接把组件字段的 numpy 标量当参数传）执行时必错，都要在创建时拒绝"""
+    from hetu.system.future import _build_future_row
+
+    ctx = new_ctx()
+    with pytest.raises(ValueError, match="1024"):
+        _build_future_row(ctx, -1, "add_rls_comp_value", ("x" * 1100,), timeout=10)
+    # repr 为 np.int64(5)，literal_eval 不认
+    with pytest.raises(AssertionError):
+        _build_future_row(ctx, -1, "add_rls_comp_value", (np.int64(5),), timeout=10)
+    with pytest.raises(AssertionError):
+        _build_future_row(ctx, -1, "add_rls_comp_value", (object(),), timeout=10)
+
+
+async def _insert_future_row(fc_tbl, row):
+    async with fc_tbl.session() as session:
+        await session.using(fc_tbl.comp_cls).insert(row)
+
+
+async def _get_future_row(fc_tbl, row_id):
+    async with fc_tbl.session() as session:
+        return await session.using(fc_tbl.comp_cls).get(id=row_id)
+
+
+async def test_timeout_zero_call_deleted_on_pop(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """timeout=0 的未来调用不保证成功：取出时就删掉，之后不会再被取出、重复执行"""
+    from hetu.system.future import (
+        FutureCalls,
+        _build_future_row,
+        exec_future_call,
+        pop_upcoming_call,
+    )
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    row = _build_future_row(executor.context, -1, "add_rls_comp_value", (4,), timeout=0)
+    await _insert_future_row(fc_tbl, row)
+
+    last_time = time.time() + 2
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == row.id and call.timeout == 0
+    assert await _get_future_row(fc_tbl, row.id) is None
+    assert await pop_upcoming_call(fc_tbl) is None
+
+    # 不走 call_lock 也能正常执行
+    assert await exec_future_call(call, executor.context.systems, fc_tbl)
+    ok, _ = await executor.execute("test_rls_comp_value", 104)
+    assert ok
+
+
+async def test_exec_future_call_missing_system(
+    monkeypatch, caplog, test_app, tbl_mgr, executor
+):
+    """已持久化的未来调用，目标 System 后来被代码删掉了：记 error、返回 False，
+    任务不丢（已按 timeout 顺延），代码修好后还会再触发"""
+    from hetu.system.future import (
+        FutureCalls,
+        _build_future_row,
+        exec_future_call,
+        pop_upcoming_call,
+    )
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    row = _build_future_row(
+        executor.context, -1, "add_rls_comp_value", (4,), timeout=10
+    )
+    row.system = "removed_system"
+    await _insert_future_row(fc_tbl, row)
+
+    last_time = time.time() + 2
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == row.id
+
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        ok = await exec_future_call(call, executor.context.systems, fc_tbl)
+    assert ok is False
+    assert "removed_system" in caplog.text
+    kept = await _get_future_row(fc_tbl, row.id)
+    assert kept is not None and kept.scheduled == last_time + 10
+
+
+async def test_exec_future_call_system_error_keeps_call(
+    monkeypatch, caplog, test_app, tbl_mgr, executor
+):
+    """目标 System 执行抛异常：异常不外抛（不拖垮 future_call_task 的循环），记日志；
+    任务不删除，按 timeout 顺延后重试"""
+    from hetu.system.future import (
+        FutureCalls,
+        _build_future_row,
+        exec_future_call,
+        pop_upcoming_call,
+    )
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    # add_rls_comp_value 里 row.value += "oops"：int32 加字符串，System 内抛 TypeError
+    row = _build_future_row(
+        executor.context, -1, "add_rls_comp_value", ("oops",), timeout=10
+    )
+    await _insert_future_row(fc_tbl, row)
+
+    last_time = time.time() + 2
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == row.id
+
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        await exec_future_call(call, executor.context.systems, fc_tbl)
+    assert "add_rls_comp_value('oops',)" in caplog.text
+    kept = await _get_future_row(fc_tbl, row.id)
+    assert kept is not None and kept.scheduled == last_time + 10
 
 
 def test_key_to_id_properties():

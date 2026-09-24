@@ -52,6 +52,18 @@ namespace HeTu
     /// <summary>
     ///     订阅基类，封装反订阅与资源释放逻辑。
     /// </summary>
+    /// <remarks>
+    ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据（通常在
+    ///     变更后 100~200ms 内）；服务端 Redis 压力过大（副本复制延迟超过约 100ms）时，
+    ///     可能残留旧数据，直到该行下次变更。订阅数据适合用来显示，扣钱、发奖、校验这类
+    ///     需要强一致的判断请交给服务端 System。
+    ///     Subscriptions are best-effort and eventually consistent: under normal load
+    ///     you get the latest data about 99% of the time (usually within 100-200 ms of
+    ///     the change); when the server's Redis is overloaded (replica lag above
+    ///     ~100 ms), stale data may remain until the row changes again. Use subscription
+    ///     data for display and leave strongly consistent decisions (spending currency,
+    ///     granting rewards, validation) to a server System.
+    /// </remarks>
     [MustDisposeResource]
     public abstract class BaseSubscription : IDisposable, IRestorableSubscription
     {

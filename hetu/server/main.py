@@ -32,9 +32,9 @@ from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
 from ..system.future import future_call_task
 from . import pipeline
-from . import websocket as _ws  # noqa: F401 (防止未使用警告)
 from .watchdog import hang_watchdog_task
 from .web import HETU_BLUEPRINT, web_root
+from .websocket import wait_connections_closed  # 导入即注册 ws 路由
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
@@ -273,6 +273,8 @@ async def worker_start(app: Sanic):
 
 async def worker_close(app):
     # ctrl+c并不会触发此函数，sanic会直接退出进程
+    # 先等连接拆完（断线System、删Connection行）再关后端，见 wait_connections_closed
+    await wait_connections_closed(app.config.GRACEFUL_SHUTDOWN_TIMEOUT)
     await close_backends(app)
 
 
@@ -303,7 +305,7 @@ async def worker_keeper_renewal(app: Sanic):
     # 循环每5秒续约一次worker id
     while True:
         await asyncio.sleep(5)
-        logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
+        # logger.info(_("⌚ [📡WorkerKeeper] 续约中... "))
         # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
         try:
             await app.ctx.worker_keeper.keep_alive()

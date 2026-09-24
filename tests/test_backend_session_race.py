@@ -6,18 +6,27 @@ from hetu.data.backend import Backend
 SnowflakeID().init(1, 0)
 
 
-async def test_version_race(item_ref, mod_auto_backend):
-    import asyncio
+async def _read_master(backend: Backend, comp, name: str):
+    """从 master 读一行（不受副本滞后影响），用来核对嵌套的两个事务谁提交成功了"""
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        row = await session.using(comp).get(name=name)
+        assert row is not None
+        return row
 
+
+async def test_version_race(item_ref, mod_auto_backend):
     from hetu.data.backend import RaceCondition
 
-    # 测试竞态，通过2个协程来测试
+    # 测试竞态。两个事务的先后用嵌套 session 排定：外层先读，内层在其间整个提交，外层最后
+    # 提交。不靠两个协程的 sleep 时间差——长 GC 冻住事件循环时先后会乱（见 test_unique_commit_race）
     backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
     # 数据准备
     async with backend.session("pytest", 1) as session:
-        item_repo = session.using(item_ref.comp_cls)
-        row = item_ref.comp_cls.new_row()
+        item_repo = session.using(comp)
+        row = comp.new_row()
         row.owner = 65535
         row.name = "Self"
         row.time = 233874
@@ -33,51 +42,50 @@ async def test_version_race(item_ref, mod_auto_backend):
 
     await backend.wait_for_synced()
 
-    async def read_owner(value):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            rows = await _item_repo.range("owner", value)
-            assert len(rows) > 0
-            await asyncio.sleep(0.2)
+    async def bump_owner(session, name):
+        repo = session.using(comp)
+        row = await repo.get(name=name)
+        assert row
+        row.owner = row.owner + 1  # type: ignore
+        await repo.update(row)
 
-    async def del_row(name, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = await _item_repo.get(name=name)
-            await asyncio.sleep(sleep)
-            _item_repo.delete(_row.id)  # type: ignore
-
-    async def update_owner(name, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = await _item_repo.get(name=name)
-            assert _row
-            _row.owner = _row.owner + 1  # type: ignore
-            await asyncio.sleep(sleep)
-            await _item_repo.update(_row)
-
-    # 测试update_owner和read_only不应该激发RaceCondition
-    task1 = asyncio.create_task(read_owner(65535))
-    task2 = asyncio.create_task(update_owner("Self", 0.2))
-    await asyncio.gather(task1, task2)
+    # 测试update_owner和read_only不应该激发RaceCondition：只读事务读过的行被别人改了也不报错
+    async with backend.session("pytest", 1) as s1:
+        assert len(await s1.using(comp).range("owner", 65535)) > 0
+        async with backend.session("pytest", 1) as s2:
+            await bump_owner(s2, "Self")
+    assert (await _read_master(backend, comp, "Self")).owner == 65536
 
     # 测试update和del竞态是否激发race condition
-    task1 = asyncio.create_task(del_row("ForDel", 0.2))
-    task2 = asyncio.create_task(update_owner("ForDel", 0.01))
-    await task2
+    await backend.wait_for_synced()
     with pytest.raises(RaceCondition, match="Version"):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            row = await repo.get(name="ForDel")
+            assert row
+            repo.delete(row.id)
+            async with backend.session("pytest", 1) as s2:
+                await bump_owner(s2, "ForDel")
+    # 内层的修改提交了，外层的删除没有生效
+    assert (await _read_master(backend, comp, "ForDel")).owner == 65536
 
     # 测试update和update竞态是否激发race condition
-    task1 = asyncio.create_task(update_owner("ForUpdt", 0.2))
-    task2 = asyncio.create_task(update_owner("ForUpdt", 0.2))
+    await backend.wait_for_synced()
     with pytest.raises(RaceCondition, match="Version"):
-        await asyncio.gather(task1, task2)
+        async with backend.session("pytest", 1) as s1:
+            await bump_owner(s1, "ForUpdt")
+            async with backend.session("pytest", 1) as s2:
+                await bump_owner(s2, "ForUpdt")
+    assert (await _read_master(backend, comp, "ForUpdt")).owner == 65536
 
     # 测试update和不同行update不应该冲突
-    task1 = asyncio.create_task(update_owner("ForUpdt", 0.2))
-    task2 = asyncio.create_task(update_owner("Self", 0.2))
-    await asyncio.gather(task1, task2)
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as s1:
+        await bump_owner(s1, "ForUpdt")
+        async with backend.session("pytest", 1) as s2:
+            await bump_owner(s2, "Self")
+    assert (await _read_master(backend, comp, "ForUpdt")).owner == 65537
+    assert (await _read_master(backend, comp, "Self")).owner == 65537
 
 
 async def test_stale_read_race(item_ref, mod_auto_backend):
@@ -89,23 +97,22 @@ async def test_stale_read_race(item_ref, mod_auto_backend):
     依据严格的事务语义（Snapshot/Serializable Isolation），
     事务1此时持有的是A的陈旧快照，提交时应抛出 RaceCondition。
     """
-    import asyncio
-
     from hetu.data.backend import RaceCondition
 
     backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
     # 数据准备：插入源行A 与目标行B
     async with backend.session("pytest", 1) as session:
-        item_repo = session.using(item_ref.comp_cls)
-        row_a = item_ref.comp_cls.new_row()
+        item_repo = session.using(comp)
+        row_a = comp.new_row()
         row_a.owner = 1
         row_a.name = "SourceA"
         row_a.time = 100
         row_a.qty = 1
         await item_repo.insert(row_a)
 
-        row_b = item_ref.comp_cls.new_row()
+        row_b = comp.new_row()
         row_b.id = SnowflakeID().next_id()
         row_b.owner = 2
         row_b.name = "TargetB"
@@ -115,35 +122,27 @@ async def test_stale_read_race(item_ref, mod_auto_backend):
 
     await backend.wait_for_synced()
 
-    async def copy_a_to_b(sleep):
-        """读A，把读到的qty写到B"""
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _a = await _item_repo.get(name="SourceA")
-            assert _a is not None
-            stale_qty = int(_a.qty)
-            await asyncio.sleep(sleep)  # 期间A被task2改掉
-            _b = await _item_repo.get(name="TargetB")
-            assert _b is not None
-            _b.qty = stale_qty  # type: ignore
-            await _item_repo.update(_b)
-
-    async def modify_a(sleep):
-        """修改A的qty"""
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _a = await _item_repo.get(name="SourceA")
-            assert _a is not None
-            await asyncio.sleep(sleep)
-            _a.qty = _a.qty + 99  # type: ignore
-            await _item_repo.update(_a)
-
-    # task1先读A并等待，task2在此期间修改A并先提交，然后task1把A的旧值写入B
-    task1 = asyncio.create_task(copy_a_to_b(0.2))
-    task2 = asyncio.create_task(modify_a(0.05))
-    await task2  # 先等task2完成（A已被改）
+    # 事务1（外层）先读A；事务2（内层）在此期间修改A并提交；然后事务1把A的旧值写入B。
+    # 先后用嵌套 session 排定，不靠 sleep 时间差（见 test_version_race）
     with pytest.raises(RaceCondition):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            repo1 = s1.using(comp)
+            a = await repo1.get(name="SourceA")
+            assert a is not None
+            stale_qty = int(a.qty)
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                a2 = await repo2.get(name="SourceA")
+                assert a2 is not None
+                a2.qty = a2.qty + 99  # type: ignore
+                await repo2.update(a2)
+            b = await repo1.get(name="TargetB")
+            assert b is not None
+            b.qty = stale_qty  # type: ignore
+            await repo1.update(b)
+    # 事务2对A的修改提交了，事务1写B被拒
+    assert (await _read_master(backend, comp, "SourceA")).qty == 100
+    assert (await _read_master(backend, comp, "TargetB")).qty == 0
 
 
 async def test_unique_commit_race(item_ref, mod_auto_backend):
@@ -151,50 +150,50 @@ async def test_unique_commit_race(item_ref, mod_auto_backend):
     提交时的 unique 冲突判定：盲写（本事务未曾 get 观察其不存在）撞上并发已提交的同值
     → 确定性 UniqueViolation，不重试（重跑事务体只会再写同一个值）。
     """
-    import asyncio
-
     from hetu.data.backend import UniqueViolation
 
     backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
-    # 测试insert提交时unique的确定性冲突
-    async def insert_and_sleep(uni_val, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = item_ref.comp_cls.new_row()
-            _row.owner = 874233
-            _row.name = str(uni_val)
-            _row.time = uni_val
-            await _item_repo.insert(_row)
-            await asyncio.sleep(sleep)
+    # 两个事务的先后用嵌套 session 排定：外层先开事务写入，内层整个提交完，外层退出时才
+    # 提交。不能用两个协程靠 sleep 时间差排序——一次长 GC 冻住事件循环几百毫秒，醒来后
+    # 两边会几乎同时进入提交，外层的唯一性 SELECT 看不到内层还没提交完的行，只能撞上
+    # UNIQUE 约束变成 RaceCondition
+    async def insert_row(session, uni_val):
+        row = comp.new_row()
+        row.owner = 874233
+        row.name = str(uni_val)
+        row.time = uni_val
+        await session.using(comp).insert(row)
 
     # 测试insert不同的值应该没有竞态
-    task1 = asyncio.create_task(insert_and_sleep(111111, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(111112, 0.01))
-    await asyncio.gather(task1, task2)
+    async with backend.session("pytest", 1) as s1:
+        await insert_row(s1, 111111)
+        async with backend.session("pytest", 1) as s2:
+            await insert_row(s2, 111112)
 
     # 相同的time：后提交者是确定性冲突
-    task1 = asyncio.create_task(insert_and_sleep(222222, 0.1))
-    task2 = asyncio.create_task(insert_and_sleep(222222, 0.01))
-    await task2
     with pytest.raises(UniqueViolation, match="UNIQUE"):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            await insert_row(s1, 222222)
+            async with backend.session("pytest", 1) as s2:
+                await insert_row(s2, 222222)
 
     # 测试update提交时把不同行改成同一个unique值：后提交者是确定性冲突
-    async def update_and_sleep(name, sleep):
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            _row = await _item_repo.get(name=str(name))
-            assert _row
-            _row.time = 874233
-            await _item_repo.update(_row)
-            await asyncio.sleep(sleep)
+    await backend.wait_for_synced()
 
-    task1 = asyncio.create_task(update_and_sleep(111111, 0.1))
-    task2 = asyncio.create_task(update_and_sleep(111112, 0.02))
-    await task2
+    async def update_row(session, name):
+        repo = session.using(comp)
+        row = await repo.get(name=str(name))
+        assert row
+        row.time = 874233
+        await repo.update(row)
+
     with pytest.raises(UniqueViolation, match="UNIQUE"):
-        await task1
+        async with backend.session("pytest", 1) as s1:
+            await update_row(s1, 111111)
+            async with backend.session("pytest", 1) as s2:
+                await update_row(s2, 111112)
 
 
 async def test_update_to_value_set_by_concurrent_self_update_is_race(
@@ -232,33 +231,27 @@ async def test_update_to_value_set_by_concurrent_self_update_is_race(
 
 
 async def test_update_or_insert_race(item_ref, mod_auto_backend):
-    import asyncio
-
     from hetu.data.backend import RaceCondition
 
     backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
     # 测试update_or_insert UniqueViolation是否转化为了RaceCondition
-    # 这其实是本地unique违反，但为了语义上正确，应该换成RaceCondition
-    async def main_task():
-        async with backend.session("pytest", 1) as session:
-            item_repo = session.using(item_ref.comp_cls)
-            async with item_repo.upsert(name="uni_vio") as row:
-                await asyncio.sleep(0.1)
-                row.qty = 1
-
-    async def trouble_task():
-        async with backend.session("pytest", 1) as _session:
-            _item_repo = _session.using(item_ref.comp_cls)
-            row = item_ref.comp_cls.new_row()
-            row.name = "uni_vio"
-            await _item_repo.insert(row)
-
-    task1 = asyncio.create_task(main_task())
-    task2 = asyncio.create_task(trouble_task())
-    await task2
+    # 这其实是本地unique违反，但为了语义上正确，应该换成RaceCondition。
+    # upsert 观察到不存在之后，另一个事务（内层）插入同名行并整个提交完，外层才提交
+    # （先后用嵌套 session 排定，不靠 sleep 时间差，见 test_version_race）
     with pytest.raises(RaceCondition):
-        await task1
+        async with (
+            backend.session("pytest", 1) as s1,
+            s1.using(comp).upsert(name="uni_vio") as row,
+        ):
+            async with backend.session("pytest", 1) as s2:
+                intruder = comp.new_row()
+                intruder.name = "uni_vio"
+                intruder.qty = 7
+                await s2.using(comp).insert(intruder)
+            row.qty = 1
+    assert (await _read_master(backend, comp, "uni_vio")).qty == 7
 
 
 async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
@@ -270,39 +263,31 @@ async def test_insert_after_get_none_is_race(item_ref, mod_auto_backend):
     对照 `test_insert_unique`：未先 get、直接 insert 已存在数据，仍是确定性
     `UniqueViolation`。
     """
-    import asyncio
-
     from hetu.data.backend import RaceCondition
 
     backend = mod_auto_backend()
+    comp = item_ref.comp_cls
 
-    async def observer_task():
-        async with backend.session("pytest", 1) as session:
-            session.only_master = True  # 强制 master 读，避免 replica 延迟
-            repo = session.using(item_ref.comp_cls)
+    # 观察者（外层）先 get 到不存在；入侵者（内层）在其间插入并整个提交；观察者再插入
+    # （先后用嵌套 session 排定，不靠 sleep 时间差，见 test_version_race）
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as observer:
+            observer.only_master = True  # 强制 master 读，避免 replica 延迟
+            repo = observer.using(comp)
             # 观察到 name="zrc" 不存在
             assert await repo.get(name="zrc") is None
-            await asyncio.sleep(0.1)  # 让 intruder 抢先插入并提交
-            row = item_ref.comp_cls.new_row()
+            async with backend.session("pytest", 1) as intruder:
+                intruder.only_master = True
+                row = comp.new_row()
+                row.name = "zrc"
+                row.time = 7770001  # time 取不同值，确保冲突只发生在 name 上
+                await intruder.using(comp).insert(row)
+            row = comp.new_row()
             row.name = "zrc"
             row.time = 7770002
             # 远程已被占用且本事务曾观察其不存在 → commit 时判 Race
             await repo.insert(row)
-
-    async def intruder_task():
-        async with backend.session("pytest", 1) as session:
-            session.only_master = True
-            repo = session.using(item_ref.comp_cls)
-            row = item_ref.comp_cls.new_row()
-            row.name = "zrc"
-            row.time = 7770001  # time 取不同值，确保冲突只发生在 name 上
-            await repo.insert(row)
-
-    observer = asyncio.create_task(observer_task())
-    intruder = asyncio.create_task(intruder_task())
-    await intruder
-    with pytest.raises(RaceCondition):
-        await observer
+    assert (await _read_master(backend, comp, "zrc")).time == 7770001
 
 
 async def test_retry_generator(item_ref, mod_auto_backend):

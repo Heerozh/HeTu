@@ -44,6 +44,28 @@ async def test_watchdog_dumps_on_stall(dump_dir):
     assert "StuckTask" in dump  # 协程任务列表
 
 
+def test_watchdog_exits_when_loop_stops(dump_dir):
+    """起它的事件循环停了：sanic 停服时 shutdown_tasks(timeout=0) 只给心跳 task 打上取消标记
+    就 stop loop，task 的 finally 里的 stop() 永远跑不到（测试里进程内反复起停服务就是这样）。
+    看门狗要自己退出，不能对着一个早已不转的 loop 一直报卡死"""
+    loop = asyncio.new_event_loop()
+    watchdog = LoopWatchdog(0.2, dump_dir=dump_dir)
+
+    async def start_and_leave():
+        watchdog.start()  # 不 stop，模拟 finally 没跑到
+
+    try:
+        loop.run_until_complete(start_and_leave())
+    finally:
+        loop.close()
+
+    thread = watchdog._thread
+    assert thread is not None
+    thread.join(timeout=1.0)
+    assert not thread.is_alive()
+    assert not os.path.exists(watchdog.dump_file)
+
+
 async def test_watchdog_silent_when_healthy(dump_dir):
     # loop正常转动时不能产生任何dump文件
     watchdog = LoopWatchdog(0.2, dump_dir=dump_dir)

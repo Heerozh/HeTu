@@ -35,7 +35,8 @@ CONNECTION_ALIVE_RECHECK_INTERVAL = 0
 
 @define_component(namespace="core", volatile=True, permission=Permission.ADMIN)
 class Connection(BaseComponent):
-    owner: np.int64 = property_field(0, index=True)
+    # point_sub：顶号检测 watch 的是 "owner == 本用户" 的值频道（见 ConnectionAliveChecker）
+    owner: np.int64 = property_field(0, index=True, point_sub=True)
     address: str = property_field("", dtype="<U32", index=True)  # 连接地址
     device: str = property_field("", dtype="<U32")  # 物理设备名
     device_id: str = property_field("", dtype="<U128")  # 设备id
@@ -166,10 +167,11 @@ class ConnectionAliveChecker:
 
     - 默认：登录用户每次调用都读一次 Connection 行（裸 executor / Sandbox / future call）。
     - 通知模式（websocket 层 `enable_notify_mode()` 后）：ws 连接登录后订阅了 Connection 表
-      "owner == 本用户" 的索引值频道（被顶号时本行 owner 被改，一定会通知到它；本连接自己的
-      心跳写 last_active 走行频道，碰不到它），只在收到通知（脏标记）或距上次检查超过
-      `CONNECTION_ALIVE_RECHECK_INTERVAL` 时才读。RPC 路径上的那次读因此省掉；
-      间隔是通知丢失时的兜底。
+      "owner == 本用户" 的索引值频道（`owner` 声明了 point_sub）。顶号发生在别处登录的
+      `elevate()` 事务里：本行 owner 改成 0 的同时，新连接那行 owner 改成本用户——有行进入
+      这个值，commit 发值频道，一定会通知到它；本连接自己的心跳写 last_active 走行频道，
+      碰不到它。只在收到通知（脏标记）或距上次检查超过 `CONNECTION_ALIVE_RECHECK_INTERVAL`
+      时才读。RPC 路径上的那次读因此省掉；间隔是通知丢失时的兜底。
     """
 
     def __init__(self, tbl_mgr: ComponentTableManager):

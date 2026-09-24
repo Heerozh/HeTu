@@ -122,6 +122,9 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     subs_task_id = f"subs_receiver:{request.id}"
     broker: SubscriptionBroker | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
+    # 关服时要等本连接拆完再关后端，见 wait_connections_closed
+    _live_connections.add(current_task)
+    current_task.add_done_callback(_live_connections.discard)
     try:
         # 初始化订阅管理器，一个连接一个订阅管理器
         broker = SubscriptionBroker(
@@ -131,12 +134,14 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             ),
         )
 
-        # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道，收到通知才重查，
-        # RPC 路径上不再每次读库；收到通知还主动从 master 核一次，被顶号就立刻断连，不用等它
-        # 下次调用。订索引值频道而不是本连接那行的行频道：行频道会被本连接自己的心跳
-        # HSET(last_active) 每 ENDPOINT_CALL_IDLE_TIMEOUT/5 秒触发一次，白白重查；而 owner 值
-        # 频道只在某行的 owner 从/到本用户变化、或带本用户的行增删时才有消息——正是被顶号
-        # （本行 owner 被改成 0）和别处登录本用户这两件事，心跳碰不到它。
+        # 被顶号通知：登录后订阅 Connection 表 "owner == 本用户" 这个索引值频道（owner 声明了
+        # point_sub），收到通知才重查，RPC 路径上不再每次读库；收到通知还主动从 master 核一次，
+        # 被顶号就立刻断连，不用等它下次调用。订索引值频道而不是本连接那行的行频道：行频道会被
+        # 本连接自己的心跳 HSET(last_active) 每 ENDPOINT_CALL_IDLE_TIMEOUT/5 秒触发一次，白白
+        # 重查；值频道只在有行"进入"本用户时才有消息（commit 只发进入），心跳碰不到它。顶号正是
+        # 这样：别处登录的 elevate() 在同一个事务里把本行 owner 改成 0（离开，不发）、把新连接
+        # 那行 owner 改成本用户（进入，发）。只把本行 owner 改走、或删掉本行而没有行进入本用户，
+        # 不会有通知，要等下次调用时按 CONNECTION_ALIVE_RECHECK_INTERVAL 兜底重查。
         # 频道名与 hub 必须是同一个后端，否则保持每次都查
         conn_tbl = tbl_mgr.get_table(connection.Connection)
         if conn_tbl is not None and conn_tbl.backend is request.app.ctx.default_backend:
@@ -224,6 +229,19 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 # 的清理，否则本协程会一直阻塞在 get() 上，连接半死不活地挂着
                 if reply is PUSH_CLOSE:
                     break
+                if isinstance(reply, asyncio.Future):
+                    # 在后台完成的订阅（整表订阅）占住的回复位：等它填好再发。回复没有
+                    # 请求 id、SDK 按顺序对应，排在它后面的回复都得跟着等
+                    try:
+                        reply = await reply
+                    except Exception as e:
+                        err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
+                            err=f"{type(e).__name__}:{e}"
+                        )
+                        replay.info(err_msg)
+                        logger.exception(err_msg)
+                        ws.fail_connection()
+                        break
                 # 如果关闭了replay，为了速度不执行下面的字符串序列化
                 if replay.level < logging.ERROR:
                     replay.debug(">>> " + str(reply))
@@ -260,7 +278,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         # （connection_lost → 取消连接 task），要是正落在清理里的某个 await 上，后面的
         # terminate() 就跑不到，Connection 行同样泄漏；shield 让本协程被取消时清理照常跑完。
         # 不登记进 app 的任务表：关服时 shutdown_tasks 会取消表里的任务，loop 却已经不转了，
-        # 没法结束的任务会让它空转不退出
+        # 没法结束的任务会让它空转不退出。关服由 wait_connections_closed 等它跑完
         closing = True
         cleanup_task = asyncio.create_task(
             _cleanup_connection(
@@ -282,6 +300,43 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
 
 # 拆连接的清理任务：保持引用免得被 gc，跑完自动移除
 _cleanup_tasks: set[asyncio.Task] = set()
+# Connection 行已落库的连接协程，协程结束自动移除
+_live_connections: set[asyncio.Task] = set()
+
+
+async def wait_connections_closed(timeout: float) -> bool:
+    """
+    关服时等本进程的连接都拆完：连接协程结束、清理任务（断线 System、删 Connection 行）
+    跑完。超时返回 False。
+
+    清理任务没登记进 app 的任务表（见 websocket_connection 的 finally），Sanic 关服不等它；
+    直接关后端的话，它可能正停在写库事务中途，loop 一关就永远挂住：断线 System 没跑完、
+    Connection 行漏删；SQLite 后端还会被这个没提交的事务一直占着写锁，同进程之后的写入
+    全部 "database is locked"。
+
+    Wait until every connection of this process is torn down (on_disconnect called,
+    Connection row deleted) before the backends are closed. Returns False on timeout.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    # 连接协程被 Sanic 强关后才进 finally 建清理任务，所以每轮重新收集，直到两边都空。
+    # 别的 loop 上的任务（测试里之前起过的服务器）永远等不到，不算
+    while pending := {
+        task
+        for task in (*_live_connections, *_cleanup_tasks)
+        if not task.done() and task.get_loop() is loop
+    }:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            logger.warning(
+                _(
+                    "⚠️ [📡Server] 关服时还有{count}个连接没拆完，已等待{timeout}秒，"
+                    "不再等待直接关闭后端"
+                ).format(count=len(pending), timeout=timeout)
+            )
+            return False
+        await asyncio.wait(pending, timeout=remaining)
+    return True
 
 
 async def _cleanup_connection(
@@ -300,9 +355,10 @@ async def _cleanup_connection(
     logger.info(close_msg)
     await request.app.cancel_task(recv_task_id, raise_exception=False)
     await request.app.cancel_task(subs_task_id, raise_exception=False)
-    # 先退订再删本连接的 Connection 行：删行会向 owner 索引值频道 PUBLISH（带本用户的行没了），
-    # 被顶号的 watcher 还挂着的话会收到它，主动核查读到行不存在就记一条假的"已被顶号"。
-    # 退订等到 UNSUBSCRIBE ack 才返回，之后的 DEL 通知 Redis 不会再投给本进程
+    # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
+    # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
+    # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
+    # 退订等到 UNSUBSCRIBE ack 才返回，之后的通知 Redis 不会再投给本进程
     if broker is not None:
         await broker.close()
     try:

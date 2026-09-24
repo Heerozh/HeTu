@@ -112,6 +112,10 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 
 三种订阅都是**实时的**：当底层行在 Redis 中发生变化时，服务器会推送增量更新。
 
+> **一致性说明**：订阅推送是尽力而为的最终一致。正常负载下约 99% 的情况，你收到的都是最新数据
+> （通常在变更后 100～200ms 内）；服务端 Redis 压力过大时，可能残留旧数据，直到该行下次变更。
+> 订阅数据适合用来显示，扣钱、发奖、校验这类需要强一致的判断请交给服务端 `System`。
+
 | API                                                     | 返回                                        | 使用场景                                      |
 |---------------------------------------------------------|-------------------------------------------|-------------------------------------------|
 | `WatchRow<T>(index, value)`                             | `RowSubscription<T>`（单行，如果没有匹配行则为 `null`） | 你希望根据唯一键获取一行 — 自己的血量、自己的库存记录。             |
@@ -128,7 +132,22 @@ HeTuClient.Instance.SystemLocalCallbacks["move_to"] = args =>
 区别在服务端：`Range` 为结果集里的每一行各订阅一个频道，几千行就是几千个频道；`Table`
 不管多少行都只订一个表级频道，所以不计入行订阅配额。代价是该表**任何**写入都会触发一次
 通知（服务端按权限过滤后再推），所以高频写入的表（位置、血量）请用 `Range`。
-服务端拒绝行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表，此时返回 `null`。
+服务端组件要声明 `table_sub=True`（见[概念 · 订阅](concepts.md#何时用整表订阅)），没声明的表、
+以及行数超过 `MAX_TABLE_SUBSCRIPTION_ROWS`（默认 10 万）的表都会拒绝整表订阅，此时返回 `null`。
+
+整表订阅在订阅生效后约 100ms（一个推送间隔）才读数据，确保读到的副本已经跟上。要订好几张表时，
+先把请求都发出去再逐个 `await`，服务端会让它们一起等；一个一个 `await` 就是每张表各等一次：
+
+```csharp
+// 登录后订几张表：先都发出去，再 await
+var namesTask = HeTuClient.Instance.WatchTable<PlayerNames>();
+var guildsTask = HeTuClient.Instance.WatchTable<GuildList>();
+var names = await namesTask;
+var guilds = await guildsTask;
+```
+
+`Range` 的点查询（`left == right`，如 `WatchRange<Item>("owner", myId, myId, 100)`）要高效，
+服务端对应的索引要声明 `point_sub=True`，否则该索引上任何写入都会让服务端重跑一次比对。
 
 ```csharp
 // 所有玩家的名字：几千行，一个订阅

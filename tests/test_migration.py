@@ -5,7 +5,6 @@
 #  @email: heeroz@gmail.com
 #  """
 
-from pathlib import Path
 
 import numpy as np
 import pytest
@@ -16,13 +15,9 @@ from hetu.data.backend import Table
 SnowflakeID().init(1, 0)
 
 
-async def test_migration_unique_violation(filled_item_ref, caplog):
-    # 假app文件
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    # 清理logs目录下所有maint文件
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+async def test_migration_unique_violation(filled_item_ref, caplog, tmp_path):
+    # 假app文件，迁移脚本会生成在它旁边的 maint/migration 目录
+    test_app_file = tmp_path / "test.py"
 
     # 测试自动迁移
     backend = filled_item_ref.backend
@@ -77,13 +72,10 @@ async def test_migration_unique_violation(filled_item_ref, caplog):
         maint.rebuild_index(new_table)
 
 
-async def test_migration_add_unique_column(filled_item_ref, caplog):
+async def test_migration_add_unique_column(filled_item_ref, caplog, tmp_path):
     """为已有数据的表新增 unique 列：所有现有行会被填入相同默认值，自动迁移无法生成
     唯一值，应抛出可操作的报错（说明成因 + 两条修复建议）。"""
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+    test_app_file = tmp_path / "test.py"
 
     backend = filled_item_ref.backend
 
@@ -132,13 +124,9 @@ async def test_migration_add_unique_column(filled_item_ref, caplog):
     assert "unique" in msg
 
 
-async def test_auto_migration(filled_item_ref, caplog):
-    # 假app文件
-    import shutil
-
-    test_app_file = Path(__file__).parent / "logs/test.py"
-    # 清理logs目录下所有maint文件
-    shutil.rmtree(test_app_file.parent / "maint", ignore_errors=True)
+async def test_auto_migration(filled_item_ref, caplog, tmp_path):
+    # 假app文件，迁移脚本会生成在它旁边的 maint/migration 目录
+    test_app_file = tmp_path / "test.py"
 
     # 测试自动迁移
     backend = filled_item_ref.backend
@@ -203,6 +191,64 @@ async def test_auto_migration(filled_item_ref, caplog):
         )
 
 
+async def test_migration_declaration_only(filled_item_ref, tmp_path):
+    """
+    只改声明、dtype 不变（table_sub / point_sub，同理只改 index、权限）：迁移脚本判 skip、
+    不用搬数据，但 meta 要写成新定义，否则服务器一直报 schema_mismatch 拒绝启动、upgrade
+    又什么都不做。给没索引的字段加 point_sub 会打开 index，这个索引也要建出来。
+    """
+    test_app_file = tmp_path / "test.py"
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    # dtype 与原 Item 完全一致：去掉 table_sub，model 加 point_sub（本来就有索引），
+    # qty 加 point_sub（本来没有索引，会打开 index）
+    @define_component(namespace="pytest", permission=Permission.OWNER)
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
+        model: np.float32 = property_field(0, unique=False, index=True, point_sub=True)
+        qty: np.int16 = property_field(1, unique=False, point_sub=True)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
+
+    import json
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed_new_item_cls,
+        filled_item_ref.instance_name,
+        filled_item_ref.cluster_id,
+        backend,
+    )
+
+    maint = backend.get_table_maintenance()
+    tbl_status, old_meta = maint.check_table(new_table)
+    assert tbl_status == "schema_mismatch"
+
+    assert maint.migration_schema(test_app_file, new_table, old_meta)
+    assert maint.check_table(new_table)[0] == "ok"
+
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(renamed_new_item_cls)
+        # 数据原样保留；qty 新开的索引要能查到已有的 25 行
+        assert (await repo.get(time=111)).name == "Itm11"
+        assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
+
+
 async def test_read_meta_by_name(item_ref, mod_auto_backend):
     """read_meta 接受组件类或组件名：不持有本地类定义的进程（headless）按名字读 meta。"""
     maint = mod_auto_backend().get_table_maintenance()
@@ -212,3 +258,218 @@ async def test_read_meta_by_name(item_ref, mod_auto_backend):
     assert by_cls == by_name
     assert by_name.cluster_id == item_ref.cluster_id
     assert maint.read_meta(item_ref.instance_name, "NoSuchComponent") is None
+
+
+# ============ ComponentTableManager：`hetu upgrade` 的建表 / 迁移 / 清易失数据 ============
+
+
+def _def_mgr_comps(alpha_v: bool, beta_v: bool = False, beta_permission=None):
+    """定义 MgrAlpha / MgrBeta 两个组件。alpha_v / beta_v 决定有没有 v 属性（去掉是
+    不安全迁移、加上是安全迁移），beta_permission 只改 MgrBeta 的权限（不动 dtype）"""
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+    if alpha_v:
+
+        @define_component(namespace="pytest", force=True)
+        class MgrAlpha(BaseComponent):
+            owner: np.int64 = property_field(0, unique=True)
+            v: np.int32 = property_field(7)
+
+    else:
+
+        @define_component(namespace="pytest", force=True)
+        class MgrAlpha(BaseComponent):
+            owner: np.int64 = property_field(0, unique=True)
+
+    beta_permission = beta_permission or Permission.USER
+    if beta_v:
+
+        @define_component(namespace="pytest", force=True, permission=beta_permission)
+        class MgrBeta(BaseComponent):
+            owner: np.int64 = property_field(0, unique=True)
+            v: np.int32 = property_field(7)
+
+    else:
+
+        @define_component(namespace="pytest", force=True, permission=beta_permission)
+        class MgrBeta(BaseComponent):
+            owner: np.int64 = property_field(0, unique=True)
+
+    return MgrAlpha, MgrBeta
+
+
+def _mgr(backend, instance, alpha, beta, merged: bool):
+    """按 System 划分重建簇，返回表管理器：分开时 MgrAlpha / MgrBeta 各在一簇（id 0 / 1），
+    合并时两者同簇（id 都是 0），MgrBeta 的 cluster id 因此改变"""
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    SystemClusters()._clear()
+    if merged:
+
+        @define_system(namespace="pytest", components=(alpha, beta))
+        async def mgr_use_both(ctx):
+            pass
+
+    else:
+
+        @define_system(namespace="pytest", components=(alpha,))
+        async def mgr_use_alpha(ctx):
+            pass
+
+        @define_system(namespace="pytest", components=(beta,))
+        async def mgr_use_beta(ctx):
+            pass
+
+    SystemClusters().build_clusters("pytest")
+    return ComponentTableManager("pytest", instance, {"default": backend})
+
+
+def _status(tbl_mgr, comp) -> str:
+    tbl = tbl_mgr.get_table(comp)
+    return tbl.backend.get_table_maintenance().check_table(tbl)[0]
+
+
+async def _insert_owner(tbl_mgr, comp, owner):
+    async with tbl_mgr.get_table(comp).session() as session:
+        row = comp.new_row()
+        row.owner = owner
+        await session.using(comp).insert(row)
+
+
+async def _get_owner(tbl_mgr, comp, owner):
+    async with tbl_mgr.get_table(comp).session() as session:
+        return await session.using(comp).get(owner=owner)
+
+
+async def test_manager_create_or_migrate_all(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """`hetu upgrade` 的核心：新表直接建；cluster id 变了迁移过去、数据还在；schema 有
+    不安全变更（删属性）时不带 force 返回 False 且不动表，force 才迁移"""
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+    instance = "mgr_upgrade"
+
+    # 新表：直接建
+    alpha, beta = _def_mgr_comps(alpha_v=True)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert _status(tm, alpha) == _status(tm, beta) == "not_exists"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, alpha) == _status(tm, beta) == "ok"
+    await _insert_owner(tm, alpha, 1)
+    await _insert_owner(tm, beta, 2)
+
+    # 两个组件并进同一簇：MgrBeta 的 cluster id 变了，迁移后数据跟着过去
+    tm = _mgr(backend, instance, alpha, beta, merged=True)
+    assert _status(tm, alpha) == "ok"
+    assert _status(tm, beta) == "cluster_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, beta) == "ok"
+    await backend.wait_for_synced()
+    assert await _get_owner(tm, beta, 2) is not None
+
+    # 删掉 MgrAlpha.v：有损迁移，不带 force 不做
+    alpha, beta = _def_mgr_comps(alpha_v=False)
+    tm = _mgr(backend, instance, alpha, beta, merged=True)
+    assert _status(tm, alpha) == "schema_mismatch"
+    assert tm.create_or_migrate_all(app_file) is False
+    assert _status(tm, alpha) == "schema_mismatch"
+    assert tm.create_or_migrate_all(app_file, force=True) is True
+    assert _status(tm, alpha) == "ok"
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, alpha, 1)
+    assert row is not None and "v" not in row.dtype.names
+
+
+async def test_manager_migrates_cluster_and_schema_in_one_run(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """同一张表 cluster id 和 schema（安全变更：加属性）同时变了：一次
+    create_or_migrate_all 应该两步都做完。否则 `hetu upgrade` 报成功，表却仍是
+    schema_mismatch，服务器启动时 check_and_create_new_tables 不通过"""
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+    instance = "mgr_both"
+
+    alpha, beta = _def_mgr_comps(alpha_v=False)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert tm.create_or_migrate_all(app_file) is True
+    await _insert_owner(tm, beta, 2)
+
+    # MgrBeta 并簇换 cluster id，同时加属性 v
+    alpha, beta = _def_mgr_comps(alpha_v=False, beta_v=True)
+    tm = _mgr(backend, instance, alpha, beta, merged=True)
+    assert _status(tm, beta) == "cluster_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, beta) == "ok"
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, beta, 2)
+    assert row is not None and row.v == 7
+
+
+async def test_manager_permission_only_change(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """只改组件权限：meta 里存的 json / 版本号变了但 dtype 没变。`hetu upgrade` 之后表
+    应该是 ok，否则 check_and_create_new_tables 一直报需要迁移，服务器起不来"""
+    from hetu.data import Permission
+
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+    instance = "mgr_perm"
+
+    alpha, beta = _def_mgr_comps(alpha_v=False)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert tm.create_or_migrate_all(app_file) is True
+
+    alpha, beta = _def_mgr_comps(alpha_v=False, beta_permission=Permission.ADMIN)
+    tm = _mgr(backend, instance, alpha, beta, merged=False)
+    assert _status(tm, beta) == "schema_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, beta) == "ok"
+    assert tm.check_and_create_new_tables() is True
+
+
+async def test_manager_flush_volatile(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """flush_volatile 只清易失组件的数据，持久组件不动；持久组件不带 force 不许 flush"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    @define_component(namespace="pytest", force=True)
+    class MgrKeep(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_component(namespace="pytest", force=True, volatile=True)
+    class MgrTemp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_system(namespace="pytest", components=(MgrKeep, MgrTemp))
+    async def mgr_use_keep_temp(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tm = ComponentTableManager("pytest", "mgr_flush", {"default": backend})
+    assert tm.check_and_create_new_tables() is True
+    await _insert_owner(tm, MgrKeep, 1)
+    await _insert_owner(tm, MgrTemp, 1)
+
+    tm.flush_volatile()
+    await backend.wait_for_synced()
+    assert await _get_owner(tm, MgrKeep, 1) is not None
+    assert await _get_owner(tm, MgrTemp, 1) is None
+
+    keep = tm.get_table(MgrKeep)
+    with pytest.raises(ValueError):
+        keep.backend.get_table_maintenance().flush(keep)

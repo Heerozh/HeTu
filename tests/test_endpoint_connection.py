@@ -411,3 +411,100 @@ async def test_endpoint_permission_fail_closed(mod_test_app, tbl_mgr, new_ctx):
     assert executor.execute_check("ep_owner_sneaky", ()) is None
     # 对照：EVERYBODY 端点匿名可正常通过网关
     assert executor.execute_check("ep_public", ()) is not None
+
+
+async def test_endpoint_admin_permission(mod_test_app, tbl_mgr, new_ctx, caplog):
+    """ADMIN 端点只放行 admin 组：匿名、已登录的普通用户都被网关拒绝"""
+    from hetu.common import Permission
+    from hetu.endpoint.definer import EndpointDefines
+
+    async def ep_admin_only(ctx):
+        pass
+
+    EndpointDefines().add("pytest", ep_admin_only, True, Permission.ADMIN)
+
+    anonymous = EndpointExecutor("pytest", tbl_mgr, new_ctx())
+    assert anonymous.execute_check("ep_admin_only", ()) is None
+    assert "ep_admin_only无调用权限" in caplog.text
+
+    user_ctx = new_ctx()
+    user_ctx.caller = 10
+    assert (
+        EndpointExecutor("pytest", tbl_mgr, user_ctx).execute_check("ep_admin_only", ())
+        is None
+    )
+
+    admin_ctx = new_ctx()
+    admin_ctx.group = "admin"
+    assert (
+        EndpointExecutor("pytest", tbl_mgr, admin_ctx).execute_check(
+            "ep_admin_only", ()
+        )
+        is not None
+    )
+
+
+# ============ 服务端发送限流（SERVER_SEND_LIMITS，防订阅攻击） ============
+
+
+def _send_limited_checker(monkeypatch, server_limits):
+    """造一个 t=1000 起算的 FloodChecker 和配了 server_limits 的 ctx；返回改时钟的函数"""
+    from fixtures.contexts import make_ctx
+
+    clock = [1000.0]
+    monkeypatch.setattr(time, "time", lambda: clock[0])
+    ctx = make_ctx()
+    ctx.configure([], server_limits, 0, 0)
+
+    def set_time(t):
+        clock[0] = t
+
+    return connection.ConnectionFloodChecker(), ctx, set_time
+
+
+def test_send_limit_not_reached(monkeypatch):
+    """每层窗口内的发送数都没超过阈值：不断开"""
+    checker, ctx, set_time = _send_limited_checker(monkeypatch, [[10, 1], [30, 5]])
+    checker.sent(10)
+    set_time(1000.5)
+    assert checker.send_limit_reached(ctx, "test") is False
+    checker.sent(20)  # 共 30，1 秒层已过窗口，5 秒层刚好没超
+    set_time(1003)
+    assert checker.send_limit_reached(ctx, "test") is False
+
+
+def test_send_limit_reached_in_any_tier(monkeypatch, caplog):
+    """任一层在其窗口内超过阈值就判定为订阅攻击，并记警告"""
+    checker, ctx, set_time = _send_limited_checker(monkeypatch, [[10, 1], [30, 5]])
+    checker.sent(11)
+    set_time(1000.5)
+    assert checker.send_limit_reached(ctx, "Websocket.push") is True
+    assert "可能是订阅攻击" in caplog.text and "Websocket.push" in caplog.text
+
+    # 1 秒层的窗口过了，但 5 秒层也超了
+    checker, ctx, set_time = _send_limited_checker(monkeypatch, [[10, 1], [30, 5]])
+    checker.sent(31)
+    set_time(1003)
+    assert checker.send_limit_reached(ctx, "test") is True
+
+
+def test_send_limit_resets_after_last_window(monkeypatch):
+    """超过最后一层的窗口后计数清零、重新起算：长期低速发送不会累积触发"""
+    checker, ctx, set_time = _send_limited_checker(monkeypatch, [[10, 1], [30, 5]])
+    checker.sent(25)
+    set_time(1006)  # 超过最长的 5 秒窗口
+    assert checker.send_limit_reached(ctx, "test") is False
+
+    # 新窗口里只算新的发送数
+    checker.sent(10)
+    set_time(1006.5)
+    assert checker.send_limit_reached(ctx, "test") is False
+    checker.sent(1)
+    assert checker.send_limit_reached(ctx, "test") is True
+
+
+def test_send_limit_disabled_without_limits(monkeypatch):
+    """没配 SERVER_SEND_LIMITS 时不限流"""
+    checker, ctx, _set_time = _send_limited_checker(monkeypatch, [])
+    checker.sent(1_000_000)
+    assert checker.send_limit_reached(ctx, "test") is False

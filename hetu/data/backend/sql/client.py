@@ -40,12 +40,17 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+# 无符号整型都放在 BIGINT（有符号 64 位）列里，uint64 超过它的值存不下：写入时明确拒绝
+# （_reject_uint64_overflow），查询边界收回这个范围（clamp_uint64_bounds_）
+_BIGINT_MAX = 2**63 - 1
+
 
 def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
     dtype_type = dtype.type
 
-    if np.issubdtype(dtype_type, np.bool_):
-        return sa.Boolean()
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，走不到
+    # if np.issubdtype(dtype_type, np.bool_):
+    #     return sa.Boolean()
     if np.issubdtype(dtype_type, np.signedinteger):
         bits = dtype.itemsize * 8
         if bits <= 16:
@@ -54,7 +59,7 @@ def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
             return sa.Integer()
         return sa.BigInteger()
     if np.issubdtype(dtype_type, np.unsignedinteger):
-        # 各方言对unsigned支持不统一，统一放到BigInteger，保证兼容性。
+        # 各方言对unsigned支持不统一，统一放到BigInteger，保证兼容性（见 _BIGINT_MAX）。
         return sa.BigInteger()
     if np.issubdtype(dtype_type, np.floating):
         return sa.Float(precision=24 if dtype.itemsize <= 4 else 53)
@@ -89,6 +94,28 @@ def _apply_sqlite_pragmas(dbapi_conn: Any, _rec: Any) -> None:
         cur.execute("PRAGMA busy_timeout=5000")
     finally:
         cur.close()
+
+
+def _escape_bytes_hex(value: bytes) -> str:
+    return f"_binary X'{value.hex()}'"
+
+
+def _patch_aiomysql_escape_bytes() -> None:
+    """让 aiomysql 0.3.2 在 PyMySQL >= 1.2.3 下也能转义 bytes 参数。
+
+    aiomysql 0.3.2 转义 bytes 参数用的是 PyMySQL 的内部函数 `escape_bytes_prefixed`；
+    PyMySQL 1.2.1 的安全修复（GHSA-x4f8-9hx9-hpp9）删掉了它，1.2.3 为了让 aiomysql 能
+    import 又放回一个字符串占位，结果一有 bytes 参数就 `'str' object is not callable`。
+    这里照 aiomysql 自己的修复（aio-libs/aiomysql#1081，0.3.3）换成 16 进制字面量，
+    也就是 PyMySQL 1.2.1 修复后的做法。
+
+    只在认出那个字符串占位时才替换：PyMySQL 还是老版本（它仍是函数），或 aiomysql 已经
+    不再用这个名字（>= 0.3.3）时什么都不做。aiomysql 0.3.3 发布后可以删掉本函数。
+    """
+    import aiomysql.connection
+
+    if isinstance(getattr(aiomysql.connection, "escape_bytes_prefixed", None), str):
+        aiomysql.connection.escape_bytes_prefixed = _escape_bytes_hex  # pyright: ignore[reportAttributeAccessIssue]
 
 
 @final
@@ -325,7 +352,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
     def index_value_channel(
         self, table_ref: TableReference, index_name: str, value: Any
     ) -> str:
-        """与 Redis 后端同一串名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
+        """
+        只有声明了 point_sub 的索引才有值频道，否则抛 ValueError（见基类）。
+
+        Only indexes declared with `point_sub` have value channels; raises `ValueError`
+        otherwise (see the base class).
+        """
+        self.require_point_sub_(table_ref, index_name)
+        return self.value_channel_(table_ref, index_name, value)
+
+    def value_channel_(
+        self, table_ref: TableReference, index_name: str, value: Any
+    ) -> str:
+        """`index_value_channel` 的内部形式，不检查声明（commit 用）。与 Redis 后端同一串
+        名字；通知表 channel 列是 VARCHAR(256)，token 最长 64 字符"""
         dtype = table_ref.comp_cls.dtype_map_[index_name]
         token = sortable_token(to_sortable_bytes(dtype.type(value)))
         return f"{self.index_key(table_ref, index_name)}:{token}"
@@ -336,7 +376,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     @override
     def table_channel(self, table_ref: TableReference):
-        return f"{self.cluster_prefix(table_ref)}:table"
+        return f"{self.cluster_prefix(table_ref)}{self.TABLE_CHANNEL_SUFFIX}"
 
     def __init__(self, endpoint: str | list[str], is_servant, **kwargs):
         super().__init__(endpoint, is_servant, **kwargs)
@@ -364,6 +404,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
             if io.dialect.name == "sqlite":
                 event.listen(io, "connect", _apply_sqlite_pragmas)
                 event.listen(aio.sync_engine, "connect", _apply_sqlite_pragmas)
+            if aio.dialect.driver == "aiomysql":
+                _patch_aiomysql_escape_bytes()
             self._ios.append(io)
             self._async_ios.append(aio)
 
@@ -443,15 +485,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
             await aio.dispose()
         self._async_ios = []
 
-    @staticmethod
-    def _coerce_bool(value: Any) -> bool:
-        if isinstance(value, bool):
-            return value
-        if isinstance(value, (int, np.integer)):
-            return bool(value)
-        if isinstance(value, str):
-            return value.strip().lower() in {"1", "true", "t", "yes", "y"}
-        return bool(value)
+    # define_component 已把 bool 字段强制转成 int8，组件 dtype 里不会出现 bool，用不到
+    # @staticmethod
+    # def _coerce_bool(value: Any) -> bool:
+    #     if isinstance(value, bool):
+    #         return value
+    #     if isinstance(value, (int, np.integer)):
+    #         return bool(value)
+    #     if isinstance(value, str):
+    #         return value.strip().lower() in {"1", "true", "t", "yes", "y"}
+    #     return bool(value)
 
     @classmethod
     def _coerce_scalar(cls, dtype: np.dtype, value: Any) -> Any:
@@ -461,8 +504,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
             value = value.tobytes()
 
         dtype_type = dtype.type
-        if np.issubdtype(dtype_type, np.bool_):
-            return cls._coerce_bool(value)
+        # bool 字段已被 define_component 转成 int8，此分支走不到
+        # if np.issubdtype(dtype_type, np.bool_):
+        #     return cls._coerce_bool(value)
         if np.issubdtype(dtype_type, np.integer):
             if isinstance(value, bytes):
                 value = value.decode("utf-8", "ignore")
@@ -642,8 +686,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                     value_type=type(value)
                 )
             )
-        if np.issubdtype(dtype_type, np.bool_):
-            return cls._coerce_bool(value)
+        # bool 字段已被 define_component 转成 int8，此分支走不到
+        # if np.issubdtype(dtype_type, np.bool_):
+        #     return cls._coerce_bool(value)
         if np.issubdtype(dtype_type, np.integer):
             return int(value)
         if np.issubdtype(dtype_type, np.floating):
@@ -711,6 +756,27 @@ class SQLBackendClient(BackendClient, alias="sql"):
             return x
 
         return clamp(left), clamp(right)
+
+    @staticmethod
+    def clamp_uint64_bounds_(
+        dtype: np.dtype, left: Any, right: Any, li: bool, ri: bool, desc: bool
+    ) -> tuple[Any, Any, bool, bool]:
+        """
+        uint64 的区间边界收回 BIGINT 范围：超过 2**63-1 的值绑不进参数（inf 也会
+        被 range_normalize_ 钳到 uint64 的最大值），库里也没有这么大的值，写入时
+        就拒绝了。上界超了等于到头（闭区间），下界超了什么都查不到（开区间）。
+        desc 时 left 是上界、right 是下界。
+        """
+        if dtype.kind != "u" or dtype.itemsize != 8:
+            return left, right, li, ri
+        lower, upper = ((right, ri), (left, li)) if desc else ((left, li), (right, ri))
+        if upper[0] > _BIGINT_MAX:
+            upper = (_BIGINT_MAX, True)
+        if lower[0] > _BIGINT_MAX:
+            lower = (_BIGINT_MAX, False)
+        if desc:
+            return upper[0], lower[0], upper[1], lower[1]
+        return lower[0], upper[0], lower[1], upper[1]
 
     def _is_unique_violation(self, exc: sa_exc.IntegrityError) -> bool:
         message = str(exc).lower()
@@ -956,6 +1022,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
         ):
             raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
         left, right = self._clamp_float_inf(dtype, left, right)
+        left, right, li, ri = self.clamp_uint64_bounds_(
+            dtype, left, right, li, ri, desc
+        )
 
         table = self.component_table(table_ref)
         col = table.c[index_name]
@@ -1010,7 +1079,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
 
     def _dirty_to_typed_update(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key, value in dirty.items():
@@ -1020,7 +1089,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return ret
 
     def _dirty_to_typed_insert(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key in comp_cls.prop_idx_map_:
@@ -1030,6 +1099,33 @@ class SQLBackendClient(BackendClient, alias="sql"):
         ret["_version"] = 1
         return ret
 
+    @staticmethod
+    def _reject_uint64_overflow(dirties: dict[TableReference, Any]) -> None:
+        """
+        uint64 超过 2**63-1 的值存不进 BIGINT 列：在执行任何语句之前明确拒绝，而不是让
+        各数据库驱动报各自的溢出错误（整个事务什么都不写）。
+        """
+        for ref, (inserts, (_old_rows, new_rows), _deletes) in dirties.items():
+            wide = [
+                name
+                for name, dtype in ref.comp_cls.dtype_map_.items()
+                if dtype.kind == "u" and dtype.itemsize == 8
+            ]
+            if not wide:
+                continue
+            for row in (*inserts, *new_rows):
+                for name in wide:
+                    if name in row and int(row[name]) > _BIGINT_MAX:
+                        raise ValueError(
+                            _(
+                                "{comp_name}.{field} 的值 {value} 超过了 SQL 后端"
+                                "能存的上限 2**63-1：无符号整型存在 BIGINT 列里，"
+                                "更大的 uint64 请用 Redis 后端"
+                            ).format(
+                                comp_name=ref.comp_name, field=name, value=row[name]
+                            )
+                        )
+
     @override
     async def commit(self, idmap: IdentityMap) -> None:
         self._ensure_open()
@@ -1038,6 +1134,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         dirties = idmap.get_dirty_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
+        self._reject_uint64_overflow(dirties)
         # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
         absent_by_ref = idmap.get_absent_unique_fields()
 
@@ -1047,26 +1144,20 @@ class SQLBackendClient(BackendClient, alias="sql"):
         cleanup_due = now_ts >= self._next_notify_cleanup_at
         refs = list(dirties.keys())
 
-        def _touch_value(
-            pubs: dict[str, list[str]],
-            ref: TableReference,
-            index_name: str,
-            value,
-            row_id,
-        ):
-            """记一条索引值频道通知：该 (索引, 值) 上本事务变动了 row_id。
-            id 索引不记：点查 id 走行频道/整个 id 索引的频道，每次 insert/delete 都为它插一条
-            通知行纯属浪费"""
-            channel = self.index_value_channel(ref, index_name, value)
-            pubs.setdefault(channel, []).append(str(row_id))
+        def _enter_value(chans: set[str], ref: TableReference, index_name: str, value):
+            """记一条索引值频道通知：有行"进入"了该 (索引, 值)（insert、或字段改成该值）。
+            只给声明了 point_sub 的索引记（与 Redis 后端同语义）：离开由订阅者订着的行频道
+            发现，不用记；没声明的索引没人订它的值频道"""
+            if index_name in ref.comp_cls.point_subs_:
+                chans.add(self.value_channel_(ref, index_name, value))
 
         for attempt in range(2):
             channels: set[str] = set()
-            # 表级变更通知：ref -> 本事务变动的row_id列表
+            # 表级变更通知：ref -> 本事务变动的row_id列表。只有声明了 table_sub 的组件要用，
+            # 别的组件不收集
             touched_ids: dict[TableReference, list[str]] = {}
-            # 索引值频道通知：channel -> 本事务在该 (索引, 值) 上变动的row_id列表，
-            # insert/delete 记全部索引字段的值，update 记变更字段的旧值和新值
-            value_pubs: dict[str, list[str]] = {}
+            # 索引值频道通知（不带 payload），一个事务每个 (索引, 值) 一条
+            value_chans: set[str] = set()
             try:
                 async with self.aio.begin() as conn:
                     # 对纯读行加版本检查，防止事务依赖的陈旧读：
@@ -1110,17 +1201,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                if (
-                                    index_name != "id"
-                                ):  # 没人订 id 的值频道，见 _touch_value
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        old_row[index_name],
-                                        row_id,
-                                    )
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     # 显式唯一性检查：delete 之后、update / insert 之前（见 _check_unique_conflicts）
                     await self._check_unique_conflicts(conn, dirties, absent_by_ref)
@@ -1167,21 +1249,14 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             for index_name in updates:
                                 if index_name in indexes:
                                     channels.add(self.index_channel(ref, index_name))
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        old_row[index_name],
-                                        row_id,
-                                    )
-                                    _touch_value(
-                                        value_pubs,
+                                    _enter_value(
+                                        value_chans,
                                         ref,
                                         index_name,
                                         updates[index_name],
-                                        row_id,
                                     )
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     for ref, (
                         inserts,
@@ -1205,24 +1280,19 @@ class SQLBackendClient(BackendClient, alias="sql"):
                             channels.add(self.row_channel(ref, row_id))
                             for index_name in ref.comp_cls.indexes_:
                                 channels.add(self.index_channel(ref, index_name))
-                                if (
-                                    index_name != "id"
-                                ):  # 没人订 id 的值频道，见 _touch_value
-                                    _touch_value(
-                                        value_pubs,
-                                        ref,
-                                        index_name,
-                                        typed_row[index_name],
-                                        row_id,
-                                    )
-                            touched_ids.setdefault(ref, []).append(str(row_id))
+                                _enter_value(
+                                    value_chans, ref, index_name, typed_row[index_name]
+                                )
+                            if ref.comp_cls.table_sub_:
+                                touched_ids.setdefault(ref, []).append(str(row_id))
 
                     if channels:
                         notify_rows: list[dict[str, Any]] = [
                             {"channel": channel, "created_at": now_dt, "payload": None}
                             for channel in sorted(channels)
                         ]
-                        # 表级频道：一个事务一张表一条，payload为变动row_id列表
+                        # 表级频道：只给声明了 table_sub 的组件（touched_ids 只收集了它们），
+                        # 一个事务一张表一条，payload为变动row_id列表
                         for ref, ids in touched_ids.items():
                             notify_rows.append(
                                 {
@@ -1231,13 +1301,13 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                     "payload": msgpack.packb(ids),
                                 }
                             )
-                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用
-                        for channel, ids in value_pubs.items():
+                        # 索引值频道：一个事务每个 (索引, 值) 一条，点查询订阅用，不带 payload
+                        for channel in sorted(value_chans):
                             notify_rows.append(
                                 {
                                     "channel": channel,
                                     "created_at": now_dt,
-                                    "payload": msgpack.packb(ids),
+                                    "payload": None,
                                 }
                             )
                         await conn.execute(sa.insert(notify_table), notify_rows)
