@@ -6,6 +6,20 @@ from fixtures.backends import use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 
+@pytest.fixture(autouse=True)
+def _restore_snowflake_state():
+    """本文件的用例会重新 init 单件 SnowflakeID：不传 last_timestamp 时它被设成当前时间
+    加 10 秒（防重启回拨）。不恢复的话，同一 worker 上 10 秒内后跑的用例一发号就多打一条
+    "时钟回拨"告警，断言日志条数的用例（test_system_executor::test_slow_log）就会挂"""
+    from hetu.common.snowflake_id import SnowflakeID
+
+    generator = SnowflakeID()
+    saved = dict(vars(generator))
+    yield
+    vars(generator).clear()
+    vars(generator).update(saved)
+
+
 async def test_snowflake_id(monkeypatch):
     from hetu.common.snowflake_id import SnowflakeID
 
