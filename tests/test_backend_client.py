@@ -535,6 +535,140 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
     assert await run([fresh + ["UNIQUE", "Item.name id=3 insert"]]) == b"committed"
 
 
+@use_redis_family_backend_only
+async def test_redis_lua_range_count_check(item_ref, mod_auto_backend):
+    """Lua 的 CNT：ZLEXCOUNT 与期望行数不符返回 RACE: Range changed + label，相符则继续"""
+    from hetu.data.backend.redis.client import msg_packer
+
+    backend: Backend = mod_auto_backend()
+    client = cast(RedisBackendClient, backend.master)
+    assert client.lua_commit is not None
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        for i in range(2):
+            row = comp.new_row()
+            row.owner, row.time, row.name = 5, i + 1, f"n{i}"
+            await session.using(comp).insert(row)
+
+    keys = [client.row_key(item_ref, 1)]
+    idx_key = client.index_key(item_ref, "owner")
+    lo, hi = client.range_normalize_(comp.dtype_map_["owner"], 5, 5, False)
+
+    async def run(checks):
+        payload = msg_packer.pack([checks, [], {}, [], []])
+        return await client.lua_commit(keys, [payload])  # type: ignore
+
+    assert await run([["CNT", idx_key, lo, hi, 2, "Item.owner"]]) == b"committed"
+    assert await run([["CNT", idx_key, lo, hi, 1, "Item.owner"]]) == (
+        b"RACE: Range changed Item.owner"
+    )
+
+
+@use_redis_family_backend_only
+async def test_redis_range_check_payload(item_ref, mod_auto_backend):
+    """range 读在 commit 里变成 CNT 检查：格式、截断时收窄的边界、排在全部竞态检查之后 /
+    确定性检查之前；unique 点查由 VER / UNIQ 覆盖的（get(unique=) 命中、upsert 两条路径）不带"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    client = cast(RedisBackendClient, backend.master)
+    comp = item_ref.comp_cls
+    dtypes = comp.dtype_map_
+
+    async with backend.session("pytest", 1) as session:
+        for i in range(3):
+            row = comp.new_row()
+            row.owner, row.time, row.name = 1, i + 1, f"n{i}"
+            await session.using(comp).insert(row)
+
+    captured: list = []
+    orig_lua_commit = client.lua_commit
+    assert orig_lua_commit is not None
+
+    async def spy(keys, args):
+        captured.append(msgpack.unpackb(args[0], raw=True)[0])
+        return await orig_lua_commit(keys, args)
+
+    def cnt_checks() -> list:
+        return [chk for chk in captured[-1] if chk[0] == b"CNT"]
+
+    def member(field: str, row) -> bytes:
+        value = to_sortable_bytes(dtypes[field].type(row[field]))
+        return value + b"\x00" + str(int(row.id)).encode()
+
+    owner_key = client.index_key(item_ref, "owner").encode()
+    time_key = client.index_key(item_ref, "time").encode()
+
+    with patch.object(client, "lua_commit", new=spy):
+        # get(unique=) 命中 → update：命中行的 VER + unique 已经足够，不带 CNT
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            row = await repo.get(name="n0")
+            assert row is not None
+            row.qty = 5
+            await repo.update(row)
+        assert cnt_checks() == []
+
+        # upsert 的插入路径（读空 + 带 RACE 的 UNIQ）与更新路径（命中）都不带 CNT
+        for qty in (7, 8):
+            async with backend.session("pytest", 1) as session:
+                session.only_master = True
+                async with session.using(comp).upsert(name="up") as row:
+                    row.time, row.qty = 100, qty
+            assert cnt_checks() == []
+
+        # 区间读后盲插：一条 CNT，排在全部竞态检查之后、确定性检查之前
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            assert len(await repo.range(owner=(1, 1), limit=-1)) == 3
+            blind = comp.new_row()
+            blind.owner, blind.time, blind.name = 2, 200, "blind"
+            await repo.insert(blind)
+        lo, hi = client.range_normalize_(dtypes["owner"], 1, 1, False)
+        assert cnt_checks() == [[b"CNT", owner_key, lo, hi, 3, b"Item.owner"]]
+        order = ["race", "cnt", "strict"]
+        kinds = [
+            "cnt"
+            if chk[0] == b"CNT"
+            else "race"
+            if chk[0] == b"VER" or chk[-2] == b"RACE"
+            else "strict"
+            for chk in captured[-1]
+        ]
+        assert "race" in kinds and "strict" in kinds
+        assert kinds == sorted(kinds, key=order.index)
+
+        # 非 unique 列 get 命中：limit=1 的截断读，上界收到命中行的 member
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            row = await repo.get(owner=1)
+            assert row is not None
+            row.qty = 9
+            await repo.update(row)
+        lo, _ = client.range_normalize_(dtypes["owner"], 1, 1, False)
+        assert cnt_checks() == [
+            [b"CNT", owner_key, lo, b"[" + member("owner", row), 1, b"Item.owner"]
+        ]
+
+        # 降序截断：下界收到最后一个（最小的）member，上界是查询上界
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            rows = await repo.range(time=(0, 1000), limit=2, desc=True)
+            assert list(rows.time) == [200, 100]
+            extra = comp.new_row()
+            extra.owner, extra.time, extra.name = 3, 5000, "extra"
+            await repo.insert(extra)
+        upper, _ = client.range_normalize_(dtypes["time"], 0, 1000, True)
+        assert cnt_checks() == [
+            [b"CNT", time_key, b"[" + member("time", rows[-1]), upper, 2, b"Item.time"]
+        ]
+
+
 async def test_insert(item_ref, rls_ref, mod_auto_backend):
     """测试client的commit(insert)/get"""
     # 启动backend
