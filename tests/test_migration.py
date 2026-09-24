@@ -249,6 +249,27 @@ async def test_migration_declaration_only(filled_item_ref, tmp_path):
         assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
 
 
+def test_duplicate_component_migration_script_name(tmp_path):
+    """副本组件名带冒号（FutureCalls:Loot），生成的迁移脚本文件名不能带冒号：Windows 上冒号
+    是 NTFS 备用数据流分隔符，脚本会写进 0 字节文件 FutureCalls 的隐藏流，目录里看不到。
+    换掉冒号后仍要能按版本号找回脚本。"""
+    from hetu.data import BaseComponent
+    from hetu.data.migration import MigrationScript
+    from hetu.system import FutureCalls
+
+    dup = BaseComponent.load_json(FutureCalls.json_, "Loot")
+    assert dup.name_ == "FutureCalls:Loot"
+
+    script = MigrationScript._generate_default_migration_script(
+        tmp_path, dup, FutureCalls.json_, "aaa", "bbb"
+    )
+    assert script.name == "FutureCalls-Loot_vaaa_to_vbbb.py"
+    migration_dir = tmp_path / "maint" / "migration"
+    assert [f.name for f in migration_dir.iterdir()] == [script.name]
+    assert script.stat().st_size > 0
+    assert MigrationScript._find_script(tmp_path, "aaa") == (script, "bbb")
+
+
 async def test_read_meta_by_name(item_ref, mod_auto_backend):
     """read_meta 接受组件类或组件名：不持有本地类定义的进程（headless）按名字读 meta。"""
     maint = mod_auto_backend().get_table_maintenance()
