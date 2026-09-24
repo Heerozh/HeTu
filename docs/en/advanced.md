@@ -441,7 +441,7 @@ back empty is checked at commit too. When `get` finds a row, only that
 returned row is guarded; rows with the same value inserted afterwards don't
 count as a conflict.
 
-Two things to watch:
+Three things to watch:
 
 - **Read it all.** A truncated read (the database returned `limit` rows) only
   guards the first `limit` rows it saw; rows it didn't read are treated as
@@ -451,6 +451,12 @@ Two things to watch:
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.
+- **SQL backends don't catch simultaneous commits.** On SQL backends the check
+  re-runs the same query inside the commit transaction, without locks: two
+  transactions committing at the same time can both see nothing else in the
+  range and both insert. To rule out duplicates strictly, use the unique
+  anchor below (the database's unique constraint backs it up), or the Redis
+  backend.
 
 ### Hot paths: unique anchor + `upsert`
 

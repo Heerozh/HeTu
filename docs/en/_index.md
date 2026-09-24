@@ -109,8 +109,9 @@ subscription. No schema migrations, no API gateway, no message broker.
           another System *adding* a row into the queried range (a phantom),
           deleting a returned row, or moving one out of the range all raise a
           conflict — and so does having read from a replica that hadn't caught up
-          yet. So "`range`, insert if missing, update if found" is safe (see
-          [Insert if missing](advanced.md#insert-if-missing-two-ways)). A truncated
+          yet. So "`range`, insert if missing, update if found" is safe (SQL
+          backends don't catch two transactions committing at the same time;
+          see [Insert if missing](advanced.md#insert-if-missing-two-ways)). A truncated
           read (as many rows as `limit`) only guards the first `limit` rows it
           saw, so read the whole range (`limit=-1`) when checking whether
           something exists. For busy ranges where the logic doesn't depend on
