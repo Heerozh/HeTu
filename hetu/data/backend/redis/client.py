@@ -873,37 +873,36 @@ class RedisBackendClient(BackendClient, alias="redis"):
         不是原子的、还可能打到不同节点，中间有行被改走又有行插进来时行数可能不变，所以
         这里先在 worker 上核对，对不上直接判竞态，不去 master。本事务新 insert 的行不核对，
         主键冲突交给 NX 判定（否则盲插已存在的 id 会从 UniqueViolation 变成无限重试）。
-        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 implied_by_unique）。
+        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）。
         """
         if located := idmap.inconsistent_range():
             raise RaceCondition(f"RACE: Inconsistent range read {located}")
-        checks: list[list[str | bytes | int]] = []
         for ref, observations in idmap.range_observations().items():
             comp_cls = ref.comp_cls
             for obs in observations:
-                index_name = obs.index_name
-                dtype = comp_cls.dtype_map_[index_name]
+                dtype = comp_cls.dtype_map_[obs.index_name]
                 for row_id, member in zip(obs.ids, obs.members or ()):
                     row = idmap.db_row(ref, row_id)
                     if row is None:
                         continue
-                    value = to_sortable_bytes(dtype.type(row[index_name]))
+                    value = to_sortable_bytes(dtype.type(row[obs.index_name]))
                     if value != member.rsplit(b"\x00", 1)[0]:
                         raise RaceCondition(
                             f"RACE: Inconsistent range read {comp_cls.name_}."
-                            f"{index_name} id={row_id}"
+                            f"{obs.index_name} id={row_id}"
                         )
-                if idmap.implied_by_unique(ref, obs):
-                    continue
+        checks: list[list[str | bytes | int]] = []
+        for ref, observations in idmap.range_observations_to_check().items():
+            for obs in observations:
                 lo, hi = obs.bounds
                 checks.append(
                     [
                         "CNT",
-                        self.index_key(ref, index_name),
+                        self.index_key(ref, obs.index_name),
                         lo,
                         hi,
                         len(obs.ids),
-                        f"{comp_cls.name_}.{index_name}",
+                        f"{ref.comp_cls.name_}.{obs.index_name}",
                     ]
                 )
         return checks

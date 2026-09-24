@@ -83,8 +83,10 @@ class IdentityMap:
         # （见 get_absent_unique_fields）。
         self._absent: dict[TableReference, set[tuple[str, object]]] = {}
 
-        # 本事务 range 读的观察，commit 时校验区间没变（防幻读），见 RangeObservation
+        # 本事务 range 读的观察，commit 时校验区间没变（防幻读），见 RangeObservation；
+        # _range_keys 给完全相同的观察去重
         self._ranges: dict[TableReference, list[RangeObservation]] = {}
+        self._range_keys: dict[TableReference, set[tuple]] = {}
 
     @property
     def is_dirty(self) -> bool:
@@ -359,13 +361,47 @@ class IdentityMap:
         assert self.is_same_txn_group(table_ref), (
             f"{table_ref} has different transaction context"
         )
-        observations = self._ranges.setdefault(table_ref, [])
-        if obs not in observations:
-            observations.append(obs)
+        key = (
+            obs.index_name,
+            obs.bounds,
+            tuple(obs.ids),
+            tuple(obs.members or ()),
+            tuple(obs.missing),
+        )
+        seen = self._range_keys.setdefault(table_ref, set())
+        if key not in seen:
+            seen.add(key)
+            self._ranges.setdefault(table_ref, []).append(obs)
 
     def range_observations(self) -> dict[TableReference, list[RangeObservation]]:
         """本事务全部 range 读的观察 {TableReference: [RangeObservation, ...]}"""
         return self._ranges
+
+    def range_observations_to_check(
+        self,
+    ) -> dict[TableReference, list[RangeObservation]]:
+        """
+        需要后端单独校验区间的观察：`range_observations()` 去掉 unique 列点查里已由其他
+        检查保证不变的（Redis 用来省掉这些 CNT）：
+
+        - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
+        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
+          数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
+          保证提交时除本事务删掉的行外没有这个值，再排除"删掉了这个值的行"就等价于读空。
+          删掉过这样的行，说明本事务先看到"没有"、后又读到"有"，读集本身矛盾，要校验区间。
+        """
+        ret: dict[TableReference, list[RangeObservation]] = {}
+        for table_ref, observations in self._ranges.items():
+            # 每个 unique 列的写入值 / 删除原值，一次 commit 只扫一遍缓存行
+            writes: dict[str, tuple[set[object], set[object]]] = {}
+            keep = [
+                obs
+                for obs in observations
+                if not self._implied_by_unique(table_ref, obs, writes)
+            ]
+            if keep:
+                ret[table_ref] = keep
+        return ret
 
     def inconsistent_range(self) -> str | None:
         """
@@ -386,21 +422,15 @@ class IdentityMap:
         """
         return self._row_clean.get(table_ref, {}).get(row_id)
 
-    def implied_by_unique(
-        self, table_ref: TableReference, obs: RangeObservation
+    def _implied_by_unique(
+        self,
+        table_ref: TableReference,
+        obs: RangeObservation,
+        writes: dict[str, tuple[set[object], set[object]]],
     ) -> bool:
-        """
-        unique 列等值点查的观察，是否已由其他检查保证不变，commit 可以不再单独校验区间：
-
-        - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
-        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
-          数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
-          保证提交时除本事务删掉的行外没有这个值，再排除"删掉了这个值的行"就等价于读空。
-          删掉过这样的行，说明本事务先看到"没有"、后又读到"有"，读集本身矛盾，要校验区间。
-        """
-        comp_cls = table_ref.comp_cls
+        """见 range_observations_to_check。writes 是按列缓存的 _unique_writes 结果"""
         index_name = obs.index_name
-        if obs.point is None or index_name not in comp_cls.uniques_:
+        if obs.point is None or index_name not in table_ref.comp_cls.uniques_:
             return False
         if len(obs.ids) == 1:
             return self.db_row(table_ref, obs.ids[0]) is not None
@@ -408,24 +438,37 @@ class IdentityMap:
             table_ref, index_name, obs.point
         ):
             return False
-
+        if index_name not in writes:
+            writes[index_name] = self._unique_writes(table_ref, index_name)
+        written, deleted = writes[index_name]
         point = self._norm_value(obs.point)
-        states = self._row_states.get(table_ref, {})
-        clean_rows = self._row_clean.get(table_ref, {})
-        cache = self._row_cache.get(table_ref)
-        writes_point = False
-        for row_id, state in states.items():
+        return point in written and point not in deleted
+
+    def _unique_writes(
+        self, table_ref: TableReference, index_name: str
+    ) -> tuple[set[object], set[object]]:
+        """
+        本事务在该列上写入的值（insert 的值，update 改成的新值），以及删除的行的原值。
+        """
+        written: set[object] = set()
+        deleted: set[object] = set()
+        states = self._row_states.get(table_ref)
+        if not states:
+            return written, deleted
+        clean_rows = self._row_clean[table_ref]
+        for row in self._row_cache[table_ref]:
+            row_id = int(row["id"])
+            state = states.get(row_id)
             clean = clean_rows.get(row_id)
             clean_value = None if clean is None else self._norm_value(clean[index_name])
             if state == RowState.DELETE:
-                if clean_value == point:
-                    return False
+                if clean is not None:
+                    deleted.add(clean_value)
             elif state == RowState.INSERT or state == RowState.UPDATE:
-                assert cache is not None
-                row = cache[np.flatnonzero(cache["id"] == row_id)[0]]
-                if self._norm_value(row[index_name]) == point and clean_value != point:
-                    writes_point = True
-        return writes_point
+                value = self._norm_value(row[index_name])
+                if value != clean_value:
+                    written.add(value)
+        return written, deleted
 
     def get_clean_rows(self) -> dict["TableReference", dict[int, str]]:
         """

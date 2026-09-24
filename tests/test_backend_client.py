@@ -482,6 +482,65 @@ async def test_redis_commit_check_codes(mod_item_model):
     assert is_race == sorted(is_race, reverse=True)
 
 
+async def test_range_observations_to_check(mod_item_model):
+    """哪些 range 观察要单独校验区间：unique 点查命中（该行有数据库态）、读空后本事务写入该值
+    （insert 或 update 改成该值，且没删掉数据库态为该值的行）由已有检查覆盖，其余都要；
+    完全相同的观察只留一条"""
+    from hetu.data.backend.idmap import RangeObservation
+
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    idmap = IdentityMap()
+
+    def observe(index_name: str, point, ids=()):
+        obs = RangeObservation(index_name, list(ids), (index_name, point), [], point)
+        idmap.add_range_observation(item_ref, obs)
+        return obs
+
+    def row(name: str, time: int):
+        r = mod_item_model.new_row()
+        r.name, r.time = name, time
+        return r
+
+    # 命中一行、该行有数据库态：覆盖
+    hit = row("hit", 1)
+    idmap.add_clean(item_ref, hit)
+    s1 = observe("name", "hit", [int(hit.id)])
+    # 读空后 insert 该值：覆盖
+    idmap.mark_absent(item_ref, "name", "new")
+    s2_insert = observe("name", "new")
+    idmap.add_insert(item_ref, row("new", 2))
+    # 读空后把另一行 update 成该值：覆盖
+    idmap.mark_absent(item_ref, "time", 30)
+    s2_update = observe("time", 30)
+    other = row("other", 3)
+    idmap.add_clean(item_ref, other)
+    changed, _ = idmap.get(item_ref, int(other.id))
+    assert changed is not None
+    changed.time = 30
+    idmap.update(item_ref, changed)
+    # 读空、本事务没写这个值：要校验
+    idmap.mark_absent(item_ref, "name", "ghost")
+    absent_only = observe("name", "ghost")
+    # 读空后又删掉一行数据库态为该值的行、再插入该值：读集矛盾，要校验
+    idmap.mark_absent(item_ref, "name", "v")
+    contradicted = observe("name", "v")
+    gone = row("v", 4)
+    idmap.add_clean(item_ref, gone)
+    idmap.mark_deleted(item_ref, int(gone.id))
+    idmap.add_insert(item_ref, row("v", 5))
+    # 非 unique 列（没有 point）、区间读：要校验
+    nonunique = observe("owner", None, [int(hit.id)])
+    ranged = observe("time", None)
+
+    # 完全相同的观察去重
+    observe("owner", None, [int(hit.id)])
+    assert len(idmap.range_observations()[item_ref]) == 7
+
+    to_check = {id(obs) for obs in idmap.range_observations_to_check()[item_ref]}
+    assert to_check == {id(absent_only), id(contradicted), id(nonunique), id(ranged)}
+    assert not {id(s1), id(s2_insert), id(s2_update)} & to_check
+
+
 @use_redis_family_backend_only
 async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
     """Lua 按 check 携带的 code 回显 RACE:/UNIQUE: 前缀 + label；

@@ -172,15 +172,16 @@ class RangeObservation:
 ```
 
 - `add_range_observation(ref, obs)`：与 `add_clean` 一样断言同一事务组，而且观察也参与组的判定。
-  否则一个只 range 了别的 cluster 空表的事务，会在 cluster 下拼出跨 slot 的脚本。同一
-  `(ref, index_name, bounds)` 重复观察时，`ids` 相同就去重，不同就记为不一致（同一事务两次读
-  同一区间，结果不同）。
+  否则一个只 range 了别的 cluster 空表的事务，会在 cluster 下拼出跨 slot 的脚本。完全相同的观察
+  按 key 用集合去重（不在列表里逐个比，事务里 range 上千次也不退化）。同一区间两次读到不同结果的
+  观察都留着：提交时的状态不可能同时对上两者，commit 自然判竞态，不用另立规则。
 - `range_observations()`：返回全部观察 `{ref: [obs]}`。
-- `inconsistent_range()`：有 `missing` 或重复观察不一致时返回定位串，否则 None。两个后端 commit
-  开头都先调它，非 None 就直接抛 `RaceCondition`，不连数据库。
+- `inconsistent_range()`：有 `missing` 时返回定位串，否则 None。两个后端 commit 开头都先调它，
+  非 None 就直接抛 `RaceCondition`，不连数据库。
 - `db_row(ref, row_id)`：该行在本事务里的数据库态，即 `_row_clean` 里的副本。INSERT 行或不在缓存
   时返回 None。
-- `implied_by_unique(ref, obs)`：§3.7 的 S1 / S2，仅 Redis 使用。
+- `range_observations_to_check()`：全部观察去掉 §3.7 S1 / S2 覆盖的，仅 Redis 使用。S2 要知道本事务
+  在该列写入 / 删除了哪些值，按 (表, 列) 扫一遍缓存行算成集合，一次 commit 只算一遍。
 
 ### 3.5 Redis
 
@@ -409,7 +410,7 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 
 - desc 开闭修复：`range(time=("(110", "115"), desc=True)`、`("110", "(115")`、两端都开、两端都闭，各后端
   结果与对应 asc 查询的集合相同、顺序相反。
-- 同一事务两次读同一区间、中间被插入 → commit RACE（重复观察不一致）。
+- 同一事务两次读同一区间、中间被插入 → commit RACE（两条观察不可能同时对上）。
 
 框架内部
 
@@ -482,7 +483,7 @@ S1 / S2 覆盖了 `get(unique=)` → update、`upsert` 的两条路径，以及 
 ## 11. 主要改动文件清单
 
 - `hetu/data/backend/idmap.py`：`RangeObservation`、`add_range_observation`、`range_observations`、
-  `inconsistent_range`、`db_row`、`implied_by_unique`；观察参与事务组判定。
+  `inconsistent_range`、`db_row`、`range_observations_to_check`；观察参与事务组判定。
 - `hetu/data/backend/repo.py`：`range(phantom_check=True)`，记录观察与 `missing` / `point`；docstring。
 - `hetu/data/backend/base.py`：`range_read_` 接口；`RaceCondition` 与 commit 的 Exceptions docstring。
 - `hetu/data/backend/redis/client.py`：`range_read_`、commit 前一致性核对、`CNT` 检查、`range_normalize_`
