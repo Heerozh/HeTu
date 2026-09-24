@@ -58,7 +58,10 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
         repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-            same_ips = await repo.range("address", address, limit=1000)
+            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）
+            same_ips = await repo.range(
+                "address", address, limit=1000, phantom_check=False
+            )
             same_ip_guests = same_ips[same_ips.owner == 0]
             if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
                 msg = _(
