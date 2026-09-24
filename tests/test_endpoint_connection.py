@@ -353,6 +353,36 @@ async def test_flood_detect(mod_test_app, tbl_mgr, caplog, new_ctx):
         await loc_executor.terminate()
 
 
+async def test_flood_detect_same_ip_concurrent_no_race(
+    mod_test_app, tbl_mgr, monkeypatch
+):
+    """同 IP 匿名连接数检查只是粗略计数，不做区间校验：本连接数完同 IP 的连接、提交之前，
+    另一个同 IP 连接先建好了，也不能判竞态（new_connection 不重试，判竞态就是连接失败）"""
+    from unittest.mock import patch
+
+    from hetu.endpoint.connection import Connection, del_connection, new_connection
+
+    monkeypatch.setattr(connection, "MAX_ANONYMOUS_CONNECTION_BY_IP", 3)
+    table = tbl_mgr.get_table(Connection)
+    assert table
+    master = table.backend.master
+    orig_commit = master.commit
+    others: list[int] = []
+
+    async def commit_after_other(idmap):
+        if not others:
+            others.append(0)  # 占位，内层连接自己的提交不再嵌套
+            others[0] = await new_connection(tbl_mgr, "233.1.2.3")
+        return await orig_commit(idmap)
+
+    with patch.object(master, "commit", new=commit_after_other):
+        conn_id = await new_connection(tbl_mgr, "233.1.2.3")
+    assert conn_id and others[0]
+
+    await del_connection(tbl_mgr, conn_id)
+    await del_connection(tbl_mgr, others[0])
+
+
 async def test_future_call_bypass_flood_detect(mod_test_app, tbl_mgr, new_ctx):
     # 测试连接，包括flood检测等，特别是future不应该遇到flood检测
     # 不然服务器反复重启后会提示flood
