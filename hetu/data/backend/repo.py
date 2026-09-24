@@ -11,7 +11,7 @@ import numpy as np
 
 from ...i18n import _
 from .base import BackendClient, RowFormat, UniqueViolation
-from .idmap import RowState
+from .idmap import RangeObservation, RowState
 from .table import TableReference
 
 if TYPE_CHECKING:
@@ -194,6 +194,12 @@ class SessionRepository:
         推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
         主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
         None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
+        结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
+
+        非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
+        副本）判 `RaceCondition`，所以"get 为 None 就 insert"的写法是安全的（SQL 后端挡不住
+        两个事务同时提交，见 `range`）；命中时只保证返回的这一行没被改过，之后别的事务再插入
+        同值的行不算冲突。
 
         Parameters
         ----------
@@ -244,8 +250,21 @@ class SessionRepository:
             if is_unique and idmap.observed_absent(self.ref, index_name, query_value):
                 return None
 
-            # cache未命中，去数据库查询
-            rows = await self.range(index_name, query_value, limit=1, desc=False)
+            # cache未命中，去数据库查询。本事务删掉的、改走了这个索引值的行，提交前还在数据库
+            # 索引的原值上，会占掉读到的名额：多读这么多行，剩下的里面才一定有真匹配的（如果
+            # 有）；读空时也就读全了这个值，校验的是整个值上没有别的行
+            moved = idmap.moved_away(self.ref, index_name)
+            rows, obs = await self._range_rows(
+                index_name, query_value, None, 1 + len(moved), False, True
+            )
+            if moved:
+                # 删掉的 _range_rows 已经排除了，改走的也去掉：它们已经不匹配这个值了
+                rows = rows[~np.isin(rows.id, list(moved))]
+            if obs is not None:
+                # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值
+                # 新行排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
+                obs.rows_only = rows.shape[0] > 0
+                idmap.add_range_observation(self.ref, obs)
             if rows.shape[0] > 0:
                 return rows[0]
             # 等值查询unique列读空：登记negative observation，供commit判定竞态。
@@ -274,6 +293,7 @@ class SessionRepository:
         _right: IndexScalar | None = None,
         limit: int = 10,
         desc: bool = False,
+        phantom_check: bool = True,
         **kwargs: tuple[IndexScalar, IndexScalar],
     ) -> np.recarray:
         """
@@ -282,7 +302,19 @@ class SessionRepository:
 
         与 `get` 不同，本方法的区间匹配只读取**已提交**的数据，不会读取当前事务中未提交
         的修改：当前事务内新 `insert` 的行、或索引字段被改动的行，不会反映在返回结果里
-        （但已 `delete` 的行仍会被正确排除）。如需读取事务内新插入的行，请改用 `get`。
+        （但已 `delete` 的行仍会被正确排除，不过仍占limit名额）。如需读取事务内新插入的行，
+        请改用 `get`。
+
+        读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
+        区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
+        `RaceCondition`，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
+        的写法是安全的。SQL 后端的校验是在提交事务里重跑同一条查询、不加锁，
+        两个事务同时提交时可能都看到区间没变、都提交成功；要严格防重复请用unique 约束，
+        或用 Redis 后端。
+
+        截断读（数据库返回了 `limit` 行）也防幻读，和语法一致，只保护看到的前 `limit` 行：
+        区间外的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
+        （`limit=-1`），否则没读到的行会被当成不存在。
 
         Parameters
         ----------
@@ -300,6 +332,10 @@ class SessionRepository:
             限制返回的行数，越少越快。负数表示不限制行数。
         desc: bool
             是否降序排列
+        phantom_check: bool
+            提交时是否校验区间，默认 True。读写频繁的区间（如"读最新 N 条消息再插一条"），
+            且逻辑不依赖"区间里没有别的行"时可关掉，大幅提升性能。关掉后返回的行仍然
+            参与版本校验，只是不管区间里新增的行。
 
         Returns
         -------
@@ -342,29 +378,59 @@ class SessionRepository:
                 )
             )
 
-        if isinstance(_left, np.generic):
-            _left = _left.item()
-        if isinstance(_right, np.generic):
-            _right = _right.item()
-
-        # 先查询 id 列表
-        row_ids = await self._session.master_or_servant.range(
-            self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
+        rows, obs = await self._range_rows(
+            index_name, _left, _right, limit, desc, phantom_check
         )
+        if obs is not None:
+            self._session.idmap.add_range_observation(self.ref, obs)
+        return rows
 
-        # 等值点查（判定规则同订阅侧 point_query_value_）unique 列读空：与 get 一样登记
-        # negative observation，让"先 range 确认不存在再写"的写法撞车时判竞态而非
-        # UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内可见性。
-        if not row_ids and index_name in comp_cls.uniques_:
-            point = BackendClient.point_query_value_(
-                comp_cls.dtype_map_[index_name], _left, _right
+    async def _range_rows(
+        self,
+        index_name: str,
+        left: IndexScalar,
+        right: IndexScalar | None,
+        limit: int,
+        desc: bool,
+        phantom_check: bool,
+    ) -> tuple[np.recarray, RangeObservation | None]:
+        """
+        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（不校验区间时为
+        None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
+        """
+        comp_cls = self.ref.comp_cls
+        if isinstance(left, np.generic):
+            left = left.item()
+        if isinstance(right, np.generic):
+            right = right.item()
+
+        # 先查询 id 列表；要校验区间的，顺便拿回这次读取的观察，commit 时由后端校验
+        client = self._session.master_or_servant
+        obs: RangeObservation | None = None
+        if phantom_check and limit != 0:
+            row_ids, obs = await client.range_read_(
+                self.ref, index_name, left, right, limit, desc
             )
-            if point is not None:
-                self._session.idmap.mark_absent(self.ref, index_name, point)
+        else:
+            row_ids = await client.range(
+                self.ref, index_name, left, right, limit, desc, RowFormat.ID_LIST
+            )
+
+        idmap = self._session.idmap
+        # 等值点查的值（判定规则同订阅侧 point_query_value_），不是点查为 None
+        point = BackendClient.point_query_value_(
+            comp_cls.dtype_map_[index_name], left, right
+        )
+        # unique 列读空时与 get 一样登记 negative observation，让"先 range 确认不存在再写"
+        # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内
+        # 可见性。
+        if not row_ids and point is not None and index_name in comp_cls.uniques_:
+            idmap.mark_absent(self.ref, index_name, point)
 
         # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
-        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）
-        idmap = self._session.idmap
+        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）。
+        # 取行和查 id 用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对
+        # 会把这种滞后误判成竞态
         rows: list[np.record | None] = []
         miss_slots: list[int] = []
         miss_ids: list[int] = []
@@ -376,28 +442,34 @@ class SessionRepository:
                 rows.append(None)  # 占位，保持索引顺序
             elif row_stat != RowState.DELETE:
                 rows.append(row)
+        missing: list[int] = []
         if miss_ids:
             fetched = cast(
                 list[np.record | None],
-                await self._session.master_or_servant.get_many(
-                    self.ref, miss_ids, RowFormat.STRUCT
-                ),
+                await client.get_many(self.ref, miss_ids, RowFormat.STRUCT),
             )
-            # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过
+            # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
             found = [r for r in fetched if r is not None]
             if found:
                 idmap.add_clean(
                     self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
                 )
-            for slot, r in zip(miss_slots, fetched):
+            for slot, _id, r in zip(miss_slots, miss_ids, fetched):
                 rows[slot] = r
+                if r is None:
+                    missing.append(_id)
         result = [r for r in rows if r is not None]
+
+        if obs is not None:
+            # 取行时有行已被删，读到的就不是任何一刻的区间，commit 会直接判竞态
+            obs.point = point
+            obs.missing = missing
 
         # 转换成 np.recarray 返回
         if len(result) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes)), obs
         else:
-            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes))
+            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes)), obs
 
     async def insert(self, row: np.record) -> None:
         """

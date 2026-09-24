@@ -22,6 +22,7 @@ from redis.cluster import LoadBalancingStrategy
 from ....i18n import _
 from ..base import (
     BackendClient,
+    InconsistentRangeRead,
     RaceCondition,
     RowFormat,
     UniqueViolation,
@@ -29,6 +30,7 @@ from ..base import (
     sortable_token,
     to_sortable_bytes,
 )
+from ..idmap import RangeObservation
 from .pool import HeTuConnectionPool
 
 if TYPE_CHECKING:
@@ -646,10 +648,14 @@ class RedisBackendClient(BackendClient, alias="redis"):
         ri = True if ri is None else ri
         # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
         # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
-        ls = b"\x00" if li else b"\x00\xff"
-        rs = b"\x00\xff" if ri else b"\x00"
+        # 后缀按上界 / 下界的角色取：desc 时上面已把值换过来，left 是上界、right 是下界，
+        # li / ri 也跟着各自的值走
         if desc:
-            ls, rs = rs, ls
+            ls = b"\x00\xff" if li else b"\x00"
+            rs = b"\x00" if ri else b"\x00\xff"
+        else:
+            ls = b"\x00" if li else b"\x00\xff"
+            rs = b"\x00\xff" if ri else b"\x00"
 
         # 二进制化。
         b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
@@ -781,30 +787,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         由于python numpy支持SIMD，比直接在数据库复合查询快。
         """
-        if not self._ios:
-            raise ConnectionError(_("连接已关闭，已调用过close"))
-
-        idx_key = self.index_key(table_ref, index_name)
-        aio = self.aio
-
-        # 生成zrange命令
-        comp_cls = table_ref.comp_cls
-        if index_name not in comp_cls.indexes_:
-            raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
-        b_left, b_right = self.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, desc
+        members, _b_left, _b_right = await self._zrange_members(
+            table_ref, index_name, left, right, limit, desc
         )
-        if (b_left < b_right) if desc else (b_right < b_left):
-            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
-
-        row_ids = await aio.zrange(
-            name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
-        )
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
+        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
 
         if row_format == RowFormat.ID_LIST:
             return row_ids
 
+        comp_cls = table_ref.comp_cls
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
         rows = [
@@ -822,6 +813,100 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 record_list = cast(list[np.record], rows)
                 return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
+    async def _zrange_members(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[bytes], bytes, bytes]:
+        """按索引区间 ZRANGE，返回原样 member（value\\x00id）与规范化后的两个边界"""
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+
+        idx_key = self.index_key(table_ref, index_name)
+        comp_cls = table_ref.comp_cls
+        if index_name not in comp_cls.indexes_:
+            raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
+        b_left, b_right = self.range_normalize_(
+            comp_cls.dtype_map_[index_name], left, right, desc
+        )
+        if (b_left < b_right) if desc else (b_right < b_left):
+            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
+
+        members = await self.aio.zrange(
+            name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
+        )
+        return cast(list[bytes], members), b_left, b_right
+
+    @override
+    async def range_read_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[int], RangeObservation]:
+        members, b_left, b_right = await self._zrange_members(
+            table_ref, index_name, left, right, limit, desc
+        )
+        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        # 观察区间给 ZLEXCOUNT 用，要按 min, max 排；desc 时 b_left 是上界
+        lo, hi = (b_right, b_left) if desc else (b_left, b_right)
+        if 0 < limit == len(members):
+            # 截断读只看到了前 limit 行，观察区间收到最后一个返回的 member 为止
+            if desc:
+                lo = b"[" + members[-1]
+            else:
+                hi = b"[" + members[-1]
+        return row_ids, RangeObservation(index_name, row_ids, (lo, hi), members)
+
+    def _range_checks(self, idmap: IdentityMap) -> list[list[str | bytes | int]]:
+        """
+        把本事务的 range 观察变成 commit 的 CNT 检查（ZLEXCOUNT 观察区间 == 读到的行数）。
+
+        行数不变 + 读到的行 VER 不变，就说明区间里还是这些行；前提是读到的每一行，本事务
+        手里的数据（VER 钉住的那个版本）与读取时索引里的 member 一致。ZRANGE 与随后取行
+        不是原子的、还可能打到不同节点，中间有行被改走又有行插进来时行数可能不变，所以
+        这里先在 worker 上核对，对不上直接判竞态，不去 master。本事务新 insert 的行不核对，
+        主键冲突交给 NX 判定（否则盲插已存在的 id 会从 UniqueViolation 变成无限重试）。
+        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）。
+        """
+        if located := idmap.inconsistent_range():
+            raise InconsistentRangeRead(*located)
+        for ref, observations in idmap.range_observations().items():
+            comp_cls = ref.comp_cls
+            for obs in observations:
+                dtype = comp_cls.dtype_map_[obs.index_name]
+                for row_id, member in zip(obs.ids, obs.members or ()):
+                    row = idmap.db_row(ref, row_id)
+                    if row is None:
+                        continue
+                    value = to_sortable_bytes(dtype.type(row[obs.index_name]))
+                    if value != member.rsplit(b"\x00", 1)[0]:
+                        raise InconsistentRangeRead(
+                            comp_cls.name_, obs.index_name, row_id
+                        )
+        checks: list[list[str | bytes | int]] = []
+        for ref, observations in idmap.range_observations_to_check().items():
+            for obs in observations:
+                lo, hi = obs.bounds
+                checks.append(
+                    [
+                        "CNT",
+                        self.index_key(ref, obs.index_name),
+                        lo,
+                        hi,
+                        len(obs.ids),
+                        f"{ref.comp_cls.name_}.{obs.index_name}",
+                    ]
+                )
+        return checks
+
     @override
     async def commit(self, idmap: IdentityMap) -> None:
         """
@@ -831,7 +916,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了，可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
@@ -926,11 +1011,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert first_ref is not None, "typing检查"
         # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
         absent_by_ref = idmap.get_absent_unique_fields()
+        # range 读的区间校验（防幻读）；读取本身就不一致的，这里直接抛 RaceCondition
+        range_checks = self._range_checks(idmap)
 
         # 组合成checks/pushes命令表，减少lua脚本的复杂度
-        # checks有exists/unique/version，分两组：竞态类在前（VER、带 RACE 标记的 NX/UNIQ），
-        # 确定性类在后。Lua 首个失败即返回 → 同时存在两类冲突时 RACE 优先
-        # （保住 upsert 锚定列与其他 unique 列同时撞车时"重试后转 update"的语义）
+        # checks有exists/unique/version/区间行数，分两组：竞态类在前（VER、带 RACE 标记的
+        # NX/UNIQ，最后是区间的 CNT），确定性类在后。Lua 首个失败即返回 → 同时存在两类冲突
+        # 时 RACE 优先（保住 upsert 锚定列与其他 unique 列同时撞车时"重试后转 update"的
+        # 语义；基于过时区间做的决定撞上 unique 也该重试）。CNT 排在其他竞态检查之后，
+        # 同时冲突时报出的仍是原来的信息
         # pushes有hset/zadd/zrem/del
         race_checks: list[list[str | bytes]] = []
         strict_checks: list[list[str | bytes]] = []
@@ -1028,7 +1117,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
 
-        checks = race_checks + strict_checks
+        checks = race_checks + range_checks + strict_checks
         payload_json: bytes = msg_packer.pack(  # type: ignore
             [checks, pushes, deleted, table_pubs, list(value_chans)]
         )

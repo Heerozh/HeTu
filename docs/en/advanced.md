@@ -30,6 +30,9 @@ once a project leaves the prototype stage:
 - **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)
   ** —
   commit (or abort) the transaction before the `System` body returns.
+- **[Insert if missing](#insert-if-missing-two-ways)** — the range check
+  on `range` (phantom protection), and the cheaper unique-anchor + `upsert`
+  pattern for hot paths.
 - **[NumPy patterns for range queries](#numpy-patterns-for-range-queries)** —
   broadcasting, boolean masks, aggregations, and joining two queries in
   memory instead of looping.
@@ -391,6 +394,108 @@ Two important caveats:
 `session_discard()` is the same shape but throws everything away. Use it
 when the `System` has decided early that the right answer is "do nothing"
 and you want to skip the commit entirely.
+
+## Insert if missing: two ways
+
+"One row per player per item type: insert it if missing, otherwise add to
+the quantity" is about the most common thing to write. There are two correct
+ways to do it in HeTu.
+
+### The plain way: decide after a `range`
+
+```python
+import hetu
+import numpy as np
+
+
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    items = await ctx.repo[Item].range(owner=(ctx.caller, ctx.caller), limit=-1)
+    hit = items[items.template == tpl]
+    if len(hit) == 0:
+        row = Item.new_row()
+        row.owner, row.template, row.qty = ctx.caller, tpl, n
+        await ctx.repo[Item].insert(row)
+    else:
+        row = hit[0]
+        row.qty += n
+        await ctx.repo[Item].update(row)
+```
+
+This is safe: the range read by `range` is checked at commit. If another
+transaction inserts a row for the same player in the meantime, or this
+`range` read from a replica that hadn't caught up yet, the commit is treated
+as a race; the retried `System` reads that row and takes the `update` branch.
+
+The same goes for `get`: inserting after a `get` on a non-unique field came
+back empty is checked at commit too. When `get` finds a row, only that
+returned row is guarded; rows with the same value inserted afterwards don't
+count as a conflict.
+
+Three things to watch:
+
+- **Read it all.** A truncated read (the database returned `limit` rows) only
+  guards the first `limit` rows it saw; rows it didn't read are treated as
+  missing. When checking whether something exists, use `limit=-1`. Rows this
+  transaction deleted are left out of the result but still take up `limit`
+  slots, so getting fewer than `limit` rows back doesn't mean you read it all.
+- **Cost grows with the rows read.** Every row read gets a version check on
+  the master, so a player with many items pays for the whole inventory on
+  every item added.
+- **SQL backends don't catch simultaneous commits.** On SQL backends the check
+  re-runs the same query inside the commit transaction, without locks: two
+  transactions committing at the same time can both see nothing else in the
+  range and both insert. To rule out duplicates strictly, use the unique
+  anchor below (the database's unique constraint backs it up), or the Redis
+  backend.
+
+### Hot paths: unique anchor + `upsert`
+
+Give the compound key its own unique field and anchor an `upsert` on it; the
+transaction touches a single row:
+
+```python
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
+        item.owner, item.template = ctx.caller, tpl
+        item.qty += n
+```
+
+When two transactions both reach the insert branch, the later commit hits
+the unique constraint and is treated as a race; on retry the `upsert` finds
+the other row and updates it instead. The price: one more unique index,
+`slot` must be kept in sync when an item changes owner, and existing rows
+need a backfill when you add the field.
+
+### Turning the range check off
+
+For busy ranges where the logic doesn't depend on "nothing else is in the
+range" — say, reading the latest N messages before inserting one — every new
+message makes concurrent transactions race and retry for nothing. Pass
+`phantom_check=False` to such a `range`: the rows it returns still take part
+in the version check, but rows added to the range are ignored. The
+`[RaceCondition]` lines in `replay.log` carry the reason (e.g.
+`Range changed Item.owner`), which helps find the ranges that conflict a lot.
 
 ## NumPy patterns for range queries
 

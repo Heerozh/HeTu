@@ -34,6 +34,10 @@ RaceCondition
   `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
   行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
   [`UniqueViolation`](exceptions.md#uniqueviolation)；
+- 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
+  返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
+  过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
+  `SessionRepository.range` 的 `phantom_check`；
 - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
 `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
@@ -58,7 +62,7 @@ RaceCondition
 UniqueViolation
 ```
 
-<small>Source: [`hetu/data/backend/base.py:82`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L82)</small>
+<small>Source: [`hetu/data/backend/base.py:109`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L109)</small>
 
 
 **Bases:** `IndexError`

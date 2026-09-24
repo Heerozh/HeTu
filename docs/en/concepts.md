@@ -154,7 +154,9 @@ helper that takes `ctx` and call it directly.
 
 HeTu uses optimistic concurrency. Every Session keeps an `IdentityMap` of the
 rows it read or wrote. On commit, the engine checks each row's version against
-Redis. If anything changed underneath, the commit aborts with `RaceCondition`
+Redis, as well as every range the Session read with `range` (a row added into
+such a range counts as a change). If anything changed underneath, the commit
+aborts with `RaceCondition`
 and the engine **automatically re-runs the `System` from the top**, up to
 `retry=` times (default 9999).
 

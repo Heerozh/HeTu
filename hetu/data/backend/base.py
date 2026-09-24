@@ -51,7 +51,7 @@ from ...i18n import _
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
-    from .idmap import IdentityMap
+    from .idmap import IdentityMap, RangeObservation
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -71,12 +71,39 @@ class RaceCondition(Exception):
       `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
       行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
       `UniqueViolation`；
+    - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
+      返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
+      过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
+      `SessionRepository.range` 的 `phantom_check`；
     - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
     `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
     """
 
     pass
+
+
+class InconsistentRangeRead(RaceCondition):
+    """
+    range 读到的行和索引对不上：索引里有这个 id，取行时却读不到，或读到的行已经不在索引
+    说的那个值上。
+
+    通常是正常的竞态（两次读之间行被删改了），重试即可。如果同一行每次重试都对不上，就是
+    索引里残留了和行数据不一致的项（比如维护脚本只删了行、没删索引），重试不会自愈，
+    `SystemCaller` 会打一条 error 日志提示重建索引。
+    """
+
+    def __init__(self, comp_name: str, index_name: str, row_id: int):
+        super().__init__(comp_name, index_name, row_id)
+        self.comp_name = comp_name
+        self.index_name = index_name
+        self.row_id = row_id
+
+    def __str__(self) -> str:
+        return (
+            f"RACE: Inconsistent range read {self.comp_name}.{self.index_name} "
+            f"id={self.row_id}"
+        )
 
 
 class UniqueViolation(IndexError):
@@ -505,6 +532,22 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    async def range_read_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[int], RangeObservation]:
+        """
+        内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
+        同时返回这次读取的观察。之后 `commit` 据此校验同样的查询是否仍返回这些行（防幻读，
+        见 `SessionRepository.range`）。`limit` 不能为 0。
+        """
+        raise NotImplementedError
+
     async def commit(self, idmap: IdentityMap) -> None:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
@@ -513,7 +556,8 @@ class BackendClient:
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了（幻读、读取
+            期间行被改走）。可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
@@ -648,7 +692,10 @@ class TableMaintenance:
         raise NotImplementedError
 
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
-        """实际重建组件表索引的逻辑实现，返回重建的行数"""
+        """
+        实际重建组件表索引的逻辑实现，返回重建的行数。要按行数据整个重建（行已不存在的
+        索引残留要清掉），并且原子替换：中途失败时旧索引原样保留。
+        """
         raise NotImplementedError
 
     def do_update_meta_(self, table_ref: TableReference) -> None:
@@ -861,7 +908,10 @@ class TableMaintenance:
             )
 
     def rebuild_index(self, table_ref: TableReference) -> None:
-        """重建组件表的索引数据"""
+        """
+        按行数据重建组件表的索引，修掉索引残留。扫描行与覆盖索引之间的写入会丢，必须停服
+        执行（`hetu upgrade` 默认会调用）。
+        """
         logger.info(
             _("  ➖ [💾TABLE_MAINT][{comp_name}组件] 正在重建索引...").format(
                 comp_name=table_ref.comp_name

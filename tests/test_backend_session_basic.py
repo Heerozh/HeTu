@@ -277,15 +277,27 @@ async def test_unique_after_range_none_is_race(item_ref, mod_auto_backend):
             r.name, r.time = "x", 6002
             await repo.insert(r)
 
-    # 对照：区间查询读空不算观察，盲写撞车是确定性冲突
+    # 对照：区间查询读空不算 absent 观察，盲写撞车是确定性冲突（关掉区间校验单看这条规则）
     with pytest.raises(UniqueViolation, match="time"):
         async with backend.session("pytest", 1) as s:
             s.only_master = True
             repo = s.using(comp)
-            assert (await repo.range(time=(0, 1000), limit=10)).shape[0] == 0
+            rows = await repo.range(time=(0, 1000), limit=10, phantom_check=False)
+            assert rows.shape[0] == 0
             await intrude("z", 5)
             r = comp.new_row()
             r.name, r.time = "w", 5
+            await repo.insert(r)
+
+    # 默认开着区间校验：读过的区间被插入了，先判竞态（重试后区间一致，才轮到确定性冲突）
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert (await repo.range(time=(2000, 3000), limit=10)).shape[0] == 0
+            await intrude("y", 2005)
+            r = comp.new_row()
+            r.name, r.time = "v", 2005
             await repo.insert(r)
 
 
@@ -449,7 +461,7 @@ async def test_get_negative_cache(item_ref, mod_auto_backend):
         session.only_master = True
         repo = session.using(comp)
         with (
-            patch.object(master, "range", wraps=master.range) as m_range,
+            patch.object(master, "range_read_", wraps=master.range_read_) as m_range,
             patch.object(master, "get", wraps=master.get) as m_get,
         ):
             # unique 列读空：第一次打远程，第二次命中 negative cache
@@ -705,6 +717,37 @@ async def test_range_interval(filled_item_ref, mod_auto_backend):
         np.testing.assert_array_equal(
             (await item_repo.range(time=("(110", "(115"))).time, range(111, 115)
         )
+
+
+async def test_range_interval_desc(filled_item_ref, mod_auto_backend):
+    """降序的开闭区间与升序相同、只是顺序相反：两端开闭不同时不能互换"""
+    backend: Backend = mod_auto_backend()
+
+    # time范围为110-134，name为Itm10-Itm34，见test_data.py的filled_item_ref夹具
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(filled_item_ref.comp_cls)
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=(110, 115), desc=True)).time,
+            range(115, 109, -1),
+        )
+        # 左闭右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("[110", "(115"), desc=True)).time,
+            range(114, 109, -1),
+        )
+        # 左开右闭
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "[115"), desc=True)).time,
+            range(115, 110, -1),
+        )
+        # 左开右开
+        np.testing.assert_array_equal(
+            (await item_repo.range(time=("(110", "(115"), desc=True)).time,
+            range(114, 110, -1),
+        )
+        # 字符串索引同理
+        rows = await item_repo.range(name=("(Itm10", "Itm12"), desc=True)
+        assert list(rows.name) == ["Itm12", "Itm11"]
 
 
 async def test_range_infinite(filled_item_ref, mod_auto_backend):

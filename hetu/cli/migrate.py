@@ -73,11 +73,20 @@ class MigrateCommand(CommandInterface):
             default=False,
             help=_("强制执行升级迁移，丢弃无法迁移的数据。请勿在生产环境使用此选项！"),
         )
+        parser_migrate.add_argument(
+            "--no-rebuild-index",
+            action="store_true",
+            default=False,
+            help=_(
+                "跳过重建索引。默认每次升级都按行数据重建持久组件的索引、修掉索引残留，"
+                "数据量大时较慢"
+            ),
+        )
 
         pass
 
     @classmethod
-    def run(cls, config: dict, yes, drop_data):
+    def run(cls, config: dict, yes, drop_data, rebuild_index=True):
         # 创建后端连接池
         from ..data.backend import Backend
         from ..manager import ComponentTableManager
@@ -90,6 +99,25 @@ class MigrateCommand(CommandInterface):
             # 把config第一个设置为default后端
             if "default" not in backends:
                 backends["default"] = backends[name]
+
+        # 有服务器在跑时不能升级：迁移、清空易失表、重建索引在线执行都会写坏数据。
+        # 靠 worker 租约判断，SQL 后端没有租约，看不出来
+        from ..data.backend import worker_keeper
+
+        live: set[int] = set()
+        for backend in set(backends.values()):
+            live.update(worker_keeper.live_worker_ids(backend))
+        if live:
+            from ..data.backend.redis.worker_keeper import WORKER_ID_EXPIRE_SEC
+
+            print(
+                _(
+                    "❌ 检测到还有服务器在运行（持有 Worker ID 租约：{ids}），请先停服再升级："
+                    "迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常"
+                    "退出的，等租约过期（最多 {ttl} 秒）后再试。"
+                ).format(ids=sorted(live), ttl=WORKER_ID_EXPIRE_SEC)
+            )
+            sys.exit(1)
 
         # 加载玩家的app文件
         spec = importlib.util.spec_from_file_location("HeTuApp", config["APP_FILE"])
@@ -157,6 +185,14 @@ class MigrateCommand(CommandInterface):
             )
             tbl_mgr.flush_volatile()
 
+            if rebuild_index:
+                print(
+                    _("🔧 正在重建 {instance_name} 服的索引...").format(
+                        instance_name=instance_name
+                    )
+                )
+                tbl_mgr.rebuild_index_all()
+
             print(
                 _("✅  {instance_name} 服升级迁移完成！").format(
                     instance_name=instance_name
@@ -190,4 +226,4 @@ class MigrateCommand(CommandInterface):
             assert args.namespace, _("namespace参数不能为空，建议用--config参数")
             assert args.instance, _("instance参数不能为空，建议用--config参数")
             assert args.app_file, _("app_file参数不能为空，建议用--config参数")
-        return cls.run(config, args.y, args.drop_data)
+        return cls.run(config, args.y, args.drop_data, not args.no_rebuild_index)

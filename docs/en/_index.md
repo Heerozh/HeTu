@@ -105,12 +105,18 @@ subscription. No schema migrations, no API gateway, no message broker.
       conflict if another process/coroutine changes it underneath. Rows the
       transaction only *read* count too: commit verifies their versions, so a
       transaction is never built on a stale read.
-        - Exception: `range()` locks the rows it returned, not the index itself.
-          A row another System *adds* into the queried range is a phantom — the
-          version check can't see it, so it raises no conflict. The rows the query
-          actually returned are checked like any other read: deleting one, or
-          moving one out of the range, does raise a conflict. Use a `unique`
-          constraint instead of index checks to guard against phantoms.
+        - The ranges a transaction read with `range()` are checked at commit too:
+          another System *adding* a row into the queried range (a phantom),
+          deleting a returned row, or moving one out of the range all raise a
+          conflict — and so does having read from a replica that hadn't caught up
+          yet. So "`range`, insert if missing, update if found" is safe (SQL
+          backends don't catch two transactions committing at the same time;
+          see [Insert if missing](advanced.md#insert-if-missing-two-ways)). A truncated
+          read (as many rows as `limit`) only guards the first `limit` rows it
+          saw, so read the whole range (`limit=-1`) when checking whether
+          something exists. For busy ranges where the logic doesn't depend on
+          "nothing else is in the range", pass `phantom_check=False` to skip the
+          range check and avoid pointless retries.
         - Unique conflicts are checked at commit: if this transaction `get`-observed
           the value as absent (e.g. the anchor field of an `upsert`, or an equality
           `range`), the conflict counts as a race and is retried; otherwise it fails

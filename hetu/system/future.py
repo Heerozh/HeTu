@@ -338,9 +338,12 @@ async def pop_upcoming_call(tbl: Table):
     async for attempt in tbl.session().retry(2):
         async with attempt as session:
             repo = session.using(tbl.comp_cls)
-            # 取出最早到期的任务
+            # 取出最早到期的任务。不做区间校验：取哪一条不依赖区间里没有别的行，并发取同一条
+            # 由它的版本校验管；否则不断有新的到期任务插进来时会反复判竞态
             now = time.time()
-            calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
+            calls = await repo.range(
+                scheduled=(0, now + 0.1), limit=1, phantom_check=False
+            )
             # 检查可能被其他worker消费了
             if calls.size == 0:
                 return None

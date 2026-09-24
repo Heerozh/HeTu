@@ -158,6 +158,55 @@ async def test_pop_upcoming_call(
     assert ok
 
 
+async def test_pop_upcoming_call_ignores_new_due_calls(
+    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
+):
+    """取"最早到期的一条"不依赖区间里没有别的行：取出期间不断有更早到期的新调用插进来，
+    也不能判竞态（pop 只重试 2 次，耗尽就是任务循环里的一条错误日志）"""
+    from unittest.mock import patch
+
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+    ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
+    assert ok
+
+    master = fc_tbl.backend.master
+    orig_commit = master.commit
+    intruding = False
+    intruders: list[int] = []
+
+    async def commit_after_new_due_call(idmap):
+        # 每次提交前都有一条更早到期的新调用插进来（一条比一条早）
+        nonlocal intruding
+        if not intruding:
+            intruding = True
+            try:
+                async with fc_tbl.session() as session:
+                    row = FutureCallsTableCopy1.new_row()
+                    row.system = "nobody"
+                    row.scheduled = 1.0 / (len(intruders) + 1)
+                    await session.using(FutureCallsTableCopy1).insert(row)
+                    intruders.append(int(row.id))
+            finally:
+                intruding = False
+        return await orig_commit(idmap)
+
+    last_time = time.time() + 1  # 让调用到期
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    with patch.object(master, "commit", new=commit_after_new_due_call):
+        call = await pop_upcoming_call(fc_tbl)
+    assert call is not None and call.id == uuid
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        for row_id in [uuid, *intruders]:
+            if await repo.get(id=row_id):
+                repo.delete(row_id)
+
+
 def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     """测试未来调用常用的duplicated的system，component是否会按namespace隔离"""
     from hetu.system import define_system, SystemContext

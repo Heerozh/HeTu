@@ -10,6 +10,7 @@
 from .base import (
     BackendClient,
     BackendClientFactory,
+    InconsistentRangeRead,
     MQClient,
     RaceCondition,
     RowFormat,
@@ -22,6 +23,7 @@ from .table import Table, TableReference
 
 __all__ = [
     "RaceCondition",
+    "InconsistentRangeRead",
     "UniqueViolation",
     "RowFormat",
     "BackendClient",

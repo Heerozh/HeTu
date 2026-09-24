@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from ....i18n import _
 from ..base import (
     BackendClient,
+    InconsistentRangeRead,
     RaceCondition,
     RowFormat,
     UniqueViolation,
@@ -30,6 +31,7 @@ from ..base import (
     sortable_token,
     to_sortable_bytes,
 )
+from ..idmap import RangeObservation
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
@@ -727,13 +729,12 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 left = clamp_inf(left)
                 right = clamp_inf(right)
 
-        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间。desc 时上面已把值换过来，li / ri
+        # 跟着各自的值走（left 是上界、right 是下界），不能再交换
         left, li = peel_bound_(left)
         right, ri = peel_bound_(right)
         li = True if li is None else li
         ri = True if ri is None else ri
-        if desc:
-            li, ri = ri, li
 
         left = cls._normalize_range_bound(dtype, left)
         right = cls._normalize_range_bound(dtype, right)
@@ -1010,6 +1011,55 @@ class SQLBackendClient(BackendClient, alias="sql"):
         self._ensure_open()
 
         comp_cls = table_ref.comp_cls
+        if row_format == RowFormat.ID_LIST:
+            stmt = self._range_stmt(
+                table_ref, index_name, left, right, limit, desc, True
+            )
+            async with self.aio.connect() as conn:
+                try:
+                    rows = (await conn.execute(stmt)).scalars().all()
+                except sa_exc.DBAPIError as exc:
+                    if self._is_table_missing_error(exc):
+                        return []
+                    raise
+            return [int(x) for x in rows]
+
+        stmt = self._range_stmt(table_ref, index_name, left, right, limit, desc, False)
+        async with self.aio.connect() as conn:
+            try:
+                rows = (await conn.execute(stmt)).mappings().all()
+            except sa_exc.DBAPIError as exc:
+                if self._is_table_missing_error(exc):
+                    rows = []
+                else:
+                    raise
+
+        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
+            return [
+                cast(dict[str, Any], self.row_decode_(comp_cls, dict(row), row_format))
+                for row in rows
+            ]
+
+        if len(rows) == 0:
+            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+        records = [
+            cast(np.record, self.row_decode_(comp_cls, dict(row), RowFormat.STRUCT))
+            for row in rows
+        ]
+        return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
+
+    def _range_stmt(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+        id_only: bool,
+    ) -> sa.Select:
+        """range 的查询语句。commit 校验区间时用同样的参数重建，保证与读取时是同一条查询"""
+        comp_cls = table_ref.comp_cls
         if index_name not in comp_cls.indexes_:
             raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
 
@@ -1037,46 +1087,81 @@ class SQLBackendClient(BackendClient, alias="sql"):
             cond_right = col <= right if ri else col < right
             order_by = (col.asc(), table.c.id.asc())
 
-        if row_format == RowFormat.ID_LIST:
-            stmt = (
-                sa.select(table.c.id).where(cond_left, cond_right).order_by(*order_by)
-            )
-            if limit >= 0:
-                stmt = stmt.limit(limit)
-            async with self.aio.connect() as conn:
-                try:
-                    rows = (await conn.execute(stmt)).scalars().all()
-                except sa_exc.DBAPIError as exc:
-                    if self._is_table_missing_error(exc):
-                        return []
-                    raise
-            return [int(x) for x in rows]
-
-        stmt = sa.select(table).where(cond_left, cond_right).order_by(*order_by)
+        stmt = sa.select(table.c.id if id_only else table)
+        stmt = stmt.where(cond_left, cond_right).order_by(*order_by)
         if limit >= 0:
             stmt = stmt.limit(limit)
-        async with self.aio.connect() as conn:
-            try:
-                rows = (await conn.execute(stmt)).mappings().all()
-            except sa_exc.DBAPIError as exc:
-                if self._is_table_missing_error(exc):
-                    rows = []
-                else:
-                    raise
+        return stmt
 
-        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
-            return [
-                cast(dict[str, Any], self.row_decode_(comp_cls, dict(row), row_format))
-                for row in rows
-            ]
+    @override
+    async def range_read_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[int], RangeObservation]:
+        row_ids = cast(
+            list[int],
+            await self.range(
+                table_ref, index_name, left, right, limit, desc, RowFormat.ID_LIST
+            ),
+        )
+        # commit 时用同样的参数重跑这条查询，比对 id 集合（见 _check_range_observations）
+        bounds = (left, right, limit, desc)
+        return row_ids, RangeObservation(index_name, row_ids, bounds)
 
-        if len(rows) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-        records = [
-            cast(np.record, self.row_decode_(comp_cls, dict(row), RowFormat.STRUCT))
-            for row in rows
-        ]
-        return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
+    async def _check_range_observations(
+        self, conn: AsyncConnection, idmap: IdentityMap
+    ) -> None:
+        """
+        commit 事务内的区间校验（防幻读）：本事务每次 range 读，用同样的参数重跑同一条
+        查询，id 集合必须没变，否则 RaceCondition。要在任何写入之前执行，看到的才是本事务
+        写入前的状态（与 Redis 的 checks 先于 pushes 对齐）。
+
+        与 Redis 只比行数不同，这里比精确的 id 集合：截断读若按"(值, id) <= 最后一行"计数，
+        得拿读回的列值做等值比较，MariaDB 的单精度 FLOAT 对不上，会变成永远失败的重试；
+        精确集合也顺带覆盖了读取中途行被改走的情况，不用再核对读取一致性。
+
+        只保护返回行的观察（get 命中）不重跑查询，只核对读回的行仍满足查询（取行前没被
+        改走），与 Redis 核对 member 对齐。先在本地比较，比不上再以数据库的相等语义为准：
+        行是数据库按它自己的规则命中的（如 MariaDB 默认大小写不敏感的 collation），Python
+        的 != 不能直接判竞态，否则重试每次读到的都一样，会一直重试到上限。
+        """
+        for ref, observations in idmap.range_observations().items():
+            for obs in observations:
+                if obs.rows_only:
+                    for row_id in obs.ids:
+                        row = idmap.db_row(ref, row_id)
+                        if (
+                            row is None
+                            or obs.point is None
+                            or row[obs.index_name] == obs.point
+                        ):
+                            continue
+                        # 用读取时的同一条查询加上 id 问数据库。库里这一行若已不是读到的
+                        # 那一版，版本校验照样会判竞态，所以问现在的库就行
+                        left, right, _limit, desc = obs.bounds
+                        stmt = self._range_stmt(
+                            ref, obs.index_name, left, right, 1, desc, True
+                        )
+                        probe = stmt.where(stmt.selected_columns.id == row_id)
+                        if (await conn.execute(probe)).first() is None:
+                            raise InconsistentRangeRead(
+                                ref.comp_cls.name_, obs.index_name, row_id
+                            )
+                    continue
+                left, right, limit, desc = obs.bounds
+                stmt = self._range_stmt(
+                    ref, obs.index_name, left, right, limit, desc, True
+                )
+                found = {int(x) for x in (await conn.execute(stmt)).scalars().all()}
+                if found != set(obs.ids):
+                    raise RaceCondition(
+                        f"RACE: Range changed {ref.comp_cls.name_}.{obs.index_name}"
+                    )
 
     def _dirty_to_typed_update(
         self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
@@ -1137,12 +1222,16 @@ class SQLBackendClient(BackendClient, alias="sql"):
         self._reject_uint64_overflow(dirties)
         # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
         absent_by_ref = idmap.get_absent_unique_fields()
+        # range 读时就发现行已被删，读到的不是任何一刻的区间，不用去数据库就能判竞态
+        if located := idmap.inconsistent_range():
+            raise InconsistentRangeRead(*located)
 
         notify_table = self.notify_table()
         now_ts = time.time()
         now_dt = datetime.now(UTC).replace(tzinfo=None)
         cleanup_due = now_ts >= self._next_notify_cleanup_at
-        refs = list(dirties.keys())
+        # 缺表时要建的表：写入的表，加上 range 读过的表（区间校验要查它）
+        refs = list(dict.fromkeys([*dirties, *idmap.range_observations()]))
 
         def _enter_value(chans: set[str], ref: TableReference, index_name: str, value):
             """记一条索引值频道通知：有行"进入"了该 (索引, 值)（insert、或字段改成该值）。
@@ -1179,6 +1268,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
                                     f"Version mismatch on read row id={int(row_id)} "
                                     f"exp:{expected_version} got:{actual}"
                                 )
+
+                    # range 读过的区间没变（防幻读），必须在任何写入之前
+                    await self._check_range_observations(conn, idmap)
 
                     # 先删除，避免insert/update遇到本事务中将被删除数据导致unique冲突。
                     for ref, (

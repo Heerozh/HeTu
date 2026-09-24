@@ -138,6 +138,12 @@ get(
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
 主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
 None（不再查询数据库），commit 时若该值已被并发写入则判为 [`RaceCondition`](exceptions.md#racecondition) 重试。
+结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
+
+非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
+副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的（SQL 后端挡不住
+两个事务同时提交，见 `range`）；命中时只保证返回的这一行没被改过，之后别的事务再插入
+同值的行不算冲突。
 
 
 **Parameters**
@@ -180,18 +186,31 @@ range(
     _right: numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | float | str | bytes | bool | None = None,
     limit: int = 10,
     desc: bool = False,
+    phantom_check: bool = True,
     **kwargs: tuple[numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | float | str | bytes | bool, numpy.integer | numpy.floating | numpy.str_ | numpy.bytes_ | numpy.bool | float | str | bytes | bool],
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:270`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L270)</small>
+<small>Source: [`hetu/data/backend/repo.py:289`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L289)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
 
 与 `get` 不同，本方法的区间匹配只读取**已提交**的数据，不会读取当前事务中未提交
 的修改：当前事务内新 `insert` 的行、或索引字段被改动的行，不会反映在返回结果里
-（但已 `delete` 的行仍会被正确排除）。如需读取事务内新插入的行，请改用 `get`。
+（但已 `delete` 的行仍会被正确排除，不过仍占limit名额）。如需读取事务内新插入的行，
+请改用 `get`。
+
+读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
+区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
+[`RaceCondition`](exceptions.md#racecondition)，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
+的写法是安全的。SQL 后端的校验是在提交事务里重跑同一条查询、不加锁，
+两个事务同时提交时可能都看到区间没变、都提交成功；要严格防重复请用unique 约束，
+或用 Redis 后端。
+
+截断读（数据库返回了 `limit` 行）也防幻读，和语法一致，只保护看到的前 `limit` 行：
+区间外的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
+（`limit=-1`），否则没读到的行会被当成不存在。
 
 
 **Parameters**
@@ -209,6 +228,10 @@ range(
 - **`limit`** (Any) — 限制返回的行数，越少越快。负数表示不限制行数。
 
 - **`desc`** (Any) — 是否降序排列
+
+- **`phantom_check`** (Any) — 提交时是否校验区间，默认 True。读写频繁的区间（如"读最新 N 条消息再插一条"），
+且逻辑不依赖"区间里没有别的行"时可关掉，大幅提升性能。关掉后返回的行仍然
+参与版本校验，只是不管区间里新增的行。
 
 
 
@@ -241,7 +264,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:402`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L402)</small>
+<small>Source: [`hetu/data/backend/repo.py:474`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L474)</small>
 
 向Session中添加一行待插入数据。
 
@@ -270,7 +293,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:441`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L441)</small>
+<small>Source: [`hetu/data/backend/repo.py:513`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L513)</small>
 
 向Session中添加一行待更新数据。
 
@@ -299,7 +322,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:477`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L477)</small>
+<small>Source: [`hetu/data/backend/repo.py:549`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L549)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -334,7 +357,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:506`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L506)</small>
+<small>Source: [`hetu/data/backend/repo.py:578`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L578)</small>
 
 向Session中添加一行待删除数据。
 
@@ -641,7 +664,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:341`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L341)</small>
+<small>Source: [`hetu/data/backend/base.py:368`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L368)</small>
 
 从数据库直接获取单行数据。
 
@@ -686,7 +709,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:451`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L451)</small>
+<small>Source: [`hetu/data/backend/base.py:478`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L478)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -748,7 +771,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:523`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L523)</small>
+<small>Source: [`hetu/data/backend/base.py:567`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L567)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
