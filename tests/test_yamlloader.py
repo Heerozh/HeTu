@@ -131,12 +131,9 @@ def test_include_by_extension(tmp_path, monkeypatch):
     assert cfg["MOTD"] == "line1\nline2\n"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: !include 用 open() 默认编码读文件，主配置却按 utf-8 读（cli/start.py）；"
-    "中文 Windows 未开 UTF-8 模式时默认编码是 gbk，被引入文件里的中文会乱码或解码失败",
-)
 def test_include_reads_utf8_regardless_of_locale(tmp_path, monkeypatch):
+    """被引入的文件与主配置（cli/start.py）一样按 utf-8 读：中文 Windows 未开 UTF-8
+    模式时默认编码是 gbk，不指定编码的话被引入文件里的中文会乱码或解码失败"""
     real_open = open
 
     def gbk_default_open(file, mode="r", *args, encoding=None, **kwargs):
