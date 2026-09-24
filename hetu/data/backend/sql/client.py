@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+# 无符号整型都放在 BIGINT（有符号 64 位）列里，uint64 超过它的值存不下：写入时明确拒绝
+# （_reject_uint64_overflow），查询边界收回这个范围（clamp_uint64_bounds_）
+_BIGINT_MAX = 2**63 - 1
+
 
 def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
     dtype_type = dtype.type
@@ -55,7 +59,7 @@ def _numpy_to_sqla_type(dtype: np.dtype) -> sa.types.TypeEngine[Any]:
             return sa.Integer()
         return sa.BigInteger()
     if np.issubdtype(dtype_type, np.unsignedinteger):
-        # 各方言对unsigned支持不统一，统一放到BigInteger，保证兼容性。
+        # 各方言对unsigned支持不统一，统一放到BigInteger，保证兼容性（见 _BIGINT_MAX）。
         return sa.BigInteger()
     if np.issubdtype(dtype_type, np.floating):
         return sa.Float(precision=24 if dtype.itemsize <= 4 else 53)
@@ -753,6 +757,27 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
         return clamp(left), clamp(right)
 
+    @staticmethod
+    def clamp_uint64_bounds_(
+        dtype: np.dtype, left: Any, right: Any, li: bool, ri: bool, desc: bool
+    ) -> tuple[Any, Any, bool, bool]:
+        """
+        uint64 的区间边界收回 BIGINT 范围：超过 2**63-1 的值绑不进参数（inf 也会
+        被 range_normalize_ 钳到 uint64 的最大值），库里也没有这么大的值，写入时
+        就拒绝了。上界超了等于到头（闭区间），下界超了什么都查不到（开区间）。
+        desc 时 left 是上界、right 是下界。
+        """
+        if dtype.kind != "u" or dtype.itemsize != 8:
+            return left, right, li, ri
+        lower, upper = ((right, ri), (left, li)) if desc else ((left, li), (right, ri))
+        if upper[0] > _BIGINT_MAX:
+            upper = (_BIGINT_MAX, True)
+        if lower[0] > _BIGINT_MAX:
+            lower = (_BIGINT_MAX, False)
+        if desc:
+            return upper[0], lower[0], upper[1], lower[1]
+        return lower[0], upper[0], lower[1], upper[1]
+
     def _is_unique_violation(self, exc: sa_exc.IntegrityError) -> bool:
         message = str(exc).lower()
         markers = (
@@ -997,6 +1022,9 @@ class SQLBackendClient(BackendClient, alias="sql"):
         ):
             raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
         left, right = self._clamp_float_inf(dtype, left, right)
+        left, right, li, ri = self.clamp_uint64_bounds_(
+            dtype, left, right, li, ri, desc
+        )
 
         table = self.component_table(table_ref)
         col = table.c[index_name]
@@ -1051,7 +1079,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
 
     def _dirty_to_typed_update(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key, value in dirty.items():
@@ -1061,7 +1089,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         return ret
 
     def _dirty_to_typed_insert(
-        self, comp_cls: type[BaseComponent], dirty: dict[str, str]
+        self, comp_cls: type[BaseComponent], dirty: dict[str, str | bytes]
     ) -> dict[str, Any]:
         ret: dict[str, Any] = {}
         for key in comp_cls.prop_idx_map_:
@@ -1071,6 +1099,33 @@ class SQLBackendClient(BackendClient, alias="sql"):
         ret["_version"] = 1
         return ret
 
+    @staticmethod
+    def _reject_uint64_overflow(dirties: dict[TableReference, Any]) -> None:
+        """
+        uint64 超过 2**63-1 的值存不进 BIGINT 列：在执行任何语句之前明确拒绝，而不是让
+        各数据库驱动报各自的溢出错误（整个事务什么都不写）。
+        """
+        for ref, (inserts, (_old_rows, new_rows), _deletes) in dirties.items():
+            wide = [
+                name
+                for name, dtype in ref.comp_cls.dtype_map_.items()
+                if dtype.kind == "u" and dtype.itemsize == 8
+            ]
+            if not wide:
+                continue
+            for row in (*inserts, *new_rows):
+                for name in wide:
+                    if name in row and int(row[name]) > _BIGINT_MAX:
+                        raise ValueError(
+                            _(
+                                "{comp_name}.{field} 的值 {value} 超过了 SQL 后端"
+                                "能存的上限 2**63-1：无符号整型存在 BIGINT 列里，"
+                                "更大的 uint64 请用 Redis 后端"
+                            ).format(
+                                comp_name=ref.comp_name, field=name, value=row[name]
+                            )
+                        )
+
     @override
     async def commit(self, idmap: IdentityMap) -> None:
         self._ensure_open()
@@ -1079,6 +1134,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         dirties = idmap.get_dirty_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
+        self._reject_uint64_overflow(dirties)
         # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
         absent_by_ref = idmap.get_absent_unique_fields()
 

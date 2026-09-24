@@ -91,7 +91,6 @@ class MessagePipeline:
     def __init__(self) -> None:
         self._layers: list[MessageProcessLayer] = []
         self._disabled: list[bool] = []
-        self._handshake_layers_count = 0
 
     def add_layer(self, layer: MessageProcessLayer):
         """
@@ -100,12 +99,11 @@ class MessagePipeline:
         self._layers.append(layer)
         self._disabled.append(False)
         layer.on_attach(self, len(self._layers) - 1)
-        if layer.is_handshake_required():
-            self._handshake_layers_count += 1
 
     def disable_layer(self, idx: int):
         """
-        禁用指定索引的层
+        禁用指定索引的层：收发都跳过它，也不参与握手（客户端不发它的握手消息）。
+        要在连接握手之前调用。
         """
         self._disabled[idx] = True
 
@@ -114,7 +112,7 @@ class MessagePipeline:
         清除所有层，重置管道
         """
         self._layers.clear()
-        self._handshake_layers_count = 0
+        self._disabled.clear()
 
     @property
     def num_layers(self) -> int:
@@ -122,7 +120,12 @@ class MessagePipeline:
 
     @property
     def num_handshake_layers(self) -> int:
-        return self._handshake_layers_count
+        """参与握手的层数（禁用层不算），也就是客户端握手消息应有的条数"""
+        return sum(
+            1
+            for layer, disabled in zip(self._layers, self._disabled)
+            if not disabled and layer.is_handshake_required()
+        )
 
     def handshake(self, client_messages: list[bytes]) -> tuple[PipeContext, bytes]:
         """
@@ -134,9 +137,9 @@ class MessagePipeline:
         reply_messages = []
         handshake_index = 0
         for i, layer in enumerate(self._layers):
-            if self._disabled[i]:
-                continue
-            if layer.is_handshake_required():
+            # 禁用层不参与握手，但 pipe_ctx 仍按层下标对齐（占一个 None）：
+            # encode / decode 都按层下标取 ctx
+            if not self._disabled[i] and layer.is_handshake_required():
                 ctx, reply = layer.handshake(client_messages[handshake_index])
                 pipe_ctx.append(ctx)
                 reply_messages.append(reply)
@@ -172,13 +175,12 @@ class MessagePipeline:
         """
         ctx = None
         decoded: JSONType | bytes = message
-        for i, layer in enumerate(reversed(self._layers)):
+        for i in reversed(range(len(self._layers))):
             if self._disabled[i]:
                 continue
             if pipe_ctx is not None:
-                original_index = len(pipe_ctx) - 1 - i
-                ctx = pipe_ctx[original_index]
-            decoded = layer.decode(ctx, decoded)
+                ctx = pipe_ctx[i]
+            decoded = self._layers[i].decode(ctx, decoded)
         assert isinstance(decoded, (dict, list)), _(
             "最终解码结果必须是JSON类型, 但实际得到: {decoded}"
         ).format(decoded=decoded)

@@ -151,6 +151,7 @@ class BaseComponent:
     default_row_: np.recarray  # 默认空数据行
     prop_idx_map_: dict[str, int]  # 属性名->第几个属性（矩阵下标）的映射
     dtype_map_: dict[str, np.dtype]  # 属性名->dtype的映射
+    bytes_fields_: frozenset[str]  # bytes（S 类型）属性名，后端要原样读写字节
     uniques_: set[str]  # 唯一索引的属性名集合
     indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
     json_: str  # Component定义的json字符串
@@ -248,6 +249,9 @@ class BaseComponent:
         for name, prop in comp.properties_:
             comp.prop_idx_map_[name] = len(comp.prop_idx_map_)
             comp.dtype_map_[name] = np.dtype(prop.dtype)
+        comp.bytes_fields_ = frozenset(
+            name for name, dtype in comp.dtype_map_.items() if dtype.kind == "S"
+        )
 
         return comp
 

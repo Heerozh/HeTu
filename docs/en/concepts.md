@@ -39,6 +39,10 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
+- **SQL backends cannot store a uint64 above `2**63 - 1`.** On the SQL
+  backends (SQLite / PostgreSQL / MariaDB) unsigned integers live in BIGINT
+  columns: committing a larger value is rejected with a `ValueError`, and range
+  bounds beyond it are clamped. The Redis backend has no such limit.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.

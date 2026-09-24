@@ -828,7 +828,8 @@ class SubscriptionBroker:
         --------
         sub_id: str | None
             订阅id，后续通过该id获取更新。如果组件没有声明 `table_sub`、无整表权限，
-            或表行数超过 `max_table_rows`，返回None。
+            或表行数超过 `max_table_rows`，返回None。重复订阅时表已超过上限，同样返回
+            None，并撤掉已有的订阅。
         rows: list[dict[str, Any]]
             caller可见的全部行数据。
 
@@ -875,13 +876,13 @@ class SubscriptionBroker:
 
         servant = self._backend.servant
         sub_id = f"{table_ref.comp_name}.table"
-        if sub_id in self._subs:
+        if (existing := self._subs.get(sub_id)) is not None:
             logger.warning(
                 _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
                     sub_id=sub_id
                 )
             )
-            return self._reread_table(table_ref, ctx, sub_id)
+            return self._reread_table(table_ref, ctx, sub_id, existing)
 
         # 先订阅、一生效就登记（同 subscribe_get）。初始全量读完成之前弹出的通知由
         # TableSubscription 攒着（pending），读完再重新入队
@@ -903,11 +904,21 @@ class SubscriptionBroker:
         return sub_id, rows
 
     async def _reread_table(
-        self, table_ref: TableReference, ctx: Context, sub_id: str
+        self,
+        table_ref: TableReference,
+        ctx: Context,
+        sub_id: str,
+        existing: BaseSubscription,
     ) -> tuple[str | None, list[dict]]:
-        """重复整表订阅：已有的订阅照旧，只把当前可见的行再读一遍返回"""
+        """重复整表订阅：已有的订阅照旧，只把当前可见的行再读一遍返回；表已超过行数
+        上限时撤掉已有的订阅，返回 None"""
         rows = await self._read_whole_table(table_ref, ctx, self._backend.servant)
         if rows is None:
+            # 回 None 客户端就认为没有订阅、不会再来 unsub（同 subscribe_get 重复订阅时
+            # 行已不可见），旧订阅得跟着撤掉，不然它和表频道会挂到连接结束，还占着整表
+            # 订阅数。读的这段时间里它可能已被退订、sub_id 又登记给了新的订阅，那个别去动
+            if self._subs.get(sub_id) is existing:
+                await self.unsubscribe(sub_id)
             return None, []
         for row in rows:
             del row["_version"]

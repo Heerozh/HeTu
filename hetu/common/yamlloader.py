@@ -28,7 +28,8 @@ def construct_include(loader: Loader, node: yaml.Node) -> Any:
     filename = os.path.abspath(os.path.join(loader.root, loader.construct_scalar(node)))
     extension = os.path.splitext(filename)[1].lstrip(".")
 
-    with open(filename, "r") as f:
+    # 与主配置（cli/start.py）一样按 utf-8 读，不随系统默认编码（中文 Windows 是 gbk）
+    with open(filename, "r", encoding="utf-8") as f:
         if extension in ("yaml", "yml"):
             return yaml.load(f, Loader)
         elif extension in ("json",):

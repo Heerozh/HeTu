@@ -442,29 +442,25 @@ def test_disabled_layer_skipped_in_encode():
     assert pipe.encode(ctx, msg) == msgspec.msgpack.encode(msg)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: decode 倒序遍历各层时拿倒序下标查 _disabled，跳过的是镜像位置的层",
-)
 def test_disabled_layer_skipped_in_decode():
+    """decode 倒序遍历各层时按层原本的下标判断禁用，跳过的是被禁用的那层本身"""
     pipe, ctx = _jsonb_zlib_pipe()
     msg = ["rpc", "login", 1]
     pipe.disable_layer(1)
     assert pipe.decode(ctx, msgspec.msgpack.encode(msg)) == msg
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="BUG: 握手不给禁用层占 pipe_ctx 的位，encode 再按层下标取 ctx 就错位越界",
-)
 def test_disabled_layer_after_handshake():
-    """禁用中间的压缩层：禁用层不参与握手（客户端也不发它的握手消息），之后照常收发"""
+    """禁用中间的压缩层：禁用层不参与握手（客户端也不发它的握手消息，与 C# SDK 一致），
+    pipe_ctx 仍按层下标对齐，之后照常收发"""
     server = pipeline.MessagePipeline()
     server.add_layer(pipeline.JSONBinaryLayer())
     server.add_layer(pipeline.ZlibLayer())
     crypto = pipeline.CryptoLayer()
     server.add_layer(crypto)
     server.disable_layer(1)
+    # 服务端按它校验客户端握手消息的条数：只剩加密层
+    assert server.num_handshake_layers == 1
 
     client_private = PrivateKey.generate()
     pipe_ctx, reply = server.handshake([client_private.public_key.encode()])
@@ -478,3 +474,21 @@ def test_disabled_layer_after_handshake():
     # 服务端 → 客户端
     frame = server.encode(pipe_ctx, msg)
     assert msgspec.msgpack.decode(crypto.decode(client_ctx, frame)) == msg
+
+
+def test_clean_resets_disabled_layers():
+    """clean 后重新加的层不继承之前的禁用标记（服务端的管道是单件，每次 worker_main
+    都会 clean 再重新加层）"""
+    pipe, _ctx = _jsonb_zlib_pipe()
+    pipe.disable_layer(1)
+    pipe.clean()
+    assert pipe.num_layers == 0 and pipe.num_handshake_layers == 0
+
+    pipe.add_layer(pipeline.JSONBinaryLayer())
+    zlib_layer = pipeline.ZlibLayer()
+    pipe.add_layer(zlib_layer)
+    zlib_ctx, _ = zlib_layer.handshake(b"")
+    msg = ["rpc", "login", 1]
+    assert pipe.num_handshake_layers == 1
+    # 压缩层照常生效，没被当成禁用
+    assert pipe.encode([None, zlib_ctx], msg) != msgspec.msgpack.encode(msg)
