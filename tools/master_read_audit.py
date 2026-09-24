@@ -27,7 +27,7 @@ import os
 import random
 import traceback
 
-READ_METHODS = ("get", "get_many", "range")
+READ_METHODS = ("get", "get_many", "range", "range_read_")
 COUNTS: collections.Counter = collections.Counter()
 
 # 这些是读路径自己的中转帧，调用点要继续往上找

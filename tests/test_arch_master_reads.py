@@ -20,7 +20,7 @@ from pathlib import Path
 HETU_ROOT = Path(__file__).resolve().parent.parent / "hetu"
 
 # 读方法（写方法不在本约束内：写本来就只能去 master）
-READ_METHODS = ("get", "get_many", "range")
+READ_METHODS = ("get", "get_many", "range", "range_read_")
 # `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……
 PATTERN = re.compile(
     r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*\(",

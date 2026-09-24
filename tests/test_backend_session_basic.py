@@ -277,15 +277,27 @@ async def test_unique_after_range_none_is_race(item_ref, mod_auto_backend):
             r.name, r.time = "x", 6002
             await repo.insert(r)
 
-    # 对照：区间查询读空不算观察，盲写撞车是确定性冲突
+    # 对照：区间查询读空不算 absent 观察，盲写撞车是确定性冲突（关掉区间校验单看这条规则）
     with pytest.raises(UniqueViolation, match="time"):
         async with backend.session("pytest", 1) as s:
             s.only_master = True
             repo = s.using(comp)
-            assert (await repo.range(time=(0, 1000), limit=10)).shape[0] == 0
+            rows = await repo.range(time=(0, 1000), limit=10, phantom_check=False)
+            assert rows.shape[0] == 0
             await intrude("z", 5)
             r = comp.new_row()
             r.name, r.time = "w", 5
+            await repo.insert(r)
+
+    # 默认开着区间校验：读过的区间被插入了，先判竞态（重试后区间一致，才轮到确定性冲突）
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s:
+            s.only_master = True
+            repo = s.using(comp)
+            assert (await repo.range(time=(2000, 3000), limit=10)).shape[0] == 0
+            await intrude("y", 2005)
+            r = comp.new_row()
+            r.name, r.time = "v", 2005
             await repo.insert(r)
 
 
@@ -449,7 +461,7 @@ async def test_get_negative_cache(item_ref, mod_auto_backend):
         session.only_master = True
         repo = session.using(comp)
         with (
-            patch.object(master, "range", wraps=master.range) as m_range,
+            patch.object(master, "range_read_", wraps=master.range_read_) as m_range,
             patch.object(master, "get", wraps=master.get) as m_get,
         ):
             # unique 列读空：第一次打远程，第二次命中 negative cache

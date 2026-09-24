@@ -6,6 +6,7 @@
 """
 
 import logging
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, cast
 
@@ -24,6 +25,28 @@ class RowState(Enum):
     INSERT = 1  # 新插入
     UPDATE = 2  # 需更新数据
     DELETE = 3  # 需从数据库删除
+
+
+@dataclass(slots=True)
+class RangeObservation:
+    """
+    本事务一次 `range` 读的"观察"：commit 时校验同样的查询现在返回的行没变（防幻读）。
+    由后端的 `range_read_` 生成，`bounds` 只有生成它的那个后端看得懂。
+
+    截断读（返回数 == limit）只观察到最后一个返回行为止，区间后面新增的行不在观察里。
+    """
+
+    index_name: str
+    # 索引快照里读到的 id（按索引顺序），个数即期望行数
+    ids: list[int]
+    # 后端相关的校验参数
+    bounds: tuple
+    # Redis：ZRANGE 原样 member，commit 前核对读取一致性；SQL 不用
+    members: list[bytes] | None = None
+    # unique 列等值点查的值，否则 None
+    point: object | None = None
+    # 取行时已读不到（ZRANGE 与取行之间被删）的 id
+    missing: list[int] = field(default_factory=list)
 
 
 def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | bytes]:
@@ -60,9 +83,8 @@ class IdentityMap:
         # （见 get_absent_unique_fields）。
         self._absent: dict[TableReference, set[tuple[str, object]]] = {}
 
-        # 范围查询缓存
-        # {TableReference: {index_name: [(left, right), ...]}} - 存储已缓存的范围
-        # self._range_cache: dict[TableReference, dict[str, list[tuple]]] = {}
+        # 本事务 range 读的观察，commit 时校验区间没变（防幻读），见 RangeObservation
+        self._ranges: dict[TableReference, list[RangeObservation]] = {}
 
     @property
     def is_dirty(self) -> bool:
@@ -73,9 +95,11 @@ class IdentityMap:
         return False
 
     def first_reference(self) -> TableReference | None:
-        if not self._row_cache:
-            return None
-        return next(iter(self._row_cache.keys()))
+        # range 读空的表只有观察、没有缓存行，也要参与"同一事务组"的判定
+        for refs in (self._row_cache, self._ranges):
+            if refs:
+                return next(iter(refs.keys()))
+        return None
 
     def is_same_txn_group(self, other: TableReference) -> bool:
         first_reference = self.first_reference()
@@ -327,6 +351,81 @@ class IdentityMap:
             if rows_absent:
                 ret[table_ref] = rows_absent
         return ret
+
+    def add_range_observation(
+        self, table_ref: TableReference, obs: RangeObservation
+    ) -> None:
+        """登记一次 range 读的观察，commit 时由后端校验。完全相同的观察只留一条。"""
+        assert self.is_same_txn_group(table_ref), (
+            f"{table_ref} has different transaction context"
+        )
+        observations = self._ranges.setdefault(table_ref, [])
+        if obs not in observations:
+            observations.append(obs)
+
+    def range_observations(self) -> dict[TableReference, list[RangeObservation]]:
+        """本事务全部 range 读的观察 {TableReference: [RangeObservation, ...]}"""
+        return self._ranges
+
+    def inconsistent_range(self) -> str | None:
+        """
+        有 range 读在取行时发现索引里的行已被删（读到的不是任何一刻的区间）时，返回定位串
+        （如 `Item.owner id=123`），否则 None。commit 据此直接判竞态，不用去数据库。
+        """
+        for table_ref, observations in self._ranges.items():
+            for obs in observations:
+                if obs.missing:
+                    located = f"{table_ref.comp_cls.name_}.{obs.index_name}"
+                    return f"{located} id={obs.missing[0]}"
+        return None
+
+    def db_row(self, table_ref: TableReference, row_id: int) -> np.record | None:
+        """
+        该行在本事务里的数据库态：读取时的原样副本（commit 时 VER 校验的就是它的版本）。
+        本事务新 insert 的行、或不在缓存里的行返回 None。
+        """
+        return self._row_clean.get(table_ref, {}).get(row_id)
+
+    def implied_by_unique(
+        self, table_ref: TableReference, obs: RangeObservation
+    ) -> bool:
+        """
+        unique 列等值点查的观察，是否已由其他检查保证不变，commit 可以不再单独校验区间：
+
+        - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
+        - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
+          数据库态为这个值的行：这个值的 unique 检查带着 RACE 标记（读空时登记过 absent），
+          保证提交时除本事务删掉的行外没有这个值，再排除"删掉了这个值的行"就等价于读空。
+          删掉过这样的行，说明本事务先看到"没有"、后又读到"有"，读集本身矛盾，要校验区间。
+        """
+        comp_cls = table_ref.comp_cls
+        index_name = obs.index_name
+        if obs.point is None or index_name not in comp_cls.uniques_:
+            return False
+        if len(obs.ids) == 1:
+            return self.db_row(table_ref, obs.ids[0]) is not None
+        if len(obs.ids) != 0 or not self.observed_absent(
+            table_ref, index_name, obs.point
+        ):
+            return False
+
+        point = self._norm_value(obs.point)
+        states = self._row_states.get(table_ref, {})
+        clean_rows = self._row_clean.get(table_ref, {})
+        cache = self._row_cache.get(table_ref)
+        writes_point = False
+        for row_id, state in states.items():
+            clean = clean_rows.get(row_id)
+            clean_value = None if clean is None else self._norm_value(clean[index_name])
+            if state == RowState.DELETE:
+                if clean_value == point:
+                    return False
+            elif state == RowState.INSERT or state == RowState.UPDATE:
+                assert cache is not None
+                row = cache[np.flatnonzero(cache["id"] == row_id)[0]]
+                if self._norm_value(row[index_name]) == point and clean_value != point:
+                    writes_point = True
+        return writes_point
 
     def get_clean_rows(self) -> dict["TableReference", dict[int, str]]:
         """

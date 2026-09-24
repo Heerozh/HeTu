@@ -51,7 +51,7 @@ from ...i18n import _
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
-    from .idmap import IdentityMap
+    from .idmap import IdentityMap, RangeObservation
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -71,6 +71,10 @@ class RaceCondition(Exception):
       `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
       行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
       `UniqueViolation`；
+    - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
+      返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
+      过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
+      `SessionRepository.range` 的 `phantom_check`；
     - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
     `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
@@ -505,6 +509,22 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    async def range_read_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[int], RangeObservation]:
+        """
+        内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
+        同时返回这次读取的观察。之后 `commit` 据此校验同样的查询是否仍返回这些行（防幻读，
+        见 `SessionRepository.range`）。`limit` 不能为 0。
+        """
+        raise NotImplementedError
+
     async def commit(self, idmap: IdentityMap) -> None:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
@@ -513,7 +533,8 @@ class BackendClient:
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了（幻读、读取
+            期间行被改走）。可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
