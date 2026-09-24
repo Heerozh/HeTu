@@ -1,10 +1,12 @@
+import asyncio
 from unittest.mock import patch
 
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import SQL_BACKENDS, use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
+from hetu.data.backend.redis import RedisBackendClient
 
 SnowflakeID().init(1, 0)
 
@@ -648,6 +650,96 @@ async def test_range_reread_after_phantom_is_race(item_ref, mod_auto_backend):
                 await s2.using(comp).insert(_item(comp, owner=3, time=1, name="other"))
             assert len(await repo.range(owner=(3, 3), limit=-1)) == 1
             await repo.insert(_item(comp, owner=99, time=2, name="mine"))
+
+
+def _meet_between_check_and_write(backend: Backend, parties: int = 2):
+    """
+    让每个提交在"校验做完、还没写入"处碰头：先到的等其他提交也校验完，再各自写入，构造
+    提交交错（都先校验、后写入）。Redis 的碰头点在 EVALSHA 之前（脚本里校验与写入原子
+    执行，交错不进去）；SQL 在提交事务里的区间校验之后、写入之前。
+
+    等待有上限：提交若在拿写锁时被另一个提交挡住（比如 SQLite 改成 BEGIN IMMEDIATE 之后），
+    根本走不到校验，不能一直等，否则两边互相等死。
+    """
+    master = backend.master
+    arrived = 0
+    everyone = asyncio.Event()
+
+    async def meet():
+        nonlocal arrived
+        arrived += 1
+        if arrived >= parties:
+            everyone.set()
+        try:
+            await asyncio.wait_for(everyone.wait(), timeout=2)
+        except TimeoutError:
+            pass
+
+    if isinstance(master, RedisBackendClient):
+        orig_lua_commit = master.lua_commit
+        assert orig_lua_commit is not None
+
+        async def lua_commit(keys, args):
+            await meet()
+            return await orig_lua_commit(keys, args)
+
+        return patch.object(master, "lua_commit", new=lua_commit)
+
+    orig_check = master._check_range_observations  # type: ignore[attr-defined]
+
+    async def check_range_observations(conn, idmap):
+        await orig_check(conn, idmap)
+        await meet()
+
+    return patch.object(
+        master, "_check_range_observations", new=check_range_observations
+    )
+
+
+async def test_range_phantom_interleaved_commits(
+    item_ref, mod_auto_backend, backend_name, request
+):
+    """
+    两个事务都读空同一区间、各插一行，提交交错（都先校验、再写入）：只能成功一个，另一个
+    判竞态。嵌套 session 的用例只覆盖了先后提交，这里覆盖同时提交。
+
+    Redis 的校验与写入在一个 Lua 脚本里原子执行，交错不进去。SQL 后端在提交事务里重跑查询、
+    不加锁，两边都能校验通过、都写入成功；SQLite 更甚，驱动只在第一条写语句前才发 BEGIN，
+    提交时的校验 SELECT 根本不在写入的事务里。SQL 后端先标 strict xfail，修好哪个去掉哪个。
+    """
+    if backend_name in SQL_BACKENDS:
+        request.applymarker(
+            pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="SQL 后端的区间校验不加锁，两个交错的提交都能成功，插出重复行（待修）",
+            )
+        )
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def read_empty_then_insert(n: int):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            if len(await repo.range(owner=(7, 7), limit=-1)) != 0:
+                raise RuntimeError("两个事务都应读到空区间")
+            await repo.insert(_item(comp, owner=7, time=n, name=f"t{n}"))
+
+    with _meet_between_check_and_write(backend):
+        results = await asyncio.gather(
+            read_empty_then_insert(1),
+            read_empty_then_insert(2),
+            return_exceptions=True,
+        )
+    unexpected = [
+        r
+        for r in results
+        if isinstance(r, BaseException) and not isinstance(r, RaceCondition)
+    ]
+    if unexpected:
+        raise unexpected[0]
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
+    assert sum(isinstance(r, RaceCondition) for r in results) == 1
 
 
 async def test_nonunique_get_none_then_insert_is_race(item_ref, mod_auto_backend):
