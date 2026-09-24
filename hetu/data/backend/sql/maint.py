@@ -85,6 +85,9 @@ class SQLTableMaintenance(TableMaintenance):
         table = self._safe_get_table(ref)
         dtype = comp_cls.dtype_map_[index_name]
         left, right, li, ri = self.client.range_normalize_(dtype, left, right, False)
+        left, right, li, ri = self.client.clamp_uint64_bounds_(
+            dtype, left, right, li, ri, False
+        )
         col = table.c[index_name]
         cond_left = col >= left if li else col > left
         cond_right = col <= right if ri else col < right

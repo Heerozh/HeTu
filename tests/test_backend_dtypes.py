@@ -4,8 +4,7 @@
 
 import numpy as np
 import pytest
-import sqlalchemy.exc as sa_exc
-from fixtures.backends import SQL_BACKENDS
+from fixtures.backends import SQL_BACKENDS, use_redis_family_backend_only
 from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -133,19 +132,9 @@ async def test_unsigned_index_range(blob_ref, mod_auto_backend):
     assert len(await servant.range(blob_ref, "small", 0)) == 0
 
 
-async def test_uint64_above_int64_max(
-    request, backend_name, blob_ref, mod_auto_backend
-):
-    """uint64 超过 int64 上限的值往返与排序"""
-    if backend_name in SQL_BACKENDS:
-        request.applymarker(
-            pytest.mark.xfail(
-                strict=True,
-                raises=(OverflowError, sa_exc.DBAPIError),
-                reason="BUG: SQL 后端把无符号整型统一映射成有符号 BigInteger，"
-                "大于 2**63-1 的 uint64 写入时溢出",
-            )
-        )
+@use_redis_family_backend_only
+async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
+    """uint64 超过 int64 上限的值原样往返，按无符号数值排序"""
     backend: Backend = mod_auto_backend()
     comp = blob_ref.comp_cls
     bigs = [2**64 - 1, I64_MAX, 2**63 + 5]
@@ -155,6 +144,29 @@ async def test_uint64_above_int64_max(
     assert (await servant.get(blob_ref, ids[0])).big == 2**64 - 1
     rows = await servant.range(blob_ref, "big", I64_MAX, 2**64 - 1, limit=10)
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
+
+
+@pytest.mark.parametrize("backend_name", SQL_BACKENDS, indirect=True)
+async def test_sql_rejects_uint64_above_bigint(blob_ref, mod_auto_backend):
+    """SQL 后端的无符号整型存在 BIGINT 列里：超过 2**63-1 的 uint64 写入时明确拒绝
+    （报错带组件名、字段名，整个事务什么都不写），而不是各驱动各自的溢出错误。
+    查询边界超出这个范围时按语义收回：上界超了等于到头，下界超了什么都查不到"""
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    servant = backend.servant
+
+    with pytest.raises(ValueError, match=r"Blob\.big"):
+        await _insert(backend, comp, big=[I64_MAX, 2**63 + 5], tag=[b"x", b"y"])
+    assert len(await servant.range(blob_ref, "big", 0, float("inf"), limit=10)) == 0
+
+    ids = await _insert(backend, comp, big=[5, I64_MAX], tag=[b"x", b"y"])
+    # 开放上界：inf 会被钳到 uint64 的最大值，同样要收回来
+    rows = await servant.range(blob_ref, "big", 0, float("inf"), limit=10)
+    assert [int(r.id) for r in rows] == ids
+    rows = await servant.range(blob_ref, "big", 1, 2**64 - 1, limit=10, desc=True)
+    assert list(rows.big) == [I64_MAX, 5]
+    assert len(await servant.range(blob_ref, "big", 2**63 + 5, float("inf"))) == 0
+    assert len(await servant.range(blob_ref, "big", 2**64 - 1)) == 0
 
 
 BIN = b"\xff\x80\x00\xfe"  # 不是合法 UTF-8，中间还有 \x00
