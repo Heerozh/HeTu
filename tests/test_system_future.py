@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -36,12 +37,34 @@ async def test_future_call_create(test_app, tbl_mgr, executor: EndpointExecutor)
         assert rows[0].owner == 1020
 
 
-async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor):
+class _SleepSpy:
+    """替身 asyncio 模块：记下 sleep 请求的时长，其余属性照旧转给 asyncio"""
+
+    def __init__(self):
+        self.delays = []
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay, result=None):
+        self.delays.append(delay)
+        return await asyncio.sleep(delay, result)
+
+
+async def test_sleep_for_upcoming(
+    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
+):
     """测试sleep_for_upcoming的等待逻辑是否正确"""
     time_time = time.time
 
     # 创建一个未来调用
+    from hetu.system import future
     from hetu.system.future import FutureCalls
+
+    # 断言请求的睡眠时长，而不是量墙钟：墙钟里还含一次后端查询，CI 负载高时
+    # 光查询就能超过 0.1 秒
+    spy = _SleepSpy()
+    monkeypatch.setattr(future, "asyncio", spy)
 
     await executor.execute("login", 1020)
 
@@ -60,16 +83,16 @@ async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor)
     # 测试sleep_for_upcoming(等待下一个到期任务)是否正常
     from hetu.system.future import sleep_for_upcoming
 
-    have_task = await sleep_for_upcoming(fc_tbl)
-    # 检测当前时间是否~>任务到期时间
-    assert time_time() > expire_time
-    assert expire_time, pytest.approx(time_time(), abs=0.1)
-    assert have_task
-
-    # 再调用应该只Sleep 0秒
     start = time_time()
     have_task = await sleep_for_upcoming(fc_tbl)
-    assert time_time() - start < 0.1
+    # 睡到了任务到期时间，且没多睡
+    assert time_time() > expire_time
+    assert spy.delays[-1] <= expire_time - start
+    assert have_task
+
+    # 已到期，再调用不应再睡
+    have_task = await sleep_for_upcoming(fc_tbl)
+    assert spy.delays[-1] <= 0
     assert have_task
 
     # 删除未来任务
@@ -80,9 +103,8 @@ async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor)
     assert call.id == uuid
 
     # 再次调用sleep应该返回无任务False，并睡1秒
-    start = time_time()
     have_task = await sleep_for_upcoming(fc_tbl)
-    assert time_time() - start > 1
+    assert spy.delays[-1] == 1
     assert not have_task
 
 
