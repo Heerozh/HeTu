@@ -568,6 +568,47 @@ async def test_range_row_swapped_while_reading(item_ref, mod_auto_backend):
             await repo.insert(_item(comp, owner=9, time=4, name="d"))
 
 
+async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend):
+    """range 查 id 与取行要落在同一个节点：两次各自随机选节点的话，节点间复制进度不同，
+    取行时读不到或读到旧版本，会被读取一致性核对误判成竞态"""
+    import itertools
+    from unittest.mock import PropertyMock
+
+    from hetu.data.backend.session import Session
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, owner=6, time=1, name="a"))
+
+    reads: list[tuple[str, str]] = []
+
+    class Node:
+        """代理 master 的一个"节点"，记下在它上面做了哪种读"""
+
+        def __init__(self, name: str):
+            self.name = name
+
+        def __getattr__(self, attr):
+            target = getattr(backend.master, attr)
+            if attr not in ("range_read_", "range", "get_many"):
+                return target
+
+            async def read(*args, **kwargs):
+                reads.append((self.name, attr))
+                return await target(*args, **kwargs)
+
+            return read
+
+    nodes = itertools.cycle([Node("A"), Node("B")])
+    with patch.object(
+        Session, "master_or_servant", new_callable=PropertyMock, side_effect=nodes
+    ):
+        async with backend.session("pytest", 1) as s1:
+            rows = await s1.using(comp).range(owner=(6, 6), limit=-1)
+    assert len(rows) == 1
+    assert {name for name, _ in reads} == {"A"}, reads
+
+
 async def test_range_reread_after_phantom_is_race(item_ref, mod_auto_backend):
     """同一事务两次读同一区间、中间被插入：两次结果不同，写事务判竞态"""
     backend: Backend = mod_auto_backend()
