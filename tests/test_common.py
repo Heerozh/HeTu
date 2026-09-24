@@ -250,11 +250,11 @@ def _make_lease_table(backend):
 
 
 async def test_snowflake_timestamp_keeper(
-    mod_sqlite_backend, monkeypatch, tmp_path, caplog
+    mod_auto_backend, monkeypatch, tmp_path, caplog
 ):
     """时间戳高水位：独立于租约的读写语义，只需要单调max"""
     monkeypatch.chdir(tmp_path)
-    backend = mod_sqlite_backend()
+    backend = mod_auto_backend()
 
     from hetu.data.backend.snowflake_timestamp import (
         TIMESTAMP_SAVE_INTERVAL,
@@ -270,9 +270,13 @@ async def test_snowflake_timestamp_keeper(
     # 只有"读不出来"（后端异常）才该退化成 init 的兜底值，见 load 的文档
     assert abs(await ts_keeper.load() - now_ms) < 1000
 
-    # SQL后端的 direct_set 是 UPDATE，行不存在就静默无效；GeneralWorkerKeeper 删掉后
-    # 没人替本类建行了，所以它必须自己补建，否则水位永远写不进去
+    # 首次写入前必须先把行建好（GeneralWorkerKeeper 删掉后没人替本类建行了）：
+    # SQL 的 direct_set 是 UPDATE，缺行静默无效；Redis 的是 HSET，缺行会建出
+    # 只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT 读它就 KeyError
+    # （开服后每个 worker 都报一次）
     await ts_keeper.save(now_ms - 60_000)
+    row = await backend.master.get(table, 7)
+    assert row is not None and row.id == 7 and row.last_timestamp == now_ms - 60_000
     assert await ts_keeper.load() >= now_ms
 
     # 后端读异常时才返回-1，把回拨保护交还给 SnowflakeID.init
@@ -302,6 +306,35 @@ async def test_snowflake_timestamp_keeper(
     with caplog.at_level(logging.WARNING, logger="HeTu.root"):
         await second.save(edge_ms)
     assert await second.load() == edge_ms + pad_ms
+
+
+@use_redis_family_backend_only
+async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
+    """旧版本的 save 先 direct_set 再确认行在不在，Redis 上给缺行建出了只有
+    last_timestamp、缺 id 的残缺 hash：之后按 STRUCT 读就 KeyError，每次重启 load 都
+    退化成固定容忍度。已部署的库里还留着这种行，load 要照样读出它的水位，save 照常写"""
+    from hetu.data.backend import RowFormat
+    from hetu.data.backend.snowflake_timestamp import (
+        TIMESTAMP_SAVE_INTERVAL,
+        SnowflakeTimestampKeeper,
+    )
+
+    backend = mod_auto_backend()
+    table = _make_lease_table(backend)
+    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
+    worker_id = 9
+    # 高于当前时间，才看得出读回的是不是这个水位
+    stored = int(time.time() * 1000) + 30_000
+    # 旧版本就是这样建出残缺行的：行还不存在时直接 direct_set
+    await table.direct_set(worker_id, last_timestamp=str(stored))
+    raw = await backend.master.get(table, worker_id, RowFormat.RAW)
+    assert raw is not None and "id" not in raw
+
+    keeper = SnowflakeTimestampKeeper(table, worker_id)
+    assert await keeper.load() == stored + pad_ms
+    await keeper.save(stored + 1)
+    restarted = SnowflakeTimestampKeeper(table, worker_id)
+    assert await restarted.load() == stored + 1 + pad_ms
 
 
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
