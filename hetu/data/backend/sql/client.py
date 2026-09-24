@@ -1123,9 +1123,25 @@ class SQLBackendClient(BackendClient, alias="sql"):
         与 Redis 只比行数不同，这里比精确的 id 集合：截断读若按"(值, id) <= 最后一行"计数，
         得拿读回的列值做等值比较，MariaDB 的单精度 FLOAT 对不上，会变成永远失败的重试；
         精确集合也顺带覆盖了读取中途行被改走的情况，不用再核对读取一致性。
+
+        只保护返回行的观察（get 命中）不重跑查询，只核对读回的行仍满足查询（取行前没被
+        改走），与 Redis 核对 member 对齐。
         """
         for ref, observations in idmap.range_observations().items():
             for obs in observations:
+                if obs.rows_only:
+                    for row_id in obs.ids:
+                        row = idmap.db_row(ref, row_id)
+                        if (
+                            row is not None
+                            and obs.point is not None
+                            and row[obs.index_name] != obs.point
+                        ):
+                            raise RaceCondition(
+                                f"RACE: Inconsistent range read {ref.comp_cls.name_}"
+                                f".{obs.index_name} id={row_id}"
+                            )
+                    continue
                 left, right, limit, desc = obs.bounds
                 stmt = self._range_stmt(
                     ref, obs.index_name, left, right, limit, desc, True

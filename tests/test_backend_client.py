@@ -719,7 +719,7 @@ async def test_redis_range_check_payload(item_ref, mod_auto_backend):
             repo = session.using(comp)
             assert await repo.get(owner=404) is None
             new = comp.new_row()
-            new.owner, new.time, new.name = 404, 404, "n404"
+            new.owner, new.time, new.name = 404, 40400, "n404"  # time 避开下面的区间
             await repo.insert(new)
         lo, hi = client.range_normalize_(dtypes["owner"], 404, 404, False)
         assert cnt_checks() == [[b"CNT", owner_key, lo, hi, 0, b"Item.owner"]]

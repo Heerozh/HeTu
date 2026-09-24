@@ -195,6 +195,10 @@ class SessionRepository:
         主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
         None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
 
+        非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
+        副本）判 `RaceCondition`，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回
+        的这一行没被改过，之后别的事务再插入同值的行不算冲突。
+
         Parameters
         ----------
         index_name: str | None
@@ -245,7 +249,14 @@ class SessionRepository:
                 return None
 
             # cache未命中，去数据库查询
-            rows = await self.range(index_name, query_value, limit=1, desc=False)
+            rows, obs = await self._range_rows(
+                index_name, query_value, None, 1, False, True
+            )
+            if obs is not None:
+                # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值
+                # 新行排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
+                obs.rows_only = rows.shape[0] > 0
+                idmap.add_range_observation(self.ref, obs)
             if rows.shape[0] > 0:
                 return rows[0]
             # 等值查询unique列读空：登记negative observation，供commit判定竞态。
@@ -356,33 +367,53 @@ class SessionRepository:
                 )
             )
 
-        if isinstance(_left, np.generic):
-            _left = _left.item()
-        if isinstance(_right, np.generic):
-            _right = _right.item()
+        rows, obs = await self._range_rows(
+            index_name, _left, _right, limit, desc, phantom_check
+        )
+        if obs is not None:
+            self._session.idmap.add_range_observation(self.ref, obs)
+        return rows
+
+    async def _range_rows(
+        self,
+        index_name: str,
+        left: IndexScalar,
+        right: IndexScalar | None,
+        limit: int,
+        desc: bool,
+        phantom_check: bool,
+    ) -> tuple[np.recarray, RangeObservation | None]:
+        """
+        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（不校验区间时为
+        None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
+        """
+        comp_cls = self.ref.comp_cls
+        if isinstance(left, np.generic):
+            left = left.item()
+        if isinstance(right, np.generic):
+            right = right.item()
 
         # 先查询 id 列表；要校验区间的，顺便拿回这次读取的观察，commit 时由后端校验
         client = self._session.master_or_servant
         obs: RangeObservation | None = None
         if phantom_check and limit != 0:
             row_ids, obs = await client.range_read_(
-                self.ref, index_name, _left, _right, limit, desc
+                self.ref, index_name, left, right, limit, desc
             )
         else:
             row_ids = await client.range(
-                self.ref, index_name, _left, _right, limit, desc, RowFormat.ID_LIST
+                self.ref, index_name, left, right, limit, desc, RowFormat.ID_LIST
             )
 
         idmap = self._session.idmap
-        # unique 列的等值点查（判定规则同订阅侧 point_query_value_）
-        point = None
-        if index_name in comp_cls.uniques_:
-            point = BackendClient.point_query_value_(
-                comp_cls.dtype_map_[index_name], _left, _right
-            )
-        # 读空时与 get 一样登记 negative observation，让"先 range 确认不存在再写"的写法
-        # 撞车时判竞态而非 UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内可见性。
-        if not row_ids and point is not None:
+        # 等值点查的值（判定规则同订阅侧 point_query_value_），不是点查为 None
+        point = BackendClient.point_query_value_(
+            comp_cls.dtype_map_[index_name], left, right
+        )
+        # unique 列读空时与 get 一样登记 negative observation，让"先 range 确认不存在再写"
+        # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内
+        # 可见性。
+        if not row_ids and point is not None and index_name in comp_cls.uniques_:
             idmap.mark_absent(self.ref, index_name, point)
 
         # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
@@ -422,13 +453,12 @@ class SessionRepository:
             # 取行时有行已被删，读到的就不是任何一刻的区间，commit 会直接判竞态
             obs.point = point
             obs.missing = missing
-            idmap.add_range_observation(self.ref, obs)
 
         # 转换成 np.recarray 返回
         if len(result) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
+            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes)), obs
         else:
-            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes))
+            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes)), obs
 
     async def insert(self, row: np.record) -> None:
         """

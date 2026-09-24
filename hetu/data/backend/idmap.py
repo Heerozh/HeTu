@@ -43,10 +43,13 @@ class RangeObservation:
     bounds: tuple
     # Redis：ZRANGE 原样 member，commit 前核对读取一致性；SQL 不用
     members: list[bytes] | None = None
-    # unique 列等值点查的值，否则 None
+    # 等值点查的值，否则 None
     point: object | None = None
     # 取行时已读不到（ZRANGE 与取行之间被删）的 id
     missing: list[int] = field(default_factory=list)
+    # 只保护返回的行、不校验区间（get 命中：约定是"返回一行匹配的"，那一行由 VER 管）。
+    # 读取一致性照样核对
+    rows_only: bool = False
 
 
 def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | bytes]:
@@ -367,6 +370,7 @@ class IdentityMap:
             tuple(obs.ids),
             tuple(obs.members or ()),
             tuple(obs.missing),
+            obs.rows_only,
         )
         seen = self._range_keys.setdefault(table_ref, set())
         if key not in seen:
@@ -381,8 +385,9 @@ class IdentityMap:
         self,
     ) -> dict[TableReference, list[RangeObservation]]:
         """
-        需要后端单独校验区间的观察：`range_observations()` 去掉 unique 列点查里已由其他
-        检查保证不变的（Redis 用来省掉这些 CNT）：
+        需要后端单独校验区间的观察（Redis 用来决定发哪些 CNT）：`range_observations()`
+        去掉只保护返回行的（`rows_only`，get 命中），以及 unique 列点查里已由其他检查保证
+        不变的：
 
         - 命中一行，且该行有数据库态：它的 VER 保证它仍是这个值，unique 保证没有第二行；
         - 读空，且本事务把一行写成了这个值（insert，或 update 改成这个值）、又没删掉任何
@@ -397,7 +402,8 @@ class IdentityMap:
             keep = [
                 obs
                 for obs in observations
-                if not self._implied_by_unique(table_ref, obs, writes)
+                if not obs.rows_only
+                and not self._implied_by_unique(table_ref, obs, writes)
             ]
             if keep:
                 ret[table_ref] = keep
