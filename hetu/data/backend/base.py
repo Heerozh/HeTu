@@ -913,6 +913,8 @@ class MQClient:
     DROP_AFTER = 120
     # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
     RESYNC = "*"
+    # 日志里的后端标签，后端实现覆盖
+    LOG_TAG = "MQ"
 
     def __init__(self) -> None:
         # 以下三者内容保持一致（一个频道名在队列里最多出现一次）：
@@ -983,8 +985,15 @@ class MQClient:
         becomes active: a write that another node applied before that moment, but the
         replica we read from had not, is neither in the initial rows nor notified again.
         """
+        dropped = 0
         for channel_name in channel_names:
-            self._enqueue(channel_name, payload)
+            dropped += self._enqueue(channel_name, payload)
+        if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
+            logger.warning(
+                _(
+                    "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
+                ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
+            )
 
     def _enqueue(self, channel_name: str, payload_ids: Iterable[Any] | None) -> int:
         """放进本地队列（同频道合并），返回因 `DROP_AFTER` 丢弃的旧通知条数"""
@@ -1163,7 +1172,6 @@ class HubMQClient(MQClient):
 
     # 单个连接订阅频道数的告警线；子类可覆盖
     MAX_SUBSCRIBED = 5000
-    LOG_TAG = "MQ"
 
     def __init__(self, hub: MQHub):
         super().__init__()  # 本地消息队列
