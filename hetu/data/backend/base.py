@@ -1062,11 +1062,16 @@ class MQClient:
             while dq and dq[0][0] <= cutoff:
                 channel_name = dq.popleft()[1]
                 self.pulled_set.discard(channel_name)
-                rtn[channel_name] = self.pulled_payload.pop(channel_name, None)
+                payload = self.pulled_payload.pop(channel_name, None)
+                rtn[channel_name] = payload
                 late = self._late.pop(channel_name, None)
                 late_ids = self._late_payload.pop(channel_name, None)
                 if late is not None and late > cutoff:
                     trailing.append((channel_name, late_ids))
+                    if payload and late_ids and self.RESYNC in late_ids:
+                        # 整表重同步是整表重读、全量重推：迟到的 RESYNC 这次读还不满预算，
+                        # 只留给尾随重读做一次，这次只读原有的 row_id
+                        payload.discard(self.RESYNC)
             # 合并进来的通知离这次读不足一个 interval：读可能落在还没应用它的副本上，它的
             # 通知却已经合并掉了。重新入队，interval 后再读一次。用现在的时刻而不是迟到那条
             # 的时刻，队列才保持按时间有序；持续写入时它正好顶替下一批的队头，读的次数不变
