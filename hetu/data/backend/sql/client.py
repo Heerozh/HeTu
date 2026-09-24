@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_en
 from ....i18n import _
 from ..base import (
     BackendClient,
+    InconsistentRangeRead,
     RaceCondition,
     RowFormat,
     UniqueViolation,
@@ -1148,9 +1149,8 @@ class SQLBackendClient(BackendClient, alias="sql"):
                         )
                         probe = stmt.where(stmt.selected_columns.id == row_id)
                         if (await conn.execute(probe)).first() is None:
-                            raise RaceCondition(
-                                f"RACE: Inconsistent range read {ref.comp_cls.name_}"
-                                f".{obs.index_name} id={row_id}"
+                            raise InconsistentRangeRead(
+                                ref.comp_cls.name_, obs.index_name, row_id
                             )
                     continue
                 left, right, limit, desc = obs.bounds
@@ -1224,7 +1224,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
         absent_by_ref = idmap.get_absent_unique_fields()
         # range 读时就发现行已被删，读到的不是任何一刻的区间，不用去数据库就能判竞态
         if located := idmap.inconsistent_range():
-            raise RaceCondition(f"RACE: Inconsistent range read {located}")
+            raise InconsistentRangeRead(*located)
 
         notify_table = self.notify_table()
         now_ts = time.time()

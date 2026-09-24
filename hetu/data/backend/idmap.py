@@ -409,16 +409,15 @@ class IdentityMap:
                 ret[table_ref] = keep
         return ret
 
-    def inconsistent_range(self) -> str | None:
+    def inconsistent_range(self) -> tuple[str, str, int] | None:
         """
-        有 range 读在取行时发现索引里的行已被删（读到的不是任何一刻的区间）时，返回定位串
-        （如 `Item.owner id=123`），否则 None。commit 据此直接判竞态，不用去数据库。
+        有 range 读在取行时发现索引里的行已被删（读到的不是任何一刻的区间）时，返回
+        (组件名, 索引名, 行 id)，否则 None。commit 据此直接判竞态，不用去数据库。
         """
         for table_ref, observations in self._ranges.items():
             for obs in observations:
                 if obs.missing:
-                    located = f"{table_ref.comp_cls.name_}.{obs.index_name}"
-                    return f"{located} id={obs.missing[0]}"
+                    return table_ref.comp_cls.name_, obs.index_name, obs.missing[0]
         return None
 
     def db_row(self, table_ref: TableReference, row_id: int) -> np.record | None:

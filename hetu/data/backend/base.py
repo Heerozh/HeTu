@@ -83,6 +83,29 @@ class RaceCondition(Exception):
     pass
 
 
+class InconsistentRangeRead(RaceCondition):
+    """
+    range 读到的行和索引对不上：索引里有这个 id，取行时却读不到，或读到的行已经不在索引
+    说的那个值上。
+
+    通常是正常的竞态（两次读之间行被删改了），重试即可。如果同一行每次重试都对不上，就是
+    索引里残留了和行数据不一致的项（比如维护脚本只删了行、没删索引），重试不会自愈，
+    `SystemCaller` 会打一条 error 日志提示重建索引。
+    """
+
+    def __init__(self, comp_name: str, index_name: str, row_id: int):
+        super().__init__(comp_name, index_name, row_id)
+        self.comp_name = comp_name
+        self.index_name = index_name
+        self.row_id = row_id
+
+    def __str__(self) -> str:
+        return (
+            f"RACE: Inconsistent range read {self.comp_name}.{self.index_name} "
+            f"id={self.row_id}"
+        )
+
+
 class UniqueViolation(IndexError):
     """
     唯一索引违反异常，表示写入会破坏主键 / unique 约束，且是**确定性**冲突，不应被自动重试。

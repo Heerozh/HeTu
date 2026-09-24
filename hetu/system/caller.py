@@ -12,7 +12,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from ..common.slowlog import SlowLog
-from ..data.backend import RaceCondition
+from ..data.backend import InconsistentRangeRead, RaceCondition
 from ..i18n import _
 from .definer import SystemClusters, SystemDefine
 from .lock import SystemLock
@@ -27,6 +27,35 @@ replay = logging.getLogger("HeTu.replay")
 SYSTEM_CLUSTERS = SystemClusters()
 SystemClusters = None
 SLOW_LOG = SlowLog()
+
+# 同一行连续这么多次 InconsistentRangeRead，就当作索引残留（重试不会自愈），打 error 日志
+STUCK_INDEX_RETRIES = 5
+# 同一行的 error 至少隔这么多秒才再打一次：卡住的 System 每次被调用都会走到这里，别刷屏
+STUCK_INDEX_LOG_INTERVAL = 60.0
+_stuck_index_logged: dict[tuple[str, str, int], float] = {}
+
+
+def _log_stuck_index(sys_name: str, err: InconsistentRangeRead) -> None:
+    """同一行连续多次对不上：索引里残留了和行数据不一致的项，告诉运维怎么修"""
+    key = (err.comp_name, err.index_name, err.row_id)
+    now = time.monotonic()
+    last = _stuck_index_logged.get(key)
+    if last is not None and now - last < STUCK_INDEX_LOG_INTERVAL:
+        return
+    _stuck_index_logged[key] = now
+    logger.error(
+        _(
+            "❌ [📞System] {sys_name} 连续 {count} 次重试都卡在 {comp_name}.{index_name} "
+            "索引里的 id={row_id}：索引和行数据对不上（行已不存在，或值和索引不符），多半是"
+            "索引里残留了旧数据，重试不会自愈。请停服后执行 hetu upgrade 重建索引"
+        ).format(
+            sys_name=sys_name,
+            count=STUCK_INDEX_RETRIES,
+            comp_name=err.comp_name,
+            index_name=err.index_name,
+            row_id=err.row_id,
+        )
+    )
 
 
 class SystemCaller:
@@ -96,6 +125,9 @@ class SystemCaller:
             context.depend[dep_name] = dep_sys.func
 
         start_time = time.perf_counter()
+        # 连续 InconsistentRangeRead 卡在的那一行，以及连续的次数
+        stuck_key: tuple[str, str, int] | None = None
+        stuck_count = 0
         # 调用系统
         while context.race_count < sys.max_retry:
             # 开始新的事务，并attach components
@@ -139,6 +171,14 @@ class SystemCaller:
                         "🔄 [📞System] 调用System遇到竞态: {sys_name}，{delay}秒后重试"
                     ).format(sys_name=sys_name, delay=delay)
                 )
+                if isinstance(e, InconsistentRangeRead):
+                    key = (e.comp_name, e.index_name, e.row_id)
+                    stuck_count = stuck_count + 1 if key == stuck_key else 1
+                    stuck_key = key
+                    if stuck_count == STUCK_INDEX_RETRIES:
+                        _log_stuck_index(sys_name, e)
+                else:
+                    stuck_key, stuck_count = None, 0
                 await asyncio.sleep(delay)
                 continue
             except Exception:

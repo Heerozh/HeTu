@@ -22,6 +22,7 @@ from redis.cluster import LoadBalancingStrategy
 from ....i18n import _
 from ..base import (
     BackendClient,
+    InconsistentRangeRead,
     RaceCondition,
     RowFormat,
     UniqueViolation,
@@ -876,7 +877,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
         unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）。
         """
         if located := idmap.inconsistent_range():
-            raise RaceCondition(f"RACE: Inconsistent range read {located}")
+            raise InconsistentRangeRead(*located)
         for ref, observations in idmap.range_observations().items():
             comp_cls = ref.comp_cls
             for obs in observations:
@@ -887,9 +888,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
                         continue
                     value = to_sortable_bytes(dtype.type(row[obs.index_name]))
                     if value != member.rsplit(b"\x00", 1)[0]:
-                        raise RaceCondition(
-                            f"RACE: Inconsistent range read {comp_cls.name_}."
-                            f"{obs.index_name} id={row_id}"
+                        raise InconsistentRangeRead(
+                            comp_cls.name_, obs.index_name, row_id
                         )
         checks: list[list[str | bytes | int]] = []
         for ref, observations in idmap.range_observations_to_check().items():
