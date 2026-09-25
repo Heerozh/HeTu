@@ -1544,3 +1544,38 @@ async def test_system_session_discard(
     assert tbl is not None
     async with tbl.session() as session:
         assert await session.using(DiscardComp).get(owner=7) is None
+
+
+@pytest.mark.parametrize("query", ["get", "range"])
+async def test_single_index_row_is_detached(item_ref, mod_auto_backend, query):
+    """单行索引查询的返回值、工作缓存和提交前原值必须独立。"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name = "single"
+    row.time = 1
+    row.qty = 2
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        if query == "get":
+            found = await repo.get(name="single")
+        else:
+            found = (await repo.range(name=("single", "single")))[0]
+        assert found is not None
+        found.qty = 7
+        cached = await repo.get(id=row.id)
+        assert cached is not None and cached.qty == 2
+        await repo.update(found)
+        found.qty = 99
+        cached = await repo.get(id=row.id)
+        assert cached is not None and cached.qty == 7
+        original = session.idmap.db_row(repo.ref, row.id)
+        assert original is not None and original.qty == 2
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        saved = await session.using(comp).get(id=row.id)
+        assert saved is not None and saved.qty == 7

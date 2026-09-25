@@ -450,7 +450,10 @@ class SessionRepository:
             )
             # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
             found = [r for r in fetched if r is not None]
-            if found:
+            if len(found) == 1:
+                # 点查通常只取一行：直接使用单行缓存路径，避免 stack + append。
+                idmap.add_clean(self.ref, found[0])
+            elif found:
                 idmap.add_clean(
                     self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
                 )
@@ -468,6 +471,9 @@ class SessionRepository:
         # 转换成 np.recarray 返回
         if len(result) == 0:
             return np.rec.array(np.empty(0, dtype=comp_cls.dtypes)), obs
+        elif len(result) == 1:
+            # 保持返回值与缓存/后端行相互独立；单行不需要通用 stack 的 dtype 推导。
+            return result[0].copy().reshape(1).view(np.recarray), obs
         else:
             return np.rec.array(np.stack(result, dtype=comp_cls.dtypes)), obs
 

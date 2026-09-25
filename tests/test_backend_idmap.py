@@ -369,3 +369,32 @@ def test_get_absent_unique_fields(mod_item_model):
     r.time = 7
     idmap2.add_insert(ref, r)
     assert idmap2.get_absent_unique_fields() == {ref: {1: {"time"}}}
+
+
+def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
+    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新。"""
+    ref = TableReference(mod_item_model, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = mod_item_model.new_rows(5)
+    rows.id = [11, 12, 13, 14, 15]
+    rows.name = ["clean", "update", "delete", "revert", "insert"]
+    rows.qty = 1
+    idmap.add_clean(ref, rows[:4])
+    idmap.add_insert(ref, rows[4])
+    changed = rows[1].copy()
+    changed.qty = 9
+    idmap.update(ref, changed)
+    reverted = rows[3].copy()
+    reverted.qty = 8
+    idmap.update(ref, reverted)
+    reverted.qty = 1
+    idmap.update(ref, reverted)
+    idmap.mark_deleted(ref, 13)
+
+    inserts, (old_rows, new_rows), deletes = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in inserts] == ["15"]
+    assert [r["id"] for r in old_rows] == ["12"]
+    assert old_rows[0]["qty"] == "1"
+    assert new_rows == [{"qty": "9"}]
+    assert [r["id"] for r in deletes] == ["13"]
+    assert set(idmap.get_clean_rows()[ref]) == {11}
