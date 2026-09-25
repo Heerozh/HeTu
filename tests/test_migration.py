@@ -250,7 +250,9 @@ async def test_migration_declaration_only(filled_item_ref, tmp_path):
         assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
 
 
-async def test_migration_without_snowflake(filled_item_ref, tmp_path, monkeypatch):
+async def test_migration_without_snowflake(
+    filled_item_ref, mod_auto_backend, tmp_path, monkeypatch
+):
     """
     hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约），迁移时不能发号。以前 Redis
     搬完行、旧索引随旧表删掉之后，重建索引时发号失败：表里有行却没有索引，meta 已是新版本，
@@ -300,8 +302,11 @@ async def test_migration_without_snowflake(filled_item_ref, tmp_path, monkeypatc
     assert maint.migration_schema(test_app_file, new_table, old_meta)
     assert maint.check_table(new_table)[0] == "ok"
 
-    await backend.wait_for_synced()
-    async with backend.session("pytest", 1) as session:
+    # 迁移在 upgrade 进程里做，服务器之后用新连接来读。复用迁移前的连接池的话，Postgres
+    # 上 asyncpg 缓存的旧查询计划（qty 还是 int16）会报 InvalidCachedStatementError
+    reader = mod_auto_backend("after_upgrade")
+    await reader.wait_for_synced()
+    async with reader.session("pytest", 1) as session:
         repo = session.using(renamed_new_item_cls)
         # 索引按搬过来的行建好了
         assert (await repo.get(time=111)).qty == 999
