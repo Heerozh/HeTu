@@ -75,12 +75,22 @@ def setup_websocket_proxy():
                 )
                 pipe_ctx = ctx
 
-            async def send(data):
+            async def send(data, *, fragment_size=None):
                 logger.debug(
                     f"[{id(crypto_layer)}] > Sent: {data} [{len(repr(data))} bytes]"
                 )
                 ws_proxy.client_sent.append(data)
-                await do_send(client_pipe.encode(pipe_ctx, data))
+                encoded = client_pipe.encode(pipe_ctx, data)
+                if fragment_size is None:
+                    await do_send(encoded)
+                else:
+
+                    async def fragments():
+                        for offset in range(0, len(encoded), fragment_size):
+                            yield encoded[offset : offset + fragment_size]
+                            await asyncio.sleep(0)
+
+                    await do_send(fragments())
 
             async def recv():
                 data = cast(bytes, await do_recv())
@@ -915,3 +925,65 @@ def test_shutdown_waits_for_connection_cleanup(
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     # 返回时服务器已经停了
     assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_fragmented_rpc_and_following_message(test_server):
+    """加密压缩包跨多帧（含事件循环切换），必须完整重组且不打乱后续 nonce。"""
+
+    async def routine(connect):
+        client = await connect()
+        payload = {"message": "分片消息", "values": list(range(50))}
+        await client.send(["rpc", "echo_response", payload], fragment_size=1)
+        assert await client.recv() == ["rsp", payload]
+        await client.send(["rpc", "echo_response", ["next"]])
+        assert await client.recv() == ["rsp", ["next"]]
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_streaming_close_mid_fragment(test_server):
+    """未收到 FIN 就断线，也必须取消接收器并删除 Connection 行。"""
+    from websockets.frames import Opcode
+
+    from hetu.endpoint.connection import Connection
+
+    async def routine(connect):
+        client = await connect()
+        # 确认初始化完成，然后停在下一条消息的分片中间。
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        table = test_server.ctx.table_managers["pytest_1"].get_table(Connection)
+        assert table is not None
+        before = await table.servant_range("id", 0, float("inf"), limit=100)
+        assert len(before) == 1
+        await client.write_frame(False, Opcode.BINARY, b"incomplete")
+        await client.close()
+        for _ in range(100):
+            remaining = await table.servant_range("id", 0, float("inf"), limit=100)
+            if not len(remaining):
+                return
+            await asyncio.sleep(0.02)
+        pytest.fail("Connection 行未随分片中的断线清理")
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_fragmented_message_size_limit(test_server):
+    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。"""
+    test_server.config.WEBSOCKET_MAX_SIZE = 128
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        # 每帧都小于上限，整条消息超过；必须由 WebSocket 层在解密前拒绝。
+        with pytest.raises(ConnectionClosedError) as exc_info:
+            await type(client).send(client, [b"x" * 40] * 4)
+            await client.recv()
+        assert exc_info.value.rcvd is not None
+        assert exc_info.value.rcvd.code == 1009
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)

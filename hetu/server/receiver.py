@@ -7,8 +7,8 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Awaitable
+from typing import TYPE_CHECKING, Any, cast
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
@@ -181,6 +181,22 @@ async def sub_call(
     return True
 
 
+async def receive_messages(ws: Websocket) -> AsyncIterator[str | bytes]:
+    """重组完整消息，避免 Sanic recv() 每包创建 Task + asyncio.wait。
+
+    Reassemble complete messages through Sanic's public streaming receiver.
+    Always exhaust the frame iterator before decoding or handling a message.
+    """
+    while True:
+        chunks = [chunk async for chunk in ws.recv_streaming()]
+        if len(chunks) == 1:
+            yield chunks[0]
+        elif chunks and isinstance(chunks[0], str):
+            yield "".join(cast(list[str], chunks))
+        else:
+            yield b"".join(cast(list[bytes], chunks))
+
+
 async def client_handler(
     ws: Websocket,
     pipe_ctx: PipeContext,
@@ -200,7 +216,7 @@ async def client_handler(
     # async for 正常跑完 = 对端把连接关了；其余出口在各自分支里改写此原因
     exit_reason = _("对端关闭了连接")
     try:
-        async for message in ws:
+        async for message in receive_messages(ws):
             if not message:
                 exit_reason = _("收到空帧")
                 break
