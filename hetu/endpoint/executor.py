@@ -146,11 +146,12 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        logger.debug(
-            _("🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}").format(
-                ep_name=ep_name, args=args
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                _("🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}").format(
+                    ep_name=ep_name, args=args
+                )
             )
-        )
 
         # 初始化context值
         context = self.context

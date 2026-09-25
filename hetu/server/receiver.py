@@ -61,7 +61,7 @@ async def rpc(
     check_length("rpc", data, 2, 100)
     ok, res = await executor.execute(data[1], *data[2:])
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
-    if replay.level < logging.ERROR:
+    if replay.isEnabledFor(logging.INFO):
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
 
     if not ok:
@@ -214,7 +214,7 @@ async def client_handler(
             if type(last_data) is not list:
                 raise ValueError("Invalid message format")
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
-            if replay.level < logging.ERROR:
+            if replay.isEnabledFor(logging.DEBUG):
                 replay.debug("<<< " + str(last_data))
             # 检查接受上限
             flood_checker.received()
