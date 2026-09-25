@@ -31,7 +31,8 @@ class IntTable(hetu.BaseComponent):
 async def just_get(ctx: hetu.SystemContext, number):
     row = await ctx.repo[IntTable].get(id=number)
     if row is None:
-        raise LookupError(number)
+        # 读空只测到 Redis miss，不算读行吞吐
+        raise LookupError(f"IntTable id={number} 不存在，先运行 seed_get_rows.py 填充")
     return hetu.ResponseToClient([ctx.race_count])
 
 

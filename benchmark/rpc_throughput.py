@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 import psutil
+from seed_get_rows import seed_get_rows
 
 
 def parse_args():
@@ -132,35 +133,6 @@ async def client(args):
         "cpu_seconds": time.process_time() - (cpu_start or 0),
     }
     (args.output / f"client-{args.client}.json").write_text(json.dumps(result))
-
-
-def seed_get_rows(root: Path, redis_url: str) -> None:
-    """Populate the actual IntTable cluster after volatile tables are flushed at startup."""
-    import redis
-
-    sys.path.insert(0, str(root))
-    from benchmark.server.app import IntTable
-    from benchmark.ya_hetu_rpc import BENCH_ID_RANGE
-    from hetu.system.definer import SystemClusters
-
-    clusters = SystemClusters()
-    clusters.build_clusters("bench")
-    cluster_id = clusters.get_component_cluster_id("bench", IntTable)
-    assert cluster_id is not None
-    key_prefix = f"bench:IntTable:{{CLU{cluster_id}}}:id:"
-    db = redis.Redis.from_url(redis_url)
-    with db.pipeline(transaction=False) as pipe:
-        for row_id in range(1, BENCH_ID_RANGE + 1):
-            pipe.hset(
-                key_prefix + str(row_id),
-                mapping={"_version": 1, "id": row_id, "name": "Test", "number": row_id},
-            )
-            if row_id % 1000 == 0:
-                pipe.execute()
-        pipe.execute()
-    assert db.hgetall(key_prefix + "1")
-    assert db.hgetall(key_prefix + str(BENCH_ID_RANGE))
-    db.close()
 
 
 def main(args):
