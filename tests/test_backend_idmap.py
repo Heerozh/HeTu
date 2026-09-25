@@ -398,3 +398,27 @@ def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
     assert new_rows == [{"qty": "9"}]
     assert [r["id"] for r in deletes] == ["13"]
     assert set(idmap.get_clean_rows()[ref]) == {11}
+
+
+def test_dirty_rows_skip_read_only_tables(mod_item_model):
+    """读 A 写 B 的事务：只读过的表不输出，单行缓存和多行全是 CLEAN 的表都一样"""
+    Item = mod_item_model
+    read_one = TableReference(Item.duplicate("pytest", "read_one"), "TestServer", 1)
+    read_many = TableReference(Item.duplicate("pytest", "read_many"), "TestServer", 1)
+    written = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+
+    idmap.add_clean(read_one, read_one.comp_cls.new_row(id_=1))
+    rows = read_many.comp_cls.new_rows(2)
+    rows.id = [2, 3]
+    idmap.add_clean(read_many, rows)
+    target = Item.new_row(id_=4)
+    idmap.add_clean(written, target)
+    changed = target.copy()
+    changed.qty = 9
+    idmap.update(written, changed)
+
+    dirties = idmap.get_dirty_rows()
+    assert dirties[read_one] == ([], ([], []), [])
+    assert dirties[read_many] == ([], ([], []), [])
+    assert dirties[written][1][1] == [{"qty": "9"}]
