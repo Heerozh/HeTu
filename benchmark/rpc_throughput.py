@@ -1,6 +1,6 @@
-"""Measure hello_world over real WebSockets with a separately frozen client.
+"""Measure hello_world or benchmark_get over real WebSockets with a frozen client.
 
-真实 WebSocket hello_world 基准；固定客户端源码，避免把客户端优化算作服务端收益。
+真实 WebSocket RPC 基准；固定客户端源码，避免把客户端优化算作服务端收益。
 Run with --help. Requires an isolated Redis database. Logs/results go to --output.
 """
 
@@ -23,6 +23,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-root", type=Path, default=Path.cwd())
     parser.add_argument("--client-root", type=Path, required=True)
+    parser.add_argument(
+        "--workload", choices=("hello_world", "get"), default="hello_world"
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--redis", default="redis://127.0.0.1:16389/0")
     parser.add_argument("--port", type=int, default=18466)
@@ -64,8 +67,14 @@ async def client(args):
     # Import only after PYTHONPATH has selected the frozen client checkout.
     import logging
 
-    from benchmark.ya_hetu_rpc import benchmark_hello_world, connection
+    from benchmark.ya_hetu_rpc import (
+        benchmark_get,
+        benchmark_hello_world,
+        connection,
+    )
 
+    benchmark = benchmark_get if args.workload == "get" else benchmark_hello_world
+    expected = 0 if args.workload == "get" else "世界收到"
     logging.getLogger("HeTu.root").setLevel(logging.WARNING)
     loop = asyncio.get_running_loop()
     start = loop.create_future()
@@ -79,7 +88,7 @@ async def client(args):
         fixture = connection()
         conn = await anext(fixture)
         try:
-            assert await benchmark_hello_world(conn) == "世界收到"
+            assert await benchmark(conn) == expected
             ready += 1
             windows = await start
             last_end = windows[-1][1]
@@ -89,9 +98,9 @@ async def client(args):
                 before = time.monotonic()
                 if before >= last_end:
                     break
-                result = await benchmark_hello_world(conn)
+                result = await benchmark(conn)
                 after = time.monotonic()
-                assert result == "世界收到", result
+                assert result == expected, result
                 while i < len(windows) and after >= windows[i][1]:
                     i += 1
                 if i < len(windows) and windows[i][0] <= before:
@@ -123,6 +132,35 @@ async def client(args):
         "cpu_seconds": time.process_time() - (cpu_start or 0),
     }
     (args.output / f"client-{args.client}.json").write_text(json.dumps(result))
+
+
+def seed_get_rows(root: Path, redis_url: str) -> None:
+    """Populate the actual IntTable cluster after volatile tables are flushed at startup."""
+    import redis
+
+    sys.path.insert(0, str(root))
+    from benchmark.server.app import IntTable
+    from benchmark.ya_hetu_rpc import BENCH_ID_RANGE
+    from hetu.system.definer import SystemClusters
+
+    clusters = SystemClusters()
+    clusters.build_clusters("bench")
+    cluster_id = clusters.get_component_cluster_id("bench", IntTable)
+    assert cluster_id is not None
+    key_prefix = f"bench:IntTable:{{CLU{cluster_id}}}:id:"
+    db = redis.Redis.from_url(redis_url)
+    with db.pipeline(transaction=False) as pipe:
+        for row_id in range(1, BENCH_ID_RANGE + 1):
+            pipe.hset(
+                key_prefix + str(row_id),
+                mapping={"_version": 1, "id": row_id, "name": "Test", "number": row_id},
+            )
+            if row_id % 1000 == 0:
+                pipe.execute()
+        pipe.execute()
+    assert db.hgetall(key_prefix + "1")
+    assert db.hgetall(key_prefix + str(BENCH_ID_RANGE))
+    db.close()
 
 
 def main(args):
@@ -193,6 +231,8 @@ BACKENDS:
                 if time.monotonic() > deadline:
                     raise TimeoutError("Server startup")
                 time.sleep(0.1)
+        if args.workload == "get":
+            seed_get_rows(root, args.redis)
         client_cpus = args.client_cpus.split(",")
         if args.profile:
             # The Python child already inherited server_cpu. Keep the sampler
@@ -222,6 +262,8 @@ BACKENDS:
                 str(args.connections),
                 "--rounds",
                 str(args.rounds),
+                "--workload",
+                args.workload,
             ]
             children.append(
                 subprocess.Popen(cmd, cwd=args.output, env=env, stdout=log, stderr=log)

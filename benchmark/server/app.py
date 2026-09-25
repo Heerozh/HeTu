@@ -30,6 +30,8 @@ class IntTable(hetu.BaseComponent):
 )
 async def just_get(ctx: hetu.SystemContext, number):
     row = await ctx.repo[IntTable].get(id=number)
+    if row is None:
+        raise LookupError(number)
     return hetu.ResponseToClient([ctx.race_count])
 
 
