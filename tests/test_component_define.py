@@ -129,6 +129,16 @@ def test_normal_define(new_component_env):
     assert TestString.indexes_["b"] == True
     assert TestString.indexes_["c"] == False
 
+    # Full-row conversion preserves Unicode and raw byte fields.
+    converted = TestString.dict_to_struct(
+        {"_version": "2", "id": "42", "a": "汉字", "b": b"\xff\x00", "c": "1"}
+    )
+    assert converted.id == 42
+    assert converted._version == 2
+    assert converted.a == "汉字"
+    assert converted.b == b"\xff"
+    assert converted.c == 1
+
 
 def test_instance_define(new_component_env, new_clusters_env):
     @define_component(namespace="pytest")
