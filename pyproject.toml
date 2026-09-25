@@ -48,7 +48,8 @@ dependencies = [
     "pyyaml~=6.0",
     "redis[hiredis]>=7,<9",
     "sanic~=25.3",
-    "sqlalchemy>=2.0.46",
+    # SQL 后端用 create_async_engine，要 greenlet；SQLAlchemy 2.1 起只有 [asyncio] 才装它
+    "sqlalchemy[asyncio]>=2.0.46",
     "tabulate>=0.9.0",
     "tqdm>=4.67.3",
     "wcwidth>=0.2.13",
