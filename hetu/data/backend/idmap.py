@@ -142,6 +142,17 @@ class IdentityMap:
             f"({table_ref.comp_cls.name_}, {table_ref.comp_cls.dtypes})"
         )
 
+        # A fresh transaction commonly reads just one row. Keep separate copies for
+        # the working cache and the original value used by update/change detection.
+        # This avoids constructing an empty recarray and appending to it.
+        if row_s.ndim == 0 and table_ref not in self._row_cache:
+            row_s = cast(np.record, row_s)
+            row_id = row_s["id"]
+            self._row_cache[table_ref] = row_s.copy().reshape(1).view(np.recarray)
+            self._row_clean[table_ref] = {row_id: row_s.copy()}
+            self._row_states[table_ref] = {row_id: RowState.CLEAN}
+            return
+
         # 初始化该component的缓存
         cache, clean_cache, states = self._cache(table_ref)
 
