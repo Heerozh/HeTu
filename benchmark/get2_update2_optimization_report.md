@@ -86,7 +86,7 @@ py-spy 0.4.2，19 Hz、`--nonblocking`，40 秒负载窗口、5 秒预热；采�
 
 ## 复现与原始记录
 
-逐窗口结果、配置、CPU affinity、电源策略、依赖版本、数据校验和函数采样计数保存在 [get2_update2_results.json](get2_update2_results.json)。完整客户端延迟、server/client 日志和 py-spy speedscope 文件留在本机 `/tmp/hetu-get2-results/`（临时目录可能被系统清理）。
+逐窗口吞吐、测试配置和采样摘要见上文。完整原始计量、客户端延迟、server/client 日志和 py-spy speedscope 文件留在本机 `/tmp/hetu-get2-results/`（临时目录可能被系统清理）。
 
 以下命令在仓库根目录执行，使用本次 `.venv`；每次生成新的输出目录。Redis 仅用于压测，测试结束会停止该容器。
 
@@ -113,7 +113,7 @@ done
 docker stop hetu-get2-repro
 ```
 
-`redis:latest` 本次实际为 Redis 8.10.2，镜像 ID 记录在 JSON；跨时间复现应匹配这一版本与依赖。另启新输出目录，加 `--profile --profile-cpu 0 --rounds 1 --seconds 40` 可采样。
+`redis:latest` 本次实际为 Redis 8.10.2，镜像 ID 为 `sha256:718f745deb7dfefeac6eed7041fc7ec9476b50e61b247932682457c41adafa0e`；跨时间复现应匹配这一版本与依赖。另启新输出目录，加 `--profile --profile-cpu 0 --rounds 1 --seconds 40` 可采样。
 
 ## 尚未优化与范围限制
 
