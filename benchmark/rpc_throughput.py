@@ -34,10 +34,10 @@ def parse_args():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--seconds", type=float, default=10)
     parser.add_argument("--warmup", type=float, default=3)
-    parser.add_argument("--server-cpu", type=int, default=4)
-    parser.add_argument("--client-cpus", default="5,6,7,8")
+    parser.add_argument("--server-cpu", type=int, default=3)
+    parser.add_argument("--client-cpus", default="4,6,8,10")
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--profile-cpu", type=int, default=9)
+    parser.add_argument("--profile-cpu", type=int, default=1)
     parser.add_argument("--client", type=int, default=-1, help=argparse.SUPPRESS)
     return parser.parse_args()
 
