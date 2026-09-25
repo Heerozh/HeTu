@@ -233,3 +233,30 @@ async def test_bytes_index_range(blob_ref, mod_auto_backend):
     assert list(rows.tag) == [b"a", b"a\x00b", b"ab"]
     rows = await servant.range(blob_ref, "tag", b"a", b"b", limit=2, desc=True)
     assert list(rows.tag) == [b"b", b"ab"]
+
+
+@use_redis_family_backend_only
+async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
+    """重建索引（hetu upgrade 默认每次都做）按行数据重算的 member 要与 commit 写的逐字节
+    一致：bytes 用真实字节，不是合法 UTF-8、非 ASCII 的值都不能让重建失败"""
+    from hetu.data.backend.redis import RedisBackendClient
+
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    ids = await _insert(
+        backend,
+        comp,
+        flag=[True, False, True],
+        small=[U32_MAX, 0, 2**31],
+        big=[2**64 - 1, I64_MAX, 5],
+        tag=[b"a\x00b", BIN, "河图".encode()],
+    )
+    io = backend.master.io
+    idx_keys = [RedisBackendClient.index_key(blob_ref, name) for name in comp.indexes_]
+    before = [io.zrange(key, 0, -1) for key in idx_keys]
+
+    backend.get_table_maintenance().rebuild_index(blob_ref)
+    assert [io.zrange(key, 0, -1) for key in idx_keys] == before
+    await backend.wait_for_synced()
+    rows = await backend.servant.range(blob_ref, "tag", BIN)
+    assert [int(r.id) for r in rows] == [ids[1]]
