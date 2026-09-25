@@ -422,3 +422,32 @@ def test_dirty_rows_skip_read_only_tables(mod_item_model):
     assert dirties[read_one] == ([], ([], []), [])
     assert dirties[read_many] == ([], ([], []), [])
     assert dirties[written][1][1] == [{"qty": "9"}]
+
+
+def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
+    """没动过的 NaN 不算变更：改回原值不发更新，改别的字段时只写那个字段；
+    0.0 改成 -0.0 仍和按值比较一样算没变"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = Item.new_rows(3)
+    rows.id = [1, 2, 3]
+    rows.model = [np.nan, np.nan, 0.0]
+    idmap.add_clean(ref, rows)
+
+    reverted = rows[0].copy()
+    reverted.qty = 5
+    idmap.update(ref, reverted)
+    reverted.qty = rows[0].qty
+    idmap.update(ref, reverted)
+    changed = rows[1].copy()
+    changed.qty = 7
+    idmap.update(ref, changed)
+    signed_zero = rows[2].copy()
+    signed_zero.model = -0.0
+    signed_zero.level = 3
+    idmap.update(ref, signed_zero)
+
+    _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in old_rows] == ["2", "3"]
+    assert new_rows == [{"qty": "7"}, {"level": "3"}]

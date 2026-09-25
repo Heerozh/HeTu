@@ -61,6 +61,26 @@ def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | 
     return ret
 
 
+def changed_fields(new: np.record, old: np.record) -> list[str]:
+    """
+    同一 dtype 的两行之间值有变化的字段名。先按字节比较，字节相同就算没变，所以没动过
+    的 NaN 不算变更（按值比较 NaN != NaN，会让没改的行也发一次更新）；字节不同再比值，
+    0.0 与 -0.0 这类值相等的仍算没变，与按值比较一致。
+    """
+    new_bytes, old_bytes = new.tobytes(), old.tobytes()
+    if new_bytes == old_bytes:
+        return []
+    fields = new.dtype.fields
+    assert fields  # for type checker, could be removed by python -O
+    return [
+        name
+        for name, (dt, offset, *_) in fields.items()
+        if new_bytes[offset : offset + dt.itemsize]
+        != old_bytes[offset : offset + dt.itemsize]
+        and new[name] != old[name]
+    ]
+
+
 class IdentityMap:
     """
     用于缓存和管理事务中的对象。
@@ -599,16 +619,16 @@ class IdentityMap:
                     inserts.append(_row_to_db(row, bytes_fields))
                 elif state == RowState.UPDATE:
                     old = clean_cache[row_id]
-                    changed_fields: dict[str, str | bytes] = {
-                        field: bytes(row[field])
-                        if field in bytes_fields
-                        else str(row[field])
-                        for field in row.dtype.names
-                        if row[field] != old[field]
-                    }
-                    if changed_fields:
+                    # 只写有变化的字段；改回原值的行没有变化，不发空更新
+                    if fields := changed_fields(row, old):
+                        new_fields: dict[str, str | bytes] = {
+                            field: bytes(row[field])
+                            if field in bytes_fields
+                            else str(row[field])
+                            for field in fields
+                        }
                         old_rows.append(_row_to_db(old, bytes_fields))
-                        new_rows.append(changed_fields)
+                        new_rows.append(new_fields)
                 elif state == RowState.DELETE:
                     deletes.append(_row_to_db(row, bytes_fields))
 
