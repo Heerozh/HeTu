@@ -259,7 +259,8 @@ class RedisTableMaintenance(TableMaintenance):
             io.delete(tmp_key)  # 上次中断留下的
             is_unique = idx_name in comp_cls.uniques_
             seen: set[bytes] = set()
-            struct = comp_cls.new_row()
+            # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
+            struct = comp_cls.new_row(id_=0)
             for chunk in batched(keys, self.REBUILD_BATCH):
                 pipe = io.pipeline()
                 for key in chunk:
