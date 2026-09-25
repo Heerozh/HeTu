@@ -369,3 +369,85 @@ def test_get_absent_unique_fields(mod_item_model):
     r.time = 7
     idmap2.add_insert(ref, r)
     assert idmap2.get_absent_unique_fields() == {ref: {1: {"time"}}}
+
+
+def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
+    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新。"""
+    ref = TableReference(mod_item_model, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = mod_item_model.new_rows(5)
+    rows.id = [11, 12, 13, 14, 15]
+    rows.name = ["clean", "update", "delete", "revert", "insert"]
+    rows.qty = 1
+    idmap.add_clean(ref, rows[:4])
+    idmap.add_insert(ref, rows[4])
+    changed = rows[1].copy()
+    changed.qty = 9
+    idmap.update(ref, changed)
+    reverted = rows[3].copy()
+    reverted.qty = 8
+    idmap.update(ref, reverted)
+    reverted.qty = 1
+    idmap.update(ref, reverted)
+    idmap.mark_deleted(ref, 13)
+
+    inserts, (old_rows, new_rows), deletes = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in inserts] == ["15"]
+    assert [r["id"] for r in old_rows] == ["12"]
+    assert old_rows[0]["qty"] == "1"
+    assert new_rows == [{"qty": "9"}]
+    assert [r["id"] for r in deletes] == ["13"]
+    assert set(idmap.get_clean_rows()[ref]) == {11}
+
+
+def test_dirty_rows_skip_read_only_tables(mod_item_model):
+    """读 A 写 B 的事务：只读过的表不输出，单行缓存和多行全是 CLEAN 的表都一样"""
+    Item = mod_item_model
+    read_one = TableReference(Item.duplicate("pytest", "read_one"), "TestServer", 1)
+    read_many = TableReference(Item.duplicate("pytest", "read_many"), "TestServer", 1)
+    written = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+
+    idmap.add_clean(read_one, read_one.comp_cls.new_row(id_=1))
+    rows = read_many.comp_cls.new_rows(2)
+    rows.id = [2, 3]
+    idmap.add_clean(read_many, rows)
+    target = Item.new_row(id_=4)
+    idmap.add_clean(written, target)
+    changed = target.copy()
+    changed.qty = 9
+    idmap.update(written, changed)
+
+    dirties = idmap.get_dirty_rows()
+    assert dirties[read_one] == ([], ([], []), [])
+    assert dirties[read_many] == ([], ([], []), [])
+    assert dirties[written][1][1] == [{"qty": "9"}]
+
+
+def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
+    """没动过的 NaN 不算变更：改回原值不发更新，改别的字段时只写那个字段；
+    0.0 改成 -0.0 仍和按值比较一样算没变"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = Item.new_rows(3)
+    rows.id = [1, 2, 3]
+    rows.model = [np.nan, np.nan, 0.0]
+    idmap.add_clean(ref, rows)
+
+    reverted = rows[0].copy()
+    reverted.qty = 5
+    idmap.update(ref, reverted)
+    reverted.qty = rows[0].qty
+    idmap.update(ref, reverted)
+    changed = rows[1].copy()
+    changed.qty = 7
+    idmap.update(ref, changed)
+    signed_zero = rows[2].copy()
+    signed_zero.model = -0.0
+    signed_zero.level = 3
+    idmap.update(ref, signed_zero)
+
+    _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in old_rows] == ["2", "3"]
+    assert new_rows == [{"qty": "7"}, {"level": "3"}]

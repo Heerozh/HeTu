@@ -61,6 +61,26 @@ def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | 
     return ret
 
 
+def changed_fields(new: np.record, old: np.record) -> list[str]:
+    """
+    同一 dtype 的两行之间值有变化的字段名。先按字节比较，字节相同就算没变，所以没动过
+    的 NaN 不算变更（按值比较 NaN != NaN，会让没改的行也发一次更新）；字节不同再比值，
+    0.0 与 -0.0 这类值相等的仍算没变，与按值比较一致。
+    """
+    new_bytes, old_bytes = new.tobytes(), old.tobytes()
+    if new_bytes == old_bytes:
+        return []
+    fields = new.dtype.fields
+    assert fields  # for type checker, could be removed by python -O
+    return [
+        name
+        for name, (dt, offset, *_) in fields.items()
+        if new_bytes[offset : offset + dt.itemsize]
+        != old_bytes[offset : offset + dt.itemsize]
+        and new[name] != old[name]
+    ]
+
+
 class IdentityMap:
     """
     用于缓存和管理事务中的对象。
@@ -578,47 +598,39 @@ class IdentityMap:
             cache = self._row_cache[table_ref]
             bytes_fields = table_ref.comp_cls.bytes_fields_
 
-            # 收集各状态的行ID
-            insert_ids = [
-                row_id for row_id, state in states.items() if state == RowState.INSERT
-            ]
-            update_ids = [
-                row_id for row_id, state in states.items() if state == RowState.UPDATE
-            ]
-            delete_ids = [
-                row_id for row_id, state in states.items() if state == RowState.DELETE
-            ]
-
-            # 从缓存中获取对应的行数据
-            if insert_ids:
-                mask = np.isin(cache["id"], insert_ids)
-                inserts = [_row_to_db(row, bytes_fields) for row in cache[mask]]
-
-            if update_ids:
-                clean_cache = self._row_clean[table_ref]
-                # todo isin可能有性能问题，等py3.15的旁路trace再sampling一下优化看看
-                mask = np.isin(cache["id"], update_ids)
-                # 新数据只保存变更的数据
-                old_rows, new_rows = [], []
-                updates = (old_rows, new_rows)
-                for row in cache[mask]:
-                    old = clean_cache[row.id]
-                    changed_fields: dict[str, str | bytes] = {
-                        field: bytes(row[field])
-                        if field in bytes_fields
-                        else str(row[field])
-                        for field in row.dtype.names
-                        if row[field] != old[field]
-                    }
-                    old_dict = _row_to_db(old, bytes_fields)  # type: ignore
-                    if changed_fields:
-                        old_rows.append(old_dict)
-                        new_rows.append(changed_fields)
-
-            if delete_ids:
-                # DELETE只需要ID列表
-                mask = np.isin(cache["id"], delete_ids)
-                deletes = [_row_to_db(row, bytes_fields) for row in cache[mask]]
+            clean_cache = self._row_clean[table_ref]
+            old_rows, new_rows = updates
+            # 单行事务直接按已有状态分派，避免 np.isin 掩码和 recarray 副本。
+            # 多行仍先用 NumPy 筛掉 CLEAN 行，避免大范围读取、少量写入时逐行
+            # 创建 record；INSERT/UPDATE/DELETE 共用一次筛选。
+            if len(cache) > 1:
+                dirty_ids = [
+                    row_id
+                    for row_id, state in states.items()
+                    if state != RowState.CLEAN
+                ]
+                dirty_rows = cache[np.isin(cache["id"], dirty_ids)] if dirty_ids else ()
+            else:
+                dirty_rows = cache
+            for row in dirty_rows:
+                row_id = row["id"]
+                state = states[row_id]
+                if state == RowState.INSERT:
+                    inserts.append(_row_to_db(row, bytes_fields))
+                elif state == RowState.UPDATE:
+                    old = clean_cache[row_id]
+                    # 只写有变化的字段；改回原值的行没有变化，不发空更新
+                    if fields := changed_fields(row, old):
+                        new_fields: dict[str, str | bytes] = {
+                            field: bytes(row[field])
+                            if field in bytes_fields
+                            else str(row[field])
+                            for field in fields
+                        }
+                        old_rows.append(_row_to_db(old, bytes_fields))
+                        new_rows.append(new_fields)
+                elif state == RowState.DELETE:
+                    deletes.append(_row_to_db(row, bytes_fields))
 
             ret[table_ref] = (inserts, updates, deletes)
 
