@@ -114,16 +114,29 @@ class IdentityMap:
 
     def _cache(self, table_ref: TableReference):
         if table_ref not in self._row_cache:
-            self._row_cache[table_ref] = np.rec.array(
-                np.empty(0, dtype=table_ref.comp_cls.dtypes)
-            )
-            self._row_clean[table_ref] = {}
-            self._row_states[table_ref] = {}
+            return self._new_cache(table_ref)
         return (
             self._row_cache[table_ref],
             self._row_clean[table_ref],
             self._row_states[table_ref],
         )
+
+    def _new_cache(self, table_ref: TableReference, first_row: np.record | None = None):
+        """
+        新建该表的缓存。给了 first_row 就直接用它的拷贝当缓存第一行，省掉建空 recarray
+        再 np.append（事务常常只读一行）；行状态都由调用方标记。
+        """
+        if first_row is None:
+            cache = np.rec.array(np.empty(0, dtype=table_ref.comp_cls.dtypes))
+        else:
+            # 必须拷贝：结构化数组的标量下标是源数组的视图，reshape 也不复制
+            cache = first_row.copy().reshape(1).view(np.recarray)
+        clean_cache: dict[int, np.record] = {}
+        states: dict[int, RowState] = {}
+        self._row_cache[table_ref] = cache
+        self._row_clean[table_ref] = clean_cache
+        self._row_states[table_ref] = states
+        return cache, clean_cache, states
 
     def add_clean(
         self, table_ref: TableReference, row_s: np.record | np.recarray
@@ -142,26 +155,33 @@ class IdentityMap:
             f"({table_ref.comp_cls.name_}, {table_ref.comp_cls.dtypes})"
         )
 
-        # 初始化该component的缓存
-        cache, clean_cache, states = self._cache(table_ref)
+        single = row_s.ndim == 0
+        if single and table_ref not in self._row_cache:
+            # 事务读到该表的第一行（常见的只读一行）：直接用它建缓存，不用查重和追加
+            _, clean_cache, states = self._new_cache(table_ref, cast(np.record, row_s))
+        else:
+            # 初始化该component的缓存
+            cache, clean_cache, states = self._cache(table_ref)
 
-        # 查找是否已存在该ID的行
-        if len(cache) > 0:
-            existing_idx = np.isin(cache["id"], row_s["id"])
-            if np.any(existing_idx):
-                raise ValueError(
-                    f"Row with id {cache['id'][existing_idx]} already exists in cache"
-                )
+            # 查找是否已存在该ID的行
+            if len(cache) > 0:
+                existing_idx = np.isin(cache["id"], row_s["id"])
+                if np.any(existing_idx):
+                    raise ValueError(
+                        f"Row with id {cache['id'][existing_idx]} "
+                        "already exists in cache"
+                    )
 
-        # 添加新行
-        self._row_cache[table_ref] = np.rec.array(np.append(cache, row_s))
+            # 添加新行
+            self._row_cache[table_ref] = np.rec.array(np.append(cache, row_s))
 
         # 标记为CLEAN
-        if row_s.ndim == 0:
+        if single:
             # 如果是单行数据，直接添加状态
             row_s = cast(np.record, row_s)
-            states[row_s["id"]] = RowState.CLEAN
-            clean_cache[row_s["id"]] = row_s.copy()
+            row_id = row_s["id"]
+            states[row_id] = RowState.CLEAN
+            clean_cache[row_id] = row_s.copy()
         else:
             states.update({key: RowState.CLEAN for key in row_s["id"]})
             clean_cache.update({row["id"]: row.copy() for row in row_s})

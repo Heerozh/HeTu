@@ -1,6 +1,6 @@
-"""Measure hello_world over real WebSockets with a separately frozen client.
+"""Measure hello_world or benchmark_get over real WebSockets with a frozen client.
 
-真实 WebSocket hello_world 基准；固定客户端源码，避免把客户端优化算作服务端收益。
+真实 WebSocket RPC 基准；固定客户端源码，避免把客户端优化算作服务端收益。
 Run with --help. Requires an isolated Redis database. Logs/results go to --output.
 """
 
@@ -17,12 +17,16 @@ import time
 from pathlib import Path
 
 import psutil
+from seed_get_rows import seed_get_rows
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-root", type=Path, default=Path.cwd())
     parser.add_argument("--client-root", type=Path, required=True)
+    parser.add_argument(
+        "--workload", choices=("hello_world", "get"), default="hello_world"
+    )
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--redis", default="redis://127.0.0.1:16389/0")
     parser.add_argument("--port", type=int, default=18466)
@@ -31,10 +35,10 @@ def parse_args():
     parser.add_argument("--rounds", type=int, default=5)
     parser.add_argument("--seconds", type=float, default=10)
     parser.add_argument("--warmup", type=float, default=3)
-    parser.add_argument("--server-cpu", type=int, default=4)
-    parser.add_argument("--client-cpus", default="5,6,7,8")
+    parser.add_argument("--server-cpu", type=int, default=3)
+    parser.add_argument("--client-cpus", default="4,6,8,10")
     parser.add_argument("--profile", action="store_true")
-    parser.add_argument("--profile-cpu", type=int, default=9)
+    parser.add_argument("--profile-cpu", type=int, default=1)
     parser.add_argument("--client", type=int, default=-1, help=argparse.SUPPRESS)
     return parser.parse_args()
 
@@ -64,8 +68,14 @@ async def client(args):
     # Import only after PYTHONPATH has selected the frozen client checkout.
     import logging
 
-    from benchmark.ya_hetu_rpc import benchmark_hello_world, connection
+    from benchmark.ya_hetu_rpc import (
+        benchmark_get,
+        benchmark_hello_world,
+        connection,
+    )
 
+    benchmark = benchmark_get if args.workload == "get" else benchmark_hello_world
+    expected = 0 if args.workload == "get" else "世界收到"
     logging.getLogger("HeTu.root").setLevel(logging.WARNING)
     loop = asyncio.get_running_loop()
     start = loop.create_future()
@@ -79,7 +89,7 @@ async def client(args):
         fixture = connection()
         conn = await anext(fixture)
         try:
-            assert await benchmark_hello_world(conn) == "世界收到"
+            assert await benchmark(conn) == expected
             ready += 1
             windows = await start
             last_end = windows[-1][1]
@@ -89,9 +99,9 @@ async def client(args):
                 before = time.monotonic()
                 if before >= last_end:
                     break
-                result = await benchmark_hello_world(conn)
+                result = await benchmark(conn)
                 after = time.monotonic()
-                assert result == "世界收到", result
+                assert result == expected, result
                 while i < len(windows) and after >= windows[i][1]:
                     i += 1
                 if i < len(windows) and windows[i][0] <= before:
@@ -193,6 +203,8 @@ BACKENDS:
                 if time.monotonic() > deadline:
                     raise TimeoutError("Server startup")
                 time.sleep(0.1)
+        if args.workload == "get":
+            seed_get_rows(root, args.redis)
         client_cpus = args.client_cpus.split(",")
         if args.profile:
             # The Python child already inherited server_cpu. Keep the sampler
@@ -222,6 +234,8 @@ BACKENDS:
                 str(args.connections),
                 "--rounds",
                 str(args.rounds),
+                "--workload",
+                args.workload,
             ]
             children.append(
                 subprocess.Popen(cmd, cwd=args.output, env=env, stdout=log, stderr=log)

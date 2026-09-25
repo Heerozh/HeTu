@@ -116,6 +116,9 @@ cd benchmark/
 export REDIS_URL='redis://:@localhost:6379/0?protocol=2'
 uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
 
+# benchmark_get 按 id 读 IntTable，服务端启动后先填充（读空会直接报错）
+uv run python seed_get_rows.py --redis ${REDIS_URL}
+
 export HETU_HOST=ws://localhost:2466/hetu/bench
 
 # 启动 1200 个并发用户
@@ -130,5 +133,6 @@ Windows:
 redis-server.exe
 redis-cli.exe config set protected-mode no
 uv run hetu start --app-file=./server/app.py --db="redis://:@172.29.0.1:6379/0" --namespace=bench --instance=bench --workers=40
+uv run python seed_get_rows.py --redis "redis://:@172.29.0.1:6379/0"
 
 """

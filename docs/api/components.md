@@ -125,7 +125,7 @@ dict_to_struct(data: dict) -> numpy.record
 struct_to_dict(data: numpy.record) -> dict[str, typing.Any]
 ```
 
-<small>Source: [`hetu/data/component.py:304`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L304)</small>
+<small>Source: [`hetu/data/component.py:303`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L303)</small>
 
 从c-struct like的行数据转换为typed dict
 
@@ -144,7 +144,7 @@ struct_to_dict(data: numpy.record) -> dict[str, typing.Any]
 duplicate(namespace: str, suffix: str) -> type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:310`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L310)</small>
+<small>Source: [`hetu/data/component.py:309`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L309)</small>
 
 复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
 
@@ -168,7 +168,7 @@ duplicate(namespace: str, suffix: str) -> type[hetu.data.component.BaseComponent
 get_duplicates(namespace: str) -> dict[str, type[hetu.data.component.BaseComponent]]
 ```
 
-<small>Source: [`hetu/data/component.py:332`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L332)</small>
+<small>Source: [`hetu/data/component.py:331`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L331)</small>
 
 获取此Component在指定namespace下的所有副本实例
 
@@ -187,7 +187,7 @@ get_duplicates(namespace: str) -> dict[str, type[hetu.data.component.BaseCompone
 is_rls() -> bool
 ```
 
-<small>Source: [`hetu/data/component.py:337`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L337)</small>
+<small>Source: [`hetu/data/component.py:336`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L336)</small>
 
 判断此Component是否是RLS权限
 

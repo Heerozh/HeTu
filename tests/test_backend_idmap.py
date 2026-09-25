@@ -32,6 +32,11 @@ def test_add_clean_and_get(mod_item_model):
     assert fetched_row["name"] == "TestItem"
     assert status == RowState.CLEAN
 
+    # 事务第一行直接建缓存时，缓存也必须是拷贝：改调用方的行不能影响缓存
+    row.name = "Changed after add"
+    cached, _ = id_map.get(item_ref, 100)
+    assert cached is not None and cached.name == "TestItem"
+
     # 验证重复添加报错
     with pytest.raises(ValueError, match="already exists"):
         id_map.add_clean(item_ref, row)
