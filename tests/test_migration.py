@@ -8,7 +8,8 @@
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import use_redis_family_backend_only, xfail_on_backends
+from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -280,6 +281,34 @@ async def test_read_meta_by_name(item_ref, mod_auto_backend):
     assert by_cls == by_name
     assert by_name.cluster_id == item_ref.cluster_id
     assert maint.read_meta(item_ref.instance_name, "NoSuchComponent") is None
+
+
+async def test_maintenance_range_infinite_bounds(
+    item_ref, mod_auto_backend, backend_name, request
+):
+    """
+    维护接口按 ±inf 边界查浮点索引（取全部）。MariaDB 不接受 inf 参数，维护接口没有像
+    SQLBackendClient.range 那样先把 inf 钳到 dtype 的极值，驱动报 ProgrammingError。
+    """
+    xfail_on_backends(
+        request,
+        backend_name,
+        ("mariadb",),
+        raises=sa_exc.DBAPIError,
+        reason="SQL 维护接口的 range 没有钳位 ±inf",
+    )
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    ids = []
+    async with backend.session("pytest", 1) as session:
+        for i, model in enumerate([-2.5, 0.5]):
+            row = comp.new_row()
+            row.name, row.time, row.model = f"m{i}", i, model
+            await session.using(comp).insert(row)
+            ids.append(int(row.id))
+    maint = backend.get_table_maintenance()
+    found = maint.range(item_ref, "model", float("-inf"), float("inf"))
+    assert found == ids
 
 
 # ============ ComponentTableManager：`hetu upgrade` 的建表 / 迁移 / 清易失数据 ============

@@ -1,6 +1,7 @@
 import asyncio
 import threading
 import time
+import uuid
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
@@ -537,6 +538,98 @@ async def test_sql_mariadb_bytes_param_roundtrip(mod_backend_config):
             result = await conn.execute(sa.text("SELECT :p"), {"p": payload})
             assert result.scalar_one() == payload
     finally:
+        await client.close()
+
+
+# 自增 id 在插入时分配、提交时才可见，两者顺序可以不同的后端（SQLite 只有一个写者，id 顺序
+# 就是提交顺序）
+CONCURRENT_WRITER_BACKENDS = [b for b in SQL_BACKENDS if b in ("postgres", "mariadb")]
+
+
+async def _commit_out_of_id_order(
+    client: SQLBackendClient, early: str, late: str, between
+):
+    """
+    事务 A 先往通知表插 `early`（分到小 id）、不提交；事务 B 再插 `late`（大 id）并提交；
+    然后在 A 还没提交时调 `between()`，最后提交 A
+    """
+    notify = client.notify_table()
+    now = datetime.now(UTC).replace(tzinfo=None)
+    async with (
+        client.aio.connect() as conn_a,
+        client.aio.connect() as conn_b,
+        conn_a.begin(),
+    ):
+        await conn_a.execute(sa.insert(notify).values(channel=early, created_at=now))
+        async with conn_b.begin():
+            await conn_b.execute(sa.insert(notify).values(channel=late, created_at=now))
+        await between()
+
+
+async def _poll_a_few_times(hub: SQLNotifyHub) -> None:
+    for _ in range(3):
+        await hub.poll_once()
+        await asyncio.sleep(0.05)
+
+
+@pytest.mark.parametrize("backend_name", CONCURRENT_WRITER_BACKENDS, indirect=True)
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="通知表的 id 顺序不是提交顺序，游标会越过还没提交的通知（待修）",
+)
+async def test_sql_hub_delivers_notify_committed_after_larger_id(mod_backend_config):
+    """
+    通知的 id 比游标小、但提交得晚，也要送到：事务 A 先插通知（小 id）还没提交，事务 B 后插
+    （大 id）先提交；轮询读到 B 后游标越过了 A 的 id，A 提交后它的通知再也读不到。
+    Redis pubsub 对在线的订阅者不丢
+    """
+    client = SQLBackendClient(mod_backend_config["master"], False)
+    client.post_configure([])
+    mq = client.get_mq_client()
+    try:
+        tag = uuid.uuid4().hex[:8]
+        early, late = f"probe:{tag}:early", f"probe:{tag}:late"
+        await mq.subscribe(early, late)
+        hub = client._hub
+        assert hub is not None
+        await _commit_out_of_id_order(client, early, late, between=hub.poll_once)
+        await _poll_a_few_times(hub)
+        assert mq.pulled_set == {early, late}
+    finally:
+        await mq.close()
+        await client.close()
+
+
+@pytest.mark.parametrize("backend_name", CONCURRENT_WRITER_BACKENDS, indirect=True)
+@pytest.mark.xfail(
+    strict=True,
+    raises=AssertionError,
+    reason="订阅水位取 max(id)，比它小但还没提交的通知会被当成旧通知（待修）",
+)
+async def test_sql_hub_delivers_notify_in_flight_at_subscribe(mod_backend_config):
+    """
+    订阅生效之后才提交的通知都要送到：订阅时取的水位是通知表的 max(id)，一条 id 比它小、
+    但订阅时还没提交的通知，提交后会被当成订阅之前的旧通知跳过。Redis 订阅生效之后 PUBLISH
+    的都能收到
+    """
+    client = SQLBackendClient(mod_backend_config["master"], False)
+    client.post_configure([])
+    mq = client.get_mq_client()
+    try:
+        tag = uuid.uuid4().hex[:8]
+        early, late = f"probe:{tag}:early", f"probe:{tag}:late"
+
+        async def subscribe():
+            await mq.subscribe(early)
+
+        await _commit_out_of_id_order(client, early, late, between=subscribe)
+        hub = client._hub
+        assert hub is not None
+        await _poll_a_few_times(hub)
+        assert mq.pulled_set == {early}
+    finally:
+        await mq.close()
         await client.close()
 
 
