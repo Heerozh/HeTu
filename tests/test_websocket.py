@@ -950,19 +950,23 @@ def test_websocket_streaming_close_mid_fragment(test_server):
     from hetu.endpoint.connection import Connection
 
     async def routine(connect):
+        table = test_server.ctx.table_managers["pytest_1"].get_table(Connection)
+        assert table is not None
+
+        async def count_rows():
+            return len(await table.servant_range("id", 0, float("inf"), limit=100))
+
+        # Redis 整个 session 共用、不清库，前面的用例可能留下行：只看本连接带来的变化
+        before = await count_rows()
         client = await connect()
         # 确认初始化完成，然后停在下一条消息的分片中间。
         await client.send(["rpc", "echo_response", ["ready"]])
         assert await client.recv() == ["rsp", ["ready"]]
-        table = test_server.ctx.table_managers["pytest_1"].get_table(Connection)
-        assert table is not None
-        before = await table.servant_range("id", 0, float("inf"), limit=100)
-        assert len(before) == 1
+        assert await count_rows() == before + 1
         await client.write_frame(False, Opcode.BINARY, b"incomplete")
         await client.close()
         for _ in range(100):
-            remaining = await table.servant_range("id", 0, float("inf"), limit=100)
-            if not len(remaining):
+            if await count_rows() == before:
                 return
             await asyncio.sleep(0.02)
         pytest.fail("Connection 行未随分片中的断线清理")
