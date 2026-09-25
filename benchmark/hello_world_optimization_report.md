@@ -17,7 +17,7 @@
 
 主要收益来自加密实现替换（相对第 1 轮 +16.2%）和接收调度（相对第 2 轮再 +11.4%）；日志优化幅度较小。
 
-[正式原始数据](results/hello_world_20260925/measurements.json)、[汇总](results/hello_world_20260925/summary.json)、[环境与检查结果](results/hello_world_20260925/environment.json)。前轮 CPU 4（E 核）的结果单独存于 [previous_e_core](results/hello_world_20260925/previous_e_core/measurements.json)，未与此次 P 核结果混算；当时未记录电源模式，约 +30.8% 的旧结果不作为本报告主结论。
+原始测量文件和环境记录未纳入本次提交；本报告保留汇总数据、测试条件和复现命令。前轮 CPU 4（E 核）的结果未与此次 P 核结果混算；当时未记录电源模式，约 +30.8% 的旧结果不作为本报告主结论。
 
 保留的三轮修改：
 
@@ -39,7 +39,7 @@
 
 PyNaCl 逐包包装和接收分支的 `asyncio.wait` 已从热点栈消失。流式接收内部的消息组装与 Queue、加密原生调用、WebSocket 发送仍占较大份额；JSONB 占比较小，因此没有继续改其复制路径。
 
-原始 Speedscope 文件：[基线](results/hello_world_20260925/baseline.speedscope.json)、[最终](results/hello_world_20260925/final.speedscope.json)；[基线统计](results/hello_world_20260925/baseline_profile_summary.json)、[最终统计](results/hello_world_20260925/final_profile_summary.json)。
+原始 Speedscope 文件与逐帧统计未纳入本次提交；可使用下方命令的 `--profile` 选项重新采样。
 
 测试条件：
 
