@@ -213,8 +213,10 @@ async def client_handler(
     cancelled = False
     # 在后台跑后半段的订阅（整表订阅等全量读），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
-    # async for 正常跑完 = 对端把连接关了；其余出口在各自分支里改写此原因
-    exit_reason = _("对端关闭了连接")
+    # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
+    # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。
+    # 其余出口都在各自分支里写明原因，这里只是兜底
+    exit_reason = _("接收循环意外结束")
     try:
         async for message in receive_messages(ws):
             if not message:
