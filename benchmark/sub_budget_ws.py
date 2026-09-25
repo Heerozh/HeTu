@@ -29,7 +29,7 @@ from typing import Any
 import psutil
 import sub_budget as base
 import websockets.asyncio.client
-from nacl.public import PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from hetu.server import pipeline
 
@@ -73,14 +73,14 @@ async def _client_main(url, zones, limit, ready, stop, window, result_q):
         crypto = pipeline.CryptoLayer()
         pipe.add_layer(crypto)
         # 握手（与 tests/test_websocket.py 一致）
-        pvt = PrivateKey.generate()
+        pvt = X25519PrivateKey.generate()
         hs = [b""] * pipe.num_handshake_layers
-        hs[-1] = pvt.public_key.encode()
+        hs[-1] = pvt.public_key().public_bytes_raw()
         await ws.send(pipe.encode(None, hs))
         reply = pipe.decode(None, _bytes(await ws.recv()))
         assert isinstance(reply, list)
         ctx, _ = pipe.handshake(reply)
-        ctx[-1] = crypto.client_handshake(pvt.encode(), reply[-1])
+        ctx[-1] = crypto.client_handshake(pvt.private_bytes_raw(), reply[-1])
         # 订阅本 zone 的全部 S 行
         await ws.send(
             pipe.encode(
