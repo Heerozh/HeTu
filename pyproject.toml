@@ -35,6 +35,7 @@ dependencies = [
     "asyncpg>=0.31.0",
     "babel>=2.18.0",
     "brotli>=1.2.0",
+    "cryptography>=45.0.0",
     "msgpack>=1.1.2",
     "msgspec>=0.20.0",
     "numpy~=2.3",

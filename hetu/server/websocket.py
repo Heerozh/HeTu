@@ -243,7 +243,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                         ws.fail_connection()
                         break
                 # 如果关闭了replay，为了速度不执行下面的字符串序列化
-                if replay.level < logging.ERROR:
+                if replay.isEnabledFor(logging.DEBUG):
                     replay.debug(">>> " + str(reply))
                 # print(executor.context, 'got', reply)
                 await ws.send(msg_pipe.encode(pipe_ctx, reply))
