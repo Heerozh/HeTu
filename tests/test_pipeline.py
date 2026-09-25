@@ -527,6 +527,22 @@ def test_crypto_rejects_wrong_key_and_direction():
             layer.decode(receiver, frame)
 
 
+def test_crypto_auth_failure_logs_reason(caplog):
+    """认证失败的错误日志要带原因：cryptography 的 InvalidTag 没有消息，不能打出空原因"""
+    layer = pipeline.CryptoLayer()
+    receiver = layer.CryptoContext(b"a" * 32, True, 0, 0)
+    sender = layer.CryptoContext(b"b" * 32, False, 0, 0)
+    frame = layer.encode(sender, b"hello")
+    with (
+        caplog.at_level(logging.ERROR, logger="HeTu.root"),
+        pytest.raises(nacl.exceptions.CryptoError),
+    ):
+        layer.decode(receiver, frame)
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "Decryption failed." in errors[0]
+
+
 def test_crypto_nonce_overflow_does_not_wrap():
     layer = pipeline.CryptoLayer()
     ctx = layer.CryptoContext(b"a" * 32, True, (1 << 88) - 1, (1 << 88) - 1)

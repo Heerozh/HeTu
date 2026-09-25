@@ -260,7 +260,12 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             self.NONCE_SIZE - 1, byteorder="big"
         )
         try:
-            return layer_ctx._cipher.decrypt(nonce, message, None)
+            try:
+                return layer_ctx._cipher.decrypt(nonce, message, None)
+            except InvalidTag as e:
+                # 保持原有的认证失败异常接口。InvalidTag 没有消息，先换成 CryptoError
+                # 再记日志，否则下面日志里的原因是空的
+                raise nacl.exceptions.CryptoError("Decryption failed.") from e
 
         except Exception as e:
             # 严重安全警告：解密/验证失败意味着数据可能被篡改或密钥不匹配
@@ -269,7 +274,4 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
                     "❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {err}"
                 ).format(err=e)
             )
-            if isinstance(e, InvalidTag):
-                # 保持原有的认证失败异常接口。
-                raise nacl.exceptions.CryptoError("Decryption failed.") from e
             raise
