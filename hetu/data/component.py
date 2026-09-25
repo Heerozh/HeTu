@@ -296,7 +296,7 @@ class BaseComponent:
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:
         """从dict转换为c-struct like的类型，成为可直接传给数据库的行数据"""
-        # Persisted rows contain every field; construct the structured row once.
+        # 存储的行包含全部字段：整行一次构造，省掉复制默认行再逐字段赋值
         values = tuple(data[name] for name, _prop in cls.properties_)
         return np.array([values], dtype=cls.dtypes).view(np.recarray)[0]
 

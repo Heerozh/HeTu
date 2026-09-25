@@ -129,7 +129,7 @@ def test_normal_define(new_component_env):
     assert TestString.indexes_["b"] == True
     assert TestString.indexes_["c"] == False
 
-    # Full-row conversion preserves Unicode and raw byte fields.
+    # 整行转换保留 Unicode 字符串和原始字节字段
     converted = TestString.dict_to_struct(
         {"_version": "2", "id": "42", "a": "汉字", "b": b"\xff\x00", "c": "1"}
     )
