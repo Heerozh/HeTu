@@ -11,13 +11,12 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, override
 
-import nacl.bindings
-import nacl.encoding
-import nacl.exceptions
-import nacl.hash
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.asymmetric.x25519 import (
+    X25519PrivateKey,
+    X25519PublicKey,
+)
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
-from nacl.public import PrivateKey, PublicKey
 
 from ...i18n import _
 from .pipeline import JSONType, MessageProcessLayer
@@ -47,7 +46,7 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         _cipher: ChaCha20Poly1305 = field(init=False, repr=False, compare=False)
 
         def __post_init__(self):
-            # 每连接复用原生 AEAD 对象，避免每个小包经过 PyNaCl 的 Python/CFFI 包装。
+            # 每连接复用一个原生 AEAD 对象，不必每个小包都重新装载密钥。
             self._cipher = ChaCha20Poly1305(self.session_key)
 
         def __repr__(self) -> str:
@@ -123,31 +122,28 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             _("无法识别的握手包格式（非 HeTu 客户端 / 协议版本不符）")
         )
 
+    @staticmethod
+    def _derive_session_key(private_key: X25519PrivateKey, peer_public: bytes) -> bytes:
+        # 1. ECDH: 计算共享点 (Shared Point)
+        # 在数学上，ECDH 本质上就是标量乘法 (Scalar Multiplication)。
+        # 对端给的是全零等小阶点时共享点恒为零，exchange() 会抛 ValueError 拒绝
+        shared_point = private_key.exchange(
+            X25519PublicKey.from_public_bytes(peer_public)
+        )
+
+        # 2. KDF: 派生会话密钥 (Session Key)
+        # 直接使用共享点作为密钥并不总是安全的（虽然Curve25519通常可以），
+        # 推荐使用 Hash 函数通过共享点派生出会话密钥。这里使用 Blake2b。
+        return hashlib.blake2b(shared_point, digest_size=32).digest()
+
     def client_handshake(self, client_pvt: bytes, server_pub: bytes) -> CryptoContext:
         """
         客户端握手辅助函数。
         """
-        # 1. 解析双方密钥
-        peer_public_key = PublicKey(server_pub)
-        my_private_key = PrivateKey(client_pvt)
-
-        # 2. ECDH: 计算共享点 (Shared Point)
-        # 在数学上，ECDH 本质上就是标量乘法 (Scalar Multiplication)
-        shared_point = nacl.bindings.crypto_scalarmult(
-            my_private_key.encode(),  # 转为 bytes
-            peer_public_key.encode(),  # 转为 bytes
+        session_key = self._derive_session_key(
+            X25519PrivateKey.from_private_bytes(client_pvt), server_pub
         )
-
-        # 4. KDF: 派生会话密钥 (Session Key)
-        # 直接使用共享点作为密钥并不总是安全的（虽然Curve25519通常可以），
-        # 推荐使用 Hash 函数通过共享点派生出会话密钥。这里使用 Blake2b。
-        session_key = nacl.hash.blake2b(
-            shared_point, digest_size=32, encoder=nacl.encoding.RawEncoder
-        )
-
-        # 返回 Session Key 作为 Context，以及服务端的公钥给客户端
-        ctx = self.CryptoContext(session_key, False, 0, 0)
-        return ctx
+        return self.CryptoContext(session_key, False, 0, 0)
 
     @override
     def handshake(self, message: bytes) -> tuple[Any, bytes]:
@@ -163,30 +159,13 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
 
             client_public_key = self._parse_client_public_key(message)
 
-            # 1. 解析客户端公钥
-            peer_public_key = PublicKey(client_public_key)
-
-            # 2. 生成服务端临时密钥对 (Ephemeral Key Pair)
-            private_key = PrivateKey.generate()
-            public_key = private_key.public_key
-
-            # 3. ECDH: 计算共享点 (Shared Point)
-            # 在数学上，ECDH 本质上就是标量乘法 (Scalar Multiplication)
-            shared_point = nacl.bindings.crypto_scalarmult(
-                private_key.encode(),  # 转为 bytes
-                peer_public_key.encode(),  # 转为 bytes
-            )
-
-            # 4. KDF: 派生会话密钥 (Session Key)
-            # 直接使用共享点作为密钥并不总是安全的（虽然Curve25519通常可以），
-            # 推荐使用 Hash 函数通过共享点派生出会话密钥。这里使用 Blake2b。
-            session_key = nacl.hash.blake2b(
-                shared_point, digest_size=32, encoder=nacl.encoding.RawEncoder
-            )
+            # 生成服务端临时密钥对 (Ephemeral Key Pair)，与客户端公钥派生会话密钥
+            private_key = X25519PrivateKey.generate()
+            session_key = self._derive_session_key(private_key, client_public_key)
 
             # 返回 Session Key 作为 Context，以及服务端的公钥给客户端
             ctx = self.CryptoContext(session_key, True, 0, 0)
-            return ctx, public_key.encode()
+            return ctx, private_key.public_key().public_bytes_raw()
 
         except self.HandshakeError as e:
             logger.warning(
@@ -260,18 +239,13 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             self.NONCE_SIZE - 1, byteorder="big"
         )
         try:
-            try:
-                return layer_ctx._cipher.decrypt(nonce, message, None)
-            except InvalidTag as e:
-                # 保持原有的认证失败异常接口。InvalidTag 没有消息，先换成 CryptoError
-                # 再记日志，否则下面日志里的原因是空的
-                raise nacl.exceptions.CryptoError("Decryption failed.") from e
-
-        except Exception as e:
-            # 严重安全警告：解密/验证失败意味着数据可能被篡改或密钥不匹配
+            return layer_ctx._cipher.decrypt(nonce, message, None)
+        except InvalidTag as e:
+            # 严重安全警告：解密/验证失败意味着数据可能被篡改或密钥不匹配。
+            # InvalidTag 没有消息，原因写异常名，否则日志里的原因是空的
             logger.error(
                 _(
                     "❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {err}"
-                ).format(err=e)
+                ).format(err=type(e).__name__)
             )
             raise

@@ -45,7 +45,6 @@ dependencies = [
     # >=1.2.3 由 sql/client.py 的 _patch_aiomysql_escape_bytes 兜底（aio-libs/aiomysql#1080）。
     # aiomysql 0.3.3 发布后改成 aiomysql>=0.3.3，这两处排除和那个垫片都可以删
     "pymysql>=1.1.2,!=1.2.1,!=1.2.2",
-    "pynacl>=1.6.2",
     "pyyaml~=6.0",
     "redis[hiredis]>=7,<9",
     "sanic~=25.3",
@@ -79,6 +78,8 @@ dev = [
     "mypy>=1.19.0",
     "pandas>=2.3.3",
     "py-spy>=0.4.1",
+    # 加密层已不用它：测试里作为旧实现的对照，验证握手和线协议互通
+    "pynacl>=1.6.2",
     "pytest>=8.4.2",
     "pytest-asyncio>=1.3.0",
     "pytest-benchmark>=5.2.3",
