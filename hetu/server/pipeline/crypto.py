@@ -8,13 +8,15 @@
 import hashlib
 import hmac
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, override
 
 import nacl.bindings
 import nacl.encoding
+import nacl.exceptions
 import nacl.hash
-import nacl.utils
+from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 from nacl.public import PrivateKey, PublicKey
 
 from ...i18n import _
@@ -42,6 +44,11 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
         server_side: bool
         send_nonce: int
         recv_nonce: int
+        _cipher: ChaCha20Poly1305 = field(init=False, repr=False, compare=False)
+
+        def __post_init__(self):
+            # 每连接复用原生 AEAD 对象，避免每个小包经过 PyNaCl 的 Python/CFFI 包装。
+            self._cipher = ChaCha20Poly1305(self.session_key)
 
         def __repr__(self) -> str:
             return f"CryptoContext('{self.session_key.hex()[:8]}...')"
@@ -201,8 +208,10 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
     ) -> JSONType | bytes:
         """
         发送消息时调用：加密
-        输入: 明文 bytes (通常是 zstd 压缩后的数据)
-        输出: [Nonce(12)] + [Ciphertext + Tag]
+        输入: 明文 bytes（通常是压缩后的数据）。
+        输出: Ciphertext + Tag；nonce 由双方按方向独立递增，不上线路。
+
+        Encrypt compressed bytes with an implicit, direction-specific nonce.
         """
         # 如果没有握手成功或者不需要加密，layer_ctx 为空
         if not layer_ctx:
@@ -210,30 +219,13 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
 
         assert isinstance(message, bytes), "CryptoLayer只能加密bytes类型数据"
 
-        # 1. 生成随机 Nonce
-        # 对于 ChaCha20-Poly1305，Nonce 必须对每个 key 唯一。
-        # 这里使用随机 Nonce。对于12字节Nonce，随机碰撞概率极低，足以应付长连接。
-        # nonce = nacl.utils.random(self.NONCE_SIZE)
-        # 这里用简单的递增 Nonce，避免随机碰撞风险
+        # 每个 key 下 nonce 唯一；方向前缀隔离客户端和服务端的计数器。
         layer_ctx.send_nonce += 1
         sign = b"\x00" if layer_ctx.server_side else b"\xff"
         nonce = sign + layer_ctx.send_nonce.to_bytes(
             self.NONCE_SIZE - 1, byteorder="big"
         )
-        # print(id(self), f"encode 使用的nonce: {sign} + {layer_ctx.send_nonce}")
-        # 2. 加密 (ChaCha20-Poly1305-IETF)
-        # 结果包含 Ciphertext 和 Poly1305 MAC Tag
-        encrypted = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
-            message,
-            None,  # Additional Authenticated Data (AAD)，这里不用
-            nonce,
-            layer_ctx.session_key,
-        )
-
-        # 3. 拼接: Nonce放头部发送给对方用于解密
-        # return nonce + encrypted
-        # 直接返回无Nonce版本
-        return encrypted
+        return layer_ctx._cipher.encrypt(nonce, message, None)
 
     @override
     def decode(
@@ -241,18 +233,17 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
     ) -> JSONType | bytes:
         """
         接收消息时调用：解密
-        输入: [Nonce(12)] + [Ciphertext + Tag]
-        输出: 明文 bytes
+        输入: Ciphertext + Tag；nonce 由本地接收计数器重建。
+        输出: 验证认证标签后的明文 bytes。
+
+        Authenticate and decrypt bytes using the implicit receive nonce.
         """
         if not layer_ctx:
             return message
 
         assert isinstance(message, bytes), "CryptoLayer只能解密bytes类型数据"
 
-        # 检查最小长度: Nonce(12) + Tag(16) = 28 bytes
-        # 实际上空消息加密后也有 Tag，所以长度至少是 NONCE_SIZE + 16
-        # min_len = self.NONCE_SIZE + 16
-        # 去掉NONCE SIZE
+        # 空消息也有 16 字节认证标签；截断帧不消耗 nonce。
         min_len = 16
         if len(message) < min_len:
             err_msg = _(
@@ -263,26 +254,13 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
             )
             raise ValueError(err_msg)
 
-        # 1. 提取 Nonce
-        # nonce = message[: self.NONCE_SIZE]
-        # ciphertext = message[self.NONCE_SIZE :]
-        # 这里用简单的递增 Nonce，避免随机碰撞风险
         layer_ctx.recv_nonce += 1
         sign = b"\xff" if layer_ctx.server_side else b"\x00"
         nonce = sign + layer_ctx.recv_nonce.to_bytes(
             self.NONCE_SIZE - 1, byteorder="big"
         )
-        # print(id(self), f"decode 使用的nonce: {sign} + {layer_ctx.recv_nonce}")
         try:
-            # 2. 解密 & 验证
-            # 如果 Tag 验证失败，这里会抛出 nacl.exceptions.CryptoError
-            decrypted = nacl.bindings.crypto_aead_chacha20poly1305_ietf_decrypt(
-                message,
-                None,  # AAD
-                nonce,
-                layer_ctx.session_key,
-            )
-            return decrypted
+            return layer_ctx._cipher.decrypt(nonce, message, None)
 
         except Exception as e:
             # 严重安全警告：解密/验证失败意味着数据可能被篡改或密钥不匹配
@@ -291,4 +269,7 @@ class CryptoLayer(MessageProcessLayer, alias="crypto"):
                     "❌ [📡Pipeline] [Crypto层] 解密验证失败，断开连接。原因: {err}"
                 ).format(err=e)
             )
+            if isinstance(e, InvalidTag):
+                # 保持原有的认证失败异常接口。
+                raise nacl.exceptions.CryptoError("Decryption failed.") from e
             raise

@@ -5,6 +5,7 @@ import zlib
 from typing import Any
 
 import msgspec
+import nacl.bindings
 import nacl.exceptions
 import pytest
 from nacl.public import PrivateKey
@@ -492,3 +493,44 @@ def test_clean_resets_disabled_layers():
     assert pipe.num_handshake_layers == 1
     # 压缩层照常生效，没被当成禁用
     assert pipe.encode([None, zlib_ctx], msg) != msgspec.msgpack.encode(msg)
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+@pytest.mark.parametrize("size", [0, 1, 25, 1024, 65536])
+def test_crypto_wire_compatible_with_pynacl(server_side, size):
+    """逐字节兼容旧实现：双方向、多包计数、空包和大包，不仅是自身 roundtrip。"""
+    layer = pipeline.CryptoLayer()
+    key = bytes(range(32))
+    ctx = layer.CryptoContext(key, server_side, 0, 0)
+    payload = (bytes(range(256)) * (size // 256 + 1))[:size]
+    for counter in (1, 2, 3):
+        send_nonce = (b"\x00" if server_side else b"\xff") + counter.to_bytes(11)
+        recv_nonce = (b"\xff" if server_side else b"\x00") + counter.to_bytes(11)
+        expected = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
+            payload, None, send_nonce, key
+        )
+        assert layer.encode(ctx, payload) == expected
+        incoming = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
+            payload, None, recv_nonce, key
+        )
+        assert layer.decode(ctx, incoming) == payload
+
+
+def test_crypto_rejects_wrong_key_and_direction():
+    layer = pipeline.CryptoLayer()
+    key = b"a" * 32
+    for peer_key, peer_side in ((b"b" * 32, False), (key, True)):
+        receiver = layer.CryptoContext(key, True, 0, 0)
+        sender = layer.CryptoContext(peer_key, peer_side, 0, 0)
+        frame = layer.encode(sender, b"hello")
+        with pytest.raises(nacl.exceptions.CryptoError):
+            layer.decode(receiver, frame)
+
+
+def test_crypto_nonce_overflow_does_not_wrap():
+    layer = pipeline.CryptoLayer()
+    ctx = layer.CryptoContext(b"a" * 32, True, (1 << 88) - 1, (1 << 88) - 1)
+    with pytest.raises(OverflowError):
+        layer.encode(ctx, b"hello")
+    with pytest.raises(OverflowError):
+        layer.decode(ctx, b"x" * 16)
