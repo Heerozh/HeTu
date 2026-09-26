@@ -441,7 +441,7 @@ back empty is checked at commit too. When `get` finds a row, only that
 returned row is guarded; rows with the same value inserted afterwards don't
 count as a conflict.
 
-Three things to watch:
+Two things to watch:
 
 - **Read it all.** A truncated read (the database returned `limit` rows) only
   guards the first `limit` rows it saw; rows it didn't read are treated as
@@ -451,12 +451,6 @@ Three things to watch:
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.
-- **SQL backends don't catch simultaneous commits.** On SQL backends the check
-  re-runs the same query inside the commit transaction, without locks: two
-  transactions committing at the same time can both see nothing else in the
-  range and both insert. To rule out duplicates strictly, use the unique
-  anchor below (the database's unique constraint backs it up), or the Redis
-  backend.
 
 ### Hot paths: unique anchor + `upsert`
 
@@ -885,7 +879,7 @@ Some processes must share a backend with a HeTu server without *being* a HeTu ap
 import hetu.headless
 
 client = await hetu.headless.connect(
-    backend_config,                      # the BACKENDS[x] dict from config.yml; Redis and SQL both work
+    backend_config,                      # the BACKENDS[x] dict from config.yml; Redis and SQLite both work
     instance="my-region",                # an instance name from INSTANCES; tables are per instance
     components=[BattleCommand, "BattleReport", BattleSim],  # classes or names, mixed freely
 )
@@ -913,7 +907,7 @@ for row in rows:
         ...
 ```
 
-Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend (on MySQL / MariaDB the engine clamps it to the dtype's max). `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
+Note that `right` cannot be omitted — omitting it means "exactly equal to `left`", not `>=`. `float("inf")` works on every backend. `servant_*` reads go to read replicas and are allowed to lag; a watermark that looks back a little plus seq de-duplication covers that. Re-read specific rows in bulk with `servant_get_many`. Do not use `Table.direct_set`: it bypasses the transaction and does not guarantee consistent notifications.
 
 ### Writing: `client.session(*comps)`
 

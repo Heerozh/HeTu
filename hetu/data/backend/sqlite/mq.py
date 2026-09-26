@@ -25,7 +25,7 @@ PULL_BATCH_SIZE = 256
 # 轮询通知表失败后的退避区间（与 Redis pubsub 节点失效后的重订阅一致）
 POLL_BACKOFF_MIN = 0.5
 POLL_BACKOFF_MAX = 5.0
-# 订阅的频道超过这么多就不在 SQL 里按频道过滤（IN 参数太多），改成按 id 扫描后本地过滤
+# 订阅的频道超过这么多就不在查询里按频道过滤（IN 参数太多），改成按 id 扫描后本地过滤
 MAX_CHANNELS_IN_FILTER = 500
 
 

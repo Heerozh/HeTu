@@ -294,16 +294,13 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 用 `get` 判断也一样：非 unique 列的 `get` 读空后再插入，提交时同样会校验。`get` 命中时只保证返回的
 这一行没被改过，之后再插入的同值行不算冲突。
 
-三个注意点：
+两个注意点：
 
 - **读全。** 截断读（数据库返回了 `limit` 行）只保护读到的前 `limit` 行，没读到的行会被当成不存在。
   判断"有没有"时用 `limit=-1`。本事务删掉的行不在结果里、却占着 `limit` 的名额，返回行数小于 `limit`
   不代表读全了。
 - **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
   整个背包付费。
-- **SQL 后端挡不住同时提交。** SQL 后端的校验是在提交事务里把同一条查询重跑一遍，不加锁：两个事务
-  同时提交时，可能都看到区间里没有别的行、都插入成功。要严格防重复，用下面的 unique 锚定写法（由数据库
-  的 unique 约束兜底），或者用 Redis 后端。
 
 ### 热路径：unique 锚定 + `upsert`
 
@@ -606,7 +603,7 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 import hetu.headless
 
 client = await hetu.headless.connect(
-    backend_config,                      # config.yml 里 BACKENDS[x] 那个 dict，Redis 与 SQL 都支持
+    backend_config,                      # config.yml 里 BACKENDS[x] 那个 dict，Redis 与 SQLite 都支持
     instance="my-region",                # INSTANCES 里的实例名，表按实例隔离
     components=[BattleCommand, "BattleReport", BattleSim],  # 组件类或组件名，可混用
 )
@@ -634,7 +631,7 @@ for row in rows:
         ...
 ```
 
-注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用（MySQL / MariaDB 由引擎钳到 dtype 极值）。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
 
 ### 写：`client.session(*comps)`
 

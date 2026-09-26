@@ -125,7 +125,7 @@ async def start_backends(app: Sanic):
         backend.post_configure()
 
     # 在backend初始化完毕后，启动WorkerKeeper，分配Worker ID，并把Worker ID和上次时间戳传给雪花ID生成器
-    # 分配器按后端类型自动选：Redis后端用真租约（多机安全），SQL后端用本机进程序号
+    # 分配器按后端类型自动选：Redis后端用真租约（多机安全），SQLite后端用本机进程序号
     # （开发模式，单机安全）。见 create_worker_keeper
     lease_tbl = table_managers[app.config.INSTANCES[0]].get_table(WorkerLease)
     assert lease_tbl is not None

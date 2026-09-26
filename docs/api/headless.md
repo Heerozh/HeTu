@@ -421,7 +421,7 @@ connect(
 ### Parameters
 
 - **`backend_config`** (Any) — config.yml 里 ``BACKENDS[x]`` 那个 dict（``type`` / ``master`` / ``servants`` ...），
-Redis 与 SQL 都支持。
+Redis 与 SQLite 都支持。
 
 - **`instance`** (Any) — 服务器实例名（``INSTANCES`` 里的一个），表按实例隔离。
 

@@ -248,8 +248,8 @@ def normalize_int_bounds_(
       都在范围外，或者像 (inf, inf)、(1.2, 1.8) 这样里面没有整数，就是空。
 
     NaN 边界抛 ValueError。下界大于上界要调用方先用原始值判定：那是参数传反了，应该报错，
-    而不是当成空区间。两个后端都应按这个规则处理整数区间（SQL 后端还没接上，见
-    tests/test_backend_index_semantics.py 里的 xfail）。
+    而不是当成空区间。Redis 与 SQLite 后端都经 `RedisModelClient.range_normalize_` 按这个规则
+    处理整数区间。
     """
     info = np.iinfo(dtype)
 
@@ -286,7 +286,7 @@ class BackendClient:
     数据库后端的连接类，Backend会用此类创建master, servant连接。
 
     继承写法：
-    class PostgresClient(BackendClient, alias="postgres")
+    class MyStoreClient(BackendClient, alias="mystore")
 
     服务器启动时，Backend会根据Config中type配置，寻找对应alias初始化Client。
     继承此类，完善所有NotImplementedError的方法。

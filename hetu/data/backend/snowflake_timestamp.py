@@ -162,11 +162,10 @@ class SnowflakeTimestampKeeper:
         """把 `last_timestamp` 原样写成水位（精确值），用于正常关服：调用方保证之后不会再
         发出时间戳更大的ID，周期写入要用 `reserve`。无条件写，不做任何所有权校验（见类文档）。
 
-        行必须先存在，才能 `direct_set`。它在两种后端上对缺行的行为不一样，但都不对：
-        Redis 是 `HSET`，会建出一个只有 `last_timestamp`、缺 `id` 等字段的残缺 hash，
-        之后按 STRUCT 读这行就 KeyError；SQL 是 `UPDATE ... WHERE id=?`，**静默无效**。
-        以前 SQL 那边靠 GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有
-        任何人替本类建行，所以首次写入前先确认行在不在，缺行就自己补建（只在进程内做一次）。
+        行必须先存在，才能 `direct_set`。它是 `HSET`（SQLite 后端照 Redis 模拟），缺行时会建出
+        一个只有 `last_timestamp`、缺 `id` 等字段的残缺行，之后按 STRUCT 读这行就 KeyError。
+        以前靠 GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有任何人替本类
+        建行，所以首次写入前先确认行在不在，缺行就自己补建（只在进程内做一次）。
         """
         if not self._row_ready:
             if not await self._row_exists():

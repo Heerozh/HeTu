@@ -105,14 +105,30 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 
 ## Task 5: 文档
 
-- [ ] `docs/zh` 与 `docs/en`（同一提交）：`_index` / `concepts` / `advanced` / `operations` / `getting-started` /
+- [x] `docs/zh` 与 `docs/en`（同一提交）：`_index` / `concepts` / `advanced` / `operations` / `getting-started` /
   `tutorial/chat-room` 里 SQL 后端相关的说法。
-- [ ] `repo.py` / `idmap.py` / `base.py` docstring 里的 SQL 说明；`AGENTS.md`；重新生成 `docs/api/`
+- [x] `repo.py` / `idmap.py` / `base.py` docstring 里的 SQL 说明；`AGENTS.md`；重新生成 `docs/api/`
   （`uv run python scripts/gen_api_docs.py`）。
-- [ ] 提交：`docs: SQLite 开发后端`
+- [x] 提交：`docs: SQLite 开发后端`
 
 ---
 
 ## 基线与实测
 
-（实施时填写）
+全量都是 `HETU_TEST_BACKENDS=redis,valkey,redis_cluster,sqlite uv run pytest -n 8 tests/`（本机 Windows）。
+
+| 时点 | 结果 | 耗时 |
+|---|---|---|
+| 基线 dev `30cb1ca9`（旧 SQL 后端） | 1569 passed / 4 skipped / 9 xfailed | 148s |
+| Task 1 后（共享模块） | 1569 passed / 4 skipped / 9 xfailed | 141s |
+| Task 2a 后（新后端） | 1575 passed / 5 skipped，原 9 条 xfail 转为通过 | 140s |
+| Task 3 后（删旧后端） | 1554 passed / 1 skipped | 146s |
+| Task 2b 后（测试扩面） | 1605 passed / 1 skipped | 149s |
+| 完成 | 1605 passed / 1 skipped | 142s |
+
+- 只跑 sqlite：新后端第一次跑就只挂了预期中的那几条（9 条 xfail 变成 strict XPASS、1 条旧后端的
+  uint64 拒绝用例、1 条"SQL 不限制索引类型"的旧断言），没有新后端自己的 bug。
+- Redis 提交路径（Python 侧，假 lua_commit，单行 update，中位数）：抽共享模块后多了一层 async 的
+  `commit_script_`，每次约 +0.7µs；改成直接交出 `lua_commit` 的 awaitable 后与抽取前的内联写法持平
+  （差值在 ±0.4µs 的噪声内）。读路径代码没动。
+- 依赖少了 8 个包：sqlalchemy、greenlet、aiosqlite、asyncpg、aiomysql、pymysql、psycopg、psycopg-binary。
