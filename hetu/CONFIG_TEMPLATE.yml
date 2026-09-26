@@ -139,9 +139,9 @@ BACKENDS:
     #        但广泛兼容Forks: Valkey(推荐>=9.2有通知快速路径), Tair等；支持redis代理层。
     #        代理层多数不支持RESP3协议，启动时会报 ResponseError: unknown command，
     #        此时在url后追加 ?protocol=2 降级。河图没有用到RESP3独有特性。
-    # SQLite 仅限开发环境：在本地库文件上模拟 Redis 的行为，免装服务、方便调试，不考虑性能；
-    #         servants 留空。旧版 type: SQL 的库文件不兼容，删掉重建即可。
-    # SQLite:   sqlite:///./data/hetu.sqlite3
+    # SQLite url格式：sqlite:///./data/hetu.sqlite3
+    #        仅限开发环境：在本地库文件上模拟 Redis 的行为，免装服务、方便调试，不考虑性能；
+    #        servants 留空。
     master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
     # 读分为 事务读、和订阅读；事务读会在主服务器和servants中按权重选择，
