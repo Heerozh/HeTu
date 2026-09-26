@@ -5,8 +5,8 @@
 @email: heeroz@gmail.com
 """
 
-# 内置后端（redis / sql）不在此 eager import：BackendClientFactory 按 alias 懒加载，
-# 这样 `import hetu` 不会把 redis / sqlalchemy 一起拖进来（headless 进程只想认识其中一种）。
+# 内置后端（redis / sqlite）不在此 eager import：BackendClientFactory 按 alias 懒加载，
+# 这样 `import hetu` 不会把用不到的后端一起拖进来（headless 进程只想认识其中一种）。
 from .base import (
     BackendClient,
     BackendClientFactory,

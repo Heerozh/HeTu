@@ -703,11 +703,10 @@ class BackendClientFactory:
     _registry: dict[str, type[BackendClient]] = {}
 
     # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
-    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会同时加载
-    # redis 与 sqlalchemy 两套重依赖。第三方后端仍靠显式 import 自己的模块注册。
+    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会把用不到的后端（如
+    # redis-py）一起加载。第三方后端仍靠显式 import 自己的模块注册。
     _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
         "redis": "hetu.data.backend.redis",
-        "sql": "hetu.data.backend.sql",
         "sqlite": "hetu.data.backend.sqlite",
     }
 
@@ -719,6 +718,13 @@ class BackendClientFactory:
     def client_class(alias: str) -> type[BackendClient]:
         """按 alias 取后端的客户端类，内置后端按需 import"""
         alias = alias.lower()
+        if alias == "sql" and alias not in BackendClientFactory._registry:
+            raise ValueError(
+                _(
+                    "SQL 后端已移除：SQLite 请把 type 改成 SQLite（地址不变），"
+                    "PostgreSQL / MariaDB 不再支持"
+                )
+            )
         if alias not in BackendClientFactory._registry:
             module = BackendClientFactory._BUILTIN_MODULES.get(alias)
             if module:
@@ -1061,8 +1067,8 @@ class MQClient:
     连接到消息队列的客户端，每个用户连接一个实例。
     继承此类实现数据库写入通知和消息队列的结合。
 
-    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
-    `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
+    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQLite 的
+    `SQLiteNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
 
     尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是

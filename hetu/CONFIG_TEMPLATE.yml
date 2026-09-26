@@ -131,7 +131,7 @@ PACKET_LAYERS:
 BACKENDS:
   # 第一条是默认后端。@define_component不指定backend时会用这个
   your_backend_name:
-    # 指定backend的类型，可选Redis、SQL
+    # 指定backend的类型，可选Redis、SQLite
     type: Redis
     # 指定master服务器，只能一个地址
     # Redis: url格式：redis://[[username]:[password]]@localhost:6379/0
@@ -139,7 +139,8 @@ BACKENDS:
     #        但广泛兼容Forks: Valkey(推荐>=9.2有通知快速路径), Tair等；支持redis代理层。
     #        代理层多数不支持RESP3协议，启动时会报 ResponseError: unknown command，
     #        此时在url后追加 ?protocol=2 降级。河图没有用到RESP3独有特性。
-    # SQL仅限开发环境，主要为了SQLite方便，生产环境订阅表性能不够。
+    # SQLite 仅限开发环境：在本地库文件上模拟 Redis 的行为，免装服务、方便调试，不考虑性能；
+    #         servants 留空。旧版 type: SQL 的库文件不兼容，删掉重建即可。
     # SQLite:   sqlite:///./data/hetu.sqlite3
     master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入
     # 开启Hetu内置的读写分离模式，填写只读副本服务器的url们。
@@ -188,11 +189,9 @@ LOGGING:
       propagate: false # 不向上级传递，不然会传递给root
       handlers:
         - replay_queue
-    # 第三方库的日志记录器：它们在DEBUG级别会刷屏（如SQLite后端用的aiosqlite，
-    # 会为每次数据库游标操作打印日志）
-    # 其他想安静的第三方库（如websockets）可照此添加。
-    aiosqlite:
-      level: INFO
+    # 第三方库的日志记录器在DEBUG级别可能会刷屏，想让它们安静的（如websockets）可照此添加：
+    # websockets:
+    #   level: INFO
 
   filters:
     add_context: # 生成ctx信息的filter

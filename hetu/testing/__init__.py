@@ -6,7 +6,7 @@ In-process HeTu application test sandbox (SQLite temp file), for game packages t
 unit-test their own `@define_system` / `@define_endpoint` logic.
 
 `call` 走 Endpoint 正常路径（权限/guard/elevate 全过），`call_system` 绕过 Endpoint 层
-直接跑 System。只覆盖"进程内 SQLite"的单测场景；多后端参数化（Redis/Valkey/Postgres）
+直接跑 System。只覆盖"进程内 SQLite"的单测场景；多后端参数化（Redis/Valkey/SQLite）
 与 docker 服务编排保留在 HeTu 内部 fixture，不在此模块范围。
 
 @author: Heerozh (Zhang Jianhao)
@@ -209,7 +209,7 @@ class Sandbox:
             SystemClusters().switch_main(namespace)
 
         # 3. SQLite backend；schema 检查直接给全部已定义组件，不依赖 SystemClusters
-        config = {"type": "sql", "master": f"sqlite:///{db_path}", "servants": []}
+        config = {"type": "sqlite", "master": f"sqlite:///{db_path}", "servants": []}
         backend = Backend(config)
         backend.post_configure(ComponentDefines().get_all())
 

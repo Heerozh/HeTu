@@ -5,13 +5,8 @@
 
 import numpy as np
 import pytest
-from fixtures.backends import (
-    SQL_BACKENDS,
-    use_redis_family_backend_only,
-    xfail_on_backends,
-)
+from fixtures.backends import use_redis_family_backend_only
 from fixtures.testdata import create_ref, def_item
-from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, TableReference
@@ -153,31 +148,6 @@ async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
 
 
-@pytest.mark.parametrize(
-    "backend_name", [b for b in SQL_BACKENDS if b != "sqlite"], indirect=True
-)
-async def test_sql_rejects_uint64_above_bigint(blob_ref, mod_auto_backend):
-    """SQL 后端的无符号整型存在 BIGINT 列里：超过 2**63-1 的 uint64 写入时明确拒绝
-    （报错带组件名、字段名，整个事务什么都不写），而不是各驱动各自的溢出错误。
-    查询边界超出这个范围时按语义收回：上界超了等于到头，下界超了什么都查不到"""
-    backend: Backend = mod_auto_backend()
-    comp = blob_ref.comp_cls
-    servant = backend.servant
-
-    with pytest.raises(ValueError, match=r"Blob\.big"):
-        await _insert(backend, comp, big=[I64_MAX, 2**63 + 5], tag=[b"x", b"y"])
-    assert len(await servant.range(blob_ref, "big", 0, float("inf"), limit=10)) == 0
-
-    ids = await _insert(backend, comp, big=[5, I64_MAX], tag=[b"x", b"y"])
-    # 开放上界：inf 会被钳到 uint64 的最大值，同样要收回来
-    rows = await servant.range(blob_ref, "big", 0, float("inf"), limit=10)
-    assert [int(r.id) for r in rows] == ids
-    rows = await servant.range(blob_ref, "big", 1, 2**64 - 1, limit=10, desc=True)
-    assert list(rows.big) == [I64_MAX, 5]
-    assert len(await servant.range(blob_ref, "big", 2**63 + 5, float("inf"))) == 0
-    assert len(await servant.range(blob_ref, "big", 2**64 - 1)) == 0
-
-
 BIN = b"\xff\x80\x00\xfe"  # 不是合法 UTF-8，中间还有 \x00
 
 
@@ -281,23 +251,11 @@ async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
 @pytest.mark.parametrize(
     "value", [float("inf"), float("-inf"), float("nan")], ids=["inf", "-inf", "nan"]
 )
-async def test_float_special_values(
-    item_ref, mod_auto_backend, backend_name, request, value
-):
+async def test_float_special_values(item_ref, mod_auto_backend, value):
     """
     浮点列存 ±inf / NaN 原样读回。后端存不下的值要在写入前明确拒绝（ValueError，同
     uint64），不能交给驱动报错，更不能被当成竞态重试。
-
-    MariaDB 存不了 ±inf / NaN，驱动报 ProgrammingError；SQLite 把 NaN 绑定成 NULL、撞上
-    NOT NULL 约束，这个 IntegrityError 被当成 unique 冲突转成 RaceCondition，会一直重试到上限。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=sa_exc.DBAPIError,
-        reason="MariaDB 存不了 ±inf / NaN，写入前没有明确拒绝",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     row = comp.new_row()
@@ -314,20 +272,10 @@ async def test_float_special_values(
         np.testing.assert_equal(batch_row.model, np.float32(value))
 
 
-async def test_str_with_nul_roundtrip(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_str_with_nul_roundtrip(item_ref, mod_auto_backend):
     """
     字符串中间的 \\x00 原样存取、能按它点查。后端存不下的要在写入前明确拒绝（ValueError）。
-    PG 的 text 类型不能含 \\x00，驱动报 DBAPIError。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres",),
-        raises=sa_exc.DBAPIError,
-        reason="PG 的字符串不能含 \\x00，写入前没有明确拒绝",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     row = comp.new_row()
@@ -383,23 +331,4 @@ def test_redis_rows_decode_roundtrip(new_component_env):
         single = RedisBackendClient.row_decode_(comp, raw[1], RowFormat.STRUCT)
         assert single.tobytes() == rows[1].tobytes()
         empty = RedisBackendClient.rows_decode_(comp, [])
-        assert len(empty) == 0 and empty.dtype == comp.dtypes
-
-
-def test_sql_rows_decode_roundtrip(new_component_env):
-    """SQL 一次解码多行：数据库读回的 python 值（bytes 列可能是 memoryview）解码回来与
-    原行逐字节一致。单行解码（row_decode_ 的 STRUCT）是它的特例，0 行得到空 recarray"""
-    from hetu.data.backend.sql import SQLBackendClient
-
-    for comp, rows in _tricky_rows().items():
-        fetched = [comp.struct_to_dict(row) for row in rows]
-        for row in fetched:
-            for name in comp.bytes_fields_:
-                row[name] = memoryview(row[name])
-        decoded = SQLBackendClient.rows_decode_(comp, fetched)
-        assert type(decoded) is np.recarray and decoded.dtype == comp.dtypes
-        assert decoded.tobytes() == rows.tobytes()
-        single = SQLBackendClient.row_decode_(comp, fetched[1], RowFormat.STRUCT)
-        assert single.tobytes() == rows[1].tobytes()
-        empty = SQLBackendClient.rows_decode_(comp, [])
         assert len(empty) == 0 and empty.dtype == comp.dtypes

@@ -77,18 +77,18 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 
 ## Task 3: 删除通用 SQL 后端与 PG / MariaDB
 
-- [ ] 删 `hetu/data/backend/sql/`、`tests/test_backend_sql.py`；`tests/fixtures/sql_service.py` →
+- [x] 删 `hetu/data/backend/sql/`、`tests/test_backend_sql.py`；`tests/fixtures/sql_service.py` →
   `sqlite_service.py`；夹具去掉 postgres / mariadb，`SQL_BACKENDS` → `SQLITE_BACKENDS`；删 PG / MariaDB 的 xfail、
   `xfail_on_backends`（没人用了）、`sa_exc` 等 import；碰头 helper 去掉旧 SQL 分支。
-- [ ] `BackendClientFactory`：去掉 `sql`，`type: SQL` 报改名提示。
-- [ ] CLI：`infer_backend_type_from_db_url`、`hetu init` 生成 `type: SQLite`；`hetu.testing.Sandbox`；
+- [x] `BackendClientFactory`：去掉 `sql`，`type: SQL` 报改名提示。
+- [x] CLI：`infer_backend_type_from_db_url`、`hetu init` 生成 `type: SQLite`；`hetu.testing.Sandbox`；
   `CONFIG_TEMPLATE.yml`（BACKENDS 注释、删 aiosqlite 日志条目）；`examples/chat/server/config.yml`；
   `worker_keeper.py` 的说明；对应测试（`test_cli_init`、`test_migration`、`test_safelogging`、
   `test_headless_process`、`test_common`）。
-- [ ] 依赖：`uv remove sqlalchemy aiosqlite asyncpg aiomysql pymysql psycopg psycopg-binary`，
+- [x] 依赖：`uv remove sqlalchemy aiosqlite asyncpg aiomysql pymysql psycopg psycopg-binary`，
   `uv sync --all-packages --group dev`。
-- [ ] 验证：全绿；`hetu/`、`tests/`、`pyproject.toml` 搜不到这些库名。
-- [ ] 提交：`refactor!: 删除通用 SQL 后端，SQLite 改用新后端（type: SQLite）`、`build: 移出 SQLAlchemy 与 SQL 驱动`
+- [x] 验证：全绿（1554 passed / 1 skipped）；`hetu/`、`tests/`、`pyproject.toml` 搜不到这些库名。
+- [x] 提交：`refactor!: 删除通用 SQL 后端，SQLite 改用新后端（type: SQLite）`、`build: 移出 SQLAlchemy 与 SQL 驱动`
 
 ## Task 2b: 测试扩面（Task 3 之后）
 

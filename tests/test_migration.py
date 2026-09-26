@@ -12,8 +12,7 @@ import sys
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only, xfail_on_backends
-from sqlalchemy import exc as sa_exc
+from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -307,8 +306,7 @@ async def test_migration_without_snowflake(
     assert maint.migration_schema(test_app_file, new_table, old_meta)
     assert maint.check_table(new_table)[0] == "ok"
 
-    # 迁移在 upgrade 进程里做，服务器之后用新连接来读。复用迁移前的连接池的话，Postgres
-    # 上 asyncpg 缓存的旧查询计划（qty 还是 int16）会报 InvalidCachedStatementError
+    # 迁移在 upgrade 进程里做，服务器之后用新连接来读
     reader = mod_auto_backend("after_upgrade")
     await reader.wait_for_synced()
     async with reader.session("pytest", 1) as session:
@@ -350,20 +348,8 @@ async def test_read_meta_by_name(item_ref, mod_auto_backend):
     assert maint.read_meta(item_ref.instance_name, "NoSuchComponent") is None
 
 
-async def test_maintenance_range_infinite_bounds(
-    item_ref, mod_auto_backend, backend_name, request
-):
-    """
-    维护接口按 ±inf 边界查浮点索引（取全部）。MariaDB 不接受 inf 参数，维护接口没有像
-    SQLBackendClient.range 那样先把 inf 钳到 dtype 的极值，驱动报 ProgrammingError。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=sa_exc.DBAPIError,
-        reason="SQL 维护接口的 range 没有钳位 ±inf",
-    )
+async def test_maintenance_range_infinite_bounds(item_ref, mod_auto_backend):
+    """维护接口按 ±inf 边界查浮点索引（取全部）"""
     backend = mod_auto_backend()
     comp = item_ref.comp_cls
     ids = []
@@ -816,7 +802,7 @@ def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):
         "APP_FILE": str(tmp_path / "no_such_app.py"),
         "NAMESPACE": "ns",
         "INSTANCES": ["s1"],
-        "BACKENDS": {"SQLite": {"type": "sql", "master": f"sqlite:///{db}"}},
+        "BACKENDS": {"SQLite": {"type": "sqlite", "master": f"sqlite:///{db}"}},
     }
     with pytest.raises(SystemExit) as exc_info:
         MigrateCommand.run(config, True, False)

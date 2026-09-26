@@ -49,10 +49,10 @@ class FixedWorkerKeeper(WorkerKeeper):
 
     ## 适用范围
 
-    给 SQL 后端（SQLite/Postgres/MariaDB）用。这些后端在 HeTu 里本来就只推荐开发/调试或
-    极低订阅负载场景（订阅表性能不够，见 CONFIG_TEMPLATE 里 BACKENDS 的说明），而开发场景
-    的特征是**单机**——单机内 worker 序号天然唯一，不需要租约、不需要续约、不需要所有权
-    校验，也就不存在租约被抢导致雪花ID重复那一整类问题。
+    给 SQLite 后端用。它在 HeTu 里只用于开发/调试（见 CONFIG_TEMPLATE 里 BACKENDS 的说明），
+    而开发场景的特征是**单机**——单机内 worker 序号天然唯一，不需要租约、不需要续约、不需要
+    所有权校验，也就不存在租约被抢导致雪花ID重复那一整类问题。也不模拟 Redis 的租约：租约的
+    发号围栏会让调试时断点停久了就拒绝发号、甚至让 worker 退出。
 
     生产多机部署请用 Redis 后端，那里有 `RedisWorkerKeeper` 的真正租约。
 
@@ -65,8 +65,8 @@ class FixedWorkerKeeper(WorkerKeeper):
     的混用场景，而两种分配方式互相看不见对方占用了哪些 id，会静默撞车产生重复雪花ID——
     那是现有的 CAS / 围栏等所有防护都拦不住的一类错误。
 
-    A dev-mode worker id allocator for SQL backends: it simply uses the process's index
-    within the machine, with no cross-process coordination at all. SQL backends are
+    A dev-mode worker id allocator for the SQLite backend: it simply uses the process's
+    index within the machine, with no cross-process coordination at all. SQLite is
     dev-only in HeTu, and dev means single machine, where per-process indexes are already
     unique. Use the Redis backend (and its real lease) for multi-machine production.
     """
@@ -116,7 +116,7 @@ def create_worker_keeper(backend: Backend, pid: int) -> WorkerKeeper:
     """按后端类型选 Worker ID 分配器。
 
     * Redis 后端 → `RedisWorkerKeeper`，基于 Redis 原生命令的真正租约（多机安全）
-    * 其余（SQL 系）→ `FixedWorkerKeeper`，开发模式的本机序号分配（单机安全）
+    * 其余（SQLite）→ `FixedWorkerKeeper`，开发模式的本机序号分配（单机安全）
 
     这里按后端而不是按配置项来选，是为了不给用户留"选错模式"的机会：能多机部署的后端
     自动获得多机安全的分配器，只适合开发的后端自动获得零协调的分配器。
@@ -134,7 +134,7 @@ def live_worker_ids(backend: Backend) -> list[int]:
     """
     这个后端上还持有租约的 worker id，非空就说明有服务器在跑（或者异常退出后租约还没
     过期；Windows 上本机已经退出的进程留下的不算，见 redis 版同名函数）。`hetu upgrade`
-    据此拒绝在线执行。SQL 后端没有租约（见 `FixedWorkerKeeper`），看不出来，返回空列表。
+    据此拒绝在线执行。SQLite 后端没有租约（见 `FixedWorkerKeeper`），看不出来，返回空列表。
     """
     from .redis.client import RedisBackendClient
     from .redis.worker_keeper import live_worker_ids as redis_live_worker_ids

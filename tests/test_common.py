@@ -264,9 +264,8 @@ async def test_snowflake_timestamp_keeper(
     assert abs(await ts_keeper.load() - now_ms) < 1000
 
     # 首次写入前必须先把行建好（GeneralWorkerKeeper 删掉后没人替本类建行了）：
-    # SQL 的 direct_set 是 UPDATE，缺行静默无效；Redis 的是 HSET，缺行会建出
-    # 只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT 读它就 KeyError
-    # （开服后每个 worker 都报一次）
+    # direct_set 是 HSET，缺行会建出只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT
+    # 读它就 KeyError（开服后每个 worker 都报一次）
     await ts_keeper.save(now_ms - 60_000)
     row = await backend.master.get(table, 7)
     assert row is not None and row.id == 7 and row.last_timestamp == now_ms - 60_000

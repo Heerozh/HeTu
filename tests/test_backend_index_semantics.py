@@ -1,19 +1,15 @@
 """
 索引查询的比较语义在各后端一致。期望的行为以 Redis 后端为准：索引值编码成可排序的字节
-（`to_sortable_bytes`）后按字节比较，同一个值内按 id 的十进制字符串排序。
-
-SQL 后端用数据库原生的列类型，比较规则交给了各数据库（collation、浮点类型提升……），已知
-的偏差用 strict xfail 标出（`xfail_on_backends`），修好后 XPASS 会报错，提醒去掉标记。
+（`to_sortable_bytes`）后按字节比较，同一个值内按 id 的十进制字符串排序。SQLite 后端用同一套
+编码模拟 Redis 的 zset，比较规则相同。
 整数列的区间按数学含义处理（`normalize_int_bounds_`）：越界的边界到头、小数边界向区间内取整。
 """
 
 import pytest
-from fixtures.backends import xfail_on_backends
 from fixtures.testdata import create_ref
-from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RaceCondition, RowFormat, UniqueViolation
+from hetu.data.backend import Backend, RowFormat
 from hetu.data.backend.base import normalize_int_bounds_
 
 SnowflakeID().init(1, 0)
@@ -98,19 +94,11 @@ async def _which(backend: Backend, nums, field: str, *args, **kwargs) -> str:
     return "".join(tags[i] for i in ids)
 
 
-async def test_float32_point_query(item_ref, mod_auto_backend, backend_name, request):
+async def test_float32_point_query(item_ref, mod_auto_backend):
     """
     float32 列按 0.1 点查、以 0.1 为闭区间上界：边界先按列的 dtype 取整（float32(0.1)），
-    才对得上存进去的值。SQLite / MariaDB 拿 double 的 0.1 去比 float32 的 0.1
-    （0.10000000149…），查不到。
+    才对得上存进去的值；拿 double 的 0.1 去比 float32 的 0.1（0.10000000149…）会查不到。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=AssertionError,
-        reason="float32 索引的查询边界没有先转成 float32",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     row = _item(comp, time=1, name="f", model=0.1)
@@ -123,20 +111,8 @@ async def test_float32_point_query(item_ref, mod_auto_backend, backend_name, req
         assert got is not None and got.id == row.id
 
 
-async def test_str_index_case_sensitive(
-    item_ref, mod_auto_backend, backend_name, request
-):
-    """
-    字符串按字节比较，只差大小写是两个值：unique 不冲突，点查只命中自己。MariaDB 默认的
-    collation 不区分大小写，第二行插入报 UniqueViolation。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=UniqueViolation,
-        reason="MariaDB 默认 collation 不区分大小写",
-    )
+async def test_str_index_case_sensitive(item_ref, mod_auto_backend):
+    """字符串按字节比较，只差大小写是两个值：unique 不冲突，点查只命中自己"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     await _insert_rows(backend, comp, _item(comp, time=1, name="Abc"))
@@ -146,21 +122,8 @@ async def test_str_index_case_sensitive(
     assert await _names(backend, item_ref, "Abc", limit=-1) == ["Abc"]
 
 
-async def test_str_case_variants_in_one_transaction(
-    item_ref, mod_auto_backend, backend_name, request
-):
-    """
-    同一个事务插入只差大小写的两个 unique 值：两个都是新值，提交成功。MariaDB 的 collation
-    认为它们重复，UNIQUE 约束报的 IntegrityError 被当成竞态抛 RaceCondition，每次重试结果都
-    一样，System 会一直重试到上限。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=RaceCondition,
-        reason="MariaDB 的 collation 冲突被当成竞态，重试不会自愈",
-    )
+async def test_str_case_variants_in_one_transaction(item_ref, mod_auto_backend):
+    """同一个事务插入只差大小写的两个 unique 值：两个都是新值，提交成功"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     await _insert_rows(
@@ -171,20 +134,8 @@ async def test_str_case_variants_in_one_transaction(
     assert await _names(backend, item_ref, "q", limit=-1) == ["q"]
 
 
-async def test_str_index_trailing_space(
-    item_ref, mod_auto_backend, backend_name, request
-):
-    """
-    尾随空格是值的一部分。MariaDB 默认 collation 是 PAD SPACE，比较时忽略尾随空格，
-    第二行插入报 UniqueViolation。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("mariadb",),
-        raises=UniqueViolation,
-        reason="MariaDB 默认 collation 忽略尾随空格（PAD SPACE）",
-    )
+async def test_str_index_trailing_space(item_ref, mod_auto_backend):
+    """尾随空格是值的一部分：只差尾随空格的两个值不冲突，点查各自命中"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     await _insert_rows(backend, comp, _item(comp, time=1, name="x "))
@@ -194,21 +145,10 @@ async def test_str_index_trailing_space(
     assert await _names(backend, item_ref, "x ", limit=-1) == ["x "]
 
 
-async def test_str_index_byte_order(item_ref, mod_auto_backend, backend_name, request):
-    """
-    字符串区间按 UTF-8 字节序：大写在小写前，"_" 在两者之间，非 ASCII 在最后。PG 默认
-    collation 按 locale 排序，MariaDB 的 collation 不区分大小写，区间和顺序都不一样。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres", "mariadb"),
-        raises=AssertionError,
-        reason="PG / MariaDB 的字符串不按字节序比较",
-    )
+async def test_str_index_byte_order(item_ref, mod_auto_backend):
+    """字符串区间按 UTF-8 字节序：大写在小写前，"_" 在两者之间，非 ASCII 在最后"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
-    # 故意不放只差大小写的值，免得 MariaDB 先撞上 unique
     names = ["c", "B", "_", "a", "Z", "é"]
     await _insert_rows(
         backend, comp, *[_item(comp, time=i, name=n) for i, n in enumerate(names)]
@@ -223,20 +163,11 @@ async def test_str_index_byte_order(item_ref, mod_auto_backend, backend_name, re
     assert await _names(backend, item_ref, "Z", "a", limit=-1) == ["Z", "_", "a"]
 
 
-async def test_same_value_rows_ordered_by_id_string(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_same_value_rows_ordered_by_id_string(item_ref, mod_auto_backend):
     """
-    同一个索引值内的行按 id 的十进制字符串排序（Redis 索引的 member 是 值\\x00id）。SQL
-    后端按数值排。雪花 id 位数相同时两者一致，只有位数不同的显式 id 才看得出来，低优先级。
+    同一个索引值内的行按 id 的十进制字符串排序（索引的 member 是 值\\x00id）。雪花 id 位数
+    相同时与按数值排一致，只有位数不同的显式 id 才看得出来。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres", "mariadb"),
-        raises=AssertionError,
-        reason="SQL 后端同一值内按 id 数值排序（低优先级）",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     await _insert_rows(
@@ -267,21 +198,11 @@ async def test_int_index_bounds_beyond_dtype_range(nums, mod_auto_backend):
     assert await _which(backend, nums, "u32", 6, 2**40) == "DEA"
 
 
-async def test_int_index_bounds_beyond_sql_column_range(
-    nums, mod_auto_backend, backend_name, request
-):
+async def test_int_index_bounds_far_beyond_range(nums, mod_auto_backend):
     """
-    边界连 SQL 列类型也装不下时，一样当作"到头"。int8 / int16 列在 SQL 里建成 SMALLINT，
-    asyncpg 按列类型给参数定型，超过 int16 的参数直接报错；2**64 超过 int64，PG 和 SQLite
-    的驱动也都报错。
+    边界离 dtype 的范围很远、甚至超出 int64 时，一样当作"到头"：先按数学含义收进 dtype 的
+    范围再编码，不会溢出。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres",),
-        raises=sa_exc.DBAPIError,
-        reason="PG 的查询参数超出列类型的范围",
-    )
     backend: Backend = mod_auto_backend()
 
     assert await _which(backend, nums, "i8", 0, 100000) == "CBA"
@@ -289,21 +210,11 @@ async def test_int_index_bounds_beyond_sql_column_range(
     assert await _which(backend, nums, "i64", 0, 2**64) == "CBA"
 
 
-async def test_int_index_fractional_bounds(
-    nums, mod_auto_backend, backend_name, request
-):
+async def test_int_index_fractional_bounds(nums, mod_auto_backend):
     """
     整数列的小数边界按区间的含义取整：下界向上、上界向下（x >= 0.5 即 x >= 1），区间里没有
-    整数就是空。常见于按比例算出来的边界，比如匹配"等级的 0.8 ~ 1.2 倍"。SQL 后端把边界
-    向 0 截断，(0.5, 1) 连 0 也查了出来。
+    整数就是空。常见于按比例算出来的边界，比如匹配"等级的 0.8 ~ 1.2 倍"。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres", "mariadb"),
-        raises=AssertionError,
-        reason="SQL 后端把整数列的小数边界向 0 截断",
-    )
     backend: Backend = mod_auto_backend()
 
     assert await _which(backend, nums, "i8", 0.5, 1) == "B"
@@ -314,18 +225,8 @@ async def test_int_index_fractional_bounds(
     assert await _which(backend, nums, "i8", 1.2, 1.8) == ""
 
 
-async def test_int_index_infinite_bounds(nums, mod_auto_backend, backend_name, request):
-    """
-    两端都是 +inf（或都是 -inf）的区间里没有整数，是空的。SQL 后端把 ±inf 钳成 dtype 的
-    极值（闭区间），(inf, inf) 查出了值正好是最大值的行。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres", "mariadb"),
-        raises=AssertionError,
-        reason="SQL 后端把 ±inf 钳成 dtype 的极值（闭区间）",
-    )
+async def test_int_index_infinite_bounds(nums, mod_auto_backend):
+    """两端都是 +inf（或都是 -inf）的区间里没有整数，是空的"""
     backend: Backend = mod_auto_backend()
     inf = float("inf")
 
