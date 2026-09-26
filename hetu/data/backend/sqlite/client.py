@@ -10,6 +10,7 @@ import logging
 import random
 import sqlite3
 import time
+import weakref
 from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
@@ -118,11 +119,8 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         self._closing = False
         self._next_notify_cleanup_at = self._next_cleanup_time(time.time())
 
-        # 同 Redis：客户端只能在一个事件循环里用（开发期就暴露跨 loop 使用）
-        try:
-            self.loop_id = hash(asyncio.get_running_loop())
-        except RuntimeError:
-            self.loop_id = 0
+        # 在用的事件循环（弱引用），见 `_bind_loop`
+        self._loop_ref: weakref.ref[asyncio.AbstractEventLoop] | None = None
 
     def _next_cleanup_time(self, now: float) -> float:
         return (
@@ -136,15 +134,26 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
             raise ConnectionError(_("连接已关闭，已调用过close"))
         return self._store
 
+    def _bind_loop(self) -> asyncio.AbstractEventLoop:
+        """
+        取当前事件循环。数据读写在专用线程里跑，跟事件循环无关：前一个 loop 已经不在跑了（关了，
+        或者像 pytest 里 session 级 fixture 建的 Sandbox 给 function 级的测试用）就跟着换过去。
+        前一个 loop 还在跑（别的线程同时在用），或者建过通知轮询（它的任务在那个 loop 上）时，
+        同 Redis 断言失败，开发期就暴露跨 loop 使用。
+        """
+        loop = asyncio.get_running_loop()
+        bound = self._loop_ref() if self._loop_ref is not None else None
+        if bound is not loop:
+            assert bound is None or (not bound.is_running() and self._hub is None), _(
+                "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
+            )
+            self._loop_ref = weakref.ref(loop)
+        return loop
+
     async def run_(self, fn: Callable[..., Any], *args: Any) -> Any:
         """内部方法：在专用线程里执行 fn(store, *args)"""
         store = self._ensure_open()
-        loop = asyncio.get_running_loop()
-        if self.loop_id == 0:
-            self.loop_id = hash(loop)
-        assert hash(loop) == self.loop_id, _(
-            "Backend只能在同一个coroutine中使用。检测到调用此函数的协程发生了变化"
-        )
+        loop = self._bind_loop()
         return await loop.run_in_executor(self._executor, fn, store, *args)
 
     def run_sync_(self, fn: Callable[..., Any], *args: Any) -> Any:
@@ -440,5 +449,6 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         from .mq import SQLiteMQClient, SQLiteNotifyHub
 
         if self._hub is None:
+            self._bind_loop()  # 轮询的任务会跑在当前 loop 上，之后就不能换 loop 了
             self._hub = SQLiteNotifyHub(self)
         return SQLiteMQClient(self._hub)
