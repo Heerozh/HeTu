@@ -917,6 +917,21 @@ async def test_get_many(filled_item_ref, mod_auto_backend):
     assert duplicates[1].qty == original
 
 
+async def test_get_many_rows_do_not_pin_batch(filled_item_ref, mod_auto_backend):
+    """get_many 返回的每行只占自己的内存：批量解码后不能把整批数组的视图直接交出去，
+    否则调用方只留一行，也会拖住整批（比如 headless 轮询里只存有变化的行）"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    ids = await servant.range(
+        filled_item_ref, "time", 110, 134, limit=100, row_format=RowFormat.ID_LIST
+    )
+    got = await servant.get_many(filled_item_ref, ids)
+    assert len(got) == 25
+    for row in got:
+        assert row is not None
+        assert getattr(row.base, "nbytes", 0) <= row.nbytes
+
+
 async def test_table_servant_get_many(filled_item_ref):
     """Table.servant_get_many：与 servant_get / servant_range 同款绑定，供非事务批量读"""
     tbl: Table = filled_item_ref
