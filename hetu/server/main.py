@@ -282,7 +282,8 @@ async def worker_start(app: Sanic):
 
 
 async def worker_close(app):
-    # ctrl+c并不会触发此函数，sanic会直接退出进程
+    # Windows 多 worker 时不会执行：sanic 停 worker（Ctrl+C、DEBUG 自动重载）是
+    # TerminateProcess 硬杀，留下的租约由 live_worker_ids 认出来（见 redis/worker_keeper.py）
     # 先等连接拆完（断线System、删Connection行）再关后端，见 wait_connections_closed
     await wait_connections_closed(app.config.GRACEFUL_SHUTDOWN_TIMEOUT)
     await close_backends(app)

@@ -335,9 +335,11 @@ Before doing anything, `upgrade` checks whether any server is still running
 (on Redis backends, from the worker leases) and exits with code 1 if so,
 leaving everything untouched: migrating, wiping volatile tables and rebuilding
 indexes all corrupt data while servers are running. If a server crashed, wait
-for its lease to expire (at most 60 seconds) and try again. SQL backends have
-no leases, so the check can't see them; make sure the servers are stopped
-yourself.
+for its lease to expire (at most 60 seconds) and try again. On Windows there is
+no need to wait for servers on the same machine that have already exited:
+Sanic stops Windows workers with a hard kill, so they never get to release
+their leases, and such leases are not counted. SQL backends have no leases,
+so the check can't see them; make sure the servers are stopped yourself.
 
 ### `hetu build`
 
