@@ -430,7 +430,7 @@ class SessionRepository:
             idmap.mark_absent(self.ref, index_name, point)
 
         # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
-        # 未命中的 id 一次 get_many 批量读回并放入缓存（N 行 1 次往返，而非逐行 get）。
+        # 未命中的 id 一次批量读回、解码成一个数组放入缓存（N 行 1 次往返，而非逐行 get）。
         # 取行和查 id 用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对
         # 会把这种滞后误判成竞态
         rows: list[np.record | None] = []
@@ -444,40 +444,35 @@ class SessionRepository:
                 rows.append(None)  # 占位，保持索引顺序
             elif row_stat != RowState.DELETE:
                 rows.append(row)
+        fetched: np.recarray | None = None
         missing: list[int] = []
         if miss_ids:
-            fetched = cast(
-                list[np.record | None],
-                await client.get_many(self.ref, miss_ids, RowFormat.STRUCT),
-            )
             # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
-            found = [r for r in fetched if r is not None]
-            if len(found) == 1:
-                # 点查通常只取一行：直接使用单行缓存路径，避免 stack + append。
-                idmap.add_clean(self.ref, found[0])
-            elif found:
-                idmap.add_clean(
-                    self.ref, np.array(found, dtype=comp_cls.dtypes).view(np.recarray)
-                )
-            for slot, _id, r in zip(miss_slots, miss_ids, fetched):
-                rows[slot] = r
-                if r is None:
-                    missing.append(_id)
-        result = [r for r in rows if r is not None]
+            fetched, missing = await client.get_many_array_(self.ref, miss_ids)
+            if len(fetched) == 1:
+                # 点查通常只取一行：单行缓存路径比按批加入快
+                idmap.add_clean(self.ref, fetched[0])
+            elif len(fetched) > 1:
+                idmap.add_clean(self.ref, fetched)
 
         if obs is not None:
             # 取行时有行已被删，读到的就不是任何一刻的区间，commit 会直接判竞态
             obs.point = point
             obs.missing = missing
 
-        # 转换成 np.recarray 返回
-        if len(result) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes)), obs
-        elif len(result) == 1:
-            # 保持返回值与缓存/后端行相互独立；单行不需要通用 stack 的 dtype 推导。
-            return result[0].copy().reshape(1).view(np.recarray), obs
-        else:
-            return np.array(result, dtype=comp_cls.dtypes).view(np.recarray), obs
+        if fetched is not None and len(miss_ids) == len(rows):
+            # 没有命中缓存的行：读回的这批就是结果。缓存存的是拷贝，返回值与缓存互不影响
+            return fetched, obs
+        if fetched is not None:
+            # 有命中缓存的行：读回的行按索引顺序填回占位
+            gone = set(missing)
+            records = iter(fetched)
+            for slot, _id in zip(miss_slots, miss_ids):
+                if _id not in gone:
+                    rows[slot] = next(records)
+        # 拼成一个数组返回（拷贝，与缓存互不影响）
+        result = [r for r in rows if r is not None]
+        return np.array(result, dtype=comp_cls.dtypes).view(np.recarray), obs
 
     async def insert(self, row: np.record) -> None:
         """

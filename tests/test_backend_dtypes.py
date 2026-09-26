@@ -10,7 +10,7 @@ from fixtures.backends import (
     use_redis_family_backend_only,
     xfail_on_backends,
 )
-from fixtures.testdata import create_ref
+from fixtures.testdata import create_ref, def_item
 from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -349,3 +349,63 @@ async def test_str_with_nul_roundtrip(
     assert [r.name for r in batch] == ["a\x00b"] * 2
     rows = await backend.master.range(item_ref, "name", "a\x00b", limit=-1)
     assert [int(r.id) for r in rows] == [int(row.id)]
+
+
+def _tricky_rows():
+    """覆盖各种 dtype 边界值的两个组件的行：{组件: recarray}。要在 new_component_env 里调"""
+    item = def_item()
+    items = item.new_rows(3)
+    items.owner = [-1, 0, I64_MAX]
+    items.model = [np.nan, np.inf, -0.0]
+    items.qty = [-32768, 0, 32767]
+    items.name = ["", "中文名", "a\x00b"]
+    items.used = [True, False, True]
+    blob = def_blob()
+    blobs = blob.new_rows(3)
+    blobs.flag = [True, False, True]
+    blobs.small = [0, U32_MAX, 5]
+    blobs.big = [0, 2**64 - 1, 7]
+    blobs.tag = [b"", b"\xff\x00a", b"abc"]
+    return {item: items, blob: blobs}
+
+
+def test_redis_rows_decode_roundtrip(new_component_env):
+    """Redis 一次解码多行：按提交时的格式（_row_to_db 再编码成 bytes）写出去，解码回来与
+    原行逐字节一致。单行解码（row_decode_ 的 STRUCT）是它的特例，0 行得到空 recarray"""
+    from hetu.data.backend.idmap import _row_to_db
+    from hetu.data.backend.redis import RedisBackendClient
+
+    for comp, rows in _tricky_rows().items():
+        raw = [
+            {
+                k.encode(): v if isinstance(v, bytes) else v.encode()
+                for k, v in _row_to_db(row, comp.bytes_fields_).items()
+            }
+            for row in rows
+        ]
+        decoded = RedisBackendClient.rows_decode_(comp, raw)
+        assert type(decoded) is np.recarray and decoded.dtype == comp.dtypes
+        assert decoded.tobytes() == rows.tobytes()
+        single = RedisBackendClient.row_decode_(comp, raw[1], RowFormat.STRUCT)
+        assert single.tobytes() == rows[1].tobytes()
+        empty = RedisBackendClient.rows_decode_(comp, [])
+        assert len(empty) == 0 and empty.dtype == comp.dtypes
+
+
+def test_sql_rows_decode_roundtrip(new_component_env):
+    """SQL 一次解码多行：数据库读回的 python 值（bytes 列可能是 memoryview）解码回来与
+    原行逐字节一致。单行解码（row_decode_ 的 STRUCT）是它的特例，0 行得到空 recarray"""
+    from hetu.data.backend.sql import SQLBackendClient
+
+    for comp, rows in _tricky_rows().items():
+        fetched = [comp.struct_to_dict(row) for row in rows]
+        for row in fetched:
+            for name in comp.bytes_fields_:
+                row[name] = memoryview(row[name])
+        decoded = SQLBackendClient.rows_decode_(comp, fetched)
+        assert type(decoded) is np.recarray and decoded.dtype == comp.dtypes
+        assert decoded.tobytes() == rows.tobytes()
+        single = SQLBackendClient.row_decode_(comp, fetched[1], RowFormat.STRUCT)
+        assert single.tobytes() == rows[1].tobytes()
+        empty = SQLBackendClient.rows_decode_(comp, [])
+        assert len(empty) == 0 and empty.dtype == comp.dtypes

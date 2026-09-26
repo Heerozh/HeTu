@@ -40,7 +40,7 @@ import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -272,6 +272,15 @@ def normalize_int_bounds_(
     return int(lo), int(hi)
 
 
+def detach_rows_(batch: np.recarray) -> Iterator[np.record]:
+    """
+    内部方法：把一次解码的一批行逐行拷成互相独立的 record，给 `get_many` 用。直接交出整批
+    数组的视图的话，调用方只留一行也会拖住整批。
+    """
+    # 迭代普通 ndarray 比迭代 recarray 快，元素照样是 np.record
+    return (record.copy() for record in batch.view(np.ndarray))
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
@@ -498,7 +507,17 @@ class BackendClient:
         Returns
         -------
         rows: list
-            与 `row_ids` 顺序一一对应，不存在的行位置为 None。
+            与 `row_ids` 顺序一一对应，不存在的行位置为 None。各行互相独立，只留其中一行
+            不会拖住整批的内存。
+        """
+        raise NotImplementedError
+
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        """
+        内部方法，事务里的 range 取行用：同 `get_many`，但读到的行按 `row_ids` 顺序一次解码
+        成一个 recarray 直接返回，省掉逐行拆开再拼回去；另返回读不到的 id。
         """
         raise NotImplementedError
 

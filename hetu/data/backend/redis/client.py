@@ -26,6 +26,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    detach_rows_,
     exact_number_,
     inverted_bounds_error_,
     normalize_int_bounds_,
@@ -478,26 +479,45 @@ class RedisBackendClient(BackendClient, alias="redis"):
         comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         """将redis获取的行byte数据解码为指定格式"""
-        row_decoded: dict[str, str | bytes] = {
-            k.decode("utf-8", "ignore"): v.decode("utf-8", "ignore")
-            for k, v in row.items()
-        }
-        if fmt is not RowFormat.RAW:
-            # bytes 字段用原始字节：utf-8 解码会丢掉不合法的字节，
-            # 非 ASCII 的 str 也存不进 S 类型。RAW 格式照旧一律是 str
-            for name in comp_cls.bytes_fields_:
-                if (raw := row.get(name.encode())) is not None:
-                    row_decoded[name] = raw
         match fmt:
-            case RowFormat.RAW:
-                return row_decoded
             case RowFormat.STRUCT:
-                return comp_cls.dict_to_struct(row_decoded)
+                return RedisBackendClient.rows_decode_(comp_cls, (row,))[0]
             case RowFormat.TYPED_DICT:
-                struct_row = comp_cls.dict_to_struct(row_decoded)
+                struct_row = RedisBackendClient.rows_decode_(comp_cls, (row,))[0]
                 return comp_cls.struct_to_dict(struct_row)
+            case RowFormat.RAW:
+                # RAW 一律是 str，bytes 字段也按 utf-8 容错解码
+                return {
+                    k.decode("utf-8", "ignore"): v.decode("utf-8", "ignore")
+                    for k, v in row.items()
+                }
             case _:
                 raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
+
+    @staticmethod
+    def rows_decode_(
+        comp_cls: type[BaseComponent], rows: Iterable[dict[bytes, bytes]]
+    ) -> np.recarray:
+        """
+        把 HGETALL 读回的多行一次解码成 recarray，顺序与传入一致。`row_decode_` 的 STRUCT
+        格式就是它的单行特例，解码规则只写在这里。
+        """
+        # bytes 字段用原始字节：utf-8 解码会丢掉不合法的字节，非 ASCII 的 str 也存不进
+        # S 类型。其余字段按 utf-8 容错解码成 str，交给 numpy 按 dtype 转换
+        fields = [
+            (name.encode(), name in comp_cls.bytes_fields_)
+            for name, _prop in comp_cls.properties_
+        ]
+        values = [
+            tuple(
+                [
+                    row[key] if raw else row[key].decode("utf-8", "ignore")
+                    for key, raw in fields
+                ]
+            )
+            for row in rows
+        ]
+        return np.array(values, dtype=comp_cls.dtypes).view(np.recarray)
 
     @overload
     async def get(
@@ -604,27 +624,25 @@ class RedisBackendClient(BackendClient, alias="redis"):
         key_prefix = self.cluster_prefix(table_ref) + ":id:"
         comp_cls = table_ref.comp_cls
         raw_rows = await self._hgetall_many(key_prefix, row_ids)
-        if row_format is RowFormat.STRUCT and len(raw_rows) > 1:
-            # 同一批行共用一次结构化数组分配，避免逐行 array/view 再创建 record。
-            # 字符串的 UTF-8 容错和 S 字段原始字节与 row_decode_ 保持一致。
-            fields = [
-                (name.encode(), name in comp_cls.bytes_fields_)
-                for name, _ in comp_cls.properties_
-            ]
-            values = [
-                tuple(
-                    row[name] if raw else row[name].decode("utf-8", "ignore")
-                    for name, raw in fields
-                )
-                for row in raw_rows
-                if row
-            ]
-            records = iter(np.array(values, dtype=comp_cls.dtypes).view(np.recarray))
+        if row_format is RowFormat.STRUCT:
+            batch = self.rows_decode_(comp_cls, [row for row in raw_rows if row])
+            records = detach_rows_(batch)
             return [next(records) if row else None for row in raw_rows]
         return [
             self.row_decode_(comp_cls, row, row_format) if row else None
             for row in raw_rows
         ]
+
+    @override
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"
+        raw_rows = await self._hgetall_many(key_prefix, row_ids)
+        rows = self.rows_decode_(table_ref.comp_cls, [row for row in raw_rows if row])
+        return rows, [row_id for row_id, row in zip(row_ids, raw_rows) if not row]
 
     @classmethod
     def range_normalize_(
@@ -822,20 +840,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         comp_cls = table_ref.comp_cls
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
-        rows = [
-            self.row_decode_(comp_cls, row, row_format)
-            for row in await self._hgetall_many(key_prefix, row_ids)
-            if row
+        raw_rows = [row for row in await self._hgetall_many(key_prefix, row_ids) if row]
+        if row_format == RowFormat.STRUCT:
+            return self.rows_decode_(comp_cls, raw_rows)
+        return [
+            cast(dict[str, Any], self.row_decode_(comp_cls, row, row_format))
+            for row in raw_rows
         ]
-
-        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
-            return cast(list[dict[str, Any]], rows)
-        else:
-            if len(rows) == 0:
-                return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-            else:
-                record_list = cast(list[np.record], rows)
-                return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
     async def _zrange_members(
         self,

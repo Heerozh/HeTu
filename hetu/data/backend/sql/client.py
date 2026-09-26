@@ -9,7 +9,7 @@ import hashlib
 import logging
 import random
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -27,6 +27,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    detach_rows_,
     inverted_bounds_error_,
     peel_bound_,
     sortable_token,
@@ -530,15 +531,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
             return bytes(value)
         return value
 
-    @classmethod
-    def _row_to_typed_dict(
-        cls, comp_cls: type[BaseComponent], row: dict[str, Any]
-    ) -> dict[str, Any]:
-        typed: dict[str, Any] = {}
-        for name in comp_cls.prop_idx_map_:
-            typed[name] = cls._coerce_scalar(comp_cls.dtype_map_[name], row[name])
-        return typed
-
     @staticmethod
     def _row_to_raw_dict(row: dict[str, Any]) -> dict[str, str]:
         ret: dict[str, str] = {}
@@ -577,17 +569,30 @@ class SQLBackendClient(BackendClient, alias="sql"):
         comp_cls: type[BaseComponent], row: dict[str, Any], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         match fmt:
+            case RowFormat.STRUCT:
+                return SQLBackendClient.rows_decode_(comp_cls, (row,))[0]
+            case RowFormat.TYPED_DICT:
+                struct_row = SQLBackendClient.rows_decode_(comp_cls, (row,))[0]
+                return comp_cls.struct_to_dict(struct_row)
             case RowFormat.RAW:
                 return SQLBackendClient._row_to_raw_dict(row)
-            case RowFormat.STRUCT:
-                typed = SQLBackendClient._row_to_typed_dict(comp_cls, row)
-                return comp_cls.dict_to_struct(typed)
-            case RowFormat.TYPED_DICT:
-                typed = SQLBackendClient._row_to_typed_dict(comp_cls, row)
-                struct_row = comp_cls.dict_to_struct(typed)
-                return comp_cls.struct_to_dict(struct_row)
             case _:
                 raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
+
+    @classmethod
+    def rows_decode_(
+        cls, comp_cls: type[BaseComponent], rows: Iterable[Mapping[Any, Any]]
+    ) -> np.recarray:
+        """
+        把数据库读回的多行一次解码成 recarray，顺序与传入一致。`row_decode_` 的 STRUCT
+        格式就是它的单行特例，解码规则只写在这里。
+        """
+        coerce = cls._coerce_scalar
+        fields = list(comp_cls.dtype_map_.items())
+        values = [
+            tuple([coerce(dtype, row[name]) for name, dtype in fields]) for row in rows
+        ]
+        return np.array(values, dtype=comp_cls.dtypes).view(np.recarray)
 
     @overload
     async def get(
@@ -638,20 +643,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
     # 单条 IN 查询的参数上限，避免SQLite等数据库的参数数量限制
     GET_MANY_CHUNK = 500
 
-    @override
-    async def get_many(
-        self,
-        table_ref: TableReference,
-        row_ids: Iterable[int],
-        row_format: RowFormat = RowFormat.STRUCT,
-    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+    async def _select_many(
+        self, table_ref: TableReference, ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        """按 id 分块 IN 查询，返回 {id: 行}，读不到的 id 不在里面"""
         self._ensure_open()
-        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
-        ids = [int(i) for i in row_ids]
+        found: dict[int, dict[str, Any]] = {}
         if not ids:
-            return []
+            return found
         table = self.component_table(table_ref)
-        found: dict[int, Any] = {}
         async with self.aio.connect() as conn:
             for i in range(0, len(ids), self.GET_MANY_CHUNK):
                 chunk = ids[i : i + self.GET_MANY_CHUNK]
@@ -664,11 +664,38 @@ class SQLBackendClient(BackendClient, alias="sql"):
                     raise
                 for row in rows:
                     found[int(row["id"])] = dict(row)
+        return found
+
+    @override
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
+        ids = [int(i) for i in row_ids]
+        found = await self._select_many(table_ref, ids)
         comp_cls = table_ref.comp_cls
+        if row_format is RowFormat.STRUCT:
+            batch = self.rows_decode_(comp_cls, [found[i] for i in ids if i in found])
+            records = detach_rows_(batch)
+            return [next(records) if i in found else None for i in ids]
         return [
             self.row_decode_(comp_cls, found[i], row_format) if i in found else None
             for i in ids
         ]
+
+    @override
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        ids = [int(i) for i in row_ids]
+        found = await self._select_many(table_ref, ids)
+        rows = self.rows_decode_(
+            table_ref.comp_cls, [found[i] for i in ids if i in found]
+        )
+        return rows, [i for i in ids if i not in found]
 
     @classmethod
     def _normalize_range_bound(
@@ -1041,13 +1068,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 for row in rows
             ]
 
-        if len(rows) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-        records = [
-            cast(np.record, self.row_decode_(comp_cls, dict(row), RowFormat.STRUCT))
-            for row in rows
-        ]
-        return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
+        return self.rows_decode_(comp_cls, rows)
 
     def _range_stmt(
         self,

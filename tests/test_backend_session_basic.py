@@ -643,22 +643,23 @@ async def test_cache_hit_row_is_a_copy(
 
 
 async def test_range_batches_row_reads(filled_item_ref, mod_auto_backend):
-    """range 拿到 id 列表后，缓存未命中的行一次 get_many 批量读回（不逐行 get）；
+    """range 拿到 id 列表后，缓存未命中的行一次 get_many_array_ 批量读回（不逐行 get）；
     命中缓存的行不再读、本事务修改可见、已删除的行排除；结果顺序与索引一致"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()
     comp = filled_item_ref.comp_cls
     master = backend.master
+    fetch = "get_many_array_"
 
     async with backend.session("pytest", 1) as session:
         session.only_master = True
         repo = session.using(comp)
         with (
-            patch.object(master, "get_many", wraps=master.get_many) as m_many,
+            patch.object(master, fetch, wraps=getattr(master, fetch)) as m_many,
             patch.object(master, "get", wraps=master.get) as m_get,
         ):
-            # 25 行全部未命中：1 次 get_many、0 次 get
+            # 25 行全部未命中：1 次批量读、0 次 get
             rows = await repo.range(owner=(10, 10), limit=100)
             assert rows.shape[0] == 25
             assert m_many.call_count == 1 and m_get.call_count == 0
@@ -686,11 +687,13 @@ async def test_range_batches_row_reads(filled_item_ref, mod_auto_backend):
         repo = session.using(comp)
         cached = await repo.range(time=(113, 115), limit=10)
         assert cached.shape[0] == 3
-        with patch.object(master, "get_many", wraps=master.get_many) as m_many:
+        with patch.object(master, fetch, wraps=getattr(master, fetch)) as m_many:
             rows = await repo.range(time=(113, 122), limit=10)
             assert rows.shape[0] == 10
             assert m_many.call_count == 1
             assert len(m_many.call_args.args[1]) == 7
+            # 缓存里的行和读回的行按索引顺序拼在一起
+            assert list(rows.time) == list(range(113, 123))
 
 
 async def test_range_interval(filled_item_ref, mod_auto_backend):
