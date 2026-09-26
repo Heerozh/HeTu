@@ -324,6 +324,64 @@ async def test_instance_name_reserved_prefix(tmp_path, new_component_env, instan
         await backend.close()
 
 
+def test_commit_does_not_recheck_schema_per_row(tmp_path):
+    """写行前要确认行表和列都在，但不能每行都查一遍 sqlite_master / table_info（写锁拿在手里，
+    一次写几千行会把别的进程拖到 busy_timeout）：表结构没变就直接用缓存"""
+    store = open_store(str(tmp_path / "s.db"), 1000)
+
+    def hsets(value: str) -> list[list[str]]:
+        return [
+            ["HSET", f"t:C:{{CLU1}}:id:{i}", "_version", "1", "id", str(i), "v", value]
+            for i in range(50)
+        ]
+
+    statements: list[str] = []
+    try:
+        assert _commit(store, pushes=hsets("1")) == b"committed"  # 建表
+        store.conn.set_trace_callback(statements.append)
+        assert _commit(store, pushes=hsets("2")) == b"committed"
+    finally:
+        store.conn.set_trace_callback(None)
+        store.close()
+    meta = [s for s in statements if "sqlite_master" in s or "table_info" in s]
+    assert meta == []
+
+
+def test_schema_cache_sees_other_connections(tmp_path):
+    """行表缓存要看得到别的进程改的表结构：删了表就重建，加了列就不再重复加"""
+    path = str(tmp_path / "s.db")
+    mine, other = open_store(path, 1000), open_store(path, 1000)
+    try:
+        mine.hset_txn("t:C:{CLU1}:id:1", {"a": "1"})
+        with other.write_txn():
+            other.drop_row_table("t:C:{CLU1}")
+        mine.hset_txn("t:C:{CLU1}:id:1", {"a": "2"})
+        assert mine.hgetall("t:C:{CLU1}:id:1") == {b"a": b"2"}
+
+        other.hset_txn("t:C:{CLU1}:id:2", {"b": "1"})  # 别的进程加了列 b
+        mine.hset_txn("t:C:{CLU1}:id:1", {"b": "2"})
+        assert mine.hgetall("t:C:{CLU1}:id:1") == {b"a": b"2", b"b": b"2"}
+    finally:
+        mine.close()
+        other.close()
+
+
+def test_schema_cache_forgets_rolled_back_ddl(tmp_path):
+    """写事务回滚了，里面建的表、加的列也跟着没了，缓存不能还当它们在"""
+    store = open_store(str(tmp_path / "s.db"), 1000)
+    try:
+        store.hset_txn("t:C:{CLU1}:id:1", {"a": "1"})
+        with pytest.raises(RuntimeError), store.write_txn():
+            store.hset("t:D:{CLU1}:id:1", {"v": "1"})
+            store.hset("t:C:{CLU1}:id:1", {"b": "1"})
+            raise RuntimeError
+        assert store.hset_existing_txn("t:D:{CLU1}:id:1", {"v": "2"}) is False
+        store.hset_txn("t:C:{CLU1}:id:1", {"b": "2"})
+        assert store.hgetall("t:C:{CLU1}:id:1") == {b"a": b"1", b"b": b"2"}
+    finally:
+        store.close()
+
+
 def test_hset_needs_fields(tmp_path):
     """同 Redis 的 HSET：一个字段都不给是错误（direct_set 不带字段也一样），给出明确的报错"""
     store = open_store(str(tmp_path / "s.db"), 1000)
