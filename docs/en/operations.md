@@ -240,6 +240,11 @@ file per `Component`, versioned by schema hash. From there:
     - **Force it with `--drop-data`.** Discards the affected attributes
       outright. Don't use in production.
 
+Volatile components (`volatile=True`) skip the migration script: `upgrade`
+wipes their data anyway, so on any schema change it simply recreates the
+table under the new definition — dropped or retyped columns don't need
+`--drop-data`.
+
 Commit everything under `maint/migration/` to your repo so deployed
 environments don't regenerate (and possibly diverge from) the script you
 already reviewed.
