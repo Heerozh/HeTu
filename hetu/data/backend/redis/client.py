@@ -63,6 +63,8 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
 
     # 探测 HSETEX 用的 key：FXX 对不存在的 key 什么都不写，拿它试一次没有副作用
     HSETEX_PROBE_KEY = "hetu:probe:hsetex"
+    # 探测遇到连接错误时最多试几次
+    HSETEX_PROBE_ATTEMPTS = 3
 
     def load_commit_scripts(self, file: str | Path):
         # read file to text
@@ -88,22 +90,36 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         """
         内部方法：服务端（含前面的代理层）支不支持 `HSETEX key FXX …`（Redis >= 8.0、
         Valkey >= 9.0）。FXX 对不存在的 key 什么都不写，拿不存在的探测 key 试一次没有副作用。
+        结论管这个进程的一辈子，所以只在确定不支持时才回退 Lua：网络抖动重试，master 连不上
+        照常抛出（启动失败），不悄悄降级。
         """
-        try:
-            self._ios[0].execute_command(
-                "HSETEX", self.HSETEX_PROBE_KEY, "FXX", "FIELDS", 1, "f", "v"
-            )
-        except redis.exceptions.RedisError as e:
-            # 服务端回 unknown command、集群客户端的命令表里没有、有的代理层遇到不认识的命令
-            # 直接断连接。回退的 Lua 语义相同只是慢些，所以什么错都回退，不让启动失败
-            logger.info(
-                _(
-                    "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set "
-                    "改用同样语义的 Lua 脚本（稍慢）"
-                ).format(err=e)
-            )
-            return False
-        return True
+        io = self._ios[0]
+        error: redis.exceptions.RedisError | None = None
+        for _attempt in range(self.HSETEX_PROBE_ATTEMPTS):
+            try:
+                io.execute_command(
+                    "HSETEX", self.HSETEX_PROBE_KEY, "FXX", "FIELDS", 1, "f", "v"
+                )
+                return True
+            except (
+                redis.exceptions.ConnectionError,
+                redis.exceptions.TimeoutError,
+            ) as e:
+                # 网络抖动，或者有的代理层遇到不认识的命令直接断连接。PING 不通就是前者，
+                # 照常抛出；通的话再试，每次都断才算后者
+                error = e
+                io.ping()
+            except redis.exceptions.RedisError as e:
+                # 服务端回 unknown command、集群客户端的命令表里没有
+                error = e
+                break
+        logger.info(
+            _(
+                "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set "
+                "改用同样语义的 Lua 脚本（稍慢）"
+            ).format(err=error)
+        )
+        return False
 
     @property
     def io(self) -> redis.Redis | redis.cluster.RedisCluster:
