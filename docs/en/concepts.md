@@ -39,6 +39,13 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
+- **Field names cannot shadow NumPy row attributes.** A row is an `np.record`
+  and a batch of rows is an `np.recarray`; attribute access finds NumPy's own
+  attributes before fields, so a field named `size` would make `row.size`
+  return NumPy's `size` instead of the field's value. Names such as `size`,
+  `item`, `shape`, `data`, `round` and `sort` (and Python / C# keywords) are
+  rejected at definition time; pick a more specific name like `bag_size` or
+  `item_id`.
 - **SQL backends cannot store a uint64 above `2**63 - 1`.** On the SQL
   backends (SQLite / PostgreSQL / MariaDB) unsigned integers live in BIGINT
   columns: committing a larger value is rejected with a `ValueError`, and range
