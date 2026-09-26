@@ -6,6 +6,7 @@ import pytest
 from hetu.data.backend import Backend
 from hetu.data.backend.redis import RedisBackendClient
 from hetu.data.backend.sql import SQLBackendClient
+from hetu.data.backend.sqlite import SQLiteBackendClient
 
 
 @pytest.fixture(scope="module")
@@ -179,7 +180,7 @@ async def mod_sqlite_backend(ses_sqlite_service):
         else:
             dsn = ses_sqlite_service
             config = {
-                "type": "sql",
+                "type": "sqlite",
                 "master": dsn,
                 "servants": [],
             }
@@ -190,7 +191,7 @@ async def mod_sqlite_backend(ses_sqlite_service):
         def _mock_get_referred():
             return ComponentDefines().get_all()
 
-        _master = cast(SQLBackendClient, _backend.master)
+        _master = cast(SQLiteBackendClient, _backend.master)
         _master._get_referred_components = _mock_get_referred
         _backend.post_configure()
         return _backend
@@ -293,7 +294,10 @@ def backend_config_by_name(name: str, request) -> dict:
             "raw_clustering": True,
             "servants": [],
         }
-    elif name in ("postgres", "sqlite", "mariadb"):
+    elif name == "sqlite":
+        dsn = request.getfixturevalue("ses_sqlite_service")
+        return {"type": "sqlite", "master": dsn, "servants": []}
+    elif name in ("postgres", "mariadb"):
         dsn = request.getfixturevalue(f"ses_{name}_service")
         return {"type": "sql", "master": dsn, "servants": []}
     else:

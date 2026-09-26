@@ -401,6 +401,13 @@ class BackendClient:
         self.endpoint = endpoint
         self.is_servant = is_servant
 
+    @classmethod
+    def check_config_(cls, config: dict) -> None:
+        """
+        内部方法：`Backend` 建连接之前检查整段配置（config 为 BACKENDS[i]），不合适就抛 ValueError。
+        默认什么都不查。
+        """
+
     async def close(self):
         """关闭数据库连接，释放资源。"""
         raise NotImplementedError
@@ -701,6 +708,7 @@ class BackendClientFactory:
     _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
         "redis": "hetu.data.backend.redis",
         "sql": "hetu.data.backend.sql",
+        "sqlite": "hetu.data.backend.sqlite",
     }
 
     @staticmethod
@@ -708,9 +716,8 @@ class BackendClientFactory:
         BackendClientFactory._registry[alias.lower()] = client_cls
 
     @staticmethod
-    def create(
-        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
-    ) -> BackendClient:
+    def client_class(alias: str) -> type[BackendClient]:
+        """按 alias 取后端的客户端类，内置后端按需 import"""
         alias = alias.lower()
         if alias not in BackendClientFactory._registry:
             module = BackendClientFactory._BUILTIN_MODULES.get(alias)
@@ -718,7 +725,13 @@ class BackendClientFactory:
                 importlib.import_module(module)
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
-        return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
+        return BackendClientFactory._registry[alias]
+
+    @staticmethod
+    def create(
+        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
+    ) -> BackendClient:
+        return BackendClientFactory.client_class(alias)(endpoint, is_servant, **config)
 
 
 class TableMaintenance:

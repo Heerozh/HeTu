@@ -17,6 +17,7 @@ from hetu.data.backend import Backend, RowFormat, Table, TableReference
 from hetu.data.backend.base import sortable_token, to_sortable_bytes
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -1243,11 +1244,11 @@ async def test_post_configure_explicit_components(mod_auto_backend):
     # 显式空列表：什么都不检查，正常返回；且不带参数的老用法仍可用
     backend.post_configure(components=[])
     backend.post_configure()
-    if isinstance(backend.master, RedisBackendClient):
+    if isinstance(backend.master, RedisModelClient):
         with pytest.raises(ValueError):
             backend.post_configure(components=[bad_cls])
     else:
-        backend.post_configure(components=[bad_cls])  # SQL 系目前没有索引 dtype 限制
+        backend.post_configure(components=[bad_cls])  # 旧 SQL 后端没有索引 dtype 限制
 
 
 async def test_client_rejects_unknown_index(item_ref, mod_auto_backend):

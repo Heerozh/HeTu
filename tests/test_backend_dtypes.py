@@ -14,7 +14,7 @@ from fixtures.testdata import create_ref, def_item
 from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RaceCondition, RowFormat, TableReference
+from hetu.data.backend import Backend, RowFormat, TableReference
 
 SnowflakeID().init(1, 0)
 
@@ -153,7 +153,9 @@ async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
 
 
-@pytest.mark.parametrize("backend_name", SQL_BACKENDS, indirect=True)
+@pytest.mark.parametrize(
+    "backend_name", [b for b in SQL_BACKENDS if b != "sqlite"], indirect=True
+)
 async def test_sql_rejects_uint64_above_bigint(blob_ref, mod_auto_backend):
     """SQL 后端的无符号整型存在 BIGINT 列里：超过 2**63-1 的 uint64 写入时明确拒绝
     （报错带组件名、字段名，整个事务什么都不写），而不是各驱动各自的溢出错误。
@@ -296,14 +298,6 @@ async def test_float_special_values(
         raises=sa_exc.DBAPIError,
         reason="MariaDB 存不了 ±inf / NaN，写入前没有明确拒绝",
     )
-    if np.isnan(value):
-        xfail_on_backends(
-            request,
-            backend_name,
-            ("sqlite",),
-            raises=RaceCondition,
-            reason="SQLite 的 NaN 变成 NULL，约束错误被当成竞态",
-        )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     row = comp.new_row()

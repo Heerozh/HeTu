@@ -46,31 +46,34 @@ PUBLISH（通知表，跨进程轮询）。
   Python 侧无额外开销（读路径未改，commit 多一层 await，可忽略）。
 - [x] 提交：`refactor(redis): 抽出 Redis 数据模型的纯逻辑到 redis_model，供 SQLite 后端共用`
 
-## Task 2: 新 SQLite 后端 + 测试切换
+## Task 2a: 新 SQLite 后端 + 测试切换
 
-**Files:** 新增 `hetu/data/backend/sqlite/{__init__,store,commit,client,maint,mq}.py`、
-`tests/test_backend_sqlite.py`；改 `base.py`（`_BUILTIN_MODULES`）、`tests/fixtures/backends.py` 与相关用例。
+**Files:** 新增 `hetu/data/backend/sqlite/{__init__,store,commit,client,maint,mq}.py`；改 `base.py`
+（`_BUILTIN_MODULES`、`client_class`、`check_config_` 钩子）、`backend/__init__.py`（配置检查、不再改调用方的
+servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 
-- [ ] `store.py`：连接与 PRAGMA、库文件标识（`application_id` / `user_version`、旧库与外来库报错）、内部表；
+- [x] `store.py`：连接与 PRAGMA、库文件标识（`application_id` / `user_version`、旧库与外来库报错）、内部表；
   行表（HGETALL / HGET / HSET upsert + 缺表建表 + 缺列加列 / DEL / EXISTS / 列出 id、只差大小写报错）、zset
   （ZADD / ZREM 返回是否真变了、ZRANGE BYLEX 含 REV 与 LIMIT、ZLEXCOUNT、按前缀删 / 改名）、kv（带过期，
-  NX 设置、按值删除）、meta、通知表（插入、按游标取、最大 / 最小 id、序号、按时间清理）、写事务。
-- [ ] `commit.py`：commit_v2.lua 的逐段移植，返回与 Lua 字节相同的串；按 Redis 规则收集要发的频道并写通知表。
-- [ ] `client.py`：DSN 解析、配置检查钩子（servants 非空报错、忽略 Redis 专用项）、专用线程、事件循环断言、
+  NX 设置、按值删除）、meta、通知表（插入、按游标取、最小 id、序号、按 id 前缀清理）、读写事务。
+- [x] `commit.py`：commit_v2.lua 的逐段移植，返回与 Lua 字节相同的串；按 Redis 规则收集要发的频道并写通知表。
+- [x] `client.py`：DSN 解析、配置检查钩子（servants 非空报错、忽略 Redis 专用项）、专用线程、事件循环断言、
   `post_configure` / `is_synced` / `close`、读路径、`commit_script_`、`direct_set`（不发通知）、
   `get_table_maintenance` / `get_mq_client`。
-- [ ] `maint.py`：逐项对应 `RedisTableMaintenance`，维护锁。
-- [ ] `mq.py`：`SQLiteNotifyHub`（沿用 `SQLNotifyHub` 的登记 / 水位 / 轮询 / 退避，加游标落后时的补发）+
-  `SQLiteMQClient`。
-- [ ] 夹具：`mod_sqlite_backend`、`backend_config_by_name` 改用 `type: sqlite`。
-- [ ] 去掉 §2.2 的 9 条 SQLite xfail；PG / MariaDB 的 xfail 改成显式的 `("postgres", "mariadb")`。
-- [ ] 删掉只对旧后端有意义、会在新后端上挂的 sqlite 用例：两条 NOCASE collation 用例；
-  `test_sql_rejects_uint64_above_bigint` 只留给 PG / MariaDB（Task 3 删）。
-- [ ] 交错提交的碰头 helper：有 `commit_script_` 的后端都 patch 它。
-- [ ] Redis 专属用例扩到 sqlite（spec §7.4），加测试 helper 读原始索引 member / 改行字段。
-- [ ] `tests/test_backend_sqlite.py`（spec §7.5），其中 hub 并发单测从 `test_backend_sql.py` 改写迁来。
-- [ ] 验证：redis / valkey / redis_cluster / sqlite 全绿。
-- [ ] 提交（可拆成几个）：`feat(sqlite): …`、`test: …`
+- [x] `maint.py`：逐项对应 `RedisTableMaintenance`，维护锁。
+- [x] `mq.py`：`SQLiteNotifyHub`（沿用 `SQLNotifyHub` 的登记 / 水位 / 轮询 / 退避，游标推到快照表尾，游标之后的
+  通知被清理时补发 `resync_`）+ `SQLiteMQClient`。
+- [x] 夹具：`mod_sqlite_backend`、`backend_config_by_name` 改用 `type: sqlite`。
+- [x] 去掉 §2.2 的 9 条 SQLite xfail；PG / MariaDB 的 xfail 改成显式的 `("postgres", "mariadb")`。
+- [x] 删掉只对旧后端有意义、会在新后端上挂的 sqlite 用例：两条 NOCASE collation 用例；
+  `test_sql_rejects_uint64_above_bigint` 只留给 PG / MariaDB（Task 3 删）；复数索引的 schema 检查用例按
+  `RedisModelClient` 判断。
+- [x] 交错提交的碰头 helper：有 `commit_script_` 的后端都 patch 它。
+- [x] 验证：redis / valkey / redis_cluster / sqlite 全绿（1575 passed / 5 skipped，原 9 条 xfail 转为通过）。
+- [x] 提交：`feat(sqlite): …`
+
+> 顺序调整：Redis 专属用例扩到 sqlite、`test_backend_sqlite.py` 放到 Task 3 之后（Task 2b），免得中间态给
+> PG / MariaDB 加临时的跳过标记。
 
 ## Task 3: 删除通用 SQL 后端与 PG / MariaDB
 
@@ -86,6 +89,13 @@ PUBLISH（通知表，跨进程轮询）。
   `uv sync --all-packages --group dev`。
 - [ ] 验证：全绿；`hetu/`、`tests/`、`pyproject.toml` 搜不到这些库名。
 - [ ] 提交：`refactor!: 删除通用 SQL 后端，SQLite 改用新后端（type: SQLite）`、`build: 移出 SQLAlchemy 与 SQL 驱动`
+
+## Task 2b: 测试扩面（Task 3 之后）
+
+- [ ] Redis 专属用例扩到 sqlite（spec §7.4），加测试 helper 读原始索引 member / 改行字段。
+- [ ] `tests/test_backend_sqlite.py`（spec §7.5），其中 hub 并发单测从 `test_backend_sql.py` 改写迁来。
+- [ ] 验证：全绿。
+- [ ] 提交：`test: …`
 
 ## Task 4: direct_set 通知契约
 

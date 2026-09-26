@@ -8,7 +8,7 @@ SQL 后端用数据库原生的列类型，比较规则交给了各数据库（c
 """
 
 import pytest
-from fixtures.backends import SQL_BACKENDS, xfail_on_backends
+from fixtures.backends import xfail_on_backends
 from fixtures.testdata import create_ref
 from sqlalchemy import exc as sa_exc
 
@@ -107,7 +107,7 @@ async def test_float32_point_query(item_ref, mod_auto_backend, backend_name, req
     xfail_on_backends(
         request,
         backend_name,
-        ("sqlite", "mariadb"),
+        ("mariadb",),
         raises=AssertionError,
         reason="float32 索引的查询边界没有先转成 float32",
     )
@@ -233,7 +233,7 @@ async def test_same_value_rows_ordered_by_id_string(
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端同一值内按 id 数值排序（低优先级）",
     )
@@ -282,13 +282,6 @@ async def test_int_index_bounds_beyond_sql_column_range(
         raises=sa_exc.DBAPIError,
         reason="PG 的查询参数超出列类型的范围",
     )
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("sqlite",),
-        raises=OverflowError,
-        reason="SQLite 的查询参数超出 int64",
-    )
     backend: Backend = mod_auto_backend()
 
     assert await _which(backend, nums, "i8", 0, 100000) == "CBA"
@@ -307,7 +300,7 @@ async def test_int_index_fractional_bounds(
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端把整数列的小数边界向 0 截断",
     )
@@ -329,7 +322,7 @@ async def test_int_index_infinite_bounds(nums, mod_auto_backend, backend_name, r
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端把 ±inf 钳成 dtype 的极值（闭区间）",
     )

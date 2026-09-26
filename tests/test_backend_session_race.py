@@ -4,7 +4,6 @@ from unittest.mock import patch
 import pytest
 import sqlalchemy as sa
 from fixtures.backends import (
-    SQL_BACKENDS,
     use_redis_family_backend_only,
     xfail_on_backends,
 )
@@ -13,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
-from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -686,21 +685,21 @@ def _rendezvous(parties: int):
 def _meet_between_check_and_write(backend: Backend, parties: int = 2):
     """
     让每个提交在"校验做完、还没写入"处碰头：先到的等其他提交也校验完，再各自写入，构造
-    提交交错（都先校验、后写入）。Redis 的碰头点在 EVALSHA 之前（脚本里校验与写入原子
-    执行，交错不进去）；SQL 在提交事务里的最后一项校验（unique）之后、insert / update 之前。
+    提交交错（都先校验、后写入）。Redis / SQLite 的碰头点在提交脚本之前（脚本里校验与写入
+    原子执行，交错不进去）；旧 SQL 后端在提交事务里的最后一项校验（unique）之后、insert /
+    update 之前。
     """
     master = backend.master
     meet = _rendezvous(parties)
 
-    if isinstance(master, RedisBackendClient):
-        orig_lua_commit = master.lua_commit
-        assert orig_lua_commit is not None
+    if isinstance(master, RedisModelClient):
+        orig_commit_script = master.commit_script_
 
-        async def lua_commit(keys, args):
+        async def commit_script_(keys, args):
             await meet()
-            return await orig_lua_commit(keys, args)
+            return await orig_commit_script(keys, args)
 
-        return patch.object(master, "lua_commit", new=lua_commit)
+        return patch.object(master, "commit_script_", new=commit_script_)
 
     orig_check = master._check_unique_conflicts  # type: ignore[attr-defined]
 
@@ -713,11 +712,11 @@ def _meet_between_check_and_write(backend: Backend, parties: int = 2):
 
 def _meet_before_second_update(backend: Backend, parties: int = 2):
     """
-    SQL 后端：每个提交执行完自己的第一条 UPDATE、执行第二条之前碰头，保证各自先锁住一行、
-    再去要对方锁着的那一行（交错得正好互等）。Redis 没有这一步，碰头点同
+    旧 SQL 后端：每个提交执行完自己的第一条 UPDATE、执行第二条之前碰头，保证各自先锁住一行、
+    再去要对方锁着的那一行（交错得正好互等）。Redis / SQLite 没有这一步，碰头点同
     `_meet_between_check_and_write`。
     """
-    if isinstance(backend.master, RedisBackendClient):
+    if isinstance(backend.master, RedisModelClient):
         return _meet_between_check_and_write(backend, parties)
     meet = _rendezvous(parties)
     orig_execute = AsyncConnection.execute
@@ -754,7 +753,7 @@ async def test_range_phantom_interleaved_commits(
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端的区间校验不加锁，两个交错的提交都能成功，插出重复行（待修）",
     )
@@ -792,7 +791,7 @@ async def test_write_skew_interleaved_commits(
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端校验纯读行版本时不加锁，交错的两个提交都能成功（写偏斜）",
     )
@@ -834,7 +833,7 @@ async def test_unique_blind_insert_interleaved_commits(
     xfail_on_backends(
         request,
         backend_name,
-        SQL_BACKENDS,
+        ("postgres", "mariadb"),
         raises=AssertionError,
         reason="SQL 后端交错的盲插先报 RaceCondition，重试一轮才是 UniqueViolation",
     )
@@ -1041,54 +1040,6 @@ async def test_nonunique_get_hit_moved_while_reading_is_race(
                 row = await repo.get(owner=2)
             assert row is not None and row.owner == 20  # 读回的已经被改走了
             await repo.insert(_item(comp, owner=9, time=3, name="c"))
-
-
-@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
-async def test_get_hit_ci_collation_commits(
-    monkeypatch, new_component_env, mod_auto_backend
-):
-    """SQL 后端 get 命中的行是数据库按自身相等语义找到的（MariaDB 默认大小写不敏感的
-    collation；这里用 SQLite 的 NOCASE 模拟）：get(name="Alice") 命中 "alice" 后写入要能提交，
-    不能因为 Python 里 "alice" != "Alice" 判竞态——重试每次读到的都一样，会一直重试到上限"""
-    import numpy as np
-    import sqlalchemy as sa
-    from fixtures.testdata import create_ref
-
-    from hetu.data import BaseComponent, Permission, define_component, property_field
-    from hetu.data.backend.sql import client as sql_client
-
-    real_type = sql_client._numpy_to_sqla_type
-
-    def ci_type(dtype):
-        col_type = real_type(dtype)
-        if isinstance(col_type, sa.String):
-            return sa.String(length=col_type.length, collation="NOCASE")
-        return col_type
-
-    monkeypatch.setattr(sql_client, "_numpy_to_sqla_type", ci_type)
-
-    @define_component(namespace="pytest", permission=Permission.ADMIN)
-    class CIName(BaseComponent):
-        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
-        qty: np.int16 = property_field(0)
-
-    backend: Backend = mod_auto_backend()
-    create_ref(CIName, backend)  # 表在打了 collation 补丁之后建
-    async with backend.session("pytest", 1) as s:
-        r = CIName.new_row()
-        r.name = "alice"
-        await s.using(CIName).insert(r)
-
-    async with backend.session("pytest", 1) as s:
-        repo = s.using(CIName)
-        row = await repo.get(name="Alice")
-        assert row is not None and row.name == "alice"
-        row.qty = 5
-        await repo.update(row)
-
-    async with backend.session("pytest", 1) as s:
-        row = await s.using(CIName).get(name="alice")
-        assert row is not None and row.qty == 5
 
 
 async def test_range_float_index_truncated_commits(item_ref, mod_auto_backend):
