@@ -30,6 +30,7 @@ class ChatMessage(hetu.BaseComponent):
 
 - **字符串是固定宽度的。** `dtype="U256"` 是一个 256 字符的 UTF-32 列；更长的值会被截断。这是使用类 NumPy C 结构存储的代价。
 - **没有空值。** 每一列都有默认值；您无法判断某个值是“已设置”还是“仍为默认值”。如果您需要可选数据，请将其拆分为单独的组件，并通过 `owner` 进行连接。
+- **字段名不能和 NumPy 行属性同名。** 单行数据是 `np.record`，多行是 `np.recarray`，读属性时 NumPy 自己的属性优先：字段若叫 `size`，`row.size` 读到的是 NumPy 的 `size`，而不是字段值。所以 `size`、`item`、`shape`、`data`、`round`、`sort` 这类名字（以及 Python / C# 关键字）在定义时就会报错，请换成 `bag_size`、`item_id` 这样更具体的名字。
 - **SQL 后端存不下超过 `2**63 - 1` 的 uint64。** 在 SQL 后端（SQLite / PostgreSQL / MariaDB）上，无符号整型存在 BIGINT 列里：提交更大的值会被拒绝（`ValueError`），超出这个范围的查询边界会被收回。Redis 后端没有这个限制。
 - **一种索引类型，两种风格。** 索引始终是有序集合，支持 `range()` 查询和订阅。`unique=True` 是相同的排序索引，外加提交时的唯一性检查，同时隐式开启 `index=True`。`point_sub=True` 声明这个索引支持高效点订阅（见[订阅](#订阅)），同样隐式开启 `index=True`。
 - **`namespace=` 只是一个标签。** 任何字符串都可以。运行中的服务器在启动时绑定到恰好一个命名空间（`--namespace`），并且只加载该命名空间的 `系统` 和 `端点`；如果这些 `系统` 引用了其他命名空间的 `组件`，则这些组件也会随之加载。要托管多个命名空间，请启动多台服务器。

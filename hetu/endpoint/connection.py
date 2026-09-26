@@ -38,7 +38,7 @@ class Connection(BaseComponent):
     # point_sub：顶号检测 watch 的是 "owner == 本用户" 的值频道（见 ConnectionAliveChecker）
     owner: np.int64 = property_field(0, index=True, point_sub=True)
     address: str = property_field("", dtype="<U32", index=True)  # 连接地址
-    device: str = property_field("", dtype="<U32")  # 物理设备名
+    device_name: str = property_field("", dtype="<U32")  # 物理设备名
     device_id: str = property_field("", dtype="<U128")  # 设备id
     admin: str = property_field("", dtype="<U16")  # 是否是admin
     created: np.double = property_field(0)  # 连接创建时间

@@ -29,7 +29,7 @@ async def test_volatile_table_flush(auto_backend, new_component_env):
 
     @define_component(namespace="pytest", volatile=True)
     class TempData(BaseComponent):
-        data: np.int64 = property_field(0, unique=True)
+        value: np.int64 = property_field(0, unique=True)
 
     temp_table = TableReference(TempData, "test", 1)
     table_maint = backend.get_table_maintenance()
@@ -42,7 +42,7 @@ async def test_volatile_table_flush(auto_backend, new_component_env):
         repo = session.using(TempData)
         for i in range(25):
             row = TempData.new_row()
-            row.data = i  # type: ignore # noqa
+            row.value = i
             await repo.insert(row)
 
     async with backend.session("test", 1) as session:

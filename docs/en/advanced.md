@@ -858,13 +858,15 @@ The numbers you actually care about:
 - Up to 1024 workers across the cluster (the lease pool).
 - 69 years of headroom from the epoch (`2025-12-18` UTC+8).
 
-Worker IDs are leased automatically by `WorkerKeeper`, which stores
-them in the `WorkerLease` `Component` (a `core`/volatile table) and renews
-the lease every 5 seconds. If a process dies without releasing its
-lease, the slot is reclaimed after the lease expires. On startup, the
-engine restores the *last persisted timestamp* and waits a short grace
-period if the system clock has gone backwards — that's HeTu's defense
-against duplicate ids when a host's NTP slews after a reboot.
+Worker IDs are leased automatically by `WorkerKeeper`: on the Redis
+backend each lease is a Redis key renewed every 5 seconds, and if a
+process dies without releasing its lease, the slot is reclaimed after the
+lease expires; the SQL backends (development only) simply use the
+process's index on the host. On startup, the engine restores the *last
+persisted timestamp* from the `WorkerLease` `Component` (a `core`/volatile
+table) and waits a short grace period if the system clock has gone
+backwards — that's HeTu's defense against duplicate ids when a host's NTP
+slews after a reboot.
 
 For your code, the practical implications are short:
 
