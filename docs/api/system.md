@@ -275,6 +275,9 @@ insert(row: numpy.record) -> None
 本事务曾 `get` 观察该值不存在 → [`RaceCondition`](exceptions.md#racecondition)（自动重试），否则 → [`UniqueViolation`](exceptions.md#uniqueviolation)。
 要提前确认可调用 `is_unique_conflicts`。
 
+本事务删掉的库里的行，不能再用同一个 id insert（`upsert` 锚定这个 id 新建也一样），
+抛 `ValueError`：要改这行请直接 `update`。
+
 
 **Parameters**
 
@@ -295,7 +298,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:521`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L521)</small>
+<small>Source: [`hetu/data/backend/repo.py:533`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L533)</small>
 
 向Session中添加一行待更新数据。
 
@@ -324,7 +327,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:557`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L557)</small>
+<small>Source: [`hetu/data/backend/repo.py:569`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L569)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -359,7 +362,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:586`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L586)</small>
+<small>Source: [`hetu/data/backend/repo.py:598`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L598)</small>
 
 向Session中添加一行待删除数据。
 
