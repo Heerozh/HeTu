@@ -399,7 +399,7 @@ pubsub 断线重订的语义，给仍在订阅的频道补发一次（表频道�
 - `type: SQLite`（alias `sqlite`，大小写不敏感），`master: sqlite:///<路径>`：`sqlite:///./hetu.db` 相对
   当前目录，`sqlite:////abs/hetu.db` 是绝对路径，Windows 可写 `sqlite:///C:/…`。文件不存在就建。
 - `type: SQL` 报错："SQL 后端已移除：SQLite 请把 type 改成 SQLite（地址不变），PostgreSQL / MariaDB
-  不再支持"（在 `BackendClientFactory.create` 里特判）。
+  不再支持"（在 `BackendClientFactory.client_class` 里特判）。
 - `servants` 非空报错（SQLite 没有只读副本）：`Backend.__init__` 建客户端前调用客户端类的配置检查钩子
   （默认不做事），SQLite 在钩子里拒绝。Redis 专用的 `raw_clustering` / `max_connections` /
   `pool_timeout` 忽略，模板生成的配置里都带着；`master_weight` 没有意义，但不报错。

@@ -749,12 +749,6 @@ class BackendClientFactory:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
         return BackendClientFactory._registry[alias]
 
-    @staticmethod
-    def create(
-        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
-    ) -> BackendClient:
-        return BackendClientFactory.client_class(alias)(endpoint, is_servant, **config)
-
 
 class TableMaintenance:
     """
