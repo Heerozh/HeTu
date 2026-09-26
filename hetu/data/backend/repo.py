@@ -457,7 +457,7 @@ class SessionRepository:
                 idmap.add_clean(self.ref, found[0])
             elif found:
                 idmap.add_clean(
-                    self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
+                    self.ref, np.array(found, dtype=comp_cls.dtypes).view(np.recarray)
                 )
             for slot, _id, r in zip(miss_slots, miss_ids, fetched):
                 rows[slot] = r
@@ -477,7 +477,7 @@ class SessionRepository:
             # 保持返回值与缓存/后端行相互独立；单行不需要通用 stack 的 dtype 推导。
             return result[0].copy().reshape(1).view(np.recarray), obs
         else:
-            return np.rec.array(np.stack(result, dtype=comp_cls.dtypes)), obs
+            return np.array(result, dtype=comp_cls.dtypes).view(np.recarray), obs
 
     async def insert(self, row: np.record) -> None:
         """
