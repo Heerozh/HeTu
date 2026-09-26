@@ -603,9 +603,27 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
         key_prefix = self.cluster_prefix(table_ref) + ":id:"
         comp_cls = table_ref.comp_cls
+        raw_rows = await self._hgetall_many(key_prefix, row_ids)
+        if row_format is RowFormat.STRUCT and len(raw_rows) > 1:
+            # 同一批行共用一次结构化数组分配，避免逐行 array/view 再创建 record。
+            # 字符串的 UTF-8 容错和 S 字段原始字节与 row_decode_ 保持一致。
+            fields = [
+                (name.encode(), name in comp_cls.bytes_fields_)
+                for name, _ in comp_cls.properties_
+            ]
+            values = [
+                tuple(
+                    row[name] if raw else row[name].decode("utf-8", "ignore")
+                    for name, raw in fields
+                )
+                for row in raw_rows
+                if row
+            ]
+            records = iter(np.array(values, dtype=comp_cls.dtypes).view(np.recarray))
+            return [next(records) if row else None for row in raw_rows]
         return [
             self.row_decode_(comp_cls, row, row_format) if row else None
-            for row in await self._hgetall_many(key_prefix, row_ids)
+            for row in raw_rows
         ]
 
     @classmethod
