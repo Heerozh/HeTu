@@ -703,9 +703,11 @@ def test_point_query_value():
     assert point(i64, 10, 10) == 10
     assert point(i64, "10", 10) == 10  # 按 dtype 规范化后比较
     assert point(i64, 10, 11) is None
-    assert point(i64, float("inf"), None) is None  # int 索引传 inf 转换失败 → 回退
+    assert point(i64, float("inf"), None) is None  # int 索引里没有 inf 这个值 → 回退
+    assert point(i64, "abc", None) is None  # 解析不了的边界 → 回退，不报错
     f32 = np.dtype(np.float32)
     assert point(f32, float("nan"), None) is None
+    assert point(f32, "abc", None) is None
     assert point(f32, 0.1, 0.1) == np.float32(0.1)
     u8 = np.dtype("U8")
     assert point(u8, "abc", None) == "abc"
