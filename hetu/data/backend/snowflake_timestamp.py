@@ -176,9 +176,11 @@ class SnowflakeTimestampKeeper:
                 await self._create_row(last_timestamp)
                 return
             self._row_ready = True
-        if not await self.table.direct_set(
+        written = await self.table.direct_set(
             self.worker_id, last_timestamp=str(last_timestamp)
-        ):
+        )
+        # 只认明确的 False：第三方后端的 direct_set 可能还按老契约什么都不返回（None）
+        if written is False:
             self._row_ready = False
             await self._create_row(last_timestamp)
 
