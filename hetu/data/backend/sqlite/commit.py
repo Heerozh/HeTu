@@ -20,6 +20,7 @@ from typing import Any
 
 import msgpack
 
+from ....i18n import _
 from .store import KEYSPACE_PREFIX, SQLiteStore
 
 
@@ -117,7 +118,7 @@ def _run_pushes(store: SQLiteStore, pushes: list) -> dict[str, bytes | None]:
             if store.delete_row(key):
                 notify(key)
         else:
-            raise ValueError(f"未知的提交命令：{op!r}")
+            raise ValueError(_("未知的提交命令：{op}").format(op=repr(op)))
     return channels
 
 

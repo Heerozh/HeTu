@@ -155,8 +155,10 @@ class SQLiteNotifyHub(MQHub):
             use_channel_filter = self._should_use_channel_in_filter(len(channels))
             if not use_channel_filter and not self._large_sub_warned:
                 logger.warning(
-                    "⚠️ [💾SQLite] 订阅频道过多，轮询切换为按id扫描后本地过滤模式，"
-                    f"当前订阅数={len(channels)}，阈值={MAX_CHANNELS_IN_FILTER}"
+                    _(
+                        "⚠️ [💾SQLite] 订阅频道过多，轮询切换为按id扫描后本地过滤模式，"
+                        "当前订阅数={count}，阈值={limit}"
+                    ).format(count=len(channels), limit=MAX_CHANNELS_IN_FILTER)
                 )
                 self._large_sub_warned = True
             cursor = self._last_notify_id

@@ -203,7 +203,9 @@ class SQLiteTableMaintenance(TableMaintenance):
 
         count = self._run(_rename)
         logger.warning(
-            f"  ✔️ [💾SQLite][{to_.comp_name}组件] rename完成，共改名{count}个键值。"
+            _(
+                "  ✔️ [💾SQLite][{comp_name}组件] rename完成，共改名{count}个键值。"
+            ).format(comp_name=to_.comp_name, count=count)
         )
 
     @override
@@ -263,15 +265,25 @@ class SQLiteTableMaintenance(TableMaintenance):
                     if is_unique:
                         if value in seen:
                             raise RuntimeError(
-                                f"组件{table_ref.comp_name}的unique索引`{idx_name}`在重建时"
-                                f"发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
-                                f"Unique标记导致。"
+                                _(
+                                    "组件{comp_name}的unique索引`{idx_name}`在重建时"
+                                    "发现违反unique约束，可能是迁移时缩短了值类型、或新增了"
+                                    "Unique标记导致。"
+                                ).format(
+                                    comp_name=table_ref.comp_name, idx_name=idx_name
+                                )
                             )
                         seen.add(value)
                     if value is None:
                         raise RuntimeError(
-                            f"组件{table_ref.comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
-                            f"无法重建索引"
+                            _(
+                                "组件{comp_name}的行 id={row_id} 缺字段`{idx_name}`，"
+                                "无法重建索引"
+                            ).format(
+                                comp_name=table_ref.comp_name,
+                                row_id=row_id,
+                                idx_name=idx_name,
+                            )
                         )
                     members.append(
                         self.client.rebuild_member_(
