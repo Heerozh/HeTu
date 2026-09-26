@@ -1625,3 +1625,27 @@ async def test_untouched_nan_row_stays_clean_read(item_ref, mod_auto_backend):
                 other.qty = 5
                 await repo2.update(other)
             await repo1.insert(new_item("extra_b", 3))
+
+
+async def test_range_batch_result_is_detached(filled_item_ref, mod_auto_backend):
+    """多行 range 的返回值与缓存、提交时使用的原值必须独立。"""
+    backend = mod_auto_backend()
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(filled_item_ref.comp_cls)
+        rows = await repo.range(owner=(10, 10), limit=50)
+        assert len(rows) == 25
+        row_id = int(rows[0].id)
+        original = rows[0].qty
+        rows[0].qty = original + 1
+        cached = await repo.get(id=row_id)
+        assert cached is not None and cached.qty == original
+        assert session.idmap.db_row(repo.ref, row_id).qty == original
+        await repo.update(rows[0])
+        assert session.idmap.db_row(repo.ref, row_id).qty == original
+        repeated = await repo.range(owner=(10, 10), limit=50)
+        assert repeated[0].qty == original + 1
+        repeated[0].qty = original + 2
+        assert (await repo.get(id=row_id)).qty == original + 1
+    stored = await backend.master.get(filled_item_ref, row_id)
+    assert stored.qty == original + 1

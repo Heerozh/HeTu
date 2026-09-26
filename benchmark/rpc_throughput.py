@@ -20,6 +20,7 @@ from pathlib import Path
 import psutil
 from seed_get2_rows import seed_get2_rows, verify_get2_rows
 from seed_get_rows import seed_get_rows
+from seed_range50_rows import seed_range50_rows, verify_range50_rows
 
 
 def parse_args():
@@ -28,7 +29,7 @@ def parse_args():
     parser.add_argument("--client-root", type=Path, required=True)
     parser.add_argument(
         "--workload",
-        choices=("hello_world", "get", "get2_update2"),
+        choices=("hello_world", "get", "get2_update2", "range50_update2"),
         default="hello_world",
     )
     parser.add_argument("--output", type=Path, required=True)
@@ -72,23 +73,18 @@ async def client(args):
     # Import only after PYTHONPATH has selected the frozen client checkout.
     import logging
 
-    from benchmark.ya_hetu_rpc import (
-        benchmark_get,
-        benchmark_get2_update2,
-        benchmark_hello_world,
-        connection,
-    )
+    from benchmark import ya_hetu_rpc as rpc
 
-    benchmark = {
-        "get": benchmark_get,
-        "get2_update2": benchmark_get2_update2,
-        "hello_world": benchmark_hello_world,
-    }[args.workload]
+    connection = rpc.connection
+    name = "exchange" if args.workload == "get2_update2" else args.workload
+    benchmark = getattr(rpc, f"benchmark_{name}", None)
+    if benchmark is None:
+        benchmark = getattr(rpc, f"benchmark_{args.workload}")
     expected = 0 if args.workload == "get" else "世界收到"
     random.seed(20260925 + args.client)
 
     def verify(result):
-        if args.workload == "get2_update2":
+        if args.workload in ("get2_update2", "range50_update2"):
             assert type(result) is int and result >= 0, result
         else:
             assert result == expected, result
@@ -101,13 +97,15 @@ async def client(args):
     retries = [0] * args.rounds
     latencies = [[] for _ in counts]
     cpu_start = None
+    completed = 0
 
     async def one():
-        nonlocal ready, cpu_start
+        nonlocal ready, cpu_start, completed
         fixture = connection()
         conn = await anext(fixture)
         try:
             verify(await benchmark(conn))
+            completed += 1
             ready += 1
             windows = await start
             last_end = windows[-1][1]
@@ -120,13 +118,14 @@ async def client(args):
                 result = await benchmark(conn)
                 after = time.monotonic()
                 verify(result)
+                completed += 1
                 while i < len(windows) and after >= windows[i][1]:
                     i += 1
                 if i < len(windows) and windows[i][0] <= before:
                     if cpu_start is None:
                         cpu_start = time.process_time()
                     counts[i] += 1
-                    if args.workload == "get2_update2":
+                    if args.workload in ("get2_update2", "range50_update2"):
                         retries[i] += result
                     seen += 1
                     if seen % 64 == 0:
@@ -149,6 +148,7 @@ async def client(args):
     await asyncio.gather(*tasks)
     result = {
         "counts": counts,
+        "completed_including_warmup": completed,
         "retries": retries,
         "latencies_ms": latencies,
         "cpu_seconds": time.process_time() - (cpu_start or 0),
@@ -229,6 +229,8 @@ BACKENDS:
             seed_get_rows(root, args.redis)
         elif args.workload == "get2_update2":
             seeded = seed_get2_rows(root, args.redis)
+        elif args.workload == "range50_update2":
+            seeded = seed_range50_rows(root, args.redis)
         client_cpus = args.client_cpus.split(",")
         if args.profile:
             # The Python child already inherited server_cpu. Keep the sampler
@@ -330,6 +332,8 @@ BACKENDS:
             rounds.append(
                 {
                     "qps": qps,
+                    "successful_rpcs": sum(r["counts"][i] for r in results),
+                    "retries": sum(r["retries"][i] for r in results),
                     "retries_per_rpc": sum(r["retries"][i] for r in results)
                     / sum(r["counts"][i] for r in results),
                     "server_cpu_percent": cpu_fraction * 100,
@@ -338,9 +342,23 @@ BACKENDS:
                     "p99_ms": samples[int(len(samples) * 0.99)],
                 }
             )
-        data_check = verify_get2_rows(args.redis, seeded) if seeded else {}
+        data_check = {}
+        if seeded:
+            verify_rows = (
+                verify_range50_rows
+                if args.workload == "range50_update2"
+                else verify_get2_rows
+            )
+            data_check = verify_rows(args.redis, seeded)
+            if args.workload == "range50_update2":
+                increments = sum(r["version_increments"] for r in data_check.values())
+                completed = sum(r["completed_including_warmup"] for r in results)
+                assert increments == completed * 2, (increments, completed)
         result = {
             "data_check": data_check,
+            "completed_including_warmup": sum(
+                r["completed_including_warmup"] for r in results
+            ),
             "config": {
                 k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()
             },

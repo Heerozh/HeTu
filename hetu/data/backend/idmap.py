@@ -141,16 +141,20 @@ class IdentityMap:
             self._row_states[table_ref],
         )
 
-    def _new_cache(self, table_ref: TableReference, first_row: np.record | None = None):
+    def _new_cache(
+        self,
+        table_ref: TableReference,
+        first_rows: np.record | np.recarray | None = None,
+    ):
         """
-        新建该表的缓存。给了 first_row 就直接用它的拷贝当缓存第一行，省掉建空 recarray
-        再 np.append（事务常常只读一行）；行状态都由调用方标记。
+        新建该表的缓存。给了 first_rows 就直接拷贝，省掉空 recarray 和 np.append；
+        单行和范围读取共用此路径，行状态都由调用方标记。
         """
-        if first_row is None:
+        if first_rows is None:
             cache = np.rec.array(np.empty(0, dtype=table_ref.comp_cls.dtypes))
         else:
             # 必须拷贝：结构化数组的标量下标是源数组的视图，reshape 也不复制
-            cache = first_row.copy().reshape(1).view(np.recarray)
+            cache = first_rows.copy().reshape(-1).view(np.recarray)
         clean_cache: dict[int, np.record] = {}
         states: dict[int, RowState] = {}
         self._row_cache[table_ref] = cache
@@ -176,9 +180,9 @@ class IdentityMap:
         )
 
         single = row_s.ndim == 0
-        if single and table_ref not in self._row_cache:
-            # 事务读到该表的第一行（常见的只读一行）：直接用它建缓存，不用查重和追加
-            _, clean_cache, states = self._new_cache(table_ref, cast(np.record, row_s))
+        if table_ref not in self._row_cache:
+            # 首批读取直接建立独立缓存，不用先创建空数组再追加。
+            _, clean_cache, states = self._new_cache(table_ref, row_s)
         else:
             # 初始化该component的缓存
             cache, clean_cache, states = self._cache(table_ref)
@@ -203,8 +207,11 @@ class IdentityMap:
             states[row_id] = RowState.CLEAN
             clean_cache[row_id] = row_s.copy()
         else:
-            states.update({key: RowState.CLEAN for key in row_s["id"]})
-            clean_cache.update({row["id"]: row.copy() for row in row_s})
+            # 一次复制整批原值；record 只引用这个独立快照，与调用方和工作缓存隔离。
+            clean_rows = row_s.copy()
+            ids = clean_rows["id"]
+            states.update(dict.fromkeys(ids, RowState.CLEAN))
+            clean_cache.update(zip(ids, clean_rows))
 
     def get(
         self, table_ref: TableReference, row_id: int

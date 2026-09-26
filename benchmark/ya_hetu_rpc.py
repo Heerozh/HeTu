@@ -3,7 +3,6 @@
 import os
 import random
 import string
-from typing import cast
 
 import msgspec
 import websockets
@@ -16,7 +15,7 @@ msg_decoder = msgspec.msgpack.Decoder()
 buffer = bytearray()
 
 # Configuration
-# 可以通过环境变量配置Redis连接
+# 可以通过环境变量配置 WebSocket 连接
 HETU_URL = os.getenv("HETU_URL", "ws://localhost:2466/hetu/bench")
 
 
@@ -102,10 +101,22 @@ async def benchmark_get_then_update(connection):
     return received[0]
 
 
-async def benchmark_get2_update2(connection):
+async def benchmark_exchange(connection):
     rnd_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
     row_id = random.randint(1, BENCH_ID_RANGE)
     received = await rpc(connection, ["rpc", "exchange_data", rnd_str, row_id])
+    return received[0]
+
+
+async def benchmark_range50_update2(connection):
+    # 连续的 number 索引中保证至少能读到 50 行。
+    left = random.randint(1, BENCH_ID_RANGE - 49)
+    right = random.randint(left + 49, BENCH_ID_RANGE)
+    new1 = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+    new2 = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+    received = await rpc(
+        connection, ["rpc", "range50_update2", left, right, new1, new2]
+    )
     return received[0]
 
 
@@ -118,8 +129,10 @@ uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench
 
 # benchmark_get 按 id 读 IntTable，服务端启动后先填充（读空会直接报错）
 uv run python seed_get_rows.py --redis ${REDIS_URL}
+# range50_update2 要填充 number 索引；只对隔离压测 Redis 执行。
+uv run python seed_range50_rows.py --redis ${REDIS_URL}
 
-export HETU_HOST=ws://localhost:2466/hetu/bench
+export HETU_URL=ws://localhost:2466/hetu/bench
 
 # 启动 1200 个并发用户
 

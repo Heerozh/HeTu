@@ -5,10 +5,12 @@
 #  @email: heeroz@gmail.com
 #  """
 
-import hetu
-import numpy as np
 import random
 import string
+
+import numpy as np
+
+import hetu
 
 
 @hetu.define_component(namespace="bench", volatile=True)
@@ -54,6 +56,22 @@ async def exchange_data(ctx: hetu.SystemContext, name, number):
     async with ctx.repo[StrTable].upsert(name=name) as name_row:
         async with ctx.repo[IntTable].upsert(number=number) as number_row:
             name_row.number, number_row.name = number, name
+    return hetu.ResponseToClient([ctx.race_count])
+
+
+@hetu.define_system(
+    namespace="bench",
+    components=(IntTable,),
+    permission=hetu.Permission.EVERYBODY,
+)
+async def range50_update2(ctx: hetu.SystemContext, left, right, new1, new2):
+    rows = await ctx.repo[IntTable].range(number=(left, right), limit=50)
+    if len(rows) != 50:
+        raise LookupError("range50_update2 requires 50 rows; run seed_range50_rows.py")
+    for row, value in zip(rows[:2], (new1, new2)):
+        row.name = value if value != row.name else value + "X"
+    await ctx.repo[IntTable].update(rows[0])
+    await ctx.repo[IntTable].update(rows[1])
     return hetu.ResponseToClient([ctx.race_count])
 
 
