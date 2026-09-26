@@ -339,6 +339,8 @@ class SQLiteStore:
         HSET：只写给出的字段，行不存在就建（和 Redis 一样，缺行时写出的是只有这几个字段的残缺行）。
         schema 是建表时的列（组件的全部字段），不给就按 mapping。只能在写事务里调用。
         """
+        if not mapping:
+            raise ValueError(_("HSET 至少要给一个字段：{key}").format(key=key))
         table, row_id = split_row_key(key)
         self.ensure_row_table(table, [*(schema or ()), *mapping])
         cols = list(mapping)

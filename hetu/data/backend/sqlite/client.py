@@ -115,6 +115,7 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
 
         # 本进程共享的通知表轮询器，首次 get_mq_client 时在事件循环里懒建
         self._hub: SQLiteNotifyHub | None = None
+        self._closing = False
         self._next_notify_cleanup_at = self._next_cleanup_time(time.time())
 
         # 同 Redis：客户端只能在一个事件循环里用（开发期就暴露跨 loop 使用）
@@ -172,12 +173,15 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
 
     @override
     async def close(self):
-        if self._store is None:
+        store = self._store
+        if store is None or self._closing:
             return
-        store, self._store = self._store, None
+        self._closing = True
+        # 先停轮询再断连接：否则轮询在两步之间醒来会多报一条"轮询失败"
         if self._hub is not None:
             hub, self._hub = self._hub, None
             await hub.close()
+        self._store = None
         # 排在已提交的 job 之后关连接：不打断正在跑的事务
         await asyncio.get_running_loop().run_in_executor(self._executor, store.close)
         self._executor.shutdown(wait=False)

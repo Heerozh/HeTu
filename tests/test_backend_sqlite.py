@@ -260,6 +260,16 @@ def test_case_insensitive_names_rejected(tmp_path):
         store.close()
 
 
+def test_hset_needs_fields(tmp_path):
+    """同 Redis 的 HSET：一个字段都不给是错误（direct_set 不带字段也一样），给出明确的报错"""
+    store = open_store(str(tmp_path / "s.db"), 1000)
+    try:
+        with pytest.raises(ValueError, match="至少"):
+            store.hset_txn("t:Item:{CLU1}:id:1", {})
+    finally:
+        store.close()
+
+
 # ============ lex zset ============
 
 
