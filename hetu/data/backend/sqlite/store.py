@@ -142,6 +142,8 @@ class SQLiteStore:
         self.conn = sqlite3.connect(path, isolation_level=None)
         try:
             self.conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
+            # 先认库文件：不是 HeTu 的（旧后端的库、别的程序的库）就报错，一个字节都不改
+            self._check_format()
             mode = self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
             if str(mode).lower() != "wal":
                 logger.warning(
@@ -151,7 +153,6 @@ class SQLiteStore:
                     ).format(path=path, mode=mode)
                 )
             self.conn.execute("PRAGMA synchronous=NORMAL")
-            self._check_format()
         except BaseException:
             self.conn.close()
             raise
