@@ -285,7 +285,7 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--namespace NAME` | —                          | Which namespace from `app.py` to run                                                                |
 | `--instance NAME`  | —                          | Logical instance id (each running process needs a unique one for snowflake worker assignment)       |
 | `--port PORT`      | `2466`                     | WebSocket listening port                                                                            |
-| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `sqlite:///`, `postgresql://`, `mysql://`, ...)  |
+| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `rediss://`, or `sqlite:///<file>` for dev)      |
 | `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                   |
 | `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)         |
 | `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy |
@@ -338,8 +338,9 @@ indexes all corrupt data while servers are running. If a server crashed, wait
 for its lease to expire (at most 60 seconds) and try again. On Windows there is
 no need to wait for servers on the same machine that have already exited:
 Sanic stops Windows workers with a hard kill, so they never get to release
-their leases, and such leases are not counted. SQL backends have no leases,
-so the check can't see them; make sure the servers are stopped yourself.
+their leases, and such leases are not counted. The SQLite backend has no
+leases, so the check can't see its servers; make sure they are stopped
+yourself.
 
 ### `hetu build`
 

@@ -224,7 +224,7 @@ await HeTuClient.Instance.CallSystem("user_chat", "Hello, world!");
 
 ## 你学到了什么
 
-- **组件**是存储在 Redis（或开发中的 SQLite/Postgres）中的类型化表。
+- **组件**是存储在 Redis（或开发中的 SQLite）中的类型化表。
 - **系统**是在事务内读写组件的异步函数。它们的 `permission=` 控制谁可以调用它们。
 - **`elevate()`** 将连接提升为已认证。
 - **订阅**将行级更改推送到客户端，无需轮询。

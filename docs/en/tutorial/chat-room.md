@@ -234,7 +234,7 @@ just yours) flows into `ObserveAdd()` within milliseconds, no polling.
 
 ## What you've learned
 
-- **Components** are typed tables stored in Redis (or SQLite/Postgres in dev).
+- **Components** are typed tables stored in Redis (or SQLite in dev).
 - **Systems** are async functions that read/write components inside a
   transaction. Their `permission=` controls who can call them.
 - **`elevate()`** promotes a connection to authenticated.

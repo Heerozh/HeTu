@@ -311,8 +311,7 @@ async def wait_connections_closed(timeout: float) -> bool:
 
     清理任务没登记进 app 的任务表（见 websocket_connection 的 finally），Sanic 关服不等它；
     直接关后端的话，它可能正停在写库事务中途，loop 一关就永远挂住：断线 System 没跑完、
-    Connection 行漏删；SQLite 后端还会被这个没提交的事务一直占着写锁，同进程之后的写入
-    全部 "database is locked"。
+    Connection 行漏删。
 
     Wait until every connection of this process is torn down (on_disconnect called,
     Connection row deleted) before the backends are closed. Returns False on timeout.

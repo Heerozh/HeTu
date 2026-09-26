@@ -196,7 +196,7 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--namespace NAME`  | —                         | 要运行的 `app.py` 中的命名空间                                                                     |
 | `--instance NAME`   | —                         | 逻辑实例 ID（每个运行进程需要一个唯一 ID，用于雪花算法 worker 分配）                                  |
 | `--port PORT`       | `2466`                    | WebSocket 监听端口                                                                                 |
-| `--db URL`          | `redis://127.0.0.1:6379/0`| 后端 DSN；scheme 选择后端（`redis://`、`sqlite:///`、`postgresql://`、`mysql://`等）                |
+| `--db URL`          | `redis://127.0.0.1:6379/0`| 后端 DSN；scheme 选择后端（`redis://`、`rediss://`、开发用的 `sqlite:///<库文件>`）                  |
 | `--workers N`       | `4`                       | Worker 进程数（经验值：`CPU * 1.2`）                                                                |
 | `--debug 0/1/2`     | `0`                       | `1` 启用热重载 + 详细日志；`2` 额外启用 Python 协程调试（慢 90%）                                    |
 | `--cert DIR`        | `""`                      | TLS 证书目录，或 `auto` 使用自签名证书；通常建议在反向代理处终止 TLS                                  |
@@ -235,7 +235,7 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 `upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
 不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
 秒）后再试。Windows 上本机已经退出的服务器不用等：Sanic 在 Windows 上停 worker 是硬杀，租约来不及释放，
-所以这种租约不算。SQL 后端没有租约、检查不出来，请自己确认已经停服。
+所以这种租约不算。SQLite 后端没有租约、检查不出来，请自己确认已经停服。
 
 ### `hetu build`
 

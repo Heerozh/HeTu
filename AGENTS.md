@@ -18,10 +18,9 @@ uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 uv run pytest -n 8 tests/     # 多进程并行测试（pytest-xdist）
 ```
 
-需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey/Postgres/MariaDB 容器；SQLite 后端无需
-Docker）。`HETU_TEST_BACKENDS` 接受逗号分隔的子集， 取值范围：`redis`、`valkey`、
-`redis_cluster`、`postgres`、`sqlite`、`mariadb`。 未设置时跑全部后端；一般TDD时只需跑`redis`
-，CI 在 `push` 到非 `main`
+需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey 容器；SQLite 后端无需 Docker）。
+`HETU_TEST_BACKENDS` 接受逗号分隔的子集，取值范围：`redis`、`valkey`、`redis_cluster`、`sqlite`。
+未设置时跑全部后端；一般TDD时只需跑`redis`（或免 Docker 的 `sqlite`），CI 在 `push` 到非 `main`
 分支时也会限制为 `redis` 为了快速验证。
 
 测试容器按 pytest 进程隔离（`tests/fixtures/docker_infra.py`）：每个进程（含 xdist 的每个
@@ -78,9 +77,10 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 ### Backend Layer (`hetu/data/backend/`)
 
 - `Backend`：管理 master + servant（read replica）连接，使用 weighted random selection。
-- `BackendClient` / `BackendClientFactory`：抽象 DB client。生产推荐 Redis （
-  `backend/redis/`，含 cluster 支持）；`backend/sql/` 提供 SQLAlchemy based
-  实现（PostgreSQL/SQLite/MariaDB），仅用于开发或低订阅负载场景；
+- `BackendClient` / `BackendClientFactory`：抽象 DB client。生产用 Redis（`backend/redis/`，
+  含 cluster 支持）；`backend/sqlite/` 是只给开发用的 SQLite 后端，在 SQLite 上模拟 Redis 的
+  数据模型（行表 / lex zset / commit_v2.lua 的 Python 版 / keyspace 通知），行为与 Redis 一致、
+  不考虑性能。两者共用 `redis_model.py` 里的纯逻辑（key 布局、索引编码、commit payload）；
 - `Session`：transaction manager，使用 optimistic concurrency（通过
   `IdentityMap` 检测冲突并抛出 `RaceCondition`）。
 - `SessionRepository`：Session 内按 Component 进行 CRUD（`get`、`range`、
@@ -89,7 +89,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `ComponentTableManager` 管理。
 - `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个
   worker 只有一个共享的通知接收器
-  （Redis `PubSubHub` 一条 pubsub 连接 / SQL `SQLNotifyHub`  一个轮询任务）
+  （Redis `PubSubHub` 一条 pubsub 连接 / SQLite `SQLiteNotifyHub` 一个通知表轮询任务）
   按频道分发到各连接的队列。
 
 ### Server Layer (`hetu/server/`)

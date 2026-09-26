@@ -14,5 +14,5 @@ PACKET_LAYERS:
 
 BACKENDS:
   test_db:
-    type: SQL
+    type: SQLite
     master: sqlite:///./data/chat.sqlite3

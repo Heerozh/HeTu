@@ -12,7 +12,7 @@ from fixtures.backends import *
 from fixtures.contexts import *
 from fixtures.defines import *
 from fixtures.redis_service import *
-from fixtures.sql_service import *
+from fixtures.sqlite_service import *
 from fixtures.testapp import *
 from fixtures.testdata import *
 

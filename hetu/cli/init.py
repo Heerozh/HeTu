@@ -305,7 +305,7 @@ def render_config(template_text: str, namespace: str, app_file: str) -> str:
     )
     text = text.replace("APP_FILE: app.py", f"APP_FILE: {app_file}")
     # 默认用 SQLite 调试数据库，无需启动数据库服务即可 hetu start
-    text = text.replace("type: Redis", "type: SQL")
+    text = text.replace("type: Redis", "type: SQLite")
     text = text.replace(
         "master: redis://127.0.0.1:6379/0",
         "master: sqlite:///./hetu.db",

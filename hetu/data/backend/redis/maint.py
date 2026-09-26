@@ -65,17 +65,12 @@ class RedisTableMaintenance(TableMaintenance):
         limit: int = 10,
     ) -> list[int]:
         """按索引范围查询指定表的数据"""
-        idx_key = self.client.index_key(ref, index_name)
-        io = self.client.io
-
-        # 生成zrange命令
-        comp_cls = ref.comp_cls
-        assert index_name in comp_cls.indexes_
-        b_left, b_right = self.client.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, False
+        idx_key, b_left, b_right, empty = self.client.zrange_args_(
+            ref, index_name, left, right, False
         )
-
-        row_ids = io.zrange(
+        if empty:
+            return []
+        row_ids = self.client.io.zrange(
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
         row_ids = cast(list[bytes], row_ids)
@@ -212,9 +207,9 @@ class RedisTableMaintenance(TableMaintenance):
         注意：此操作会删除所有数据！
         """
         io = self.client.io
-        # 删除数据
+        # 删除数据（所有簇的行与索引，不碰名字以本组件名开头的副本组件）
         del_keys = io.keys(
-            self.client.table_prefix(table_ref) + ":*",
+            self.client.all_clusters_prefix(table_ref) + "*",
             target_nodes=RedisCluster.PRIMARIES,
         )
         del_keys = cast(list[bytes], del_keys)
@@ -278,11 +273,11 @@ class RedisTableMaintenance(TableMaintenance):
                                 f"Unique标记导致。"
                             )
                         seen.add(value)
-                    # 按 dtype 转换后再算 sortable bytes，与 commit 写索引时一致。bytes 字段
-                    # 用原始字节（同 row_decode_），decode 成 str 后非 ASCII 的塞不进 S 列
-                    struct[idx_name] = value if is_bytes else value.decode()
-                    sortable = RedisBackendClient.to_sortable_bytes(struct[idx_name])
-                    members[sortable + b"\x00" + key.split(b":")[-1]] = 0
+                    # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
+                    member = RedisBackendClient.rebuild_member_(
+                        struct, idx_name, value, is_bytes, key.split(b":")[-1]
+                    )
+                    members[member] = 0
                 io.zadd(tmp_key, members)
             io.rename(tmp_key, idx_key)
         return len(keys)

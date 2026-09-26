@@ -101,7 +101,7 @@ class MigrateCommand(CommandInterface):
                 backends["default"] = backends[name]
 
         # 有服务器在跑时不能升级：迁移、清空易失表、重建索引在线执行都会写坏数据。
-        # 靠 worker 租约判断，SQL 后端没有租约，看不出来
+        # 靠 worker 租约判断，SQLite 后端没有租约，看不出来
         from ..data.backend import worker_keeper
 
         live: set[int] = set()

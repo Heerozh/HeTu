@@ -18,7 +18,8 @@ not the data-mapper sense the term has acquired in some web frameworks.
 entity. **`Components`** are typed tables (one per logical kind of data).
 **`Systems`** are async functions that operate on those tables inside a
 transaction. There is no inheritance, no per-row methods, and no central
-"world" object. State lives in Redis (or SQL); systems are stateless.
+"world" object. State lives in Redis (or SQLite in development); systems are
+stateless.
 
 ## Components
 
@@ -39,10 +40,11 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
-- **SQL backends cannot store a uint64 above `2**63 - 1`.** On the SQL
-  backends (SQLite / PostgreSQL / MariaDB) unsigned integers live in BIGINT
-  columns: committing a larger value is rejected with a `ValueError`, and range
-  bounds beyond it are clamped. The Redis backend has no such limit.
+- **SQLite is for development only.** The SQLite backend emulates Redis's
+  behavior on a local database file (index ordering, commit checks and
+  subscription notifications all match Redis), so there is nothing to install
+  and it is easy to debug, but it is not built for performance; use Redis in
+  production.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.

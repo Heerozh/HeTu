@@ -127,7 +127,7 @@ def _schema_diff(
 ) -> tuple[list[str], list[str]]:
     """比对本地组件类与服务器 meta 的定义，返回 ``(必须一致的差异, 只告警的差异)``。
 
-    比数据布局：``namespace``（SQL 表名含它）和 ``properties`` 的列名 / dtype / unique /
+    比数据布局：``namespace`` 和 ``properties`` 的列名 / dtype / unique /
     index；以及通知声明 ``table_sub`` / 各列 ``point_sub``——headless 写入走同一条
     commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新。``default`` 差异只告警；
     ``permission / rls_compare / volatile / readonly / backend`` 与 headless 无关，忽略。
@@ -406,7 +406,7 @@ async def connect(
     ----------
     backend_config: dict
         config.yml 里 ``BACKENDS[x]`` 那个 dict（``type`` / ``master`` / ``servants`` ...），
-        Redis 与 SQL 都支持。
+        Redis 与 SQLite 都支持。
     instance: str
         服务器实例名（``INSTANCES`` 里的一个），表按实例隔离。
     components:

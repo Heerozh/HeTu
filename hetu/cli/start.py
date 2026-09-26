@@ -45,14 +45,21 @@ def infer_backend_type_from_db_url(db_url: str) -> str:
     scheme = urlparse(db_url).scheme.lower()
     if scheme in {"redis", "rediss", "valkey", "valkeys"}:
         return "redis"
-    if scheme in {"postgres", "postgresql", "sqlite", "mariadb", "mysql"}:
-        return "sql"
+    if scheme == "sqlite":
+        return "sqlite"
+    if scheme in {"postgres", "postgresql", "mariadb", "mysql"}:
+        raise ValueError(
+            _(
+                "SQL 后端已移除，PostgreSQL / MariaDB 不再支持：'{scheme}'。"
+                "开发用 sqlite:///<库文件路径>，生产用 Redis"
+            ).format(scheme=scheme)
+        )
     if scheme in {"file"}:
         return "sharedmemory"
     raise ValueError(
         _(
             "不支持的数据库URL scheme: '{scheme}'。"
-            "目前支持 redis/rediss/valkey/valkeys/postgres/postgresql/sqlite/mysql/mariadb"
+            "目前支持 redis/rediss/valkey/valkeys/sqlite"
         ).format(scheme=scheme)
     )
 

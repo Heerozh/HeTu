@@ -1,5 +1,5 @@
 """
-进程共享的通知接收器（Redis 的 PubSubHub / SQL 的 SQLNotifyHub）：
+进程共享的通知接收器（Redis 的 PubSubHub / SQLite 的 SQLiteNotifyHub）：
 多个连接订阅同一频道只向后端订阅一次，各自都能收到更新，最后一个退订才真正退订。
 """
 
@@ -247,7 +247,7 @@ async def test_pubsub_connection_tcp_keepalive(filled_item_ref, mod_auto_backend
     try:
         pubsub = getattr(_hub(backend), "_pubsub", None)
         if pubsub is None:
-            return  # SQL 后端没有 pubsub 连接
+            return  # SQLite 后端没有 pubsub 连接
         sub, _ = await broker.subscribe_get(
             filled_item_ref, admin_ctx_(), "name", "Itm10"
         )

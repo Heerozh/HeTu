@@ -30,26 +30,15 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "aiomysql>=0.3.2",
-    "aiosqlite>=0.22.1",
-    "asyncpg>=0.31.0",
     "babel>=2.18.0",
     "brotli>=1.2.0",
     "cryptography>=45.0.0",
     "msgpack>=1.1.2",
     "msgspec>=0.20.0",
     "numpy~=2.3",
-    "psycopg>=3.3.3",
-    "psycopg-binary>=3.3.3",
-    # 1.2.1/1.2.2 删掉了 aiomysql 0.3.2 要 import 的内部函数（连 import 都失败）；
-    # >=1.2.3 由 sql/client.py 的 _patch_aiomysql_escape_bytes 兜底（aio-libs/aiomysql#1080）。
-    # aiomysql 0.3.3 发布后改成 aiomysql>=0.3.3，这两处排除和那个垫片都可以删
-    "pymysql>=1.1.2,!=1.2.1,!=1.2.2",
     "pyyaml~=6.0",
     "redis[hiredis]>=7,<9",
     "sanic~=25.3",
-    # SQL 后端用 create_async_engine，要 greenlet；SQLAlchemy 2.1 起只有 [asyncio] 才装它
-    "sqlalchemy[asyncio]>=2.0.46",
     "tabulate>=0.9.0",
     "tqdm>=4.67.3",
     "wcwidth>=0.2.13",
