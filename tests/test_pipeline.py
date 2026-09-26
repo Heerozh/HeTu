@@ -63,6 +63,44 @@ def test_handshake_returns_dict_message(base_pipeline):
     assert len(zstd_layer.dict_message) == zstd_layer.dict_size
 
 
+def test_zstd_skips_unencodable_samples(base_pipeline, monkeypatch):
+    """前面的层编码不了的样本要跳过：原来塞进去的是 "" (str)，zstd.train_dict 拼 bytes
+    时抛 TypeError，握手失败"""
+    zstd_layer = pipeline.ZstdLayer(level=3)
+    base_pipeline.add_layer(zstd_layer)
+    real_encode = base_pipeline.encode
+    calls = 0
+
+    def flaky_encode(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 10 == 0:
+            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr(base_pipeline, "encode", flaky_encode)
+    _ctx, msg = zstd_layer.handshake(b"")
+    assert msg == zstd_layer.dict_message
+    assert len(zstd_layer.dict_message) == zstd_layer.dict_size
+
+
+def test_zstd_samples_have_valid_strings(base_pipeline):
+    """随机样本里的字符串列得是合法字符串。整行填随机字节时，UTF-32 的字符串列几乎必然
+    填出超出 Unicode 范围的码位（numpy 造出坏掉的 str，编码出无效的 UTF-8），偶尔填出
+    代理字符（编码直接失败，样本被丢弃）"""
+    zstd_layer = pipeline.ZstdLayer(level=3)
+    base_pipeline.add_layer(zstd_layer)
+
+    samples = zstd_layer.initial_samples()
+    assert samples
+    for sample in samples:
+        assert isinstance(sample, bytes)
+        _cmd, _sub_id, row = msgspec.msgpack.decode(sample)
+        for value in row.values():
+            if isinstance(value, str):
+                value.encode("utf-8")  # 代理字符在这里抛
+
+
 def test_zstd_encode_decode_roundtrip(base_pipeline, mod_item_model):
     zstd_layer = pipeline.ZstdLayer(level=3)
     base_pipeline.add_layer(zstd_layer)
