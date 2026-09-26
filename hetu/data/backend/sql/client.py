@@ -9,7 +9,7 @@ import hashlib
 import logging
 import random
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
 
@@ -581,7 +581,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
 
     @classmethod
     def rows_decode_(
-        cls, comp_cls: type[BaseComponent], rows: Iterable[dict[str, Any]]
+        cls, comp_cls: type[BaseComponent], rows: Iterable[Mapping[Any, Any]]
     ) -> np.recarray:
         """
         把数据库读回的多行一次解码成 recarray，顺序与传入一致。`row_decode_` 的 STRUCT
@@ -1068,13 +1068,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
                 for row in rows
             ]
 
-        if len(rows) == 0:
-            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-        records = [
-            cast(np.record, self.row_decode_(comp_cls, dict(row), RowFormat.STRUCT))
-            for row in rows
-        ]
-        return np.rec.array(np.stack(records, dtype=comp_cls.dtypes))
+        return self.rows_decode_(comp_cls, rows)
 
     def _range_stmt(
         self,

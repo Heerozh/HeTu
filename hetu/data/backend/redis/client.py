@@ -840,20 +840,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         comp_cls = table_ref.comp_cls
         key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
-        rows = [
-            self.row_decode_(comp_cls, row, row_format)
-            for row in await self._hgetall_many(key_prefix, row_ids)
-            if row
+        raw_rows = [row for row in await self._hgetall_many(key_prefix, row_ids) if row]
+        if row_format == RowFormat.STRUCT:
+            return self.rows_decode_(comp_cls, raw_rows)
+        return [
+            cast(dict[str, Any], self.row_decode_(comp_cls, row, row_format))
+            for row in raw_rows
         ]
-
-        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
-            return cast(list[dict[str, Any]], rows)
-        else:
-            if len(rows) == 0:
-                return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-            else:
-                record_list = cast(list[np.record], rows)
-                return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
     async def _zrange_members(
         self,
