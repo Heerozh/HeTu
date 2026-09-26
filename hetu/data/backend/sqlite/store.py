@@ -163,10 +163,21 @@ class SQLiteStore:
     # ============ 库文件 ============
 
     def _check_format(self) -> None:
+        """
+        认库文件。标识和表清单在同一个读事务里读（同一个快照）：几个进程同时打开新库时，别的
+        进程可能正好在两次读之间建好库，分开读会看到"标识还是 0、表却已经有了"而误判成别人的库
+        """
         conn = self.conn
-        app_id = conn.execute("PRAGMA application_id").fetchone()[0]
-        if app_id == APPLICATION_ID:
+        with self.read_txn():
+            app_id = conn.execute("PRAGMA application_id").fetchone()[0]
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+            tables = {
+                str(row[0]).lower()
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        if app_id == APPLICATION_ID:
             if version != FORMAT_VERSION:
                 raise ValueError(
                     _(
@@ -175,10 +186,6 @@ class SQLiteStore:
                     ).format(path=self.path, version=version, expected=FORMAT_VERSION)
                 )
             return
-        tables = {
-            str(row[0]).lower()
-            for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
         if LEGACY_META_TABLE.lower() in tables:
             raise ValueError(
                 _(
