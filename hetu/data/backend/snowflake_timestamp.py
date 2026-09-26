@@ -88,7 +88,7 @@ class SnowflakeTimestampKeeper:
     def __init__(self, table: Table, worker_id: int):
         self.table = table
         self.worker_id = worker_id
-        # 已确认本 worker_id 的行存在，之后 save 只需 direct_set
+        # 已确认本 worker_id 的行存在，之后 save 只需 direct_set（它发现行没了就重置）
         self._row_ready = False
 
     @staticmethod
@@ -162,17 +162,25 @@ class SnowflakeTimestampKeeper:
         """把 `last_timestamp` 原样写成水位（精确值），用于正常关服：调用方保证之后不会再
         发出时间戳更大的ID，周期写入要用 `reserve`。无条件写，不做任何所有权校验（见类文档）。
 
-        行必须先存在，才能 `direct_set`。它是 `HSET`（SQLite 后端照 Redis 模拟），缺行时会建出
-        一个只有 `last_timestamp`、缺 `id` 等字段的残缺行，之后按 STRUCT 读这行就 KeyError。
-        以前靠 GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在没有任何人替本类
-        建行，所以首次写入前先确认行在不在，缺行就自己补建（只在进程内做一次）。
+        `direct_set` 只改已存在的行，缺行时什么都不写、返回 False，所以行得先有人建。以前靠
+        GeneralWorkerKeeper 抢租约时把行建出来，那个类已经删了，现在由本类自己补建：首次写入前
+        确认一次行在不在；之后 direct_set 返回 False（运行中行被删了，比如开着服跑了
+        `hetu upgrade`，它会清空易失表）也重新补建，不然水位从此静默地写不进去。
+
+        旧版本的 direct_set 是 `HSET`，缺行时建出过只有 `last_timestamp`、缺 `id` 的残缺行，
+        已部署的库里可能还留着。它有 `last_timestamp` 字段，direct_set 照样能写（load 也按
+        RAW 读它）。
         """
         if not self._row_ready:
             if not await self._row_exists():
                 await self._create_row(last_timestamp)
                 return
             self._row_ready = True
-        await self.table.direct_set(self.worker_id, last_timestamp=str(last_timestamp))
+        if not await self.table.direct_set(
+            self.worker_id, last_timestamp=str(last_timestamp)
+        ):
+            self._row_ready = False
+            await self._create_row(last_timestamp)
 
     async def _row_exists(self) -> bool:
         # 按 RAW 读：旧版本留下的残缺行（缺 id）按 STRUCT 读会 KeyError。它照样能存水位
