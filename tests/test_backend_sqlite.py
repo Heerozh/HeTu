@@ -178,6 +178,55 @@ def test_refuses_other_files(tmp_path, sqls, match):
     assert path.read_bytes() == before
 
 
+def test_new_file_initialized_by_another_process_while_checking(tmp_path, monkeypatch):
+    """
+    几个 worker 同时打开同一个新库文件：本进程读完 application_id（还是 0）、还没读表清单时，
+    别的进程把库初始化好了。两次读要看同一个快照，不能把"app_id 是 0 却已经有表"当成别人的库
+    """
+    path = str(tmp_path / "new.db")
+    real_connect = sqlite3.connect
+    other = threading.Thread(target=lambda: open_store(path, 5000).close())
+    wrapped: list[bool] = []
+
+    class RacingConn:
+        """读表清单之前，让"别的进程"把库初始化完（SQLite 一允许它提交就提交）"""
+
+        def __init__(self, conn: sqlite3.Connection):
+            self._conn = conn
+            self._fired = False
+
+        def __getattr__(self, name):
+            return getattr(self._conn, name)
+
+        def execute(self, sql, *args):
+            if "sqlite_master" in sql and not self._fired:
+                self._fired = True
+                other.start()
+                if not self._conn.in_transaction:
+                    other.join()  # 本进程没拿着快照：别的进程马上就能提交完
+            return self._conn.execute(sql, *args)
+
+    def connect(*args, **kwargs):
+        conn = real_connect(*args, **kwargs)
+        if wrapped:
+            return conn
+        wrapped.append(True)
+        return RacingConn(conn)
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    try:
+        store = open_store(path, 5000)
+        store.close()
+    finally:
+        if other.ident is not None:  # 起过才 join
+            other.join()
+    conn = real_connect(path)
+    try:
+        assert conn.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
+    finally:
+        conn.close()
+
+
 # ============ 行表：每组件一张、每字段一列，DB 工具能直接看 ============
 
 
