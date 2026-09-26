@@ -9,8 +9,7 @@ from typing import Callable
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
-from redis.asyncio.cluster import RedisCluster
+from fixtures.backends import raw_key_count
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
@@ -363,55 +362,6 @@ async def test_unique_race_on_updated_row_has_priority(item_ref, mod_auto_backen
             await repo.insert(r)
             p.qty = 8
             await repo.update(p)  # p 的版本已过期
-
-
-@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
-async def test_unique_ci_collation_multi_candidate_is_deterministic(
-    monkeypatch, new_component_env, mod_auto_backend
-):
-    """SQL 后端遇到大小写不敏感 collation（MariaDB 默认；这里用 SQLite 的 NOCASE 模拟）：
-    一个事务盲 insert 两个不同的 name，其中一个按数据库的相等语义撞上既有行（'Alice' vs
-    'alice'）→ 必须是确定性 UniqueViolation、只跑一次；不能因为查回的值对不上本地候选就漏判，
-    交给 UNIQUE 约束报错后被当成 RaceCondition 反复重试"""
-    import sqlalchemy as sa
-    from fixtures.testdata import create_ref
-
-    from hetu.data import BaseComponent, Permission, define_component, property_field
-    from hetu.data.backend.sql import client as sql_client
-
-    real_type = sql_client._numpy_to_sqla_type
-
-    def ci_type(dtype):
-        col_type = real_type(dtype)
-        if isinstance(col_type, sa.String):
-            return sa.String(length=col_type.length, collation="NOCASE")
-        return col_type
-
-    monkeypatch.setattr(sql_client, "_numpy_to_sqla_type", ci_type)
-
-    @define_component(namespace="pytest", permission=Permission.ADMIN)
-    class CIName(BaseComponent):
-        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
-        time: np.int64 = property_field(0, unique=True, index=True)
-
-    backend: Backend = mod_auto_backend()
-    ref = create_ref(CIName, backend)  # 表在打了 collation 补丁之后建
-    async with backend.session("pytest", 1) as s:
-        r = CIName.new_row()
-        r.name, r.time = "alice", 300
-        await s.using(CIName).insert(r)
-
-    attempts = 0
-    with pytest.raises(UniqueViolation, match="name"):
-        async for attempt in backend.session("pytest", 1).retry(3):
-            async with attempt as s:
-                attempts += 1
-                repo = s.using(ref.comp_cls)
-                for name, t in (("Alice", 301), ("Bob", 302)):
-                    r = CIName.new_row()
-                    r.name, r.time = name, t
-                    await repo.insert(r)
-    assert attempts == 1
 
 
 async def test_unique_explicit_id_pk_conflict(item_ref, mod_auto_backend):
@@ -1131,9 +1081,8 @@ async def test_session_exception(item_ref, mod_auto_backend):
         assert len(row) == 0
 
 
-@use_redis_family_backend_only
-async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name):
-    """测试Redis后端删除所有key后，index key应该为空"""
+async def test_empty_index_after_deleting_all_rows(filled_item_ref, mod_auto_backend):
+    """行都删掉之后，表名下一个 key 都不剩（索引的 zset 删空了自动消失）"""
     backend: Backend = mod_auto_backend()
 
     # 测试更新name后再把所有key删除后index是否正常为空
@@ -1152,11 +1101,7 @@ async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name
         for row in rows:
             item_repo.delete(row.id)
 
-    # time.sleep(1)  # 等待部分key过期
-    assert (
-        backend.master.io.keys("pytest:Item:{CLU*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
-        == []
-    )  # type: ignore
+    assert raw_key_count(backend, filled_item_ref) == 0
 
 
 async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):
@@ -1583,10 +1528,9 @@ async def test_single_index_row_is_detached(item_ref, mod_auto_backend, query):
         assert saved is not None and saved.qty == 7
 
 
-@use_redis_family_backend_only
 async def test_untouched_nan_row_stays_clean_read(item_ref, mod_auto_backend):
     """含 NaN 的行在 upsert 里没改：不写入，提交时仍按纯读校验版本；显式 update 也判成
-    没有修改。SQLite / MariaDB 存不了 NaN，只测 Redis 系"""
+    没有修改"""
     backend = mod_auto_backend()
     comp = item_ref.comp_cls
 

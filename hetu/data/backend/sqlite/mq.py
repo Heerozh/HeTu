@@ -12,42 +12,43 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, final, override
 
 import msgpack
-import sqlalchemy as sa
 
 from ....i18n import _
 from ..base import HubMQClient, MQClient, MQHub
+from .store import SQLiteStore
 
 if TYPE_CHECKING:
-    from .client import SQLBackendClient
+    from .client import SQLiteBackendClient
 
 logger = logging.getLogger("HeTu.root")
 PULL_BATCH_SIZE = 256
 # 轮询通知表失败后的退避区间（与 Redis pubsub 节点失效后的重订阅一致）
 POLL_BACKOFF_MIN = 0.5
 POLL_BACKOFF_MAX = 5.0
-# 避免SQLite等数据库在IN参数过多时触发参数上限/编译开销问题。
+# 订阅的频道超过这么多就不在查询里按频道过滤（IN 参数太多），改成按 id 扫描后本地过滤
 MAX_CHANNELS_IN_FILTER = 500
 
 
-class SQLNotifyHub(MQHub):
+class SQLiteNotifyHub(MQHub):
     """
-    每个进程（每个 SQLBackendClient）一个：唯一的通知表轮询任务 + "频道 → 本进程内订阅了
-    它的连接" 分发表。以前是每个连接各自轮询同一张通知表，DB 负载与在线人数成正比。
+    每个进程（每个 servant 客户端）一个：唯一的通知表轮询任务 + "频道 → 本进程内订阅了它的连接"
+    分发表。commit 把要发的通知和数据在同一个写事务里写进通知表；SQLite 只有一个写者，id 顺序就是
+    提交顺序，按 id 消费不会漏。
 
-    与 Redis pubsub 语义对齐，只消费订阅之后产生的通知：每个频道加入本进程时记下当时通知表的
-    最大 id 作为水位，之前的通知不算它的（游标只随命中订阅频道的行前进，可能落后于表尾，
-    新频道加入时不能把旧通知重放给它）。没有任何订阅时不轮询。
+    与 Redis pubsub 语义对齐，只消费订阅之后产生的通知：每个频道加入本进程时记下当时发过的最后一个
+    通知 id 作为水位，之前的通知不算它的。没有任何订阅时不轮询。
 
-    取水位和轮询互斥（同一把锁），水位读回来到记下之间轮询不会把这期间的通知消费掉；
-    同一频道先登记再取水位，并发的后来者看到已登记就不再取，先到者的水位说了算。
-    已知局限：max(id) 不是提交序（PostgreSQL/MariaDB 的自增 id 在事务提交前就分配），
-    先分配了较小 id、后于水位提交的通知会被当成旧通知，游标本身也有同样的窗口。
+    取水位和轮询互斥（同一把锁），水位读回来到记下之间轮询不会把这期间的通知消费掉；同一频道先登记
+    再取水位，并发的后来者看到已登记就不再取，先到者的水位说了算。
+
+    通知只保留一段时间（见 `SQLiteBackendClient.NOTIFY_TTL_SECONDS`）。游标之后的通知已经被清理
+    （进程卡住太久）时，按 Redis pubsub 断线重订的语义给仍订阅的频道补发一次（`MQHub.resync_`）。
     """
 
-    def __init__(self, client: SQLBackendClient):
+    def __init__(self, client: SQLiteBackendClient):
         super().__init__()
         self._client = client
-        # 频道加入 hub 时通知表的最大 id：id 不大于它的通知不属于该频道的订阅者。
+        # 频道加入 hub 时发过的最后一个通知 id：id 不大于它的通知不属于该频道的订阅者。
         # 已登记但还没取到水位的频道不在这里，轮询遇到它的通知先跳过
         self._since: dict[str, int] = {}
         self._last_notify_id = 0
@@ -60,10 +61,7 @@ class SQLNotifyHub(MQHub):
 
     async def _get_current_notify_id(self) -> int:
         # 查不到就让异常抛给 add() 的调用方：游标退回 0 会把整张通知表重放一遍
-        table = self._client.notify_table()
-        async with self._client.aio.connect() as conn:
-            latest = (await conn.execute(sa.select(sa.func.max(table.c.id)))).scalar()
-        return int(latest or 0)
+        return await self._client.run_(SQLiteStore.notify_tail)
 
     def _polling(self) -> bool:
         return self._task is not None and not self._task.done()
@@ -83,6 +81,7 @@ class SQLNotifyHub(MQHub):
             for channel in channels:
                 self._placing.pop(channel, None)
 
+    @override
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
         """登记 mq 对这些频道的订阅，返回时水位已经记好（别人正在取的也等到取完）"""
         if self._closed:
@@ -128,12 +127,12 @@ class SQLNotifyHub(MQHub):
     def _on_channel_gone(self, channel: str) -> None:
         self._since.pop(channel, None)
 
+    @override
     async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
-        """撤销 mq 对这些频道的订阅。本进程没人订阅了轮询任务会自己退出，别空转打 DB"""
+        """撤销 mq 对这些频道的订阅。本进程没人订阅了轮询任务会自己退出，别空转"""
         self._release(mq, channels)
 
     async def _stop_task(self) -> None:
-        # 只在 close 时取消：在 SQL 语句执行中途取消会弄坏池里的连接
         if self._task is None:
             return
         task, self._task = self._task, None
@@ -149,55 +148,70 @@ class SQLNotifyHub(MQHub):
     async def poll_once(self) -> tuple[int, int]:
         """
         查一批游标之后的通知并分发给订阅者。返回 (本批查到的行数, 其中命中本进程订阅的条数)。
-        回退到按 id 扫描模式时可能整批都是无关频道，命中为 0。
+        不按频道过滤时可能整批都是无关频道，命中为 0。
         """
-        notify = self._client.notify_table()
-        async with self._lock, self._client.aio.connect() as conn:
+        async with self._lock:
             channels = list(self._subs)
             use_channel_filter = self._should_use_channel_in_filter(len(channels))
             if not use_channel_filter and not self._large_sub_warned:
                 logger.warning(
-                    "⚠️ [💾SQL] 订阅频道过多，pull切换为按id扫描后本地过滤模式，"
+                    "⚠️ [💾SQLite] 订阅频道过多，轮询切换为按id扫描后本地过滤模式，"
                     f"当前订阅数={len(channels)}，阈值={MAX_CHANNELS_IN_FILTER}"
                 )
                 self._large_sub_warned = True
-
-            stmt = sa.select(notify.c.id, notify.c.channel, notify.c.payload).where(
-                notify.c.id > self._last_notify_id
+            cursor = self._last_notify_id
+            rows, min_id, tail = await self._client.run_(
+                SQLiteStore.notify_fetch,
+                cursor,
+                channels if use_channel_filter else None,
+                PULL_BATCH_SIZE,
             )
-            if use_channel_filter:
-                stmt = stmt.where(notify.c.channel.in_(channels))
-            stmt = stmt.order_by(notify.c.id.asc()).limit(PULL_BATCH_SIZE)
-            rows = (await conn.execute(stmt)).mappings().all()
 
-        hits = 0
-        for row in rows:
-            msg_id = int(row["id"])
-            if msg_id > self._last_notify_id:
-                self._last_notify_id = msg_id
-            channel_name = str(row["channel"])
-            since = self._since.get(channel_name)
-            # 没水位 = 刚登记还没取到（取水位和本轮询互斥，它取回的 max(id) 只会 >= 本行）
-            if since is None or msg_id <= since or channel_name not in self._subs:
-                continue
-            hits += 1
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    _("🔔 [💾SQL] 收到订阅更新通知: {channel_name}").format(
-                        channel_name=channel_name
-                    )
-                )
-            payload = row.get("payload")
-            ids = msgpack.unpackb(payload) if payload else None
-            dropped = self._dispatch(channel_name, ids)
-            if dropped:
+            # 游标之后的通知已经被清理掉了（进程卡住太久）：这段时间的变更不可知，同 Redis
+            # pubsub 断线重订，给已经有水位的频道补发一次
+            lost = min_id > cursor + 1 if min_id is not None else tail > cursor
+            if lost:
                 logger.warning(
                     _(
-                        "⚠️ [💾SQL] 订阅更新通知来不及处理，"
-                        "丢弃了{seconds}秒前的消息共{count}条"
-                    ).format(seconds=MQClient.DROP_AFTER, count=dropped)
+                        "⚠️ [💾SQLite] 通知游标 {cursor} 之后的通知已被清理，"
+                        "给订阅的频道补发一次重读"
+                    ).format(cursor=cursor)
                 )
+                self._warn_dropped(
+                    self.resync_([ch for ch in channels if ch in self._since])
+                )
+
+            hits = 0
+            for msg_id, channel_name, payload in rows:
+                self._last_notify_id = max(self._last_notify_id, msg_id)
+                since = self._since.get(channel_name)
+                # 没水位 = 刚登记还没取到（取水位和本轮询互斥，它取回的表尾只会 >= 本行）
+                if since is None or msg_id <= since or channel_name not in self._subs:
+                    continue
+                hits += 1
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        _("🔔 [💾SQLite] 收到订阅更新通知: {channel_name}").format(
+                            channel_name=channel_name
+                        )
+                    )
+                ids = msgpack.unpackb(payload) if payload else None
+                self._warn_dropped(self._dispatch(channel_name, ids))
+            if len(rows) < PULL_BATCH_SIZE:
+                # 同一个快照里，游标之后与本进程订阅有关的通知已经全部取回：游标直接推到表尾，
+                # 别让它因为没有相关通知而一直落在后面（落到清理范围里会误判成丢了通知）
+                self._last_notify_id = max(self._last_notify_id, tail)
         return len(rows), hits
+
+    @staticmethod
+    def _warn_dropped(dropped: int) -> None:
+        if dropped:
+            logger.warning(
+                _(
+                    "⚠️ [💾SQLite] 订阅更新通知来不及处理，"
+                    "丢弃了{seconds}秒前的消息共{count}条"
+                ).format(seconds=MQClient.DROP_AFTER, count=dropped)
+            )
 
     async def _run(self) -> None:
         interval = 1 / MQClient.UPDATE_FREQUENCY
@@ -212,20 +226,20 @@ class SQLNotifyHub(MQHub):
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                # 数据库不可用时按轮询节奏重试等于每秒几十次重连 + 几十条带栈日志，
-                # 每个 worker 都这样：指数退避，栈只在首次记，之后一行一条
+                # 库文件不可用时按轮询节奏重试等于每秒几十条带栈日志，每个 worker 都这样：
+                # 指数退避，栈只在首次记，之后一行一条
                 failures += 1
                 backoff = min(POLL_BACKOFF_MIN * 2 ** (failures - 1), POLL_BACKOFF_MAX)
                 if failures == 1:
                     logger.exception(
-                        _("❌ [💾SQL] 轮询通知表失败，{backoff}s 后重试").format(
+                        _("❌ [💾SQLite] 轮询通知表失败，{backoff}s 后重试").format(
                             backoff=backoff
                         )
                     )
                 else:
                     logger.error(
                         _(
-                            "❌ [💾SQL] 轮询通知表连续失败 {count} 次，{backoff}s 后重试：{err}"
+                            "❌ [💾SQLite] 轮询通知表连续失败 {count} 次，{backoff}s 后重试：{err}"
                         ).format(
                             count=failures,
                             backoff=backoff,
@@ -236,7 +250,7 @@ class SQLNotifyHub(MQHub):
                 continue
             if failures:
                 logger.info(
-                    _("✅ [💾SQL] 轮询通知表恢复，期间失败 {count} 次").format(
+                    _("✅ [💾SQLite] 轮询通知表恢复，期间失败 {count} 次").format(
                         count=failures
                     )
                 )
@@ -254,10 +268,10 @@ class SQLNotifyHub(MQHub):
 
 
 @final
-class SQLMQClient(HubMQClient):
+class SQLiteMQClient(HubMQClient):
     """
     每个用户连接一个实例：只是本连接订阅集合 + 本地消息队列，
-    通知表的轮询由本进程共享的 `SQLNotifyHub` 负责。
+    通知表的轮询由本进程共享的 `SQLiteNotifyHub` 负责。
     """
 
-    LOG_TAG = "💾SQL"
+    LOG_TAG = "💾SQLite"

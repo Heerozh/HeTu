@@ -141,9 +141,8 @@ None（不再查询数据库），commit 时若该值已被并发写入则判为
 结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
 
 非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
-副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的（SQL 后端挡不住
-两个事务同时提交，见 `range`）；命中时只保证返回的这一行没被改过，之后别的事务再插入
-同值的行不算冲突。
+副本）判 [`RaceCondition`](exceptions.md#racecondition)，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回的
+这一行没被改过，之后别的事务再插入同值的行不算冲突。
 
 
 **Parameters**
@@ -191,7 +190,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:289`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L289)</small>
+<small>Source: [`hetu/data/backend/repo.py:288`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L288)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -204,9 +203,7 @@ range(
 读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
 区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
 [`RaceCondition`](exceptions.md#racecondition)，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
-的写法是安全的。SQL 后端的校验是在提交事务里重跑同一条查询、不加锁，
-两个事务同时提交时可能都看到区间没变、都提交成功；要严格防重复请用unique 约束，
-或用 Redis 后端。
+的写法是安全的。
 
 截断读（数据库返回了 `limit` 行）也防幻读，和语法一致，只保护看到的前 `limit` 行：
 区间外的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
@@ -266,7 +263,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:477`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L477)</small>
+<small>Source: [`hetu/data/backend/repo.py:474`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L474)</small>
 
 向Session中添加一行待插入数据。
 
@@ -298,7 +295,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:528`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L528)</small>
+<small>Source: [`hetu/data/backend/repo.py:525`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L525)</small>
 
 向Session中添加一行待更新数据。
 
@@ -327,7 +324,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:564`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L564)</small>
+<small>Source: [`hetu/data/backend/repo.py:561`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L561)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -362,7 +359,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:593`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L593)</small>
+<small>Source: [`hetu/data/backend/repo.py:590`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L590)</small>
 
 向Session中添加一行待删除数据。
 
@@ -669,7 +666,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:459`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L459)</small>
+<small>Source: [`hetu/data/backend/base.py:467`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L467)</small>
 
 从数据库直接获取单行数据。
 
@@ -714,7 +711,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:579`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L579)</small>
+<small>Source: [`hetu/data/backend/base.py:587`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L587)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -773,18 +770,31 @@ servant_range(
 #### `direct_set`
 
 ```python
-direct_set(id_: int, **kwargs: str) -> None
+direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:668`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L668)</small>
+<small>Source: [`hetu/data/backend/base.py:676`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L676)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
 直接写入属性到数据库，避免session必须要执行get+事务2条指令。
 仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
 一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+
+只改已存在的行：行不存在（比如已被删掉），或行里没有要写的字段时，什么都不写，
+返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。
+
+这是维护类写入：不改 `_version`、不参与乐观锁，也**不保证**触发订阅通知——行订阅可能
+立刻收到，也可能等该行下一次事务写入时一起推；整表订阅收不到。需要订阅方及时看到的数据
+请走事务。（Redis 上行频道就是行 key 的 keyspace 通知，会顺带触发；SQLite 后端不发。）
+
+UNSAFE, volatile components only, no type checks. Only updates an existing row:
+if the row (or one of the fields) does not exist, nothing is written and False is
+returned; True means the fields were written. A maintenance-class write: it does
+not bump `_version`, takes no part in optimistic locking, and is **not guaranteed**
+to notify subscribers (a row subscriber may see it at once or only with the row's
+next transactional write; table subscribers never do). Use a transaction for data
+that subscribers must see promptly.
 
 
 

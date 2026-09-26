@@ -41,7 +41,7 @@ class RangeObservation:
     ids: list[int]
     # 后端相关的校验参数
     bounds: tuple
-    # Redis：ZRANGE 原样 member，commit 前核对读取一致性；SQL 不用
+    # ZRANGE 原样 member（Redis / SQLite 相同），commit 前核对读取一致性
     members: list[bytes] | None = None
     # 等值点查的值，否则 None
     point: object | None = None

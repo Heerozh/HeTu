@@ -10,7 +10,7 @@ import logging
 import os
 
 # 必须在构造时提供 default：filter 会在未 set 过此 ContextVar 的线程里运行
-# （如 aiosqlite 的 DB worker thread），ContextVar 不跨线程继承，缺省时 .get()
+# （如 SQLite 后端的专用线程），ContextVar 不跨线程继承，缺省时 .get()
 # 会抛 LookupError。不能改用 .set() 代替，.set() 只对当前线程的 context 生效。
 log_contex_var = contextvars.ContextVar("client_ctx", default="[None|None|Startup]")
 

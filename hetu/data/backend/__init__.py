@@ -5,8 +5,8 @@
 @email: heeroz@gmail.com
 """
 
-# 内置后端（redis / sql）不在此 eager import：BackendClientFactory 按 alias 懒加载，
-# 这样 `import hetu` 不会把 redis / sqlalchemy 一起拖进来（headless 进程只想认识其中一种）。
+# 内置后端（redis / sqlite）不在此 eager import：BackendClientFactory 按 alias 懒加载，
+# 这样 `import hetu` 不会把用不到的后端一起拖进来（headless 进程只想认识其中一种）。
 from .base import (
     BackendClient,
     BackendClientFactory,
@@ -61,19 +61,18 @@ class Backend:
             for k, v in config.items()
             if k not in {"type", "master", "servants", "master_weight"}
         }
+        client_cls = BackendClientFactory.client_class(config["type"])
+        client_cls.check_config_(config)
 
-        # 如果未填写servants，则将master也作为servant使用(为了api统一)
-        servants_urls = config.get("servants", [])
+        # 如果未填写servants，则将master也作为servant使用(为了api统一)。拷贝一份，不改调用方的配置
+        servants_urls = list(config.get("servants") or [])
         if not servants_urls:
             servants_urls.append(config["master"])
 
         # 连接数据库
-        self._master = BackendClientFactory.create(
-            config["type"], config["master"], False, extra_config
-        )
+        self._master = client_cls(config["master"], False, **extra_config)
         self._servants = [
-            BackendClientFactory.create(config["type"], servant, True, extra_config)
-            for servant in servants_urls
+            client_cls(servant, True, **extra_config) for servant in servants_urls
         ]
 
         # master_weight表示选中的权重，每台副本数据库权重固定为1.0

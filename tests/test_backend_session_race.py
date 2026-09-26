@@ -2,18 +2,10 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-import sqlalchemy as sa
-from fixtures.backends import (
-    SQL_BACKENDS,
-    use_redis_family_backend_only,
-    xfail_on_backends,
-)
-from sqlalchemy import exc as sa_exc
-from sqlalchemy.ext.asyncio import AsyncConnection
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
-from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -620,7 +612,6 @@ async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend)
     assert {name for name, _ in reads} == {"A"}, reads
 
 
-@use_redis_family_backend_only
 async def test_orphan_index_member_raises_inconsistent_range_read(
     item_ref, mod_auto_backend
 ):
@@ -664,8 +655,8 @@ def _rendezvous(parties: int):
     """
     碰头点：先到的等到 `parties` 个都到齐再一起往下走。
 
-    等待有上限：提交若在拿写锁时被另一个提交挡住（比如 SQLite 改成 BEGIN IMMEDIATE 之后），
-    根本走不到碰头点，不能一直等，否则两边互相等死。
+    等待有上限：万一某个提交走不到碰头点（比如被别的写锁挡住），不能一直等，否则两边互相
+    等死。
     """
     arrived = 0
     everyone = asyncio.Event()
@@ -685,52 +676,19 @@ def _rendezvous(parties: int):
 
 def _meet_between_check_and_write(backend: Backend, parties: int = 2):
     """
-    让每个提交在"校验做完、还没写入"处碰头：先到的等其他提交也校验完，再各自写入，构造
-    提交交错（都先校验、后写入）。Redis 的碰头点在 EVALSHA 之前（脚本里校验与写入原子
-    执行，交错不进去）；SQL 在提交事务里的最后一项校验（unique）之后、insert / update 之前。
+    让每个提交在提交脚本之前碰头：先到的等其他提交也到齐，再一起提交，构造同时提交。Redis 的
+    Lua、SQLite 的写事务里校验与写入原子执行，交错不进去，后执行的那个一定看得到先执行的写入。
     """
     master = backend.master
+    assert isinstance(master, RedisModelClient)
     meet = _rendezvous(parties)
+    orig_commit_script = master.commit_script_
 
-    if isinstance(master, RedisBackendClient):
-        orig_lua_commit = master.lua_commit
-        assert orig_lua_commit is not None
-
-        async def lua_commit(keys, args):
-            await meet()
-            return await orig_lua_commit(keys, args)
-
-        return patch.object(master, "lua_commit", new=lua_commit)
-
-    orig_check = master._check_unique_conflicts  # type: ignore[attr-defined]
-
-    async def check_unique_conflicts(conn, dirties, absent_by_ref):
-        await orig_check(conn, dirties, absent_by_ref)
+    async def commit_script_(keys, args):
         await meet()
+        return await orig_commit_script(keys, args)
 
-    return patch.object(master, "_check_unique_conflicts", new=check_unique_conflicts)
-
-
-def _meet_before_second_update(backend: Backend, parties: int = 2):
-    """
-    SQL 后端：每个提交执行完自己的第一条 UPDATE、执行第二条之前碰头，保证各自先锁住一行、
-    再去要对方锁着的那一行（交错得正好互等）。Redis 没有这一步，碰头点同
-    `_meet_between_check_and_write`。
-    """
-    if isinstance(backend.master, RedisBackendClient):
-        return _meet_between_check_and_write(backend, parties)
-    meet = _rendezvous(parties)
-    orig_execute = AsyncConnection.execute
-    updates: dict[int, int] = {}
-
-    async def execute(self, statement, *args, **kwargs):
-        if isinstance(statement, sa.Update):
-            updates[id(self)] = updates.get(id(self), 0) + 1
-            if updates[id(self)] == 2:
-                await meet()
-        return await orig_execute(self, statement, *args, **kwargs)
-
-    return patch.object(AsyncConnection, "execute", new=execute)
+    return patch.object(master, "commit_script_", new=commit_script_)
 
 
 def _raise_unexpected(results, *expected: type[BaseException]) -> None:
@@ -740,24 +698,11 @@ def _raise_unexpected(results, *expected: type[BaseException]) -> None:
             raise r
 
 
-async def test_range_phantom_interleaved_commits(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_range_phantom_interleaved_commits(item_ref, mod_auto_backend):
     """
-    两个事务都读空同一区间、各插一行，提交交错（都先校验、再写入）：只能成功一个，另一个
-    判竞态。嵌套 session 的用例只覆盖了先后提交，这里覆盖同时提交。
-
-    Redis 的校验与写入在一个 Lua 脚本里原子执行，交错不进去。SQL 后端在提交事务里重跑查询、
-    不加锁，两边都能校验通过、都写入成功；SQLite 更甚，驱动只在第一条写语句前才发 BEGIN，
-    提交时的校验 SELECT 根本不在写入的事务里。SQL 后端先标 strict xfail，修好哪个去掉哪个。
+    两个事务都读空同一区间、各插一行，同时提交：只能成功一个，另一个判竞态。嵌套 session 的
+    用例只覆盖了先后提交，这里覆盖同时提交。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        SQL_BACKENDS,
-        raises=AssertionError,
-        reason="SQL 后端的区间校验不加锁，两个交错的提交都能成功，插出重复行（待修）",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
 
@@ -779,23 +724,11 @@ async def test_range_phantom_interleaved_commits(
     assert sum(isinstance(r, RaceCondition) for r in results) == 1
 
 
-async def test_write_skew_interleaved_commits(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_write_skew_interleaved_commits(item_ref, mod_auto_backend):
     """
-    写偏斜：两个事务各读一行、改另一行（都依赖自己读到的那行没变），提交交错：只能成功
-    一个，另一个判竞态。
-
-    Redis 在 Lua 里校验纯读行的版本、再写入，原子执行。SQL 后端校验纯读行版本的 SELECT
-    不加锁，两边都校验通过、都写入成功。
+    写偏斜：两个事务各读一行、改另一行（都依赖自己读到的那行没变），同时提交：只能成功一个，
+    另一个判竞态（纯读行的版本和写入在同一个原子提交里校验）。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        SQL_BACKENDS,
-        raises=AssertionError,
-        reason="SQL 后端校验纯读行版本时不加锁，交错的两个提交都能成功（写偏斜）",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     a = _item(comp, time=1, name="a")
@@ -821,23 +754,11 @@ async def test_write_skew_interleaved_commits(
     assert sum(isinstance(r, RaceCondition) for r in results) == 1
 
 
-async def test_unique_blind_insert_interleaved_commits(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_unique_blind_insert_interleaved_commits(item_ref, mod_auto_backend):
     """
-    两个事务都没读过、直接插同一个 unique 值，提交交错：一个成功，另一个是确定性的
+    两个事务都没读过、直接插同一个 unique 值，同时提交：一个成功，另一个是确定性的
     UniqueViolation（本事务没观察过这个值不存在，重试没用）。
-
-    SQL 后端做 unique 检查的 SELECT 不加锁，两边都查不到，后写入的撞上 UNIQUE 约束被当成
-    竞态，要多重试一轮才得到 UniqueViolation。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        SQL_BACKENDS,
-        raises=AssertionError,
-        reason="SQL 后端交错的盲插先报 RaceCondition，重试一轮才是 UniqueViolation",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
 
@@ -855,22 +776,8 @@ async def test_unique_blind_insert_interleaved_commits(
     assert len(await _master_range(backend, comp, name=("dup", "dup"))) == 1
 
 
-async def test_opposite_order_updates_interleaved_commits(
-    item_ref, mod_auto_backend, backend_name, request
-):
-    """
-    两个事务以相反的顺序更新同样两行，提交交错：一个成功，另一个判竞态（重试即可）。
-
-    PG / MariaDB 上两个提交各持一行的行锁、互等对方，数据库判死锁回滚其中一个，报的是
-    DBAPIError：不会重试，直接报给调用方（PG 还要先等 deadlock_timeout，默认 1 秒）。
-    """
-    xfail_on_backends(
-        request,
-        backend_name,
-        ("postgres", "mariadb"),
-        raises=sa_exc.DBAPIError,
-        reason="提交时的死锁没有转成 RaceCondition",
-    )
+async def test_opposite_order_updates_interleaved_commits(item_ref, mod_auto_backend):
+    """两个事务以相反的顺序更新同样两行，同时提交：一个成功，另一个判竞态（重试即可）"""
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     a = _item(comp, time=1, name="a")
@@ -886,7 +793,7 @@ async def test_opposite_order_updates_interleaved_commits(
                 row.qty += 1
                 await repo.update(row)
 
-    with _meet_before_second_update(backend):
+    with _meet_between_check_and_write(backend):
         results = await asyncio.gather(
             bump_both(int(a.id), int(b.id)),
             bump_both(int(b.id), int(a.id)),
@@ -1041,54 +948,6 @@ async def test_nonunique_get_hit_moved_while_reading_is_race(
                 row = await repo.get(owner=2)
             assert row is not None and row.owner == 20  # 读回的已经被改走了
             await repo.insert(_item(comp, owner=9, time=3, name="c"))
-
-
-@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
-async def test_get_hit_ci_collation_commits(
-    monkeypatch, new_component_env, mod_auto_backend
-):
-    """SQL 后端 get 命中的行是数据库按自身相等语义找到的（MariaDB 默认大小写不敏感的
-    collation；这里用 SQLite 的 NOCASE 模拟）：get(name="Alice") 命中 "alice" 后写入要能提交，
-    不能因为 Python 里 "alice" != "Alice" 判竞态——重试每次读到的都一样，会一直重试到上限"""
-    import numpy as np
-    import sqlalchemy as sa
-    from fixtures.testdata import create_ref
-
-    from hetu.data import BaseComponent, Permission, define_component, property_field
-    from hetu.data.backend.sql import client as sql_client
-
-    real_type = sql_client._numpy_to_sqla_type
-
-    def ci_type(dtype):
-        col_type = real_type(dtype)
-        if isinstance(col_type, sa.String):
-            return sa.String(length=col_type.length, collation="NOCASE")
-        return col_type
-
-    monkeypatch.setattr(sql_client, "_numpy_to_sqla_type", ci_type)
-
-    @define_component(namespace="pytest", permission=Permission.ADMIN)
-    class CIName(BaseComponent):
-        name: "U8" = property_field("", unique=True, index=True)  # type: ignore  # noqa
-        qty: np.int16 = property_field(0)
-
-    backend: Backend = mod_auto_backend()
-    create_ref(CIName, backend)  # 表在打了 collation 补丁之后建
-    async with backend.session("pytest", 1) as s:
-        r = CIName.new_row()
-        r.name = "alice"
-        await s.using(CIName).insert(r)
-
-    async with backend.session("pytest", 1) as s:
-        repo = s.using(CIName)
-        row = await repo.get(name="Alice")
-        assert row is not None and row.name == "alice"
-        row.qty = 5
-        await repo.update(row)
-
-    async with backend.session("pytest", 1) as s:
-        row = await s.using(CIName).get(name="alice")
-        assert row is not None and row.qty == 5
 
 
 async def test_range_float_index_truncated_commits(item_ref, mod_auto_backend):

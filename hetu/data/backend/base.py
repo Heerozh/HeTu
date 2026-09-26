@@ -248,8 +248,8 @@ def normalize_int_bounds_(
       都在范围外，或者像 (inf, inf)、(1.2, 1.8) 这样里面没有整数，就是空。
 
     NaN 边界抛 ValueError。下界大于上界要调用方先用原始值判定：那是参数传反了，应该报错，
-    而不是当成空区间。两个后端都应按这个规则处理整数区间（SQL 后端还没接上，见
-    tests/test_backend_index_semantics.py 里的 xfail）。
+    而不是当成空区间。Redis 与 SQLite 后端都经 `RedisModelClient.range_normalize_` 按这个规则
+    处理整数区间。
     """
     info = np.iinfo(dtype)
 
@@ -286,7 +286,7 @@ class BackendClient:
     数据库后端的连接类，Backend会用此类创建master, servant连接。
 
     继承写法：
-    class PostgresClient(BackendClient, alias="postgres")
+    class MyStoreClient(BackendClient, alias="mystore")
 
     服务器启动时，Backend会根据Config中type配置，寻找对应alias初始化Client。
     继承此类，完善所有NotImplementedError的方法。
@@ -387,9 +387,10 @@ class BackendClient:
         raise NotImplementedError
 
     def __init_subclass__(cls, **kwargs):
-        """让继承子类自动注册alias"""
+        """让继承子类自动注册alias；不带 alias 的中间基类（如 RedisModelClient）不注册"""
         super().__init_subclass__()
-        BackendClientFactory.register(kwargs["alias"], cls)
+        if alias := kwargs.get("alias"):
+            BackendClientFactory.register(alias, cls)
 
     def __init__(self, endpoint: Any, is_servant, **kwargs):
         """
@@ -399,6 +400,13 @@ class BackendClient:
         """
         self.endpoint = endpoint
         self.is_servant = is_servant
+
+    @classmethod
+    def check_config_(cls, config: dict) -> None:
+        """
+        内部方法：`Backend` 建连接之前检查整段配置（config 为 BACKENDS[i]），不合适就抛 ValueError。
+        默认什么都不查。
+        """
 
     async def close(self):
         """关闭数据库连接，释放资源。"""
@@ -667,15 +675,28 @@ class BackendClient:
 
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
         UNSAFE! 只用于易失数据! 不会做类型检查!
 
         直接写入属性到数据库，避免session必须要执行get+事务2条指令。
         仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-        注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
         一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+
+        只改已存在的行：行不存在（比如已被删掉），或行里没有要写的字段时，什么都不写，
+        返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。
+
+        这是维护类写入：不改 `_version`、不参与乐观锁，也**不保证**触发订阅通知——行订阅可能
+        立刻收到，也可能等该行下一次事务写入时一起推；整表订阅收不到。需要订阅方及时看到的数据
+        请走事务。（Redis 上行频道就是行 key 的 keyspace 通知，会顺带触发；SQLite 后端不发。）
+
+        UNSAFE, volatile components only, no type checks. Only updates an existing row:
+        if the row (or one of the fields) does not exist, nothing is written and False is
+        returned; True means the fields were written. A maintenance-class write: it does
+        not bump `_version`, takes no part in optimistic locking, and is **not guaranteed**
+        to notify subscribers (a row subscriber may see it at once or only with the row's
+        next transactional write; table subscribers never do). Use a transaction for data
+        that subscribers must see promptly.
         """
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
         raise NotImplementedError
@@ -695,11 +716,11 @@ class BackendClientFactory:
     _registry: dict[str, type[BackendClient]] = {}
 
     # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
-    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会同时加载
-    # redis 与 sqlalchemy 两套重依赖。第三方后端仍靠显式 import 自己的模块注册。
+    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会把用不到的后端（如
+    # redis-py）一起加载。第三方后端仍靠显式 import 自己的模块注册。
     _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
         "redis": "hetu.data.backend.redis",
-        "sql": "hetu.data.backend.sql",
+        "sqlite": "hetu.data.backend.sqlite",
     }
 
     @staticmethod
@@ -707,17 +728,29 @@ class BackendClientFactory:
         BackendClientFactory._registry[alias.lower()] = client_cls
 
     @staticmethod
-    def create(
-        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
-    ) -> BackendClient:
+    def client_class(alias: str) -> type[BackendClient]:
+        """按 alias 取后端的客户端类，内置后端按需 import"""
         alias = alias.lower()
+        if alias == "sql" and alias not in BackendClientFactory._registry:
+            raise ValueError(
+                _(
+                    "SQL 后端已移除：SQLite 请把 type 改成 SQLite（地址不变），"
+                    "PostgreSQL / MariaDB 不再支持"
+                )
+            )
         if alias not in BackendClientFactory._registry:
             module = BackendClientFactory._BUILTIN_MODULES.get(alias)
             if module:
                 importlib.import_module(module)
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
-        return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
+        return BackendClientFactory._registry[alias]
+
+    @staticmethod
+    def create(
+        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
+    ) -> BackendClient:
+        return BackendClientFactory.client_class(alias)(endpoint, is_servant, **config)
 
 
 class TableMaintenance:
@@ -1047,8 +1080,8 @@ class MQClient:
     连接到消息队列的客户端，每个用户连接一个实例。
     继承此类实现数据库写入通知和消息队列的结合。
 
-    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
-    `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
+    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQLite 的
+    `SQLiteNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
 
     尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是
@@ -1303,6 +1336,28 @@ class MQHub:
         dropped = 0
         for mq in self._subs.get(channel_name, ()):
             dropped += mq.push_pulled_(channel_name, ids)
+        return dropped
+
+    @staticmethod
+    def is_table_channel_(channel: str) -> bool:
+        """表级频道（commit 主动发，payload 是 row_id 列表）；行 / 索引频道是 keyspace 通知"""
+        return not channel.startswith("__keyspace@") and channel.endswith(
+            BackendClient.TABLE_CHANNEL_SUFFIX
+        )
+
+    def resync_(self, channels: Iterable[str]) -> int:
+        """
+        这段时间的通知丢了（Redis 的 pubsub 断线、SQLite 的通知被清理）：给这些频道里本进程仍有人
+        订的各分发一条通知，各连接一个 interval 后补读（行 / 索引订阅重读、重跑比对；整表订阅整表
+        重同步）。只有表级频道带 `RESYNC`：它的 payload 本来就是 row_id 集合，整表订阅靠这个标记
+        整表重读；行 / 索引（含值）频道照约定 payload 为 None。服务端内部 watch 的回调也照常触发。
+        返回丢弃的过期通知条数，由调用方打日志。
+        """
+        dropped = 0
+        for channel in channels:
+            if channel in self._subs:
+                ids = [MQClient.RESYNC] if self.is_table_channel_(channel) else None
+                dropped += self._dispatch(channel, ids)
         return dropped
 
     def _spawn(self, coro) -> asyncio.Task:

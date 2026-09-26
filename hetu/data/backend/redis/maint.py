@@ -278,11 +278,11 @@ class RedisTableMaintenance(TableMaintenance):
                                 f"Unique标记导致。"
                             )
                         seen.add(value)
-                    # 按 dtype 转换后再算 sortable bytes，与 commit 写索引时一致。bytes 字段
-                    # 用原始字节（同 row_decode_），decode 成 str 后非 ASCII 的塞不进 S 列
-                    struct[idx_name] = value if is_bytes else value.decode()
-                    sortable = RedisBackendClient.to_sortable_bytes(struct[idx_name])
-                    members[sortable + b"\x00" + key.split(b":")[-1]] = 0
+                    # 与 commit 写索引时同一个编码（SQLite 后端的重建也用它）
+                    member = RedisBackendClient.rebuild_member_(
+                        struct, idx_name, value, is_bytes, key.split(b":")[-1]
+                    )
+                    members[member] = 0
                 io.zadd(tmp_key, members)
             io.rename(tmp_key, idx_key)
         return len(keys)

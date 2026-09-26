@@ -84,7 +84,7 @@ def test_render_config_substitutes_namespace_and_app_file():
 def test_render_config_switches_backend_to_sqlite():
     template = "  type: Redis\n  master: redis://127.0.0.1:6379/0\n"
     out = render_config(template, "ns", "src/app.py")
-    assert "type: SQL" in out
+    assert "type: SQLite" in out
     assert "master: sqlite:///./hetu.db" in out
     assert "type: Redis" not in out
     assert "master: redis://127.0.0.1:6379/0" not in out
@@ -270,7 +270,7 @@ def test_execute_fresh_project(tmp_path, monkeypatch):
     cfg = (proj / "config.yml").read_text(encoding="utf-8")
     assert "APP_FILE: src/app.py" in cfg
     assert "NAMESPACE: mygame" in cfg
-    assert "type: SQL" in cfg
+    assert "type: SQLite" in cfg
     assert "master: sqlite:///./hetu.db" in cfg
 
     # devtools.py + uv run build/dev 注册到 pyproject.toml

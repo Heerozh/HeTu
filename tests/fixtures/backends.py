@@ -2,10 +2,13 @@ import os
 from typing import Callable, cast
 
 import pytest
+from redis.cluster import RedisCluster
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis import RedisBackendClient
-from hetu.data.backend.sql import SQLBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
+from hetu.data.backend.sqlite import SQLiteBackendClient
+from hetu.data.backend.sqlite.store import SQLiteStore
 
 
 @pytest.fixture(scope="module")
@@ -131,42 +134,6 @@ async def mod_redis_cluster_backend(ses_redis_cluster_service):
 
 
 @pytest.fixture(scope="module")
-async def mod_postgres_backend(ses_postgres_service):
-    """PostgreSQL后端工厂fixture，返回创建postgres后端的工厂函数"""
-    from hetu.data.component import ComponentDefines
-
-    backends = {}
-
-    def _create_postgres_backend(key="main"):
-        if key in backends:
-            _backend = backends[key]
-        else:
-            dsn = ses_postgres_service
-            config = {
-                "type": "sql",
-                "master": dsn,
-                "servants": [],
-            }
-
-            _backend = Backend(config)
-            backends[key] = _backend
-
-        # mock _get_referred_components
-        def _mock_get_referred():
-            return ComponentDefines().get_all()
-
-        _master = cast(SQLBackendClient, _backend.master)
-        _master._get_referred_components = _mock_get_referred
-        _backend.post_configure()
-        return _backend
-
-    yield _create_postgres_backend
-
-    for backend in backends.values():
-        await backend.close()
-
-
-@pytest.fixture(scope="module")
 async def mod_sqlite_backend(ses_sqlite_service):
     """SQLite后端工厂fixture，返回创建sqlite后端的工厂函数"""
     from hetu.data.component import ComponentDefines
@@ -179,7 +146,7 @@ async def mod_sqlite_backend(ses_sqlite_service):
         else:
             dsn = ses_sqlite_service
             config = {
-                "type": "sql",
+                "type": "sqlite",
                 "master": dsn,
                 "servants": [],
             }
@@ -190,7 +157,7 @@ async def mod_sqlite_backend(ses_sqlite_service):
         def _mock_get_referred():
             return ComponentDefines().get_all()
 
-        _master = cast(SQLBackendClient, _backend.master)
+        _master = cast(SQLiteBackendClient, _backend.master)
         _master._get_referred_components = _mock_get_referred
         _backend.post_configure()
         return _backend
@@ -201,44 +168,9 @@ async def mod_sqlite_backend(ses_sqlite_service):
         await backend.close()
 
 
-@pytest.fixture(scope="module")
-async def mod_mariadb_backend(ses_mariadb_service):
-    """MariaDB后端工厂fixture，返回创建mariadb后端的工厂函数"""
-    from hetu.data.component import ComponentDefines
-
-    backends = {}
-
-    def _create_mariadb_backend(key="main"):
-        if key in backends:
-            _backend = backends[key]
-        else:
-            dsn = ses_mariadb_service
-            config = {
-                "type": "sql",
-                "master": dsn,
-                "servants": [],
-            }
-
-            _backend = Backend(config)
-            backends[key] = _backend
-
-        def _mock_get_referred():
-            return ComponentDefines().get_all()
-
-        _master = cast(SQLBackendClient, _backend.master)
-        _master._get_referred_components = _mock_get_referred
-        _backend.post_configure()
-        return _backend
-
-    yield _create_mariadb_backend
-
-    for backend in backends.values():
-        await backend.close()
-
-
 REDIS_BACKENDS = ["redis", "redis_cluster"]
 REDIS_FORK_BACKENDS = ["valkey"]
-SQL_BACKENDS = ["postgres", "sqlite", "mariadb"]
+SQLITE_BACKENDS = ["sqlite"]
 
 # 允许通过环境变量过滤后端，用于CI/CD优化
 # Allow filtering backends via environment variable for CI/CD optimization
@@ -247,9 +179,9 @@ if _env_backends:
     _allowed = [b.strip() for b in _env_backends.split(",")]
     REDIS_BACKENDS = [b for b in REDIS_BACKENDS if b in _allowed]
     REDIS_FORK_BACKENDS = [b for b in REDIS_FORK_BACKENDS if b in _allowed]
-    SQL_BACKENDS = [b for b in SQL_BACKENDS if b in _allowed]
+    SQLITE_BACKENDS = [b for b in SQLITE_BACKENDS if b in _allowed]
 
-ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS + SQL_BACKENDS
+ALL_BACKENDS = REDIS_BACKENDS + REDIS_FORK_BACKENDS + SQLITE_BACKENDS
 
 
 @pytest.fixture(params=ALL_BACKENDS, scope="module")
@@ -266,14 +198,10 @@ def backend_fixture_by_name(name: str, request):
         return request.getfixturevalue("mod_valkey_backend")
     elif name == "redis_cluster":
         return request.getfixturevalue("mod_redis_cluster_backend")
-    elif name == "postgres":
-        return request.getfixturevalue("mod_postgres_backend")
     elif name == "sqlite":
         return request.getfixturevalue("mod_sqlite_backend")
-    elif name == "mariadb":
-        return request.getfixturevalue("mod_mariadb_backend")
     else:
-        raise ValueError("Unknown db type: %s" % backend_name)
+        raise ValueError(f"Unknown db type: {name}")
 
 
 def backend_config_by_name(name: str, request) -> dict:
@@ -293,9 +221,9 @@ def backend_config_by_name(name: str, request) -> dict:
             "raw_clustering": True,
             "servants": [],
         }
-    elif name in ("postgres", "sqlite", "mariadb"):
-        dsn = request.getfixturevalue(f"ses_{name}_service")
-        return {"type": "sql", "master": dsn, "servants": []}
+    elif name == "sqlite":
+        dsn = request.getfixturevalue("ses_sqlite_service")
+        return {"type": "sqlite", "master": dsn, "servants": []}
     else:
         raise ValueError(f"Unknown db type: {name}")
 
@@ -332,13 +260,37 @@ def use_redis_family_backend_only(func):
     )(func)
 
 
-def xfail_on_backends(request, backend_name: str, backends, *, raises, reason: str):
-    """
-    已知的后端行为偏差：当前后端在 `backends` 里，就把本用例标成 strict xfail。用例按期望
-    的行为写，`raises` 限定现在的失败方式（别的错误照常报失败）；修好后 XPASS(strict)
-    会报错，提醒去掉这一行。
-    """
-    if backend_name in backends:
-        request.applymarker(
-            pytest.mark.xfail(strict=True, raises=raises, reason=reason)
-        )
+# ============ 直接读写底层数据（造数据、核对索引用） ============
+
+
+def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
+    """索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表"""
+    master = cast(RedisModelClient, backend.master)
+    key = master.index_key(ref, index_name)
+    if isinstance(master, RedisBackendClient):
+        return list(master.io.zrange(key, 0, -1))  # type: ignore
+    return cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+
+
+def raw_hset(backend: Backend, ref, row_id: int, **fields: str) -> None:
+    """绕过事务直接改行字段（造数据用：不改 _version、不动索引、不发通知）"""
+    master = cast(RedisModelClient, backend.master)
+    key = master.row_key(ref, row_id)
+    if isinstance(master, RedisBackendClient):
+        master.io.hset(key, mapping=fields)  # type: ignore
+    else:
+        cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.hset_txn, key, fields)
+
+
+def raw_key_count(backend: Backend, ref) -> int:
+    """这张表（这个簇）名下还有几个 key：行 + 索引（Redis 的 zset 删空了自动消失）"""
+    master = cast(RedisModelClient, backend.master)
+    prefix = master.cluster_prefix(ref)
+    if isinstance(master, RedisBackendClient):
+        keys = master.io.keys(prefix + ":*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        return len(keys)  # type: ignore
+
+    def count(store: SQLiteStore) -> int:
+        return len(store.row_ids(prefix)) + len(store.zkeys_with_prefix(prefix + ":"))
+
+    return cast(SQLiteBackendClient, master).run_sync_(count)
