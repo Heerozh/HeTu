@@ -782,7 +782,8 @@ UNSAFE! 只用于易失数据! 不会做类型检查!
 一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
 
 只改已存在的行：行不存在（比如已被删掉），或行里没有要写的字段时，什么都不写，
-返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。
+返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。（以前不返回值，
+实现方请补上；调用方只把 False 当作没写上。）
 
 这是维护类写入：不改 `_version`、不参与乐观锁，也**不保证**触发订阅通知——行订阅可能
 立刻收到，也可能等该行下一次事务写入时一起推；整表订阅收不到。需要订阅方及时看到的数据
@@ -790,7 +791,9 @@ UNSAFE! 只用于易失数据! 不会做类型检查!
 
 UNSAFE, volatile components only, no type checks. Only updates an existing row:
 if the row (or one of the fields) does not exist, nothing is written and False is
-returned; True means the fields were written. A maintenance-class write: it does
+returned; True means the fields were written (it used to return nothing:
+implementers should add the return value; callers only treat False as not
+written). A maintenance-class write: it does
 not bump `_version`, takes no part in optimistic locking, and is **not guaranteed**
 to notify subscribers (a row subscriber may see it at once or only with the row's
 next transactional write; table subscribers never do). Use a transaction for data
