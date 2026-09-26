@@ -395,9 +395,15 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         now = time.time()
         cleanup_before = None
         if now >= self._next_notify_cleanup_at:
+            # 先排下一次，免得并发的提交都来清；这次出错没清成就退回去，下一次提交接着清
             cleanup_before = now - self.NOTIFY_TTL_SECONDS
             self._next_notify_cleanup_at = self._next_cleanup_time(now)
-        return await self.run_(run_commit, args[0], cleanup_before)
+        try:
+            return await self.run_(run_commit, args[0], cleanup_before)
+        except BaseException:
+            if cleanup_before is not None:
+                self._next_notify_cleanup_at = now
+            raise
 
     @override
     async def direct_set(

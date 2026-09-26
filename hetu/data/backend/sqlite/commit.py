@@ -23,14 +23,6 @@ import msgpack
 from .store import KEYSPACE_PREFIX, SQLiteStore
 
 
-class _CheckFailed(Exception):
-    """某条 check 没通过：回滚写事务，返回 Lua 同款的串"""
-
-    def __init__(self, resp: bytes):
-        super().__init__(resp)
-        self.resp = resp
-
-
 def _lua_str(value: Any) -> bytes:
     """Lua 的 tostring：HGET 读不到是 false"""
     if value is None or value is False:
@@ -136,7 +128,7 @@ def run_commit(
     执行一次提交。packed 是 `RedisModelClient.build_commit_payload_` 的 payload 经 msgpack 打包，
     结构: [ [checks...], [pushes...], {deleted...}, [table_pubs...], [value_chans...] ]；按
     `raw=True` 解开，和 Lua 里一样全是字节串，末尾缺的元素按空处理（同 Lua 的 nil）。
-    cleanup_before 不为 None 时，顺手清掉这之前的通知（和提交同一个事务）。
+    cleanup_before 不为 None 时，顺手清掉这之前的通知（和提交同一个事务；校验不过时照样清）。
     """
     payload: list = list(msgpack.unpackb(packed, raw=True))
     payload += [None] * (5 - len(payload))
@@ -145,21 +137,18 @@ def run_commit(
     deleted: dict = payload[2] or {}
     table_pubs: list = payload[3] or []
     value_chans: list = payload[4] or []
-    try:
-        with store.write_txn():
-            if (failure := _run_checks(store, checks, deleted)) is not None:
-                raise _CheckFailed(failure)
+    with store.write_txn():
+        # 校验只读：没通过时什么都还没写，不用回滚
+        failure = _run_checks(store, checks, deleted)
+        if failure is None:
             channels = _run_pushes(store, pushes)
             # Phase 3: 表频道（payload 是 msgpack 的 row_id 列表）/ 索引值频道（无 payload）
             for channel, message in table_pubs:
                 channels.setdefault(channel.decode(), bytes(message))
             for channel in value_chans:
                 channels.setdefault(channel.decode(), None)
-            now = time.time()
             if channels:
-                store.notify_insert(channels.items(), now)
-            if cleanup_before is not None:
-                store.notify_cleanup(cleanup_before)
-    except _CheckFailed as failed:
-        return failed.resp
-    return b"committed"
+                store.notify_insert(channels.items(), time.time())
+        if cleanup_before is not None:
+            store.notify_cleanup(cleanup_before)
+    return b"committed" if failure is None else failure
