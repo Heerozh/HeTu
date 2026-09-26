@@ -258,8 +258,10 @@ class RedisTableMaintenance(TableMaintenance):
             tmp_key = f"{idx_key}:rebuilding"
             io.delete(tmp_key)  # 上次中断留下的
             is_unique = idx_name in comp_cls.uniques_
+            is_bytes = idx_name in comp_cls.bytes_fields_
             seen: set[bytes] = set()
-            struct = comp_cls.new_row()
+            # 只拿来按 dtype 转值，给定 id 不发号：hetu upgrade 进程没初始化 SnowflakeID
+            struct = comp_cls.new_row(id_=0)
             for chunk in batched(keys, self.REBUILD_BATCH):
                 pipe = io.pipeline()
                 for key in chunk:
@@ -276,8 +278,9 @@ class RedisTableMaintenance(TableMaintenance):
                                 f"Unique标记导致。"
                             )
                         seen.add(value)
-                    # 按 dtype 转换后再算 sortable bytes，与 commit 写索引时一致
-                    struct[idx_name] = value.decode()
+                    # 按 dtype 转换后再算 sortable bytes，与 commit 写索引时一致。bytes 字段
+                    # 用原始字节（同 row_decode_），decode 成 str 后非 ASCII 的塞不进 S 列
+                    struct[idx_name] = value if is_bytes else value.decode()
                     sortable = RedisBackendClient.to_sortable_bytes(struct[idx_name])
                     members[sortable + b"\x00" + key.split(b":")[-1]] = 0
                 io.zadd(tmp_key, members)

@@ -1543,3 +1543,85 @@ async def test_system_session_discard(
     assert tbl is not None
     async with tbl.session() as session:
         assert await session.using(DiscardComp).get(owner=7) is None
+
+
+@pytest.mark.parametrize("query", ["get", "range"])
+async def test_single_index_row_is_detached(item_ref, mod_auto_backend, query):
+    """单行索引查询的返回值、工作缓存和提交前原值必须独立。"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name = "single"
+    row.time = 1
+    row.qty = 2
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        if query == "get":
+            found = await repo.get(name="single")
+        else:
+            found = (await repo.range(name=("single", "single")))[0]
+        assert found is not None
+        found.qty = 7
+        cached = await repo.get(id=row.id)
+        assert cached is not None and cached.qty == 2
+        await repo.update(found)
+        found.qty = 99
+        cached = await repo.get(id=row.id)
+        assert cached is not None and cached.qty == 7
+        original = session.idmap.db_row(repo.ref, row.id)
+        assert original is not None and original.qty == 2
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        saved = await session.using(comp).get(id=row.id)
+        assert saved is not None and saved.qty == 7
+
+
+@use_redis_family_backend_only
+async def test_untouched_nan_row_stays_clean_read(item_ref, mod_auto_backend):
+    """含 NaN 的行在 upsert 里没改：不写入，提交时仍按纯读校验版本；显式 update 也判成
+    没有修改。SQLite / MariaDB 存不了 NaN，只测 Redis 系"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    def new_item(name: str, time: int, model: float = 0.0):
+        row = comp.new_row()
+        row.name, row.time, row.model = name, time, model
+        return row
+
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(new_item("nan_row", 1, np.nan))
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        before = await session.using(comp).get(name="nan_row")
+        assert before is not None and np.isnan(before.model)
+
+    # 读了没改，同事务另有写入才会提交：这一行不写，版本不变
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        async with repo.upsert(name="nan_row") as found:
+            pass
+        with pytest.raises(ValueError, match="No fields changed"):
+            await repo.update(found)
+        await repo.insert(new_item("extra_a", 2))
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        after = await session.using(comp).get(name="nan_row")
+        assert after is not None and after._version == before._version
+
+    # 没改的行按纯读校验：提交前被别的事务改了，要判竞态
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            repo1 = s1.using(comp)
+            async with repo1.upsert(name="nan_row"):
+                pass
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                other = await repo2.get(name="nan_row")
+                assert other is not None
+                other.qty = 5
+                await repo2.update(other)
+            await repo1.insert(new_item("extra_b", 3))

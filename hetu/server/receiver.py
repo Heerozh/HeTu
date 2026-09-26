@@ -7,8 +7,8 @@
 
 import asyncio
 import logging
-from collections.abc import Awaitable
-from typing import TYPE_CHECKING, Any
+from collections.abc import AsyncIterator, Awaitable
+from typing import TYPE_CHECKING, Any, cast
 
 from redis.exceptions import ConnectionError as RedisConnectionError
 from sanic import SanicException
@@ -61,7 +61,7 @@ async def rpc(
     check_length("rpc", data, 2, 100)
     ok, res = await executor.execute(data[1], *data[2:])
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
-    if replay.level < logging.ERROR:
+    if replay.isEnabledFor(logging.INFO):
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
 
     if not ok:
@@ -181,6 +181,22 @@ async def sub_call(
     return True
 
 
+async def receive_messages(ws: Websocket) -> AsyncIterator[str | bytes]:
+    """重组完整消息，避免 Sanic recv() 每包创建 Task + asyncio.wait。
+
+    Reassemble complete messages through Sanic's public streaming receiver.
+    Always exhaust the frame iterator before decoding or handling a message.
+    """
+    while True:
+        chunks = [chunk async for chunk in ws.recv_streaming()]
+        if len(chunks) == 1:
+            yield chunks[0]
+        elif chunks and isinstance(chunks[0], str):
+            yield "".join(cast(list[str], chunks))
+        else:
+            yield b"".join(cast(list[bytes], chunks))
+
+
 async def client_handler(
     ws: Websocket,
     pipe_ctx: PipeContext,
@@ -197,10 +213,12 @@ async def client_handler(
     cancelled = False
     # 在后台跑后半段的订阅（整表订阅等全量读），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
-    # async for 正常跑完 = 对端把连接关了；其余出口在各自分支里改写此原因
-    exit_reason = _("对端关闭了连接")
+    # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
+    # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。
+    # 其余出口都在各自分支里写明原因，这里只是兜底
+    exit_reason = _("接收循环意外结束")
     try:
-        async for message in ws:
+        async for message in receive_messages(ws):
             if not message:
                 exit_reason = _("收到空帧")
                 break
@@ -214,7 +232,7 @@ async def client_handler(
             if type(last_data) is not list:
                 raise ValueError("Invalid message format")
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
-            if replay.level < logging.ERROR:
+            if replay.isEnabledFor(logging.DEBUG):
                 replay.debug("<<< " + str(last_data))
             # 检查接受上限
             flood_checker.received()

@@ -11,7 +11,7 @@ import numpy as np
 
 from ...i18n import _
 from .base import BackendClient, RowFormat, UniqueViolation
-from .idmap import RangeObservation, RowState
+from .idmap import RangeObservation, RowState, changed_fields
 from .table import TableReference
 
 if TYPE_CHECKING:
@@ -99,7 +99,7 @@ class SessionRepository:
         if old_row is None or row_stat == RowState.DELETE:
             return set(row.dtype.names)
         else:
-            return {key for key in row.dtype.names if old_row[key] != row[key]}
+            return set(changed_fields(row, old_row))
 
     async def is_unique_conflicts(
         self, row: np.record, insert=False
@@ -452,7 +452,10 @@ class SessionRepository:
             )
             # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
             found = [r for r in fetched if r is not None]
-            if found:
+            if len(found) == 1:
+                # 点查通常只取一行：直接使用单行缓存路径，避免 stack + append。
+                idmap.add_clean(self.ref, found[0])
+            elif found:
                 idmap.add_clean(
                     self.ref, np.rec.array(np.stack(found, dtype=comp_cls.dtypes))
                 )
@@ -470,6 +473,9 @@ class SessionRepository:
         # 转换成 np.recarray 返回
         if len(result) == 0:
             return np.rec.array(np.empty(0, dtype=comp_cls.dtypes)), obs
+        elif len(result) == 1:
+            # 保持返回值与缓存/后端行相互独立；单行不需要通用 stack 的 dtype 推导。
+            return result[0].copy().reshape(1).view(np.recarray), obs
         else:
             return np.rec.array(np.stack(result, dtype=comp_cls.dtypes)), obs
 
@@ -643,7 +649,10 @@ class UpsertContext:
                 # 见 IdentityMap.get_absent_unique_fields。
                 await self.repo.insert(self.row_data)
             else:
-                if self.row_data == self.clean_data:
-                    # 无修改不更新
+                assert self.clean_data is not None
+                # 无修改不更新，行保持 CLEAN，提交时按纯读校验版本。和 update、提交用同一个
+                # changed_fields 判定，否则含 NaN 的行会在这里判成有修改、提交时判成没修改，
+                # 既不写入也不校验版本
+                if not changed_fields(self.row_data, self.clean_data):
                     return
                 await self.repo.update(self.row_data)

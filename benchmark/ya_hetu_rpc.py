@@ -7,7 +7,7 @@ from typing import cast
 
 import msgspec
 import websockets
-from nacl.public import PrivateKey
+from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 
 from hetu.server import pipeline
 
@@ -55,14 +55,16 @@ async def connection():
     crypto_layer = pipeline.CryptoLayer()
     client_pipe.add_layer(crypto_layer)
     # 握手（与 tests/test_websocket.py 一致）
-    private_key = PrivateKey.generate()
+    private_key = X25519PrivateKey.generate()
     handshake_msg = [b""] * client_pipe.num_handshake_layers
-    handshake_msg[-1] = private_key.public_key.encode()
+    handshake_msg[-1] = private_key.public_key().public_bytes_raw()
     await ws.send(client_pipe.encode(None, handshake_msg))
     peer_handshake = client_pipe.decode(None, _bytes(await ws.recv()))
     assert isinstance(peer_handshake, list)
     ctx, _ = client_pipe.handshake(peer_handshake)
-    ctx[-1] = crypto_layer.client_handshake(private_key.encode(), peer_handshake[-1])
+    ctx[-1] = crypto_layer.client_handshake(
+        private_key.private_bytes_raw(), peer_handshake[-1]
+    )
 
     pipe_ctx = ctx
 
@@ -114,6 +116,9 @@ cd benchmark/
 export REDIS_URL='redis://:@localhost:6379/0?protocol=2'
 uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench --instance=bench --workers=76
 
+# benchmark_get 按 id 读 IntTable，服务端启动后先填充（读空会直接报错）
+uv run python seed_get_rows.py --redis ${REDIS_URL}
+
 export HETU_HOST=ws://localhost:2466/hetu/bench
 
 # 启动 1200 个并发用户
@@ -128,5 +133,6 @@ Windows:
 redis-server.exe
 redis-cli.exe config set protected-mode no
 uv run hetu start --app-file=./server/app.py --db="redis://:@172.29.0.1:6379/0" --namespace=bench --instance=bench --workers=40
+uv run python seed_get_rows.py --redis "redis://:@172.29.0.1:6379/0"
 
 """

@@ -296,10 +296,9 @@ class BaseComponent:
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:
         """从dict转换为c-struct like的类型，成为可直接传给数据库的行数据"""
-        row = cls.new_row(id_=data["id"])
-        for i, (name, _prop) in enumerate(cls.properties_):
-            row[i] = data[name]
-        return row
+        # 存储的行包含全部字段：整行一次构造，省掉复制默认行再逐字段赋值
+        values = tuple(data[name] for name, _prop in cls.properties_)
+        return np.array([values], dtype=cls.dtypes).view(np.recarray)[0]
 
     @classmethod
     def struct_to_dict(cls, data: np.record) -> dict[str, Any]:

@@ -251,6 +251,69 @@ async def test_migration_declaration_only(filled_item_ref, tmp_path):
         assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
 
 
+async def test_migration_without_snowflake(
+    filled_item_ref, mod_auto_backend, tmp_path, monkeypatch
+):
+    """
+    hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约），迁移时不能发号。以前 Redis
+    搬完行、旧索引随旧表删掉之后，重建索引时发号失败：表里有行却没有索引，meta 已是新版本，
+    下次 upgrade 不再迁移，服务器就带着空索引起来了。
+    """
+    test_app_file = tmp_path / "test.py"
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    # 与原 Item 只差 qty 的 dtype（int16 → int32，能安全转换），迁移要搬数据
+    @define_component(namespace="pytest", permission=Permission.OWNER, table_sub=True)
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
+        model: np.float32 = property_field(0, unique=False, index=True)
+        qty: np.int32 = property_field(1, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
+
+    import json
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed_new_item_cls,
+        filled_item_ref.instance_name,
+        filled_item_ref.cluster_id,
+        backend,
+    )
+
+    maint = backend.get_table_maintenance()
+    tbl_status, old_meta = maint.check_table(new_table)
+    assert tbl_status == "schema_mismatch"
+
+    monkeypatch.setattr(SnowflakeID(), "worker_id", -1)  # 模拟 upgrade 进程里未初始化
+    assert maint.migration_schema(test_app_file, new_table, old_meta)
+    assert maint.check_table(new_table)[0] == "ok"
+
+    # 迁移在 upgrade 进程里做，服务器之后用新连接来读。复用迁移前的连接池的话，Postgres
+    # 上 asyncpg 缓存的旧查询计划（qty 还是 int16）会报 InvalidCachedStatementError
+    reader = mod_auto_backend("after_upgrade")
+    await reader.wait_for_synced()
+    async with reader.session("pytest", 1) as session:
+        repo = session.using(renamed_new_item_cls)
+        # 索引按搬过来的行建好了
+        assert (await repo.get(time=111)).qty == 999
+        assert (await repo.range("owner", 10, limit=99)).shape[0] == 25
+
+
 def test_duplicate_component_migration_script_name(tmp_path):
     """副本组件名带冒号（FutureCalls:Loot），生成的迁移脚本文件名不能带冒号：Windows 上冒号
     是 NTFS 备用数据流分隔符，脚本会写进 0 字节文件 FutureCalls 的隐藏流，目录里看不到。
@@ -582,6 +645,28 @@ async def test_rebuild_index_failure_keeps_old_index(item_ref, mod_auto_backend)
     with pytest.raises(RuntimeError, match="unique"):
         maint.rebuild_index(item_ref)
     assert io.zrange(idx_key, 0, -1) == before
+
+
+@use_redis_family_backend_only
+async def test_rebuild_index_without_snowflake(item_ref, mod_auto_backend, monkeypatch):
+    """hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约）：重建索引不能发号，
+    有行的表照样重建，建出来的与 commit 写的逐字节一致"""
+    from hetu.data.backend.redis import RedisBackendClient
+
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    io = backend.master.io
+    await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
+    idx_keys = [
+        RedisBackendClient.index_key(item_ref, name)
+        for name in item_ref.comp_cls.indexes_
+    ]
+    before = [io.zrange(key, 0, -1) for key in idx_keys]
+    assert all(before)
+
+    monkeypatch.setattr(SnowflakeID(), "worker_id", -1)  # 模拟 upgrade 进程里未初始化
+    maint.rebuild_index(item_ref)
+    assert [io.zrange(key, 0, -1) for key in idx_keys] == before
 
 
 @use_redis_family_backend_only
