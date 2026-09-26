@@ -71,7 +71,8 @@ PG / MariaDB 另有 collation、死锁、通知表 id 不按提交序等各自�
   这是 `InconsistentRangeRead` 的来源之一（另一个是索引残留）。
 - **同一个客户端只能在一个事件循环里用**（`aio` 的断言，`redis/client.py:118-129`）。
 - **direct_set = HSET**（`:1179-1208`）：不改 `_version`；缺行时建出缺 id 的残缺行（记录在案、待定的
-  bug）；行频道就是行 key 的 keyspace 通知，所以它会顺带触发行频道，但不触发表频道。
+  bug，后来在本分支修成只改已存在的行，见 §3.2）；行频道就是行 key 的 keyspace 通知，所以它会顺带
+  触发行频道，但不触发表频道。
 - **维护**（`redis/maint.py`）：`create_table` 只写 meta，行和索引的 key 写入时才出现，所以不建表也能
   直接提交；`delete_row` 只删行 key、不动索引，留下的残留由 `rebuild_index` 清；`rebuild_index` 按行数据
   重算 member，先建在临时 key 上，unique 冲突就报错，成功才 RENAME 覆盖（`:235-288`）；锁是 redis-py
@@ -131,6 +132,7 @@ PG / MariaDB 参数，`test_opposite_order_updates_interleaved_commits`（死锁
 | 4 | 旧配置 | 直接改名：只认 `type: SQLite`，`type: SQL` 报错提示改名；旧后端建的库文件报错，提示删掉重建（§4.10） |
 | 5 | SQLAlchemy | 移出，只用标准库 `sqlite3`（§3.3） |
 | 6 | Worker ID | 继续用 `FixedWorkerKeeper`（§4.9） |
+| 7 | direct_set 缺行 | 只改已存在的行，返回是否写入：Redis 用 `HSETEX FXX`，不支持时回退 Lua；SQLite 只 UPDATE（§3.2，PR 开出之后定的） |
 
 ### 3.1 总体思路：在 SQLite 上模拟 Redis 的数据模型
 
@@ -169,8 +171,16 @@ redis-py 无关的逻辑两边共用，以后 Redis 那边改了语义，SQLite 
 - Redis：代码不改，现在的行频道通知算附带效果。
 - SQLite：不发。这是契约最严的一端，依赖它的代码在开发期就会暴露；心跳也不往通知表写。
 - 将来的 PG：两种实现都满足契约。
-- 缺行时的行为：Redis 的 HSET 会建出缺 id 的残缺行（修法是 Lua 里先 EXISTS 再 HSET，待定）。SQLite 先
-  照 Redis 现状写出只有这几列的行；那个 bug 定了之后两边一起改。
+- 缺行时的行为（§3 决定 7）：只改已存在的行里已有的字段，缺行、缺字段时什么都不写，返回 `bool` 表示
+  写没写，不再建出缺 id 的残缺行。
+  - Redis：`HSETEX key FXX FIELDS n f v …`（Redis ≥ 8.0、Valkey ≥ 9.0），要写的字段都已存在才写。
+    启动时拿不存在的 key 试一次（FXX 什么都不写，没有副作用），不支持的（Redis 7、Valkey 8、部分代理层）
+    回退到同样语义的 Lua（逐个 HEXISTS 再 HSET）。
+  - SQLite：只 UPDATE 已存在、且这些列非 NULL 的行；缺表当缺行。
+  - 服务端开销实测（`INFO commandstats` 的 usec_per_call）：HSET 0.09µs；HSETEX FXX 0.15µs（Redis 8.10）
+    / 0.25µs（Valkey 9.1）；Lua 1.2 / 1.4µs。
+  - 调用方：连接心跳不看返回值，连接行被删后晚到的心跳正好什么都不写；雪花水位拿到 False 就重新按事务
+    建整行（运行中行被删了，比如开着服跑了 `hetu upgrade`），不然水位从此静默地写不进去。
 
 ### 3.3 移出 SQLAlchemy
 
@@ -245,13 +255,15 @@ CREATE TABLE "pytest:Item:{CLU1}" (
 
 - 值是合法 UTF-8 就存 TEXT（DB 工具里直接可读），否则存 BLOB；读回一律转成 bytes，和 Redis 一样按
   字节还原，存储类型只影响显示。列不声明类型（无亲和性），SQLite 不会改写存进去的值。
-- HGETALL = 该行非 NULL 的列（去掉 `_hetu_key`）。NULL 就是"hash 里没有这个字段"：direct_set 建出的
-  残缺行、schema 改了但没迁移的旧行，读出来都和 Redis 一样缺字段（按 STRUCT 解码报 KeyError）。
+- HGETALL = 该行非 NULL 的列（去掉 `_hetu_key`）。NULL 就是"hash 里没有这个字段"：残缺行、schema
+  改了但没迁移的旧行，读出来都和 Redis 一样缺字段（按 STRUCT 解码报 KeyError）。
 - HSET = upsert（`INSERT … ON CONFLICT("_hetu_key") DO UPDATE`，只写给出的列），列不存在就
   `ALTER TABLE ADD COLUMN`（Redis 的 hash 字段不受限）。DEL = 删行；EXISTS = 行在不在。
 - 表在第一次写入时建：commit 在同一个事务里先按 `TableReference` 把缺的行表建好（列序按组件定义），
-  direct_set、`upsert_row` 同理；`create_table` 也会提前建空表，开服后在工具里就能看到。读不存在的表
-  当空，和 Redis 读不存在的 key 一样，所以和 Redis 一样不需要先 `create_table` 就能提交。
+  `upsert_row` 同理（direct_set 只改已有的行，缺表当缺行）；`create_table` 也会提前建空表，开服后在
+  工具里就能看到。读不存在的表当空，和 Redis 读不存在的 key 一样，所以和 Redis 一样不需要先
+  `create_table` 就能提交。
+- UPDATE（direct_set 专用，同 `HSETEX FXX`）：只改已存在、且这些列非 NULL 的行，按受影响行数返回写没写。
 - 大小写：建表时发现已有只差大小写的表名，或同一组件里有只差大小写的字段名，直接报错（§8）。
 
 **索引（zset）**：一张全局表
@@ -440,7 +452,7 @@ pubsub 断线重订的语义，给仍在订阅的频道补发一次（表频道�
 | 索引频道何时发 | zset 真变了才发 | 按涉及的索引 | 同 Redis |
 | 通知送达 | ack 之后都到；断线补 RESYNC | PG / MariaDB 可能漏 | 不漏；游标过旧时补 RESYNC |
 | direct_set 的通知 | 顺带触发行频道 | 不发 | 不发（契约：不保证） |
-| direct_set 缺行 | 建残缺行（待定 bug） | 静默不写 | 同 Redis |
+| direct_set 缺行 | 原先建残缺行；改为不写、返回 False（`HSETEX FXX`） | 静默不写 | 同 Redis（只 UPDATE） |
 | 不建表直接提交 | 可以 | 缺表时建表重试 | 可以 |
 | `delete_row` 之后的索引 | 留下残留 | 库自动维护 | 同 Redis |
 | `rebuild_index` | 按行重建、原子替换 | 只查 unique | 同 Redis |
@@ -488,7 +500,7 @@ pubsub 断线重订的语义，给仍在订阅的频道补发一次（表频道�
 | `test_backend_session_basic.py::test_redis_empty_index` | 同上的 helper |
 | `test_backend_session_race.py::test_orphan_index_member_raises_inconsistent_range_read` | 无 |
 | `test_migration.py` 的 `test_rebuild_index_removes_orphans` / `_failure_keeps_old_index` / `_without_snowflake` / `test_manager_rebuild_index_all` | helper 读 member、直接改行字段 |
-| `test_common.py::test_snowflake_timestamp_keeper_legacy_partial_row` | 无（SQLite 的 direct_set 缺行时同样建残缺行） |
+| `test_common.py::test_snowflake_timestamp_keeper_legacy_partial_row` | 残缺行改用测试 helper 直接写（direct_set 已不再建残缺行，§3.2） |
 
 仍然只给 Redis 跑的：PUBLISH 预算（`test_arch_publish`）、pubsub / 原生集群 / 连接池、keyspace 配置、
 租约（`test_common` 里 keeper 的几条、`test_live_worker_ids_sees_unexpired_leases`）、master 读预算
@@ -554,6 +566,8 @@ pubsub 断线重订的语义，给仍在订阅的频道补发一次（表频道�
 - **不开线程、直接同步调用 sqlite3**：后端调用不再让出事件循环，协程的交错点和 Redis 不同，会藏住
   竞态；等写锁时还会卡住整个事件循环。
 - **direct_set "保证发通知" / "Redis 也不发"**：见 §3.2 的代价表。
+- **direct_set 缺行时一律用 Lua（EXISTS / HEXISTS 再 HSET）**：比 `HSETEX FXX` 慢一个数量级（1.2µs 对
+  0.15µs），只留作服务端不支持 HSETEX 时的回退（§3.2）。
 - **模拟 Redis 租约的 WorkerKeeper**：见 §4.9。
 - **给 `type: SQL` 留兼容别名**：已决定直接改名（§3 决定 4）。
 
@@ -568,6 +582,7 @@ pubsub 断线重订的语义，给仍在订阅的频道补发一次（表频道�
 3. 删除 `sql/` 包、PG / MariaDB 的夹具与用例、依赖（`uv remove` 之后 `uv sync --all-packages`）。
 4. direct_set 契约：docstring、API 文档、`test_endpoint_connection` 的注释。
 5. CLI、配置模板、Sandbox、示例、文档（zh 与 en 放同一个提交）、`AGENTS.md`。
+6. direct_set 只改已存在的行（§3 决定 7，PR 开出之后定的）：红测试先行，雪花水位的行被删时重新建。
 
 ## 11. 主要改动文件清单
 

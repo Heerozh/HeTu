@@ -188,7 +188,7 @@ def upgrade(
 TableMaintenance(master: hetu.data.backend.base.BackendClient)
 ```
 
-<small>Source: [`hetu/data/backend/base.py:753`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L753)</small>
+<small>Source: [`hetu/data/backend/base.py:756`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L756)</small>
 
 
 
@@ -222,7 +222,7 @@ TableMaintenance(master: hetu.data.backend.base.BackendClient)
 get(ref: TableReference, row_id: int) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:771`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L771)</small>
+<small>Source: [`hetu/data/backend/base.py:774`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L774)</small>
 
 获取指定表的指定行数据
 
@@ -241,7 +241,7 @@ get(ref: TableReference, row_id: int) -> numpy.record | None
 range(ref: TableReference, index_name: str, left: Any, right: Any = None) -> list[int]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:775`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L775)</small>
+<small>Source: [`hetu/data/backend/base.py:778`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L778)</small>
 
 按索引范围查询指定表的数据
 
@@ -260,7 +260,7 @@ range(ref: TableReference, index_name: str, left: Any, right: Any = None) -> lis
 get_all_row_id(ref: TableReference) -> list[int]
 ```
 
-<small>Source: [`hetu/data/backend/base.py:781`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L781)</small>
+<small>Source: [`hetu/data/backend/base.py:784`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L784)</small>
 
 获取指定表的所有row id
 
@@ -279,7 +279,7 @@ get_all_row_id(ref: TableReference) -> list[int]
 delete_row(ref: TableReference, row_id: int)
 ```
 
-<small>Source: [`hetu/data/backend/base.py:785`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L785)</small>
+<small>Source: [`hetu/data/backend/base.py:788`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L788)</small>
 
 删除指定表的指定行数据
 
@@ -298,7 +298,7 @@ delete_row(ref: TableReference, row_id: int)
 upsert_row(ref: TableReference, row_data: numpy.record)
 ```
 
-<small>Source: [`hetu/data/backend/base.py:789`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L789)</small>
+<small>Source: [`hetu/data/backend/base.py:792`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L792)</small>
 
 更新指定表的一行数据，如果不存在就插入
 
@@ -320,7 +320,7 @@ read_meta(
 ) -> hetu.data.backend.base.TableMaintenance.TableMeta | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:793`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L793)</small>
+<small>Source: [`hetu/data/backend/base.py:796`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L796)</small>
 
 读取组件表在数据库中的meta信息，如果不存在则返回None。
 
@@ -343,7 +343,7 @@ read_meta(
 comp_name_of_(comp: type[BaseComponent] | str) -> str
 ```
 
-<small>Source: [`hetu/data/backend/base.py:804`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L804)</small>
+<small>Source: [`hetu/data/backend/base.py:807`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L807)</small>
 
 内部方法，把组件类或组件名统一成组件名
 
@@ -362,7 +362,7 @@ comp_name_of_(comp: type[BaseComponent] | str) -> str
 get_lock() -> contextlib.AbstractContextManager
 ```
 
-<small>Source: [`hetu/data/backend/base.py:809`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L809)</small>
+<small>Source: [`hetu/data/backend/base.py:812`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L812)</small>
 
 获得一个可以锁整个数据库的with锁，在获得锁之前堵塞，获得锁之后可以安全的进行表结构变更等操作，操作完成后释放锁
 
@@ -383,7 +383,7 @@ do_create_table_(
 ) -> hetu.data.backend.base.TableMaintenance.TableMeta
 ```
 
-<small>Source: [`hetu/data/backend/base.py:813`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L813)</small>
+<small>Source: [`hetu/data/backend/base.py:816`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L816)</small>
 
 实际创建组件表的逻辑实现，返回创建后的TableMeta
 
@@ -402,7 +402,7 @@ do_create_table_(
 do_rename_table_(from_: TableReference, to_: TableReference) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:817`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L817)</small>
+<small>Source: [`hetu/data/backend/base.py:820`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L820)</small>
 
 修改表名的实现，迁移组件表cluster_id用的就是这个，因为水平分片根据表名决定
 
@@ -421,7 +421,7 @@ do_rename_table_(from_: TableReference, to_: TableReference) -> None
 do_drop_table_(table_ref: TableReference) -> int
 ```
 
-<small>Source: [`hetu/data/backend/base.py:821`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L821)</small>
+<small>Source: [`hetu/data/backend/base.py:824`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L824)</small>
 
 实际drop组件表数据的逻辑实现，返回删除的行数
 
@@ -440,7 +440,7 @@ do_drop_table_(table_ref: TableReference) -> int
 do_rebuild_index_(table_ref: TableReference) -> int
 ```
 
-<small>Source: [`hetu/data/backend/base.py:825`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L825)</small>
+<small>Source: [`hetu/data/backend/base.py:828`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L828)</small>
 
 实际重建组件表索引的逻辑实现，返回重建的行数。要按行数据整个重建（行已不存在的
 索引残留要清掉），并且原子替换：中途失败时旧索引原样保留。
@@ -460,7 +460,7 @@ do_rebuild_index_(table_ref: TableReference) -> int
 do_update_meta_(table_ref: TableReference) -> None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:832`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L832)</small>
+<small>Source: [`hetu/data/backend/base.py:835`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L835)</small>
 
 把组件表的meta改写成table_ref的定义（json/version/cluster_id），不动表数据
 

@@ -111,6 +111,20 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
   （`uv run python scripts/gen_api_docs.py`）。
 - [x] 提交：`docs: SQLite 开发后端`
 
+## Task 6: direct_set 只改已存在的行（spec §3 决定 7，PR 开出之后定的）
+
+- [x] 红测试：缺行、缺字段都不写并返回 False，已有的行返回 True；不给字段报错；Redis 系再强制走一遍
+  Lua 回退，并确认启动探测没留下 key；`legacy_partial_row` 改用 `raw_hset` 造残缺行。
+  提交：`test: direct_set 只改已存在的行、返回是否写入的红测试`
+- [x] 实现：`BackendClient.direct_set -> bool` 与契约；Redis 的 `HSETEX FXX`、`probe_hsetex_`、
+  `DIRECT_SET_LUA` 回退；SQLite 的 `hset_existing(_txn)`。
+  提交：`fix(backend): direct_set 只改已存在的行，返回是否写入`
+- [x] 红测试：雪花水位的行在运行中被删，下一次 save 要重新建出完整的行。
+  提交：`test: 雪花水位行在运行中被删后，save 要重新建出完整的行的红测试`
+- [x] 修复：`SnowflakeTimestampKeeper.save` 拿到 False 就重置、按事务补建。
+  提交：`fix(snowflake): 水位行在运行中被删时，save 重新建出完整的行`
+- [x] spec、本计划、`docs/api/` 重新生成。提交：`docs: direct_set 只改已存在的行`
+
 ---
 
 ## 基线与实测
@@ -125,6 +139,8 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 | Task 3 后（删旧后端） | 1554 passed / 1 skipped | 146s |
 | Task 2b 后（测试扩面） | 1605 passed / 1 skipped | 149s |
 | 完成 | 1605 passed / 1 skipped | 142s |
+| rebase 到 dev `3c8bbd68` 并开 PR #164 | 1610 passed / 1 skipped | — |
+| Task 6 后（direct_set 只改已存在的行） | 1621 passed / 1 skipped | 145s |
 
 - 只跑 sqlite：新后端第一次跑就只挂了预期中的那几条（9 条 xfail 变成 strict XPASS、1 条旧后端的
   uint64 拒绝用例、1 条"SQL 不限制索引类型"的旧断言），没有新后端自己的 bug。
