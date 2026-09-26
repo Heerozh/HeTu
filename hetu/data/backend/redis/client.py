@@ -9,7 +9,7 @@ import asyncio
 import itertools
 import logging
 import random
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
@@ -633,13 +633,16 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         )
 
     @override
-    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes:
-        """执行 commit_v2.lua（`configure_master` 里加载），见基类"""
+    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
+        """
+        执行 commit_v2.lua（`configure_master` 里加载），见基类。不包一层 async：直接交出
+        lua_commit 的 awaitable，commit 路径上少一层协程
+        """
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
         assert self.lua_commit is not None, _(
             "lua_commit脚本没有初始化，请先调用 post_configure"
         )
-        return await self.lua_commit(keys, args)
+        return self.lua_commit(keys, args)
 
     @override
     async def direct_set(

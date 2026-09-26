@@ -12,7 +12,7 @@ SQLite 用 sqlite3 与它的 Python 版（`sqlite/commit.py`）。
 """
 
 import itertools
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable
 from typing import TYPE_CHECKING, Any, Literal, Never, overload, override
 
 # from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
@@ -610,11 +610,11 @@ class RedisModelClient(BackendClient):
             else:
                 raise RuntimeError(_("未知的提交错误：{resp}").format(resp=text))
 
-    async def commit_script_(self, keys: list[str], args: list[bytes]) -> bytes:
+    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
         """
         原子执行一次提交：`args[0]` 是 msgpack 打包的 payload（见 `build_commit_payload_`），返回
-        `b"committed"` 或 `b"RACE: …"` / `b"UNIQUE: …"`。Redis 是 `commit_v2.lua`，SQLite 是它的
-        Python 版。测试的碰头点、抓 payload 都 patch 这里。
+        `b"committed"` 或 `b"RACE: …"` / `b"UNIQUE: …"` 的 awaitable。Redis 是 `commit_v2.lua`，
+        SQLite 是它的 Python 版。测试的碰头点、抓 payload 都 patch 这里。
         """
         raise NotImplementedError
 
@@ -635,7 +635,8 @@ class RedisModelClient(BackendClient):
         assert not self.is_servant, _("从节点不允许提交事务")
         keys, payload = self.build_commit_payload_(idmap)
         resp = await self.commit_script_(keys, [msg_packer.pack(payload)])  # type: ignore
-        self.raise_for_commit_response_(resp)
+        if resp != b"committed":
+            self.raise_for_commit_response_(resp)
 
     # ============ 其他 ============
 
