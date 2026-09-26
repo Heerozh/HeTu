@@ -66,8 +66,10 @@ async def exchange_data(ctx: hetu.SystemContext, name, number):
 )
 async def range50_update2(ctx: hetu.SystemContext, left, right, new1, new2):
     rows = await ctx.repo[IntTable].range(number=(left, right), limit=50)
-    rows[0].name = new1
-    rows[1].name = new2
+    if len(rows) != 50:
+        raise LookupError("range50_update2 requires 50 rows; run seed_range50_rows.py")
+    for row, value in zip(rows[:2], (new1, new2)):
+        row.name = value if value != row.name else value + "X"
     await ctx.repo[IntTable].update(rows[0])
     await ctx.repo[IntTable].update(rows[1])
     return hetu.ResponseToClient([ctx.race_count])
