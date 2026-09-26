@@ -23,6 +23,11 @@ from ..i18n import _
 logger = logging.getLogger("HeTu.root")
 SNOWFLAKE_ID = SnowflakeID()
 
+# 单行数据是 np.record、多行是 np.recarray，两者读属性都是 numpy 自己的属性优先、字段其次：
+# 字段叫 size 的话 row.size 读到的是 numpy 的 size（写却写进字段），rows.shape = ... 还可能
+# 被当成 reshape。按运行时的 dir() 取，numpy 升级新加的属性也能挡住
+NUMPY_ROW_ATTRS = frozenset(dir(np.record)) | frozenset(dir(np.recarray))
+
 
 @dataclass
 class Property:
@@ -117,7 +122,9 @@ def property_field(
     `property_field(...)` 只负责声明字段元数据，真正的合法性校验会在
     `@define_component` 执行时完成，包括：
 
-    - 字段名是否合法；
+    - 字段名是否合法：不能是 Python / C# 关键字，也不能和 numpy 行数据
+      （`np.record` / `np.recarray`）的属性同名，如 `size`、`item`、`shape`，
+      否则 `row.size` 读到的是 numpy 的属性而不是字段值；
     - `default` 与 `dtype` 是否兼容；
     - `dtype` 是否可用于 NumPy structured array；
     - `unique/index/point_sub` 组合是否合法。
@@ -507,6 +514,14 @@ def define_component(
                 _("{cname}.{fname}属性定义出错，属性名不能是C#关键字。").format(
                     cname=cname, fname=fname
                 )
+            )
+        # 只在定义时检查：迁移要用 load_json 加载旧 schema，旧表里撞名的列得能读出来
+        if fname in NUMPY_ROW_ATTRS:
+            raise ValueError(
+                _(
+                    "{cname}.{fname}属性定义出错，属性名不能和numpy行数据的属性同名，"
+                    "否则row.{fname}读到的是numpy的属性而不是字段值，请换个名字。"
+                ).format(cname=cname, fname=fname)
             )
         # 判断类型，以及长度合法性
         assert np.dtype(prop.dtype).itemsize > 0, _(
