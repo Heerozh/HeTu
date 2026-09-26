@@ -6,7 +6,7 @@ import time
 from typing import Any
 
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import raw_hset, use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
 # 导入即注册 core 组件 WorkerLease，必须赶在 mod_test_app 建簇之前，不然簇里没有它
@@ -317,8 +317,9 @@ async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     worker_id = 9
     # 高于当前时间，才看得出读回的是不是这个水位
     stored = int(time.time() * 1000) + 30_000
-    # 旧版本就是这样建出残缺行的：行还不存在时直接 direct_set
-    await table.direct_set(worker_id, last_timestamp=str(stored))
+    # 旧版本的 direct_set 是裸 HSET，行还不存在时就建出这样的残缺行（现在的 direct_set
+    # 缺行不写，这里直接造）
+    raw_hset(backend, table, worker_id, last_timestamp=str(stored))
     raw = await backend.master.get(table, worker_id, RowFormat.RAW)
     assert raw is not None and "id" not in raw
 
