@@ -231,7 +231,7 @@ async def _raise_backend_error(*_args, **_kwargs):
 
 def _make_lease_table(backend):
     """建好 WorkerLease 的表。真实服务器里由 check_and_create_new_tables 在开服时建，
-    测试里直接构造 Table 不会碰数据库，而 direct_set 是裸 UPDATE，表不存在会直接报错。"""
+    测试里直接构造 Table 不会碰数据库，要自己建。"""
     from hetu.data.backend.table import Table
     from hetu.data.backend.worker_keeper import WorkerLease
 
@@ -264,8 +264,7 @@ async def test_snowflake_timestamp_keeper(
     assert abs(await ts_keeper.load() - now_ms) < 1000
 
     # 首次写入前必须先把行建好（GeneralWorkerKeeper 删掉后没人替本类建行了）：
-    # direct_set 是 HSET，缺行会建出只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT
-    # 读它就 KeyError（开服后每个 worker 都报一次）
+    # direct_set 只改已存在的行，缺行时什么都不写
     await ts_keeper.save(now_ms - 60_000)
     row = await backend.master.get(table, 7)
     assert row is not None and row.id == 7 and row.last_timestamp == now_ms - 60_000
@@ -328,6 +327,34 @@ async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     await keeper.save(stored + 1)
     restarted = SnowflakeTimestampKeeper(table, worker_id)
     assert await restarted.load() == stored + 1
+
+
+async def test_snowflake_timestamp_keeper_recreates_deleted_row(mod_auto_backend):
+    """运行中行被删掉了（比如开着服跑了 `hetu upgrade`，它会清空易失的 WorkerLease 表），
+    下一次 save 要把完整的行重新建出来。direct_set 只改已存在的行、缺行时什么都不写，
+    不看它的返回值的话，水位从此静默地再也写不进去"""
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+    from hetu.data.backend.worker_keeper import WorkerLease
+
+    backend = mod_auto_backend()
+    table = _make_lease_table(backend)
+    worker_id = 10
+    stored = int(time.time() * 1000) + 30_000
+    keeper = SnowflakeTimestampKeeper(table, worker_id)
+    await keeper.save(stored)  # 首次写入：建行
+    await keeper.save(stored + 1)  # 之后走 direct_set
+
+    async with table.session() as session:
+        repo = session.using(WorkerLease)
+        assert await repo.get(id=worker_id) is not None
+        repo.delete(worker_id)
+    assert await backend.master.get(table, worker_id) is None
+
+    await keeper.save(stored + 2)
+    row = await backend.master.get(table, worker_id)
+    assert row is not None and row.id == worker_id
+    assert row.last_timestamp == stored + 2
+    assert await SnowflakeTimestampKeeper(table, worker_id).load() == stored + 2
 
 
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
