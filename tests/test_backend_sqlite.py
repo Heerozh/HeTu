@@ -78,6 +78,13 @@ def test_parse_dsn_rejects(dsn):
         SQLiteBackendClient.parse_dsn(dsn)
 
 
+def test_parse_dsn_rejects_query():
+    """旧 SQL 后端（SQLAlchemy）的地址可以带 ?参数，改成 type: SQLite 时地址照抄过来：不认就明确
+    报错，不能把参数当成文件名的一部分，悄悄建一个新的空库"""
+    with pytest.raises(ValueError, match="参数"):
+        SQLiteBackendClient.parse_dsn("sqlite:///./hetu.db?timeout=30")
+
+
 def test_removed_sql_backend_is_reported(tmp_path):
     """type: SQL 与 postgres / mysql 地址都明确报错，告诉用户怎么改"""
     from hetu.cli.start import infer_backend_type_from_db_url
