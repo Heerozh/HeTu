@@ -324,6 +324,14 @@ class SQLiteStore:
         """
         fields = list(fields)
         if not self._table_exists(table, trust_cache=False):
+            if table.lower().startswith("sqlite_"):
+                # 行表名以实例名开头，这样的实例名在 Redis 上能用，SQLite 上建表会报内部错误
+                raise ValueError(
+                    _(
+                        "SQLite 保留了 sqlite_ 开头的表名（不分大小写），建不了行表 {table}："
+                        "请给实例换个不以 sqlite_ 开头的名字"
+                    ).format(table=table)
+                )
             cols = ", ".join(quote(c) for c in self._column_order(fields))
             self._ddl(
                 f"CREATE TABLE {quote(table)} ({quote(ROW_KEY)} INTEGER PRIMARY KEY, {cols})",
