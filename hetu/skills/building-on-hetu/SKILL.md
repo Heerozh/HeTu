@@ -61,6 +61,9 @@ working examples — read them first.
 - **Component** — a typed table. Strings are **fixed-width** (`dtype="U256"`)
   and truncate; there are **no nulls** (every column has a default). `index=True`
   builds a sorted index for `range()`; `unique=True` adds a uniqueness check.
+  Field names must not shadow NumPy row attributes: `size`, `item`, `shape`,
+  `data`, … are rejected at definition (`row.size` would read NumPy's `size`),
+  so use `bag_size`, `item_id`.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
