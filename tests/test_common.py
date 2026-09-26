@@ -357,6 +357,37 @@ async def test_snowflake_timestamp_keeper_recreates_deleted_row(mod_auto_backend
     assert await SnowflakeTimestampKeeper(table, worker_id).load() == stored + 2
 
 
+async def test_snowflake_timestamp_keeper_legacy_direct_set_contract():
+    """第三方后端的 direct_set 还按老契约什么都不返回（None）：不能当成行没了，每个周期
+    都去补建、撞主键、刷警告。只有明确返回 False 才是行没了"""
+    from types import SimpleNamespace
+
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+
+    writes: list[dict] = []
+    created: list[int] = []
+
+    async def direct_set(worker_id, **kwargs):
+        writes.append(kwargs)
+
+    async def create_row(last_timestamp):
+        created.append(last_timestamp)
+
+    async def get(*_args, **_kwargs):
+        return {"id": "3", "last_timestamp": "1"}  # 行在
+
+    table = SimpleNamespace(
+        direct_set=direct_set, backend=SimpleNamespace(master=SimpleNamespace(get=get))
+    )
+    keeper = SnowflakeTimestampKeeper(table, 3)  # type: ignore[arg-type]
+    keeper._row_ready = True  # 行已确认存在
+    keeper._create_row = create_row  # type: ignore[method-assign]
+    await keeper.save(123)
+    await keeper.save(456)
+    assert created == []
+    assert writes == [{"last_timestamp": "123"}, {"last_timestamp": "456"}]
+
+
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
     """回归：开服（首次和重启）都不该让雪花ID起始时间戳超前于当前时间。
 
