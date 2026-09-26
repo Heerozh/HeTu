@@ -15,6 +15,12 @@ from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
 import numpy as np
 import redis
+
+# 这几个子模块运行时都在用（建连接、isinstance、except），不能只在类型检查时 import
+import redis.asyncio
+import redis.asyncio.cluster
+import redis.cluster
+import redis.exceptions
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
@@ -23,11 +29,6 @@ from ..redis_model import RedisModelClient
 from .pool import HeTuConnectionPool
 
 if TYPE_CHECKING:
-    import redis.asyncio
-    import redis.asyncio.cluster
-    import redis.cluster
-    import redis.exceptions
-
     from ...component import BaseComponent
     from ..idmap import RangeObservation
     from ..table import TableReference
