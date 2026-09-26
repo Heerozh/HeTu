@@ -487,3 +487,75 @@ def test_add_clean_batch_snapshots_are_independent(mod_item_model, preload):
         assert first_clean is not None and first_clean.qty == 9
     with pytest.raises(ValueError, match="already exists"):
         idmap.add_clean(ref, rows)
+
+
+@pytest.mark.parametrize("others", [0, 2])
+def test_delete_after_update_sends_db_values(mod_item_model, others):
+    """先 update 再删：DELETE 带的是数据库里的原值，不是改后的值。Redis 按这些值 ZREM 索引，
+    拿改后的值去删，原值上的索引项就成了孤儿。others 覆盖单行、多行两条分派路径"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    row = Item.new_row(id_=7)
+    row.time, row.name, row.owner = 100, "old", 1
+    idmap.add_clean(ref, row)
+    if others:
+        rows = Item.new_rows(others)
+        rows.id = np.arange(20, 20 + others)
+        idmap.add_clean(ref, rows)
+    changed = row.copy()
+    changed.time, changed.name, changed.owner = 200, "new", 2
+    idmap.update(ref, changed)
+    idmap.mark_deleted(ref, 7)
+
+    _, (old_rows, _), deletes = idmap.get_dirty_rows()[ref]
+    assert old_rows == []
+    assert [(d["id"], d["time"], d["name"], d["owner"]) for d in deletes] == [
+        ("7", "100", "old", "1")
+    ]
+
+
+def test_delete_inserted_row_leaves_nothing_to_commit(mod_item_model):
+    """本事务 insert 的行又删掉：数据库里从没有过这行，提交时什么都不用发，事务也不算脏
+    （当成库里的行按 _version=0 去删，每次提交都判竞态）。删掉后这个 id 可以再 insert"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    idmap.add_clean(ref, Item.new_row(id_=1))
+    row = Item.new_row(id_=8)
+    row.name = "a"
+    idmap.add_insert(ref, row)
+    changed = row.copy()
+    changed.qty = 5
+    idmap.update(ref, changed)
+    idmap.mark_deleted(ref, 8)
+
+    assert not idmap.is_dirty
+    assert idmap.get_dirty_rows()[ref] == ([], ([], []), [])
+    assert len(idmap.filter(ref, name="a")) == 0
+
+    row.name = "b"
+    idmap.add_insert(ref, row)
+    inserts, _, deletes = idmap.get_dirty_rows()[ref]
+    assert [(r["id"], r["name"]) for r in inserts] == [("8", "b")]
+    assert deletes == []
+
+
+def test_delete_reinserted_db_row_still_deletes_it(mod_item_model):
+    """库里的行删掉、同一个 id 又 insert、再删：状态虽是 INSERT，库里那行仍然要删，不能
+    当成本事务新插的行直接忘掉"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    row = Item.new_row(id_=9)
+    row.name = "db"
+    idmap.add_clean(ref, row)
+    idmap.mark_deleted(ref, 9)
+    again = Item.new_row(id_=9)
+    again.name = "again"
+    idmap.add_insert(ref, again)
+    idmap.mark_deleted(ref, 9)
+
+    inserts, _, deletes = idmap.get_dirty_rows()[ref]
+    assert inserts == []
+    assert {(d["id"], d["name"]) for d in deletes} == {("9", "db")}

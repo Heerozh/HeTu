@@ -314,17 +314,26 @@ class IdentityMap:
 
     def mark_deleted(self, table_ref: TableReference, row_id: int) -> None:
         """
-        标记指定ID的对象为删除状态。
+        标记指定ID的对象为删除状态。本事务 insert、数据库里没有的行直接从缓存去掉，当它
+        没插过。
         """
         if table_ref not in self._row_states:
             raise ValueError(f"Component {table_ref} not in cache")
 
-        cache, _, states = self._cache(table_ref)
+        cache, clean_cache, states = self._cache(table_ref)
 
         # 查找行必须已存在
-        idx = np.where(cache["id"] == row_id)[0]
-        if len(idx) == 0:
+        found = cache["id"] == row_id
+        if not found.any():
             raise ValueError(f"Row with id {row_id} not found in cache")
+
+        # 数据库里没有的行（本事务 insert 的）提交时不用管，直接忘掉；标成 DELETE 会被当成
+        # 库里的行去删，版本校验必然失败，每次重试都一样。按有没有数据库态判断、不按 INSERT
+        # 状态：删掉库里的行再用同一个 id insert，状态也是 INSERT，忘掉就把那行的删除也丢了
+        if row_id not in clean_cache:
+            self._row_cache[table_ref] = cast(np.recarray, cache[~found])
+            del states[row_id]
+            return
 
         # 标记为DELETE
         states[row_id] = RowState.DELETE
@@ -637,7 +646,8 @@ class IdentityMap:
                         old_rows.append(_row_to_db(old, bytes_fields))
                         new_rows.append(new_fields)
                 elif state == RowState.DELETE:
-                    deletes.append(_row_to_db(row, bytes_fields))
+                    # 按数据库里的原值删：Redis 据此清索引，改过的索引列要清的是原值
+                    deletes.append(_row_to_db(clean_cache[row_id], bytes_fields))
 
             ret[table_ref] = (inserts, updates, deletes)
 

@@ -488,6 +488,9 @@ class SessionRepository:
         本事务曾 `get` 观察该值不存在 → `RaceCondition`（自动重试），否则 → `UniqueViolation`。
         要提前确认可调用 `is_unique_conflicts`。
 
+        本事务删掉的库里的行，不能再用同一个 id insert（`upsert` 锚定这个 id 新建也一样），
+        抛 `ValueError`：要改这行请直接 `update`。
+
         Parameters
         ----------
         row: np.record
@@ -500,6 +503,15 @@ class SessionRepository:
                     "{comp_name} 的 insert 行 id 为 0：本 Session 不发雪花号，"
                     "请用 new_row(id_=...) 显式给出非零 id"
                 ).format(comp_name=self.ref.comp_cls.name_)
+            )
+        if self._session.idmap.is_deleted(self.ref, row["id"]):
+            # 放行的话缓存里会有两行同 id：事务内按 id 读到的是删掉的旧行，提交时也不会
+            # 先删再插，只会报主键冲突
+            raise ValueError(
+                _(
+                    "{comp_name} 的行 id={row_id} 已在本事务中删除，不能再用同一个 id "
+                    "insert；要改这行请直接 update，不要先删再插"
+                ).format(comp_name=self.ref.comp_cls.name_, row_id=row.id)
             )
 
         changed_fields = self._get_changed_fields(row)
