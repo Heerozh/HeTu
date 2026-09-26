@@ -6,6 +6,10 @@
 #  """
 
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
 from fixtures.backends import use_redis_family_backend_only, xfail_on_backends
@@ -758,6 +762,46 @@ async def test_live_worker_ids_sees_unexpired_leases(mod_auto_backend):
         assert 1023 in live_worker_ids(backend)
     finally:
         io.delete(key)
+
+
+def _exited_process() -> subprocess.Popen:
+    """起一个进程并等它退出。Windows 上调用方握着返回的 Popen（也就握着进程句柄）期间，
+    这个 pid 不会被别的进程复用"""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc
+
+
+@use_redis_family_backend_only
+async def test_live_worker_ids_skips_exited_local_workers(mod_auto_backend):
+    """Windows 上 sanic 停 worker 是硬杀（Ctrl+C、DEBUG 自动重载都是 TerminateProcess），
+    租约来不及释放。本机上进程已经退出了的租约不算"服务器在跑"，不然 upgrade 得干等它过期。
+
+    只在 Windows 上这么认：别的平台上同一个机器码下可能是另一个 PID 空间（容器用 host
+    网络），本地查不到 pid 不代表进程不在，照旧算在跑。本机活着的、别的机器的、值不是
+    `机器码:pid` 的租约，哪个平台都算在跑"""
+    from hetu.common.helper import get_machine_id
+    from hetu.data.backend.worker_keeper import live_worker_ids
+
+    backend = mod_auto_backend()
+    io = backend.master.io
+    exited = _exited_process()
+    leases = {
+        1019: f"{get_machine_id()}:{exited.pid}",
+        1020: f"{get_machine_id()}:{os.getpid()}",
+        1021: f"other-machine:{exited.pid}",
+        1022: "pytest-node",
+    }
+    try:
+        for worker_id, owner in leases.items():
+            io.set(f"snowflake:worker:{worker_id}", owner, ex=60)
+        live = set(live_worker_ids(backend)) & set(leases)
+        assert live == ({1020, 1021, 1022} if sys.platform == "win32" else set(leases))
+        # 只是不算，不删：key 照旧等 TTL 过期
+        assert io.exists("snowflake:worker:1019")
+    finally:
+        for worker_id in leases:
+            io.delete(f"snowflake:worker:{worker_id}")
 
 
 def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):

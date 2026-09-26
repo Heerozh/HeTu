@@ -1,4 +1,7 @@
 import logging
+import os
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -556,3 +559,21 @@ def test_get_machine_id(monkeypatch):
     _fake_fs(monkeypatch, {})
     monkeypatch.setattr(uuid, "getnode", lambda: 0x1A2B3C4D5E6F)
     assert get_machine_id() == "1a2b3c4d5e6f"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="只在 Windows 上判断")
+def test_windows_pid_exited():
+    """认得出本机已经退出的进程：进程对象还在（有人握着句柄）、查无此 pid 两种都算；
+    活着的、没权限查的（System 进程）都不算"""
+    from hetu.common.helper import windows_pid_exited
+
+    assert not windows_pid_exited(os.getpid())
+    # System 进程：OpenProcess 拒绝访问，拿不准就当活着
+    assert not windows_pid_exited(4)
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    # Popen 还握着句柄，进程对象没释放，OpenProcess 照样打得开，得看退出码
+    assert windows_pid_exited(proc.pid)
+
+    assert windows_pid_exited(0xFFFFFFFC)  # Windows 的 pid 到不了这么大，查无此进程
