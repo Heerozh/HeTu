@@ -58,7 +58,7 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         """
         `sqlite:///<路径>` → 路径：`sqlite:///./hetu.db` 相对当前目录，`sqlite:////abs/hetu.db`
         是绝对路径，Windows 可写 `sqlite:///C:/…`。不支持 `:memory:`（跨客户端、跨进程看不到同一份
-        数据）。
+        数据），也不支持 `?参数`（旧 SQL 后端的地址可以带）。
         """
         prefix = "sqlite:///"
         if not isinstance(dsn, str) or not dsn.lower().startswith(prefix):
@@ -69,6 +69,13 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
                 ).format(dsn=dsn)
             )
         path = dsn[len(prefix) :]
+        if "?" in path:
+            # 不认就报错：当成文件名的一部分会悄悄换到一个新的空库上
+            raise ValueError(
+                _("SQLite 后端的地址不支持 ?参数，请去掉 ? 及后面的部分：{dsn}").format(
+                    dsn=dsn
+                )
+            )
         if not path or path == ":memory:":
             raise ValueError(
                 _("SQLite 后端不支持内存库，请给一个库文件路径：{dsn}").format(dsn=dsn)
