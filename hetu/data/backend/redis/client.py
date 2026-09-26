@@ -26,6 +26,9 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    exact_number_,
+    inverted_bounds_error_,
+    normalize_int_bounds_,
     peel_bound_,
     sortable_token,
     to_sortable_bytes,
@@ -613,54 +616,57 @@ class RedisBackendClient(BackendClient, alias="redis"):
         right: int | float | str | bytes | bool | None,
         desc: bool,
     ) -> tuple[bytes, bytes]:
-        """规范化范围查询的左边界和右边界"""
-        # 处理right none, 顺序问题
+        """
+        规范化范围查询的边界，返回 ZRANGE BYLEX 的两端，按扫描顺序排（desc 时上界在前）。
+
+        left / right 是 (下界, 上界)，desc 时也一样；下界大于上界多半是传反了，报 ValueError。
+        整数索引按区间的数学含义收成闭区间（见 `normalize_int_bounds_`），越界、小数照常查。
+        区间是空的（两端开区间同值、整数列里没有整数……）时，返回的两端交叉或相等：ZRANGE /
+        ZLEXCOUNT 对这样的两端自然得到空 / 0，`_zrange_members` 也就不去查了。
+        """
         if right is None:
             right = left
-        if desc:
-            left, right = right, left
 
-        if issubclass(dtype.type, np.character):
-            # component字段如果是str/bytes类型的索引，不能查询数字
-            if type(left) not in (str, bytes) or type(right) not in (str, bytes):
-                raise ValueError(
-                    f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
-                    f"right={type(right)}({right})"
-                )
-        else:
-            # component字段如果是int数字，则处理inf
-            # 浮点不用处理，因为浮点的inf是高位的Exponent全FF，大于2**1023最大值，自然永远最大
-            if issubclass(dtype.type, np.integer):
-                type_info = np.iinfo(dtype)
+        # component字段如果是str/bytes类型的索引，不能查询数字
+        if issubclass(dtype.type, np.character) and (
+            type(left) not in (str, bytes) or type(right) not in (str, bytes)
+        ):
+            raise ValueError(
+                f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
+                f"right={type(right)}({right})"
+            )
 
-                def clamp_inf(x):
-                    if type(x) is float and np.isinf(x):
-                        return type_info.max if x > 0 else type_info.min
-                    return x
-
-                left = clamp_inf(left)
-                right = clamp_inf(right)
-
-        # 处理范围区间：边界值开头的 "(" / "[" 指定开/闭，默认闭区间
-        left, li = peel_bound_(left)
-        right, ri = peel_bound_(right)
+        # 边界值开头的 "(" / "[" 指定开/闭，默认闭区间
+        lower, li = peel_bound_(left)
+        upper, ui = peel_bound_(right)
         li = True if li is None else li
-        ri = True if ri is None else ri
-        # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
-        # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
-        # 后缀按上界 / 下界的角色取：desc 时上面已把值换过来，left 是上界、right 是下界，
-        # li / ri 也跟着各自的值走
-        if desc:
-            ls = b"\x00\xff" if li else b"\x00"
-            rs = b"\x00" if ri else b"\x00\xff"
-        else:
-            ls = b"\x00" if li else b"\x00\xff"
-            rs = b"\x00\xff" if ri else b"\x00"
+        ui = True if ui is None else ui
 
-        # 二进制化。
-        b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
-        b_right = b"[" + to_sortable_bytes(dtype.type(right)) + rs
-        return b_left, b_right
+        if issubclass(dtype.type, np.integer):
+            # 不按 dtype 转换（会溢出、会截断小数）：先用精确的数判定传反，再收成范围内的闭区间
+            lower_num, upper_num = exact_number_(lower), exact_number_(upper)
+            if lower_num > upper_num:
+                raise inverted_bounds_error_(lower, upper)
+            bounds = normalize_int_bounds_(dtype, lower_num, li, upper_num, ui)
+            if bounds is None:
+                # 区间里没有整数：给交叉的两端 [最大值, 最小值]
+                info = np.iinfo(dtype)
+                bounds = (info.max, info.min)
+            lower_value = to_sortable_bytes(dtype.type(bounds[0]))
+            upper_value = to_sortable_bytes(dtype.type(bounds[1]))
+            li = ui = True
+        else:
+            lower_value = to_sortable_bytes(dtype.type(lower))
+            upper_value = to_sortable_bytes(dtype.type(upper))
+            # 按值判定传反（编码是保序的）。同值时开区间让两端交叉，那是空区间，不是传反
+            if upper_value < lower_value:
+                raise inverted_bounds_error_(lower, upper)
+
+        # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
+        # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)
+        b_lower = b"[" + lower_value + (b"\x00" if li else b"\x00\xff")
+        b_upper = b"[" + upper_value + (b"\x00\xff" if ui else b"\x00")
+        return (b_upper, b_lower) if desc else (b_lower, b_upper)
 
     @staticmethod
     def make_zrange_cmd_(b_left, b_right, desc, limit):
@@ -833,8 +839,9 @@ class RedisBackendClient(BackendClient, alias="redis"):
         b_left, b_right = self.range_normalize_(
             comp_cls.dtype_map_[index_name], left, right, desc
         )
-        if (b_left < b_right) if desc else (b_right < b_left):
-            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
+        # 两端交叉或相等就是空区间（传反的已在 range_normalize_ 里报错），不用去查
+        if (b_left <= b_right) if desc else (b_right <= b_left):
+            return [], b_left, b_right
 
         members = await self.aio.zrange(
             name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)

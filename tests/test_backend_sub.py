@@ -703,9 +703,11 @@ def test_point_query_value():
     assert point(i64, 10, 10) == 10
     assert point(i64, "10", 10) == 10  # 按 dtype 规范化后比较
     assert point(i64, 10, 11) is None
-    assert point(i64, float("inf"), None) is None  # int 索引传 inf 转换失败 → 回退
+    assert point(i64, float("inf"), None) is None  # int 索引里没有 inf 这个值 → 回退
+    assert point(i64, "abc", None) is None  # 解析不了的边界 → 回退，不报错
     f32 = np.dtype(np.float32)
     assert point(f32, float("nan"), None) is None
+    assert point(f32, "abc", None) is None
     assert point(f32, 0.1, 0.1) == np.float32(0.1)
     u8 = np.dtype("U8")
     assert point(u8, "abc", None) == "abc"
@@ -713,6 +715,12 @@ def test_point_query_value():
     assert point(u8, "(abc", "abc") is None  # ( 是开区间
     assert point(u8, "abc", "(abc") is None
     assert point(np.dtype(np.int8), True, None) == 1  # bool 字段定义时已转 int8
+    # 整数索引：区间里没有这个值的不算点查询，不能截断成整数去订值频道、登记"读空"
+    i8 = np.dtype(np.int8)
+    assert point(i8, 1.0, None) == 1
+    assert point(i8, 1.5, 1.5) is None
+    assert point(i8, 200, None) is None  # 越界
+    assert point(i8, "1.5", None) is None
 
 
 async def test_subscribe_point_query_channel(

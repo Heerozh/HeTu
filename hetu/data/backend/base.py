@@ -35,6 +35,7 @@ import asyncio
 import hashlib
 import importlib
 import logging
+import math
 import struct
 import time
 import warnings
@@ -203,6 +204,74 @@ def peel_bound_(
     return value, None
 
 
+def inverted_bounds_error_(lower: Any, upper: Any) -> ValueError:
+    """内部方法：区间下界大于上界（多半是参数传反了）的报错，两个后端共用这一句"""
+    return ValueError(
+        _(
+            "区间的下界大于上界：下界={lower}，上界={upper}"
+            "（desc=True 时也按 (下界, 上界) 传）"
+        ).format(lower=repr(lower), upper=repr(upper))
+    )
+
+
+def exact_number_(value: Any) -> int | float:
+    """
+    内部方法：整数索引的区间边界（已剥掉 `(` / `[` 前缀）转成精确的 Python 数。不按 dtype
+    转换，越界不会溢出、小数也不会被截断。str / bytes 先按整数解析，不行再按浮点，都不行
+    抛 ValueError。
+    """
+    if isinstance(value, (bool, int, np.integer)):
+        return int(value)
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        try:
+            return int(text)
+        except ValueError:
+            return float(text)
+    return float(value)
+
+
+def normalize_int_bounds_(
+    dtype: np.dtype,
+    lower: float,
+    lower_inclusive: bool,
+    upper: float,
+    upper_inclusive: bool,
+) -> tuple[int, int] | None:
+    """
+    内部方法：整数索引的区间按数学含义收成 dtype 范围内的闭区间 (lo, hi)，区间里没有整数时
+    返回 None。边界先用 `exact_number_` 转成精确的数：
+
+    - 小数边界向区间内取整：x >= 0.5 即 x >= 1，x <= 1.5 即 x <= 1；
+    - 开区间的整数边界收进一格：x > 5 即 x >= 6；
+    - 超出 dtype 范围的边界（含 ±inf）钳到极值：int8 列上 x <= 1000 即 x <= 127。整个区间
+      都在范围外，或者像 (inf, inf)、(1.2, 1.8) 这样里面没有整数，就是空。
+
+    NaN 边界抛 ValueError。下界大于上界要调用方先用原始值判定：那是参数传反了，应该报错，
+    而不是当成空区间。两个后端都应按这个规则处理整数区间（SQL 后端还没接上，见
+    tests/test_backend_index_semantics.py 里的 xfail）。
+    """
+    info = np.iinfo(dtype)
+
+    def edge(value: float, inclusive: bool, inward: int) -> float:
+        # inward：下界 +1（往上收）、上界 -1（往下收）。±inf 原样返回，由下面钳到极值
+        if isinstance(value, float):
+            if math.isnan(value):
+                raise ValueError(_("整数索引的区间边界不能是 NaN"))
+            if math.isinf(value):
+                return value
+            if not value.is_integer():
+                return math.ceil(value) if inward > 0 else math.floor(value)
+            value = int(value)
+        return value if inclusive else value + inward
+
+    lo = max(edge(lower, lower_inclusive, 1), info.min)
+    hi = min(edge(upper, upper_inclusive, -1), info.max)
+    if lo > hi:
+        return None
+    return int(lo), int(hi)
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
@@ -262,8 +331,10 @@ class BackendClient:
         """
         判断 range 查询是否退化为点查询（right 省略或 left == right），是则返回按 dtype
         规范化后的值，否则返回 None。与 `range_normalize_` 的 peel 规则一致：str/bytes 值的
-        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（int 索引传 ±inf、
-        非法字符串）或 NaN 也返回 None，由调用方回退到整个索引的频道。
+        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（非法字符串）或 NaN
+        也返回 None，由调用方回退到整个索引的频道。整数索引的边界要是 dtype 范围内的整数才算：
+        小数、越界、±inf 的区间里没有这个值（见 `normalize_int_bounds_`），拿截断后的值去订
+        值频道、登记"读空"都不对。
         """
         left, left_inclusive = peel_bound_(left)
         right, right_inclusive = (
@@ -271,6 +342,17 @@ class BackendClient:
         )
         if left_inclusive is False or right_inclusive is False:
             return None  # 开区间不算点查询
+        if issubclass(dtype.type, np.integer):
+            try:
+                value, other = exact_number_(left), exact_number_(right)
+            except ValueError, TypeError:
+                return None
+            if value != other or (isinstance(value, float) and not value.is_integer()):
+                return None  # 两端不同、小数、±inf、NaN
+            info = np.iinfo(dtype)
+            if not info.min <= int(value) <= info.max:
+                return None
+            return dtype.type(int(value))
         try:
             left_value, right_value = dtype.type(left), dtype.type(right)
         except ValueError, OverflowError, TypeError:

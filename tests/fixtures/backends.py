@@ -330,3 +330,15 @@ def use_redis_family_backend_only(func):
     return pytest.mark.parametrize(
         "backend_name", REDIS_BACKENDS + REDIS_FORK_BACKENDS, indirect=True
     )(func)
+
+
+def xfail_on_backends(request, backend_name: str, backends, *, raises, reason: str):
+    """
+    已知的后端行为偏差：当前后端在 `backends` 里，就把本用例标成 strict xfail。用例按期望
+    的行为写，`raises` 限定现在的失败方式（别的错误照常报失败）；修好后 XPASS(strict)
+    会报错，提醒去掉这一行。
+    """
+    if backend_name in backends:
+        request.applymarker(
+            pytest.mark.xfail(strict=True, raises=raises, reason=reason)
+        )

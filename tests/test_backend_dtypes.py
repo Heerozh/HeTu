@@ -1,14 +1,20 @@
 """
-非常规字段类型在各后端的往返与索引查询：bool（定义时转成 int8）、无符号整型、bytes。
+非常规字段类型与值在各后端的往返与索引查询：bool（定义时转成 int8）、无符号整型、bytes、
+浮点的 ±inf / NaN、含 \\x00 的字符串。
 """
 
 import numpy as np
 import pytest
-from fixtures.backends import SQL_BACKENDS, use_redis_family_backend_only
+from fixtures.backends import (
+    SQL_BACKENDS,
+    use_redis_family_backend_only,
+    xfail_on_backends,
+)
 from fixtures.testdata import create_ref
+from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend, RowFormat, TableReference
+from hetu.data.backend import Backend, RaceCondition, RowFormat, TableReference
 
 SnowflakeID().init(1, 0)
 
@@ -260,3 +266,74 @@ async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
     await backend.wait_for_synced()
     rows = await backend.servant.range(blob_ref, "tag", BIN)
     assert [int(r.id) for r in rows] == [ids[1]]
+
+
+@pytest.mark.parametrize(
+    "value", [float("inf"), float("-inf"), float("nan")], ids=["inf", "-inf", "nan"]
+)
+async def test_float_special_values(
+    item_ref, mod_auto_backend, backend_name, request, value
+):
+    """
+    浮点列存 ±inf / NaN 原样读回。后端存不下的值要在写入前明确拒绝（ValueError，同
+    uint64），不能交给驱动报错，更不能被当成竞态重试。
+
+    MariaDB 存不了 ±inf / NaN，驱动报 ProgrammingError；SQLite 把 NaN 绑定成 NULL、撞上
+    NOT NULL 约束，这个 IntegrityError 被当成 unique 冲突转成 RaceCondition，会一直重试到上限。
+    """
+    xfail_on_backends(
+        request,
+        backend_name,
+        ("mariadb",),
+        raises=sa_exc.DBAPIError,
+        reason="MariaDB 存不了 ±inf / NaN，写入前没有明确拒绝",
+    )
+    if np.isnan(value):
+        xfail_on_backends(
+            request,
+            backend_name,
+            ("sqlite",),
+            raises=RaceCondition,
+            reason="SQLite 的 NaN 变成 NULL，约束错误被当成竞态",
+        )
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name, row.time, row.model = "s", 1, value
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(row)
+    except ValueError:
+        return  # 后端存不下，写入前明确拒绝也可以
+    got = await backend.master.get(item_ref, int(row.id))
+    assert got is not None
+    np.testing.assert_equal(got.model, np.float32(value))
+
+
+async def test_str_with_nul_roundtrip(
+    item_ref, mod_auto_backend, backend_name, request
+):
+    """
+    字符串中间的 \\x00 原样存取、能按它点查。后端存不下的要在写入前明确拒绝（ValueError）。
+    PG 的 text 类型不能含 \\x00，驱动报 DBAPIError。
+    """
+    xfail_on_backends(
+        request,
+        backend_name,
+        ("postgres",),
+        raises=sa_exc.DBAPIError,
+        reason="PG 的字符串不能含 \\x00，写入前没有明确拒绝",
+    )
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name, row.time = "a\x00b", 1
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(row)
+    except ValueError:
+        return  # 后端存不下，写入前明确拒绝也可以
+    got = await backend.master.get(item_ref, int(row.id))
+    assert got is not None and got.name == "a\x00b"
+    rows = await backend.master.range(item_ref, "name", "a\x00b", limit=-1)
+    assert [int(r.id) for r in rows] == [int(row.id)]
