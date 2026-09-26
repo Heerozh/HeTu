@@ -39,6 +39,9 @@ logger = logging.getLogger("HeTu.root")
 
 # direct_set 的回退（服务端不支持 HSETEX 时）：要写的字段都已存在才写，同 HSETEX FXX。字段不在
 # （含整行不存在）就什么都不写，不会建出残缺行。返回 1 / 0
+# 代价：一次约 1.2~1.4µs，HSET 约 0.09µs。它要写，只能在 master 上跑，只读 Lua 转副本的开关
+# （如阿里云的 readonly_lua_route_ronode_enable）帮不上；把 HEXISTS 拆去副本又丢了原子性。按连接
+# 心跳最多每 ENDPOINT_CALL_IDLE_TIMEOUT / 5（默认 24 秒）写一次算，10 万在线约占 master 单核 0.5%
 DIRECT_SET_LUA = """
 for i = 1, #ARGV, 2 do
     if redis.call('HEXISTS', KEYS[1], ARGV[i]) == 0 then
