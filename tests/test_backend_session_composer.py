@@ -214,3 +214,33 @@ async def test_insert_then_delete(item_ref, mod_auto_backend):
         assert await item_repo.get(id=dropped.id) is None
         assert await item_repo.get(name="dropped") is None
         assert await item_repo.get(name="alone") is None
+
+
+async def test_reinsert_deleted_id_rejected(filled_item_ref, mod_auto_backend):
+    """删掉库里的行后，同一事务不能再用这个 id insert（upsert 锚定这个 id 新建也一样），
+    要改这行请直接 update。放行的话缓存里会有两行同 id，事务内 get(id) 读到已删的旧行，
+    提交时报 UniqueViolation。被拒不影响之前的删除"""
+    backend = mod_auto_backend()
+    comp = filled_item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(comp)
+        row = await item_repo.get(name="Itm12")
+        assert row is not None
+        row_id = int(row.id)
+        item_repo.delete(row_id)
+        again = comp.new_row(id_=row_id)
+        again.name, again.time = "again", 999_999
+        with pytest.raises(ValueError, match="已在本事务中删除"):
+            await item_repo.insert(again)
+        with pytest.raises(ValueError, match="已在本事务中删除"):
+            async with item_repo.upsert(id=row_id) as upserted:
+                upserted.name, upserted.time = "again", 999_999
+        assert await item_repo.get(id=row_id) is None
+
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(comp)
+        assert await item_repo.get(id=row_id) is None
+        assert await item_repo.get(name="Itm12") is None
+        assert await item_repo.get(name="again") is None
