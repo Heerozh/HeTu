@@ -593,6 +593,63 @@ async def test_manager_flush_volatile(
         keep.backend.get_table_maintenance().flush(keep)
 
 
+async def test_manager_volatile_drop_column_without_force(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """易失组件删属性不算有损：`hetu upgrade` 迁移完紧接着就 flush_volatile，数据本来就要
+    清掉。不带 force 也要迁移成功，不然改一个易失核心组件（Connection 之类）就逼所有部署
+    带 --drop-data 升级"""
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        define_component,
+        property_field,
+    )
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+
+    def define(with_v: bool):
+        ComponentDefines().clear_()
+        SystemClusters()._clear()
+        if with_v:
+
+            @define_component(namespace="pytest", force=True, volatile=True)
+            class MgrVolatile(BaseComponent):
+                owner: np.int64 = property_field(0, unique=True)
+                v: np.int32 = property_field(7, index=True)
+
+        else:
+
+            @define_component(namespace="pytest", force=True, volatile=True)
+            class MgrVolatile(BaseComponent):
+                owner: np.int64 = property_field(0, unique=True)
+
+        @define_system(namespace="pytest", components=(MgrVolatile,))
+        async def mgr_use_volatile(ctx):
+            pass
+
+        SystemClusters().build_clusters("pytest")
+        tm = ComponentTableManager("pytest", "mgr_volatile", {"default": backend})
+        return MgrVolatile, tm
+
+    comp, tm = define(with_v=True)
+    assert tm.create_or_migrate_all(app_file) is True
+    await _insert_owner(tm, comp, 1)
+
+    # 删掉带索引的 v：不带 force 也迁移成功，表按新定义重建、照常读写
+    comp, tm = define(with_v=False)
+    assert _status(tm, comp) == "schema_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, comp) == "ok"
+    await _insert_owner(tm, comp, 2)
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, comp, 2)
+    assert row is not None and "v" not in row.dtype.names
+
+
 # ---------------------------------------------------------------------------
 # 重建索引：`hetu upgrade` 默认每次都按行数据重建持久组件的索引，修掉索引残留
 # ---------------------------------------------------------------------------
