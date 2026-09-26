@@ -102,10 +102,21 @@ async def benchmark_get_then_update(connection):
     return received[0]
 
 
-async def benchmark_get2_update2(connection):
+async def benchmark_exchange(connection):
     rnd_str = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
     row_id = random.randint(1, BENCH_ID_RANGE)
     received = await rpc(connection, ["rpc", "exchange_data", rnd_str, row_id])
+    return received[0]
+
+
+async def benchmark_range50_update2(connection):
+    left = random.randint(1, BENCH_ID_RANGE)
+    right = random.randint(left, BENCH_ID_RANGE)
+    new1 = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+    new2 = "".join(random.choices(string.ascii_uppercase + string.digits, k=3))
+    received = await rpc(
+        connection, ["rpc", "range50_update2", left, right, new1, new2]
+    )
     return received[0]
 
 
@@ -119,7 +130,7 @@ uv run hetu start --app-file=./server/app.py --db=${REDIS_URL} --namespace=bench
 # benchmark_get 按 id 读 IntTable，服务端启动后先填充（读空会直接报错）
 uv run python seed_get_rows.py --redis ${REDIS_URL}
 
-export HETU_HOST=ws://localhost:2466/hetu/bench
+export HETU_URL=ws://localhost:2466/hetu/bench
 
 # 启动 1200 个并发用户
 
