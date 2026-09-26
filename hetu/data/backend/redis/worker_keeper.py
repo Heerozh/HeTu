@@ -1,10 +1,11 @@
 import logging
+import sys
 from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
-from ....common.helper import get_machine_id
+from ....common.helper import get_machine_id, windows_pid_exited
 from ....common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 from ....i18n import _
 
@@ -37,11 +38,47 @@ def live_worker_ids(io: redis.Redis | redis.RedisCluster) -> list[int]:
     """
     还持有租约的 worker id：服务器在跑，或者异常退出后租约还没过期（最多
     WORKER_ID_EXPIRE_SEC 秒）。一次 pipeline 查完所有 id，cluster 下按 slot 分发。
+
+    例外：Windows 上本机已经退出的进程留下的租约不算，见 `_owner_exited`。
     """
     pipe = io.pipeline()
     for worker_id in range(MAX_WORKER_ID + 1):
-        pipe.exists(f"{WORKER_ID_KEY}:{worker_id}")
-    return [worker_id for worker_id, alive in enumerate(pipe.execute()) if alive]
+        pipe.get(f"{WORKER_ID_KEY}:{worker_id}")
+    return [
+        worker_id
+        for worker_id, owner in enumerate(pipe.execute())
+        if owner is not None and not _owner_exited(owner)
+    ]
+
+
+def _owner_exited(owner: bytes | str) -> bool:
+    """
+    租约的主人（node_id，即 `机器码:pid`）是本机上已经退出的进程。只在 Windows 上这么认。
+
+    为什么要认：Windows 上 sanic 停 worker 是 TerminateProcess 硬杀——Ctrl+C 走
+    `WorkerProcess.terminate()` 的 `os.kill(pid, SIGINT)`，DEBUG 自动重载走
+    `multiprocessing.Process.terminate()`，从外面 `taskkill /F` 也一样——关服钩子里的
+    release_worker_id 没机会跑。这些租约照算的话，upgrade 就得干等它们过期。
+
+    为什么只在 Windows：判断的前提是"机器码相同就是同一个 PID 空间，本地查得到那个 pid"。
+    容器里机器码是 hostname（识别不出容器时是 MAC），host 网络或写死 hostname 时多个容器
+    共用一个机器码、PID 空间却各自独立，本地查不到 pid 不代表进程不在，会把活着的服务器当成
+    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 sanic
+    用信号优雅停 worker，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
+
+    只认不删：key 照旧等 TTL 过期，开服分配有的是空位。按值删会撞上"pid 被回收、新 worker
+    经 `_getex_if_mine` 接手同一把 key"的竞态，删掉的就成了活租约。
+    """
+    if sys.platform != "win32":
+        return False
+    if isinstance(owner, bytes):
+        owner = owner.decode("ascii", errors="replace")
+    machine_id, _, pid = owner.rpartition(":")
+    return (
+        machine_id == get_machine_id()
+        and pid.isdecimal()
+        and windows_pid_exited(int(pid))
+    )
 
 
 @final

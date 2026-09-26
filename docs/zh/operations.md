@@ -234,7 +234,8 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 
 `upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
 不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
-秒）后再试。SQL 后端没有租约、检查不出来，请自己确认已经停服。
+秒）后再试。Windows 上本机已经退出的服务器不用等：Sanic 在 Windows 上停 worker 是硬杀，租约来不及释放，
+所以这种租约不算。SQL 后端没有租约、检查不出来，请自己确认已经停服。
 
 ### `hetu build`
 
