@@ -387,9 +387,10 @@ class BackendClient:
         raise NotImplementedError
 
     def __init_subclass__(cls, **kwargs):
-        """让继承子类自动注册alias"""
+        """让继承子类自动注册alias；不带 alias 的中间基类（如 RedisModelClient）不注册"""
         super().__init_subclass__()
-        BackendClientFactory.register(kwargs["alias"], cls)
+        if alias := kwargs.get("alias"):
+            BackendClientFactory.register(alias, cls)
 
     def __init__(self, endpoint: Any, is_servant, **kwargs):
         """
@@ -1303,6 +1304,28 @@ class MQHub:
         dropped = 0
         for mq in self._subs.get(channel_name, ()):
             dropped += mq.push_pulled_(channel_name, ids)
+        return dropped
+
+    @staticmethod
+    def is_table_channel_(channel: str) -> bool:
+        """表级频道（commit 主动发，payload 是 row_id 列表）；行 / 索引频道是 keyspace 通知"""
+        return not channel.startswith("__keyspace@") and channel.endswith(
+            BackendClient.TABLE_CHANNEL_SUFFIX
+        )
+
+    def resync_(self, channels: Iterable[str]) -> int:
+        """
+        这段时间的通知丢了（Redis 的 pubsub 断线、SQLite 的通知被清理）：给这些频道里本进程仍有人
+        订的各分发一条通知，各连接一个 interval 后补读（行 / 索引订阅重读、重跑比对；整表订阅整表
+        重同步）。只有表级频道带 `RESYNC`：它的 payload 本来就是 row_id 集合，整表订阅靠这个标记
+        整表重读；行 / 索引（含值）频道照约定 payload 为 None。服务端内部 watch 的回调也照常触发。
+        返回丢弃的过期通知条数，由调用方打日志。
+        """
+        dropped = 0
+        for channel in channels:
+            if channel in self._subs:
+                ids = [MQClient.RESYNC] if self.is_table_channel_(channel) else None
+                dropped += self._dispatch(channel, ids)
         return dropped
 
     def _spawn(self, coro) -> asyncio.Task:

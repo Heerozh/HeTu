@@ -31,20 +31,20 @@ PUBLISH（通知表，跨进程轮询）。
 **Files:** 新增 `hetu/data/backend/redis_model.py`；改 `redis/client.py`、`redis/maint.py`、`redis/mq.py`、
 `base.py`。
 
-- [ ] `BackendClient.__init_subclass__` 改成有 `alias` 才注册。
-- [ ] `RedisModelClient(BackendClient)`：key / 频道命名（`dbi` 由子类设置）、`to_sortable_bytes` 别名、
+- [x] `BackendClient.__init_subclass__` 改成有 `alias` 才注册。
+- [x] `RedisModelClient(BackendClient)`：key / 频道命名（`dbi` 由子类设置）、`to_sortable_bytes` 别名、
   `row_decode_` / `rows_decode_`、`range_normalize_` / `make_zrange_cmd_`、区间两端与空区间判定、由 member 生成
   `RangeObservation`、`_range_checks`、`build_commit_payload_`（原 `commit` 的组装部分，一字不改）、
   `raise_for_commit_response_`、`commit`（组装 → `commit_script_` → 映射）、`direct_set` 的参数校验、
   `_get_referred_components`、索引 dtype 的 schema 检查、重建索引的 member 计算。`msg_packer` 也搬过去，
   `redis/client.py` 照旧能 import 到。
-- [ ] `RedisBackendClient(RedisModelClient, alias="redis")` 只留 redis-py I/O；`commit_script_` 转调
+- [x] `RedisBackendClient(RedisModelClient, alias="redis")` 只留 redis-py I/O；`commit_script_` 转调
   `lua_commit`。读路径（`get` / `_hgetall_many` / `get_many` / `range`）代码不动。
-- [ ] `MQHub` 增加共用的 `is_table_channel_` / `decode_table_payload_` / `_resync_`（原
+- [x] `MQHub` 增加共用的 `is_table_channel_` / `decode_table_payload_` / `_resync_`（原
   `PubSubHub._on_resubscribed` 的分发部分），`PubSubHub` 改用它们。
-- [ ] 验证：redis / valkey / redis_cluster / sqlite 全绿（sqlite 此时仍是旧后端）；Redis range / commit 的
+- [x] 验证：redis / valkey / redis_cluster / sqlite 全绿（sqlite 此时仍是旧后端）；Redis range / commit 的
   Python 侧无额外开销（读路径未改，commit 多一层 await，可忽略）。
-- [ ] 提交：`refactor(redis): 抽出 Redis 数据模型的纯逻辑到 redis_model，供 SQLite 后端共用`
+- [x] 提交：`refactor(redis): 抽出 Redis 数据模型的纯逻辑到 redis_model，供 SQLite 后端共用`
 
 ## Task 2: 新 SQLite 后端 + 测试切换
 

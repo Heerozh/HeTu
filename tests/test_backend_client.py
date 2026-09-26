@@ -548,7 +548,7 @@ async def test_range_observations_to_check(mod_item_model):
 async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
     """Lua 按 check 携带的 code 回显 RACE:/UNIQUE: 前缀 + label；
     同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:（不依赖本地 IdentityMap 检查）"""
-    from hetu.data.backend.redis.client import msg_packer
+    from hetu.data.backend.redis_model import msg_packer
 
     backend: Backend = mod_auto_backend()
     client = cast(RedisBackendClient, backend.master)
@@ -600,7 +600,7 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
 @use_redis_family_backend_only
 async def test_redis_lua_range_count_check(item_ref, mod_auto_backend):
     """Lua 的 CNT：ZLEXCOUNT 与期望行数不符返回 RACE: Range changed + label，相符则继续"""
-    from hetu.data.backend.redis.client import msg_packer
+    from hetu.data.backend.redis_model import msg_packer
 
     backend: Backend = mod_auto_backend()
     client = cast(RedisBackendClient, backend.master)
