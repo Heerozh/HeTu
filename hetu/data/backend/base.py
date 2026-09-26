@@ -502,6 +502,15 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        """
+        内部方法，事务里的 range 取行用：同 `get_many`，但读到的行按 `row_ids` 顺序一次解码
+        成一个 recarray 直接返回，省掉逐行拆开再拼回去；另返回读不到的 id。
+        """
+        raise NotImplementedError
+
     @overload
     async def range(
         self,

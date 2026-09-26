@@ -634,6 +634,17 @@ class RedisBackendClient(BackendClient, alias="redis"):
             for row in raw_rows
         ]
 
+    @override
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"
+        raw_rows = await self._hgetall_many(key_prefix, row_ids)
+        rows = self.rows_decode_(table_ref.comp_cls, [row for row in raw_rows if row])
+        return rows, [row_id for row_id, row in zip(row_ids, raw_rows) if not row]
+
     @classmethod
     def range_normalize_(
         cls,

@@ -642,20 +642,15 @@ class SQLBackendClient(BackendClient, alias="sql"):
     # 单条 IN 查询的参数上限，避免SQLite等数据库的参数数量限制
     GET_MANY_CHUNK = 500
 
-    @override
-    async def get_many(
-        self,
-        table_ref: TableReference,
-        row_ids: Iterable[int],
-        row_format: RowFormat = RowFormat.STRUCT,
-    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+    async def _select_many(
+        self, table_ref: TableReference, ids: list[int]
+    ) -> dict[int, dict[str, Any]]:
+        """按 id 分块 IN 查询，返回 {id: 行}，读不到的 id 不在里面"""
         self._ensure_open()
-        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
-        ids = [int(i) for i in row_ids]
+        found: dict[int, dict[str, Any]] = {}
         if not ids:
-            return []
+            return found
         table = self.component_table(table_ref)
-        found: dict[int, Any] = {}
         async with self.aio.connect() as conn:
             for i in range(0, len(ids), self.GET_MANY_CHUNK):
                 chunk = ids[i : i + self.GET_MANY_CHUNK]
@@ -668,11 +663,34 @@ class SQLBackendClient(BackendClient, alias="sql"):
                     raise
                 for row in rows:
                     found[int(row["id"])] = dict(row)
+        return found
+
+    @override
+    async def get_many(
+        self,
+        table_ref: TableReference,
+        row_ids: Iterable[int],
+        row_format: RowFormat = RowFormat.STRUCT,
+    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
+        ids = [int(i) for i in row_ids]
+        found = await self._select_many(table_ref, ids)
         comp_cls = table_ref.comp_cls
         return [
             self.row_decode_(comp_cls, found[i], row_format) if i in found else None
             for i in ids
         ]
+
+    @override
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        ids = [int(i) for i in row_ids]
+        found = await self._select_many(table_ref, ids)
+        rows = self.rows_decode_(
+            table_ref.comp_cls, [found[i] for i in ids if i in found]
+        )
+        return rows, [i for i in ids if i not in found]
 
     @classmethod
     def _normalize_range_bound(

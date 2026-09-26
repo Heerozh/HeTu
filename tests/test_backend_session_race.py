@@ -503,23 +503,24 @@ async def test_range_read_only_unaffected(item_ref, mod_auto_backend):
             await s2.using(comp).insert(_item(comp, owner=7, time=1, name="other"))
 
 
-def _intrude_before_get_many(backend: Backend, intrude):
-    """包住 master.get_many：range 拿到 id 列表之后、取行之前，先跑一次 intrude(repo) 并提交。
-    用来构造"ZRANGE 与取行之间有行被改"（调用方的 session 要 only_master）"""
+def _intrude_before_row_fetch(backend: Backend, intrude):
+    """包住 master.get_many_array_：range 拿到 id 列表之后、取行之前，先跑一次
+    intrude(repo) 并提交。用来构造"ZRANGE 与取行之间有行被改"（调用方的 session 要
+    only_master）"""
     master = backend.master
-    orig_get_many = master.get_many
+    orig_fetch = master.get_many_array_
     fired = False
 
-    async def get_many(*args, **kwargs):
+    async def get_many_array_(*args, **kwargs):
         nonlocal fired
         if not fired:
             fired = True
             async with backend.session("pytest", 1) as intruder:
                 intruder.only_master = True
                 await intrude(intruder)
-        return await orig_get_many(*args, **kwargs)
+        return await orig_fetch(*args, **kwargs)
 
-    return patch.object(master, "get_many", new=get_many)
+    return patch.object(master, "get_many_array_", new=get_many_array_)
 
 
 @pytest.mark.parametrize("write", [True, False])
@@ -540,7 +541,7 @@ async def test_range_row_deleted_while_reading(item_ref, mod_auto_backend, write
         async with backend.session("pytest", 1) as s1:
             s1.only_master = True
             repo = s1.using(comp)
-            with _intrude_before_get_many(backend, delete_b):
+            with _intrude_before_row_fetch(backend, delete_b):
                 rows = await repo.range(owner=(6, 6), limit=-1)
             assert list(rows.id) == [a.id]
             if then_write:
@@ -573,7 +574,7 @@ async def test_range_row_swapped_while_reading(item_ref, mod_auto_backend):
         async with backend.session("pytest", 1) as s1:
             s1.only_master = True
             repo = s1.using(comp)
-            with _intrude_before_get_many(backend, swap):
+            with _intrude_before_row_fetch(backend, swap):
                 assert len(await repo.range(owner=(6, 6), limit=-1)) == 2
             await repo.insert(_item(comp, owner=9, time=4, name="d"))
 
@@ -600,7 +601,7 @@ async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend)
 
         def __getattr__(self, attr):
             target = getattr(backend.master, attr)
-            if attr not in ("range_read_", "range", "get_many"):
+            if attr not in ("range_read_", "range", "get_many_array_"):
                 return target
 
             async def read(*args, **kwargs):
@@ -1036,7 +1037,7 @@ async def test_nonunique_get_hit_moved_while_reading_is_race(
         async with backend.session("pytest", 1) as s1:
             s1.only_master = True
             repo = s1.using(comp)
-            with _intrude_before_get_many(backend, move_a):
+            with _intrude_before_row_fetch(backend, move_a):
                 row = await repo.get(owner=2)
             assert row is not None and row.owner == 20  # 读回的已经被改走了
             await repo.insert(_item(comp, owner=9, time=3, name="c"))
