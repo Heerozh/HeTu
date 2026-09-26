@@ -309,6 +309,21 @@ def test_case_insensitive_names_rejected(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("instance", ["sqlite_dev", "SQLite_Test"])
+async def test_instance_name_reserved_prefix(tmp_path, new_component_env, instance):
+    """SQLite 保留了 sqlite_ 开头的表名（不分大小写），行表名又以实例名开头：这样的实例名在
+    Redis 上能用、SQLite 上建不了表，要给出明确的报错，而不是 SQLite 的内部错误"""
+    from hetu.data.backend import TableReference
+
+    backend = Backend({"type": "sqlite", "master": _dsn(tmp_path / "hetu.db")})
+    try:
+        ref = TableReference(def_item(), instance, 1)
+        with pytest.raises(ValueError, match="sqlite_"):
+            backend.get_table_maintenance().create_table(ref)
+    finally:
+        await backend.close()
+
+
 def test_hset_needs_fields(tmp_path):
     """同 Redis 的 HSET：一个字段都不给是错误（direct_set 不带字段也一样），给出明确的报错"""
     store = open_store(str(tmp_path / "s.db"), 1000)
