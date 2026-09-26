@@ -637,7 +637,8 @@ class IdentityMap:
                         old_rows.append(_row_to_db(old, bytes_fields))
                         new_rows.append(new_fields)
                 elif state == RowState.DELETE:
-                    deletes.append(_row_to_db(row, bytes_fields))
+                    # 按数据库里的原值删：Redis 据此清索引，改过的索引列要清的是原值
+                    deletes.append(_row_to_db(clean_cache[row_id], bytes_fields))
 
             ret[table_ref] = (inserts, updates, deletes)
 
