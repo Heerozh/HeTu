@@ -836,6 +836,37 @@ async def test_client_is_bound_to_one_event_loop(tmp_path):
         await client.close()
 
 
+def test_client_follows_event_loop_switch(tmp_path):
+    """
+    数据读写在专用线程里跑，跟事件循环无关：前一个 loop 已经不在跑了（比如 pytest 里 session 级
+    fixture 建的 Sandbox 给 function 级的测试用）就跟着换过去。建过订阅用的通知轮询之后，
+    轮询的任务在那个 loop 上，就只能在那个 loop 里用了
+    """
+    client = SQLiteBackendClient(_dsn(tmp_path / "a.db"), False)
+    fixture_loop, test_loop = asyncio.new_event_loop(), asyncio.new_event_loop()
+    try:
+        assert (
+            fixture_loop.run_until_complete(client.run_(SQLiteStore.notify_tail)) == 0
+        )
+        assert test_loop.run_until_complete(client.run_(SQLiteStore.notify_tail)) == 0
+        assert (
+            fixture_loop.run_until_complete(client.run_(SQLiteStore.notify_tail)) == 0
+        )
+
+        async def subscribe():
+            mq = client.get_mq_client()
+            await mq.subscribe("A")
+            return mq
+
+        test_loop.run_until_complete(subscribe())
+        with pytest.raises(AssertionError):
+            fixture_loop.run_until_complete(client.run_(SQLiteStore.notify_tail))
+    finally:
+        test_loop.run_until_complete(client.close())
+        fixture_loop.close()
+        test_loop.close()
+
+
 async def test_close_is_idempotent(tmp_path):
     client = SQLiteBackendClient(_dsn(tmp_path / "a.db"), False)
     await client.close()
