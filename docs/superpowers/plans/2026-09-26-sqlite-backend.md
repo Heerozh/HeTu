@@ -99,9 +99,9 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 
 ## Task 4: direct_set 通知契约
 
-- [ ] `BackendClient.direct_set` docstring：维护类写入，不改 `_version`、不保证触发订阅通知。
-- [ ] `test_endpoint_connection.py::test_owner_value_channel_ignores_own_heartbeat` 的注释。
-- [ ] 提交：`docs(backend): direct_set 不保证触发订阅通知`
+- [x] `BackendClient.direct_set` docstring：维护类写入，不改 `_version`、不保证触发订阅通知。
+- [x] `test_endpoint_connection.py::test_owner_value_channel_ignores_own_heartbeat` 的注释。
+- [x] 提交：`docs(backend): direct_set 不保证触发订阅通知`
 
 ## Task 5: 文档
 

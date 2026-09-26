@@ -646,13 +646,10 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         self, table_ref: TableReference, id_: int, **kwargs: str
     ) -> None:
         """
-        UNSAFE! 只用于易失数据! 不会做类型检查!
+        UNSAFE! 只用于易失数据! 不会做类型检查! 契约见基类。
 
-        直接写入属性到数据库，避免session必须要执行get+事务2条指令。
-        仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-        注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
-        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+        HSET：缺行时建出只有这几个字段的残缺行；行频道是行 key 的 keyspace 通知，会顺带触发
+        （契约不保证通知）。
         """
         self.check_direct_set_(table_ref, kwargs)
         aio = self.aio

@@ -270,7 +270,8 @@ async def test_owner_value_channel_ignores_own_heartbeat(
         ok, _ = await executor.execute("add_rls_comp_value", i)
         assert ok
     if isinstance(backend.master, RedisBackendClient):
-        # Redis 的 keyspace 通知会把心跳的 HSET 打到行频道上（SQL 的 direct_set 不发通知）
+        # Redis 上心跳（direct_set）的 HSET 顺带触发行频道的 keyspace 通知（契约不保证，
+        # SQLite 不发）：它不能把 owner 值频道也叫醒
         await wait_hits(row_hits, 3)
     await asyncio.sleep(0.3)
     assert owner_hits == [], "心跳不该触发 owner 索引值频道"
