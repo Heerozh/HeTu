@@ -831,8 +831,7 @@ async def test_range_number_index(filled_item_ref, mod_auto_backend):
             (await item_repo.range(id=(ids[5], ids[10]), limit=999)).id, ids[5:11]
         )
         # 测试range的方向反了
-        # AssertionError: right必须大于等于left，你的:
-        with pytest.raises(ValueError, match="right.*left"):
+        with pytest.raises(ValueError, match="下界大于上界"):
             await item_repo.range(time=(115, 110))
         # 测试float类型索引
         np.testing.assert_array_equal(

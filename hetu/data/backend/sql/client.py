@@ -27,6 +27,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    inverted_bounds_error_,
     peel_bound_,
     sortable_token,
     to_sortable_bytes,
@@ -1070,7 +1071,7 @@ class SQLBackendClient(BackendClient, alias="sql"):
             if desc
             else (cast(Any, right) < cast(Any, left))
         ):
-            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
+            raise inverted_bounds_error_(*((right, left) if desc else (left, right)))
         left, right = self._clamp_float_inf(dtype, left, right)
         left, right, li, ri = self.clamp_uint64_bounds_(
             dtype, left, right, li, ri, desc

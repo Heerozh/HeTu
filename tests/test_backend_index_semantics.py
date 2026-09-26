@@ -4,8 +4,7 @@
 
 SQL 后端用数据库原生的列类型，比较规则交给了各数据库（collation、浮点类型提升……），已知
 的偏差用 strict xfail 标出（`xfail_on_backends`），修好后 XPASS 会报错，提醒去掉标记。
-整数列的边界（越界、小数、同向的 ±inf）和两端开区间的同值，Redis 后端也有缺陷，一样按期望
-的行为写、标 xfail。
+整数列的区间按数学含义处理（`normalize_int_bounds_`）：越界的边界到头、小数边界向区间内取整。
 """
 
 import pytest
@@ -15,10 +14,9 @@ from sqlalchemy import exc as sa_exc
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, RowFormat, UniqueViolation
+from hetu.data.backend.base import normalize_int_bounds_
 
 SnowflakeID().init(1, 0)
-
-REDIS_FAMILY = ("redis", "redis_cluster", "valkey")
 
 
 def _item(comp, *, time: int, name: str, owner: int = 0, **fields):
@@ -252,22 +250,12 @@ async def test_same_value_rows_ordered_by_id_string(
     assert desc == [9, 100, 10]
 
 
-async def test_int_index_bounds_beyond_dtype_range(
-    nums, mod_auto_backend, backend_name, request
-):
+async def test_int_index_bounds_beyond_dtype_range(nums, mod_auto_backend):
     """
     整数列的区间边界超出 dtype 的范围时当作"到头"（和 ±inf 边界一样）：上界超过最大值就是
     到最大值，下界低于最小值就是从最小值起；整个区间都在范围外就是空。边界常常是算出来的：
     满级（int8 的 127）玩家查"上下 5 级"、用大数表示"不设上限"、无符号列减出负数。
-    Redis 后端把边界转成 dtype 时 numpy 直接抛 OverflowError。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        REDIS_FAMILY,
-        raises=OverflowError,
-        reason="Redis 后端把越界的边界转成 dtype 时溢出",
-    )
     backend: Backend = mod_auto_backend()
 
     assert await _which(backend, nums, "i8", 127 - 5, 127 + 5) == "A"
@@ -287,13 +275,6 @@ async def test_int_index_bounds_beyond_sql_column_range(
     asyncpg 按列类型给参数定型，超过 int16 的参数直接报错；2**64 超过 int64，PG 和 SQLite
     的驱动也都报错。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        REDIS_FAMILY,
-        raises=OverflowError,
-        reason="Redis 后端把越界的边界转成 dtype 时溢出",
-    )
     xfail_on_backends(
         request,
         backend_name,
@@ -320,15 +301,15 @@ async def test_int_index_fractional_bounds(
 ):
     """
     整数列的小数边界按区间的含义取整：下界向上、上界向下（x >= 0.5 即 x >= 1），区间里没有
-    整数就是空。常见于按比例算出来的边界，比如匹配"等级的 0.8 ~ 1.2 倍"。各后端现在都把
-    边界向 0 截断，(0.5, 1) 连 0 也查了出来。
+    整数就是空。常见于按比例算出来的边界，比如匹配"等级的 0.8 ~ 1.2 倍"。SQL 后端把边界
+    向 0 截断，(0.5, 1) 连 0 也查了出来。
     """
     xfail_on_backends(
         request,
         backend_name,
-        REDIS_FAMILY + tuple(SQL_BACKENDS),
+        SQL_BACKENDS,
         raises=AssertionError,
-        reason="整数列的小数边界被向 0 截断",
+        reason="SQL 后端把整数列的小数边界向 0 截断",
     )
     backend: Backend = mod_auto_backend()
 
@@ -342,15 +323,15 @@ async def test_int_index_fractional_bounds(
 
 async def test_int_index_infinite_bounds(nums, mod_auto_backend, backend_name, request):
     """
-    两端都是 +inf（或都是 -inf）的区间里没有整数，是空的。各后端现在把 ±inf 钳成 dtype 的
+    两端都是 +inf（或都是 -inf）的区间里没有整数，是空的。SQL 后端把 ±inf 钳成 dtype 的
     极值（闭区间），(inf, inf) 查出了值正好是最大值的行。
     """
     xfail_on_backends(
         request,
         backend_name,
-        REDIS_FAMILY + tuple(SQL_BACKENDS),
+        SQL_BACKENDS,
         raises=AssertionError,
-        reason="±inf 被钳成 dtype 的极值（闭区间）",
+        reason="SQL 后端把 ±inf 钳成 dtype 的极值（闭区间）",
     )
     backend: Backend = mod_auto_backend()
     inf = float("inf")
@@ -380,20 +361,11 @@ async def test_inverted_bounds_raise(item_ref, mod_auto_backend):
         await _ids(backend, item_ref, "time", 2, 1)
 
 
-async def test_open_bounds_on_same_value_is_empty(
-    item_ref, mod_auto_backend, backend_name, request
-):
+async def test_open_bounds_on_same_value_is_empty(item_ref, mod_auto_backend):
     """
-    两端都是开区间、值相同：区间为空，返回空结果。Redis 后端比较编码后的边界时，开区间
-    的后缀让右边界比左边界小，误报"left必须大于等于right"的 ValueError。
+    两端都是开区间、值相同：区间为空，返回空结果，不是传反了。边界常常是算出来的，比如按
+    时间取"上次处理之后、这一刻之前"的行 `(last, now)`，同一个 tick 里 last == now。
     """
-    xfail_on_backends(
-        request,
-        backend_name,
-        REDIS_FAMILY,
-        raises=ValueError,
-        reason="Redis 后端把两端开区间的同值误判成左右边界颠倒",
-    )
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
     await _insert_rows(backend, comp, _item(comp, time=1, name="x"))
@@ -401,3 +373,38 @@ async def test_open_bounds_on_same_value_is_empty(
     assert await _names(backend, item_ref, "(x", "(x", limit=-1) == []
     assert await _names(backend, item_ref, "(x", "[x", limit=-1) == []
     assert await _names(backend, item_ref, "[x", "[x", limit=-1) == ["x"]
+
+
+def test_normalize_int_bounds():
+    """整数区间按数学含义收成 dtype 范围内的闭区间，里面没有整数时为 None"""
+    import numpy as np
+
+    i8 = np.dtype(np.int8)
+    inf = float("inf")
+
+    def norm(lower, lower_inclusive, upper, upper_inclusive, dtype=i8):
+        return normalize_int_bounds_(
+            dtype, lower, lower_inclusive, upper, upper_inclusive
+        )
+
+    assert norm(5, True, 10, True) == (5, 10)
+    assert norm(5, False, 10, False) == (6, 9)  # 开区间收进一格
+    assert norm(0.5, True, 1.5, True) == (1, 1)  # 小数向区间内取整
+    assert norm(0.5, False, 1.5, False) == (1, 1)
+    assert norm(-1.5, True, -0.5, True) == (-1, -1)
+    assert norm(5.0, False, 7.0, True) == (6, 7)  # 整数值的 float 同整数
+    assert norm(1.2, True, 1.8, True) is None  # 区间里没有整数
+    assert norm(5, False, 5, False) is None
+    assert norm(5, True, 5, False) is None
+    assert norm(-1000, True, 1000, True) == (-128, 127)  # 越界钳到极值
+    assert norm(200, True, 300, True) is None  # 整个区间在范围外
+    assert norm(-300, True, -200, True) is None
+    assert norm(127, False, 1000, True) is None  # x > 127
+    assert norm(-1000, True, -128, False) is None  # x < -128
+    assert norm(-inf, True, inf, True) == (-128, 127)
+    assert norm(inf, True, inf, True) is None
+    assert norm(-inf, True, -inf, True) is None
+    assert norm(-1, True, 2**40, True, np.dtype(np.uint32)) == (0, 2**32 - 1)
+    assert norm(0, True, 2**64, True, np.dtype(np.int64)) == (0, 2**63 - 1)
+    with pytest.raises(ValueError):
+        norm(float("nan"), True, 1, True)
