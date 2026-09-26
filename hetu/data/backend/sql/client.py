@@ -530,15 +530,6 @@ class SQLBackendClient(BackendClient, alias="sql"):
             return bytes(value)
         return value
 
-    @classmethod
-    def _row_to_typed_dict(
-        cls, comp_cls: type[BaseComponent], row: dict[str, Any]
-    ) -> dict[str, Any]:
-        typed: dict[str, Any] = {}
-        for name in comp_cls.prop_idx_map_:
-            typed[name] = cls._coerce_scalar(comp_cls.dtype_map_[name], row[name])
-        return typed
-
     @staticmethod
     def _row_to_raw_dict(row: dict[str, Any]) -> dict[str, str]:
         ret: dict[str, str] = {}
@@ -577,17 +568,30 @@ class SQLBackendClient(BackendClient, alias="sql"):
         comp_cls: type[BaseComponent], row: dict[str, Any], fmt: RowFormat
     ) -> np.record | dict[str, Any]:
         match fmt:
+            case RowFormat.STRUCT:
+                return SQLBackendClient.rows_decode_(comp_cls, (row,))[0]
+            case RowFormat.TYPED_DICT:
+                struct_row = SQLBackendClient.rows_decode_(comp_cls, (row,))[0]
+                return comp_cls.struct_to_dict(struct_row)
             case RowFormat.RAW:
                 return SQLBackendClient._row_to_raw_dict(row)
-            case RowFormat.STRUCT:
-                typed = SQLBackendClient._row_to_typed_dict(comp_cls, row)
-                return comp_cls.dict_to_struct(typed)
-            case RowFormat.TYPED_DICT:
-                typed = SQLBackendClient._row_to_typed_dict(comp_cls, row)
-                struct_row = comp_cls.dict_to_struct(typed)
-                return comp_cls.struct_to_dict(struct_row)
             case _:
                 raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
+
+    @classmethod
+    def rows_decode_(
+        cls, comp_cls: type[BaseComponent], rows: Iterable[dict[str, Any]]
+    ) -> np.recarray:
+        """
+        把数据库读回的多行一次解码成 recarray，顺序与传入一致。`row_decode_` 的 STRUCT
+        格式就是它的单行特例，解码规则只写在这里。
+        """
+        coerce = cls._coerce_scalar
+        fields = list(comp_cls.dtype_map_.items())
+        values = [
+            tuple([coerce(dtype, row[name]) for name, dtype in fields]) for row in rows
+        ]
+        return np.array(values, dtype=comp_cls.dtypes).view(np.recarray)
 
     @overload
     async def get(

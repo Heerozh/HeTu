@@ -390,3 +390,22 @@ def test_redis_rows_decode_roundtrip(new_component_env):
         assert single.tobytes() == rows[1].tobytes()
         empty = RedisBackendClient.rows_decode_(comp, [])
         assert len(empty) == 0 and empty.dtype == comp.dtypes
+
+
+def test_sql_rows_decode_roundtrip(new_component_env):
+    """SQL 一次解码多行：数据库读回的 python 值（bytes 列可能是 memoryview）解码回来与
+    原行逐字节一致。单行解码（row_decode_ 的 STRUCT）是它的特例，0 行得到空 recarray"""
+    from hetu.data.backend.sql import SQLBackendClient
+
+    for comp, rows in _tricky_rows().items():
+        fetched = [comp.struct_to_dict(row) for row in rows]
+        for row in fetched:
+            for name in comp.bytes_fields_:
+                row[name] = memoryview(row[name])
+        decoded = SQLBackendClient.rows_decode_(comp, fetched)
+        assert type(decoded) is np.recarray and decoded.dtype == comp.dtypes
+        assert decoded.tobytes() == rows.tobytes()
+        single = SQLBackendClient.row_decode_(comp, fetched[1], RowFormat.STRUCT)
+        assert single.tobytes() == rows[1].tobytes()
+        empty = SQLBackendClient.rows_decode_(comp, [])
+        assert len(empty) == 0 and empty.dtype == comp.dtypes
