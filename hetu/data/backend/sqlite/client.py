@@ -11,21 +11,20 @@ import random
 import sqlite3
 import time
 import weakref
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
+from typing import TYPE_CHECKING, Any, Literal, final, overload, override
 
 import numpy as np
 
 from ....i18n import _
-from ..base import RowFormat, detach_rows_
+from ..base import RowFormat
 from ..redis_model import RedisModelClient
 from .commit import run_commit
 from .store import KEYSPACE_PREFIX, SQLiteStore, open_store
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
-    from ..idmap import RangeObservation
     from ..table import TableReference
     from .maint import SQLiteTableMaintenance
     from .mq import SQLiteMQClient, SQLiteNotifyHub
@@ -243,164 +242,21 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         return None
 
     @override
-    async def get_many(
-        self,
-        table_ref: TableReference,
-        row_ids: Iterable[int],
-        row_format: RowFormat = RowFormat.STRUCT,
-    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
-        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
-        comp_cls = table_ref.comp_cls
-        raw_rows = await self.run_(
+    async def hgetall_many_(
+        self, table_ref: TableReference, row_ids: Sequence[int]
+    ) -> list[dict[bytes, bytes]]:
+        """按 row_ids 的顺序批量读行，见基类"""
+        return await self.run_(
             SQLiteStore.hgetall_many, self.cluster_prefix(table_ref), list(row_ids)
         )
-        if row_format is RowFormat.STRUCT:
-            batch = self.rows_decode_(comp_cls, [row for row in raw_rows if row])
-            records = detach_rows_(batch)
-            return [next(records) if row else None for row in raw_rows]
-        return [
-            self.row_decode_(comp_cls, row, row_format) if row else None
-            for row in raw_rows
-        ]
 
     @override
-    async def get_many_array_(
-        self, table_ref: TableReference, row_ids: list[int]
-    ) -> tuple[np.recarray, list[int]]:
-        raw_rows = await self.run_(
-            SQLiteStore.hgetall_many, self.cluster_prefix(table_ref), list(row_ids)
-        )
-        rows = self.rows_decode_(table_ref.comp_cls, [row for row in raw_rows if row])
-        return rows, [row_id for row_id, row in zip(row_ids, raw_rows) if not row]
-
-    async def _zrange_members(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None,
-        limit: int,
-        desc: bool,
-    ) -> tuple[list[bytes], bytes, bytes]:
-        """按索引区间 ZRANGE，返回原样 member（value\\x00id）与规范化后的两个边界"""
-        idx_key, b_left, b_right, empty = self.zrange_args_(
-            table_ref, index_name, left, right, desc
-        )
-        if empty:
-            return [], b_left, b_right
-        members = await self.run_(
+    def zrange_bylex_(
+        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
+    ) -> Awaitable[list[bytes]]:
+        """见基类"""
+        return self.run_(
             SQLiteStore.zrange_bylex, idx_key, b_left, b_right, desc, 0, limit
-        )
-        return members, b_left, b_right
-
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
-    ) -> np.recarray: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.RAW] = ...,
-    ) -> list[dict[str, str]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.TYPED_DICT] = ...,
-    ) -> list[dict[str, Any]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.ID_LIST] = ...,
-    ) -> list[int]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: RowFormat = ...,
-    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
-    @override
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format=RowFormat.STRUCT,
-    ) -> list[int] | list[dict[str, Any]] | np.recarray:
-        """
-        按索引区间查询，见基类。和 Redis 一样分两次调用：先查索引拿 id，再批量读行，两次之间
-        行可能被删改（读不到的行跳过）。
-        """
-        members, _b_left, _b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
-        )
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
-
-        if row_format == RowFormat.ID_LIST:
-            return row_ids
-
-        comp_cls = table_ref.comp_cls
-        raw_rows = [
-            row
-            for row in await self.run_(
-                SQLiteStore.hgetall_many, self.cluster_prefix(table_ref), row_ids
-            )
-            if row
-        ]
-        if row_format == RowFormat.STRUCT:
-            return self.rows_decode_(comp_cls, raw_rows)
-        return [
-            cast(dict[str, Any], self.row_decode_(comp_cls, row, row_format))
-            for row in raw_rows
-        ]
-
-    @override
-    async def range_read_(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None,
-        limit: int,
-        desc: bool,
-    ) -> tuple[list[int], RangeObservation]:
-        members, b_left, b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
-        )
-        return self.range_observation_(
-            index_name, members, b_left, b_right, limit, desc
         )
 
     # ============ 写 ============

@@ -65,17 +65,12 @@ class RedisTableMaintenance(TableMaintenance):
         limit: int = 10,
     ) -> list[int]:
         """按索引范围查询指定表的数据"""
-        idx_key = self.client.index_key(ref, index_name)
-        io = self.client.io
-
-        # 生成zrange命令
-        comp_cls = ref.comp_cls
-        assert index_name in comp_cls.indexes_
-        b_left, b_right = self.client.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, False
+        idx_key, b_left, b_right, empty = self.client.zrange_args_(
+            ref, index_name, left, right, False
         )
-
-        row_ids = io.zrange(
+        if empty:
+            return []
+        row_ids = self.client.io.zrange(
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
         row_ids = cast(list[bytes], row_ids)

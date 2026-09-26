@@ -9,7 +9,7 @@ import asyncio
 import itertools
 import logging
 import random
-from collections.abc import Awaitable, Iterable
+from collections.abc import Awaitable, Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
@@ -24,13 +24,12 @@ import redis.exceptions
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
-from ..base import RowFormat, detach_rows_
+from ..base import RowFormat
 from ..redis_model import RedisModelClient
 from .pool import HeTuConnectionPool
 
 if TYPE_CHECKING:
     from ...component import BaseComponent
-    from ..idmap import RangeObservation
     from ..table import TableReference
     from .maint import RedisTableMaintenance
     from .mq import PubSubHub, RedisMQClient
@@ -466,9 +465,10 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         else:
             return None
 
-    async def _hgetall_many(
-        self, key_prefix: str, row_ids: Iterable[int | str]
-    ) -> list[dict]:
+    @override
+    async def hgetall_many_(
+        self, table_ref: TableReference, row_ids: Sequence[int]
+    ) -> list[dict[bytes, bytes]]:
         """
         按块pipeline批量HGETALL，返回与row_ids顺序一致的raw dict列表，不存在的为空dict。
 
@@ -476,14 +476,15 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         的N次读取合并成 ceil(N/CHUNK) 次往返，不会让不相关的请求互相等待。
         同一张表的所有行key都带同一个 {CLU} hash tag，cluster模式下同slot，pipeline可直接用。
         """
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         aio = self.aio
-        if not isinstance(row_ids, (list, tuple)):
-            row_ids = list(row_ids)
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         if len(row_ids) == 1:
             # 单行直接 HGETALL：redis-py 8 的 pipeline 有固定开销（建对象、HIMPORT 预处理、
             # asyncio.shield 还连接），比单条命令贵一截，而 upsert、get(unique=) 每次都走这里
-            return [await aio.hgetall(key_prefix + str(row_ids[0]))]
-        rows: list[dict] = []
+            return [await aio.hgetall(key_prefix + str(row_ids[0]))]  # type: ignore
+        rows: list[dict[bytes, bytes]] = []
         for chunk in itertools.batched(row_ids, self.RANGE_PIPELINE_CHUNK):
             async with aio.pipeline(transaction=False) as pipe:
                 for _id in chunk:
@@ -492,210 +493,17 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         return rows
 
     @override
-    async def get_many(
-        self,
-        table_ref: TableReference,
-        row_ids: Iterable[int],
-        row_format: RowFormat = RowFormat.STRUCT,
-    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+    def zrange_bylex_(
+        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
+    ) -> Awaitable[list[bytes]]:
+        """直接交出 redis-py 的 awaitable，见基类"""
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
-        key_prefix = self.cluster_prefix(table_ref) + ":id:"
-        comp_cls = table_ref.comp_cls
-        raw_rows = await self._hgetall_many(key_prefix, row_ids)
-        if row_format is RowFormat.STRUCT:
-            batch = self.rows_decode_(comp_cls, [row for row in raw_rows if row])
-            records = detach_rows_(batch)
-            return [next(records) if row else None for row in raw_rows]
-        return [
-            self.row_decode_(comp_cls, row, row_format) if row else None
-            for row in raw_rows
-        ]
-
-    @override
-    async def get_many_array_(
-        self, table_ref: TableReference, row_ids: list[int]
-    ) -> tuple[np.recarray, list[int]]:
-        if not self._ios:
-            raise ConnectionError(_("连接已关闭，已调用过close"))
-        key_prefix = self.cluster_prefix(table_ref) + ":id:"
-        raw_rows = await self._hgetall_many(key_prefix, row_ids)
-        rows = self.rows_decode_(table_ref.comp_cls, [row for row in raw_rows if row])
-        return rows, [row_id for row_id, row in zip(row_ids, raw_rows) if not row]
-
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
-    ) -> np.recarray: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.RAW] = ...,
-    ) -> list[dict[str, str]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.TYPED_DICT] = ...,
-    ) -> list[dict[str, Any]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.ID_LIST] = ...,
-    ) -> list[int]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: RowFormat = ...,
-    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
-    @override
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format=RowFormat.STRUCT,
-    ) -> list[int] | list[dict[str, Any]] | np.recarray:
-        """
-        从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
-        如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
-
-        Parameters
-        ----------
-        table_ref: TableReference
-            表信息，指定Component、实例名、分片簇id。
-        index_name: str
-            查询Component中的哪条索引
-        left, right: str or number
-            查询范围，闭区间。可以在开头加上"["指定闭区间，还是"("开区间。
-            如果right不填写，则精确查询等于left的数据。
-        limit: int
-            限制返回的行数，本方法至少请求数据库 `1 + limit` 次。
-            负数表示不限制行数。
-        desc: bool
-            是否降序排列
-        row_format
-            返回数据解码格式，见 "Returns"
-
-        Returns
-        -------
-        row: np.recarray or list[int] or list[dict]
-            根据 `row_format` 参数返回以下格式之一：
-
-            - RowFormat.STRUCT - **默认值**
-                返回 `numpy.recarray`，如果没有查询到数据，返回空 `numpy.recarray`。
-                `numpy.recarray` 是一种 c-struct array。
-            - RowFormat.RAW
-                返回无类型的原始数据 (dict[str, str]) 的列表，如果没有查询到数据，返回空list
-            - RowFormat.TYPED_DICT
-                返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
-                此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
-            - RowFormat.ID_LIST
-                返回查询到的 row id 列表，如果没有查询到数据，返回空list
-
-        Notes
-        -----
-        如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
-
-            items = client.range(ref, "owner", player_id, limit=100)
-            few_items = items[items.amount < 10]
-
-        由于python numpy支持SIMD，比直接在数据库复合查询快。
-        """
-        members, _b_left, _b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
-        )
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
-
-        if row_format == RowFormat.ID_LIST:
-            return row_ids
-
-        comp_cls = table_ref.comp_cls
-        key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
-        # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
-        raw_rows = [row for row in await self._hgetall_many(key_prefix, row_ids) if row]
-        if row_format == RowFormat.STRUCT:
-            return self.rows_decode_(comp_cls, raw_rows)
-        return [
-            cast(dict[str, Any], self.row_decode_(comp_cls, row, row_format))
-            for row in raw_rows
-        ]
-
-    async def _zrange_members(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None,
-        limit: int,
-        desc: bool,
-    ) -> tuple[list[bytes], bytes, bytes]:
-        """按索引区间 ZRANGE，返回原样 member（value\\x00id）与规范化后的两个边界"""
-        if not self._ios:
-            raise ConnectionError(_("连接已关闭，已调用过close"))
-
-        idx_key, b_left, b_right, empty = self.zrange_args_(
-            table_ref, index_name, left, right, desc
-        )
-        # 两端交叉或相等就是空区间（传反的已在 range_normalize_ 里报错），不用去查
-        if empty:
-            return [], b_left, b_right
-
-        members = await self.aio.zrange(
-            name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
-        )
-        return cast(list[bytes], members), b_left, b_right
-
-    @override
-    async def range_read_(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None,
-        limit: int,
-        desc: bool,
-    ) -> tuple[list[int], RangeObservation]:
-        members, b_left, b_right = await self._zrange_members(
-            table_ref, index_name, left, right, limit, desc
-        )
-        return self.range_observation_(
-            index_name, members, b_left, b_right, limit, desc
+        return cast(
+            Awaitable[list[bytes]],
+            self.aio.zrange(
+                name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
+            ),
         )
 
     @override

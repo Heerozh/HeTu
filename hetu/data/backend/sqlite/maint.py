@@ -94,19 +94,13 @@ class SQLiteTableMaintenance(TableMaintenance):
         limit: int = 10,
     ) -> list[int]:
         """按索引范围查询指定表的数据"""
-        comp_cls = ref.comp_cls
-        assert index_name in comp_cls.indexes_
-        b_left, b_right = self.client.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, False
+        idx_key, b_left, b_right, empty = self.client.zrange_args_(
+            ref, index_name, left, right, False
         )
+        if empty:
+            return []
         members = self._run(
-            SQLiteStore.zrange_bylex,
-            self.client.index_key(ref, index_name),
-            b_left,
-            b_right,
-            False,
-            0,
-            limit,
+            SQLiteStore.zrange_bylex, idx_key, b_left, b_right, False, 0, limit
         )
         return [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
 
