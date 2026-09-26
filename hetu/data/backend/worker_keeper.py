@@ -32,14 +32,10 @@ class WorkerLease(BaseComponent):
     - `id` 内置主键，直接使用 `worker_id`（0~1023）
     - `last_timestamp` 是雪花ID的时间戳高水位，由 `SnowflakeTimestampKeeper` 读写，
       非索引字段以便 direct_set 直写
-    - `node_id` / `expires_at` 是已删除的 GeneralWorkerKeeper（基于本表做租约）留下的字段，
-      目前没有任何代码读写。**故意保留**：改字段会让 `check_and_create_new_tables` 判定
-      schema_mismatch，逼所有现网部署跑一次 `hetu upgrade`，为一次内部清理付这个代价不值。
-      将来若有别的迁移顺路带上即可。
+    - worker id 的租约不在本表：Redis 后端存成 Redis 键（见 `RedisWorkerKeeper`），
+      SQL 后端不用租约（见 `FixedWorkerKeeper`）
     """
 
-    node_id: str = property_field("", dtype="<U96")
-    expires_at: np.int64 = property_field(0)
     last_timestamp: np.int64 = property_field(0)
 
 
