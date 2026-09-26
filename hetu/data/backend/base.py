@@ -924,6 +924,8 @@ class TableMaintenance:
 
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
+
+        易失组件不走迁移脚本，直接按新定义重建表：数据本来就会在 `hetu upgrade` 里清空。
         """
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
@@ -932,6 +934,17 @@ class TableMaintenance:
                         "[💾TABLE_MAINT][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
                     ).format(comp_name=table_ref.comp_name, status=status)
                 )
+            # hetu upgrade 迁移完紧接着就 flush_volatile，搬过去的数据也是清掉，所以不搬，
+            # 删属性、改类型也就谈不上有损
+            if table_ref.comp_cls.volatile_:
+                self.do_drop_table_(table_ref)
+                self.do_create_table_(table_ref)
+                logger.warning(
+                    _(
+                        "  ✔️ [💾MIGRATION][{comp_name}组件] 易失组件，已按新定义重建表"
+                    ).format(comp_name=table_ref.comp_name)
+                )
+                return True
             from ..migration import MigrationScript
 
             migrator = MigrationScript(app_file, table_ref, old_meta)
