@@ -136,8 +136,14 @@ class SQLiteStore:
 
     def __init__(self, path: str, busy_timeout_ms: int = 5000):
         self.path = path
-        # 已确认存在（名字精确匹配）的行表，只作加速：别的进程删了表时读写会报 no such table
-        self._known_tables: set[str] = set()
+        # 已确认存在（名字精确匹配）的行表 → 它的列（None 为还没读过）。写事务开头按表结构版本
+        # 核对过（见 `write_txn`），写事务里可以全信；写事务外只作加速：别的进程删了表时读会报
+        # no such table
+        self._tables: dict[str, set[str] | None] = {}
+        # 缓存对应的表结构版本（PRAGMA schema_version：任何连接建表、加列、删表、改名都会变）
+        self._schema_version: int | None = None
+        # 正处在开头核对过缓存的写事务里：写锁在手，别的进程改不了表结构
+        self._schema_synced = False
         # 自动提交模式：事务都由我们显式 BEGIN（驱动不会在写语句前偷偷开事务）
         self.conn = sqlite3.connect(path, isolation_level=None)
         try:
@@ -240,17 +246,31 @@ class SQLiteStore:
     def write_txn(self) -> Iterator[None]:
         """
         写事务：`BEGIN IMMEDIATE` 一开始就拿写锁（别的进程的写者按 busy_timeout 等），先拿锁再读，
-        读到的就是最新提交。异常时回滚。
+        读到的就是最新提交。开头核对一次表结构版本，别的进程改过表结构就清掉行表缓存，事务里
+        就不用每写一行都去查表和列在不在。异常时回滚。
         """
         conn = self.conn
         conn.execute("BEGIN IMMEDIATE")
         try:
+            version = self._read_schema_version()
+            if version != self._schema_version:
+                self._tables.clear()
+                self._schema_version = version
+            self._schema_synced = True
             yield
             conn.execute("COMMIT")
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
+            # 回滚掉的建表、加列还在缓存里，而表结构版本退回了原值，下次核对不出来：直接作废
+            self._tables.clear()
+            self._schema_version = None
             raise
+        finally:
+            self._schema_synced = False
+
+    def _read_schema_version(self) -> int:
+        return int(self.conn.execute("PRAGMA schema_version").fetchone()[0])
 
     @contextmanager
     def read_txn(self) -> Iterator[None]:
@@ -268,16 +288,17 @@ class SQLiteStore:
     def _table_exists(self, table: str, trust_cache: bool = True) -> bool:
         """
         行表在不在（按名字精确匹配）。SQLite 表名不分大小写、Redis key 分：已有只差大小写的另一张
-        表时报错，而不是静默共用一张表。写入前传 trust_cache=False，别的进程可能刚删了表。
+        表时报错，而不是静默共用一张表。写入前传 trust_cache=False：写事务里缓存已按表结构版本
+        核对过，照样信；写事务外别的进程可能刚删了表，要去查。
         """
-        if trust_cache and table in self._known_tables:
+        if table in self._tables and (trust_cache or self._schema_synced):
             return True
         row = self.conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name = ? COLLATE NOCASE",
             (table,),
         ).fetchone()
         if row is None:
-            self._known_tables.discard(table)
+            self._tables.pop(table, None)
             return False
         if row[0] != table:
             raise ValueError(
@@ -286,7 +307,7 @@ class SQLiteStore:
                     "请给组件（或实例）换个名字"
                 ).format(table=table, existing=row[0])
             )
-        self._known_tables.add(table)
+        self._tables.setdefault(table, None)
         return True
 
     def _columns(self, table: str) -> list[str]:
@@ -305,6 +326,7 @@ class SQLiteStore:
         return head + rest + tail
 
     def _ddl(self, sql: str, table: str) -> None:
+        """执行改表结构的语句（只能在写事务里），之后缓存对应的表结构版本跟上"""
         try:
             self.conn.execute(sql)
         except sqlite3.OperationalError as exc:
@@ -316,11 +338,13 @@ class SQLiteStore:
                     ).format(table=table, err=exc)
                 ) from exc
             raise
+        # 写锁在手，版本的变化只会是自己这条语句带来的，缓存已由调用方更新
+        self._schema_version = self._read_schema_version()
 
     def ensure_row_table(self, table: str, fields: Iterable[str]) -> None:
         """
         保证行表存在、并且有这些列（Redis 的 hash 字段不受限）。只能在写事务里调用：建表、加列要和
-        写入在同一个事务里。
+        写入在同一个事务里。表和列都在缓存里时不查库。
         """
         fields = list(fields)
         if not self._table_exists(table, trust_cache=False):
@@ -332,14 +356,17 @@ class SQLiteStore:
                         "请给实例换个不以 sqlite_ 开头的名字"
                     ).format(table=table)
                 )
-            cols = ", ".join(quote(c) for c in self._column_order(fields))
+            ordered = self._column_order(fields)
+            cols = ", ".join(quote(c) for c in ordered)
             self._ddl(
                 f"CREATE TABLE {quote(table)} ({quote(ROW_KEY)} INTEGER PRIMARY KEY, {cols})",
                 table,
             )
-            self._known_tables.add(table)
+            self._tables[table] = {ROW_KEY, *ordered}
             return
-        existing = set(self._columns(table))
+        existing = self._tables.get(table)
+        if existing is None:
+            existing = self._tables[table] = set(self._columns(table))
         for field in fields:
             if field not in existing:
                 self._ddl(
@@ -425,7 +452,7 @@ class SQLiteStore:
                 )
             except sqlite3.OperationalError as exc:
                 if _is_missing_table(exc):  # 别的进程刚删了表
-                    self._known_tables.discard(table)
+                    self._tables.pop(table, None)
                     return found
                 raise
             names = [str(d[0]) for d in cur.description]
@@ -466,7 +493,7 @@ class SQLiteStore:
             if _is_missing_column(exc):
                 return None
             if _is_missing_table(exc):
-                self._known_tables.discard(table)
+                self._tables.pop(table, None)
                 return None
             raise
         if row is None or row[0] is None:
@@ -500,7 +527,7 @@ class SQLiteStore:
             ).fetchall()
         except sqlite3.OperationalError as exc:
             if _is_missing_table(exc):
-                self._known_tables.discard(table)
+                self._tables.pop(table, None)
                 return []
             raise
         return [int(row[0]) for row in rows]
@@ -543,8 +570,8 @@ class SQLiteStore:
 
     def drop_row_table(self, table: str) -> None:
         """只能在写事务里调用"""
-        self.conn.execute(f"DROP TABLE IF EXISTS {quote(table)}")
-        self._known_tables.discard(table)
+        self._ddl(f"DROP TABLE IF EXISTS {quote(table)}", table)
+        self._tables.pop(table, None)
 
     def rename_row_table(self, old: str, new: str) -> None:
         """改行表名，目标表已存在就先删（同 Redis RESTORE 的 REPLACE）。只能在写事务里调用"""
@@ -552,9 +579,8 @@ class SQLiteStore:
             return
         if self._table_exists(new, trust_cache=False):
             self.drop_row_table(new)
-        self.conn.execute(f"ALTER TABLE {quote(old)} RENAME TO {quote(new)}")
-        self._known_tables.discard(old)
-        self._known_tables.add(new)
+        self._ddl(f"ALTER TABLE {quote(old)} RENAME TO {quote(new)}", new)
+        self._tables[new] = self._tables.pop(old, None)
 
     # ============ lex zset（索引） ============
 
