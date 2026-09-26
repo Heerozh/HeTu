@@ -10,13 +10,13 @@ from typing import cast
 import msgpack
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, Table, TableReference
 from hetu.data.backend.base import sortable_token, to_sortable_bytes
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -544,15 +544,16 @@ async def test_range_observations_to_check(mod_item_model):
     assert not {id(s1), id(s2_insert), id(s2_update), id(got)} & to_check
 
 
-@use_redis_family_backend_only
-async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
-    """Lua 按 check 携带的 code 回显 RACE:/UNIQUE: 前缀 + label；
-    同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:（不依赖本地 IdentityMap 检查）"""
+async def test_commit_script_check_codes(item_ref, mod_auto_backend):
+    """
+    提交脚本（Redis 的 commit_v2.lua / SQLite 的 Python 版）按 check 携带的 code 回显
+    RACE:/UNIQUE: 前缀 + label；同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:
+    （不依赖本地 IdentityMap 检查）。两个后端的返回串逐字节相同
+    """
     from hetu.data.backend.redis_model import msg_packer
 
     backend: Backend = mod_auto_backend()
-    client = cast(RedisBackendClient, backend.master)
-    assert client.lua_commit is not None
+    client = cast(RedisModelClient, backend.master)
 
     # 准备一行 name="dup"
     async with backend.session("pytest", 1) as session:
@@ -566,7 +567,7 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
 
     async def run(checks):
         payload = msg_packer.pack([checks, [], {}, []])
-        return await client.lua_commit(keys, [payload])  # type: ignore
+        return await client.commit_script_(keys, [payload])
 
     uniq = ["UNIQ", idx_key, b"[dup\x00", b"[dup\x00\xff"]
     assert await run([uniq + ["RACE", "Item.name id=7 insert"]]) == (
@@ -597,14 +598,12 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
     assert await run([fresh + ["UNIQUE", "Item.name id=3 insert"]]) == b"committed"
 
 
-@use_redis_family_backend_only
-async def test_redis_lua_range_count_check(item_ref, mod_auto_backend):
-    """Lua 的 CNT：ZLEXCOUNT 与期望行数不符返回 RACE: Range changed + label，相符则继续"""
+async def test_commit_script_range_count_check(item_ref, mod_auto_backend):
+    """提交脚本的 CNT：ZLEXCOUNT 与期望行数不符返回 RACE: Range changed + label，相符则继续"""
     from hetu.data.backend.redis_model import msg_packer
 
     backend: Backend = mod_auto_backend()
-    client = cast(RedisBackendClient, backend.master)
-    assert client.lua_commit is not None
+    client = cast(RedisModelClient, backend.master)
     comp = item_ref.comp_cls
 
     async with backend.session("pytest", 1) as session:
@@ -619,7 +618,7 @@ async def test_redis_lua_range_count_check(item_ref, mod_auto_backend):
 
     async def run(checks):
         payload = msg_packer.pack([checks, [], {}, [], []])
-        return await client.lua_commit(keys, [payload])  # type: ignore
+        return await client.commit_script_(keys, [payload])
 
     assert await run([["CNT", idx_key, lo, hi, 2, "Item.owner"]]) == b"committed"
     assert await run([["CNT", idx_key, lo, hi, 1, "Item.owner"]]) == (
@@ -627,14 +626,13 @@ async def test_redis_lua_range_count_check(item_ref, mod_auto_backend):
     )
 
 
-@use_redis_family_backend_only
-async def test_redis_range_check_payload(item_ref, mod_auto_backend):
+async def test_range_check_payload(item_ref, mod_auto_backend):
     """range 读在 commit 里变成 CNT 检查：格式、截断时收窄的边界、排在全部竞态检查之后 /
     确定性检查之前；unique 点查由 VER / UNIQ 覆盖的（get(unique=) 命中、upsert 两条路径）不带"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()
-    client = cast(RedisBackendClient, backend.master)
+    client = cast(RedisModelClient, backend.master)
     comp = item_ref.comp_cls
     dtypes = comp.dtype_map_
 
@@ -645,12 +643,11 @@ async def test_redis_range_check_payload(item_ref, mod_auto_backend):
             await session.using(comp).insert(row)
 
     captured: list = []
-    orig_lua_commit = client.lua_commit
-    assert orig_lua_commit is not None
+    orig_commit_script = client.commit_script_
 
     async def spy(keys, args):
         captured.append(msgpack.unpackb(args[0], raw=True)[0])
-        return await orig_lua_commit(keys, args)
+        return await orig_commit_script(keys, args)
 
     def cnt_checks() -> list:
         return [chk for chk in captured[-1] if chk[0] == b"CNT"]
@@ -662,7 +659,7 @@ async def test_redis_range_check_payload(item_ref, mod_auto_backend):
     owner_key = client.index_key(item_ref, "owner").encode()
     time_key = client.index_key(item_ref, "time").encode()
 
-    with patch.object(client, "lua_commit", new=spy):
+    with patch.object(client, "commit_script_", new=spy):
         # get(unique=) 命中 → update：命中行的 VER + unique 已经足够，不带 CNT
         async with backend.session("pytest", 1) as session:
             session.only_master = True

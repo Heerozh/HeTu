@@ -305,7 +305,6 @@ async def test_snowflake_timestamp_keeper(
     assert await second.load() == future_ms
 
 
-@use_redis_family_backend_only
 async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     """旧版本的 save 先 direct_set 再确认行在不在，Redis 上给缺行建出了只有
     last_timestamp、缺 id 的残缺 hash：之后按 STRUCT 读就 KeyError，每次重启 load 都

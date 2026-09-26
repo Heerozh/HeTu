@@ -12,7 +12,11 @@ import sys
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import (
+    raw_hset,
+    raw_index_members,
+    use_redis_family_backend_only,
+)
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -597,69 +601,51 @@ async def _insert_items(backend, comp, *fields):
     return rows
 
 
-@use_redis_family_backend_only
 async def test_rebuild_index_removes_orphans(item_ref, mod_auto_backend):
     """重建按行数据来：索引里残留的、行已经不存在的项被清掉；表里一行都不剩时也要清"""
-    from hetu.data.backend.redis import RedisBackendClient
-
     backend = mod_auto_backend()
     maint = backend.get_table_maintenance()
-    io = backend.master.io
-    idx_key = RedisBackendClient.index_key(item_ref, "owner")
     x, y = await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
 
     maint.delete_row(item_ref, int(x.id))  # 只删行 key，owner 索引里留下 x
     maint.rebuild_index(item_ref)
-    members = io.zrange(idx_key, 0, -1)
+    members = raw_index_members(backend, item_ref, "owner")
     assert [m.rsplit(b"\x00", 1)[-1] for m in members] == [str(y.id).encode()]
 
     maint.delete_row(item_ref, int(y.id))  # 表空了，索引里只剩残留
     maint.rebuild_index(item_ref)
-    assert io.zrange(idx_key, 0, -1) == []
+    assert raw_index_members(backend, item_ref, "owner") == []
 
 
-@use_redis_family_backend_only
 async def test_rebuild_index_failure_keeps_old_index(item_ref, mod_auto_backend):
     """重建中途失败（这里是行数据违反 unique）：旧索引原样保留，不能留下空的或半截的
     索引——每次 hetu upgrade 都重建，失败后照样得能起服"""
-    from hetu.data.backend.redis import RedisBackendClient
-
     backend = mod_auto_backend()
     maint = backend.get_table_maintenance()
-    io = backend.master.io
     _a, b = await _insert_items(backend, item_ref.comp_cls, (1, 1, "a"), (1, 2, "b"))
-    io.hset(RedisBackendClient.row_key(item_ref, int(b.id)), "name", "a")
+    raw_hset(backend, item_ref, int(b.id), name="a")
 
-    idx_key = RedisBackendClient.index_key(item_ref, "name")
-    before = io.zrange(idx_key, 0, -1)
+    before = raw_index_members(backend, item_ref, "name")
     with pytest.raises(RuntimeError, match="unique"):
         maint.rebuild_index(item_ref)
-    assert io.zrange(idx_key, 0, -1) == before
+    assert raw_index_members(backend, item_ref, "name") == before
 
 
-@use_redis_family_backend_only
 async def test_rebuild_index_without_snowflake(item_ref, mod_auto_backend, monkeypatch):
     """hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约）：重建索引不能发号，
     有行的表照样重建，建出来的与 commit 写的逐字节一致"""
-    from hetu.data.backend.redis import RedisBackendClient
-
     backend = mod_auto_backend()
     maint = backend.get_table_maintenance()
-    io = backend.master.io
     await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
-    idx_keys = [
-        RedisBackendClient.index_key(item_ref, name)
-        for name in item_ref.comp_cls.indexes_
-    ]
-    before = [io.zrange(key, 0, -1) for key in idx_keys]
+    names = list(item_ref.comp_cls.indexes_)
+    before = [raw_index_members(backend, item_ref, name) for name in names]
     assert all(before)
 
     monkeypatch.setattr(SnowflakeID(), "worker_id", -1)  # 模拟 upgrade 进程里未初始化
     maint.rebuild_index(item_ref)
-    assert [io.zrange(key, 0, -1) for key in idx_keys] == before
+    assert [raw_index_members(backend, item_ref, name) for name in names] == before
 
 
-@use_redis_family_backend_only
 async def test_manager_rebuild_index_all(
     mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
 ):

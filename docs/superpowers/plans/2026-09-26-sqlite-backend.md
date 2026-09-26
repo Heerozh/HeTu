@@ -92,10 +92,10 @@ servants 列表）、`tests/fixtures/backends.py` 与相关用例。
 
 ## Task 2b: 测试扩面（Task 3 之后）
 
-- [ ] Redis 专属用例扩到 sqlite（spec §7.4），加测试 helper 读原始索引 member / 改行字段。
-- [ ] `tests/test_backend_sqlite.py`（spec §7.5），其中 hub 并发单测从 `test_backend_sql.py` 改写迁来。
-- [ ] 验证：全绿。
-- [ ] 提交：`test: …`
+- [x] Redis 专属用例扩到 sqlite（spec §7.4），加测试 helper 读原始索引 member / 改行字段。
+- [x] `tests/test_backend_sqlite.py`（spec §7.5），其中 hub 并发单测从 `test_backend_sql.py` 改写迁来。
+- [x] 验证：全绿（1605 passed / 1 skipped）。
+- [x] 提交：`test: …`
 
 ## Task 4: direct_set 通知契约
 

@@ -5,7 +5,7 @@
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import raw_index_members
 from fixtures.testdata import create_ref, def_item
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -133,7 +133,6 @@ async def test_unsigned_index_range(blob_ref, mod_auto_backend):
     assert len(await servant.range(blob_ref, "small", 0)) == 0
 
 
-@use_redis_family_backend_only
 async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     """uint64 超过 int64 上限的值原样往返，按无符号数值排序"""
     backend: Backend = mod_auto_backend()
@@ -221,12 +220,9 @@ async def test_bytes_index_range(blob_ref, mod_auto_backend):
     assert list(rows.tag) == [b"b", b"ab"]
 
 
-@use_redis_family_backend_only
 async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
     """重建索引（hetu upgrade 默认每次都做）按行数据重算的 member 要与 commit 写的逐字节
     一致：bytes 用真实字节，不是合法 UTF-8、非 ASCII 的值都不能让重建失败"""
-    from hetu.data.backend.redis import RedisBackendClient
-
     backend: Backend = mod_auto_backend()
     comp = blob_ref.comp_cls
     ids = await _insert(
@@ -237,12 +233,11 @@ async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
         big=[2**64 - 1, I64_MAX, 5],
         tag=[b"a\x00b", BIN, "河图".encode()],
     )
-    io = backend.master.io
-    idx_keys = [RedisBackendClient.index_key(blob_ref, name) for name in comp.indexes_]
-    before = [io.zrange(key, 0, -1) for key in idx_keys]
+    before = [raw_index_members(backend, blob_ref, name) for name in comp.indexes_]
 
     backend.get_table_maintenance().rebuild_index(blob_ref)
-    assert [io.zrange(key, 0, -1) for key in idx_keys] == before
+    after = [raw_index_members(backend, blob_ref, name) for name in comp.indexes_]
+    assert after == before
     await backend.wait_for_synced()
     rows = await backend.servant.range(blob_ref, "tag", BIN)
     assert [int(r.id) for r in rows] == [ids[1]]

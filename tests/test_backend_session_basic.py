@@ -9,8 +9,7 @@ from typing import Callable
 
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
-from redis.asyncio.cluster import RedisCluster
+from fixtures.backends import raw_key_count
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
@@ -1082,9 +1081,8 @@ async def test_session_exception(item_ref, mod_auto_backend):
         assert len(row) == 0
 
 
-@use_redis_family_backend_only
-async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name):
-    """测试Redis后端删除所有key后，index key应该为空"""
+async def test_empty_index_after_deleting_all_rows(filled_item_ref, mod_auto_backend):
+    """行都删掉之后，表名下一个 key 都不剩（索引的 zset 删空了自动消失）"""
     backend: Backend = mod_auto_backend()
 
     # 测试更新name后再把所有key删除后index是否正常为空
@@ -1103,11 +1101,7 @@ async def test_redis_empty_index(filled_item_ref, mod_auto_backend, backend_name
         for row in rows:
             item_repo.delete(row.id)
 
-    # time.sleep(1)  # 等待部分key过期
-    assert (
-        backend.master.io.keys("pytest:Item:{CLU*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
-        == []
-    )  # type: ignore
+    assert raw_key_count(backend, filled_item_ref) == 0
 
 
 async def test_unique_batch_add_in_same_session_bug(item_ref, mod_auto_backend):
@@ -1534,10 +1528,9 @@ async def test_single_index_row_is_detached(item_ref, mod_auto_backend, query):
         assert saved is not None and saved.qty == 7
 
 
-@use_redis_family_backend_only
 async def test_untouched_nan_row_stays_clean_read(item_ref, mod_auto_backend):
     """含 NaN 的行在 upsert 里没改：不写入，提交时仍按纯读校验版本；显式 update 也判成
-    没有修改。SQLite / MariaDB 存不了 NaN，只测 Redis 系"""
+    没有修改"""
     backend = mod_auto_backend()
     comp = item_ref.comp_cls
 

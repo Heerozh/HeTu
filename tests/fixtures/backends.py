@@ -2,10 +2,13 @@ import os
 from typing import Callable, cast
 
 import pytest
+from redis.cluster import RedisCluster
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 from hetu.data.backend.sqlite import SQLiteBackendClient
+from hetu.data.backend.sqlite.store import SQLiteStore
 
 
 @pytest.fixture(scope="module")
@@ -255,3 +258,39 @@ def use_redis_family_backend_only(func):
     return pytest.mark.parametrize(
         "backend_name", REDIS_BACKENDS + REDIS_FORK_BACKENDS, indirect=True
     )(func)
+
+
+# ============ 直接读写底层数据（造数据、核对索引用） ============
+
+
+def raw_index_members(backend: Backend, ref, index_name: str) -> list[bytes]:
+    """索引的原始 member（值的可排序编码 + \\x00 + id），按顺序。Redis 读 zset，SQLite 读模拟 zset 的表"""
+    master = cast(RedisModelClient, backend.master)
+    key = master.index_key(ref, index_name)
+    if isinstance(master, RedisBackendClient):
+        return list(master.io.zrange(key, 0, -1))  # type: ignore
+    return cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.zmembers, key)
+
+
+def raw_hset(backend: Backend, ref, row_id: int, **fields: str) -> None:
+    """绕过事务直接改行字段（造数据用：不改 _version、不动索引、不发通知）"""
+    master = cast(RedisModelClient, backend.master)
+    key = master.row_key(ref, row_id)
+    if isinstance(master, RedisBackendClient):
+        master.io.hset(key, mapping=fields)  # type: ignore
+    else:
+        cast(SQLiteBackendClient, master).run_sync_(SQLiteStore.hset_txn, key, fields)
+
+
+def raw_key_count(backend: Backend, ref) -> int:
+    """这张表（这个簇）名下还有几个 key：行 + 索引（Redis 的 zset 删空了自动消失）"""
+    master = cast(RedisModelClient, backend.master)
+    prefix = master.cluster_prefix(ref)
+    if isinstance(master, RedisBackendClient):
+        keys = master.io.keys(prefix + ":*", target_nodes=RedisCluster.PRIMARIES)  # type: ignore
+        return len(keys)  # type: ignore
+
+    def count(store: SQLiteStore) -> int:
+        return len(store.row_ids(prefix)) + len(store.zkeys_with_prefix(prefix + ":"))
+
+    return cast(SQLiteBackendClient, master).run_sync_(count)

@@ -2,7 +2,6 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
-from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
@@ -613,7 +612,6 @@ async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend)
     assert {name for name, _ in reads} == {"A"}, reads
 
 
-@use_redis_family_backend_only
 async def test_orphan_index_member_raises_inconsistent_range_read(
     item_ref, mod_auto_backend
 ):
