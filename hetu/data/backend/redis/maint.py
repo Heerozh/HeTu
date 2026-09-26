@@ -212,9 +212,9 @@ class RedisTableMaintenance(TableMaintenance):
         注意：此操作会删除所有数据！
         """
         io = self.client.io
-        # 删除数据
+        # 删除数据（所有簇的行与索引，不碰名字以本组件名开头的副本组件）
         del_keys = io.keys(
-            self.client.table_prefix(table_ref) + ":*",
+            self.client.all_clusters_prefix(table_ref) + "*",
             target_nodes=RedisCluster.PRIMARIES,
         )
         del_keys = cast(list[bytes], del_keys)

@@ -99,6 +99,14 @@ class RedisModelClient(BackendClient):
         )
 
     @classmethod
+    def all_clusters_prefix(cls, table_ref: TableReference) -> str:
+        """
+        这张表所有簇的行、索引 key 的共同前缀（到 `{CLU` 为止）。只按 `table_prefix` 匹配会连带
+        匹配上名字以本组件名开头的副本组件（`Comp:suffix`，见 `BaseComponent.duplicate`）
+        """
+        return f"{cls.table_prefix(table_ref)}:{{CLU"
+
+    @classmethod
     def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
         """获取redis表行的key名"""
         return f"{cls.cluster_prefix(table_ref)}:id:{str(row_id)}"

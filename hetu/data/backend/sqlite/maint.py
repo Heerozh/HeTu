@@ -221,9 +221,9 @@ class SQLiteTableMaintenance(TableMaintenance):
     def do_drop_table_(self, table_ref: TableReference) -> int:
         """
         清空组件表的全部数据（所有簇的行表、索引）和 meta。返回删掉的键数：行数 + 索引 key 数 +
-        meta，对应 Redis 删掉的 key 数。
+        meta，对应 Redis 删掉的 key 数。名字以本组件名开头的副本组件不碰
         """
-        prefix = self.client.table_prefix(table_ref) + ":"
+        prefix = self.client.all_clusters_prefix(table_ref)
         instance, comp = table_ref.instance_name, table_ref.comp_name
 
         def _drop(store: SQLiteStore) -> int:
