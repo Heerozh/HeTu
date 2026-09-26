@@ -42,8 +42,7 @@ class SnowflakeTimestampKeeper:
     和一个 worker_id，不关心这个 id 是抢来的还是配置里写死的。
 
     存储直接复用 `WorkerLease` 表的 `last_timestamp` 字段（它本来就以 worker_id 为主键，
-    语义正好对上），省掉一张新表和它的迁移；本类只碰这一个字段，和租约的
-    `node_id`/`expires_at` 互不干涉。
+    语义正好对上），省掉一张新表和它的迁移。
 
     ## 防的是哪一种回拨
 
