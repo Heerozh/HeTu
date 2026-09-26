@@ -906,6 +906,16 @@ async def test_get_many(filled_item_ref, mod_auto_backend):
 
     assert await servant.get_many(filled_item_ref, []) == []
 
+    assert await servant.get_many(filled_item_ref, [999999999, 888888888]) == [
+        None,
+        None,
+    ]
+    # 同一批的重复 ID 仍是两个独立 record，不能修改一个连带改变另一个。
+    duplicates = await servant.get_many(filled_item_ref, [ids[0], ids[0]])
+    original = duplicates[1].qty
+    duplicates[0].qty = original + 1
+    assert duplicates[1].qty == original
+
 
 async def test_table_servant_get_many(filled_item_ref):
     """Table.servant_get_many：与 servant_get / servant_range 同款绑定，供非事务批量读"""

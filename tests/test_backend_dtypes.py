@@ -148,6 +148,7 @@ async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     servant = backend.servant
 
     assert (await servant.get(blob_ref, ids[0])).big == 2**64 - 1
+    assert [int(row.big) for row in await servant.get_many(blob_ref, ids)] == bigs
     rows = await servant.range(blob_ref, "big", I64_MAX, 2**64 - 1, limit=10)
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
 
@@ -193,6 +194,13 @@ async def test_bytes_roundtrip(blob_ref, mod_auto_backend):
         assert typed["tag"] == tag
     rows = await servant.get_many(blob_ref, ids, RowFormat.TYPED_DICT)
     assert [row["tag"] for row in rows] == tags
+    rows = await servant.get_many(blob_ref, [ids[2], 0, ids[0], ids[1]])
+    assert [None if row is None else bytes(row.tag) for row in rows] == [
+        tags[2],
+        None,
+        tags[0],
+        tags[1],
+    ]
 
 
 async def test_bytes_index_follows_update_and_delete(blob_ref, mod_auto_backend):
@@ -308,6 +316,8 @@ async def test_float_special_values(
     got = await backend.master.get(item_ref, int(row.id))
     assert got is not None
     np.testing.assert_equal(got.model, np.float32(value))
+    for batch_row in await backend.master.get_many(item_ref, [int(row.id)] * 2):
+        np.testing.assert_equal(batch_row.model, np.float32(value))
 
 
 async def test_str_with_nul_roundtrip(
@@ -335,5 +345,7 @@ async def test_str_with_nul_roundtrip(
         return  # 后端存不下，写入前明确拒绝也可以
     got = await backend.master.get(item_ref, int(row.id))
     assert got is not None and got.name == "a\x00b"
+    batch = await backend.master.get_many(item_ref, [int(row.id)] * 2)
+    assert [r.name for r in batch] == ["a\x00b"] * 2
     rows = await backend.master.range(item_ref, "name", "a\x00b", limit=-1)
     assert [int(r.id) for r in rows] == [int(row.id)]

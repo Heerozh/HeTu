@@ -451,3 +451,39 @@ def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
     _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
     assert [r["id"] for r in old_rows] == ["2", "3"]
     assert new_rows == [{"qty": "7"}, {"level": "3"}]
+
+
+@pytest.mark.parametrize("preload", [False, True])
+def test_add_clean_batch_snapshots_are_independent(mod_item_model, preload):
+    """批量原值快照不能与输入、工作缓存或后续加入的批次相互污染。"""
+    comp = mod_item_model
+    ref = TableReference(comp, "pytest", 1)
+    idmap = IdentityMap()
+    if preload:
+        first = comp.new_row(id_=99)
+        first.qty = 9
+        idmap.add_clean(ref, first)
+    rows = comp.new_rows(50)
+    rows.id = np.arange(1, 51)
+    rows.qty = 1
+    idmap.add_clean(ref, rows)
+    rows.qty = 7
+    cached, state = idmap.get(ref, 1)
+    assert cached is not None and cached.qty == 1 and state == RowState.CLEAN
+    cached.qty = 3
+    idmap.update(ref, cached)
+    clean = idmap.db_row(ref, 1)
+    assert clean is not None and clean.qty == 1
+    updated, _ = idmap.get(ref, 1)
+    assert updated is not None and updated.qty == 3
+    second, _ = idmap.get(ref, 2)
+    assert second is not None and second.qty == 1
+    second_clean = idmap.db_row(ref, 2)
+    assert second_clean is not None and second_clean.qty == 1
+    assert idmap.get_clean_rows()[ref][2] == "0"
+    assert idmap.get_dirty_rows()[ref][1][1] == [{"qty": "3"}]
+    if preload:
+        first_clean = idmap.db_row(ref, 99)
+        assert first_clean is not None and first_clean.qty == 9
+    with pytest.raises(ValueError, match="already exists"):
+        idmap.add_clean(ref, rows)
