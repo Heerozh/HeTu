@@ -583,6 +583,44 @@ async def test_manager_flush_volatile(
         keep.backend.get_table_maintenance().flush(keep)
 
 
+async def test_flush_leaves_duplicate_components_alone(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """清空组件 MgrOrder 不能碰它的副本 MgrOrder:Copy（名字也以 `MgrOrder:` 开头）：副本的
+    数据和 meta 都得留着"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    @define_component(namespace="pytest", force=True, volatile=True)
+    class MgrOrder(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    copy = MgrOrder.duplicate("pytest", "Copy")
+
+    @define_system(namespace="pytest", components=(MgrOrder,))
+    async def mgr_use_order(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(copy,))
+    async def mgr_use_order_copy(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tm = ComponentTableManager("pytest", "mgr_dup", {"default": backend})
+    assert tm.check_and_create_new_tables() is True
+    await _insert_owner(tm, MgrOrder, 1)
+    await _insert_owner(tm, copy, 1)
+
+    order = tm.get_table(MgrOrder)
+    order.backend.get_table_maintenance().flush(order)
+    await backend.wait_for_synced()
+    assert await _get_owner(tm, MgrOrder, 1) is None
+    assert await _get_owner(tm, copy, 1) is not None
+    assert _status(tm, copy) == "ok"
+
+
 # ---------------------------------------------------------------------------
 # 重建索引：`hetu upgrade` 默认每次都按行数据重建持久组件的索引，修掉索引残留
 # ---------------------------------------------------------------------------
