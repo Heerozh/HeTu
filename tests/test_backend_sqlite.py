@@ -462,6 +462,46 @@ def test_commits_from_two_connections_serialize(tmp_path):
         second.close()
 
 
+async def test_notify_cleanup_survives_failed_commit(tmp_path, monkeypatch):
+    """
+    轮到顺手清理通知的那次提交没成（校验不过、或者出错）：清理不能跟着跳过一整个周期。
+    校验不过时本来就什么都没写，清理照做；出错时下一次提交接着清
+    """
+    client = SQLiteBackendClient(_dsn(tmp_path / "n.db"), False)
+    racing = msg_packer.pack([[["VER", "t:C:{CLU1}:id:1", "7"]], [], {}, [], []])
+
+    def seed_old_notify() -> None:
+        old = time.time() - client.NOTIFY_TTL_SECONDS - 60
+
+        def insert(store: SQLiteStore):
+            with store.write_txn():
+                store.notify_insert([("old", None)], old)
+
+        client.run_sync_(insert)
+        client._next_notify_cleanup_at = 0  # 下一次提交就该清
+
+    def remaining() -> int:
+        return client.run_sync_(lambda store: len(_notify_rows(store)))
+
+    def locked(*_args):
+        raise sqlite3.OperationalError("database is locked")
+
+    try:
+        seed_old_notify()
+        assert (await client.commit_script_([], [racing])).startswith(b"RACE")
+        assert remaining() == 0, "校验不过也要清理"
+
+        seed_old_notify()
+        with monkeypatch.context() as patched:
+            patched.setattr("hetu.data.backend.sqlite.client.run_commit", locked)
+            with pytest.raises(sqlite3.OperationalError):
+                await client.commit_script_([], [racing])
+        await client.commit_script_([], [racing])
+        assert remaining() == 0, "出错没清成，下一次提交要接着清"
+    finally:
+        await client.close()
+
+
 async def test_direct_set_and_maintenance_do_not_notify(tmp_path, new_component_env):
     """direct_set 与维护接口的写入不发订阅通知（direct_set 的契约是不保证通知，SQLite 取不发）"""
     backend = Backend({"type": "sqlite", "master": _dsn(tmp_path / "hetu.db")})
