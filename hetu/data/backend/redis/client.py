@@ -26,6 +26,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    detach_rows_,
     exact_number_,
     inverted_bounds_error_,
     normalize_int_bounds_,
@@ -624,10 +625,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
         comp_cls = table_ref.comp_cls
         raw_rows = await self._hgetall_many(key_prefix, row_ids)
         if row_format is RowFormat.STRUCT:
-            # 读到的行一次解码
-            records = iter(
-                self.rows_decode_(comp_cls, [row for row in raw_rows if row])
-            )
+            batch = self.rows_decode_(comp_cls, [row for row in raw_rows if row])
+            records = detach_rows_(batch)
             return [next(records) if row else None for row in raw_rows]
         return [
             self.row_decode_(comp_cls, row, row_format) if row else None

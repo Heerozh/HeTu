@@ -27,6 +27,7 @@ from ..base import (
     RaceCondition,
     RowFormat,
     UniqueViolation,
+    detach_rows_,
     inverted_bounds_error_,
     peel_bound_,
     sortable_token,
@@ -676,6 +677,10 @@ class SQLBackendClient(BackendClient, alias="sql"):
         ids = [int(i) for i in row_ids]
         found = await self._select_many(table_ref, ids)
         comp_cls = table_ref.comp_cls
+        if row_format is RowFormat.STRUCT:
+            batch = self.rows_decode_(comp_cls, [found[i] for i in ids if i in found])
+            records = detach_rows_(batch)
+            return [next(records) if i in found else None for i in ids]
         return [
             self.row_decode_(comp_cls, found[i], row_format) if i in found else None
             for i in ids
