@@ -355,10 +355,41 @@ class SQLiteStore:
             (row_id, *values),
         )
 
+    def hset_existing(self, key: str, mapping: dict[str, Any]) -> bool:
+        """
+        同 `HSETEX key FXX`：行存在、且要写的字段都已存在（非 NULL）才写，返回写没写。缺行、
+        缺表、缺列都什么都不建（direct_set 用）。只能在写事务里调用。
+        """
+        if not mapping:
+            raise ValueError(_("HSET 至少要给一个字段：{key}").format(key=key))
+        table, row_id = split_row_key(key)
+        if not self._table_exists(table, trust_cache=False):
+            return False
+        cols = list(mapping)
+        values = [to_column(encode_value(mapping[c])) for c in cols]
+        sets = ", ".join(f"{quote(c)}=?" for c in cols)
+        present = " AND ".join(f"{quote(c)} IS NOT NULL" for c in cols)
+        try:
+            cur = self.conn.execute(
+                f"UPDATE {quote(table)} SET {sets} "
+                f"WHERE {quote(ROW_KEY)} = ? AND {present}",
+                (*values, row_id),
+            )
+        except sqlite3.OperationalError as exc:
+            if _is_missing_column(exc):
+                return False
+            raise
+        return cur.rowcount > 0
+
+    def hset_existing_txn(self, key: str, mapping: dict[str, Any]) -> bool:
+        """`hset_existing` 自带写事务"""
+        with self.write_txn():
+            return self.hset_existing(key, mapping)
+
     def hset_txn(
         self, key: str, mapping: dict[str, Any], schema: Iterable[str] | None = None
     ) -> None:
-        """HSET 自带写事务（direct_set、维护接口用）"""
+        """HSET 自带写事务（直接造原始数据用，比如测试里造残缺行）"""
         with self.write_txn():
             self.hset(key, mapping, schema)
 

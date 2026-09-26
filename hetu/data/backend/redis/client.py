@@ -36,6 +36,18 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
+# direct_set 的回退（服务端不支持 HSETEX 时）：要写的字段都已存在才写，同 HSETEX FXX。字段不在
+# （含整行不存在）就什么都不写，不会建出残缺行。返回 1 / 0
+DIRECT_SET_LUA = """
+for i = 1, #ARGV, 2 do
+    if redis.call('HEXISTS', KEYS[1], ARGV[i]) == 0 then
+        return 0
+    end
+end
+redis.call('HSET', KEYS[1], unpack(ARGV))
+return 1
+"""
+
 
 @final
 class RedisBackendClient(RedisModelClient, alias="redis"):
@@ -48,7 +60,17 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
     # range/get_many 批量读行时，每个pipeline最多打包的HGETALL条数
     RANGE_PIPELINE_CHUNK = 1000
 
+    # 探测 HSETEX 用的 key：FXX 对不存在的 key 什么都不写，拿它试一次没有副作用
+    HSETEX_PROBE_KEY = "hetu:probe:hsetex"
+
     def load_commit_scripts(self, file: str | Path):
+        # read file to text
+        with open(file, "r", encoding="utf-8") as f:
+            script_text = f.read()
+        return self.register_script_(script_text)
+
+    def register_script_(self, script_text: str):
+        """内部方法：把 Lua 脚本载入 master，返回可 await 调用的 Script"""
         assert self._async_ios, _("连接已关闭，已调用过close")
         assert self.is_servant is False, _(
             "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
@@ -56,14 +78,31 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         assert len(self._async_ios) == 1, _(
             "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
         )
-        # read file to text
-        with open(file, "r", encoding="utf-8") as f:
-            script_text = f.read()
-
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
         # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了
         return self._async_ios[0].register_script(script_text)  # type: ignore
+
+    def probe_hsetex_(self) -> bool:
+        """
+        内部方法：服务端（含前面的代理层）支不支持 `HSETEX key FXX …`（Redis >= 8.0、
+        Valkey >= 9.0）。FXX 对不存在的 key 什么都不写，拿不存在的探测 key 试一次没有副作用。
+        """
+        try:
+            self._ios[0].execute_command(
+                "HSETEX", self.HSETEX_PROBE_KEY, "FXX", "FIELDS", 1, "f", "v"
+            )
+        except redis.exceptions.RedisError as e:
+            # 服务端回 unknown command、集群客户端的命令表里没有、有的代理层遇到不认识的命令
+            # 直接断连接。回退的 Lua 语义相同只是慢些，所以什么错都回退，不让启动失败
+            logger.info(
+                _(
+                    "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set "
+                    "改用同样语义的 Lua 脚本（稍慢）"
+                ).format(err=e)
+            )
+            return False
+        return True
 
     @property
     def io(self) -> redis.Redis | redis.cluster.RedisCluster:
@@ -190,6 +229,8 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         self.lua_commit = None
+        # direct_set 回退用的 Lua，服务端不支持 HSETEX 时由 configure_master 载入；None 即用 HSETEX
+        self.direct_set_script = None
         # 本进程共享的 pubsub 分发器，首次 get_mq_client 时在事件循环里懒建
         self._hub: PubSubHub | None = None
 
@@ -230,6 +271,11 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
         # 加载lua脚本，注意redis-py的pipeline里不能用lua，会反复检测script exists性能极低
         self.lua_commit = self.load_commit_scripts(
             Path(__file__).parent.resolve() / "commit_v2.lua"
+        )
+        # direct_set 优先用原生的 HSETEX FXX（和 HSET 差不多快），不支持的（Redis 7、Valkey 8、
+        # 部分代理层）回退到同样语义的 Lua
+        self.direct_set_script = (
+            None if self.probe_hsetex_() else self.register_script_(DIRECT_SET_LUA)
         )
         # 提示用户schema定义是否符合要求，比如索引类型不能有复数等
         self._schema_checking(components)
@@ -647,17 +693,25 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
     @override
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
         UNSAFE! 只用于易失数据! 不会做类型检查! 契约见基类。
 
-        HSET：缺行时建出只有这几个字段的残缺行；行频道是行 key 的 keyspace 通知，会顺带触发
-        （契约不保证通知）。
+        `HSETEX key FXX`：要写的字段都已存在才写，缺行时什么都不建；服务端不支持 HSETEX 时
+        回退到同样语义的 Lua（见 `configure_master`）。行频道是行 key 的 keyspace 通知，写入时
+        会顺带触发（契约不保证通知）。
         """
         self.check_direct_set_(table_ref, kwargs)
         aio = self.aio
         key = self.row_key(table_ref, id_)
-        await aio.hset(key, mapping=kwargs)  # type: ignore
+        kvs = list(itertools.chain.from_iterable(kwargs.items()))
+        if self.direct_set_script is None:
+            written = await aio.execute_command(
+                "HSETEX", key, "FXX", "FIELDS", len(kwargs), *kvs
+            )
+        else:
+            written = await self.direct_set_script(keys=[key], args=kvs, client=aio)
+        return bool(written)
 
     def get_table_maintenance(self) -> RedisTableMaintenance:
         """

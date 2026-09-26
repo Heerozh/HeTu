@@ -675,25 +675,28 @@ class BackendClient:
 
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
         UNSAFE! 只用于易失数据! 不会做类型检查!
 
         直接写入属性到数据库，避免session必须要执行get+事务2条指令。
         仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-        注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
         一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+
+        只改已存在的行：行不存在（比如已被删掉），或行里没有要写的字段时，什么都不写，
+        返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。
 
         这是维护类写入：不改 `_version`、不参与乐观锁，也**不保证**触发订阅通知——行订阅可能
         立刻收到，也可能等该行下一次事务写入时一起推；整表订阅收不到。需要订阅方及时看到的数据
         请走事务。（Redis 上行频道就是行 key 的 keyspace 通知，会顺带触发；SQLite 后端不发。）
 
-        UNSAFE, volatile components only, no type checks. A maintenance-class write: it
-        does not bump `_version`, takes no part in optimistic locking, and is **not
-        guaranteed** to notify subscribers (a row subscriber may see it at once or only with
-        the row's next transactional write; table subscribers never do). Use a transaction
-        for data that subscribers must see promptly.
+        UNSAFE, volatile components only, no type checks. Only updates an existing row:
+        if the row (or one of the fields) does not exist, nothing is written and False is
+        returned; True means the fields were written. A maintenance-class write: it does
+        not bump `_version`, takes no part in optimistic locking, and is **not guaranteed**
+        to notify subscribers (a row subscriber may see it at once or only with the row's
+        next transactional write; table subscribers never do). Use a transaction for data
+        that subscribers must see promptly.
         """
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
         raise NotImplementedError

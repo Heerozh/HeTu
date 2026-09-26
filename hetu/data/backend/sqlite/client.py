@@ -402,17 +402,16 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
     @override
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
         UNSAFE! 只用于易失数据! 不会做类型检查! 契约见基类。
 
-        同 Redis 的 HSET：缺行时建出只有这几个字段的残缺行。不发订阅通知（契约不保证通知，
-        SQLite 取最严的一端，依赖它的代码在开发期就会暴露）。
+        同 Redis 的 `HSETEX key FXX`：只改已存在的行里已有的字段，缺行时什么都不建，返回写没写。
+        不发订阅通知（契约不保证通知，SQLite 取最严的一端，依赖它的代码在开发期就会暴露）。
         """
         self.check_direct_set_(table_ref, kwargs)
-        schema = [name for name, _prop in table_ref.comp_cls.properties_]
-        await self.run_(
-            SQLiteStore.hset_txn, self.row_key(table_ref, id_), kwargs, schema
+        return await self.run_(
+            SQLiteStore.hset_existing_txn, self.row_key(table_ref, id_), kwargs
         )
 
     # ============ 维护 / 订阅 ============

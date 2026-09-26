@@ -642,9 +642,11 @@ class RedisModelClient(BackendClient):
 
     @staticmethod
     def check_direct_set_(table_ref: TableReference, kwargs: dict[str, str]) -> None:
-        """`direct_set` 的参数检查：只能写易失组件的非索引字段"""
+        """`direct_set` 的参数检查：只能写易失组件的非索引字段，至少一个"""
         assert "id" not in kwargs, "id不允许修改"
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
+        if not kwargs:
+            raise ValueError(_("direct_set 至少要写一个字段"))
         for prop in kwargs:
             if prop in table_ref.comp_cls.indexes_:
                 raise ValueError(
