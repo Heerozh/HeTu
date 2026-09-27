@@ -6,9 +6,11 @@
 """
 
 import asyncio
+from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractAsyncContextManager
-from typing import TYPE_CHECKING, AsyncIterator, Callable, cast
+from typing import TYPE_CHECKING, cast
 
+from ...i18n import _
 from .base import RaceCondition
 from .idmap import IdentityMap
 from .repo import SessionRepository
@@ -162,10 +164,7 @@ class RetryAttempt(AbstractAsyncContextManager):
         # 1. 如果 Body 内发生了 RaceCondition
         if exc_type and issubclass(exc_type, RaceCondition):
             self.session.discard()
-            if self.is_last:
-                return False
-            else:
-                return True  # 抑制异常，不让循环中断
+            return not self.is_last  # 抑制异常，不让循环中断
 
         # 2. 如果 Body 正常，尝试 Commit
         if exc_type is None:
@@ -175,7 +174,7 @@ class RetryAttempt(AbstractAsyncContextManager):
             except RaceCondition as e:
                 self.session.discard()
                 if self.is_last:
-                    raise RuntimeError("Exceeded maximum retry attempts") from e
+                    raise RuntimeError(_("事务超过最大重试次数。")) from e
                 return True  # 同样抑制异常，触发重试
 
         # 其他异常正常抛出
