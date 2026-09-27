@@ -62,7 +62,7 @@ async def rpc(
     ok, res = await executor.execute(data[1], *data[2:])
     # 如果关闭了replay，为了速度，不执行下面的字符串序列化
     if replay.isEnabledFor(logging.INFO):
-        replay.info(f"[EndpointResult][{data[1]}]({ok}, {str(res)})")
+        replay.info(f"[EndpointResult][{data[1]}]({ok}, {res!s})")
 
     if not ok:
         # 执行失败/非法调用。debug 模式下发独立的 err 帧（区别于成功的 rsp 信封），

@@ -81,8 +81,6 @@ class RaceCondition(Exception):
     `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
     """
 
-    pass
-
 
 class InconsistentRangeRead(RaceCondition):
     """
@@ -124,8 +122,6 @@ class UniqueViolation(IndexError):
     分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用
     `SessionRepository.is_unique_conflicts` 提前检查。
     """
-
-    pass
 
 
 class RowFormat(Enum):

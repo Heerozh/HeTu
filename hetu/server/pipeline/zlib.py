@@ -6,10 +6,9 @@
 """
 
 import logging
+import zlib
 from dataclasses import dataclass
 from typing import Any, override
-
-import zlib
 
 from .pipeline import JSONType, MessageProcessLayer
 

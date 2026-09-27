@@ -110,7 +110,7 @@ class RedisModelClient(BackendClient):
     @classmethod
     def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
         """获取redis表行的key名"""
-        return f"{cls.cluster_prefix(table_ref)}:id:{str(row_id)}"
+        return f"{cls.cluster_prefix(table_ref)}:id:{row_id!s}"
 
     @classmethod
     def index_key(cls, table_ref: TableReference, index_name: str) -> str:
@@ -316,8 +316,8 @@ class RedisModelClient(BackendClient):
         cls,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
         desc: bool,
     ) -> tuple[str, bytes, bytes, bool]:
         """
@@ -380,8 +380,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
     ) -> tuple[list[bytes], bytes, bytes]:
@@ -431,8 +431,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
@@ -442,8 +442,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.RAW] = ...,
@@ -453,8 +453,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.TYPED_DICT] = ...,
@@ -464,8 +464,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: Literal[RowFormat.ID_LIST] = ...,
@@ -475,8 +475,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format: RowFormat = ...,
@@ -486,8 +486,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None = None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
         limit: int = 100,
         desc: bool = False,
         row_format=RowFormat.STRUCT,
@@ -562,8 +562,8 @@ class RedisModelClient(BackendClient):
         self,
         table_ref: TableReference,
         index_name: str,
-        left: float | str | bytes | bool,
-        right: float | str | bytes | bool | None,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
         limit: int,
         desc: bool,
     ) -> tuple[list[int], RangeObservation]:

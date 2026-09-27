@@ -5,8 +5,9 @@
 @email: heeroz@gmail.com
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 from ..endpoint import Context
 

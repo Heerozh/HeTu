@@ -5,9 +5,9 @@
 @email: heeroz@gmail.com
 """
 
-import compression.zstd as zstd  # 仅在 Python 3.14+ 可用
 import logging
 import time
+from compression import zstd  # 仅在 Python 3.14+ 可用
 from dataclasses import dataclass
 from typing import Any, override
 

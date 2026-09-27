@@ -25,6 +25,7 @@ IndexScalar = (
     | np.str_
     | np.bytes_
     | np.bool_
+    | int
     | float
     | str
     | bytes

@@ -62,7 +62,7 @@ def _key_to_id(key: str) -> int:
 
 
 def _build_future_row(
-    ctx: "SystemContext",
+    ctx: SystemContext,
     at: float,
     system: str,
     args: tuple,
@@ -407,7 +407,7 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
         logger.exception(err_msg)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
-        replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
+        replay.info(f"[SystemResult][{call.system}]({ok}, {res!s})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
         async with tbl.session() as session:

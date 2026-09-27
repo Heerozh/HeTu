@@ -157,7 +157,7 @@ class Sandbox:
         instance_name: str = "test",
         worker_id: int = 1,
         reload_app: bool = False,
-    ) -> "Sandbox":
+    ) -> Sandbox:
         """拉起一个 SQLite 后端的应用沙盒，注册 namespace 的 Component/System，建表。
 
         Parameters
@@ -351,7 +351,7 @@ class Sandbox:
         message = rtn.message if isinstance(rtn, ResponseToClient) else "ok"
         return self._wire_roundtrip(message)
 
-    def _resolve_table(self, comp: Any) -> "Table":
+    def _resolve_table(self, comp: Any) -> Table:
         """把 Component 类或名字字符串解析为本沙盒的 `Table`。"""
         try:
             return self.client.table(comp)
@@ -360,7 +360,7 @@ class Sandbox:
                 f"找不到 Component：{comp!r}（是否在 components 中引用过？）"
             ) from e
 
-    async def get(self, comp: Any, **query: Any) -> "np.record | None":
+    async def get(self, comp: Any, **query: Any) -> np.record | None:
         """按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
 
         `comp` 可传 Component 类或其名字字符串；`query` 只允许一个带索引的字段，
@@ -371,7 +371,7 @@ class Sandbox:
         async with self.client.session(table.comp_cls) as session:
             return await session[table.comp_cls].get(**query)
 
-    async def must_get(self, comp: Any, **query: Any) -> "np.record":
+    async def must_get(self, comp: Any, **query: Any) -> np.record:
         """同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
 
         用于测试中 setup 后「保证存在」的读取，省去 `assert ... is not None` 样板；
@@ -391,7 +391,7 @@ class Sandbox:
         limit: int = 10,
         desc: bool = False,
         **kwargs: Any,
-    ) -> "np.recarray":
+    ) -> np.recarray:
         """按索引区间读多行，便于断言列表场景。默认闭区间 `[left, right]`。
 
         签名与 `repo.range` 对齐，两种形态都支持：位置参数
@@ -435,7 +435,7 @@ class Sandbox:
         return int(row.id)
 
     @asynccontextmanager
-    async def upsert(self, comp: Any, **anchor: Any) -> "AsyncIterator[np.record]":
+    async def upsert(self, comp: Any, **anchor: Any) -> AsyncIterator[np.record]:
         """以 `async with` 语法 upsert 一行，镜像 `repo.upsert`：按 unique 字段锚定
         查询，块内修改字段，退出块时自动 update/insert 并 commit。
 
@@ -467,7 +467,7 @@ class Sandbox:
         """关闭 backend 连接。"""
         await self.client.close()
 
-    async def __aenter__(self) -> "Sandbox":
+    async def __aenter__(self) -> Sandbox:
         return self
 
     async def __aexit__(self, *exc: object) -> None:

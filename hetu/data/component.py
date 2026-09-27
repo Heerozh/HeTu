@@ -10,8 +10,9 @@ import json
 import keyword
 import logging
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, cast, overload
+from typing import Any, cast, overload
 
 import numpy as np
 

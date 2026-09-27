@@ -165,7 +165,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         从Redis中获取一个可用的 Worker ID。
         """
         # 查找之前是否已经分配过自己的worker id
-        for worker_id in range(0, MAX_WORKER_ID + 1):
+        for worker_id in range(MAX_WORKER_ID + 1):
             # node_id相同说明是容器重启，直接复用。GETEX一条命令原子完成"读值+续期"，
             # 拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
             if not await self._getex_if_mine(worker_id):
@@ -180,7 +180,7 @@ class RedisWorkerKeeper(WorkerKeeper):
             return worker_id
 
         # 尝试分配新的worker id
-        for worker_id in range(0, MAX_WORKER_ID + 1):
+        for worker_id in range(MAX_WORKER_ID + 1):
             # SET NX 本身就是原子的抢占，不需要额外的CAS
             started_at = monotonic()
             result = await self.aio.set(

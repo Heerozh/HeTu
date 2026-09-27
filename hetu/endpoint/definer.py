@@ -7,10 +7,11 @@
 """
 
 import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from inspect import signature
 from types import FunctionType
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..common import Permission, Singleton
 from ..i18n import _

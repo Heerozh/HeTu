@@ -191,5 +191,3 @@ class ServerMessagePipeline(MessagePipeline, metaclass=Singleton):
     """
     服务器端的消息流层叠处理类，单例模式。
     """
-
-    pass

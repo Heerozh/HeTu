@@ -5,8 +5,9 @@
 @email: heeroz@gmail.com
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Concatenate, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Concatenate, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
     from ..component import BaseComponent

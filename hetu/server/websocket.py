@@ -27,7 +27,7 @@ replay = logging.getLogger("HeTu.replay")
 DISCONNECT_SYSTEM = "on_disconnect"
 
 
-@HETU_BLUEPRINT.websocket("/hetu/<db_name>")  # noqa
+@HETU_BLUEPRINT.websocket("/hetu/<db_name>")
 async def websocket_connection(request: Request, ws: Websocket, db_name: str) -> None:
     """ws连接处理器，运行在worker主协程下"""
     # 获取当前协程任务, 自身算是一个协程1

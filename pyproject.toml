@@ -116,6 +116,10 @@ line-length = 88
 [tool.ruff]
 line-length = 88
 
+[tool.ruff.lint]
+# PYI041：int | float 比单写 float 直观，不依赖类型检查器的数字提升隐式规则
+ignore = ["PYI041"]
+
 [tool.uv.workspace]
 members = ["benchmark"]
 

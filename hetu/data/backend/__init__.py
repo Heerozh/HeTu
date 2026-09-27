@@ -22,17 +22,17 @@ from .session import Session
 from .table import Table, TableReference
 
 __all__ = [
-    "RaceCondition",
-    "InconsistentRangeRead",
-    "UniqueViolation",
-    "RowFormat",
-    "BackendClient",
     "Backend",
+    "BackendClient",
+    "InconsistentRangeRead",
+    "MQClient",
+    "RaceCondition",
+    "RowFormat",
     "Session",
     "SessionRepository",
     "Table",
     "TableReference",
-    "MQClient",
+    "UniqueViolation",
 ]
 
 

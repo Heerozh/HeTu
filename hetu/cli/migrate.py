@@ -83,8 +83,6 @@ class MigrateCommand(CommandInterface):
             ),
         )
 
-        pass
-
     @classmethod
     def run(cls, config: dict, yes, drop_data, rebuild_index=True):
         # 创建后端连接池
@@ -199,7 +197,6 @@ class MigrateCommand(CommandInterface):
                 )
             )
         print(_("🎉  恭喜！所有数据库表结构均已升级完成！"))
-        pass
 
     @classmethod
     def execute(cls, args):

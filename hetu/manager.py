@@ -8,7 +8,8 @@ Component Table管理类，通过System定义的Component来管理他们所属�
 """
 
 import logging
-from typing import TYPE_CHECKING, ItemsView
+from collections.abc import ItemsView
+from typing import TYPE_CHECKING
 
 from .data.backend import RaceCondition, Table
 from .i18n import _

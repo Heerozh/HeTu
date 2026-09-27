@@ -558,7 +558,7 @@ class IdentityMap:
                     written.add(value)
         return written, deleted
 
-    def get_clean_rows(self) -> dict["TableReference", dict[int, str]]:
+    def get_clean_rows(self) -> dict[TableReference, dict[int, str]]:
         """
         返回当前仍处于CLEAN状态的行（被读取但未被修改/删除/重新插入），
         以及它们读取时的 `_version`。提交时用于对纯读行做严格的乐观锁检查，
