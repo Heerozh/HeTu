@@ -4,7 +4,6 @@
 """
 
 import asyncio
-from contextvars import ContextVar
 from typing import cast
 
 from fixtures.backends import use_redis_family_backend_only
@@ -60,7 +59,6 @@ async def test_hub_empty_message_skips_unpack(filled_item_ref, mod_auto_backend)
 
 async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     ctx = admin_ctx_()
     broker_a = SubscriptionBroker(backend)
     broker_b = SubscriptionBroker(backend)
@@ -154,7 +152,6 @@ async def test_watch_channel_callback_bypasses_client_queue(
     """broker.watch_channel：服务端内部关注的频道收到通知只回调，不进客户端推送队列；
     回调异常不影响后续通知；连接关闭随 mq_client 一起退订"""
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     servant = backend.servant
     ref = filled_item_ref
     row = await servant.get(ref, (await servant.range(ref, "time", 110, limit=1))[0].id)
@@ -197,7 +194,6 @@ async def test_watch_and_client_subscription_share_channel(
     """服务端关注（watch_channel）和客户端订阅落在同一频道：通知既回调也推给客户端；
     客户端退订不能把关注一起退掉，关注只随连接关闭退订"""
     backend: Backend = mod_auto_backend()
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
     ctx = admin_ctx_()
     broker = SubscriptionBroker(backend)
     hub = _hub(backend)

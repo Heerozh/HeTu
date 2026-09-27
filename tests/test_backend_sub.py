@@ -2,7 +2,6 @@ import asyncio
 import contextlib
 import time
 from collections.abc import Callable
-from contextvars import ContextVar
 from typing import AsyncGenerator, cast
 from unittest.mock import patch
 
@@ -32,8 +31,6 @@ async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
 
     # 初始化订阅器
     broker = SubscriptionBroker(mod_auto_backend("main"))
-    # 清空row订阅缓存
-    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
 
     yield broker
 
@@ -2655,7 +2652,7 @@ async def test_private_shared_reads_still_batch_the_tick(
     """连接用自己的 SharedReads（不跨连接共享，压测对比时这样）：一个 tick 里变了的几行
     仍然一次批量读完，不逐行往返"""
     backend = mod_auto_backend("main")
-    broker = SubscriptionBroker(backend, shared_reads=SharedReads(backend))
+    broker = SubscriptionBroker(backend, shared_reads=SharedReads())
     comp = filled_item_ref.comp_cls
     try:
         sub_id, rows = await broker.subscribe_range(

@@ -59,7 +59,7 @@ class FakeServant:
 
 def make_reads() -> tuple[SharedReads, FakeServant]:
     servant = FakeServant()
-    return SharedReads(SimpleNamespace(servant=servant)), servant
+    return SharedReads(), servant
 
 
 def old_cover() -> float:
@@ -70,18 +70,18 @@ def old_cover() -> float:
 async def test_reuses_read_issued_late_enough():
     reads, servant = make_reads()
     cover = old_cover()
-    [(row, issued)] = await reads.rows(REF, [(1, cover)])
+    [(row, issued)] = await reads.rows(servant, REF, [(1, cover)])
     assert issued >= cover + INTERVAL
-    assert await reads.rows(REF, [(1, cover)]) == [(row, issued)]
+    assert await reads.rows(servant, REF, [(1, cover)]) == [(row, issued)]
     assert len(servant.calls) == 1
 
 
 async def test_does_not_reuse_read_issued_too_early():
     """覆盖时刻之后不足 interval 发出的读，可能落在还没应用那条通知的副本上：不能用，新发"""
     reads, servant = make_reads()
-    [(_row, issued)] = await reads.rows(REF, [(1, old_cover())])
+    [(_row, issued)] = await reads.rows(servant, REF, [(1, old_cover())])
     servant.version = 2
-    [(row, issued2)] = await reads.rows(REF, [(1, issued)])
+    [(row, issued2)] = await reads.rows(servant, REF, [(1, issued)])
     assert row is not None and row["_version"] == 2
     assert issued2 > issued
     assert len(servant.calls) == 2
@@ -91,9 +91,9 @@ async def test_inflight_read_is_shared():
     reads, servant = make_reads()
     servant.gate.clear()
     cover = old_cover()
-    first = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    first = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
-    second = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    second = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
     servant.gate.set()
     async with asyncio.timeout(1):
@@ -104,8 +104,8 @@ async def test_inflight_read_is_shared():
 async def test_partial_hits_fetch_only_missing_in_one_batch():
     reads, servant = make_reads()
     cover = old_cover()
-    await reads.rows(REF, [(1, cover), (2, cover)])
-    rows = await reads.rows(REF, [(1, cover), (2, cover), (3, cover)])
+    await reads.rows(servant, REF, [(1, cover), (2, cover)])
+    rows = await reads.rows(servant, REF, [(1, cover), (2, cover), (3, cover)])
     assert [row["id"] for row, _issued in rows if row] == [1, 2, 3]
     assert servant.calls == [("get_many", REF, [1, 2]), ("get_many", REF, [3])]
 
@@ -116,9 +116,9 @@ async def test_issuer_cancelled_riders_still_get_result():
     reads, servant = make_reads()
     servant.gate.clear()
     cover = old_cover()
-    issuer = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    issuer = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
-    rider = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    rider = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
     issuer.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -137,9 +137,9 @@ async def test_failed_read_raises_for_issuer_riders_read_themselves():
     servant.gate.clear()
     servant.fail = ConnectionError("read failed")
     cover = old_cover()
-    issuer = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    issuer = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
-    rider = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    rider = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
     servant.gate.set()
     async with asyncio.timeout(1):
@@ -148,7 +148,7 @@ async def test_failed_read_raises_for_issuer_riders_read_themselves():
         [(row, _issued)] = await rider
     assert row is not None and row["id"] == 1
     assert len(servant.calls) == 2
-    await reads.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
     assert len(servant.calls) == 3, "失败的读不能留着给后来的人用"
 
 
@@ -156,11 +156,11 @@ async def test_range_ids_shared_per_query():
     reads, servant = make_reads()
     query = {"index_name": "id", "left": 0, "right": 10, "limit": 5, "desc": True}
     cover = old_cover()
-    ids, issued = await reads.range_ids(REF, query, cover)
+    ids, issued = await reads.range_ids(servant, REF, query, cover)
     assert ids == [1, 2, 3]
-    assert await reads.range_ids(REF, dict(query), cover) == (ids, issued)
+    assert await reads.range_ids(servant, REF, dict(query), cover) == (ids, issued)
     assert servant.calls == [("range", REF, "id", 0, 10, 5, True)]
-    await reads.range_ids(REF, dict(query, limit=6), cover)
+    await reads.range_ids(servant, REF, dict(query, limit=6), cover)
     assert len(servant.calls) == 2, "不同查询不能共享"
 
 
@@ -169,9 +169,9 @@ async def test_entries_expire_after_horizon(monkeypatch):
     monkeypatch.setattr(MQClient, "UPDATE_FREQUENCY", 1000)  # interval 1ms
     reads, servant = make_reads()
     cover = time.monotonic() - 1
-    await reads.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
     await asyncio.sleep(SharedReads.HORIZON_INTERVALS / 1000 * 3)
-    await reads.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
     assert len(servant.calls) == 2
 
 
@@ -179,19 +179,19 @@ async def test_event_loop_change_drops_entries():
     """future 不能跨事件循环（测试按模块换 loop）：换了 loop 就清空"""
     reads, servant = make_reads()
     cover = old_cover()
-    await reads.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
     reads._loop = object()  # type: ignore[assignment]  模拟上一个模块的 loop
-    await reads.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
     assert len(servant.calls) == 2
 
 
 async def test_separate_instances_do_not_share():
     """各自的 SharedReads 互不共享：连接用自己的实例，就只在本连接内合并（压测对比用）"""
     reads, servant = make_reads()
-    other = SharedReads(SimpleNamespace(servant=servant))
+    other = SharedReads()
     cover = old_cover()
-    await reads.rows(REF, [(1, cover)])
-    await other.rows(REF, [(1, cover)])
+    await reads.rows(servant, REF, [(1, cover)])
+    await other.rows(servant, REF, [(1, cover)])
     assert len(servant.calls) == 2
 
 
@@ -202,7 +202,7 @@ async def test_peek_row_gives_finished_read_that_satisfies_cover():
     cover = old_cover()
     assert reads.peek_row(REF, 1, cover) is None
     servant.gate.clear()
-    reading = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    reading = asyncio.create_task(reads.rows(servant, REF, [(1, cover)]))
     await asyncio.sleep(0)
     assert reads.peek_row(REF, 1, cover) is None, "在途的读要 await，不能同步给"
     servant.gate.set()
@@ -258,11 +258,10 @@ async def test_row_subscription_never_uses_older_read():
     reads, servant = make_reads()
     ref = _Ref()
     cover = old_cover()
-    [(_row, early)] = await reads.rows(ref, [(1, cover)])
+    [(_row, early)] = await reads.rows(servant, ref, [(1, cover)])
     sub = RowSubscription(ref, servant, reads, None, "ch", 1)  # type: ignore[arg-type]
     sub.read_at = early + 0.001  # 它已经用过一次更晚发出的读
-    RowSubscription.reset_cache_()
     await asyncio.sleep(0.005)  # 下面新发的读晚于 read_at
-    await sub.read_("ch", cover)
+    await sub.read_(cover)
     assert len(servant.calls) == 2, "用上了比它已用过的更早的读"
     assert sub.read_at > early + 0.001

@@ -11,7 +11,6 @@ import time
 import weakref
 from collections import Counter
 from collections.abc import Callable, Coroutine, Mapping
-from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
@@ -130,12 +129,6 @@ class BaseSubscription:
 
 
 class RowSubscription(BaseSubscription):
-    # 这是get_updates的cache：{行频道: (原始行dict（含_version）| None(行不存在), 读的发出
-    # 时刻)}。每个tick开始时重置，tick内先由get_updates批量预读填充，多个订阅交叉命中同一行时
-    # 免去重复查询；缓存的是原始行，RLS由各订阅自己判定（同一连接可能挂着不同ctx的订阅）。
-    # get_updated是async的，可能会切换走，所以要用ContextVar隔离
-    __cache: ContextVar[dict] = ContextVar("user_row_cache")
-
     def __init__(
         self,
         table_ref: TableReference,
@@ -162,25 +155,6 @@ class RowSubscription(BaseSubscription):
         # 用过的最新一次读的发出时刻。之后用到的读只进不退：不用比它更早发出的共享读，否则
         # 积压的旧通知会把客户端推回更旧的内容（见 read_）
         self.read_at = read_at
-        if RowSubscription.__cache.get(None) is None:
-            RowSubscription.__cache.set({})
-
-    @classmethod
-    def reset_cache_(cls) -> dict:
-        """每个tick开始时调用：清空本任务的行缓存并返回它"""
-        cache: dict = {}
-        cls.__cache.set(cache)
-        return cache
-
-    @classmethod
-    def prefill_cache_(
-        cls, channel: str, row: dict[str, Any] | None, issued: float
-    ) -> None:
-        """get_updates批量预读后填充：row为None表示行不存在，issued 为那次读的发出时刻"""
-        cache = cls.__cache.get(None)
-        if cache is None:
-            cache = cls.reset_cache_()
-        cache[channel] = (row, issued)
 
     def decode_row_(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
         """按本订阅的RLS判定行是否可见：可见返回去掉_version的拷贝，不可见/不存在返回None"""
@@ -189,37 +163,31 @@ class RowSubscription(BaseSubscription):
         ctx = self.rls_ctx
         if ctx is not None and not ctx.rls_check(self.table_ref.comp_cls, row):
             return None
-        row = dict(row)  # 缓存里的原始行可能被别的订阅共用，不能就地改
+        row = dict(row)  # 共享读回的原始行别的订阅也在用，不能就地改
         row.pop("_version", None)
         return row
 
-    async def read_(
-        self, channel: str, cover: float | None = None
-    ) -> dict[str, Any] | None:
+    async def read_(self, cover: float | None = None) -> dict[str, Any] | None:
         """
         读本行的原始行（含 _version，不做 RLS 判定），行不存在为 None。cover 是这次弹出的
-        覆盖时刻：走共享读，且不低于本订阅用过的最新一次读（只进不退）；为 None 时直接读
+        覆盖时刻：走共享读，且不低于本订阅用过的最新一次读（只进不退）。tick 开头批量预读
+        过的（见 SubscriptionBroker._prefetch_rows）同步取到，同一连接几个订阅订着同一行也
+        只读一次；tick 中途新建的行订阅不在预读范围内，兜底单行读。为 None 时直接读
         """
-        interval = interval_()
-        need = None if cover is None else max(cover, self.read_at - interval)
-        # 如果订阅有交叉，这里会重复被调用，先看本tick的缓存（get_updates会批量预读填好；
-        # tick中途新建的行订阅不在预读范围内，这里兜底单行查询）
-        cache = RowSubscription.__cache.get(None)
-        if cache is None:
-            cache = RowSubscription.reset_cache_()
-        hit = cache.get(channel)
-        if hit is None or (need is not None and hit[1] < need + interval):
-            if need is None:
-                issued = time.monotonic()
-                row = await self.servant.get(
-                    self.table_ref, self.row_id, RowFormat.TYPED_DICT
+        if cover is None:
+            issued = time.monotonic()
+            row = await self.servant.get(
+                self.table_ref, self.row_id, RowFormat.TYPED_DICT
+            )
+        else:
+            need = max(cover, self.read_at - interval_())
+            hit = self.reads.peek_row(self.table_ref, self.row_id, need)
+            if hit is None:
+                ((row, issued),) = await self.reads.rows(
+                    self.servant, self.table_ref, [(self.row_id, need)]
                 )
             else:
-                ((row, issued),) = await self.reads.rows(
-                    self.table_ref, [(self.row_id, need)]
-                )
-            hit = cache[channel] = (row, issued)
-        row, issued = hit
+                row, issued = hit
         self.read_at = max(self.read_at, issued)
         return row
 
@@ -234,7 +202,7 @@ class RowSubscription(BaseSubscription):
         返回 {空}, {空}, {变更的row_id: 行数据，None表示删除}；读回的与客户端已持有的
         一样时不返回任何更新。
         """
-        row = await self.read_(channel, cover)
+        row = await self.read_(cover)
         visible = self.decode_row_(row)
         # 不可见的行客户端没有，和行不存在一样记 None：它在不可见期间怎么变都不推，
         # 推 None 等于把不可见行的 id 告诉了客户端
@@ -319,9 +287,7 @@ class IndexSubscription(BaseSubscription):
                     channel=channel
                 )
             )
-        if self.point_value is not None and self._left_(
-            await row_sub.read_(channel, cover)
-        ):
+        if self.point_value is not None and self._left_(await row_sub.read_(cover)):
             # 值频道只在有行"进入"时才有通知：这行离开了该值（删除 / 字段改走）只能在这里
             # 发现。重跑比对：推 None、退订它的行频道，并补进被 limit 截在外面的行
             new_chans, rem_chans, rtn = await self._rerange(cover)
@@ -356,7 +322,10 @@ class IndexSubscription(BaseSubscription):
             )
         else:
             row_ids, issued = await self.reads.range_ids(
-                ref, self.query_param, max(cover, self.range_read_at - interval)
+                servant,
+                ref,
+                self.query_param,
+                max(cover, self.range_read_at - interval),
             )
         self.range_read_at = max(self.range_read_at, issued)
         row_ids = set(row_ids)
@@ -376,7 +345,9 @@ class IndexSubscription(BaseSubscription):
             read = [(cast(dict[str, Any] | None, row), rows_issued) for row in rows]
         else:
             row_cover = max(cover, issued - interval)
-            read = await self.reads.rows(ref, [(i, row_cover) for i in inserts])
+            read = await self.reads.rows(
+                servant, ref, [(i, row_cover) for i in inserts]
+            )
         for row_id, (row, row_issued) in zip(inserts, read):
             if row is None:
                 self.last_range_result.remove(row_id)
@@ -501,7 +472,9 @@ class TableSubscription(BaseSubscription):
             read = [(cast(dict[str, Any] | None, row), issued) for row in rows]
         else:
             need = max(cover, self.read_at - interval_())
-            read = await self.reads.rows(self.table_ref, [(i, need) for i in ids])
+            read = await self.reads.rows(
+                self.servant, self.table_ref, [(i, need) for i in ids]
+            )
         comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
         known = self.known_ids
@@ -604,7 +577,7 @@ class SubscriptionBroker:
             一般对应配置项 `MAX_TABLE_SUBSCRIPTION_ROWS`。
         shared_reads: SharedReads | None
             订阅读合并用的共享读层，缺省为该 backend 上所有连接共用的那个（`SharedReads.of`）。
-            测试、压测可传 `SharedReads(backend, share=False)` 关掉共享。
+            测试、压测可传一个自己的 `SharedReads()`：只在本连接内合并，不跨连接共享。
         """
         self._backend = backend
         self._mq_client = backend.get_mq_client()
@@ -1191,8 +1164,7 @@ class SubscriptionBroker:
         channel_subs = self._channel_subs
         rtn = {}
 
-        # 本tick变更的行先按表分组一次批量读取，填进RowSubscription的缓存
-        RowSubscription.reset_cache_()
+        # 本tick变更的行先按表分组一次批量读取，登记在共享读层，各订阅再同步取到
         await self._prefetch_rows(updated_channels)
 
         added: set[str] = set()
@@ -1274,11 +1246,11 @@ class SubscriptionBroker:
         self, updated_channels: Mapping[str, tuple[set[str] | None, float]]
     ) -> None:
         """
-        本tick所有收到通知的行频道，按表分组各一次共享读（订阅读合并），把原始行填进
-        RowSubscription的缓存，循环里的get_updated就不用逐行往返了。
+        本tick所有收到通知的行频道，按表分组各一次共享读（订阅读合并），结果登记在共享读层：
+        循环里各订阅的 get_updated 同步取到（`SharedReads.peek_row`），不用逐行往返。
         """
         interval = interval_()
-        by_table: dict[TableReference, tuple[list[str], list[tuple[int, float]]]] = {}
+        by_table: dict[TableReference, list[tuple[int, float]]] = {}
         for channel, (_payload, cover) in updated_channels.items():
             row_subs: list[RowSubscription] = []
             for sub_id in self._channel_subs.get(channel, ()):
@@ -1292,14 +1264,14 @@ class SubscriptionBroker:
                     row_subs.append(row_sub)
             if not row_subs:
                 continue
-            # 同一频道只读一次，本连接订着它的各订阅共用缓存：读不早于它们谁用过的最新一次
-            # （只进不退，见 RowSubscription.read_at）
+            # 同一频道只读一次，本连接订着它的各订阅都用这次读：读不早于它们谁用过的最新一次
+            # （只进不退，见 RowSubscription.read_at），各订阅来取时才都满足判据
             read_at = max(row_sub.read_at for row_sub in row_subs)
             first = row_subs[0]
-            channels, wants = by_table.setdefault(first.table_ref, ([], []))
-            channels.append(channel)
+            wants = by_table.setdefault(first.table_ref, [])
             wants.append((first.row_id, max(cover, read_at - interval)))
-        for table_ref, (channels, wants) in by_table.items():
-            read = await self._reads.rows(table_ref, wants)
-            for channel, (row, issued) in zip(channels, read):
-                RowSubscription.prefill_cache_(channel, row, issued)
+        if not by_table:
+            return
+        servant = self._backend.servant
+        for table_ref, wants in by_table.items():
+            await self._reads.rows(servant, table_ref, wants)
