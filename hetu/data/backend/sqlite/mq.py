@@ -8,6 +8,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, final, override
 
@@ -51,6 +52,8 @@ class SQLiteNotifyHub(MQHub):
         # 频道加入 hub 时发过的最后一个通知 id：id 不大于它的通知不属于该频道的订阅者。
         # 已登记但还没取到水位的频道不在这里，轮询遇到它的通知先跳过
         self._since: dict[str, int] = {}
+        # 以及记下水位的时刻：订阅从此生效，与 _since 同进同出（见 effective_since_）
+        self._placed_at: dict[str, float] = {}
         self._last_notify_id = 0
         # 取水位与轮询互斥
         self._lock = asyncio.Lock()
@@ -71,9 +74,11 @@ class SQLiteNotifyHub(MQHub):
         try:
             async with self._lock:
                 watermark = await self._get_current_notify_id()
+                placed_at = time.monotonic()
                 for channel in channels:
                     if channel in self._subs:  # 等水位期间订阅者可能已经全走了
                         self._since[channel] = watermark
+                        self._placed_at[channel] = placed_at
                 if not self._polling() and not self._closed:
                     self._last_notify_id = watermark
                     self._task = asyncio.create_task(self._run())
@@ -126,6 +131,15 @@ class SQLiteNotifyHub(MQHub):
     @override
     def _on_channel_gone(self, channel: str) -> None:
         self._since.pop(channel, None)
+        self._placed_at.pop(channel, None)
+
+    @override
+    def effective_since_(self, channel: str) -> float | None:
+        """
+        订阅生效的时刻：记下水位的时刻。之前提交的写 id 不大于水位、不会分发，但只有一个库、
+        没有复制延迟，此后发出的读都读得到；之后提交的都会分发
+        """
+        return self._placed_at.get(channel)
 
     @override
     async def remove(self, mq: MQClient, channels: Iterable[str]) -> None:
@@ -266,6 +280,7 @@ class SQLiteNotifyHub(MQHub):
         self._subs.clear()
         self._last_notified.clear()
         self._since.clear()
+        self._placed_at.clear()
         await self._cancel_tasks()
         await self._stop_task()
 

@@ -115,6 +115,10 @@ class PubSubHub(MQHub):
         if gone and not self._closed:
             await self._unsubscribe(gone)
 
+    def effective_since_(self, channel: str) -> float | None:
+        """订阅生效的时刻：收到 SUBSCRIBE ack 的时刻（节点失效后清掉，重订上是新的）"""
+        return self._pubsub.acked_at(channel)
+
     def _on_message(self, msg: dict) -> None:
         """AsyncKeyspacePubSub 的监听协程收到消息时同步调用，每条消息一次"""
         channel_name = msg["channel"].decode()

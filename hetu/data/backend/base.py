@@ -1177,21 +1177,40 @@ class MQClient:
         return self._enqueue(channel_name, payload_ids, stamp)
 
     def request_reread(
-        self, *channel_names: str, payload: Iterable[Any] | None = None
+        self,
+        *channel_names: str,
+        payload: Iterable[Any] | None = None,
+        known_at: float | None = None,
+        may_skip: bool = True,
     ) -> None:
         """
         把这些频道当作刚收到一条通知放进本地队列（不触发 `watch` 回调），interval 后照常
         弹出、重读。用于订阅生效后的补读：生效之前已在别的节点上应用、读到的副本却还没应用
         的写入，既不在初始读回的行里，也不会再有通知。
 
+        `known_at` 是本连接手里这份数据那次读的发出时刻。给了的话，覆盖时刻由通知接收器按
+        频道给出（`reread_cover_`）：数据读已经盖住它（覆盖时刻 <= known_at - interval）且
+        `may_skip` 时不补读；否则覆盖时刻不低于 known_at - interval，用不上比这份数据更早的
+        共享读。没给、或接收器对该频道还没有生效的订阅时，覆盖时刻就是现在。
+
         Queue the channels as if they had just been notified (``watch`` callbacks are not
         fired), so they are re-read one interval later. Used right after a subscription
         becomes active: a write that another node applied before that moment, but the
         replica we read from had not, is neither in the initial rows nor notified again.
+        With ``known_at`` (when the data the client holds was read), the re-read is skipped
+        if that read already covers everything the receiver could have missed.
         """
+        interval = 1 / self.UPDATE_FREQUENCY
         dropped = 0
         for channel_name in channel_names:
-            dropped += self._enqueue(channel_name, payload)
+            cover = None
+            if known_at is not None:
+                since = self.reread_cover_(channel_name)
+                if since is not None:
+                    if may_skip and since <= known_at - interval:
+                        continue  # 数据读已经盖住了空档
+                    cover = max(since, known_at - interval)
+            dropped += self._enqueue(channel_name, payload, cover=cover)
         if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
             logger.warning(
                 _(
@@ -1199,17 +1218,27 @@ class MQClient:
                 ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
             )
 
+    def reread_cover_(self, channel_name: str) -> float | None:
+        """
+        补读的覆盖时刻，由通知接收器给出（见 `MQHub.reread_cover_`）；不知道时为 None，
+        调用方按现在算。不挂接收器的实现一律 None
+        """
+        return None
+
     def _enqueue(
         self,
         channel_name: str,
         payload_ids: Iterable[Any] | None,
         stamp: float | None = None,
+        cover: float | None = None,
     ) -> int:
         """
         放进本地队列（同频道合并），返回因 `DROP_AFTER` 丢弃的旧通知条数。
-        stamp 是收到的时刻，也是覆盖时刻，缺省为现在
+        stamp 是收到的时刻，缺省为现在；cover 是覆盖时刻（不晚于 stamp），缺省同 stamp
         """
         now = time.monotonic() if stamp is None else stamp
+        if cover is None:
+            cover = now
         dropped = 0
         dq = self.pulled_deque
         if dq and dq[0][0] < now - self.DROP_AFTER:
@@ -1230,14 +1259,14 @@ class MQClient:
         if channel_name not in self.pulled_set:
             dq.append((now, channel_name))
             self.pulled_set.add(channel_name)
-            self._cover[channel_name] = now
+            self._cover[channel_name] = cover
             self._arrived.set()
         else:
             # 合并进已在队列里的那条：弹出时可能离这条不足一个 interval，记下来由
             # get_batch 决定要不要补排尾随重读
             late = self._late.get(channel_name)
-            if late is None or now > late:
-                self._late[channel_name] = now
+            if late is None or cover > late:
+                self._late[channel_name] = cover
             if ids is not None:
                 self._late_payload.setdefault(channel_name, set()).update(ids)
         return dropped
@@ -1378,6 +1407,26 @@ class MQHub:
     def _on_channel_gone(self, channel: str) -> None:
         """某频道在本进程内没人订了：子类清理自己按频道记的状态"""
 
+    def effective_since_(self, channel: str) -> float | None:
+        """
+        本进程对该频道的订阅从什么时刻起生效（此后的写都会有通知送到这里）；还没生效
+        （在等 ack、节点失效中）或没订为 None。后端实现，只能偏晚、不能偏早
+        """
+        return None
+
+    def reread_cover_(self, channel: str) -> float | None:
+        """
+        订阅补读的覆盖时刻（见 `MQClient.request_reread`）：本进程对该频道的订阅生效时刻与
+        最后一条通知时刻中较晚的。连接数据读之后、自己订阅生效之前可能漏掉的写，要么在本进程
+        订阅生效之前（发出时刻晚于生效 + interval 的读读得到），要么通知到了本进程、只是没分发
+        给它（晚于那条通知 + interval 的读读得到）。订阅没生效为 None
+        """
+        since = self.effective_since_(channel)
+        if since is None:
+            return None
+        last = self._last_notified.get(channel)
+        return since if last is None or last < since else last
+
     def _dispatch(self, channel_name: str, ids: list | None) -> int:
         """
         把一条通知塞进本进程订阅了该频道的各连接的本地队列，返回丢弃的过期通知条数。
@@ -1507,6 +1556,10 @@ class HubMQClient(MQClient):
                     "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
                 ).format(tag=self.LOG_TAG, limit=self.MAX_SUBSCRIBED)
             )
+
+    def reread_cover_(self, channel_name: str) -> float | None:
+        """见基类；由本进程共享的通知接收器按频道给出"""
+        return self._hub.reread_cover_(channel_name)
 
     async def unsubscribe(self, *channel_names: str) -> None:
         """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""

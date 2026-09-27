@@ -8,6 +8,7 @@
 import asyncio
 import contextlib
 import logging
+import time
 from asyncio.queues import Queue
 from collections.abc import Callable, Iterable
 from functools import partial
@@ -85,6 +86,9 @@ class AsyncKeyspacePubSub:
         self.node_resources: dict[str, dict] = {}
         # 已成功订阅（收到 ack 且之后没发过 UNSUBSCRIBE）的频道
         self._subscribed: set[str] = set()
+        # 以及收到它们 ack 的时刻：订阅从此生效（Redis 处理 SUBSCRIBE 在前、ack 送到在后，
+        # 取 ack 只会偏晚），与 _subscribed 同进同出。订阅补读据此判断能不能省（见 MQHub）
+        self._acked_at: dict[str, float] = {}
         # 已发出 SUBSCRIBE / UNSUBSCRIBE、尚未收到 ack 的频道，每个频道一个 future，
         # ack 到了只唤醒等它的那几个调用方，不用广播
         self._pending_subscribe: dict[str, asyncio.Future[None]] = {}
@@ -312,6 +316,10 @@ class AsyncKeyspacePubSub:
         """频道已订阅成功，或 SUBSCRIBE 已发出正在等 ack"""
         return channel in self._subscribed or channel in self._pending_subscribe
 
+    def acked_at(self, channel: str) -> float | None:
+        """频道订阅生效（收到 ack）的时刻；没订、还在等 ack、节点失效后还没重订上为 None"""
+        return self._acked_at.get(channel)
+
     def pending_acks(self, channels: Iterable[str]) -> list[asyncio.Future[None]]:
         """
         这些频道里已发出 SUBSCRIBE、尚未 ack 的 future（别的调用方发的），
@@ -335,6 +343,7 @@ class AsyncKeyspacePubSub:
         if self._closed:
             for channel in channels:
                 self._subscribed.discard(channel)
+                self._acked_at.pop(channel, None)
                 self._channel_node.pop(channel, None)
             return
         loop = asyncio.get_running_loop()
@@ -344,6 +353,7 @@ class AsyncKeyspacePubSub:
         for channel in channels:
             node_key = self._channel_node.pop(channel, "standalone")
             self._subscribed.discard(channel)
+            self._acked_at.pop(channel, None)
             self._resubscribe_targets.discard(channel)  # 恢复流程跑着也别把它订回来
             # SUBSCRIBE 还没 ack 就退订：让等它的人正常返回而不是报错。等的人就是刚撤了
             # 自己登记的那个连接（hub 只在没人订时才退订），它的 subscribe 没有失败，
@@ -428,6 +438,7 @@ class AsyncKeyspacePubSub:
                             if self._channel_node.get(channel) != node_key:
                                 continue
                             self._subscribed.add(channel)
+                            self._acked_at[channel] = time.monotonic()
                             fut = self._pending_subscribe.pop(channel, None)
                             if fut is not None and not fut.done():
                                 fut.set_result(None)
@@ -439,6 +450,7 @@ class AsyncKeyspacePubSub:
                             # 期间没有重新订阅的话，兜底保证它不在已订阅集合里
                             if channel not in self._channel_node:
                                 self._subscribed.discard(channel)
+                                self._acked_at.pop(channel, None)
                         continue
                     if self.on_message is None:
                         await self.message_queue.put(message)
@@ -480,6 +492,7 @@ class AsyncKeyspacePubSub:
             # 这样被永远漏掉的
             self._resubscribe_targets.update(self._subscribed)
             self._subscribed.clear()
+            self._acked_at.clear()
             self._channel_node.clear()
             # 灾难恢复逻辑（已有一个在退避重试中就不再起，它会把新并进来的频道一起订上）。
             # 如果不保存task，task不会执行会被gc

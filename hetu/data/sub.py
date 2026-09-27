@@ -763,8 +763,13 @@ class SubscriptionBroker:
             # 保持 UNKNOWN，让下面的补读无条件推一次最新的
             row_sub.pushed = UNKNOWN
         # 订阅生效前已在别的节点上应用、这次读到的副本却还没应用的写入，不会再有通知：
-        # 隔一个 interval 补读一次（读回一样就不推）
-        self._mq_client.request_reread(channel_name)
+        # 隔一个 interval 补读一次（读回一样就不推）。本进程早就订着这一行、初始读已经盖住
+        # 空档的就省掉；读期间被 tick 碰过的（UNKNOWN）要无条件推一次，不能省
+        self._mq_client.request_reread(
+            channel_name,
+            known_at=row_sub.read_at,
+            may_skip=row_sub.pushed is not UNKNOWN,
+        )
         del row["_version"]  # 内部版本号不推给客户端
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
@@ -929,8 +934,13 @@ class SubscriptionBroker:
         self._sub_counts[IndexSubscription] += 1
         # 先读后订：读与订阅生效之间的写入不会有通知，生效前已在别的节点上应用、读到的副本
         # 却还没应用的写入也不会再有通知。隔一个 interval 补读一次：重跑范围比对、重读各行
-        # （读回一样就不推）
-        self._mq_client.request_reread(index_channel, *row_channels)
+        # （读回一样就不推）。本进程早就订着、初始读已经盖住空档的频道省掉；RLS 订阅的索引
+        # 频道不能省：初始结果按 RLS 过滤过，靠这次重跑比对把范围内不可见的行也订上
+        mq = self._mq_client
+        mq.request_reread(
+            index_channel, known_at=read_at, may_skip=idx_sub.rls_ctx is None
+        )
+        mq.request_reread(*row_channels, known_at=read_at)
 
         return sub_id, rows
 
@@ -1223,10 +1233,13 @@ class SubscriptionBroker:
         to_subscribe = [chan for chan in added if chan in channel_subs]
         # 本连接原先没订着的（行进入范围时才订的行频道）：读这行在前、订阅生效在后，其间的写入
         # 不会有通知，值频道又不发"离开"，行在这时被删 / 改走就再也发现不了。同订阅生效后的
-        # 补读，隔一个 interval 再读一次（读回一样就不推）
+        # 补读，隔一个 interval 再读一次（读回一样就不推）；覆盖时刻由 hub 按频道给出，同一
+        # worker 的连接相同，读能合并，初始读已经盖住的就省掉。数据读的时刻要在 await 之前取
         fresh = [chan for chan in to_subscribe if chan not in mq.subscribed_channels]
+        fresh_by_read_at = self._group_by_read_at(fresh)
         await mq.subscribe(*to_subscribe)
-        mq.request_reread(*fresh)
+        for read_at, channels in fresh_by_read_at.items():
+            mq.request_reread(*channels, known_at=read_at)
         # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能处理了客户端的
         # 新订阅（subscribe_get 等），把刚释放的行频道又登记回来了——对 mq 来说该频道
         # 一直是订着的，那次 subscribe 不会有任何动作，这里按旧名单退订就会把新订阅
@@ -1234,6 +1247,26 @@ class SubscriptionBroker:
         to_unsubscribe = [chan for chan in released if chan not in channel_subs]
         await mq.unsubscribe(*to_unsubscribe)
         return rtn
+
+    def _group_by_read_at(self, channels: list[str]) -> dict[float | None, list[str]]:
+        """
+        新订上的行频道按"本连接手里这行数据那次读的发出时刻"分组（几个订阅同时收进同一行时
+        取最早的），给补读定覆盖时刻用；找不到的归入 None（按现在算）
+        """
+        groups: dict[float | None, list[str]] = {}
+        for channel in channels:
+            read_at: float | None = None
+            for sub_id in self._channel_subs.get(channel, ()):
+                sub = self._subs.get(sub_id)
+                if not isinstance(sub, IndexSubscription):
+                    continue
+                row_sub = sub.row_subs.get(channel)
+                if row_sub is not None and (
+                    read_at is None or row_sub.read_at < read_at
+                ):
+                    read_at = row_sub.read_at
+            groups.setdefault(read_at, []).append(channel)
+        return groups
 
     async def _prefetch_rows(
         self, updated_channels: Mapping[str, tuple[set[str] | None, float]]
