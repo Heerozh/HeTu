@@ -1193,6 +1193,34 @@ async def test_point_query_on_undeclared_index_falls_back(
     await updates_until(broker, moved_out)
 
 
+async def test_point_query_on_id_warns_to_use_get(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
+):
+    """
+    id 不能声明 point_sub，点查 id 订的是整个 id 索引的频道，这张表每次插入、删除都会叫醒它：
+    同一组件只警告一次，指向行订阅。id 的区间查询是正常用法（雪花 id 按时间排序），不警告
+    """
+    import logging
+
+    servant = broker._backend.servant
+    rows = await servant.range(filled_item_ref, "id", 0, 2**63 - 1, limit=2)
+    id_a, id_b = (int(row.id) for row in rows)
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_all, _ = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "id", 0, 2**63 - 1, limit=10
+        )
+        sub_a, got = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "id", id_a
+        )
+        sub_b, _ = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "id", id_b, id_b
+        )
+    assert sub_all and sub_a and sub_b and len(got) == 1
+    warns = [r.getMessage() for r in caplog.records if "Subscription" in r.getMessage()]
+    assert len(warns) == 1, warns
+    assert "subscribe_get" in warns[0] and "WatchRow" in warns[0]
+
+
 async def test_index_value_channel_requires_point_sub(mod_auto_backend, item_ref):
     """值频道只给声明了 point_sub 的索引发：订一个没人会发的频道是 bug，直接报错"""
     servant = mod_auto_backend().servant
