@@ -7,9 +7,9 @@
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from time import monotonic, sleep, time
-from typing import final
+from typing import ClassVar, final
 
 from hetu.common.singleton import Singleton
 from hetu.i18n import _
@@ -116,12 +116,14 @@ class SnowflakeID(metaclass=Singleton):
         # 每次init都重置围栏来源，避免单件在测试/嵌入场景里残留上一次的租约
         self.lease = lease
 
+        # 日志里按本地时区显示
+        local_dt = datetime.fromtimestamp(last_timestamp / 1000, UTC).astimezone()
         logger.info(
             _(
                 "[❄️ID] 雪花ID生成器初始化完成，Worker ID: {worker_id}, last_timestamp: {ts}"
             ).format(
                 worker_id=worker_id,
-                ts=f"{datetime.fromtimestamp(last_timestamp / 1000):%Y-%m-%d %H:%M:%S}",
+                ts=f"{local_dt:%Y-%m-%d %H:%M:%S}",
             )
         )
 
@@ -231,7 +233,7 @@ class SnowflakeID(metaclass=Singleton):
 
 
 class WorkerKeeper:
-    subclasses: list[type[WorkerKeeper]] = []
+    subclasses: ClassVar[list[type[WorkerKeeper]]] = []
 
     def __init_subclass__(cls, **_):
         """让继承子类自动注册alias"""

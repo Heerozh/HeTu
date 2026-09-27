@@ -57,9 +57,11 @@ def stop_all_logging_handlers():
     c = logger
     while c:
         for handler in list(c.handlers):
-            if isinstance(handler, logging.handlers.QueueHandler):
-                if handler.queue in CREATED_QUEUES:
-                    c.removeHandler(handler)
+            if (
+                isinstance(handler, logging.handlers.QueueHandler)
+                and handler.queue in CREATED_QUEUES
+            ):
+                c.removeHandler(handler)
         c = c.parent
 
     # 停止queue的进程

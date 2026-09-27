@@ -33,7 +33,7 @@ except PackageNotFoundError:
     __version__ = "hetu is not installed in a proper way"
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022 按用途分组
     "data",
     "system",
     "common",

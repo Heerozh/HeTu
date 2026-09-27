@@ -542,9 +542,7 @@ class SubscriptionBroker:
             # 其他权限要求至少登陆过
             if comp_permission == Permission.ADMIN:
                 return False
-            if ctx.caller:
-                return True
-            return False
+            return bool(ctx.caller)
 
     @classmethod
     def _has_row_permission(
@@ -781,7 +779,13 @@ class SubscriptionBroker:
             ctx,
             index_channel,
             row_ids,
-            dict(index_name=index_name, left=left, right=right, limit=limit, desc=desc),
+            {
+                "index_name": index_name,
+                "left": left,
+                "right": right,
+                "limit": limit,
+                "desc": desc,
+            },
             point_value,
         )
         # 索引频道 + 每行的行频道（行变更时才能收到消息）一次批量订阅
@@ -1088,7 +1092,7 @@ class SubscriptionBroker:
                         released.add(rem_chan)
                 # 添加行数据到返回值
                 if len(sub_updates) > 0:
-                    rtn.setdefault(sub_id, dict()).update(sub_updates)
+                    rtn.setdefault(sub_id, {}).update(sub_updates)
 
         # 同一频道可能在本tick内既被一个订阅加入又被另一个释放，按最终状态定夺；
         # 已订阅过的频道重复subscribe是幂等的

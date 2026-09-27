@@ -156,7 +156,7 @@ async def start_backends(app: Sanic):
     # 发号前先预留一段水位：不然在第一次周期写入之前崩溃，这期间发出的ID没有任何记录
     try:
         await ts_keeper.reserve(SnowflakeID().last_timestamp)
-    except Exception as e:  # 写不进去只是少一层重启回拨保护，不该挡住开服
+    except Exception as e:  # noqa: BLE001 写不进去只是少一层重启回拨保护，不该挡住开服
         logger.warning(
             _("[❄️ID] 写入时间戳高水位失败，将重试: {err}").format(
                 err=f"{type(e).__name__}:{e}"
@@ -172,7 +172,7 @@ async def close_backends(app: Sanic):
     # 失败不能挡住关服流程，下次开服就按最近一次的预留值接着发
     try:
         await app.ctx.snowflake_ts_keeper.save(SnowflakeID().last_timestamp)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001
         logger.warning(
             _("[❄️ID] 关服时写入时间戳高水位失败: {err}").format(
                 err=f"{type(e).__name__}:{e}"
@@ -304,7 +304,7 @@ async def snowflake_timestamp_save(app: Sanic):
             await app.ctx.snowflake_ts_keeper.reserve(SnowflakeID().last_timestamp)
         except asyncio.CancelledError:
             break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # 写不进去只是少一层重启回拨保护，不值得打断服务，下个周期再试
             logger.warning(
                 _("[❄️ID] 写入时间戳高水位失败，将重试: {err}").format(
@@ -369,7 +369,7 @@ def worker_main(app_name, config) -> Sanic:
                     "* 如果由Docker启动，还需检查是否正确映射了/app目录\n"
                 ).format(err=type(e).__name__, app_file=app_file)
             )
-            raise e
+            raise
 
     # 初始化SystemCluster
     SystemClusters().build_clusters(config["NAMESPACE"])

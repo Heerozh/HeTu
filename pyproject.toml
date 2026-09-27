@@ -118,7 +118,8 @@ line-length = 88
 
 [tool.ruff.lint]
 # PYI041：int | float 比单写 float 直观，不依赖类型检查器的数字提升隐式规则
-ignore = ["PYI041"]
+# TRY401：日志消息里带 {type(e).__name__}:{e} 是有意的，首行摘要 / replay 日志要用
+ignore = ["PYI041", "TRY401"]
 
 [tool.uv.workspace]
 members = ["benchmark"]

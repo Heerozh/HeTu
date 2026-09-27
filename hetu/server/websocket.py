@@ -77,7 +77,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     try:
         pipe_ctx, reply = msg_pipe.handshake(handshake_msg)
         await ws.send(reply)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 握手包来自客户端，出什么异常都只断开该连接
         logger.info(f"New Connect Error: handshake failed: {e}")
         try:
             await ws.send(msg_pipe.encode(None, []))

@@ -12,7 +12,7 @@ import logging
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, cast, overload
+from typing import Any, ClassVar, cast, overload
 
 import numpy as np
 
@@ -141,7 +141,7 @@ class BaseComponent:
     """所有组件的基类"""
 
     # -------------------------------定义部分-------------------------------
-    properties_: list[tuple[str, Property]] = []  # Ordered属性列表
+    properties_: ClassVar[list[tuple[str, Property]]] = []  # Ordered属性列表
     name_: str
     namespace_: str
     permission_: Permission = Permission.USER
@@ -163,7 +163,7 @@ class BaseComponent:
     uniques_: set[str]  # 唯一索引的属性名集合
     indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
     json_: str  # Component定义的json字符串
-    instances_: dict[str, dict[str, type[BaseComponent]]] = {}  # 所有副本实例
+    instances_: ClassVar[dict[str, dict[str, type[BaseComponent]]]] = {}  # 所有副本实例
     master_: type[BaseComponent] | None = None  # 该Component的主实例
 
     @staticmethod
@@ -376,7 +376,7 @@ class ComponentDefines(metaclass=Singleton):
     def add_component(
         self, namespace: str, component_cls: type[BaseComponent], force: bool = False
     ):
-        comp_map = self._components.setdefault(namespace, dict())
+        comp_map = self._components.setdefault(namespace, {})
         if not force:
             assert component_cls.name_ not in comp_map, _("Component重复定义")
         comp_map[component_cls.name_] = component_cls
@@ -630,7 +630,7 @@ def define_component(
                 _normalize_prop(cls.__name__, _name, anno_type, prop)
                 properties[_name] = prop
             else:
-                raise AssertionError(
+                raise TypeError(
                     _("{cls_name}.{name}不是Property类型").format(
                         cls_name=cls.__name__, name=_name
                     )

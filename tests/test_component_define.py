@@ -36,7 +36,7 @@ def test_normal_define(new_component_env):
     ]
 
     # 测试是否会提示无Property错误
-    with pytest.raises(AssertionError, match="Property"):
+    with pytest.raises(TypeError, match="Property"):
 
         @define_component(namespace="pytest")
         class MyPosition(BaseComponent):

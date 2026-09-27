@@ -54,7 +54,7 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
         from ...system import SystemClusters
 
         keys: set[str] = {"updt"}
-        for comp, _ in SystemClusters().get_components().items():
+        for comp in SystemClusters().get_components():
             if comp.permission_ == Permission.ADMIN:
                 continue
             keys.update(comp.dtype_map_.keys())

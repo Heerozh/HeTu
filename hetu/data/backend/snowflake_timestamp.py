@@ -126,7 +126,7 @@ class SnowflakeTimestampKeeper:
             )
             # 行不存在 和 水位为0 是同一件事：确认没有记录过，不需要保护
             stored = int(row.get("last_timestamp") or 0) if row is not None else 0
-        except Exception as e:  # 开服阶段不能因为读不到水位就起不来
+        except Exception as e:  # noqa: BLE001 开服阶段不能因为读不到水位就起不来
             logger.warning(
                 _("[❄️ID] 读取时间戳高水位失败，退化为固定容忍度: {err}").format(
                     err=f"{type(e).__name__}:{e}"
@@ -201,7 +201,7 @@ class SnowflakeTimestampKeeper:
                 row = WorkerLease.new_row(id_=self.worker_id)
                 row.last_timestamp = last_timestamp
                 await repo.insert(row)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # 并发下别的进程可能刚好也在补建（撞主键），或后端异常；两种都不致命——
             # 最坏是这一轮水位没写上，下个周期重新确认：行已被别人建好就直接 direct_set
             logger.warning(

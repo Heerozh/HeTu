@@ -463,7 +463,7 @@ class AsyncKeyspacePubSub:
         except asyncio.CancelledError:
             # 正常取消
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 监听任务死于任何异常都按节点断线处理
             logger.error(f"Listener error on node {node_key}: {e}")
             # 断线处理：丢弃并尽力关掉失效节点的自建连接，等 ack 的调用方全部失败
             res = self.node_resources.pop(node_key, None)

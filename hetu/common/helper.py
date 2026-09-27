@@ -43,7 +43,7 @@ def is_container_env():
                     or "containerd" in content
                 ):
                     return True
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 读不了 cgroup 就当不在容器里
         pass
 
     return False
@@ -62,7 +62,7 @@ def get_machine_id():
                 # 读取内容并去除换行符
                 machine_id = f.read().strip()
                 return machine_id
-        except Exception:
+        except Exception:  # noqa: BLE001
             # 如果文件不存在或无法读取（极少见），回退到 socket 获取
             import socket
 

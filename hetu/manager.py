@@ -65,7 +65,7 @@ class ComponentTableManager:
         创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则返回False。
         此时要么写迁移脚本，要么用cli强制迁移。
         """
-        for _key, tbl in self._tables.items():
+        for tbl in self._tables.values():
             maint = tbl.backend.get_table_maintenance()
             tbl_status, old_meta = maint.check_table(tbl)
             if tbl_status == "not_exists":
@@ -90,9 +90,9 @@ class ComponentTableManager:
         返回true表示所有表的状态正常，false表示有表需要迁移。
         """
         ret = True
-        for _key, tbl in self._tables.items():
+        for tbl in self._tables.values():
             maint = tbl.backend.get_table_maintenance()
-            tbl_status, old_meta = maint.check_table(tbl)
+            tbl_status, _old_meta = maint.check_table(tbl)
             match tbl_status:
                 case "not_exists":
                     try:

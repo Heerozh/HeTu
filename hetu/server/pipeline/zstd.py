@@ -98,7 +98,7 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
 
         samples = []
         # cherry pick样本
-        for comp, _ in SystemClusters().get_components().items():
+        for comp in SystemClusters().get_components():
             if comp.permission_ == Permission.ADMIN:
                 continue
 

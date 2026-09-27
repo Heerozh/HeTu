@@ -66,7 +66,7 @@ class EndpointDefines(metaclass=Singleton):
         defaults_count=None,
         guards=None,
     ):
-        sub_map = self._endpoint_map.setdefault(namespace, dict())
+        sub_map = self._endpoint_map.setdefault(namespace, {})
 
         if not force:
             assert func.__name__ not in sub_map, _("Endpoint重复定义：") + func.__name__

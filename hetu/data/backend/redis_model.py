@@ -58,14 +58,14 @@ class RedisModelClient(BackendClient):
         """获取当前app用到的Component列表"""
         from ...system.definer import SystemClusters
 
-        return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
+        return list(SystemClusters().get_components())
 
     def _schema_checking(self, components: Iterable[type[BaseComponent]] | None = None):
         """检查Component的schema定义，确保索引字段能编码成可排序的字节"""
         if components is None:
             components = self._get_referred_components()
         for comp_cls in components:
-            for field, _is_str in comp_cls.indexes_.items():
+            for field in comp_cls.indexes_:
                 dtype = comp_cls.dtype_map_[field]
                 # 索引不支持复数
                 if np.issubdtype(dtype, np.complexfloating):
@@ -679,7 +679,7 @@ class RedisModelClient(BackendClient):
             """exchange index(zadd/zrem)的push命令"""
             _b_row_id = _old["id"].encode("ascii")
             _values = _new if _add else _old
-            for _field in _new.keys():
+            for _field in _new:
                 if _field in _indexes:
                     _idx_key = _idx_prefix + _field
                     # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的

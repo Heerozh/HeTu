@@ -712,7 +712,7 @@ class BackendClient:
 
 
 class BackendClientFactory:
-    _registry: dict[str, type[BackendClient]] = {}
+    _registry: ClassVar[dict[str, type[BackendClient]]] = {}
 
     # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
     # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会把用不到的后端（如

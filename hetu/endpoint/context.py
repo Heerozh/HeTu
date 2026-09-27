@@ -74,7 +74,7 @@ class Context:
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
     def is_admin(self):
-        return True if self.group.startswith("admin") else False
+        return self.group.startswith("admin")
 
     def configure(
         self, client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0

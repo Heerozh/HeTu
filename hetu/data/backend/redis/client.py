@@ -371,7 +371,7 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
             checkpoint = master_offset
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
-            if key.startswith("slave") or key.startswith("replica"):
+            if key.startswith(("slave", "replica")):
                 if type(value) is not dict:  # 可能是 replicas_waiting_psync:0
                     continue
                 lag_of_offset = checkpoint - int(value.get("offset", 0))

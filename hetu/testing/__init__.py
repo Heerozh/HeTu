@@ -18,7 +18,7 @@ import importlib
 import time
 import warnings
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import msgspec
 
@@ -467,7 +467,7 @@ class Sandbox:
         """关闭 backend 连接。"""
         await self.client.close()
 
-    async def __aenter__(self) -> Sandbox:
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *exc: object) -> None:

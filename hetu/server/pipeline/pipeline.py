@@ -6,7 +6,7 @@
 """
 
 import logging
-from typing import Any
+from typing import Any, ClassVar
 
 from ...common.singleton import Singleton
 from ...i18n import _
@@ -19,7 +19,7 @@ PipeContext = list[Any]
 
 
 class MessageProcessLayerFactory:
-    _registry: dict[str, type[MessageProcessLayer]] = {}
+    _registry: ClassVar[dict[str, type[MessageProcessLayer]]] = {}
 
     @staticmethod
     def register(alias: str, client_cls: type[MessageProcessLayer]) -> None:
