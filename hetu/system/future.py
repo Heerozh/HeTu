@@ -335,7 +335,7 @@ async def sleep_for_upcoming(tbl: Table):
 async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
     call = None
-    async for attempt in tbl.session().retry(2):
+    async for attempt in tbl.session().retry(5):
         async with attempt as session:
             repo = session.using(tbl.comp_cls)
             # 取出最早到期的任务。不做区间校验：取哪一条不依赖区间里没有别的行，并发取同一条
@@ -472,7 +472,7 @@ async def future_call_task(app):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            err_msg = _("❌ [⚙️Future] Task执行异常：{exc}").format(
+            err_msg = _("⚠️ [⚙️Future] Task执行异常，将再次重试：{exc}").format(
                 exc=f"{type(e).__name__}:{e}"
             )
             logger.exception(err_msg)
