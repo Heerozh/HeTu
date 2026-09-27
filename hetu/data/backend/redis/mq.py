@@ -161,6 +161,7 @@ class PubSubHub(MQHub):
     async def close(self) -> None:
         self._closed = True
         self._subs.clear()
+        self._last_notified.clear()
         # 后台退订等的 ack 不会再来了，别让它们在 pubsub 关闭时各报一条失败
         await self._cancel_tasks()
         await self._pubsub.close()

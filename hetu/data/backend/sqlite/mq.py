@@ -264,6 +264,7 @@ class SQLiteNotifyHub(MQHub):
     async def close(self) -> None:
         self._closed = True
         self._subs.clear()
+        self._last_notified.clear()
         self._since.clear()
         await self._cancel_tasks()
         await self._stop_task()
