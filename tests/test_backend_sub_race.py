@@ -28,7 +28,10 @@ class FakeSub(BaseSubscription):
         self.updates: dict[int, dict[str, Any] | None] = {}
 
     async def get_updated(
-        self, channel: str, payload: set[str] | None = None
+        self,
+        channel: str,
+        payload: set[str] | None = None,
+        cover: float | None = None,
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
         self.entered.set()
         await self.gate.wait()

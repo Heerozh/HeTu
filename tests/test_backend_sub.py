@@ -1,4 +1,5 @@
 import asyncio
+import contextlib
 import time
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -2559,3 +2560,143 @@ async def test_subscription_rejects_foreign_channel(
                 {},
             )
         get_many.assert_not_called()
+
+
+# === 订阅读合并（设计稿 2026-09-28）：同一 backend 上的连接共享通知触发的读 ===
+
+
+@contextlib.contextmanager
+def counting_reads(servant):
+    """照常读，但记下 servant 上 range / get_many / get 每次调用的参数"""
+    calls: dict[str, list[tuple]] = {"range": [], "get_many": [], "get": []}
+    with contextlib.ExitStack() as stack:
+        for name in calls:
+            real = getattr(servant, name)
+
+            async def counted(*args, _name=name, _real=real, **kwargs):
+                calls[_name].append(args)
+                return await _real(*args, **kwargs)
+
+            stack.enter_context(patch.object(servant, name, counted))
+        yield calls
+
+
+def pushed_row(sub_id: str, row_id: int, **fields):
+    """updates_until 的检查：该订阅推过这一行，且字段是这些值"""
+
+    def check(merged: dict[str, dict]):
+        row = merged[sub_id][row_id]
+        for name, value in fields.items():
+            assert row[name] == value, (name, row[name], value)
+
+    return check
+
+
+async def test_same_query_read_once_per_notification(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """同一 backend 上几个连接订同一个区间查询：一条通知只读一次范围、一次新进入的行，
+    各连接都推到"""
+    backend = mod_auto_backend("main")
+    brokers = [SubscriptionBroker(backend) for _ in range(3)]
+    try:
+        sub_ids = []
+        for broker in brokers:
+            sub_id, rows = await broker.subscribe_range(
+                filled_item_ref, admin_ctx, "time", 100, 200, limit=50
+            )
+            assert sub_id and len(rows) == 25
+            sub_ids.append(sub_id)
+        # 订阅生效后的补读先消化掉
+        await asyncio.gather(*(b.get_updates(timeout=0.5) for b in brokers))
+
+        async with backend.session("pytest", 1) as session:
+            new = filled_item_ref.comp_cls.new_row()
+            new.name, new.owner, new.time = "New", 10, 150
+            await session.using(filled_item_ref.comp_cls).insert(new)
+        new_id = int(new.id)
+        with counting_reads(backend.servant) as calls:
+            await asyncio.gather(
+                *(
+                    updates_until(b, pushed_row(s, new_id, name="New"))
+                    for b, s in zip(brokers, sub_ids)
+                )
+            )
+        assert len(calls["range"]) == 1, calls["range"]
+        assert len(calls["get_many"]) == 1, calls["get_many"]
+    finally:
+        for broker in brokers:
+            await broker.close()
+
+
+async def test_later_write_not_served_by_earlier_shared_read(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """同一行先后两次写：第二次写的通知不能用第一次写之后那次共享读（它比第二条通知 +
+    interval 早发出，可能没读到第二次写），两个连接最后都要推到第二次的值"""
+    backend = mod_auto_backend("main")
+    brokers = [SubscriptionBroker(backend) for _ in range(2)]
+    comp = filled_item_ref.comp_cls
+    try:
+        row_id = int((await backend.servant.range(filled_item_ref, "time", 110))[0].id)
+        sub_ids = []
+        for broker in brokers:
+            sub_id, row = await broker.subscribe_get(
+                filled_item_ref, admin_ctx, "id", row_id
+            )
+            assert sub_id and row
+            sub_ids.append(sub_id)
+        await asyncio.gather(*(b.get_updates(timeout=0.5) for b in brokers))
+
+        for qty in (1, 2):
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                row = await repo.get(id=row_id)
+                assert row is not None
+                row.qty = qty
+                await repo.update(row)
+            await asyncio.gather(
+                *(
+                    updates_until(b, pushed_row(s, row_id, qty=qty))
+                    for b, s in zip(brokers, sub_ids)
+                )
+            )
+    finally:
+        for broker in brokers:
+            await broker.close()
+
+
+async def test_table_subscribers_share_rows_without_mutating(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """两个连接整表订阅同一张表：共享的行只读，各自推出去的都去掉了 _version、内容正确
+    （以前整表订阅就地删 _version，行被共享后第二个连接会拿到删过的行）"""
+    backend = mod_auto_backend("main")
+    brokers = [SubscriptionBroker(backend) for _ in range(2)]
+    comp = filled_item_ref.comp_cls
+    try:
+        sub_ids = []
+        for broker in brokers:
+            sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
+            assert sub_id and len(rows) == 25
+            sub_ids.append(sub_id)
+        await asyncio.gather(*(b.get_updates(timeout=0.5) for b in brokers))
+
+        row_id = int((await backend.servant.range(filled_item_ref, "time", 111))[0].id)
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = await repo.get(id=row_id)
+            assert row is not None
+            row.qty = 7
+            await repo.update(row)
+        results = await asyncio.gather(
+            *(
+                updates_until(b, pushed_row(s, row_id, qty=7))
+                for b, s in zip(brokers, sub_ids)
+            )
+        )
+        for merged, sub_id in zip(results, sub_ids):
+            assert "_version" not in merged[sub_id][row_id]
+    finally:
+        for broker in brokers:
+            await broker.close()
