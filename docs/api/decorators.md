@@ -23,10 +23,10 @@ define_component(
     backend: str = 'default',
     rls_compare: tuple[str, str, str] | None = None,
     table_sub: bool = False,
-) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
+) -> collections.abc.Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:412`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L412)</small>
+<small>Source: [`hetu/data/component.py:413`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L413)</small>
 
 
 
@@ -131,7 +131,7 @@ define_endpoint(
 )
 ```
 
-<small>Source: [`hetu/endpoint/definer.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L92)</small>
+<small>Source: [`hetu/endpoint/definer.py:93`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L93)</small>
 
 
 
@@ -434,7 +434,7 @@ property_field(
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:59`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L59)</small>
+<small>Source: [`hetu/data/component.py:60`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L60)</small>
 
 
 
