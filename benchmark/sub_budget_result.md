@@ -114,6 +114,26 @@ K = 扇出（每次写入通知的连接数）= conns/zones，每连接点查询
 
 同一订阅同 tick 的多行合成一帧，ws + pipeline 的成本按帧摊，行越密每行摊得越少。
 
+## 同查询扇出（订阅读合并）
+
+2026-09-28 起，同一 worker 内的连接共享通知触发的读（设计稿
+`docs/superpowers/specs/2026-09-28-sub-shared-reads-design.md`）。很多连接订同一行、同一个查询时，
+一条通知在每个 worker 里只读一次：范围一次、行一次、新行补读一次。读的副本 CPU 与出网从按连接数计
+变成按 worker 数计，worker 侧也省掉每连接的读往返与解码。上面几张表测于这之前，每个连接各读各的；
+其中 K10 那几组（10 个连接点查询同一个 zone）现在也会共享，没有重测。
+
+全服聊天实测（`sub_fanout_chat.py`，1 个 worker 200 连接订"最近 N 条消息"，主 + 1 副本，每秒 2 条）：
+
+| 每条消息 | N=1024 不共享 | 共享 | N=50 不共享 | 共享 |
+|---|---|---|---|---|
+| worker CPU / 连接 | 711µs | 195µs | 320µs | 102µs |
+| 副本 CPU / worker | 31.3ms | 1.85ms | 18.3ms | 1.65ms |
+| 副本出网 / worker | 6.9MB | 35KB | 439KB | 2.9KB |
+
+按预算公式算同查询扇出：交付的 worker 成本取上表"共享"列（N=50 约 100µs/连接，含 MQ 唤醒、比对、
+行频道增删，不含 ws 编码），副本成本每条通知每个 worker 是常数，与在线人数无关。"最近 N 条"的窗口别开
+太大：共享后剩下的大头是每连接对 N 个 id 建集合、求差；N=1024 时每连接常驻约 750KB、订阅一次 24ms。
+
 ## 注意事项
 
 1. 区间查询仍是整索引广播：热索引上每个区间订阅者最多 ~10 次重查/秒，随订阅者数线性增长。
@@ -140,6 +160,8 @@ uv run python sub_budget.py --conns 800 --zones 80 --limit 50 --procs 4 --writes
 uv run python sub_budget.py --conns 200 --zones 20 --limit 50 --hot-rows 20 --writes 2000
 uv run python sub_budget.py --conns 200 --zones 20 --limit 50 --writes 300 --move-ratio 0.1
 uv run python sub_budget_ws.py --conns 120 --zones 12 --limit 50 --writes 500 --duration 15
+uv run python sub_fanout_chat.py --replica redis://127.0.0.1:23401/0 --conns 200 --limit 1024
+uv run python sub_fanout_chat.py --replica redis://127.0.0.1:23401/0 --conns 200 --limit 1024 --no-share
 ```
 
 Windows 下 `asyncio.sleep` 粒度约 15ms，每个写协程最多 ~60 写/秒，要更高写入量请加 `--writer-coroutines`。
