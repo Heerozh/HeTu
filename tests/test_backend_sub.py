@@ -2701,3 +2701,153 @@ async def test_table_subscribers_share_rows_without_mutating(
     finally:
         for broker in brokers:
             await broker.close()
+
+
+async def test_new_row_reread_shared_across_connections(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """新行进入范围后的补读：覆盖时刻取 hub 订上该行频道的时刻，同一 backend 上各连接
+    相同，只读一次。以前取各连接自己登记的时刻，彼此错开一点就各读各的"""
+    backend = mod_auto_backend("main")
+    brokers = [SubscriptionBroker(backend) for _ in range(3)]
+    try:
+        sub_ids = []
+        for broker in brokers:
+            sub_id, _rows = await broker.subscribe_range(
+                filled_item_ref, admin_ctx, "time", 100, 200, limit=50
+            )
+            assert sub_id
+            sub_ids.append(sub_id)
+        await asyncio.gather(*(b.get_updates(timeout=0.5) for b in brokers))
+
+        async with backend.session("pytest", 1) as session:
+            new = filled_item_ref.comp_cls.new_row()
+            new.name, new.owner, new.time = "New", 10, 150
+            await session.using(filled_item_ref.comp_cls).insert(new)
+        new_id = int(new.id)
+        with counting_reads(backend.servant) as calls:
+            # 各连接隔开处理：订上新行频道的时刻彼此错开
+            for broker, sub_id in zip(brokers, sub_ids):
+                await updates_until(broker, pushed_row(sub_id, new_id, name="New"))
+                await asyncio.sleep(INTERVAL * 0.3)
+            # 新行频道的补读：读回一样，不推
+            for broker in brokers:
+                assert await broker.get_updates(timeout=INTERVAL * 3) == {}
+        assert len(calls["range"]) == 1, calls["range"]
+        assert len(calls["get_many"]) == 2, f"新行一次、补读一次：{calls['get_many']}"
+    finally:
+        for broker in brokers:
+            await broker.close()
+
+
+async def _row_id_at(backend, ref, time_value: int) -> int:
+    return int((await backend.servant.range(ref, "time", time_value))[0].id)
+
+
+async def test_subscribe_reread_skipped_when_hub_already_watching(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """同一 backend 上别的连接早就订着这一行、期间也没有写：新订阅的初始读已经盖住了
+    "读与订阅生效之间"的空档，不再补读"""
+    backend = mod_auto_backend("main")
+    first, second = SubscriptionBroker(backend), SubscriptionBroker(backend)
+    try:
+        row_id = await _row_id_at(backend, filled_item_ref, 112)
+        assert (await first.subscribe_get(filled_item_ref, admin_ctx, "id", row_id))[0]
+        # first 自己的补读消化掉，也让 hub 订上这一行超过一个 interval
+        assert await first.get_updates(timeout=INTERVAL * 3) == {}
+        sub_id, row = await second.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row_id
+        )
+        assert sub_id and row
+        channel = backend.servant.row_channel(filled_item_ref, row_id)
+        assert channel not in second._mq_client.pulled_set, "不需要的补读"
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_subscribe_reread_kept_after_recent_notification(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """初始读之前不足一个 interval，hub 收到过这一行的通知：初始读可能落在还没应用那次写
+    的副本上，照常补读"""
+    backend = mod_auto_backend("main")
+    first, second = SubscriptionBroker(backend), SubscriptionBroker(backend)
+    try:
+        row_id = await _row_id_at(backend, filled_item_ref, 113)
+        assert (await first.subscribe_get(filled_item_ref, admin_ctx, "id", row_id))[0]
+        assert await first.get_updates(timeout=INTERVAL * 3) == {}
+        channel = backend.servant.row_channel(filled_item_ref, row_id)
+        # 模拟 hub 刚收到这一行的一条通知（分发给了 first）
+        second._mq_client._hub._last_notified[channel] = time.monotonic()  # type: ignore[attr-defined]
+        assert (await second.subscribe_get(filled_item_ref, admin_ctx, "id", row_id))[0]
+        assert channel in second._mq_client.pulled_set
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_subscribe_get_touched_during_read_still_rereads(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """subscribe_get 读期间被 tick 碰过（pushed 保持 UNKNOWN）：那次补读要无条件推一次，
+    即使 hub 早就订着这一行、初始读也盖住了空档，也不能省"""
+    backend = mod_auto_backend("main")
+    first, second = SubscriptionBroker(backend), SubscriptionBroker(backend)
+    servant = backend.servant
+    try:
+        row_id = await _row_id_at(backend, filled_item_ref, 114)
+        assert (await first.subscribe_get(filled_item_ref, admin_ctx, "id", row_id))[0]
+        assert await first.get_updates(timeout=INTERVAL * 3) == {}
+        sub_id = SubscriptionBroker.make_query_id_(
+            filled_item_ref, "id", row_id, None, 1, False
+        )
+        real_get = servant.get
+
+        async def touched_get(*args, **kwargs):
+            row = await real_get(*args, **kwargs)
+            second._subs[sub_id].pushed = 0  # type: ignore[attr-defined]  读期间 tick 替它算好了推送
+            return row
+
+        with patch.object(servant, "get", touched_get):
+            assert (
+                await second.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+            )[0]
+        channel = servant.row_channel(filled_item_ref, row_id)
+        assert channel in second._mq_client.pulled_set
+    finally:
+        await first.close()
+        await second.close()
+
+
+async def test_rls_range_reread_not_skipped(
+    mod_auto_backend, filled_rls_ref, mod_rls_test_model, admin_ctx, user_id11_ctx
+):
+    """RLS 区间订阅：初始结果按 RLS 过滤过，靠订阅生效后的重跑比对把范围内不可见的行订上；
+    即使同一 backend 上别的连接早就订着这个索引频道、期间没有写，这次补读也不能省"""
+    backend = mod_auto_backend("main")
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_rls_ref.comp_cls)
+        rows = await repo.range(id=(0, float("inf")), limit=4)
+        hidden = rows[-1]
+        assert hidden
+        hidden.friend = 12  # 对 user 11 不可见
+        await repo.update(hidden)
+    watcher, broker = SubscriptionBroker(backend), SubscriptionBroker(backend)
+    try:
+        assert (
+            await watcher.subscribe_range(
+                filled_rls_ref, admin_ctx, "owner", 1, right=20, limit=55
+            )
+        )[0]
+        assert await watcher.get_updates(timeout=INTERVAL * 3) == {}
+        sub_id, rows = await broker.subscribe_range(
+            filled_rls_ref, user_id11_ctx, "owner", 1, right=20, limit=55
+        )
+        assert sub_id and len(rows) == 24
+        assert await broker.get_updates(timeout=INTERVAL * 5) == {}
+        assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore[attr-defined]
+    finally:
+        await watcher.close()
+        await broker.close()

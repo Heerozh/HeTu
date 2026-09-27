@@ -9,7 +9,7 @@ import logging
 import time
 
 import pytest
-from fixtures.fake_pubsub import make_hub, settle
+from fixtures.fake_pubsub import attach_fake_node, make_hub, settle
 
 from hetu.data.backend.base import MQClient
 from hetu.data.backend.redis.mq import RedisMQClient
@@ -385,4 +385,103 @@ async def test_cover_of_request_reread_is_now():
     payload, cover = batch["A"]
     assert payload is None
     assert before <= cover <= after
+    await hub.close()
+
+
+# === 补读的覆盖时刻（订阅读合并设计稿 §4.5） ===
+
+
+async def test_reread_cover_is_ack_time_then_last_notified():
+    """hub 给补读的覆盖时刻：SUBSCRIBE ack 到达的时刻，之后收到过通知就取最后一条的时刻；
+    还没 ack 的频道订阅没生效，为 None"""
+    hub, node = make_hub()
+    mq = RedisMQClient(hub)
+    subscribing = asyncio.create_task(mq.subscribe("A"))
+    await settle()
+    assert hub.reread_cover_("A") is None, "还没 ack，订阅没生效"
+    before = time.monotonic()
+    node.ack("subscribe", "A")
+    async with asyncio.timeout(1):
+        await subscribing
+    acked = hub.reread_cover_("A")
+    assert acked is not None and before <= acked <= time.monotonic()
+    _notify(node, "A")
+    await settle()
+    assert hub.reread_cover_("A") == hub._last_notified["A"] >= acked
+    await hub.close()
+
+
+async def test_reread_cover_unknown_until_resubscribed():
+    """pubsub 节点失效到重订生效之间订阅不算生效：覆盖时刻为 None（补读不能跳过）；重订
+    生效后是新的时刻"""
+    hub, node = make_hub()
+    await _subscribed(hub, node, "A", 1)
+    first = hub.reread_cover_("A")
+    assert first is not None
+    node.fail()
+    await settle()
+    assert hub.reread_cover_("A") is None
+    node2 = attach_fake_node(hub._pubsub)
+    async with asyncio.timeout(3):
+        while "A" not in node2.sent("subscribe"):
+            await asyncio.sleep(0.05)
+    node2.ack("subscribe", "A")
+    await settle()
+    again = hub.reread_cover_("A")
+    assert again is not None and again > first
+    await hub.close()
+
+
+async def test_request_reread_skipped_when_data_read_covers_it():
+    """补读盖的是"数据读之后、本连接订阅生效之前"的空档：hub 在数据读之前一个 interval
+    以上就订着这个频道、期间也没收到通知，数据读已经盖住了，不补读"""
+    hub, node = make_hub()
+    (mq,) = await _subscribed(hub, node, "A", 1)
+    await asyncio.sleep(INTERVAL * 1.5)
+    mq.request_reread("A", known_at=time.monotonic())
+    assert "A" not in mq.pulled_set
+    await hub.close()
+
+
+async def test_request_reread_kept_after_recent_notification():
+    """数据读之前不足一个 interval，hub 收到过这个频道的通知（分发给了别的连接）：数据读
+    可能没读到它，照常补读，覆盖时刻就是那条通知"""
+    hub, node = make_hub()
+    await _subscribed(hub, node, "A", 1)
+    await asyncio.sleep(INTERVAL * 1.5)
+    _notify(node, "A")
+    await settle()
+    notified = hub._last_notified["A"]
+    known_at = time.monotonic()
+    mq = RedisMQClient(hub)
+    await mq.subscribe("A")  # hub 早就订着，不用等 ack
+    mq.request_reread("A", known_at=known_at)
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, notified)}
+    await hub.close()
+
+
+async def test_request_reread_not_skippable_still_rereads():
+    """不许跳过的补读（subscribe_get 读期间被 tick 碰过、RLS 区间订阅的索引频道）：数据读
+    盖住了也照常补读，覆盖时刻不低于数据读的（不能用比客户端手里更早的读）"""
+    hub, node = make_hub()
+    (mq,) = await _subscribed(hub, node, "A", 1)
+    await asyncio.sleep(INTERVAL * 1.5)
+    known_at = time.monotonic()
+    mq.request_reread("A", known_at=known_at, may_skip=False)
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, known_at - INTERVAL)}
+    await hub.close()
+
+
+async def test_request_reread_cover_is_now_when_hub_not_subscribed():
+    """hub 对该频道没有生效的订阅（没订、还在等 ack、节点失效中）：覆盖时刻就是现在"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    before = time.monotonic()
+    mq.request_reread("A", known_at=before)
+    after = time.monotonic()
+    async with asyncio.timeout(1):
+        batch = await mq.get_batch()
+    assert before <= batch["A"][1] <= after
     await hub.close()

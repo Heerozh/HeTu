@@ -723,6 +723,24 @@ async def test_hub_new_channel_while_polling_keeps_cursor(hub_client):
     await hub.close()
 
 
+async def test_hub_reread_cover_is_watermark_time_then_last_notified(hub_client):
+    """补读的覆盖时刻（订阅读合并）：水位记下的时刻（之后提交的通知才分发），之后收到过通知
+    就取最后一条的时刻；没水位的频道订阅没生效，为 None；没人订了就清掉"""
+    hub = _quiet_hub(hub_client)
+    mq = SQLiteMQClient(hub)
+    assert hub.reread_cover_("A") is None
+    before = time.monotonic()
+    await mq.subscribe("A")
+    placed = hub.reread_cover_("A")
+    assert placed is not None and before <= placed <= time.monotonic()
+    _publish(hub_client, "A")
+    assert await hub.poll_once() == (1, 1)
+    assert hub.reread_cover_("A") == hub._last_notified["A"] >= placed
+    await mq.unsubscribe("A")
+    assert hub.reread_cover_("A") is None
+    await hub.close()
+
+
 async def test_hub_watermark_survives_callers_cancellation(hub_client):
     """先到者等表尾时被取消（连接断了）：搭车登记的连接还等着这个水位，取水位不能跟着中断；
     先到者只撤自己的登记"""
