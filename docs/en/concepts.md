@@ -227,7 +227,8 @@ notified when a row enters or leaves that value (insert, delete, or a row's
 field changing to/from it). An **interval query**, and a point query on an index
 without `point_sub`, listens to the whole index and is woken by any change to
 any value of that index, re-running its comparison on the server (the server
-logs a warning once when a point query lands here). So for hot indexes such as
+logs a warning once when a point query lands here; `id` cannot declare
+`point_sub`, so watch a single row by id with `select`). So for hot indexes such as
 "every player watches their own inventory", declare `point_sub=True` and write
 a point query — other players picking up items will not touch you:
 

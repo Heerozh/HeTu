@@ -52,6 +52,16 @@ def warn_point_sub_fallback_(table_ref: TableReference, index_name: str) -> None
     if index_name in warned:
         return
     warned.add(index_name)
+    if index_name == "id":
+        # id 不能声明 point_sub，按 id 订单行本该走行订阅
+        logger.warning(
+            _(
+                "⚠️ [📡Subscription] {comp_name} 按 id 点查询的范围订阅会订整个 id 索引的"
+                "频道：这张表每次插入、删除都会叫醒它重跑比对。按 id 订单行请用行订阅"
+                "（服务端 subscribe_get，客户端 WatchRow）"
+            ).format(comp_name=table_ref.comp_name)
+        )
+        return
     logger.warning(
         _(
             "⚠️ [📡Subscription] {comp_name}.{index_name} 没有声明 point_sub，"
@@ -689,11 +699,13 @@ class SubscriptionBroker:
         - 区间查询，或索引没有声明 `point_sub` 的点查询：订整个索引的频道，该索引上任何值的
           行增删/变更都会唤醒它重跑一次比对（点查询落到这里时服务器会警告一次）。
           热索引（如所有玩家都订自己的背包）请用点查询，并给索引声明 `point_sub=True`。
+          `id` 不能声明 `point_sub`，按 id 订单行请用 `subscribe_get`。
 
         Point queries (`right` omitted or equal to `left`) on an index declared with
         `point_sub` only wake up when rows enter or leave that value. Range queries, and
         point queries on undeclared indexes (warned once), wake up on any write to the
-        index.
+        index. `id` cannot declare `point_sub`; watch a single row by id with
+        `subscribe_get`.
 
         Returns
         --------
@@ -749,7 +761,7 @@ class SubscriptionBroker:
         # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道
         # （index_name 已由上面的 servant.range 校验过存在）。值频道只有声明了 point_sub 的
         # 索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引的频道并警告一次。
-        # id 不能声明 point_sub，点查 id 也订整个 id 索引的频道（该用 subscribe_get）
+        # id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）
         point_value = BackendClient.point_query_value_(
             table_ref.comp_cls.dtype_map_[index_name], left, right
         )
@@ -758,7 +770,7 @@ class SubscriptionBroker:
                 table_ref, index_name, point_value
             )
         else:
-            if point_value is not None and index_name != "id":
+            if point_value is not None:
                 warn_point_sub_fallback_(table_ref, index_name)
             index_channel = servant.index_channel(table_ref, index_name)
             point_value = None  # 订的是整个索引的频道，离开会由它通知
