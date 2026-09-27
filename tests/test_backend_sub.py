@@ -14,6 +14,7 @@ from fixtures.testdata import create_ref
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat
 from hetu.data.backend.base import MQClient
+from hetu.data.shared_reads import SharedReads
 from hetu.data.sub import (
     IndexSubscription,
     RowSubscription,
@@ -74,12 +75,15 @@ async def tick_with(broker: SubscriptionBroker, *channels: str) -> dict[str, dic
     """
     等 channels 的通知都进了本连接的本地队列，再把队列里的通知都当作已过合批窗口（同
     test_mq_backlog，拨回收到时间）跑一个 tick：这些频道保证在同一个 tick 里处理。
+    覆盖时刻一起拨回：否则这次弹出时发出的读达不到它们的判据（发出时刻 >= 覆盖时刻 +
+    interval），每个订阅都会各自重读
     """
     mq = broker._mq_client
     await wait_until(lambda: all(ch in mq.pulled_set for ch in channels), timeout=10)
     back = 1 / mq.UPDATE_FREQUENCY
     for i, (received_at, channel) in enumerate(mq.pulled_deque):
         mq.pulled_deque[i] = (received_at - back, channel)
+        mq._cover[channel] -= back
     return await broker.get_updates()
 
 
@@ -284,12 +288,12 @@ async def test_subscribe_updates(
     await updates_until(broker, check)
 
 
-async def test_row_subscribe_cache(
+async def test_row_moves_between_range_subscriptions(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
+    """一行的 owner 从 10 改到 11 再改到 12：行订阅推新值，区间订阅按范围放掉 / 收进这行"""
     backend = broker._backend
 
-    # row订阅会用全局cache加速相同数据的更新，当一个row更新时，应该cache中有该值
     sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
     sub_10, _ = await broker.subscribe_range(
         filled_item_ref, admin_ctx, "owner", 10, limit=33
@@ -314,25 +318,14 @@ async def test_row_subscribe_cache(
         row1_id = row.id
         await repo.update(row)
 
-    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version）与那次读的发出时刻，
-    # 按行频道存。缓存每个tick重置，所以要确定行频道的通知落在检查的这个tick里
-    row1_channel = backend.servant.row_channel(filled_item_ref, row1_id)
-    updates = await tick_with(broker, row1_channel)
-    cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    cached_row, _issued = cache[row1_channel]
-    assert cached_row["id"] == row1_id
-    assert cached_row["owner"] == 11
-    assert "_version" in cached_row
-
-    # 这次写入在索引、值频道上的通知可能还没处理：等 sub_10 放掉该行、sub_11_12 收进该行
-    # 再进下一步，否则它们留到下一步才推
+    # 行、索引、值频道的通知可能分在几个 tick：收齐再看
     def settled(updates):
+        assert updates[sub_row][row1_id]["owner"] == 11
         assert updates[sub_10][row1_id] is None
         assert updates[sub_11_12][row1_id]["owner"] == 11
 
-    await updates_until(broker, settled, merged=updates)
+    await updates_until(broker, settled)
 
-    # 测试第二次更新cache是否清空了
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
         row = await repo.get(time=110)
@@ -340,12 +333,6 @@ async def test_row_subscribe_cache(
         row.owner = 12
         await repo.update(row)
 
-    updates = await tick_with(broker, row1_channel)
-    # 每个tick重置缓存并重新预读，如果数据正确说明更新了
-    cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    assert cache[row1_channel][0]["owner"] == 12
-
-    # 其他顺带检测：索引、值频道的通知可能晚一个tick才到，收齐再看
     def check(updates):
         assert len(updates) == 3
         assert updates[sub_row][row1_id]["owner"] == 12  # row订阅数据更新
@@ -353,7 +340,39 @@ async def test_row_subscribe_cache(
         assert updates[sub_10_11][row1_id] is None  # query 10-11删除了1
         assert updates[sub_11_12][row1_id]["owner"] == 12  # query 11-12更新row数据
 
-    await updates_until(broker, check, merged=updates)
+    await updates_until(broker, check)
+
+
+async def test_tick_reads_row_once_for_all_subscriptions(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """同一连接里几个订阅都订着同一行（行订阅、两个区间订阅的行频道）：这一行变了，一个
+    tick 只读一次，各订阅都推到"""
+    backend = broker._backend
+    sub_row, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "name", "Itm10")
+    sub_10, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=33
+    )
+    sub_10_11, _ = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, right=11, limit=44
+    )
+    assert sub_row and sub_10 and sub_10_11
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(filled_item_ref.comp_cls)
+        row = await repo.get(time=110)
+        assert row
+        row.qty = 5  # 不动索引：只有行频道有通知
+        row_id = int(row.id)
+        await repo.update(row)
+    channel = backend.servant.row_channel(filled_item_ref, row_id)
+    with counting_reads(backend.servant) as calls:
+        updates = await tick_with(broker, channel)
+    for sub_id in (sub_row, sub_10, sub_10_11):
+        assert updates[sub_id][row_id]["qty"] == 5
+    assert [args[1] for args in calls["get_many"]] == [[row_id]]
+    assert not calls["get"]
 
 
 async def test_cancel_subscribe(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
@@ -2628,6 +2647,38 @@ async def test_same_query_read_once_per_notification(
     finally:
         for broker in brokers:
             await broker.close()
+
+
+async def test_private_shared_reads_still_batch_the_tick(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """连接用自己的 SharedReads（不跨连接共享，压测对比时这样）：一个 tick 里变了的几行
+    仍然一次批量读完，不逐行往返"""
+    backend = mod_auto_backend("main")
+    broker = SubscriptionBroker(backend, shared_reads=SharedReads(backend))
+    comp = filled_item_ref.comp_cls
+    try:
+        sub_id, rows = await broker.subscribe_range(
+            filled_item_ref, admin_ctx, "owner", 10, limit=33
+        )
+        assert sub_id
+        assert await broker.get_updates(timeout=0.5) == {}
+        ids = sorted(int(row["id"]) for row in rows[:3])
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            for row_id in ids:
+                row = await repo.get(id=row_id)
+                assert row is not None
+                row.qty = 7
+                await repo.update(row)
+        channels = [backend.servant.row_channel(filled_item_ref, i) for i in ids]
+        with counting_reads(backend.servant) as calls:
+            updates = await tick_with(broker, *channels)
+        assert {i: updates[sub_id][i]["qty"] for i in ids} == dict.fromkeys(ids, 7)
+        assert [sorted(args[1]) for args in calls["get_many"]] == [ids]
+        assert not calls["get"]
+    finally:
+        await broker.close()
 
 
 async def test_later_write_not_served_by_earlier_shared_read(

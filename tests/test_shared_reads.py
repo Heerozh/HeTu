@@ -57,9 +57,9 @@ class FakeServant:
         return [1, 2, 3]
 
 
-def make_reads(**kwargs) -> tuple[SharedReads, FakeServant]:
+def make_reads() -> tuple[SharedReads, FakeServant]:
     servant = FakeServant()
-    return SharedReads(SimpleNamespace(servant=servant), **kwargs), servant
+    return SharedReads(SimpleNamespace(servant=servant)), servant
 
 
 def old_cover() -> float:
@@ -185,12 +185,32 @@ async def test_event_loop_change_drops_entries():
     assert len(servant.calls) == 2
 
 
-async def test_share_disabled_reads_every_time():
-    reads, servant = make_reads(share=False)
+async def test_separate_instances_do_not_share():
+    """各自的 SharedReads 互不共享：连接用自己的实例，就只在本连接内合并（压测对比用）"""
+    reads, servant = make_reads()
+    other = SharedReads(SimpleNamespace(servant=servant))
     cover = old_cover()
     await reads.rows(REF, [(1, cover)])
-    await reads.rows(REF, [(1, cover)])
+    await other.rows(REF, [(1, cover)])
     assert len(servant.calls) == 2
+
+
+async def test_peek_row_gives_finished_read_that_satisfies_cover():
+    """同步查表（订阅的热路径）：有已读完、满足判据的共享读就直接给，不用 await；在途的、
+    不满足判据的、没有的都返回 None，调用方再走 rows"""
+    reads, servant = make_reads()
+    cover = old_cover()
+    assert reads.peek_row(REF, 1, cover) is None
+    servant.gate.clear()
+    reading = asyncio.create_task(reads.rows(REF, [(1, cover)]))
+    await asyncio.sleep(0)
+    assert reads.peek_row(REF, 1, cover) is None, "在途的读要 await，不能同步给"
+    servant.gate.set()
+    async with asyncio.timeout(1):
+        [(row, issued)] = await reading
+    assert reads.peek_row(REF, 1, cover) == (row, issued)
+    assert reads.peek_row(REF, 1, issued) is None, "发出时刻不满足判据"
+    assert reads.peek_row(REF, 2, cover) is None
 
 
 def test_of_returns_one_instance_per_backend():
