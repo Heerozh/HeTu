@@ -154,11 +154,16 @@ worker that only reads a command table and writes a report table) uses
 `hetu.headless` to touch component tables directly. (→ `headless.py`, `advanced.md`)
 
 ```python
-client = await hetu.headless.connect(backend_cfg, instance="region-1",
-                                     components=[BattleCommand, "BattleReport"])
-rows = await client.table(BattleCommand).servant_range("created_at", since, float("inf"), limit=4096)
-async with client.session("BattleReport") as s:            # s[Comp] is a SessionRepository
-    async with s["BattleReport"].upsert(id=-report_key) as row:  # explicit id — headless never mints ids
+client = await hetu.headless.connect(
+    backend_cfg, instance="region-1", components=[BattleCommand, "BattleReport"]
+)
+rows = await client.table(BattleCommand).servant_range(
+    "created_at", since, float("inf"), limit=4096
+)
+async with client.session("BattleReport") as s:  # s[Comp] is a SessionRepository
+    async with s["BattleReport"].upsert(
+        id=-report_key
+    ) as row:  # explicit id — headless never mints ids
         row.kind = 1
 await client.close()
 ```
