@@ -256,6 +256,7 @@ async def test_drop_after_clears_late_state(monkeypatch):
     await asyncio.sleep(INTERVAL)
     assert mq.push_pulled_("B", None) == 1  # A 被当作积压丢弃
     assert "A" not in mq._late and "A" not in mq._late_payload
+    assert "A" not in mq._cover
     await hub.close()
 
 
@@ -273,4 +274,115 @@ async def test_request_reread_warns_dropped_backlog(monkeypatch, caplog):
     warns = [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert len(warns) == 1, "积压的通知被丢弃了却没有警告"
     assert "💾Redis" in warns[0].getMessage()
+    await hub.close()
+
+
+# === 通知时刻与覆盖时刻（订阅读合并设计稿 §4.1、§4.2） ===
+
+
+async def _subscribed(hub, node, channel: str, n: int) -> list[RedisMQClient]:
+    """n 个连接都订上 channel（第一个发 SUBSCRIBE，其余搭车），ack 之后返回"""
+    mqs = [RedisMQClient(hub) for _ in range(n)]
+    subscribing = [asyncio.create_task(mq.subscribe(channel)) for mq in mqs]
+    await settle()
+    node.ack("subscribe", channel)
+    async with asyncio.timeout(1):
+        await asyncio.gather(*subscribing)
+    return mqs
+
+
+def _notify(node, channel: str) -> None:
+    """节点推来一条不带 payload 的通知"""
+    node.inbox.put_nowait({"type": "message", "channel": channel.encode(), "data": b""})
+
+
+async def test_dispatch_stamps_every_client_alike():
+    """同一条通知分发给本进程各连接时只取一次时刻：各连接队列里记的时刻完全相同，
+    否则连接分不清别人早一点的那个是不是同一条通知，共享读的判据就对不上"""
+    hub, node = make_hub()
+    mqs = await _subscribed(hub, node, "A", 5)
+    _notify(node, "A")
+    await settle()
+    stamps = {mq.pulled_deque[0][0] for mq in mqs}
+    assert len(stamps) == 1, f"同一条通知各连接的时刻不同：{stamps}"
+    assert hub._last_notified["A"] == stamps.pop()
+    await hub.close()
+
+
+async def test_last_notified_cleared_when_channel_released():
+    """频道在本进程没人订了，它的最后通知时刻一起清掉"""
+    hub, node = make_hub()
+    mqs = await _subscribed(hub, node, "A", 2)
+    _notify(node, "A")
+    await settle()
+    assert "A" in hub._last_notified
+    await mqs[0].unsubscribe("A")
+    assert "A" in hub._last_notified, "还有连接订着，不能清"
+    unsubscribing = asyncio.create_task(mqs[1].unsubscribe("A"))
+    await settle()
+    node.ack("unsubscribe", "A")
+    async with asyncio.timeout(1):
+        await unsubscribing
+    assert "A" not in hub._last_notified
+    await hub.close()
+
+
+async def test_cover_of_single_notification_is_its_stamp():
+    """单条通知：这次弹出的覆盖时刻就是 hub 收到它的时刻"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    stamp = time.monotonic()
+    mq.push_pulled_("A", None, stamp)
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, stamp)}
+    await hub.close()
+
+
+async def test_cover_of_merged_within_budget_is_latest():
+    """合并进来的通知到弹出时已隔够一个 interval：这次读就覆盖它，覆盖时刻取最晚那条，
+    不尾随"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    first = time.monotonic()
+    mq.push_pulled_("A", None, first)
+    second = first + INTERVAL * 0.1
+    mq.push_pulled_("A", None, second)
+    await asyncio.sleep(INTERVAL * 2.5)
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, second)}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
+async def test_cover_of_merged_too_late_goes_to_trailing_read():
+    """合并进来的通知离弹出不足一个 interval：这次的覆盖时刻仍是队头那条；尾随重读的覆盖
+    时刻是迟到那条的 hub 时刻，不是重新入队的那一刻（各连接重新入队的时刻不同，用它就
+    共享不上）"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    first = time.monotonic()
+    mq.push_pulled_("A", None, first)
+    await asyncio.sleep(INTERVAL * 0.5)
+    late = time.monotonic()
+    mq.push_pulled_("A", None, late)
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, first)}
+    async with asyncio.timeout(1):
+        assert await mq.get_batch() == {"A": (None, late)}
+    await _expect_nothing(mq)
+    await hub.close()
+
+
+async def test_cover_of_request_reread_is_now():
+    """没给覆盖时刻的补读：覆盖时刻就是调用那一刻（同今天）"""
+    hub, _node = make_hub()
+    mq = RedisMQClient(hub)
+    before = time.monotonic()
+    mq.request_reread("A")
+    after = time.monotonic()
+    async with asyncio.timeout(1):
+        batch = await mq.get_batch()
+    payload, cover = batch["A"]
+    assert payload is None
+    assert before <= cover <= after
     await hub.close()
