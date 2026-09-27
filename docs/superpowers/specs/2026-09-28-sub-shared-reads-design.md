@@ -137,48 +137,53 @@ hub 时刻是真正收到的时刻，不晚于原来各连接的入队时刻；�
 
 ### 4.3 共享读层 `SharedReads`
 
-新模块 `hetu/data/shared_reads.py`。每个 `Backend` 一个实例（按 backend 登记，`SharedReads.of(backend)`）；
-`SubscriptionBroker` 默认取它，构造参数可以传入别的实例或关掉共享（测试、压测对比用）。
+新模块 `hetu/data/shared_reads.py`。每个 `Backend` 一个实例（按 backend 登记，`SharedReads.of(backend)`，
+值不引用 backend，登记表不会钉住它）；`SubscriptionBroker` 默认取它，构造参数可以传入别的实例：给连接
+一个自己的 `SharedReads()` 就只在本连接内合并（测试、压测对比用）。
 
 - key：
-  - 行：`(table_ref, row_id)` → 原始行（`TYPED_DICT`，含 `_version`）或 `None`；
+  - 行：表 → {row_id → 原始行（`TYPED_DICT`，含 `_version`）或 `None`}，按表分两层，一批行只 hash
+    一次表；
   - 范围：`(table_ref, index_name, left, right, limit, desc)` → id 列表（`ID_LIST`）。
 - 每个 key 只留最近一次读：`(发出时刻 r, 结果)`。更晚的读满足的覆盖时刻只多不少，旧的直接替换掉。
 - 取数：
-  - `range_ids(table_ref, query, cover)`、`rows(table_ref, [(row_id, cover), ...])`；
+  - `range_ids(servant, table_ref, query, cover)`、`rows(servant, table_ref, [(row_id, cover), ...])`，
+    servant 由调用方给：订阅用它订阅时选定的那个，`_prefetch_rows` 每个 tick 随机取一个，都同今天；
   - 有条目且 `r >= cover + T`：用它（在途的就等它），不再发；
-  - 否则取 `r = time.monotonic()`，向 `backend.servant`（随机副本，同今天 `_prefetch_rows`）发一次读，
-    登记后等它；
+  - 否则取 `r = time.monotonic()`，登记后用 servant 发一次读；
   - 多行：命中的行直接用，没命中的并成一次 `get_many`，每行各自登记（共享同一个批次）；
-  - 返回结果时一并返回所用读的发出时刻（§4.4、§4.5 要用）。
-- 读由发起的连接自己等，结果放进 future 给搭车的，搭车的只旁观（`asyncio.shield`）。没人搭车时（大多数
-  订阅）就和直接读一样，不多建 task。最初每次读都建一个独立 task，关掉共享的压测比 dev 慢约 30%，
-  所以改成这样（§10）。
-- 读失败、或发起它的连接断开被取消：发起方照常抛出，future 里放异常（不放 `CancelledError`，搭车的会
+  - 返回结果时一并返回所用读的发出时刻（§4.4、§4.5 要用）；
+  - `peek_row(table_ref, row_id, cover)`：同步查已读完、满足判据的行，给订阅的热路径用（§4.4）。
+- 读由发起的连接自己等，结果记在这次读上；搭车的来了才建 future，只旁观（`asyncio.shield`）。没人搭车时
+  （大多数订阅）就和直接读一样：不多建 task、不多建 future、不多一层协程（§10 记了第一版这样做的代价）。
+- 读失败、或发起它的连接断开被取消：发起方照常抛出，给搭车的的是异常（不给 `CancelledError`，搭车的会
   以为是自己被取消了）；搭车的各自改为自己读一次（再失败才抛）。否则一次偶发的读错误会让整个 worker 里
   共享它的连接一起断开（今天只断发起的那一个）。失败的条目不留。
 - 共享出去的结果只读。`TableSubscription.get_updated` / `_resync` 里就地 `del row["_version"]` 改为
   拷贝；`RowSubscription.decode_row_` 已经拷贝；`_rerange` 的 `set(row_ids)` 本来就是新集合。
 - 保留期：条目只要满足判据就一直可用，与年龄无关。为控内存，发出超过 `HORIZON`（暂定 10T，即 1s）的
   条目惰性清掉，清掉只是多一次读。
-- 运行中的事件循环换了（测试按模块换 loop）就清空全部条目：future 不跨 loop。
+- 运行中的事件循环换了（测试按模块换 loop）就清空全部条目：在途的读不跨 loop。
 - 计数：命中、发出、回退，给测试和压测用。
 
 ### 4.4 订阅读路径改走共享层
 
 `_apply_notifications` 拿到 `{频道: (payload, 覆盖时刻)}`：
 
-- `_prefetch_rows`：本批行频道按表分组，逐行带各自的覆盖时刻走 `SharedReads.rows`，结果照旧填进本
-  tick 的 `RowSubscription` 缓存。
+- `_prefetch_rows`：本批行频道按表分组，逐行带各自的覆盖时刻走 `SharedReads.rows`，一次批量读完，
+  结果登记在共享读层。
 - `get_updated(channel, payload, cover)` 多一个参数；缺省 `None` 表示不走共享、直接读，保持直接调用
   它的测试语义。
-  - `RowSubscription.read_`：本 tick 缓存没有时，按 cover 走共享单行读；
-  - `IndexSubscription`：索引频道 → `_rerange(cover)`；行频道 → `read_(channel, cover)`，值频道离开
-    时 `_rerange(cover)`；
+  - `RowSubscription.read_(cover)`：先 `peek_row` 同步取预读登记过的；取不到（tick 中途新建的行订阅）
+    再走共享单行读；
+  - `IndexSubscription`：索引频道 → `_rerange(cover)`；行频道 → `read_(cover)`，值频道离开时
+    `_rerange(cover)`；
   - `_rerange(cover)`：范围 id 走 `range_ids`，进入的行走 `rows`；
   - `TableSubscription`：payload 里的 id 走 `rows`；`RESYNC` 的整表重读不共享（只在断线恢复时发生）。
-- 读哪个 servant 由共享层随机选，与今天 `_prefetch_rows` 一样（今天 `_rerange` / `read_` 用订阅时选定
-  的 servant；频道名与 servant 无关）。
+- 每连接每 tick 的行缓存（`RowSubscription.__cache`，ContextVar）删掉：它做的"同一连接几个订阅读同一行
+  只读一次"、"预读结果交给后面各订阅"现在都由共享读层做（预读登记、各订阅 `peek_row`），不会多读
+  Redis。删掉之后同一 tick 里同一连接的两个订阅可能拿到不同的两次读（中间别的连接发了更新的读），两份
+  都满足判据，最终一致不受影响。
 
 **每个订阅用到的读只进不退**：订阅记住它用过的最新一次读的发出时刻（`RowSubscription.read_at`、
 `IndexSubscription.range_read_at`、`TableSubscription.read_at`），取数时覆盖时刻取
@@ -306,7 +311,9 @@ MQ（`tests/test_backend_mq_client.py`、`tests/test_backend_pubsub_hub.py`，�
 - 整表订阅两个连接共享同一批行：各自推送都不带 `_version`、内容正确（就地删字段的回归）。
 - 现有 `test_backend_sub*`、race、recovery、`test_arch_master_reads`、`test_arch_publish` 全绿。
   断言具体读调用次数的用例（如 `test_subscription_rejects_foreign_channel`）按需给 broker 独立的
-  `SharedReads` 或关掉共享。
+  `SharedReads`。
+- 删掉每 tick 行缓存时补的守护用例：同一连接几个订阅订着同一行，一个 tick 只读一次；连接用自己的
+  `SharedReads` 时一个 tick 变了的几行仍一次批量读；`peek_row` 的单测。
 
 ## 8. 提交计划
 
@@ -341,20 +348,26 @@ MQ（`tests/test_backend_mq_client.py`、`tests/test_backend_pubsub_hub.py`，�
 `benchmark/sub_fanout_chat.py`：单进程（= 1 个 worker）200 连接都订"最近 N 条消息"
 （`subscribe_range("id", 0, MAX, N, desc=True)`，examples/chat 的写法），每秒 2 条消息共 10 条；
 Windows 11 + Docker Redis 8.10 主 + 1 副本，读走副本；不含 ws 推送编码。`--no-share` 给每个连接
-一个不共享的 `SharedReads`。
+一个自己的 `SharedReads`（只在连接内合并）。本机多次运行的 worker CPU 在 ±15% 内波动。
 
 | 每条消息 | N=1024 不共享 | 共享 | N=50 不共享 | 共享 |
 |---|---|---|---|---|
-| worker CPU（每连接） | 711µs | 195µs | 320µs | 102µs |
-| 副本 CPU（整个 worker） | 31.3ms | 1.85ms | 18.3ms | 1.65ms |
+| worker CPU（每连接） | 742µs | 234µs | 320µs | 70µs |
+| 副本 CPU（整个 worker） | 32.5ms | 1.96ms | 17.5ms | 1.67ms |
 | 副本出网（整个 worker） | 6.9MB | 35KB | 439KB | 2.9KB |
-| 副本读命令（整个 worker） | 200 ZRANGE + 395 HGETALL | 1 + 2 | 200 + 400 | 1 + 2 |
+| 副本读命令（整个 worker） | 200 ZRANGE + 398 HGETALL | 1 + 2 | 200 + 400 | 1 + 2 |
 
 - 共享后每个 worker 每条消息：一次范围读、一次新行读、一次新行补读，与连接数无关；共享读层计数
   `ranges_shared` 1990 / `rows_shared` 3980（10 条消息 × 199 个搭车连接 × 1 / 2）。
-- 同一台 Redis 只用 master、交替跑，与 dev 的代码比：关掉共享 695µs / 328µs，dev 672µs / 336µs，
-  持平；开共享 219µs / 86µs。第一版每次读都建 task，关掉共享 383µs（N=50），比 dev 慢约 30%，
-  改为发起方自己等之后持平（§4.3）。
+- 没人搭车时（大多数订阅）的开销，按不共享与 dev 的代码比（同一台 Redis 只用 master、交替跑，N=50）：
+  - 第一版每次读都建 task + shield：383µs 对 dev 273–297µs，慢约 30%；改为发起方自己等、结果放
+    future：3 轮平均 287µs 对 264µs；
+  - 再删掉每 tick 的行缓存、改成预读登记 + `peek_row`，一度 300µs；
+  - 搭车的来了才建 future、读不再多套一层协程、servant 由调用方给（不再每次 `random.choice`）、行按表
+    分两层、热路径不用 `cast`（运行时每次现造 `dict[str, Any] | None`）之后：cProfile 下 680µs 对 dev
+    680µs，交替 3 轮 311µs 对 296µs（本轮噪声 ±15µs 以内），持平。
+- 剩下的每连接成本：N=1024 时大头是每个连接对 1024 个 id 建集合、求差（§9）；此外是 MQ 唤醒、
+  tick 记账、行频道增删与推送。
 - 剩下的每连接成本：N=1024 时大头是每个连接对 1024 个 id 建集合、求差（§9）；此外是 MQ 唤醒、
   tick 记账、行频道增删与推送。
 - 每连接常驻内存 N=1024 约 750KB，N=50 约 45KB，订阅一次 24ms / 3.4ms，与共享无关。

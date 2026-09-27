@@ -9,7 +9,8 @@
 - 先灌 LIMIT 条消息，再按 RATE 条/秒插入 M 条（同进程写，写入本身的成本可忽略）。每条消息
   让每个连接收到"新行进入 + 最旧一行离开"。
 - 默认开订阅读合并（同一 backend 的连接共享通知触发的读，见
-  docs/superpowers/specs/2026-09-28-sub-shared-reads-design.md）；--no-share 关掉对比。
+  docs/superpowers/specs/2026-09-28-sub-shared-reads-design.md）；--no-share 给每个连接一个
+  自己的 SharedReads，只在连接内合并、不跨连接共享，用来对比。
 
 输出
 ----
@@ -137,7 +138,7 @@ async def run(args) -> None:
     brokers: list[SubscriptionBroker] = []
     t0 = time.perf_counter()
     for _ in range(args.conns):
-        reads = SharedReads(backend, share=False) if args.no_share else None
+        reads = SharedReads() if args.no_share else None
         broker = SubscriptionBroker(backend, shared_reads=reads)
         sub_id, rows = await broker.subscribe_range(
             table, ctx, "id", 0, MAX_ID, args.limit, True
