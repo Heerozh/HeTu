@@ -532,9 +532,11 @@ class TableSubscription(BaseSubscription):
         这段时间的变更不可知（pubsub 断线重连，期间的通知全丢了）：整表重读，推所有可见行，
         已知但读不到、或不再可见的行推 None。
         """
+        issued = time.monotonic()
         rows, truncated = await read_whole_table_(
             self.servant, self.table_ref, self.max_rows
         )
+        self.read_at = max(self.read_at, issued)  # 只进不退，同 get_updated
         comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
         known = self.known_ids

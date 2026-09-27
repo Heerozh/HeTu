@@ -9,13 +9,13 @@ import asyncio
 import time
 import weakref
 from collections import Counter
-from collections.abc import Awaitable, Hashable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Hashable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
 from hetu.data.backend import MQClient, RowFormat
 
 if TYPE_CHECKING:
-    from hetu.data.backend import Backend, TableReference
+    from hetu.data.backend import Backend, BackendClient, TableReference
 
 
 class _Abandoned(Exception):
@@ -80,13 +80,25 @@ class SharedReads:
 
     def __init__(self, backend: Backend, share: bool = True):
         """share=False 时每次都自己读、不登记（测试、压测对比用）"""
-        self._backend = backend
+        # 弱引用：登记表的值不能反过来钉住它的键，否则 backend 永远回收不掉。读的时候它一定
+        # 还在——用共享读层的订阅（SubscriptionBroker）自己持有 backend
+        try:
+            self._backend: Callable[[], Backend | None] = weakref.ref(backend)
+        except TypeError:  # 不能弱引用的替身（测试）
+            self._backend = lambda: backend
         self._share = share
         self._entries: dict[Hashable, _Read] = {}
         self._loop: object | None = None
         self._next_sweep = 0.0
         # rows_issued / rows_shared / ranges_issued / ranges_shared / fallbacks
         self.stats: Counter[str] = Counter()
+
+    @property
+    def _servant(self) -> BackendClient:
+        """随机一个读副本（同 `Backend.servant`）"""
+        backend = self._backend()
+        assert backend is not None, "backend 已被回收，共享读层不该还在用"
+        return backend.servant
 
     async def rows(
         self, table_ref: TableReference, wants: Sequence[tuple[int, float]]
@@ -118,7 +130,7 @@ class SharedReads:
             self.stats["rows_issued"] += len(ids)
             # 自己发的读失败就照抛，同今天
             rows, issued = await self._read(
-                self._backend.servant.get_many(table_ref, ids, RowFormat.TYPED_DICT),
+                self._servant.get_many(table_ref, ids, RowFormat.TYPED_DICT),
                 keys,
             )
             for i, pos in enumerate(missing):
@@ -136,7 +148,7 @@ class SharedReads:
             # 断开，今天只断发起的那一个
             self.stats["fallbacks"] += len(failed)
             issued = time.monotonic()
-            rows = await self._backend.servant.get_many(
+            rows = await self._servant.get_many(
                 table_ref, [wants[pos][0] for pos in failed], RowFormat.TYPED_DICT
             )
             for pos, row in zip(failed, rows):
@@ -180,9 +192,7 @@ class SharedReads:
                     return ids, entry.issued
         self.stats["ranges_issued"] += 1
         return await self._read(
-            self._backend.servant.range(
-                table_ref, **query, row_format=RowFormat.ID_LIST
-            ),
+            self._servant.range(table_ref, **query, row_format=RowFormat.ID_LIST),
             [key] if key is not None else [],
             indexed=False,
         )
