@@ -224,6 +224,7 @@ async def test_row_subscription_never_uses_older_read():
     sub = RowSubscription(ref, servant, reads, None, "ch", 1)  # type: ignore[arg-type]
     sub.read_at = early + 0.001  # 它已经用过一次更晚发出的读
     RowSubscription.reset_cache_()
+    await asyncio.sleep(0.005)  # 下面新发的读晚于 read_at
     await sub.read_("ch", cover)
     assert len(servant.calls) == 2, "用上了比它已用过的更早的读"
     assert sub.read_at > early + 0.001

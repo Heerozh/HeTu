@@ -314,14 +314,15 @@ async def test_row_subscribe_cache(
         row1_id = row.id
         await repo.update(row)
 
-    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version），按行频道存。
-    # 缓存每个tick重置，所以要确定行频道的通知落在检查的这个tick里
+    # 检测Row cache：缓存的是本tick批量预读的原始行（含_version）与那次读的发出时刻，
+    # 按行频道存。缓存每个tick重置，所以要确定行频道的通知落在检查的这个tick里
     row1_channel = backend.servant.row_channel(filled_item_ref, row1_id)
     updates = await tick_with(broker, row1_channel)
     cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    assert cache[row1_channel]["id"] == row1_id
-    assert cache[row1_channel]["owner"] == 11
-    assert "_version" in cache[row1_channel]
+    cached_row, _issued = cache[row1_channel]
+    assert cached_row["id"] == row1_id
+    assert cached_row["owner"] == 11
+    assert "_version" in cached_row
 
     # 这次写入在索引、值频道上的通知可能还没处理：等 sub_10 放掉该行、sub_11_12 收进该行
     # 再进下一步，否则它们留到下一步才推
@@ -342,7 +343,7 @@ async def test_row_subscribe_cache(
     updates = await tick_with(broker, row1_channel)
     # 每个tick重置缓存并重新预读，如果数据正确说明更新了
     cache = RowSubscription._RowSubscription__cache.get()  # type: ignore
-    assert cache[row1_channel]["owner"] == 12
+    assert cache[row1_channel][0]["owner"] == 12
 
     # 其他顺带检测：索引、值频道的通知可能晚一个tick才到，收齐再看
     def check(updates):
