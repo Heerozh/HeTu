@@ -1417,7 +1417,7 @@ async def test_retry_commit_race_exhausted(item_ref, mod_auto_backend, backoff_s
     await backend.wait_for_synced()
 
     attempts = 0
-    with pytest.raises(RuntimeError, match="Exceeded maximum retry") as exc_info:
+    with pytest.raises(RuntimeError, match="事务超过最大重试次数") as exc_info:
         async for attempt in backend.session("pytest", 1).retry(3):
             async with attempt as s:
                 attempts += 1
