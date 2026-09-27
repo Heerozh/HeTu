@@ -162,7 +162,7 @@ async def test_pop_upcoming_call_ignores_new_due_calls(
     monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
 ):
     """取"最早到期的一条"不依赖区间里没有别的行：取出期间不断有更早到期的新调用插进来，
-    也不能判竞态（pop 只重试 2 次，耗尽就是任务循环里的一条错误日志）"""
+    也不能判竞态（pop 只重试 5 次，耗尽就是任务循环里的一条错误日志）"""
     from unittest.mock import patch
 
     from hetu.system.future import FutureCalls, pop_upcoming_call
@@ -209,8 +209,8 @@ async def test_pop_upcoming_call_ignores_new_due_calls(
 
 def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     """测试未来调用常用的duplicated的system，component是否会按namespace隔离"""
-    from hetu.system import define_system, SystemContext
     from hetu.data.component import Permission
+    from hetu.system import SystemContext, define_system
 
     # 定义2个不同的namespace的future call
     @define_system(
@@ -391,6 +391,46 @@ async def test_exec_future_call_system_error_keeps_call(
     assert kept is not None and kept.scheduled == last_time + 10
 
 
+async def test_pop_upcoming_call_error_names_the_call(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """取出事务失败（如一直竞态、重试耗尽）时，异常要带上正在取出的是哪条调用：
+    call 出了 pop_upcoming_call 就没了，任务循环的错误日志只剩一句重试耗尽"""
+    import traceback
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from hetu.data.backend import session as session_mod
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system.future import FutureCalls, _build_future_row, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    row = _build_future_row(
+        executor.context, -1, "add_rls_comp_value", (4,), timeout=10
+    )
+    await _insert_future_row(fc_tbl, row)
+
+    async def always_race(_idmap):
+        raise RaceCondition("RACE: 每次都被别的 worker 抢先")
+
+    async def no_backoff(_delay):
+        pass
+
+    monkeypatch.setattr(session_mod, "asyncio", SimpleNamespace(sleep=no_backoff))
+    last_time = time.time() + 2
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    with (
+        patch.object(fc_tbl.backend.master, "commit", new=always_race),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await pop_upcoming_call(fc_tbl)
+    # 任务循环用 logger.exception 记日志，打出来的就是这段 traceback
+    logged = "".join(traceback.format_exception(exc_info.value))
+    assert "add_rls_comp_value(4,)" in logged
+    assert str(row.id) in logged
+
+
 def test_key_to_id_properties():
     """确定性 id：稳定、恒负（与雪花正 id 隔离）、非 0、落在 int64 范围、不同 key 不同 id"""
     from hetu.system.future import _key_to_id
@@ -462,7 +502,7 @@ async def test_cancel_future_call(test_app, tbl_mgr, executor):
 
 async def test_ensure_skips_preexisting_row(test_app, tbl_mgr, executor):
     """表里已有同 key 行时（代表上次开服播种的持久化行），再 ensure 不新增、不报错、返回同 id"""
-    from hetu.system.future import FutureCalls, _key_to_id, _build_future_row
+    from hetu.system.future import FutureCalls, _build_future_row, _key_to_id
 
     await executor.execute("login", 1020)
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
@@ -500,8 +540,8 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     from hetu.system.future import (
         FutureCalls,
         _key_to_id,
-        pop_upcoming_call,
         exec_future_call,
+        pop_upcoming_call,
     )
 
     await executor.execute("login", 1020)
