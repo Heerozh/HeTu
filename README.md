@@ -72,12 +72,16 @@ _composerSend.clicked += () => {
 // 聊天列表，订阅服务器推送，自动更新UI
 _messageList.itemsSource = _messages;
 
-var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
+// 最新的 1024 条消息（desc：雪花 id 越大越新）
+var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>(
+    "id", 0, long.MaxValue, 1024, desc: true);
 messageSub.AddTo(gameObject); // 绑定生命周期，go销毁自动取消订阅
-messageSub.ObserveAdd()  // 监听新增消息事件
+messageSub.ObserveAdd()  // 监听新增消息事件，初始行也会先依次发出（从新到旧）
     .Subscribe(msg =>
     {
-        _messages.Add(msg);
+        // 按 id 插入，列表保持从旧到新
+        var i = _messages.FindIndex(m => m.ID > msg.ID);
+        _messages.Insert(i < 0 ? _messages.Count : i, msg);
         _messageList.Rebuild();
         _messageList.ScrollToItem(_messages.Count - 1);
     })

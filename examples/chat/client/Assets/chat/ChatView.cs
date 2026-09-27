@@ -113,7 +113,10 @@ namespace Chat
             try
             {
                 var memberSub = await HeTuClient.Instance.WatchRange<OnlineUser>("owner", 0, long.MaxValue, 512);
-                var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
+                // 最新的 1024 条：雪花 id 按时间递增，desc 从最新一端取；升序会停在最早的
+                // 1024 条上，攒满后新消息就进不来了。新消息进来时最旧的一条被挤出窗口
+                var messageSub = await HeTuClient.Instance.WatchRange<ChatMessage>(
+                    "id", 0, long.MaxValue, 1024, desc: true);
 
                 // Tie subscription lifetime to this GameObject
                 memberSub.AddTo(gameObject);
@@ -123,7 +126,9 @@ namespace Chat
                 messageSub.ObserveAdd()
                     .Subscribe(msg =>
                     {
-                        _messages.Add(msg);
+                        // 初始行按 desc 从新到旧发出：按 id 插到对应位置，列表保持从旧到新
+                        var index = _messages.FindIndex(m => m.ID > msg.ID);
+                        _messages.Insert(index < 0 ? _messages.Count : index, msg);
                         _messageList?.Rebuild();
                         ScheduleScrollToBottom();
                     })

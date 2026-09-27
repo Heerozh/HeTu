@@ -72,7 +72,10 @@ Client (Unity / C#):
 ```csharp
 await HeTuClient.Instance.CallSystem("user_chat", "Hello world");
 
-var sub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
+// The latest 1024 messages (desc: larger snowflake ids are newer);
+// the initial rows arrive newest first
+var sub = await HeTuClient.Instance.WatchRange<ChatMessage>(
+    "id", 0, long.MaxValue, 1024, desc: true);
 sub.AddTo(gameObject); 
 sub.ObserveAdd().Subscribe(msg => Render(msg));
 ```

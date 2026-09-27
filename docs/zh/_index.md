@@ -67,7 +67,9 @@ async def user_chat(ctx: hetu.SystemContext, text: str):
 ```csharp
 await HeTuClient.Instance.CallSystem("user_chat", "Hello world");
 
-var sub = await HeTuClient.Instance.WatchRange<ChatMessage>("id", 0, long.MaxValue, 1024);
+// 最新的 1024 条（desc：雪花 id 越大越新），初始行从新到旧发出
+var sub = await HeTuClient.Instance.WatchRange<ChatMessage>(
+    "id", 0, long.MaxValue, 1024, desc: true);
 sub.AddTo(gameObject); 
 sub.ObserveAdd().Subscribe(msg => Render(msg));
 ```
