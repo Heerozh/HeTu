@@ -109,7 +109,8 @@ async def test_partial_hits_fetch_only_missing_in_one_batch():
 
 
 async def test_issuer_cancelled_riders_still_get_result():
-    """发起读的连接断开（被取消）：读照常跑完，搭车的照常拿到结果"""
+    """发起读的连接断开（被取消）：它的读跟着取消，搭车的不跟着被取消，各自重读，照常拿到
+    结果"""
     reads, servant = make_reads()
     servant.gate.clear()
     cover = old_cover()
@@ -124,7 +125,7 @@ async def test_issuer_cancelled_riders_still_get_result():
     async with asyncio.timeout(1):
         [(row, _issued)] = await rider
     assert row is not None and row["id"] == 1
-    assert len(servant.calls) == 1
+    assert len(servant.calls) == 2  # 发起方那次（被取消）+ 搭车的自己重读
 
 
 async def test_failed_read_raises_for_issuer_riders_read_themselves():

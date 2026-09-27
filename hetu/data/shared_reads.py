@@ -18,19 +18,23 @@ if TYPE_CHECKING:
     from hetu.data.backend import Backend, TableReference
 
 
+class _Abandoned(Exception):
+    """发起共享读的连接被取消了，读没有结果：搭车的各自重读"""
+
+
 class _Read:
-    """一次读（可能被共享）：发出时刻、跑读的 task；批量读行时 index 是这一行在批里的位置"""
+    """一次读（可能被共享）：发出时刻与结果的 future；批量读行时 index 是这一行在批里的位置"""
 
-    __slots__ = ("index", "issued", "task")
+    __slots__ = ("future", "index", "issued")
 
-    def __init__(self, issued: float, task: asyncio.Future, index: int | None = None):
+    def __init__(self, issued: float, future: asyncio.Future, index: int | None):
         self.issued = issued
-        self.task = task
+        self.future = future
         self.index = index
 
     async def result(self) -> Any:
-        """等这次读完。只旁观：等待方被取消不会取消这次读，别人还在等它"""
-        value = await asyncio.shield(self.task)
+        """等发起方读完。只旁观：搭车的被取消不会取消这次读，别人还在等它"""
+        value = await asyncio.shield(self.future)
         return value if self.index is None else value[self.index]
 
 
@@ -43,6 +47,9 @@ class SharedReads:
     发出时刻 r 不早于覆盖时刻 c + interval，就能给覆盖时刻为 c 的订阅用。尾随重读的保证正是
     "通知之后至少隔一个 interval 发出的读读得到它"，订阅自己去读也不过是在 c + interval 之后
     发一次，所以共享不引入新的假设。覆盖时刻见 `MQClient`。
+
+    读由发起的连接自己等（没人搭车时和直接读一样，不多建 task），结果放进 future 给搭车的
+    连接。发起方的读失败或被取消（连接断了），搭车的各自重读，不跟着一起断开。
 
     只给订阅用，事务读不走这里。共享出去的行、id 列表只读，调用方要改就先拷贝。每个 key 只留
     最近一次读（更晚的读满足的覆盖时刻只多不少）；发出超过 `HORIZON_INTERVALS` 个 interval
@@ -76,8 +83,6 @@ class SharedReads:
         self._backend = backend
         self._share = share
         self._entries: dict[Hashable, _Read] = {}
-        # 在跑的读：保存引用免得被 gc（发起方被取消、条目被更晚的读替换后，可能还有人等它）
-        self._inflight: set[asyncio.Future] = set()
         self._loop: object | None = None
         self._next_sweep = 0.0
         # rows_issued / rows_shared / ranges_issued / ranges_shared / fallbacks
@@ -107,15 +112,17 @@ class SharedReads:
         else:
             missing = list(range(len(wants)))
 
-        own: _Read | None = None
         if missing:
             ids = [wants[pos][0] for pos in missing]
             keys = [(table_ref, row_id) for row_id in ids] if self._share else []
-            own = self._issue(
+            self.stats["rows_issued"] += len(ids)
+            # 自己发的读失败就照抛，同今天
+            rows, issued = await self._read(
                 self._backend.servant.get_many(table_ref, ids, RowFormat.TYPED_DICT),
                 keys,
             )
-            self.stats["rows_issued"] += len(ids)
+            for i, pos in enumerate(missing):
+                results[pos] = (rows[i], issued)
 
         failed: list[int] = []
         for pos, entry in riding:
@@ -124,11 +131,6 @@ class SharedReads:
             except Exception:  # noqa: BLE001 别人发的读失败了，下面自己读
                 failed.append(pos)
         self.stats["rows_shared"] += len(riding) - len(failed)
-
-        if own is not None:
-            rows = await asyncio.shield(own.task)  # 自己发的读失败就照抛，同今天
-            for i, pos in enumerate(missing):
-                results[pos] = (rows[i], own.issued)
         if failed:
             # 搭车的读失败了：各自读一次（不登记）。否则一次偶发的读错误会让共享它的连接一起
             # 断开，今天只断发起的那一个
@@ -176,39 +178,43 @@ class SharedReads:
                 else:
                     self.stats["ranges_shared"] += 1
                     return ids, entry.issued
-        own = self._issue(
+        self.stats["ranges_issued"] += 1
+        return await self._read(
             self._backend.servant.range(
                 table_ref, **query, row_format=RowFormat.ID_LIST
             ),
             [key] if key is not None else [],
             indexed=False,
         )
-        self.stats["ranges_issued"] += 1
-        return await asyncio.shield(own.task), own.issued
 
-    def _issue(
+    async def _read(
         self, read: Awaitable[Any], keys: Sequence[Hashable], indexed: bool = True
-    ) -> _Read:
-        """发一次读并登记到这些 key 下（indexed 时第 i 个 key 取结果的第 i 项）"""
+    ) -> tuple[Any, float]:
+        """
+        发一次读，登记到这些 key 下给别人搭车（indexed 时第 i 个 key 取结果的第 i 项），
+        返回 (结果, 发出时刻)。读失败或被取消：撤掉登记，搭车的各自重读，这里照抛
+        """
         issued = time.monotonic()  # 取在真正发出之前，只会偏早，偏保守
-        task = asyncio.ensure_future(read)
-        self._inflight.add(task)
+        if not keys:
+            return await read, issued
+        future = asyncio.get_running_loop().create_future()
         registered: list[tuple[Hashable, _Read]] = []
         for index, key in enumerate(keys):
-            entry = _Read(issued, task, index if indexed else None)
+            entry = _Read(issued, future, index if indexed else None)
             self._entries[key] = entry
             registered.append((key, entry))
-
-        def done(finished: asyncio.Future) -> None:
-            self._inflight.discard(finished)
-            # 取一下异常，免得没人等时报 "exception was never retrieved"；失败的读不留
-            if finished.cancelled() or finished.exception() is not None:
-                for key, entry in registered:
-                    if self._entries.get(key) is entry:
-                        del self._entries[key]
-
-        task.add_done_callback(done)
-        return _Read(issued, task)
+        try:
+            value = await read
+        except BaseException as e:
+            for key, entry in registered:
+                if self._entries.get(key) is entry:
+                    del self._entries[key]
+            # 共享的 future 里不能放 CancelledError，搭车的会以为是自己被取消了
+            future.set_exception(e if isinstance(e, Exception) else _Abandoned())
+            future.exception()  # 没人搭车时别在 gc 时报 "exception was never retrieved"
+            raise
+        future.set_result(value)
+        return value, issued
 
     def _maintain(self) -> None:
         """换了事件循环就清空（future 不能跨 loop，测试按模块换 loop）；定期清掉太老的条目"""
@@ -216,7 +222,6 @@ class SharedReads:
         if loop is not self._loop:
             self._loop = loop
             self._entries.clear()
-            self._inflight.clear()
         now = time.monotonic()
         if now < self._next_sweep:
             return
@@ -226,7 +231,7 @@ class SharedReads:
         stale = [
             key
             for key, entry in self._entries.items()
-            if entry.issued < cutoff and entry.task.done()
+            if entry.issued < cutoff and entry.future.done()
         ]
         for key in stale:
             del self._entries[key]
