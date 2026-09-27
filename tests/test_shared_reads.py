@@ -5,7 +5,9 @@
 """
 
 import asyncio
+import gc
 import time
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -201,6 +203,21 @@ def test_of_returns_one_instance_per_backend():
     # 不能弱引用的替身（如 SimpleNamespace）：不报错，各用各的
     namespace = SimpleNamespace(servant=None)
     assert SharedReads.of(namespace) is not SharedReads.of(namespace)
+
+
+def test_registry_does_not_keep_backend_alive():
+    """按 backend 登记的共享读层不能反过来钉住 backend（测试里 backend 一个模块建一批），
+    backend 没人用了就能回收，登记也跟着消失"""
+
+    class FakeBackend:
+        servant = None
+
+    backend = FakeBackend()
+    SharedReads.of(backend)
+    alive = weakref.ref(backend)
+    del backend
+    gc.collect()
+    assert alive() is None
 
 
 class _Comp:
