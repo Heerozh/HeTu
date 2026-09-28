@@ -12,7 +12,13 @@ from typing import Any, cast
 
 import pytest
 from fixtures.contexts import wait_until
-from fixtures.fake_pubsub import FakeNodePubSub, make_hub, settle
+from fixtures.fake_pubsub import (
+    FakeNodePubSub,
+    attach_fake_node,
+    make_hub,
+    route_channels,
+    settle,
+)
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis.mq import RedisMQClient
@@ -598,3 +604,111 @@ async def test_repair_does_not_block_the_tick():
         assert await broker.get_updates(timeout=TICK) == {}
     assert ("X", None) in s.calls, "补订上之后要重读"
     await close_all(broker, node)
+
+
+# ============ 几个连接共用 hub 的 MQClient：重叠的订阅不能互相回滚 ============
+
+
+class OrderedFakeSub(FakeSub):
+    """频道按给定顺序订（attach 按 sub.channels 的顺序发，决定先发哪个节点）"""
+
+    def __init__(self, channels: list[str]):
+        super().__init__(set(channels))
+        self._order = list(channels)
+
+    @property
+    def channels(self) -> set[str]:
+        return cast(set[str], [ch for ch in self._order if ch in self._channels])
+
+
+async def ack_until_done(node: FakeNodePubSub, *tasks: asyncio.Task) -> list[Any]:
+    """等这些 task 都结束，期间把发出的 SUBSCRIBE/UNSUBSCRIBE 都 ack 掉；返回结果或异常"""
+    acked = {mtype: len(node.sent(mtype)) for mtype in ("subscribe", "unsubscribe")}
+    async with asyncio.timeout(1):
+        while not all(task.done() for task in tasks):
+            for mtype, done in acked.items():
+                sent = node.sent(mtype)
+                for channel in sent[done:]:
+                    node.ack(mtype, channel)
+                acked[mtype] = len(sent)
+            await asyncio.sleep(0.001)
+    return list(await asyncio.gather(*tasks, return_exceptions=True))
+
+
+async def drain_acks(node: FakeNodePubSub):
+    """跑一会儿，期间发出的（含后台退订的）SUBSCRIBE/UNSUBSCRIBE 都 ack 掉"""
+    await ack_until_done(node, asyncio.create_task(asyncio.sleep(0.05)))
+
+
+def assert_active_channels_subscribed(hub: SubscriptionHub, mq: RedisMQClient):
+    """已登记到门面（active）的订阅，它的频道都真的订着：没有返回成功却收不到通知的订阅"""
+    for channel, subs in hub._channel_subs.items():
+        if any(sub.active for sub in subs):
+            assert channel in mq.subscribed_channels, channel
+            assert mq._hub.subscriber_count(channel) == 1, channel
+
+
+async def test_failed_attach_does_not_revoke_channel_another_attach_waits_on():
+    """
+    连接 A 订 [C, D]，D 在另一个连不上的节点上；C 的 SUBSCRIBE 已经回来时连接 B 订 C。A 失败回滚
+    不能把 B 靠着的 C 一起撤掉、B 却以为订上了，再也收不到 C 的通知：B 要么跟着失败（客户端知道），
+    要么 C 真的订着（设计稿 §4.6）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    n2 = attach_fake_node(mq._hub._pubsub, "n2")
+    route_channels(mq._hub._pubsub, {"D": "n2"})
+    n2.gate.clear()  # 连 D 所在的节点：一直连不上
+    sa = OrderedFakeSub(["C", "D"])
+    ta = asyncio.create_task(a._attach("A", sa))
+    await wait_sent(node, "subscribe", "C")
+    node.ack("subscribe", "C")
+    await settle()
+    sb = FakeSub({"C"})
+    tb = asyncio.create_task(b._attach("B", sb))
+    await settle()
+
+    n2.fail_next = ConnectionError("connect to n2 failed")
+    n2.gate.set()
+    ra, rb = await ack_until_done(node, ta, tb)
+    await drain_acks(node)
+    assert isinstance(ra, ConnectionError)
+    if isinstance(rb, BaseException):
+        assert not sb.active
+    else:
+        assert sb.active
+        assert "C" in mq.subscribed_channels, "B 以为订上了，C 却被 A 的回滚撤掉了"
+    assert_active_channels_subscribed(hub, mq)
+    await close_hub(hub, node)
+
+
+async def test_attach_right_after_failed_subscribe_is_not_left_unsubscribed():
+    """
+    连接 A 订 T 的 SUBSCRIBE 发送失败，A 的回滚还没跑完时连接 B 也来订 T：B 不能返回成功却其实
+    没订上（A 回滚的后台退订会把 B 重新发出的那次 SUBSCRIBE 当作成功结算掉）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    sa, sb = FakeSub({"T"}), FakeSub({"T"})
+    b_attach: list[asyncio.Task] = []
+    real_subscribe = node.subscribe
+
+    async def fail_first_and_race(*channels: str):
+        if not b_attach:  # A 那次：发送失败的同一刻，B 的订阅请求到了
+            b_attach.append(asyncio.ensure_future(b._attach("B", sb)))
+            raise ConnectionError("send failed")
+        await real_subscribe(*channels)
+
+    node.subscribe = fail_first_and_race  # type: ignore[method-assign]
+    ta = asyncio.create_task(a._attach("A", sa))
+    async with asyncio.timeout(1):
+        while not b_attach:
+            await asyncio.sleep(0.001)
+    ra, rb = await ack_until_done(node, ta, b_attach[0])
+    await drain_acks(node)
+    assert isinstance(ra, ConnectionError)
+    if isinstance(rb, BaseException):
+        assert not sb.active
+    else:
+        assert sb.active
+        assert "T" in mq.subscribed_channels, "B 以为订上了，T 却已被退订"
+    assert_active_channels_subscribed(hub, mq)
+    await close_hub(hub, node)

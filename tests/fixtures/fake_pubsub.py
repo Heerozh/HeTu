@@ -56,11 +56,22 @@ class FakeNodePubSub:
         return [ch for cmd, chans in self.commands if cmd == mtype for ch in chans]
 
 
-def attach_fake_node(pubsub: AsyncKeyspacePubSub) -> FakeNodePubSub:
+def attach_fake_node(
+    pubsub: AsyncKeyspacePubSub, node_key: str = "standalone"
+) -> FakeNodePubSub:
     node = FakeNodePubSub()
-    pubsub.node_resources["standalone"] = {"client": node, "pubsub": node}
-    pubsub._spawn_listener("standalone", node)  # type: ignore[reportPrivateUsage]
+    pubsub.node_resources[node_key] = {"client": node, "pubsub": node}
+    pubsub._spawn_listener(node_key, node)  # type: ignore[reportPrivateUsage]
     return node
+
+
+def route_channels(pubsub: AsyncKeyspacePubSub, routes: dict[str, str]) -> None:
+    """模拟集群按 slot 路由：routes 里的频道发到指定节点，其余发到 standalone"""
+
+    async def resolve(channel: str) -> str:
+        return routes.get(channel, "standalone")
+
+    pubsub._resolve_node = resolve  # type: ignore[method-assign]
 
 
 def make_pubsub(**kwargs) -> tuple[AsyncKeyspacePubSub, FakeNodePubSub]:
