@@ -715,10 +715,10 @@ class SubscriptionHub:
             except Exception as e:  # noqa: BLE001
                 self._log_error(_("处理订阅通知异常"), e)
 
-    def _log_error(self, what: str, exc: BaseException) -> None:
+    def _log_error(self, what: str, exc: BaseException, requeued: bool = True) -> None:
         """
         tick 里出错：记错误日志（带栈）。限流：每 _ERROR_LOG_INTERVAL 秒最多一条，带上此前压下的
-        次数。出错的读都已重新入队，一个 interval 后重试（设计稿 §6）
+        次数。requeued：出错的读已重新入队，一个 interval 后重试（设计稿 §6）
         """
         now = time.monotonic()
         if now - self._error_logged_at < _ERROR_LOG_INTERVAL:
@@ -726,13 +726,17 @@ class SubscriptionHub:
             return
         muted, self._errors_muted = self._errors_muted, 0
         self._error_logged_at = now
-        logger.error(
-            _(
+        err = f"{type(exc).__name__}:{exc}"
+        if requeued:
+            msg = _(
                 "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试"
                 "（上次记录以来另有 {muted} 次出错未记）"
-            ).format(what=what, err=f"{type(exc).__name__}:{exc}", muted=muted),
-            exc_info=exc,
-        )
+            ).format(what=what, err=err, muted=muted)
+        else:
+            msg = _(
+                "❌ [📡Subscription] {what}：{err}（上次记录以来另有 {muted} 次出错未记）"
+            ).format(what=what, err=err, muted=muted)
+        logger.error(msg, exc_info=exc)
 
     async def step_(self, deadline: float | None, ready: Callable[[], bool]) -> bool:
         """
@@ -765,14 +769,7 @@ class SubscriptionHub:
             return
         # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
         RowSubscription.reset_cache_()
-        try:
-            await self._prefetch_rows(work)
-        except Exception as e:  # noqa: BLE001 读错误重新入队重试，不牵连连接
-            # 读出错（Redis 抖动）：本批原样重新入队，一个 interval 后重试，不牵连连接
-            self._log_error(_("预读订阅的行出错"), e)
-            for key, payload in batch.items():
-                self._mq.request_reread(key, payload=payload)
-            return
+        await self._prefetch_rows(work)
         tick = _Tick()
         try:
             await self._process_all(work, tick)
@@ -848,6 +845,10 @@ class SubscriptionHub:
         本 tick 各订阅要处理的行频道按表分组，各一次 get_many，把原始行填进 RowSubscription 的
         每 tick 缓存：同一行在 worker 内只读一次，get_updated 也不用逐行往返。这些读都在本批弹出
         之后发出，离各订阅要覆盖的通知都已至少一个 interval。
+
+        某张表读失败（Redis 抖动、有行解码不了……）只是这张表不填缓存：它的订阅在 get_updated 里
+        各自单行读（`RowSubscription.read_` 的兜底），读不出的由 `_process` 记日志、定向重读。一行
+        坏数据只卡住订了它的订阅，不牵连同批的别的行、别的表（设计稿 §6）。
         """
         by_table: dict[TableReference, tuple[list[str], list[int]]] = {}
         seen: set[str] = set()
@@ -871,10 +872,20 @@ class SubscriptionHub:
             return
         servant = self._backend.servant
         for table_ref, (channels, row_ids) in by_table.items():
-            rows = cast(
-                list[dict[str, Any] | None],
-                await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
-            )
+            try:
+                rows = cast(
+                    list[dict[str, Any] | None],
+                    await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
+                )
+            except Exception as e:  # noqa: BLE001 不填缓存，订阅各自单行读
+                self._log_error(
+                    _("预读 {comp_name} 的行出错，这批改为逐行读").format(
+                        comp_name=table_ref.comp_name
+                    ),
+                    e,
+                    requeued=False,
+                )
+                continue
             for channel, row in zip(channels, rows):
                 RowSubscription.prefill_cache_(channel, row)
 

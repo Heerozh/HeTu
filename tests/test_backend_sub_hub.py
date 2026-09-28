@@ -226,10 +226,10 @@ def _fail_get_many_once(stack: ExitStack, backend: Backend) -> list[int]:
     return failures
 
 
-async def test_prefetch_failure_is_retried(
+async def test_prefetch_failure_falls_back_to_row_reads(
     hub: SubscriptionHub, filled_item_ref, admin_ctx
 ):
-    """预读行出错：本批原样重新入队，一个 interval 后重试，推送照常到达，连接不断（设计稿 §6）"""
+    """预读行出错（Redis 抖动）：这张表不填缓存，订阅各自单行读，推送照常到达，连接不断（设计稿 §6）"""
     backend = hub._backend
     broker = SubscriptionBroker(backend, hub=hub)
     sub_id, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "time", 110)
