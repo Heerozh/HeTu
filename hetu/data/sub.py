@@ -618,12 +618,11 @@ class SubscriptionHub:
         self._parked: dict[
             SubscriptionBroker, dict[BaseSubscription, dict[str, set[str] | None]]
         ] = {}
-        # 后台任务（attach 的订阅、放掉的频道的退订）：不随调用方取消，close 时统一取消
+        # 后台任务（频道的订阅、退订、补订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
         # 手动模式：几个门面并发驱动时一次只跑一个 tick
         self._step_lock = asyncio.Lock()
-        # 错误日志限流：上次记的时刻，以及之后压下没记的次数
         # 错误日志按类别限流：(说明模板, 异常类型) → 状态，见 _log_error
         self._errors: dict[tuple[str, type[BaseException]], _ErrorKind] = {}
         self._closed = False
@@ -986,8 +985,9 @@ class SubscriptionHub:
                     # 放掉的一直订着
                     await self._settle_channels(tick)
             finally:
-                # 放在最后：推给客户端的新行在其行频道订阅生效之后，get_updates 拿到的也总是完整
-                # 的 tick。中途出错也把已算好的交出去
+                # 放在最后：推给客户端的新行一般在其行频道订阅生效之后（SUBSCRIBE 最多等
+                # SUBSCRIBE_WAIT_INTERVALS），get_updates 拿到的也总是完整的 tick。中途出错也把
+                # 已算好的交出去
                 for broker, entries in tick.staged.items():
                     broker.deliver_(entries)
 
@@ -1400,7 +1400,7 @@ class SubscriptionBroker:
     """
 
     # 单个连接订阅频道数的告警线，按订阅时登记的频道数估算（tick 里行进出范围不计）；只是告警
-    MAX_SUBSCRIBED = 5000
+    MAX_SUBSCRIBED: int = 5000
 
     def __init__(
         self,

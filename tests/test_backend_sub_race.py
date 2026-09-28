@@ -668,8 +668,9 @@ async def test_failed_attach_does_not_revoke_channel_another_attach_waits_on():
     要么 C 真的订着（设计稿 §4.6）
     """
     hub, (a, b), mq, node = make_brokers(2)
-    n2 = attach_fake_node(mq._hub._pubsub, "n2")
-    route_channels(mq._hub._pubsub, {"D": "n2"})
+    pubsub = cast(Any, mq._hub)._pubsub  # PubSubHub 的 AsyncKeyspacePubSub
+    n2 = attach_fake_node(pubsub, "n2")
+    route_channels(pubsub, {"D": "n2"})
     n2.gate.clear()  # 连 D 所在的节点：一直连不上
     sa = OrderedFakeSub(["C", "D"])
     ta = asyncio.create_task(a._attach("A", sa))
@@ -977,6 +978,7 @@ async def test_processing_loop_restarts_after_it_dies(monkeypatch):
     await asyncio.wait([first])
     hub._start()
     dead = hub._task
+    assert dead is not None
     async with asyncio.timeout(1):
         await asyncio.wait([dead])
     s.updates = {1: {"v": 1}}
