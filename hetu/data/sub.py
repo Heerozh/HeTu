@@ -6,6 +6,7 @@
 """
 
 import asyncio
+import contextvars
 import itertools
 import logging
 import time
@@ -21,6 +22,7 @@ from hetu.data.backend import BackendClient, MQClient, RowFormat
 from hetu.data.backend.base import HubMQClient
 from hetu.data.component import Permission
 from hetu.i18n import _
+from hetu.safelogging.filter import ContextFilter
 
 if TYPE_CHECKING:
     from hetu.data.backend import Backend, TableReference
@@ -516,6 +518,8 @@ _ERROR_LOG_INTERVAL = 10.0
 _RETRY_BACKOFF_MAX = 5.0
 # 后台处理循环因 bug 意外结束后，隔多少秒重新拉起
 _RUN_RESTART_DELAY = 1.0
+# hub 处理循环的日志上下文（同连接的 [连接id|地址|用户] 格式）
+_HUB_LOG_CONTEXT = "[None|None|SubscriptionHub]"
 
 
 class _Tick:
@@ -807,10 +811,18 @@ class SubscriptionHub:
     # === === === 处理循环 === === ===
 
     def _start(self) -> None:
-        """起后台处理循环；它意外结束了的话再起一个"""
+        """
+        起后台处理循环；它意外结束了的话再起一个。
+        用一个全新的 contextvars.Context：hub 是在某个连接的协程里懒建 / 重新拉起的，复制那个连接
+        的 context 的话，此后整个 worker 的订阅日志都带着它的身份（id / IP），它的 Request 也一直被
+        引用着释放不掉
+        """
         if self._task is None or self._task.done():
-            self._task = asyncio.create_task(self._run(), name="SubscriptionHub")
-            self._task.add_done_callback(self._on_run_done)
+            ctx = contextvars.Context()
+            self._task = asyncio.create_task(
+                self._run(), name="SubscriptionHub", context=ctx
+            )
+            self._task.add_done_callback(self._on_run_done, context=ctx)
 
     def _on_run_done(self, task: asyncio.Task) -> None:
         if self._closed or task is not self._task:
@@ -835,6 +847,8 @@ class SubscriptionHub:
             self._start()
 
     async def _run(self) -> None:
+        # hub 自己的日志标签（本任务的 Context 是 _start 新建的，不影响任何连接）
+        ContextFilter.set_log_context(_HUB_LOG_CONTEXT)
         mq = self._mq
         while True:
             batch = await mq.get_message()
