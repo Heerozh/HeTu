@@ -993,3 +993,81 @@ async def test_log_error_survives_broken_translation(monkeypatch, caplog):
     with caplog.at_level(logging.ERROR, logger="HeTu.root"):
         hub._log_error("出错了", RuntimeError("boom"))
     assert any("boom" in r.getMessage() for r in caplog.records)
+
+
+# ============ 拆连接：先撤内部关注，两个退订并发；关闭后不再接受订阅 / 关注 ============
+
+
+def make_broker_with_watch() -> tuple[
+    SubscriptionHub, SubscriptionBroker, RedisMQClient, FakeNodePubSub
+]:
+    """hub 与门面的内部关注（watch_channel）各用一个 MQClient，挂在同一个假 pubsub 上（同生产）"""
+    pubsub_hub, node = make_hub()
+    hub_mq = RedisMQClient(pubsub_hub)
+    hub_mq.UPDATE_FREQUENCY = 1000  # type: ignore[reportAttributeAccessIssue]
+    clients = iter([hub_mq])
+    backend = cast(
+        Backend,
+        SimpleNamespace(
+            get_mq_client=lambda: next(clients, None) or RedisMQClient(pubsub_hub),
+            servant=None,
+        ),
+    )
+    hub = SubscriptionHub(backend, autostart=False)
+    return hub, SubscriptionBroker(backend, hub=hub), hub_mq, node
+
+
+def notify(node: FakeNodePubSub, channel: str):
+    node.inbox.put_nowait({"type": "message", "channel": channel.encode(), "data": b""})
+
+
+async def test_close_disarms_watch_before_waiting_for_unsubscribe():
+    """
+    拆连接时先撤内部关注：等订阅退订回来的期间同一用户在别处登录（owner 值频道来了通知），
+    顶号回调不能再触发（它会去 master 核一次，结果随即因为在拆被丢掉，白读一次 master）
+    """
+    hub, broker, _mq, node = make_broker_with_watch()
+    fired: list[None] = []
+    await finish(
+        asyncio.create_task(broker.watch_channel("W", lambda: fired.append(None))),
+        node,
+    )
+    await register(broker, node, "S", FakeSub({"X"}))
+    closing = asyncio.create_task(broker.close())
+    await wait_sent(node, "unsubscribe", "X")  # 退订发出去了，ack 还没回来
+    notify(node, "W")
+    await settle()
+    assert fired == [], "拆连接期间顶号回调还挂着"
+    for channel in node.sent("unsubscribe"):
+        node.ack("unsubscribe", channel)
+    await ack_until_done(node, closing)
+    await close_hub(hub, node)
+
+
+async def test_close_unsubscribes_concurrently():
+    """拆连接时订阅的退订与内部关注的退订并发发出，只等一个往返（以前串行，最坏各等满 5 秒）"""
+    hub, broker, _mq, node = make_broker_with_watch()
+    await finish(asyncio.create_task(broker.watch_channel("W", lambda: None)), node)
+    await register(broker, node, "S", FakeSub({"X"}))
+    closing = asyncio.create_task(broker.close())
+    async with asyncio.timeout(1):
+        while not {"X", "W"} <= set(node.sent("unsubscribe")):
+            await asyncio.sleep(0.001)  # 两个都发出了，都还没 ack
+    for channel in node.sent("unsubscribe"):
+        node.ack("unsubscribe", channel)
+    await ack_until_done(node, closing)
+    await close_hub(hub, node)
+
+
+async def test_closed_broker_rejects_watch_and_subscribe():
+    """关闭之后再关注 / 订阅直接拒绝：不能新建一个永不关闭的 MQClient 并登记回调，也不用先订上再撤"""
+    hub, broker, _mq, node = make_broker_with_watch()
+    await close_all(broker, node)
+    async with asyncio.timeout(1):  # 以前会订上去、一直等 ack
+        with pytest.raises(ConnectionError):
+            await broker.watch_channel("W", lambda: None)
+        with pytest.raises(ConnectionError):
+            await broker._attach("S", FakeSub({"X"}))
+    assert node.sent("subscribe") == []
+    assert broker._watch_mq is None
+    await close_hub(hub, node)
