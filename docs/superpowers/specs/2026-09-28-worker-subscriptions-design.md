@@ -195,7 +195,9 @@ pubsub 断线恢复后出现）、limit 很大的 range、副本变慢。第一�
     `finish_init_`、定向补读 `pending`，同今天。
 - **`unsubscribe`**：先同步撤掉门面登记，以及 outbox 里该 sub_id 未取走的更新，再调 hub.detach：成员撤空时
   置 `closed`、撤登记，并退订没人要的频道。
-- **`close`**：撤掉本连接全部订阅，关掉 watch 用的 MQClient；后端出错也不抛，同今天。
+- **`close`**：撤掉本连接全部订阅，关掉 watch 用的 MQClient；后端出错也不抛，同今天。两个退订并发，只等一个
+  往返；watch 的先撤（回调在第一次 await 之前就同步清掉），等退订回来的期间顶号检测不会再触发、白读 master。
+  关闭之后 `watch_channel` / 订阅直接拒绝。
 - **`get_updates(timeout)`**：outbox 空就等唤醒，非空就整个取走返回；`timeout` 按总时长计算，到时返回 `{}`，
   与今天相同。没来取之前交来的几次更新在 outbox 里按 sub_id / row_id 合并，后到的覆盖先到的；SDK 删除不存在
   的行是空操作，所以"先进入后离开"合并成一个 None 没问题。

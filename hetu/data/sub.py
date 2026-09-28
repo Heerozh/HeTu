@@ -1380,17 +1380,25 @@ class SubscriptionBroker:
         self._channel_counts.clear()
         self._channel_count = 0
         self._outbox.clear()
-        if subs:
-            try:
-                await self._hub.detach(self, *subs)
-            except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
-                logger.warning(
-                    _("⚠️ [📡Subscription] 关闭连接时取消订阅失败：{err}").format(
-                        err=f"{type(e).__name__}:{e}"
-                    )
+        # 两个退订并发，只等一个往返。内部关注的先撤：MQClient.close 在第一次 await 之前就同步
+        # 清掉回调，等订阅退订回来的期间顶号检测不会再触发（它会去 master 核一次，白读）
+        detach = asyncio.ensure_future(self._detach_all(subs)) if subs else None
+        try:
+            if self._watch_mq is not None:
+                await self._watch_mq.close()
+        finally:
+            if detach is not None:
+                await detach
+
+    async def _detach_all(self, subs: list[BaseSubscription]) -> None:
+        try:
+            await self._hub.detach(self, *subs)
+        except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
+            logger.warning(
+                _("⚠️ [📡Subscription] 关闭连接时取消订阅失败：{err}").format(
+                    err=f"{type(e).__name__}:{e}"
                 )
-        if self._watch_mq is not None:
-            await self._watch_mq.close()
+            )
 
     async def watch_channel(self, channel: str, callback: Callable[[], None]) -> None:
         """
@@ -1399,6 +1407,8 @@ class SubscriptionBroker:
         退订与之互不干扰。连接关闭（`close`）时一起退订。
         回调在后端通知接收器的监听协程里同步执行，必须非阻塞。
         """
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         if self._watch_mq is None:
             self._watch_mq = self._backend.get_mq_client()
         await self._watch_mq.watch(channel, callback)
@@ -1445,6 +1455,8 @@ class SubscriptionBroker:
         订阅 sub 的频道（返回时已生效）并登记到本连接。active 与登记在同一个同步段里置：tick 在
         此之前不处理它（设计稿 §4.6）
         """
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         await self._hub.attach(sub, self, sub_id)
         if self._closed:
             # 等订阅生效期间连接被关了：撤掉刚订上的，别留在 hub 里
