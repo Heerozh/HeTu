@@ -35,6 +35,7 @@ import gc
 import logging
 import pstats
 import time
+from typing import Any
 
 import numpy as np
 import psutil
@@ -89,7 +90,7 @@ def snapshot(r: redis.Redis) -> dict:
     """读副本（servant）上的 CPU、出网字节与读命令统计"""
     commands = r.info("commandstats")
     cpu = r.info("cpu")
-    out = {
+    out: dict[str, Any] = {
         "cpu": float(cpu["used_cpu_user"]) + float(cpu["used_cpu_sys"]),
         "net_out": float(r.info("stats")["total_net_output_bytes"]),
     }
