@@ -2471,6 +2471,9 @@ async def test_subscribe_table_duplicate_over_row_cap_revokes_old_sub(
         sub_id, rows = await broker.subscribe_table(filled_item_ref, admin_ctx)
         assert sub_id and len(rows) == 25
         await _overfill_item_table(backend, filled_item_ref)
+        # 共享的整表订阅，重复订阅回的是订阅已推给客户端的内容：先让它收到这次插入
+        updates = await broker.get_updates(timeout=3)
+        assert len(updates[sub_id]) == 1
 
         assert await broker.subscribe_table(filled_item_ref, admin_ctx) == (None, [])
         assert sub_id not in broker._subs

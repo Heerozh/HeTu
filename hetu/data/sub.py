@@ -79,6 +79,14 @@ async def read_whole_table_(
     return rows[:max_rows], len(rows) > max_rows
 
 
+def rls_ctx_(table_ref: TableReference, ctx: Context | None) -> Context | None:
+    """订阅按哪个 ctx 判定行级权限：组件是 RLS 且 ctx 不是 admin 时是 ctx，否则 None（不用判定，
+    可以在 worker 内与同一查询的订阅共享）"""
+    if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
+        return ctx
+    return None
+
+
 def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
     """
     行内容的指纹（行不存在为 None），用来判断重读回来的是不是客户端已经持有的那份数据：
@@ -102,15 +110,28 @@ class BaseSubscription:
     # 生效：tick 处理它的通知。行 / 范围订阅初始化完成才生效（之前弹出的通知由生效时的补读覆盖）；
     # 整表订阅订上频道就生效，初始化期间的通知攒进 pending
     active: bool = False
+    # 初始化完成、订阅成立
+    ready: bool = False
     # 最后一个成员离开时置真：处理到一半的 tick、初始化据此丢掉结果
     closed: bool = False
     # 接连读出错的次数：重试按它退避，读成功清零
     failures: int = 0
     # 初始化任务（hub 的后台任务），成员撤空时取消；完成后为 None
     init_task: asyncio.Task | None = None
+    # 共享键：worker 内同一查询的连接共用这个订阅（见 SubscriptionHub.open_）。私有订阅为 None
+    share_key: tuple | None = None
+    # 共享订阅的快照：成员的客户端手里现在有什么 {row_id: 行}，初始化完成时由初始行填上，之后
+    # 随暂存的更新改（见 SubscriptionHub._stage）；后加入的成员拿它做回复。私有订阅为 None。
+    # 行对象与推送共用，之后都不再改
+    snapshot: dict[int, dict[str, Any]] | None = None
 
     def use_servant_(self, servant: BackendClient) -> None:
         """之后的读改走这个副本（读出错时 hub 换一个随机副本重试）。没有自己副本的订阅什么也不做"""
+
+    def snapshot_rows_(self) -> list[dict[str, Any]]:
+        """快照里的行，按回复的顺序排好（后加入的成员的回复）"""
+        assert self.snapshot is not None, "私有订阅没有快照"
+        return list(self.snapshot.values())
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
         """
@@ -157,10 +178,7 @@ class RowSubscription(BaseSubscription):
     ):
         self.table_ref = table_ref
         self.servant = servant
-        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
-            self.rls_ctx = ctx
-        else:
-            self.rls_ctx = None
+        self.rls_ctx = rls_ctx_(table_ref, ctx)
         self.channel = channel
         self.row_id = row_id
         # 客户端当前持有的内容指纹（row_fingerprint_）：重读回来一样就不推。
@@ -262,15 +280,15 @@ class IndexSubscription(BaseSubscription):
         """建好时结果为空，由 `initialize_` 读初始结果"""
         self.table_ref = table_ref
         self.servant = servant
-        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
-            self.rls_ctx = ctx
-        else:
-            self.rls_ctx = None
+        self.rls_ctx = rls_ctx_(table_ref, ctx)
         # 点查询时是"索引=该值"的频道，区间查询时是整个索引的频道；收到就重跑 range 比对
         self.index_channel = index_channel
         self.query_param = query_param
         self.row_subs: dict[str, RowSubscription] = {}
         self.last_range_result: set[int] = set()
+        # 最近一次读 range 的 id 顺序（索引顺序）：共享订阅按它排快照，后加入者的回复与首次
+        # 订阅的回复一样按索引排。只改非索引字段的更新不影响顺序
+        self.order: list[int] = []
         # 订的是值频道时为该值（已按 dtype 规范化），否则 None。值频道只在有行"进入"时才有
         # 通知，行"离开"（删除、字段改走）要靠结果里各行的行频道发现，见 get_updated
         self.point_value = point_value
@@ -279,6 +297,11 @@ class IndexSubscription(BaseSubscription):
         self.servant = servant
         for row_sub in self.row_subs.values():
             row_sub.servant = servant
+
+    def snapshot_rows_(self) -> list[dict[str, Any]]:
+        snapshot = self.snapshot
+        assert snapshot is not None, "私有订阅没有快照"
+        return [snapshot[row_id] for row_id in self.order if row_id in snapshot]
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
         """先读后订：读 range 拿到初始行、填好比对状态，再订上索引频道与各行的行频道"""
@@ -308,6 +331,7 @@ class IndexSubscription(BaseSubscription):
             visible.append(row)
         self.row_subs = row_subs
         self.last_range_result = {row_sub.row_id for row_sub in row_subs.values()}
+        self.order = [row_sub.row_id for row_sub in row_subs.values()]
         # 索引频道 + 每行的行频道（行变更时才能收到消息）一次批量订阅
         await hub.attach_(self)
         # 读与订阅生效之间的写入不会有通知，生效前已在别的节点上应用、读到的副本却还没应用的
@@ -356,10 +380,11 @@ class IndexSubscription(BaseSubscription):
         """重跑 range，与上次结果比对：新进入的行订上行频道并推送，离开的行推 None 并退订"""
         servant = self.servant
         ref = self.table_ref
-        row_ids = await servant.range(
-            ref, **self.query_param, row_format=RowFormat.ID_LIST
+        order = cast(
+            list[int],
+            await servant.range(ref, **self.query_param, row_format=RowFormat.ID_LIST),
         )
-        row_ids = set(row_ids)
+        row_ids = set(order)
         inserts = list(row_ids - self.last_range_result)
         deletes = self.last_range_result - row_ids
         new_chans = set()
@@ -388,6 +413,7 @@ class IndexSubscription(BaseSubscription):
             if visible is not None:
                 rtn[row_id] = visible
         self.last_range_result = row_ids
+        self.order = [row_id for row_id in order if row_id in row_ids]
         self.row_subs.update(new_subs)
         new_chans.update(new_subs)
         for row_id in deletes:
@@ -422,10 +448,7 @@ class TableSubscription(BaseSubscription):
         """建好时处于初始化中，由 `initialize_` 全量读、完成初始化"""
         self.table_ref = table_ref
         self.servant = servant
-        if table_ref.comp_cls.is_rls() and ctx and not ctx.is_admin():
-            self.rls_ctx = ctx
-        else:
-            self.rls_ctx = None
+        self.rls_ctx = rls_ctx_(table_ref, ctx)
         self.table_channel = table_channel
         # 已推送给客户端、且客户端仍持有的行id。用于判断"删除/失去RLS"是否需要通知；
         # 初始化完成时由初始行填上
@@ -442,6 +465,11 @@ class TableSubscription(BaseSubscription):
 
     def use_servant_(self, servant: BackendClient) -> None:
         self.servant = servant
+
+    def snapshot_rows_(self) -> list[dict[str, Any]]:
+        snapshot = self.snapshot
+        assert snapshot is not None, "私有订阅没有快照"
+        return [snapshot[row_id] for row_id in sorted(snapshot)]  # 同全量读，按 id 升序
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
         """
@@ -650,14 +678,20 @@ class SubscriptionHub:
 
     一个 worker 一个队列、一条时间线，尾随重读与补读的保证与每连接一个队列时相同。订阅层的补读
     定向到单个订阅（`reread_for`），不按频道重跑 worker 里所有订阅。通知接连不断时相邻 tick 之间
-    留一个合批窗口（`TICK_SPACING_INTERVALS`）。设计见
-    docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md。
+    留一个合批窗口（`TICK_SPACING_INTERVALS`）。
+    不按 RLS 判定可见的订阅按查询共享：同一查询在 worker 里只有一个订阅对象，订了它的连接都是
+    成员，每条通知的读与比对只做一次；后加入的成员拿 hub 维护的快照做回复。订阅在 hub 自己的
+    任务里初始化，成员先登记、再等初始化结果。设计见
+    docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md、
+    docs/superpowers/specs/2026-09-29-shared-subscriptions-design.md。
 
     The worker-level subscription engine, one per backend per worker process. It owns the only
     MQClient (local queue with batching and trailing re-reads) and one processing loop that
     serves the subscriptions of every connection, handing the updates to each connection's
     `SubscriptionBroker` at the end of a tick. Under a continuous stream of notifications,
     consecutive ticks are spaced by `TICK_SPACING_INTERVALS` so that they batch up.
+    Subscriptions not filtered by row-level security are shared per query: one subscription
+    object per query per worker, joined by every connection that subscribes to it.
     """
 
     # tick 末尾等新增频道的 SUBSCRIBE 回来最多等几个 interval，之后照常交付：推给客户端的新行尽量
@@ -700,11 +734,12 @@ class SubscriptionHub:
         self._effective_seq = 0
         # 正在订阅的频道 → 那一次在途的 subscribe（见 _subscribe）
         self._inflight: dict[str, _Subscribing] = {}
-        # 推送卡住的连接先攒着不读的通知：连接 → {订阅: {频道: payload}}，连接取走待发区时重读
-        # （见 _collect、resume_）
-        self._parked: dict[
-            SubscriptionBroker, dict[BaseSubscription, dict[str, set[str] | None]]
-        ] = {}
+        # 共享登记表：共享键 → 同一查询的订阅（设计稿 2026-09-29 §3.1）。私有订阅不进表；订阅
+        # 关闭、不成立、初始化失败时撤掉
+        self._shared: dict[tuple, BaseSubscription] = {}
+        # 成员的推送全都卡住的订阅先攒着不读的通知：订阅 → {频道: payload}；有成员取走待发区、
+        # 或有新成员加入时重读（见 _collect、resume_、join_）
+        self._parked: dict[BaseSubscription, dict[str, set[str] | None]] = {}
         # 后台任务（频道的订阅、退订、补订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
@@ -744,14 +779,22 @@ class SubscriptionHub:
 
     # === === === 订阅的登记 === === ===
 
+    def shared_(self, key: tuple | None) -> BaseSubscription | None:
+        """共享键对应的订阅（worker 里同一查询的那个）；没有、或 key 为 None（私有）时为 None"""
+        return None if key is None else self._shared.get(key)
+
     def open_(
-        self, sub: BaseSubscription, broker: SubscriptionBroker, sub_id: str
+        self,
+        sub: BaseSubscription,
+        broker: SubscriptionBroker,
+        sub_id: str,
+        key: tuple | None = None,
     ) -> asyncio.Future[list[dict[str, Any]] | None]:
         """
         登记新建的订阅 sub 与它的第一个成员，在 hub 自己的任务里初始化（`sub.initialize_`：订上
-        频道、读初始行，出错换副本重试，见 `_init`），不挂在任何连接上。返回该成员等初始化结果
-        的 future：结果是回复用的行，None 表示订阅不成立；重试用尽时是那次的异常；成员在初始化
-        完成前离开时为 None。
+        频道、读初始行，出错换副本重试，见 `_init`），不挂在任何连接上。key 不为 None 时登记为该
+        查询的共享订阅，之后同一查询的连接加入它（`join_`）。返回该成员等初始化结果的 future，
+        见 `wait_`。
         成员当场登记（设计稿 2026-09-29 §3.3）：订阅在初始化完成之前不产生任何推送（行 / 范围订阅
         还没生效，整表订阅只攒 pending），之后的推送都排在成员拿到结果之后。
         """
@@ -760,17 +803,52 @@ class SubscriptionHub:
         if self._autostart:
             self._start()  # 处理循环意外结束过的话重新拉起
         sub.members = {broker: sub_id}
+        sub.waiters = {}
+        sub.token = next(self._tokens)
+        sub.active = sub.ready = sub.closed = False
+        sub.share_key = key
+        sub.snapshot = None
+        self._by_token[sub.token] = sub
+        if key is not None:
+            self._shared[key] = sub
+        # 新的 Context：不带着第一个成员连接的日志身份与 Request（同 _start）
+        sub.init_task = self._spawn(self._init(sub), context=contextvars.Context())
+        return self.wait_(sub, broker)
+
+    def join_(
+        self, sub: BaseSubscription, broker: SubscriptionBroker, sub_id: str
+    ) -> asyncio.Future[list[dict[str, Any]] | None]:
+        """
+        broker 加入 worker 里已有的共享订阅 sub（同一查询），返回等初始化结果的 future，见 `wait_`。
+        已就绪的当场拿快照：之后暂存的更新都会交给它，快照已含之前的（设计稿 2026-09-29 §3.2）
+        """
+        sub.members[broker] = sub_id
+        # 新成员的推送没卡着：成员全都卡着时攒下的通知现在重读，不然要等哪个老成员取走待发区，
+        # 新成员拿到的快照才会动
+        self._unpark(sub)
+        return self.wait_(sub, broker)
+
+    def wait_(
+        self, sub: BaseSubscription, broker: SubscriptionBroker
+    ) -> asyncio.Future[list[dict[str, Any]] | None]:
+        """
+        broker 等 sub 的初始化结果：回复用的行（已就绪的共享订阅当场给快照），None 表示订阅不成立；
+        重试用尽时是那次的异常。broker 在初始化完成前离开时为 None
+        """
         waiter: asyncio.Future[list[dict[str, Any]] | None] = (
             asyncio.get_running_loop().create_future()
         )
-        sub.waiters = {broker: [waiter]}
-        sub.token = next(self._tokens)
-        sub.active = False
-        sub.closed = False
-        self._by_token[sub.token] = sub
-        # 新的 Context：不带着第一个成员连接的日志身份与 Request（同 _start）
-        sub.init_task = self._spawn(self._init(sub), context=contextvars.Context())
+        if sub.ready:
+            waiter.set_result(sub.snapshot_rows_())
+        else:
+            sub.waiters.setdefault(broker, []).append(waiter)
         return waiter
+
+    def _unshare(self, sub: BaseSubscription) -> None:
+        """从共享登记表撤掉 sub（表里登记的还是它的话）：之后同一查询新建订阅"""
+        key = sub.share_key
+        if key is not None and self._shared.get(key) is sub:
+            del self._shared[key]
 
     async def attach_(self, sub: BaseSubscription, active: bool = False) -> None:
         """
@@ -810,12 +888,6 @@ class SubscriptionHub:
     ) -> list[str]:
         """同步撤掉成员身份与登记，返回 worker 里因此没人要的频道"""
         gone: list[str] = []
-        parked = self._parked.get(broker)
-        if parked is not None:
-            for sub in subs:
-                parked.pop(sub, None)
-            if not parked:
-                del self._parked[broker]
         for sub in subs:
             sub.members.pop(broker, None)
             # 还在等初始化结果的：不用等了，它的后半段回 None
@@ -826,6 +898,8 @@ class SubscriptionHub:
                 continue
             sub.closed = True
             self._by_token.pop(sub.token, None)
+            self._unshare(sub)
+            self._parked.pop(sub, None)
             task, sub.init_task = sub.init_task, None
             if task is not None:
                 task.cancel()
@@ -971,22 +1045,29 @@ class SubscriptionHub:
 
     def _ready(self, sub: BaseSubscription, rows: list[dict[str, Any]] | None) -> None:
         """
-        初始化完成，与 initialize_ 返回在同一个同步段里：订阅生效，结果交给等着的成员。之后的
-        更新都交给成员表里的连接，与交出去的结果衔接得上。
-        订阅不成立（rows 为 None）的不生效，等着的成员都回 None，由它们各自退订（等退订回来才
-        返回，同以前）
+        初始化完成，与 initialize_ 返回在同一个同步段里：订阅生效，结果交给等着的成员（共享订阅
+        以它填上快照，交出去的就是快照）。之后暂存的更新都交给成员表里的连接，与交出去的结果
+        衔接得上。
+        订阅不成立（rows 为 None）的不生效、撤掉共享登记，等着的成员都回 None，由它们各自退订
+        （等退订回来才返回，同以前）
         """
         if sub.closed:
             return
         waiters, sub.waiters = sub.waiters, {}
-        sub.active = rows is not None
+        if rows is None:
+            sub.active = False
+            self._unshare(sub)
+        else:
+            sub.active = sub.ready = True
+            if sub.share_key is not None:
+                sub.snapshot = {int(row["id"]): row for row in rows}
         for futures in waiters.values():
             for waiter in futures:
                 if not waiter.done():
                     waiter.set_result(rows)
 
     def _fail_init(self, sub: BaseSubscription, exc: Exception) -> None:
-        """初始化重试用尽：订阅不生效，等着的成员都拿到这个异常，由它们各自退订"""
+        """初始化重试用尽：订阅不生效、撤掉共享登记，等着的成员都拿到这个异常，由它们各自退订"""
         self._log_error(
             _("初始化订阅 {sub_id} 出错，重试 {retries} 次仍失败"),
             exc,
@@ -995,6 +1076,7 @@ class SubscriptionHub:
             retries=self.INIT_RETRIES,
         )
         sub.active = False
+        self._unshare(sub)
         waiters, sub.waiters = sub.waiters, {}
         for futures in waiters.values():
             for waiter in futures:
@@ -1218,33 +1300,44 @@ class SubscriptionHub:
     def _stalled(self, sub: BaseSubscription) -> bool:
         """
         订阅的成员是不是全都推送卡住了：待发区还有上次交的没取走，而且没在 get_updates 里等着取
-        （推送阻塞在 push_queue 上）。手动模式由 get_updates 自己跑 tick，不存在卡住
+        （推送阻塞在 push_queue 上）。有一个没卡着就照常处理，卡着的成员待发区按 sub_id / row_id
+        合并，上限是这个订阅的数据量。成员表为空不算卡住（all([]) 为真，攒下的通知就没人来重读了）。
+        手动模式由 get_updates 自己跑 tick，不存在卡住
         """
-        return self._autostart and all(broker.stalled_() for broker in sub.members)
+        members = sub.members
+        return (
+            self._autostart
+            and bool(members)
+            and all(broker.stalled_() for broker in members)
+        )
 
     def _park(
         self, sub: BaseSubscription, channel: str, payload: set[str] | None
     ) -> None:
-        """推送卡住的订阅这个频道先不读，攒在成员名下，成员取走待发区时重读（resume_）"""
-        for broker in sub.members:
-            items = self._parked.setdefault(broker, {}).setdefault(sub, {})
-            if payload is None:
-                items.setdefault(channel, None)
-            elif (known := items.get(channel)) is None:
-                items[channel] = set(payload)
-            else:
-                known.update(payload)
+        """成员全都卡着的订阅这个频道先不读，攒着，有成员取走待发区（resume_）或有新成员加入时重读"""
+        items = self._parked.setdefault(sub, {})
+        if payload is None:
+            items.setdefault(channel, None)
+        elif (known := items.get(channel)) is None:
+            items[channel] = set(payload)
+        else:
+            known.update(payload)
+
+    def _unpark(self, sub: BaseSubscription) -> None:
+        """sub 攒着的通知全部定向重读：interval 后照常读、推最新的"""
+        items = self._parked.pop(sub, None)
+        if not items or sub.closed or not sub.active:
+            return
+        for channel, payload in items.items():
+            self.reread_for(sub, channel, payload=payload)
 
     def resume_(self, broker: SubscriptionBroker) -> None:
-        """门面取走了待发区：给推送卡着时攒下的通知定向重读，interval 后照常读、推最新的"""
-        parked = self._parked.pop(broker, None)
-        if not parked:
+        """门面取走了待发区：它所在的订阅攒下的通知都重读（它没卡着了，订阅不再"全都卡着"）"""
+        if not self._parked:
             return
-        for sub, items in parked.items():
-            if sub.closed or not sub.active:
-                continue
-            for channel, payload in items.items():
-                self.reread_for(sub, channel, payload=payload)
+        for sub in broker.subscriptions_():
+            if sub in self._parked:
+                self._unpark(sub)
 
     def _repair(
         self, work: dict[BaseSubscription, list[tuple[str, set[str] | None]]]
@@ -1458,7 +1551,18 @@ class SubscriptionHub:
         sub: BaseSubscription,
         updates: Mapping[int, dict[str, Any] | None],
     ) -> None:
-        """按成员暂存：同一个 tick 里同一订阅的几次更新合并，后到的覆盖先到的"""
+        """
+        按成员暂存：同一个 tick 里同一订阅的几次更新合并，后到的覆盖先到的。共享订阅的快照在这里
+        跟着改，不等交付：tick 中途加入的成员拿到的快照已含这次更新，它又不在这次暂存时的成员表
+        里，不会再收到一次（设计稿 2026-09-29 §3.2）
+        """
+        snapshot = sub.snapshot
+        if snapshot is not None:
+            for row_id, row in updates.items():
+                if row is None:
+                    snapshot.pop(row_id, None)
+                else:
+                    snapshot[row_id] = row
         staged = tick.staged
         for broker, sub_id in sub.members.items():
             entries = staged.setdefault(broker, {})
@@ -1565,6 +1669,7 @@ class SubscriptionHub:
                         waiter.exception()
         self._channel_subs.clear()
         self._by_token.clear()
+        self._shared.clear()
         self._effective.clear()
         self._inflight.clear()
         self._parked.clear()
@@ -1720,19 +1825,71 @@ class SubscriptionBroker:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table_ref.comp_cls, row)
 
+    @staticmethod
+    def _share_key(
+        table_ref: TableReference, ctx: Context, query: tuple
+    ) -> tuple | None:
+        """
+        共享键（设计稿 2026-09-29 §3.1）：同一张表上同一查询的订阅在 worker 内共用一个订阅对象。
+        按 RLS 判定可见的订阅（组件是 RLS、ctx 不是 admin）私有，返回 None。
+        不用 sub_id 当键：right=None 与字符串 "None" 拼出同一个 sub_id，共享后会让别人拿到另一个
+        查询的结果。查询里的值用 repr（None / bool / int / float / str 之间不会撞，1 与 1.0 分开只是
+        少共享些），同键一定同 sub_id：一个连接不会以两个 sub_id 加入同一个订阅。表不用
+        TableReference：Table 多一个 backend 字段，与同地址的 TableReference 互不相等
+        """
+        if rls_ctx_(table_ref, ctx) is not None:
+            return None
+        return (
+            table_ref.comp_cls,
+            table_ref.instance_name,
+            table_ref.cluster_id,
+            *query,
+        )
+
+    def _subscribe(
+        self,
+        sub_id: str,
+        key: tuple | None,
+        make: Callable[[], BaseSubscription],
+    ) -> tuple[BaseSubscription, asyncio.Future[list[dict[str, Any]] | None]]:
+        """
+        前半段的登记：可共享的（key 不为 None）先找 worker 里同一查询的订阅，有就加入，没有就新建
+        （make）、在 hub 里开订阅（初始化在 hub 的任务里跑）；登记到本连接、计入订阅数。返回订阅和
+        等初始化结果的 future，交给后半段（`_finish`）
+        """
+        sub = self._hub.shared_(key)
+        if sub is None:
+            sub = make()
+            return sub, self._open(sub_id, sub, key)
+        return sub, self._join(sub_id, sub)
+
     def _open(
-        self, sub_id: str, sub: BaseSubscription
+        self, sub_id: str, sub: BaseSubscription, key: tuple | None = None
     ) -> asyncio.Future[list[dict[str, Any]] | None]:
-        """
-        前半段的登记：在 hub 里开订阅 sub（初始化在 hub 的任务里跑），登记到本连接、计入订阅数。
-        返回等初始化结果的 future，交给后半段（`_finish`）
-        """
+        """新建的订阅：在 hub 里开订阅（key 不为 None 时登记为共享），登记到本连接"""
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        waiter = self._hub.open_(sub, self, sub_id)
+        waiter = self._hub.open_(sub, self, sub_id, key)
+        self._register(sub_id, sub)
+        return waiter
+
+    def _join(
+        self, sub_id: str, sub: BaseSubscription
+    ) -> asyncio.Future[list[dict[str, Any]] | None]:
+        """加入 worker 里同一查询的共享订阅，登记到本连接"""
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        waiter = self._hub.join_(sub, self, sub_id)
+        self._register(sub_id, sub)
+        return waiter
+
+    def _register(self, sub_id: str, sub: BaseSubscription) -> None:
         self._subs[sub_id] = sub
         self._sub_counts[type(sub)] += 1
-        return waiter
+
+    def subscriptions_(self) -> Iterable[BaseSubscription]:
+        """本连接的订阅对象（hub 的背压恢复用）"""
+        return self._subs.values()
 
     async def _finish(
         self,
@@ -1779,8 +1936,9 @@ class SubscriptionBroker:
     ) -> tuple[str | None, dict[str, Any] | None]:
         """
         获取并订阅单行数据。
-        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据是这次重新
-        读的（可能落在滞后的副本上），不代表订阅已推给客户端的内容：客户端应沿用已有的订阅
+        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
+        内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
+        按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
         对象、不要拿它覆盖本地数据（官方 SDK 就是这样）。客户端应该写代码防止重复订阅。
 
         推送是尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据
@@ -1848,11 +2006,17 @@ class SubscriptionBroker:
                     sub_id=sub_id
                 )
             )
+            if existing.share_key is not None:
+                return self._repeat_get(sub_id, existing)
             return self._reread_get(table_ref, ctx, sub_id, existing, row_id)
 
-        channel_name = servant.row_channel(table_ref, row_id)
-        row_sub = RowSubscription(table_ref, servant, ctx, channel_name, row_id)
-        return self._finish_get(sub_id, row_sub, self._open(sub_id, row_sub))
+        def make() -> RowSubscription:
+            channel = servant.row_channel(table_ref, row_id)
+            return RowSubscription(table_ref, servant, ctx, channel, row_id)
+
+        key = self._share_key(table_ref, ctx, ("get", row_id))
+        row_sub, waiter = self._subscribe(sub_id, key, make)
+        return self._finish_get(sub_id, cast(RowSubscription, row_sub), waiter)
 
     async def _finish_get(
         self,
@@ -1860,9 +2024,14 @@ class SubscriptionBroker:
         row_sub: RowSubscription,
         waiter: asyncio.Future[list[dict[str, Any]] | None],
     ) -> tuple[str | None, dict[str, Any] | None]:
-        """行订阅的后半段：行不存在、或 caller 对该行无权限时订阅不成立，回 None"""
+        """
+        行订阅的后半段：行不存在、或 caller 对该行无权限时订阅不成立，回 None。加入的共享订阅这行
+        已经不在了（成员们都已收到 None）时同样回 None，不加入
+        """
         rows = await self._finish(sub_id, row_sub, waiter)
-        if rows is None:
+        if not rows:
+            if rows is not None:
+                await self.unsubscribe(sub_id)
             return None, None
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
@@ -1870,6 +2039,29 @@ class SubscriptionBroker:
             )
         )
         return sub_id, rows[0]
+
+    async def _repeat_get(
+        self, sub_id: str, existing: BaseSubscription
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """重复的共享行订阅：回它的快照，不读库；这行已经不在了时撤掉已有的订阅"""
+        rows = await self._snapshot_of(sub_id, existing)
+        if not rows:
+            if rows is not None:
+                await self.unsubscribe(sub_id)
+            return None, None
+        return sub_id, rows[0]
+
+    async def _snapshot_of(
+        self, sub_id: str, sub: BaseSubscription
+    ) -> list[dict[str, Any]] | None:
+        """
+        重复订阅了共享订阅：回它的快照（订阅已推给客户端的内容），不读库；还在初始化的等它初始化
+        完成。订阅不成立、或等的期间被退订了回 None（撤掉订阅的事由第一次订阅的后半段做）
+        """
+        rows = await self._hub.wait_(sub, self)
+        if rows is None or self._subs.get(sub_id) is not sub:
+            return None
+        return rows
 
     async def _reread_get(
         self,
@@ -1904,8 +2096,9 @@ class SubscriptionBroker:
     ) -> tuple[str | None, list[dict]]:
         """
         获取并订阅多行数据。
-        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据是这次重新
-        读的（可能落在滞后的副本上），不代表订阅已推给客户端的内容：客户端应沿用已有的订阅
+        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
+        内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
+        按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
         对象、不要拿它覆盖本地数据（官方 SDK 就是这样）。客户端应该写代码防止重复订阅。
 
         订阅会观察数据的变化/添加/删除，收到对应通知，由get_updates调用时处理。
@@ -1993,46 +2186,57 @@ class SubscriptionBroker:
         servant.check_range_(table_ref, index_name, left, right, desc)
 
         sub_id = self.make_query_id_(table_ref, index_name, left, right, limit, desc)
-        if sub_id in self._subs:
+        if (existing := self._subs.get(sub_id)) is not None:
             logger.warning(
                 _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
                     sub_id=sub_id
                 )
             )
+            if existing.share_key is not None:
+                return self._repeat_range(sub_id, existing, force)
             return self._reread_range(
                 table_ref, ctx, sub_id, index_name, left, right, limit, desc, force
             )
 
-        # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道。值频道只有
-        # 声明了 point_sub 的索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引的
-        # 频道并警告一次。id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）
-        point_value = BackendClient.point_query_value_(
-            table_ref.comp_cls.dtype_map_[index_name], left, right
-        )
-        if point_value is not None and index_name in table_ref.comp_cls.point_subs_:
-            index_channel = servant.index_value_channel(
-                table_ref, index_name, point_value
+        def make() -> IndexSubscription:
+            # 点查询只订该值的频道，别的值的变动不会打扰；区间查询订整个索引的频道。值频道只有
+            # 声明了 point_sub 的索引才有（commit 只给它们发）：没声明的点查询退化为订整个索引
+            # 的频道并警告一次。id 不能声明 point_sub，点查 id 也退化并警告（该用 subscribe_get）
+            point_value = BackendClient.point_query_value_(
+                table_ref.comp_cls.dtype_map_[index_name], left, right
             )
-        else:
-            if point_value is not None:
-                warn_point_sub_fallback_(table_ref, index_name)
-            index_channel = servant.index_channel(table_ref, index_name)
-            point_value = None  # 订的是整个索引的频道，离开会由它通知
-        idx_sub = IndexSubscription(
-            table_ref,
-            servant,
-            ctx,
-            index_channel,
-            {
-                "index_name": index_name,
-                "left": left,
-                "right": right,
-                "limit": limit,
-                "desc": desc,
-            },
-            point_value,
+            if point_value is not None and index_name in table_ref.comp_cls.point_subs_:
+                index_channel = servant.index_value_channel(
+                    table_ref, index_name, point_value
+                )
+            else:
+                if point_value is not None:
+                    warn_point_sub_fallback_(table_ref, index_name)
+                index_channel = servant.index_channel(table_ref, index_name)
+                point_value = None  # 订的是整个索引的频道，离开会由它通知
+            return IndexSubscription(
+                table_ref,
+                servant,
+                ctx,
+                index_channel,
+                {
+                    "index_name": index_name,
+                    "left": left,
+                    "right": right,
+                    "limit": limit,
+                    "desc": desc,
+                },
+                point_value,
+            )
+
+        # desc 按真假（sub_id 也是），客户端传 1 或 True 是同一个查询
+        query = ("range", index_name, repr(left), repr(right), repr(limit), bool(desc))
+        idx_sub, waiter = self._subscribe(
+            sub_id, self._share_key(table_ref, ctx, query), make
         )
-        return self._finish_range(sub_id, idx_sub, self._open(sub_id, idx_sub), force)
+        return self._finish_range(
+            sub_id, cast(IndexSubscription, idx_sub), waiter, force
+        )
 
     async def _finish_range(
         self,
@@ -2053,6 +2257,17 @@ class SubscriptionBroker:
                 sub_id=sub_id, index_channel=idx_sub.index_channel
             )
         )
+        return sub_id, rows
+
+    async def _repeat_range(
+        self, sub_id: str, existing: BaseSubscription, force: bool
+    ) -> tuple[str | None, list[dict]]:
+        """重复的共享范围订阅：回它的快照，不读库"""
+        rows = await self._snapshot_of(sub_id, existing)
+        if rows is None:
+            return None, []
+        if not force and not rows:
+            return None, rows
         return sub_id, rows
 
     async def _reread_range(
@@ -2090,8 +2305,9 @@ class SubscriptionBroker:
         """
         获取并订阅整张表。与 `subscribe_range` 语义独立：只订阅一个表级频道，
         不管表有多少行都只占一个订阅，适合"行多、行小、很少变"的表（如所有玩家名字）。
-        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据是这次重新
-        读的（可能落在滞后的副本上），不代表订阅已推给客户端的内容：客户端应沿用已有的订阅
+        如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
+        内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
+        按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
         对象、不要拿它覆盖本地数据（官方 SDK 就是这样）。客户端应该写代码防止重复订阅。
 
         订阅会观察表内任何行的添加/变化/删除，由get_updates调用时处理。
@@ -2162,23 +2378,40 @@ class SubscriptionBroker:
                     sub_id=sub_id
                 )
             )
+            if existing.share_key is not None:
+                return self._repeat_table(table_ref, ctx, sub_id, existing)
             return self._reread_table(table_ref, ctx, sub_id, existing)
 
-        table_channel = servant.table_channel(table_ref)
-        tbl_sub = TableSubscription(
-            table_ref, servant, ctx, table_channel, self._max_table_rows
+        def make() -> TableSubscription:
+            table_channel = servant.table_channel(table_ref)
+            return TableSubscription(
+                table_ref, servant, ctx, table_channel, self._max_table_rows
+            )
+
+        key = self._share_key(table_ref, ctx, ("table",))
+        tbl_sub, waiter = self._subscribe(sub_id, key, make)
+        return self._finish_table(
+            table_ref, ctx, sub_id, cast(TableSubscription, tbl_sub), waiter
         )
-        return self._finish_table(sub_id, tbl_sub, self._open(sub_id, tbl_sub))
 
     async def _finish_table(
         self,
+        table_ref: TableReference,
+        ctx: Context,
         sub_id: str,
         tbl_sub: TableSubscription,
         waiter: asyncio.Future[list[dict[str, Any]] | None],
     ) -> tuple[str | None, list[dict]]:
-        """整表订阅的后半段：表超过行数上限时订阅不成立，回 None"""
+        """
+        整表订阅的后半段：表超过行数上限时订阅不成立，回 None。加入的共享订阅，表已经超过本连接的
+        上限时同样回 None，不加入
+        """
         rows = await self._finish(sub_id, tbl_sub, waiter)
         if rows is None:
+            return None, []
+        if len(rows) > self._max_table_rows:
+            self._warn_table_cap(table_ref, ctx)
+            await self.unsubscribe(sub_id)
             return None, []
         logger.debug(
             _("🆕 [📡Subscription] 订阅了整表: {sub_id} {table_channel}").format(
@@ -2186,6 +2419,35 @@ class SubscriptionBroker:
             )
         )
         return sub_id, rows
+
+    async def _repeat_table(
+        self,
+        table_ref: TableReference,
+        ctx: Context,
+        sub_id: str,
+        existing: BaseSubscription,
+    ) -> tuple[str | None, list[dict]]:
+        """重复的共享整表订阅：回它的快照，不读库；表已超过行数上限时撤掉已有的订阅"""
+        rows = await self._snapshot_of(sub_id, existing)
+        if rows is None:
+            return None, []
+        if len(rows) > self._max_table_rows:
+            self._warn_table_cap(table_ref, ctx)
+            await self.unsubscribe(sub_id)
+            return None, []
+        return sub_id, rows
+
+    def _warn_table_cap(self, table_ref: TableReference, ctx: Context) -> None:
+        logger.warning(
+            _(
+                "⚠️ [📡Subscription] {comp_name}整表订阅行数超过限制"
+                "MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}，拒绝订阅，caller：{caller}"
+            ).format(
+                comp_name=table_ref.comp_name,
+                max_rows=self._max_table_rows,
+                caller=ctx.caller,
+            )
+        )
 
     @staticmethod
     async def _settled(sub_id: str | None, data: Any) -> tuple[str | None, Any]:
@@ -2217,17 +2479,11 @@ class SubscriptionBroker:
         self, table_ref: TableReference, ctx: Context, servant: BackendClient
     ) -> list[dict[str, Any]] | None:
         """全量读取 caller 可见的行（含 _version）；超过 max_table_rows 返回 None"""
-        max_rows = self._max_table_rows
-        rows, truncated = await read_whole_table_(servant, table_ref, max_rows)
+        rows, truncated = await read_whole_table_(
+            servant, table_ref, self._max_table_rows
+        )
         if truncated:
-            logger.warning(
-                _(
-                    "⚠️ [📡Subscription] {comp_name}整表订阅行数超过限制"
-                    "MAX_TABLE_SUBSCRIPTION_ROWS={max_rows}，拒绝订阅，caller：{caller}"
-                ).format(
-                    comp_name=table_ref.comp_name, max_rows=max_rows, caller=ctx.caller
-                )
-            )
+            self._warn_table_cap(table_ref, ctx)
             return None
         # 如果是rls权限，需要对每行数据进行权限判断
         if table_ref.comp_cls.is_rls():
@@ -2255,7 +2511,9 @@ class SubscriptionBroker:
     ) -> None:
         """
         hub 在 tick 末尾调用：本 tick 暂存的更新并进待发区（按 sub_id / row_id，后到的覆盖先到
-        的），唤醒 get_updates。退订了、或退订后同 id 重订成了别的订阅的丢掉
+        的），唤醒 get_updates。退订了、或退订后同 id 重订成了别的订阅的丢掉。
+        本 tick 里退订后又加入同一个共享订阅的，退订前暂存的照样交付：加入时拿到的快照已含
+        它们，客户端按 row_id 再覆盖一次同样的内容，无害
         """
         if self._closed:
             return

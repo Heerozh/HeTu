@@ -51,13 +51,14 @@ Linux 实测（2000 个真实 ws 连接，每人订最近 1024 条聊天；第�
   与同地址的 `TableReference` 互不相等。hub 本来就按 backend 分，不用再区分。
 - **查询**：
   - get：row_id；
-  - range：`(index_name, repr(left), repr(right), int(limit), bool(desc))`；
+  - range：`(index_name, repr(left), repr(right), repr(limit), bool(desc))`；
   - table：空。
 
   不用 sub_id 字符串做键：`right=None` 与字符串 `"None"` 拼出同一个 sub_id，共享后会让别人拿到另一个查询
   的结果。`repr` 在 None / bool / int / float / str 之间不会撞；`1` 与 `1.0` 分成两个键，只是少共享一些。
-  `desc` 按 bool 规范化（客户端传 1 或 True 是一样的）。sub_id 仍按 `make_query_id_` 给客户端，记在各成员
-  上（SDK 的 `MakeSubId` 在预测它，格式不能动）。
+  `desc` 按 bool 规范化（客户端传 1 或 True 是一样的，sub_id 也按真假拼）。反过来，同键一定同 sub_id：
+  limit 若按 `int` 规范化，同一个连接用 `10` 与 `10.0` 两个 sub_id 会加入同一个订阅，成员表按连接记就乱了。
+  sub_id 仍按 `make_query_id_` 给客户端，记在各成员上（SDK 的 `MakeSubId` 在预测它，格式不能动）。
 - **可见性**：订阅的 `rls_ctx` 为 None（组件不是 RLS，或 ctx 是 admin）时可以共享；否则私有。
 
 hub 新增共享登记表 `_shared: dict[键, 订阅]`，私有订阅不进表。订阅关闭时（最后一个成员离开、初始化失败、
@@ -118,7 +119,9 @@ get / range / table 三种订阅都拆成两段（今天只有整表订阅这样
 初始化的结果：
 - 交给等着的成员做回复：共享订阅给就绪时的快照；私有订阅不维护快照，给初始读到的、按它的 ctx 可见的行
   （同今天）。
-- get 的行不存在、整表超过行数上限：订阅不建，等着的成员都回 None，并撤掉成员身份。
+- get 的行不存在、整表超过行数上限：订阅不成立，当场撤掉共享登记（之后同一查询新建），等着的成员都回
+  None、各自退订（退订等 UNSUBSCRIBE 回来才返回，同今天）。就绪后加入的：get 的行已经不在了（快照为
+  空）、整表已超过它自己的上限，同样回 None、不加入。
 - 范围订阅没有行时照样建；`force` 由各成员自己判断（§3.6）。
 
 出错（用户已定：有限重试后失败）：
