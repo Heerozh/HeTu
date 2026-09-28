@@ -849,3 +849,28 @@ async def test_prefetch_reads_tables_concurrently():
     await hub._prefetch_rows(work)
     assert peak == 3, "各表的预读串行了"
     await close_hub(hub, node)
+
+
+async def test_new_channel_gets_reread_when_its_subscribe_lands_mid_tick():
+    """
+    tick 里订阅 S 读了新进入范围的行 X；别的连接订 X 的 SUBSCRIBE 在 S 读完之后、tick 结束之前
+    回来。S 读 X 在前、X 生效在后，其间的写入没有通知，仍要给 S 定向补读：fresh 要按 tick 开始时
+    的生效状态判断，不能按 tick 末尾（设计稿 §4.4）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    s = FakeSub({"idx"})
+    await register(a, node, "S", s)
+    s.new = {"X"}
+    s.gate.clear()  # S 读完、还没返回
+    mq.push_pulled_("idx", None)
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await s.entered.wait()
+    await register(b, node, "P", FakeSub({"X"}))  # X 的 SUBSCRIBE 这时回来，生效
+    assert "X" in hub._effective
+    s.gate.set()
+    await finish(tick, node)
+    s.new = set()
+    await finish(asyncio.create_task(a.get_updates(timeout=TICK)), node)
+    assert ("X", None) in s.calls, "X 在 S 读过之后才生效，要给 S 定向补读"
+    await close_hub(hub, node)
