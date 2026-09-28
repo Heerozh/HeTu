@@ -137,9 +137,15 @@ class Context:
             b = self.user_data.get(ctx_attr, np.nan)
         # struct 行也要按配置的 comp_attr 取值（与 dict 分支一致），不能写死 "owner"，
         # 否则字段名非 owner 的自定义 RLS 会拿错列判断权限。
-        a = type(b)(
-            row.get(comp_attr, np.nan)
-            if type(row) is dict
-            else getattr(row, comp_attr, np.nan)
-        )
+        try:
+            a = type(b)(
+                row.get(comp_attr, np.nan)
+                if type(row) is dict
+                else getattr(row, comp_attr, np.nan)
+            )
+        except TypeError, ValueError:
+            # 行里的值转不成 ctx 那边的类型（比如某个 System 把 user_data 里比较用的值置成了
+            # None）：按不可见处理。判定出错不能当作有权限；抛出的话订阅这一批整个失败，每次
+            # 重试都一样
+            return False
         return bool(rls_func(a, b))

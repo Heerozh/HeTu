@@ -325,21 +325,24 @@ class IndexSubscription(BaseSubscription):
             if inserts
             else [],
         )
-        # 读完才改状态：读出错时 hub 会定向重读，上次的结果原样留着，重读才能再算出同样的进出
-        self.last_range_result = row_ids
+        # 新行都判完（RLS 判定可能出错）才改状态：中途出错时 hub 会定向重读，上次的结果原样
+        # 留着，重读才能再算出同样的进出
+        new_subs: dict[str, RowSubscription] = {}
         for row_id, row in zip(inserts, rows):
             if row is None:
-                self.last_range_result.remove(row_id)
+                row_ids.discard(row_id)
                 continue  # 可能是刚添加就删了
             new_chan_name = servant.row_channel(ref, row_id)
-            new_chans.add(new_chan_name)
             row_sub = RowSubscription(ref, servant, self.rls_ctx, new_chan_name, row_id)
-            self.row_subs[new_chan_name] = row_sub
             # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
             visible = row_sub.decode_row_(row)
             row_sub.pushed = None if visible is None else row_fingerprint_(row)
+            new_subs[new_chan_name] = row_sub
             if visible is not None:
                 rtn[row_id] = visible
+        self.last_range_result = row_ids
+        self.row_subs.update(new_subs)
+        new_chans.update(new_subs)
         for row_id in deletes:
             rem_chan_name = servant.row_channel(ref, row_id)
             rem_chans.add(rem_chan_name)
@@ -439,21 +442,27 @@ class TableSubscription(BaseSubscription):
         ctx = self.rls_ctx
         known = self.known_ids
         last_read = self.last_read
-        self.last_read = {}
+        # 整批都判完（RLS 判定可能出错）才改状态：中途出错时 hub 会定向重读这批，重读才能再算出
+        # 同样的推送（先从 known_ids 撤掉的删除，重读时它的 None 就推不出去了）
+        read_now: dict[int, int | None] = {}
         rtn: dict[int, dict[str, Any] | None] = {}
         for row_id, row in zip(ids, rows):
             if row is not None and (ctx is None or ctx.rls_check(comp_cls, row)):
-                fingerprint = self.last_read[row_id] = row_fingerprint_(row)
+                fingerprint = read_now[row_id] = row_fingerprint_(row)
                 if row_id in known and last_read.get(row_id) == fingerprint:
                     continue  # 上一批刚推过一模一样的（尾随重读）
                 del row["_version"]
                 rtn[row_id] = row
-                known.add(row_id)
             elif row_id in known:
                 # 被删除，或失去RLS权限：客户端持有该行，需要通知删除
                 rtn[row_id] = None
-                known.discard(row_id)
             # 既不可见、客户端也从未持有的行：不推
+        self.last_read = read_now
+        for row_id, row in rtn.items():
+            if row is None:
+                known.discard(row_id)
+            else:
+                known.add(row_id)
         return set(), set(), rtn
 
     async def _resync(self) -> dict[int, dict[str, Any] | None]:
@@ -469,22 +478,25 @@ class TableSubscription(BaseSubscription):
         known = self.known_ids
         rtn: dict[int, dict[str, Any] | None] = {}
         seen: set[int] = set()
+        # 同 get_updated：都判完才改 known_ids，中途出错重试能再算出同样的推送
         for row in rows:
             row_id = int(row["id"])
             seen.add(row_id)
             if ctx is None or ctx.rls_check(comp_cls, row):
                 del row["_version"]
                 rtn[row_id] = row
-                known.add(row_id)
             elif row_id in known:
                 rtn[row_id] = None
-                known.discard(row_id)
         # 超过上限时后面还有行没读到（按 id 升序），只对读到的 id 范围内的已知行判删除
         bound = max(seen) if seen and truncated else None
         for row_id in known - seen:
             if bound is None or row_id <= bound:
                 rtn[row_id] = None
+        for row_id, row in rtn.items():
+            if row is None:
                 known.discard(row_id)
+            else:
+                known.add(row_id)
         self.last_read = {}
         return rtn
 
