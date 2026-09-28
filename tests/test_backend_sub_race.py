@@ -1071,3 +1071,47 @@ async def test_closed_broker_rejects_watch_and_subscribe():
     assert node.sent("subscribe") == []
     assert broker._watch_mq is None
     await close_hub(hub, node)
+
+
+# ============ worker 级的处理循环不能继承第一个连接的 contextvars ============
+
+
+async def test_hub_loop_does_not_inherit_the_first_connection_context():
+    """
+    处理循环在第一个连接的协程里懒建（SubscriptionHub.of）：不能继承那个连接的 contextvars。
+    否则此后整个 worker 的订阅日志都带着这个连接的身份（id / IP），它的 Request 也一直被 hub 任务
+    的 Context 引用着释放不掉；循环因故重新拉起时同理
+    """
+    from hetu.safelogging.filter import log_contex_var
+
+    first_conn = "[1001|203.0.113.7|0]"
+    token = log_contex_var.set(first_conn)  # 第一个连接的日志上下文
+    try:
+        hub, (a,), mq, node = make_brokers(1, autostart=True)
+        s = FakeSub({"C"})
+        await register(a, node, "S", s)
+        assert hub._task is not None
+        assert hub._task.get_context().get(log_contex_var) != first_conn
+
+        seen: list[str] = []
+        real = s.get_updated
+
+        async def spy(channel, payload=None):
+            seen.append(log_contex_var.get())
+            return await real(channel, payload)
+
+        s.get_updated = spy  # type: ignore[method-assign]
+        mq.push_pulled_("C", None)
+        await a.get_updates(timeout=TICK)
+        assert seen and seen[0] != first_conn, "hub 的日志带着第一个连接的身份"
+
+        # 循环因故结束、下一次（另一个连接的）attach 重新拉起：同样不继承
+        old = hub._task
+        old.cancel()
+        await asyncio.wait([old])
+        await register(a, node, "S2", FakeSub({"D"}))
+        assert hub._task is not old
+        assert hub._task.get_context().get(log_contex_var) != first_conn
+    finally:
+        log_contex_var.reset(token)
+    await close_hub(hub, node)
