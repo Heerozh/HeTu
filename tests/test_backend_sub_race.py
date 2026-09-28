@@ -1115,3 +1115,88 @@ async def test_hub_loop_does_not_inherit_the_first_connection_context():
     finally:
         log_contex_var.reset(token)
     await close_hub(hub, node)
+
+
+# ============ 错误日志：按类别限流，静默后补一条恢复日志 ============
+
+
+def hub_records(caplog, level: int = logging.ERROR) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "HeTu.root" and r.levelno >= level]
+
+
+async def test_new_kind_of_error_is_not_muted_by_a_chronic_one(caplog):
+    """
+    一个订阅持续出错（每个 interval 重试一次）时又冒出另一类错误：新的那类要照样记下来（带栈），
+    不能因为限流窗口被慢性错误占着就只算进"另有 N 次出错未记"
+    """
+    broker, mq, node = make_broker()
+    chronic = FlakySub({"C"}, fails=10**6)
+    await register(broker, node, "S", chronic)
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        await broker.get_updates(timeout=0.05)  # 慢性错误开始刷
+
+        class OtherError(Exception):
+            pass
+
+        other = FakeSub({"D"})
+
+        async def fail_otherwise(channel, payload=None):
+            raise OtherError("a different failure")
+
+        other.get_updated = fail_otherwise  # type: ignore[method-assign]
+        await register(broker, node, "O", other)
+        mq.push_pulled_("D", None)
+        await broker.get_updates(timeout=0.05)
+    messages = [r.getMessage() for r in hub_records(caplog)]
+    assert any("read failed" in m for m in messages)
+    new_kind = [
+        r for r in hub_records(caplog) if "a different failure" in r.getMessage()
+    ]
+    assert new_kind, "新的一类错误被慢性错误的限流窗口吞了"
+    assert new_kind[0].exc_info is not None
+    await close_all(broker, node)
+
+
+async def test_errors_that_stop_get_a_recovery_log(caplog, monkeypatch):
+    """出错停下来之后补一条恢复日志，带上最后一条日志之后压下的次数（同 SQLite 轮询）"""
+    monkeypatch.setattr("hetu.data.sub._ERROR_LOG_INTERVAL", 0.1)
+    broker, mq, node = make_broker()
+    sub = FlakySub({"C"}, fails=5)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.INFO, logger="HeTu.root"):
+        assert await broker.get_updates(timeout=1) == {"S": {1: {"v": 1}}}
+        await asyncio.sleep(0.3)  # 静默超过一个限流间隔
+    recovered = [
+        r.getMessage()
+        for r in hub_records(caplog, logging.INFO)
+        if r.levelno < logging.ERROR and "✅" in r.getMessage()
+    ]
+    assert recovered, "出错停了没有恢复日志"
+    await close_all(broker, node)
+
+
+async def test_loop_fallback_log_does_not_claim_requeue(caplog):
+    """处理循环兜底记的 tick 异常：那批通知已经弹出、丢了，日志不能说"已重新入队稍后重试\""""
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    await register(a, node, "S", FakeSub({"C"}))
+    real = hub._collect
+    broken: list[None] = []
+
+    def collect_once_broken(batch):
+        if not broken:
+            broken.append(None)
+            raise RuntimeError("bug in collect")
+        return real(batch)
+
+    hub._collect = collect_once_broken  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        mq.push_pulled_("C", None)
+        await wait_until(lambda: broken)
+        await asyncio.sleep(0.01)
+    messages = [r.getMessage() for r in hub_records(caplog)]
+    assert any("bug in collect" in m for m in messages)
+    assert not any("已重新入队" in m for m in messages if "bug in collect" in m)
+    await close_hub(hub, node)
