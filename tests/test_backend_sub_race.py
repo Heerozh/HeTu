@@ -874,3 +874,122 @@ async def test_new_channel_gets_reread_when_its_subscribe_lands_mid_tick():
     await finish(asyncio.create_task(a.get_updates(timeout=TICK)), node)
     assert ("X", None) in s.calls, "X 在 S 读过之后才生效，要给 S 定向补读"
     await close_hub(hub, node)
+
+
+# ============ tick 里逃出 _process 的异常（bug）：不能留下半截的 tick ============
+
+
+class BadStageSub(FakeSub):
+    """get_updated 正常返回，但暂存它的更新时出错（模拟 _process 里 get_updated 之外的 bug）"""
+
+
+def break_stage_for(hub: SubscriptionHub, bad: BaseSubscription):
+    real = hub._stage
+
+    def stage(tick, sub, updates):
+        if sub is bad:
+            raise RuntimeError("bug in bookkeeping")
+        return real(tick, sub, updates)
+
+    hub._stage = stage  # type: ignore[method-assign]
+
+
+def hub_errors(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "HeTu.root"]
+
+
+async def test_escaped_error_in_eager_task_is_logged(caplog):
+    """
+    缓存命中、当场跑完的订阅（eager task）处理时逃出异常：要记日志，本 tick 别的订阅照常交付
+    （以前 eager 完成的 task 不进 pending，它的异常没人取，悄无声息地丢了）
+    """
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    good, bad = FakeSub({"C"}), BadStageSub({"C"})
+    await register(broker, node, "G", good)
+    await register(broker, node, "B", bad)
+    good.updates, bad.updates = {1: {"v": 1}}, {2: {"v": 2}}
+    break_stage_for(hub, bad)
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await finish(
+            asyncio.create_task(broker.get_updates(timeout=TICK)), node
+        )
+    assert updates == {"G": {1: {"v": 1}}}
+    assert any("bug in bookkeeping" in msg for msg in hub_errors(caplog))
+    await close_all(broker, node)
+
+
+async def test_escaped_error_in_pending_task_does_not_abort_the_tick(caplog):
+    """
+    要读库的订阅（挂起的 task）处理时逃出异常：不能中止整个 tick。别的还在读的订阅等它们跑完、
+    照常交付，tick 末尾照常订上新增的频道（以前 gather 一抛出 tick 就结束了：_settle_channels 被
+    跳过，新行的频道永远订不上；没跑完的 task 之后把更新暂存进已经交付过的 tick，推送丢了、
+    指纹却已推进）
+    """
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    slow, bad = FakeSub({"C"}), BadStageSub({"C"})
+    await register(broker, node, "S", slow)
+    await register(broker, node, "B", bad)
+    slow.new, slow.updates = {"Y"}, {1: {"v": 1}}
+    bad.updates = {2: {"v": 2}}
+    slow.gate.clear()
+    bad.gate.clear()
+    break_stage_for(hub, bad)
+    mq.push_pulled_("C", None)
+    tick = asyncio.create_task(broker.get_updates(timeout=1))
+    async with asyncio.timeout(1):
+        await slow.entered.wait()
+        await bad.entered.wait()
+    bad.gate.set()  # 出错的那个先跑完
+    await settle()
+    slow.gate.set()
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        assert await finish(tick, node) == {"S": {1: {"v": 1}}}
+    await wait_sent(node, "subscribe", "Y")
+    node.ack("subscribe", "Y")
+    await wait_until(lambda: "Y" in hub._effective)
+    assert any("bug in bookkeeping" in msg for msg in hub_errors(caplog))
+    await close_all(broker, node)
+
+
+async def test_processing_loop_restarts_after_it_dies(monkeypatch):
+    """后台处理循环因 bug 意外结束：过一会儿自己重新拉起，不用等下一次有连接订阅"""
+    monkeypatch.setattr("hetu.data.sub._RUN_RESTART_DELAY", 0.01, raising=False)
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    real = mq.get_message
+    broken = []
+
+    async def get_message_once_broken():
+        if not broken:
+            broken.append(1)
+            raise RuntimeError("bug in the loop")
+        return await real()
+
+    mq.get_message = get_message_once_broken  # type: ignore[method-assign]
+    first = hub._task
+    assert first is not None
+    hub._task = None  # 按新的 get_message 重新起一个，让它死掉
+    first.cancel()
+    await asyncio.wait([first])
+    hub._start()
+    dead = hub._task
+    async with asyncio.timeout(1):
+        await asyncio.wait([dead])
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        assert await a.get_updates(timeout=1) == {"S": {1: {"v": 1}}}
+    await close_hub(hub, node)
+
+
+async def test_log_error_survives_broken_translation(monkeypatch, caplog):
+    """翻译出来的日志模板占位符对不上（.po 由 CD 机翻同步）：记日志不能抛，退回原文"""
+    hub, _brokers, _mq, _node = make_brokers(0)
+    monkeypatch.setattr("hetu.data.sub._", lambda s: "{bogus} " + s)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        hub._log_error("出错了", RuntimeError("boom"))
+    assert any("boom" in r.getMessage() for r in caplog.records)
