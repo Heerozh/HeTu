@@ -25,13 +25,16 @@ SnowflakeID().init(1, 0)
 INTERVAL = 1 / MQClient.UPDATE_FREQUENCY
 
 
-def new_broker(backend: Backend, **kwargs) -> SubscriptionBroker:
+def new_broker(
+    backend: Backend, autostart: bool = False, **kwargs
+) -> SubscriptionBroker:
     """
-    每个 broker 独享一个手动模式的 hub：不调 get_updates，通知就留在队列里；数频道、倒拨时刻
-    的断言也只看本连接（同改成 worker 级订阅器之前每个连接一个队列）
+    每个 broker 独享一个 hub，默认手动模式：不调 get_updates，通知就留在队列里；数频道、倒拨时刻
+    的断言也只看本连接（同改成 worker 级订阅器之前每个连接一个队列）。autostart=True 走生产的
+    后台处理循环
     """
     return SubscriptionBroker(
-        backend, hub=SubscriptionHub(backend, autostart=False), **kwargs
+        backend, hub=SubscriptionHub(backend, autostart=autostart), **kwargs
     )
 
 
@@ -45,18 +48,24 @@ def channel_subs(broker: SubscriptionBroker) -> dict[str, set[str]]:
 
 
 @pytest.fixture
-async def broker(mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
-    """初始化订阅管理器的fixture"""
-
-    # 初始化订阅器
-    broker = new_broker(mod_auto_backend("main"))
+async def broker(request, mod_auto_backend) -> AsyncGenerator[SubscriptionBroker]:
+    """初始化订阅管理器的fixture。默认手动模式的 hub，用 both_hub_modes 参数化的用例两种各跑一遍"""
     # 清空row订阅缓存
     RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
+    # 初始化订阅器
+    mode = getattr(request, "param", "manual")
+    broker = new_broker(mod_auto_backend("main"), autostart=mode == "loop")
 
     yield broker
 
     await broker.close()
     await broker._hub.close()
+
+
+# 不看队列、不手动驱动 tick 的用例：手动模式与生产的后台处理循环（"loop"）各跑一遍。手动模式由
+# get_updates 自己跑 tick，生产路径上 tick 里的异常只记日志，只在手动模式下测会漏掉只有后台循环
+# 才有的问题
+both_hub_modes = pytest.mark.parametrize("broker", ["manual", "loop"], indirect=True)
 
 
 async def updates_until(
@@ -160,6 +169,7 @@ async def test_subscribe_get(broker: SubscriptionBroker, filled_item_ref, admin_
     assert len(broker._hub.mq.subscribed_channels) == 1
 
 
+@both_hub_modes
 async def test_subscribe_get_by_id(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -258,6 +268,7 @@ async def test_subscribe_mq_merge_message(
     assert await broker.get_updates(timeout=0.3) == {}
 
 
+@both_hub_modes
 async def test_subscribe_updates(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -420,6 +431,7 @@ async def test_cancel_subscribe(broker: SubscriptionBroker, filled_item_ref, adm
     assert len(broker._hub.mq.subscribed_channels) == 0
 
 
+@both_hub_modes
 async def test_subscribe_get_rls(
     broker: SubscriptionBroker, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
@@ -435,6 +447,7 @@ async def test_subscribe_get_rls(
     assert sub_id is None
 
 
+@both_hub_modes
 async def test_subscribe_range_rls(
     broker: SubscriptionBroker, filled_item_ref, user_id10_ctx
 ):
@@ -455,6 +468,7 @@ async def test_subscribe_range_rls(
     assert len(broker._subs[sub_id].row_subs) == 24  # type: ignore
 
 
+@both_hub_modes
 async def test_subscribe_get_rls_update(
     broker: SubscriptionBroker,
     filled_item_ref,
@@ -479,6 +493,7 @@ async def test_subscribe_get_rls_update(
     assert updates[sub_id][row3_id] is None
 
 
+@both_hub_modes
 async def test_query_subscribe_rls_lost(
     broker: SubscriptionBroker,
     filled_item_ref,
@@ -513,6 +528,7 @@ async def test_query_subscribe_rls_lost(
     assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
+@both_hub_modes
 async def test_query_subscribe_rls_gain(
     broker: SubscriptionBroker,
     filled_item_ref,
@@ -568,6 +584,7 @@ async def test_query_subscribe_rls_gain(
     await updates_until(broker, check_insert)
 
 
+@both_hub_modes
 async def test_query_subscribe_rls_lost_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
@@ -601,6 +618,7 @@ async def test_query_subscribe_rls_lost_without_index(
     assert len(broker._subs[sub_id].row_subs) == 25  # type: ignore
 
 
+@both_hub_modes
 async def test_query_subscribe_rls_gain_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
@@ -797,6 +815,7 @@ async def test_subscribe_point_query_channel(
     assert index_chan in broker._hub.mq.subscribed_channels
 
 
+@both_hub_modes
 async def test_subscribe_point_query_on_id_uses_index_channel(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -839,6 +858,7 @@ async def test_subscribe_point_query_on_id_uses_index_channel(
     await updates_until(broker, inserted)
 
 
+@both_hub_modes
 async def test_subscribe_point_query_not_woken_by_other_values(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -897,6 +917,7 @@ async def test_subscribe_point_query_not_woken_by_other_values(
     await updates_until(broker, deleted)
 
 
+@both_hub_modes
 async def test_subscribe_point_query_string(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -965,6 +986,7 @@ async def test_subscribe_point_query_string(
     await updates_until(broker, renamed_back)
 
 
+@both_hub_modes
 async def test_point_query_leave_backfills_limit(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -1082,6 +1104,7 @@ async def _owner10_with_two_hidden_rows(
     return idx_sub, hidden
 
 
+@both_hub_modes
 async def test_point_query_hidden_row_change_is_not_pushed(
     broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
 ):
@@ -1099,6 +1122,7 @@ async def test_point_query_hidden_row_change_is_not_pushed(
     assert len(idx_sub.row_subs) == 25
 
 
+@both_hub_modes
 async def test_point_query_hidden_row_leaving_is_not_pushed(
     broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
 ):
@@ -1119,6 +1143,7 @@ async def test_point_query_hidden_row_leaving_is_not_pushed(
     assert idx_sub.last_range_result.isdisjoint({moved, deleted})
 
 
+@both_hub_modes
 async def test_range_query_hidden_rows_are_not_pushed(
     broker: SubscriptionBroker, filled_rls_ref, user_id11_ctx
 ):
@@ -1160,6 +1185,7 @@ async def test_range_query_hidden_rows_are_not_pushed(
     assert idx_sub.last_range_result.isdisjoint({moved, deleted})
 
 
+@both_hub_modes
 async def test_point_query_on_undeclared_index_falls_back(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
@@ -1216,6 +1242,7 @@ async def test_point_query_on_undeclared_index_falls_back(
     await updates_until(broker, moved_out)
 
 
+@both_hub_modes
 async def test_point_query_on_id_warns_to_use_get(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
 ):
@@ -1399,6 +1426,7 @@ async def test_subscribe_table_coexist_range(
     await updates_until(broker, table_only)
 
 
+@both_hub_modes
 async def test_subscribe_table_rls(
     broker: SubscriptionBroker,
     filled_item_ref,
@@ -1875,6 +1903,7 @@ async def test_table_trailing_reread_pushes_no_duplicate(
     assert await broker.get_updates(timeout=0.6) == {}
 
 
+@both_hub_modes
 async def test_reinserted_row_with_restarted_version_is_pushed(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -1920,6 +1949,7 @@ def _lagging_once(real, stale):
     return read
 
 
+@both_hub_modes
 async def test_subscribe_get_followup_reread_fixes_lagging_initial_read(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -1950,6 +1980,7 @@ async def test_subscribe_get_followup_reread_fixes_lagging_initial_read(
     await updates_until(broker, caught_up)
 
 
+@both_hub_modes
 async def test_subscribe_range_followup_reread_fixes_lagging_initial_read(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -2020,6 +2051,7 @@ async def test_subscribe_table_initial_read_waits_lag_budget(
     assert read_at - acked_at >= INTERVAL * 0.9
 
 
+@both_hub_modes
 async def test_subscribe_table_defers_notifications_during_initial_read(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -2072,6 +2104,7 @@ async def test_subscribe_table_defers_notifications_during_initial_read(
     await updates_until(broker, caught_up)
 
 
+@both_hub_modes
 async def test_subscribe_followup_reread_pushes_nothing_when_fresh(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):
@@ -2559,6 +2592,7 @@ async def test_index_sub_skips_row_gone_before_read(
     assert new_channel in idx_sub.row_subs
 
 
+@both_hub_modes
 async def test_subscription_rejects_foreign_channel(
     broker: SubscriptionBroker, filled_item_ref, admin_ctx
 ):

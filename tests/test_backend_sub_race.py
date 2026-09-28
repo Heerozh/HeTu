@@ -385,6 +385,32 @@ async def test_resubscribe_with_same_id_mid_tick_skips_old_updates():
     await close_hub(hub, node)
 
 
+async def _deliver_one_update(autostart: bool) -> dict[str, dict]:
+    """订一个频道、来一条通知，返回连接拿到的更新：走一遍 hub 的 tick（处理、暂存、交付）"""
+    hub, (broker,), mq, node = make_brokers(1, autostart=autostart)
+    sub = FakeSub({"C"})
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    try:
+        return await broker.get_updates(timeout=TICK)
+    finally:
+        await close_hub(hub, node)
+
+
+@pytest.mark.parametrize("autostart", [True, False], ids=["loop", "manual"])
+def test_tick_runs_on_uvloop(autostart: bool):
+    """
+    生产在 Linux / macOS 上跑 uvloop（Sanic 默认启用），hub 的 tick 在它上面照常处理、交付。
+    Windows 没有 uvloop 跳过（本机的异步用例跑在 conftest 的 UvloopSignatureLoop 上兜着）
+    """
+    uvloop = pytest.importorskip("uvloop")
+    updates = asyncio.run(
+        _deliver_one_update(autostart), loop_factory=uvloop.new_event_loop
+    )
+    assert updates == {"S": {1: {"v": 1}}}
+
+
 async def test_manual_hub_runs_one_tick_at_a_time():
     """手动模式下两个门面并发驱动同一个 hub：不会同时跑两个 tick"""
     hub, (a, b), mq, node = make_brokers(2)
