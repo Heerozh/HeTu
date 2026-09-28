@@ -269,3 +269,72 @@ async def test_range_read_failure_keeps_state_for_retry(
     assert failures == [1]
     assert updates[sub_id][new_id]["name"] == "New"
     await broker.close()
+
+
+def _poison_rows(stack: ExitStack, backend: Backend, bad_ids: set[int]) -> None:
+    """
+    订阅读行（各 servant 的 get / get_many）碰到 bad_ids 里的行就抛解码错误，别的行照常：
+    模拟一行坏数据（比如 direct_set 不做类型检查写进去的值，TYPED_DICT 解码时 ValueError）
+    """
+    for servant in backend._servants:  # type: ignore[reportPrivateUsage]
+        real_get, real_many = servant.get, servant.get_many
+
+        async def get(ref, row_id, *args, _real=real_get, **kwargs):
+            if int(row_id) in bad_ids:
+                raise ValueError("could not convert string to float: 'full'")
+            return await _real(ref, row_id, *args, **kwargs)
+
+        async def get_many(ref, row_ids, *args, _real=real_many, **kwargs):
+            row_ids = list(row_ids)
+            if bad_ids.intersection(int(i) for i in row_ids):
+                raise ValueError("could not convert string to float: 'full'")
+            return await _real(ref, row_ids, *args, **kwargs)
+
+        stack.enter_context(patch.object(servant, "get", get))
+        stack.enter_context(patch.object(servant, "get_many", get_many))
+
+
+async def test_unreadable_row_does_not_hold_back_its_batch(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """
+    一行读不出来（坏数据解码失败）：只卡住订了它的订阅，与它同一批弹出的别的行照常推送。以前
+    预读出错整批原样重新入队，同批的行跟着一次次重试，永远推不出去（设计稿 §6）
+    """
+    backend: Backend = mod_auto_backend("main")
+    RowSubscription._RowSubscription__cache = ContextVar("user_row_cache")  # type: ignore
+    hub = SubscriptionHub(
+        backend, autostart=False
+    )  # 手动驱动 tick，两条通知保证同一批弹出
+    broker = SubscriptionBroker(backend, hub=hub)
+    try:
+        sub_bad, bad = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "time", 112
+        )
+        sub_ok, ok = await broker.subscribe_get(filled_item_ref, admin_ctx, "time", 113)
+        assert sub_bad and bad and sub_ok and ok
+        assert await broker.get_updates(timeout=INTERVAL * 3) == {}  # 补读先消化掉
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(filled_item_ref.comp_cls)
+            for row_id, qty in ((bad["id"], 71), (ok["id"], 72)):
+                row = await repo.get(id=row_id)
+                assert row
+                row.qty = qty
+                await repo.update(row)
+        mq = hub.mq
+        channels = [
+            cast(RowSubscription, broker._subs[sub_id]).channel
+            for sub_id in (sub_bad, sub_ok)
+        ]
+        await wait_until(lambda: all(ch in mq.pulled_set for ch in channels), timeout=3)
+        for i, (received_at, channel) in enumerate(mq.pulled_deque):
+            mq.pulled_deque[i] = (received_at - INTERVAL, channel)  # 都已过合批窗口
+
+        with ExitStack() as stack:
+            _poison_rows(stack, backend, {int(bad["id"])})
+            updates = await settled_updates(broker, timeout=3)
+        assert updates.get(sub_ok, {}).get(ok["id"], {}).get("qty") == 72
+        assert sub_bad not in updates
+    finally:
+        await broker.close()
+        await hub.close()
