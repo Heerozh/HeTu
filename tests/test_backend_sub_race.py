@@ -5,6 +5,7 @@ tick 里的 await 间隙与接收协程（客户端的 sub/unsub）交错、几�
 """
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, cast
@@ -43,6 +44,23 @@ class FakeSub(BaseSubscription):
     @property
     def channels(self) -> set[str]:
         return set(self._channels)
+
+
+class FlakySub(FakeSub):
+    """前 fails 次 get_updated 读库出错（模拟 Redis 抖动），之后照常"""
+
+    def __init__(self, channels: set[str], fails: int = 1):
+        super().__init__(channels)
+        self.fails = fails
+
+    async def get_updated(
+        self, channel: str, payload: set[str] | None = None
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
+        if self.fails > 0:
+            self.fails -= 1
+            self.calls.append((channel, payload))
+            raise ConnectionError("read failed")
+        return await super().get_updated(channel, payload)
 
 
 # 一个 tick：get_updates 碰到没有任何更新的批次会接着等下一批，给个总时长让它结束
@@ -389,3 +407,62 @@ async def test_manual_hub_runs_one_tick_at_a_time():
     assert await ta == {"A": {1: {"a": 1}}}
     assert await tb == {"B": {2: {"b": 1}}}
     await close_hub(hub, node)
+
+
+# ============ 错误处理（设计稿 §6）：重读，不断开 ============
+
+
+async def test_failed_read_is_retried_without_raising(caplog):
+    """订阅读库出错（Redis 抖动）：不抛给连接、不断开，记日志；一个 interval 后给它定向重读
+    这个频道（表级频道带原来的 row_id），这次读成功照常推送"""
+    broker, mq, node = make_broker()
+    row, table = FlakySub({"R"}), FlakySub({"T"})
+    await register(broker, node, "R", row)
+    await register(broker, node, "T", table)
+    row.updates = {1: {"v": 1}}
+    table.updates = {5: {"v": 5}}
+    mq.push_pulled_("R", None)
+    mq.push_pulled_("T", ["5"])
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await broker.get_updates(timeout=TICK)
+    assert updates == {"R": {1: {"v": 1}}, "T": {5: {"v": 5}}}
+    assert row.calls == [("R", None), ("R", None)]
+    assert table.calls == [("T", {"5"}), ("T", {"5"})]
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+    await close_all(broker, node)
+
+
+async def test_repeated_read_errors_are_logged_rate_limited(caplog):
+    """Redis 挂着时每个 tick 都会出错、都会重试：错误日志限流，间隔内只记一条（带栈），别刷屏"""
+    broker, mq, node = make_broker()
+    sub = FlakySub({"C"}, fails=5)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await broker.get_updates(timeout=1)
+    assert updates == {"S": {1: {"v": 1}}}
+    assert len(sub.calls) == 6
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    await close_all(broker, node)
+
+
+async def test_failed_subscribe_of_new_channel_is_repaired():
+    """tick 末尾订阅新进入范围的行频道失败：不抛给连接；频道留在频道表里重新入队，之后弹出时
+    先补订，订上之后再让订着它的订阅重读"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    s = FakeSub({"idx"})
+    await register(broker, node, "S", s)
+    s.new = {"X"}
+    node.fail_next = ConnectionError("send failed")  # 下一次 SUBSCRIBE 发送失败
+    mq.push_pulled_("idx", None)
+    await finish(asyncio.create_task(broker.get_updates(timeout=TICK)), node)
+    # 发送失败的那次没记进 sent，补订的这次记上了
+    assert node.sent("subscribe").count("X") == 1
+    assert "X" in mq.subscribed_channels
+    assert hub._channel_subs["X"] == {s}
+    assert ("X", None) in s.calls, "补订之后要重读，失败期间的写入没有通知"
+    await close_all(broker, node)

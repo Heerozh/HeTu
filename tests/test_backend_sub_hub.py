@@ -207,3 +207,65 @@ async def test_loop_restarts_on_next_attach(
     updates = await settled_updates(broker, timeout=3)
     assert updates[sub_id][row_id]["qty"] == 558
     await broker.close()
+
+
+def _fail_get_many_once(stack: ExitStack, backend: Backend) -> list[int]:
+    """各 servant 的 get_many（订阅读行）下一次调用抛读错误，之后照常；返回记失败次数的列表。
+    事务读走 get_many_array_，不受影响"""
+    failures: list[int] = []
+    for servant in backend._servants:  # type: ignore[reportPrivateUsage]
+        real = servant.get_many
+
+        async def flaky(*args, _real=real, **kwargs):
+            if not failures:
+                failures.append(1)
+                raise ConnectionError("read failed")
+            return await _real(*args, **kwargs)
+
+        stack.enter_context(patch.object(servant, "get_many", flaky))
+    return failures
+
+
+async def test_prefetch_failure_is_retried(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """预读行出错：本批原样重新入队，一个 interval 后重试，推送照常到达，连接不断（设计稿 §6）"""
+    backend = hub._backend
+    broker = SubscriptionBroker(backend, hub=hub)
+    sub_id, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "time", 110)
+    assert sub_id
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    with ExitStack() as stack:
+        failures = _fail_get_many_once(stack, backend)
+        row_id = await _set_qty(backend, filled_item_ref, 559)
+        updates = await settled_updates(broker, timeout=3)
+    assert failures == [1]
+    assert updates[sub_id][row_id]["qty"] == 559
+    await broker.close()
+
+
+async def test_range_read_failure_keeps_state_for_retry(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """范围订阅重跑比对时读新进入的行出错：比对的状态不能先改掉，重试要能再算出同样的进出，
+    新行照常推到（以前出错就断连接、状态跟着丢，现在是重读，见设计稿 §6）"""
+    backend = hub._backend
+    comp = filled_item_ref.comp_cls
+    broker = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    assert sub_id and len(rows) == 25
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    with ExitStack() as stack:
+        failures = _fail_get_many_once(stack, backend)
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            row = comp.new_row()
+            row.name, row.owner, row.time = "New", 10, 999
+            await repo.insert(row)
+        new_id = int(row.id)
+        updates = await settled_updates(broker, timeout=3)
+    assert failures == [1]
+    assert updates[sub_id][new_id]["name"] == "New"
+    await broker.close()
