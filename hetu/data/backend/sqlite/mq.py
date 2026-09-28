@@ -272,8 +272,8 @@ class SQLiteNotifyHub(MQHub):
 @final
 class SQLiteMQClient(HubMQClient):
     """
-    每个用户连接一个实例：只是本连接订阅集合 + 本地消息队列，
-    通知表的轮询由本进程共享的 `SQLiteNotifyHub` 负责。
+    每个 worker 级订阅器一个实例（连接做服务端内部关注时另有自己的一个）：只是订阅集合 +
+    本地消息队列，通知表的轮询由本进程共享的 `SQLiteNotifyHub` 负责。
     """
 
     LOG_TAG = "💾SQLite"

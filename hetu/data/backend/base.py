@@ -8,26 +8,26 @@
                                Backend相关结构
     ┌─────────────────┐      ┌────────────────┐       ┌───────────────────┐
     │     MQClient    │      │  BackendClient │       │  TableMaintenance │
-    │消息队列连接(每连接)│─────►│  数据库连接/操作 │◄──────┤    组件表维护类     │
+    │消息队列(每个订阅器)│─────►│  数据库连接/操作 │◄──────┤    组件表维护类     │
     └─────────────────┘      └────────────────┘       └───────────────────┘
     继承此类实现各种通知队列      继承此类实现各种数据库         继承此类实现表维护
             ▲                        ▲                         ▲
             │                        └───────────┬─────────────┘
  数据订阅结构 │                                    │ 数据事务结构
   ┌─────────┴──────────┐               ┌─────────┴──────────┐
-  │ SubscriptionBroker │               │      Backend       │
-  │ 每连接一个的消息管理器 │               │  数据库连接管理器    │ 每个进程一个Backend
+  │  SubscriptionHub   │               │      Backend       │
+  │ 每个进程一个的订阅处理器 │               │  数据库连接管理器    │ 每个进程一个Backend
   └────────────────────┘               └────────────────────┘
             ▲                                    ▲
   ┌─────────┴──────────┐                ┌────────┴─────────┐
-  │ 用户连接(Websocket) │                │      Session     │
-  │   等待Subs返回消息   │                │     事务处理类     │
+  │ SubscriptionBroker │                │      Session     │
+  │ 每个连接一个的订阅门面 │                │     事务处理类     │
   └────────────────────┘                └──────────────────┘
-                                                 ▲
-                                       ┌─────────┴──────────┐
-                                       │  SessionRepository │
-                                       │   组件相关事务操作    │
-                                       └────────────────────┘
+            ▲                                    ▲
+  ┌─────────┴──────────┐               ┌─────────┴──────────┐
+  │ 用户连接(Websocket) │               │  SessionRepository │
+  │   等待Subs返回消息   │               │   组件相关事务操作    │
+  └────────────────────┘               └────────────────────┘
 
 """
 
@@ -1083,11 +1083,12 @@ class TableMaintenance:
 
 class MQClient:
     """
-    连接到消息队列的客户端，每个用户连接一个实例。
+    连接到消息队列的客户端。每个 worker 级订阅器（`hetu.data.sub.SubscriptionHub`）一个实例，
+    连接做服务端内部关注（`watch`）时另有自己的一个。
     继承此类实现数据库写入通知和消息队列的结合。
 
     本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQLite 的
-    `SQLiteNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
+    `SQLiteNotifyHub`）收到本客户端订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
 
     尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是
@@ -1234,8 +1235,8 @@ class MQClient:
         interval = 1 / self.UPDATE_FREQUENCY
         while True:
             if not dq:
-                # 没数据就等 push_pulled_ 的信号。每个连接一个本协程，空闲时定时醒来看队列
-                # 是纯粹的底噪（每 1000 个空闲连接约占一个核的 1.6%），等信号则零成本。
+                # 没数据就等 push_pulled_ 的信号。空闲时定时醒来看队列是纯粹的底噪（以前每个
+                # 连接一个本协程时，每 1000 个空闲连接约占一个核的 1.6%），等信号则零成本。
                 # clear 与 wait 之间没有 await，不会漏掉中间到达的消息
                 self._arrived.clear()
                 await self._arrived.wait()
@@ -1383,7 +1384,7 @@ class MQHub:
 
 class HubMQClient(MQClient):
     """
-    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录本连接订阅了哪些频道，
+    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录自己订阅了哪些频道，
     订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
     """
 
@@ -1401,7 +1402,7 @@ class HubMQClient(MQClient):
         self._closed = False
 
     async def close(self):
-        """取消本连接的全部订阅（含内部关注的）。连接拆除路径上调用，后端出错也不抛"""
+        """取消本客户端的全部订阅（含内部关注的）。拆除路径上调用，后端出错也不抛"""
         self._closed = True
         channels = self.subscribed | self._watched
         self.subscribed = set()

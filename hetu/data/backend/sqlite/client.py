@@ -305,8 +305,9 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
     @override
     def get_mq_client(self) -> SQLiteMQClient:
         """
-        获取消息队列连接（每个用户连接一个）。本进程对本库只有一个 `SQLiteNotifyHub`（一个通知表
-        轮询任务）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        获取消息队列连接（worker 级订阅器取一个，连接做内部关注时各取一个）。本进程对本库
+        只有一个 `SQLiteNotifyHub`（一个通知表轮询任务）在首次调用时懒建，之后每次返回一个挂在
+        它上面的轻量 MQClient。
         """
         self._ensure_open()
         from .mq import SQLiteMQClient, SQLiteNotifyHub

@@ -554,8 +554,9 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
 
     def get_mq_client(self) -> RedisMQClient:
         """
-        获取消息队列连接（每个用户连接一个）。本进程对本地址只有一个 `PubSubHub`
-        （一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        获取消息队列连接（worker 级订阅器取一个，连接做内部关注时各取一个）。本进程对本地址
+        只有一个 `PubSubHub`（一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的
+        轻量 MQClient。
         """
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))

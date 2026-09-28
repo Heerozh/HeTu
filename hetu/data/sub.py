@@ -1031,6 +1031,10 @@ class SubscriptionBroker:
     里处理，本对象是连接的门面：权限检查、sub_id、同连接的重复订阅与订阅数，以及待发区——hub 在
     tick 末尾把本连接的更新交到这里，`get_updates` 取走。
 
+    The per-connection facade of component subscriptions. The subscriptions themselves are
+    processed by the worker-wide `SubscriptionHub`; this object handles permissions, sub
+    ids, per-connection duplicates and quotas, and the outbox that `get_updates` drains.
+
     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况，客户端会在 1~2 个
     `1/UPDATE_FREQUENCY`（默认 100~200ms）内收到最新数据；Redis 压力过大（副本复制延迟
     超过约 100ms）时，客户端可能残留旧数据，直到该行下次变更。需要强一致的判断请放在
@@ -1067,6 +1071,7 @@ class SubscriptionBroker:
         hub: SubscriptionHub | None
             处理订阅的 worker 级订阅器，默认取 backend 共享的那个（`SubscriptionHub.of`）。
             测试可以传入自己的实例。
+            The worker-level engine; defaults to the one shared by `backend`.
         """
         self._backend = backend
         self._hub = hub if hub is not None else SubscriptionHub.of(backend)

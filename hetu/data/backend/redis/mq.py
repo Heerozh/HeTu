@@ -169,8 +169,8 @@ class PubSubHub(MQHub):
 @final
 class RedisMQClient(HubMQClient):
     """
-    每个用户连接一个实例：只是本连接订阅集合 + 本地消息队列，
-    真正的 Redis pubsub 由本进程共享的 `PubSubHub` 持有。
+    每个 worker 级订阅器一个实例（连接做服务端内部关注时另有自己的一个）：只是订阅集合 +
+    本地消息队列，真正的 Redis pubsub 由本进程共享的 `PubSubHub` 持有。
     """
 
     LOG_TAG = "💾Redis"
