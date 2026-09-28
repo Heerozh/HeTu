@@ -966,26 +966,38 @@ class SubscriptionHub:
                 channels, row_ids = by_table.setdefault(row_sub.table_ref, ([], []))
                 channels.append(channel)
                 row_ids.append(row_sub.row_id)
-        if not by_table:
+        if len(by_table) == 1:
+            await self._prefetch_table(*next(iter(by_table.items())))
+        elif by_table:
+            # 各表并发读、各选一个随机副本：串行的话 worker 里每个连接的交付都要等所有表的往返
+            # 加起来（每张表的读在 _prefetch_table 里自己兜住错误，gather 不会中途抛出）
+            await asyncio.gather(
+                *(self._prefetch_table(ref, table) for ref, table in by_table.items())
+            )
+
+    async def _prefetch_table(
+        self, table_ref: TableReference, table: tuple[list[str], list[int]]
+    ) -> None:
+        """预读一张表的这些行，填进 RowSubscription 的每 tick 缓存；读失败这张表不填"""
+        channels, row_ids = table
+        try:
+            rows = cast(
+                list[dict[str, Any] | None],
+                await self._backend.servant.get_many(
+                    table_ref, row_ids, RowFormat.TYPED_DICT
+                ),
+            )
+        except Exception as e:  # noqa: BLE001 不填缓存，订阅各自单行读
+            self._log_error(
+                _("预读 {comp_name} 的行出错，这批改为逐行读").format(
+                    comp_name=table_ref.comp_name
+                ),
+                e,
+                requeued=False,
+            )
             return
-        servant = self._backend.servant
-        for table_ref, (channels, row_ids) in by_table.items():
-            try:
-                rows = cast(
-                    list[dict[str, Any] | None],
-                    await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
-                )
-            except Exception as e:  # noqa: BLE001 不填缓存，订阅各自单行读
-                self._log_error(
-                    _("预读 {comp_name} 的行出错，这批改为逐行读").format(
-                        comp_name=table_ref.comp_name
-                    ),
-                    e,
-                    requeued=False,
-                )
-                continue
-            for channel, row in zip(channels, rows):
-                RowSubscription.prefill_cache_(channel, row)
+        for channel, row in zip(channels, rows):
+            RowSubscription.prefill_cache_(channel, row)
 
     async def _process_all(
         self,
