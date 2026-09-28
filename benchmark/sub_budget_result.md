@@ -7,6 +7,23 @@
 只在自己那个值有行进出时才被叫醒，可以随便用；区间查询会被该索引任何值的变动叫醒，
 放在热索引上要按订阅者数付费。
 
+## 2026-09 更新：worker 级订阅器与同查询共享
+
+下面的成本模型、天花板和预算公式量的是旧实现：每个连接各订各读。现在订阅在 worker 级订阅器
+（`SubscriptionHub`）里处理，不按 RLS 判定可见的订阅（`EVERYBODY` / `USER` 组件，或 caller 是
+admin）按查询在 worker 内共享一个订阅对象（设计稿
+`docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md`、
+`docs/superpowers/specs/2026-09-29-shared-subscriptions-design.md`）：
+
+- **共享的订阅**：通知的读与比对每个 worker 每个查询只做一次，副本开销按 worker 数算、与在线人数无关；
+  每个成员连接只剩暂存、交付、编码、发送，进程内实测约 4µs / 连接 / 次（不含 ws 编码与发送）。例：200 个
+  连接都订"最近 1024 条"聊天，每条消息的 worker CPU 从每连接 688–727µs 降到 31–39µs，副本 CPU 从 27ms
+  降到 1.8ms（`sub_fanout_chat.py`，共享设计稿 §9.1）。
+- **按 RLS 私有的订阅**（`OWNER` / `RLS` 组件、普通玩家）：仍是每个连接各读各比，下面的模型照旧适用；worker
+  级订阅器让同一 tick 的行读在 worker 内合成一批（K=10 的 AOI 每次交付 106µs → 27µs）。
+- 所以预算公式里的"交付"对共享订阅要拆成两项：`worker 数 × 每条通知一次读与比对` + `交付数 × 每连接的
+  边际成本`；可共享订阅的快照另占内存，约每行 400B × 每个 worker 一份。
+
 ## 环境
 
 - Windows 11，9950X3D（32 线程），Redis 8.10.1 跑在 Docker Desktop（WSL2），master + 1 replica

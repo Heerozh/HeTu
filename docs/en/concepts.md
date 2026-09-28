@@ -220,6 +220,18 @@ strong consistency (spending currency, granting rewards, validation) inside a
 `System` — write transactions are guarded by optimistic locking — rather than
 relying on the subscription data a client holds.
 
+**Identical queries are shared within a worker.** Subscriptions that are not
+filtered by row-level security — components with `EVERYBODY` or `USER`
+permission, or a caller that is an admin — are shared per query inside a worker:
+connections that subscribe to the same query join one subscription, the server
+reads and compares each change once, and a connection that subscribes later gets
+the current result without touching the database. Public queries such as a
+server-wide chat (thousands of players watching "the latest N messages"),
+announcements or leaderboards therefore cost the same reads no matter how many
+players watch them; what remains per connection is encoding and sending the
+push. Subscriptions on `OWNER` / `RLS` components are filtered per connection
+and are not shared, so their cost grows with the number of players.
+
 What wakes a `range` up depends on the shape of the query. A **point query**
 (`high` omitted, or `low == high` — `owner=me`, `zone=z`) on an index declared
 with `point_sub=True` listens to the channel of that one index value and is only
@@ -254,6 +266,12 @@ different route: on commit, the engine publishes one extra table-level
 notification per modified table carrying the list of changed `row_id`s, and a
 table subscription listens to that single channel — it counts as one
 subscription regardless of how many rows the table has.
+
+Public (not RLS-filtered) `select` and `range` subscriptions are shared within
+a worker, so those per-row channels are subscribed once per worker, not once
+per connection; for a public table of a few hundred rows, a `range` over the
+whole table is usually enough. Table subscriptions are mainly for larger
+tables, and for RLS-filtered tables where every connection sees its own slice.
 
 That notification costs a Redis PUBLISH (replicated to every replica) on every
 commit, so it is only sent for components declared with `table_sub=True`;
