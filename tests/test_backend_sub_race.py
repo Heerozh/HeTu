@@ -712,3 +712,55 @@ async def test_attach_right_after_failed_subscribe_is_not_left_unsubscribed():
         assert "T" in mq.subscribed_channels, "B 以为订上了，T 却已被退订"
     assert_active_channels_subscribed(hub, mq)
     await close_hub(hub, node)
+
+
+async def test_repair_waits_for_subscribe_to_take_effect_before_reading():
+    """
+    tick 末尾订阅新行 X 失败、X 重新入队；弹出前连接 B 订 X，SUBSCRIBE 发出去还没回来。补订看的
+    不能是"SUBSCRIBE 发没发"（MQClient.subscribed）：那样 S 当场就读 X，早于任何订阅生效，其间的
+    写入没有通知；B 的 SUBSCRIBE 随后失败的话 X 就成了没人订、队列里也没有的孤儿，S 的客户端一直
+    持有旧行。要等 X 真的订上之后再读（设计稿 §6）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    s = FakeSub({"idx"})
+    await register(a, node, "S", s)
+    loop = asyncio.get_running_loop()
+
+    async def one_tick():
+        await asyncio.sleep(0.005)  # 队列里的项都过了合批窗口
+        await hub.step_(loop.time() + 0.05, lambda: False)
+
+    async with asyncio.timeout(3):
+        # tick N：S 新增 X，tick 末尾订阅 X 发送失败，X 按真实频道重新入队
+        s.new = {"X"}
+        node.fail_next = ConnectionError("send failed")
+        mq.push_pulled_("idx", None)
+        await one_tick()
+        await wait_until(lambda: "X" in mq.pulled_set)
+        s.new = set()
+
+        # 连接 B 订 X：SUBSCRIBE 卡在发送上（之后也会失败）
+        node.gate.clear()
+        node.entered.clear()
+        node.fail_next = ConnectionError("send failed again")
+        tb = asyncio.create_task(b._attach("P", FakeSub({"X"})))
+        await node.entered.wait()
+        assert "X" in mq.subscribed_channels  # 发出去了，但还没生效
+
+        # tick N+1：弹出 X，S 不能现在就读
+        await one_tick()
+        assert ("X", None) not in s.calls, "X 的订阅还没生效就读了"
+
+        # B 的 SUBSCRIBE 失败：X 只剩 S 在要，要补订上，生效之后 S 再读
+        node.gate.set()
+        with pytest.raises(ConnectionError):
+            await tb
+        acked = 0
+        while ("X", None) not in s.calls:
+            sent = node.sent("subscribe")
+            for channel in sent[acked:]:
+                node.ack("subscribe", channel)
+            acked = len(sent)
+            await one_tick()
+    assert "X" in mq.subscribed_channels and "X" in hub._effective
+    await close_hub(hub, node)
