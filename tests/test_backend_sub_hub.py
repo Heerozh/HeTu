@@ -770,13 +770,14 @@ async def test_rls_subscriptions_are_not_shared(
     s10, rows10 = await u10.subscribe_range(
         filled_rls_ref, user_ctx_(10), "owner", 10, limit=30
     )
-    assert s11 == s10 and len(rows11) == 25 and rows10 == []  # 行的 friend 都是 11
+    assert s11 and s10 and s11 == s10
+    assert len(rows11) == 25 and rows10 == []  # 行的 friend 都是 11
     assert u11._subs[s11] is not u10._subs[s10]
     sa, rows_a = await a1.subscribe_range(
         filled_rls_ref, admin_ctx, "owner", 10, limit=30
     )
     sb, _ = await a2.subscribe_range(filled_rls_ref, admin_ctx, "owner", 10, limit=30)
-    assert len(rows_a) == 25
+    assert sa and sb and len(rows_a) == 25
     assert a1._subs[sa] is a2._subs[sb]
     assert a1._subs[sa] is not u11._subs[s11]
     for broker in (u11, u10, a1, a2):
@@ -799,17 +800,26 @@ async def test_share_key_tells_queries_apart(
     sb, rows_b = await b.subscribe_range(
         filled_item_ref, admin_ctx, "name", "Itm10", "None", limit=30
     )
-    assert sa == sb  # 都拼成 [Itm10:None:1]
+    assert sa and sb and sa == sb  # 都拼成 [Itm10:None:1]
     assert a._subs[sa] is not b._subs[sb]
     assert len(rows_a) == 1 and len(rows_b) == 25
 
-    sc, _ = await c.subscribe_range(filled_item_ref, admin_ctx, "owner", 10, desc=1)
+    # 客户端传来的 desc 可能是 1
+    sc, _ = await c.subscribe_range(
+        filled_item_ref,
+        admin_ctx,
+        "owner",
+        10,
+        desc=1,  # type: ignore[arg-type]
+    )
     sd, _ = await d.subscribe_range(filled_item_ref, admin_ctx, "owner", 10, desc=True)
-    assert sc == sd and c._subs[sc] is d._subs[sd]
+    assert sc and sd and sc == sd
+    assert c._subs[sc] is d._subs[sd]
 
     se, _ = await e.subscribe_range(filled_item_ref, admin_ctx, "owner", 10)
     sf, _ = await f.subscribe_range(filled_item_ref, admin_ctx, "owner", 10.0)
-    assert se != sf and e._subs[se] is not f._subs[sf]
+    assert se and sf and se != sf
+    assert e._subs[se] is not f._subs[sf]
     for broker in brokers:
         await broker.close()
 
