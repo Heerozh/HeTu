@@ -23,7 +23,12 @@ from fixtures.fake_pubsub import (
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis.mq import RedisMQClient
-from hetu.data.sub import BaseSubscription, SubscriptionBroker, SubscriptionHub
+from hetu.data.sub import (
+    BaseSubscription,
+    RowSubscription,
+    SubscriptionBroker,
+    SubscriptionHub,
+)
 
 
 class FakeSub(BaseSubscription):
@@ -794,3 +799,46 @@ async def test_repeated_read_errors_back_off():
     # 第 n 次失败后隔 2^(n-1) 个 interval 再读（call_later 可能早触发一个时钟精度，留余量）
     assert gaps[2] >= 0.15 and gaps[3] >= 0.35, gaps
     await close_all(broker, node)
+
+
+class _TableRef:
+    """预读只用到 table_ref 的 comp_cls.is_rls() 和可哈希"""
+
+    class comp_cls:
+        @staticmethod
+        def is_rls() -> bool:
+            return False
+
+    def __init__(self, name: str):
+        self.comp_name = name
+
+
+async def test_prefetch_reads_tables_concurrently():
+    """一批通知涉及几张表：各表的预读 get_many 并发发出，不按表串行排队（否则 worker 里每个连接的
+    交付都要等所有表的往返加起来）"""
+    in_flight = peak = 0
+
+    class SlowServant:
+        async def get_many(self, ref, row_ids, row_format):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.02)  # 一次往返
+            in_flight -= 1
+            return [{"id": row_id} for row_id in row_ids]
+
+    servant = SlowServant()
+    pubsub_hub, node = make_hub()
+    mq = RedisMQClient(pubsub_hub)
+    backend = cast(Backend, SimpleNamespace(get_mq_client=lambda: mq, servant=servant))
+    hub = SubscriptionHub(backend, autostart=False)
+    work: dict[BaseSubscription, list[tuple[str, set[str] | None]]] = {}
+    for i in range(3):
+        ref = cast(Any, _TableRef(f"T{i}"))
+        work[RowSubscription(ref, cast(Any, servant), None, f"row{i}", i)] = [
+            (f"row{i}", None)
+        ]
+    RowSubscription.reset_cache_()
+    await hub._prefetch_rows(work)
+    assert peak == 3, "各表的预读串行了"
+    await close_hub(hub, node)
