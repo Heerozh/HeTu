@@ -503,6 +503,16 @@ class _Tick:
         ] = {}
 
 
+class _Subscribing:
+    """一次在途的 MQClient.subscribe：hub 里同一频道同时只有一次，后来要这个频道的等它的结果"""
+
+    __slots__ = ("channels", "done")
+
+    def __init__(self, channels: list[str]) -> None:
+        self.channels = channels
+        self.done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+
 class SubscriptionHub:
     """
     worker 级订阅器：每个 worker（进程）的每个 backend 一个，worker 内所有连接的订阅都在这里处理。
@@ -549,6 +559,8 @@ class SubscriptionHub:
         # SUBSCRIBE 已经回来的频道。MQClient.subscribed 在 SUBSCRIBE 发出时就记上，不能用来判断
         # 是否已生效（见 _settle_channels 的 fresh）
         self._effective: set[str] = set()
+        # 正在订阅的频道 → 那一次在途的 subscribe（见 _subscribe）
+        self._inflight: dict[str, _Subscribing] = {}
         # 后台任务（attach 的订阅、放掉的频道的退订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
@@ -600,9 +612,9 @@ class SubscriptionHub:
         `sub.active`：由订阅任务自己置的话，门面登记之前 tick 算好的推送会因 sub_id 没登记被丢掉，
         指纹却已更新，之后的补读读回一样也不再推。
 
-        订阅放进 hub 自己的任务里跑，调用方 shield 着等：调用方被取消（连接在拆）时订阅照常完成，
-        不会把几个连接共用的 MQClient 对这些频道的登记撤掉（别的连接可能正搭着同一个 SUBSCRIBE）。
-        失败或被取消时撤掉占位再抛出。
+        对 MQClient 的 subscribe 在 hub 自己的任务里跑（见 `_subscribe`）：调用方被取消（连接在拆）
+        时订阅照常完成，不会把几个连接共用的 MQClient 对这些频道的登记撤掉（别的连接可能正等着同一
+        个 SUBSCRIBE）。失败或被取消时撤掉占位再抛出。
         """
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
@@ -618,7 +630,7 @@ class SubscriptionHub:
         for channel in channels:
             channel_subs.setdefault(channel, set()).add(sub)
         try:
-            await asyncio.shield(self._spawn(self._subscribe(channels)))
+            await self._subscribe(channels)
         except BaseException:
             gone = self._release(broker, (sub,))
             if gone and not self._closed:
@@ -658,19 +670,74 @@ class SubscriptionHub:
                     gone.append(channel)
         return gone
 
-    async def _subscribe(self, channels: list[str]) -> None:
-        """订阅频道，回来后把仍订着的记为已生效"""
+    async def _subscribe(self, channels: Iterable[str]) -> None:
+        """
+        订阅频道，返回时都已生效（记进 `_effective`），失败抛出。
+
+        worker 里所有调用方（各连接的 attach、tick 末尾、补订）共用一个 MQClient，而 MQClient 按
+        客户端登记、不按调用方：对同一频道重叠的两次 subscribe，一次失败回滚会把另一次搭车订上、
+        已经返回成功的频道一并撤掉。所以同一频道同时只发一次：已生效的跳过，正在订的等那一次的
+        结果（它失败，等它的都失败），其余合成一次发出。发送放在 hub 自己的任务里，调用方被取消
+        也照常跑完，等它的人不受牵连
+        """
+        waits: set[asyncio.Future[None]] = set()
+        own: list[str] = []
+        for channel in channels:
+            if channel in self._effective:
+                continue
+            ticket = self._inflight.get(channel)
+            if ticket is None:
+                own.append(channel)
+            else:
+                waits.add(ticket.done)
+        if own:
+            ticket = _Subscribing(own)
+            for channel in own:
+                self._inflight[channel] = ticket
+            self._spawn(self._send_subscribe(ticket))
+            waits.add(ticket.done)
+        if waits:
+            # asyncio.wait 只旁观：本调用方被取消不会取消共享的 future
+            done, _pending = await asyncio.wait(waits)
+            for fut in done:
+                fut.result()
+
+    async def _send_subscribe(self, ticket: _Subscribing) -> None:
+        """发一次 MQClient.subscribe（hub 的后台任务），回来后把仍订着的记为已生效，结果交给等它的人"""
         mq = self._mq
-        await mq.subscribe(*channels)
+        try:
+            await mq.subscribe(*ticket.channels)
+        except BaseException as e:
+            for channel in ticket.channels:
+                if self._inflight.get(channel) is ticket:
+                    del self._inflight[channel]
+            # 共享的 future 里不放 CancelledError（只会来自 close），免得等它的人以为是自己被取消
+            exc = (
+                ConnectionError(_("连接已关闭，已调用过close"))
+                if isinstance(e, asyncio.CancelledError)
+                else e
+            )
+            ticket.done.set_exception(exc)
+            ticket.done.exception()  # 没人等的话别在 gc 时报 "never retrieved"
+            raise
         subscribed = mq.subscribed_channels
-        self._effective.update(ch for ch in channels if ch in subscribed)
+        for channel in ticket.channels:
+            # 等 ack 期间被退订了的（见 _unsubscribe）不算：它回来的 SUBSCRIBE 已经作废
+            if self._inflight.get(channel) is ticket:
+                del self._inflight[channel]
+                if channel in subscribed:
+                    self._effective.add(channel)
+        ticket.done.set_result(None)
 
     async def _unsubscribe(self, channels: list[str]) -> None:
         """退订频道。排队到真正跑起来之间可能又有人订了（含 attach 的占位），那就不能退"""
         channels = [ch for ch in channels if ch not in self._channel_subs]
         if not channels:
             return
-        self._effective.difference_update(channels)
+        for channel in channels:
+            self._effective.discard(channel)
+            # 在途的订阅作废：它回来也不算生效，之后再要这个频道的另发一次 SUBSCRIBE
+            self._inflight.pop(channel, None)
         await self._mq.unsubscribe(*channels)
 
     def reread_for(
@@ -1069,6 +1136,7 @@ class SubscriptionHub:
         self._channel_subs.clear()
         self._by_token.clear()
         self._effective.clear()
+        self._inflight.clear()
         await self._mq.close()
 
 

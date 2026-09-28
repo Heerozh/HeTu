@@ -1435,7 +1435,12 @@ class HubMQClient(MQClient):
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
     async def subscribe(self, *channel_names: str) -> None:
-        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        """
+        订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得。
+        失败时撤掉本次新登记的频道：登记按 MQClient 记、不按调用方，几个调用方共用一个 MQClient
+        时，重叠的另一次 subscribe 搭车订上的也会被一并撤掉。所以共用时要由调用方保证同一频道同时
+        只有一次在途（见 `hetu.data.sub.SubscriptionHub._subscribe`）
+        """
         if not channel_names:
             return
         if self._closed:
