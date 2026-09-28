@@ -579,6 +579,11 @@ class SubscriptionHub:
         self._effective: set[str] = set()
         # 正在订阅的频道 → 那一次在途的 subscribe（见 _subscribe）
         self._inflight: dict[str, _Subscribing] = {}
+        # 推送卡住的连接先攒着不读的通知：连接 → {订阅: {频道: payload}}，连接取走待发区时重读
+        # （见 _collect、resume_）
+        self._parked: dict[
+            SubscriptionBroker, dict[BaseSubscription, dict[str, set[str] | None]]
+        ] = {}
         # 后台任务（attach 的订阅、放掉的频道的退订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
@@ -670,6 +675,12 @@ class SubscriptionHub:
         """同步撤掉成员身份与登记，返回 worker 里因此没人要的频道"""
         channel_subs = self._channel_subs
         gone: list[str] = []
+        parked = self._parked.get(broker)
+        if parked is not None:
+            for sub in subs:
+                parked.pop(sub, None)
+            if not parked:
+                del self._parked[broker]
         for sub in subs:
             sub.members.pop(broker, None)
             if sub.members or sub.closed:
@@ -876,8 +887,11 @@ class SubscriptionHub:
         """
         按订阅分组：真实频道交给订了它的所有已生效订阅；定向补读只交给它指定的订阅（还订着那个
         频道的话）。每个订阅内保持弹出顺序。
+        成员的推送全都卡着的订阅先不读（`_park`）：恢复按拉取驱动的背压，同 dev 不调 get_updates
+        就不读
         """
         channel_subs = self._channel_subs
+        stalled = self._stalled
         work: dict[BaseSubscription, list[tuple[str, set[str] | None]]] = {}
         for key, payload in batch.items():
             if key.startswith(_TARGETED):
@@ -888,12 +902,50 @@ class SubscriptionHub:
                     and sub.active
                     and sub in channel_subs.get(channel, ())
                 ):
-                    work.setdefault(sub, []).append((channel, payload))
+                    if stalled(sub):
+                        self._park(sub, channel, payload)
+                    else:
+                        work.setdefault(sub, []).append((channel, payload))
                 continue
             for sub in channel_subs.get(key, ()):
-                if sub.active:
+                if not sub.active:
+                    continue
+                if stalled(sub):
+                    self._park(sub, key, payload)
+                else:
                     work.setdefault(sub, []).append((key, payload))
         return work
+
+    def _stalled(self, sub: BaseSubscription) -> bool:
+        """
+        订阅的成员是不是全都推送卡住了：待发区还有上次交的没取走，而且没在 get_updates 里等着取
+        （推送阻塞在 push_queue 上）。手动模式由 get_updates 自己跑 tick，不存在卡住
+        """
+        return self._autostart and all(broker.stalled_() for broker in sub.members)
+
+    def _park(
+        self, sub: BaseSubscription, channel: str, payload: set[str] | None
+    ) -> None:
+        """推送卡住的订阅这个频道先不读，攒在成员名下，成员取走待发区时重读（resume_）"""
+        for broker in sub.members:
+            items = self._parked.setdefault(broker, {}).setdefault(sub, {})
+            if payload is None:
+                items.setdefault(channel, None)
+            elif (known := items.get(channel)) is None:
+                items[channel] = set(payload)
+            else:
+                known.update(payload)
+
+    def resume_(self, broker: SubscriptionBroker) -> None:
+        """门面取走了待发区：给推送卡着时攒下的通知定向重读，interval 后照常读、推最新的"""
+        parked = self._parked.pop(broker, None)
+        if not parked:
+            return
+        for sub, items in parked.items():
+            if sub.closed or not sub.active:
+                continue
+            for channel, payload in items.items():
+                self.reread_for(sub, channel, payload=payload)
 
     def _repair(
         self, work: dict[BaseSubscription, list[tuple[str, set[str] | None]]]
@@ -1197,6 +1249,7 @@ class SubscriptionHub:
         self._by_token.clear()
         self._effective.clear()
         self._inflight.clear()
+        self._parked.clear()
         await self._mq.close()
 
 
@@ -1257,6 +1310,8 @@ class SubscriptionBroker:
         # 待发区：hub 在 tick 末尾交来的更新 {sub_id: {row_id: 行 | None}}，get_updates 取走
         self._outbox: dict[str, dict[int, dict[str, Any] | None]] = {}
         self._arrived = asyncio.Event()
+        # 正在 get_updates 里等 hub 交来更新（推送没卡住）
+        self._waiting = False
         # 服务端内部关注（watch_channel）用的 MQClient，第一次用时才建
         self._watch_mq: MQClient | None = None
         # MAX_SUBSCRIBED 告警用：各订阅登记时的频道数
@@ -1826,6 +1881,13 @@ class SubscriptionBroker:
     def _has_updates(self) -> bool:
         return bool(self._outbox)
 
+    def stalled_(self) -> bool:
+        """
+        推送卡住了：待发区里还有上次交来的没取走，也没在 get_updates 里等着取（推送阻塞在
+        push_queue 上，客户端网络拥塞）。hub 据此先不为本连接读库，等它取走待发区再重读
+        """
+        return bool(self._outbox) and not self._waiting
+
     async def get_updates(self, timeout=None) -> dict[str, dict[int, Any]]:
         """
         取走待发区里的数据更新：hub 处理本连接订阅的通知、重读数据库后，在 tick 末尾交到这里。
@@ -1861,12 +1923,17 @@ class SubscriptionBroker:
             if hub.autostart:
                 # clear 与 wait 之间没有 await，不会漏掉中间交来的更新
                 self._arrived.clear()
+                self._waiting = True
                 try:
                     async with asyncio.timeout_at(deadline):
                         await self._arrived.wait()
                 except TimeoutError:
                     return {}
+                finally:
+                    self._waiting = False
             elif not await hub.step_(deadline, self._has_updates):
                 return {}
         updates, self._outbox = self._outbox, {}
+        # 推送卡着时 hub 攒下没读的通知，现在重读
+        hub.resume_(self)
         return updates
