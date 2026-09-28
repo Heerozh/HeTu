@@ -127,7 +127,8 @@ hub 分发一条通知，就是对订了它的每个连接各调一次 `push_pul
    `RowSubscription` 的 ContextVar，处理循环的子任务继承同一个缓存）。同一行在 worker 内只读一次。
 3. **按订阅并发处理**：每个订阅按顺序处理自己的频道，订阅之间并发。今天每个连接一个协程，天然并发；改成
    一个循环后如果逐个 await，各订阅读库的往返时间会累加起来。
-   - 用 `asyncio.create_task(..., eager_start=True)`（3.14）：从缓存命中、不需要 I/O 的订阅当场跑完，
+   - 用 eager task（`asyncio.Task(..., eager_start=True)`；不能用 3.14 的 `create_task(..., eager_start=True)`，
+     生产在 Linux / macOS 上跑的 uvloop 的 `create_task` 不收这个参数）：从缓存命中、不需要 I/O 的订阅当场跑完，
      不进调度；要读库的（range、整表订阅的 `get_many`）并发执行。每跑完一定数量就让出一次事件循环，
      不能长时间饿死接收 / 发送协程。
    - 处理某个频道前，先确认订阅还订着它。同一 tick 里，订阅自己的处理可能刚把这行放出范围；今天是逐频道

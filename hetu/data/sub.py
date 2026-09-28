@@ -885,12 +885,15 @@ class SubscriptionHub:
     ) -> None:
         """
         订阅之间并发：从缓存命中、不需要 I/O 的当场跑完（eager task，不进调度），要读库的并发
-        执行，读的往返不串起来
+        执行，读的往返不串起来。
+        eager task 直接用 Task 构造：3.14 的 create_task(..., eager_start=True) 要事件循环的
+        create_task 收这个参数，生产在 Linux / macOS 上跑的 uvloop 不收（TypeError）
         """
+        loop = asyncio.get_running_loop()
         pending: list[asyncio.Task] = []
         for count, (sub, items) in enumerate(work.items(), 1):
-            task = asyncio.create_task(
-                self._process(sub, items, tick), eager_start=True
+            task = asyncio.Task(
+                self._process(sub, items, tick), loop=loop, eager_start=True
             )
             if not task.done():
                 pending.append(task)
