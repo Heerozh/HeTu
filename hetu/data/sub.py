@@ -575,19 +575,27 @@ class SubscriptionHub:
     订阅 / 退订频道，再把更新交给各连接的门面（`SubscriptionBroker`）。
 
     一个 worker 一个队列、一条时间线，尾随重读与补读的保证与每连接一个队列时相同。订阅层的补读
-    定向到单个订阅（`reread_for`），不按频道重跑 worker 里所有订阅。设计见
+    定向到单个订阅（`reread_for`），不按频道重跑 worker 里所有订阅。通知接连不断时相邻 tick 之间
+    留一个合批窗口（`TICK_SPACING_INTERVALS`）。设计见
     docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md。
 
     The worker-level subscription engine, one per backend per worker process. It owns the only
     MQClient (local queue with batching and trailing re-reads) and one processing loop that
     serves the subscriptions of every connection, handing the updates to each connection's
-    `SubscriptionBroker` at the end of a tick.
+    `SubscriptionBroker` at the end of a tick. Under a continuous stream of notifications,
+    consecutive ticks are spaced by `TICK_SPACING_INTERVALS` so that they batch up.
     """
 
     # tick 末尾等新增频道的 SUBSCRIBE 回来最多等几个 interval，之后照常交付：推给客户端的新行尽量
     # 在它的行频道订阅生效之后，但 ack 迟迟不来（比如某个节点的 pubsub 连接半开）时不能冻住整个
     # worker 的推送。晚回来的由订阅任务自己补读 / 补订（见 _subscribe_added）
     SUBSCRIBE_WAIT_INTERVALS: float = 1
+    # 合批窗口：相邻两个 tick 的开始至少隔这么多个 interval（设计稿 §4.8）。MQClient 只弹出已满一个
+    # interval 的通知，通知接连不断时每次只弹出刚满期的一两条；弹一批跑一个 tick 的话，建任务、等订阅
+    # 回执、预读往返这些每 tick 的固定开销会被放大到每秒上千次（实测私有订阅反而比每连接一个队列更费
+    # CPU）。隔一小段，这期间满期的通知攒成一批，代价是延迟最多多这么一段。零星的通知不受影响（上一个
+    # tick 早已过去，满期就处理）；tick 本身已经超过窗口时也不再多等。手动模式（测试）不等
+    TICK_SPACING_INTERVALS: float = 0.1
 
     def __init__(self, backend: Backend, autostart: bool = True):
         """
@@ -861,8 +869,10 @@ class SubscriptionHub:
         # hub 自己的日志标签（本任务的 Context 是 _start 新建的，不影响任何连接）
         ContextFilter.set_log_context(_HUB_LOG_CONTEXT)
         mq = self._mq
+        loop = asyncio.get_running_loop()
         while True:
             batch = await mq.get_message()
+            started = loop.time()
             try:
                 await self._tick(batch)
             # 读错误在 tick 里都兜住并重试了；这里兜 bug，处理循环不能停。这批通知已经弹出，没处理
@@ -873,6 +883,10 @@ class SubscriptionHub:
                     e,
                     requeued=False,
                 )
+            # 合批窗口（TICK_SPACING_INTERVALS）从本 tick 开始时算：tick 本身已经超过窗口就不再等
+            rest = started + self.TICK_SPACING_INTERVALS * self.interval - loop.time()
+            if rest > 0:
+                await asyncio.sleep(rest)
 
     def _log_error(
         self,
