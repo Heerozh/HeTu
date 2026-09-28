@@ -8,6 +8,7 @@
 import asyncio
 import itertools
 import logging
+import time
 import weakref
 from collections import Counter
 from collections.abc import Callable, Coroutine, Iterable, Mapping
@@ -301,7 +302,6 @@ class IndexSubscription(BaseSubscription):
         row_ids = set(row_ids)
         inserts = list(row_ids - self.last_range_result)
         deletes = self.last_range_result - row_ids
-        self.last_range_result = row_ids
         new_chans = set()
         rem_chans = set()
         rtn: dict[int, dict[str, Any] | None] = {}
@@ -312,6 +312,8 @@ class IndexSubscription(BaseSubscription):
             if inserts
             else [],
         )
+        # 读完才改状态：读出错时 hub 会定向重读，上次的结果原样留着，重读才能再算出同样的进出
+        self.last_range_result = row_ids
         for row_id, row in zip(inserts, rows):
             if row is None:
                 self.last_range_result.remove(row_id)
@@ -480,6 +482,8 @@ class TableSubscription(BaseSubscription):
 _TARGETED = "\0"
 # 一个 tick 里连续处理这么多个订阅就让出一次事件循环，别长时间饿死接收 / 发送协程
 _YIELD_EVERY = 256
+# 错误日志的限流间隔（秒）：Redis 挂着时每个 tick 都会出错、都会重试，别刷屏
+_ERROR_LOG_INTERVAL = 10.0
 
 
 class _Tick:
@@ -545,6 +549,9 @@ class SubscriptionHub:
         self._task: asyncio.Task | None = None
         # 手动模式：几个门面并发驱动时一次只跑一个 tick
         self._step_lock = asyncio.Lock()
+        # 错误日志限流：上次记的时刻，以及之后压下没记的次数
+        self._error_logged_at = float("-inf")
+        self._errors_muted = 0
         self._closed = False
         if autostart:
             self._start()
@@ -704,10 +711,28 @@ class SubscriptionHub:
             batch = await mq.get_message()
             try:
                 await self._tick(batch)
-            except (
-                Exception
-            ):  # 读错误在 _process 里按订阅兜住了；这里兜 bug，循环不能停
-                logger.exception(_("❌ [📡Subscription] 处理订阅通知异常"))
+            # 读错误在 tick 里都兜住并重试了；这里兜 bug，处理循环不能停
+            except Exception as e:  # noqa: BLE001
+                self._log_error(_("处理订阅通知异常"), e)
+
+    def _log_error(self, what: str, exc: BaseException) -> None:
+        """
+        tick 里出错：记错误日志（带栈）。限流：每 _ERROR_LOG_INTERVAL 秒最多一条，带上此前压下的
+        次数。出错的读都已重新入队，一个 interval 后重试（设计稿 §6）
+        """
+        now = time.monotonic()
+        if now - self._error_logged_at < _ERROR_LOG_INTERVAL:
+            self._errors_muted += 1
+            return
+        muted, self._errors_muted = self._errors_muted, 0
+        self._error_logged_at = now
+        logger.error(
+            _(
+                "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试"
+                "（上次记录以来另有 {muted} 次出错未记）"
+            ).format(what=what, err=f"{type(exc).__name__}:{exc}", muted=muted),
+            exc_info=exc,
+        )
 
     async def step_(self, deadline: float | None, ready: Callable[[], bool]) -> bool:
         """
@@ -735,14 +760,21 @@ class SubscriptionHub:
 
     async def _tick(self, batch: Mapping[str, set[str] | None]) -> None:
         """处理一批弹出的通知（设计稿 §4.3）"""
-        work = self._collect(batch)
+        work = await self._repair(self._collect(batch))
         if not work:
+            return
+        # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
+        RowSubscription.reset_cache_()
+        try:
+            await self._prefetch_rows(work)
+        except Exception as e:  # noqa: BLE001 读错误重新入队重试，不牵连连接
+            # 读出错（Redis 抖动）：本批原样重新入队，一个 interval 后重试，不牵连连接
+            self._log_error(_("预读订阅的行出错"), e)
+            for key, payload in batch.items():
+                self._mq.request_reread(key, payload=payload)
             return
         tick = _Tick()
         try:
-            # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
-            RowSubscription.reset_cache_()
-            await self._prefetch_rows(work)
             await self._process_all(work, tick)
             await self._settle_channels(tick)
         finally:
@@ -775,6 +807,39 @@ class SubscriptionHub:
                 if sub.active:
                     work.setdefault(sub, []).append((key, payload))
         return work
+
+    async def _repair(
+        self, work: dict[BaseSubscription, list[tuple[str, set[str] | None]]]
+    ) -> dict[BaseSubscription, list[tuple[str, set[str] | None]]]:
+        """
+        本批涉及的频道若 hub 没订着（此前 tick 末尾订阅它失败了，见 _settle_channels），先补订。
+        不管补订成败，这些频道本 tick 都不处理、按真实频道重新入队：订上了的一个 interval 后再读
+        （要在订阅生效之后读，失败期间的写入没有通知），没订上的到时再补
+        """
+        subscribed = self._mq.subscribed_channels
+        missing: dict[str, set[str] | None] = {}
+        for items in work.values():
+            for channel, payload in items:
+                if channel in subscribed:
+                    continue
+                known = missing.get(channel)
+                if payload is None:
+                    missing.setdefault(channel, None)
+                else:
+                    missing[channel] = payload if known is None else known | payload
+        if not missing:
+            return work
+        try:
+            await self._subscribe(list(missing))
+        except Exception as e:  # noqa: BLE001 没订上的到时再补
+            self._log_error(_("补订频道出错"), e)
+        for channel, payload in missing.items():
+            self._mq.request_reread(channel, payload=payload)
+        return {
+            sub: kept
+            for sub, items in work.items()
+            if (kept := [item for item in items if item[0] not in missing])
+        }
 
     async def _prefetch_rows(
         self, work: Mapping[BaseSubscription, list[tuple[str, set[str] | None]]]
@@ -848,12 +913,14 @@ class SubscriptionHub:
                 continue
             try:
                 new_chans, rem_chans, updates = await sub.get_updated(channel, payload)
-            except Exception:
-                logger.exception(
-                    _("❌ [📡Subscription] 订阅处理通知出错，频道：{channel}").format(
-                        channel=channel
-                    )
+            except Exception as e:  # noqa: BLE001 定向重读重试，不牵连别的订阅
+                # 读库出错（Redis 抖动等）：不牵连别的订阅、不断开连接。给它定向重读这个频道，
+                # 一个 interval 后重试（设计稿 §6）
+                self._log_error(
+                    _("订阅处理通知出错，频道 {channel}").format(channel=channel), e
                 )
+                if not sub.closed:
+                    self.reread_for(sub, channel, payload=payload)
                 continue
             closed = sub.closed
             # 行进入/离开范围：先记账，订阅/退订留到 tick 末尾各一次批量往返。查库期间被退订的
@@ -902,7 +969,14 @@ class SubscriptionHub:
         # 之后的写入都有通知进本队列，tick 结束前订阅已登记好（设计稿 §4.4）
         fresh = [chan for chan in to_subscribe if chan not in self._effective]
         if to_subscribe:
-            await self._subscribe(to_subscribe)
+            try:
+                await self._subscribe(to_subscribe)
+            except Exception as e:  # noqa: BLE001 重新入队，弹出时补订
+                # 订阅失败：频道仍留在频道表里，按真实频道重新入队，弹出时先补订（见 _repair）
+                self._log_error(_("订阅新进入范围的行频道出错"), e)
+                for chan in to_subscribe:
+                    self._mq.request_reread(chan)
+                fresh = []  # 补订成功后会按真实频道重读，不用定向补读
         for chan in fresh:
             for sub in tick.added[chan]:
                 if not sub.closed and sub in channel_subs.get(chan, ()):
