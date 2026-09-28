@@ -114,6 +114,11 @@ class BaseSubscription:
     active: bool = False
     # 最后一个成员离开时置真：处理到一半的 tick 据此丢掉结果
     closed: bool = False
+    # 接连读出错的次数：重试按它退避，读成功清零
+    failures: int = 0
+
+    def use_servant_(self, servant: BackendClient) -> None:
+        """之后的读改走这个副本（读出错时 hub 换一个随机副本重试）。没有自己副本的订阅什么也不做"""
 
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
@@ -160,6 +165,9 @@ class RowSubscription(BaseSubscription):
         self.pushed: int | _Unknown | None = pushed
         if RowSubscription.__cache.get(None) is None:
             RowSubscription.__cache.set({})
+
+    def use_servant_(self, servant: BackendClient) -> None:
+        self.servant = servant
 
     @classmethod
     def reset_cache_(cls) -> dict:
@@ -249,6 +257,11 @@ class IndexSubscription(BaseSubscription):
         # 订的是值频道时为该值（已按 dtype 规范化），否则 None。值频道只在有行"进入"时才有
         # 通知，行"离开"（删除、字段改走）要靠结果里各行的行频道发现，见 get_updated
         self.point_value = point_value
+
+    def use_servant_(self, servant: BackendClient) -> None:
+        self.servant = servant
+        for row_sub in self.row_subs.values():
+            row_sub.servant = servant
 
     def add_row_subscriber(self, channel: str, row_id: int, pushed: int | None):
         """登记初始结果里的一行，pushed 是客户端拿到的那份的指纹"""
@@ -377,6 +390,9 @@ class TableSubscription(BaseSubscription):
         # 丢掉，而初始读又未必包含这些写入。初始化完成后为 None
         self.pending: set[str] | None = set()
 
+    def use_servant_(self, servant: BackendClient) -> None:
+        self.servant = servant
+
     def finish_init_(self, rows: list[dict[str, Any]]) -> set[str]:
         """
         初始全量读完成（rows 为客户端将拿到的行，含 _version）：记下客户端持有的行，退出
@@ -484,6 +500,8 @@ _TARGETED = "\0"
 _YIELD_EVERY = 256
 # 错误日志的限流间隔（秒）：Redis 挂着时每个 tick 都会出错、都会重试，别刷屏
 _ERROR_LOG_INTERVAL = 10.0
+# 同一个订阅接连读出错时重试间隔的上限（秒）：按 1、2、4… 个 interval 退避
+_RETRY_BACKOFF_MAX = 5.0
 
 
 class _Tick:
@@ -1009,13 +1027,16 @@ class SubscriptionHub:
                 new_chans, rem_chans, updates = await sub.get_updated(channel, payload)
             except Exception as e:  # noqa: BLE001 定向重读重试，不牵连别的订阅
                 # 读库出错（Redis 抖动等）：不牵连别的订阅、不断开连接。给它定向重读这个频道，
-                # 一个 interval 后重试（设计稿 §6）
+                # 稍后重试（设计稿 §6）。订阅的读固定走订阅时选的副本，它可能挂了：换一个随机
+                # 副本再试，别每次都打同一个死节点
                 self._log_error(
                     _("订阅处理通知出错，频道 {channel}").format(channel=channel), e
                 )
                 if not sub.closed:
-                    self.reread_for(sub, channel, payload=payload)
+                    sub.use_servant_(self._backend.servant)
+                    self._retry_later(sub, channel, payload)
                 continue
+            sub.failures = 0
             closed = sub.closed
             # 行进入/离开范围：先记账，订阅/退订留到 tick 末尾各一次批量往返。查库期间被退订的
             # 不再登记新行，但离开的行照样撤掉：退订时按那一刻的频道撤，可能还没撤到它们
@@ -1035,6 +1056,30 @@ class SubscriptionHub:
                 return
             if updates:
                 self._stage(tick, sub, updates)
+
+    def _retry_later(
+        self, sub: BaseSubscription, channel: str, payload: set[str] | None
+    ) -> None:
+        """
+        出错的读定向重读重试。同一个订阅接连出错按 1、2、4… 个 interval 退避，封顶
+        _RETRY_BACKOFF_MAX 秒：入队本身就要等一个 interval，多出来的用 call_later 推迟入队
+        """
+        sub.failures += 1
+        interval = self.interval
+        backoff = interval * 2 ** min(sub.failures - 1, 16)
+        delay = min(backoff, _RETRY_BACKOFF_MAX) - interval
+        if delay <= 0:
+            self.reread_for(sub, channel, payload=payload)
+            return
+        asyncio.get_running_loop().call_later(
+            delay, self._retry_now, sub, channel, payload
+        )
+
+    def _retry_now(
+        self, sub: BaseSubscription, channel: str, payload: set[str] | None
+    ) -> None:
+        if not self._closed and not sub.closed:
+            self.reread_for(sub, channel, payload=payload)
 
     @staticmethod
     def _stage(
