@@ -201,7 +201,8 @@ async def test_loop_restarts_on_next_attach(
     broker = SubscriptionBroker(hub._backend, hub=hub)
     sub_id, _ = await broker.subscribe_get(filled_item_ref, admin_ctx, "time", 110)
     assert sub_id
-    assert hub._task is not task and not hub._task.done()
+    restarted = hub._task
+    assert restarted is not None and restarted is not task and not restarted.done()
     row_id = await _set_qty(hub._backend, filled_item_ref, 558)
     updates = await settled_updates(broker, timeout=3)
     assert updates[sub_id][row_id]["qty"] == 558

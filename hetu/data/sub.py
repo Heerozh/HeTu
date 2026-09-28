@@ -6,16 +6,18 @@
 """
 
 import asyncio
+import itertools
 import logging
 import weakref
 from collections import Counter
-from collections.abc import Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Iterable, Mapping
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Final, cast
 
 import numpy as np
 
 from hetu.data.backend import BackendClient, MQClient, RowFormat
+from hetu.data.backend.base import HubMQClient
 from hetu.data.component import Permission
 from hetu.i18n import _
 
@@ -102,6 +104,16 @@ def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
 
 
 class BaseSubscription:
+    # 以下几项由 SubscriptionHub 维护（attach / _release），比对逻辑不用管
+    # 成员连接 → 该连接给这个订阅的 sub_id
+    members: dict[SubscriptionBroker, str]
+    # hub 内唯一，定向补读用
+    token: int = 0
+    # 频道订阅生效、门面登记完成才置真：之前 tick 不处理它
+    active: bool = False
+    # 最后一个成员离开时置真：处理到一半的 tick 据此丢掉结果
+    closed: bool = False
+
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
@@ -464,9 +476,486 @@ class TableSubscription(BaseSubscription):
         return {self.table_channel}
 
 
+# 定向补读在 MQ 队列里的键："\0{token}\0{频道}"。真实频道名不会以 NUL 开头（设计稿 §4.4）
+_TARGETED = "\0"
+# 一个 tick 里连续处理这么多个订阅就让出一次事件循环，别长时间饿死接收 / 发送协程
+_YIELD_EVERY = 256
+
+
+class _Tick:
+    """一个 tick 的簿记"""
+
+    __slots__ = ("added", "released", "staged")
+
+    def __init__(self) -> None:
+        # 本 tick 新增的频道 → 新增它的订阅（新订上的频道要给它们定向补读）
+        self.added: dict[str, set[BaseSubscription]] = {}
+        # 本 tick 没人要了的频道
+        self.released: set[str] = set()
+        # 暂存的更新：成员连接 → {sub_id: (订阅, 合并后的更新)}，tick 末尾才交给连接
+        self.staged: dict[
+            SubscriptionBroker,
+            dict[str, tuple[BaseSubscription, dict[int, dict[str, Any] | None]]],
+        ] = {}
+
+
+class SubscriptionHub:
+    """
+    worker 级订阅器：每个 worker（进程）的每个 backend 一个，worker 内所有连接的订阅都在这里处理。
+    持有唯一的 MQClient（本地队列：合批、尾随重读，见 `MQClient`）和一个处理循环：弹出一批通知 →
+    按表批量预读行 → 各订阅 `get_updated`（订阅之间并发）→ 记账 → 按成员暂存更新；tick 末尾统一
+    订阅 / 退订频道，再把更新交给各连接的门面（`SubscriptionBroker`）。
+
+    一个 worker 一个队列、一条时间线，尾随重读与补读的保证与每连接一个队列时相同。订阅层的补读
+    定向到单个订阅（`reread_for`），不按频道重跑 worker 里所有订阅。设计见
+    docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md。
+
+    The worker-level subscription engine, one per backend per worker process. It owns the only
+    MQClient (local queue with batching and trailing re-reads) and one processing loop that
+    serves the subscriptions of every connection, handing the updates to each connection's
+    `SubscriptionBroker` at the end of a tick.
+    """
+
+    def __init__(self, backend: Backend, autostart: bool = True):
+        """
+        Parameters
+        ----------
+        backend: Backend
+            数据库后端。一般用 `SubscriptionHub.of(backend)` 取 backend 共享的那个。
+        autostart: bool
+            True 起后台处理循环（生产）。False 为手动模式（测试用）：不起循环，由门面的
+            `get_updates` 自己弹出一批、跑一个 tick，不调它通知就留在队列里。
+        """
+        self._backend = backend
+        mq = backend.get_mq_client()
+        if isinstance(mq, HubMQClient):
+            mq.MAX_SUBSCRIBED = None  # 订的是整个 worker 的频道，单连接的告警在门面做
+        self._mq = mq
+        self._autostart = autostart
+        # 频道 → 订了它的订阅（含 attach 中还没生效的占位）
+        self._channel_subs: dict[str, set[BaseSubscription]] = {}
+        # token → 订阅，定向补读用
+        self._by_token: dict[int, BaseSubscription] = {}
+        self._tokens = itertools.count(1)
+        # SUBSCRIBE 已经回来的频道。MQClient.subscribed 在 SUBSCRIBE 发出时就记上，不能用来判断
+        # 是否已生效（见 _settle_channels 的 fresh）
+        self._effective: set[str] = set()
+        # 后台任务（attach 的订阅、放掉的频道的退订）：不随调用方取消，close 时统一取消
+        self._tasks: set[asyncio.Task] = set()
+        self._task: asyncio.Task | None = None
+        # 手动模式：几个门面并发驱动时一次只跑一个 tick
+        self._step_lock = asyncio.Lock()
+        self._closed = False
+        if autostart:
+            self._start()
+
+    @classmethod
+    def of(cls, backend: Backend) -> SubscriptionHub:
+        """
+        backend 共享的订阅器：第一次调用时在当前事件循环里建，挂在 backend 上
+        （`Backend.sub_hub_`），随 `Backend.close()` 关闭。
+        """
+        hub = backend.sub_hub_
+        if hub is None or hub._closed:
+            hub = backend.sub_hub_ = cls(backend)
+        return hub
+
+    @property
+    def mq(self) -> MQClient:
+        """本订阅器的 MQClient（测试、压测看队列用）"""
+        return self._mq
+
+    @property
+    def autostart(self) -> bool:
+        """是否有后台处理循环；False 为手动模式，由门面的 get_updates 驱动"""
+        return self._autostart
+
+    @property
+    def interval(self) -> float:
+        """合批间隔，也是副本复制延迟的预算（1/UPDATE_FREQUENCY）"""
+        return 1 / self._mq.UPDATE_FREQUENCY
+
+    # === === === 订阅的登记 === === ===
+
+    async def attach(
+        self, sub: BaseSubscription, broker: SubscriptionBroker, sub_id: str
+    ) -> None:
+        """
+        登记 sub，订阅它的频道（`sub.channels`），返回时频道都已生效。
+
+        先占位（`active=False`）再订阅：期间 tick / 别的 detach 定退订名单时看得到占位，不会把
+        这些频道退掉；tick 也不处理未生效的订阅。返回后由调用方在登记到门面的同一个同步段里置
+        `sub.active`：由订阅任务自己置的话，门面登记之前 tick 算好的推送会因 sub_id 没登记被丢掉，
+        指纹却已更新，之后的补读读回一样也不再推。
+
+        订阅放进 hub 自己的任务里跑，调用方 shield 着等：调用方被取消（连接在拆）时订阅照常完成，
+        不会把几个连接共用的 MQClient 对这些频道的登记撤掉（别的连接可能正搭着同一个 SUBSCRIBE）。
+        失败或被取消时撤掉占位再抛出。
+        """
+        if self._closed:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        if self._autostart:
+            self._start()  # 处理循环意外结束过的话重新拉起
+        sub.members = {broker: sub_id}
+        sub.token = next(self._tokens)
+        sub.active = False
+        sub.closed = False
+        self._by_token[sub.token] = sub
+        channels = list(sub.channels)
+        channel_subs = self._channel_subs
+        for channel in channels:
+            channel_subs.setdefault(channel, set()).add(sub)
+        try:
+            await asyncio.shield(self._spawn(self._subscribe(channels)))
+        except BaseException:
+            gone = self._release(broker, (sub,))
+            if gone and not self._closed:
+                self._spawn(self._unsubscribe(gone))
+            raise
+
+    async def detach(self, broker: SubscriptionBroker, *subs: BaseSubscription) -> None:
+        """
+        撤掉 broker 在这些订阅上的成员身份：成员撤空的订阅关闭（`closed`）、撤登记，退订 worker
+        里没人再要的频道（等退订回来才返回）
+        """
+        gone = self._release(broker, subs)
+        if gone and not self._closed:
+            await self._unsubscribe(gone)
+
+    def _release(
+        self, broker: SubscriptionBroker, subs: Iterable[BaseSubscription]
+    ) -> list[str]:
+        """同步撤掉成员身份与登记，返回 worker 里因此没人要的频道"""
+        channel_subs = self._channel_subs
+        gone: list[str] = []
+        for sub in subs:
+            sub.members.pop(broker, None)
+            if sub.members or sub.closed:
+                continue
+            sub.closed = True
+            self._by_token.pop(sub.token, None)
+            # tick 处理它的途中退订的话，sub.channels 可能已含 tick 还没登记的新行，也可能少了
+            # tick 还没撤掉的旧行：前者不在频道表里，跳过；后者由 tick 回来后撤（见 _process）
+            for channel in sub.channels:
+                subs_on = channel_subs.get(channel)
+                if subs_on is None or sub not in subs_on:
+                    continue
+                subs_on.discard(sub)
+                if not subs_on:
+                    del channel_subs[channel]
+                    gone.append(channel)
+        return gone
+
+    async def _subscribe(self, channels: list[str]) -> None:
+        """订阅频道，回来后把仍订着的记为已生效"""
+        mq = self._mq
+        await mq.subscribe(*channels)
+        subscribed = mq.subscribed_channels
+        self._effective.update(ch for ch in channels if ch in subscribed)
+
+    async def _unsubscribe(self, channels: list[str]) -> None:
+        """退订频道。排队到真正跑起来之间可能又有人订了（含 attach 的占位），那就不能退"""
+        channels = [ch for ch in channels if ch not in self._channel_subs]
+        if not channels:
+            return
+        self._effective.difference_update(channels)
+        await self._mq.unsubscribe(*channels)
+
+    def reread_for(
+        self,
+        sub: BaseSubscription,
+        *channels: str,
+        payload: Iterable[Any] | None = None,
+    ) -> None:
+        """
+        定向补读：interval 后只让 sub 重读这些频道（payload 同 `MQClient.request_reread`，表级
+        频道为 row_id）。在同一个 MQ 队列里用虚拟键入队，享有同样的延迟、合批、尾随重读与积压
+        丢弃，不按频道重跑 worker 里其他订着它们的订阅（设计稿 §4.4）
+        """
+        if not channels:
+            return
+        prefix = f"{_TARGETED}{sub.token}{_TARGETED}"
+        self._mq.request_reread(*[prefix + ch for ch in channels], payload=payload)
+
+    # === === === 处理循环 === === ===
+
+    def _start(self) -> None:
+        """起后台处理循环；它意外结束了的话再起一个"""
+        if self._task is None or self._task.done():
+            self._task = asyncio.create_task(self._run(), name="SubscriptionHub")
+            self._task.add_done_callback(self._on_run_done)
+
+    def _on_run_done(self, task: asyncio.Task) -> None:
+        if self._closed:
+            return
+        if task.cancelled():
+            logger.warning(
+                _("⚠️ [📡Subscription] 订阅处理循环被取消，下次订阅时重新拉起")
+            )
+        elif (exc := task.exception()) is not None:
+            logger.error(
+                _("❌ [📡Subscription] 订阅处理循环异常结束，下次订阅时重新拉起"),
+                exc_info=exc,
+            )
+
+    async def _run(self) -> None:
+        mq = self._mq
+        while True:
+            batch = await mq.get_message()
+            try:
+                await self._tick(batch)
+            except (
+                Exception
+            ):  # 读错误在 _process 里按订阅兜住了；这里兜 bug，循环不能停
+                logger.exception(_("❌ [📡Subscription] 处理订阅通知异常"))
+
+    async def step_(self, deadline: float | None, ready: Callable[[], bool]) -> bool:
+        """
+        手动模式（测试用）：弹出一批通知跑一个 tick。几个门面并发调用时一次只跑一个 tick；拿到
+        锁时 ready() 已为真（别人驱动的 tick 已把更新交来）就直接返回。deadline（loop.time()）前
+        等不到可弹出的通知返回 False。
+        """
+        try:
+            async with asyncio.timeout_at(deadline):
+                await self._step_lock.acquire()
+        except TimeoutError:
+            return False
+        try:
+            if ready():
+                return True
+            try:
+                async with asyncio.timeout_at(deadline):
+                    batch = await self._mq.get_message()
+            except TimeoutError:
+                return False
+            await self._tick(batch)
+            return True
+        finally:
+            self._step_lock.release()
+
+    async def _tick(self, batch: Mapping[str, set[str] | None]) -> None:
+        """处理一批弹出的通知（设计稿 §4.3）"""
+        work = self._collect(batch)
+        if not work:
+            return
+        tick = _Tick()
+        try:
+            # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
+            RowSubscription.reset_cache_()
+            await self._prefetch_rows(work)
+            await self._process_all(work, tick)
+            await self._settle_channels(tick)
+        finally:
+            # 放在最后：推给客户端的新行在其行频道订阅生效之后，get_updates 拿到的也总是完整的
+            # tick。中途出错也把已算好的交出去
+            for broker, entries in tick.staged.items():
+                broker.deliver_(entries)
+
+    def _collect(
+        self, batch: Mapping[str, set[str] | None]
+    ) -> dict[BaseSubscription, list[tuple[str, set[str] | None]]]:
+        """
+        按订阅分组：真实频道交给订了它的所有已生效订阅；定向补读只交给它指定的订阅（还订着那个
+        频道的话）。每个订阅内保持弹出顺序。
+        """
+        channel_subs = self._channel_subs
+        work: dict[BaseSubscription, list[tuple[str, set[str] | None]]] = {}
+        for key, payload in batch.items():
+            if key.startswith(_TARGETED):
+                token, channel = key[1:].split(_TARGETED, 1)
+                sub = self._by_token.get(int(token))
+                if (
+                    sub is not None
+                    and sub.active
+                    and sub in channel_subs.get(channel, ())
+                ):
+                    work.setdefault(sub, []).append((channel, payload))
+                continue
+            for sub in channel_subs.get(key, ()):
+                if sub.active:
+                    work.setdefault(sub, []).append((key, payload))
+        return work
+
+    async def _prefetch_rows(
+        self, work: Mapping[BaseSubscription, list[tuple[str, set[str] | None]]]
+    ) -> None:
+        """
+        本 tick 各订阅要处理的行频道按表分组，各一次 get_many，把原始行填进 RowSubscription 的
+        每 tick 缓存：同一行在 worker 内只读一次，get_updated 也不用逐行往返。这些读都在本批弹出
+        之后发出，离各订阅要覆盖的通知都已至少一个 interval。
+        """
+        by_table: dict[TableReference, tuple[list[str], list[int]]] = {}
+        seen: set[str] = set()
+        for sub, items in work.items():
+            for channel, _payload in items:
+                if channel in seen:
+                    continue
+                if isinstance(sub, RowSubscription):
+                    row_sub: RowSubscription | None = sub
+                elif isinstance(sub, IndexSubscription):
+                    row_sub = sub.row_subs.get(channel)
+                else:
+                    break
+                if row_sub is None:
+                    continue  # 索引频道
+                seen.add(channel)
+                channels, row_ids = by_table.setdefault(row_sub.table_ref, ([], []))
+                channels.append(channel)
+                row_ids.append(row_sub.row_id)
+        if not by_table:
+            return
+        servant = self._backend.servant
+        for table_ref, (channels, row_ids) in by_table.items():
+            rows = cast(
+                list[dict[str, Any] | None],
+                await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
+            )
+            for channel, row in zip(channels, rows):
+                RowSubscription.prefill_cache_(channel, row)
+
+    async def _process_all(
+        self,
+        work: Mapping[BaseSubscription, list[tuple[str, set[str] | None]]],
+        tick: _Tick,
+    ) -> None:
+        """
+        订阅之间并发：从缓存命中、不需要 I/O 的当场跑完（eager task，不进调度），要读库的并发
+        执行，读的往返不串起来
+        """
+        pending: list[asyncio.Task] = []
+        for count, (sub, items) in enumerate(work.items(), 1):
+            task = asyncio.create_task(
+                self._process(sub, items, tick), eager_start=True
+            )
+            if not task.done():
+                pending.append(task)
+            if count % _YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+        if pending:
+            await asyncio.gather(*pending)
+
+    async def _process(
+        self,
+        sub: BaseSubscription,
+        items: list[tuple[str, set[str] | None]],
+        tick: _Tick,
+    ) -> None:
+        """一个订阅按顺序处理它这批的频道：记账、按成员暂存更新"""
+        channel_subs = self._channel_subs
+        for channel, payload in items:
+            # 已退订；或本 tick 里它自己的处理刚把这行放出了范围（分组在前，这里得现查）
+            if sub.closed or sub not in channel_subs.get(channel, ()):
+                continue
+            try:
+                new_chans, rem_chans, updates = await sub.get_updated(channel, payload)
+            except Exception:
+                logger.exception(
+                    _("❌ [📡Subscription] 订阅处理通知出错，频道：{channel}").format(
+                        channel=channel
+                    )
+                )
+                continue
+            closed = sub.closed
+            # 行进入/离开范围：先记账，订阅/退订留到 tick 末尾各一次批量往返。查库期间被退订的
+            # 不再登记新行，但离开的行照样撤掉：退订时按那一刻的频道撤，可能还没撤到它们
+            if not closed:
+                for new_chan in new_chans:
+                    channel_subs.setdefault(new_chan, set()).add(sub)
+                    tick.added.setdefault(new_chan, set()).add(sub)
+            for rem_chan in rem_chans:
+                subs_on = channel_subs.get(rem_chan)
+                if subs_on is None or sub not in subs_on:
+                    continue
+                subs_on.discard(sub)
+                if not subs_on:
+                    del channel_subs[rem_chan]
+                    tick.released.add(rem_chan)
+            if closed:
+                return
+            if updates:
+                self._stage(tick, sub, updates)
+
+    @staticmethod
+    def _stage(
+        tick: _Tick,
+        sub: BaseSubscription,
+        updates: Mapping[int, dict[str, Any] | None],
+    ) -> None:
+        """按成员暂存：同一个 tick 里同一订阅的几次更新合并，后到的覆盖先到的"""
+        staged = tick.staged
+        for broker, sub_id in sub.members.items():
+            entries = staged.setdefault(broker, {})
+            entry = entries.get(sub_id)
+            if entry is not None and entry[0] is sub:
+                entry[1].update(updates)
+            else:
+                entries[sub_id] = (sub, dict(updates))
+
+    async def _settle_channels(self, tick: _Tick) -> None:
+        """tick 末尾：订阅新增的频道、给新订上的定向补读、退订没人要的"""
+        channel_subs = self._channel_subs
+        # 同一频道可能在本 tick 内既被一个订阅加入又被另一个释放，按最终状态定夺；
+        # 已订阅过的频道重复 subscribe 是幂等的
+        to_subscribe = [chan for chan in tick.added if chan in channel_subs]
+        # hub 在本 tick 之前没有生效地订着的：订阅读这行在前、订阅生效在后，其间的写入不会有
+        # 通知，值频道又不发"离开"。给新增它的订阅定向补读（读回一样就不推）。已生效的不用：
+        # 之后的写入都有通知进本队列，tick 结束前订阅已登记好（设计稿 §4.4）
+        fresh = [chan for chan in to_subscribe if chan not in self._effective]
+        if to_subscribe:
+            await self._subscribe(to_subscribe)
+        for chan in fresh:
+            for sub in tick.added[chan]:
+                if not sub.closed and sub in channel_subs.get(chan, ()):
+                    self.reread_for(sub, chan)
+        # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能登记了新订阅（attach 的
+        # 占位），把刚释放的频道又要回去了
+        to_unsubscribe = [chan for chan in tick.released if chan not in channel_subs]
+        if to_unsubscribe:
+            await self._unsubscribe(to_unsubscribe)
+
+    # === === === 生命周期 === === ===
+
+    def _spawn(self, coro: Coroutine[Any, Any, None]) -> asyncio.Task:
+        """hub 自己的后台任务：不随调用方取消，保存引用免得被 gc，close 时统一取消"""
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._on_spawned_done)
+        return task
+
+    def _on_spawned_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            # 等它的调用方会收到同样的异常；调用方已被取消的话只剩这一条记录
+            logger.warning(
+                _("⚠️ [📡Subscription] 订阅 / 退订频道失败：{err}").format(
+                    err=f"{type(exc).__name__}:{exc}"
+                )
+            )
+
+    async def close(self) -> None:
+        """关闭处理循环与 MQClient（`Backend.close` 调用）。之后这个 hub 上的订阅都不再推送"""
+        if self._closed:
+            return
+        self._closed = True
+        tasks = [
+            t for t in (self._task, *self._tasks) if t is not None and not t.done()
+        ]
+        self._task = None
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._channel_subs.clear()
+        self._by_token.clear()
+        self._effective.clear()
+        await self._mq.close()
+
+
 class SubscriptionBroker:
     """
-    Component的数据订阅和查询接口
+    Component的数据订阅和查询接口，每个连接一个。订阅本身在本 worker 共享的 `SubscriptionHub`
+    里处理，本对象是连接的门面：权限检查、sub_id、同连接的重复订阅与订阅数，以及待发区——hub 在
+    tick 末尾把本连接的更新交到这里，`get_updates` 取走。
 
     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况，客户端会在 1~2 个
     `1/UPDATE_FREQUENCY`（默认 100~200ms）内收到最新数据；Redis 压力过大（副本复制延迟
@@ -484,7 +973,15 @@ class SubscriptionBroker:
     consistency inside a System (write transactions are guarded by optimistic locking).
     """
 
-    def __init__(self, backend: Backend, max_table_rows: int = 100_000):
+    # 单个连接订阅频道数的告警线，按订阅时登记的频道数估算（tick 里行进出范围不计）；只是告警
+    MAX_SUBSCRIBED = 5000
+
+    def __init__(
+        self,
+        backend: Backend,
+        max_table_rows: int = 100_000,
+        hub: SubscriptionHub | None = None,
+    ):
         """
         Parameters
         ----------
@@ -493,26 +990,57 @@ class SubscriptionBroker:
         max_table_rows: int
             单次整表订阅（subscribe_table）允许的最大行数，超过则拒绝订阅。
             一般对应配置项 `MAX_TABLE_SUBSCRIPTION_ROWS`。
+        hub: SubscriptionHub | None
+            处理订阅的 worker 级订阅器，默认取 backend 共享的那个（`SubscriptionHub.of`）。
+            测试可以传入自己的实例。
         """
         self._backend = backend
-        self._mq_client = backend.get_mq_client()
+        self._hub = hub if hub is not None else SubscriptionHub.of(backend)
         self._max_table_rows = max_table_rows
 
         self._subs: dict[str, BaseSubscription] = {}  # key是sub_id
-        self._channel_subs: dict[str, set[str]] = {}  # key是频道名， value是set[sub_id]
         self._sub_counts: Counter[type[BaseSubscription]] = Counter()
+        # 待发区：hub 在 tick 末尾交来的更新 {sub_id: {row_id: 行 | None}}，get_updates 取走
+        self._outbox: dict[str, dict[int, dict[str, Any] | None]] = {}
+        self._arrived = asyncio.Event()
+        # 服务端内部关注（watch_channel）用的 MQClient，第一次用时才建
+        self._watch_mq: MQClient | None = None
+        # MAX_SUBSCRIBED 告警用：各订阅登记时的频道数
+        self._channel_counts: dict[str, int] = {}
+        self._channel_count = 0
+        self._closed = False
 
     async def close(self):
-        return await self._mq_client.close()
+        """撤掉本连接的全部订阅，关掉内部关注用的 MQClient。连接拆除路径上调用，后端出错也不抛"""
+        self._closed = True
+        subs = list(self._subs.values())
+        self._subs.clear()
+        self._sub_counts.clear()
+        self._channel_counts.clear()
+        self._channel_count = 0
+        self._outbox.clear()
+        if subs:
+            try:
+                await self._hub.detach(self, *subs)
+            except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
+                logger.warning(
+                    _("⚠️ [📡Subscription] 关闭连接时取消订阅失败：{err}").format(
+                        err=f"{type(e).__name__}:{e}"
+                    )
+                )
+        if self._watch_mq is not None:
+            await self._watch_mq.close()
 
     async def watch_channel(self, channel: str, callback: Callable[[], None]) -> None:
         """
         服务端内部关注一个频道（如本连接用户的 Connection owner 值频道）：收到通知调
-        `callback`，不计入订阅数、不做权限检查；客户端对同一频道的订阅/退订与之互不干扰。
-        连接关闭时随 mq_client.close() 一起退订。
+        `callback`，不计入订阅数、不做权限检查，也不经过 hub 的队列；客户端对同一频道的订阅/
+        退订与之互不干扰。连接关闭（`close`）时一起退订。
         回调在后端通知接收器的监听协程里同步执行，必须非阻塞。
         """
-        await self._mq_client.watch(channel, callback)
+        if self._watch_mq is None:
+            self._watch_mq = self._backend.get_mq_client()
+        await self._watch_mq.watch(channel, callback)
 
     def count(self) -> tuple[int, int, int]:
         """获取订阅数，返回 (row订阅数, index订阅数, table订阅数)"""
@@ -550,6 +1078,29 @@ class SubscriptionBroker:
     ) -> bool:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table_ref.comp_cls, row)
+
+    async def _attach(self, sub_id: str, sub: BaseSubscription) -> None:
+        """
+        订阅 sub 的频道（返回时已生效）并登记到本连接。active 与登记在同一个同步段里置：tick 在
+        此之前不处理它（设计稿 §4.6）
+        """
+        await self._hub.attach(sub, self, sub_id)
+        if self._closed:
+            # 等订阅生效期间连接被关了：撤掉刚订上的，别留在 hub 里
+            await self._hub.detach(self, sub)
+            raise ConnectionError(_("连接已关闭，已调用过close"))
+        sub.active = True
+        self._subs[sub_id] = sub
+        self._sub_counts[type(sub)] += 1
+        channels = len(sub.channels)
+        self._channel_counts[sub_id] = channels
+        self._channel_count += channels
+        if self._channel_count > self.MAX_SUBSCRIBED:
+            logger.warning(
+                _(
+                    "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
+                ).format(tag="📡Subscription", limit=self.MAX_SUBSCRIBED)
+            )
 
     async def subscribe_get(
         self,
@@ -616,22 +1167,19 @@ class SubscriptionBroker:
         # 先订后读：读与订之间落下的写入，要么已经在读回的行里，要么随后有通知。
         # 先读后订的话，它既不在读回的行里、也不会有通知，客户端一直拿着旧行
         channel_name = servant.row_channel(table_ref, row_id)
-        await self._mq_client.subscribe(channel_name)
-        # 订阅一生效就同步登记，不能等读完：get_updates 的退订名单按 _channel_subs 定，
-        # 读是真正的 await，期间某个索引订阅把这行放出范围的话，没登记的频道会被它当作
-        # 没人要而退订，这里再登记上去的就是一个永远收不到通知的订阅。
-        # 读期间到达的通知会由 get_updates 照常推给这个订阅，那次推送可能先于、也可能晚于
-        # sub 回复送达，见读完后对 pushed 的处理
         row_sub = RowSubscription(table_ref, servant, ctx, channel_name, row_id)
-        self._subs[sub_id] = row_sub
-        self._channel_subs.setdefault(channel_name, set()).add(sub_id)
-        self._sub_counts[RowSubscription] += 1
+        # 订阅一生效就登记，不能等读完：tick 的退订名单按频道表定，读是真正的 await，期间某个
+        # 索引订阅把这行放出范围的话，没登记的频道会被当作没人要而退订，这里再登记上去的就是
+        # 一个永远收不到通知的订阅。
+        # 读期间到达的通知会由 tick 照常推给这个订阅，那次推送可能先于、也可能晚于 sub 回复
+        # 送达，见读完后对 pushed 的处理
+        await self._attach(sub_id, row_sub)
         try:
             row = await servant.get(table_ref, row_id, RowFormat.TYPED_DICT)
         except BaseException:
             await self.unsubscribe(sub_id)
             raise
-        # 行不存在，或 caller 对该行无权限：撤销登记并退订（同一连接别的订阅还在用这个
+        # 行不存在，或 caller 对该行无权限：撤销登记并退订（本 worker 别的订阅还在用这个
         # 频道就留着）
         if row is None or not self._has_row_permission(table_ref, ctx, row):
             await self.unsubscribe(sub_id)
@@ -646,7 +1194,7 @@ class SubscriptionBroker:
             row_sub.pushed = UNKNOWN
         # 订阅生效前已在别的节点上应用、这次读到的副本却还没应用的写入，不会再有通知：
         # 隔一个 interval 补读一次（读回一样就不推）
-        self._mq_client.request_reread(channel_name)
+        self._hub.reread_for(row_sub, channel_name)
         del row["_version"]  # 内部版本号不推给客户端
         logger.debug(
             _("🆕 [📡Subscription] 订阅了行: {sub_id} {channel_name}").format(
@@ -794,22 +1342,16 @@ class SubscriptionBroker:
             row_channel = servant.row_channel(table_ref, row_id)
             row_channels.append(row_channel)
             idx_sub.add_row_subscriber(row_channel, row_id, pushed[row_id])
-        await self._mq_client.subscribe(index_channel, *row_channels)
+        await self._attach(sub_id, idx_sub)
         logger.debug(
             _("🆕 [📡Subscription] 订阅了索引: {sub_id} {index_channel}").format(
                 sub_id=sub_id, index_channel=index_channel
             )
         )
-
-        self._subs[sub_id] = idx_sub
-        self._channel_subs.setdefault(index_channel, set()).add(sub_id)
-        for row_channel in row_channels:
-            self._channel_subs.setdefault(row_channel, set()).add(sub_id)
-        self._sub_counts[IndexSubscription] += 1
         # 先读后订：读与订阅生效之间的写入不会有通知，生效前已在别的节点上应用、读到的副本
         # 却还没应用的写入也不会再有通知。隔一个 interval 补读一次：重跑范围比对、重读各行
         # （读回一样就不推）
-        self._mq_client.request_reread(index_channel, *row_channels)
+        self._hub.reread_for(idx_sub, index_channel, *row_channels)
 
         return sub_id, rows
 
@@ -903,13 +1445,10 @@ class SubscriptionBroker:
         # 先订阅、一生效就登记（同 subscribe_get）。初始全量读完成之前弹出的通知由
         # TableSubscription 攒着（pending），读完再重新入队
         table_channel = servant.table_channel(table_ref)
-        await self._mq_client.subscribe(table_channel)
         tbl_sub = TableSubscription(
             table_ref, servant, ctx, table_channel, self._max_table_rows
         )
-        self._subs[sub_id] = tbl_sub
-        self._channel_subs.setdefault(table_channel, set()).add(sub_id)
-        self._sub_counts[TableSubscription] += 1
+        await self._attach(sub_id, tbl_sub)
         return self._finish_subscribe_table(ctx, sub_id, tbl_sub)
 
     @staticmethod
@@ -947,7 +1486,7 @@ class SubscriptionBroker:
         try:
             # 整表重读太贵，不做补读：订阅生效后隔一个 interval 才全量读。生效前已在别的
             # 节点上应用的写入不会再有通知，隔这一下，读到的副本也已应用（复制延迟在预算内）
-            await asyncio.sleep(1 / self._mq_client.UPDATE_FREQUENCY)
+            await asyncio.sleep(self._hub.interval)
             rows = await self._read_whole_table(tbl_sub.table_ref, ctx, tbl_sub.servant)
         except BaseException:
             if self._subs.get(sub_id) is tbl_sub:
@@ -961,9 +1500,9 @@ class SubscriptionBroker:
             await self.unsubscribe(sub_id)
             return None, []
 
-        # 初始化期间攒下的通知重新入队重读；初始读已经包含的（读回一样）不再推
+        # 初始化期间攒下的通知定向重新入队重读；初始读已经包含的（读回一样）不再推
         if pending := tbl_sub.finish_init_(rows):
-            self._mq_client.request_reread(tbl_sub.table_channel, payload=pending)
+            self._hub.reread_for(tbl_sub, tbl_sub.table_channel, payload=pending)
         for row in rows:
             del row["_version"]
         logger.debug(
@@ -998,30 +1537,55 @@ class SubscriptionBroker:
 
     async def unsubscribe(self, sub_id) -> None:
         """取消该sub_id的订阅"""
-        if sub_id not in self._subs:
+        sub = self._subs.pop(sub_id, None)
+        if sub is None:
             return
-
-        rem_chans = []
-        for channel in self._subs[sub_id].channels:
-            self._channel_subs[channel].remove(sub_id)
-            if len(self._channel_subs[channel]) == 0:
-                rem_chans.append(channel)
-                del self._channel_subs[channel]
-        await self._mq_client.unsubscribe(*rem_chans)
-        sub = self._subs.pop(sub_id)
         self._sub_counts[type(sub)] -= 1
+        self._channel_count -= self._channel_counts.pop(sub_id, 0)
+        # 已交到待发区、还没被取走的更新不再推
+        self._outbox.pop(sub_id, None)
+        await self._hub.detach(self, sub)
 
-    async def get_updates(self, timeout=None) -> dict[str, dict[str, dict]]:
+    def deliver_(
+        self,
+        entries: Mapping[
+            str, tuple[BaseSubscription, Mapping[int, dict[str, Any] | None]]
+        ],
+    ) -> None:
         """
-        pop后端通知接收器推到本连接本地队列的数据更新通知，然后通过查询数据库取出最新的值，并返回。
-        返回值为dict: key是sub_id；value是更新的行数据，value格式为dict：key是row_id，value是数据库raw值。
+        hub 在 tick 末尾调用：本 tick 暂存的更新并进待发区（按 sub_id / row_id，后到的覆盖先到
+        的），唤醒 get_updates。退订了、或退订后同 id 重订成了别的订阅的丢掉
+        """
+        if self._closed:
+            return
+        outbox = self._outbox
+        subs = self._subs
+        delivered = False
+        for sub_id, (sub, updates) in entries.items():
+            if subs.get(sub_id) is not sub:
+                continue
+            outbox.setdefault(sub_id, {}).update(updates)
+            delivered = True
+        if delivered:
+            self._arrived.set()
+
+    def _has_updates(self) -> bool:
+        return bool(self._outbox)
+
+    async def get_updates(self, timeout=None) -> dict[str, dict[int, Any]]:
+        """
+        取走待发区里的数据更新：hub 处理本连接订阅的通知、重读数据库后，在 tick 末尾交到这里。
+        返回值为dict: key是sub_id；value是更新的行数据，value格式为dict：key是row_id，value是
+        数据库raw值（None 表示删除或不再可见）。
         timeout参数主要给单元测试用，None时堵塞到有更新，否则最多等待timeout秒（总时长），
         到时返回空dict。
 
-        一批通知读下来可能没有任何要推给客户端的变化（尾随重读、订阅生效后的补读读回的与
-        客户端已有的一样，或变化的行对本连接不可见），这时继续等下一批，不返回空结果。
-        一次写入引起的推送也可能分在几批里：合并进队头的通知会在一个 interval 后尾随重读，
-        它和别的频道的通知谁先弹出取决于时序。
+        待发区只收到真有变化的更新（尾随重读、订阅生效后的补读读回的与客户端已有的一样，或变化
+        的行对本连接不可见，都不会交来），所以不会拿到空结果。一次写入引起的推送也可能分在几批
+        里：合并进队头的通知会在一个 interval 后尾随重读，它和别的频道的通知谁先弹出取决于时序。
+        没来取的期间，几个 tick 的更新按 sub_id / row_id 合并，后到的覆盖先到的。
+
+        hub 是手动模式（测试用）时，由这里弹出通知、跑 tick。
 
         遇到消息堆积会丢弃通知。
 
@@ -1038,107 +1602,17 @@ class SubscriptionBroker:
         """
         loop = asyncio.get_running_loop()
         deadline = None if timeout is None else loop.time() + timeout
-        while True:
-            try:
-                async with asyncio.timeout_at(deadline):
-                    updated_channels = await self._mq_client.get_message()
-            except TimeoutError:
+        hub = self._hub
+        while not self._outbox:
+            if hub.autostart:
+                # clear 与 wait 之间没有 await，不会漏掉中间交来的更新
+                self._arrived.clear()
+                try:
+                    async with asyncio.timeout_at(deadline):
+                        await self._arrived.wait()
+                except TimeoutError:
+                    return {}
+            elif not await hub.step_(deadline, self._has_updates):
                 return {}
-            if rtn := await self._apply_notifications(updated_channels):
-                return rtn
-
-    async def _apply_notifications(
-        self, updated_channels: Mapping[str, set[str] | None]
-    ) -> dict[str, dict[str, dict]]:
-        """处理一批弹出的通知：重读变更、维护范围进出的频道订阅，返回要推给客户端的更新"""
-        mq = self._mq_client
-        channel_subs = self._channel_subs
-        rtn = {}
-
-        # 本tick变更的行先按表分组一次批量读取，填进RowSubscription的缓存
-        RowSubscription.reset_cache_()
-        await self._prefetch_rows(updated_channels)
-
-        added: set[str] = set()
-        released: set[str] = set()
-        for channel, payload in updated_channels.items():
-            # 快照迭代：前面的 get_updated 是真正的 await，期间接收协程可能处理了客户端
-            # 对本快照里后面某个订阅的 unsub，它已经从 _subs 里弹掉了，跳过即可，
-            # 不能 KeyError 把整个连接断掉
-            for sub_id in list(channel_subs.get(channel, ())):
-                sub = self._subs.get(sub_id)
-                if sub is None:
-                    continue
-                # 获取sub更新的行数据
-                new_chans, rem_chans, sub_updates = await sub.get_updated(
-                    channel, payload
-                )
-                if self._subs.get(sub_id) is not sub:
-                    # 查库期间这个订阅被 unsub 了（或退了又用同一 id 重订成新对象）：
-                    # 它的频道已由 unsubscribe 从 channel_subs 里撤掉，这里再记账会把
-                    # 已经不存在的订阅登记回去，更新也不用再推
-                    continue
-                # 行进入/离开范围：先记账，订阅/退订留到tick末尾各一次批量往返
-                for new_chan in new_chans:
-                    channel_subs.setdefault(new_chan, set()).add(sub_id)
-                    added.add(new_chan)
-                for rem_chan in rem_chans:
-                    subs = channel_subs.get(rem_chan)
-                    if subs is None:
-                        continue
-                    subs.discard(sub_id)
-                    if not subs:
-                        del channel_subs[rem_chan]
-                        released.add(rem_chan)
-                # 添加行数据到返回值
-                if len(sub_updates) > 0:
-                    rtn.setdefault(sub_id, {}).update(sub_updates)
-
-        # 同一频道可能在本tick内既被一个订阅加入又被另一个释放，按最终状态定夺；
-        # 已订阅过的频道重复subscribe是幂等的
-        to_subscribe = [chan for chan in added if chan in channel_subs]
-        # 本连接原先没订着的（行进入范围时才订的行频道）：读这行在前、订阅生效在后，其间的写入
-        # 不会有通知，值频道又不发"离开"，行在这时被删 / 改走就再也发现不了。同订阅生效后的
-        # 补读，隔一个 interval 再读一次（读回一样就不推）
-        fresh = [chan for chan in to_subscribe if chan not in mq.subscribed_channels]
-        await mq.subscribe(*to_subscribe)
-        mq.request_reread(*fresh)
-        # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能处理了客户端的
-        # 新订阅（subscribe_get 等），把刚释放的行频道又登记回来了——对 mq 来说该频道
-        # 一直是订着的，那次 subscribe 不会有任何动作，这里按旧名单退订就会把新订阅
-        # 底下的频道退掉，之后它的变更永远推不到客户端
-        to_unsubscribe = [chan for chan in released if chan not in channel_subs]
-        await mq.unsubscribe(*to_unsubscribe)
-        return rtn
-
-    async def _prefetch_rows(self, updated_channels: Mapping[str, Any]) -> None:
-        """
-        本tick所有收到通知的行频道，按表分组各一次get_many，把原始行填进
-        RowSubscription的缓存，循环里的get_updated就不用逐行往返了。
-        """
-        by_table: dict[TableReference, tuple[list[str], list[int]]] = {}
-        for channel in updated_channels:
-            for sub_id in self._channel_subs.get(channel, ()):
-                sub = self._subs[sub_id]
-                if isinstance(sub, RowSubscription):
-                    row_sub = sub
-                elif isinstance(sub, IndexSubscription):
-                    row_sub = sub.row_subs.get(channel)
-                else:
-                    row_sub = None
-                if row_sub is None:
-                    continue
-                channels, row_ids = by_table.setdefault(row_sub.table_ref, ([], []))
-                channels.append(channel)
-                row_ids.append(row_sub.row_id)
-                break  # 同一频道只需读一次，其他订阅共用缓存
-        if not by_table:
-            return
-        servant = self._backend.servant
-        for table_ref, (channels, row_ids) in by_table.items():
-            rows = cast(
-                list[dict[str, Any] | None],
-                await servant.get_many(table_ref, row_ids, RowFormat.TYPED_DICT),
-            )
-            for channel, row in zip(channels, rows):
-                RowSubscription.prefill_cache_(channel, row)
+        updates, self._outbox = self._outbox, {}
+        return updates

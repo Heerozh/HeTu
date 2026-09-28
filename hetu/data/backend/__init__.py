@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
+    from ..sub import SubscriptionHub
 
 
 class Backend:
@@ -81,8 +82,15 @@ class Backend:
         self._master_weight = config.get("master_weight", 1.0)
         self._all_clients = self._servants + [self._master]
         self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
+        # 本进程在这个 backend 上的 worker 级订阅器（见 `SubscriptionHub.of`）：第一次建订阅门面时
+        # 懒建，随本对象关闭
+        self.sub_hub_: SubscriptionHub | None = None
 
     async def close(self):
+        # 先关订阅器：它的处理循环和 MQClient 还在用下面这些连接
+        if (hub := self.sub_hub_) is not None:
+            self.sub_hub_ = None
+            await hub.close()
         await self._master.close()
         for servant in self._servants:
             await servant.close()

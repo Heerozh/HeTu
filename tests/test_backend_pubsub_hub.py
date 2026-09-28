@@ -78,14 +78,16 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
 
         pubsub.subscribe = counting_subscribe
 
-    # 两个连接订阅同一行：hub 里计数 2，向后端只订阅一次
+    # 两个连接订阅同一行：两个连接共用 worker 级订阅器的一个 MQClient，通知接收器里计数 1，
+    # 向后端只订阅一次
     sub_a, row = await broker_a.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub_a and row
     sends_after_first = sends
     sub_b, _ = await broker_b.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub_b
     channel = cast(RowSubscription, broker_a._subs[sub_a]).channel
-    assert hub.subscriber_count(channel) == 2
+    assert hub.subscriber_count(channel) == 1
+    assert len(broker_a._hub._channel_subs[channel]) == 2
     assert channel in hub.channels
     if pubsub is not None:
         assert sends == sends_after_first, "同一频道第二个订阅者不应再发 SUBSCRIBE"
@@ -178,7 +180,9 @@ async def test_watch_channel_callback_bypasses_client_queue(
         while not hits:
             await asyncio.sleep(0.02)
     # 没进推送队列：客户端侧拿不到任何更新
-    assert channel not in broker._mq_client.pulled_set
+    assert channel not in broker._hub.mq.pulled_set
+    assert broker._watch_mq is not None
+    assert channel not in broker._watch_mq.pulled_set
     assert await broker.get_updates(timeout=0.3) == {}
 
     # 回调抛过异常后，后续通知照常到达
@@ -212,7 +216,8 @@ async def test_watch_and_client_subscription_share_channel(
     assert sub_id and row
     channel = cast(RowSubscription, broker._subs[sub_id]).channel
     await broker.watch_channel(channel, lambda: hits.append(1))
-    assert hub.subscriber_count(channel) == 1  # 同一连接只登记一次
+    # 客户端订阅走 worker 级订阅器的 MQClient，内部关注走本连接自己的 MQClient，各登记一次
+    assert hub.subscriber_count(channel) == 2
 
     # 同一条变更：关注回调到了，客户端也照常收到 updt
     await _update_qty(backend, filled_item_ref, 501)
