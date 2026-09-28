@@ -881,16 +881,19 @@ class SubscriptionHub:
         self, work: dict[BaseSubscription, list[tuple[str, set[str] | None]]]
     ) -> dict[BaseSubscription, list[tuple[str, set[str] | None]]]:
         """
-        本批涉及的频道若 hub 没订着（此前 tick 末尾订阅它失败了，见 _subscribe_added），本 tick
-        不处理它们，交给后台补订（_resubscribe）：订上之后再按真实频道重新入队，一个 interval 后
-        读（要在订阅生效之后读，失败期间的写入没有通知），没订上的也重新入队、到时再补。不等补订
-        回来，别让它卡住本批别的订阅的交付
+        本批涉及的频道若 hub 没生效地订着（此前 tick 末尾订阅它失败了，见 _subscribe_added），本
+        tick 不处理它们，交给后台补订（_resubscribe）：订上之后再按真实频道重新入队，一个 interval
+        后读（要在订阅生效之后读，失败期间的写入没有通知），没订上的也重新入队、到时再补。不等补订
+        回来，别让它卡住本批别的订阅的交付。
+        按 `_effective` 判断，不看 MQClient.subscribed：后者在 SUBSCRIBE 发出时就记上，别的连接的
+        SUBSCRIBE 还在途时会被当作已订好、当场就读；那次 SUBSCRIBE 随后失败的话频道就成了孤儿。
+        在途的由补订去等它（见 _subscribe）
         """
-        subscribed = self._mq.subscribed_channels
+        effective = self._effective
         missing: dict[str, set[str] | None] = {}
         for items in work.values():
             for channel, payload in items:
-                if channel in subscribed:
+                if channel in effective:
                     continue
                 known = missing.get(channel)
                 if payload is None:
