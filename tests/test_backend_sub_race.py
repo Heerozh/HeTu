@@ -348,22 +348,29 @@ async def test_updates_are_delivered_when_the_tick_ends():
     await close_hub(hub, node)
 
 
-async def test_undrained_updates_merge_across_ticks():
-    """连接没来取（推送阻塞）时，几个 tick 的更新在待发区按 sub_id / row_id 合并，后到的覆盖先到的"""
+async def test_stalled_connection_is_not_read_until_it_drains():
+    """
+    连接的推送卡住（客户端网络拥塞：ws.send 阻塞，push_queue 满了，没人来 get_updates 取待发区）：
+    不再为它读库、比对，通知先攒着，等它取走待发区再重读，推最新的。以前照样每个 tick 读、合并进
+    待发区，过载时该卸掉的副本读和 CPU 照常消耗，范围订阅的待发区随行进出无上限增长（dev 不调
+    get_updates 就不读）
+    """
     hub, (a,), mq, node = make_brokers(1, autostart=True)
     s = FakeSub({"C"})
     await register(a, node, "S", s)
     s.updates = {1: {"v": 1}, 2: {"v": 1}}
     mq.push_pulled_("C", None)
-    async with asyncio.timeout(1):
-        while not a._outbox:
-            await asyncio.sleep(0.001)
-    s.updates = {1: {"v": 2}}
-    mq.push_pulled_("C", None)
-    async with asyncio.timeout(1):
-        while a._outbox["S"][1] != {"v": 2}:
-            await asyncio.sleep(0.001)
-    assert await a.get_updates(timeout=TICK) == {"S": {1: {"v": 2}, 2: {"v": 1}}}
+    await wait_until(lambda: a._outbox)  # 交到待发区了，连接卡着没来取
+    reads = len(s.calls)
+    for v in range(2, 5):
+        s.updates = {1: {"v": v}}
+        mq.push_pulled_("C", None)
+        await asyncio.sleep(0.01)
+    assert len(s.calls) == reads, "连接卡着没来取，还在为它读"
+
+    # 连接恢复：先取走卡住前的那批，攒着的通知随即重读，推最新的
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"v": 1}, 2: {"v": 1}}}
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"v": 4}}}
     await close_hub(hub, node)
 
 
