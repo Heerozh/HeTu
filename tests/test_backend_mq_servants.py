@@ -12,7 +12,7 @@ from collections.abc import Awaitable
 from typing import Any
 
 import pytest
-from fixtures.fake_pubsub import FakeNodePubSub, make_hub, settle
+from fixtures.fake_pubsub import FakeNodePubSub, attach_fake_node, make_hub, settle
 
 from hetu.data.backend.base import HubMQClient, MQClient
 from hetu.data.backend.redis.mq import PubSubHub, RedisMQClient
@@ -45,6 +45,22 @@ async def acked(nodes: list[FakeNodePubSub], aw: Awaitable[Any]) -> Any:
                     done[i, mtype] = len(sent)
             await asyncio.sleep(0.001)
     return task.result()
+
+
+def kill(hub: PubSubHub, node: FakeNodePubSub) -> None:
+    """副本挂掉：它的 pubsub 连接断开，之后重连上的节点订阅 / 退订都立刻报错（连接被拒）"""
+    pubsub = hub._pubsub  # type: ignore[reportPrivateUsage]
+
+    async def refuse(*channels: str):
+        raise ConnectionError("servant down")
+
+    def reconnect():
+        dead = attach_fake_node(pubsub)
+        dead.subscribe = refuse  # type: ignore[method-assign]
+        dead.unsubscribe = refuse  # type: ignore[method-assign]
+
+    pubsub.standalone_connect = reconnect  # type: ignore[method-assign]
+    node.fail()
 
 
 def route(mq: HubMQClient) -> dict[str, Any]:
@@ -125,7 +141,7 @@ async def test_lost_servant_channels_move_and_are_reread():
     on_first = {ch for ch, hub in route(mq).items() if hub is hubs[0]}
     assert on_first & set(ROWS) and on_first & set(WATCHED)
 
-    nodes[0].fail()
+    kill(hubs[0], nodes[0])
     async with asyncio.timeout(3):
         while not on_first <= set(nodes[1].sent("subscribe")):
             await asyncio.sleep(0.001)
@@ -151,7 +167,7 @@ async def test_channel_unsubscribed_while_moving_is_not_left_on_new_servant():
     await acked(nodes, mq.subscribe(*ROWS))
     on_first = {ch for ch, hub in route(mq).items() if hub is hubs[0]}
     victim = next(iter(on_first))
-    nodes[0].fail()
+    kill(hubs[0], nodes[0])
     async with asyncio.timeout(3):
         while victim not in nodes[1].sent("subscribe"):
             await asyncio.sleep(0.001)
@@ -172,7 +188,7 @@ async def test_subscribe_of_a_moving_channel_waits_for_the_move():
     await acked(nodes, mq.subscribe(*ROWS))
     on_first = {ch for ch, hub in route(mq).items() if hub is hubs[0]}
     channel = next(iter(on_first))
-    nodes[0].fail()
+    kill(hubs[0], nodes[0])
     async with asyncio.timeout(3):
         while channel not in nodes[1].sent("subscribe"):
             await asyncio.sleep(0.001)
@@ -188,7 +204,7 @@ async def test_close_releases_channels_on_every_servant():
     """关闭时各副本上的登记都撤掉（含换过副本的）"""
     mq, hubs, nodes = make_mq()
     await acked(nodes, mq.subscribe(*ROWS))
-    nodes[0].fail()
+    kill(hubs[0], nodes[0])
     await acked(nodes[1:], asyncio.sleep(0.1))
     await acked(nodes[1:], mq.close())
     assert all(hub.subscriber_count(ch) == 0 for hub in hubs for ch in ROWS)
@@ -200,7 +216,7 @@ async def test_single_servant_leaves_recovery_to_the_hub():
     """只挂一个副本时没有别处可换：断线仍由它自己重连重订、补发 RESYNC，不另起换副本"""
     mq, hubs, nodes = make_mq(1)
     await acked(nodes, mq.subscribe(*ROWS))
-    nodes[0].fail()
+    kill(hubs[0], nodes[0])
     await asyncio.sleep(0.05)
     assert all(hubs[0].subscriber_count(ch) == 1 for ch in ROWS)
     await close_all(mq, hubs)

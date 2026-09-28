@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, Literal, final, overload, override
 import numpy as np
 
 from ....i18n import _
-from ..base import RowFormat
+from ..base import BackendClient, RowFormat
 from ..redis_model import RedisModelClient
 from .commit import run_commit
 from .store import KEYSPACE_PREFIX, SQLiteStore, open_store
@@ -303,16 +303,28 @@ class SQLiteBackendClient(RedisModelClient, alias="sqlite"):
         return SQLiteTableMaintenance(self)
 
     @override
-    def get_mq_client(self) -> SQLiteMQClient:
+    def get_mq_client(self, *others: BackendClient) -> SQLiteMQClient:
         """
         获取消息队列连接（worker 级订阅器取一个，连接做内部关注时各取一个）。本进程对本库
         只有一个 `SQLiteNotifyHub`（一个通知表轮询任务）在首次调用时懒建，之后每次返回一个挂在
-        它上面的轻量 MQClient。
+        它上面的轻量 MQClient。SQLite 后端没有 servant，others 总是空的
         """
+        from .mq import SQLiteMQClient
+
+        hubs = [self.mq_hub_()]
+        for other in others:
+            assert isinstance(other, SQLiteBackendClient), _(
+                "消息队列只能挂在同类后端的连接上"
+            )
+            hubs.append(other.mq_hub_())
+        return SQLiteMQClient(*hubs)
+
+    def mq_hub_(self) -> SQLiteNotifyHub:
+        """本进程对本库唯一的 `SQLiteNotifyHub`（一个通知表轮询任务），首次调用时懒建"""
         self._ensure_open()
-        from .mq import SQLiteMQClient, SQLiteNotifyHub
+        from .mq import SQLiteNotifyHub
 
         if self._hub is None:
             self._bind_loop()  # 轮询的任务会跑在当前 loop 上，之后就不能换 loop 了
             self._hub = SQLiteNotifyHub(self)
-        return SQLiteMQClient(self._hub)
+        return self._hub

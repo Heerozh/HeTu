@@ -94,9 +94,10 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `ComponentTableManager` 管理。
 - `MQClient`：本地 message queue（合批、尾随重读），用于 subscription notification。每个
   worker 级订阅器（`SubscriptionHub`）一个；连接做服务端内部关注（`watch_channel`，如顶号
-  检测）时另有自己的一个。后端每个 worker 只有一个共享的通知接收器
+  检测）时另有自己的一个。后端每个 worker 对每个 servant 只有一个共享的通知接收器
   （Redis `PubSubHub` 一条 pubsub 连接 / SQLite `SQLiteNotifyHub` 一个通知表轮询任务）
-  按频道分发到各 MQClient 的队列。
+  按频道分发到各 MQClient 的队列。一个 MQClient 挂在所有 servant 的通知接收器上
+  （`HubMQClient`）：频道按哈希分到各 servant 订阅，某个 servant 断线时换到别的上重订、补读。
 
 ### Server Layer (`hetu/server/`)
 

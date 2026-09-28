@@ -61,6 +61,7 @@ class AsyncKeyspacePubSub:
         client: Redis | RedisCluster,
         on_message: Callable[[dict], None] | None = None,
         on_resubscribed: Callable[[list[str]], None] | None = None,
+        on_lost: Callable[[list[str]], None] | None = None,
     ):
         """
         Parameters
@@ -74,11 +75,15 @@ class AsyncKeyspacePubSub:
         on_resubscribed
             节点失效后，恢复流程确认这批频道全部重订生效时同步调用一次，传入这批频道。
             失效到恢复之间的通知全部丢失，上层据此补读。不能 await。
+        on_lost
+            节点失效时同步调用一次，传入订在这个节点上、已生效的频道：恢复之前它们收不到通知
+            （恢复流程照旧重订它们，上层也可以先退订、换到别处订）。不能 await。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
         self.on_message = on_message
         self.on_resubscribed = on_resubscribed
+        self.on_lost = on_lost
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
@@ -465,6 +470,12 @@ class AsyncKeyspacePubSub:
             return
         except Exception as e:  # noqa: BLE001 监听任务死于任何异常都按节点断线处理
             logger.error(f"Listener error on node {node_key}: {e}")
+            # 订在这个节点上、已生效的频道：恢复之前收不到通知（下面清掉已订阅集合之前取）
+            lost = [
+                channel
+                for channel in self._subscribed
+                if self._channel_node.get(channel) == node_key
+            ]
             # 断线处理：丢弃并尽力关掉失效节点的自建连接，等 ack 的调用方全部失败
             res = self.node_resources.pop(node_key, None)
             if res is not None:
@@ -485,6 +496,12 @@ class AsyncKeyspacePubSub:
             # 如果不保存task，task不会执行会被gc
             if self._resubscribe_task is None or self._resubscribe_task.done():
                 self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
+            # 交给上层（可以换到别的副本上订）。回调出错不能拖垮恢复流程
+            if lost and self.on_lost is not None:
+                try:
+                    self.on_lost(lost)
+                except Exception:
+                    logger.exception("on_lost callback failed")
 
     @staticmethod
     async def _dispose_node(res: dict):

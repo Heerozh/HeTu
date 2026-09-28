@@ -39,7 +39,10 @@ class PubSubHub(MQHub):
     def __init__(self, client: Redis | RedisCluster):
         super().__init__()
         self._pubsub = AsyncKeyspacePubSub(
-            client, on_message=self._on_message, on_resubscribed=self._on_resubscribed
+            client,
+            on_message=self._on_message,
+            on_resubscribed=self._on_resubscribed,
+            on_lost=self._on_lost,
         )
 
     async def add(self, mq: MQClient, channels: Iterable[str]) -> None:
@@ -139,6 +142,19 @@ class PubSubHub(MQHub):
             if not isinstance(ids, list):
                 ids = None
         self._warn_dropped(self._dispatch(channel_name, ids))
+
+    def _on_lost(self, channels: list[str]) -> None:
+        """
+        AsyncKeyspacePubSub 的节点失效时同步调用：这些频道恢复之前收不到通知。交给订了它们的
+        MQClient（`MQHub.lost_`），挂了几个副本的会换到别的副本重订；其余的等恢复流程重订、补发
+        """
+        logger.warning(
+            _(
+                "⚠️ [💾Redis] pubsub 连接断了，{count} 个频道在恢复前收不到通知："
+                "挂了多个副本的订阅换到别的副本重订，其余的等它重连后重订、补读"
+            ).format(count=len(channels))
+        )
+        self.lost_(channels)
 
     def _on_resubscribed(self, channels: list[str]) -> None:
         """

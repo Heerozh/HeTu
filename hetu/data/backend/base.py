@@ -36,11 +36,12 @@ import hashlib
 import importlib
 import logging
 import math
+import random
 import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Collection, Coroutine, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -706,8 +707,12 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    def get_mq_client(self) -> MQClient:
-        """获取消息队列连接"""
+    def get_mq_client(self, *others: BackendClient) -> MQClient:
+        """
+        获取消息队列连接。others 是同一个后端的其他连接（其余 servant）：给了的话，返回的 MQClient 挂在
+        本连接和它们各自的通知接收器上，频道分到各处订阅，某处订阅失败或断线时换到别处（见
+        `HubMQClient`）。
+        """
         raise NotImplementedError
 
 
@@ -1284,6 +1289,13 @@ class MQClient:
         """取消订阅频道，可一次取消多个"""
         raise NotImplementedError
 
+    def lost_(self, hub: MQHub, channels: list[str]) -> None:
+        """
+        通知接收器 hub 到后端的连接断了（如 Redis 副本挂掉），本客户端在它上面的这些频道恢复之前收不到
+        通知（`MQHub.lost_` 调用，同步、不能 await）。默认什么也不做：由 hub 自己重连重订、补发
+        （`MQHub.resync_`）。挂在几个 hub 上的实现（`HubMQClient`）把它们换到别的 hub。
+        """
+
     @property
     def subscribed_channels(self) -> set[str]:
         """返回当前订阅的频道名"""
@@ -1367,6 +1379,22 @@ class MQHub:
                 dropped += self._dispatch(channel, ids)
         return dropped
 
+    def lost_(self, channels: Iterable[str]) -> None:
+        """
+        到后端的连接断了（Redis 的 pubsub 节点失效）：这些频道的通知在恢复之前收不到。按订阅者分组交给
+        各 MQClient（`MQClient.lost_`）：挂在几个 hub 上的会把频道换到别的 hub 重订、补读。仍登记在这里
+        的，恢复流程照旧重订、补发（`resync_`）。同步调用，不能 await
+        """
+        per_mq: dict[MQClient, list[str]] = {}
+        for channel in channels:
+            for mq in self._subs.get(channel, ()):
+                per_mq.setdefault(mq, []).append(channel)
+        for mq, lost in per_mq.items():
+            try:
+                mq.lost_(self, lost)
+            except Exception:  # 一个订阅者出错不能拖累别人，也不能拖垮恢复流程
+                logger.exception(_("⚠️ [MQ] 通知接收器断线的回调异常"))
+
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         task.add_done_callback(self._tasks.discard)
@@ -1384,31 +1412,70 @@ class MQHub:
 
 class HubMQClient(MQClient):
     """
-    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录自己订阅了哪些频道，
-    订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
+    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录自己订阅了哪些频道，订阅/退订转发给 hub。
+    后端实现只需继承并指定 `LOG_TAG`。
+
+    可以挂在几个 hub 上（每个 servant 一个，见 `Backend.get_mq_client`）：仍是一个本地队列，频道按哈希
+    分到各 hub 订阅（rendezvous 哈希，每个实例随机加盐：同一频道在不同 worker 落在不同的副本上）。
+    - 分到的 hub 订阅失败：它冷却 `HUB_COOLDOWN` 秒不再分新频道，这些频道换下一个 hub 订；都订不上才
+      抛出，并撤掉本次在别处新登记的；
+    - hub 到后端的连接断了（`lost_`，如副本挂掉）：它上面的频道换到别的 hub 重订，订上之后各补一条
+      通知让订阅者重读（断线期间的写入没有通知，同 `MQHub.resync_`）；换不成的留在原处，等它自己重连
+      重订、补发。
+    只挂一个 hub 时与以前一样：断线由 hub 自己重连重订、补发 RESYNC。
+
     单个连接订阅频道数的告警（MAX_SUBSCRIBED）在门面 `SubscriptionBroker` 做：订阅都走 worker 级
     订阅器的这一个 MQClient，它订的是整个 worker 的频道。
+
+    A lightweight MQClient on top of process-wide `MQHub`s. With several hubs (one per
+    servant) it keeps one local queue, spreads channels over the hubs by salted rendezvous
+    hashing, and moves them to another hub when a hub fails to subscribe or loses its
+    connection (re-reading the moved channels once they are subscribed again).
     """
 
-    def __init__(self, hub: MQHub):
+    # 某个 hub 订阅失败或断线后，这么多秒内不给它分新频道（到时再试；已经换到别处的不搬回来）
+    HUB_COOLDOWN: float = 5.0
+
+    def __init__(self, hub: MQHub, *more_hubs: MQHub):
         super().__init__()  # 本地消息队列
+        self._hubs: tuple[MQHub, ...] = (hub, *more_hubs)
+        # 只挂一个 hub 时就是它（多个时是第一个）
         self._hub = hub
         # 客户端订阅的频道；服务端内部关注（watch）的频道另记一份，两者可以重叠：
         # hub 按 MQClient 计数，同一频道只登记一次，所以客户端退订时要看它是不是还被关注着
         self.subscribed: set[str] = set()
         self._watched: set[str] = set()
+        # 以下只在挂了几个 hub 时用。频道 → 登记在哪个 hub 上（登记中的也算）
+        self._route: dict[str, MQHub] = {}
+        self._salt = random.getrandbits(64)
+        # hub → 冷却到期的时刻（time.monotonic）
+        self._cooldown: dict[MQHub, float] = {}
+        # 正在换 hub 的频道 → 换完时完成的 future
+        self._moving: dict[str, asyncio.Future[None]] = {}
+        # 后台任务（换 hub、撤掉旧 hub 上的登记）：保存引用免得被 gc，close 时统一取消
+        self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
     async def close(self):
         """取消本客户端的全部订阅（含内部关注的）。拆除路径上调用，后端出错也不抛"""
         self._closed = True
-        channels = self.subscribed | self._watched
+        # 回调在第一次 await 之前就同步清掉：退订回来之前的通知不再触发它
+        channels = self.subscribed | self._watched | set(self._route)
         self.subscribed = set()
         self._watched = set()
         self._watchers.clear()
+        self._route.clear()
+        tasks = [task for task in self._tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if channels:
             try:
-                await self._hub.remove(self, channels)
+                # 每个 hub 都撤一遍（hub 只撤本客户端登记过的）：换过 hub 的频道新旧两边都可能还有
+                await asyncio.gather(
+                    *(hub.remove(self, channels) for hub in self._hubs)
+                )
             except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
                 logger.warning(
                     _("⚠️ [{tag}] 关闭连接时取消订阅失败：{err}").format(
@@ -1419,22 +1486,23 @@ class HubMQClient(MQClient):
     async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
+        await self._wait_moving((channel_name,))
         # 先登记回调再订阅：订阅生效到登记之间的通知不能落进客户端推送队列
         self._watchers[channel_name] = callback
         self._watched.add(channel_name)
         try:
-            await self._hub.add(self, [channel_name])
+            await self._add((channel_name,))
         except BaseException:
             self._watched.discard(channel_name)
             self._watchers.pop(channel_name, None)
             raise
         if self._closed:
-            await self._hub.remove(self, [channel_name])
+            await self._remove((channel_name,))
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
     async def subscribe(self, *channel_names: str) -> None:
         """
-        订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得。
+        订阅频道（可多个，每个 hub 一次往返），频道名通过 client.xxx_channel(table_ref) 获得。
         失败时撤掉本次新登记的频道：登记按 MQClient 记、不按调用方，几个调用方共用一个 MQClient
         时，重叠的另一次 subscribe 搭车订上的也会被一并撤掉。所以共用时要由调用方保证同一频道同时
         只有一次在途（见 `hetu.data.sub.SubscriptionHub._subscribe`）
@@ -1443,18 +1511,20 @@ class HubMQClient(MQClient):
             return
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
+        # 正在换 hub 的频道先等换完，它们的 hub 才定下来
+        await self._wait_moving(channel_names)
         # 先记再等：等 ack 期间本连接可能又 unsubscribe/close 了其中的频道，由它们从
         # subscribed 和 hub 里撤掉；add 返回后不能再把这些频道加回来
         new = [name for name in channel_names if name not in self.subscribed]
         self.subscribed.update(new)
         try:
-            await self._hub.add(self, channel_names)
+            await self._add(channel_names)
         except BaseException:
             self.subscribed.difference_update(new)
             raise
         if self._closed:
             # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
-            await self._hub.remove(self, channel_names)
+            await self._remove(channel_names)
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
     async def unsubscribe(self, *channel_names: str) -> None:
@@ -1465,9 +1535,232 @@ class HubMQClient(MQClient):
         # 服务端还关注着的频道只是客户端不要了，hub 里的登记得留着
         gone = [name for name in channel_names if name not in self._watched]
         if gone:
-            await self._hub.remove(self, gone)
+            await self._remove(gone)
 
     @property
     def subscribed_channels(self) -> set[str]:
         """返回当前连接订阅的所有频道名"""
         return self.subscribed
+
+    # === === === 挂在几个 hub 上时：分配、换 hub === === ===
+
+    def _candidates(self, channel: str, exclude: Collection[MQHub] = ()) -> list[MQHub]:
+        """频道可选的 hub，按优先顺序：rendezvous 哈希从高到低，冷却中的排到最后"""
+        now = time.monotonic()
+        salt = self._salt
+        ranked = sorted(
+            (self._cooldown.get(hub, 0.0) > now, -hash((salt, i, channel)), i)
+            for i, hub in enumerate(self._hubs)
+            if hub not in exclude
+        )
+        return [self._hubs[i] for _cooling, _score, i in ranked]
+
+    def _cool_down(self, hub: MQHub) -> None:
+        self._cooldown[hub] = time.monotonic() + self.HUB_COOLDOWN
+
+    async def _wait_moving(self, channels: Iterable[str]) -> None:
+        """这些频道里有正在换 hub 的就等它换完（没有时不让出事件循环）"""
+        moving = self._moving
+        if not moving:
+            return
+        futures = {moving[ch] for ch in channels if ch in moving}
+        if futures:
+            await asyncio.wait(futures)  # 只旁观：本调用方被取消不会取消换 hub
+
+    async def _add(self, channels: Iterable[str]) -> None:
+        """
+        在各频道的 hub 上登记订阅，返回时都已生效。只挂一个 hub 时就是 `hub.add`。
+
+        挂了几个 hub 时：登记过的照旧登记在原 hub 上（重复 add 幂等，会等在途的 ack）；没登记过的按
+        `_candidates` 挑一个。某个 hub 登记失败：它冷却，本次新分给它的频道换下一个候选再试；本次之前
+        就登记在它上面的不在这里搬（断线由 `lost_` 搬），直接抛出。抛出（含被取消）时本次新分配的
+        一律撤掉，在别处已登记上的也撤掉：与 `hub.add` 一样，失败不留半截登记
+        """
+        if len(self._hubs) == 1:
+            await self._hub.add(self, channels)
+            return
+        route = self._route
+        # 本次新分配 hub 的频道 → 在哪些 hub 上失败过
+        tried: dict[str, set[MQHub]] = {}
+        # 本次新登记成功的，出错时要撤掉
+        registered: list[tuple[MQHub, list[str]]] = []
+        todo = list(dict.fromkeys(channels))
+        error: BaseException | None = None
+        try:
+            while todo:
+                groups: dict[MQHub, list[str]] = {}
+                for channel in todo:
+                    hub = route.get(channel)
+                    if hub is None:
+                        candidates = self._candidates(
+                            channel, tried.setdefault(channel, set())
+                        )
+                        if not candidates:
+                            assert error is not None
+                            raise error  # 每个 hub 都试过了
+                        hub = route[channel] = candidates[0]
+                    groups.setdefault(hub, []).append(channel)
+                done: dict[MQHub, list[str]] = {}
+                try:
+                    failed = await self._add_groups(groups, done)
+                finally:
+                    registered.extend(
+                        (hub, [ch for ch in group if ch in tried])
+                        for hub, group in done.items()
+                    )
+                todo = []
+                for hub, exc in failed.items():
+                    self._cool_down(hub)
+                    error = exc
+                    for channel in groups[hub]:
+                        if channel not in tried:
+                            raise exc
+                        if route.get(channel) is hub:
+                            del route[channel]
+                        tried[channel].add(hub)
+                        todo.append(channel)
+        except BaseException:
+            for channel in tried:
+                route.pop(channel, None)
+            stale = [(hub, group) for hub, group in registered if group]
+            if stale:
+                self._spawn(self._drop(stale))
+            raise
+
+    async def _add_groups(
+        self, groups: dict[MQHub, list[str]], done: dict[MQHub, list[str]]
+    ) -> dict[MQHub, Exception]:
+        """各 hub 并发登记，登记成功的记进 done（被取消时调用方据此撤掉），返回登记失败的"""
+        failed: dict[MQHub, Exception] = {}
+
+        async def add(hub: MQHub, group: list[str]) -> None:
+            try:
+                await hub.add(self, group)
+            except Exception as e:  # noqa: BLE001 换下一个 hub，或由调用方抛出
+                failed[hub] = e
+            else:
+                done[hub] = group
+
+        await asyncio.gather(*(add(hub, group) for hub, group in groups.items()))
+        return failed
+
+    async def _remove(self, channels: Iterable[str]) -> None:
+        """
+        撤掉这些频道在各自 hub 上的登记（等退订回来）。只挂一个 hub 时就是 `hub.remove`。
+        正在换 hub 的，这里撤旧 hub 上的，新 hub 上的由换 hub 的任务换完时发现没人要了再撤
+        """
+        if len(self._hubs) == 1:
+            await self._hub.remove(self, channels)
+            return
+        groups: dict[MQHub, list[str]] = {}
+        for channel in channels:
+            hub = self._route.pop(channel, None)
+            if hub is not None:
+                groups.setdefault(hub, []).append(channel)
+        if groups:
+            await asyncio.gather(
+                *(hub.remove(self, group) for hub, group in groups.items())
+            )
+
+    async def _drop(self, groups: Iterable[tuple[MQHub, list[str]]]) -> None:
+        """撤掉这些 hub 上的登记（后台任务）"""
+        await asyncio.gather(*(hub.remove(self, group) for hub, group in groups))
+
+    def lost_(self, hub: MQHub, channels: list[str]) -> None:
+        """
+        hub 到后端的连接断了，这些频道的通知在它恢复之前收不到（`MQHub.lost_` 调用）。挂了几个 hub
+        时：它冷却，这些频道在后台换到别的 hub（`_move`）。只挂一个 hub 时什么也不做
+        """
+        if len(self._hubs) < 2 or self._closed:
+            return
+        self._cool_down(hub)
+        moving = [
+            channel
+            for channel in channels
+            if self._route.get(channel) is hub and channel not in self._moving
+        ]
+        if not moving:
+            return
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        for channel in moving:
+            self._moving[channel] = done
+        self._spawn(self._move(hub, moving, done))
+
+    async def _move(
+        self, old: MQHub, channels: list[str], done: asyncio.Future[None]
+    ) -> None:
+        """
+        把断线的 hub 上的这些频道换到别的 hub：先在新 hub 订上，再撤掉旧 hub 上的登记（它的重订名单
+        随之去掉这些频道），然后各补一条通知让订阅者重读：新订阅生效之后发出的读，才覆盖得了断线期间
+        的写入（同 `MQHub.resync_`：表级频道带 RESYNC，内部关注的频道触发回调）。换不成的留在原处，
+        等旧 hub 自己重连重订、补发
+        """
+        route = self._route
+        try:
+            moved: list[str] = []
+            tried: set[MQHub] = {old}
+            todo = channels
+            while todo:
+                groups: dict[MQHub, list[str]] = {}
+                for channel in todo:
+                    candidates = self._candidates(channel, tried)
+                    if candidates:
+                        groups.setdefault(candidates[0], []).append(channel)
+                if not groups:
+                    break
+                failed = await self._add_groups(groups, {})
+                todo = []
+                for hub, group in groups.items():
+                    if hub in failed:
+                        self._cool_down(hub)
+                        tried.add(hub)
+                        todo.extend(group)
+                        continue
+                    for channel in group:
+                        route[channel] = hub
+                    moved.extend(group)
+            if not moved:
+                logger.debug(
+                    "[%s] %d channels stay on the lost hub, no other hub took them",
+                    self.LOG_TAG,
+                    len(channels),
+                )
+                return
+            self._spawn(old.remove(self, moved))
+            # 换 hub 的途中不要了（退订了、也不再关注）的：新 hub 上的也撤掉
+            unwanted: dict[MQHub, list[str]] = {}
+            dropped = 0
+            for channel in moved:
+                if channel not in self.subscribed and channel not in self._watched:
+                    unwanted.setdefault(route.pop(channel), []).append(channel)
+                    continue
+                ids = [self.RESYNC] if MQHub.is_table_channel_(channel) else None
+                dropped += self.push_pulled_(channel, ids)
+            if unwanted:
+                self._spawn(self._drop(unwanted.items()))
+            if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
+                logger.warning(
+                    _(
+                        "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
+                    ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
+                )
+        finally:
+            for channel in channels:
+                if self._moving.get(channel) is done:
+                    del self._moving[channel]
+            done.set_result(None)
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            logger.warning(
+                _("⚠️ [{tag}] 订阅 / 退订频道失败：{err}").format(
+                    tag=self.LOG_TAG, err=f"{type(exc).__name__}:{exc}"
+                )
+            )

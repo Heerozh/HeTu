@@ -96,8 +96,9 @@ hub 分发一条通知，就是对订了它的每个连接各调一次 `push_pul
   `SubscriptionBroker` 时，在当前事件循环里懒建。`SubscriptionBroker(backend, hub=...)` 可以传入别的
   实例，供测试使用。
 - **MQClient**：建 hub 时调一次 `backend.get_mq_client()`。今天是每个连接随机挑一个 servant 的通知接收器；
-  现在一个 worker 的订阅通知都走同一个 servant 的 pubsub，跨 worker 仍随机分散。worker 内也不会再因为连接
-  落在不同 servant 上而把同一条通知收几份。
+  现在 hub 的 MQClient 挂在所有 servant 的通知接收器上，频道按哈希分到各 servant，某个 servant 断线时换到
+  别的上（§4.9）。同一频道在 worker 内只订一次，不会再因为连接落在不同 servant 上而把同一条通知收几份。
+  （第一版是随机绑一个 servant、终身不换，见 §4.9。）
 - **关闭**：`Backend.close()` 先关 hub（取消处理循环、关 MQClient），再关 master / servant 连接。
 - **处理循环**：按 tick 捕获异常（§6），自己不会结束。万一因 bug 结束，记错误日志，隔 1 秒自己重新拉起（下一次
   attach 也会拉起）。一个订阅的处理逃出异常（bug）只记日志：不中止这个 tick，别的订阅照常跑完、交付，tick 末尾
@@ -242,7 +243,8 @@ hub 的 MQClient 由整个 worker 共用。有几个竞态今天只在单个连�
 2. 同一 tick 里的行读在 worker 内共用（论证见 §5）。
 3. fresh 按 hub 已生效的订阅判定，比今天更准（§4.4）。
 4. 推送卡住时通知按（订阅, 频道）攒着不读，取走 outbox 后重读；今天是队列按频道去重、不读，效果相当。
-5. 一个 worker 的订阅通知都走同一个 servant 的 pubsub（§4.2）。
+5. 订阅通知按频道分到各 servant 的 pubsub，每个频道在 worker 内只订一次；某个 servant 断线时换到别的
+   servant 重订、补读（§4.9）。
 6. tick 屏障（§4.3）。
 7. 通知接连不断时相邻 tick 之间留合批窗口，延迟最多多一个窗口（§4.8）。
 
@@ -265,6 +267,33 @@ hub 弹一批跑一个 tick、跑完马上弹下一批，tick 就碎成每条一
 实测 10ms 窗口（按 user 态周期数比，笔记本 P 核频率随负载变，CPU 时间不可比）：背包增删 500~4000
 次/秒每次操作比 dev 少 32~40% 的周期，只改不增删少 46~47%；p50 延迟多 6~8ms（101 → 107~110ms）。窗口开到 25ms 时 CPU 再少一点，但一个 tick 里同时存活的
 对象多了，4000 次/秒时开始频繁触发全量 GC（2000 连接时一次约 230ms），尾延迟变差，所以默认取 10ms。
+
+### 4.9 订阅通知分到各副本，断线换副本（Linux 实测后补）
+
+第一版 hub 建的时候调一次 `backend.get_mq_client()`，随机绑一个 servant、终身不换。故障复现（两个副本，
+`docker stop` 掉 hub 绑定的那个）：该 worker 已有订阅 0/20 收到推送、新订阅 0/20 成功，客户端重连也换不了
+（还是同一个 hub），要等这个副本恢复；dev 是每连接随机一个副本，影响面是 1/N 的连接，重连还能换。负载也
+全压在一个副本上。
+
+做法：`Backend.get_mq_client()` 返回的 MQClient 挂在每个 servant 的通知接收器上（`HubMQClient` 可以挂几个
+hub），仍是一个本地队列、一条时间线：
+- 频道按 rendezvous 哈希分到各 servant，每个 MQClient 随机加盐：同一频道在 worker 内只订在一个 servant 上，
+  在不同 worker 落在不同 servant 上，热点频道的推送分摊到各副本；
+- 分到的 servant 订阅失败：它冷却 `HUB_COOLDOWN`（5 秒）不分新频道，这些频道换下一个 servant 订；都订不上
+  才抛出，并撤掉本次在别处新登记的（与只挂一个 hub 时的 `hub.add` 一样，不留半截登记）；
+- servant 的 pubsub 断线：`AsyncKeyspacePubSub` 把这个节点上已生效的频道交给 `on_lost` → `MQHub.lost_` →
+  各 MQClient 的 `lost_`。`HubMQClient` 在后台把它们换到别的 servant：先在新 servant 订上，再撤掉旧的登记
+  （它的重订名单随之去掉这些频道），然后各补一条通知让订阅者重读（同 `resync_`：表级频道带 RESYNC，watch
+  的回调补触发一次）。新订阅生效之后发出的读才覆盖得了断线期间的写入，所以补读放在订上之后。换不成（别的
+  也不可用）的留在原处，等它自己重连重订、补发；
+- 换的途中再订阅同一频道的，等换完；退订了的，新 servant 上订好后也撤掉；
+- 只挂一个 servant（包括 Redis 原生集群：集群客户端自己按 slot 分节点）时与以前一样。
+
+订阅器这一层（`_effective`、fresh、补订）不用改：频道对它来说一直是生效的，断线期间漏掉的写入由换副本后的
+补读覆盖，论证同 pubsub 断线重订（§5 表格"pubsub 断线期间的写"一行）。
+
+没做的：半开的连接（对端没有 RST）要等 TCP keepalive 判死才会换；订阅时的首次读仍随机选 servant，读到死掉的
+那个时这次订阅失败（dev 也一样）。
 
 ## 5. 正确性
 

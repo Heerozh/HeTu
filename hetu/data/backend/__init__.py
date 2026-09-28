@@ -146,8 +146,15 @@ class Backend:
         return self._master.get_table_maintenance()
 
     def get_mq_client(self) -> MQClient:
-        """获取消息队列连接"""
-        return self.servant.get_mq_client()
+        """
+        获取消息队列连接：一个本地队列，挂在每个 servant 的通知接收器上。订阅的频道按哈希分到各
+        servant（每个 MQClient 随机加盐，同一频道在不同 worker 落在不同 servant 上），某个 servant
+        订阅失败或断线时换到别的 servant 重订、补读（见 `HubMQClient`）。
+        Returns an MQClient spanning every servant: channels are spread over them and moved
+        away from a servant whose subscription fails or whose connection is lost.
+        """
+        first, *rest = self._servants
+        return first.get_mq_client(*rest)
 
     def session(self, instance: str, cluster_id: int) -> Session:
         """
