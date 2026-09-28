@@ -24,7 +24,7 @@ import redis.exceptions
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
-from ..base import RowFormat
+from ..base import BackendClient, RowFormat
 from ..redis_model import RedisModelClient
 from .pool import HeTuConnectionPool
 
@@ -552,15 +552,29 @@ class RedisBackendClient(RedisModelClient, alias="redis"):
 
         return RedisTableMaintenance(self)
 
-    def get_mq_client(self) -> RedisMQClient:
+    def get_mq_client(self, *others: BackendClient) -> RedisMQClient:
         """
-        获取消息队列连接（每个用户连接一个）。本进程对本地址只有一个 `PubSubHub`
-        （一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        获取消息队列连接（worker 级订阅器取一个，连接做内部关注时各取一个）。本进程对每个地址
+        只有一个 `PubSubHub`（一条 pubsub 连接），首次用到时懒建；返回挂在本地址的 hub 上的轻量
+        MQClient。others 是其余 servant：给了的话 MQClient 同时挂在它们的 hub 上，频道分到各副本
+        订阅，某个副本断线时换到别的副本（见 `HubMQClient`）。
         """
+        from .mq import RedisMQClient
+
+        hubs = [self.mq_hub_()]
+        for other in others:
+            assert isinstance(other, RedisBackendClient), _(
+                "消息队列只能挂在同类后端的连接上"
+            )
+            hubs.append(other.mq_hub_())
+        return RedisMQClient(*hubs)
+
+    def mq_hub_(self) -> PubSubHub:
+        """本进程对本地址唯一的 `PubSubHub`（一条 pubsub 连接），首次调用时在当前事件循环里懒建"""
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        from .mq import PubSubHub, RedisMQClient
+        from .mq import PubSubHub
 
         if self._hub is None:
             self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
-        return RedisMQClient(self._hub)
+        return self._hub

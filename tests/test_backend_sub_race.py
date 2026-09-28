@@ -1,28 +1,45 @@
 """
-SubscriptionBroker.get_updates 一个 tick 内的 await 间隙与接收协程（客户端的 sub/unsub）
-交错时的行为。不连数据库：订阅对象用可控的替身，mq 走假的 pubsub 节点。
+worker 级订阅器（SubscriptionHub + 每连接的 SubscriptionBroker 门面）在各种协程交错下的行为：
+tick 里的 await 间隙与接收协程（客户端的 sub/unsub）交错、几个连接共用一个 MQClient 时的订阅 /
+退订 / 取消。不连数据库：订阅对象用可控的替身，mq 走假的 pubsub 节点。
 """
 
 import asyncio
+import itertools
+import logging
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import Any, cast
 
-from fixtures.fake_pubsub import FakeNodePubSub, make_hub, settle
+import pytest
+from fixtures.contexts import wait_until
+from fixtures.fake_pubsub import (
+    FakeNodePubSub,
+    attach_fake_node,
+    make_hub,
+    route_channels,
+    settle,
+)
 
 from hetu.data.backend import Backend
 from hetu.data.backend.redis.mq import RedisMQClient
-from hetu.data.sub import BaseSubscription, SubscriptionBroker
+from hetu.data.sub import (
+    BaseSubscription,
+    RowSubscription,
+    SubscriptionBroker,
+    SubscriptionHub,
+)
 
 
 class FakeSub(BaseSubscription):
-    """可控的订阅：get_updated 可卡在闸门上，返回预设的 (新增频道, 移除频道, 更新)"""
+    """可控的订阅：get_updated 可卡在闸门上，返回预设的 (新增频道, 移除频道, 更新)，并记下调用"""
 
     def __init__(self, channels: set[str]):
         self._channels = set(channels)
         self.gate = asyncio.Event()
         self.gate.set()
         self.entered = asyncio.Event()
+        self.calls: list[tuple[str, set[str] | None]] = []
         self.new: set[str] = set()
         self.rem: set[str] = set()
         self.updates: dict[int, dict[str, Any] | None] = {}
@@ -30,6 +47,7 @@ class FakeSub(BaseSubscription):
     async def get_updated(
         self, channel: str, payload: set[str] | None = None
     ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
+        self.calls.append((channel, payload))
         self.entered.set()
         await self.gate.wait()
         self._channels |= self.new
@@ -41,33 +59,42 @@ class FakeSub(BaseSubscription):
         return set(self._channels)
 
 
+class FlakySub(FakeSub):
+    """前 fails 次 get_updated 读库出错（模拟 Redis 抖动），之后照常"""
+
+    def __init__(self, channels: set[str], fails: int = 1):
+        super().__init__(channels)
+        self.fails = fails
+
+    async def get_updated(
+        self, channel: str, payload: set[str] | None = None
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
+        if self.fails > 0:
+            self.fails -= 1
+            self.calls.append((channel, payload))
+            raise ConnectionError("read failed")
+        return await super().get_updated(channel, payload)
+
+
 # 一个 tick：get_updates 碰到没有任何更新的批次会接着等下一批，给个总时长让它结束
 TICK = 0.3
 
 
-def make_broker() -> tuple[SubscriptionBroker, RedisMQClient, FakeNodePubSub]:
-    hub, node = make_hub()
-    mq = RedisMQClient(hub)
+def make_brokers(
+    n: int, autostart: bool = False
+) -> tuple[SubscriptionHub, list[SubscriptionBroker], RedisMQClient, FakeNodePubSub]:
+    """n 个门面共用一个 hub；autostart=False 时由门面的 get_updates 驱动 tick"""
+    pubsub_hub, node = make_hub()
+    mq = RedisMQClient(pubsub_hub)
     mq.UPDATE_FREQUENCY = 1000  # type: ignore[reportAttributeAccessIssue]  通知入队后马上能取走
-    backend = SimpleNamespace(get_mq_client=lambda: mq, servant=None)
-    broker = SubscriptionBroker(cast(Backend, backend))
+    backend = cast(Backend, SimpleNamespace(get_mq_client=lambda: mq, servant=None))
+    hub = SubscriptionHub(backend, autostart=autostart)
+    return hub, [SubscriptionBroker(backend, hub=hub) for _ in range(n)], mq, node
+
+
+def make_broker() -> tuple[SubscriptionBroker, RedisMQClient, FakeNodePubSub]:
+    _hub, (broker,), mq, node = make_brokers(1)
     return broker, mq, node
-
-
-async def register(
-    broker: SubscriptionBroker, node: FakeNodePubSub, sub_id: str, sub: FakeSub
-):
-    """照 subscribe_get / subscribe_range 的顺序登记一个订阅：先订频道再记账"""
-    channels = sorted(sub.channels)
-    t = asyncio.create_task(broker._mq_client.subscribe(*channels))  # type: ignore[reportPrivateUsage]
-    await settle()
-    for channel in channels:
-        node.ack("subscribe", channel)
-    async with asyncio.timeout(1):
-        await t
-    broker._subs[sub_id] = sub  # type: ignore[reportPrivateUsage]
-    for channel in channels:
-        broker._channel_subs.setdefault(channel, set()).add(sub_id)  # type: ignore[reportPrivateUsage]
 
 
 async def finish(task: asyncio.Task, node: FakeNodePubSub):
@@ -85,6 +112,13 @@ async def finish(task: asyncio.Task, node: FakeNodePubSub):
     return task.result()
 
 
+async def register(
+    broker: SubscriptionBroker, node: FakeNodePubSub, sub_id: str, sub: FakeSub
+):
+    """照 subscribe_get / subscribe_range 的顺序登记一个订阅：先订频道（生效），再登记到门面"""
+    await finish(asyncio.create_task(broker._attach(sub_id, sub)), node)
+
+
 async def unsubscribe_and_ack(
     broker: SubscriptionBroker, node: FakeNodePubSub, sub_id: str
 ):
@@ -96,10 +130,24 @@ async def close_all(broker: SubscriptionBroker, node: FakeNodePubSub):
     await finish(asyncio.create_task(broker.close()), node)
 
 
+async def close_hub(hub: SubscriptionHub, node: FakeNodePubSub):
+    await finish(asyncio.create_task(hub.close()), node)
+
+
+async def wait_sent(node: FakeNodePubSub, mtype: str, channel: str):
+    async with asyncio.timeout(1):
+        while channel not in node.sent(mtype):
+            await asyncio.sleep(0.001)
+
+
 async def test_released_channel_resubscribed_during_tick_is_kept():
     """tick 内索引订阅 I1 丢掉行 X、I2 新增行 Y，等 Y 的 SUBSCRIBE ack 期间接收协程
     又为 X 登记了新的行订阅 R：tick 末尾不能按旧名单把 X 退掉"""
     broker, mq, node = make_broker()
+    hub = broker._hub
+    hub.SUBSCRIBE_WAIT_INTERVALS = (
+        1000  # tick 末尾等 Y 的 ack（interval 1ms，最多等 1 秒）
+    )
     i1 = FakeSub({"idx1", "X"})
     i2 = FakeSub({"idx2"})
     await register(broker, node, "I1", i1)
@@ -110,10 +158,8 @@ async def test_released_channel_resubscribed_during_tick_is_kept():
     mq.push_pulled_("idx1", None)
     mq.push_pulled_("idx2", None)
     tick = asyncio.create_task(broker.get_updates(timeout=TICK))
-    async with asyncio.timeout(1):
-        while "Y" not in node.sent("subscribe"):
-            await asyncio.sleep(0.001)
-    assert "X" not in broker._channel_subs  # type: ignore[reportPrivateUsage]
+    await wait_sent(node, "subscribe", "Y")
+    assert "X" not in hub._channel_subs
 
     # 接收协程：客户端 subscribe_get 命中了行 X（mq 从没退订过 X，这次订阅无任何动作）
     r = FakeSub({"X"})
@@ -124,35 +170,32 @@ async def test_released_channel_resubscribed_during_tick_is_kept():
     await finish(tick, node)
     assert node.sent("unsubscribe") == [], "X 又有人订了，不能退"
     assert "X" in mq.subscribed_channels
-    assert broker._channel_subs["X"] == {"R"}  # type: ignore[reportPrivateUsage]
+    assert hub._channel_subs["X"] == {r}
     await close_all(broker, node)
 
 
-async def test_unsub_of_later_sub_in_snapshot_during_tick_is_skipped():
-    """两个订阅共享一个频道，tick 处理第一个时（查库中）客户端 unsub 了第二个：
-    第二个已从 _subs 弹掉，tick 应跳过它，而不是 KeyError 把连接断掉"""
+async def test_unsub_of_another_sub_during_tick_drops_its_updates():
+    """两个订阅共享一个频道，tick 处理它们时（都在查库）客户端 unsub 了第二个：
+    第二个的结果丢掉，频道第一个还在用、不退订；第一个照常推送"""
     broker, mq, node = make_broker()
     subs = {"S1": FakeSub({"C"}), "S2": FakeSub({"C"})}
     for sub_id, sub in subs.items():
         await register(broker, node, sub_id, sub)
-        sub.updates = {sub_id: {"id": sub_id}}  # type: ignore[dict-item]
+        sub.updates = {int(sub_id[1]): {"id": sub_id}}
         sub.gate.clear()
 
     mq.push_pulled_("C", None)
     tick = asyncio.create_task(broker.get_updates(timeout=TICK))
-    # 同一频道下订阅的处理顺序取决于 set 的迭代顺序：先等出来谁在查库，再 unsub 另一个
     async with asyncio.timeout(1):
-        while not any(sub.entered.is_set() for sub in subs.values()):
-            await asyncio.sleep(0.001)
-    first_id = next(sub_id for sub_id, sub in subs.items() if sub.entered.is_set())
-    second_id = next(sub_id for sub_id in subs if sub_id != first_id)
-    await unsubscribe_and_ack(broker, node, second_id)  # C 还有人在订，不会真退
+        for sub in subs.values():
+            await sub.entered.wait()
+    await unsubscribe_and_ack(broker, node, "S2")  # C 还有人在订，不会真退
     assert node.sent("unsubscribe") == []
 
-    subs[first_id].gate.set()
+    for sub in subs.values():
+        sub.gate.set()
     updates = await finish(tick, node)
-    assert updates == {first_id: subs[first_id].updates}
-    assert not subs[second_id].entered.is_set()
+    assert updates == {"S1": subs["S1"].updates}
     await close_all(broker, node)
 
 
@@ -160,6 +203,7 @@ async def test_sub_unsubscribed_during_its_own_get_updated_leaves_no_trace():
     """索引订阅查库期间被客户端 unsub：查库结果里的新增/移除行不能再记账
     （否则给一个已不存在的订阅登记频道、还为它发 SUBSCRIBE），更新也不再推"""
     broker, mq, node = make_broker()
+    hub = broker._hub
     s1 = FakeSub({"idx", "X"})
     await register(broker, node, "S1", s1)
     s1.new = {"Y"}
@@ -173,12 +217,1095 @@ async def test_sub_unsubscribed_during_its_own_get_updated_leaves_no_trace():
         await s1.entered.wait()
     await unsubscribe_and_ack(broker, node, "S1")
     assert sorted(node.sent("unsubscribe")) == ["X", "idx"]
-    assert "S1" not in broker._subs  # type: ignore[reportPrivateUsage]
+    assert "S1" not in broker._subs
 
     s1.gate.set()
     updates = await finish(tick, node)
     assert updates == {}
     assert "Y" not in node.sent("subscribe"), "为已不存在的订阅发了 SUBSCRIBE"
-    assert broker._channel_subs == {}  # type: ignore[reportPrivateUsage]
+    assert hub._channel_subs == {}
     assert mq.subscribed_channels == set()
     await close_all(broker, node)
+
+
+async def test_attach_returns_inactive_until_broker_registers():
+    """hub.attach 返回时订阅仍未生效（active=False），tick 不处理它：active 要由门面在登记的同一个
+    同步段里置。由订阅任务自己置的话，门面登记之前 tick 算好的推送会因 sub_id 未登记被丢掉，
+    指纹却已更新，之后的补读读回一样也不再推（设计稿 §4.6）"""
+    hub, (broker,), mq, node = make_brokers(1)
+    sub = FakeSub({"X"})
+    await finish(asyncio.create_task(hub.attach(sub, broker, "S")), node)
+    assert not sub.active
+    mq.push_pulled_("X", None)
+    assert await broker.get_updates(timeout=TICK) == {}
+    assert sub.calls == []
+    await close_hub(hub, node)
+
+
+async def test_attach_in_flight_keeps_channel_from_unsubscribe():
+    """连接 B 正在 attach 订阅 R（频道 X、Y，Y 的 SUBSCRIBE 还没回来），tick 里 I1 把 X 放出范围：
+    X 上有 R 的占位，不能退订；R 订上之后 X 的通知照常交给它（设计稿 §4.6）"""
+    hub, (a, b), mq, node = make_brokers(2)
+    i1 = FakeSub({"idx1", "X"})
+    await register(a, node, "I1", i1)
+    i1.rem = {"X"}
+
+    r = FakeSub({"X", "Y"})
+    attaching = asyncio.create_task(b._attach("R", r))
+    await wait_sent(node, "subscribe", "Y")
+
+    mq.push_pulled_("idx1", None)
+    await finish(asyncio.create_task(a.get_updates(timeout=TICK)), node)
+    assert i1.calls == [("idx1", None)]
+    assert node.sent("unsubscribe") == [], "X 上有 R 的占位，不能退订"
+
+    node.ack("subscribe", "Y")
+    await finish(attaching, node)
+    assert {"X", "Y"} <= mq.subscribed_channels
+    assert hub._channel_subs["X"] == {r}
+    mq.push_pulled_("X", None)
+    await finish(asyncio.create_task(b.get_updates(timeout=TICK)), node)
+    assert ("X", None) in r.calls
+    await close_hub(hub, node)
+
+
+async def test_cancelled_attach_does_not_revoke_other_connection():
+    """连接 A、B 同时 attach 同一个新频道 X（B 搭 A 发出的 SUBSCRIBE），A 在等 ack 时被取消
+    （连接断开）：共用的 MQClient 对 X 的登记不能被撤掉，B 照常收到 X 的通知（设计稿 §4.6）"""
+    hub, (a, b), mq, node = make_brokers(2)
+    sa, sb = FakeSub({"X"}), FakeSub({"X"})
+    ta = asyncio.create_task(a._attach("A", sa))
+    await wait_sent(node, "subscribe", "X")
+    tb = asyncio.create_task(b._attach("B", sb))
+    await settle()
+    ta.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ta
+    node.ack("subscribe", "X")
+    await finish(tb, node)
+
+    assert "X" in mq.subscribed_channels
+    assert mq._hub.subscriber_count("X") == 1
+    assert node.sent("unsubscribe") == []
+    assert sa.closed and not sa.active
+    assert hub._channel_subs["X"] == {sb}
+    mq.push_pulled_("X", None)
+    await finish(asyncio.create_task(b.get_updates(timeout=TICK)), node)
+    assert ("X", None) in sb.calls
+    await close_hub(hub, node)
+
+
+async def test_new_channel_gets_reread_while_its_subscribe_is_in_flight():
+    """tick 里订阅 S 新增频道 X 时，X 的 SUBSCRIBE 正由别的连接的 attach 发出、还没回来：
+    MQClient.subscribed 里已经有 X，但订阅还没生效。S 读 X 在前、生效在后，其间的写入没有
+    通知，仍要给 S 定向补读（设计稿 §4.4）"""
+    hub, (a, b), mq, node = make_brokers(2)
+    hub.SUBSCRIBE_WAIT_INTERVALS = (
+        1000  # tick 末尾等 X 的 ack（interval 1ms，最多等 1 秒）
+    )
+    s = FakeSub({"idx"})
+    await register(a, node, "S", s)
+    s.new = {"X"}
+
+    p = FakeSub({"X"})
+    attaching = asyncio.create_task(b._attach("P", p))
+    await wait_sent(node, "subscribe", "X")
+    assert "X" in mq.subscribed_channels
+
+    mq.push_pulled_("idx", None)
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await s.entered.wait()
+    await settle()
+    assert not tick.done()  # tick 末尾在等 X 的 SUBSCRIBE（搭 P 发出的那个）
+    node.ack("subscribe", "X")
+    await finish(attaching, node)
+    await finish(tick, node)
+    assert ("X", None) in s.calls, "X 订阅生效前 S 读过它，要定向补读"
+    await close_hub(hub, node)
+
+
+async def test_updates_are_delivered_when_the_tick_ends():
+    """一个 tick 里一个订阅处理完、另一个还在查库：算好的更新先暂存，整个 tick 结束才交给连接
+    （get_updates 拿到的总是完整的 tick）"""
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    fast, slow = FakeSub({"C"}), FakeSub({"C"})
+    await register(a, node, "F", fast)
+    await register(a, node, "S", slow)
+    fast.updates = {1: {"id": 1}}
+    slow.updates = {2: {"id": 2}}
+    slow.gate.clear()
+
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        await slow.entered.wait()
+    await settle()
+    assert fast.calls == [("C", None)]
+    assert await a.get_updates(timeout=TICK) == {}, "tick 还没结束，不能先交出一部分"
+    slow.gate.set()
+    async with asyncio.timeout(1):
+        assert await a.get_updates() == {"F": {1: {"id": 1}}, "S": {2: {"id": 2}}}
+    await close_hub(hub, node)
+
+
+async def test_stalled_connection_is_not_read_until_it_drains():
+    """
+    连接的推送卡住（客户端网络拥塞：ws.send 阻塞，push_queue 满了，没人来 get_updates 取待发区）：
+    不再为它读库、比对，通知先攒着，等它取走待发区再重读，推最新的。以前照样每个 tick 读、合并进
+    待发区，过载时该卸掉的副本读和 CPU 照常消耗，范围订阅的待发区随行进出无上限增长（dev 不调
+    get_updates 就不读）
+    """
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    s.updates = {1: {"v": 1}, 2: {"v": 1}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox)  # 交到待发区了，连接卡着没来取
+    reads = len(s.calls)
+    for v in range(2, 5):
+        s.updates = {1: {"v": v}}
+        mq.push_pulled_("C", None)
+        await asyncio.sleep(0.01)
+    assert len(s.calls) == reads, "连接卡着没来取，还在为它读"
+
+    # 连接恢复：先取走卡住前的那批，攒着的通知随即重读，推最新的
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"v": 1}, 2: {"v": 1}}}
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"v": 4}}}
+    await close_hub(hub, node)
+
+
+async def test_unsubscribe_drops_undelivered_updates():
+    """已交到待发区、还没被取走的更新，退订后不再推"""
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        while not a._outbox:
+            await asyncio.sleep(0.001)
+    await unsubscribe_and_ack(a, node, "S")
+    assert await a.get_updates(timeout=TICK) == {}
+    await close_hub(hub, node)
+
+
+async def test_resubscribe_with_same_id_mid_tick_skips_old_updates():
+    """tick 里订阅 S 的更新已暂存、tick 还没结束时，客户端退订 S 又用同一个 sub_id 重订成 S2：
+    S 的更新不能当作 S2 的推出去"""
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s, g = FakeSub({"C"}), FakeSub({"C"})
+    await register(a, node, "S", s)
+    await register(a, node, "G", g)
+    s.updates = {1: {"old": True}}
+    g.gate.clear()  # 卡住 G，tick 结束不了
+
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        await g.entered.wait()
+    await settle()
+    assert s.calls == [("C", None)]
+    await unsubscribe_and_ack(a, node, "S")
+    await register(a, node, "S", FakeSub({"D"}))
+    g.gate.set()
+    assert await a.get_updates(timeout=TICK) == {}
+    await close_hub(hub, node)
+
+
+async def _deliver_one_update(autostart: bool) -> dict[str, dict]:
+    """订一个频道、来一条通知，返回连接拿到的更新：走一遍 hub 的 tick（处理、暂存、交付）"""
+    hub, (broker,), mq, node = make_brokers(1, autostart=autostart)
+    sub = FakeSub({"C"})
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    try:
+        return await broker.get_updates(timeout=TICK)
+    finally:
+        await close_hub(hub, node)
+
+
+@pytest.mark.parametrize("autostart", [True, False], ids=["loop", "manual"])
+def test_tick_runs_on_uvloop(autostart: bool):
+    """
+    生产在 Linux / macOS 上跑 uvloop（Sanic 默认启用），hub 的 tick 在它上面照常处理、交付。
+    Windows 没有 uvloop 跳过（本机的异步用例跑在 conftest 的 UvloopSignatureLoop 上兜着）
+    """
+    uvloop = pytest.importorskip("uvloop")
+    updates = asyncio.run(
+        _deliver_one_update(autostart), loop_factory=uvloop.new_event_loop
+    )
+    assert updates == {"S": {1: {"v": 1}}}
+
+
+async def test_manual_hub_runs_one_tick_at_a_time():
+    """手动模式下两个门面并发驱动同一个 hub：不会同时跑两个 tick"""
+    hub, (a, b), mq, node = make_brokers(2)
+    sa, sb = FakeSub({"C1"}), FakeSub({"C2"})
+    await register(a, node, "A", sa)
+    await register(b, node, "B", sb)
+    sa.updates = {1: {"a": 1}}
+    sb.updates = {2: {"b": 1}}
+    sa.gate.clear()
+
+    mq.push_pulled_("C1", None)
+    ta = asyncio.create_task(a.get_updates(timeout=1))
+    async with asyncio.timeout(1):
+        await sa.entered.wait()
+    mq.push_pulled_("C2", None)
+    tb = asyncio.create_task(b.get_updates(timeout=1))
+    await asyncio.sleep(0.05)
+    assert not sb.entered.is_set(), "A 驱动的 tick 还没结束，B 不能另起一个"
+    sa.gate.set()
+    assert await ta == {"A": {1: {"a": 1}}}
+    assert await tb == {"B": {2: {"b": 1}}}
+    await close_hub(hub, node)
+
+
+# ============ 错误处理（设计稿 §6）：重读，不断开 ============
+
+
+async def test_failed_read_is_retried_without_raising(caplog):
+    """订阅读库出错（Redis 抖动）：不抛给连接、不断开，记日志；一个 interval 后给它定向重读
+    这个频道（表级频道带原来的 row_id），这次读成功照常推送"""
+    broker, mq, node = make_broker()
+    row, table = FlakySub({"R"}), FlakySub({"T"})
+    await register(broker, node, "R", row)
+    await register(broker, node, "T", table)
+    row.updates = {1: {"v": 1}}
+    table.updates = {5: {"v": 5}}
+    mq.push_pulled_("R", None)
+    mq.push_pulled_("T", ["5"])
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await broker.get_updates(timeout=TICK)
+    assert updates == {"R": {1: {"v": 1}}, "T": {5: {"v": 5}}}
+    assert row.calls == [("R", None), ("R", None)]
+    assert table.calls == [("T", {"5"}), ("T", {"5"})]
+    assert any(r.levelno >= logging.ERROR for r in caplog.records)
+    await close_all(broker, node)
+
+
+async def test_repeated_read_errors_are_logged_rate_limited(caplog):
+    """Redis 挂着时每个 tick 都会出错、都会重试：错误日志限流，间隔内只记一条（带栈），别刷屏"""
+    broker, mq, node = make_broker()
+    sub = FlakySub({"C"}, fails=5)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await broker.get_updates(timeout=1)
+    assert updates == {"S": {1: {"v": 1}}}
+    assert len(sub.calls) == 6
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    await close_all(broker, node)
+
+
+async def test_failed_subscribe_of_new_channel_is_repaired():
+    """tick 末尾订阅新进入范围的行频道失败：不抛给连接；频道留在频道表里重新入队，之后弹出时
+    先补订，订上之后再让订着它的订阅重读"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    s = FakeSub({"idx"})
+    await register(broker, node, "S", s)
+    s.new = {"X"}
+    node.fail_next = ConnectionError("send failed")  # 下一次 SUBSCRIBE 发送失败
+    mq.push_pulled_("idx", None)
+    await finish(asyncio.create_task(broker.get_updates(timeout=TICK)), node)
+    # 发送失败的那次没记进 sent，补订的这次记上了
+    assert node.sent("subscribe").count("X") == 1
+    assert "X" in mq.subscribed_channels
+    assert hub._channel_subs["X"] == {s}
+    assert ("X", None) in s.calls, "补订之后要重读，失败期间的写入没有通知"
+    await close_all(broker, node)
+
+
+# ============ tick 末尾的订阅 / 退订不能卡住整个 worker 的交付 ============
+
+
+async def test_tick_delivers_without_waiting_for_unsubscribe_ack():
+    """行离开范围、tick 末尾退订没人要的行频道：交付不等 UNSUBSCRIBE 回来。它对交付毫无作用，
+    ack 迟迟不来时要等满 UNSUBSCRIBE_ACK_TIMEOUT（5 秒），worker 里所有连接的推送都跟着卡住"""
+    broker, mq, node = make_broker()
+    s = FakeSub({"idx", "X"})
+    await register(broker, node, "S", s)
+    s.rem = {"X"}
+    s.updates = {1: None}
+    mq.push_pulled_("idx", None)
+    async with asyncio.timeout(1):
+        updates = await broker.get_updates(timeout=TICK)  # UNSUBSCRIBE 一直不 ack
+    assert updates == {"S": {1: None}}
+    await wait_sent(node, "unsubscribe", "X")  # 退订照常发出，只是交付不等它
+    node.ack("unsubscribe", "X")
+    await close_all(broker, node)
+
+
+async def test_released_channel_resubscribed_during_background_unsubscribe():
+    """tick 把 X 放出范围、退订放在后台：退订还没回来时接收协程又为 X 登记了行订阅 R。X 最终仍
+    订着、已生效，R 收得到 X 的通知"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    i1 = FakeSub({"idx", "X"})
+    await register(broker, node, "I1", i1)
+    i1.rem = {"X"}
+    mq.push_pulled_("idx", None)
+    assert await broker.get_updates(timeout=TICK) == {}
+    await wait_sent(node, "unsubscribe", "X")  # 后台退订已发出，ack 还没回来
+
+    r = FakeSub({"X"})
+    await register(broker, node, "R", r)  # 重新发出的 SUBSCRIBE X 由 finish 投递 ack
+    node.ack("unsubscribe", "X")
+    await settle()
+    assert "X" in mq.subscribed_channels and "X" in hub._effective
+    assert hub._channel_subs["X"] == {r}
+    mq.push_pulled_("X", None)
+    await broker.get_updates(timeout=TICK)
+    assert ("X", None) in r.calls
+    await close_all(broker, node)
+
+
+async def test_tick_waits_for_subscribe_ack_at_most_an_interval():
+    """行进入范围、tick 末尾订阅它的行频道：SUBSCRIBE 的 ack 迟迟不来（比如节点的 pubsub 连接
+    半开，要靠 TCP keepalive 才发现）时最多等一个 interval 就交付，不能冻住整个 worker 的推送；
+    ack 回来之后照常给新增它的订阅定向补读"""
+    broker, mq, node = make_broker()
+    s = FakeSub({"idx"})
+    await register(broker, node, "S", s)
+    s.new = {"X"}
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("idx", None)
+    async with asyncio.timeout(1):
+        updates = await broker.get_updates(timeout=TICK)  # SUBSCRIBE X 还没 ack
+    assert updates == {"S": {1: {"v": 1}}}
+
+    s.new, s.updates = set(), {}
+    await wait_sent(node, "subscribe", "X")
+    node.ack("subscribe", "X")
+    assert await broker.get_updates(timeout=TICK) == {}
+    assert ("X", None) in s.calls, "SUBSCRIBE 回来之后要给新增它的订阅定向补读"
+    await close_all(broker, node)
+
+
+async def test_repair_does_not_block_the_tick():
+    """补订（此前订阅失败的频道弹出时先补订）不等 SUBSCRIBE 回来：本批别的订阅照常处理、交付，
+    补订的频道订上之后再重读"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    s = FakeSub({"idx"})
+    other = FakeSub({"C"})
+    await register(broker, node, "S", s)
+    await register(broker, node, "O", other)
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(3):
+        # 跑一个 tick：S 新增 X，tick 末尾订阅 X 发送失败，X 按真实频道重新入队
+        s.new = {"X"}
+        node.fail_next = ConnectionError("send failed")
+        mq.push_pulled_("idx", None)
+        assert await hub.step_(loop.time() + 1, lambda: False)
+        await wait_until(lambda: "X" in mq.pulled_set)
+        assert "X" not in mq.subscribed_channels and hub._channel_subs["X"] == {s}
+
+        # X 与 C 的通知同一批弹出：补订 X 的 SUBSCRIBE 一直不 ack，C 照常交付
+        s.new = set()
+        other.updates = {2: {"v": 2}}
+        mq.push_pulled_("C", None)
+        await asyncio.sleep(0.01)  # 两项都过了合批窗口
+        assert await broker.get_updates(timeout=TICK) == {"O": {2: {"v": 2}}}
+
+        await wait_sent(node, "subscribe", "X")
+        node.ack("subscribe", "X")
+        assert await broker.get_updates(timeout=TICK) == {}
+    assert ("X", None) in s.calls, "补订上之后要重读"
+    await close_all(broker, node)
+
+
+# ============ 几个连接共用 hub 的 MQClient：重叠的订阅不能互相回滚 ============
+
+
+class OrderedFakeSub(FakeSub):
+    """频道按给定顺序订（attach 按 sub.channels 的顺序发，决定先发哪个节点）"""
+
+    def __init__(self, channels: list[str]):
+        super().__init__(set(channels))
+        self._order = list(channels)
+
+    @property
+    def channels(self) -> set[str]:
+        return cast(set[str], [ch for ch in self._order if ch in self._channels])
+
+
+async def ack_until_done(node: FakeNodePubSub, *tasks: asyncio.Task) -> list[Any]:
+    """等这些 task 都结束，期间把发出的 SUBSCRIBE/UNSUBSCRIBE 都 ack 掉；返回结果或异常"""
+    acked = {mtype: len(node.sent(mtype)) for mtype in ("subscribe", "unsubscribe")}
+    async with asyncio.timeout(1):
+        while not all(task.done() for task in tasks):
+            for mtype, done in acked.items():
+                sent = node.sent(mtype)
+                for channel in sent[done:]:
+                    node.ack(mtype, channel)
+                acked[mtype] = len(sent)
+            await asyncio.sleep(0.001)
+    return list(await asyncio.gather(*tasks, return_exceptions=True))
+
+
+async def drain_acks(node: FakeNodePubSub):
+    """跑一会儿，期间发出的（含后台退订的）SUBSCRIBE/UNSUBSCRIBE 都 ack 掉"""
+    await ack_until_done(node, asyncio.create_task(asyncio.sleep(0.05)))
+
+
+def assert_active_channels_subscribed(hub: SubscriptionHub, mq: RedisMQClient):
+    """已登记到门面（active）的订阅，它的频道都真的订着：没有返回成功却收不到通知的订阅"""
+    for channel, subs in hub._channel_subs.items():
+        if any(sub.active for sub in subs):
+            assert channel in mq.subscribed_channels, channel
+            assert mq._hub.subscriber_count(channel) == 1, channel
+
+
+async def test_failed_attach_does_not_revoke_channel_another_attach_waits_on():
+    """
+    连接 A 订 [C, D]，D 在另一个连不上的节点上；C 的 SUBSCRIBE 已经回来时连接 B 订 C。A 失败回滚
+    不能把 B 靠着的 C 一起撤掉、B 却以为订上了，再也收不到 C 的通知：B 要么跟着失败（客户端知道），
+    要么 C 真的订着（设计稿 §4.6）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    pubsub = cast(Any, mq._hub)._pubsub  # PubSubHub 的 AsyncKeyspacePubSub
+    n2 = attach_fake_node(pubsub, "n2")
+    route_channels(pubsub, {"D": "n2"})
+    n2.gate.clear()  # 连 D 所在的节点：一直连不上
+    sa = OrderedFakeSub(["C", "D"])
+    ta = asyncio.create_task(a._attach("A", sa))
+    await wait_sent(node, "subscribe", "C")
+    node.ack("subscribe", "C")
+    await settle()
+    sb = FakeSub({"C"})
+    tb = asyncio.create_task(b._attach("B", sb))
+    await settle()
+
+    n2.fail_next = ConnectionError("connect to n2 failed")
+    n2.gate.set()
+    ra, rb = await ack_until_done(node, ta, tb)
+    await drain_acks(node)
+    assert isinstance(ra, ConnectionError)
+    if isinstance(rb, BaseException):
+        assert not sb.active
+    else:
+        assert sb.active
+        assert "C" in mq.subscribed_channels, "B 以为订上了，C 却被 A 的回滚撤掉了"
+    assert_active_channels_subscribed(hub, mq)
+    await close_hub(hub, node)
+
+
+async def test_attach_right_after_failed_subscribe_is_not_left_unsubscribed():
+    """
+    连接 A 订 T 的 SUBSCRIBE 发送失败，A 的回滚还没跑完时连接 B 也来订 T：B 不能返回成功却其实
+    没订上（A 回滚的后台退订会把 B 重新发出的那次 SUBSCRIBE 当作成功结算掉）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    sa, sb = FakeSub({"T"}), FakeSub({"T"})
+    b_attach: list[asyncio.Task] = []
+    real_subscribe = node.subscribe
+
+    async def fail_first_and_race(*channels: str):
+        if not b_attach:  # A 那次：发送失败的同一刻，B 的订阅请求到了
+            b_attach.append(asyncio.ensure_future(b._attach("B", sb)))
+            raise ConnectionError("send failed")
+        await real_subscribe(*channels)
+
+    node.subscribe = fail_first_and_race  # type: ignore[method-assign]
+    ta = asyncio.create_task(a._attach("A", sa))
+    async with asyncio.timeout(1):
+        while not b_attach:
+            await asyncio.sleep(0.001)
+    ra, rb = await ack_until_done(node, ta, b_attach[0])
+    await drain_acks(node)
+    assert isinstance(ra, ConnectionError)
+    if isinstance(rb, BaseException):
+        assert not sb.active
+    else:
+        assert sb.active
+        assert "T" in mq.subscribed_channels, "B 以为订上了，T 却已被退订"
+    assert_active_channels_subscribed(hub, mq)
+    await close_hub(hub, node)
+
+
+async def test_repair_waits_for_subscribe_to_take_effect_before_reading():
+    """
+    tick 末尾订阅新行 X 失败、X 重新入队；弹出前连接 B 订 X，SUBSCRIBE 发出去还没回来。补订看的
+    不能是"SUBSCRIBE 发没发"（MQClient.subscribed）：那样 S 当场就读 X，早于任何订阅生效，其间的
+    写入没有通知；B 的 SUBSCRIBE 随后失败的话 X 就成了没人订、队列里也没有的孤儿，S 的客户端一直
+    持有旧行。要等 X 真的订上之后再读（设计稿 §6）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    s = FakeSub({"idx"})
+    await register(a, node, "S", s)
+    loop = asyncio.get_running_loop()
+
+    async def one_tick():
+        await asyncio.sleep(0.005)  # 队列里的项都过了合批窗口
+        await hub.step_(loop.time() + 0.05, lambda: False)
+
+    async with asyncio.timeout(3):
+        # tick N：S 新增 X，tick 末尾订阅 X 发送失败，X 按真实频道重新入队
+        s.new = {"X"}
+        node.fail_next = ConnectionError("send failed")
+        mq.push_pulled_("idx", None)
+        await one_tick()
+        await wait_until(lambda: "X" in mq.pulled_set)
+        s.new = set()
+
+        # 连接 B 订 X：SUBSCRIBE 卡在发送上（之后也会失败）
+        node.gate.clear()
+        node.entered.clear()
+        node.fail_next = ConnectionError("send failed again")
+        tb = asyncio.create_task(b._attach("P", FakeSub({"X"})))
+        await node.entered.wait()
+        assert "X" in mq.subscribed_channels  # 发出去了，但还没生效
+
+        # tick N+1：弹出 X，S 不能现在就读
+        await one_tick()
+        assert ("X", None) not in s.calls, "X 的订阅还没生效就读了"
+
+        # B 的 SUBSCRIBE 失败：X 只剩 S 在要，要补订上，生效之后 S 再读
+        node.gate.set()
+        with pytest.raises(ConnectionError):
+            await tb
+        acked = 0
+        while ("X", None) not in s.calls:
+            sent = node.sent("subscribe")
+            for channel in sent[acked:]:
+                node.ack("subscribe", channel)
+            acked = len(sent)
+            await one_tick()
+    assert "X" in mq.subscribed_channels and "X" in hub._effective
+    await close_hub(hub, node)
+
+
+async def test_repeated_read_errors_back_off():
+    """
+    同一个订阅接连读出错（副本挂着、坏数据）：重试间隔指数退避（1、2、4… 个 interval，封顶），
+    别每个 interval 都去打同一个出错的节点；读成功后恢复正常节奏
+    """
+    broker, mq, node = make_broker()
+    mq.UPDATE_FREQUENCY = 20  # type: ignore[reportAttributeAccessIssue]  interval 50ms
+    sub = FlakySub({"C"}, fails=4)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    loop = asyncio.get_running_loop()
+    stamps: list[float] = []
+    real = sub.get_updated
+
+    async def stamped(channel, payload=None):
+        stamps.append(loop.time())
+        return await real(channel, payload)
+
+    sub.get_updated = stamped  # type: ignore[method-assign]
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(5):
+        assert await broker.get_updates(timeout=5) == {"S": {1: {"v": 1}}}
+    assert len(stamps) == 5
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
+    # 第 n 次失败后隔 2^(n-1) 个 interval 再读（call_later 可能早触发一个时钟精度，留余量）
+    assert gaps[2] >= 0.15 and gaps[3] >= 0.35, gaps
+    await close_all(broker, node)
+
+
+class _TableRef:
+    """预读只用到 table_ref 的 comp_cls.is_rls() 和可哈希"""
+
+    class comp_cls:
+        @staticmethod
+        def is_rls() -> bool:
+            return False
+
+    def __init__(self, name: str):
+        self.comp_name = name
+
+
+async def test_prefetch_reads_tables_concurrently():
+    """一批通知涉及几张表：各表的预读 get_many 并发发出，不按表串行排队（否则 worker 里每个连接的
+    交付都要等所有表的往返加起来）"""
+    in_flight = peak = 0
+
+    class SlowServant:
+        async def get_many(self, ref, row_ids, row_format):
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await asyncio.sleep(0.02)  # 一次往返
+            in_flight -= 1
+            return [{"id": row_id} for row_id in row_ids]
+
+    servant = SlowServant()
+    pubsub_hub, node = make_hub()
+    mq = RedisMQClient(pubsub_hub)
+    backend = cast(Backend, SimpleNamespace(get_mq_client=lambda: mq, servant=servant))
+    hub = SubscriptionHub(backend, autostart=False)
+    work: dict[BaseSubscription, list[tuple[str, set[str] | None]]] = {}
+    for i in range(3):
+        ref = cast(Any, _TableRef(f"T{i}"))
+        work[RowSubscription(ref, cast(Any, servant), None, f"row{i}", i)] = [
+            (f"row{i}", None)
+        ]
+    RowSubscription.reset_cache_()
+    await hub._prefetch_rows(work)
+    assert peak == 3, "各表的预读串行了"
+    await close_hub(hub, node)
+
+
+async def test_new_channel_gets_reread_when_its_subscribe_lands_mid_tick():
+    """
+    tick 里订阅 S 读了新进入范围的行 X；别的连接订 X 的 SUBSCRIBE 在 S 读完之后、tick 结束之前
+    回来。S 读 X 在前、X 生效在后，其间的写入没有通知，仍要给 S 定向补读：fresh 要按 tick 开始时
+    的生效状态判断，不能按 tick 末尾（设计稿 §4.4）
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    s = FakeSub({"idx"})
+    await register(a, node, "S", s)
+    s.new = {"X"}
+    s.gate.clear()  # S 读完、还没返回
+    mq.push_pulled_("idx", None)
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await s.entered.wait()
+    await register(b, node, "P", FakeSub({"X"}))  # X 的 SUBSCRIBE 这时回来，生效
+    assert "X" in hub._effective
+    s.gate.set()
+    await finish(tick, node)
+    s.new = set()
+    await finish(asyncio.create_task(a.get_updates(timeout=TICK)), node)
+    assert ("X", None) in s.calls, "X 在 S 读过之后才生效，要给 S 定向补读"
+    await close_hub(hub, node)
+
+
+# ============ tick 里逃出 _process 的异常（bug）：不能留下半截的 tick ============
+
+
+class BadStageSub(FakeSub):
+    """get_updated 正常返回，但暂存它的更新时出错（模拟 _process 里 get_updated 之外的 bug）"""
+
+
+def break_stage_for(hub: SubscriptionHub, bad: BaseSubscription):
+    real = hub._stage
+
+    def stage(tick, sub, updates):
+        if sub is bad:
+            raise RuntimeError("bug in bookkeeping")
+        return real(tick, sub, updates)
+
+    hub._stage = stage  # type: ignore[method-assign]
+
+
+def hub_errors(caplog) -> list[str]:
+    return [r.getMessage() for r in caplog.records if r.name == "HeTu.root"]
+
+
+async def test_escaped_error_in_eager_task_is_logged(caplog):
+    """
+    缓存命中、当场跑完的订阅（eager task）处理时逃出异常：要记日志，本 tick 别的订阅照常交付
+    （以前 eager 完成的 task 不进 pending，它的异常没人取，悄无声息地丢了）
+    """
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    good, bad = FakeSub({"C"}), BadStageSub({"C"})
+    await register(broker, node, "G", good)
+    await register(broker, node, "B", bad)
+    good.updates, bad.updates = {1: {"v": 1}}, {2: {"v": 2}}
+    break_stage_for(hub, bad)
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        updates = await finish(
+            asyncio.create_task(broker.get_updates(timeout=TICK)), node
+        )
+    assert updates == {"G": {1: {"v": 1}}}
+    assert any("bug in bookkeeping" in msg for msg in hub_errors(caplog))
+    await close_all(broker, node)
+
+
+async def test_escaped_error_in_pending_task_does_not_abort_the_tick(caplog):
+    """
+    要读库的订阅（挂起的 task）处理时逃出异常：不能中止整个 tick。别的还在读的订阅等它们跑完、
+    照常交付，tick 末尾照常订上新增的频道（以前 gather 一抛出 tick 就结束了：_settle_channels 被
+    跳过，新行的频道永远订不上；没跑完的 task 之后把更新暂存进已经交付过的 tick，推送丢了、
+    指纹却已推进）
+    """
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    slow, bad = FakeSub({"C"}), BadStageSub({"C"})
+    await register(broker, node, "S", slow)
+    await register(broker, node, "B", bad)
+    slow.new, slow.updates = {"Y"}, {1: {"v": 1}}
+    bad.updates = {2: {"v": 2}}
+    slow.gate.clear()
+    bad.gate.clear()
+    break_stage_for(hub, bad)
+    mq.push_pulled_("C", None)
+    tick = asyncio.create_task(broker.get_updates(timeout=1))
+    async with asyncio.timeout(1):
+        await slow.entered.wait()
+        await bad.entered.wait()
+    bad.gate.set()  # 出错的那个先跑完
+    await settle()
+    slow.gate.set()
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        assert await finish(tick, node) == {"S": {1: {"v": 1}}}
+    await wait_sent(node, "subscribe", "Y")
+    node.ack("subscribe", "Y")
+    await wait_until(lambda: "Y" in hub._effective)
+    assert any("bug in bookkeeping" in msg for msg in hub_errors(caplog))
+    await close_all(broker, node)
+
+
+async def test_processing_loop_restarts_after_it_dies(monkeypatch):
+    """后台处理循环因 bug 意外结束：过一会儿自己重新拉起，不用等下一次有连接订阅"""
+    monkeypatch.setattr("hetu.data.sub._RUN_RESTART_DELAY", 0.01, raising=False)
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    real = mq.get_message
+    broken = []
+
+    async def get_message_once_broken():
+        if not broken:
+            broken.append(1)
+            raise RuntimeError("bug in the loop")
+        return await real()
+
+    mq.get_message = get_message_once_broken  # type: ignore[method-assign]
+    first = hub._task
+    assert first is not None
+    hub._task = None  # 按新的 get_message 重新起一个，让它死掉
+    first.cancel()
+    await asyncio.wait([first])
+    hub._start()
+    dead = hub._task
+    assert dead is not None
+    async with asyncio.timeout(1):
+        await asyncio.wait([dead])
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        assert await a.get_updates(timeout=1) == {"S": {1: {"v": 1}}}
+    await close_hub(hub, node)
+
+
+async def test_log_error_survives_broken_translation(monkeypatch, caplog):
+    """翻译出来的日志模板占位符对不上（.po 由 CD 机翻同步）：记日志不能抛，退回原文"""
+    hub, _brokers, _mq, _node = make_brokers(0)
+    monkeypatch.setattr("hetu.data.sub._", lambda s: "{bogus} " + s)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        hub._log_error("出错了", RuntimeError("boom"))
+    assert any("boom" in r.getMessage() for r in caplog.records)
+
+
+# ============ 拆连接：先撤内部关注，两个退订并发；关闭后不再接受订阅 / 关注 ============
+
+
+def make_broker_with_watch() -> tuple[
+    SubscriptionHub, SubscriptionBroker, RedisMQClient, FakeNodePubSub
+]:
+    """hub 与门面的内部关注（watch_channel）各用一个 MQClient，挂在同一个假 pubsub 上（同生产）"""
+    pubsub_hub, node = make_hub()
+    hub_mq = RedisMQClient(pubsub_hub)
+    hub_mq.UPDATE_FREQUENCY = 1000  # type: ignore[reportAttributeAccessIssue]
+    clients = iter([hub_mq])
+    backend = cast(
+        Backend,
+        SimpleNamespace(
+            get_mq_client=lambda: next(clients, None) or RedisMQClient(pubsub_hub),
+            servant=None,
+        ),
+    )
+    hub = SubscriptionHub(backend, autostart=False)
+    return hub, SubscriptionBroker(backend, hub=hub), hub_mq, node
+
+
+def notify(node: FakeNodePubSub, channel: str):
+    node.inbox.put_nowait({"type": "message", "channel": channel.encode(), "data": b""})
+
+
+async def test_close_disarms_watch_before_waiting_for_unsubscribe():
+    """
+    拆连接时先撤内部关注：等订阅退订回来的期间同一用户在别处登录（owner 值频道来了通知），
+    顶号回调不能再触发（它会去 master 核一次，结果随即因为在拆被丢掉，白读一次 master）
+    """
+    hub, broker, _mq, node = make_broker_with_watch()
+    fired: list[None] = []
+    await finish(
+        asyncio.create_task(broker.watch_channel("W", lambda: fired.append(None))),
+        node,
+    )
+    await register(broker, node, "S", FakeSub({"X"}))
+    closing = asyncio.create_task(broker.close())
+    await wait_sent(node, "unsubscribe", "X")  # 退订发出去了，ack 还没回来
+    notify(node, "W")
+    await settle()
+    assert fired == [], "拆连接期间顶号回调还挂着"
+    for channel in node.sent("unsubscribe"):
+        node.ack("unsubscribe", channel)
+    await ack_until_done(node, closing)
+    await close_hub(hub, node)
+
+
+async def test_close_unsubscribes_concurrently():
+    """拆连接时订阅的退订与内部关注的退订并发发出，只等一个往返（以前串行，最坏各等满 5 秒）"""
+    hub, broker, _mq, node = make_broker_with_watch()
+    await finish(asyncio.create_task(broker.watch_channel("W", lambda: None)), node)
+    await register(broker, node, "S", FakeSub({"X"}))
+    closing = asyncio.create_task(broker.close())
+    async with asyncio.timeout(1):
+        while not {"X", "W"} <= set(node.sent("unsubscribe")):
+            await asyncio.sleep(0.001)  # 两个都发出了，都还没 ack
+    for channel in node.sent("unsubscribe"):
+        node.ack("unsubscribe", channel)
+    await ack_until_done(node, closing)
+    await close_hub(hub, node)
+
+
+async def test_closed_broker_rejects_watch_and_subscribe():
+    """关闭之后再关注 / 订阅直接拒绝：不能新建一个永不关闭的 MQClient 并登记回调，也不用先订上再撤"""
+    hub, broker, _mq, node = make_broker_with_watch()
+    await close_all(broker, node)
+    async with asyncio.timeout(1):  # 以前会订上去、一直等 ack
+        with pytest.raises(ConnectionError):
+            await broker.watch_channel("W", lambda: None)
+        with pytest.raises(ConnectionError):
+            await broker._attach("S", FakeSub({"X"}))
+    assert node.sent("subscribe") == []
+    assert broker._watch_mq is None
+    await close_hub(hub, node)
+
+
+# ============ worker 级的处理循环不能继承第一个连接的 contextvars ============
+
+
+async def test_hub_loop_does_not_inherit_the_first_connection_context():
+    """
+    处理循环在第一个连接的协程里懒建（SubscriptionHub.of）：不能继承那个连接的 contextvars。
+    否则此后整个 worker 的订阅日志都带着这个连接的身份（id / IP），它的 Request 也一直被 hub 任务
+    的 Context 引用着释放不掉；循环因故重新拉起时同理
+    """
+    from hetu.safelogging.filter import log_contex_var
+
+    first_conn = "[1001|203.0.113.7|0]"
+    token = log_contex_var.set(first_conn)  # 第一个连接的日志上下文
+    try:
+        hub, (a,), mq, node = make_brokers(1, autostart=True)
+        s = FakeSub({"C"})
+        await register(a, node, "S", s)
+        assert hub._task is not None
+        assert hub._task.get_context().get(log_contex_var) != first_conn
+
+        seen: list[str] = []
+        real = s.get_updated
+
+        async def spy(channel, payload=None):
+            seen.append(log_contex_var.get())
+            return await real(channel, payload)
+
+        s.get_updated = spy  # type: ignore[method-assign]
+        mq.push_pulled_("C", None)
+        await a.get_updates(timeout=TICK)
+        assert seen and seen[0] != first_conn, "hub 的日志带着第一个连接的身份"
+
+        # 循环因故结束、下一次（另一个连接的）attach 重新拉起：同样不继承
+        old = hub._task
+        old.cancel()
+        await asyncio.wait([old])
+        await register(a, node, "S2", FakeSub({"D"}))
+        assert hub._task is not old
+        assert hub._task.get_context().get(log_contex_var) != first_conn
+    finally:
+        log_contex_var.reset(token)
+    await close_hub(hub, node)
+
+
+# ============ 错误日志：按类别限流，静默后补一条恢复日志 ============
+
+
+def hub_records(caplog, level: int = logging.ERROR) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "HeTu.root" and r.levelno >= level]
+
+
+async def test_new_kind_of_error_is_not_muted_by_a_chronic_one(caplog):
+    """
+    一个订阅持续出错（每个 interval 重试一次）时又冒出另一类错误：新的那类要照样记下来（带栈），
+    不能因为限流窗口被慢性错误占着就只算进"另有 N 次出错未记"
+    """
+    broker, mq, node = make_broker()
+    chronic = FlakySub({"C"}, fails=10**6)
+    await register(broker, node, "S", chronic)
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        await broker.get_updates(timeout=0.05)  # 慢性错误开始刷
+
+        class OtherError(Exception):
+            pass
+
+        other = FakeSub({"D"})
+
+        async def fail_otherwise(channel, payload=None):
+            raise OtherError("a different failure")
+
+        other.get_updated = fail_otherwise  # type: ignore[method-assign]
+        await register(broker, node, "O", other)
+        mq.push_pulled_("D", None)
+        await broker.get_updates(timeout=0.05)
+    messages = [r.getMessage() for r in hub_records(caplog)]
+    assert any("read failed" in m for m in messages)
+    new_kind = [
+        r for r in hub_records(caplog) if "a different failure" in r.getMessage()
+    ]
+    assert new_kind, "新的一类错误被慢性错误的限流窗口吞了"
+    assert new_kind[0].exc_info is not None
+    await close_all(broker, node)
+
+
+async def test_errors_that_stop_get_a_recovery_log(caplog, monkeypatch):
+    """出错停下来之后补一条恢复日志，带上最后一条日志之后压下的次数（同 SQLite 轮询）"""
+    monkeypatch.setattr("hetu.data.sub._ERROR_LOG_INTERVAL", 0.1)
+    broker, mq, node = make_broker()
+    sub = FlakySub({"C"}, fails=5)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    with caplog.at_level(logging.INFO, logger="HeTu.root"):
+        assert await broker.get_updates(timeout=1) == {"S": {1: {"v": 1}}}
+        await asyncio.sleep(0.3)  # 静默超过一个限流间隔
+    recovered = [
+        r.getMessage()
+        for r in hub_records(caplog, logging.INFO)
+        if r.levelno < logging.ERROR and "✅" in r.getMessage()
+    ]
+    assert recovered, "出错停了没有恢复日志"
+    await close_all(broker, node)
+
+
+async def test_loop_fallback_log_does_not_claim_requeue(caplog):
+    """处理循环兜底记的 tick 异常：那批通知已经弹出、丢了，日志不能说"已重新入队稍后重试\""""
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    await register(a, node, "S", FakeSub({"C"}))
+    real = hub._collect
+    broken: list[None] = []
+
+    def collect_once_broken(batch):
+        if not broken:
+            broken.append(None)
+            raise RuntimeError("bug in collect")
+        return real(batch)
+
+    hub._collect = collect_once_broken  # type: ignore[method-assign]
+    with caplog.at_level(logging.ERROR, logger="HeTu.root"):
+        mq.push_pulled_("C", None)
+        await wait_until(lambda: broken)
+        await asyncio.sleep(0.01)
+    messages = [r.getMessage() for r in hub_records(caplog)]
+    assert any("bug in collect" in m for m in messages)
+    assert not any("已重新入队" in m for m in messages if "bug in collect" in m)
+    await close_hub(hub, node)
+
+
+async def test_broker_warns_when_a_connection_subscribes_too_many_channels(caplog):
+    """
+    单个连接订阅的频道数超过 MAX_SUBSCRIBED 时告警（只告警）。告警在门面按连接算：订阅都走 worker
+    级订阅器的一个 MQClient，它订的是整个 worker 的频道，别的连接订得再多也不算这个连接的
+    """
+    hub, (a, b), _mq, node = make_brokers(2)
+    a.MAX_SUBSCRIBED = 2
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        await register(b, node, "B", FakeSub({"X", "Y", "Z"}))
+        await register(a, node, "A1", FakeSub({"C1", "C2"}))
+        assert not [r for r in caplog.records if "MAX_SUBSCRIBED" in r.getMessage()]
+        await register(a, node, "A2", FakeSub({"C3"}))
+    warns = [r for r in caplog.records if "MAX_SUBSCRIBED" in r.getMessage()]
+    assert len(warns) == 1
+    await close_hub(hub, node)
+
+
+# ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
+
+
+def time_ticks(hub: SubscriptionHub) -> list[tuple[float, float]]:
+    """记下 hub 每个 tick 开始、结束时的 loop 时间（tick 结束时追加）"""
+    spans: list[tuple[float, float]] = []
+    tick = hub._tick
+    loop = asyncio.get_running_loop()
+
+    async def timed(batch):
+        start = loop.time()
+        try:
+            return await tick(batch)
+        finally:
+            spans.append((start, loop.time()))
+
+    hub._tick = timed  # type: ignore[method-assign]
+    return spans
+
+
+async def test_continuous_notifications_are_batched_into_spaced_ticks():
+    """
+    通知接连不断时，MQClient 每次只弹出刚满一个 interval 的那一两条。以前 hub 弹一批跑一个 tick、
+    跑完马上弹下一批：实测 2000 连接、每秒 2000 次写入时每秒约 1500 个 tick、平均每个 2 条，建任务、
+    等订阅回执、预读往返这些每 tick 的固定开销被放大，私有订阅反而比每连接一个队列更费 CPU。
+    相邻两个 tick 的开始至少隔 TICK_SPACING_INTERVALS 个 interval，这期间满期的通知攒成一批
+    """
+    hub, _brokers, mq, node = make_brokers(0, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 3  # 30ms：拉开到计时误差之外
+    spacing = 3 * hub.interval
+    spans = time_ticks(hub)
+    for i in range(40):
+        mq.push_pulled_(f"C{i}", None)
+        await asyncio.sleep(0.003)
+    async with asyncio.timeout(3):
+        while mq.pulled_deque:
+            await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # 最后一个 tick 跑完才记下
+    starts = [start for start, _end in spans]
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert gaps, "通知只够跑一个 tick，测不出间隔"
+    assert min(gaps) >= spacing - 0.002, (
+        f"相邻 tick 只隔了 {min(gaps) * 1000:.1f}ms（{len(starts)} 个 tick）"
+    )
+    await close_hub(hub, node)
+
+
+async def test_isolated_notification_is_not_delayed_by_tick_spacing():
+    """合批窗口只在通知接连不断时起作用：隔了一阵才来的一条，满一个 interval 就处理，不多等"""
+    hub, _brokers, mq, node = make_brokers(0, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 10  # 100ms
+    spans = time_ticks(hub)
+    loop = asyncio.get_running_loop()
+    mq.push_pulled_("A", None)
+    await wait_until(lambda: spans)
+    await asyncio.sleep(0.2)  # 空闲超过窗口
+    pushed = loop.time()
+    mq.push_pulled_("B", None)
+    await wait_until(lambda: len(spans) == 2)
+    delay = spans[1][0] - pushed
+    assert delay < hub.interval + 0.05, (
+        f"隔了一阵才来的通知多等了：{delay * 1000:.1f}ms 才处理"
+    )
+    await close_hub(hub, node)
+
+
+async def test_slow_tick_is_not_followed_by_extra_wait():
+    """tick 本身已经超过合批窗口时，下一个 tick 不再多等：窗口从上一个 tick 开始时算"""
+    hub, (broker,), mq, node = make_brokers(1, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 3  # 30ms
+    slow = FakeSub({"S"})
+    await register(broker, node, "S", slow)
+    slow.gate.clear()
+    spans = time_ticks(hub)
+    mq.push_pulled_("S", None)
+    async with asyncio.timeout(1):
+        await slow.entered.wait()
+    mq.push_pulled_("N", None)  # tick 卡着的期间满期
+    await asyncio.sleep(0.08)  # 这个 tick 远超窗口
+    slow.gate.set()
+    await wait_until(lambda: len(spans) >= 2)
+    (start1, end1), (start2, _end2) = spans[0], spans[1]
+    assert end1 - start1 > 0.06
+    assert start2 - end1 < 0.015, f"慢 tick 之后又等了 {(start2 - end1) * 1000:.1f}ms"
+    await close_hub(hub, node)

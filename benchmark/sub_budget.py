@@ -370,8 +370,14 @@ async def _subscriber_main(args, proc_idx, zones, ready, go, stop, result_q):
             stats.loop_lag.append(time.perf_counter() - t - 0.1)
             now = time.monotonic()
             oldest = now
+            # 队列是 (收到时刻 monotonic, 频道名) 的 FIFO。worker 级订阅器之前每个连接一个
+            # 队列（broker._mq_client），之后整个 worker 一个（broker._hub.mq）
+            queues = {}
             for b in brokers:
-                dq = b._mq_client.pulled_deque  # (收到时刻 monotonic, 频道名) 的 FIFO
+                mq = getattr(b, "_mq_client", None) or b._hub.mq
+                queues[id(mq)] = mq
+            for mq in queues.values():
+                dq = mq.pulled_deque
                 if dq:
                     oldest = min(oldest, dq[0][0])
             stats.backlog_age.append(now - oldest)

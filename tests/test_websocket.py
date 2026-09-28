@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
+import gc
 import logging
 import os
+import warnings
 from typing import Callable, cast
 
 import pytest
@@ -528,6 +530,40 @@ def test_websocket_table_subscribe_limit(test_server):
 
 
 # ==== 整表订阅要先等一个 interval 再全量读（复制延迟预算），等待不能堵住接收协程 ====
+
+
+async def test_deferred_table_reply_cancelled_before_it_runs_still_rolls_back():
+    """
+    整表订阅的后半段交给后台（defer_sub_reply_），连接拆掉时接收协程的 finally 立刻取消它，
+    这时它常常还没开始跑（比如这条订阅本身就超了订阅数上限，接收协程紧接着就断开连接）。
+    后半段也得收到这次取消、跑它自己的回滚；不能一行没跑就被丢掉（以前回滚不执行，还报
+    "coroutine '_finish_subscribe_table' was never awaited"）
+    """
+    from hetu.server.receiver import defer_sub_reply_
+
+    rolled_back: list[None] = []
+
+    async def finish() -> tuple[str | None, list[dict]]:
+        try:
+            await asyncio.sleep(10)  # 后半段：先等一个 interval 再全量读
+        except asyncio.CancelledError:
+            rolled_back.append(None)  # 同 _finish_subscribe_table：撤掉订阅再抛出
+            raise
+        return "S", []
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        deferred: set[asyncio.Task] = set()
+        reply = defer_sub_reply_(finish(), deferred)
+        tasks = list(deferred)
+        for task in tasks:  # 接收协程的 finally：它还没让出过事件循环就取消
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        del tasks
+        gc.collect()
+    assert reply.cancelled()
+    assert rolled_back, "后半段一行没跑就被丢了，订阅的回滚没执行"
+    assert not [w for w in caught if "never awaited" in str(w.message)]
 
 
 @pytest.mark.timeout(30)

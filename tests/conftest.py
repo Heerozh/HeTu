@@ -11,12 +11,21 @@ os.environ["LC_ALL"] = "zh_CN.UTF-8"
 from fixtures.backends import *
 from fixtures.contexts import *
 from fixtures.defines import *
+from fixtures.event_loops import UvloopSignatureLoop
 from fixtures.redis_service import *
 from fixtures.sqlite_service import *
 from fixtures.testapp import *
 from fixtures.testdata import *
 
 # set default lang
+
+
+def pytest_asyncio_loop_factories(config, item):
+    """
+    所有异步用例跑在 create_task 签名同 uvloop 的事件循环上：生产在 Linux / macOS 上跑 uvloop，
+    它不收 eager_start 这类参数，标准事件循环收，本机测试发现不了
+    """
+    return {"uvloop_signature": UvloopSignatureLoop}
 
 
 @pytest.hookimpl(tryfirst=True)

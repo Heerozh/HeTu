@@ -107,11 +107,16 @@ def defer_sub_reply_(
 
     def settle(task: asyncio.Task):
         deferred.discard(task)
-        # 被取消（连接在拆）：占位一起作废。还没开始跑就被取消的话，fill 里一行都不会执行
+        # 被取消（连接在拆）：占位一起作废
         if not reply.done():
             reply.cancel()
 
-    task = asyncio.create_task(fill())
+    # 当场开跑（eager），跑到后半段的第一个 await 才让出：连接拆掉时接收协程会立刻取消它，常常
+    # 就在它还没开始跑的时候（这条订阅本身超了订阅数上限，接收协程紧接着就断开）。还没跑就被
+    # 取消的话 fill 一行都不执行，finish 从没开始：它自己的取消回滚（撤掉订阅）不执行，还报
+    # "coroutine ... was never awaited"。用 Task 构造而不是 create_task(..., eager_start=True)：
+    # 生产在 Linux / macOS 上跑的 uvloop 的 create_task 不收这个参数
+    task = asyncio.Task(fill(), loop=asyncio.get_running_loop(), eager_start=True)
     deferred.add(task)
     task.add_done_callback(settle)
     return reply

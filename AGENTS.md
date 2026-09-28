@@ -58,7 +58,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
                                                          │
                                           ┌──────────────┤
                                           ▼              ▼
-                                    SystemCaller    SubscriptionBroker
+                                    SystemCaller    SubscriptionBroker（每连接）
+                                          │              │
+                                          │         SubscriptionHub（每 worker）
                                           │              │
                                     Session/Repo    MQClient (pub/sub)
                                           │              │
@@ -71,8 +73,11 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 2. RPC 调用（`callSystem`）经由 `EndpointExecutor` → `SystemCaller` 路由，后者会 打开
    `Session`（transaction）、为每个 Component 创建 `SessionRepository`、执行 System function
    并 commit。
-3. 数据订阅（`select`/`query`）会创建 `RowSubscription`/`IndexSubscription` 对象， 由
-   `SubscriptionBroker` 管理；其监听 Redis pub/sub 的变更通知并将更新推送给 client。
+3. 数据订阅（`select`/`query`）会创建 `RowSubscription`/`IndexSubscription`/`TableSubscription`
+   对象，在 worker 级的 `SubscriptionHub` 里处理：每个 worker × backend 一个 MQ 队列和一个处理
+   循环，收到变更通知后重读、比对，tick 末尾把更新交给各连接的 `SubscriptionBroker`（每连接的
+   门面：权限、sub_id、订阅数、待发区），再推送给 client。设计见
+   `docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md`。
 
 ### Backend Layer (`hetu/data/backend/`)
 
@@ -87,10 +92,12 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   `upsert`、`insert`、`delete`、`update_rows`）。
 - `Table` / `TableReference`：Component 到 backend 的映射，由
   `ComponentTableManager` 管理。
-- `MQClient`：每个连接一个本地 message queue，用于 subscription notification；后端每个
-  worker 只有一个共享的通知接收器
+- `MQClient`：本地 message queue（合批、尾随重读），用于 subscription notification。每个
+  worker 级订阅器（`SubscriptionHub`）一个；连接做服务端内部关注（`watch_channel`，如顶号
+  检测）时另有自己的一个。后端每个 worker 对每个 servant 只有一个共享的通知接收器
   （Redis `PubSubHub` 一条 pubsub 连接 / SQLite `SQLiteNotifyHub` 一个通知表轮询任务）
-  按频道分发到各连接的队列。
+  按频道分发到各 MQClient 的队列。一个 MQClient 挂在所有 servant 的通知接收器上
+  （`HubMQClient`）：频道按哈希分到各 servant 订阅，某个 servant 断线时换到别的上重订、补读。
 
 ### Server Layer (`hetu/server/`)
 
@@ -124,7 +131,7 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 | `hetu/system/context.py` | `SystemContext` —— 带 `repo` dict 的 transaction context                                |
 | `hetu/endpoint/`         | `@define_endpoint`, `Context`, `elevate()`, `EndpointExecutor`                          |
 | `hetu/data/backend/`     | `Backend`, `Session`, `SessionRepository`, `Table`                                      |
-| `hetu/data/sub.py`       | `SubscriptionBroker`, `RowSubscription`, `IndexSubscription`                            |
+| `hetu/data/sub.py`       | `SubscriptionHub`（worker 级）, `SubscriptionBroker`（每连接）, 三种 Subscription      |
 | `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline                                      |
 | `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables                          |
 | `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK） |

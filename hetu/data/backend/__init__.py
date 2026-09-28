@@ -43,6 +43,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
+    from ..sub import SubscriptionHub
 
 
 class Backend:
@@ -81,8 +82,15 @@ class Backend:
         self._master_weight = config.get("master_weight", 1.0)
         self._all_clients = self._servants + [self._master]
         self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
+        # 本进程在这个 backend 上的 worker 级订阅器（见 `SubscriptionHub.of`）：第一次建订阅门面时
+        # 懒建，随本对象关闭
+        self.sub_hub_: SubscriptionHub | None = None
 
     async def close(self):
+        # 先关订阅器：它的处理循环和 MQClient 还在用下面这些连接
+        if (hub := self.sub_hub_) is not None:
+            self.sub_hub_ = None
+            await hub.close()
         await self._master.close()
         for servant in self._servants:
             await servant.close()
@@ -138,8 +146,15 @@ class Backend:
         return self._master.get_table_maintenance()
 
     def get_mq_client(self) -> MQClient:
-        """获取消息队列连接"""
-        return self.servant.get_mq_client()
+        """
+        获取消息队列连接：一个本地队列，挂在每个 servant 的通知接收器上。订阅的频道按哈希分到各
+        servant（每个 MQClient 随机加盐，同一频道在不同 worker 落在不同 servant 上），某个 servant
+        订阅失败或断线时换到别的 servant 重订、补读（见 `HubMQClient`）。
+        Returns an MQClient spanning every servant: channels are spread over them and moved
+        away from a servant whose subscription fails or whose connection is lost.
+        """
+        first, *rest = self._servants
+        return first.get_mq_client(*rest)
 
     def session(self, instance: str, cluster_id: int) -> Session:
         """
