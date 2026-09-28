@@ -1078,7 +1078,8 @@ async def test_point_query_row_leaving_before_its_channel_is_active(
     await updates_until(broker, left, timeout=3)
     idx_sub = cast(IndexSubscription, broker._subs[sub_id])
     assert new_id not in idx_sub.last_range_result
-    assert new_chan not in mq.subscribed_channels
+    # 离开的行频道由 tick 放到后台退订（交付不等它）
+    await wait_until(lambda: new_chan not in mq.subscribed_channels)
 
 
 async def _owner10_with_two_hidden_rows(

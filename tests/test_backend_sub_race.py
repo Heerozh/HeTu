@@ -133,6 +133,9 @@ async def test_released_channel_resubscribed_during_tick_is_kept():
     又为 X 登记了新的行订阅 R：tick 末尾不能按旧名单把 X 退掉"""
     broker, mq, node = make_broker()
     hub = broker._hub
+    hub.SUBSCRIBE_WAIT_INTERVALS = (
+        1000  # tick 末尾等 Y 的 ack（interval 1ms，最多等 1 秒）
+    )
     i1 = FakeSub({"idx1", "X"})
     i2 = FakeSub({"idx2"})
     await register(broker, node, "I1", i1)
@@ -285,6 +288,9 @@ async def test_new_channel_gets_reread_while_its_subscribe_is_in_flight():
     MQClient.subscribed 里已经有 X，但订阅还没生效。S 读 X 在前、生效在后，其间的写入没有
     通知，仍要给 S 定向补读（设计稿 §4.4）"""
     hub, (a, b), mq, node = make_brokers(2)
+    hub.SUBSCRIBE_WAIT_INTERVALS = (
+        1000  # tick 末尾等 X 的 ack（interval 1ms，最多等 1 秒）
+    )
     s = FakeSub({"idx"})
     await register(a, node, "S", s)
     s.new = {"X"}
@@ -512,6 +518,30 @@ async def test_tick_delivers_without_waiting_for_unsubscribe_ack():
     assert updates == {"S": {1: None}}
     await wait_sent(node, "unsubscribe", "X")  # 退订照常发出，只是交付不等它
     node.ack("unsubscribe", "X")
+    await close_all(broker, node)
+
+
+async def test_released_channel_resubscribed_during_background_unsubscribe():
+    """tick 把 X 放出范围、退订放在后台：退订还没回来时接收协程又为 X 登记了行订阅 R。X 最终仍
+    订着、已生效，R 收得到 X 的通知"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    i1 = FakeSub({"idx", "X"})
+    await register(broker, node, "I1", i1)
+    i1.rem = {"X"}
+    mq.push_pulled_("idx", None)
+    assert await broker.get_updates(timeout=TICK) == {}
+    await wait_sent(node, "unsubscribe", "X")  # 后台退订已发出，ack 还没回来
+
+    r = FakeSub({"X"})
+    await register(broker, node, "R", r)  # 重新发出的 SUBSCRIBE X 由 finish 投递 ack
+    node.ack("unsubscribe", "X")
+    await settle()
+    assert "X" in mq.subscribed_channels and "X" in hub._effective
+    assert hub._channel_subs["X"] == {r}
+    mq.push_pulled_("X", None)
+    await broker.get_updates(timeout=TICK)
+    assert ("X", None) in r.calls
     await close_all(broker, node)
 
 

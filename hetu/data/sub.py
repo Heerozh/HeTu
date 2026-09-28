@@ -520,6 +520,11 @@ class SubscriptionHub:
     `SubscriptionBroker` at the end of a tick.
     """
 
+    # tick 末尾等新增频道的 SUBSCRIBE 回来最多等几个 interval，之后照常交付：推给客户端的新行尽量
+    # 在它的行频道订阅生效之后，但 ack 迟迟不来（比如某个节点的 pubsub 连接半开）时不能冻住整个
+    # worker 的推送。晚回来的由订阅任务自己补读 / 补订（见 _subscribe_added）
+    SUBSCRIBE_WAIT_INTERVALS: float = 1
+
     def __init__(self, backend: Backend, autostart: bool = True):
         """
         Parameters
@@ -764,7 +769,7 @@ class SubscriptionHub:
 
     async def _tick(self, batch: Mapping[str, set[str] | None]) -> None:
         """处理一批弹出的通知（设计稿 §4.3）"""
-        work = await self._repair(self._collect(batch))
+        work = self._repair(self._collect(batch))
         if not work:
             return
         # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
@@ -805,13 +810,14 @@ class SubscriptionHub:
                     work.setdefault(sub, []).append((key, payload))
         return work
 
-    async def _repair(
+    def _repair(
         self, work: dict[BaseSubscription, list[tuple[str, set[str] | None]]]
     ) -> dict[BaseSubscription, list[tuple[str, set[str] | None]]]:
         """
-        本批涉及的频道若 hub 没订着（此前 tick 末尾订阅它失败了，见 _settle_channels），先补订。
-        不管补订成败，这些频道本 tick 都不处理、按真实频道重新入队：订上了的一个 interval 后再读
-        （要在订阅生效之后读，失败期间的写入没有通知），没订上的到时再补
+        本批涉及的频道若 hub 没订着（此前 tick 末尾订阅它失败了，见 _subscribe_added），本 tick
+        不处理它们，交给后台补订（_resubscribe）：订上之后再按真实频道重新入队，一个 interval 后
+        读（要在订阅生效之后读，失败期间的写入没有通知），没订上的也重新入队、到时再补。不等补订
+        回来，别让它卡住本批别的订阅的交付
         """
         subscribed = self._mq.subscribed_channels
         missing: dict[str, set[str] | None] = {}
@@ -826,17 +832,21 @@ class SubscriptionHub:
                     missing[channel] = payload if known is None else known | payload
         if not missing:
             return work
+        self._spawn(self._resubscribe(missing))
+        return {
+            sub: kept
+            for sub, items in work.items()
+            if (kept := [item for item in items if item[0] not in missing])
+        }
+
+    async def _resubscribe(self, missing: dict[str, set[str] | None]) -> None:
+        """补订（hub 的后台任务）：不管成败，补订的频道都按真实频道重新入队"""
         try:
             await self._subscribe(list(missing))
         except Exception as e:  # noqa: BLE001 没订上的到时再补
             self._log_error(_("补订频道出错"), e)
         for channel, payload in missing.items():
             self._mq.request_reread(channel, payload=payload)
-        return {
-            sub: kept
-            for sub, items in work.items()
-            if (kept := [item for item in items if item[0] not in missing])
-        }
 
     async def _prefetch_rows(
         self, work: Mapping[BaseSubscription, list[tuple[str, set[str] | None]]]
@@ -973,33 +983,56 @@ class SubscriptionHub:
                 entries[sub_id] = (sub, dict(updates))
 
     async def _settle_channels(self, tick: _Tick) -> None:
-        """tick 末尾：订阅新增的频道、给新订上的定向补读、退订没人要的"""
+        """
+        tick 末尾：订阅新增的频道、给新订上的定向补读、退订没人要的。
+        只等 SUBSCRIBE 回来、最多 SUBSCRIBE_WAIT_INTERVALS 个 interval：推给客户端的新行尽量在它
+        的行频道订阅生效之后，但 ack 迟迟不来时不能冻住整个 worker 的交付，晚回来的补读 / 补订由
+        订阅任务自己做（_subscribe_added）。退订不等：交付不依赖它，放到后台，跑起来时还会按频道
+        表复查（见 _unsubscribe）
+        """
         channel_subs = self._channel_subs
         # 同一频道可能在本 tick 内既被一个订阅加入又被另一个释放，按最终状态定夺；
         # 已订阅过的频道重复 subscribe 是幂等的
         to_subscribe = [chan for chan in tick.added if chan in channel_subs]
-        # hub 在本 tick 之前没有生效地订着的：订阅读这行在前、订阅生效在后，其间的写入不会有
-        # 通知，值频道又不发"离开"。给新增它的订阅定向补读（读回一样就不推）。已生效的不用：
-        # 之后的写入都有通知进本队列，tick 结束前订阅已登记好（设计稿 §4.4）
-        fresh = [chan for chan in to_subscribe if chan not in self._effective]
         if to_subscribe:
-            try:
-                await self._subscribe(to_subscribe)
-            except Exception as e:  # noqa: BLE001 重新入队，弹出时补订
-                # 订阅失败：频道仍留在频道表里，按真实频道重新入队，弹出时先补订（见 _repair）
-                self._log_error(_("订阅新进入范围的行频道出错"), e)
-                for chan in to_subscribe:
-                    self._mq.request_reread(chan)
-                fresh = []  # 补订成功后会按真实频道重读，不用定向补读
-        for chan in fresh:
-            for sub in tick.added[chan]:
-                if not sub.closed and sub in channel_subs.get(chan, ()):
-                    self.reread_for(sub, chan)
-        # 退订名单必须在等 SUBSCRIBE 回来之后再定：等待期间接收协程可能登记了新订阅（attach 的
-        # 占位），把刚释放的频道又要回去了
+            # hub 在本 tick 之前没有生效地订着的：订阅读这行在前、订阅生效在后，其间的写入不会
+            # 有通知，值频道又不发"离开"。给新增它的订阅定向补读（读回一样就不推）。已生效的
+            # 不用：之后的写入都有通知进本队列，tick 结束前订阅已登记好（设计稿 §4.4）
+            fresh = {
+                chan: tick.added[chan]
+                for chan in to_subscribe
+                if chan not in self._effective
+            }
+            task = self._spawn(self._subscribe_added(to_subscribe, fresh))
+            await asyncio.wait(
+                [task], timeout=self.SUBSCRIBE_WAIT_INTERVALS * self.interval
+            )
+        # 退订名单在等 SUBSCRIBE 之后再定：等待期间接收协程可能登记了新订阅（attach 的占位），
+        # 把刚释放的频道又要回去了
         to_unsubscribe = [chan for chan in tick.released if chan not in channel_subs]
         if to_unsubscribe:
-            await self._unsubscribe(to_unsubscribe)
+            self._spawn(self._unsubscribe(to_unsubscribe))
+
+    async def _subscribe_added(
+        self, channels: list[str], fresh: Mapping[str, set[BaseSubscription]]
+    ) -> None:
+        """
+        tick 末尾新增频道的订阅（hub 的后台任务）：订上后给 fresh 频道的新增者定向补读。失败时
+        频道仍留在频道表里，按真实频道重新入队，弹出时先补订（见 _repair），补订成功后会按真实
+        频道重读，不用定向补读
+        """
+        try:
+            await self._subscribe(channels)
+        except Exception as e:  # noqa: BLE001 重新入队，弹出时补订
+            self._log_error(_("订阅新进入范围的行频道出错"), e)
+            for chan in channels:
+                self._mq.request_reread(chan)
+            return
+        channel_subs = self._channel_subs
+        for chan, subs in fresh.items():
+            for sub in subs:
+                if not sub.closed and sub in channel_subs.get(chan, ()):
+                    self.reread_for(sub, chan)
 
     # === === === 生命周期 === === ===
 
