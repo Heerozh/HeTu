@@ -99,7 +99,9 @@ hub 分发一条通知，就是对订了它的每个连接各调一次 `push_pul
   现在一个 worker 的订阅通知都走同一个 servant 的 pubsub，跨 worker 仍随机分散。worker 内也不会再因为连接
   落在不同 servant 上而把同一条通知收几份。
 - **关闭**：`Backend.close()` 先关 hub（取消处理循环、关 MQClient），再关 master / servant 连接。
-- **处理循环**：按 tick 捕获异常（§6），自己不会结束。万一因 bug 结束，记错误日志，下一次 attach 时重新拉起。
+- **处理循环**：按 tick 捕获异常（§6），自己不会结束。万一因 bug 结束，记错误日志，隔 1 秒自己重新拉起（下一次
+  attach 也会拉起）。一个订阅的处理逃出异常（bug）只记日志：不中止这个 tick，别的订阅照常跑完、交付，tick 末尾
+  照常订阅 / 退订频道。
 - **手动模式（测试用）**：`SubscriptionHub(backend, autostart=False)` 不起后台循环，由门面的 `get_updates`
   自己弹出一批、跑一个 tick，节奏与今天每连接相同；几个门面并发驱动同一个手动 hub 时，一次只跑一个 tick。
   现有订阅用例依赖"不调 `get_updates`，通知就留在队列里"（`tick_with` 倒拨时刻、手工 `push_pulled_`、数

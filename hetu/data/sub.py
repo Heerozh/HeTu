@@ -514,6 +514,8 @@ _YIELD_EVERY = 256
 _ERROR_LOG_INTERVAL = 10.0
 # 同一个订阅接连读出错时重试间隔的上限（秒）：按 1、2、4… 个 interval 退避
 _RETRY_BACKOFF_MAX = 5.0
+# 后台处理循环因 bug 意外结束后，隔多少秒重新拉起
+_RUN_RESTART_DELAY = 1.0
 
 
 class _Tick:
@@ -811,17 +813,26 @@ class SubscriptionHub:
             self._task.add_done_callback(self._on_run_done)
 
     def _on_run_done(self, task: asyncio.Task) -> None:
-        if self._closed:
+        if self._closed or task is not self._task:
             return
         if task.cancelled():
             logger.warning(
                 _("⚠️ [📡Subscription] 订阅处理循环被取消，下次订阅时重新拉起")
             )
         elif (exc := task.exception()) is not None:
+            # 因 bug 结束：过一会儿自己拉起，不能等到下一次有连接订阅（只在登录时订阅的玩法里
+            # 可能要停很久）。隔一会儿，别在出错的地方原地打转
             logger.error(
-                _("❌ [📡Subscription] 订阅处理循环异常结束，下次订阅时重新拉起"),
+                _(
+                    "❌ [📡Subscription] 订阅处理循环异常结束，{delay} 秒后重新拉起"
+                ).format(delay=_RUN_RESTART_DELAY),
                 exc_info=exc,
             )
+            asyncio.get_running_loop().call_later(_RUN_RESTART_DELAY, self._restart)
+
+    def _restart(self) -> None:
+        if not self._closed and self._autostart:
+            self._start()
 
     async def _run(self) -> None:
         mq = self._mq
@@ -833,10 +844,19 @@ class SubscriptionHub:
             except Exception as e:  # noqa: BLE001
                 self._log_error(_("处理订阅通知异常"), e)
 
-    def _log_error(self, what: str, exc: BaseException, requeued: bool = True) -> None:
+    def _log_error(
+        self,
+        what: str,
+        exc: BaseException,
+        requeued: bool = True,
+        **fields: Any,
+    ) -> None:
         """
         tick 里出错：记错误日志（带栈）。限流：每 _ERROR_LOG_INTERVAL 秒最多一条，带上此前压下的
-        次数。requeued：出错的读已重新入队，一个 interval 后重试（设计稿 §6）
+        次数。what 是（已翻译的）说明模板，fields 填它的占位符。requeued：出错的读已重新入队，
+        一个 interval 后重试（设计稿 §6）。
+        翻译出来的模板占位符对不上（.po 由 CD 机翻同步）时不能抛：这是 tick 的出错路径，抛出去
+        就丢了重试、甚至让处理循环结束。退回原文
         """
         now = time.monotonic()
         if now - self._error_logged_at < _ERROR_LOG_INTERVAL:
@@ -845,15 +865,19 @@ class SubscriptionHub:
         muted, self._errors_muted = self._errors_muted, 0
         self._error_logged_at = now
         err = f"{type(exc).__name__}:{exc}"
-        if requeued:
-            msg = _(
-                "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试"
-                "（上次记录以来另有 {muted} 次出错未记）"
-            ).format(what=what, err=err, muted=muted)
-        else:
-            msg = _(
-                "❌ [📡Subscription] {what}：{err}（上次记录以来另有 {muted} 次出错未记）"
-            ).format(what=what, err=err, muted=muted)
+        try:
+            what = what.format(**fields)
+            if requeued:
+                msg = _(
+                    "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试"
+                    "（上次记录以来另有 {muted} 次出错未记）"
+                ).format(what=what, err=err, muted=muted)
+            else:
+                msg = _(
+                    "❌ [📡Subscription] {what}：{err}（上次记录以来另有 {muted} 次出错未记）"
+                ).format(what=what, err=err, muted=muted)
+        except KeyError, IndexError, ValueError:
+            msg = f"❌ [📡Subscription] {what} {fields}: {err} (muted {muted})"
         logger.error(msg, exc_info=exc)
 
     async def step_(self, deadline: float | None, ready: Callable[[], bool]) -> bool:
@@ -891,12 +915,17 @@ class SubscriptionHub:
         await self._prefetch_rows(work)
         try:
             await self._process_all(work, tick)
-            await self._settle_channels(tick)
         finally:
-            # 放在最后：推给客户端的新行在其行频道订阅生效之后，get_updates 拿到的也总是完整的
-            # tick。中途出错也把已算好的交出去
-            for broker, entries in tick.staged.items():
-                broker.deliver_(entries)
+            try:
+                if not self._closed:
+                    # 中途出错也要把已记账的频道订上 / 退掉：新行的频道不订上就永远收不到通知，
+                    # 放掉的一直订着
+                    await self._settle_channels(tick)
+            finally:
+                # 放在最后：推给客户端的新行在其行频道订阅生效之后，get_updates 拿到的也总是完整
+                # 的 tick。中途出错也把已算好的交出去
+                for broker, entries in tick.staged.items():
+                    broker.deliver_(entries)
 
     def _collect(
         self, batch: Mapping[str, set[str] | None]
@@ -1058,11 +1087,10 @@ class SubscriptionHub:
             )
         except Exception as e:  # noqa: BLE001 不填缓存，订阅各自单行读
             self._log_error(
-                _("预读 {comp_name} 的行出错，这批改为逐行读").format(
-                    comp_name=table_ref.comp_name
-                ),
+                _("预读 {comp_name} 的行出错，这批改为逐行读"),
                 e,
                 requeued=False,
+                comp_name=table_ref.comp_name,
             )
             return
         for channel, row in zip(channels, rows):
@@ -1087,10 +1115,19 @@ class SubscriptionHub:
             )
             if not task.done():
                 pending.append(task)
+            elif not task.cancelled() and (exc := task.exception()) is not None:
+                # 当场跑完的也要取异常：不进 pending 的话没人取，悄无声息地丢了
+                self._log_error(_("处理订阅通知异常（bug）"), exc, requeued=False)
             if count % _YIELD_EVERY == 0:
                 await asyncio.sleep(0)
         if pending:
-            await asyncio.gather(*pending)
+            # 逃出 _process 的异常（bug）不能中止整个 tick：别的还在读的要等它们跑完，不然它们
+            # 之后把更新暂存进已经交付过的 tick，推送丢了、指纹却已推进
+            for result in await asyncio.gather(*pending, return_exceptions=True):
+                if isinstance(result, Exception):
+                    self._log_error(
+                        _("处理订阅通知异常（bug）"), result, requeued=False
+                    )
 
     async def _process(
         self,
@@ -1111,7 +1148,7 @@ class SubscriptionHub:
                 # 稍后重试（设计稿 §6）。订阅的读固定走订阅时选的副本，它可能挂了：换一个随机
                 # 副本再试，别每次都打同一个死节点
                 self._log_error(
-                    _("订阅处理通知出错，频道 {channel}").format(channel=channel), e
+                    _("订阅处理通知出错，频道 {channel}"), e, channel=channel
                 )
                 if not sub.closed:
                     sub.use_servant_(self._backend.servant)
