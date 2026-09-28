@@ -274,29 +274,3 @@ async def test_request_reread_warns_dropped_backlog(monkeypatch, caplog):
     assert len(warns) == 1, "积压的通知被丢弃了却没有警告"
     assert "💾Redis" in warns[0].getMessage()
     await hub.close()
-
-
-async def _subscribe_acked(mq: RedisMQClient, node, *channels: str) -> None:
-    task = asyncio.create_task(mq.subscribe(*channels))
-    await settle()
-    for channel in channels:
-        node.ack("subscribe", channel)
-    async with asyncio.timeout(1):
-        await task
-
-
-async def test_max_subscribed_none_disables_warning(caplog):
-    """MAX_SUBSCRIBED 是单连接订阅频道数的告警线。worker 级订阅器用的 MQClient 订的是整个 worker
-    的频道，设为 None 就不告警"""
-    hub, node = make_hub()
-    per_conn = RedisMQClient(hub)
-    per_conn.MAX_SUBSCRIBED = 1
-    worker = RedisMQClient(hub)
-    worker.MAX_SUBSCRIBED = None
-    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
-        await _subscribe_acked(per_conn, node, "A", "B")
-        assert len(caplog.records) == 1, "超过告警线要告警"
-        caplog.clear()
-        await _subscribe_acked(worker, node, "C", "D")
-    assert caplog.records == []
-    await hub.close()

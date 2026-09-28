@@ -19,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Final, cast
 import numpy as np
 
 from hetu.data.backend import BackendClient, MQClient, RowFormat
-from hetu.data.backend.base import HubMQClient
 from hetu.data.component import Permission
 from hetu.i18n import _
 from hetu.safelogging.filter import ContextFilter
@@ -601,10 +600,7 @@ class SubscriptionHub:
             `get_updates` 自己弹出一批、跑一个 tick，不调它通知就留在队列里。
         """
         self._backend = backend
-        mq = backend.get_mq_client()
-        if isinstance(mq, HubMQClient):
-            mq.MAX_SUBSCRIBED = None  # 订的是整个 worker 的频道，单连接的告警在门面做
-        self._mq = mq
+        self._mq = backend.get_mq_client()
         self._autostart = autostart
         # 频道 → 订了它的订阅（含 attach 中还没生效的占位）
         self._channel_subs: dict[str, set[BaseSubscription]] = {}

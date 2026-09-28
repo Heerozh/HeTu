@@ -1200,3 +1200,20 @@ async def test_loop_fallback_log_does_not_claim_requeue(caplog):
     assert any("bug in collect" in m for m in messages)
     assert not any("已重新入队" in m for m in messages if "bug in collect" in m)
     await close_hub(hub, node)
+
+
+async def test_broker_warns_when_a_connection_subscribes_too_many_channels(caplog):
+    """
+    单个连接订阅的频道数超过 MAX_SUBSCRIBED 时告警（只告警）。告警在门面按连接算：订阅都走 worker
+    级订阅器的一个 MQClient，它订的是整个 worker 的频道，别的连接订得再多也不算这个连接的
+    """
+    hub, (a, b), _mq, node = make_brokers(2)
+    a.MAX_SUBSCRIBED = 2
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        await register(b, node, "B", FakeSub({"X", "Y", "Z"}))
+        await register(a, node, "A1", FakeSub({"C1", "C2"}))
+        assert not [r for r in caplog.records if "MAX_SUBSCRIBED" in r.getMessage()]
+        await register(a, node, "A2", FakeSub({"C3"}))
+    warns = [r for r in caplog.records if "MAX_SUBSCRIBED" in r.getMessage()]
+    assert len(warns) == 1
+    await close_hub(hub, node)

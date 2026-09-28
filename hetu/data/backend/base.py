@@ -1386,11 +1386,9 @@ class HubMQClient(MQClient):
     """
     挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录自己订阅了哪些频道，
     订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
+    单个连接订阅频道数的告警（MAX_SUBSCRIBED）在门面 `SubscriptionBroker` 做：订阅都走 worker 级
+    订阅器的这一个 MQClient，它订的是整个 worker 的频道。
     """
-
-    # 单个连接订阅频道数的告警线；子类可覆盖。None 不告警（worker 级订阅器用的 MQClient 订的是
-    # 整个 worker 的频道，单连接的告警线对它没有意义）
-    MAX_SUBSCRIBED: int | None = 5000
 
     def __init__(self, hub: MQHub):
         super().__init__()  # 本地消息队列
@@ -1458,13 +1456,6 @@ class HubMQClient(MQClient):
             # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
             await self._hub.remove(self, channel_names)
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        limit = self.MAX_SUBSCRIBED
-        if limit is not None and len(self.subscribed) > limit:
-            logger.warning(
-                _(
-                    "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
-                ).format(tag=self.LOG_TAG, limit=limit)
-            )
 
     async def unsubscribe(self, *channel_names: str) -> None:
         """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""

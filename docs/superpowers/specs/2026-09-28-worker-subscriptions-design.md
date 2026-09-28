@@ -107,8 +107,8 @@ hub 分发一条通知，就是对订了它的每个连接各调一次 `push_pul
   现有订阅用例依赖"不调 `get_updates`，通知就留在队列里"（`tick_with` 倒拨时刻、手工 `push_pulled_`、数
   本连接订了几个频道），这些用例给每个 broker 一个独立的手动 hub。生产、websocket 测试和新增的 hub 测试
   用后台循环。
-- **告警**：hub 的 MQClient 订的是整个 worker 的频道，不做 `MAX_SUBSCRIBED` 单连接频道数告警，改由门面
-  负责（§4.5）。
+- **告警**：hub 的 MQClient 订的是整个 worker 的频道，单连接频道数的 `MAX_SUBSCRIBED` 告警改由门面负责（§4.5），
+  `HubMQClient` 里原来那份检查删掉（订阅都走 hub，它在生产里已走不到）。
 - **已生效的频道**：hub 另记一份 `_effective`，存 SUBSCRIBE 已经回来的频道。`MQClient.subscribed` 在
   SUBSCRIBE 发出时就记上，不能用来判断"是否已生效"（§4.4 的 fresh 判定要用）。
 
