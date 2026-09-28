@@ -542,6 +542,22 @@ class _Tick:
         ] = {}
 
 
+class _ErrorKind:
+    """一类错误（说明模板 + 异常类型）的日志限流状态"""
+
+    __slots__ = ("last_seen", "logged_at", "muted", "timer", "what")
+
+    def __init__(self, what: str) -> None:
+        # 最近一次记日志时填好占位符的说明，恢复日志用
+        self.what = what
+        self.logged_at = float("-inf")
+        self.last_seen = float("-inf")
+        # 最近一次记日志之后压下没记的次数
+        self.muted = 0
+        # 检查它是否已静默（该补恢复日志）的定时器
+        self.timer: asyncio.TimerHandle | None = None
+
+
 class _Subscribing:
     """一次在途的 MQClient.subscribe：hub 里同一频道同时只有一次，后来要这个频道的等它的结果"""
 
@@ -612,8 +628,8 @@ class SubscriptionHub:
         # 手动模式：几个门面并发驱动时一次只跑一个 tick
         self._step_lock = asyncio.Lock()
         # 错误日志限流：上次记的时刻，以及之后压下没记的次数
-        self._error_logged_at = float("-inf")
-        self._errors_muted = 0
+        # 错误日志按类别限流：(说明模板, 异常类型) → 状态，见 _log_error
+        self._errors: dict[tuple[str, type[BaseException]], _ErrorKind] = {}
         self._closed = False
         if autostart:
             self._start()
@@ -854,9 +870,14 @@ class SubscriptionHub:
             batch = await mq.get_message()
             try:
                 await self._tick(batch)
-            # 读错误在 tick 里都兜住并重试了；这里兜 bug，处理循环不能停
+            # 读错误在 tick 里都兜住并重试了；这里兜 bug，处理循环不能停。这批通知已经弹出，没处理
+            # 完的就丢了
             except Exception as e:  # noqa: BLE001
-                self._log_error(_("处理订阅通知异常"), e)
+                self._log_error(
+                    _("处理订阅通知异常（bug），这批通知可能没处理完"),
+                    e,
+                    requeued=False,
+                )
 
     def _log_error(
         self,
@@ -866,33 +887,66 @@ class SubscriptionHub:
         **fields: Any,
     ) -> None:
         """
-        tick 里出错：记错误日志（带栈）。限流：每 _ERROR_LOG_INTERVAL 秒最多一条，带上此前压下的
-        次数。what 是（已翻译的）说明模板，fields 填它的占位符。requeued：出错的读已重新入队，
-        一个 interval 后重试（设计稿 §6）。
+        tick 里出错：记错误日志。what 是（已翻译的）说明模板，fields 填它的占位符。requeued：出错
+        的读已重新入队，稍后重试（设计稿 §6）。
+        按类别（说明模板 + 异常类型）限流：每类每 _ERROR_LOG_INTERVAL 秒最多一条，带上此前压下的
+        次数；一类错误第一次出现时带栈。一个订阅持续出错（每个 interval 重试一次）不会占着窗口把
+        新冒出来的另一类错误压掉。一类错误静默满一个间隔后补一条恢复日志（_check_quiet）。
         翻译出来的模板占位符对不上（.po 由 CD 机翻同步）时不能抛：这是 tick 的出错路径，抛出去
         就丢了重试、甚至让处理循环结束。退回原文
         """
         now = time.monotonic()
-        if now - self._error_logged_at < _ERROR_LOG_INTERVAL:
-            self._errors_muted += 1
+        key = (what, type(exc))
+        kind = self._errors.get(key)
+        first = kind is None
+        if kind is None:
+            kind = self._errors[key] = _ErrorKind(what)
+        kind.last_seen = now
+        if kind.timer is None:
+            kind.timer = asyncio.get_running_loop().call_later(
+                _ERROR_LOG_INTERVAL, self._check_quiet, key
+            )
+        if now - kind.logged_at < _ERROR_LOG_INTERVAL:
+            kind.muted += 1
             return
-        muted, self._errors_muted = self._errors_muted, 0
-        self._error_logged_at = now
+        muted, kind.muted = kind.muted, 0
+        kind.logged_at = now
         err = f"{type(exc).__name__}:{exc}"
         try:
-            what = what.format(**fields)
+            kind.what = what.format(**fields)
             if requeued:
                 msg = _(
                     "❌ [📡Subscription] {what}：{err}，已重新入队稍后重试"
                     "（上次记录以来另有 {muted} 次出错未记）"
-                ).format(what=what, err=err, muted=muted)
+                ).format(what=kind.what, err=err, muted=muted)
             else:
                 msg = _(
                     "❌ [📡Subscription] {what}：{err}（上次记录以来另有 {muted} 次出错未记）"
-                ).format(what=what, err=err, muted=muted)
+                ).format(what=kind.what, err=err, muted=muted)
         except KeyError, IndexError, ValueError:
             msg = f"❌ [📡Subscription] {what} {fields}: {err} (muted {muted})"
-        logger.error(msg, exc_info=exc)
+        logger.error(msg, exc_info=exc if first else None)
+
+    def _check_quiet(self, key: tuple[str, type[BaseException]]) -> None:
+        """一类错误静默满一个间隔：补一条恢复日志（带上压下的次数），下次再出现时重新带栈"""
+        kind = self._errors.get(key)
+        if kind is None:
+            return
+        kind.timer = None
+        quiet_for = time.monotonic() - kind.last_seen
+        if quiet_for < _ERROR_LOG_INTERVAL:
+            kind.timer = asyncio.get_running_loop().call_later(
+                _ERROR_LOG_INTERVAL - quiet_for, self._check_quiet, key
+            )
+            return
+        del self._errors[key]
+        try:
+            msg = _(
+                "✅ [📡Subscription] {what}：{err} 已停止（最后一条日志之后另有 {muted} 次未记）"
+            ).format(what=kind.what, err=key[1].__name__, muted=kind.muted)
+        except KeyError, IndexError, ValueError:
+            msg = f"✅ [📡Subscription] {kind.what}: {key[1].__name__} stopped ({kind.muted})"
+        logger.info(msg)
 
     async def step_(self, deadline: float | None, ready: Callable[[], bool]) -> bool:
         """
@@ -1316,6 +1370,10 @@ class SubscriptionHub:
         self._effective.clear()
         self._inflight.clear()
         self._parked.clear()
+        for kind in self._errors.values():
+            if kind.timer is not None:
+                kind.timer.cancel()
+        self._errors.clear()
         await self._mq.close()
 
 
