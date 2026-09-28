@@ -1219,3 +1219,93 @@ async def test_broker_warns_when_a_connection_subscribes_too_many_channels(caplo
     warns = [r for r in caplog.records if "MAX_SUBSCRIBED" in r.getMessage()]
     assert len(warns) == 1
     await close_hub(hub, node)
+
+
+# ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
+
+
+def time_ticks(hub: SubscriptionHub) -> list[tuple[float, float]]:
+    """记下 hub 每个 tick 开始、结束时的 loop 时间（tick 结束时追加）"""
+    spans: list[tuple[float, float]] = []
+    tick = hub._tick
+    loop = asyncio.get_running_loop()
+
+    async def timed(batch):
+        start = loop.time()
+        try:
+            return await tick(batch)
+        finally:
+            spans.append((start, loop.time()))
+
+    hub._tick = timed  # type: ignore[method-assign]
+    return spans
+
+
+async def test_continuous_notifications_are_batched_into_spaced_ticks():
+    """
+    通知接连不断时，MQClient 每次只弹出刚满一个 interval 的那一两条。以前 hub 弹一批跑一个 tick、
+    跑完马上弹下一批：实测 2000 连接、每秒 2000 次写入时每秒约 1500 个 tick、平均每个 2 条，建任务、
+    等订阅回执、预读往返这些每 tick 的固定开销被放大，私有订阅反而比每连接一个队列更费 CPU。
+    相邻两个 tick 的开始至少隔 TICK_SPACING_INTERVALS 个 interval，这期间满期的通知攒成一批
+    """
+    hub, _brokers, mq, node = make_brokers(0, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 3  # 30ms：拉开到计时误差之外
+    spacing = 3 * hub.interval
+    spans = time_ticks(hub)
+    for i in range(40):
+        mq.push_pulled_(f"C{i}", None)
+        await asyncio.sleep(0.003)
+    async with asyncio.timeout(3):
+        while mq.pulled_deque:
+            await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)  # 最后一个 tick 跑完才记下
+    starts = [start for start, _end in spans]
+    gaps = [b - a for a, b in itertools.pairwise(starts)]
+    assert gaps, "通知只够跑一个 tick，测不出间隔"
+    assert min(gaps) >= spacing - 0.002, (
+        f"相邻 tick 只隔了 {min(gaps) * 1000:.1f}ms（{len(starts)} 个 tick）"
+    )
+    await close_hub(hub, node)
+
+
+async def test_isolated_notification_is_not_delayed_by_tick_spacing():
+    """合批窗口只在通知接连不断时起作用：隔了一阵才来的一条，满一个 interval 就处理，不多等"""
+    hub, _brokers, mq, node = make_brokers(0, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 10  # 100ms
+    spans = time_ticks(hub)
+    loop = asyncio.get_running_loop()
+    mq.push_pulled_("A", None)
+    await wait_until(lambda: spans)
+    await asyncio.sleep(0.2)  # 空闲超过窗口
+    pushed = loop.time()
+    mq.push_pulled_("B", None)
+    await wait_until(lambda: len(spans) == 2)
+    delay = spans[1][0] - pushed
+    assert delay < hub.interval + 0.05, (
+        f"隔了一阵才来的通知多等了：{delay * 1000:.1f}ms 才处理"
+    )
+    await close_hub(hub, node)
+
+
+async def test_slow_tick_is_not_followed_by_extra_wait():
+    """tick 本身已经超过合批窗口时，下一个 tick 不再多等：窗口从上一个 tick 开始时算"""
+    hub, (broker,), mq, node = make_brokers(1, autostart=True)
+    mq.UPDATE_FREQUENCY = 100  # type: ignore[reportAttributeAccessIssue]  interval 10ms
+    hub.TICK_SPACING_INTERVALS = 3  # 30ms
+    slow = FakeSub({"S"})
+    await register(broker, node, "S", slow)
+    slow.gate.clear()
+    spans = time_ticks(hub)
+    mq.push_pulled_("S", None)
+    async with asyncio.timeout(1):
+        await slow.entered.wait()
+    mq.push_pulled_("N", None)  # tick 卡着的期间满期
+    await asyncio.sleep(0.08)  # 这个 tick 远超窗口
+    slow.gate.set()
+    await wait_until(lambda: len(spans) >= 2)
+    (start1, end1), (start2, _end2) = spans[0], spans[1]
+    assert end1 - start1 > 0.06
+    assert start2 - end1 < 0.015, f"慢 tick 之后又等了 {(start2 - end1) * 1000:.1f}ms"
+    await close_hub(hub, node)
