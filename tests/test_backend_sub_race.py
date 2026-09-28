@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from fixtures.contexts import wait_until
 from fixtures.fake_pubsub import FakeNodePubSub, make_hub, settle
 
 from hetu.data.backend import Backend
@@ -491,4 +492,79 @@ async def test_failed_subscribe_of_new_channel_is_repaired():
     assert "X" in mq.subscribed_channels
     assert hub._channel_subs["X"] == {s}
     assert ("X", None) in s.calls, "补订之后要重读，失败期间的写入没有通知"
+    await close_all(broker, node)
+
+
+# ============ tick 末尾的订阅 / 退订不能卡住整个 worker 的交付 ============
+
+
+async def test_tick_delivers_without_waiting_for_unsubscribe_ack():
+    """行离开范围、tick 末尾退订没人要的行频道：交付不等 UNSUBSCRIBE 回来。它对交付毫无作用，
+    ack 迟迟不来时要等满 UNSUBSCRIBE_ACK_TIMEOUT（5 秒），worker 里所有连接的推送都跟着卡住"""
+    broker, mq, node = make_broker()
+    s = FakeSub({"idx", "X"})
+    await register(broker, node, "S", s)
+    s.rem = {"X"}
+    s.updates = {1: None}
+    mq.push_pulled_("idx", None)
+    async with asyncio.timeout(1):
+        updates = await broker.get_updates(timeout=TICK)  # UNSUBSCRIBE 一直不 ack
+    assert updates == {"S": {1: None}}
+    await wait_sent(node, "unsubscribe", "X")  # 退订照常发出，只是交付不等它
+    node.ack("unsubscribe", "X")
+    await close_all(broker, node)
+
+
+async def test_tick_waits_for_subscribe_ack_at_most_an_interval():
+    """行进入范围、tick 末尾订阅它的行频道：SUBSCRIBE 的 ack 迟迟不来（比如节点的 pubsub 连接
+    半开，要靠 TCP keepalive 才发现）时最多等一个 interval 就交付，不能冻住整个 worker 的推送；
+    ack 回来之后照常给新增它的订阅定向补读"""
+    broker, mq, node = make_broker()
+    s = FakeSub({"idx"})
+    await register(broker, node, "S", s)
+    s.new = {"X"}
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("idx", None)
+    async with asyncio.timeout(1):
+        updates = await broker.get_updates(timeout=TICK)  # SUBSCRIBE X 还没 ack
+    assert updates == {"S": {1: {"v": 1}}}
+
+    s.new, s.updates = set(), {}
+    await wait_sent(node, "subscribe", "X")
+    node.ack("subscribe", "X")
+    assert await broker.get_updates(timeout=TICK) == {}
+    assert ("X", None) in s.calls, "SUBSCRIBE 回来之后要给新增它的订阅定向补读"
+    await close_all(broker, node)
+
+
+async def test_repair_does_not_block_the_tick():
+    """补订（此前订阅失败的频道弹出时先补订）不等 SUBSCRIBE 回来：本批别的订阅照常处理、交付，
+    补订的频道订上之后再重读"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    s = FakeSub({"idx"})
+    other = FakeSub({"C"})
+    await register(broker, node, "S", s)
+    await register(broker, node, "O", other)
+    loop = asyncio.get_running_loop()
+    async with asyncio.timeout(3):
+        # 跑一个 tick：S 新增 X，tick 末尾订阅 X 发送失败，X 按真实频道重新入队
+        s.new = {"X"}
+        node.fail_next = ConnectionError("send failed")
+        mq.push_pulled_("idx", None)
+        assert await hub.step_(loop.time() + 1, lambda: False)
+        await wait_until(lambda: "X" in mq.pulled_set)
+        assert "X" not in mq.subscribed_channels and hub._channel_subs["X"] == {s}
+
+        # X 与 C 的通知同一批弹出：补订 X 的 SUBSCRIBE 一直不 ack，C 照常交付
+        s.new = set()
+        other.updates = {2: {"v": 2}}
+        mq.push_pulled_("C", None)
+        await asyncio.sleep(0.01)  # 两项都过了合批窗口
+        assert await broker.get_updates(timeout=TICK) == {"O": {2: {"v": 2}}}
+
+        await wait_sent(node, "subscribe", "X")
+        node.ack("subscribe", "X")
+        assert await broker.get_updates(timeout=TICK) == {}
+    assert ("X", None) in s.calls, "补订上之后要重读"
     await close_all(broker, node)
