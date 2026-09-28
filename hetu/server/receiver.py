@@ -86,12 +86,13 @@ async def rpc(
 
 
 def defer_sub_reply_(
-    finish: Awaitable[tuple[str | None, list[dict]]], deferred: set[asyncio.Task]
+    finish: Awaitable[tuple[str | None, Any]], deferred: set[asyncio.Task]
 ) -> asyncio.Future:
     """
-    后台跑完订阅的后半段，结果填进返回的占位。占位放进 push_queue，发送循环按顺序等它填好：
-    回复没有请求 id、SDK 按顺序对应，排在它后面的回复都跟着等。任务登记在 deferred 里，
-    连接拆掉时由接收协程取消
+    后台跑完订阅的后半段（等订阅在 worker 级订阅器里初始化好），结果填进返回的占位。占位放进
+    push_queue，发送循环按顺序等它填好：回复没有请求 id、SDK 按顺序对应，排在它后面的回复都
+    跟着等；之后给这个订阅的推送也都排在它后面。任务登记在 deferred 里，连接拆掉时由接收协程
+    取消
     """
     reply = asyncio.get_running_loop().create_future()
 
@@ -142,30 +143,29 @@ async def sub_call(
         logger.warning(err_msg)
         return False
 
-    sub_id = None
-    sub_data: dict[str, Any] | list[dict] | None = None
-    deferred_reply: asyncio.Future | None = None
+    # 前半段（检查、登记）在这里做完，下面的订阅数检查照常；后半段（等订阅在 worker 级订阅器里
+    # 初始化好：订阅频道、读初始行）交给后台，接收协程接着处理下一条消息
+    finish: Awaitable[tuple[str | None, Any]] | None = None
     match data[2]:
         case "get":
             check_length("get", data, 5, 5)
-            sub_id, sub_data = await broker.subscribe_get(table, ctx, *data[3:])
+            finish = await broker.begin_subscribe_get(table, ctx, *data[3:])
         case "range":
             # sub comp range index left [right limit desc force]
             check_length("range", data, 5, 9)
-            sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
+            finish = await broker.begin_subscribe_range(table, ctx, *data[3:])
         case "table":  # sub component_name table
             check_length("table", data, 3, 3)
-            # 前半段（检查、订阅、登记）在这里做完，下面的订阅数检查照常；后半段要先等
-            # 一个 interval 再全量读，交给后台，接收协程接着处理下一条消息
             finish = await broker.begin_subscribe_table(table, ctx)
-            deferred_reply = defer_sub_reply_(finish, deferred)
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
         case _:
             raise ValueError(_(" [非法操作] 未知订阅操作：{op}").format(op=data[2]))
 
-    reply = ["sub", sub_id, sub_data] if deferred_reply is None else deferred_reply
+    reply = (
+        ["sub", None, None] if finish is None else defer_sub_reply_(finish, deferred)
+    )
     await push_queue.put(reply)
 
     num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
@@ -216,7 +216,7 @@ async def client_handler(
     ctx = executor.context
     last_data = None
     cancelled = False
-    # 在后台跑后半段的订阅（整表订阅等全量读），连接拆掉时一起取消
+    # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
     # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
     # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。

@@ -112,11 +112,17 @@ async def finish(task: asyncio.Task, node: FakeNodePubSub):
     return task.result()
 
 
+def open_sub(broker: SubscriptionBroker, sub_id: str, sub: FakeSub) -> asyncio.Task:
+    """订阅的前半段（登记，初始化交给 hub）当场做完；返回后半段（等初始化完成）的任务"""
+    return asyncio.create_task(broker._finish(sub_id, sub, broker._open(sub_id, sub)))
+
+
 async def register(
     broker: SubscriptionBroker, node: FakeNodePubSub, sub_id: str, sub: FakeSub
 ):
-    """照 subscribe_get / subscribe_range 的顺序登记一个订阅：先订频道（生效），再登记到门面"""
-    await finish(asyncio.create_task(broker._attach(sub_id, sub)), node)
+    """照 subscribe_get / subscribe_range 的流程登记一个订阅：前半段登记，hub 里初始化（替身只订上
+    频道，没有初始行、不补读），完成时生效"""
+    await finish(open_sub(broker, sub_id, sub), node)
 
 
 async def unsubscribe_and_ack(
@@ -228,13 +234,13 @@ async def test_sub_unsubscribed_during_its_own_get_updated_leaves_no_trace():
     await close_all(broker, node)
 
 
-async def test_attach_returns_inactive_until_broker_registers():
-    """hub.attach 返回时订阅仍未生效（active=False），tick 不处理它：active 要由门面在登记的同一个
-    同步段里置。由订阅任务自己置的话，门面登记之前 tick 算好的推送会因 sub_id 未登记被丢掉，
-    指纹却已更新，之后的补读读回一样也不再推（设计稿 §4.6）"""
+async def test_attach_returns_inactive_until_init_completes():
+    """hub.attach_ 返回时（频道已生效）行 / 范围订阅仍未生效（active=False），tick 不处理它：初始化
+    完成时才由 hub 置，与把结果交给等着的成员在同一个同步段里，推送都排在成员拿到的结果之后
+    （设计稿 2026-09-29 §3.4）"""
     hub, (broker,), mq, node = make_brokers(1)
     sub = FakeSub({"X"})
-    await finish(asyncio.create_task(hub.attach(sub, broker, "S")), node)
+    await finish(asyncio.create_task(hub.attach_(sub)), node)
     assert not sub.active
     mq.push_pulled_("X", None)
     assert await broker.get_updates(timeout=TICK) == {}
@@ -251,7 +257,7 @@ async def test_attach_in_flight_keeps_channel_from_unsubscribe():
     i1.rem = {"X"}
 
     r = FakeSub({"X", "Y"})
-    attaching = asyncio.create_task(b._attach("R", r))
+    attaching = open_sub(b, "R", r)
     await wait_sent(node, "subscribe", "Y")
 
     mq.push_pulled_("idx1", None)
@@ -274,9 +280,9 @@ async def test_cancelled_attach_does_not_revoke_other_connection():
     （连接断开）：共用的 MQClient 对 X 的登记不能被撤掉，B 照常收到 X 的通知（设计稿 §4.6）"""
     hub, (a, b), mq, node = make_brokers(2)
     sa, sb = FakeSub({"X"}), FakeSub({"X"})
-    ta = asyncio.create_task(a._attach("A", sa))
+    ta = open_sub(a, "A", sa)
     await wait_sent(node, "subscribe", "X")
-    tb = asyncio.create_task(b._attach("B", sb))
+    tb = open_sub(b, "B", sb)
     await settle()
     ta.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -308,7 +314,7 @@ async def test_new_channel_gets_reread_while_its_subscribe_is_in_flight():
     s.new = {"X"}
 
     p = FakeSub({"X"})
-    attaching = asyncio.create_task(b._attach("P", p))
+    attaching = open_sub(b, "P", p)
     await wait_sent(node, "subscribe", "X")
     assert "X" in mq.subscribed_channels
 
@@ -668,17 +674,18 @@ async def test_failed_attach_does_not_revoke_channel_another_attach_waits_on():
     要么 C 真的订着（设计稿 §4.6）
     """
     hub, (a, b), mq, node = make_brokers(2)
+    hub.INIT_RETRIES = 0  # A 的订阅一出错就失败（不重试）
     pubsub = cast(Any, mq._hub)._pubsub  # PubSubHub 的 AsyncKeyspacePubSub
     n2 = attach_fake_node(pubsub, "n2")
     route_channels(pubsub, {"D": "n2"})
     n2.gate.clear()  # 连 D 所在的节点：一直连不上
     sa = OrderedFakeSub(["C", "D"])
-    ta = asyncio.create_task(a._attach("A", sa))
+    ta = open_sub(a, "A", sa)
     await wait_sent(node, "subscribe", "C")
     node.ack("subscribe", "C")
     await settle()
     sb = FakeSub({"C"})
-    tb = asyncio.create_task(b._attach("B", sb))
+    tb = open_sub(b, "B", sb)
     await settle()
 
     n2.fail_next = ConnectionError("connect to n2 failed")
@@ -701,18 +708,19 @@ async def test_attach_right_after_failed_subscribe_is_not_left_unsubscribed():
     没订上（A 回滚的后台退订会把 B 重新发出的那次 SUBSCRIBE 当作成功结算掉）
     """
     hub, (a, b), mq, node = make_brokers(2)
+    hub.INIT_RETRIES = 0  # A 的订阅一出错就失败（不重试）
     sa, sb = FakeSub({"T"}), FakeSub({"T"})
     b_attach: list[asyncio.Task] = []
     real_subscribe = node.subscribe
 
     async def fail_first_and_race(*channels: str):
         if not b_attach:  # A 那次：发送失败的同一刻，B 的订阅请求到了
-            b_attach.append(asyncio.ensure_future(b._attach("B", sb)))
+            b_attach.append(open_sub(b, "B", sb))
             raise ConnectionError("send failed")
         await real_subscribe(*channels)
 
     node.subscribe = fail_first_and_race  # type: ignore[method-assign]
-    ta = asyncio.create_task(a._attach("A", sa))
+    ta = open_sub(a, "A", sa)
     async with asyncio.timeout(1):
         while not b_attach:
             await asyncio.sleep(0.001)
@@ -736,6 +744,7 @@ async def test_repair_waits_for_subscribe_to_take_effect_before_reading():
     持有旧行。要等 X 真的订上之后再读（设计稿 §6）
     """
     hub, (a, b), mq, node = make_brokers(2)
+    hub.INIT_RETRIES = 0  # B 的订阅一出错就失败（不重试）
     s = FakeSub({"idx"})
     await register(a, node, "S", s)
     loop = asyncio.get_running_loop()
@@ -757,7 +766,7 @@ async def test_repair_waits_for_subscribe_to_take_effect_before_reading():
         node.gate.clear()
         node.entered.clear()
         node.fail_next = ConnectionError("send failed again")
-        tb = asyncio.create_task(b._attach("P", FakeSub({"X"})))
+        tb = open_sub(b, "P", FakeSub({"X"}))
         await node.entered.wait()
         assert "X" in mq.subscribed_channels  # 发出去了，但还没生效
 
@@ -1069,7 +1078,7 @@ async def test_closed_broker_rejects_watch_and_subscribe():
         with pytest.raises(ConnectionError):
             await broker.watch_channel("W", lambda: None)
         with pytest.raises(ConnectionError):
-            await broker._attach("S", FakeSub({"X"}))
+            broker._open("S", FakeSub({"X"}))
     assert node.sent("subscribe") == []
     assert broker._watch_mq is None
     await close_hub(hub, node)
@@ -1259,11 +1268,6 @@ class FailingInitSub(FakeSub):
         self.attempts += 1
         await hub.attach_(self)
         raise ConnectionError("replica down")
-
-
-def open_sub(broker: SubscriptionBroker, sub_id: str, sub: FakeSub) -> asyncio.Task:
-    """订阅的前半段（登记，初始化交给 hub）当场做完；返回后半段（等初始化完成）的任务"""
-    return asyncio.create_task(broker._finish(sub_id, sub, broker._open(sub_id, sub)))
 
 
 async def test_sub_is_not_processed_until_its_init_completes():

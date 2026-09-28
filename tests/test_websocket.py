@@ -547,7 +547,7 @@ async def test_deferred_table_reply_cancelled_before_it_runs_still_rolls_back():
         try:
             await asyncio.sleep(10)  # 后半段：先等一个 interval 再全量读
         except asyncio.CancelledError:
-            rolled_back.append(None)  # 同 _finish_subscribe_table：撤掉订阅再抛出
+            rolled_back.append(None)  # 同 SubscriptionBroker._finish：撤掉订阅再抛出
             raise
         return "S", []
 

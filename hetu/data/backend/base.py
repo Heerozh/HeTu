@@ -638,6 +638,20 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def check_range_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        desc: bool,
+    ) -> None:
+        """
+        内部方法：校验一次 `range` 查询的参数（索引存在、边界合法），不合法抛 ValueError，不访问
+        数据库。订阅在接收协程里先校验，读库放到后台（见 SubscriptionBroker.begin_subscribe_range）。
+        默认不校验，由之后的 range 读报错
+        """
+
     async def range_read_(
         self,
         table_ref: TableReference,
