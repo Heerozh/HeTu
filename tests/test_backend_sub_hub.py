@@ -12,6 +12,7 @@ from typing import cast
 from unittest.mock import patch
 
 import pytest
+import redis
 from fixtures.contexts import settled_updates, wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -397,3 +398,48 @@ async def test_subscription_moves_off_a_dead_servant(
     assert updates.get(idx_id, {}).get(new_id, {}).get("name") == "Survivor"
     assert updates.get(tbl_id, {}).get(new_id, {}).get("name") == "Survivor"
     await broker.close()
+
+
+@pytest.mark.parametrize("backend_name", ["redis", "valkey"], indirect=True)
+async def test_hub_moves_subscriptions_off_a_servant_whose_pubsub_dropped(
+    mod_backend_config, filled_item_ref, admin_ctx
+):
+    """
+    worker 级订阅器的订阅通知分到各副本订阅（这里把主库也当一个副本）。某个副本的 pubsub 连接断了
+    （这里 CLIENT KILL 掉主库上的 pubsub 连接）：它上面的频道换到另一个副本订阅、补读，推送照常。
+    以前订阅器建的时候随机绑一个副本、终身不换，它断了整个 worker 的推送都停
+    """
+    config = {
+        **mod_backend_config,
+        "servants": [*mod_backend_config["servants"], mod_backend_config["master"]],
+    }
+    backend = Backend(config)
+    backend.post_configure([filled_item_ref.comp_cls])
+    replica, master = backend._servants  # type: ignore[reportPrivateUsage]
+    hub = SubscriptionHub(backend)
+    broker = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    assert sub_id and len(rows) == 25
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    routes = cast(HubMQClient, hub.mq)._route  # type: ignore[reportPrivateUsage]
+    on_master = {ch for ch, h in routes.items() if h is master._hub}  # type: ignore[attr-defined]
+    assert on_master and set(routes) - on_master, "订阅没有分到两个副本上"
+
+    redis.Redis.from_url(config["master"]).client_kill_filter(_type="pubsub")
+    await wait_until(
+        lambda: all(routes.get(ch) is replica._hub for ch in on_master),  # type: ignore[attr-defined]
+        timeout=5,
+    )
+    comp = filled_item_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        row.name, row.owner, row.time = "Survivor", 10, 779
+        await session.using(comp).insert(row)
+        new_id = int(row.id)
+    updates = await settled_updates(broker, timeout=3)
+    assert updates.get(sub_id, {}).get(new_id, {}).get("name") == "Survivor"
+    await broker.close()
+    await hub.close()
+    await backend.close()
