@@ -15,6 +15,8 @@ from functools import partial
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
 from redis.asyncio.connection import Connection, ConnectionPool
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.cluster import LoadBalancingStrategy
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import SlotNotCoveredError
@@ -37,10 +39,20 @@ def _pubsub_pool(connection_class: type, connection_kwargs: dict) -> ConnectionP
     redis-py >= 8 默认开（idle 30s / interval 5s / 3 probes），这里显式打开，不依赖版本
     默认值；URL 里明确配了 socket_keepalive 的仍按配置来。
     unix socket 连接没有这个参数（也没有半开的问题）。
+
+    重试一律关掉：连接出错必须原样抛到监听协程，由 `AsyncKeyspacePubSub` 按节点失效处理（换副本、
+    重订、通知上层补读）。redis-py 的 PubSub 读写都走连接的 retry，照抄过来的参数里有重试
+    （URL 带 retry_on_timeout、主客户端配了 retry）时它会自己重连、重订，监听协程察觉不到断过，
+    断线期间丢的通知就再也不会补读。
     """
     kwargs = dict(connection_kwargs)
     if issubclass(connection_class, Connection):
         kwargs.setdefault("socket_keepalive", True)
+    # 这两个会被 Connection 并进 retry 认的错误类型，一起去掉
+    kwargs.pop("retry_on_timeout", None)
+    kwargs.pop("retry_on_error", None)
+    # 不认任何错误：重试 0 次时 redis-py 仍会先断开重连、重订一遍再抛，白订一轮就扔
+    kwargs["retry"] = Retry(NoBackoff(), 0, supported_errors=())
     return ConnectionPool(
         connection_class=connection_class, max_connections=2, **kwargs
     )

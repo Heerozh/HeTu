@@ -1,10 +1,15 @@
 """
-pubsub 节点失效 → 重订阅恢复：不连 Redis，用假的节点 pubsub 控制失效与 ack 的时机，
+pubsub 节点失效 → 重订阅恢复：大部分不连 Redis，用假的节点 pubsub 控制失效与 ack 的时机，
 验证恢复期间又有节点失效时频道不会被永远漏掉，恢复期间退订的频道也不会被订回来。
+最后一组连真 Redis，由服务端断开 pubsub 连接，验证监听协程确实察觉得到、走恢复流程。
 """
 
 import asyncio
+from typing import cast
 
+import pytest
+import redis
+from fixtures.backends import backend_config_by_name, use_redis_family_backend_only
 from fixtures.fake_pubsub import (
     FakeNodePubSub,
     attach_fake_node,
@@ -12,7 +17,9 @@ from fixtures.fake_pubsub import (
     make_pubsub,
     settle,
 )
+from redis.cluster import RedisCluster
 
+from hetu.data.backend import Backend
 from hetu.data.backend.base import MQClient
 from hetu.data.backend.redis.mq import RedisMQClient
 from hetu.data.backend.redis.pubsub import AsyncKeyspacePubSub
@@ -169,3 +176,63 @@ async def test_hub_dispatches_resync_after_resubscribe():
         }
     assert fired == [ROW_B]
     await hub.close()
+
+
+# ============ 真 Redis：服务端断开 pubsub 连接 ============
+
+
+def _kill_pubsub_clients(config: dict) -> int:
+    """
+    在 servant 所在的各节点上踢掉全部 pubsub 连接（输出缓冲超限时 Redis 就是这么断的），返回
+    踢掉的条数。本模块只有被测的 backend 连着这些容器，不会误伤别人
+    """
+    killed = 0
+    for url in config["servants"] or [config["master"]]:
+        if config.get("raw_clustering"):
+            rc = RedisCluster.from_url(url)
+            try:
+                nodes = [redis.Redis(host=n.host, port=n.port) for n in rc.get_nodes()]
+            finally:
+                rc.close()
+        else:
+            nodes = [redis.Redis.from_url(url)]
+        for node in nodes:
+            with node:
+                killed += cast(int, node.client_kill_filter(_type="pubsub"))
+    return killed
+
+
+@pytest.mark.parametrize(
+    "url_query", ["", "?retry_on_timeout=true"], ids=["default", "retry_on_timeout"]
+)
+@use_redis_family_backend_only
+async def test_server_closed_pubsub_resyncs(request, backend_name, url_query):
+    """
+    Redis 主动断开 pubsub 连接（输出缓冲超限、CLIENT KILL、重启）：监听协程要察觉断线、走恢复流程，
+    重订生效后给订着的频道补发一条通知让订阅者重读。pubsub 的连接池照抄主连接的参数，URL 带了
+    retry_on_timeout 的话以前连重试也抄过来：redis-py 自己重连、重订，监听协程察觉不到断过，
+    断线期间的通知丢了也不补读，一行日志都没有
+    """
+    if backend_name == "redis_cluster" and url_query:
+        pytest.skip("RedisCluster.from_url 不收 retry_on_timeout")
+    config = backend_config_by_name(backend_name, request)
+    backend = Backend(
+        {
+            **config,
+            "master": config["master"] + url_query,
+            "servants": [url + url_query for url in config["servants"]],
+        }
+    )
+    mq = backend.get_mq_client()
+    try:
+        await mq.subscribe(KS_ROW)
+        assert _kill_pubsub_clients(config) >= 1
+        try:
+            async with asyncio.timeout(5):
+                batch = await mq.get_message()
+        except TimeoutError:
+            pytest.fail("pubsub 连接被服务端断开，5 秒内没有补发通知：没走恢复流程")
+        assert batch == {KS_ROW: None}
+    finally:
+        await mq.close()
+        await backend.close()
