@@ -617,6 +617,59 @@ def test_websocket_table_subscribe_does_not_block_following_messages(
 
 
 @pytest.mark.timeout(30)
+def test_websocket_range_subscribe_does_not_block_following_messages(
+    monkeypatch, test_server
+):
+    """范围订阅的初始读卡住时（副本慢、在重试），后面的消息照常执行；回复仍按请求顺序送达
+    （get / range 的回复也走占位，同整表订阅，设计稿 2026-09-29 §3.3）"""
+    from hetu.data.backend.redis_model import RedisModelClient
+
+    real_range = RedisModelClient.range
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_range(self, table_ref, index_name, left, *args, **kwargs):
+        if table_ref.comp_name == "PublicNames" and left == 8201:
+            gate["reading"].set()
+            await gate["release"].wait()
+        return await real_range(self, table_ref, index_name, left, *args, **kwargs)
+
+    monkeypatch.setattr(RedisModelClient, "range", gated_range)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        watcher = await connect()
+        await watcher.send(["sub", "PublicNames", "range", "owner", 8101, 8102])
+        watch_id = (await watcher.recv())[1]
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "range", "owner", 8201, 8202])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 范围订阅卡在初始读上
+            await client.send(["rpc", "set_public_name", 8101, "Early"])
+            try:
+                async with asyncio.timeout(5):
+                    result["early"] = await watcher.recv()
+            except TimeoutError:
+                result["early"] = None
+        finally:
+            gate["release"].set()
+        order = []
+        async with asyncio.timeout(5):
+            while len(order) < 2:
+                msg = await client.recv()
+                if msg[0] in ("sub", "rsp"):
+                    order.append(msg[0])
+        result["order"] = order
+        result["watch_id"] = watch_id
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["early"], "范围订阅在等初始读，后面的 RPC 没被执行"
+    assert result["early"][:2] == ["updt", result["watch_id"]]
+    assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
+
+
+@pytest.mark.timeout(30)
 def test_websocket_table_subscribes_wait_concurrently(monkeypatch, test_server):
     """连着发两个整表订阅：第二个不用排在第一个的等待和全量读后面（登录时常一次订好几张
     表，串行就是每张一个 interval）；回复仍按请求顺序"""

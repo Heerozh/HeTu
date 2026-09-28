@@ -348,22 +348,27 @@ async def test_unreadable_row_does_not_hold_back_its_batch(
 
 
 class _DeadServant:
-    """挂掉的副本：读都抛连接错误，其余（频道名等）照原来的副本"""
+    """挂掉的副本：读都抛连接错误（记下次数），其余（频道名等）照原来的副本"""
 
     def __init__(self, real):
         self._real = real
+        self.reads = 0
 
     def __getattr__(self, name):
         return getattr(self._real, name)
 
+    def _down(self):
+        self.reads += 1
+        return ConnectionError("replica down")
+
     async def get(self, *args, **kwargs):
-        raise ConnectionError("replica down")
+        raise self._down()
 
     async def get_many(self, *args, **kwargs):
-        raise ConnectionError("replica down")
+        raise self._down()
 
     async def range(self, *args, **kwargs):
-        raise ConnectionError("replica down")
+        raise self._down()
 
 
 async def test_subscription_moves_off_a_dead_servant(
@@ -397,6 +402,57 @@ async def test_subscription_moves_off_a_dead_servant(
     updates = await settled_updates(broker, timeout=3)
     assert updates.get(idx_id, {}).get(new_id, {}).get("name") == "Survivor"
     assert updates.get(tbl_id, {}).get(new_id, {}).get("name") == "Survivor"
+    await broker.close()
+
+
+async def test_initial_read_retries_on_another_servant(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    订阅时选中的副本挂了：初始读出错不直接失败（以前连接当场断开，客户端重连、重订一遍），换一个
+    随机副本重试，回复照常（设计稿 2026-09-29 §3.4）
+    """
+    backend = hub._backend
+    real = backend.servant
+    dead = _DeadServant(real)
+    row_id = int((await real.range(filled_item_ref, "time", 110, limit=1))[0].id)
+    broker = SubscriptionBroker(backend, hub=hub)
+    with patch.object(backend, "_servants", [dead]):  # 前半段选中的是挂掉的副本
+        finishes = [
+            await broker.begin_subscribe_get(filled_item_ref, admin_ctx, "id", row_id),
+            await broker.begin_subscribe_range(
+                filled_item_ref, admin_ctx, "owner", 10, limit=30
+            ),
+            await broker.begin_subscribe_table(filled_item_ref, admin_ctx),
+        ]
+    async with asyncio.timeout(5):
+        (get_id, row), (idx_id, rows), (tbl_id, tbl_rows) = [await f for f in finishes]
+    assert get_id and row and row["id"] == row_id
+    assert idx_id and len(rows) == 25
+    assert tbl_id and len(tbl_rows) == 25
+    assert dead.reads == 3
+    for sub_id in (get_id, idx_id, tbl_id):
+        assert cast(RowSubscription, broker._subs[sub_id]).servant is real
+    await broker.close()
+
+
+async def test_initial_read_gives_up_after_retries(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """初始读一直出错：重试 INIT_RETRIES 次仍失败才抛给调用方（服务器里是断开连接），订阅撤干净"""
+    backend = hub._backend
+    dead = _DeadServant(backend.servant)
+    hub.INIT_RETRIES = 2
+    broker = SubscriptionBroker(backend, hub=hub)
+    with (
+        patch.object(backend, "_servants", [dead]),
+        pytest.raises(ConnectionError, match="replica down"),
+    ):
+        async with asyncio.timeout(5):
+            await broker.subscribe_range(filled_item_ref, admin_ctx, "owner", 10)
+    assert dead.reads == 3
+    assert broker.count() == (0, 0, 0) and not broker._subs
+    assert not hub._channel_subs and not hub.mq.subscribed_channels
     await broker.close()
 
 

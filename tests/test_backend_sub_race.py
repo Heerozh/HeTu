@@ -1221,6 +1221,120 @@ async def test_broker_warns_when_a_connection_subscribes_too_many_channels(caplo
     await close_hub(hub, node)
 
 
+# ============ 订阅在 hub 里初始化（设计稿 2026-09-29 §3.3、§3.4） ============
+
+
+class SlowInitSub(FakeSub):
+    """初始化订上频道后卡在"读初始行"上，放行后回一行"""
+
+    def __init__(self, channels: set[str]):
+        super().__init__(channels)
+        self.reading = asyncio.Event()
+        self.release = asyncio.Event()
+        self.init_cancelled = False
+
+    async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
+        await hub.attach_(self)
+        self.reading.set()
+        try:
+            await self.release.wait()
+        except asyncio.CancelledError:
+            self.init_cancelled = True
+            raise
+        return [{"id": 1}]
+
+
+class FailingInitSub(FakeSub):
+    """初始化总是读出错（副本挂着）；记下重试前换过的副本"""
+
+    def __init__(self, channels: set[str]):
+        super().__init__(channels)
+        self.attempts = 0
+        self.servants: list[Any] = []
+
+    def use_servant_(self, servant) -> None:
+        self.servants.append(servant)
+
+    async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
+        self.attempts += 1
+        await hub.attach_(self)
+        raise ConnectionError("replica down")
+
+
+def open_sub(broker: SubscriptionBroker, sub_id: str, sub: FakeSub) -> asyncio.Task:
+    """订阅的前半段（登记，初始化交给 hub）当场做完；返回后半段（等初始化完成）的任务"""
+    return asyncio.create_task(broker._finish(sub_id, sub, broker._open(sub_id, sub)))
+
+
+async def test_sub_is_not_processed_until_its_init_completes():
+    """初始化期间（频道已订上、初始行还没读回）订阅不生效：tick 跳过它的通知，不会有推送抢在回复
+    前面；初始化完成后照常处理"""
+    broker, mq, node = make_broker()
+    s = SlowInitSub({"X"})
+    second = open_sub(broker, "S", s)
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    assert "X" in mq.subscribed_channels and not s.active
+    mq.push_pulled_("X", None)
+    assert await broker.get_updates(timeout=TICK) == {}
+    assert s.calls == []
+
+    s.release.set()
+    async with asyncio.timeout(1):
+        assert await second == [{"id": 1}]
+    assert s.active
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("X", None)
+    assert await broker.get_updates(timeout=TICK) == {"S": {1: {"v": 1}}}
+    await close_all(broker, node)
+
+
+async def test_leaving_during_init_cancels_it():
+    """初始化期间成员走了（客户端 unsub）：后半段当场回 None，不用等初始化；成员撤空时初始化取消、
+    占位撤掉、频道退订"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    s = SlowInitSub({"X"})
+    second = open_sub(broker, "S", s)
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    await unsubscribe_and_ack(broker, node, "S")
+    async with asyncio.timeout(1):
+        assert await second is None
+    assert s.init_cancelled and s.closed and not s.active
+    assert hub._channel_subs == {}
+    assert "X" not in mq.subscribed_channels
+    assert broker.count() == (0, 0, 0)
+    await close_all(broker, node)
+
+
+async def test_init_retries_a_failed_subscribe():
+    """初始化时 SUBSCRIBE 出错（节点抖动）：hub 退避重试，回复照常到达（以前当场失败、断开连接）"""
+    broker, mq, node = make_broker()
+    node.fail_next = ConnectionError("send failed")
+    s = FakeSub({"X"})
+    assert await finish(open_sub(broker, "S", s), node) == []
+    assert s.active and "X" in mq.subscribed_channels
+    assert node.sent("subscribe") == ["X"]  # 失败的那次没记进 sent
+    await close_all(broker, node)
+
+
+async def test_init_gives_up_after_retries():
+    """初始化一直出错：每次重试前换一个副本、退避，重试 INIT_RETRIES 次仍失败才让等着的成员失败；
+    订阅、占位、频道都撤干净"""
+    broker, mq, node = make_broker()
+    hub = broker._hub
+    hub.INIT_RETRIES = 2
+    s = FailingInitSub({"X"})
+    (result,) = await ack_until_done(node, open_sub(broker, "S", s))
+    await drain_acks(node)
+    assert isinstance(result, ConnectionError)
+    assert s.attempts == 3
+    assert len(s.servants) == 2
+    assert "S" not in broker._subs and broker.count() == (0, 0, 0)
+    assert hub._channel_subs == {}
+    assert "X" not in mq.subscribed_channels
+    await close_all(broker, node)
+
+
 # ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
 
 
