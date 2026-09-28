@@ -1339,6 +1339,168 @@ async def test_init_gives_up_after_retries():
     await close_all(broker, node)
 
 
+# ============ 同一查询共享一个订阅：加入、离开、背压（设计稿 2026-09-29 §3.2、§3.5、§3.7） ============
+
+KEY = ("K",)
+
+
+def share_sub(
+    broker: SubscriptionBroker, sub_id: str, make, key: tuple = KEY
+) -> tuple[BaseSubscription, asyncio.Task]:
+    """按共享键找或建订阅并加入（前半段），返回订阅和后半段的任务"""
+    sub, waiter = broker._subscribe(sub_id, key, make)
+    return sub, asyncio.create_task(broker._finish(sub_id, sub, waiter))
+
+
+async def shared_by(
+    node: FakeNodePubSub, *brokers: SubscriptionBroker, sub: FakeSub
+) -> FakeSub:
+    """这些连接都以 sub_id "S" 加入同一个共享订阅（第一个建它），等初始化完成"""
+    for broker in brokers:
+        joined, task = share_sub(broker, "S", lambda: sub)
+        assert joined is sub
+        await finish(task, node)
+    return sub
+
+
+async def test_joiner_after_staging_gets_the_update_only_in_its_snapshot():
+    """
+    tick 中途加入共享订阅，它这次的更新已经暂存、tick 还没结束：快照里已含这次更新，交付时不会
+    再收到一次；已有成员照常收到
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    s = await shared_by(node, a, sub=FakeSub({"C"}))
+    g = FakeSub({"C"})
+    await register(a, node, "G", g)  # 同频道的另一个订阅，卡住 tick 的结尾
+    s.updates = {1: {"id": 1, "v": 1}}
+    g.gate.clear()
+    mq.push_pulled_("C", None)
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await g.entered.wait()
+    await settle()
+    assert s.calls == [("C", None)]  # S 这次已处理、暂存
+    joined, task = share_sub(b, "S", lambda: FakeSub({"C"}))
+    assert joined is s
+    async with asyncio.timeout(1):
+        assert await task == [{"id": 1, "v": 1}]
+    g.gate.set()
+    assert await tick == {"S": {1: {"id": 1, "v": 1}}}
+    assert await b.get_updates(timeout=TICK) == {}, "快照里已有的更新又交付了一次"
+    await close_hub(hub, node)
+
+
+async def test_joiner_while_notification_is_read_gets_the_update():
+    """tick 中途加入共享订阅，这次的更新还没暂存（订阅还在读库）：快照里没有，交付时收到"""
+    hub, (a, b), mq, node = make_brokers(2)
+    s = await shared_by(node, a, sub=FakeSub({"C"}))
+    s.updates = {1: {"id": 1, "v": 1}}
+    s.gate.clear()
+    mq.push_pulled_("C", None)
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await s.entered.wait()
+    joined, task = share_sub(b, "S", lambda: FakeSub({"C"}))
+    assert joined is s
+    async with asyncio.timeout(1):
+        assert await task == []
+    s.gate.set()
+    assert await tick == {"S": {1: {"id": 1, "v": 1}}}
+    assert await b.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 1}}}
+    await close_hub(hub, node)
+
+
+async def test_last_member_leaving_closes_shared_subscription():
+    """成员一个个走：还有成员时订阅照旧；最后一个走了订阅关闭、从共享登记撤掉、频道退订。之后再订
+    同一查询是新建的订阅"""
+    hub, (a, b), mq, node = make_brokers(2)
+    s = await shared_by(node, a, b, sub=FakeSub({"C"}))
+    assert set(s.members) == {a, b}
+    await unsubscribe_and_ack(a, node, "S")
+    assert not s.closed and hub.shared_(KEY) is s
+    assert "C" in mq.subscribed_channels
+    await unsubscribe_and_ack(b, node, "S")
+    assert s.closed and hub.shared_(KEY) is None
+    assert "C" not in mq.subscribed_channels and hub._channel_subs == {}
+
+    again = FakeSub({"C"})
+    assert await shared_by(node, a, sub=again) is again
+    await close_hub(hub, node)
+
+
+async def test_shared_init_goes_on_until_every_member_leaves():
+    """初始化期间：有成员走了（它的后半段当场回 None），初始化照常给别的成员；成员全走了才取消"""
+    hub, (a, b), mq, node = make_brokers(2)
+    s = SlowInitSub({"X"})
+    _, ta = share_sub(a, "S", lambda: s)
+    joined, tb = share_sub(b, "S", lambda: SlowInitSub({"X"}))
+    assert joined is s
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    await unsubscribe_and_ack(a, node, "S")
+    async with asyncio.timeout(1):
+        assert await ta is None
+    assert not s.init_cancelled and not tb.done()
+    s.release.set()
+    async with asyncio.timeout(1):
+        assert await tb == [{"id": 1}]
+    assert s.active and set(s.members) == {b}
+
+    t = SlowInitSub({"Y"})
+    _, tc = share_sub(a, "T", lambda: t, key=("K2",))
+    joined, td = share_sub(b, "T", lambda: SlowInitSub({"Y"}), key=("K2",))
+    assert joined is t
+    await finish(asyncio.create_task(t.reading.wait()), node)
+    await unsubscribe_and_ack(a, node, "T")
+    await unsubscribe_and_ack(b, node, "T")
+    assert await tc is None and await td is None
+    assert t.init_cancelled and t.closed
+    assert "Y" not in mq.subscribed_channels
+    await close_hub(hub, node)
+
+
+async def test_join_rereads_what_stalled_members_parked():
+    """
+    共享订阅的成员推送全都卡着：先不读、攒着通知（按订阅攒）。有新成员加入时它没卡着，攒着的通知
+    全部定向重读，新成员拿到的快照接着动；卡着的老成员待发区按 row_id 合并
+    """
+    hub, (a, b), mq, node = make_brokers(2, autostart=True)
+    s = await shared_by(node, a, sub=FakeSub({"C"}))
+    s.updates = {1: {"id": 1, "v": 1}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox)  # 交到待发区了，a 卡着没来取
+    reads = len(s.calls)
+    s.updates = {1: {"id": 1, "v": 2}}
+    mq.push_pulled_("C", None)
+    await asyncio.sleep(0.02)
+    assert len(s.calls) == reads, "成员全都卡着，还在读"
+
+    joined, task = share_sub(b, "S", lambda: FakeSub({"C"}))
+    assert joined is s
+    assert await task == [{"id": 1, "v": 1}]
+    assert await b.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 2}}}
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 2}}}
+    await close_hub(hub, node)
+
+
+async def test_any_member_draining_rereads_parked_notifications():
+    """全员卡着时攒下的通知：任何一个成员取走待发区就全部重读，卡着的成员待发区按 row_id 合并"""
+    hub, (a, b), mq, node = make_brokers(2, autostart=True)
+    s = await shared_by(node, a, b, sub=FakeSub({"C"}))
+    s.updates = {1: {"id": 1, "v": 1}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox and b._outbox)  # 都交到了，都卡着
+    reads = len(s.calls)
+    s.updates = {1: {"id": 1, "v": 2}}
+    mq.push_pulled_("C", None)
+    await asyncio.sleep(0.02)
+    assert len(s.calls) == reads, "成员全都卡着，还在读"
+
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 1}}}
+    assert await a.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 2}}}
+    assert await b.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 2}}}
+    await close_hub(hub, node)
+
+
 # ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
 
 

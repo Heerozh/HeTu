@@ -13,10 +13,10 @@ from unittest.mock import patch
 
 import pytest
 import redis
-from fixtures.contexts import settled_updates, wait_until
+from fixtures.contexts import settled_updates, user_ctx_, wait_until
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RowFormat
 from hetu.data.backend.base import HubMQClient, MQClient
 from hetu.data.sub import (
     IndexSubscription,
@@ -135,7 +135,8 @@ async def test_same_row_read_once_per_tick(
 async def test_subscribe_reread_targets_only_new_subscription(
     hub: SubscriptionHub, filled_item_ref, admin_ctx
 ):
-    """B 订阅生效后的补读只让 B 的订阅重读；A 订着同样的频道，不跟着重跑（设计稿 §4.4）"""
+    """B 订阅生效后的补读只让 B 的订阅重读；A 订着同样的频道，不跟着重跑（设计稿 §4.4）。
+    两个查询不同（limit）、结果与频道相同，不共享"""
     backend = hub._backend
     a = SubscriptionBroker(backend, hub=hub)
     b = SubscriptionBroker(backend, hub=hub)
@@ -147,7 +148,7 @@ async def test_subscribe_reread_targets_only_new_subscription(
     a_sub = a._subs[sub_a]
     with patch.object(a_sub, "get_updated", wraps=a_sub.get_updated) as spy_a:
         sub_b, _ = await b.subscribe_range(
-            filled_item_ref, admin_ctx, "owner", 10, limit=30
+            filled_item_ref, admin_ctx, "owner", 10, limit=31
         )
         assert sub_b
         b_sub = b._subs[sub_b]
@@ -499,3 +500,340 @@ async def test_hub_moves_subscriptions_off_a_servant_whose_pubsub_dropped(
     await broker.close()
     await hub.close()
     await backend.close()
+
+
+# ============ 同一查询在 worker 内共享一个订阅（设计稿 2026-09-29） ============
+
+
+def _read_counter(stack: ExitStack, backend: Backend) -> Callable[[], dict[str, int]]:
+    """按方法数订阅的读（各 servant 的 range / get / get_many）。事务读走 get_many_array_ /
+    range_read_，不计"""
+    mocks: dict[str, list] = {"range": [], "get": [], "get_many": []}
+    for servant in backend._servants:  # type: ignore[reportPrivateUsage]
+        for meth, spies in mocks.items():
+            spies.append(
+                stack.enter_context(
+                    patch.object(servant, meth, wraps=getattr(servant, meth))
+                )
+            )
+    return lambda: {meth: sum(m.call_count for m in ms) for meth, ms in mocks.items()}
+
+
+async def _insert_item(backend: Backend, ref, **fields) -> int:
+    comp = ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        for name, value in fields.items():
+            setattr(row, name, value)
+        await session.using(comp).insert(row)
+    return int(row.id)
+
+
+async def _updates_until(
+    broker: SubscriptionBroker, check: Callable[[dict], object], timeout: float = 5
+) -> dict[str, dict]:
+    """反复取推送、按 sub_id / row_id 合并，直到 check(合并结果) 为真"""
+    merged: dict[str, dict] = {}
+    async with asyncio.timeout(timeout):
+        while not check(merged):
+            for sub_id, rows in (await broker.get_updates()).items():
+                merged.setdefault(sub_id, {}).update(rows)
+    return merged
+
+
+async def test_same_query_is_one_subscription_per_worker(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    N 个连接订同一查询：worker 里只有一个订阅对象，初始读一次；之后每条消息在 worker 内的读、比对
+    也只做一次，与连接数无关，各连接都收到推送（以前每个连接一个订阅对象，各读各比）
+    """
+    backend = hub._backend
+    brokers = [SubscriptionBroker(backend, hub=hub) for _ in range(5)]
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        replies = [
+            await b.subscribe_range(filled_item_ref, admin_ctx, "owner", 10, limit=30)
+            for b in brokers
+        ]
+        assert reads()["range"] == 1, reads()
+    (sub_id,) = {sub_id for sub_id, _ in replies}
+    assert sub_id
+    assert len({id(b._subs[sub_id]) for b in brokers}) == 1
+    assert all(len(rows) == 25 and rows == replies[0][1] for _, rows in replies)
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        new_id = await _insert_item(
+            backend, filled_item_ref, name="New", owner=10, time=900
+        )
+        for broker in brokers:
+            updates = await settled_updates(broker, timeout=3)
+            assert updates[sub_id][new_id]["name"] == "New"
+        counts = reads()
+    # ZRANGE（合并进队头的话再尾随重读一次）、读新行、新行频道订上后补读：与连接数无关
+    assert counts["range"] <= 2 and counts["get"] + counts["get_many"] <= 3, counts
+    for broker in brokers:
+        await broker.close()
+
+
+async def test_late_joiner_gets_what_members_hold_without_reading(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    后加入的连接：不读库、不补读，回复就是已有成员客户端手里的内容（它的回复 + 之后收到的推送），
+    按索引顺序排
+    """
+    backend = hub._backend
+    comp = filled_item_ref.comp_cls
+    a = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await a.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    assert sub_id
+    held = {row["id"]: row for row in rows}
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+
+    # 已有成员手里的内容变了：改一行、删一行、进来一行
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        changed = await repo.get(time=111)
+        gone = await repo.get(time=112)
+        assert changed and gone
+        changed.qty = 1
+        await repo.update(changed)
+        repo.delete(gone.id)
+        new = comp.new_row()
+        new.name, new.owner, new.time = "New", 10, 901
+        await repo.insert(new)
+    changed_id, gone_id, new_id = int(changed.id), int(gone.id), int(new.id)
+
+    def all_seen(merged):
+        got = merged.get(sub_id, {})
+        return (
+            got.get(changed_id, {}).get("qty") == 1
+            and gone_id in got
+            and got[gone_id] is None
+            and new_id in got
+        )
+
+    for row_id, row in (await _updates_until(a, all_seen))[sub_id].items():
+        if row is None:
+            held.pop(row_id, None)
+        else:
+            held[row_id] = row
+
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        b = SubscriptionBroker(backend, hub=hub)
+        sub_b, rows_b = await b.subscribe_range(
+            filled_item_ref, admin_ctx, "owner", 10, limit=30
+        )
+        assert reads() == {"range": 0, "get": 0, "get_many": 0}
+    assert sub_b == sub_id
+    assert {row["id"]: row for row in rows_b} == held
+    order = await backend.servant.range(
+        filled_item_ref, "owner", 10, limit=30, row_format=RowFormat.ID_LIST
+    )
+    assert [row["id"] for row in rows_b] == order, "快照没按索引顺序排"
+    assert await b.get_updates(timeout=INTERVAL * 3) == {}, "加入者不该有补读推送"
+    await a.close()
+    await b.close()
+
+
+async def test_joiners_during_init_share_one_read(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """几个连接同时订同一查询（初始化期间陆续加入）：初始读只有一次，回复都是就绪时的快照，之后的
+    更新都收得到"""
+    backend = hub._backend
+    brokers = [SubscriptionBroker(backend, hub=hub) for _ in range(4)]
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        # 前半段都做完（登记）才让出事件循环：初始化还没开始跑，后三个都在初始化期间加入
+        finishes = [
+            await b.begin_subscribe_range(
+                filled_item_ref, admin_ctx, "owner", 10, limit=30
+            )
+            for b in brokers
+        ]
+        async with asyncio.timeout(5):
+            replies = await asyncio.gather(*finishes)
+        assert reads()["range"] == 1, reads()
+    (sub_id,) = {sub_id for sub_id, _ in replies}
+    assert sub_id
+    assert all(len(rows) == 25 and rows == replies[0][1] for _, rows in replies)
+    new_id = await _insert_item(
+        backend, filled_item_ref, name="New", owner=10, time=902
+    )
+    for broker in brokers:
+        updates = await settled_updates(broker, timeout=3)
+        assert updates[sub_id][new_id]["name"] == "New"
+        await broker.close()
+
+
+async def test_shared_subscription_not_established_answers_none_to_all(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    订阅不成立：订一行不存在的行、整表超过行数上限，初始化期间加入的几个连接都回 None，不留订阅、
+    不留共享登记与频道；后加入的连接按自己的上限判断（表已超过它的上限就不加入）
+    """
+    backend = hub._backend
+    brokers = [
+        SubscriptionBroker(backend, hub=hub, max_table_rows=10) for _ in range(3)
+    ]
+    finishes = [
+        await b.begin_subscribe_get(filled_item_ref, admin_ctx, "id", 987654321)
+        for b in brokers
+    ]
+    assert await asyncio.gather(*finishes) == [(None, None)] * 3
+    finishes = [
+        await b.begin_subscribe_table(filled_item_ref, admin_ctx) for b in brokers
+    ]
+    assert await asyncio.gather(*finishes) == [(None, [])] * 3
+    assert all(b.count() == (0, 0, 0) and not b._subs for b in brokers)
+    assert not hub._shared and not hub._channel_subs
+    assert not hub.mq.subscribed_channels
+
+    roomy = SubscriptionBroker(backend, hub=hub)
+    tbl_id, rows = await roomy.subscribe_table(filled_item_ref, admin_ctx)
+    assert tbl_id and len(rows) == 25
+    assert await brokers[0].subscribe_table(filled_item_ref, admin_ctx) == (None, [])
+    assert brokers[0].count() == (0, 0, 0)
+    assert set(roomy._subs[tbl_id].members) == {roomy}
+    await roomy.close()
+    for broker in brokers:
+        await broker.close()
+
+
+async def test_force_false_member_does_not_join_empty_shared_range(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """range 的 force=False：共享订阅的快照为空时这个连接不加入，回 (None, [])；已有成员照旧"""
+    backend = hub._backend
+    a = SubscriptionBroker(backend, hub=hub)
+    b = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await a.subscribe_range(filled_item_ref, admin_ctx, "owner", 99)
+    assert sub_id and rows == []
+    assert await b.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 99, force=False
+    ) == (None, [])
+    assert b.count() == (0, 0, 0) and not b._subs
+    assert set(a._subs[sub_id].members) == {a}
+    await a.close()
+    await b.close()
+
+
+async def test_duplicate_of_shared_subscription_answers_snapshot(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """同一连接重复订阅共享的订阅：回快照（订阅已推给客户端的内容），不读库，不重复计数"""
+    backend = hub._backend
+    row_id = int((await backend.servant.range(filled_item_ref, "time", 110))[0].id)
+    a = SubscriptionBroker(backend, hub=hub)
+    get_id, row = await a.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    idx_id, rows = await a.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    tbl_id, tbl_rows = await a.subscribe_table(filled_item_ref, admin_ctx)
+    assert get_id and idx_id and tbl_id
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        assert await a.subscribe_get(filled_item_ref, admin_ctx, "id", row_id) == (
+            get_id,
+            row,
+        )
+        assert await a.subscribe_range(
+            filled_item_ref, admin_ctx, "owner", 10, limit=30
+        ) == (idx_id, rows)
+        assert await a.subscribe_table(filled_item_ref, admin_ctx) == (
+            tbl_id,
+            tbl_rows,
+        )
+        assert reads() == {"range": 0, "get": 0, "get_many": 0}
+    assert a.count() == (1, 1, 1)
+    await a.close()
+
+
+async def test_rls_subscriptions_are_not_shared(
+    hub: SubscriptionHub, filled_rls_ref, admin_ctx, user_id11_ctx
+):
+    """RLS 组件的订阅按连接私有，各自按自己的 ctx 判可见；admin 的订阅不按行判定，照样共享"""
+    backend = hub._backend
+    u11, u10, a1, a2 = (SubscriptionBroker(backend, hub=hub) for _ in range(4))
+    s11, rows11 = await u11.subscribe_range(
+        filled_rls_ref, user_id11_ctx, "owner", 10, limit=30
+    )
+    s10, rows10 = await u10.subscribe_range(
+        filled_rls_ref, user_ctx_(10), "owner", 10, limit=30
+    )
+    assert s11 == s10 and len(rows11) == 25 and rows10 == []  # 行的 friend 都是 11
+    assert u11._subs[s11] is not u10._subs[s10]
+    sa, rows_a = await a1.subscribe_range(
+        filled_rls_ref, admin_ctx, "owner", 10, limit=30
+    )
+    sb, _ = await a2.subscribe_range(filled_rls_ref, admin_ctx, "owner", 10, limit=30)
+    assert len(rows_a) == 25
+    assert a1._subs[sa] is a2._subs[sb]
+    assert a1._subs[sa] is not u11._subs[s11]
+    for broker in (u11, u10, a1, a2):
+        await broker.close()
+
+
+async def test_share_key_tells_queries_apart(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    共享键按查询本身，不按 sub_id：right=None（点查询）与字符串 "None" 拼出同一个 sub_id，却是两个
+    查询，不能共享；1 与 1.0 分开（只是少共享些）；desc=1 与 True 是同一个查询
+    """
+    backend = hub._backend
+    brokers = [SubscriptionBroker(backend, hub=hub) for _ in range(6)]
+    a, b, c, d, e, f = brokers
+    sa, rows_a = await a.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "Itm10", limit=30
+    )
+    sb, rows_b = await b.subscribe_range(
+        filled_item_ref, admin_ctx, "name", "Itm10", "None", limit=30
+    )
+    assert sa == sb  # 都拼成 [Itm10:None:1]
+    assert a._subs[sa] is not b._subs[sb]
+    assert len(rows_a) == 1 and len(rows_b) == 25
+
+    sc, _ = await c.subscribe_range(filled_item_ref, admin_ctx, "owner", 10, desc=1)
+    sd, _ = await d.subscribe_range(filled_item_ref, admin_ctx, "owner", 10, desc=True)
+    assert sc == sd and c._subs[sc] is d._subs[sd]
+
+    se, _ = await e.subscribe_range(filled_item_ref, admin_ctx, "owner", 10)
+    sf, _ = await f.subscribe_range(filled_item_ref, admin_ctx, "owner", 10.0)
+    assert se != sf and e._subs[se] is not f._subs[sf]
+    for broker in brokers:
+        await broker.close()
+
+
+async def test_shared_init_failure_fails_every_waiter(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """共享订阅初始化重试用尽：初始化期间加入的成员都失败（服务器里各自断开），订阅、登记撤干净"""
+    backend = hub._backend
+    hub.INIT_RETRIES = 1
+    dead = _DeadServant(backend.servant)
+    brokers = [SubscriptionBroker(backend, hub=hub) for _ in range(3)]
+    with patch.object(backend, "_servants", [dead]):
+        finishes = [
+            await b.begin_subscribe_range(
+                filled_item_ref, admin_ctx, "owner", 10, limit=30
+            )
+            for b in brokers
+        ]
+        async with asyncio.timeout(5):
+            results = await asyncio.gather(*finishes, return_exceptions=True)
+    assert all(isinstance(r, ConnectionError) for r in results), results
+    assert dead.reads == 2  # 一个订阅：初始读 + 重试 1 次
+    assert all(b.count() == (0, 0, 0) for b in brokers)
+    assert not hub._shared and not hub._channel_subs
+    for broker in brokers:
+        await broker.close()

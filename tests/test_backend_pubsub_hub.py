@@ -79,7 +79,7 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
         pubsub.subscribe = counting_subscribe
 
     # 两个连接订阅同一行：两个连接共用 worker 级订阅器的一个 MQClient，通知接收器里计数 1，
-    # 向后端只订阅一次
+    # 向后端只订阅一次；同一查询在 worker 里是同一个订阅对象
     sub_a, row = await broker_a.subscribe_get(filled_item_ref, ctx, "name", "Itm10")
     assert sub_a and row
     sends_after_first = sends
@@ -87,7 +87,8 @@ async def test_hub_shared_subscription(filled_item_ref, mod_auto_backend):
     assert sub_b
     channel = cast(RowSubscription, broker_a._subs[sub_a]).channel
     assert hub.subscriber_count(channel) == 1
-    assert len(broker_a._hub._channel_subs[channel]) == 2
+    assert broker_a._subs[sub_a] is broker_b._subs[sub_b]
+    assert len(broker_a._hub._channel_subs[channel]) == 1
     assert channel in hub.channels
     if pubsub is not None:
         assert sends == sends_after_first, "同一频道第二个订阅者不应再发 SUBSCRIBE"
