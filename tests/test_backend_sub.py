@@ -2617,3 +2617,91 @@ async def test_subscription_rejects_foreign_channel(
                 {},
             )
         get_many.assert_not_called()
+
+
+# ====== 读 / 判定出错重试：状态不能先改掉一部分（设计稿 §6） ======
+
+
+async def test_range_error_midway_through_new_rows_keeps_state_for_retry(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx
+):
+    """
+    重跑范围比对时，新进入的几行判到一半出错（比如某行的 RLS 判定抛错）：不能先改掉一部分状态
+    （登记了前面的新行、改了 last_range_result），否则重试算出的进出为空，这几行永远不推、行频道
+    也订不上。要全部判完才提交，重试照样算出这几行进入
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    assert sub_id and len(rows) == 25
+    assert await broker.get_updates(timeout=0.5) == {}  # 订阅生效后的补读先消化掉
+    new_ids = []
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        for time_ in (901, 902):
+            row = comp.new_row()
+            row.name, row.owner, row.time = f"New{time_}", 10, time_
+            await repo.insert(row)
+            new_ids.append(int(row.id))
+
+    real = RowSubscription.decode_row_
+    decoded = []
+
+    def flaky(self, row):
+        decoded.append(row)
+        if len(decoded) == 2:  # 第二个新行第一次判定时出错
+            raise ValueError("rls check failed")
+        return real(self, row)
+
+    def entered(updates):
+        for new_id in new_ids:
+            assert updates[sub_id][new_id]["owner"] == 10
+
+    with patch.object(RowSubscription, "decode_row_", flaky):
+        await updates_until(broker, entered, timeout=5)
+    for new_id in new_ids:
+        channel = backend.servant.row_channel(filled_item_ref, new_id)
+        assert sub_id in channel_subs(broker)[channel]
+
+
+async def test_table_error_midway_keeps_state_for_retry(
+    broker: SubscriptionBroker, filled_item_ref, user_id10_ctx
+):
+    """
+    整表订阅一批 row_id 判到一半出错（某行的 RLS 判定抛错）：前面判完的删除不能先从 known_ids 里
+    撤掉，否则重试时它已不在 known_ids 里，它的 None 永远推不出去。要全部判完才提交
+    """
+    backend = broker._backend
+    comp = filled_item_ref.comp_cls
+    sub_id, rows = await broker.subscribe_table(filled_item_ref, user_id10_ctx)
+    assert sub_id and len(rows) == 25
+    ids = sorted(int(r["id"]) for r in rows)
+    gone, changed = ids[0], ids[1]  # 同一批：先判 gone（删除），再判 changed
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert await repo.get(id=gone) is not None
+        repo.delete(gone)
+        row = await repo.get(id=changed)
+        assert row
+        row.qty = 5
+        await repo.update(row)
+
+    ctx_cls = type(user_id10_ctx)
+    real = ctx_cls.rls_check
+    raised = []
+
+    def flaky(self, comp_cls, row):
+        if int(row["id"]) == changed and not raised:
+            raised.append(1)
+            raise ValueError("rls check failed")
+        return real(self, comp_cls, row)
+
+    def synced(updates):
+        assert updates[sub_id][gone] is None
+        assert updates[sub_id][changed]["qty"] == 5
+
+    with patch.object(ctx_cls, "rls_check", flaky):
+        await updates_until(broker, synced, timeout=5)
+    assert raised
