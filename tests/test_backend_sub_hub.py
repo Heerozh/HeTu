@@ -17,7 +17,13 @@ from fixtures.contexts import settled_updates, wait_until
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.backend.base import HubMQClient, MQClient
-from hetu.data.sub import RowSubscription, SubscriptionBroker, SubscriptionHub
+from hetu.data.sub import (
+    IndexSubscription,
+    RowSubscription,
+    SubscriptionBroker,
+    SubscriptionHub,
+    TableSubscription,
+)
 
 SnowflakeID().init(1, 0)
 INTERVAL = 1 / MQClient.UPDATE_FREQUENCY
@@ -338,3 +344,56 @@ async def test_unreadable_row_does_not_hold_back_its_batch(
     finally:
         await broker.close()
         await hub.close()
+
+
+class _DeadServant:
+    """挂掉的副本：读都抛连接错误，其余（频道名等）照原来的副本"""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def get(self, *args, **kwargs):
+        raise ConnectionError("replica down")
+
+    async def get_many(self, *args, **kwargs):
+        raise ConnectionError("replica down")
+
+    async def range(self, *args, **kwargs):
+        raise ConnectionError("replica down")
+
+
+async def test_subscription_moves_off_a_dead_servant(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    范围 / 整表订阅的读固定走订阅时选的副本：它长时间挂掉时，出错重试要换一个副本，不能每个
+    interval 都打同一个死节点、永远恢复不了（以前出错就断开连接，客户端重连时会重新选副本）
+    """
+    backend = hub._backend
+    comp = filled_item_ref.comp_cls
+    broker = SubscriptionBroker(backend, hub=hub)
+    idx_id, rows = await broker.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    tbl_id, _ = await broker.subscribe_table(filled_item_ref, admin_ctx)
+    assert idx_id and tbl_id and len(rows) == 25
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    idx_sub = cast(IndexSubscription, broker._subs[idx_id])
+    tbl_sub = cast(TableSubscription, broker._subs[tbl_id])
+    dead = _DeadServant(idx_sub.servant)
+    idx_sub.servant = tbl_sub.servant = dead  # type: ignore[assignment]
+    for row_sub in idx_sub.row_subs.values():
+        row_sub.servant = dead  # type: ignore[assignment]
+
+    async with backend.session("pytest", 1) as session:
+        row = comp.new_row()
+        row.name, row.owner, row.time = "Survivor", 10, 777
+        await session.using(comp).insert(row)
+        new_id = int(row.id)
+    updates = await settled_updates(broker, timeout=3)
+    assert updates.get(idx_id, {}).get(new_id, {}).get("name") == "Survivor"
+    assert updates.get(tbl_id, {}).get(new_id, {}).get("name") == "Survivor"
+    await broker.close()

@@ -5,6 +5,7 @@ tick 里的 await 间隙与接收协程（客户端的 sub/unsub）交错、几�
 """
 
 import asyncio
+import itertools
 import logging
 from collections.abc import Mapping
 from types import SimpleNamespace
@@ -764,3 +765,32 @@ async def test_repair_waits_for_subscribe_to_take_effect_before_reading():
             await one_tick()
     assert "X" in mq.subscribed_channels and "X" in hub._effective
     await close_hub(hub, node)
+
+
+async def test_repeated_read_errors_back_off():
+    """
+    同一个订阅接连读出错（副本挂着、坏数据）：重试间隔指数退避（1、2、4… 个 interval，封顶），
+    别每个 interval 都去打同一个出错的节点；读成功后恢复正常节奏
+    """
+    broker, mq, node = make_broker()
+    mq.UPDATE_FREQUENCY = 20  # type: ignore[reportAttributeAccessIssue]  interval 50ms
+    sub = FlakySub({"C"}, fails=4)
+    await register(broker, node, "S", sub)
+    sub.updates = {1: {"v": 1}}
+    loop = asyncio.get_running_loop()
+    stamps: list[float] = []
+    real = sub.get_updated
+
+    async def stamped(channel, payload=None):
+        stamps.append(loop.time())
+        return await real(channel, payload)
+
+    sub.get_updated = stamped  # type: ignore[method-assign]
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(5):
+        assert await broker.get_updates(timeout=5) == {"S": {1: {"v": 1}}}
+    assert len(stamps) == 5
+    gaps = [b - a for a, b in itertools.pairwise(stamps)]
+    # 第 n 次失败后隔 2^(n-1) 个 interval 再读（call_later 可能早触发一个时钟精度，留余量）
+    assert gaps[2] >= 0.15 and gaps[3] >= 0.35, gaps
+    await close_all(broker, node)
