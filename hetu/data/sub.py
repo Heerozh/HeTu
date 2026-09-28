@@ -594,8 +594,10 @@ class SubscriptionHub:
     # interval 的通知，通知接连不断时每次只弹出刚满期的一两条；弹一批跑一个 tick 的话，建任务、等订阅
     # 回执、预读往返这些每 tick 的固定开销会被放大到每秒上千次（实测私有订阅反而比每连接一个队列更费
     # CPU）。隔一小段，这期间满期的通知攒成一批，代价是延迟最多多这么一段。零星的通知不受影响（上一个
-    # tick 早已过去，满期就处理）；tick 本身已经超过窗口时也不再多等。手动模式（测试）不等
-    TICK_SPACING_INTERVALS: float = 0.1
+    # tick 早已过去，满期就处理）；tick 本身已经超过窗口时也不再多等。手动模式（测试）不等。
+    # 窗口越大批越大、越省 CPU，但一个 tick 里同时存活的对象越多，高负载时更容易触发全量 GC、事件循环
+    # 一口气处理得更久（RPC 尾延迟上升）：实测 5ms 已拿到大部分收益，10ms 起尾延迟明显变差
+    TICK_SPACING_INTERVALS: float = 0.05
 
     def __init__(self, backend: Backend, autostart: bool = True):
         """
