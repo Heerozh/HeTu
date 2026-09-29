@@ -106,7 +106,11 @@ async def login(ctx: hetu.SystemContext, user_id: int, name: str):
 )
 async def on_disconnect(ctx: hetu.SystemContext):
     """连接断开时由引擎自动调用，客户端无法直接调用。"""
-    if row := await ctx.repo[Player].get(owner=ctx.caller):
+    # 未登录、或已被顶号（账号已在别的连接上）的连接 ctx.caller 为 0，不动用户数据
+    if not ctx.caller:
+        return
+    # 已经离线就不改：update() 没有字段变化时会抛 ValueError
+    if (row := await ctx.repo[Player].get(owner=ctx.caller)) and row.online:
         row.online = False
         await ctx.repo[Player].update(row)
 '''
