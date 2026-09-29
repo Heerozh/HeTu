@@ -9,6 +9,8 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Callable
+from typing import Any
 
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
@@ -244,57 +246,9 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 return True
             return False
 
-        # 这里循环发送，保证总是第一时间Push。push_queue 里是按请求顺序的回复（RPC 回复、订阅回复
-        # 的占位）；订阅推送不进队列，留在门面的待发区里按 sub_id / row_id 合并，队列空了才取走发送。
-        # 订阅回复的占位先于登记放进队列，队列空了就说明登记之前放的占位都已发出，推送不会抢到
-        # 它的回复前面（设计稿 2026-09-29-push-path-and-gc §2）
+        # 这里循环发送，保证总是第一时间Push
         try:
-            while True:
-                if push_queue.empty():
-                    updates = broker.take_updates_()
-                    if updates:
-                        closed = False
-                        for sub_id, data in updates.items():
-                            await ws.send(pack(["updt", sub_id, data]))
-                            if closed := flooded():
-                                break
-                        if closed:
-                            break
-                        continue
-                    # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里
-                    broker.idle_(True)
-                    try:
-                        reply = await push_queue.get()
-                    finally:
-                        broker.idle_(False)
-                else:
-                    reply = push_queue.get_nowait()
-                if reply is PUSH_UPDATES:
-                    continue
-                # 接收协程结束时会塞这个哨兵进来（它已经把连接拆了）：跳出去跑 finally
-                # 的清理，否则本协程会一直阻塞在 get() 上，连接半死不活地挂着
-                if reply is PUSH_CLOSE:
-                    break
-                if isinstance(reply, asyncio.Future):
-                    # 在后台完成的订阅占住的回复位：等它填好再发。回复没有请求 id、SDK 按
-                    # 顺序对应，排在它后面的回复都得跟着等。等的期间推送不算卡住：hub 照常
-                    # 读、合并进待发区，回复发出之后再推
-                    broker.idle_(True)
-                    try:
-                        reply = await reply
-                    except Exception as e:
-                        err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
-                            err=f"{type(e).__name__}:{e}"
-                        )
-                        replay.info(err_msg)
-                        logger.exception(err_msg)
-                        ws.fail_connection()
-                        break
-                    finally:
-                        broker.idle_(False)
-                await ws.send(pack(reply))
-                if flooded():
-                    break
+            await send_loop(ws, broker, push_queue, pack, flooded)
         except asyncio.CancelledError:
             if ws.ws_proto.parser_exc and not isinstance(
                 ws.ws_proto.parser_exc, EOFError
@@ -336,6 +290,65 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         _cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
         cleanup_task.add_done_callback(_cleanup_tasks.discard)
         await asyncio.shield(cleanup_task)
+
+
+async def send_loop(
+    ws: Websocket,
+    broker: SubscriptionBroker,
+    push_queue: asyncio.Queue,
+    pack: Callable[[Any], bytes],
+    flooded: Callable[[], bool],
+) -> None:
+    """
+    连接的发送循环（跑在连接协程自己里）：按顺序发 push_queue 里的回复（RPC 回复、订阅回复的占位），
+    队列空了就取门面的待发区发订阅推送。订阅推送不进队列，留在待发区里按 sub_id / row_id 合并。
+    订阅回复的占位先于登记放进队列，队列空了就说明登记之前放的占位都已发出，推送不会抢到它的回复
+    前面（设计稿 2026-09-29-push-path-and-gc §2）。
+    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
+    返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
+    """
+    while True:
+        if push_queue.empty():
+            updates = broker.take_updates_()
+            if updates:
+                for sub_id, data in updates.items():
+                    await ws.send(pack(["updt", sub_id, data]))
+                    if flooded():
+                        return
+                continue
+            # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里
+            broker.idle_(True)
+            try:
+                reply = await push_queue.get()
+            finally:
+                broker.idle_(False)
+        else:
+            reply = push_queue.get_nowait()
+        if reply is PUSH_UPDATES:
+            continue
+        # 接收协程结束时会塞这个哨兵进来（它已经把连接拆了）：返回去跑连接协程 finally 里的清理，
+        # 否则会一直阻塞在 get() 上，连接半死不活地挂着
+        if reply is PUSH_CLOSE:
+            return
+        if isinstance(reply, asyncio.Future):
+            # 在后台完成的订阅占住的回复位：等它填好再发。回复没有请求 id、SDK 按顺序对应，排在它
+            # 后面的回复都得跟着等。等的期间推送不算卡住：hub 照常读、合并进待发区，回复发出之后再推
+            broker.idle_(True)
+            try:
+                reply = await reply
+            except Exception as e:
+                err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+                replay.info(err_msg)
+                logger.exception(err_msg)
+                ws.fail_connection()
+                return
+            finally:
+                broker.idle_(False)
+        await ws.send(pack(reply))
+        if flooded():
+            return
 
 
 # 拆连接的清理任务：保持引用免得被 gc，跑完自动移除
