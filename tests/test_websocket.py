@@ -447,6 +447,88 @@ def test_websocket_disconnect_system_missing_skip(monkeypatch, test_server):
     test_server.test_client.websocket("/hetu/pytest_1", mimic=disconnect_routine)
 
 
+async def _wait_server_connections(count: int, timeout: float = 5) -> None:
+    """等服务端只剩 count 条连接：其余的都拆完了（连接协程、拆连接的清理任务都跑完）"""
+    loop = asyncio.get_running_loop()
+
+    def pending() -> int:
+        tasks = (*websocket_server._live_connections, *websocket_server._cleanup_tasks)
+        return sum(1 for t in tasks if not t.done() and t.get_loop() is loop)
+
+    async with asyncio.timeout(timeout):
+        while pending() > count:
+            await asyncio.sleep(0.02)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_kicked_disconnect_system_not_as_user(test_server):
+    """被顶号的连接拆掉时，断线 System 不能再以这个用户的身份跑：账号已经在新连接上登录，
+    新连接的登录逻辑可能已经跑过（比如把用户标成在线），再以用户身份跑断线逻辑会把它覆盖掉"""
+    user_id = 199995
+    counts = {}
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", user_id])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", user_id])
+        await client2.recv()
+
+        # 服务器收到顶号通知后主动断开 client1，等它在服务端拆完（断线 System 在拆连接里跑）
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+            async with asyncio.timeout(3):
+                await client1.recv()
+        await _wait_server_connections(1)
+        await client2.send(["rpc", "get_disconnect_count", user_id])
+        counts["kicked"] = (await client2.recv())[1]
+
+        # 新连接正常断开，断线 System 照常以用户身份跑
+        await client2.close()
+        await _wait_server_connections(0)
+        client3 = await connect()
+        await client3.send(["rpc", "get_disconnect_count", user_id])
+        counts["logout"] = (await client3.recv())[1]
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert counts == {"kicked": 0, "logout": 1}
+
+
+@pytest.mark.timeout(20)
+def test_websocket_kicked_unnoticed_disconnect_system_not_as_user(
+    monkeypatch, test_server
+):
+    """顶号通知没到（丢了、或者还在路上）连接就自己断了：拆连接时也要认出它已被顶号"""
+    from hetu.data.sub import SubscriptionBroker
+
+    async def no_watch(self, channel, callback):
+        pass
+
+    # 收不到顶号通知，服务器不会主动断开被顶号的连接
+    monkeypatch.setattr(SubscriptionBroker, "watch_channel", no_watch)
+    user_id = 199996
+    counts = {}
+
+    async def routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", user_id])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", user_id])
+        await client2.recv()
+
+        # client1 没发觉自己被顶号，自己断开
+        await client1.close()
+        await _wait_server_connections(1)
+        await client2.send(["rpc", "get_disconnect_count", user_id])
+        counts["kicked"] = (await client2.recv())[1]
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert counts == {"kicked": 0}
+
+
 def test_call_flooding_lv1_normal(test_server):
     # 测试CLIENT_SEND_LIMITS配置
     # CLIENT_SEND_LIMITS:

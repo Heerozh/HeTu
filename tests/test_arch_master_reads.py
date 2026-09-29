@@ -37,7 +37,10 @@ ALLOWED: dict[tuple[str, str], str] = {
     (
         "endpoint/connection.py",
         "get",
-    ): "kicked()：顶号核查不能用滞后数据，只在收到顶号通知时才读；RPC 热路径用的是 servant_get",
+    ): (
+        "kicked()：顶号核查不能用滞后数据，只在收到顶号通知时、已登录连接拆连接时（决定断线 "
+        "System 以谁的身份跑）才读；RPC 热路径用的是 servant_get"
+    ),
 }
 
 

@@ -278,6 +278,16 @@ Notes:
   close.
 - **`ctx.caller`** is the user id if the connection was elevated, or `0`
   if it disconnected before login. Guard accordingly.
+- **A kicked connection runs the hook with `ctx.caller == 0`.** When the
+  same account logs in on another connection
+  (`elevate(..., kick_logged_in=True)`), the old connection is closed and
+  its `on_disconnect` runs as an anonymous connection: the account now
+  lives on the new connection, whose login logic may already have run
+  (e.g. marked the user online), so the old connection must not mark it
+  offline. In the rare case where the old connection drops on its own at
+  the same moment the account logs in elsewhere, its hook may still run as
+  the user; if that matters, store `ctx.connection_id` on the user row at
+  login and only change the row in the hook when it still matches.
 - The hook runs in a normal transaction, so failures retry on
   `RaceCondition`. Do not block on external services here — the
   connection is already gone.

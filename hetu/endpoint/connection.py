@@ -107,6 +107,8 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     kick_logged_in:
         如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
         断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
+        被顶掉的连接的 `on_disconnect` 以匿名身份（`ctx.caller == 0`）运行，不会动已在新连接
+        上的这个用户。
 
     Notes
     -----
@@ -216,7 +218,8 @@ class ConnectionAliveChecker:
     async def kicked(self, ctx: Context) -> bool:
         """
         从 master 读一次本连接的 Connection 行，判断是否已被顶号（非事务、不写 last_active）。
-        给收到变更通知后的主动核查用；未登录的连接直接返回 False。
+        给收到变更通知后的主动核查、拆连接时决定断线 System 以谁的身份跑用；未登录的连接直接
+        返回 False。
         """
         if not ctx.caller:
             return False
