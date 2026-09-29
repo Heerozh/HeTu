@@ -114,7 +114,7 @@ async def finish(task: asyncio.Task, node: FakeNodePubSub):
 
 def open_sub(broker: SubscriptionBroker, sub_id: str, sub: FakeSub) -> asyncio.Task:
     """订阅的前半段（登记，初始化交给 hub）当场做完；返回后半段（等初始化完成）的任务"""
-    return asyncio.create_task(broker._finish(sub_id, sub, broker._open(sub_id, sub)))
+    return asyncio.create_task(broker._finish(broker._open(sub_id, sub)))
 
 
 async def register(
@@ -1348,8 +1348,8 @@ def share_sub(
     broker: SubscriptionBroker, sub_id: str, make, key: tuple = KEY
 ) -> tuple[BaseSubscription, asyncio.Task]:
     """按共享键找或建订阅并加入（前半段），返回订阅和后半段的任务"""
-    sub, waiter = broker._subscribe(sub_id, key, make)
-    return sub, asyncio.create_task(broker._finish(sub_id, sub, waiter))
+    p = broker._subscribe(sub_id, key, make)
+    return p.sub, asyncio.create_task(broker._finish(p))
 
 
 async def shared_by(
