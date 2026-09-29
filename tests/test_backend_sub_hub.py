@@ -726,6 +726,108 @@ async def test_force_false_member_does_not_join_empty_shared_range(
     await b.close()
 
 
+async def test_force_false_joiner_rechecks_a_stale_empty_snapshot(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    共享范围订阅的快照为空，但刚有一行进入范围、通知还没处理（快照落后于提交至少一个 interval）：
+    force=False 的后加入者不能按快照回"没有"，要等订阅重读一次索引频道再判，这时有行，加入并回这行。
+    以前据快照回 (None, [])、不加入，随后推来的这行它再也收不到（dev 在订阅时读库）
+    """
+    backend = hub._backend
+    a = SubscriptionBroker(backend, hub=hub)
+    b = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await a.subscribe_range(filled_item_ref, admin_ctx, "owner", 98)
+    assert sub_id and rows == []
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    new_id = await _insert_item(
+        backend, filled_item_ref, name="Late", owner=98, time=903
+    )
+    sub_b, rows_b = await b.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 98, force=False
+    )
+    assert sub_b == sub_id and [row["id"] for row in rows_b] == [new_id]
+    assert set(a._subs[sub_id].members) == {a, b}
+    await a.close()
+    await b.close()
+
+
+async def test_force_false_joiner_is_not_answered_from_parked_snapshot(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    共享范围订阅的成员推送卡着（待发区没取走）：新行进入范围的通知攒着没读，快照一直是空的。force=False
+    的后加入者要等订阅重读再判：加入它就不再"全都卡着"，重读照常进行，它拿到这行
+    """
+    backend = hub._backend
+    a = SubscriptionBroker(backend, hub=hub)
+    b = SubscriptionBroker(backend, hub=hub)
+    sub_id, rows = await a.subscribe_range(filled_item_ref, admin_ctx, "owner", 97)
+    row_id = int((await backend.servant.range(filled_item_ref, "time", 110))[0].id)
+    get_id, _row = await a.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    assert sub_id and rows == [] and get_id
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    await _set_qty(backend, filled_item_ref, 571)
+    await wait_until(lambda: a._outbox, timeout=3)  # a 卡着，不来取
+    sub = a._subs[sub_id]
+    new_id = await _insert_item(
+        backend, filled_item_ref, name="Parked", owner=97, time=904
+    )
+    await wait_until(lambda: sub in hub._parked, timeout=3)
+    sub_b, rows_b = await b.subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 97, force=False
+    )
+    assert sub_b == sub_id and [row["id"] for row in rows_b] == [new_id]
+    await a.close()
+    await b.close()
+
+
+async def test_get_joiner_rechecks_a_stale_empty_snapshot(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    共享行订阅的行被删过（快照为空，成员还在），随后同一个 id 又插回来、通知还没处理：后加入者要等订阅
+    重读一次行频道再判，这时行在，加入并回这行（以前据快照回 None）；重复订阅也一样，不能据快照撤掉
+    已有的订阅
+    """
+    backend = hub._backend
+    comp = filled_item_ref.comp_cls
+    a = SubscriptionBroker(backend, hub=hub)
+    b = SubscriptionBroker(backend, hub=hub)
+    row_id = await _insert_item(
+        backend, filled_item_ref, name="Back", owner=96, time=905
+    )
+    sub_id, row = await a.subscribe_get(filled_item_ref, admin_ctx, "id", row_id)
+    assert sub_id and row
+
+    async def delete_then_insert_back():
+        """删掉这行、等 a 收到 None（快照清空），再用同一个 id 插回同样的内容"""
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            assert await repo.get(id=row_id)
+            repo.delete(row_id)
+        await _updates_until(a, lambda m: m.get(sub_id, {}).get(row_id, 0) is None)
+        assert a._subs[sub_id].snapshot == {}
+        async with backend.session("pytest", 1) as session:
+            again = comp.new_row(id_=row_id)
+            again.name, again.owner, again.time = "Back", 96, 905
+            await session.using(comp).insert(again)
+
+    await delete_then_insert_back()
+    assert await a.subscribe_get(filled_item_ref, admin_ctx, "id", row_id) == (
+        sub_id,
+        row,
+    ), "重复订阅据落后的快照撤掉了已有的订阅"
+    await delete_then_insert_back()
+    assert await b.subscribe_get(filled_item_ref, admin_ctx, "id", row_id) == (
+        sub_id,
+        row,
+    )
+    assert set(a._subs[sub_id].members) == {a, b}
+    await a.close()
+    await b.close()
+
+
 async def test_duplicate_of_shared_subscription_answers_snapshot(
     hub: SubscriptionHub, filled_item_ref, admin_ctx
 ):
