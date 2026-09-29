@@ -1530,6 +1530,28 @@ async def test_draining_rereads_only_its_own_parked_subscriptions():
     await close_hub(hub, node)
 
 
+async def test_unsubscribe_emptying_outbox_rereads_parked_notifications():
+    """
+    连接卡着（待发区有 S1 的更新没人取）时 S2 的通知攒着没读；客户端退订 S1 清空了待发区，连接不算卡着了，
+    S2 攒着的通知要重读、推出去。否则只有取走待发区时才重读，而待发区已经空了，S2 的这次变动一直推不出去
+    """
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s1, s2 = FakeSub({"C1"}), FakeSub({"C2"})
+    await register(a, node, "S1", s1)
+    await register(a, node, "S2", s2)
+    s1.updates = {1: {"v": 1}}
+    mq.push_pulled_("C1", None)
+    await wait_until(lambda: a._outbox)  # 交到了，没人取：卡着
+    s2.updates = {2: {"v": 1}}
+    mq.push_pulled_("C2", None)
+    await wait_until(lambda: s2 in hub._parked)
+
+    await unsubscribe_and_ack(a, node, "S1")
+    assert not a._outbox
+    assert await a.get_updates(timeout=TICK) == {"S2": {2: {"v": 1}}}
+    await close_hub(hub, node)
+
+
 class ScriptedSub(FakeSub):
     """按频道返回预设的更新（script）；gates 里的频道卡在各自的闸门上，进入时置 reached[频道]"""
 
