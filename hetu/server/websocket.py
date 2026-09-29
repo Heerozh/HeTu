@@ -31,6 +31,8 @@ DISCONNECT_SYSTEM = "on_disconnect"
 # 塞进 push_queue 叫醒空闲等在 get() 上的发送循环去取待发区：hub 把订阅推送交到门面时由它的
 # 叫醒函数塞进来（见 SubscriptionBroker.bind_sender_）
 PUSH_UPDATES = object()
+# 订阅推送最多被排着的回复压住多久（秒，约一个合批间隔），见 send_loop
+PUSH_MAX_HOLD = 0.1
 
 
 class PushQueue(asyncio.Queue[Any]):
@@ -327,11 +329,29 @@ async def send_loop(
     队列空了就取门面的待发区发订阅推送。订阅推送不进队列，留在待发区里按 sub_id / row_id 合并。
     订阅回复的占位先于登记放进队列，队列空了就说明登记之前放的占位都已发出，推送不会抢到它的回复
     前面（设计稿 2026-09-29-push-path-and-gc §2）。
+    回复优先，但推送不能一直等队列空：客户端连着发 RPC、链路又慢时队列可能一直不空。推送被排着的回复
+    压住超过 PUSH_MAX_HOLD 秒，而队列里一个订阅回复的占位都没有（登记过的订阅的回复都已发出）时，
+    先插一轮推送。在等占位的期间不插：那个占位是哪个订阅的还不知道。
     pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
     返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
     """
+    loop = asyncio.get_running_loop()
+    # 推送开始被排着的回复压住的时刻；待发区空了、或推送发出去了就清掉
+    held_since: float | None = None
     while True:
-        if push_queue.empty():
+        drain = push_queue.empty()
+        if not drain:
+            if not broker.has_updates_():
+                held_since = None
+            elif held_since is None:
+                held_since = loop.time()
+            elif (
+                push_queue.placeholders == 0
+                and loop.time() - held_since >= PUSH_MAX_HOLD
+            ):
+                drain = True
+        if drain:
+            held_since = None
             updates = broker.take_updates_()
             if updates:
                 for sub_id, data in updates.items():
@@ -339,6 +359,7 @@ async def send_loop(
                     if flooded():
                         return
                 continue
+        if push_queue.empty():
             # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里
             broker.idle_(True)
             try:

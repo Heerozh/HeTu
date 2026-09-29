@@ -2842,7 +2842,8 @@ class SubscriptionBroker:
         self._hub.resume_(self)
         return updates
 
-    def _has_updates(self) -> bool:
+    def has_updates_(self) -> bool:
+        """待发区里有没有还没取走的更新"""
         return bool(self._outbox)
 
     def stalled_(self) -> bool:
@@ -2896,6 +2897,6 @@ class SubscriptionBroker:
                     return {}
                 finally:
                     self._waiting = False
-            elif not await hub.step_(deadline, self._has_updates):
+            elif not await hub.step_(deadline, self.has_updates_):
                 return {}
         return self.take_updates_()
