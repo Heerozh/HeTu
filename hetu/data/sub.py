@@ -124,9 +124,18 @@ class BaseSubscription:
     # 随暂存的更新改（见 SubscriptionHub._stage）；后加入的成员拿它做回复。私有订阅为 None。
     # 行对象与推送共用，之后都不再改
     snapshot: dict[int, dict[str, Any]] | None = None
+    # 有成员在等重读判定频道（SubscriptionHub.recheck_）时：序号大于它的 tick 里重读到才算数
+    recheck_after: int = 0
 
     def use_servant_(self, servant: BackendClient) -> None:
         """之后的读改走这个副本（读出错时 hub 换一个随机副本重试）。没有自己副本的订阅什么也不做"""
+
+    def recheck_channel_(self) -> str | None:
+        """
+        判定"有没有"要重读的频道（行订阅是行频道，范围订阅是索引频道）：成员按快照要回"没有"之前，
+        等订阅重读一次它（见 `SubscriptionHub.recheck_`）。None 为不支持
+        """
+        return None
 
     def snapshot_rows_(self) -> list[dict[str, Any]]:
         """快照里的行，按回复的顺序排好（后加入的成员的回复）"""
@@ -189,6 +198,9 @@ class RowSubscription(BaseSubscription):
 
     def use_servant_(self, servant: BackendClient) -> None:
         self.servant = servant
+
+    def recheck_channel_(self) -> str | None:
+        return self.channel
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
         """先订后读：读与订之间落下的写入，要么已经在读回的行里，要么随后有通知。先读后订的话，
@@ -297,6 +309,9 @@ class IndexSubscription(BaseSubscription):
         self.servant = servant
         for row_sub in self.row_subs.values():
             row_sub.servant = servant
+
+    def recheck_channel_(self) -> str | None:
+        return self.index_channel
 
     def snapshot_rows_(self) -> list[dict[str, Any]]:
         snapshot = self.snapshot
@@ -626,9 +641,11 @@ _HUB_LOG_CONTEXT = "[None|None|SubscriptionHub]"
 class _Tick:
     """一个 tick 的簿记"""
 
-    __slots__ = ("added", "joined", "released", "since", "staged")
+    __slots__ = ("added", "joined", "released", "seq", "since", "staged")
 
-    def __init__(self, since: int) -> None:
+    def __init__(self, seq: int, since: int) -> None:
+        # 本 tick 的序号（hub 里从 1 递增）：等重读的成员按它认读是不是在请求之后（见 recheck_）
+        self.seq = seq
         # tick 开始（本 tick 的任何读之前）时 hub 的生效序号：之后才生效的频道，订阅读它可能在
         # 生效之前，要补读（见 _subscribe_added）
         self.since = since
@@ -749,6 +766,8 @@ class SubscriptionHub:
         self._task: asyncio.Task | None = None
         # 正在跑的 tick（从建起到交付完）：tick 中途加入的成员要按它的暂存记下加入时已有的（见 join_）
         self._staging: _Tick | None = None
+        # 已开始的 tick 数（最近一个 tick 的序号）
+        self._ticks = 0
         # 手动模式：几个门面并发驱动时一次只跑一个 tick
         self._step_lock = asyncio.Lock()
         # 错误日志按类别限流：(说明模板, 异常类型) → 状态，见 _log_error
@@ -862,6 +881,45 @@ class SubscriptionHub:
         else:
             sub.waiters.setdefault(broker, []).append(waiter)
         return waiter
+
+    def recheck_(
+        self, sub: BaseSubscription, broker: SubscriptionBroker
+    ) -> asyncio.Future[list[dict[str, Any]] | None]:
+        """
+        broker（已就绪的共享订阅 sub 的成员）要按快照回"没有"（行不存在、范围为空）之前：等 sub 重读
+        一次判定频道（`recheck_channel_`），再给那之后的快照。快照落后于提交至少一个 interval（通知
+        隔一个 interval 才读），成员的推送全都卡着时一直不动：据它回"没有"的话，随后才推来的行这个
+        连接再也收不到（它已不是成员）。本调用之后才开始的 tick 里重读到才算数，与 dev 订阅时读库
+        一样新。为此定向补读一次；等的期间订阅不算卡住（见 `_stalled`）。
+        订阅已关闭、没有快照（私有）或不支持时回 None 或当前快照，hub 已关闭时是 ConnectionError。
+        broker 等的期间离开时为 None
+        """
+        waiter: asyncio.Future[list[dict[str, Any]] | None] = (
+            asyncio.get_running_loop().create_future()
+        )
+        channel = sub.recheck_channel_()
+        if self._closed:
+            waiter.set_exception(ConnectionError(_("连接已关闭，已调用过close")))
+        elif sub.closed or not sub.ready or sub.snapshot is None:
+            waiter.set_result(None)
+        elif channel is None:
+            waiter.set_result(sub.snapshot_rows_())
+        else:
+            if self._autostart:
+                self._start()
+            sub.waiters.setdefault(broker, []).append(waiter)
+            sub.recheck_after = self._ticks
+            self.reread_for(sub, channel)
+        return waiter
+
+    def _rechecked(self, sub: BaseSubscription) -> None:
+        """sub 在请求之后重读到了判定频道：等着的成员拿这时的快照（已含本 tick 暂存的）"""
+        waiters, sub.waiters = sub.waiters, {}
+        rows = sub.snapshot_rows_()
+        for futures in waiters.values():
+            for waiter in futures:
+                if not waiter.done():
+                    waiter.set_result(rows)
 
     def _unshare(self, sub: BaseSubscription) -> None:
         """从共享登记表撤掉 sub（表里登记的还是它的话）：之后同一查询新建订阅"""
@@ -1262,7 +1320,9 @@ class SubscriptionHub:
         work = self._repair(self._collect(batch))
         if not work:
             return
-        tick = self._staging = _Tick(self._effective_seq)  # 在本 tick 的任何读之前记下
+        self._ticks += 1
+        # 在本 tick 的任何读之前记下
+        tick = self._staging = _Tick(self._ticks, self._effective_seq)
         try:
             # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
             RowSubscription.reset_cache_()
@@ -1321,12 +1381,14 @@ class SubscriptionHub:
         订阅的成员是不是全都推送卡住了：待发区还有上次交的没取走，而且没在 get_updates 里等着取
         （推送阻塞在 push_queue 上）。有一个没卡着就照常处理，卡着的成员待发区按 sub_id / row_id
         合并，上限是这个订阅的数据量。成员表为空不算卡住（all([]) 为真，攒下的通知就没人来重读了）。
+        有人在等它的结果（初始化、重读判定频道）也不算：等着的回复占着位，卡着的正是它后面的推送。
         手动模式由 get_updates 自己跑 tick，不存在卡住
         """
         members = sub.members
         return (
             self._autostart
             and bool(members)
+            and not sub.waiters
             and all(broker.stalled_() for broker in members)
         )
 
@@ -1500,8 +1562,11 @@ class SubscriptionHub:
         items: list[tuple[str, set[str] | None]],
         tick: _Tick,
     ) -> None:
-        """一个订阅按顺序处理它这批的频道：记账、按成员暂存更新"""
+        """一个订阅按顺序处理它这批的频道：记账、暂存更新"""
         channel_subs = self._channel_subs
+        # 有成员在等它重读判定频道（recheck_）
+        recheck = sub.recheck_channel_() if sub.waiters and sub.ready else None
+        rechecked = False
         for channel, payload in items:
             # 已退订；或本 tick 里它自己的处理刚把这行放出了范围（分组在前，这里得现查）
             if sub.closed or sub not in channel_subs.get(channel, ()):
@@ -1539,6 +1604,11 @@ class SubscriptionHub:
                 return
             if updates:
                 self._stage(tick, sub, updates)
+            if channel == recheck:
+                rechecked = True
+        # 请求之后才开始的 tick 里重读到了判定频道：等着的成员拿这时的快照
+        if rechecked and tick.seq > sub.recheck_after and sub.waiters:
+            self._rechecked(sub)
 
     def _retry_later(
         self, sub: BaseSubscription, channel: str, payload: set[str] | None
@@ -2081,9 +2151,12 @@ class SubscriptionBroker:
     ) -> tuple[str | None, dict[str, Any] | None]:
         """
         行订阅的后半段：行不存在、或 caller 对该行无权限时订阅不成立，回 None。加入的共享订阅这行
-        已经不在了（成员们都已收到 None）时同样回 None，不加入
+        已经不在了（成员们都已收到 None，快照为空）时同样回 None、不加入，先重读一次行确认
+        （`_recheck`）
         """
         rows = await self._finish(p)
+        if rows == [] and p.joined:
+            rows = await self._recheck(p.sub_id, p.sub, p.reg)
         if not rows:
             if rows is not None:
                 await self.unsubscribe(p.sub_id)
@@ -2098,8 +2171,13 @@ class SubscriptionBroker:
     async def _repeat_get(
         self, sub_id: str, existing: BaseSubscription, reg: object
     ) -> tuple[str | None, dict[str, Any] | None]:
-        """重复的共享行订阅：回它的快照，不读库；这行已经不在了时撤掉已有的订阅"""
+        """
+        重复的共享行订阅：回它的快照，不读库；这行已经不在了时撤掉已有的订阅，撤之前先重读一次行
+        确认（`_recheck`）
+        """
         rows = await self._await_existing(sub_id, existing, reg)
+        if rows == []:
+            rows = await self._recheck(sub_id, existing, reg)
         if not rows:
             if rows is not None:
                 await self.unsubscribe(sub_id)
@@ -2115,6 +2193,25 @@ class SubscriptionBroker:
         期间被退订了回 None（撤掉订阅的事由第一次订阅的后半段做）
         """
         rows = await self._hub.wait_(sub, self)
+        if rows is None or not self._current(sub_id, reg):
+            return None
+        return rows
+
+    async def _recheck(
+        self, sub_id: str, sub: BaseSubscription, reg: object
+    ) -> list[dict[str, Any]] | None:
+        """
+        要按共享订阅的快照回"没有"（行不存在、force=False 的范围为空）之前：等订阅重读一次判定频道，
+        返回那之后的快照（见 `SubscriptionHub.recheck_`）。快照落后于提交，据它回"没有"的话，随后才
+        推来的行这个连接再也收不到。自己新建的订阅不用：初始读就是为这次订阅读的。等的期间被退订了
+        回 None。手动模式（测试）没有处理循环，自己驱动 tick
+        """
+        hub = self._hub
+        waiter = hub.recheck_(sub, self)
+        if not hub.autostart:
+            while not waiter.done():
+                await hub.step_(None, waiter.done)
+        rows = await waiter
         if rows is None or not self._current(sub_id, reg):
             return None
         return rows
@@ -2308,13 +2405,21 @@ class SubscriptionBroker:
     async def _finish_range(
         self, p: _Pending, force: bool
     ) -> tuple[str | None, list[dict]]:
-        """范围订阅的后半段：force 为 False 且没查到（可见的）数据时不订阅"""
+        """
+        范围订阅的后半段：force 为 False 且没查到（可见的）数据时不订阅。加入的共享订阅快照为空的，
+        先重读一次索引确认（`_recheck`）
+        """
         rows = await self._finish(p)
         if rows is None:
             return None, []
         if not force and not rows:
-            await self.unsubscribe(p.sub_id)
-            return None, rows
+            if p.joined:
+                rows = await self._recheck(p.sub_id, p.sub, p.reg)
+                if rows is None:
+                    return None, []
+            if not rows:
+                await self.unsubscribe(p.sub_id)
+                return None, []
         logger.debug(
             _("🆕 [📡Subscription] 订阅了索引: {sub_id} {index_channel}").format(
                 sub_id=p.sub_id,
@@ -2326,8 +2431,13 @@ class SubscriptionBroker:
     async def _repeat_range(
         self, sub_id: str, existing: BaseSubscription, reg: object, force: bool
     ) -> tuple[str | None, list[dict]]:
-        """重复的共享范围订阅：回它的快照，不读库"""
+        """
+        重复的共享范围订阅：回它的快照，不读库。force 为 False 且快照为空的，回 None 之前先重读一次
+        索引确认（`_recheck`）
+        """
         rows = await self._await_existing(sub_id, existing, reg)
+        if rows == [] and not force:
+            rows = await self._recheck(sub_id, existing, reg)
         if rows is None:
             return None, []
         if not force and not rows:
