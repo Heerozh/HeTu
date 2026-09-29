@@ -1583,6 +1583,72 @@ async def test_rejoin_within_tick_gets_what_changes_after_it():
     assert got_b == {"S": {1: None}}
 
 
+# ============ hub 的兜底：初始化漏出的 BaseException、处理循环意外结束 ============
+
+
+class StrayCancelInitSub(FakeSub):
+    """初始化时后端调用里漏出 CancelledError（本任务并没有被取消），前 stray 次如此"""
+
+    def __init__(self, channels: set[str], stray: int):
+        super().__init__(channels)
+        self.stray = stray
+        self.attempts = 0
+
+    async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
+        self.attempts += 1
+        await hub.attach_(self)
+        if self.attempts <= self.stray:
+            raise asyncio.CancelledError()
+        return []
+
+
+@pytest.mark.parametrize("stray", [1, 100], ids=["once", "always"])
+async def test_stray_cancelled_error_in_init_is_handled(stray: int):
+    """
+    初始化时后端调用里漏出 CancelledError（本任务没被取消）：当作出错，换副本重试；重试用尽让等着的
+    成员都失败、撤掉共享登记。以前只兜 Exception，初始化任务以"取消"结束：等着的成员一直等（服务器里
+    它们的发送循环卡在占位上，之后的回复、推送全堵住），之后同一查询的订阅者也都加入这个死订阅
+    """
+    hub, (a, b), _mq, node = make_brokers(2)
+    hub.INIT_RETRIES = 2
+    s = StrayCancelInitSub({"X"}, stray)
+    _, ta = share_sub(a, "S", lambda: s)
+    joined, tb = share_sub(b, "S", lambda: StrayCancelInitSub({"X"}, stray))
+    assert joined is s
+    results = await ack_until_done(node, ta, tb)
+    if stray == 1:
+        assert results == [[], []]
+        assert s.attempts == 2 and s.active
+    else:
+        assert all(type(r) is not asyncio.CancelledError for r in results), results
+        assert all(isinstance(r, Exception) for r in results), results
+        assert s.attempts == 3 and not s.active
+        assert hub.shared_(KEY) is None
+    await close_hub(hub, node)
+
+
+async def test_join_restarts_a_dead_processing_loop():
+    """
+    处理循环意外结束（这里直接取消它）后，新连接加入已有的共享订阅也要把它拉起来。以前只有新建订阅
+    时才拉起：热门查询都是加入，循环一直停着，整个 worker 没有推送
+    """
+    hub, (a, b), mq, node = make_brokers(2, autostart=True)
+    s = await shared_by(node, a, sub=FakeSub({"C"}))
+    task = hub._task
+    assert task is not None
+    task.cancel()
+    await asyncio.wait([task])
+    joined, tb = share_sub(b, "S", lambda: FakeSub({"C"}))
+    assert joined is s
+    await finish(tb, node)
+    assert hub._task is not task and hub._task is not None and not hub._task.done()
+    s.updates = {1: {"id": 1}}
+    mq.push_pulled_("C", None)
+    async with asyncio.timeout(1):
+        assert await b.get_updates() == {"S": {1: {"id": 1}}}
+    await close_hub(hub, node)
+
+
 # ============ 后半段认的是那一次登记：退订后重订同一查询会重新加入同一个订阅对象 ============
 
 
