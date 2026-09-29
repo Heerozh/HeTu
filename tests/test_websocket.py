@@ -1,10 +1,11 @@
 import asyncio
 import contextlib
 import gc
+import itertools
 import logging
 import os
 import warnings
-from typing import Callable, cast
+from typing import Any, Callable, cast
 
 import pytest
 import sanic_testing
@@ -712,6 +713,129 @@ async def test_push_queue_counts_placeholders():
     assert queue.placeholders == 0
     assert await queue.get() is PUSH_UPDATES
     assert queue.placeholders == 0
+
+
+class _FakeSendWs:
+    """send_loop 用的连接替身：记下发出的帧，每帧发完调 on_send（模拟客户端接着发来请求），再等 delay 秒
+    （模拟慢链路）"""
+
+    def __init__(self, on_send: Callable[[Any], None] | None = None, delay: float = 0):
+        self.frames: list = []
+        self.on_send = on_send
+        self.delay = delay
+
+    async def send(self, frame) -> None:
+        self.frames.append(frame)
+        if self.on_send is not None:
+            self.on_send(frame)
+        await asyncio.sleep(self.delay)
+
+    def fail_connection(self) -> None:
+        pass
+
+
+class _FakeOutbox:
+    """send_loop 用的门面替身：待发区就是个 dict"""
+
+    def __init__(self, outbox: dict[str, dict]):
+        self.outbox = dict(outbox)
+
+    def has_updates_(self) -> bool:
+        return bool(self.outbox)
+
+    def take_updates_(self) -> dict[str, dict]:
+        updates, self.outbox = self.outbox, {}
+        return updates
+
+    def idle_(self, idle: bool) -> None:
+        pass
+
+
+async def _run_send_loop(ws: _FakeSendWs, outbox: _FakeOutbox, queue, until) -> None:
+    """跑 send_loop 直到 until(发出的帧) 为真（最多 2 秒），之后停掉它"""
+    from hetu.server.websocket import send_loop
+
+    task = asyncio.create_task(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=lambda: False,
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not until(ws.frames):
+                await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_send_loop_does_not_hold_pushes_behind_replies_forever():
+    """
+    客户端连着发 RPC、链路又慢时 push_queue 里一直排着回复：推送不能一直等到队列空了才发（以前每连接一个
+    推送协程，推送与回复在队列里按先后交错；发送循环直接取待发区之后，推送会一直发不出去）。队列里没有订阅
+    回复的占位时，推送被回复压住一阵就插一轮；在那之前回复照样先发
+    """
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    calls = itertools.count(1)
+
+    def client_keeps_calling(frame) -> None:
+        if frame[0] == "rsp":
+            queue.put_nowait(["rsp", next(calls)])  # 回复一发出，客户端又发来一条 RPC
+
+    ws = _FakeSendWs(on_send=client_keeps_calling, delay=0.01)
+    queue.put_nowait(["rsp", 0])
+    push = ["updt", "S", {1: {"v": 1}}]
+    await _run_send_loop(
+        ws, _FakeOutbox({"S": {1: {"v": 1}}}), queue, lambda f: push in f
+    )
+    assert ws.frames[0] == ["rsp", 0], "推送一开始就抢到了排着的回复前面"
+
+
+async def test_send_loop_never_pushes_ahead_of_a_queued_sub_reply():
+    """
+    推送只在队列里没有订阅回复的占位时才插到排着的回复前面：新订阅 X 的回复占位还排着（X 已登记，它的
+    更新已交到待发区），前面的回复发了再久也不能先推 X 的更新，SDK 会把它当作不认识的订阅丢掉
+    """
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    for i in range(10):
+        queue.put_nowait(["rsp", i])  # 每帧 20ms，这些回复要发 200ms
+    placeholder = asyncio.get_running_loop().create_future()
+    placeholder.set_result(["sub", "X", []])
+    queue.put_nowait(placeholder)
+    ws = _FakeSendWs(delay=0.02)
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"X": {1: {"v": 1}}}),
+        queue,
+        lambda frames: any(f[0] == "updt" for f in frames),
+    )
+    assert [f[0] for f in ws.frames] == ["rsp"] * 10 + ["sub", "updt"]
+
+
+async def test_send_loop_waits_for_the_sub_reply_it_is_holding():
+    """发送循环在等订阅回复的占位时不插推送（占位是哪个订阅的还不知道），回复发出之后再推"""
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    placeholder = asyncio.get_running_loop().create_future()
+    queue.put_nowait(placeholder)
+    ws = _FakeSendWs()
+    asyncio.get_running_loop().call_later(0.3, placeholder.set_result, ["sub", "X", []])
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"S": {1: {"v": 1}}}),
+        queue,
+        lambda frames: any(f[0] == "updt" for f in frames),
+    )
+    assert [f[0] for f in ws.frames] == ["sub", "updt"]
 
 
 @pytest.mark.timeout(30)
