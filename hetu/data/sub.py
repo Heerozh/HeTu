@@ -626,7 +626,7 @@ _HUB_LOG_CONTEXT = "[None|None|SubscriptionHub]"
 class _Tick:
     """一个 tick 的簿记"""
 
-    __slots__ = ("added", "released", "since", "staged")
+    __slots__ = ("added", "joined", "released", "since", "staged")
 
     def __init__(self, since: int) -> None:
         # tick 开始（本 tick 的任何读之前）时 hub 的生效序号：之后才生效的频道，订阅读它可能在
@@ -636,10 +636,14 @@ class _Tick:
         self.added: dict[str, set[BaseSubscription]] = {}
         # 本 tick 没人要了的频道
         self.released: set[str] = set()
-        # 暂存的更新：成员连接 → {sub_id: (订阅, 合并后的更新)}，tick 末尾才交给连接
-        self.staged: dict[
-            SubscriptionBroker,
-            dict[str, tuple[BaseSubscription, dict[int, dict[str, Any] | None]]],
+        # 暂存的更新：订阅 → 本 tick 合并后的更新（后到的覆盖先到的）。tick 末尾交给那时的各成员，
+        # 成员共用这一份（见 SubscriptionHub._deliver）
+        self.staged: dict[BaseSubscription, dict[int, dict[str, Any] | None]] = {}
+        # tick 中途加入、加入时订阅已有暂存的成员：(订阅, 连接) → 加入那一刻的暂存（拷贝）。它的
+        # 快照已含这些，交付时只给它加入之后变了的
+        self.joined: dict[
+            tuple[BaseSubscription, SubscriptionBroker],
+            dict[int, dict[str, Any] | None],
         ] = {}
 
 
@@ -743,6 +747,8 @@ class SubscriptionHub:
         # 后台任务（频道的订阅、退订、补订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
+        # 正在跑的 tick（从建起到交付完）：tick 中途加入的成员要按它的暂存记下加入时已有的（见 join_）
+        self._staging: _Tick | None = None
         # 手动模式：几个门面并发驱动时一次只跑一个 tick
         self._step_lock = asyncio.Lock()
         # 错误日志按类别限流：(说明模板, 异常类型) → 状态，见 _log_error
@@ -820,9 +826,13 @@ class SubscriptionHub:
     ) -> asyncio.Future[list[dict[str, Any]] | None]:
         """
         broker 加入 worker 里已有的共享订阅 sub（同一查询），返回等初始化结果的 future，见 `wait_`。
-        已就绪的当场拿快照：之后暂存的更新都会交给它，快照已含之前的（设计稿 2026-09-29 §3.2）
+        已就绪的当场拿快照：之后暂存的更新都会交给它，快照已含之前的（设计稿 2026-09-29 §3.2）。
+        tick 中途加入、这个 tick 已给订阅暂存了更新的，记下已暂存的：交付时只给它之后变了的
         """
         sub.members[broker] = sub_id
+        tick = self._staging
+        if tick is not None and (staged := tick.staged.get(sub)):
+            tick.joined[sub, broker] = dict(staged)
         # 新成员的推送没卡着：成员全都卡着时攒下的通知现在重读，不然要等哪个老成员取走待发区，
         # 新成员拿到的快照才会动
         self._unpark(sub)
@@ -1243,11 +1253,11 @@ class SubscriptionHub:
         work = self._repair(self._collect(batch))
         if not work:
             return
-        tick = _Tick(self._effective_seq)  # 在本 tick 的任何读之前记下
-        # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
-        RowSubscription.reset_cache_()
-        await self._prefetch_rows(work)
+        tick = self._staging = _Tick(self._effective_seq)  # 在本 tick 的任何读之前记下
         try:
+            # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
+            RowSubscription.reset_cache_()
+            await self._prefetch_rows(work)
             await self._process_all(work, tick)
         finally:
             try:
@@ -1259,8 +1269,8 @@ class SubscriptionHub:
                 # 放在最后：推给客户端的新行一般在其行频道订阅生效之后（SUBSCRIBE 最多等
                 # SUBSCRIBE_WAIT_INTERVALS），get_updates 拿到的也总是完整的 tick。中途出错也把
                 # 已算好的交出去
-                for broker, entries in tick.staged.items():
-                    broker.deliver_(entries)
+                self._staging = None
+                self._deliver(tick)
 
     def _collect(
         self, batch: Mapping[str, set[str] | None]
@@ -1552,9 +1562,10 @@ class SubscriptionHub:
         updates: Mapping[int, dict[str, Any] | None],
     ) -> None:
         """
-        按成员暂存：同一个 tick 里同一订阅的几次更新合并，后到的覆盖先到的。共享订阅的快照在这里
-        跟着改，不等交付：tick 中途加入的成员拿到的快照已含这次更新，它又不在这次暂存时的成员表
-        里，不会再收到一次（设计稿 2026-09-29 §3.2）
+        按订阅暂存：同一个 tick 里同一订阅的几次更新合并成一份，后到的覆盖先到的，tick 末尾交给
+        那时的各成员（`_deliver`）。不按成员各拷一份：共享订阅的成员成百上千时，每个变动的频道都要
+        走一遍成员表。共享订阅的快照在这里跟着改，不等交付：tick 中途加入的成员拿到的快照已含
+        这次更新（设计稿 2026-09-29 §3.2）
         """
         snapshot = sub.snapshot
         if snapshot is not None:
@@ -1563,14 +1574,34 @@ class SubscriptionHub:
                     snapshot.pop(row_id, None)
                 else:
                     snapshot[row_id] = row
-        staged = tick.staged
-        for broker, sub_id in sub.members.items():
-            entries = staged.setdefault(broker, {})
-            entry = entries.get(sub_id)
-            if entry is not None and entry[0] is sub:
-                entry[1].update(updates)
-            else:
-                entries[sub_id] = (sub, dict(updates))
+        staged = tick.staged.get(sub)
+        if staged is None:
+            tick.staged[sub] = dict(updates)
+        else:
+            staged.update(updates)
+
+    @staticmethod
+    def _deliver(tick: _Tick) -> None:
+        """
+        tick 末尾：各订阅合并好的更新交给这时的成员，成员们共用这一份（只读）。成员按交付这一刻
+        的成员表：tick 中途退订的不给，退订后又重订的按重订算，退订前暂存给它的不会交给新的它。
+        tick 中途加入的，快照已含加入时已暂存的，只给它之后变了的（行对象每次更新都是新读出来的，
+        按对象认）。按 row_id 覆盖 / 删除的结果与快照一致：没变的行快照里本来就是这个值
+        """
+        joined = tick.joined
+        for sub, updates in tick.staged.items():
+            for broker, sub_id in sub.members.items():
+                seen = joined.get((sub, broker)) if joined else None
+                if seen is None:
+                    broker.deliver_(sub_id, sub, updates)
+                    continue
+                fresh = {
+                    row_id: row
+                    for row_id, row in updates.items()
+                    if row_id not in seen or seen[row_id] is not row
+                }
+                if fresh:
+                    broker.deliver_(sub_id, sub, fresh)
 
     async def _settle_channels(self, tick: _Tick) -> None:
         """
@@ -1736,6 +1767,8 @@ class SubscriptionBroker:
         self._sub_counts: Counter[type[BaseSubscription]] = Counter()
         # 待发区：hub 在 tick 末尾交来的更新 {sub_id: {row_id: 行 | None}}，get_updates 取走
         self._outbox: dict[str, dict[int, dict[str, Any] | None]] = {}
+        # 待发区里与同一订阅的别的成员共用的那几份（hub 交来的原样，只读）：再合并时先拷一份
+        self._borrowed: set[str] = set()
         self._arrived = asyncio.Event()
         # 正在 get_updates 里等 hub 交来更新（推送没卡住）
         self._waiting = False
@@ -1755,6 +1788,7 @@ class SubscriptionBroker:
         self._channel_counts.clear()
         self._channel_count = 0
         self._outbox.clear()
+        self._borrowed.clear()
         # 两个退订并发，只等一个往返。内部关注的先撤：MQClient.close 在第一次 await 之前就同步
         # 清掉回调，等订阅退订回来的期间顶号检测不会再触发（它会去 master 核一次，白读）
         detach = asyncio.ensure_future(self._detach_all(subs)) if subs else None
@@ -2501,32 +2535,35 @@ class SubscriptionBroker:
         self._channel_count -= self._channel_counts.pop(sub_id, 0)
         # 已交到待发区、还没被取走的更新不再推
         self._outbox.pop(sub_id, None)
+        self._borrowed.discard(sub_id)
         await self._hub.detach(self, sub)
 
     def deliver_(
         self,
-        entries: Mapping[
-            str, tuple[BaseSubscription, Mapping[int, dict[str, Any] | None]]
-        ],
+        sub_id: str,
+        sub: BaseSubscription,
+        updates: dict[int, dict[str, Any] | None],
     ) -> None:
         """
-        hub 在 tick 末尾调用：本 tick 暂存的更新并进待发区（按 sub_id / row_id，后到的覆盖先到
-        的），唤醒 get_updates。退订了、或退订后同 id 重订成了别的订阅的丢掉。
-        本 tick 里退订后又加入同一个共享订阅的，退订前暂存的照样交付：加入时拿到的快照已含
-        它们，客户端按 row_id 再覆盖一次同样的内容，无害
+        hub 在 tick 末尾调用：订阅 sub 本 tick 合并好的更新并进待发区（按 row_id，后到的覆盖先到
+        的），唤醒 get_updates。updates 与这个订阅的别的成员共用、只读：待发区里没有这个 sub_id 时
+        原样放进去，还有上次没取走的才拷一份合并。退订了、或退订后同 id 重订成了别的订阅的丢掉
         """
-        if self._closed:
+        if self._closed or self._subs.get(sub_id) is not sub:
             return
         outbox = self._outbox
-        subs = self._subs
-        delivered = False
-        for sub_id, (sub, updates) in entries.items():
-            if subs.get(sub_id) is not sub:
-                continue
-            outbox.setdefault(sub_id, {}).update(updates)
-            delivered = True
-        if delivered:
-            self._arrived.set()
+        pending = outbox.get(sub_id)
+        if pending is None:
+            outbox[sub_id] = updates
+            self._borrowed.add(sub_id)
+        elif sub_id in self._borrowed:
+            merged = dict(pending)
+            merged.update(updates)
+            outbox[sub_id] = merged
+            self._borrowed.discard(sub_id)
+        else:
+            pending.update(updates)
+        self._arrived.set()
 
     def _has_updates(self) -> bool:
         return bool(self._outbox)
@@ -2550,6 +2587,7 @@ class SubscriptionBroker:
         的行对本连接不可见，都不会交来），所以不会拿到空结果。一次写入引起的推送也可能分在几批
         里：合并进队头的通知会在一个 interval 后尾随重读，它和别的频道的通知谁先弹出取决于时序。
         没来取的期间，几个 tick 的更新按 sub_id / row_id 合并，后到的覆盖先到的。
+        返回的各 sub_id 的 dict 与同一共享订阅的别的连接共用，只读，不要改。
 
         hub 是手动模式（测试用）时，由这里弹出通知、跑 tick。
 
@@ -2584,6 +2622,7 @@ class SubscriptionBroker:
             elif not await hub.step_(deadline, self._has_updates):
                 return {}
         updates, self._outbox = self._outbox, {}
+        self._borrowed.clear()
         # 推送卡着时 hub 攒下没读的通知，现在重读
         hub.resume_(self)
         return updates
