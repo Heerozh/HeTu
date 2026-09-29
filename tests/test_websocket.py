@@ -694,6 +694,26 @@ async def test_failed_sub_replies_are_all_retrieved():
     assert not [c for c in caught if "never retrieved" in c.get("message", "")]
 
 
+# ==== 发送循环（send_loop）：回复与推送的先后 ====
+
+
+async def test_push_queue_counts_placeholders():
+    """PushQueue 记着排在里面的订阅回复占位（future）有几个，别的回复、哨兵不算"""
+    from hetu.server.websocket import PUSH_UPDATES, PushQueue
+
+    queue = PushQueue(8)
+    placeholder = asyncio.get_running_loop().create_future()
+    for item in (["rsp", "ok"], placeholder, PUSH_UPDATES):
+        queue.put_nowait(item)
+    assert queue.placeholders == 1
+    assert queue.get_nowait() == ["rsp", "ok"]
+    assert queue.placeholders == 1
+    assert queue.get_nowait() is placeholder
+    assert queue.placeholders == 0
+    assert await queue.get() is PUSH_UPDATES
+    assert queue.placeholders == 0
+
+
 @pytest.mark.timeout(30)
 def test_websocket_table_subscribe_does_not_block_following_messages(
     monkeypatch, test_server

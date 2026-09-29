@@ -33,6 +33,29 @@ DISCONNECT_SYSTEM = "on_disconnect"
 PUSH_UPDATES = object()
 
 
+class PushQueue(asyncio.Queue[Any]):
+    """
+    连接的 push_queue：按请求顺序排着要发的回复（RPC 回复、订阅回复的占位）和几个哨兵。另记着排在
+    里面的订阅回复占位（future）有几个：一个都没有时，登记过的订阅的回复都已发出（占位先于登记入队），
+    发送循环据此判断推送能不能插到排着的回复前面（见 send_loop）
+    """
+
+    def _init(self, maxsize: int) -> None:
+        super()._init(maxsize)
+        self.placeholders = 0
+
+    def _put(self, item: Any) -> None:
+        if isinstance(item, asyncio.Future):
+            self.placeholders += 1
+        super()._put(item)
+
+    def _get(self) -> Any:
+        item = super()._get()
+        if isinstance(item, asyncio.Future):
+            self.placeholders -= 1
+        return item
+
+
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")
 async def websocket_connection(request: Request, ws: Websocket, db_name: str) -> None:
     """ws连接处理器，运行在worker主协程下"""
@@ -193,7 +216,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             endpoint_executor.on_elevated = watch_owner
 
         # 初始化push消息队列
-        push_queue = asyncio.Queue(1024)
+        push_queue = PushQueue(1024)
 
         # 初始化发送/接受计数器
         flood_checker = connection.ConnectionFloodChecker()
@@ -295,7 +318,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
 async def send_loop(
     ws: Websocket,
     broker: SubscriptionBroker,
-    push_queue: asyncio.Queue,
+    push_queue: PushQueue,
     pack: Callable[[Any], bytes],
     flooded: Callable[[], bool],
 ) -> None:
