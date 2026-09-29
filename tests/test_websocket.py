@@ -644,7 +644,12 @@ async def test_sub_limit_waits_for_in_flight_subscriptions():
     from hetu.server.receiver import sub_call
 
     executor = _sub_executor(max_index_sub=1)
-    for results, expected in (([None, "S2"], True), (["S1", "S2"], False)):
+    # (各次订阅的结果, 第二次订阅是否放行)：第一次随后不成立的放行，都成立的超限
+    cases: list[tuple[list[str | None], bool]] = [
+        ([None, "S2"], True),
+        (["S1", "S2"], False),
+    ]
+    for results, expected in cases:
         broker = _GatedBroker(results)
         push_queue: asyncio.Queue = asyncio.Queue()
         deferred: set[asyncio.Task] = set()
