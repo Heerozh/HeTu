@@ -1501,6 +1501,88 @@ async def test_any_member_draining_rereads_parked_notifications():
     await close_hub(hub, node)
 
 
+class ScriptedSub(FakeSub):
+    """按频道返回预设的更新（script）；gates 里的频道卡在各自的闸门上，进入时置 reached[频道]"""
+
+    def __init__(
+        self, channels: set[str], script: dict[str, dict[int, dict[str, Any] | None]]
+    ):
+        super().__init__(channels)
+        self.script = script
+        self.gates: dict[str, asyncio.Event] = {}
+        self.reached = {channel: asyncio.Event() for channel in channels}
+
+    async def get_updated(
+        self, channel: str, payload: set[str] | None = None
+    ) -> tuple[set[str], set[str], Mapping[int, dict[str, Any] | None]]:
+        self.calls.append((channel, payload))
+        self.reached[channel].set()
+        gate = self.gates.get(channel)
+        if gate is not None:
+            await gate.wait()
+        return set(), set(), dict(self.script.get(channel, {}))
+
+
+async def _leave_while_row_moves_out(
+    rejoin_before_removal: bool,
+) -> tuple[dict[str, dict], list[dict[str, Any]], dict[str, dict]]:
+    """
+    A、B 共享 S。一批里行频道 R 先暂存 {1: v1}，索引频道 I 读的期间 B 退订（S 还有 A），I 随后把行 1
+    移出范围（暂存 None、快照里删掉）。B 在 tick 结束前重订：rejoin_before_removal 为真时在 I 暂存之前，
+    否则之后。返回 (A 拿到的更新, B 重订的回复, B 之后拿到的更新)
+    """
+    hub, (a, b), mq, node = make_brokers(2)
+    v1 = {"id": 1, "v": 1}
+    s = ScriptedSub({"R", "I"}, {"R": {1: v1}, "I": {1: None}})
+    await shared_by(node, a, b, sub=s)
+    g = FakeSub({"I"})  # 同批的另一个订阅，卡住 tick 的结尾
+    await register(a, node, "G", g)
+    s.gates["I"] = asyncio.Event()
+    g.gate.clear()
+    mq.push_pulled_("R", None)
+    mq.push_pulled_("I", None)
+    await asyncio.sleep(0.01)  # 都过了合批间隔，同一批弹出
+    tick = asyncio.create_task(a.get_updates(timeout=TICK))
+    async with asyncio.timeout(1):
+        await s.reached["I"].wait()
+        await g.entered.wait()
+    assert s.snapshot == {1: v1}
+    await unsubscribe_and_ack(b, node, "S")  # A 还订着，订阅不关
+    if not rejoin_before_removal:
+        s.gates["I"].set()
+        await wait_until(lambda: s.snapshot == {})
+    joined, task = share_sub(b, "S", lambda: FakeSub({"R", "I"}))
+    assert joined is s
+    async with asyncio.timeout(1):
+        reply = await task
+    s.gates["I"].set()
+    g.gate.set()
+    got_a = await tick
+    got_b = await b.get_updates(timeout=TICK)
+    await close_hub(hub, node)
+    return got_a, reply, got_b
+
+
+async def test_rejoin_within_tick_skips_updates_staged_before_leaving():
+    """
+    同一 tick 里退订又重订同一个共享查询：退订前暂存给它的更新不能再交给它。以前交付时按订阅对象认，
+    B 重订后退订前那份 {1: v1} 照样交给它，排在回复（快照里已没有行 1）后面，客户端留着一行订阅已不再
+    跟踪的幽灵行
+    """
+    got_a, reply, got_b = await _leave_while_row_moves_out(rejoin_before_removal=False)
+    assert got_a == {"S": {1: None}}
+    assert reply == []
+    assert got_b == {}, "退订前暂存的旧行交给了重订的连接"
+
+
+async def test_rejoin_within_tick_gets_what_changes_after_it():
+    """同一 tick 里退订又重订：重订时快照里还有行 1，之后它被移出范围，重订的连接要收到 None"""
+    got_a, reply, got_b = await _leave_while_row_moves_out(rejoin_before_removal=True)
+    assert got_a == {"S": {1: None}}
+    assert reply == [{"id": 1, "v": 1}]
+    assert got_b == {"S": {1: None}}
+
+
 # ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
 
 
