@@ -1856,3 +1856,68 @@ async def test_slow_tick_is_not_followed_by_extra_wait():
     assert end1 - start1 > 0.06
     assert start2 - end1 < 0.015, f"慢 tick 之后又等了 {(start2 - end1) * 1000:.1f}ms"
     await close_hub(hub, node)
+
+
+# ============ 服务端发送循环直接取待发区（设计稿 2026-09-29-push-path-and-gc §2） ============
+
+
+async def test_idle_sender_is_woken_once_per_idle_wait():
+    """
+    发送循环空闲等着时交来更新，叫醒它一次；同一段空闲里再交来的只合并进待发区，不重复叫。取走、再空闲
+    之后，又能叫醒。待发区空时 take_updates_ 不等待，返回空
+    """
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    woken: list[int] = []
+    a.bind_sender_(lambda: woken.append(1))
+    assert a.take_updates_() == {}
+
+    a.idle_(True)
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox)
+    assert woken == [1]
+    s.updates = {1: {"v": 2}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox.get("S") == {1: {"v": 2}})
+    assert woken == [1], "同一段空闲里重复叫醒"
+
+    a.idle_(False)
+    assert a.take_updates_() == {"S": {1: {"v": 2}}}
+    a.idle_(True)
+    s.updates = {1: {"v": 3}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox)
+    assert woken == [1, 1]
+    await close_hub(hub, node)
+
+
+async def test_busy_sender_with_outbox_is_stalled_and_draining_rereads():
+    """
+    发送循环空闲等着时交来、还没取走的不算卡着；醒来之后没在空闲等待（卡在 ws.send 上）而待发区有东西才算
+    卡着，通知攒着不读。取走待发区时重读攒着的，推最新的
+    """
+    hub, (a,), mq, node = make_brokers(1, autostart=True)
+    s = FakeSub({"C"})
+    await register(a, node, "S", s)
+    a.bind_sender_(lambda: None)
+    a.idle_(True)
+    s.updates = {1: {"v": 1}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox)
+    assert not a.stalled_(), "发送循环空闲等着，交来的还没取就算卡着了"
+
+    a.idle_(False)
+    assert a.stalled_()
+    reads = len(s.calls)
+    s.updates = {1: {"v": 2}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: s in hub._parked)
+    assert len(s.calls) == reads, "卡着还在读"
+
+    assert a.take_updates_() == {"S": {1: {"v": 1}}}
+    a.idle_(True)
+    await wait_until(lambda: a._outbox)  # 攒着的重读了
+    assert a.take_updates_() == {"S": {1: {"v": 2}}}
+    await close_hub(hub, node)

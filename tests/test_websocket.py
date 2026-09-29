@@ -798,6 +798,55 @@ def test_websocket_range_subscribe_does_not_block_following_messages(
 
 
 @pytest.mark.timeout(30)
+def test_websocket_pushes_merge_while_sub_reply_is_pending(monkeypatch, test_server):
+    """同一连接上一个订阅的回复还在等初始读时，已有订阅的同一行被改了几次：推送留在待发区按行合并，
+    回复发出之后只推一帧、是最新的值，且排在回复后面。发送循环直接取待发区，推送不在 push_queue 里
+    逐帧排着（设计稿 2026-09-29-push-path-and-gc §2.2）"""
+    from hetu.data.backend.redis_model import RedisModelClient
+
+    real_range = RedisModelClient.range
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_range(self, table_ref, index_name, left, *args, **kwargs):
+        if table_ref.comp_name == "PublicNames" and left == 8401:
+            gate["reading"].set()
+            await gate["release"].wait()
+        return await real_range(self, table_ref, index_name, left, *args, **kwargs)
+
+    monkeypatch.setattr(RedisModelClient, "range", gated_range)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        client = await connect()
+        writer = await connect()
+        await client.send(["sub", "PublicNames", "range", "owner", 8301, 8302])
+        result["watch_id"] = (await client.recv())[1]
+        try:
+            await client.send(["sub", "PublicNames", "range", "owner", 8401, 8402])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 第二个订阅卡在初始读上，回复占着位
+            for name in ("M1", "M2", "M3"):
+                await writer.send(["rpc", "set_public_name", 8301, name])
+                await writer.recv()
+                await asyncio.sleep(0.3)  # 各自一个 tick 交到待发区
+        finally:
+            gate["release"].set()
+        msgs = []
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(1.5):
+                while True:
+                    msgs.append(await client.recv())
+        result["msgs"] = msgs
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    msgs = result["msgs"]
+    assert [m[0] for m in msgs] == ["sub", "updt"], msgs
+    assert msgs[1][1] == result["watch_id"]
+    assert [row["name"] for row in msgs[1][2].values()] == ["M3"]
+
+
+@pytest.mark.timeout(30)
 def test_websocket_table_subscribes_wait_concurrently(monkeypatch, test_server):
     """连着发两个整表订阅：第二个不用排在第一个的等待和全量读后面（登录时常一次订好几张
     表，串行就是每张一个 interval）；回复仍按请求顺序"""
