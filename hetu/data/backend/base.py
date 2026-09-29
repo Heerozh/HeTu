@@ -638,6 +638,27 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def check_range_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> None:
+        """
+        内部方法：校验一次 `range` 查询的参数，不合法抛 TypeError / ValueError，不访问数据库。订阅在
+        接收协程里先校验，读库放到后台（见 SubscriptionBroker.begin_subscribe_range）：不合法的查询
+        当场报错，不用登记后在后台读了、重试了才失败。
+        这里只校验 limit 是整数（负数表示不限行数）；索引、边界由子类校验，默认不校验，由之后的
+        range 读报错
+        """
+        if type(limit) is bool or not isinstance(limit, int):
+            raise TypeError(
+                _("range 的 limit 必须是整数，收到：{limit}").format(limit=repr(limit))
+            )
+
     async def range_read_(
         self,
         table_ref: TableReference,

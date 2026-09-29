@@ -396,6 +396,20 @@ class RedisModelClient(BackendClient):
         return members, b_left, b_right
 
     @override
+    def check_range_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> None:
+        """校验 range 查询的参数（limit、索引存在、边界合法），见基类"""
+        super().check_range_(table_ref, index_name, left, right, limit, desc)
+        self.zrange_args_(table_ref, index_name, left, right, desc)
+
+    @override
     async def get_many(
         self,
         table_ref: TableReference,

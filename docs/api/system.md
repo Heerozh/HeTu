@@ -773,7 +773,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:673`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L673)</small>
+<small>Source: [`hetu/data/backend/base.py:694`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L694)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 

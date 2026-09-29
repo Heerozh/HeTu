@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from sanic import Websocket
 
     from ..data.sub import SubscriptionBroker
+    from ..endpoint.context import Context
     from ..endpoint.executor import EndpointExecutor
 
 logger = logging.getLogger("HeTu.root")
@@ -86,14 +87,18 @@ async def rpc(
 
 
 def defer_sub_reply_(
-    finish: Awaitable[tuple[str | None, list[dict]]], deferred: set[asyncio.Task]
+    finish: Awaitable[tuple[str | None, Any]],
+    deferred: set[asyncio.Task],
+    reply: asyncio.Future | None = None,
 ) -> asyncio.Future:
     """
-    后台跑完订阅的后半段，结果填进返回的占位。占位放进 push_queue，发送循环按顺序等它填好：
-    回复没有请求 id、SDK 按顺序对应，排在它后面的回复都跟着等。任务登记在 deferred 里，
-    连接拆掉时由接收协程取消
+    后台跑完订阅的后半段（等订阅在 worker 级订阅器里初始化好），结果填进占位 reply（不传就新建一个），
+    返回它。占位放进 push_queue，发送循环按顺序等它填好：回复没有请求 id、SDK 按顺序对应，排在它
+    后面的回复都跟着等；之后给这个订阅的推送也都排在它后面。任务登记在 deferred 里，连接拆掉时由
+    接收协程取消
     """
-    reply = asyncio.get_running_loop().create_future()
+    if reply is None:
+        reply = asyncio.get_running_loop().create_future()
 
     async def fill():
         try:
@@ -101,6 +106,9 @@ def defer_sub_reply_(
         except Exception as e:  # noqa: BLE001 交给发送循环，它等到占位时抛出、记日志、断开
             if not reply.done():
                 reply.set_exception(e)
+                # 同一连接几个占位同时失败时，发送循环只等到第一个就断开：别的没人取，别在 gc
+                # 时各报一条 "never retrieved"
+                reply.exception()
         else:
             if not reply.done():  # 发送循环被取消时，它在等的占位也跟着被取消了
                 reply.set_result(["sub", sub_id, rows])
@@ -120,6 +128,16 @@ def defer_sub_reply_(
     deferred.add(task)
     task.add_done_callback(settle)
     return reply
+
+
+def _over_sub_limits(broker: SubscriptionBroker, ctx: Context) -> bool:
+    """本连接的订阅数（行 / 索引 / 整表）是否超过了上限"""
+    num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
+    return (
+        num_row_sub > ctx.max_row_sub
+        or num_idx_sub > ctx.max_index_sub
+        or num_tbl_sub > ctx.max_table_sub
+    )
 
 
 async def sub_call(
@@ -142,38 +160,51 @@ async def sub_call(
         logger.warning(err_msg)
         return False
 
-    sub_id = None
-    sub_data: dict[str, Any] | list[dict] | None = None
-    deferred_reply: asyncio.Future | None = None
-    match data[2]:
+    op = data[2]
+    match op:
         case "get":
             check_length("get", data, 5, 5)
-            sub_id, sub_data = await broker.subscribe_get(table, ctx, *data[3:])
         case "range":
             # sub comp range index left [right limit desc force]
             check_length("range", data, 5, 9)
-            sub_id, sub_data = await broker.subscribe_range(table, ctx, *data[3:])
         case "table":  # sub component_name table
             check_length("table", data, 3, 3)
-            # 前半段（检查、订阅、登记）在这里做完，下面的订阅数检查照常；后半段要先等
-            # 一个 interval 再全量读，交给后台，接收协程接着处理下一条消息
-            finish = await broker.begin_subscribe_table(table, ctx)
-            deferred_reply = defer_sub_reply_(finish, deferred)
         case "logic_query":
             # todo 逻辑订阅，query后再通过脚本进行二次筛选，再发送到客户端，更新时也会调用筛选代码
             pass
         case _:
-            raise ValueError(_(" [非法操作] 未知订阅操作：{op}").format(op=data[2]))
+            raise ValueError(_(" [非法操作] 未知订阅操作：{op}").format(op=op))
 
-    reply = ["sub", sub_id, sub_data] if deferred_reply is None else deferred_reply
+    # 先在 push_queue 里占住回复的位，再做前半段（检查、登记）：一登记，推送协程就可能给这个 sub_id
+    # 放推送，占位在前才能保证回复先到。队列满着（客户端网络拥塞）时在这里等，这期间还没登记。
+    # 后半段（等订阅在 worker 级订阅器里初始化好：订阅频道、读初始行）交给后台，接收协程接着处理
+    # 下一条消息
+    reply = asyncio.get_running_loop().create_future()
     await push_queue.put(reply)
+    finish: Awaitable[tuple[str | None, Any]] | None = None
+    try:
+        match op:
+            case "get":
+                finish = await broker.begin_subscribe_get(table, ctx, *data[3:])
+            case "range":
+                finish = await broker.begin_subscribe_range(table, ctx, *data[3:])
+            case "table":
+                finish = await broker.begin_subscribe_table(table, ctx)
+    except BaseException:
+        reply.cancel()  # 前半段出错，连接随即断开：发送循环等到这个占位时当作连接在拆
+        raise
+    if finish is None:
+        reply.set_result(["sub", None, None])
+    else:
+        defer_sub_reply_(finish, deferred, reply)
 
-    num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
-    if (
-        num_row_sub > ctx.max_row_sub
-        or num_idx_sub > ctx.max_index_sub
-        or num_tbl_sub > ctx.max_table_sub
-    ):
+    if _over_sub_limits(broker, ctx) and deferred:
+        # 订阅数在前半段登记时就计入，其中可能有随后不成立的（force=False 的空结果、不存在或不可见的
+        # 行，它们会自己撤掉）；dev 逐条处理，不成立的不计入。到了上限先等在途的都有结果（这期间
+        # 不接收新消息，同 dev），再按成立的判
+        await asyncio.wait(list(deferred))
+    if _over_sub_limits(broker, ctx):
+        num_row_sub, num_idx_sub, num_tbl_sub = broker.count()
         err_msg = _(
             " [非法操作] 订阅数超过限制：{num_row_sub}个行订阅，{num_idx_sub}个索引订阅，"
             "{num_tbl_sub}个整表订阅"
@@ -216,7 +247,7 @@ async def client_handler(
     ctx = executor.context
     last_data = None
     cancelled = False
-    # 在后台跑后半段的订阅（整表订阅等全量读），连接拆掉时一起取消
+    # 在后台跑后半段的订阅（等订阅初始化好），连接拆掉时一起取消
     deferred: set[asyncio.Task] = set()
     # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
     # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。
@@ -316,38 +347,3 @@ async def client_handler(
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:
                 pass  # 队列满时外层自然会被 Sanic 的连接关闭取消掉
-
-
-async def subscription_handler(
-    ws: Websocket, broker: SubscriptionBroker, push_queue: asyncio.Queue
-):
-    """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
-    last_updates = {}
-    try:
-        while True:
-            last_updates = await broker.get_updates()
-            for sub_id, data in last_updates.items():
-                reply = ["updt", sub_id, data]
-                await push_queue.put(reply)
-    except asyncio.CancelledError:
-        # print('subscription_handler normal canceled')
-        pass
-    except RedisConnectionError as e:
-        logger.error(
-            _(
-                "❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}"
-                "上次接受了：{count}条消息。"
-            ).format(err=f"{type(e).__name__}:{e}", count=len(last_updates))
-        )
-        return ws.fail_connection()
-    except BaseException as e:
-        logger.exception(
-            _(
-                "❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
-                "上条消息：{updates}，异常：{err}"
-            ).format(updates=last_updates, err=f"{type(e).__name__}:{e}")
-        )
-        return ws.fail_connection()
-    finally:
-        # print('subscription_handler closed')
-        pass

@@ -10,7 +10,8 @@
   让每个连接收到"新行进入 + 最旧一行离开"。
 - 只用 SubscriptionBroker 的公开 API，改动前后的代码都能跑：同一个脚本分别用两份代码的环境
   跑，对比 worker 级订阅器（docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md）
-  的收益与开销。
+  的收益与开销。消费同服务端的发送循环（直接取门面的待发区）；旧代码没有这组接口时退回
+  每连接一个协程等 get_updates。
 
 输出
 ----
@@ -153,10 +154,30 @@ async def run(args) -> None:
     added = [0] * len(brokers)
     running = True
 
+    def count(idx: int, updates: dict) -> None:
+        for rows in updates.values():
+            added[idx] += sum(row is not None for row in rows.values())
+
     async def consume(idx: int, broker: SubscriptionBroker) -> None:
+        # 同服务端的发送循环：hub 交来更新时叫醒，直接取走待发区。旧代码没有这组接口，退回
+        # 每连接一个协程等 get_updates
+        if not hasattr(broker, "take_updates_"):
+            while running:
+                count(idx, await broker.get_updates())
+            return
+        wake = asyncio.Event()
+        broker.bind_sender_(wake.set)
         while running:
-            for rows in (await broker.get_updates()).values():
-                added[idx] += sum(row is not None for row in rows.values())
+            updates = broker.take_updates_()
+            if updates:
+                count(idx, updates)
+                continue
+            wake.clear()
+            broker.idle_(True)
+            try:
+                await wake.wait()
+            finally:
+                broker.idle_(False)
 
     tasks = [asyncio.create_task(consume(i, b)) for i, b in enumerate(brokers)]
 

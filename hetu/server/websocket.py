@@ -6,8 +6,11 @@
 """
 
 import asyncio
+import contextlib
 import logging
 import time
+from collections.abc import Callable
+from typing import Any
 
 from sanic import Request, Websocket
 from sanic.exceptions import WebsocketClosed
@@ -19,12 +22,40 @@ from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import PUSH_CLOSE, client_handler, subscription_handler
+from .receiver import PUSH_CLOSE, client_handler
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 DISCONNECT_SYSTEM = "on_disconnect"
+# 塞进 push_queue 叫醒空闲等在 get() 上的发送循环去取待发区：hub 把订阅推送交到门面时由它的
+# 叫醒函数塞进来（见 SubscriptionBroker.bind_sender_）
+PUSH_UPDATES = object()
+# 订阅推送最多被排着的回复压住多久（秒，约一个合批间隔），见 send_loop
+PUSH_MAX_HOLD = 0.1
+
+
+class PushQueue(asyncio.Queue[Any]):
+    """
+    连接的 push_queue：按请求顺序排着要发的回复（RPC 回复、订阅回复的占位）和几个哨兵。另记着排在
+    里面的订阅回复占位（future）有几个：一个都没有时，登记过的订阅的回复都已发出（占位先于登记入队），
+    发送循环据此判断推送能不能插到排着的回复前面（见 send_loop）
+    """
+
+    def _init(self, maxsize: int) -> None:
+        super()._init(maxsize)
+        self.placeholders = 0
+
+    def _put(self, item: Any) -> None:
+        if isinstance(item, asyncio.Future):
+            self.placeholders += 1
+        super()._put(item)
+
+    def _get(self) -> Any:
+        item = super()._get()
+        if isinstance(item, asyncio.Future):
+            self.placeholders -= 1
+        return item
 
 
 @HETU_BLUEPRINT.websocket("/hetu/<db_name>")
@@ -119,7 +150,6 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     # 也没有清理任务，漏掉就永远留在库里，而匿名连接数是按 IP 计数的，攒够几次同一出口的
     # 客户端就再也连不上了
     recv_task_id = f"client_handler:{request.id}"
-    subs_task_id = f"subs_receiver:{request.id}"
     broker: SubscriptionBroker | None = None
     closing = False  # 已进入拆连接流程：之后收到的"被顶号"核查结果不作数
     # 关服时要等本连接拆完再关后端，见 wait_connections_closed
@@ -188,7 +218,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             endpoint_executor.on_elevated = watch_owner
 
         # 初始化push消息队列
-        push_queue = asyncio.Queue(1024)
+        push_queue = PushQueue(1024)
 
         # 初始化发送/接受计数器
         flood_checker = connection.ConnectionFloodChecker()
@@ -205,9 +235,13 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         _forget = request.app.add_task(receiver_task, name=recv_task_id)
 
-        # 创建获得订阅推送通知的协程3（通知由本进程共享的 pubsub 分发器直接塞进 broker 的本地队列）
-        subscript_task = subscription_handler(ws, broker, push_queue)
-        _forget = request.app.add_task(subscript_task, name=subs_task_id)
+        # 订阅推送不另开协程：hub 交到门面的待发区时，发送循环空闲就塞 PUSH_UPDATES 叫醒它，由它
+        # 直接取走发送。队列满时不塞：那时发送循环不会等在 get() 上，发完队列会回来取待发区
+        def wake_sender() -> None:
+            with contextlib.suppress(asyncio.QueueFull):
+                push_queue.put_nowait(PUSH_UPDATES)
+
+        broker.bind_sender_(wake_sender)
 
         # 删除当前长连接用不上的临时变量
         del namespace
@@ -221,39 +255,25 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         logger.exception(err_msg)
         ws.fail_connection()
     else:
+        assert broker is not None
+
+        def pack(reply) -> bytes:
+            # 如果关闭了replay，为了速度不执行下面的字符串序列化
+            if replay.isEnabledFor(logging.DEBUG):
+                replay.debug(">>> " + str(reply))
+            return msg_pipe.encode(pipe_ctx, reply)
+
+        def flooded() -> bool:
+            """记一次发送，到了发送上限就断开"""
+            flood_checker.sent()
+            if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):
+                ws.fail_connection()
+                return True
+            return False
+
         # 这里循环发送，保证总是第一时间Push
         try:
-            while True:
-                reply = await push_queue.get()
-                # 接收协程结束时会塞这个哨兵进来（它已经把连接拆了）：跳出去跑 finally
-                # 的清理，否则本协程会一直阻塞在 get() 上，连接半死不活地挂着
-                if reply is PUSH_CLOSE:
-                    break
-                if isinstance(reply, asyncio.Future):
-                    # 在后台完成的订阅（整表订阅）占住的回复位：等它填好再发。回复没有
-                    # 请求 id、SDK 按顺序对应，排在它后面的回复都得跟着等
-                    try:
-                        reply = await reply
-                    except Exception as e:
-                        err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
-                            err=f"{type(e).__name__}:{e}"
-                        )
-                        replay.info(err_msg)
-                        logger.exception(err_msg)
-                        ws.fail_connection()
-                        break
-                # 如果关闭了replay，为了速度不执行下面的字符串序列化
-                if replay.isEnabledFor(logging.DEBUG):
-                    replay.debug(">>> " + str(reply))
-                # print(executor.context, 'got', reply)
-                await ws.send(msg_pipe.encode(pipe_ctx, reply))
-                # 检查发送上限
-                flood_checker.sent()
-                if flood_checker.send_limit_reached(
-                    context, "Coroutines(Websocket.push)"
-                ):
-                    ws.fail_connection()
-                    break
+            await send_loop(ws, broker, push_queue, pack, flooded)
         except asyncio.CancelledError:
             if ws.ws_proto.parser_exc and not isinstance(
                 ws.ws_proto.parser_exc, EOFError
@@ -285,7 +305,6 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 request,
                 current_task.get_name(),
                 recv_task_id,
-                subs_task_id,
                 system_caller,
                 context,
                 endpoint_executor,
@@ -296,6 +315,84 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         _cleanup_tasks.add(cleanup_task)  # 保持引用免得被 gc
         cleanup_task.add_done_callback(_cleanup_tasks.discard)
         await asyncio.shield(cleanup_task)
+
+
+async def send_loop(
+    ws: Websocket,
+    broker: SubscriptionBroker,
+    push_queue: PushQueue,
+    pack: Callable[[Any], bytes],
+    flooded: Callable[[], bool],
+) -> None:
+    """
+    连接的发送循环（跑在连接协程自己里）：按顺序发 push_queue 里的回复（RPC 回复、订阅回复的占位），
+    队列空了就取门面的待发区发订阅推送。订阅推送不进队列，留在待发区里按 sub_id / row_id 合并。
+    订阅回复的占位先于登记放进队列，队列空了就说明登记之前放的占位都已发出，推送不会抢到它的回复
+    前面（设计稿 2026-09-29-push-path-and-gc §2）。
+    回复优先，但推送不能一直等队列空：客户端连着发 RPC、链路又慢时队列可能一直不空。推送被排着的回复
+    压住超过 PUSH_MAX_HOLD 秒，而队列里一个订阅回复的占位都没有（登记过的订阅的回复都已发出）时，
+    先插一轮推送。在等占位的期间不插：那个占位是哪个订阅的还不知道。
+    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
+    返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
+    """
+    loop = asyncio.get_running_loop()
+    # 推送开始被排着的回复压住的时刻；待发区空了、或推送发出去了就清掉
+    held_since: float | None = None
+    while True:
+        drain = push_queue.empty()
+        if not drain:
+            if not broker.has_updates_():
+                held_since = None
+            elif held_since is None:
+                held_since = loop.time()
+            elif (
+                push_queue.placeholders == 0
+                and loop.time() - held_since >= PUSH_MAX_HOLD
+            ):
+                drain = True
+        if drain:
+            held_since = None
+            updates = broker.take_updates_()
+            if updates:
+                for sub_id, data in updates.items():
+                    await ws.send(pack(["updt", sub_id, data]))
+                    if flooded():
+                        return
+                continue
+        if push_queue.empty():
+            # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里
+            broker.idle_(True)
+            try:
+                reply = await push_queue.get()
+            finally:
+                broker.idle_(False)
+        else:
+            reply = push_queue.get_nowait()
+        if reply is PUSH_UPDATES:
+            continue
+        # 接收协程结束时会塞这个哨兵进来（它已经把连接拆了）：返回去跑连接协程 finally 里的清理，
+        # 否则会一直阻塞在 get() 上，连接半死不活地挂着
+        if reply is PUSH_CLOSE:
+            return
+        if isinstance(reply, asyncio.Future):
+            # 在后台完成的订阅占住的回复位：等它填好再发。回复没有请求 id、SDK 按顺序对应，排在它
+            # 后面的回复都得跟着等。等的期间推送不算卡住：hub 照常读、合并进待发区，回复发出之后再推
+            broker.idle_(True)
+            try:
+                reply = await reply
+            except Exception as e:
+                err_msg = _("❌ [📡WSSender] 订阅初始化异常：{err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+                replay.info(err_msg)
+                logger.exception(err_msg)
+                ws.fail_connection()
+                return
+            finally:
+                broker.idle_(False)
+        await ws.send(pack(reply))
+        if flooded():
+            return
 
 
 # 拆连接的清理任务：保持引用免得被 gc，跑完自动移除
@@ -342,7 +439,6 @@ async def _cleanup_connection(
     request: Request,
     task_name: str,
     recv_task_id: str,
-    subs_task_id: str,
     system_caller: SystemCaller,
     context: SystemContext,
     endpoint_executor: EndpointExecutor,
@@ -353,7 +449,6 @@ async def _cleanup_connection(
     replay.info(close_msg)
     logger.info(close_msg)
     await request.app.cancel_task(recv_task_id, raise_exception=False)
-    await request.app.cancel_task(subs_task_id, raise_exception=False)
     # 先退订再删本连接的 Connection 行（在 endpoint_executor.terminate 里）。删行对 owner 值
     # 频道是"离开"，commit 不发（值频道只发进入），被顶号的 watcher 不会因此收到通知；此前
     # 已发起、读回时已在拆连接的核查结果也不作数（见 closing）。
