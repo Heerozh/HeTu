@@ -15,6 +15,8 @@ from functools import partial
 from redis.asyncio.client import PubSub, Redis
 from redis.asyncio.cluster import ClusterNode, RedisCluster
 from redis.asyncio.connection import Connection, ConnectionPool
+from redis.asyncio.retry import Retry
+from redis.backoff import NoBackoff
 from redis.cluster import LoadBalancingStrategy
 from redis.exceptions import ConnectionError as RedisConnectionError
 from redis.exceptions import SlotNotCoveredError
@@ -37,10 +39,20 @@ def _pubsub_pool(connection_class: type, connection_kwargs: dict) -> ConnectionP
     redis-py >= 8 默认开（idle 30s / interval 5s / 3 probes），这里显式打开，不依赖版本
     默认值；URL 里明确配了 socket_keepalive 的仍按配置来。
     unix socket 连接没有这个参数（也没有半开的问题）。
+
+    重试一律关掉：连接出错必须原样抛到监听协程，由 `AsyncKeyspacePubSub` 按节点失效处理（换副本、
+    重订、通知上层补读）。redis-py 的 PubSub 读写都走连接的 retry，照抄过来的参数里有重试
+    （URL 带 retry_on_timeout、主客户端配了 retry）时它会自己重连、重订，监听协程察觉不到断过，
+    断线期间丢的通知就再也不会补读。
     """
     kwargs = dict(connection_kwargs)
     if issubclass(connection_class, Connection):
         kwargs.setdefault("socket_keepalive", True)
+    # 这两个会被 Connection 并进 retry 认的错误类型，一起去掉
+    kwargs.pop("retry_on_timeout", None)
+    kwargs.pop("retry_on_error", None)
+    # 不认任何错误：重试 0 次时 redis-py 仍会先断开重连、重订一遍再抛，白订一轮就扔
+    kwargs["retry"] = Retry(NoBackoff(), 0, supported_errors=())
     return ConnectionPool(
         connection_class=connection_class, max_connections=2, **kwargs
     )
@@ -61,6 +73,7 @@ class AsyncKeyspacePubSub:
         client: Redis | RedisCluster,
         on_message: Callable[[dict], None] | None = None,
         on_resubscribed: Callable[[list[str]], None] | None = None,
+        on_lost: Callable[[list[str]], None] | None = None,
     ):
         """
         Parameters
@@ -74,11 +87,15 @@ class AsyncKeyspacePubSub:
         on_resubscribed
             节点失效后，恢复流程确认这批频道全部重订生效时同步调用一次，传入这批频道。
             失效到恢复之间的通知全部丢失，上层据此补读。不能 await。
+        on_lost
+            节点失效时同步调用一次，传入订在这个节点上、已生效的频道：恢复之前它们收不到通知
+            （恢复流程照旧重订它们，上层也可以先退订、换到别处订）。不能 await。
         """
         self.main_client = client
         self.is_cluster = isinstance(client, RedisCluster)
         self.on_message = on_message
         self.on_resubscribed = on_resubscribed
+        self.on_lost = on_lost
 
         # 存储每个节点的独立 Client 和 PubSub
         # Key: 节点标识 (f"host:port" 或 "standalone"), Value: {'client': Redis, 'pubsub': PubSub}
@@ -463,8 +480,14 @@ class AsyncKeyspacePubSub:
         except asyncio.CancelledError:
             # 正常取消
             return
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 监听任务死于任何异常都按节点断线处理
             logger.error(f"Listener error on node {node_key}: {e}")
+            # 订在这个节点上、已生效的频道：恢复之前收不到通知（下面清掉已订阅集合之前取）
+            lost = [
+                channel
+                for channel in self._subscribed
+                if self._channel_node.get(channel) == node_key
+            ]
             # 断线处理：丢弃并尽力关掉失效节点的自建连接，等 ack 的调用方全部失败
             res = self.node_resources.pop(node_key, None)
             if res is not None:
@@ -485,6 +508,12 @@ class AsyncKeyspacePubSub:
             # 如果不保存task，task不会执行会被gc
             if self._resubscribe_task is None or self._resubscribe_task.done():
                 self._resubscribe_task = asyncio.create_task(self.resubscribe_all())
+            # 交给上层（可以换到别的副本上订）。回调出错不能拖垮恢复流程
+            if lost and self.on_lost is not None:
+                try:
+                    self.on_lost(lost)
+                except Exception:
+                    logger.exception("on_lost callback failed")
 
     @staticmethod
     async def _dispose_node(res: dict):

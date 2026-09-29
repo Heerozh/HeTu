@@ -77,3 +77,28 @@ def test_rls_check_string_ctx_attr_no_crash(new_component_env):
     # 旧代码在 np.isnan(ctx.address="1.2.3.4") 处抛 TypeError；修复后应正常比较
     assert ctx.rls_check(AddrRLS, {"token": "1.2.3.4", "owner": 0}) is True
     assert ctx.rls_check(AddrRLS, {"token": "9.9.9.9", "owner": 0}) is False
+
+
+def test_rls_check_unconvertible_value_is_invisible(new_component_env):
+    """
+    行里的值转不成 ctx 那边的类型（比如某个 System 把 user_data 里比较用的值置成了 None）：按不可见
+    处理，不抛。权限判定出错不能当作有权限；抛出的话订阅这一批整个失败，每次重试都一样
+    """
+
+    @define_component(
+        namespace="pytest",
+        permission=Permission.RLS,
+        rls_compare=("eq", "guild", "guild"),
+    )
+    class GuildRLS(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        guild: "U16" = property_field("", unique=False, index=False)  # type: ignore  # noqa
+
+    row = {"guild": "7", "owner": 1}
+    assert _make_ctx(user_data={"guild": "7"}).rls_check(GuildRLS, row) is True
+    assert _make_ctx(user_data={"guild": 7}).rls_check(GuildRLS, row) is True
+    # NoneType("7") → TypeError；int("abc") → ValueError
+    assert _make_ctx(user_data={"guild": None}).rls_check(GuildRLS, row) is False
+    assert (
+        _make_ctx(user_data={"guild": 7}).rls_check(GuildRLS, {"guild": "abc"}) is False
+    )

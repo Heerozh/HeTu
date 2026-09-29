@@ -70,6 +70,7 @@ namespace HeTu
         ///     放弃。配合 <see cref="StateChanged" /> 绑 UI 时：
         ///     <c>Faulted &amp;&amp; !HasBeenReady</c> → "连不上服务器"，
         ///     <c>Faulted &amp;&amp; HasBeenReady</c> → "已掉线且无法恢复"。
+        ///     被顶号也会直接进 Faulted（不重连），见 <see cref="HeTuKickedException" />。
         /// </summary>
         public bool HasBeenReady => _core?.HasBeenReady ?? false;
 
@@ -83,6 +84,10 @@ namespace HeTu
         ///     每次"本次连接失败"触发一次：socket 关闭、bootstrap 异常、restore 异常
         ///     都会进来，携带本次失败的异常。是否已经是终态请同时观察
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Faulted" />。
+        ///     异常是 <see cref="HeTuKickedException" /> 时表示被顶号（账号在别处登录）：会话
+        ///     不会重连、直接进 Faulted，请提示玩家。
+        ///     A <see cref="HeTuKickedException" /> means the account logged in
+        ///     elsewhere; the session enters Faulted without reconnecting.
         /// </summary>
         public event Action<Exception> Faulted;
 
@@ -489,7 +494,7 @@ namespace HeTu
         public bool IsConnected => _client.IsConnectionAlive;
 
         public event Action Connected;
-        public event Action<string> Closed;
+        public event Action<int, string> Closed;
 
         public void Connect()
         {
@@ -544,7 +549,9 @@ namespace HeTu
 
         private void HandleConnected() => Connected?.Invoke();
 
-        private void HandleClosed(string reason) => Closed?.Invoke(reason);
+        // LastCloseCode 在 OnClosed 触发前已设好
+        private void HandleClosed(string reason) =>
+            Closed?.Invoke(_client.LastCloseCode, reason);
 
 #if UNITY_6000_0_OR_NEWER
         private async Awaitable ConnectAsync()
@@ -558,7 +565,7 @@ namespace HeTu
             }
             catch (Exception ex)
             {
-                Closed?.Invoke(ex.Message);
+                Closed?.Invoke(HeTuCloseCode.Abnormal, ex.Message);
             }
         }
     }

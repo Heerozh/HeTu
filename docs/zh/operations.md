@@ -80,7 +80,9 @@ backends:
   网络抖动）时，客户端可能残留旧数据直到该行下次变更——订阅推送因此只保证约 99% 的情况是最新的。
   请监控副本的复制延迟（云厂商控制台的"同步延迟"之类），让它远低于 100ms。
 - 每个登录连接还订阅 `Connection` 表 `owner == 本用户` 的索引值频道，被顶号时服务器据此主动断开它，RPC 路径上
-  不再每次读库；通知丢失时由 `CONNECTION_ALIVE_RECHECK_INTERVAL`（默认 5 秒）兜底重查。
+  不再每次读库；通知丢失时由 `CONNECTION_ALIVE_RECHECK_INTERVAL`（默认 5 秒）兜底重查。断开前先发
+  WebSocket close 码 `4001`、原因 `kicked`，客户端可据此提示"账号已在别处登录"，并且不要自动重连（重连会重新
+  登录，把对方顶掉）。
 
 **Redis 连接预算**
 
@@ -159,6 +161,8 @@ Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模�
     - **编辑生成的脚本。** 常见的情况是“删除 + 添加”实际上是一个重命名——修改脚本的 `upgrade()` 主体，在删除旧列之前将旧列数据复制到新列。
     - **使用 `--drop-data` 强制迁移。** 直接丢弃受影响的属性。请勿在生产环境中使用。
 
+易失组件（`volatile=True`）不走迁移脚本：它的数据每次 `upgrade` 都会被清空，所以 schema 一变，`upgrade` 就直接按新定义重建表，删列、改类型也不需要 `--drop-data`。
+
 将 `maint/migration/` 下的所有内容提交到您的仓库，这样部署环境不会重新生成（并可能偏离）您已经审核过的脚本。
 
 目前不支持降级，未来可能会添加此功能。
@@ -196,7 +200,7 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--namespace NAME`  | —                         | 要运行的 `app.py` 中的命名空间                                                                     |
 | `--instance NAME`   | —                         | 逻辑实例 ID（每个运行进程需要一个唯一 ID，用于雪花算法 worker 分配）                                  |
 | `--port PORT`       | `2466`                    | WebSocket 监听端口                                                                                 |
-| `--db URL`          | `redis://127.0.0.1:6379/0`| 后端 DSN；scheme 选择后端（`redis://`、`sqlite:///`、`postgresql://`、`mysql://`等）                |
+| `--db URL`          | `redis://127.0.0.1:6379/0`| 后端 DSN；scheme 选择后端（`redis://`、`rediss://`、开发用的 `sqlite:///<库文件>`）                  |
 | `--workers N`       | `4`                       | Worker 进程数（经验值：`CPU * 1.2`）                                                                |
 | `--debug 0/1/2`     | `0`                       | `1` 启用热重载 + 详细日志；`2` 额外启用 Python 协程调试（慢 90%）                                    |
 | `--cert DIR`        | `""`                      | TLS 证书目录，或 `auto` 使用自签名证书；通常建议在反向代理处终止 TLS                                  |
@@ -223,8 +227,19 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 
 - `-y` — 跳过数据备份确认提示（用于 CI/CD）。
 - `--drop-data` — 通过丢弃无法迁移的数据强制迁移。**请勿在生产环境中使用。**
+- `--no-rebuild-index` — 跳过重建索引（见下）。
 
 如果您不运行 `upgrade`，`hetu start` 在检测到 schema 不匹配时会拒绝启动。
+
+`upgrade` 默认每次都按行数据重建持久 `Component` 的索引，修掉索引残留：比如维护脚本只删了行、没删
+索引，服务器日志会报"索引和行数据对不上"，读到这一行的 `System` 一直重试。重建要**停服**执行（扫描行
+与覆盖索引之间的写入会丢），每个索引建好后才原子替换旧索引，中途失败旧索引原样保留。数据量大时重建较慢，
+可以用 `--no-rebuild-index` 跳过。
+
+`upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
+不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
+秒）后再试。Windows 上本机已经退出的服务器不用等：Sanic 在 Windows 上停 worker 是硬杀，租约来不及释放，
+所以这种租约不算。SQLite 后端没有租约、检查不出来，请自己确认已经停服。
 
 ### `hetu build`
 

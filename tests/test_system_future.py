@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import time
 
@@ -36,12 +37,34 @@ async def test_future_call_create(test_app, tbl_mgr, executor: EndpointExecutor)
         assert rows[0].owner == 1020
 
 
-async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor):
+class _SleepSpy:
+    """替身 asyncio 模块：记下 sleep 请求的时长，其余属性照旧转给 asyncio"""
+
+    def __init__(self):
+        self.delays = []
+
+    def __getattr__(self, name):
+        return getattr(asyncio, name)
+
+    async def sleep(self, delay, result=None):
+        self.delays.append(delay)
+        return await asyncio.sleep(delay, result)
+
+
+async def test_sleep_for_upcoming(
+    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
+):
     """测试sleep_for_upcoming的等待逻辑是否正确"""
     time_time = time.time
 
     # 创建一个未来调用
+    from hetu.system import future
     from hetu.system.future import FutureCalls
+
+    # 断言请求的睡眠时长，而不是量墙钟：墙钟里还含一次后端查询，CI 负载高时
+    # 光查询就能超过 0.1 秒
+    spy = _SleepSpy()
+    monkeypatch.setattr(future, "asyncio", spy)
 
     await executor.execute("login", 1020)
 
@@ -60,16 +83,16 @@ async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor)
     # 测试sleep_for_upcoming(等待下一个到期任务)是否正常
     from hetu.system.future import sleep_for_upcoming
 
-    have_task = await sleep_for_upcoming(fc_tbl)
-    # 检测当前时间是否~>任务到期时间
-    assert time_time() > expire_time
-    assert expire_time, pytest.approx(time_time(), abs=0.1)
-    assert have_task
-
-    # 再调用应该只Sleep 0秒
     start = time_time()
     have_task = await sleep_for_upcoming(fc_tbl)
-    assert time_time() - start < 0.1
+    # 睡到了任务到期时间，且没多睡
+    assert time_time() > expire_time
+    assert spy.delays[-1] <= expire_time - start
+    assert have_task
+
+    # 已到期，再调用不应再睡
+    have_task = await sleep_for_upcoming(fc_tbl)
+    assert spy.delays[-1] <= 0
     assert have_task
 
     # 删除未来任务
@@ -80,9 +103,8 @@ async def test_sleep_for_upcoming(test_app, tbl_mgr, executor: EndpointExecutor)
     assert call.id == uuid
 
     # 再次调用sleep应该返回无任务False，并睡1秒
-    start = time_time()
     have_task = await sleep_for_upcoming(fc_tbl)
-    assert time_time() - start > 1
+    assert spy.delays[-1] == 1
     assert not have_task
 
 
@@ -136,10 +158,59 @@ async def test_pop_upcoming_call(
     assert ok
 
 
+async def test_pop_upcoming_call_ignores_new_due_calls(
+    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
+):
+    """取"最早到期的一条"不依赖区间里没有别的行：取出期间不断有更早到期的新调用插进来，
+    也不能判竞态（pop 只重试 5 次，耗尽就是任务循环里的一条错误日志）"""
+    from unittest.mock import patch
+
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
+    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+    ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
+    assert ok
+
+    master = fc_tbl.backend.master
+    orig_commit = master.commit
+    intruding = False
+    intruders: list[int] = []
+
+    async def commit_after_new_due_call(idmap):
+        # 每次提交前都有一条更早到期的新调用插进来（一条比一条早）
+        nonlocal intruding
+        if not intruding:
+            intruding = True
+            try:
+                async with fc_tbl.session() as session:
+                    row = FutureCallsTableCopy1.new_row()
+                    row.system = "nobody"
+                    row.scheduled = 1.0 / (len(intruders) + 1)
+                    await session.using(FutureCallsTableCopy1).insert(row)
+                    intruders.append(int(row.id))
+            finally:
+                intruding = False
+        return await orig_commit(idmap)
+
+    last_time = time.time() + 1  # 让调用到期
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    with patch.object(master, "commit", new=commit_after_new_due_call):
+        call = await pop_upcoming_call(fc_tbl)
+    assert call is not None and call.id == uuid
+
+    async with fc_tbl.session() as session:
+        repo = session.using(FutureCallsTableCopy1)
+        for row_id in [uuid, *intruders]:
+            if await repo.get(id=row_id):
+                repo.delete(row_id)
+
+
 def test_duplicate_bug(mod_auto_backend, new_clusters_env):
     """测试未来调用常用的duplicated的system，component是否会按namespace隔离"""
-    from hetu.system import define_system, SystemContext
     from hetu.data.component import Permission
+    from hetu.system import SystemContext, define_system
 
     # 定义2个不同的namespace的future call
     @define_system(
@@ -320,6 +391,46 @@ async def test_exec_future_call_system_error_keeps_call(
     assert kept is not None and kept.scheduled == last_time + 10
 
 
+async def test_pop_upcoming_call_error_names_the_call(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """取出事务失败（如一直竞态、重试耗尽）时，异常要带上正在取出的是哪条调用：
+    call 出了 pop_upcoming_call 就没了，任务循环的错误日志只剩一句重试耗尽"""
+    import traceback
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from hetu.data.backend import session as session_mod
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system.future import FutureCalls, _build_future_row, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    row = _build_future_row(
+        executor.context, -1, "add_rls_comp_value", (4,), timeout=10
+    )
+    await _insert_future_row(fc_tbl, row)
+
+    async def always_race(_idmap):
+        raise RaceCondition("RACE: 每次都被别的 worker 抢先")
+
+    async def no_backoff(_delay):
+        pass
+
+    monkeypatch.setattr(session_mod, "asyncio", SimpleNamespace(sleep=no_backoff))
+    last_time = time.time() + 2
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    with (
+        patch.object(fc_tbl.backend.master, "commit", new=always_race),
+        pytest.raises(RuntimeError) as exc_info,
+    ):
+        await pop_upcoming_call(fc_tbl)
+    # 任务循环用 logger.exception 记日志，打出来的就是这段 traceback
+    logged = "".join(traceback.format_exception(exc_info.value))
+    assert "add_rls_comp_value(4,)" in logged
+    assert str(row.id) in logged
+
+
 def test_key_to_id_properties():
     """确定性 id：稳定、恒负（与雪花正 id 隔离）、非 0、落在 int64 范围、不同 key 不同 id"""
     from hetu.system.future import _key_to_id
@@ -391,7 +502,7 @@ async def test_cancel_future_call(test_app, tbl_mgr, executor):
 
 async def test_ensure_skips_preexisting_row(test_app, tbl_mgr, executor):
     """表里已有同 key 行时（代表上次开服播种的持久化行），再 ensure 不新增、不报错、返回同 id"""
-    from hetu.system.future import FutureCalls, _key_to_id, _build_future_row
+    from hetu.system.future import FutureCalls, _build_future_row, _key_to_id
 
     await executor.execute("login", 1020)
     FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
@@ -429,8 +540,8 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     from hetu.system.future import (
         FutureCalls,
         _key_to_id,
-        pop_upcoming_call,
         exec_future_call,
+        pop_upcoming_call,
     )
 
     await executor.execute("login", 1020)

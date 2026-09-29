@@ -10,7 +10,13 @@
             head     : VER + HSET + PUBLISH 行频道 + PUBLISH 表频道   （perf/row-cache）
             optin    : VER + HSET，没声明 table_sub / point_sub 的组件（perf/publish-opt-in）
             optin_val: optin + 每行一条扁平的值频道 PUBLISH（point_sub 索引有行"进入"时）
+            optin_cnt: optin + 每行一条区间校验 CNT（ZLEXCOUNT，feat/range-phantom-check；
+                       limit=1 截断读命中的形状。get 命中现在只保护返回行、不发 CNT，
+                       这一组留作 CNT 单价的参照）
           rows=1 对应 get_then_update 的一次 commit，rows=2 对应 get2_update2。
+          另有几种区间校验真正会付费的形状（只跑 rows=1），各自带 / 不带一条 CNT：
+            ins / ins_cnt      : range 读空 → insert（NX + 2 条 UNIQ + 写整行 + 3 个索引）
+            scan20 / scan20_cnt: range 读 20 行 → update 其中一行（20 条 VER）
           payload 按 perf/publish-opt-in 之后的格式 [checks, pushes, deleted, table_pubs,
           value_chans]；old/main/head 的通知放在 table_pubs 里，与 Lua 的表频道调用点同一格式。
           测试 key 前缀为 hetu_probe:，结束后删除；notify-keyspace-events 结束后恢复原值。
@@ -27,6 +33,7 @@
 import argparse
 import multiprocessing as mp
 import socket
+import struct
 import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -117,9 +124,24 @@ def row_key(t: int, i: int) -> str:
     return f"{TABLES[t]}:id:{rid(i)}"
 
 
+def owner_index_key(t: int) -> str:
+    return f"{TABLES[t]}:index:owner"
+
+
+def owner_sortable(i: int) -> bytes:
+    """第 i 行的 owner 就是 i，与 HeTu 的 to_sortable_bytes(np.int64) 同形"""
+    return struct.pack(">Q", i + (1 << 63))
+
+
+SHAPES = ("ins", "ins_cnt", "scan20", "scan20_cnt")  # 只跑 rows=1
+
+
 def payload(variant: str, rows: int, i: int) -> bytes:
     pack = lambda o: msgpack.packb(o, use_bin_type=False)  # 与 HeTu 的 Packer 一致
+    if variant in SHAPES:
+        return pack(shape_payload(variant, i))
     checks, pushes, pubs_row, pubs_tbl, value_chans = [], [], [], [], []
+    cnt_checks = []
     for t in range(rows):
         key = row_key(t, i)
         checks.append(["VER", key, "2"])
@@ -128,10 +150,56 @@ def payload(variant: str, rows: int, i: int) -> bytes:
         pubs_tbl.append([f"{TABLES[t]}:table", pack([str(rid(i))])])
         # 值频道名与 HeTu 同形：{prefix}:index:{字段}:{16 位 hex 的 sortable token}
         value_chans.append(f"{TABLES[t]}:index:owner:{(1 << 63) + i:016x}")
+        # 与 HeTu 同形的区间校验：limit=1 的截断读命中，上界收到命中行的 member
+        member = owner_sortable(i) + b"\x00" + str(rid(i)).encode()
+        lo = b"[" + owner_sortable(i) + b"\x00"
+        cnt_checks.append(
+            ["CNT", owner_index_key(t), lo, b"[" + member, 1, "IntTable.owner"]
+        )
     pubs = {"main": pubs_tbl, "head": pubs_row + pubs_tbl}.get(variant, [])
     if variant != "optin_val":
         value_chans = []
+    if variant == "optin_cnt":
+        checks += cnt_checks
     return pack([checks, pushes, {}, pubs, value_chans])
+
+
+def shape_payload(variant: str, i: int) -> list:
+    """区间校验真正会付费的形状，*_cnt 多带一条 CNT"""
+    i %= N_KEYS - 20  # scan20 要用第 i..i+19 行
+    idx = owner_index_key(0)
+    key = row_key(0, i)
+    member = owner_sortable(i) + b"\x00" + str(rid(i)).encode()
+    checks: list = []
+    pushes: list = []
+    if variant.startswith("ins"):
+        # range 读空 → insert：主键 NX + 两个 unique 列的 UNIQ（值都不存在）+ 写整行 +
+        # 3 个索引（ZADD 同一 member 是幂等的，key 集合不变，可以反复回放）
+        checks.append(["NX", f"{TABLES[0]}:id:new{i}", "UNIQUE", "IntTable.id insert"])
+        for f in (1, 2):
+            free = owner_sortable(N_KEYS * 10 + i * 3 + f)
+            checks.append(
+                ["UNIQ", idx, b"[" + free + b"\x00", b"[" + free + b"\x00\xff"]
+                + ["UNIQUE", "IntTable.u insert"]
+            )
+        row = ["_version", "2", "id", str(rid(i)), "name", "XYZ", "owner", str(i)]
+        pushes.append(["HSET", key, *row])
+        for _ in range(3):
+            pushes.append(["ZADD", idx, "0", member])
+        # 读空的观察：这个值上没有行
+        free = owner_sortable(N_KEYS * 20 + i)
+        lo, hi, count = b"[" + free + b"\x00", b"[" + free + b"\x00\xff", 0
+    else:
+        # range 读 owner 在 [i, i+19] 的 20 行 → update 其中一行
+        for k in range(20):
+            checks.append(["VER", row_key(0, i + k), "2"])
+        pushes.append(["HSET", key, "_version", "2", "name", "XYZ"])
+        lo = b"[" + owner_sortable(i) + b"\x00"
+        hi = b"[" + owner_sortable(i + 19) + b"\x00\xff"
+        count = 20
+    if variant.endswith("_cnt"):
+        checks.append(["CNT", idx, lo, hi, count, "IntTable.owner"])
+    return [checks, pushes, {}, [], []]
 
 
 def replay_worker(args) -> int:
@@ -185,7 +253,10 @@ def replay(url: str, seconds: float, procs: int) -> None:
                     "ABC",
                 )
             )
-            if len(pipe) == 1000:
+            # owner 索引：optin_cnt 的 ZLEXCOUNT 要在一个真实大小的 zset 上跑
+            member = owner_sortable(i) + b"\x00" + str(rid(i)).encode()
+            pipe.append(resp("ZADD", owner_index_key(t), "0", member))
+            if len(pipe) >= 1000:
                 s.sendall(b"".join(pipe))
                 got = b""
                 while got.count(b"\r\n") < len(pipe):
@@ -197,8 +268,10 @@ def replay(url: str, seconds: float, procs: int) -> None:
         ("main", "Kghz"),
         ("optin", "Kghz"),
         ("optin_val", "Kghz"),
+        ("optin_cnt", "Kghz"),
         ("head", "Kz"),
         ("head", "Kghz"),
+        *((shape, "Kghz") for shape in SHAPES),
     ]
     print(f"原 notify-keyspace-events = {orig_ks!r}\n")
     print(
@@ -208,6 +281,8 @@ def replay(url: str, seconds: float, procs: int) -> None:
     try:
         for rows in (1, 2):
             for variant, ks in combos:
+                if variant in SHAPES and rows != 1:
+                    continue
                 cmd(s, "CONFIG", "SET", "notify-keyspace-events", ks)
                 c0, u0 = cmdstat(info(s), "evalsha")
                 i0 = info(s)
@@ -233,6 +308,7 @@ def replay(url: str, seconds: float, procs: int) -> None:
             keys = [row_key(t, i) for i in range(N_KEYS)]
             for j in range(0, len(keys), 1000):
                 cmd(s, "DEL", *keys[j : j + 1000])
+            cmd(s, "DEL", owner_index_key(t))
         print(
             f"\n已恢复 notify-keyspace-events={orig_ks!r}，已删除 hetu_probe: 测试 key"
         )

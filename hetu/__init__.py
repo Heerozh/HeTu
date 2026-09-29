@@ -5,13 +5,9 @@
 @email: heeroz@gmail.com
 """
 
-from . import data
-from . import system
-from . import common
-from . import endpoint
-from . import webext
-from . import headless
-from importlib.metadata import version, PackageNotFoundError
+from importlib.metadata import PackageNotFoundError, version
+
+from . import common, data, endpoint, headless, system, webext
 
 # 常用核心对象导出到顶层命名空间
 Permission = common.Permission
@@ -37,7 +33,7 @@ except PackageNotFoundError:
     __version__ = "hetu is not installed in a proper way"
 
 
-__all__ = [
+__all__ = [  # noqa: RUF022 按用途分组
     "data",
     "system",
     "common",

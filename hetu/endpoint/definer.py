@@ -7,10 +7,11 @@
 """
 
 import inspect
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from inspect import signature
 from types import FunctionType
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from ..common import Permission, Singleton
 from ..i18n import _
@@ -65,7 +66,7 @@ class EndpointDefines(metaclass=Singleton):
         defaults_count=None,
         guards=None,
     ):
-        sub_map = self._endpoint_map.setdefault(namespace, dict())
+        sub_map = self._endpoint_map.setdefault(namespace, {})
 
         if not force:
             assert func.__name__ not in sub_map, _("Endpoint重复定义：") + func.__name__

@@ -1,0 +1,441 @@
+{
+  "baseline_commit": "23f4c53667b3e885f146bccc05d2436b0c174f9c",
+  "summary": {
+    "base": {
+      "median_qps": 842.05,
+      "min_qps": 835.8,
+      "max_qps": 847.6,
+      "median_cpu_us_per_rpc": 1111.5243064898195,
+      "median_server_cpu_percent": 93.59581484189579,
+      "p50_ms": 35.61491399887018,
+      "p99_ms": 163.85336099483538,
+      "latency_samples": 763,
+      "successful_rpcs": 50511,
+      "retries": 936
+    },
+    "final": {
+      "median_qps": 1068.15,
+      "min_qps": 1058.4,
+      "max_qps": 1074.5,
+      "median_cpu_us_per_rpc": 875.0046037379948,
+      "median_server_cpu_percent": 93.41479421758976,
+      "p50_ms": 27.54892899247352,
+      "p99_ms": 42.5868710008217,
+      "latency_samples": 966,
+      "successful_rpcs": 64055,
+      "retries": 1197
+    }
+  },
+  "profiles": {
+    "base": {
+      "total_samples": 562,
+      "request_samples": 525,
+      "leaf_percent": {
+        "redis-py": 22.285714285714285,
+        "idmap": 12.0,
+        "other": 28.952380952380953,
+        "hetu-redis": 10.666666666666668,
+        "numpy": 26.095238095238095
+      },
+      "inclusive_percent": {
+        "_range_rows": 65.71428571428571,
+        "add_clean": 11.619047619047619,
+        "get_many": 38.476190476190474,
+        "_range_checks": 8.0,
+        "to_sortable_bytes": 3.428571428571429
+      }
+    },
+    "final": {
+      "total_samples": 563,
+      "request_samples": 505,
+      "leaf_percent": {
+        "idmap": 6.336633663366337,
+        "numpy": 17.82178217821782,
+        "redis-py": 28.51485148514851,
+        "other": 33.663366336633665,
+        "hetu-redis": 13.663366336633665
+      },
+      "inclusive_percent": {
+        "_range_rows": 56.83168316831683,
+        "add_clean": 1.782178217821782,
+        "get_many": 38.01980198019802,
+        "_range_checks": 11.683168316831685,
+        "to_sortable_bytes": 3.9603960396039604
+      }
+    }
+  },
+  "runs": {
+    "base-a": {
+      "data_check": {
+        "bench:IntTable:{CLU2}": {
+          "rows": 30000,
+          "version_increments": 61160,
+          "all_indexes_verified": true
+        }
+      },
+      "completed_including_warmup": 30580,
+      "config": {
+        "server_root": "/tmp/hetu-range50-pr-base",
+        "client_root": "/tmp/hetu-range50-pr-base",
+        "workload": "range50_update2",
+        "output": "/tmp/hetu-range50-pr-results/base-a",
+        "redis": "redis://127.0.0.1:16389/0",
+        "port": 18466,
+        "processes": 2,
+        "connections": 16,
+        "rounds": 3,
+        "seconds": 10.0,
+        "warmup": 4.0,
+        "server_cpu": 3,
+        "client_cpus": "0,1",
+        "profile": false,
+        "profile_cpu": 1,
+        "client": -1
+      },
+      "rounds": [
+        {
+          "qps": 845.4,
+          "successful_rpcs": 8454,
+          "retries": 168,
+          "retries_per_rpc": 0.0198722498225692,
+          "server_cpu_percent": 93.81529892811251,
+          "server_cpu_us_per_rpc": 1109.7149151657502,
+          "p50_ms": 35.12832699925639,
+          "p99_ms": 37.782140003400855
+        },
+        {
+          "qps": 835.8,
+          "successful_rpcs": 8358,
+          "retries": 153,
+          "retries_per_rpc": 0.01830581478822685,
+          "server_cpu_percent": 93.39748053882111,
+          "server_cpu_us_per_rpc": 1117.4620787128633,
+          "p50_ms": 35.99853100604378,
+          "p99_ms": 43.04827199666761
+        },
+        {
+          "qps": 847.6,
+          "successful_rpcs": 8476,
+          "retries": 139,
+          "retries_per_rpc": 0.01639924492685229,
+          "server_cpu_percent": 93.69758764584581,
+          "server_cpu_us_per_rpc": 1105.4458193233343,
+          "p50_ms": 35.57227100827731,
+          "p99_ms": 37.482686995645054
+        }
+      ],
+      "verified_cpu_affinity": {
+        "server": [
+          3
+        ],
+        "clients": [
+          [
+            0
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "cpu_environment_start": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "cpu_environment_end": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "median_qps": 845.4,
+      "server_cpu_percent": 93.62499999999999,
+      "client_cpu_seconds": [
+        1.6298628579999999,
+        1.6042583710000002
+      ]
+    },
+    "final-a": {
+      "data_check": {
+        "bench:IntTable:{CLU2}": {
+          "rows": 30000,
+          "version_increments": 77496,
+          "all_indexes_verified": true
+        }
+      },
+      "completed_including_warmup": 38748,
+      "config": {
+        "server_root": "/home/heerozh/ssw-re/Game/HeTu",
+        "client_root": "/tmp/hetu-range50-pr-base",
+        "workload": "range50_update2",
+        "output": "/tmp/hetu-range50-pr-results/final-a",
+        "redis": "redis://127.0.0.1:16389/0",
+        "port": 18466,
+        "processes": 2,
+        "connections": 16,
+        "rounds": 3,
+        "seconds": 10.0,
+        "warmup": 4.0,
+        "server_cpu": 3,
+        "client_cpus": "0,1",
+        "profile": false,
+        "profile_cpu": 1,
+        "client": -1
+      },
+      "rounds": [
+        {
+          "qps": 1069.3,
+          "successful_rpcs": 10693,
+          "retries": 205,
+          "retries_per_rpc": 0.0191714205555036,
+          "server_cpu_percent": 93.52688171511782,
+          "server_cpu_us_per_rpc": 874.6552110270068,
+          "p50_ms": 27.39744399150368,
+          "p99_ms": 30.0212939910125
+        },
+        {
+          "qps": 1071.2,
+          "successful_rpcs": 10712,
+          "retries": 185,
+          "retries_per_rpc": 0.017270351008215085,
+          "server_cpu_percent": 93.39609420596412,
+          "server_cpu_us_per_rpc": 871.8828809369317,
+          "p50_ms": 27.95820400933735,
+          "p99_ms": 41.655841007013805
+        },
+        {
+          "qps": 1074.5,
+          "successful_rpcs": 10745,
+          "retries": 211,
+          "retries_per_rpc": 0.01963704048394602,
+          "server_cpu_percent": 93.5005371376225,
+          "server_cpu_us_per_rpc": 870.1771720579106,
+          "p50_ms": 27.242320007644594,
+          "p99_ms": 42.538689987850375
+        }
+      ],
+      "verified_cpu_affinity": {
+        "server": [
+          3
+        ],
+        "clients": [
+          [
+            0
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "cpu_environment_start": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "cpu_environment_end": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "median_qps": 1071.2,
+      "server_cpu_percent": 93.46875,
+      "client_cpu_seconds": [
+        1.999096984,
+        2.061478233
+      ]
+    },
+    "final-b": {
+      "data_check": {
+        "bench:IntTable:{CLU2}": {
+          "rows": 30000,
+          "version_increments": 76842,
+          "all_indexes_verified": true
+        }
+      },
+      "completed_including_warmup": 38421,
+      "config": {
+        "server_root": "/home/heerozh/ssw-re/Game/HeTu",
+        "client_root": "/tmp/hetu-range50-pr-base",
+        "workload": "range50_update2",
+        "output": "/tmp/hetu-range50-pr-results/final-b",
+        "redis": "redis://127.0.0.1:16389/0",
+        "port": 18466,
+        "processes": 2,
+        "connections": 16,
+        "rounds": 3,
+        "seconds": 10.0,
+        "warmup": 4.0,
+        "server_cpu": 3,
+        "client_cpus": "0,1",
+        "profile": false,
+        "profile_cpu": 1,
+        "client": -1
+      },
+      "rounds": [
+        {
+          "qps": 1058.4,
+          "successful_rpcs": 10584,
+          "retries": 195,
+          "retries_per_rpc": 0.018424036281179137,
+          "server_cpu_percent": 93.42765845959077,
+          "server_cpu_us_per_rpc": 882.7254200641606,
+          "p50_ms": 27.723944003810175,
+          "p99_ms": 119.60976199770812
+        },
+        {
+          "qps": 1065.1,
+          "successful_rpcs": 10651,
+          "retries": 198,
+          "retries_per_rpc": 0.018589803774293492,
+          "server_cpu_percent": 93.40192997558873,
+          "server_cpu_us_per_rpc": 876.9310860537859,
+          "p50_ms": 27.779034004197456,
+          "p99_ms": 96.53619000164326
+        },
+        {
+          "qps": 1067.0,
+          "successful_rpcs": 10670,
+          "retries": 203,
+          "retries_per_rpc": 0.019025304592314902,
+          "server_cpu_percent": 93.40027142110645,
+          "server_cpu_us_per_rpc": 875.3539964489827,
+          "p50_ms": 27.355783997336403,
+          "p99_ms": 68.88987800630275
+        }
+      ],
+      "verified_cpu_affinity": {
+        "server": [
+          3
+        ],
+        "clients": [
+          [
+            0
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "cpu_environment_start": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "cpu_environment_end": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "median_qps": 1065.1,
+      "server_cpu_percent": 93.40625,
+      "client_cpu_seconds": [
+        2.067704279,
+        2.0582407930000004
+      ]
+    },
+    "base-b": {
+      "data_check": {
+        "bench:IntTable:{CLU2}": {
+          "rows": 30000,
+          "version_increments": 60964,
+          "all_indexes_verified": true
+        }
+      },
+      "completed_including_warmup": 30482,
+      "config": {
+        "server_root": "/tmp/hetu-range50-pr-base",
+        "client_root": "/tmp/hetu-range50-pr-base",
+        "workload": "range50_update2",
+        "output": "/tmp/hetu-range50-pr-results/base-b",
+        "redis": "redis://127.0.0.1:16389/0",
+        "port": 18466,
+        "processes": 2,
+        "connections": 16,
+        "rounds": 3,
+        "seconds": 10.0,
+        "warmup": 4.0,
+        "server_cpu": 3,
+        "client_cpus": "0,1",
+        "profile": false,
+        "profile_cpu": 1,
+        "client": -1
+      },
+      "rounds": [
+        {
+          "qps": 838.2,
+          "successful_rpcs": 8382,
+          "retries": 166,
+          "retries_per_rpc": 0.01980434263898831,
+          "server_cpu_percent": 93.52614235215543,
+          "server_cpu_us_per_rpc": 1115.7974511113748,
+          "p50_ms": 35.89006999391131,
+          "p99_ms": 163.85336099483538
+        },
+        {
+          "qps": 841.2,
+          "successful_rpcs": 8412,
+          "retries": 170,
+          "retries_per_rpc": 0.020209224916785545,
+          "server_cpu_percent": 93.58988533257082,
+          "server_cpu_us_per_rpc": 1112.57590742476,
+          "p50_ms": 35.426100992481224,
+          "p99_ms": 146.91067299281713
+        },
+        {
+          "qps": 842.9,
+          "successful_rpcs": 8429,
+          "retries": 140,
+          "retries_per_rpc": 0.016609324949578834,
+          "server_cpu_percent": 93.60174435122074,
+          "server_cpu_us_per_rpc": 1110.4727055548788,
+          "p50_ms": 35.677109990501776,
+          "p99_ms": 213.90167399658822
+        }
+      ],
+      "verified_cpu_affinity": {
+        "server": [
+          3
+        ],
+        "clients": [
+          [
+            0
+          ],
+          [
+            1
+          ]
+        ]
+      },
+      "cpu_environment_start": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "cpu_environment_end": {
+        "p_cores": "0-3",
+        "e_cores": "4-15",
+        "platform_profile": "performance",
+        "governor": "powersave",
+        "energy_performance_preference": "performance"
+      },
+      "median_qps": 841.2,
+      "server_cpu_percent": 93.5625,
+      "client_cpu_seconds": [
+        1.575078501,
+        1.604175773
+      ]
+    }
+  }
+}

@@ -10,8 +10,9 @@ import json
 import keyword
 import logging
 import operator
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, cast, overload
+from typing import Any, ClassVar, cast, overload
 
 import numpy as np
 
@@ -22,6 +23,11 @@ from ..i18n import _
 
 logger = logging.getLogger("HeTu.root")
 SNOWFLAKE_ID = SnowflakeID()
+
+# 单行数据是 np.record、多行是 np.recarray，两者读属性都是 numpy 自己的属性优先、字段其次：
+# 字段叫 size 的话 row.size 读到的是 numpy 的 size（写却写进字段），rows.shape = ... 还可能
+# 被当成 reshape。按运行时的 dir() 取，numpy 升级新加的属性也能挡住
+NUMPY_ROW_ATTRS = frozenset(dir(np.record)) | frozenset(dir(np.recarray))
 
 
 @dataclass
@@ -117,7 +123,9 @@ def property_field(
     `property_field(...)` 只负责声明字段元数据，真正的合法性校验会在
     `@define_component` 执行时完成，包括：
 
-    - 字段名是否合法；
+    - 字段名是否合法：不能是 Python / C# 关键字，也不能和 numpy 行数据
+      （`np.record` / `np.recarray`）的属性同名，如 `size`、`item`、`shape`，
+      否则 `row.size` 读到的是 numpy 的属性而不是字段值；
     - `default` 与 `dtype` 是否兼容；
     - `dtype` 是否可用于 NumPy structured array；
     - `unique/index/point_sub` 组合是否合法。
@@ -133,7 +141,7 @@ class BaseComponent:
     """所有组件的基类"""
 
     # -------------------------------定义部分-------------------------------
-    properties_: list[tuple[str, Property]] = []  # Ordered属性列表
+    properties_: ClassVar[list[tuple[str, Property]]] = []  # Ordered属性列表
     name_: str
     namespace_: str
     permission_: Permission = Permission.USER
@@ -155,7 +163,7 @@ class BaseComponent:
     uniques_: set[str]  # 唯一索引的属性名集合
     indexes_: dict[str, bool]  # 索引名->是否是字符串类型 的映射
     json_: str  # Component定义的json字符串
-    instances_: dict[str, dict[str, type[BaseComponent]]] = {}  # 所有副本实例
+    instances_: ClassVar[dict[str, dict[str, type[BaseComponent]]]] = {}  # 所有副本实例
     master_: type[BaseComponent] | None = None  # 该Component的主实例
 
     @staticmethod
@@ -296,10 +304,9 @@ class BaseComponent:
     @classmethod
     def dict_to_struct(cls, data: dict) -> np.record:
         """从dict转换为c-struct like的类型，成为可直接传给数据库的行数据"""
-        row = cls.new_row(id_=data["id"])
-        for i, (name, _prop) in enumerate(cls.properties_):
-            row[i] = data[name]
-        return row
+        # 存储的行包含全部字段：整行一次构造，省掉复制默认行再逐字段赋值
+        values = tuple(data[name] for name, _prop in cls.properties_)
+        return np.array([values], dtype=cls.dtypes).view(np.recarray)[0]
 
     @classmethod
     def struct_to_dict(cls, data: np.record) -> dict[str, Any]:
@@ -369,7 +376,7 @@ class ComponentDefines(metaclass=Singleton):
     def add_component(
         self, namespace: str, component_cls: type[BaseComponent], force: bool = False
     ):
-        comp_map = self._components.setdefault(namespace, dict())
+        comp_map = self._components.setdefault(namespace, {})
         if not force:
             assert component_cls.name_ not in comp_map, _("Component重复定义")
         comp_map[component_cls.name_] = component_cls
@@ -509,6 +516,14 @@ def define_component(
                     cname=cname, fname=fname
                 )
             )
+        # 只在定义时检查：迁移要用 load_json 加载旧 schema，旧表里撞名的列得能读出来
+        if fname in NUMPY_ROW_ATTRS:
+            raise ValueError(
+                _(
+                    "{cname}.{fname}属性定义出错，属性名不能和numpy行数据的属性同名，"
+                    "否则row.{fname}读到的是numpy的属性而不是字段值，请换个名字。"
+                ).format(cname=cname, fname=fname)
+            )
         # 判断类型，以及长度合法性
         assert np.dtype(prop.dtype).itemsize > 0, _(
             "{cname}.{fname}属性的dtype不能为0长度。str类型请用'<U8'方式定义"
@@ -615,7 +630,7 @@ def define_component(
                 _normalize_prop(cls.__name__, _name, anno_type, prop)
                 properties[_name] = prop
             else:
-                raise AssertionError(
+                raise TypeError(
                     _("{cls_name}.{name}不是Property类型").format(
                         cls_name=cls.__name__, name=_name
                     )

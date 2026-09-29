@@ -65,21 +65,21 @@ class SlowLog:
         time_avg.add(elapsed)
         retry_avg.add(retry)
         # 1分钟打印一次消息
-        if elapsed > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD:
-            if now - self._logged.get(name, 0) > self.log_interval:
-                logger.warning(
-                    _(
-                        "⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed}秒，"
-                        "事务冲突次数 {retry}，平均时间 {avg_time}秒\n{table}"
-                    ).format(
-                        name=name,
-                        elapsed=f"{elapsed:.3f}",
-                        retry=retry,
-                        avg_time=f"{time_avg.value:.3f}",
-                        table=self,
-                    )
+        slow = elapsed > SLOW_LOG_TIME_THRESHOLD or retry > SLOW_LOG_RETRY_THRESHOLD
+        if slow and now - self._logged.get(name, 0) > self.log_interval:
+            logger.warning(
+                _(
+                    "⚠️ [📞慢日志] 系统 {name} 执行时间 {elapsed}秒，"
+                    "事务冲突次数 {retry}，平均时间 {avg_time}秒\n{table}"
+                ).format(
+                    name=name,
+                    elapsed=f"{elapsed:.3f}",
+                    retry=retry,
+                    avg_time=f"{time_avg.value:.3f}",
+                    table=self,
                 )
-                self._logged[name] = now
+            )
+            self._logged[name] = now
 
     def __str__(self):
         slow20 = sorted(

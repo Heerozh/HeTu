@@ -9,85 +9,73 @@ import asyncio
 import itertools
 import logging
 import random
-from collections.abc import Iterable
+from collections.abc import Awaitable, Iterable, Sequence
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Never, cast, final, overload, override
+from typing import TYPE_CHECKING, Any, Literal, cast, final, overload, override
 
-# from msgspec import msgpack  # 不支持关闭bin type，lua 的msgpack库7年没更新了
-import msgpack
 import numpy as np
 import redis
+
+# 这几个子模块运行时都在用（建连接、isinstance、except），不能只在类型检查时 import
+import redis.asyncio
+import redis.asyncio.cluster
+import redis.cluster
+import redis.exceptions
 from redis.cluster import LoadBalancingStrategy
 
 from ....i18n import _
-from ..base import (
-    BackendClient,
-    RaceCondition,
-    RowFormat,
-    UniqueViolation,
-    peel_bound_,
-    sortable_token,
-    to_sortable_bytes,
-)
+from ..base import BackendClient, RowFormat
+from ..redis_model import RedisModelClient
 from .pool import HeTuConnectionPool
 
 if TYPE_CHECKING:
-    import redis.asyncio
-    import redis.asyncio.cluster
-    import redis.cluster
-    import redis.exceptions
-
     from ...component import BaseComponent
-    from ..idmap import IdentityMap
     from ..table import TableReference
     from .maint import RedisTableMaintenance
     from .mq import PubSubHub, RedisMQClient
 
 logger = logging.getLogger("HeTu.root")
-msg_packer = msgpack.Packer(use_bin_type=False)
+
+# direct_set 的回退（服务端不支持 HSETEX 时）：要写的字段都已存在才写，同 HSETEX FXX。字段不在
+# （含整行不存在）就什么都不写，不会建出残缺行。返回 1 / 0
+# 代价：一次约 1.2~1.4µs，HSET 约 0.09µs。它要写，只能在 master 上跑，只读 Lua 转副本的开关
+# （如阿里云的 readonly_lua_route_ronode_enable）帮不上；把 HEXISTS 拆去副本又丢了原子性。按连接
+# 心跳最多每 ENDPOINT_CALL_IDLE_TIMEOUT / 5（默认 24 秒）写一次算，10 万在线约占 master 单核 0.5%
+DIRECT_SET_LUA = """
+for i = 1, #ARGV, 2 do
+    if redis.call('HEXISTS', KEYS[1], ARGV[i]) == 0 then
+        return 0
+    end
+end
+redis.call('HSET', KEYS[1], unpack(ARGV))
+return 1
+"""
 
 
 @final
-class RedisBackendClient(BackendClient, alias="redis"):
-    """和Redis后端的操作的类，服务器启动时由server.py根据Config初始化"""
+class RedisBackendClient(RedisModelClient, alias="redis"):
+    """
+    和Redis后端的操作的类，服务器启动时由server.py根据Config初始化。
+    key 布局、索引编码、commit payload 等纯逻辑在 `RedisModelClient`（与 SQLite 后端共用），
+    这里只有 redis-py 的 I/O。
+    """
 
     # range/get_many 批量读行时，每个pipeline最多打包的HGETALL条数
     RANGE_PIPELINE_CHUNK = 1000
 
-    @staticmethod
-    def _get_referred_components() -> list[type[BaseComponent]]:
-        """获取当前app用到的Component列表"""
-        from ....system.definer import SystemClusters
-
-        return [comp_cls for comp_cls in SystemClusters().get_components().keys()]
-
-    def _schema_checking_for_redis(
-        self, components: Iterable[type[BaseComponent]] | None = None
-    ):
-        """检查Component的schema定义，确保符合Redis的要求"""
-        if components is None:
-            components = self._get_referred_components()
-        for comp_cls in components:
-            for field, _is_str in comp_cls.indexes_.items():
-                dtype = comp_cls.dtype_map_[field]
-                # 索引不支持复数
-                if np.issubdtype(dtype, np.complexfloating):
-                    raise ValueError(
-                        _(
-                            "Component `{comp_name}` 的索引字段`{field}`"
-                            "使用了复数，Redis后端不支持此类型作为索引字段"
-                        ).format(comp_name=comp_cls.name_, field=field)
-                    )
-                # 其他类型不支持索引
-                elif np.issubdtype(dtype, np.object_):
-                    raise ValueError(
-                        _(
-                            "Component `{comp_name}` 的索引字段`{field}`"
-                            "使用了不可用的类型 `{dtype}`，此类型不支持索引"
-                        ).format(comp_name=comp_cls.name_, field=field, dtype=dtype)
-                    )
+    # 探测 HSETEX 用的 key：FXX 对不存在的 key 什么都不写，拿它试一次没有副作用
+    HSETEX_PROBE_KEY = "hetu:probe:hsetex"
+    # 探测遇到连接错误时最多试几次
+    HSETEX_PROBE_ATTEMPTS = 3
 
     def load_commit_scripts(self, file: str | Path):
+        # read file to text
+        with open(file, "r", encoding="utf-8") as f:
+            script_text = f.read()
+        return self.register_script_(script_text)
+
+    def register_script_(self, script_text: str):
+        """内部方法：把 Lua 脚本载入 master，返回可 await 调用的 Script"""
         assert self._async_ios, _("连接已关闭，已调用过close")
         assert self.is_servant is False, _(
             "Servant不允许加载Lua事务脚本，Lua事务脚本只能在Master上加载"
@@ -95,14 +83,45 @@ class RedisBackendClient(BackendClient, alias="redis"):
         assert len(self._async_ios) == 1, _(
             "Lua事务脚本只能在Master上加载，但当前连接池中有多个服务器"
         )
-        # read file to text
-        with open(file, "r", encoding="utf-8") as f:
-            script_text = f.read()
-
         # 上传脚本到服务器使用同步io
         self._ios[0].script_load(script_text)
         # 注册脚本到异步io，因为master只能有一个连接，直接[0]就行了
         return self._async_ios[0].register_script(script_text)  # type: ignore
+
+    def probe_hsetex_(self) -> bool:
+        """
+        内部方法：服务端（含前面的代理层）支不支持 `HSETEX key FXX …`（Redis >= 8.0、
+        Valkey >= 9.0）。FXX 对不存在的 key 什么都不写，拿不存在的探测 key 试一次没有副作用。
+        结论管这个进程的一辈子，所以只在确定不支持时才回退 Lua：网络抖动重试，master 连不上
+        照常抛出（启动失败），不悄悄降级。
+        """
+        io = self._ios[0]
+        error: redis.exceptions.RedisError | None = None
+        for _attempt in range(self.HSETEX_PROBE_ATTEMPTS):
+            try:
+                io.execute_command(
+                    "HSETEX", self.HSETEX_PROBE_KEY, "FXX", "FIELDS", 1, "f", "v"
+                )
+                return True
+            except (
+                redis.exceptions.ConnectionError,
+                redis.exceptions.TimeoutError,
+            ) as e:
+                # 网络抖动，或者有的代理层遇到不认识的命令直接断连接。PING 不通就是前者，
+                # 照常抛出；通的话再试，每次都断才算后者
+                error = e
+                io.ping()
+            except redis.exceptions.RedisError as e:
+                # 服务端回 unknown command、集群客户端的命令表里没有
+                error = e
+                break
+        logger.info(
+            _(
+                "ℹ️ [💾Redis] master 上用不了 HSETEX（{err}），direct_set "
+                "改用同样语义的 Lua 脚本（稍慢）"
+            ).format(err=error)
+        )
+        return False
 
     @property
     def io(self) -> redis.Redis | redis.cluster.RedisCluster:
@@ -122,78 +141,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         return random.choice(self._async_ios)
 
-    @staticmethod
-    def table_prefix(table_ref: TableReference) -> str:
-        """获取redis表名前缀"""
-        return f"{table_ref.instance_name}:{table_ref.comp_cls.name_}"
-
-    @staticmethod
-    def cluster_prefix(table_ref: TableReference) -> str:
-        """获取redis表名前缀"""
-        return (
-            f"{table_ref.instance_name}:{table_ref.comp_cls.name_}:"
-            f"{{CLU{table_ref.cluster_id}}}"
-        )
-
-    @classmethod
-    def row_key(cls, table_ref: TableReference, row_id: str | int) -> str:
-        """获取redis表行的key名"""
-        return f"{cls.cluster_prefix(table_ref)}:id:{str(row_id)}"
-
-    @classmethod
-    def index_key(cls, table_ref: TableReference, index_name: str) -> str:
-        """获取redis表索引的key名"""
-        return f"{cls.cluster_prefix(table_ref)}:index:{index_name}"
-
-    @override
-    def index_channel(self, table_ref: TableReference, index_name: str):
-        """返回整个索引的频道名（keyspace 通知）。该索引 zset 任何 ZADD/ZREM 都会通知到该频道"""
-        return f"__keyspace@{self.dbi}__:{self.index_key(table_ref, index_name)}"
-
-    @classmethod
-    def value_channel_(cls, idx_key: str, sortable: bytes) -> str:
-        """`index_value_channel` 的内部形式：commit 里已经算好 sortable bytes 时直接拼，不重复编码"""
-        return f"{idx_key}:{sortable_token(sortable)}"
-
-    @override
-    def index_value_channel(
-        self, table_ref: TableReference, index_name: str, value: Any
-    ) -> str:
-        """
-        返回索引某一个值的频道名（只有声明了 point_sub 的索引才有，否则抛 ValueError）。
-        这是 commit lua 脚本主动 PUBLISH 的普通频道（非 keyspace 通知）；名字带 {CLU}
-        hash tag，cluster 模式下按 slot 路由。
-
-        Channel of one index value (only for indexes declared with `point_sub`, raises
-        `ValueError` otherwise). A plain channel PUBLISHed by the commit Lua script, not
-        a keyspace notification; the name carries the {CLU} hash tag, so cluster mode
-        routes it by slot.
-        """
-        self.require_point_sub_(table_ref, index_name)
-        dtype = table_ref.comp_cls.dtype_map_[index_name]
-        return self.value_channel_(
-            self.index_key(table_ref, index_name), to_sortable_bytes(dtype.type(value))
-        )
-
-    @override
-    def row_channel(self, table_ref: TableReference, row_id: int):
-        """返回行数据的频道名。如果行有变动，会通知到该频道"""
-        return f"__keyspace@{self.dbi}__:{self.row_key(table_ref, row_id)}"
-
-    @override
-    def table_channel(self, table_ref: TableReference):
-        """
-        返回表级变更频道名。这是commit lua脚本主动PUBLISH的普通频道（非keyspace通知），
-        只给声明了 table_sub 的组件发；名字带{CLU}hash tag，cluster模式下
-        AsyncKeyspacePubSub按slot路由订阅。
-
-        Channel of table-level changes: a plain channel PUBLISHed by the commit Lua
-        script (not a keyspace notification), only for components declared with
-        `table_sub`. The name carries the {CLU} hash tag, so in cluster mode
-        AsyncKeyspacePubSub routes the subscription by slot.
-        """
-        return f"{self.cluster_prefix(table_ref)}{self.TABLE_CHANNEL_SUFFIX}"
-
     async def reset_async_connection_pool(self):
         """重置异步连接池，用于协程切换后，解决aio不能跨协程传递的问题"""
         self.loop_id = 0
@@ -203,9 +150,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
                 await aio.aclose()  # 未测试
             else:
                 aio.connection_pool.reset()
-
-    # 索引 member 的值编码搬到了 base.py（两个后端共用来给索引值频道命名），这里保留同名别名
-    to_sortable_bytes = staticmethod(to_sortable_bytes)
 
     # ============ 主要方法 ============
 
@@ -304,6 +248,8 @@ class RedisBackendClient(BackendClient, alias="redis"):
             self.dbi = io.connection_pool.connection_kwargs["db"]
 
         self.lua_commit = None
+        # direct_set 回退用的 Lua，服务端不支持 HSETEX 时由 configure_master 载入；None 即用 HSETEX
+        self.direct_set_script = None
         # 本进程共享的 pubsub 分发器，首次 get_mq_client 时在事件循环里懒建
         self._hub: PubSubHub | None = None
 
@@ -345,8 +291,13 @@ class RedisBackendClient(BackendClient, alias="redis"):
         self.lua_commit = self.load_commit_scripts(
             Path(__file__).parent.resolve() / "commit_v2.lua"
         )
-        # 提示用户schema定义是否符合redis要求，比如索引类型不能有复数等
-        self._schema_checking_for_redis(components)
+        # direct_set 优先用原生的 HSETEX FXX（和 HSET 差不多快），不支持的（Redis 7、Valkey 8、
+        # 部分代理层）回退到同样语义的 Lua
+        self.direct_set_script = (
+            None if self.probe_hsetex_() else self.register_script_(DIRECT_SET_LUA)
+        )
+        # 提示用户schema定义是否符合要求，比如索引类型不能有复数等
+        self._schema_checking(components)
 
     def configure_servant(self) -> None:
         if not self._ios:
@@ -420,7 +371,7 @@ class RedisBackendClient(BackendClient, alias="redis"):
             checkpoint = master_offset
         for key, value in info.items():
             # 兼容 Redis 新旧版本（slave/replica 字段）
-            if key.startswith("slave") or key.startswith("replica"):
+            if key.startswith(("slave", "replica")):
                 if type(value) is not dict:  # 可能是 replicas_waiting_psync:0
                     continue
                 lag_of_offset = checkpoint - int(value.get("offset", 0))
@@ -446,53 +397,6 @@ class RedisBackendClient(BackendClient, alias="redis"):
         if self._hub is not None:
             hub, self._hub = self._hub, None
             await hub.close()
-
-    @overload
-    @staticmethod
-    def row_decode_(
-        comp_cls: type[BaseComponent],
-        row: dict[bytes, bytes],
-        fmt: Literal[RowFormat.STRUCT],
-    ) -> np.record: ...
-    @overload
-    @staticmethod
-    def row_decode_(
-        comp_cls: type[BaseComponent],
-        row: dict[bytes, bytes],
-        fmt: Literal[RowFormat.RAW, RowFormat.TYPED_DICT],
-    ) -> dict[str, Any]: ...
-    @overload
-    @staticmethod
-    def row_decode_(
-        comp_cls: type[BaseComponent],
-        row: dict[bytes, bytes],
-        fmt: Literal[RowFormat.ID_LIST],
-    ) -> Never: ...
-    @staticmethod
-    def row_decode_(
-        comp_cls: type[BaseComponent], row: dict[bytes, bytes], fmt: RowFormat
-    ) -> np.record | dict[str, Any]:
-        """将redis获取的行byte数据解码为指定格式"""
-        row_decoded: dict[str, str | bytes] = {
-            k.decode("utf-8", "ignore"): v.decode("utf-8", "ignore")
-            for k, v in row.items()
-        }
-        if fmt is not RowFormat.RAW:
-            # bytes 字段用原始字节：utf-8 解码会丢掉不合法的字节，
-            # 非 ASCII 的 str 也存不进 S 类型。RAW 格式照旧一律是 str
-            for name in comp_cls.bytes_fields_:
-                if (raw := row.get(name.encode())) is not None:
-                    row_decoded[name] = raw
-        match fmt:
-            case RowFormat.RAW:
-                return row_decoded
-            case RowFormat.STRUCT:
-                return comp_cls.dict_to_struct(row_decoded)
-            case RowFormat.TYPED_DICT:
-                struct_row = comp_cls.dict_to_struct(row_decoded)
-                return comp_cls.struct_to_dict(struct_row)
-            case _:
-                raise ValueError(_("不可用的行格式: {fmt}").format(fmt=fmt))
 
     @overload
     async def get(
@@ -561,9 +465,10 @@ class RedisBackendClient(BackendClient, alias="redis"):
         else:
             return None
 
-    async def _hgetall_many(
-        self, key_prefix: str, row_ids: Iterable[int | str]
-    ) -> list[dict]:
+    @override
+    async def hgetall_many_(
+        self, table_ref: TableReference, row_ids: Sequence[int]
+    ) -> list[dict[bytes, bytes]]:
         """
         按块pipeline批量HGETALL，返回与row_ids顺序一致的raw dict列表，不存在的为空dict。
 
@@ -571,14 +476,15 @@ class RedisBackendClient(BackendClient, alias="redis"):
         的N次读取合并成 ceil(N/CHUNK) 次往返，不会让不相关的请求互相等待。
         同一张表的所有行key都带同一个 {CLU} hash tag，cluster模式下同slot，pipeline可直接用。
         """
+        if not self._ios:
+            raise ConnectionError(_("连接已关闭，已调用过close"))
         aio = self.aio
-        if not isinstance(row_ids, (list, tuple)):
-            row_ids = list(row_ids)
+        key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
         if len(row_ids) == 1:
             # 单行直接 HGETALL：redis-py 8 的 pipeline 有固定开销（建对象、HIMPORT 预处理、
             # asyncio.shield 还连接），比单条命令贵一截，而 upsert、get(unique=) 每次都走这里
-            return [await aio.hgetall(key_prefix + str(row_ids[0]))]
-        rows: list[dict] = []
+            return [await aio.hgetall(key_prefix + str(row_ids[0]))]  # type: ignore
+        rows: list[dict[bytes, bytes]] = []
         for chunk in itertools.batched(row_ids, self.RANGE_PIPELINE_CHUNK):
             async with aio.pipeline(transaction=False) as pipe:
                 for _id in chunk:
@@ -587,500 +493,53 @@ class RedisBackendClient(BackendClient, alias="redis"):
         return rows
 
     @override
-    async def get_many(
-        self,
-        table_ref: TableReference,
-        row_ids: Iterable[int],
-        row_format: RowFormat = RowFormat.STRUCT,
-    ) -> list[np.record | dict[str, str] | dict[str, Any] | None]:
+    def zrange_bylex_(
+        self, idx_key: str, b_left: bytes, b_right: bytes, desc: bool, limit: int
+    ) -> Awaitable[list[bytes]]:
+        """直接交出 redis-py 的 awaitable，见基类"""
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        assert row_format != RowFormat.ID_LIST, "get_many不支持ID_LIST格式"
-        key_prefix = self.cluster_prefix(table_ref) + ":id:"
-        comp_cls = table_ref.comp_cls
-        return [
-            self.row_decode_(comp_cls, row, row_format) if row else None
-            for row in await self._hgetall_many(key_prefix, row_ids)
-        ]
-
-    @classmethod
-    def range_normalize_(
-        cls,
-        dtype: np.dtype,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None,
-        desc: bool,
-    ) -> tuple[bytes, bytes]:
-        """规范化范围查询的左边界和右边界"""
-        # 处理right none, 顺序问题
-        if right is None:
-            right = left
-        if desc:
-            left, right = right, left
-
-        if issubclass(dtype.type, np.character):
-            # component字段如果是str/bytes类型的索引，不能查询数字
-            if type(left) not in (str, bytes) or type(right) not in (str, bytes):
-                raise ValueError(
-                    f"字符串类型的查询变量类型必须是str/bytes，你的：left={type(left)}({left}), "
-                    f"right={type(right)}({right})"
-                )
-        else:
-            # component字段如果是int数字，则处理inf
-            # 浮点不用处理，因为浮点的inf是高位的Exponent全FF，大于2**1023最大值，自然永远最大
-            if issubclass(dtype.type, np.integer):
-                type_info = np.iinfo(dtype)
-
-                def clamp_inf(x):
-                    if type(x) is float and np.isinf(x):
-                        return type_info.max if x > 0 else type_info.min
-                    return x
-
-                left = clamp_inf(left)
-                right = clamp_inf(right)
-
-        # 处理范围区间：边界值开头的 "(" / "[" 指定开/闭，默认闭区间
-        left, li = peel_bound_(left)
-        right, ri = peel_bound_(right)
-        li = True if li is None else li
-        ri = True if ri is None else ri
-        # member 是 value\x00id（value 段已对 0x00 转义，见 to_sortable_bytes）。
-        # 终止符 b"\x00" = 该 value 的下边界(含最小 id)，b"\x00\xff" = 上边界(含所有 id)。
-        ls = b"\x00" if li else b"\x00\xff"
-        rs = b"\x00\xff" if ri else b"\x00"
-        if desc:
-            ls, rs = rs, ls
-
-        # 二进制化。
-        b_left = b"[" + to_sortable_bytes(dtype.type(left)) + ls
-        b_right = b"[" + to_sortable_bytes(dtype.type(right)) + rs
-        return b_left, b_right
-
-    @staticmethod
-    def make_zrange_cmd_(b_left, b_right, desc, limit):
-        return {
-            "start": b_left,
-            "end": b_right,
-            "desc": desc,
-            "offset": 0,
-            "num": limit,
-            "bylex": True,
-            "byscore": False,
-        }
-
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.STRUCT] = RowFormat.STRUCT,
-    ) -> np.recarray: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.RAW] = ...,
-    ) -> list[dict[str, str]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.TYPED_DICT] = ...,
-    ) -> list[dict[str, Any]]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: Literal[RowFormat.ID_LIST] = ...,
-    ) -> list[int]: ...
-    @overload
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format: RowFormat = ...,
-    ) -> np.recarray | list[dict[str, str]] | list[dict[str, Any]] | list[int]: ...
-    @override
-    async def range(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None = None,
-        limit: int = 100,
-        desc: bool = False,
-        row_format=RowFormat.STRUCT,
-    ) -> list[int] | list[dict[str, Any]] | np.recarray:
-        """
-        从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
-        如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
-
-        Parameters
-        ----------
-        table_ref: TableReference
-            表信息，指定Component、实例名、分片簇id。
-        index_name: str
-            查询Component中的哪条索引
-        left, right: str or number
-            查询范围，闭区间。可以在开头加上"["指定闭区间，还是"("开区间。
-            如果right不填写，则精确查询等于left的数据。
-        limit: int
-            限制返回的行数，本方法至少请求数据库 `1 + limit` 次。
-            负数表示不限制行数。
-        desc: bool
-            是否降序排列
-        row_format
-            返回数据解码格式，见 "Returns"
-
-        Returns
-        -------
-        row: np.recarray or list[int] or list[dict]
-            根据 `row_format` 参数返回以下格式之一：
-
-            - RowFormat.STRUCT - **默认值**
-                返回 `numpy.recarray`，如果没有查询到数据，返回空 `numpy.recarray`。
-                `numpy.recarray` 是一种 c-struct array。
-            - RowFormat.RAW
-                返回无类型的原始数据 (dict[str, str]) 的列表，如果没有查询到数据，返回空list
-            - RowFormat.TYPED_DICT
-                返回符合Component定义的，有格式的dict类型列表，如果没有查询到数据，返回空list
-                此方法性能低于 `RowFormat.STRUCT` ，主要用于json后传递给客户端。
-            - RowFormat.ID_LIST
-                返回查询到的 row id 列表，如果没有查询到数据，返回空list
-
-        Notes
-        -----
-        如何复合条件查询？
-        请利用python的特性，先在数据库上筛选出最少量的数据，然后本地二次筛选::
-
-            items = client.range(ref, "owner", player_id, limit=100)
-            few_items = items[items.amount < 10]
-
-        由于python numpy支持SIMD，比直接在数据库复合查询快。
-        """
-        if not self._ios:
-            raise ConnectionError(_("连接已关闭，已调用过close"))
-
-        idx_key = self.index_key(table_ref, index_name)
-        aio = self.aio
-
-        # 生成zrange命令
-        comp_cls = table_ref.comp_cls
-        if index_name not in comp_cls.indexes_:
-            raise ValueError(f"Component `{comp_cls.name_}` 没有索引 `{index_name}`")
-        b_left, b_right = self.range_normalize_(
-            comp_cls.dtype_map_[index_name], left, right, desc
+        return cast(
+            Awaitable[list[bytes]],
+            self.aio.zrange(
+                name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
+            ),
         )
-        if (b_left < b_right) if desc else (b_right < b_left):
-            raise ValueError(f"left必须大于等于right，你的:right={right}, left={left}")
-
-        row_ids = await aio.zrange(
-            name=idx_key, **self.make_zrange_cmd_(b_left, b_right, desc, limit)
-        )
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
-
-        if row_format == RowFormat.ID_LIST:
-            return row_ids
-
-        key_prefix = self.cluster_prefix(table_ref) + ":id:"  # 存下前缀组合key快1倍
-        # pipeline批量读行，N行只需 ceil(N/RANGE_PIPELINE_CHUNK) 次往返
-        rows = [
-            self.row_decode_(comp_cls, row, row_format)
-            for row in await self._hgetall_many(key_prefix, row_ids)
-            if row
-        ]
-
-        if row_format == RowFormat.RAW or row_format == RowFormat.TYPED_DICT:
-            return cast(list[dict[str, Any]], rows)
-        else:
-            if len(rows) == 0:
-                return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
-            else:
-                record_list = cast(list[np.record], rows)
-                return np.rec.array(np.stack(record_list, dtype=comp_cls.dtypes))
 
     @override
-    async def commit(self, idmap: IdentityMap) -> None:
+    def commit_script_(self, keys: list[str], args: list[bytes]) -> Awaitable[bytes]:
         """
-        使用事务，向数据库提交IdentityMap中的所有数据修改
-
-        Exceptions
-        --------
-        RaceCondition
-            数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
-        UniqueViolation
-            主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
-
+        执行 commit_v2.lua（`configure_master` 里加载），见基类。不包一层 async：直接交出
+        lua_commit 的 awaitable，commit 路径上少一层协程
         """
-
-        def _key_must_not_exist(_key: str, _race: bool, _label: str):
-            """添加key must not exist的检查（insert 主键）；_race 表示本事务曾 get 观察其不存在"""
-            (race_checks if _race else strict_checks).append(
-                ["NX", _key, "RACE" if _race else "UNIQUE", _label]
-            )
-
-        def _version_must_match(_key: str, _old_version):
-            """添加version match的检查，恒为竞态类"""
-            race_checks.append(["VER", _key, _old_version])
-
-        def _unique_meet(
-            _unique_fields,
-            _dtype_map,
-            _idx_prefix,
-            _row: dict[str, str | bytes],
-            _absent: set[str],
-            _comp_name: str,
-            _row_id: str,
-            _op: str,
-        ):
-            """添加unique索引检查；_absent 内的列冲突判竞态(RACE)，其余判确定性冲突(UNIQUE)"""
-            for _field, _value in _row.items():
-                if _field in _unique_fields:
-                    _idx_key = _idx_prefix + _field
-                    _sortable_value = to_sortable_bytes(_dtype_map[_field].type(_value))
-                    _start_val = b"[" + _sortable_value + b"\x00"
-                    _end_val = b"[" + _sortable_value + b"\x00\xff"
-                    _race = _field in _absent
-                    (race_checks if _race else strict_checks).append(
-                        [
-                            "UNIQ",
-                            _idx_key,
-                            _start_val,
-                            _end_val,
-                            "RACE" if _race else "UNIQUE",
-                            f"{_comp_name}.{_field} id={_row_id} {_op}",
-                        ]
-                    )
-
-        def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
-            """添加hset的push命令"""
-            # 版本+1
-            _ver = int(_old_version) + 1
-            _update.pop("_version", None)  # 无视用户传入的_version字段
-            # 组合hset, 别忘记写_version
-            _kvs = itertools.chain.from_iterable(_update.items())
-            pushes.append(["HSET", _key, "_version", str(_ver), *_kvs])
-
-        def _exc_index(
-            _indexes, _point_subs, _dtype_map, _idx_prefix, _old, _new, _add
-        ):
-            """exchange index(zadd/zrem)的push命令"""
-            _b_row_id = _old["id"].encode("ascii")
-            _values = _new if _add else _old
-            for _field in _new.keys():
-                if _field in _indexes:
-                    _idx_key = _idx_prefix + _field
-                    # 索引全部转换为bytes索引，测试下来lex和score排序性能是一样的
-                    _sortable_value = to_sortable_bytes(
-                        _dtype_map[_field].type(_values[_field])
-                    )
-                    # 值频道只给声明了 point_sub 的索引、只记"进入"（insert 的值、update 的
-                    # 新值）：离开（delete、改走）由订阅者订着的行频道发现，不用发。
-                    # 同一 (索引, 值) 一个事务只发一条
-                    if _add and _field in _point_subs:
-                        value_chans[self.value_channel_(_idx_key, _sortable_value)] = (
-                            None
-                        )
-                    _member = _sortable_value + b"\x00" + _b_row_id
-                    if _add:
-                        # score统一用0，因为我们不需要score排序功能
-                        pushes.append(["ZADD", _idx_key, "0", _member])
-                    else:
-                        pushes.append(["ZREM", _idx_key, _member])
-
-        def _del_key(_key):
-            """添加del的push命令"""
-            pushes.append(["DEL", _key])
-
-        assert not self.is_servant, _("从节点不允许提交事务")
-
-        dirties = idmap.get_dirty_rows()
-        if not dirties:
-            raise ValueError(_("没有脏数据需要提交"))
-
-        first_ref = idmap.first_reference()
-        assert first_ref is not None, "typing检查"
-        # 本事务曾 get 观察"不存在"的 unique 列：{ref: {row_id: {field}}}，决定冲突判 RACE 还是 UNIQUE
-        absent_by_ref = idmap.get_absent_unique_fields()
-
-        # 组合成checks/pushes命令表，减少lua脚本的复杂度
-        # checks有exists/unique/version，分两组：竞态类在前（VER、带 RACE 标记的 NX/UNIQ），
-        # 确定性类在后。Lua 首个失败即返回 → 同时存在两类冲突时 RACE 优先
-        # （保住 upsert 锚定列与其他 unique 列同时撞车时"重试后转 update"的语义）
-        # pushes有hset/zadd/zrem/del
-        race_checks: list[list[str | bytes]] = []
-        strict_checks: list[list[str | bytes]] = []
-        pushes: list[list[str | bytes]] = []
-        deleted: dict[str, bool] = {}
-        # 主动 PUBLISH 的通知只有两种，都只给声明了的组件/索引发（PUBLISH 很贵，见
-        # benchmark/redis_publish_cost_result.md；tests/test_arch_publish.py 守门，别往这里
-        # 加新通知、也别往消息里塞内容）：
-        # - 表频道 [channel, msgpack(row_id列表)]：table_sub 组件，一个事务一张表一条
-        # - 值频道 channel（消息为空串）：point_sub 索引的"进入"，一个事务每个 (索引, 值) 一条
-        table_pubs: list[list[str | bytes]] = []
-        value_chans: dict[str, None] = {}  # 有序去重
-
-        for ref, (inserts, (old_rows, new_rows), deletes) in dirties.items():
-            id_prefix = self.cluster_prefix(ref) + ":id:"
-            idx_prefix = self.cluster_prefix(ref) + ":index:"
-            comp_cls = ref.comp_cls
-            unique_fields = comp_cls.uniques_
-            indexes = comp_cls.indexes_
-            point_subs = comp_cls.point_subs_
-            dtype_map = comp_cls.dtype_map_
-            comp_name = comp_cls.name_
-            absent_rows = absent_by_ref.get(ref, {})
-            # insert
-            for insert in inserts:
-                row_id = str(insert["id"])
-                key = id_prefix + row_id
-                absent = absent_rows.get(int(row_id), set())
-                _key_must_not_exist(
-                    key, "id" in absent, f"{comp_name}.id id={row_id} insert"
-                )
-                _unique_meet(
-                    unique_fields,
-                    dtype_map,
-                    idx_prefix,
-                    insert,
-                    absent,
-                    comp_name,
-                    row_id,
-                    "insert",
-                )
-                _hset_key(key, 0, insert)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, insert, insert, True
-                )
-            # update
-            for old_row, new_row in zip(old_rows, new_rows):
-                row_id = str(old_row["id"])
-                key = id_prefix + row_id
-                old_version = old_row["_version"]
-                _version_must_match(key, old_version)
-                _unique_meet(
-                    unique_fields,
-                    dtype_map,
-                    idx_prefix,
-                    new_row,
-                    absent_rows.get(int(row_id), set()),
-                    comp_name,
-                    row_id,
-                    "update",
-                )
-                _hset_key(key, old_version, new_row)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, False
-                )
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, old_row, new_row, True
-                )
-            # delete
-            for delete in deletes:
-                # 传入deleted ids，如果之后的unique冲突查到的id在deleted里，就返回false
-                deleted[str(delete["id"])] = True
-                key = id_prefix + str(delete["id"])
-                old_version = delete["_version"]
-                _version_must_match(key, old_version)
-                _exc_index(
-                    indexes, point_subs, dtype_map, idx_prefix, delete, delete, False
-                )
-                _del_key(key)
-            # 变动的 row_id 只有表频道要用：没声明 table_sub 的组件（绝大多数）不收集
-            if comp_cls.table_sub_:
-                touched_ids = [
-                    *(row["id"] for row in inserts),
-                    *(row["id"] for row in old_rows),
-                    *(str(row["id"]) for row in deletes),
-                ]
-                if touched_ids:
-                    ids_msg: bytes = msg_packer.pack(touched_ids)  # type: ignore
-                    table_pubs.append([self.table_channel(ref), ids_msg])
-
-        # 对纯读行加版本检查，防止事务依赖的陈旧读：
-        # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
-        for ref, row_versions in idmap.get_clean_rows().items():
-            clean_id_prefix = self.cluster_prefix(ref) + ":id:"
-            for row_id, old_version in row_versions.items():
-                _version_must_match(clean_id_prefix + str(row_id), old_version)
-
-        checks = race_checks + strict_checks
-        payload_json: bytes = msg_packer.pack(  # type: ignore
-            [checks, pushes, deleted, table_pubs, list(value_chans)]
-        )
-        # 添加一个带cluster id的key，指明lua脚本执行的集群
-        keys = [self.row_key(first_ref, 1)]
-
         # 这里不需要判断redis.exceptions.NoScriptError，因为里面会处理
         assert self.lua_commit is not None, _(
             "lua_commit脚本没有初始化，请先调用 post_configure"
         )
-        resp = await self.lua_commit(keys, [payload_json])
-        resp = resp.decode("utf-8")  # type: ignore
+        return self.lua_commit(keys, args)
 
-        if resp != "committed":
-            if resp.startswith("RACE"):
-                raise RaceCondition(resp)
-            elif resp.startswith("UNIQUE"):
-                # 确定性冲突：本事务从未 get 观察该值不存在，重试无意义
-                raise UniqueViolation(resp)
-            else:
-                raise RuntimeError(_("未知的提交错误：{resp}").format(resp=resp))
-
+    @override
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
-        UNSAFE! 只用于易失数据! 不会做类型检查!
+        UNSAFE! 只用于易失数据! 不会做类型检查! 契约见基类。
 
-        直接写入属性到数据库，避免session必须要执行get+事务2条指令。
-        仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-        注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
-        一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+        `HSETEX key FXX`：要写的字段都已存在才写，缺行时什么都不建；服务端不支持 HSETEX 时
+        回退到同样语义的 Lua（见 `configure_master`）。行频道是行 key 的 keyspace 通知，写入时
+        会顺带触发（契约不保证通知）。
         """
-        assert "id" not in kwargs, "id不允许修改"
-        assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
-
+        self.check_direct_set_(table_ref, kwargs)
         aio = self.aio
         key = self.row_key(table_ref, id_)
-
-        for prop in kwargs:
-            if prop in table_ref.comp_cls.indexes_:
-                raise ValueError(
-                    _("索引字段`{prop}`不允许用direct_set修改").format(prop=prop)
-                )
-            if prop not in table_ref.comp_cls.prop_idx_map_:
-                raise ValueError(
-                    _("Component `{comp_name}` 没有字段`{prop}`").format(
-                        comp_name=table_ref.comp_name, prop=prop
-                    )
-                )
-        await aio.hset(key, mapping=kwargs)  # type: ignore
+        kvs = list(itertools.chain.from_iterable(kwargs.items()))
+        if self.direct_set_script is None:
+            written = await aio.execute_command(
+                "HSETEX", key, "FXX", "FIELDS", len(kwargs), *kvs
+            )
+        else:
+            written = await self.direct_set_script(keys=[key], args=kvs, client=aio)
+        return bool(written)
 
     def get_table_maintenance(self) -> RedisTableMaintenance:
         """
@@ -1093,15 +552,29 @@ class RedisBackendClient(BackendClient, alias="redis"):
 
         return RedisTableMaintenance(self)
 
-    def get_mq_client(self) -> RedisMQClient:
+    def get_mq_client(self, *others: BackendClient) -> RedisMQClient:
         """
-        获取消息队列连接（每个用户连接一个）。本进程对本地址只有一个 `PubSubHub`
-        （一条 pubsub 连接）在首次调用时懒建，之后每次返回一个挂在它上面的轻量 MQClient。
+        获取消息队列连接（worker 级订阅器取一个，连接做内部关注时各取一个）。本进程对每个地址
+        只有一个 `PubSubHub`（一条 pubsub 连接），首次用到时懒建；返回挂在本地址的 hub 上的轻量
+        MQClient。others 是其余 servant：给了的话 MQClient 同时挂在它们的 hub 上，频道分到各副本
+        订阅，某个副本断线时换到别的副本（见 `HubMQClient`）。
         """
+        from .mq import RedisMQClient
+
+        hubs = [self.mq_hub_()]
+        for other in others:
+            assert isinstance(other, RedisBackendClient), _(
+                "消息队列只能挂在同类后端的连接上"
+            )
+            hubs.append(other.mq_hub_())
+        return RedisMQClient(*hubs)
+
+    def mq_hub_(self) -> PubSubHub:
+        """本进程对本地址唯一的 `PubSubHub`（一条 pubsub 连接），首次调用时在当前事件循环里懒建"""
         if not self._ios:
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        from .mq import PubSubHub, RedisMQClient
+        from .mq import PubSubHub
 
         if self._hub is None:
             self._hub = PubSubHub(self.aio)  # aio 会断言事件循环一致
-        return RedisMQClient(self._hub)
+        return self._hub

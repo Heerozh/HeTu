@@ -158,9 +158,12 @@ After calling `say_hello`, the row exists in the SQLite file (or Redis). You
 can prove it by adding a temporary client subscription:
 
 ```csharp
-var sub = await HeTuClient.Instance.WatchRange<Greeting>("id", 0, long.MaxValue, 100);
+// desc: take the 100 rows with the largest (newest) ids. Snowflake ids grow over
+// time; ascending would stay on the oldest 100 rows and new rows could never enter
+var sub = await HeTuClient.Instance.WatchRange<Greeting>(
+    "id", 0, long.MaxValue, 100, desc: true);
 sub.AddTo(gameObject); // dont forget! Otherwise, you will receive a warning about GC leaks when you stop playing.
-sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
+sub.ObserveAdd().Subscribe(row => Debug.Log(row.Text));
 ```
 
 Each new `say_hello` call should now log `Hello, world!` to the Unity console.

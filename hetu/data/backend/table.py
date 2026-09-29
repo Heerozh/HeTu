@@ -5,8 +5,9 @@
 @email: heeroz@gmail.com
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Callable, Concatenate, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Concatenate
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
@@ -14,14 +15,8 @@ if TYPE_CHECKING:
     from .session import Session
 
 
-# 定义泛型变量
-P = ParamSpec("P")
-R = TypeVar("R")
-T = TypeVar("T")
-
-
 # 这是一个类型安全的 partial 辅助函数
-def bind_first_arg_with_typehint(
+def bind_first_arg_with_typehint[T, **P, R](
     func: Callable[Concatenate[T, P], R], first_arg: T
 ) -> Callable[P, R]:
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:

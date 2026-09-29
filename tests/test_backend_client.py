@@ -10,13 +10,13 @@ from typing import cast
 import msgpack
 import numpy as np
 import pytest
-from fixtures.backends import use_redis_family_backend_only
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, Table, TableReference
 from hetu.data.backend.base import sortable_token, to_sortable_bytes
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -482,15 +482,78 @@ async def test_redis_commit_check_codes(mod_item_model):
     assert is_race == sorted(is_race, reverse=True)
 
 
-@use_redis_family_backend_only
-async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
-    """Lua 按 check 携带的 code 回显 RACE:/UNIQUE: 前缀 + label；
-    同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:（不依赖本地 IdentityMap 检查）"""
-    from hetu.data.backend.redis.client import msg_packer
+async def test_range_observations_to_check(mod_item_model):
+    """哪些 range 观察要单独校验区间：unique 点查命中（该行有数据库态）、读空后本事务写入该值
+    （insert 或 update 改成该值，且没删掉数据库态为该值的行）由已有检查覆盖，get 命中只保护
+    返回的行，其余都要；完全相同的观察只留一条"""
+    from hetu.data.backend.idmap import RangeObservation
+
+    item_ref = TableReference(mod_item_model, "pytest", 1)
+    idmap = IdentityMap()
+
+    def observe(index_name: str, point, ids=()):
+        obs = RangeObservation(index_name, list(ids), (index_name, point), [], point)
+        idmap.add_range_observation(item_ref, obs)
+        return obs
+
+    def row(name: str, time: int):
+        r = mod_item_model.new_row()
+        r.name, r.time = name, time
+        return r
+
+    # 命中一行、该行有数据库态：覆盖
+    hit = row("hit", 1)
+    idmap.add_clean(item_ref, hit)
+    s1 = observe("name", "hit", [int(hit.id)])
+    # 读空后 insert 该值：覆盖
+    idmap.mark_absent(item_ref, "name", "new")
+    s2_insert = observe("name", "new")
+    idmap.add_insert(item_ref, row("new", 2))
+    # 读空后把另一行 update 成该值：覆盖
+    idmap.mark_absent(item_ref, "time", 30)
+    s2_update = observe("time", 30)
+    other = row("other", 3)
+    idmap.add_clean(item_ref, other)
+    changed, _ = idmap.get(item_ref, int(other.id))
+    assert changed is not None
+    changed.time = 30
+    idmap.update(item_ref, changed)
+    # 读空、本事务没写这个值：要校验
+    idmap.mark_absent(item_ref, "name", "ghost")
+    absent_only = observe("name", "ghost")
+    # 读空后又删掉一行数据库态为该值的行、再插入该值：读集矛盾，要校验
+    idmap.mark_absent(item_ref, "name", "v")
+    contradicted = observe("name", "v")
+    gone = row("v", 4)
+    idmap.add_clean(item_ref, gone)
+    idmap.mark_deleted(item_ref, int(gone.id))
+    idmap.add_insert(item_ref, row("v", 5))
+    # 非 unique 列（没有 point）、区间读：要校验
+    nonunique = observe("owner", None, [int(hit.id)])
+    ranged = observe("time", None)
+    # get 命中：只保护返回的那一行，不校验区间
+    got = RangeObservation("owner", [int(hit.id)], ("got",), [], 7, rows_only=True)
+    idmap.add_range_observation(item_ref, got)
+
+    # 完全相同的观察去重
+    observe("owner", None, [int(hit.id)])
+    assert len(idmap.range_observations()[item_ref]) == 8
+
+    to_check = {id(obs) for obs in idmap.range_observations_to_check()[item_ref]}
+    assert to_check == {id(absent_only), id(contradicted), id(nonunique), id(ranged)}
+    assert not {id(s1), id(s2_insert), id(s2_update), id(got)} & to_check
+
+
+async def test_commit_script_check_codes(item_ref, mod_auto_backend):
+    """
+    提交脚本（Redis 的 commit_v2.lua / SQLite 的 Python 版）按 check 携带的 code 回显
+    RACE:/UNIQUE: 前缀 + label；同一 payload 内两条同 (索引, 值) 的 UNIQ 兜底返回 UNIQUE:
+    （不依赖本地 IdentityMap 检查）。两个后端的返回串逐字节相同
+    """
+    from hetu.data.backend.redis_model import msg_packer
 
     backend: Backend = mod_auto_backend()
-    client = cast(RedisBackendClient, backend.master)
-    assert client.lua_commit is not None
+    client = cast(RedisModelClient, backend.master)
 
     # 准备一行 name="dup"
     async with backend.session("pytest", 1) as session:
@@ -504,7 +567,7 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
 
     async def run(checks):
         payload = msg_packer.pack([checks, [], {}, []])
-        return await client.lua_commit(keys, [payload])  # type: ignore
+        return await client.commit_script_(keys, [payload])
 
     uniq = ["UNIQ", idx_key, b"[dup\x00", b"[dup\x00\xff"]
     assert await run([uniq + ["RACE", "Item.name id=7 insert"]]) == (
@@ -533,6 +596,144 @@ async def test_redis_lua_check_codes(item_ref, mod_auto_backend):
     )
     # 没有冲突：正常提交
     assert await run([fresh + ["UNIQUE", "Item.name id=3 insert"]]) == b"committed"
+
+
+async def test_commit_script_range_count_check(item_ref, mod_auto_backend):
+    """提交脚本的 CNT：ZLEXCOUNT 与期望行数不符返回 RACE: Range changed + label，相符则继续"""
+    from hetu.data.backend.redis_model import msg_packer
+
+    backend: Backend = mod_auto_backend()
+    client = cast(RedisModelClient, backend.master)
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        for i in range(2):
+            row = comp.new_row()
+            row.owner, row.time, row.name = 5, i + 1, f"n{i}"
+            await session.using(comp).insert(row)
+
+    keys = [client.row_key(item_ref, 1)]
+    idx_key = client.index_key(item_ref, "owner")
+    lo, hi = client.range_normalize_(comp.dtype_map_["owner"], 5, 5, False)
+
+    async def run(checks):
+        payload = msg_packer.pack([checks, [], {}, [], []])
+        return await client.commit_script_(keys, [payload])
+
+    assert await run([["CNT", idx_key, lo, hi, 2, "Item.owner"]]) == b"committed"
+    assert await run([["CNT", idx_key, lo, hi, 1, "Item.owner"]]) == (
+        b"RACE: Range changed Item.owner"
+    )
+
+
+async def test_range_check_payload(item_ref, mod_auto_backend):
+    """range 读在 commit 里变成 CNT 检查：格式、截断时收窄的边界、排在全部竞态检查之后 /
+    确定性检查之前；unique 点查由 VER / UNIQ 覆盖的（get(unique=) 命中、upsert 两条路径）不带"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    client = cast(RedisModelClient, backend.master)
+    comp = item_ref.comp_cls
+    dtypes = comp.dtype_map_
+
+    async with backend.session("pytest", 1) as session:
+        for i in range(3):
+            row = comp.new_row()
+            row.owner, row.time, row.name = 1, i + 1, f"n{i}"
+            await session.using(comp).insert(row)
+
+    captured: list = []
+    orig_commit_script = client.commit_script_
+
+    async def spy(keys, args):
+        captured.append(msgpack.unpackb(args[0], raw=True)[0])
+        return await orig_commit_script(keys, args)
+
+    def cnt_checks() -> list:
+        return [chk for chk in captured[-1] if chk[0] == b"CNT"]
+
+    def member(field: str, row) -> bytes:
+        value = to_sortable_bytes(dtypes[field].type(row[field]))
+        return value + b"\x00" + str(int(row.id)).encode()
+
+    owner_key = client.index_key(item_ref, "owner").encode()
+    time_key = client.index_key(item_ref, "time").encode()
+
+    with patch.object(client, "commit_script_", new=spy):
+        # get(unique=) 命中 → update：命中行的 VER + unique 已经足够，不带 CNT
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            row = await repo.get(name="n0")
+            assert row is not None
+            row.qty = 5
+            await repo.update(row)
+        assert cnt_checks() == []
+
+        # upsert 的插入路径（读空 + 带 RACE 的 UNIQ）与更新路径（命中）都不带 CNT
+        for qty in (7, 8):
+            async with backend.session("pytest", 1) as session:
+                session.only_master = True
+                async with session.using(comp).upsert(name="up") as row:
+                    row.time, row.qty = 100, qty
+            assert cnt_checks() == []
+
+        # 区间读后盲插：一条 CNT，排在全部竞态检查之后、确定性检查之前
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            assert len(await repo.range(owner=(1, 1), limit=-1)) == 3
+            blind = comp.new_row()
+            blind.owner, blind.time, blind.name = 2, 200, "blind"
+            await repo.insert(blind)
+        lo, hi = client.range_normalize_(dtypes["owner"], 1, 1, False)
+        assert cnt_checks() == [[b"CNT", owner_key, lo, hi, 3, b"Item.owner"]]
+        order = ["race", "cnt", "strict"]
+        kinds = [
+            "cnt"
+            if chk[0] == b"CNT"
+            else "race"
+            if chk[0] == b"VER" or chk[-2] == b"RACE"
+            else "strict"
+            for chk in captured[-1]
+        ]
+        assert "race" in kinds and "strict" in kinds
+        assert kinds == sorted(kinds, key=order.index)
+
+        # 非 unique 列 get 命中：只保护返回的那一行（VER），不带 CNT
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            row = await repo.get(owner=1)
+            assert row is not None
+            row.qty = 9
+            await repo.update(row)
+        assert cnt_checks() == []
+
+        # 非 unique 列 get 读空再插入：要校验这个值上仍然没有行（计数 0）
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            assert await repo.get(owner=404) is None
+            new = comp.new_row()
+            new.owner, new.time, new.name = 404, 40400, "n404"  # time 避开下面的区间
+            await repo.insert(new)
+        lo, hi = client.range_normalize_(dtypes["owner"], 404, 404, False)
+        assert cnt_checks() == [[b"CNT", owner_key, lo, hi, 0, b"Item.owner"]]
+
+        # 降序截断：下界收到最后一个（最小的）member，上界是查询上界
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            rows = await repo.range(time=(0, 1000), limit=2, desc=True)
+            assert list(rows.time) == [200, 100]
+            extra = comp.new_row()
+            extra.owner, extra.time, extra.name = 3, 5000, "extra"
+            await repo.insert(extra)
+        upper, _ = client.range_normalize_(dtypes["time"], 0, 1000, True)
+        assert cnt_checks() == [
+            [b"CNT", time_key, b"[" + member("time", rows[-1]), upper, 2, b"Item.time"]
+        ]
 
 
 async def test_insert(item_ref, rls_ref, mod_auto_backend):
@@ -701,6 +902,31 @@ async def test_get_many(filled_item_ref, mod_auto_backend):
     assert got[0]["time"] == "113"
 
     assert await servant.get_many(filled_item_ref, []) == []
+
+    assert await servant.get_many(filled_item_ref, [999999999, 888888888]) == [
+        None,
+        None,
+    ]
+    # 同一批的重复 ID 仍是两个独立 record，不能修改一个连带改变另一个。
+    duplicates = await servant.get_many(filled_item_ref, [ids[0], ids[0]])
+    original = duplicates[1].qty
+    duplicates[0].qty = original + 1
+    assert duplicates[1].qty == original
+
+
+async def test_get_many_rows_do_not_pin_batch(filled_item_ref, mod_auto_backend):
+    """get_many 返回的每行只占自己的内存：批量解码后不能把整批数组的视图直接交出去，
+    否则调用方只留一行，也会拖住整批（比如 headless 轮询里只存有变化的行）"""
+    backend: Backend = mod_auto_backend()
+    servant = backend.servant
+    ids = await servant.range(
+        filled_item_ref, "time", 110, 134, limit=100, row_format=RowFormat.ID_LIST
+    )
+    got = await servant.get_many(filled_item_ref, ids)
+    assert len(got) == 25
+    for row in got:
+        assert row is not None
+        assert getattr(row.base, "nbytes", 0) <= row.nbytes
 
 
 async def test_table_servant_get_many(filled_item_ref):
@@ -1014,11 +1240,8 @@ async def test_post_configure_explicit_components(mod_auto_backend):
     # 显式空列表：什么都不检查，正常返回；且不带参数的老用法仍可用
     backend.post_configure(components=[])
     backend.post_configure()
-    if isinstance(backend.master, RedisBackendClient):
-        with pytest.raises(ValueError):
-            backend.post_configure(components=[bad_cls])
-    else:
-        backend.post_configure(components=[bad_cls])  # SQL 系目前没有索引 dtype 限制
+    with pytest.raises(ValueError):
+        backend.post_configure(components=[bad_cls])
 
 
 async def test_client_rejects_unknown_index(item_ref, mod_auto_backend):

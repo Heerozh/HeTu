@@ -43,6 +43,9 @@ class EndpointExecutor:
         # 某次调用里连接完成了登录（ctx.caller 从 0 变为 user_id）时，在该调用返回前 await 一次，
         # 传入 user_id。websocket 层用它订阅"被顶号"通知（要登录后才知道订哪个频道）
         self.on_elevated: Callable[[int], Awaitable[None]] | None = None
+        # 某次调用前的核查发现本连接已被顶号（execute 随之返回失败）。websocket 层据此带
+        # CLOSE_KICKED 断开，而不是当作普通的调用失败
+        self.kicked = False
 
     async def initialize(self, address: str):
         """初始化连接，分配connection id，如果失败则raise异常"""
@@ -146,11 +149,12 @@ class EndpointExecutor:
         """
         # 开始调用
         ep_name = ep.func.__name__
-        logger.debug(
-            _("🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}").format(
-                ep_name=ep_name, args=args
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                _("🔜 [📞Endpoint] 调用Endpoint: {ep_name}{args}").format(
+                    ep_name=ep_name, args=args
+                )
             )
-        )
 
         # 初始化context值
         context = self.context
@@ -197,6 +201,7 @@ class EndpointExecutor:
             self.context, f"{self.namespace}.{endpoint}"
         )
         if illegal:
+            self.kicked = True
             return False, None
 
         # 调用前守卫(guard)：raise ClientReject 即软拒绝，不开事务、不断连接

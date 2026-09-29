@@ -308,7 +308,7 @@ namespace Tests.HeTu
         private sealed class StubClient : HeTuClientBase
         {
             protected override void ConnectCore(string url, Action onConnected,
-                Action<byte[]> onMessage, Action<string> onClose,
+                Action<byte[]> onMessage, Action<int, string> onClose,
                 Action<string> onError)
             {
             }

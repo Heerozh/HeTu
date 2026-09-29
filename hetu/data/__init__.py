@@ -6,7 +6,6 @@
 """
 
 from . import backend
-
 from .component import (
     BaseComponent,
     ComponentDefines,
@@ -16,10 +15,10 @@ from .component import (
 )
 
 __all__ = [
-    "backend",
     "BaseComponent",
     "ComponentDefines",
     "Permission",
+    "backend",
     "define_component",
     "property_field",
 ]

@@ -8,26 +8,26 @@
                                Backend相关结构
     ┌─────────────────┐      ┌────────────────┐       ┌───────────────────┐
     │     MQClient    │      │  BackendClient │       │  TableMaintenance │
-    │消息队列连接(每连接)│─────►│  数据库连接/操作 │◄──────┤    组件表维护类     │
+    │消息队列(每个订阅器)│─────►│  数据库连接/操作 │◄──────┤    组件表维护类     │
     └─────────────────┘      └────────────────┘       └───────────────────┘
     继承此类实现各种通知队列      继承此类实现各种数据库         继承此类实现表维护
             ▲                        ▲                         ▲
             │                        └───────────┬─────────────┘
  数据订阅结构 │                                    │ 数据事务结构
   ┌─────────┴──────────┐               ┌─────────┴──────────┐
-  │ SubscriptionBroker │               │      Backend       │
-  │ 每连接一个的消息管理器 │               │  数据库连接管理器    │ 每个进程一个Backend
+  │  SubscriptionHub   │               │      Backend       │
+  │ 每个进程一个的订阅处理器 │               │  数据库连接管理器    │ 每个进程一个Backend
   └────────────────────┘               └────────────────────┘
             ▲                                    ▲
   ┌─────────┴──────────┐                ┌────────┴─────────┐
-  │ 用户连接(Websocket) │                │      Session     │
-  │   等待Subs返回消息   │                │     事务处理类     │
+  │ SubscriptionBroker │                │      Session     │
+  │ 每个连接一个的订阅门面 │                │     事务处理类     │
   └────────────────────┘                └──────────────────┘
-                                                 ▲
-                                       ┌─────────┴──────────┐
-                                       │  SessionRepository │
-                                       │   组件相关事务操作    │
-                                       └────────────────────┘
+            ▲                                    ▲
+  ┌─────────┴──────────┐               ┌─────────┴──────────┐
+  │ 用户连接(Websocket) │               │  SessionRepository │
+  │   等待Subs返回消息   │               │   组件相关事务操作    │
+  └────────────────────┘               └────────────────────┘
 
 """
 
@@ -35,11 +35,13 @@ import asyncio
 import hashlib
 import importlib
 import logging
+import math
+import random
 import struct
 import time
 import warnings
 from collections import deque
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Coroutine, Iterable, Iterator
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from enum import Enum
@@ -51,7 +53,7 @@ from ...i18n import _
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
-    from .idmap import IdentityMap
+    from .idmap import IdentityMap, RangeObservation
     from .table import TableReference
 
 logger = logging.getLogger("HeTu.root")
@@ -71,12 +73,37 @@ class RaceCondition(Exception):
       `IdentityMap.mark_absent`）：基于过期快照的乐观并发失败，重试后 `get` 会命中对方的
       行并走正确分支；`upsert` 的锚定字段被并发插入是其典型场景。从未观察过的冲突则是
       `UniqueViolation`；
+    - 提交时，本事务 `range`（及非 unique 列的 `get`）读过的区间变了：同样的查询现在会
+      返回不同的行，典型如别的事务往区间里插了一行（幻读）、或读到了滞后的副本；读取
+      过程中索引里的行被改走 / 删掉（读到的不是任何一刻的区间）同样判竞态。见
+      `SessionRepository.range` 的 `phantom_check`；
     - 表维护、连接保活等内部流程检测到依赖状态已被其他执行流改变。
 
     `SystemCaller` 和 `Session.retry(...)` 会捕获此异常并重新执行事务。
     """
 
-    pass
+
+class InconsistentRangeRead(RaceCondition):
+    """
+    range 读到的行和索引对不上：索引里有这个 id，取行时却读不到，或读到的行已经不在索引
+    说的那个值上。
+
+    通常是正常的竞态（两次读之间行被删改了），重试即可。如果同一行每次重试都对不上，就是
+    索引里残留了和行数据不一致的项（比如维护脚本只删了行、没删索引），重试不会自愈，
+    `SystemCaller` 会打一条 error 日志提示重建索引。
+    """
+
+    def __init__(self, comp_name: str, index_name: str, row_id: int):
+        super().__init__(comp_name, index_name, row_id)
+        self.comp_name = comp_name
+        self.index_name = index_name
+        self.row_id = row_id
+
+    def __str__(self) -> str:
+        return (
+            f"RACE: Inconsistent range read {self.comp_name}.{self.index_name} "
+            f"id={self.row_id}"
+        )
 
 
 class UniqueViolation(IndexError):
@@ -96,8 +123,6 @@ class UniqueViolation(IndexError):
     分支处理，请先 `get` 该值（读空会自动登记 negative observation），或调用
     `SessionRepository.is_unique_conflicts` 提前检查。
     """
-
-    pass
 
 
 class RowFormat(Enum):
@@ -176,12 +201,89 @@ def peel_bound_(
     return value, None
 
 
+def inverted_bounds_error_(lower: Any, upper: Any) -> ValueError:
+    """内部方法：区间下界大于上界（多半是参数传反了）的报错，两个后端共用这一句"""
+    return ValueError(
+        _(
+            "区间的下界大于上界：下界={lower}，上界={upper}"
+            "（desc=True 时也按 (下界, 上界) 传）"
+        ).format(lower=repr(lower), upper=repr(upper))
+    )
+
+
+def exact_number_(value: Any) -> int | float:
+    """
+    内部方法：整数索引的区间边界（已剥掉 `(` / `[` 前缀）转成精确的 Python 数。不按 dtype
+    转换，越界不会溢出、小数也不会被截断。str / bytes 先按整数解析，不行再按浮点，都不行
+    抛 ValueError。
+    """
+    if isinstance(value, (bool, int, np.integer)):
+        return int(value)
+    if isinstance(value, (str, bytes)):
+        text = value.decode() if isinstance(value, bytes) else value
+        try:
+            return int(text)
+        except ValueError:
+            return float(text)
+    return float(value)
+
+
+def normalize_int_bounds_(
+    dtype: np.dtype,
+    lower: float,
+    lower_inclusive: bool,
+    upper: float,
+    upper_inclusive: bool,
+) -> tuple[int, int] | None:
+    """
+    内部方法：整数索引的区间按数学含义收成 dtype 范围内的闭区间 (lo, hi)，区间里没有整数时
+    返回 None。边界先用 `exact_number_` 转成精确的数：
+
+    - 小数边界向区间内取整：x >= 0.5 即 x >= 1，x <= 1.5 即 x <= 1；
+    - 开区间的整数边界收进一格：x > 5 即 x >= 6；
+    - 超出 dtype 范围的边界（含 ±inf）钳到极值：int8 列上 x <= 1000 即 x <= 127。整个区间
+      都在范围外，或者像 (inf, inf)、(1.2, 1.8) 这样里面没有整数，就是空。
+
+    NaN 边界抛 ValueError。下界大于上界要调用方先用原始值判定：那是参数传反了，应该报错，
+    而不是当成空区间。Redis 与 SQLite 后端都经 `RedisModelClient.range_normalize_` 按这个规则
+    处理整数区间。
+    """
+    info = np.iinfo(dtype)
+
+    def edge(value: float, inclusive: bool, inward: int) -> float:
+        # inward：下界 +1（往上收）、上界 -1（往下收）。±inf 原样返回，由下面钳到极值
+        if isinstance(value, float):
+            if math.isnan(value):
+                raise ValueError(_("整数索引的区间边界不能是 NaN"))
+            if math.isinf(value):
+                return value
+            if not value.is_integer():
+                return math.ceil(value) if inward > 0 else math.floor(value)
+            value = int(value)
+        return value if inclusive else value + inward
+
+    lo = max(edge(lower, lower_inclusive, 1), info.min)
+    hi = min(edge(upper, upper_inclusive, -1), info.max)
+    if lo > hi:
+        return None
+    return int(lo), int(hi)
+
+
+def detach_rows_(batch: np.recarray) -> Iterator[np.record]:
+    """
+    内部方法：把一次解码的一批行逐行拷成互相独立的 record，给 `get_many` 用。直接交出整批
+    数组的视图的话，调用方只留一行也会拖住整批。
+    """
+    # 迭代普通 ndarray 比迭代 recarray 快，元素照样是 np.record
+    return (record.copy() for record in batch.view(np.ndarray))
+
+
 class BackendClient:
     """
     数据库后端的连接类，Backend会用此类创建master, servant连接。
 
     继承写法：
-    class PostgresClient(BackendClient, alias="postgres")
+    class MyStoreClient(BackendClient, alias="mystore")
 
     服务器启动时，Backend会根据Config中type配置，寻找对应alias初始化Client。
     继承此类，完善所有NotImplementedError的方法。
@@ -235,8 +337,10 @@ class BackendClient:
         """
         判断 range 查询是否退化为点查询（right 省略或 left == right），是则返回按 dtype
         规范化后的值，否则返回 None。与 `range_normalize_` 的 peel 规则一致：str/bytes 值的
-        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（int 索引传 ±inf、
-        非法字符串）或 NaN 也返回 None，由调用方回退到整个索引的频道。
+        `(` 前缀表示开区间，不算点查询；`[` 前缀剥掉。dtype 转换失败（非法字符串）或 NaN
+        也返回 None，由调用方回退到整个索引的频道。整数索引的边界要是 dtype 范围内的整数才算：
+        小数、越界、±inf 的区间里没有这个值（见 `normalize_int_bounds_`），拿截断后的值去订
+        值频道、登记"读空"都不对。
         """
         left, left_inclusive = peel_bound_(left)
         right, right_inclusive = (
@@ -244,6 +348,17 @@ class BackendClient:
         )
         if left_inclusive is False or right_inclusive is False:
             return None  # 开区间不算点查询
+        if issubclass(dtype.type, np.integer):
+            try:
+                value, other = exact_number_(left), exact_number_(right)
+            except ValueError, TypeError:
+                return None
+            if value != other or (isinstance(value, float) and not value.is_integer()):
+                return None  # 两端不同、小数、±inf、NaN
+            info = np.iinfo(dtype)
+            if not info.min <= int(value) <= info.max:
+                return None
+            return dtype.type(int(value))
         try:
             left_value, right_value = dtype.type(left), dtype.type(right)
         except ValueError, OverflowError, TypeError:
@@ -269,9 +384,10 @@ class BackendClient:
         raise NotImplementedError
 
     def __init_subclass__(cls, **kwargs):
-        """让继承子类自动注册alias"""
+        """让继承子类自动注册alias；不带 alias 的中间基类（如 RedisModelClient）不注册"""
         super().__init_subclass__()
-        BackendClientFactory.register(kwargs["alias"], cls)
+        if alias := kwargs.get("alias"):
+            BackendClientFactory.register(alias, cls)
 
     def __init__(self, endpoint: Any, is_servant, **kwargs):
         """
@@ -281,6 +397,13 @@ class BackendClient:
         """
         self.endpoint = endpoint
         self.is_servant = is_servant
+
+    @classmethod
+    def check_config_(cls, config: dict) -> None:
+        """
+        内部方法：`Backend` 建连接之前检查整段配置（config 为 BACKENDS[i]），不合适就抛 ValueError。
+        默认什么都不查。
+        """
 
     async def close(self):
         """关闭数据库连接，释放资源。"""
@@ -389,7 +512,17 @@ class BackendClient:
         Returns
         -------
         rows: list
-            与 `row_ids` 顺序一一对应，不存在的行位置为 None。
+            与 `row_ids` 顺序一一对应，不存在的行位置为 None。各行互相独立，只留其中一行
+            不会拖住整批的内存。
+        """
+        raise NotImplementedError
+
+    async def get_many_array_(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray, list[int]]:
+        """
+        内部方法，事务里的 range 取行用：同 `get_many`，但读到的行按 `row_ids` 顺序一次解码
+        成一个 recarray 直接返回，省掉逐行拆开再拼回去；另返回读不到的 id。
         """
         raise NotImplementedError
 
@@ -505,6 +638,43 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def check_range_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> None:
+        """
+        内部方法：校验一次 `range` 查询的参数，不合法抛 TypeError / ValueError，不访问数据库。订阅在
+        接收协程里先校验，读库放到后台（见 SubscriptionBroker.begin_subscribe_range）：不合法的查询
+        当场报错，不用登记后在后台读了、重试了才失败。
+        这里只校验 limit 是整数（负数表示不限行数）；索引、边界由子类校验，默认不校验，由之后的
+        range 读报错
+        """
+        if type(limit) is bool or not isinstance(limit, int):
+            raise TypeError(
+                _("range 的 limit 必须是整数，收到：{limit}").format(limit=repr(limit))
+            )
+
+    async def range_read_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+        limit: int,
+        desc: bool,
+    ) -> tuple[list[int], RangeObservation]:
+        """
+        内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
+        同时返回这次读取的观察。之后 `commit` 据此校验同样的查询是否仍返回这些行（防幻读，
+        见 `SessionRepository.range`）。`limit` 不能为 0。
+        """
+        raise NotImplementedError
+
     async def commit(self, idmap: IdentityMap) -> None:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
@@ -513,7 +683,8 @@ class BackendClient:
         --------
         RaceCondition
             数据已被其他事务修改（版本不符）；或主键 / unique 冲突命中了本事务曾 `get`
-            观察其不存在的值（基于过期快照），可重试
+            观察其不存在的值（基于过期快照）；或本事务 range 读过的区间变了（幻读、读取
+            期间行被改走）。可重试
         UniqueViolation
             主键 / unique 值已被占用，且本事务从未观察其不存在：确定性冲突，不重试
 
@@ -522,15 +693,31 @@ class BackendClient:
 
     async def direct_set(
         self, table_ref: TableReference, id_: int, **kwargs: str
-    ) -> None:
+    ) -> bool:
         """
         UNSAFE! 只用于易失数据! 不会做类型检查!
 
         直接写入属性到数据库，避免session必须要执行get+事务2条指令。
         仅支持非索引字段，索引字段更新是非原子性的，必须使用事务。
-        注意此方法可能导致写入数据到已删除的行，请确保逻辑。
-
         一些系统级别的临时数据，使用直接写入的方式效率会更高，但不保证数据一致性。
+
+        只改已存在的行：行不存在（比如已被删掉），或行里没有要写的字段时，什么都不写，
+        返回 False；写入了返回 True。不会建出只有这几个字段的残缺行。（以前不返回值，
+        实现方请补上；调用方只把 False 当作没写上。）
+
+        这是维护类写入：不改 `_version`、不参与乐观锁，也**不保证**触发订阅通知——行订阅可能
+        立刻收到，也可能等该行下一次事务写入时一起推；整表订阅收不到。需要订阅方及时看到的数据
+        请走事务。（Redis 上行频道就是行 key 的 keyspace 通知，会顺带触发；SQLite 后端不发。）
+
+        UNSAFE, volatile components only, no type checks. Only updates an existing row:
+        if the row (or one of the fields) does not exist, nothing is written and False is
+        returned; True means the fields were written (it used to return nothing:
+        implementers should add the return value; callers only treat False as not
+        written). A maintenance-class write: it does
+        not bump `_version`, takes no part in optimistic locking, and is **not guaranteed**
+        to notify subscribers (a row subscriber may see it at once or only with the row's
+        next transactional write; table subscribers never do). Use a transaction for data
+        that subscribers must see promptly.
         """
         assert table_ref.comp_cls.volatile_, "direct_set只能用于易失数据的Component"
         raise NotImplementedError
@@ -541,20 +728,24 @@ class BackendClient:
         """
         raise NotImplementedError
 
-    def get_mq_client(self) -> MQClient:
-        """获取消息队列连接"""
+    def get_mq_client(self, *others: BackendClient) -> MQClient:
+        """
+        获取消息队列连接。others 是同一个后端的其他连接（其余 servant）：给了的话，返回的 MQClient 挂在
+        本连接和它们各自的通知接收器上，频道分到各处订阅，某处订阅失败或断线时换到别处（见
+        `HubMQClient`）。
+        """
         raise NotImplementedError
 
 
 class BackendClientFactory:
-    _registry: dict[str, type[BackendClient]] = {}
+    _registry: ClassVar[dict[str, type[BackendClient]]] = {}
 
     # 内置后端按 alias 懒加载：import 对应子包即触发 BackendClient.__init_subclass__ 注册。
-    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会同时加载
-    # redis 与 sqlalchemy 两套重依赖。第三方后端仍靠显式 import 自己的模块注册。
+    # 不在 hetu.data.backend 包顶层 eager import，`import hetu` 就不会把用不到的后端（如
+    # redis-py）一起加载。第三方后端仍靠显式 import 自己的模块注册。
     _BUILTIN_MODULES: ClassVar[dict[str, str]] = {
         "redis": "hetu.data.backend.redis",
-        "sql": "hetu.data.backend.sql",
+        "sqlite": "hetu.data.backend.sqlite",
     }
 
     @staticmethod
@@ -562,17 +753,23 @@ class BackendClientFactory:
         BackendClientFactory._registry[alias.lower()] = client_cls
 
     @staticmethod
-    def create(
-        alias: str, endpoint: Any, is_servant, config: dict[str, Any]
-    ) -> BackendClient:
+    def client_class(alias: str) -> type[BackendClient]:
+        """按 alias 取后端的客户端类，内置后端按需 import"""
         alias = alias.lower()
+        if alias == "sql" and alias not in BackendClientFactory._registry:
+            raise ValueError(
+                _(
+                    "SQL 后端已移除：SQLite 请把 type 改成 SQLite（地址不变），"
+                    "PostgreSQL / MariaDB 不再支持"
+                )
+            )
         if alias not in BackendClientFactory._registry:
             module = BackendClientFactory._BUILTIN_MODULES.get(alias)
             if module:
                 importlib.import_module(module)
         if alias not in BackendClientFactory._registry:
             raise NotImplementedError(_("{alias} 后端未实现").format(alias=alias))
-        return BackendClientFactory._registry[alias](endpoint, is_servant, **config)
+        return BackendClientFactory._registry[alias]
 
 
 class TableMaintenance:
@@ -648,7 +845,10 @@ class TableMaintenance:
         raise NotImplementedError
 
     def do_rebuild_index_(self, table_ref: TableReference) -> int:
-        """实际重建组件表索引的逻辑实现，返回重建的行数"""
+        """
+        实际重建组件表索引的逻辑实现，返回重建的行数。要按行数据整个重建（行已不存在的
+        索引残留要清掉），并且原子替换：中途失败时旧索引原样保留。
+        """
         raise NotImplementedError
 
     def do_update_meta_(self, table_ref: TableReference) -> None:
@@ -776,6 +976,8 @@ class TableMaintenance:
 
         默认迁移逻辑无法处理数据被删除的情况，以及类型转换失败的情况，
         force参数指定是否强制迁移，也就是遇到上述情况直接丢弃数据。
+
+        易失组件不走迁移脚本，直接按新定义重建表：数据本来就会在 `hetu upgrade` 里清空。
         """
         with self.get_lock():
             if (status := self.check_table(table_ref)[0]) != "schema_mismatch":
@@ -784,6 +986,17 @@ class TableMaintenance:
                         "[💾TABLE_MAINT][{comp_name}组件] 无法迁移，组件表状态不对，目前为：{status}"
                     ).format(comp_name=table_ref.comp_name, status=status)
                 )
+            # hetu upgrade 迁移完紧接着就 flush_volatile，搬过去的数据也是清掉，所以不搬，
+            # 删属性、改类型也就谈不上有损
+            if table_ref.comp_cls.volatile_:
+                self.do_drop_table_(table_ref)
+                self.do_create_table_(table_ref)
+                logger.warning(
+                    _(
+                        "  ✔️ [💾MIGRATION][{comp_name}组件] 易失组件，已按新定义重建表"
+                    ).format(comp_name=table_ref.comp_name)
+                )
+                return True
             from ..migration import MigrationScript
 
             migrator = MigrationScript(app_file, table_ref, old_meta)
@@ -861,7 +1074,10 @@ class TableMaintenance:
             )
 
     def rebuild_index(self, table_ref: TableReference) -> None:
-        """重建组件表的索引数据"""
+        """
+        按行数据重建组件表的索引，修掉索引残留。扫描行与覆盖索引之间的写入会丢，必须停服
+        执行（`hetu upgrade` 默认会调用）。
+        """
         logger.info(
             _("  ➖ [💾TABLE_MAINT][{comp_name}组件] 正在重建索引...").format(
                 comp_name=table_ref.comp_name
@@ -893,11 +1109,12 @@ class TableMaintenance:
 
 class MQClient:
     """
-    连接到消息队列的客户端，每个用户连接一个实例。
+    连接到消息队列的客户端。每个 worker 级订阅器（`hetu.data.sub.SubscriptionHub`）一个实例，
+    连接做服务端内部关注（`watch`）时另有自己的一个。
     继承此类实现数据库写入通知和消息队列的结合。
 
-    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQL 的
-    `SQLNotifyHub`）收到本连接订阅的频道通知后调 `push_pulled_()` 入队，
+    本地消息队列由基类维护：后端每个进程共享的通知接收器（如 Redis 的 `PubSubHub`、SQLite 的
+    `SQLiteNotifyHub`）收到本客户端订阅的频道通知后调 `push_pulled_()` 入队，
     `get_message()` 按 tick 合批弹出。队列只在最老一端弹出，所以是个纯 FIFO。
 
     尾随重读：通知不带内容，订阅者收到后去读的是随机副本，发通知的节点与读的节点可能不是
@@ -1044,8 +1261,8 @@ class MQClient:
         interval = 1 / self.UPDATE_FREQUENCY
         while True:
             if not dq:
-                # 没数据就等 push_pulled_ 的信号。每个连接一个本协程，空闲时定时醒来看队列
-                # 是纯粹的底噪（每 1000 个空闲连接约占一个核的 1.6%），等信号则零成本。
+                # 没数据就等 push_pulled_ 的信号。空闲时定时醒来看队列是纯粹的底噪（以前每个
+                # 连接一个本协程时，每 1000 个空闲连接约占一个核的 1.6%），等信号则零成本。
                 # clear 与 wait 之间没有 await，不会漏掉中间到达的消息
                 self._arrived.clear()
                 await self._arrived.wait()
@@ -1092,6 +1309,13 @@ class MQClient:
     async def unsubscribe(self, *channel_names: str) -> None:
         """取消订阅频道，可一次取消多个"""
         raise NotImplementedError
+
+    def lost_(self, hub: MQHub, channels: list[str]) -> None:
+        """
+        通知接收器 hub 到后端的连接断了（如 Redis 副本挂掉），本客户端在它上面的这些频道恢复之前收不到
+        通知（`MQHub.lost_` 调用，同步、不能 await）。默认什么也不做：由 hub 自己重连重订、补发
+        （`MQHub.resync_`）。挂在几个 hub 上的实现（`HubMQClient`）把它们换到别的 hub。
+        """
 
     @property
     def subscribed_channels(self) -> set[str]:
@@ -1154,6 +1378,44 @@ class MQHub:
             dropped += mq.push_pulled_(channel_name, ids)
         return dropped
 
+    @staticmethod
+    def is_table_channel_(channel: str) -> bool:
+        """表级频道（commit 主动发，payload 是 row_id 列表）；行 / 索引频道是 keyspace 通知"""
+        return not channel.startswith("__keyspace@") and channel.endswith(
+            BackendClient.TABLE_CHANNEL_SUFFIX
+        )
+
+    def resync_(self, channels: Iterable[str]) -> int:
+        """
+        这段时间的通知丢了（Redis 的 pubsub 断线、SQLite 的通知被清理）：给这些频道里本进程仍有人
+        订的各分发一条通知，各连接一个 interval 后补读（行 / 索引订阅重读、重跑比对；整表订阅整表
+        重同步）。只有表级频道带 `RESYNC`：它的 payload 本来就是 row_id 集合，整表订阅靠这个标记
+        整表重读；行 / 索引（含值）频道照约定 payload 为 None。服务端内部 watch 的回调也照常触发。
+        返回丢弃的过期通知条数，由调用方打日志。
+        """
+        dropped = 0
+        for channel in channels:
+            if channel in self._subs:
+                ids = [MQClient.RESYNC] if self.is_table_channel_(channel) else None
+                dropped += self._dispatch(channel, ids)
+        return dropped
+
+    def lost_(self, channels: Iterable[str]) -> None:
+        """
+        到后端的连接断了（Redis 的 pubsub 节点失效）：这些频道的通知在恢复之前收不到。按订阅者分组交给
+        各 MQClient（`MQClient.lost_`）：挂在几个 hub 上的会把频道换到别的 hub 重订、补读。仍登记在这里
+        的，恢复流程照旧重订、补发（`resync_`）。同步调用，不能 await
+        """
+        per_mq: dict[MQClient, list[str]] = {}
+        for channel in channels:
+            for mq in self._subs.get(channel, ()):
+                per_mq.setdefault(mq, []).append(channel)
+        for mq, lost in per_mq.items():
+            try:
+                mq.lost_(self, lost)
+            except Exception:  # 一个订阅者出错不能拖累别人，也不能拖垮恢复流程
+                logger.exception(_("⚠️ [MQ] 通知接收器断线的回调异常"))
+
     def _spawn(self, coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
         task.add_done_callback(self._tasks.discard)
@@ -1171,32 +1433,70 @@ class MQHub:
 
 class HubMQClient(MQClient):
     """
-    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录本连接订阅了哪些频道，
-    订阅/退订转发给 hub。后端实现只需继承并指定 `LOG_TAG`。
+    挂在进程共享 `MQHub` 上的轻量 MQClient：本身只记录自己订阅了哪些频道，订阅/退订转发给 hub。
+    后端实现只需继承并指定 `LOG_TAG`。
+
+    可以挂在几个 hub 上（每个 servant 一个，见 `Backend.get_mq_client`）：仍是一个本地队列，频道按哈希
+    分到各 hub 订阅（rendezvous 哈希，每个实例随机加盐：同一频道在不同 worker 落在不同的副本上）。
+    - 分到的 hub 订阅失败：它冷却 `HUB_COOLDOWN` 秒不再分新频道，这些频道换下一个 hub 订；都订不上才
+      抛出，并撤掉本次在别处新登记的；
+    - hub 到后端的连接断了（`lost_`，如副本挂掉）：它上面的频道换到别的 hub 重订，订上之后各补一条
+      通知让订阅者重读（断线期间的写入没有通知，同 `MQHub.resync_`）；换不成的留在原处，等它自己重连
+      重订、补发。
+    只挂一个 hub 时与以前一样：断线由 hub 自己重连重订、补发 RESYNC。
+
+    单个连接订阅频道数的告警（MAX_SUBSCRIBED）在门面 `SubscriptionBroker` 做：订阅都走 worker 级
+    订阅器的这一个 MQClient，它订的是整个 worker 的频道。
+
+    A lightweight MQClient on top of process-wide `MQHub`s. With several hubs (one per
+    servant) it keeps one local queue, spreads channels over the hubs by salted rendezvous
+    hashing, and moves them to another hub when a hub fails to subscribe or loses its
+    connection (re-reading the moved channels once they are subscribed again).
     """
 
-    # 单个连接订阅频道数的告警线；子类可覆盖
-    MAX_SUBSCRIBED = 5000
+    # 某个 hub 订阅失败或断线后，这么多秒内不给它分新频道（到时再试；已经换到别处的不搬回来）
+    HUB_COOLDOWN: float = 5.0
 
-    def __init__(self, hub: MQHub):
+    def __init__(self, hub: MQHub, *more_hubs: MQHub):
         super().__init__()  # 本地消息队列
+        self._hubs: tuple[MQHub, ...] = (hub, *more_hubs)
+        # 只挂一个 hub 时就是它（多个时是第一个）
         self._hub = hub
         # 客户端订阅的频道；服务端内部关注（watch）的频道另记一份，两者可以重叠：
         # hub 按 MQClient 计数，同一频道只登记一次，所以客户端退订时要看它是不是还被关注着
         self.subscribed: set[str] = set()
         self._watched: set[str] = set()
+        # 以下只在挂了几个 hub 时用。频道 → 登记在哪个 hub 上（登记中的也算）
+        self._route: dict[str, MQHub] = {}
+        self._salt = random.getrandbits(64)
+        # hub → 冷却到期的时刻（time.monotonic）
+        self._cooldown: dict[MQHub, float] = {}
+        # 正在换 hub 的频道 → 换完时完成的 future
+        self._moving: dict[str, asyncio.Future[None]] = {}
+        # 后台任务（换 hub、撤掉旧 hub 上的登记）：保存引用免得被 gc，close 时统一取消
+        self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
     async def close(self):
-        """取消本连接的全部订阅（含内部关注的）。连接拆除路径上调用，后端出错也不抛"""
+        """取消本客户端的全部订阅（含内部关注的）。拆除路径上调用，后端出错也不抛"""
         self._closed = True
-        channels = self.subscribed | self._watched
+        # 回调在第一次 await 之前就同步清掉：退订回来之前的通知不再触发它
+        channels = self.subscribed | self._watched | set(self._route)
         self.subscribed = set()
         self._watched = set()
         self._watchers.clear()
+        self._route.clear()
+        tasks = [task for task in self._tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         if channels:
             try:
-                await self._hub.remove(self, channels)
+                # 每个 hub 都撤一遍（hub 只撤本客户端登记过的）：换过 hub 的频道新旧两边都可能还有
+                await asyncio.gather(
+                    *(hub.remove(self, channels) for hub in self._hubs)
+                )
             except Exception as e:  # noqa: BLE001 拆连接不能因为后端异常半途而废
                 logger.warning(
                     _("⚠️ [{tag}] 关闭连接时取消订阅失败：{err}").format(
@@ -1207,44 +1507,46 @@ class HubMQClient(MQClient):
     async def watch(self, channel_name: str, callback: Callable[[], None]) -> None:
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
+        await self._wait_moving((channel_name,))
         # 先登记回调再订阅：订阅生效到登记之间的通知不能落进客户端推送队列
         self._watchers[channel_name] = callback
         self._watched.add(channel_name)
         try:
-            await self._hub.add(self, [channel_name])
+            await self._add((channel_name,))
         except BaseException:
             self._watched.discard(channel_name)
             self._watchers.pop(channel_name, None)
             raise
         if self._closed:
-            await self._hub.remove(self, [channel_name])
+            await self._remove((channel_name,))
             raise ConnectionError(_("连接已关闭，已调用过close"))
 
     async def subscribe(self, *channel_names: str) -> None:
-        """订阅频道（可多个，一次往返），频道名通过 client.xxx_channel(table_ref) 获得"""
+        """
+        订阅频道（可多个，每个 hub 一次往返），频道名通过 client.xxx_channel(table_ref) 获得。
+        失败时撤掉本次新登记的频道：登记按 MQClient 记、不按调用方，几个调用方共用一个 MQClient
+        时，重叠的另一次 subscribe 搭车订上的也会被一并撤掉。所以共用时要由调用方保证同一频道同时
+        只有一次在途（见 `hetu.data.sub.SubscriptionHub._subscribe`）
+        """
         if not channel_names:
             return
         if self._closed:
             raise ConnectionError(_("连接已关闭，已调用过close"))
+        # 正在换 hub 的频道先等换完，它们的 hub 才定下来
+        await self._wait_moving(channel_names)
         # 先记再等：等 ack 期间本连接可能又 unsubscribe/close 了其中的频道，由它们从
         # subscribed 和 hub 里撤掉；add 返回后不能再把这些频道加回来
         new = [name for name in channel_names if name not in self.subscribed]
         self.subscribed.update(new)
         try:
-            await self._hub.add(self, channel_names)
+            await self._add(channel_names)
         except BaseException:
             self.subscribed.difference_update(new)
             raise
         if self._closed:
             # 等订阅生效期间连接被关了：撤销刚登记的订阅，别留在 hub 里
-            await self._hub.remove(self, channel_names)
+            await self._remove(channel_names)
             raise ConnectionError(_("连接已关闭，已调用过close"))
-        if len(self.subscribed) > self.MAX_SUBSCRIBED:
-            logger.warning(
-                _(
-                    "⚠️ [{tag}] 当前连接订阅数超过全局限制MAX_SUBSCRIBED={limit}行"
-                ).format(tag=self.LOG_TAG, limit=self.MAX_SUBSCRIBED)
-            )
 
     async def unsubscribe(self, *channel_names: str) -> None:
         """取消订阅频道（可多个），频道名通过 client.xxx_channel(table_ref) 获得"""
@@ -1254,9 +1556,232 @@ class HubMQClient(MQClient):
         # 服务端还关注着的频道只是客户端不要了，hub 里的登记得留着
         gone = [name for name in channel_names if name not in self._watched]
         if gone:
-            await self._hub.remove(self, gone)
+            await self._remove(gone)
 
     @property
     def subscribed_channels(self) -> set[str]:
         """返回当前连接订阅的所有频道名"""
         return self.subscribed
+
+    # === === === 挂在几个 hub 上时：分配、换 hub === === ===
+
+    def _candidates(self, channel: str, exclude: Collection[MQHub] = ()) -> list[MQHub]:
+        """频道可选的 hub，按优先顺序：rendezvous 哈希从高到低，冷却中的排到最后"""
+        now = time.monotonic()
+        salt = self._salt
+        ranked = sorted(
+            (self._cooldown.get(hub, 0.0) > now, -hash((salt, i, channel)), i)
+            for i, hub in enumerate(self._hubs)
+            if hub not in exclude
+        )
+        return [self._hubs[i] for _cooling, _score, i in ranked]
+
+    def _cool_down(self, hub: MQHub) -> None:
+        self._cooldown[hub] = time.monotonic() + self.HUB_COOLDOWN
+
+    async def _wait_moving(self, channels: Iterable[str]) -> None:
+        """这些频道里有正在换 hub 的就等它换完（没有时不让出事件循环）"""
+        moving = self._moving
+        if not moving:
+            return
+        futures = {moving[ch] for ch in channels if ch in moving}
+        if futures:
+            await asyncio.wait(futures)  # 只旁观：本调用方被取消不会取消换 hub
+
+    async def _add(self, channels: Iterable[str]) -> None:
+        """
+        在各频道的 hub 上登记订阅，返回时都已生效。只挂一个 hub 时就是 `hub.add`。
+
+        挂了几个 hub 时：登记过的照旧登记在原 hub 上（重复 add 幂等，会等在途的 ack）；没登记过的按
+        `_candidates` 挑一个。某个 hub 登记失败：它冷却，本次新分给它的频道换下一个候选再试；本次之前
+        就登记在它上面的不在这里搬（断线由 `lost_` 搬），直接抛出。抛出（含被取消）时本次新分配的
+        一律撤掉，在别处已登记上的也撤掉：与 `hub.add` 一样，失败不留半截登记
+        """
+        if len(self._hubs) == 1:
+            await self._hub.add(self, channels)
+            return
+        route = self._route
+        # 本次新分配 hub 的频道 → 在哪些 hub 上失败过
+        tried: dict[str, set[MQHub]] = {}
+        # 本次新登记成功的，出错时要撤掉
+        registered: list[tuple[MQHub, list[str]]] = []
+        todo = list(dict.fromkeys(channels))
+        error: BaseException | None = None
+        try:
+            while todo:
+                groups: dict[MQHub, list[str]] = {}
+                for channel in todo:
+                    hub = route.get(channel)
+                    if hub is None:
+                        candidates = self._candidates(
+                            channel, tried.setdefault(channel, set())
+                        )
+                        if not candidates:
+                            assert error is not None
+                            raise error  # 每个 hub 都试过了
+                        hub = route[channel] = candidates[0]
+                    groups.setdefault(hub, []).append(channel)
+                done: dict[MQHub, list[str]] = {}
+                try:
+                    failed = await self._add_groups(groups, done)
+                finally:
+                    registered.extend(
+                        (hub, [ch for ch in group if ch in tried])
+                        for hub, group in done.items()
+                    )
+                todo = []
+                for hub, exc in failed.items():
+                    self._cool_down(hub)
+                    error = exc
+                    for channel in groups[hub]:
+                        if channel not in tried:
+                            raise exc
+                        if route.get(channel) is hub:
+                            del route[channel]
+                        tried[channel].add(hub)
+                        todo.append(channel)
+        except BaseException:
+            for channel in tried:
+                route.pop(channel, None)
+            stale = [(hub, group) for hub, group in registered if group]
+            if stale:
+                self._spawn(self._drop(stale))
+            raise
+
+    async def _add_groups(
+        self, groups: dict[MQHub, list[str]], done: dict[MQHub, list[str]]
+    ) -> dict[MQHub, Exception]:
+        """各 hub 并发登记，登记成功的记进 done（被取消时调用方据此撤掉），返回登记失败的"""
+        failed: dict[MQHub, Exception] = {}
+
+        async def add(hub: MQHub, group: list[str]) -> None:
+            try:
+                await hub.add(self, group)
+            except Exception as e:  # noqa: BLE001 换下一个 hub，或由调用方抛出
+                failed[hub] = e
+            else:
+                done[hub] = group
+
+        await asyncio.gather(*(add(hub, group) for hub, group in groups.items()))
+        return failed
+
+    async def _remove(self, channels: Iterable[str]) -> None:
+        """
+        撤掉这些频道在各自 hub 上的登记（等退订回来）。只挂一个 hub 时就是 `hub.remove`。
+        正在换 hub 的，这里撤旧 hub 上的，新 hub 上的由换 hub 的任务换完时发现没人要了再撤
+        """
+        if len(self._hubs) == 1:
+            await self._hub.remove(self, channels)
+            return
+        groups: dict[MQHub, list[str]] = {}
+        for channel in channels:
+            hub = self._route.pop(channel, None)
+            if hub is not None:
+                groups.setdefault(hub, []).append(channel)
+        if groups:
+            await asyncio.gather(
+                *(hub.remove(self, group) for hub, group in groups.items())
+            )
+
+    async def _drop(self, groups: Iterable[tuple[MQHub, list[str]]]) -> None:
+        """撤掉这些 hub 上的登记（后台任务）"""
+        await asyncio.gather(*(hub.remove(self, group) for hub, group in groups))
+
+    def lost_(self, hub: MQHub, channels: list[str]) -> None:
+        """
+        hub 到后端的连接断了，这些频道的通知在它恢复之前收不到（`MQHub.lost_` 调用）。挂了几个 hub
+        时：它冷却，这些频道在后台换到别的 hub（`_move`）。只挂一个 hub 时什么也不做
+        """
+        if len(self._hubs) < 2 or self._closed:
+            return
+        self._cool_down(hub)
+        moving = [
+            channel
+            for channel in channels
+            if self._route.get(channel) is hub and channel not in self._moving
+        ]
+        if not moving:
+            return
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        for channel in moving:
+            self._moving[channel] = done
+        self._spawn(self._move(hub, moving, done))
+
+    async def _move(
+        self, old: MQHub, channels: list[str], done: asyncio.Future[None]
+    ) -> None:
+        """
+        把断线的 hub 上的这些频道换到别的 hub：先在新 hub 订上，再撤掉旧 hub 上的登记（它的重订名单
+        随之去掉这些频道），然后各补一条通知让订阅者重读：新订阅生效之后发出的读，才覆盖得了断线期间
+        的写入（同 `MQHub.resync_`：表级频道带 RESYNC，内部关注的频道触发回调）。换不成的留在原处，
+        等旧 hub 自己重连重订、补发
+        """
+        route = self._route
+        try:
+            moved: list[str] = []
+            tried: set[MQHub] = {old}
+            todo = channels
+            while todo:
+                groups: dict[MQHub, list[str]] = {}
+                for channel in todo:
+                    candidates = self._candidates(channel, tried)
+                    if candidates:
+                        groups.setdefault(candidates[0], []).append(channel)
+                if not groups:
+                    break
+                failed = await self._add_groups(groups, {})
+                todo = []
+                for hub, group in groups.items():
+                    if hub in failed:
+                        self._cool_down(hub)
+                        tried.add(hub)
+                        todo.extend(group)
+                        continue
+                    for channel in group:
+                        route[channel] = hub
+                    moved.extend(group)
+            if not moved:
+                logger.debug(
+                    "[%s] %d channels stay on the lost hub, no other hub took them",
+                    self.LOG_TAG,
+                    len(channels),
+                )
+                return
+            self._spawn(old.remove(self, moved))
+            # 换 hub 的途中不要了（退订了、也不再关注）的：新 hub 上的也撤掉
+            unwanted: dict[MQHub, list[str]] = {}
+            dropped = 0
+            for channel in moved:
+                if channel not in self.subscribed and channel not in self._watched:
+                    unwanted.setdefault(route.pop(channel), []).append(channel)
+                    continue
+                ids = [self.RESYNC] if MQHub.is_table_channel_(channel) else None
+                dropped += self.push_pulled_(channel, ids)
+            if unwanted:
+                self._spawn(self._drop(unwanted.items()))
+            if dropped:  # 入队顺手清掉的积压，和收到通知时一样要留下日志
+                logger.warning(
+                    _(
+                        "⚠️ [{tag}] 订阅更新通知来不及处理，丢弃了{seconds}秒前的消息共{count}条"
+                    ).format(tag=self.LOG_TAG, seconds=self.DROP_AFTER, count=dropped)
+                )
+        finally:
+            for channel in channels:
+                if self._moving.get(channel) is done:
+                    del self._moving[channel]
+            done.set_result(None)
+
+    def _spawn(self, coro: Coroutine[Any, Any, Any]) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._on_task_done)
+        return task
+
+    def _on_task_done(self, task: asyncio.Task) -> None:
+        self._tasks.discard(task)
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            logger.warning(
+                _("⚠️ [{tag}] 订阅 / 退订频道失败：{err}").format(
+                    tag=self.LOG_TAG, err=f"{type(exc).__name__}:{exc}"
+                )
+            )

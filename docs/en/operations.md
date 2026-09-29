@@ -104,7 +104,10 @@ population while staying consistent.
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every
   call; if a notification is lost, `CONNECTION_ALIVE_RECHECK_INTERVAL`
-  (default 5 s) re-checks as a fallback.
+  (default 5 s) re-checks as a fallback. Before disconnecting, the server
+  sends a WebSocket close frame with code `4001` and reason `kicked`, so the
+  client can tell the user "logged in elsewhere" — and should not reconnect
+  automatically (reconnecting logs in again and kicks the other side).
 - `servants` is optional. Leaving it empty puts you in single-master mode —
   fine for small games.
 - Set Redis `client-output-buffer-limit` on the servants conservatively;
@@ -240,6 +243,11 @@ file per `Component`, versioned by schema hash. From there:
     - **Force it with `--drop-data`.** Discards the affected attributes
       outright. Don't use in production.
 
+Volatile components (`volatile=True`) skip the migration script: `upgrade`
+wipes their data anyway, so on any schema change it simply recreates the
+table under the new definition — dropped or retyped columns don't need
+`--drop-data`.
+
 Commit everything under `maint/migration/` to your repo so deployed
 environments don't regenerate (and possibly diverge from) the script you
 already reviewed.
@@ -285,7 +293,7 @@ hetu start --app-file=./app.py --namespace=my_game --instance=server1 \
 | `--namespace NAME` | —                          | Which namespace from `app.py` to run                                                                |
 | `--instance NAME`  | —                          | Logical instance id (each running process needs a unique one for snowflake worker assignment)       |
 | `--port PORT`      | `2466`                     | WebSocket listening port                                                                            |
-| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `sqlite:///`, `postgresql://`, `mysql://`, ...)  |
+| `--db URL`         | `redis://127.0.0.1:6379/0` | Backend DSN; scheme picks the backend (`redis://`, `rediss://`, or `sqlite:///<file>` for dev)      |
 | `--workers N`      | `4`                        | Worker process count (rule of thumb: `CPU * 1.2`)                                                   |
 | `--debug 0/1/2`    | `0`                        | `1` enables hot reload + verbose logs; `2` also enables Python coroutine debug (90% slower)         |
 | `--cert DIR`       | `""`                       | TLS cert directory, or `auto` for self-signed; usually better to terminate TLS at the reverse proxy |
@@ -316,9 +324,31 @@ Extra flags that apply to both modes:
 - `-y` — skip the data-backup confirmation prompt (use in CI/CD).
 - `--drop-data` — force-migrate by discarding data that cannot be migrated.
   **Do not use in production.**
+- `--no-rebuild-index` — skip rebuilding indexes (see below).
 
 If you do not run `upgrade`, `hetu start` will refuse to launch when it sees
 a schema mismatch.
+
+By default every `upgrade` rebuilds the indexes of persistent `Component`s
+from the row data, which repairs leftover index entries — for example, a
+maintenance script deleted a row but not its index entry, the server log
+reports that the index and the row data don't match, and every `System` that
+reads that row keeps retrying. Run it with the servers **stopped** (writes
+between scanning the rows and replacing the index would be lost). Each index is
+built in full before it atomically replaces the old one, so a failed rebuild
+leaves the old index untouched. With a lot of data the rebuild is slow; pass
+`--no-rebuild-index` to skip it.
+
+Before doing anything, `upgrade` checks whether any server is still running
+(on Redis backends, from the worker leases) and exits with code 1 if so,
+leaving everything untouched: migrating, wiping volatile tables and rebuilding
+indexes all corrupt data while servers are running. If a server crashed, wait
+for its lease to expire (at most 60 seconds) and try again. On Windows there is
+no need to wait for servers on the same machine that have already exited:
+Sanic stops Windows workers with a hard kill, so they never get to release
+their leases, and such leases are not counted. The SQLite backend has no
+leases, so the check can't see its servers; make sure they are stopped
+yourself.
 
 ### `hetu build`
 

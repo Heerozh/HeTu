@@ -7,6 +7,10 @@ uv run ya ya_hetu_rpc.py -n 1200 -t 0.5
 # 时间太长可能内存不足
 ```
 
+> 注意：以下各组 `benchmark_get` 测于没有按 id 填充 `IntTable` 时（upsert 插入的行是雪花 id，
+> 碰不到 1–30000），`just_get` 全部读空，只反映 Redis miss 的吞吐，不含整行解码。现在要先运行
+> `seed_get_rows.py` 填充，读空会直接报错，新测的 `benchmark_get` 不能和这里的数字直接比较。
+
 Found 4 benchmark (s): benchmark_get, benchmark_get2_update2, benchmark_get_then_update,
 benchmark_hello_world
 Running with 64 workers, 3 tasks per worker, for 1.1 minute (s)

@@ -31,11 +31,15 @@ async def test_connect_kick(mod_test_app, tbl_mgr, new_ctx):
     await executor1_replaced.execute("login", 1)
 
     # 测试运行第一个连接的system，然后看是否失败
+    assert not executor1.kicked
     ok, _ = await executor1.execute("test_rls_comp_value", 101)
     assert not ok
+    # 失败原因是被顶号：websocket 层据此带 close 码断开
+    assert executor1.kicked
     # 这个的值应该是之前executor1的
     ok, _ = await executor1_replaced.execute("test_rls_comp_value", 101)
     assert ok
+    assert not executor1_replaced.kicked
 
     # 结束连接
     await executor1.terminate()
@@ -270,7 +274,8 @@ async def test_owner_value_channel_ignores_own_heartbeat(
         ok, _ = await executor.execute("add_rls_comp_value", i)
         assert ok
     if isinstance(backend.master, RedisBackendClient):
-        # Redis 的 keyspace 通知会把心跳的 HSET 打到行频道上（SQL 的 direct_set 不发通知）
+        # Redis 上心跳（direct_set）的 HSET 顺带触发行频道的 keyspace 通知（契约不保证，
+        # SQLite 不发）：它不能把 owner 值频道也叫醒
         await wait_hits(row_hits, 3)
     await asyncio.sleep(0.3)
     assert owner_hits == [], "心跳不该触发 owner 索引值频道"
@@ -351,6 +356,36 @@ async def test_flood_detect(mod_test_app, tbl_mgr, caplog, new_ctx):
 
     for loc_executor in executors:
         await loc_executor.terminate()
+
+
+async def test_flood_detect_same_ip_concurrent_no_race(
+    mod_test_app, tbl_mgr, monkeypatch
+):
+    """同 IP 匿名连接数检查只是粗略计数，不做区间校验：本连接数完同 IP 的连接、提交之前，
+    另一个同 IP 连接先建好了，也不能判竞态（new_connection 不重试，判竞态就是连接失败）"""
+    from unittest.mock import patch
+
+    from hetu.endpoint.connection import Connection, del_connection, new_connection
+
+    monkeypatch.setattr(connection, "MAX_ANONYMOUS_CONNECTION_BY_IP", 3)
+    table = tbl_mgr.get_table(Connection)
+    assert table
+    master = table.backend.master
+    orig_commit = master.commit
+    others: list[int] = []
+
+    async def commit_after_other(idmap):
+        if not others:
+            others.append(0)  # 占位，内层连接自己的提交不再嵌套
+            others[0] = await new_connection(tbl_mgr, "233.1.2.3")
+        return await orig_commit(idmap)
+
+    with patch.object(master, "commit", new=commit_after_other):
+        conn_id = await new_connection(tbl_mgr, "233.1.2.3")
+    assert conn_id and others[0]
+
+    await del_connection(tbl_mgr, conn_id)
+    await del_connection(tbl_mgr, others[0])
 
 
 async def test_future_call_bypass_flood_detect(mod_test_app, tbl_mgr, new_ctx):

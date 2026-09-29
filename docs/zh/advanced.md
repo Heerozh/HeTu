@@ -16,6 +16,7 @@ next: operations
 - **[原始 `Endpoints`](#原始endpoints多system或非数据库rpc)** —— 无事务的 RPC 处理器，用于非数据库工作或独立调用多个 `System`。
 - **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 提升管理员权限，以及速率限制覆盖。
 - **[提前 `session_commit` / `session_discard`](#提前-session_commit--session_discard)** —— 在 `System` 主体返回之前提交（或放弃）事务。
+- **[查不到就插入](#查不到就插入两种写法)** —— `range` 的区间校验（防幻读），以及热路径上更省的 unique 锚定 + `upsert` 写法。
 - **[用于范围查询的 NumPy 模式](#用于范围查询的-numpy-模式)** —— 广播、布尔掩码、聚合，以及将两个查询在内存中合并而非循环。
 - **[多后端](#多后端per-component)** —— 通过 `backend=` 将选定的 `Components` 固定到单独的数据库。
 - **[易失性组件](#易失性组件)** —— `volatile=True` 用于在模式维护时应被清除的状态。
@@ -252,6 +253,86 @@ async def long_running(ctx: hetu.SystemContext, ...):
 - **`session_commit` 之后的操作不会在 `RaceCondition` 时重试。** 只有提交前的主体部分参与 HeTu 的乐观重试。如果提交后的工作失败，你需要自行恢复。
 
 `session_discard()` 格式相同，但会丢弃所有内容。当 `System` 提前确定正确的答案是“什么也不做”并且希望完全跳过提交时，使用它。
+
+## 查不到就插入：两种写法
+
+"每个玩家每种道具一行，没有就插入、有就加数量"是最常见的写法。HeTu 里有两种写对的方式。
+
+### 朴素写法：`range` 读完再决定
+
+```python
+import hetu
+import numpy as np
+
+
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    items = await ctx.repo[Item].range(owner=(ctx.caller, ctx.caller), limit=-1)
+    hit = items[items.template == tpl]
+    if len(hit) == 0:
+        row = Item.new_row()
+        row.owner, row.template, row.qty = ctx.caller, tpl, n
+        await ctx.repo[Item].insert(row)
+    else:
+        row = hit[0]
+        row.qty += n
+        await ctx.repo[Item].update(row)
+```
+
+这样写是安全的：`range` 读过的区间会在提交时校验。别的事务在这期间给同一个玩家插了一行，或者这次
+`range` 读到的是还没同步的副本，提交都会判竞态；`System` 重试时读到那一行，改走 `update`。
+
+用 `get` 判断也一样：非 unique 列的 `get` 读空后再插入，提交时同样会校验。`get` 命中时只保证返回的
+这一行没被改过，之后再插入的同值行不算冲突。
+
+两个注意点：
+
+- **读全。** 截断读（数据库返回了 `limit` 行）只保护读到的前 `limit` 行，没读到的行会被当成不存在。
+  判断"有没有"时用 `limit=-1`。本事务删掉的行不在结果里、却占着 `limit` 的名额，返回行数小于 `limit`
+  不代表读全了。
+- **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
+  整个背包付费。
+
+### 热路径：unique 锚定 + `upsert`
+
+给组合键建一个 unique 字段，用 `upsert` 锚定它，事务只碰一行：
+
+```python
+@hetu.define_component(namespace="game", permission=hetu.Permission.OWNER)
+class Item(hetu.BaseComponent):
+    owner: np.int64 = hetu.property_field(0, index=True)
+    template: np.int32 = hetu.property_field(0)
+    qty: np.int32 = hetu.property_field(0)
+    slot: str = hetu.property_field("", unique=True, dtype="U32")  # f"{owner}:{template}"
+
+
+@hetu.define_system(
+    namespace="game", components=(Item,), permission=hetu.Permission.USER
+)
+async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
+    async with ctx.repo[Item].upsert(slot=f"{ctx.caller}:{tpl}") as item:
+        item.owner, item.template = ctx.caller, tpl
+        item.qty += n
+```
+
+两个事务同时走到插入分支时，后提交的那个撞上 unique，判竞态；重试时 `upsert` 查到对方的行，改走更新。
+代价是多一个 unique 索引；道具换主人时要同步改 `slot`；给已有数据加这个字段时要先回填。
+
+### 关掉区间校验
+
+读写频繁的区间、且逻辑不依赖"区间里没有别的行"时，比如读最新 N 条消息再插一条，每条新消息都会让并发的
+事务判竞态、白白重试。这种 `range` 传 `phantom_check=False`：返回的行照样参与版本校验，只是不管区间里
+新增的行。`replay.log` 里的 `[RaceCondition]` 行带着冲突原因（如 `Range changed Item.owner`），可以据此
+找出冲突多的区间。
 
 ## 用于范围查询的 NumPy 模式
 
@@ -506,7 +587,7 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 - 整个集群最多 1024 个工作器（租约池）。
 - 从纪元（`2025-12-18` UTC+8）起有 69 年的余量。
 
-工作器 ID 由 `WorkerKeeper` 自动租用，它将这些 ID 存储在 `WorkerLease` `Component`（一个 `core`/易失性表）中，并且每 5 秒续租一次。如果进程在未释放租约的情况下死亡，该槽位会在租约过期后被回收。启动时，引擎会恢复*上次持久化的时间戳*，如果系统时钟回退，会等待一个短暂的宽限期——这是 HeTu 在主机重启后 NTP 调整时防止重复 ID 的防御机制。
+工作器 ID 由 `WorkerKeeper` 自动租用：Redis 后端的租约存为 Redis 键，每 5 秒续租一次，如果进程在未释放租约的情况下死亡，该槽位会在租约过期后被回收；SQLite 后端（仅用于开发）直接使用进程在本机的序号。启动时，引擎会从 `WorkerLease` `Component`（一个 `core`/易失性表）恢复*上次持久化的时间戳*，如果系统时钟回退，会等待一个短暂的宽限期——这是 HeTu 在主机重启后 NTP 调整时防止重复 ID 的防御机制。
 
 对于你的代码，实际影响很短：
 
@@ -522,7 +603,7 @@ HeTu 中的每个行 ID（`row.id`）都是一个 64 位 Snowflake：
 import hetu.headless
 
 client = await hetu.headless.connect(
-    backend_config,                      # config.yml 里 BACKENDS[x] 那个 dict，Redis 与 SQL 都支持
+    backend_config,                      # config.yml 里 BACKENDS[x] 那个 dict，Redis 与 SQLite 都支持
     instance="my-region",                # INSTANCES 里的实例名，表按实例隔离
     components=[BattleCommand, "BattleReport", BattleSim],  # 组件类或组件名，可混用
 )
@@ -550,7 +631,7 @@ for row in rows:
         ...
 ```
 
-注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用（MySQL / MariaDB 由引擎钳到 dtype 极值）。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
+注意 `right` 不能省略——省略等于“精确等于 `left`”，不是 `>=`。`float("inf")` 在所有后端都可用。`servant_*` 走只读副本，本就允许落后，配合水位线回看与 seq 去重即可；批量重读某些行时用 `servant_get_many`。不要用 `Table.direct_set`：它绕过事务，不保证通知一致。
 
 ### 写：`client.session(*comps)`
 

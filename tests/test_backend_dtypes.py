@@ -1,11 +1,12 @@
 """
-非常规字段类型在各后端的往返与索引查询：bool（定义时转成 int8）、无符号整型、bytes。
+非常规字段类型与值在各后端的往返与索引查询：bool（定义时转成 int8）、无符号整型、bytes、
+浮点的 ±inf / NaN、含 \\x00 的字符串。
 """
 
 import numpy as np
 import pytest
-from fixtures.backends import SQL_BACKENDS, use_redis_family_backend_only
-from fixtures.testdata import create_ref
+from fixtures.backends import raw_index_members
+from fixtures.testdata import create_ref, def_item
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RowFormat, TableReference
@@ -132,7 +133,6 @@ async def test_unsigned_index_range(blob_ref, mod_auto_backend):
     assert len(await servant.range(blob_ref, "small", 0)) == 0
 
 
-@use_redis_family_backend_only
 async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     """uint64 超过 int64 上限的值原样往返，按无符号数值排序"""
     backend: Backend = mod_auto_backend()
@@ -142,31 +142,9 @@ async def test_uint64_above_int64_max(blob_ref, mod_auto_backend):
     servant = backend.servant
 
     assert (await servant.get(blob_ref, ids[0])).big == 2**64 - 1
+    assert [int(row.big) for row in await servant.get_many(blob_ref, ids)] == bigs
     rows = await servant.range(blob_ref, "big", I64_MAX, 2**64 - 1, limit=10)
     assert list(rows.big) == [I64_MAX, 2**63 + 5, 2**64 - 1]
-
-
-@pytest.mark.parametrize("backend_name", SQL_BACKENDS, indirect=True)
-async def test_sql_rejects_uint64_above_bigint(blob_ref, mod_auto_backend):
-    """SQL 后端的无符号整型存在 BIGINT 列里：超过 2**63-1 的 uint64 写入时明确拒绝
-    （报错带组件名、字段名，整个事务什么都不写），而不是各驱动各自的溢出错误。
-    查询边界超出这个范围时按语义收回：上界超了等于到头，下界超了什么都查不到"""
-    backend: Backend = mod_auto_backend()
-    comp = blob_ref.comp_cls
-    servant = backend.servant
-
-    with pytest.raises(ValueError, match=r"Blob\.big"):
-        await _insert(backend, comp, big=[I64_MAX, 2**63 + 5], tag=[b"x", b"y"])
-    assert len(await servant.range(blob_ref, "big", 0, float("inf"), limit=10)) == 0
-
-    ids = await _insert(backend, comp, big=[5, I64_MAX], tag=[b"x", b"y"])
-    # 开放上界：inf 会被钳到 uint64 的最大值，同样要收回来
-    rows = await servant.range(blob_ref, "big", 0, float("inf"), limit=10)
-    assert [int(r.id) for r in rows] == ids
-    rows = await servant.range(blob_ref, "big", 1, 2**64 - 1, limit=10, desc=True)
-    assert list(rows.big) == [I64_MAX, 5]
-    assert len(await servant.range(blob_ref, "big", 2**63 + 5, float("inf"))) == 0
-    assert len(await servant.range(blob_ref, "big", 2**64 - 1)) == 0
 
 
 BIN = b"\xff\x80\x00\xfe"  # 不是合法 UTF-8，中间还有 \x00
@@ -187,6 +165,13 @@ async def test_bytes_roundtrip(blob_ref, mod_auto_backend):
         assert typed["tag"] == tag
     rows = await servant.get_many(blob_ref, ids, RowFormat.TYPED_DICT)
     assert [row["tag"] for row in rows] == tags
+    rows = await servant.get_many(blob_ref, [ids[2], 0, ids[0], ids[1]])
+    assert [None if row is None else bytes(row.tag) for row in rows] == [
+        tags[2],
+        None,
+        tags[0],
+        tags[1],
+    ]
 
 
 async def test_bytes_index_follows_update_and_delete(blob_ref, mod_auto_backend):
@@ -233,3 +218,112 @@ async def test_bytes_index_range(blob_ref, mod_auto_backend):
     assert list(rows.tag) == [b"a", b"a\x00b", b"ab"]
     rows = await servant.range(blob_ref, "tag", b"a", b"b", limit=2, desc=True)
     assert list(rows.tag) == [b"b", b"ab"]
+
+
+async def test_rebuild_index_matches_commit(blob_ref, mod_auto_backend):
+    """重建索引（hetu upgrade 默认每次都做）按行数据重算的 member 要与 commit 写的逐字节
+    一致：bytes 用真实字节，不是合法 UTF-8、非 ASCII 的值都不能让重建失败"""
+    backend: Backend = mod_auto_backend()
+    comp = blob_ref.comp_cls
+    ids = await _insert(
+        backend,
+        comp,
+        flag=[True, False, True],
+        small=[U32_MAX, 0, 2**31],
+        big=[2**64 - 1, I64_MAX, 5],
+        tag=[b"a\x00b", BIN, "河图".encode()],
+    )
+    before = [raw_index_members(backend, blob_ref, name) for name in comp.indexes_]
+
+    backend.get_table_maintenance().rebuild_index(blob_ref)
+    after = [raw_index_members(backend, blob_ref, name) for name in comp.indexes_]
+    assert after == before
+    await backend.wait_for_synced()
+    rows = await backend.servant.range(blob_ref, "tag", BIN)
+    assert [int(r.id) for r in rows] == [ids[1]]
+
+
+@pytest.mark.parametrize(
+    "value", [float("inf"), float("-inf"), float("nan")], ids=["inf", "-inf", "nan"]
+)
+async def test_float_special_values(item_ref, mod_auto_backend, value):
+    """
+    浮点列存 ±inf / NaN 原样读回。后端存不下的值要在写入前明确拒绝（ValueError，同
+    uint64），不能交给驱动报错，更不能被当成竞态重试。
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name, row.time, row.model = "s", 1, value
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(row)
+    except ValueError:
+        return  # 后端存不下，写入前明确拒绝也可以
+    got = await backend.master.get(item_ref, int(row.id))
+    assert got is not None
+    np.testing.assert_equal(got.model, np.float32(value))
+    for batch_row in await backend.master.get_many(item_ref, [int(row.id)] * 2):
+        np.testing.assert_equal(batch_row.model, np.float32(value))
+
+
+async def test_str_with_nul_roundtrip(item_ref, mod_auto_backend):
+    """
+    字符串中间的 \\x00 原样存取、能按它点查。后端存不下的要在写入前明确拒绝（ValueError）。
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name, row.time = "a\x00b", 1
+    try:
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(row)
+    except ValueError:
+        return  # 后端存不下，写入前明确拒绝也可以
+    got = await backend.master.get(item_ref, int(row.id))
+    assert got is not None and got.name == "a\x00b"
+    batch = await backend.master.get_many(item_ref, [int(row.id)] * 2)
+    assert [r.name for r in batch] == ["a\x00b"] * 2
+    rows = await backend.master.range(item_ref, "name", "a\x00b", limit=-1)
+    assert [int(r.id) for r in rows] == [int(row.id)]
+
+
+def _tricky_rows():
+    """覆盖各种 dtype 边界值的两个组件的行：{组件: recarray}。要在 new_component_env 里调"""
+    item = def_item()
+    items = item.new_rows(3)
+    items.owner = [-1, 0, I64_MAX]
+    items.model = [np.nan, np.inf, -0.0]
+    items.qty = [-32768, 0, 32767]
+    items.name = ["", "中文名", "a\x00b"]
+    items.used = [True, False, True]
+    blob = def_blob()
+    blobs = blob.new_rows(3)
+    blobs.flag = [True, False, True]
+    blobs.small = [0, U32_MAX, 5]
+    blobs.big = [0, 2**64 - 1, 7]
+    blobs.tag = [b"", b"\xff\x00a", b"abc"]
+    return {item: items, blob: blobs}
+
+
+def test_redis_rows_decode_roundtrip(new_component_env):
+    """Redis 一次解码多行：按提交时的格式（_row_to_db 再编码成 bytes）写出去，解码回来与
+    原行逐字节一致。单行解码（row_decode_ 的 STRUCT）是它的特例，0 行得到空 recarray"""
+    from hetu.data.backend.idmap import _row_to_db
+    from hetu.data.backend.redis import RedisBackendClient
+
+    for comp, rows in _tricky_rows().items():
+        raw = [
+            {
+                k.encode(): v if isinstance(v, bytes) else v.encode()
+                for k, v in _row_to_db(row, comp.bytes_fields_).items()
+            }
+            for row in rows
+        ]
+        decoded = RedisBackendClient.rows_decode_(comp, raw)
+        assert type(decoded) is np.recarray and decoded.dtype == comp.dtypes
+        assert decoded.tobytes() == rows.tobytes()
+        single = RedisBackendClient.row_decode_(comp, raw[1], RowFormat.STRUCT)
+        assert single.tobytes() == rows[1].tobytes()
+        empty = RedisBackendClient.rows_decode_(comp, [])
+        assert len(empty) == 0 and empty.dtype == comp.dtypes

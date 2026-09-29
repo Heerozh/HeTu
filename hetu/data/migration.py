@@ -69,7 +69,11 @@ class MigrationScript:
         # 在app_root/maint/migration/目录下，把默认迁移脚本写进去
         migration_dir = app_root / "maint" / "migration"
         migration_dir.mkdir(parents=True, exist_ok=True)
-        migration_file = f"{target_model.name_}_v{old_version}_to_v{new_version}.py"
+        # 副本组件名形如 "FutureCalls:Loot"，冒号在 Windows 上是 NTFS 备用数据流分隔符，
+        # 直接当文件名会写进 0 字节文件 "FutureCalls" 的隐藏流里，目录中看不到脚本。
+        # _find_script 只按版本号匹配，前缀换掉不影响查找
+        file_prefix = target_model.name_.replace(":", "-")
+        migration_file = f"{file_prefix}_v{old_version}_to_v{new_version}.py"
         script_path = migration_dir / migration_file
         if script_path.exists():
             return script_path

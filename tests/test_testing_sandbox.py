@@ -4,6 +4,8 @@
 进程内 SQLite 临时文件跑 System、读回组件行。
 """
 
+import asyncio
+
 import app
 import msgspec
 import pytest
@@ -124,6 +126,28 @@ async def test_sandbox_fixture_factory(sandbox):
     # 直接使用工厂产出的 fixture（已建好表）
     await sandbox.call_system("add_rls_comp_value", 3, caller=555)
     assert (await sandbox.get("RLSComp", owner=555)).value == 103
+
+
+def test_sandbox_used_from_another_event_loop(tmp_path):
+    """sandbox_fixture 用更大的 scope 时，fixture 与测试常常不在同一个事件循环里（pytest-asyncio
+    默认 fixture 的 loop 跟 fixture 的 scope、测试一个一个 loop）：建在前一个 loop 里的 Sandbox
+    要能在后一个 loop 里照常调用"""
+    fixture_loop, test_loop = asyncio.new_event_loop(), asyncio.new_event_loop()
+    try:
+        sb = fixture_loop.run_until_complete(
+            Sandbox.create("pytest", app, db_path=str(tmp_path / "t.sqlite3"))
+        )
+        try:
+            test_loop.run_until_complete(
+                sb.call_system("add_rls_comp_value", 3, caller=555)
+            )
+            row = test_loop.run_until_complete(sb.get("RLSComp", owner=555))
+            assert row is not None and row.value == 103
+        finally:
+            test_loop.run_until_complete(sb.aclose())
+    finally:
+        fixture_loop.close()
+        test_loop.close()
 
 
 def test_sandbox_codec_parity_with_server_pipeline():

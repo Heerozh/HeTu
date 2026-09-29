@@ -67,6 +67,34 @@ namespace HeTu
     }
 
     /// <summary>
+    ///     WebSocket close 码。连接关闭后可在 <see cref="HeTuClientBase.OnClosed" /> 里读
+    ///     <see cref="HeTuClientBase.LastCloseCode" /> 与之比较。
+    ///     WebSocket close codes; compare with
+    ///     <see cref="HeTuClientBase.LastCloseCode" /> inside
+    ///     <see cref="HeTuClientBase.OnClosed" />.
+    /// </summary>
+    public static class HeTuCloseCode
+    {
+        /// <summary>正常关闭。Normal closure.</summary>
+        public const int Normal = 1000;
+
+        /// <summary>
+        ///     没收到 close 帧就断了（网络断开、连接失败等）。
+        ///     Closed without a close frame (network loss, connect failure, ...).
+        /// </summary>
+        public const int Abnormal = 1006;
+
+        /// <summary>
+        ///     被顶号：同一账号在别处登录，服务端断开了本连接。请提示玩家，并且不要自动重连——
+        ///     重连会重新登录，把对方顶掉。与服务端 <c>CLOSE_KICKED</c> 一致。
+        ///     Kicked: the same account logged in elsewhere. Tell the player and do not
+        ///     reconnect automatically — reconnecting logs in again and kicks the other
+        ///     side.
+        /// </summary>
+        public const int Kicked = 4001;
+    }
+
+    /// <summary>
     ///     客户端连接状态。
     /// </summary>
     public enum ConnectionState
@@ -127,6 +155,15 @@ namespace HeTu
         public bool IsConnected => State == ConnectionState.Connected;
 
         /// <summary>
+        ///     最近一次连接关闭的 close 码（见 <see cref="HeTuCloseCode" />），在
+        ///     <see cref="OnClosed" /> 触发前设好；还没关闭过、或重新连接后为 0。
+        ///     例如等于 <see cref="HeTuCloseCode.Kicked" /> 时提示"账号已在别处登录"。
+        ///     Close code of the last closed connection, set before
+        ///     <see cref="OnClosed" /> fires; 0 before any close or after reconnecting.
+        /// </summary>
+        public int LastCloseCode { get; private set; }
+
+        /// <summary>
         ///     动态开关：是否启用 Inspector 拦截。
         /// </summary>
         public bool InspectorEnabled => InspectorCollector.Enabled;
@@ -167,6 +204,7 @@ namespace HeTu
         /// </summary>
         /// <remarks>
         ///     参数为 <see langword="null" /> 表示正常关闭；否则为错误信息。
+        ///     close 码见 <see cref="LastCloseCode" />。
         /// </remarks>
         public event Action<string> OnClosed;
 
@@ -176,9 +214,11 @@ namespace HeTu
         /// </summary>
         public event Action<string, string> OnCallRejected;
 
-        // 实际Websocket连接方法
+        // 实际Websocket连接方法。onClose(close 码, 原因)：原因为 null 表示正常关闭；
+        // 没收到 close 帧就断了的用 HeTuCloseCode.Abnormal
         protected abstract void ConnectCore(string url, Action onConnected,
-            Action<byte[]> onMessage, Action<string> onClose, Action<string> onError);
+            Action<byte[]> onMessage, Action<int, string> onClose,
+            Action<string> onError);
 
         // 实际关闭ws连接的方法
         protected abstract void CloseCore();
@@ -219,6 +259,7 @@ namespace HeTu
             Logger.Instance.Info($"正在连接到：{url}...");
             Subscriptions.Clean();
             ResponseQueue.CancelAll("重新连接");
+            LastCloseCode = 0;
 
             // 初始化WebSocket以及事件
             State = ConnectionState.ReadyForConnect;
@@ -257,11 +298,14 @@ namespace HeTu
             OnConnected?.Invoke();
         }
 
-        private void HandleClosed(string errMsg)
+        private void HandleClosed(int code, string errMsg)
         {
             State = ConnectionState.Disconnected;
+            LastCloseCode = code;
             Subscriptions.Clean();
-            if (errMsg == null)
+            if (code == HeTuCloseCode.Kicked)
+                Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
+            else if (errMsg == null)
                 Logger.Instance.Info("连接断开，收到了服务器Close消息。");
             OnClosed?.Invoke(errMsg);
         }

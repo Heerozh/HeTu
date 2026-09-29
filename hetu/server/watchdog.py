@@ -133,12 +133,12 @@ class LoopWatchdog:
             self._reported = True
             try:
                 self._dump(stalled)
-            except Exception:  # 看门狗自己绝不能把worker搞崩
+            except Exception:  # noqa: BLE001 看门狗自己绝不能把worker搞崩
                 traceback.print_exc(file=sys.stderr)
             if self.autoheal:
                 try:
                     self._try_heal()
-                except Exception:
+                except Exception:  # noqa: BLE001 同上
                     traceback.print_exc(file=sys.stderr)
 
     def _report_recovered(self):
@@ -185,7 +185,7 @@ class LoopWatchdog:
         # 而用户平时只看日志、不会去翻 logs/hang_<pid>.log，所以这条必须走正常日志管道。
         try:
             logger.error(msg)
-        except Exception:
+        except Exception:  # noqa: BLE001 日志管道出错也不能把看门狗搞崩
             traceback.print_exc(file=sys.stderr)
 
     def _heal_accept_deadlock(self, frame) -> bool:
@@ -244,7 +244,7 @@ class LoopWatchdog:
         try:
             sock = frame.f_locals.get("sock")
             backlog = int(frame.f_locals.get("backlog") or 100)
-        except Exception:  # f_locals 取不到就放弃自愈，绝不能抛出去
+        except Exception:  # noqa: BLE001 f_locals 取不到就放弃自愈，绝不能抛出去
             return False
         addr = _kick_address(sock) if sock is not None else None
         if addr is None:
@@ -313,7 +313,7 @@ class LoopWatchdog:
             f.write(f"\n{task!r}\n")
             try:
                 task.print_stack(limit=MAX_TASK_STACK_DEPTH, file=f)
-            except Exception as e:  # 单个task取栈失败不能中断整个dump
+            except Exception as e:  # noqa: BLE001 单个task取栈失败不能中断整个dump
                 f.write(f"  <{type(e).__name__}:{e}>\n")
         if len(tasks) > MAX_TASKS:
             f.write(
@@ -357,7 +357,7 @@ def _write_stderr(msg: str):
         if sys.stderr is not None:
             sys.stderr.write(msg)
             sys.stderr.flush()
-    except Exception:
+    except Exception:  # noqa: BLE001, S110
         pass
 
 

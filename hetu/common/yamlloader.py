@@ -1,7 +1,7 @@
 import json
 import os
 import re
-from typing import Any, IO
+from typing import IO, Any
 
 import yaml
 
@@ -53,7 +53,7 @@ def construct_eval(loader: Loader, node: yaml.Node) -> Any:
 _ENV_SUBST = re.compile(r"\$\{([^{}]+)\}")
 
 
-def _resolve_env(match: "re.Match[str]", node: yaml.Node) -> str:
+def _resolve_env(match: re.Match[str], node: yaml.Node) -> str:
     name, sep, default = match.group(1).partition(":-")
     name = name.strip()
     if name in os.environ:

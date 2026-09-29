@@ -5,8 +5,11 @@ import zlib
 from typing import Any
 
 import msgspec
-import nacl.exceptions
+import nacl.bindings
+import nacl.encoding
+import nacl.hash
 import pytest
+from cryptography.exceptions import InvalidTag
 from nacl.public import PrivateKey
 
 from hetu.data import BaseComponent, Permission, define_component, property_field
@@ -58,6 +61,44 @@ def test_handshake_returns_dict_message(base_pipeline):
     assert isinstance(msg, (bytes, bytearray))
     assert msg == zstd_layer.dict_message
     assert len(zstd_layer.dict_message) == zstd_layer.dict_size
+
+
+def test_zstd_skips_unencodable_samples(base_pipeline, monkeypatch):
+    """前面的层编码不了的样本要跳过：原来塞进去的是 "" (str)，zstd.train_dict 拼 bytes
+    时抛 TypeError，握手失败"""
+    zstd_layer = pipeline.ZstdLayer(level=3)
+    base_pipeline.add_layer(zstd_layer)
+    real_encode = base_pipeline.encode
+    calls = 0
+
+    def flaky_encode(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls % 10 == 0:
+            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
+        return real_encode(*args, **kwargs)
+
+    monkeypatch.setattr(base_pipeline, "encode", flaky_encode)
+    _ctx, msg = zstd_layer.handshake(b"")
+    assert msg == zstd_layer.dict_message
+    assert len(zstd_layer.dict_message) == zstd_layer.dict_size
+
+
+def test_zstd_samples_have_valid_strings(base_pipeline):
+    """随机样本里的字符串列得是合法字符串。整行填随机字节时，UTF-32 的字符串列几乎必然
+    填出超出 Unicode 范围的码位（numpy 造出坏掉的 str，编码出无效的 UTF-8），偶尔填出
+    代理字符（编码直接失败，样本被丢弃）"""
+    zstd_layer = pipeline.ZstdLayer(level=3)
+    base_pipeline.add_layer(zstd_layer)
+
+    samples = zstd_layer.initial_samples()
+    assert samples
+    for sample in samples:
+        assert isinstance(sample, bytes)
+        _cmd, _sub_id, row = msgspec.msgpack.decode(sample)
+        for value in row.values():
+            if isinstance(value, str):
+                value.encode("utf-8")  # 代理字符在这里抛
 
 
 def test_zstd_encode_decode_roundtrip(base_pipeline, mod_item_model):
@@ -385,7 +426,7 @@ def test_crypto_decode_rejects_tampered_frame(caplog):
     frame[0] ^= 0xFF
     with (
         caplog.at_level(logging.ERROR, logger="HeTu.root"),
-        pytest.raises(nacl.exceptions.CryptoError),
+        pytest.raises(InvalidTag),
     ):
         layer.decode(server_ctx, bytes(frame))
     assert "解密验证失败" in caplog.text
@@ -396,7 +437,7 @@ def test_crypto_decode_rejects_replayed_frame():
     layer, server_ctx, client_ctx = _crypto_pair()
     frame = layer.encode(client_ctx, b"hello")
     assert layer.decode(server_ctx, frame) == b"hello"
-    with pytest.raises(nacl.exceptions.CryptoError):
+    with pytest.raises(InvalidTag):
         layer.decode(server_ctx, frame)
 
 
@@ -492,3 +533,113 @@ def test_clean_resets_disabled_layers():
     assert pipe.num_handshake_layers == 1
     # 压缩层照常生效，没被当成禁用
     assert pipe.encode([None, zlib_ctx], msg) != msgspec.msgpack.encode(msg)
+
+
+@pytest.mark.parametrize("server_side", [False, True])
+@pytest.mark.parametrize("size", [0, 1, 25, 1024, 65536])
+def test_crypto_wire_compatible_with_pynacl(server_side, size):
+    """逐字节兼容旧实现：双方向、多包计数、空包和大包，不仅是自身 roundtrip。"""
+    layer = pipeline.CryptoLayer()
+    key = bytes(range(32))
+    ctx = layer.CryptoContext(key, server_side, 0, 0)
+    payload = (bytes(range(256)) * (size // 256 + 1))[:size]
+    for counter in (1, 2, 3):
+        send_nonce = (b"\x00" if server_side else b"\xff") + counter.to_bytes(11)
+        recv_nonce = (b"\xff" if server_side else b"\x00") + counter.to_bytes(11)
+        expected = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
+            payload, None, send_nonce, key
+        )
+        assert layer.encode(ctx, payload) == expected
+        incoming = nacl.bindings.crypto_aead_chacha20poly1305_ietf_encrypt(
+            payload, None, recv_nonce, key
+        )
+        assert layer.decode(ctx, incoming) == payload
+
+
+def _pynacl_session_key(private_key: bytes, peer_public: bytes) -> bytes:
+    """旧实现的会话密钥派生：libsodium 算 X25519 共享点，再做 32 字节 Blake2b"""
+    shared_point = nacl.bindings.crypto_scalarmult(private_key, peer_public)
+    return nacl.hash.blake2b(
+        shared_point, digest_size=32, encoder=nacl.encoding.RawEncoder
+    )
+
+
+def test_crypto_handshake_compatible_with_pynacl():
+    """握手与旧的 PyNaCl 实现互通：对端按旧实现算出的会话密钥与本层一致，双方向都验"""
+    layer = pipeline.CryptoLayer()
+    for _ in range(8):
+        client_private = PrivateKey.generate()
+        server_ctx, server_pub = layer.handshake(client_private.public_key.encode())
+        assert server_ctx.session_key == _pynacl_session_key(
+            client_private.encode(), server_pub
+        )
+
+        server_private = PrivateKey.generate()
+        client_ctx = layer.client_handshake(
+            client_private.encode(), server_private.public_key.encode()
+        )
+        assert client_ctx.session_key == _pynacl_session_key(
+            server_private.encode(), client_private.public_key.encode()
+        )
+
+
+def test_crypto_handshake_matches_rfc7748_vector():
+    """会话密钥 = Blake2b-256(X25519 共享点)，用 RFC 7748 §6.1 的已知向量钉死"""
+    alice_private = bytes.fromhex(
+        "77076d0a7318a57d3c16c17251b26645df4c2f87ebc0992ab177fba51db92c2a"
+    )
+    bob_public = bytes.fromhex(
+        "de9edb7d7b7dc1b4d35b61c2ece435373f8343c85b78674dadfc7e146f882b4f"
+    )
+    shared_point = bytes.fromhex(
+        "4a5d9d5ba4ce2de1728e3bf480350f25e07e21c947d19e3376f09b3c1e161742"
+    )
+    ctx = pipeline.CryptoLayer().client_handshake(alice_private, bob_public)
+    assert ctx.session_key == hashlib.blake2b(shared_point, digest_size=32).digest()
+
+
+def test_crypto_handshake_rejects_low_order_public_key(caplog):
+    """全零等小阶点公钥算出的共享点恒为零，会话密钥可预测，必须拒绝"""
+    layer = pipeline.CryptoLayer()
+    with (
+        caplog.at_level(logging.WARNING, logger="HeTu.root"),
+        pytest.raises(ValueError),
+    ):
+        layer.handshake(b"\x00" * 32)
+    assert "握手异常" in caplog.text
+
+
+def test_crypto_rejects_wrong_key_and_direction():
+    layer = pipeline.CryptoLayer()
+    key = b"a" * 32
+    for peer_key, peer_side in ((b"b" * 32, False), (key, True)):
+        receiver = layer.CryptoContext(key, True, 0, 0)
+        sender = layer.CryptoContext(peer_key, peer_side, 0, 0)
+        frame = layer.encode(sender, b"hello")
+        with pytest.raises(InvalidTag):
+            layer.decode(receiver, frame)
+
+
+def test_crypto_auth_failure_logs_reason(caplog):
+    """认证失败的错误日志要带原因：cryptography 的 InvalidTag 没有消息，不能打出空原因"""
+    layer = pipeline.CryptoLayer()
+    receiver = layer.CryptoContext(b"a" * 32, True, 0, 0)
+    sender = layer.CryptoContext(b"b" * 32, False, 0, 0)
+    frame = layer.encode(sender, b"hello")
+    with (
+        caplog.at_level(logging.ERROR, logger="HeTu.root"),
+        pytest.raises(InvalidTag),
+    ):
+        layer.decode(receiver, frame)
+    errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "InvalidTag" in errors[0]
+
+
+def test_crypto_nonce_overflow_does_not_wrap():
+    layer = pipeline.CryptoLayer()
+    ctx = layer.CryptoContext(b"a" * 32, True, (1 << 88) - 1, (1 << 88) - 1)
+    with pytest.raises(OverflowError):
+        layer.encode(ctx, b"hello")
+    with pytest.raises(OverflowError):
+        layer.decode(ctx, b"x" * 16)

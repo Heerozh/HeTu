@@ -218,12 +218,14 @@ HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat");
 // will automatically wait for the connection to be established before sending.
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 
+// The latest 1024 messages: desc takes them from the newest end. Ascending would
+// stay on the oldest 1024 and new messages could never enter once it is full
 var messages = await HeTuClient.Instance.WatchRange<ChatMessage>(
-    "created_at_ms", 0, long.MaxValue, 1024);
+    "created_at_ms", 0, long.MaxValue, 1024, desc: true);
 
-messages.addTo(gameObject);
-messages.ObserveAdd()
-    .Subscribe(msg => Debug.Log($"{msg.name}: {msg.text}"))
+messages.AddTo(gameObject);
+messages.ObserveAdd()  // the initial rows are emitted first, newest first
+    .Subscribe(msg => Debug.Log($"{msg.Name}: {msg.Text}"))
     .AddTo(ref messages.DisposeBag);
 
 await HeTuClient.Instance.CallSystem("user_chat", "Hello, world!");
@@ -234,7 +236,7 @@ just yours) flows into `ObserveAdd()` within milliseconds, no polling.
 
 ## What you've learned
 
-- **Components** are typed tables stored in Redis (or SQLite/Postgres in dev).
+- **Components** are typed tables stored in Redis (or SQLite in dev).
 - **Systems** are async functions that read/write components inside a
   transaction. Their `permission=` controls who can call them.
 - **`elevate()`** promotes a connection to authenticated.

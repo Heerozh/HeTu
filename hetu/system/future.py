@@ -62,7 +62,7 @@ def _key_to_id(key: str) -> int:
 
 
 def _build_future_row(
-    ctx: "SystemContext",
+    ctx: SystemContext,
     at: float,
     system: str,
     args: tuple,
@@ -335,23 +335,44 @@ async def sleep_for_upcoming(tbl: Table):
 async def pop_upcoming_call(tbl: Table):
     """取出并修改到期任务"""
     call = None
-    async for attempt in tbl.session().retry(2):
-        async with attempt as session:
-            repo = session.using(tbl.comp_cls)
-            # 取出最早到期的任务
-            now = time.time()
-            calls = await repo.range(scheduled=(0, now + 0.1), limit=1)
-            # 检查可能被其他worker消费了
-            if calls.size == 0:
-                return None
-            call = calls[0]
-            # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
-            if call.timeout == 0:
-                repo.delete(call.id)
-            else:
-                call.scheduled = now + call.timeout
-                call.last_run = now
-                await repo.update(call)
+    try:
+        async for attempt in tbl.session().retry(5):
+            async with attempt as session:
+                repo = session.using(tbl.comp_cls)
+                # 取出最早到期的任务。不做区间校验：取哪一条不依赖区间里没有别的行，并发取同一条
+                # 由它的版本校验管；否则不断有新的到期任务插进来时会反复判竞态
+                now = time.time()
+                calls = await repo.range(
+                    scheduled=(0, now + 0.1), limit=1, phantom_check=False
+                )
+                # 检查可能被其他worker消费了
+                if calls.size == 0:
+                    return None
+                call = calls[0]
+                # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+                if call.timeout == 0:
+                    repo.delete(call.id)
+                else:
+                    call.scheduled = now + call.timeout
+                    call.last_run = now
+                    await repo.update(call)
+    except Exception as e:
+        # call 出了本函数就没了，挂到异常上，任务循环记的 traceback 末尾才有是哪条调用。
+        # scheduled/last_run 已被上面就地改成要写入的值，不打
+        if call is not None:
+            e.add_note(
+                _(
+                    "[⚙️Future] 正在取出的调用：{system}{args}，id={id}，"
+                    "recurring={recurring}，timeout={timeout}"
+                ).format(
+                    system=call.system,
+                    args=call.args,
+                    id=call.id,
+                    recurring=call.recurring,
+                    timeout=call.timeout,
+                )
+            )
+        raise
     return call
 
 
@@ -386,7 +407,7 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
         logger.exception(err_msg)
     # 如果关闭了replay，为了速度不执行下面的字符串序列化
     if replay.level < logging.ERROR:
-        replay.info(f"[SystemResult][{call.system}]({ok}, {str(res)})")
+        replay.info(f"[SystemResult][{call.system}]({ok}, {res!s})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
         async with tbl.session() as session:
@@ -469,7 +490,7 @@ async def future_call_task(app):
         except asyncio.CancelledError:
             break
         except Exception as e:
-            err_msg = _("❌ [⚙️Future] Task执行异常：{exc}").format(
+            err_msg = _("⚠️ [⚙️Future] Task执行异常，将再次重试：{exc}").format(
                 exc=f"{type(e).__name__}:{e}"
             )
             logger.exception(err_msg)

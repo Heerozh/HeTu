@@ -36,7 +36,7 @@ def test_normal_define(new_component_env):
     ]
 
     # 测试是否会提示无Property错误
-    with pytest.raises(AssertionError, match="Property"):
+    with pytest.raises(TypeError, match="Property"):
 
         @define_component(namespace="pytest")
         class MyPosition(BaseComponent):
@@ -129,6 +129,16 @@ def test_normal_define(new_component_env):
     assert TestString.indexes_["b"] == True
     assert TestString.indexes_["c"] == False
 
+    # 整行转换保留 Unicode 字符串和原始字节字段
+    converted = TestString.dict_to_struct(
+        {"_version": "2", "id": "42", "a": "汉字", "b": b"\xff\x00", "c": "1"}
+    )
+    assert converted.id == 42
+    assert converted._version == 2
+    assert converted.a == "汉字"
+    assert converted.b == b"\xff"
+    assert converted.c == 1
+
 
 def test_instance_define(new_component_env, new_clusters_env):
     @define_component(namespace="pytest")
@@ -186,6 +196,65 @@ def test_keyword_define(new_component_env):
         @define_component(namespace="HeTu", volatile=True)
         class sbyte(BaseComponent):
             _ok: bool = property_field(False)
+
+
+def test_numpy_attr_name_define(new_component_env):
+    """单行是 np.record、多行是 np.recarray，读属性时 numpy 自己的属性优先：字段叫 size
+    的话 row.size 读到的是 numpy 的 size（写却写进字段），row.size += 1 会把字段写成 2。
+    这种名字要在定义时就报错"""
+    with pytest.raises(ValueError, match="numpy"):
+
+        @define_component(namespace="pytest", force=True)
+        class SizeComp(BaseComponent):
+            size: np.int32 = property_field(0)
+
+    # 只有 recarray 上有的属性（rows.field 是方法）
+    with pytest.raises(ValueError, match="numpy"):
+
+        @define_component(namespace="pytest", force=True)
+        class FieldComp(BaseComponent):
+            field: np.int32 = property_field(0)
+
+    # 只有 record 上有的属性
+    with pytest.raises(ValueError, match="numpy"):
+
+        @define_component(namespace="pytest", force=True)
+        class PprintComp(BaseComponent):
+            pprint: np.int32 = property_field(0)
+
+    # 下划线开头的属性一样会盖住字段
+    with pytest.raises(ValueError, match="numpy"):
+
+        @define_component(namespace="pytest", force=True)
+        class DunderComp(BaseComponent):
+            __len__: np.int32 = property_field(0)
+
+    # 换个名字就行，属性读写都落在字段上
+    @define_component(namespace="pytest", force=True)
+    class BagComp(BaseComponent):
+        bag_size: np.int32 = property_field(20)
+
+    row = BagComp.new_row()
+    assert row.bag_size == 20
+    row.bag_size += 1
+    assert row["bag_size"] == 21
+
+
+def test_load_json_keeps_numpy_attr_name(new_component_env):
+    """迁移要用 load_json 读库里的旧 schema，旧表里和 numpy 属性同名的列必须还能加载，
+    所以检查只放在定义时"""
+    import json
+
+    @define_component(namespace="pytest", force=True)
+    class OldBag(BaseComponent):
+        bag_size: np.int32 = property_field(20)
+
+    data = json.loads(OldBag.json_)
+    data["properties"]["size"] = data["properties"].pop("bag_size")
+
+    loaded = BaseComponent.load_json(json.dumps(data))
+    assert loaded.dtypes.names is not None and "size" in loaded.dtypes.names
+    assert loaded.default_row_[0]["size"] == 20
 
 
 def test_unique_index_false(new_component_env, caplog):

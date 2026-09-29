@@ -15,8 +15,8 @@ local value_chans = payload[5]
 
 -- ============================================================================
 -- Phase 1: Checks
--- 顺序即优先级：Python 把竞态类（VER、带 RACE 标记的 NX/UNIQ）排在确定性类前面，
--- 这里首个失败即返回，所以同时存在两类冲突时先报 RACE。
+-- 顺序即优先级：Python 把竞态类（VER、带 RACE 标记的 NX/UNIQ、区间的 CNT）排在
+-- 确定性类前面，这里首个失败即返回，所以同时存在两类冲突时先报 RACE。
 -- ============================================================================
 if checks then
     -- 同一 payload 内两条 UNIQ 指向同一 (索引, 值) 的兜底（正常由本地 IdentityMap 拦住）
@@ -71,6 +71,14 @@ if checks then
                 if not deleted[row_id] then
                     return code .. ": Unique violation " .. label
                 end
+            end
+
+            -- 检查区间行数 (range 读的防幻读校验)
+            -- 格式: ["CNT", index_key, min, max, expected_count, label]
+            -- 读到的行由 VER 保证没被删改，区间里行数不变就说明没有新行插进来
+        elseif op == "CNT" then
+            if redis_call("ZLEXCOUNT", check[2], check[3], check[4]) ~= check[5] then
+                return "RACE: Range changed " .. check[6]
             end
         end
     end

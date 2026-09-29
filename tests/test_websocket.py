@@ -1,8 +1,11 @@
 import asyncio
 import contextlib
+import gc
+import itertools
 import logging
 import os
-from typing import Callable, cast
+import warnings
+from typing import Any, Callable, cast
 
 import pytest
 import sanic_testing
@@ -75,12 +78,22 @@ def setup_websocket_proxy():
                 )
                 pipe_ctx = ctx
 
-            async def send(data):
+            async def send(data, *, fragment_size=None):
                 logger.debug(
                     f"[{id(crypto_layer)}] > Sent: {data} [{len(repr(data))} bytes]"
                 )
                 ws_proxy.client_sent.append(data)
-                await do_send(client_pipe.encode(pipe_ctx, data))
+                encoded = client_pipe.encode(pipe_ctx, data)
+                if fragment_size is None:
+                    await do_send(encoded)
+                else:
+
+                    async def fragments():
+                        for offset in range(0, len(encoded), fragment_size):
+                            yield encoded[offset : offset + fragment_size]
+                            await asyncio.sleep(0)
+
+                    await do_send(fragments())
 
             async def recv():
                 data = cast(bytes, await do_recv())
@@ -278,7 +291,9 @@ def test_websocket_kick_connect(test_server):
 
 
 def test_websocket_kick_without_rpc_after_login(test_server):
-    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开"""
+    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开；断开前先发带原因的
+    close（4001 kicked），客户端据此提示"账号在别处登录" """
+    result = {}
 
     async def kick_routine(connect):
         client1 = await connect()
@@ -290,9 +305,10 @@ def test_websocket_kick_without_rpc_after_login(test_server):
         await client2.recv()
 
         # client1 没有任何后续调用，只能靠 owner 索引值频道的通知把它断开
-        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)) as exc_info:
             async with asyncio.timeout(3):
                 await client1.recv()
+        result["close"] = exc_info.value.rcvd
         await client2.send(["rpc", "add_rls_comp_value", 2])
         await client2.recv()
 
@@ -302,6 +318,57 @@ def test_websocket_kick_without_rpc_after_login(test_server):
     assert response.client_sent[-1] == ["rpc", "add_rls_comp_value", 2], (
         "最后一行没执行到"
     )
+    close = result["close"]
+    assert close is not None and (close.code, close.reason) == (4001, "kicked"), close
+
+
+def test_websocket_kick_found_on_rpc_sends_close_code(monkeypatch, test_server):
+    """通知没把被顶号的连接断开（通知丢了）时，它下次 RPC 核查到被顶号，也一样先发带原因的 close"""
+    from hetu.endpoint.connection import ConnectionAliveChecker
+
+    async def never_kicked(self, ctx):
+        return False
+
+    # 通知触发的主动核查永远查不到顶号，只剩 RPC 路径
+    monkeypatch.setattr(ConnectionAliveChecker, "kicked", never_kicked)
+    result = {}
+
+    async def kick_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", 1])
+        await client2.recv()
+
+        # 登录后的首个调用必核一次（ConnectionAliveChecker._dirty 初值），不依赖通知的时机
+        await client1.send(["rpc", "add_rls_comp_value", 1])
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)) as exc_info:
+            async with asyncio.timeout(3):
+                await client1.recv()
+        result["close"] = exc_info.value.rcvd
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=kick_routine)
+    close = result["close"]
+    assert close is not None and (close.code, close.reason) == (4001, "kicked"), close
+
+
+async def test_rpc_kicked_disconnects_even_in_debug():
+    """被顶号不是请求出错：debug 模式也不发 err 帧留着连接，交给 client_handler 带 close 码断开"""
+    from hetu.server.receiver import rpc
+
+    class KickedExecutor:
+        kicked = True
+
+        async def execute(self, endpoint, *args):
+            return False, None
+
+    push_queue: asyncio.Queue = asyncio.Queue()
+    assert not await rpc(
+        ["rpc", "login", 1], cast(Any, KickedExecutor()), push_queue, 1
+    )
+    assert push_queue.empty()
 
 
 @pytest.mark.timeout(60)
@@ -520,6 +587,311 @@ def test_websocket_table_subscribe_limit(test_server):
 # ==== 整表订阅要先等一个 interval 再全量读（复制延迟预算），等待不能堵住接收协程 ====
 
 
+async def test_deferred_table_reply_cancelled_before_it_runs_still_rolls_back():
+    """
+    整表订阅的后半段交给后台（defer_sub_reply_），连接拆掉时接收协程的 finally 立刻取消它，
+    这时它常常还没开始跑（比如这条订阅本身就超了订阅数上限，接收协程紧接着就断开连接）。
+    后半段也得收到这次取消、跑它自己的回滚；不能一行没跑就被丢掉（以前回滚不执行，还报
+    "coroutine '_finish_subscribe_table' was never awaited"）
+    """
+    from hetu.server.receiver import defer_sub_reply_
+
+    rolled_back: list[None] = []
+
+    async def finish() -> tuple[str | None, list[dict]]:
+        try:
+            await asyncio.sleep(10)  # 后半段：先等一个 interval 再全量读
+        except asyncio.CancelledError:
+            rolled_back.append(None)  # 同 SubscriptionBroker._finish：撤掉订阅再抛出
+            raise
+        return "S", []
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        deferred: set[asyncio.Task] = set()
+        reply = defer_sub_reply_(finish(), deferred)
+        tasks = list(deferred)
+        for task in tasks:  # 接收协程的 finally：它还没让出过事件循环就取消
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        del tasks
+        gc.collect()
+    assert reply.cancelled()
+    assert rolled_back, "后半段一行没跑就被丢了，订阅的回滚没执行"
+    assert not [w for w in caught if "never awaited" in str(w.message)]
+
+
+# ==== sub_call：回复的占位、订阅数上限（设计稿 2026-09-29 §3.3） ====
+
+
+class _GatedBroker:
+    """
+    sub_call 用的门面替身：前半段登记、计入订阅数；第 i 次订阅的后半段等 gates[i] 放行后回
+    (results[i], [])，results[i] 为 None 的订阅不成立、撤掉登记（同 SubscriptionBroker）
+    """
+
+    def __init__(self, results: list[str | None]):
+        self.results = results
+        self.gates = [asyncio.Event() for _ in results]
+        self.begun = 0
+        self.registered = 0
+
+    async def begin_subscribe_range(self, table, ctx, *args):
+        i = self.begun
+        self.begun += 1
+        self.registered += 1
+
+        async def finish() -> tuple[str | None, list]:
+            await self.gates[i].wait()
+            if self.results[i] is None:
+                self.registered -= 1
+            return self.results[i], []
+
+        return finish()
+
+    def count(self) -> tuple[int, int, int]:
+        return 0, self.registered, 0
+
+
+def _sub_executor(max_index_sub: int):
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(
+        max_row_sub=100, max_index_sub=max_index_sub, max_table_sub=100
+    )
+    return SimpleNamespace(
+        context=ctx, tbl_mgr=SimpleNamespace(get_table=lambda name: object())
+    )
+
+
+RANGE_SUB = ["sub", "Comp", "range", "owner", 1]
+
+
+async def test_sub_reply_slot_is_taken_before_registering():
+    """
+    push_queue 满着（客户端网络拥塞）时，订阅先在队列里占到回复的位再登记：一登记，推送协程就可能
+    给这个 sub_id 放推送，排到回复前面的话 SDK 当作不认识的订阅丢掉（以前先登记后放占位）
+    """
+    from hetu.server.receiver import sub_call
+
+    broker = _GatedBroker(["S"])
+    broker.gates[0].set()
+    push_queue: asyncio.Queue = asyncio.Queue(1)
+    push_queue.put_nowait(["updt", "X", {}])
+    executor = _sub_executor(max_index_sub=5)
+    call = asyncio.create_task(
+        sub_call(RANGE_SUB, executor, broker, push_queue, set())  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0.01)
+    assert broker.begun == 0, "队列满着就先登记了，推送可能排到回复前面"
+    push_queue.get_nowait()
+    async with asyncio.timeout(1):
+        assert await call is True
+        assert await push_queue.get_nowait() == ["sub", "S", []]
+
+
+async def test_sub_limit_waits_for_in_flight_subscriptions():
+    """
+    订阅数上限按成立的订阅算（dev 逐条处理，不成立的不计入）。前半段就登记、计入的订阅里可能有随后
+    不成立的（force=False 的空结果、不存在的行）：到了上限先等在途的都有结果再判，不能算上它们就
+    断开连接。都成立的照样超限
+    """
+    from hetu.server.receiver import sub_call
+
+    executor = _sub_executor(max_index_sub=1)
+    # (各次订阅的结果, 第二次订阅是否放行)：第一次随后不成立的放行，都成立的超限
+    cases: list[tuple[list[str | None], bool]] = [
+        ([None, "S2"], True),
+        (["S1", "S2"], False),
+    ]
+    for results, expected in cases:
+        broker = _GatedBroker(results)
+        push_queue: asyncio.Queue = asyncio.Queue()
+        deferred: set[asyncio.Task] = set()
+        assert await sub_call(RANGE_SUB, executor, broker, push_queue, deferred)  # type: ignore[arg-type]
+        second = asyncio.create_task(
+            sub_call(RANGE_SUB, executor, broker, push_queue, deferred)  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.01)
+        assert not second.done(), "到了上限，没等在途的订阅有结果就判了"
+        for gate in broker.gates:
+            gate.set()
+        async with asyncio.timeout(1):
+            assert await second is expected
+
+
+async def test_failed_sub_replies_are_all_retrieved():
+    """
+    同一连接的几个订阅同时失败（副本挂了、重试用尽）：发送循环只等到第一个占位就断开，别的占位的
+    异常也要标成取过了，不然每个都在 gc 时报一条 "Future exception was never retrieved"（绕过限流）
+    """
+    from hetu.server.receiver import defer_sub_reply_
+
+    loop = asyncio.get_running_loop()
+    caught: list[dict] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: caught.append(context))
+    try:
+
+        async def finish() -> tuple[str | None, list]:
+            raise ConnectionError("replica down")
+
+        deferred: set[asyncio.Task] = set()
+        replies = [defer_sub_reply_(finish(), deferred) for _ in range(3)]
+        await asyncio.gather(*list(deferred), return_exceptions=True)
+        assert all(reply.done() for reply in replies)
+        await asyncio.sleep(0)  # 任务的完成回调把它们从 deferred 里撤掉
+        assert not deferred
+        del replies
+        gc.collect()
+    finally:
+        loop.set_exception_handler(old_handler)
+    assert not [c for c in caught if "never retrieved" in c.get("message", "")]
+
+
+# ==== 发送循环（send_loop）：回复与推送的先后 ====
+
+
+async def test_push_queue_counts_placeholders():
+    """PushQueue 记着排在里面的订阅回复占位（future）有几个，别的回复、哨兵不算"""
+    from hetu.server.websocket import PUSH_UPDATES, PushQueue
+
+    queue = PushQueue(8)
+    placeholder = asyncio.get_running_loop().create_future()
+    for item in (["rsp", "ok"], placeholder, PUSH_UPDATES):
+        queue.put_nowait(item)
+    assert queue.placeholders == 1
+    assert queue.get_nowait() == ["rsp", "ok"]
+    assert queue.placeholders == 1
+    assert queue.get_nowait() is placeholder
+    assert queue.placeholders == 0
+    assert await queue.get() is PUSH_UPDATES
+    assert queue.placeholders == 0
+
+
+class _FakeSendWs:
+    """send_loop 用的连接替身：记下发出的帧，每帧发完调 on_send（模拟客户端接着发来请求），再等 delay 秒
+    （模拟慢链路）"""
+
+    def __init__(self, on_send: Callable[[Any], None] | None = None, delay: float = 0):
+        self.frames: list = []
+        self.on_send = on_send
+        self.delay = delay
+
+    async def send(self, frame) -> None:
+        self.frames.append(frame)
+        if self.on_send is not None:
+            self.on_send(frame)
+        await asyncio.sleep(self.delay)
+
+    def fail_connection(self) -> None:
+        pass
+
+
+class _FakeOutbox:
+    """send_loop 用的门面替身：待发区就是个 dict"""
+
+    def __init__(self, outbox: dict[str, dict]):
+        self.outbox = dict(outbox)
+
+    def has_updates_(self) -> bool:
+        return bool(self.outbox)
+
+    def take_updates_(self) -> dict[str, dict]:
+        updates, self.outbox = self.outbox, {}
+        return updates
+
+    def idle_(self, idle: bool) -> None:
+        pass
+
+
+async def _run_send_loop(ws: _FakeSendWs, outbox: _FakeOutbox, queue, until) -> None:
+    """跑 send_loop 直到 until(发出的帧) 为真（最多 2 秒），之后停掉它"""
+    from hetu.server.websocket import send_loop
+
+    task = asyncio.create_task(
+        send_loop(
+            cast(Any, ws),
+            cast(Any, outbox),
+            queue,
+            pack=lambda reply: reply,
+            flooded=lambda: False,
+        )
+    )
+    try:
+        async with asyncio.timeout(2):
+            while not until(ws.frames):
+                await asyncio.sleep(0.005)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_send_loop_does_not_hold_pushes_behind_replies_forever():
+    """
+    客户端连着发 RPC、链路又慢时 push_queue 里一直排着回复：推送不能一直等到队列空了才发（以前每连接一个
+    推送协程，推送与回复在队列里按先后交错；发送循环直接取待发区之后，推送会一直发不出去）。队列里没有订阅
+    回复的占位时，推送被回复压住一阵就插一轮；在那之前回复照样先发
+    """
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    calls = itertools.count(1)
+
+    def client_keeps_calling(frame) -> None:
+        if frame[0] == "rsp":
+            queue.put_nowait(["rsp", next(calls)])  # 回复一发出，客户端又发来一条 RPC
+
+    ws = _FakeSendWs(on_send=client_keeps_calling, delay=0.01)
+    queue.put_nowait(["rsp", 0])
+    push = ["updt", "S", {1: {"v": 1}}]
+    await _run_send_loop(
+        ws, _FakeOutbox({"S": {1: {"v": 1}}}), queue, lambda f: push in f
+    )
+    assert ws.frames[0] == ["rsp", 0], "推送一开始就抢到了排着的回复前面"
+
+
+async def test_send_loop_never_pushes_ahead_of_a_queued_sub_reply():
+    """
+    推送只在队列里没有订阅回复的占位时才插到排着的回复前面：新订阅 X 的回复占位还排着（X 已登记，它的
+    更新已交到待发区），前面的回复发了再久也不能先推 X 的更新，SDK 会把它当作不认识的订阅丢掉
+    """
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    for i in range(10):
+        queue.put_nowait(["rsp", i])  # 每帧 20ms，这些回复要发 200ms
+    placeholder = asyncio.get_running_loop().create_future()
+    placeholder.set_result(["sub", "X", []])
+    queue.put_nowait(placeholder)
+    ws = _FakeSendWs(delay=0.02)
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"X": {1: {"v": 1}}}),
+        queue,
+        lambda frames: any(f[0] == "updt" for f in frames),
+    )
+    assert [f[0] for f in ws.frames] == ["rsp"] * 10 + ["sub", "updt"]
+
+
+async def test_send_loop_waits_for_the_sub_reply_it_is_holding():
+    """发送循环在等订阅回复的占位时不插推送（占位是哪个订阅的还不知道），回复发出之后再推"""
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    placeholder = asyncio.get_running_loop().create_future()
+    queue.put_nowait(placeholder)
+    ws = _FakeSendWs()
+    asyncio.get_running_loop().call_later(0.3, placeholder.set_result, ["sub", "X", []])
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"S": {1: {"v": 1}}}),
+        queue,
+        lambda frames: any(f[0] == "updt" for f in frames),
+    )
+    assert [f[0] for f in ws.frames] == ["sub", "updt"]
+
+
 @pytest.mark.timeout(30)
 def test_websocket_table_subscribe_does_not_block_following_messages(
     monkeypatch, test_server
@@ -568,6 +940,108 @@ def test_websocket_table_subscribe_does_not_block_following_messages(
     assert result["early"], "整表订阅在等全量读，后面的 RPC 没被执行"
     assert result["early"][:2] == ["updt", result["watch_id"]]
     assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_range_subscribe_does_not_block_following_messages(
+    monkeypatch, test_server
+):
+    """范围订阅的初始读卡住时（副本慢、在重试），后面的消息照常执行；回复仍按请求顺序送达
+    （get / range 的回复也走占位，同整表订阅，设计稿 2026-09-29 §3.3）"""
+    from hetu.data.backend.redis_model import RedisModelClient
+
+    real_range = RedisModelClient.range
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_range(self, table_ref, index_name, left, *args, **kwargs):
+        if table_ref.comp_name == "PublicNames" and left == 8201:
+            gate["reading"].set()
+            await gate["release"].wait()
+        return await real_range(self, table_ref, index_name, left, *args, **kwargs)
+
+    monkeypatch.setattr(RedisModelClient, "range", gated_range)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        watcher = await connect()
+        await watcher.send(["sub", "PublicNames", "range", "owner", 8101, 8102])
+        watch_id = (await watcher.recv())[1]
+        client = await connect()
+        try:
+            await client.send(["sub", "PublicNames", "range", "owner", 8201, 8202])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 范围订阅卡在初始读上
+            await client.send(["rpc", "set_public_name", 8101, "Early"])
+            try:
+                async with asyncio.timeout(5):
+                    result["early"] = await watcher.recv()
+            except TimeoutError:
+                result["early"] = None
+        finally:
+            gate["release"].set()
+        order = []
+        async with asyncio.timeout(5):
+            while len(order) < 2:
+                msg = await client.recv()
+                if msg[0] in ("sub", "rsp"):
+                    order.append(msg[0])
+        result["order"] = order
+        result["watch_id"] = watch_id
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert result["early"], "范围订阅在等初始读，后面的 RPC 没被执行"
+    assert result["early"][:2] == ["updt", result["watch_id"]]
+    assert result["order"] == ["sub", "rsp"], "回复没按请求顺序送达"
+
+
+@pytest.mark.timeout(30)
+def test_websocket_pushes_merge_while_sub_reply_is_pending(monkeypatch, test_server):
+    """同一连接上一个订阅的回复还在等初始读时，已有订阅的同一行被改了几次：推送留在待发区按行合并，
+    回复发出之后只推一帧、是最新的值，且排在回复后面。发送循环直接取待发区，推送不在 push_queue 里
+    逐帧排着（设计稿 2026-09-29-push-path-and-gc §2.2）"""
+    from hetu.data.backend.redis_model import RedisModelClient
+
+    real_range = RedisModelClient.range
+    gate: dict[str, asyncio.Event] = {}
+
+    async def gated_range(self, table_ref, index_name, left, *args, **kwargs):
+        if table_ref.comp_name == "PublicNames" and left == 8401:
+            gate["reading"].set()
+            await gate["release"].wait()
+        return await real_range(self, table_ref, index_name, left, *args, **kwargs)
+
+    monkeypatch.setattr(RedisModelClient, "range", gated_range)
+    result = {}
+
+    async def routine(connect):
+        gate["reading"], gate["release"] = asyncio.Event(), asyncio.Event()
+        client = await connect()
+        writer = await connect()
+        await client.send(["sub", "PublicNames", "range", "owner", 8301, 8302])
+        result["watch_id"] = (await client.recv())[1]
+        try:
+            await client.send(["sub", "PublicNames", "range", "owner", 8401, 8402])
+            async with asyncio.timeout(5):
+                await gate["reading"].wait()  # 第二个订阅卡在初始读上，回复占着位
+            for name in ("M1", "M2", "M3"):
+                await writer.send(["rpc", "set_public_name", 8301, name])
+                await writer.recv()
+                await asyncio.sleep(0.3)  # 各自一个 tick 交到待发区
+        finally:
+            gate["release"].set()
+        msgs = []
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(1.5):
+                while True:
+                    msgs.append(await client.recv())
+        result["msgs"] = msgs
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    msgs = result["msgs"]
+    assert [m[0] for m in msgs] == ["sub", "updt"], msgs
+    assert msgs[1][1] == result["watch_id"]
+    assert [row["name"] for row in msgs[1][2].values()] == ["M3"]
 
 
 @pytest.mark.timeout(30)
@@ -915,3 +1389,69 @@ def test_shutdown_waits_for_connection_cleanup(
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     # 返回时服务器已经停了
     assert len(r.keys(pattern)) == before, "关服没等连接清理，Connection 行留在库里了"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_fragmented_rpc_and_following_message(test_server):
+    """加密压缩包跨多帧（含事件循环切换），必须完整重组且不打乱后续 nonce。"""
+
+    async def routine(connect):
+        client = await connect()
+        payload = {"message": "分片消息", "values": list(range(50))}
+        await client.send(["rpc", "echo_response", payload], fragment_size=1)
+        assert await client.recv() == ["rsp", payload]
+        await client.send(["rpc", "echo_response", ["next"]])
+        assert await client.recv() == ["rsp", ["next"]]
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_streaming_close_mid_fragment(test_server):
+    """未收到 FIN 就断线，也必须取消接收器并删除 Connection 行。"""
+    from websockets.frames import Opcode
+
+    from hetu.endpoint.connection import Connection
+
+    async def routine(connect):
+        table = test_server.ctx.table_managers["pytest_1"].get_table(Connection)
+        assert table is not None
+
+        async def count_rows():
+            return len(await table.servant_range("id", 0, float("inf"), limit=100))
+
+        # Redis 整个 session 共用、不清库，前面的用例可能留下行：只看本连接带来的变化
+        before = await count_rows()
+        client = await connect()
+        # 确认初始化完成，然后停在下一条消息的分片中间。
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        assert await count_rows() == before + 1
+        await client.write_frame(False, Opcode.BINARY, b"incomplete")
+        await client.close()
+        for _ in range(100):
+            if await count_rows() == before:
+                return
+            await asyncio.sleep(0.02)
+        pytest.fail("Connection 行未随分片中的断线清理")
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+
+@pytest.mark.timeout(20)
+def test_websocket_fragmented_message_size_limit(test_server):
+    """流式接收也必须遵守消息总长上限，而非仅检查单个分片。"""
+    test_server.config.WEBSOCKET_MAX_SIZE = 128
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "echo_response", ["ready"]])
+        assert await client.recv() == ["rsp", ["ready"]]
+        # 每帧都小于上限，整条消息超过；必须由 WebSocket 层在解密前拒绝。
+        with pytest.raises(ConnectionClosedError) as exc_info:
+            await type(client).send(client, [b"x" * 40] * 4)
+            await client.recv()
+        assert exc_info.value.rcvd is not None
+        assert exc_info.value.rcvd.code == 1009
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)

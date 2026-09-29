@@ -1,23 +1,16 @@
 import logging
+import os
+import subprocess
+import sys
 import time
+from typing import Any
 
 import pytest
-from fixtures.backends import use_redis_family_backend_only
+from fixtures.backends import raw_hset, use_redis_family_backend_only
 from redis.asyncio.cluster import RedisCluster
 
-
-@pytest.fixture(autouse=True)
-def _restore_snowflake_state():
-    """本文件的用例会重新 init 单件 SnowflakeID：不传 last_timestamp 时它被设成当前时间
-    加 10 秒（防重启回拨）。不恢复的话，同一 worker 上 10 秒内后跑的用例一发号就多打一条
-    "时钟回拨"告警，断言日志条数的用例（test_system_executor::test_slow_log）就会挂"""
-    from hetu.common.snowflake_id import SnowflakeID
-
-    generator = SnowflakeID()
-    saved = dict(vars(generator))
-    yield
-    vars(generator).clear()
-    vars(generator).update(saved)
+# 导入即注册 core 组件 WorkerLease，必须赶在 mod_test_app 建簇之前，不然簇里没有它
+from hetu.server.main import close_backends, start_backends
 
 
 async def test_snowflake_id(monkeypatch):
@@ -238,7 +231,7 @@ async def _raise_backend_error(*_args, **_kwargs):
 
 def _make_lease_table(backend):
     """建好 WorkerLease 的表。真实服务器里由 check_and_create_new_tables 在开服时建，
-    测试里直接构造 Table 不会碰数据库，而 direct_set 是裸 UPDATE，表不存在会直接报错。"""
+    测试里直接构造 Table 不会碰数据库，要自己建。"""
     from hetu.data.backend.table import Table
     from hetu.data.backend.worker_keeper import WorkerLease
 
@@ -271,9 +264,7 @@ async def test_snowflake_timestamp_keeper(
     assert abs(await ts_keeper.load() - now_ms) < 1000
 
     # 首次写入前必须先把行建好（GeneralWorkerKeeper 删掉后没人替本类建行了）：
-    # SQL 的 direct_set 是 UPDATE，缺行静默无效；Redis 的是 HSET，缺行会建出
-    # 只有 last_timestamp、缺 id 的残缺 hash，按 STRUCT 读它就 KeyError
-    # （开服后每个 worker 都报一次）
+    # direct_set 只改已存在的行，缺行时什么都不写
     await ts_keeper.save(now_ms - 60_000)
     row = await backend.master.get(table, 7)
     assert row is not None and row.id == 7 and row.last_timestamp == now_ms - 60_000
@@ -291,50 +282,110 @@ async def test_snowflake_timestamp_keeper(
     monkeypatch.undo()
 
     # 关键用例：水位高于当前时间（模拟重启期间时钟回拨），必须返回水位而不是当前时间，
-    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳
+    # 否则会拿回拨后的时间重新发号，撞上关服前已经用过的时间戳。save 写的是正常关服的
+    # 精确值，原样读回，不再补写入间隔
     future_ms = now_ms + 30_000
     await ts_keeper.save(future_ms)
-    assert await ts_keeper.load() == future_ms + pad_ms
+    assert await ts_keeper.load() == future_ms
 
-    # 崩溃时最后一个写入间隔内发出的ID其时间戳已超过记录值，读回时必须补上这一段
-    edge_ms = now_ms + 1000  # 水位仅略高于当前时间，不补就会重发这段时间的ID
-    await ts_keeper.save(edge_ms)
-    assert await ts_keeper.load() == edge_ms + pad_ms
+    # 周期写入的预留值往前多留一个间隔：崩溃前最后那段发出的ID来不及记录，靠它兜住
+    await ts_keeper.reserve(future_ms)
+    assert await ts_keeper.load() == future_ms + pad_ms
+    # 空闲时 last_timestamp 早就落后于当前时间，要按当前时间预留，否则盖不住接下来发的ID
+    before_ms = int(time.time() * 1000)
+    await ts_keeper.reserve(before_ms - 60_000)
+    reserved = await ts_keeper.load()
+    assert before_ms + pad_ms <= reserved <= int(time.time() * 1000) + pad_ms
 
     # 补建是幂等的：同一个 worker_id 的第二个 keeper 实例不该因为撞主键而抛异常
     second = SnowflakeTimestampKeeper(table, 7)
     with caplog.at_level(logging.WARNING, logger="HeTu.root"):
-        await second.save(edge_ms)
-    assert await second.load() == edge_ms + pad_ms
+        await second.save(future_ms)
+    assert await second.load() == future_ms
 
 
-@use_redis_family_backend_only
 async def test_snowflake_timestamp_keeper_legacy_partial_row(mod_auto_backend):
     """旧版本的 save 先 direct_set 再确认行在不在，Redis 上给缺行建出了只有
     last_timestamp、缺 id 的残缺 hash：之后按 STRUCT 读就 KeyError，每次重启 load 都
     退化成固定容忍度。已部署的库里还留着这种行，load 要照样读出它的水位，save 照常写"""
     from hetu.data.backend import RowFormat
-    from hetu.data.backend.snowflake_timestamp import (
-        TIMESTAMP_SAVE_INTERVAL,
-        SnowflakeTimestampKeeper,
-    )
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
 
     backend = mod_auto_backend()
     table = _make_lease_table(backend)
-    pad_ms = TIMESTAMP_SAVE_INTERVAL * 1000
     worker_id = 9
     # 高于当前时间，才看得出读回的是不是这个水位
     stored = int(time.time() * 1000) + 30_000
-    # 旧版本就是这样建出残缺行的：行还不存在时直接 direct_set
-    await table.direct_set(worker_id, last_timestamp=str(stored))
+    # 旧版本的 direct_set 是裸 HSET，行还不存在时就建出这样的残缺行（现在的 direct_set
+    # 缺行不写，这里直接造）
+    raw_hset(backend, table, worker_id, last_timestamp=str(stored))
     raw = await backend.master.get(table, worker_id, RowFormat.RAW)
     assert raw is not None and "id" not in raw
 
     keeper = SnowflakeTimestampKeeper(table, worker_id)
-    assert await keeper.load() == stored + pad_ms
+    assert await keeper.load() == stored
     await keeper.save(stored + 1)
     restarted = SnowflakeTimestampKeeper(table, worker_id)
-    assert await restarted.load() == stored + 1 + pad_ms
+    assert await restarted.load() == stored + 1
+
+
+async def test_snowflake_timestamp_keeper_recreates_deleted_row(mod_auto_backend):
+    """运行中行被删掉了（比如开着服跑了 `hetu upgrade`，它会清空易失的 WorkerLease 表），
+    下一次 save 要把完整的行重新建出来。direct_set 只改已存在的行、缺行时什么都不写，
+    不看它的返回值的话，水位从此静默地再也写不进去"""
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+    from hetu.data.backend.worker_keeper import WorkerLease
+
+    backend = mod_auto_backend()
+    table = _make_lease_table(backend)
+    worker_id = 10
+    stored = int(time.time() * 1000) + 30_000
+    keeper = SnowflakeTimestampKeeper(table, worker_id)
+    await keeper.save(stored)  # 首次写入：建行
+    await keeper.save(stored + 1)  # 之后走 direct_set
+
+    async with table.session() as session:
+        repo = session.using(WorkerLease)
+        assert await repo.get(id=worker_id) is not None
+        repo.delete(worker_id)
+    assert await backend.master.get(table, worker_id) is None
+
+    await keeper.save(stored + 2)
+    row = await backend.master.get(table, worker_id)
+    assert row is not None and row.id == worker_id
+    assert row.last_timestamp == stored + 2
+    assert await SnowflakeTimestampKeeper(table, worker_id).load() == stored + 2
+
+
+async def test_snowflake_timestamp_keeper_legacy_direct_set_contract():
+    """第三方后端的 direct_set 还按老契约什么都不返回（None）：不能当成行没了，每个周期
+    都去补建、撞主键、刷警告。只有明确返回 False 才是行没了"""
+    from types import SimpleNamespace
+
+    from hetu.data.backend.snowflake_timestamp import SnowflakeTimestampKeeper
+
+    writes: list[dict] = []
+    created: list[int] = []
+
+    async def direct_set(worker_id, **kwargs):
+        writes.append(kwargs)
+
+    async def create_row(last_timestamp):
+        created.append(last_timestamp)
+
+    async def get(*_args, **_kwargs):
+        return {"id": "3", "last_timestamp": "1"}  # 行在
+
+    table = SimpleNamespace(
+        direct_set=direct_set, backend=SimpleNamespace(master=SimpleNamespace(get=get))
+    )
+    keeper = SnowflakeTimestampKeeper(table, 3)  # type: ignore[arg-type]
+    keeper._row_ready = True  # 行已确认存在
+    keeper._create_row = create_row  # type: ignore[method-assign]
+    await keeper.save(123)
+    await keeper.save(456)
+    assert created == []
+    assert writes == [{"last_timestamp": "123"}, {"last_timestamp": "456"}]
 
 
 async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_path):
@@ -371,6 +422,59 @@ async def test_boot_has_no_snowflake_clamp(mod_sqlite_backend, monkeypatch, tmp_
         assert generator._next_id() is not None, (
             f"{label}时发号容量耗尽后睡10ms仍未恢复，说明起始时间戳被钳在了未来"
         )
+
+
+def _server_app(backend_config: dict) -> Any:
+    """够 start_backends/close_backends 用的最小 app 替身（config 要能按属性读）"""
+    from types import SimpleNamespace
+
+    class Config(dict):
+        __getattr__ = dict.__getitem__
+
+    config = Config(
+        NAMESPACE="pytest",
+        # 独立 instance：别的模块在 server1 等 instance 上按各自的簇建过表，同名会撞
+        # cluster_mismatch
+        INSTANCES=["snowflake_restart"],
+        BACKENDS={"main": backend_config},
+    )
+    return SimpleNamespace(config=config, ctx=SimpleNamespace(), stop=lambda: None)
+
+
+async def test_restart_resumes_from_snowflake_watermark(
+    mod_test_app, mod_backend_config
+):
+    """开关服的水位接线：正常关服后马上重启不该被钳在未来，崩溃后重启要从开服时预留的
+    水位接着发。
+
+    以前补偿在读端，一律补一个写入间隔：正常关服后5秒内重启也被钳在未来，关服又把钳住
+    的值原样写回，连续快速重启越推越远——test_websocket 每个用例起停一次服务器，跑完
+    超前一分钟，漏给同进程后面的用例，每发一个号刷一条"时钟回拨"告警。
+    """
+    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.data.backend.snowflake_timestamp import TIMESTAMP_SAVE_INTERVAL
+
+    generator = SnowflakeID()
+    for label in ("首次开服", "正常关服后重启", "再次重启"):
+        app = _server_app(mod_backend_config)
+        await start_backends(app)
+        ahead = generator.last_timestamp - int(time.time() * 1000)
+        assert ahead < 1000, f"{label}时发号器起始时间戳超前了 {ahead} 毫秒"
+        generator.next_id()
+        await close_backends(app)
+
+    # 崩溃：不走 close_backends 直接断开。开服时预留的水位盖住了崩溃前发出的所有ID，
+    # 重启必须从它接着发，停机期间时钟被拨回也不会重复
+    boot_ms = int(time.time() * 1000)
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    generator.next_id()
+    await app.ctx.default_backend.close()
+
+    app = _server_app(mod_backend_config)
+    await start_backends(app)
+    assert generator.last_timestamp >= boot_ms + TIMESTAMP_SAVE_INTERVAL * 1000
+    await close_backends(app)
 
 
 async def test_snowflake_lease_fence():
@@ -512,3 +616,21 @@ def test_get_machine_id(monkeypatch):
     _fake_fs(monkeypatch, {})
     monkeypatch.setattr(uuid, "getnode", lambda: 0x1A2B3C4D5E6F)
     assert get_machine_id() == "1a2b3c4d5e6f"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="只在 Windows 上判断")
+def test_windows_pid_exited():
+    """认得出本机已经退出的进程：进程对象还在（有人握着句柄）、查无此 pid 两种都算；
+    活着的、没权限查的（System 进程）都不算"""
+    from hetu.common.helper import windows_pid_exited
+
+    assert not windows_pid_exited(os.getpid())
+    # System 进程：OpenProcess 拒绝访问，拿不准就当活着
+    assert not windows_pid_exited(4)
+
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    # Popen 还握着句柄，进程对象没释放，OpenProcess 照样打得开，得看退出码
+    assert windows_pid_exited(proc.pid)
+
+    assert windows_pid_exited(0xFFFFFFFC)  # Windows 的 pid 到不了这么大，查无此进程

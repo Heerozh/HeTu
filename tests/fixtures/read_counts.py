@@ -13,8 +13,9 @@ from unittest.mock import patch
 
 from hetu.data.backend import Backend
 
-READ_METHODS = ("get", "get_many")
-RANGE_METHODS = ("range",)
+# 事务里的 range 取行走 get_many_array_
+READ_METHODS = ("get", "get_many", "get_many_array_")
+RANGE_METHODS = ("range", "range_read_")  # 事务里的 range 走 range_read_
 
 
 def count_reads(

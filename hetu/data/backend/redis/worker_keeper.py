@@ -1,10 +1,11 @@
 import logging
+import sys
 from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
-from ....common.helper import get_machine_id
+from ....common.helper import get_machine_id, windows_pid_exited
 from ....common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
 from ....i18n import _
 
@@ -15,6 +16,8 @@ logger = logging.getLogger("HeTu.root")
 
 # 回收worker id的时间，超时则认为宕机
 WORKER_ID_EXPIRE_SEC = 60
+# 租约 key 的前缀，完整 key 是 f"{WORKER_ID_KEY}:{worker_id}"
+WORKER_ID_KEY = "snowflake:worker"
 # 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
 # Redis 时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
 FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
@@ -29,6 +32,53 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+
+
+def live_worker_ids(io: redis.Redis | redis.RedisCluster) -> list[int]:
+    """
+    还持有租约的 worker id：服务器在跑，或者异常退出后租约还没过期（最多
+    WORKER_ID_EXPIRE_SEC 秒）。一次 pipeline 查完所有 id，cluster 下按 slot 分发。
+
+    例外：Windows 上本机已经退出的进程留下的租约不算，见 `_owner_exited`。
+    """
+    pipe = io.pipeline()
+    for worker_id in range(MAX_WORKER_ID + 1):
+        pipe.get(f"{WORKER_ID_KEY}:{worker_id}")
+    return [
+        worker_id
+        for worker_id, owner in enumerate(pipe.execute())
+        if owner is not None and not _owner_exited(owner)
+    ]
+
+
+def _owner_exited(owner: bytes | str) -> bool:
+    """
+    租约的主人（node_id，即 `机器码:pid`）是本机上已经退出的进程。只在 Windows 上这么认。
+
+    为什么要认：Windows 上 sanic 停 worker 是 TerminateProcess 硬杀——Ctrl+C 走
+    `WorkerProcess.terminate()` 的 `os.kill(pid, SIGINT)`，DEBUG 自动重载走
+    `multiprocessing.Process.terminate()`，从外面 `taskkill /F` 也一样——关服钩子里的
+    release_worker_id 没机会跑。这些租约照算的话，upgrade 就得干等它们过期。
+
+    为什么只在 Windows：判断的前提是"机器码相同就是同一个 PID 空间，本地查得到那个 pid"。
+    容器里机器码是 hostname（识别不出容器时是 MAC），host 网络或写死 hostname 时多个容器
+    共用一个机器码、PID 空间却各自独立，本地查不到 pid 不代表进程不在，会把活着的服务器当成
+    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 sanic
+    用信号优雅停 worker，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
+
+    只认不删：key 照旧等 TTL 过期，开服分配有的是空位。按值删会撞上"pid 被回收、新 worker
+    经 `_getex_if_mine` 接手同一把 key"的竞态，删掉的就成了活租约。
+    """
+    if sys.platform != "win32":
+        return False
+    if isinstance(owner, bytes):
+        owner = owner.decode("ascii", errors="replace")
+    machine_id, _, pid = owner.rpartition(":")
+    return (
+        machine_id == get_machine_id()
+        and pid.isdecimal()
+        and windows_pid_exited(int(pid))
+    )
 
 
 @final
@@ -82,7 +132,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         """
         super().__init__()
         self.aio = aio
-        self.worker_id_key = "snowflake:worker"
+        self.worker_id_key = WORKER_ID_KEY
         self.worker_id = -1
         # 机器码+pid组成的node_id。
         # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
@@ -115,7 +165,7 @@ class RedisWorkerKeeper(WorkerKeeper):
         从Redis中获取一个可用的 Worker ID。
         """
         # 查找之前是否已经分配过自己的worker id
-        for worker_id in range(0, MAX_WORKER_ID + 1):
+        for worker_id in range(MAX_WORKER_ID + 1):
             # node_id相同说明是容器重启，直接复用。GETEX一条命令原子完成"读值+续期"，
             # 拆成 GET + EXPIRE 会有中间被抢走的窗口，见类文档
             if not await self._getex_if_mine(worker_id):
@@ -130,7 +180,7 @@ class RedisWorkerKeeper(WorkerKeeper):
             return worker_id
 
         # 尝试分配新的worker id
-        for worker_id in range(0, MAX_WORKER_ID + 1):
+        for worker_id in range(MAX_WORKER_ID + 1):
             # SET NX 本身就是原子的抢占，不需要额外的CAS
             started_at = monotonic()
             result = await self.aio.set(

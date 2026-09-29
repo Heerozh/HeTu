@@ -16,19 +16,24 @@ master 上的读按调用点聚合出来，看有没有计划外的来源。改�
 原理两步：
 1. 把 `Backend.master_or_servant` 钉死在 servant 上（等价 `master_weight: 0`），于是 master
    客户端上还发生的读一定是代码显式指定的，不会和负载均衡撞上的混在一起；
-2. 给 `BackendClient` 的读方法打点，只记 `is_servant=False` 的调用，按调用点聚合。
+2. 给 `BackendClient` 整棵子类树上定义的读方法打点（读方法可能定义在中间基类，也可能在具体
+   后端上），只记 `is_servant=False` 的调用，按调用点聚合。读方法里再调别的读方法只记最外层。
 
 注意：第 1 步会让"写完立刻读"的测试读不到自己刚写的数据（副本还没同步），所以审计这一趟
 **会有测试失败，是预期的**——只看报告，别拿这趟的红绿做结论。
 """
 
 import collections
+import contextvars
+import importlib
 import os
 import random
 import traceback
 
-READ_METHODS = ("get", "get_many", "range")
+READ_METHODS = ("get", "get_many", "get_many_array_", "range", "range_read_")
 COUNTS: collections.Counter = collections.Counter()
+# 正在一个被记过的读方法里：里面再调的读方法不重复记
+_INSIDE_READ = contextvars.ContextVar("inside_read", default=False)
 
 # 这些是读路径自己的中转帧，调用点要继续往上找
 _INTERNAL = (
@@ -54,26 +59,48 @@ def _call_site() -> str:
     return " <- ".join(picked[-3:][::-1])
 
 
+def _client_classes() -> list[type]:
+    """BackendClient 与它的全部子类（不止直接子类：具体后端挂在 RedisModelClient 这类中间基类下）"""
+    from hetu.data.backend.base import BackendClient, BackendClientFactory
+
+    # 内置后端按 alias 懒加载，先 import 进来才在子类树上
+    for module in BackendClientFactory._BUILTIN_MODULES.values():
+        importlib.import_module(module)
+    found, pending = [], [BackendClient]
+    while pending:
+        cls = pending.pop()
+        if cls not in found:
+            found.append(cls)
+            pending.extend(cls.__subclasses__())
+    return found
+
+
 def pytest_configure(config):
     from hetu.data.backend import Backend
-    from hetu.data.backend.base import BackendClient
 
     def master_or_servant(self):
         return random.choice(self._servants)
 
     Backend.master_or_servant = property(master_or_servant)
 
-    for cls in BackendClient.__subclasses__() + [BackendClient]:
+    for cls in _client_classes():
         for name in READ_METHODS:
-            orig = getattr(cls, name, None)
+            # 只包这个类自己定义的：继承来的由定义它的那个类包
+            orig = vars(cls).get(name)
             if orig is None or getattr(orig, "_audited", False):
                 continue
 
             def make(orig=orig, name=name):
                 async def wrapper(self, *a, **kw):
+                    if _INSIDE_READ.get():
+                        return await orig(self, *a, **kw)
                     if not self.is_servant:
                         COUNTS[(name, _call_site())] += 1
-                    return await orig(self, *a, **kw)
+                    token = _INSIDE_READ.set(True)
+                    try:
+                        return await orig(self, *a, **kw)
+                    finally:
+                        _INSIDE_READ.reset(token)
 
                 wrapper._audited = True
                 return wrapper

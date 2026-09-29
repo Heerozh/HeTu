@@ -1,7 +1,11 @@
+import asyncio
+from unittest.mock import patch
+
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RaceCondition, UniqueViolation
+from hetu.data.backend.redis_model import RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -322,3 +326,680 @@ async def test_retry_generator(item_ref, mod_auto_backend):
 
     print("test_retry_generator retry:", retry)
     assert retry > 4  # 应该有重试发生
+
+
+# ---------------------------------------------------------------------------
+# range 的区间校验（防幻读）：写事务里 range 读过的区间，提交时若"同样的查询现在会返回
+# 不同的行"就判竞态。见 docs/superpowers/specs/2026-09-24-range-phantom-check-design.md
+# ---------------------------------------------------------------------------
+
+
+def _item(comp, *, time: int, name: str, owner: int = 0, level: int = 1, **fields):
+    """造一行 Item。time / name 是 unique 列，每行要给不同的值（name 最多 8 个字符）"""
+    row = comp.new_row(id_=fields.pop("id_", None))
+    row.owner, row.time, row.name, row.level = owner, time, name, level
+    for key, value in fields.items():
+        row[key] = value
+    return row
+
+
+async def _insert_rows(backend: Backend, comp, *rows) -> None:
+    async with backend.session("pytest", 1) as session:
+        for row in rows:
+            await session.using(comp).insert(row)
+    await backend.wait_for_synced()
+
+
+async def _master_range(backend: Backend, comp, **query):
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        return await session.using(comp).range(limit=-1, **query)
+
+
+async def test_range_phantom_insert_is_race(item_ref, mod_auto_backend):
+    """range 读空后决定插入，提交前别的事务往同一区间插了一行 → 本事务判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            assert len(await repo.range(owner=(7, 7), limit=-1)) == 0
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, owner=7, time=1, name="other"))
+            await repo.insert(_item(comp, owner=7, time=2, name="mine"))
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
+
+
+async def test_range_phantom_retry_converges(item_ref, mod_auto_backend):
+    """朴素的"查不到就插、查到就加数量"：中途被并发插入同模板的行，重试后改走 update，
+    最终只有一行、数量是两次之和"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    intruded = False
+    async for attempt in backend.session("pytest", 1).retry(3):
+        async with attempt as session:
+            session.only_master = True  # 重试要读到内层刚提交的行，不等副本同步
+            repo = session.using(comp)
+            items = await repo.range(owner=(7, 7), limit=-1)
+            hit = items[items.level == 3]  # level 当道具模板
+            if not intruded:
+                intruded = True
+                async with backend.session("pytest", 1) as s2:
+                    first = _item(comp, owner=7, level=3, qty=5, time=1, name="first")
+                    await s2.using(comp).insert(first)
+            if len(hit) == 0:
+                second = _item(comp, owner=7, level=3, qty=2, time=2, name="second")
+                await repo.insert(second)
+            else:
+                row = hit[0]
+                row.qty += 2
+                await repo.update(row)
+
+    rows = await _master_range(backend, comp, owner=(7, 7))
+    assert len(rows) == 1 and rows[0].qty == 7
+
+
+async def test_range_insert_outside_no_race(item_ref, mod_auto_backend):
+    """并发插入落在查询区间外，不算冲突"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        assert len(await repo.range(owner=(7, 7), limit=-1)) == 0
+        async with backend.session("pytest", 1) as s2:
+            await s2.using(comp).insert(_item(comp, owner=8, time=1, name="other"))
+        await repo.insert(_item(comp, owner=7, time=2, name="mine"))
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
+
+
+@pytest.mark.parametrize("desc", [False, True])
+async def test_range_truncated_observes_returned_rows_only(
+    item_ref, mod_auto_backend, desc
+):
+    """截断读（返回数 == limit）只观察到最后一个返回行为止：插在它外面不算冲突，插在里面算"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend, comp, *(_item(comp, time=t, name=f"t{t}") for t in (10, 20, 30, 40))
+    )
+    # 升序读到 10、20，观察 [0, 20]；降序读到 40、30，观察 [30, 100]
+    outside, inside = (25, 35) if desc else (25, 15)
+
+    async def read_then_insert(intruder_time: int):
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            rows = await repo.range(time=(0, 100), limit=2, desc=desc)
+            assert list(rows.time) == ([40, 30] if desc else [10, 20])
+            async with backend.session("pytest", 1) as s2:
+                intruder = _item(comp, time=intruder_time, name=f"t{intruder_time}")
+                await s2.using(comp).insert(intruder)
+            mine = _item(comp, time=1000 + intruder_time, name=f"m{intruder_time}")
+            await repo.insert(mine)
+
+    await read_then_insert(outside)
+    await backend.wait_for_synced()
+    with pytest.raises(RaceCondition, match="Range"):
+        await read_then_insert(inside)
+
+
+async def test_range_own_writes_no_false_race(item_ref, mod_auto_backend):
+    """本事务删掉 / 改走 range 返回的行、再往区间里插入：校验看的是写入前的状态，不误判"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        _item(comp, owner=5, time=1, name="a"),
+        _item(comp, owner=5, time=2, name="b"),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        rows = await repo.range(owner=(5, 5), limit=-1)
+        assert len(rows) == 2
+        repo.delete(int(rows[0].id))
+        moved = rows[1]
+        moved.owner = 6
+        await repo.update(moved)
+        await repo.insert(_item(comp, owner=5, time=3, name="c"))
+    assert list((await _master_range(backend, comp, owner=(5, 5))).name) == ["c"]
+
+
+async def test_range_phantom_check_off(item_ref, mod_auto_backend):
+    """phantom_check=False：只校验返回的行，不管区间里新增的行（同改动前的行为）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        rows = await repo.range(owner=(7, 7), limit=-1, phantom_check=False)
+        assert len(rows) == 0
+        async with backend.session("pytest", 1) as s2:
+            await s2.using(comp).insert(_item(comp, owner=7, time=1, name="other"))
+        await repo.insert(_item(comp, owner=7, time=2, name="mine"))
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 2
+
+
+async def test_range_read_only_unaffected(item_ref, mod_auto_backend):
+    """只读事务不提交，区间被插入也不抛"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        assert len(await repo.range(owner=(7, 7), limit=-1)) == 0
+        async with backend.session("pytest", 1) as s2:
+            await s2.using(comp).insert(_item(comp, owner=7, time=1, name="other"))
+
+
+def _intrude_before_row_fetch(backend: Backend, intrude):
+    """包住 master.get_many_array_：range 拿到 id 列表之后、取行之前，先跑一次
+    intrude(repo) 并提交。用来构造"ZRANGE 与取行之间有行被改"（调用方的 session 要
+    only_master）"""
+    master = backend.master
+    orig_fetch = master.get_many_array_
+    fired = False
+
+    async def get_many_array_(*args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            async with backend.session("pytest", 1) as intruder:
+                intruder.only_master = True
+                await intrude(intruder)
+        return await orig_fetch(*args, **kwargs)
+
+    return patch.object(master, "get_many_array_", new=get_many_array_)
+
+
+@pytest.mark.parametrize("write", [True, False])
+async def test_range_row_deleted_while_reading(item_ref, mod_auto_backend, write):
+    """索引读到、取行时已被删的行：读到的不是任何一刻的区间，写事务判竞态；只读事务照旧"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a")
+    b = _item(comp, owner=6, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+
+    async def delete_b(session):
+        repo = session.using(comp)
+        assert await repo.get(id=int(b.id)) is not None
+        repo.delete(int(b.id))
+
+    async def read(then_write: bool):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            with _intrude_before_row_fetch(backend, delete_b):
+                rows = await repo.range(owner=(6, 6), limit=-1)
+            assert list(rows.id) == [a.id]
+            if then_write:
+                await repo.insert(_item(comp, owner=9, time=3, name="c"))
+
+    if write:
+        with pytest.raises(RaceCondition, match="Inconsistent"):
+            await read(True)
+    else:
+        await read(False)
+
+
+async def test_range_row_swapped_while_reading(item_ref, mod_auto_backend):
+    """取行之前一行被改出区间、同时另一行插进来（行数不变）：写事务也要判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a")
+    b = _item(comp, owner=6, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+
+    async def swap(session):
+        repo = session.using(comp)
+        row = await repo.get(id=int(a.id))
+        assert row is not None
+        row.owner = 60
+        await repo.update(row)
+        await repo.insert(_item(comp, owner=6, time=3, name="c"))
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            with _intrude_before_row_fetch(backend, swap):
+                assert len(await repo.range(owner=(6, 6), limit=-1)) == 2
+            await repo.insert(_item(comp, owner=9, time=4, name="d"))
+
+
+async def test_range_reads_ids_and_rows_on_same_node(item_ref, mod_auto_backend):
+    """range 查 id 与取行要落在同一个节点：两次各自随机选节点的话，节点间复制进度不同，
+    取行时读不到或读到旧版本，会被读取一致性核对误判成竞态"""
+    import itertools
+    from unittest.mock import PropertyMock
+
+    from hetu.data.backend.session import Session
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, owner=6, time=1, name="a"))
+
+    reads: list[tuple[str, str]] = []
+
+    class Node:
+        """代理 master 的一个"节点"，记下在它上面做了哪种读"""
+
+        def __init__(self, name: str):
+            self.name = name
+
+        def __getattr__(self, attr):
+            target = getattr(backend.master, attr)
+            if attr not in ("range_read_", "range", "get_many_array_"):
+                return target
+
+            async def read(*args, **kwargs):
+                reads.append((self.name, attr))
+                return await target(*args, **kwargs)
+
+            return read
+
+    nodes = itertools.cycle([Node("A"), Node("B")])
+    with patch.object(
+        Session, "master_or_servant", new_callable=PropertyMock, side_effect=nodes
+    ):
+        async with backend.session("pytest", 1) as s1:
+            rows = await s1.using(comp).range(owner=(6, 6), limit=-1)
+    assert len(rows) == 1
+    assert {name for name, _ in reads} == {"A"}, reads
+
+
+async def test_orphan_index_member_raises_inconsistent_range_read(
+    item_ref, mod_auto_backend
+):
+    """索引里残留了已经不存在的行（比如维护脚本只删了行 key、没删索引）：range 读到它的
+    写事务抛 InconsistentRangeRead，带上组件、索引和 id，上层据此判断是不是一直卡在同一行"""
+    from hetu.data.backend import InconsistentRangeRead
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    ghost = _item(comp, owner=6, time=1, name="ghost")
+    await _insert_rows(backend, comp, ghost)
+    backend.get_table_maintenance().delete_row(item_ref, int(ghost.id))
+    await backend.wait_for_synced()
+
+    with pytest.raises(InconsistentRangeRead) as exc_info:
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            assert len(await repo.range(owner=(6, 6), limit=-1)) == 0
+            await repo.insert(_item(comp, owner=9, time=2, name="mine"))
+    err = exc_info.value
+    assert (err.comp_name, err.index_name, err.row_id) == ("Item", "owner", ghost.id)
+
+
+async def test_range_reread_after_phantom_is_race(item_ref, mod_auto_backend):
+    """同一事务两次读同一区间、中间被插入：两次结果不同，写事务判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            assert len(await repo.range(owner=(3, 3), limit=-1)) == 0
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, owner=3, time=1, name="other"))
+            assert len(await repo.range(owner=(3, 3), limit=-1)) == 1
+            await repo.insert(_item(comp, owner=99, time=2, name="mine"))
+
+
+def _rendezvous(parties: int):
+    """
+    碰头点：先到的等到 `parties` 个都到齐再一起往下走。
+
+    等待有上限：万一某个提交走不到碰头点（比如被别的写锁挡住），不能一直等，否则两边互相
+    等死。
+    """
+    arrived = 0
+    everyone = asyncio.Event()
+
+    async def meet():
+        nonlocal arrived
+        arrived += 1
+        if arrived >= parties:
+            everyone.set()
+        try:
+            await asyncio.wait_for(everyone.wait(), timeout=2)
+        except TimeoutError:
+            pass
+
+    return meet
+
+
+def _meet_between_check_and_write(backend: Backend, parties: int = 2):
+    """
+    让每个提交在提交脚本之前碰头：先到的等其他提交也到齐，再一起提交，构造同时提交。Redis 的
+    Lua、SQLite 的写事务里校验与写入原子执行，交错不进去，后执行的那个一定看得到先执行的写入。
+    """
+    master = backend.master
+    assert isinstance(master, RedisModelClient)
+    meet = _rendezvous(parties)
+    orig_commit_script = master.commit_script_
+
+    async def commit_script_(keys, args):
+        await meet()
+        return await orig_commit_script(keys, args)
+
+    return patch.object(master, "commit_script_", new=commit_script_)
+
+
+def _raise_unexpected(results, *expected: type[BaseException]) -> None:
+    """gather(return_exceptions=True) 的结果里有预期之外的异常，原样抛出"""
+    for r in results:
+        if isinstance(r, BaseException) and not isinstance(r, expected):
+            raise r
+
+
+async def test_range_phantom_interleaved_commits(item_ref, mod_auto_backend):
+    """
+    两个事务都读空同一区间、各插一行，同时提交：只能成功一个，另一个判竞态。嵌套 session 的
+    用例只覆盖了先后提交，这里覆盖同时提交。
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def read_empty_then_insert(n: int):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            if len(await repo.range(owner=(7, 7), limit=-1)) != 0:
+                raise RuntimeError("两个事务都应读到空区间")
+            await repo.insert(_item(comp, owner=7, time=n, name=f"t{n}"))
+
+    with _meet_between_check_and_write(backend):
+        results = await asyncio.gather(
+            read_empty_then_insert(1),
+            read_empty_then_insert(2),
+            return_exceptions=True,
+        )
+    _raise_unexpected(results, RaceCondition)
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
+    assert sum(isinstance(r, RaceCondition) for r in results) == 1
+
+
+async def test_write_skew_interleaved_commits(item_ref, mod_auto_backend):
+    """
+    写偏斜：两个事务各读一行、改另一行（都依赖自己读到的那行没变），同时提交：只能成功一个，
+    另一个判竞态（纯读行的版本和写入在同一个原子提交里校验）。
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, time=1, name="a")
+    b = _item(comp, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+
+    async def read_one_bump_other(read_id: int, write_id: int):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            assert await repo.get(id=read_id) is not None
+            row = await repo.get(id=write_id)
+            assert row is not None
+            row.qty += 1
+            await repo.update(row)
+
+    with _meet_between_check_and_write(backend):
+        results = await asyncio.gather(
+            read_one_bump_other(int(a.id), int(b.id)),
+            read_one_bump_other(int(b.id), int(a.id)),
+            return_exceptions=True,
+        )
+    _raise_unexpected(results, RaceCondition)
+    assert sum(isinstance(r, RaceCondition) for r in results) == 1
+
+
+async def test_unique_blind_insert_interleaved_commits(item_ref, mod_auto_backend):
+    """
+    两个事务都没读过、直接插同一个 unique 值，同时提交：一个成功，另一个是确定性的
+    UniqueViolation（本事务没观察过这个值不存在，重试没用）。
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async def blind_insert(n: int):
+        async with backend.session("pytest", 1) as session:
+            await session.using(comp).insert(_item(comp, time=n, name="dup"))
+
+    with _meet_between_check_and_write(backend):
+        results = await asyncio.gather(
+            blind_insert(1), blind_insert(2), return_exceptions=True
+        )
+    _raise_unexpected(results, RaceCondition, UniqueViolation)
+    assert sum(isinstance(r, UniqueViolation) for r in results) == 1
+    assert not any(isinstance(r, RaceCondition) for r in results)
+    assert len(await _master_range(backend, comp, name=("dup", "dup"))) == 1
+
+
+async def test_opposite_order_updates_interleaved_commits(item_ref, mod_auto_backend):
+    """两个事务以相反的顺序更新同样两行，同时提交：一个成功，另一个判竞态（重试即可）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, time=1, name="a")
+    b = _item(comp, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+
+    async def bump_both(first: int, second: int):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            rows = [await repo.get(id=first), await repo.get(id=second)]
+            for row in rows:
+                assert row is not None
+                row.qty += 1
+                await repo.update(row)
+
+    with _meet_between_check_and_write(backend):
+        results = await asyncio.gather(
+            bump_both(int(a.id), int(b.id)),
+            bump_both(int(b.id), int(a.id)),
+            return_exceptions=True,
+        )
+    _raise_unexpected(results, RaceCondition)
+    assert sum(isinstance(r, RaceCondition) for r in results) == 1
+
+
+async def test_nonunique_get_none_then_insert_is_race(item_ref, mod_auto_backend):
+    """非 unique 列 get 读空后插入，被并发插入同值的行 → 判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            assert await repo.get(owner=9) is None
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, owner=9, time=1, name="other"))
+            await repo.insert(_item(comp, owner=9, time=2, name="mine"))
+
+
+async def test_nonunique_get_skips_row_deleted_in_txn(item_ref, mod_auto_backend):
+    """非 unique 列 get：索引里排在前面的同值行已被本事务删掉，要返回后面那行匹配的。
+    返回 None 的话，"get 为 None 就 insert"会插出重复"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        _item(comp, owner=5, time=1, name="x"),
+        _item(comp, owner=5, time=2, name="y"),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        first = await repo.get(owner=5)
+        assert first is not None
+        repo.delete(int(first.id))
+        second = await repo.get(owner=5)
+        assert second is not None and second.id != first.id
+
+
+async def test_get_skips_row_moved_in_txn(item_ref, mod_auto_backend):
+    """本事务把命中的行改走了索引值：再 get 旧值不能返回它（它已经不匹配了），要返回别的
+    匹配行；unique 列没有别的匹配行，读空"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        _item(comp, owner=5, time=1, name="x"),
+        _item(comp, owner=5, time=2, name="y"),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        first = await repo.get(owner=5)
+        assert first is not None
+        old_name = str(first.name)
+        first.owner, first.name = 6, "moved"
+        await repo.update(first)
+        second = await repo.get(owner=5)
+        assert second is not None and second.owner == 5 and second.id != first.id
+        assert await repo.get(name=old_name) is None
+
+
+async def test_nonunique_get_none_after_deleting_all_then_insert_is_race(
+    item_ref, mod_auto_backend
+):
+    """本事务删掉了这个值上仅有的一行，get 读空后插入，被并发插入同值的行 → 判竞态。
+    读空要校验整个值上没有别的行，不能只看到被删的那一行为止"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, owner=5, time=1, name="x"))
+
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            row = await repo.get(owner=5)
+            assert row is not None
+            repo.delete(int(row.id))
+            assert await repo.get(owner=5) is None
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, owner=5, time=2, name="z"))
+            await repo.insert(_item(comp, owner=5, time=3, name="w"))
+
+
+async def test_nonunique_get_hit_then_insert_after_no_race(item_ref, mod_auto_backend):
+    """非 unique 列 get 命中是 limit=1 的截断读：新插入的同值行（id 更大）排在它后面，不算冲突"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, owner=2, time=1, name="a"))
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        row = await repo.get(owner=2)
+        assert row is not None
+        async with backend.session("pytest", 1) as s2:
+            await s2.using(comp).insert(_item(comp, owner=2, time=2, name="b"))
+        row.qty = 3
+        await repo.update(row)
+
+
+async def test_nonunique_get_hit_ignores_rows_sorting_before(
+    item_ref, mod_auto_backend
+):
+    """get 命中只保护返回的那一行：之后插入的同值行即使排在它前面（id 更小），也不算冲突。
+    get 的约定是"返回一行匹配的"，不是"第一行"；省掉这次区间校验（每次约 1.3µs master）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    hit = _item(comp, owner=2, time=1, name="hit")
+    await _insert_rows(backend, comp, hit)
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        row = await repo.get(owner=2)
+        assert row is not None and row.id == hit.id
+        async with backend.session("pytest", 1) as s2:
+            # 位数相同、数值更小：两个后端都排在命中行前面
+            before = _item(comp, owner=2, time=2, name="before", id_=int(hit.id) - 1)
+            await s2.using(comp).insert(before)
+        row.qty = 3
+        await repo.update(row)
+
+
+async def test_nonunique_get_hit_moved_while_reading_is_race(
+    item_ref, mod_auto_backend
+):
+    """get 命中仍要核对读取一致性：取行前命中的行被改走（读回的行已不满足查询），写事务判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=2, time=1, name="a")
+    await _insert_rows(backend, comp, a)
+
+    async def move_a(session):
+        repo = session.using(comp)
+        row = await repo.get(id=int(a.id))
+        assert row is not None
+        row.owner = 20
+        await repo.update(row)
+
+    with pytest.raises(RaceCondition, match="Inconsistent|Range"):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            with _intrude_before_row_fetch(backend, move_a):
+                row = await repo.get(owner=2)
+            assert row is not None and row.owner == 20  # 读回的已经被改走了
+            await repo.insert(_item(comp, owner=9, time=3, name="c"))
+
+
+async def test_range_float_index_truncated_commits(item_ref, mod_auto_backend):
+    """float32 索引上的截断读，没有并发写时一次提交成功（不能拿读回的浮点值做等值比较，
+    MariaDB 的单精度 FLOAT 会对不上，变成永远失败的重试）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(
+        backend,
+        comp,
+        *(
+            _item(comp, time=i, name=f"f{i}", model=m)
+            for i, m in enumerate((0.1, 0.2, 0.3), 1)
+        ),
+    )
+
+    async with backend.session("pytest", 1) as s1:
+        repo = s1.using(comp)
+        assert len(await repo.range(model=(0.0, 1.0), limit=2)) == 2
+        await repo.insert(_item(comp, time=10, name="x", model=5.0))
+
+
+async def test_range_blind_insert_existing_id_is_violation(item_ref, mod_auto_backend):
+    """盲插一个已存在的显式 id、之后 range 又读到它：仍是确定性的 UniqueViolation，
+    不能被区间校验变成竞态（重跑事务体只会再插同一个 id，无限重试）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    existing = _item(comp, owner=4, time=1, name="x")
+    await _insert_rows(backend, comp, existing)
+
+    with pytest.raises(UniqueViolation):
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            dup = _item(comp, owner=4, time=2, name="dup", id_=int(existing.id))
+            await repo.insert(dup)
+            assert len(await repo.range(owner=(4, 4), limit=-1)) == 1
+
+
+async def test_unique_absent_then_delete_same_value_is_race(item_ref, mod_auto_backend):
+    """get(name=v) 读空，之后又读到并删掉一行 name=v 的行、插入自己的 v：读集前后矛盾，判竞态。
+    unique 检查不算本事务删掉的行，所以这种情况不能省掉区间校验"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            assert await repo.get(name="v") is None
+            theirs = _item(comp, time=1, name="v")
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(theirs)
+            assert await repo.get(id=int(theirs.id)) is not None
+            repo.delete(int(theirs.id))
+            await repo.insert(_item(comp, time=2, name="v"))

@@ -141,9 +141,12 @@ await HeTuClient.Instance.CallSystem("say_hello", "world");
 调用 `say_hello` 后，该行会存在于 SQLite 文件（或 Redis）中。你可以通过添加一个临时客户端订阅来证明：
 
 ```csharp
-var sub = await HeTuClient.Instance.WatchRange<Greeting>("id", 0, long.MaxValue, 100);
+// desc：取 id 最大（最新）的 100 行。雪花 id 按时间递增，升序会停在最早的 100 行上，
+// 攒满后新行就进不来了
+var sub = await HeTuClient.Instance.WatchRange<Greeting>(
+    "id", 0, long.MaxValue, 100, desc: true);
 sub.AddTo(gameObject); // dont forget! Otherwise, you will receive a warning about GC leaks when you stop playing.
-sub.ObserveAdd().Subscribe(row => Debug.Log(row.text));
+sub.ObserveAdd().Subscribe(row => Debug.Log(row.Text));
 ```
 
 现在，每次新的 `say_hello` 调用都应该会在 Unity 控制台记录 `Hello, world!`。

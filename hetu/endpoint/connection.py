@@ -32,13 +32,18 @@ ENDPOINT_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 # 占位符，实际由Config里修改。通知模式下"是否被顶号"检查的兜底重查间隔（秒），0 = 每次调用都查
 CONNECTION_ALIVE_RECHECK_INTERVAL = 0
 
+# 被顶号时服务器先发这个 WebSocket close 码和原因再断开（4000-4999 是留给应用自定义的段）。
+# 客户端据此提示"账号已在别处登录"，也别自动重连：重连会重新登录，把对方顶掉
+CLOSE_KICKED = 4001
+CLOSE_KICKED_REASON = "kicked"
+
 
 @define_component(namespace="core", volatile=True, permission=Permission.ADMIN)
 class Connection(BaseComponent):
     # point_sub：顶号检测 watch 的是 "owner == 本用户" 的值频道（见 ConnectionAliveChecker）
     owner: np.int64 = property_field(0, index=True, point_sub=True)
     address: str = property_field("", dtype="<U32", index=True)  # 连接地址
-    device: str = property_field("", dtype="<U32")  # 物理设备名
+    device_name: str = property_field("", dtype="<U32")  # 物理设备名
     device_id: str = property_field("", dtype="<U128")  # 设备id
     admin: str = property_field("", dtype="<U16")  # 是否是admin
     created: np.double = property_field(0)  # 连接创建时间
@@ -58,7 +63,10 @@ async def new_connection(tbl_mgr: ComponentTableManager, address: str) -> int:
         repo = session.using(Connection)
         # 服务器自己的（future call之类的localhost）连接不应该受IP限制
         if MAX_ANONYMOUS_CONNECTION_BY_IP and address not in ["localhost", "127.0.0.1"]:
-            same_ips = await repo.range("address", address, limit=1000)
+            # 粗略计数，不做区间校验：同 IP 并发连接不能互相判竞态（这里不重试）
+            same_ips = await repo.range(
+                "address", address, limit=1000, phantom_check=False
+            )
             same_ip_guests = same_ips[same_ips.owner == 0]
             if len(same_ip_guests) > MAX_ANONYMOUS_CONNECTION_BY_IP:
                 msg = _(
@@ -97,7 +105,8 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]。
 
     kick_logged_in:
-        如果user_id已在其他连接登录，则标记该连接断开并返回True，该连接将在客户端调用任意Endpoint时被关闭。
+        如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
+        断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
 
     Notes
     -----

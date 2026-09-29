@@ -5,11 +5,12 @@
 @email: heeroz@gmail.com
 """
 
-# 内置后端（redis / sql）不在此 eager import：BackendClientFactory 按 alias 懒加载，
-# 这样 `import hetu` 不会把 redis / sqlalchemy 一起拖进来（headless 进程只想认识其中一种）。
+# 内置后端（redis / sqlite）不在此 eager import：BackendClientFactory 按 alias 懒加载，
+# 这样 `import hetu` 不会把用不到的后端一起拖进来（headless 进程只想认识其中一种）。
 from .base import (
     BackendClient,
     BackendClientFactory,
+    InconsistentRangeRead,
     MQClient,
     RaceCondition,
     RowFormat,
@@ -21,16 +22,17 @@ from .session import Session
 from .table import Table, TableReference
 
 __all__ = [
-    "RaceCondition",
-    "UniqueViolation",
-    "RowFormat",
-    "BackendClient",
     "Backend",
+    "BackendClient",
+    "InconsistentRangeRead",
+    "MQClient",
+    "RaceCondition",
+    "RowFormat",
     "Session",
     "SessionRepository",
     "Table",
     "TableReference",
-    "MQClient",
+    "UniqueViolation",
 ]
 
 
@@ -41,6 +43,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from ..component import BaseComponent
+    from ..sub import SubscriptionHub
 
 
 class Backend:
@@ -59,19 +62,18 @@ class Backend:
             for k, v in config.items()
             if k not in {"type", "master", "servants", "master_weight"}
         }
+        client_cls = BackendClientFactory.client_class(config["type"])
+        client_cls.check_config_(config)
 
-        # 如果未填写servants，则将master也作为servant使用(为了api统一)
-        servants_urls = config.get("servants", [])
+        # 如果未填写servants，则将master也作为servant使用(为了api统一)。拷贝一份，不改调用方的配置
+        servants_urls = list(config.get("servants") or [])
         if not servants_urls:
             servants_urls.append(config["master"])
 
         # 连接数据库
-        self._master = BackendClientFactory.create(
-            config["type"], config["master"], False, extra_config
-        )
+        self._master = client_cls(config["master"], False, **extra_config)
         self._servants = [
-            BackendClientFactory.create(config["type"], servant, True, extra_config)
-            for servant in servants_urls
+            client_cls(servant, True, **extra_config) for servant in servants_urls
         ]
 
         # master_weight表示选中的权重，每台副本数据库权重固定为1.0
@@ -80,8 +82,15 @@ class Backend:
         self._master_weight = config.get("master_weight", 1.0)
         self._all_clients = self._servants + [self._master]
         self._all_weights = [1.0] * len(self._servants) + [self._master_weight]
+        # 本进程在这个 backend 上的 worker 级订阅器（见 `SubscriptionHub.of`）：第一次建订阅门面时
+        # 懒建，随本对象关闭
+        self.sub_hub_: SubscriptionHub | None = None
 
     async def close(self):
+        # 先关订阅器：它的处理循环和 MQClient 还在用下面这些连接
+        if (hub := self.sub_hub_) is not None:
+            self.sub_hub_ = None
+            await hub.close()
         await self._master.close()
         for servant in self._servants:
             await servant.close()
@@ -137,8 +146,15 @@ class Backend:
         return self._master.get_table_maintenance()
 
     def get_mq_client(self) -> MQClient:
-        """获取消息队列连接"""
-        return self.servant.get_mq_client()
+        """
+        获取消息队列连接：一个本地队列，挂在每个 servant 的通知接收器上。订阅的频道按哈希分到各
+        servant（每个 MQClient 随机加盐，同一频道在不同 worker 落在不同 servant 上），某个 servant
+        订阅失败或断线时换到别的 servant 重订、补读（见 `HubMQClient`）。
+        Returns an MQClient spanning every servant: channels are spread over them and moved
+        away from a servant whose subscription fails or whose connection is lost.
+        """
+        first, *rest = self._servants
+        return first.get_mq_client(*rest)
 
     def session(self, instance: str, cluster_id: int) -> Session:
         """

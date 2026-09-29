@@ -156,7 +156,7 @@ class SystemClusters(metaclass=Singleton):
                 components=(comp,),
                 force=True,
                 permission=None,
-                depends=tuple(),
+                depends=(),
                 max_retry=0,
             )
 
@@ -308,7 +308,7 @@ class SystemClusters(metaclass=Singleton):
         guards=None,
         on_start=False,
     ):
-        sub_map = self._system_map.setdefault(namespace, dict())
+        sub_map = self._system_map.setdefault(namespace, {})
 
         if not force:
             assert func.__name__ not in sub_map, _("System重复定义：") + func.__name__
@@ -344,7 +344,7 @@ def define_system(
     force: bool = False,
     permission: Permission | None = None,
     retry: int = 9999,
-    depends: tuple[str | FunctionType, ...] = tuple(),
+    depends: tuple[str | FunctionType, ...] = (),
     call_lock=False,
     on_start=False,
 ):

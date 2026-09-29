@@ -61,6 +61,9 @@ working examples — read them first.
 - **Component** — a typed table. Strings are **fixed-width** (`dtype="U256"`)
   and truncate; there are **no nulls** (every column has a default). `index=True`
   builds a sorted index for `range()`; `unique=True` adds a uniqueness check.
+  Field names must not shadow NumPy row attributes: `size`, `item`, `shape`,
+  `data`, … are rejected at definition (`row.size` would read NumPy's `size`),
+  so use `bag_size`, `item_id`.
 - **Volatile components** — `@define_component(volatile=True)` marks a table as
   transient: `hetu upgrade` may **wipe** it, and it permits fast non-transactional
   `direct_set` writes. Use for runtime-only state (connections, sessions, leases,
@@ -88,10 +91,12 @@ working examples — read them first.
   only *after* commit (or after `await ctx.session_commit()`).
 - **Endpoint** — a raw RPC with **no** transaction. Use only for non-DB work, or
   to call several Systems that each commit independently (`ctx.systems.call(...)`).
-- **Permissions** — enforced at the Component level too: a `USER` System reading
-  an `OWNER` Component still sees only the caller's rows. `RLS` needs
-  `rls_compare=` on the Component. `elevate(ctx, user_id)` is how a login System
-  authenticates a connection.
+- **Permissions** — a System's `permission=` only gates who may call it.
+  `OWNER` / `RLS` (Component-only; `RLS` needs `rls_compare=`) filter rows on
+  **subscriptions** only: inside a System, `ctx.repo` reads and writes any row
+  and `ResponseToClient` data is not filtered, so check the caller yourself
+  (e.g. channel membership before returning chat history).
+  `elevate(ctx, user_id)` is how a login System authenticates a connection.
 - **Subscriptions** — clients `select` one row (by unique key) or `range` over an
   indexed column; the server pushes deltas via Redis pub/sub, permission-filtered.
   No polling.
@@ -151,11 +156,16 @@ worker that only reads a command table and writes a report table) uses
 `hetu.headless` to touch component tables directly. (→ `headless.py`, `advanced.md`)
 
 ```python
-client = await hetu.headless.connect(backend_cfg, instance="region-1",
-                                     components=[BattleCommand, "BattleReport"])
-rows = await client.table(BattleCommand).servant_range("created_at", since, float("inf"), limit=4096)
-async with client.session("BattleReport") as s:            # s[Comp] is a SessionRepository
-    async with s["BattleReport"].upsert(id=-report_key) as row:  # explicit id — headless never mints ids
+client = await hetu.headless.connect(
+    backend_cfg, instance="region-1", components=[BattleCommand, "BattleReport"]
+)
+rows = await client.table(BattleCommand).servant_range(
+    "created_at", since, float("inf"), limit=4096
+)
+async with client.session("BattleReport") as s:  # s[Comp] is a SessionRepository
+    async with s["BattleReport"].upsert(
+        id=-report_key
+    ) as row:  # explicit id — headless never mints ids
         row.kind = 1
 await client.close()
 ```

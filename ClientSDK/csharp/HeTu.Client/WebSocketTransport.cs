@@ -17,7 +17,7 @@ namespace HeTu
 
         public event Action OnOpen;
         public event Action<byte[]> OnMessage;
-        public event Action<string> OnClose;   // null = 正常关闭
+        public event Action<int, string> OnClose;   // (close 码, 原因)；原因 null = 正常关闭
         public event Action<string> OnError;
 
         public WebSocketState State => _ws?.State ?? WebSocketState.None;
@@ -35,7 +35,7 @@ namespace HeTu
             catch (Exception ex)
             {
                 OnError?.Invoke(ex.Message);
-                OnClose?.Invoke(ex.Message);
+                OnClose?.Invoke(HeTuCloseCode.Abnormal, ex.Message);
                 return;
             }
             OnOpen?.Invoke();
@@ -58,7 +58,11 @@ namespace HeTu
                             .ConfigureAwait(false);
                         if (r.MessageType == WebSocketMessageType.Close)
                         {
-                            OnClose?.Invoke(null);
+                            // 服务端带码关闭（如被顶号 4001 "kicked"）：码和原因都透给上层
+                            var code = (int?)r.CloseStatus ?? HeTuCloseCode.Normal;
+                            OnClose?.Invoke(code, code == HeTuCloseCode.Normal
+                                ? null
+                                : r.CloseStatusDescription);
                             return;
                         }
                         ms.Write(buf, 0, r.Count);
@@ -66,10 +70,14 @@ namespace HeTu
                     OnMessage?.Invoke(ms.ToArray());
                 }
                 // State left Open (e.g. Aborted after Close()) — still fire OnClose
-                OnClose?.Invoke(null);
+                OnClose?.Invoke(HeTuCloseCode.Normal, null);
             }
-            catch (OperationCanceledException) { OnClose?.Invoke(null); }
-            catch (Exception ex) { OnError?.Invoke(ex.Message); OnClose?.Invoke(ex.Message); }
+            catch (OperationCanceledException) { OnClose?.Invoke(HeTuCloseCode.Normal, null); }
+            catch (Exception ex)
+            {
+                OnError?.Invoke(ex.Message);
+                OnClose?.Invoke(HeTuCloseCode.Abnormal, ex.Message);
+            }
         }
 
         public void Send(byte[] data) => _ = SendAsync(data);

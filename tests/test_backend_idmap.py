@@ -32,6 +32,11 @@ def test_add_clean_and_get(mod_item_model):
     assert fetched_row["name"] == "TestItem"
     assert status == RowState.CLEAN
 
+    # 事务第一行直接建缓存时，缓存也必须是拷贝：改调用方的行不能影响缓存
+    row.name = "Changed after add"
+    cached, _ = id_map.get(item_ref, 100)
+    assert cached is not None and cached.name == "TestItem"
+
     # 验证重复添加报错
     with pytest.raises(ValueError, match="already exists"):
         id_map.add_clean(item_ref, row)
@@ -364,3 +369,193 @@ def test_get_absent_unique_fields(mod_item_model):
     r.time = 7
     idmap2.add_insert(ref, r)
     assert idmap2.get_absent_unique_fields() == {ref: {1: {"time"}}}
+
+
+def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
+    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新。"""
+    ref = TableReference(mod_item_model, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = mod_item_model.new_rows(5)
+    rows.id = [11, 12, 13, 14, 15]
+    rows.name = ["clean", "update", "delete", "revert", "insert"]
+    rows.qty = 1
+    idmap.add_clean(ref, rows[:4])
+    idmap.add_insert(ref, rows[4])
+    changed = rows[1].copy()
+    changed.qty = 9
+    idmap.update(ref, changed)
+    reverted = rows[3].copy()
+    reverted.qty = 8
+    idmap.update(ref, reverted)
+    reverted.qty = 1
+    idmap.update(ref, reverted)
+    idmap.mark_deleted(ref, 13)
+
+    inserts, (old_rows, new_rows), deletes = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in inserts] == ["15"]
+    assert [r["id"] for r in old_rows] == ["12"]
+    assert old_rows[0]["qty"] == "1"
+    assert new_rows == [{"qty": "9"}]
+    assert [r["id"] for r in deletes] == ["13"]
+    assert set(idmap.get_clean_rows()[ref]) == {11}
+
+
+def test_dirty_rows_skip_read_only_tables(mod_item_model):
+    """读 A 写 B 的事务：只读过的表不输出，单行缓存和多行全是 CLEAN 的表都一样"""
+    Item = mod_item_model
+    read_one = TableReference(Item.duplicate("pytest", "read_one"), "TestServer", 1)
+    read_many = TableReference(Item.duplicate("pytest", "read_many"), "TestServer", 1)
+    written = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+
+    idmap.add_clean(read_one, read_one.comp_cls.new_row(id_=1))
+    rows = read_many.comp_cls.new_rows(2)
+    rows.id = [2, 3]
+    idmap.add_clean(read_many, rows)
+    target = Item.new_row(id_=4)
+    idmap.add_clean(written, target)
+    changed = target.copy()
+    changed.qty = 9
+    idmap.update(written, changed)
+
+    dirties = idmap.get_dirty_rows()
+    assert dirties[read_one] == ([], ([], []), [])
+    assert dirties[read_many] == ([], ([], []), [])
+    assert dirties[written][1][1] == [{"qty": "9"}]
+
+
+def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
+    """没动过的 NaN 不算变更：改回原值不发更新，改别的字段时只写那个字段；
+    0.0 改成 -0.0 仍和按值比较一样算没变"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = Item.new_rows(3)
+    rows.id = [1, 2, 3]
+    rows.model = [np.nan, np.nan, 0.0]
+    idmap.add_clean(ref, rows)
+
+    reverted = rows[0].copy()
+    reverted.qty = 5
+    idmap.update(ref, reverted)
+    reverted.qty = rows[0].qty
+    idmap.update(ref, reverted)
+    changed = rows[1].copy()
+    changed.qty = 7
+    idmap.update(ref, changed)
+    signed_zero = rows[2].copy()
+    signed_zero.model = -0.0
+    signed_zero.level = 3
+    idmap.update(ref, signed_zero)
+
+    _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
+    assert [r["id"] for r in old_rows] == ["2", "3"]
+    assert new_rows == [{"qty": "7"}, {"level": "3"}]
+
+
+@pytest.mark.parametrize("preload", [False, True])
+def test_add_clean_batch_snapshots_are_independent(mod_item_model, preload):
+    """批量原值快照不能与输入、工作缓存或后续加入的批次相互污染。"""
+    comp = mod_item_model
+    ref = TableReference(comp, "pytest", 1)
+    idmap = IdentityMap()
+    if preload:
+        first = comp.new_row(id_=99)
+        first.qty = 9
+        idmap.add_clean(ref, first)
+    rows = comp.new_rows(50)
+    rows.id = np.arange(1, 51)
+    rows.qty = 1
+    idmap.add_clean(ref, rows)
+    rows.qty = 7
+    cached, state = idmap.get(ref, 1)
+    assert cached is not None and cached.qty == 1 and state == RowState.CLEAN
+    cached.qty = 3
+    idmap.update(ref, cached)
+    clean = idmap.db_row(ref, 1)
+    assert clean is not None and clean.qty == 1
+    updated, _ = idmap.get(ref, 1)
+    assert updated is not None and updated.qty == 3
+    second, _ = idmap.get(ref, 2)
+    assert second is not None and second.qty == 1
+    second_clean = idmap.db_row(ref, 2)
+    assert second_clean is not None and second_clean.qty == 1
+    assert idmap.get_clean_rows()[ref][2] == "0"
+    assert idmap.get_dirty_rows()[ref][1][1] == [{"qty": "3"}]
+    if preload:
+        first_clean = idmap.db_row(ref, 99)
+        assert first_clean is not None and first_clean.qty == 9
+    with pytest.raises(ValueError, match="already exists"):
+        idmap.add_clean(ref, rows)
+
+
+@pytest.mark.parametrize("others", [0, 2])
+def test_delete_after_update_sends_db_values(mod_item_model, others):
+    """先 update 再删：DELETE 带的是数据库里的原值，不是改后的值。Redis 按这些值 ZREM 索引，
+    拿改后的值去删，原值上的索引项就成了孤儿。others 覆盖单行、多行两条分派路径"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    row = Item.new_row(id_=7)
+    row.time, row.name, row.owner = 100, "old", 1
+    idmap.add_clean(ref, row)
+    if others:
+        rows = Item.new_rows(others)
+        rows.id = np.arange(20, 20 + others)
+        idmap.add_clean(ref, rows)
+    changed = row.copy()
+    changed.time, changed.name, changed.owner = 200, "new", 2
+    idmap.update(ref, changed)
+    idmap.mark_deleted(ref, 7)
+
+    _, (old_rows, _), deletes = idmap.get_dirty_rows()[ref]
+    assert old_rows == []
+    assert [(d["id"], d["time"], d["name"], d["owner"]) for d in deletes] == [
+        ("7", "100", "old", "1")
+    ]
+
+
+def test_delete_inserted_row_leaves_nothing_to_commit(mod_item_model):
+    """本事务 insert 的行又删掉：数据库里从没有过这行，提交时什么都不用发，事务也不算脏
+    （当成库里的行按 _version=0 去删，每次提交都判竞态）。删掉后这个 id 可以再 insert"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    idmap.add_clean(ref, Item.new_row(id_=1))
+    row = Item.new_row(id_=8)
+    row.name = "a"
+    idmap.add_insert(ref, row)
+    changed = row.copy()
+    changed.qty = 5
+    idmap.update(ref, changed)
+    idmap.mark_deleted(ref, 8)
+
+    assert not idmap.is_dirty
+    assert idmap.get_dirty_rows()[ref] == ([], ([], []), [])
+    assert len(idmap.filter(ref, name="a")) == 0
+
+    row.name = "b"
+    idmap.add_insert(ref, row)
+    inserts, _, deletes = idmap.get_dirty_rows()[ref]
+    assert [(r["id"], r["name"]) for r in inserts] == [("8", "b")]
+    assert deletes == []
+
+
+def test_delete_reinserted_db_row_still_deletes_it(mod_item_model):
+    """库里的行删掉、同一个 id 又 insert、再删：状态虽是 INSERT，库里那行仍然要删，不能
+    当成本事务新插的行直接忘掉"""
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+    row = Item.new_row(id_=9)
+    row.name = "db"
+    idmap.add_clean(ref, row)
+    idmap.mark_deleted(ref, 9)
+    again = Item.new_row(id_=9)
+    again.name = "again"
+    idmap.add_insert(ref, again)
+    idmap.mark_deleted(ref, 9)
+
+    inserts, _, deletes = idmap.get_dirty_rows()[ref]
+    assert inserts == []
+    assert {(d["id"], d["name"]) for d in deletes} == {("9", "db")}

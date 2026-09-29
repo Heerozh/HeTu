@@ -208,12 +208,13 @@ HeTuClient.Instance.Connect("ws://127.0.0.1:2466/hetu/Chat");
 // 会自动等待连接建立后再发送。
 await HeTuClient.Instance.CallSystem("user_login", 1001, "Alice");
 
+// 最近的 1024 条：desc 从最新一端取。升序会停在最早的 1024 条上，攒满后新消息就进不来了
 var messages = await HeTuClient.Instance.WatchRange<ChatMessage>(
-    "created_at_ms", 0, long.MaxValue, 1024);
+    "created_at_ms", 0, long.MaxValue, 1024, desc: true);
 
-messages.addTo(gameObject);
-messages.ObserveAdd()
-    .Subscribe(msg => Debug.Log($"{msg.name}: {msg.text}"))
+messages.AddTo(gameObject);
+messages.ObserveAdd()  // 初始行也会先依次发出（从新到旧）
+    .Subscribe(msg => Debug.Log($"{msg.Name}: {msg.Text}"))
     .AddTo(ref messages.DisposeBag);
 
 await HeTuClient.Instance.CallSystem("user_chat", "Hello, world!");
@@ -224,7 +225,7 @@ await HeTuClient.Instance.CallSystem("user_chat", "Hello, world!");
 
 ## 你学到了什么
 
-- **组件**是存储在 Redis（或开发中的 SQLite/Postgres）中的类型化表。
+- **组件**是存储在 Redis（或开发中的 SQLite）中的类型化表。
 - **系统**是在事务内读写组件的异步函数。它们的 `permission=` 控制谁可以调用它们。
 - **`elevate()`** 将连接提升为已认证。
 - **订阅**将行级更改推送到客户端，无需轮询。

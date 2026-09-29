@@ -6,8 +6,17 @@
 #  """
 
 
+import os
+import subprocess
+import sys
+
 import numpy as np
 import pytest
+from fixtures.backends import (
+    raw_hset,
+    raw_index_members,
+    use_redis_family_backend_only,
+)
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Table
@@ -249,6 +258,89 @@ async def test_migration_declaration_only(filled_item_ref, tmp_path):
         assert (await repo.range("qty", 999, limit=99)).shape[0] == 25
 
 
+async def test_migration_without_snowflake(
+    filled_item_ref, mod_auto_backend, tmp_path, monkeypatch
+):
+    """
+    hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约），迁移时不能发号。以前 Redis
+    搬完行、旧索引随旧表删掉之后，重建索引时发号失败：表里有行却没有索引，meta 已是新版本，
+    下次 upgrade 不再迁移，服务器就带着空索引起来了。
+    """
+    test_app_file = tmp_path / "test.py"
+    backend = filled_item_ref.backend
+
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        Permission,
+        define_component,
+        property_field,
+    )
+
+    ComponentDefines().clear_()
+
+    # 与原 Item 只差 qty 的 dtype（int16 → int32，能安全转换），迁移要搬数据
+    @define_component(namespace="pytest", permission=Permission.OWNER, table_sub=True)
+    class ItemNew(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True, point_sub=True)
+        model: np.float32 = property_field(0, unique=False, index=True)
+        qty: np.int32 = property_field(1, unique=False, index=False)
+        level: np.int8 = property_field(1, unique=False, index=False)
+        time: np.int64 = property_field(0, unique=True, index=True)
+        name: "U8" = property_field("", unique=True, index=True, point_sub=True)  # type: ignore  # noqa
+        used: bool = property_field(False, unique=False, index=True, point_sub=True)
+
+    import json
+
+    define = json.loads(ItemNew.json_)
+    define["name"] = "Item"
+    renamed_new_item_cls = BaseComponent.load_json(json.dumps(define))
+    new_table = Table(
+        renamed_new_item_cls,
+        filled_item_ref.instance_name,
+        filled_item_ref.cluster_id,
+        backend,
+    )
+
+    maint = backend.get_table_maintenance()
+    tbl_status, old_meta = maint.check_table(new_table)
+    assert tbl_status == "schema_mismatch"
+
+    monkeypatch.setattr(SnowflakeID(), "worker_id", -1)  # 模拟 upgrade 进程里未初始化
+    assert maint.migration_schema(test_app_file, new_table, old_meta)
+    assert maint.check_table(new_table)[0] == "ok"
+
+    # 迁移在 upgrade 进程里做，服务器之后用新连接来读
+    reader = mod_auto_backend("after_upgrade")
+    await reader.wait_for_synced()
+    async with reader.session("pytest", 1) as session:
+        repo = session.using(renamed_new_item_cls)
+        # 索引按搬过来的行建好了
+        assert (await repo.get(time=111)).qty == 999
+        assert (await repo.range("owner", 10, limit=99)).shape[0] == 25
+
+
+def test_duplicate_component_migration_script_name(tmp_path):
+    """副本组件名带冒号（FutureCalls:Loot），生成的迁移脚本文件名不能带冒号：Windows 上冒号
+    是 NTFS 备用数据流分隔符，脚本会写进 0 字节文件 FutureCalls 的隐藏流，目录里看不到。
+    换掉冒号后仍要能按版本号找回脚本。"""
+    from hetu.data import BaseComponent
+    from hetu.data.migration import MigrationScript
+    from hetu.system import FutureCalls
+
+    dup = BaseComponent.load_json(FutureCalls.json_, "Loot")
+    assert dup.name_ == "FutureCalls:Loot"
+
+    script = MigrationScript._generate_default_migration_script(
+        tmp_path, dup, FutureCalls.json_, "aaa", "bbb"
+    )
+    assert script.name == "FutureCalls-Loot_vaaa_to_vbbb.py"
+    migration_dir = tmp_path / "maint" / "migration"
+    assert [f.name for f in migration_dir.iterdir()] == [script.name]
+    assert script.stat().st_size > 0
+    assert MigrationScript._find_script(tmp_path, "aaa") == (script, "bbb")
+
+
 async def test_read_meta_by_name(item_ref, mod_auto_backend):
     """read_meta 接受组件类或组件名：不持有本地类定义的进程（headless）按名字读 meta。"""
     maint = mod_auto_backend().get_table_maintenance()
@@ -258,6 +350,22 @@ async def test_read_meta_by_name(item_ref, mod_auto_backend):
     assert by_cls == by_name
     assert by_name.cluster_id == item_ref.cluster_id
     assert maint.read_meta(item_ref.instance_name, "NoSuchComponent") is None
+
+
+async def test_maintenance_range_infinite_bounds(item_ref, mod_auto_backend):
+    """维护接口按 ±inf 边界查浮点索引（取全部）"""
+    backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    ids = []
+    async with backend.session("pytest", 1) as session:
+        for i, model in enumerate([-2.5, 0.5]):
+            row = comp.new_row()
+            row.name, row.time, row.model = f"m{i}", i, model
+            await session.using(comp).insert(row)
+            ids.append(int(row.id))
+    maint = backend.get_table_maintenance()
+    found = maint.range(item_ref, "model", float("-inf"), float("inf"))
+    assert found == ids
 
 
 # ============ ComponentTableManager：`hetu upgrade` 的建表 / 迁移 / 清易失数据 ============
@@ -473,3 +581,311 @@ async def test_manager_flush_volatile(
     keep = tm.get_table(MgrKeep)
     with pytest.raises(ValueError):
         keep.backend.get_table_maintenance().flush(keep)
+
+
+async def test_flush_leaves_duplicate_components_alone(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """清空组件 MgrOrder 不能碰它的副本 MgrOrder:Copy（名字也以 `MgrOrder:` 开头）：副本的
+    数据和 meta 都得留着"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    @define_component(namespace="pytest", force=True, volatile=True)
+    class MgrOrder(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    copy = MgrOrder.duplicate("pytest", "Copy")
+
+    @define_system(namespace="pytest", components=(MgrOrder,))
+    async def mgr_use_order(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(copy,))
+    async def mgr_use_order_copy(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tm = ComponentTableManager("pytest", "mgr_dup", {"default": backend})
+    assert tm.check_and_create_new_tables() is True
+    await _insert_owner(tm, MgrOrder, 1)
+    await _insert_owner(tm, copy, 1)
+
+    order = tm.get_table(MgrOrder)
+    order.backend.get_table_maintenance().flush(order)
+    await backend.wait_for_synced()
+    assert await _get_owner(tm, MgrOrder, 1) is None
+    assert await _get_owner(tm, copy, 1) is not None
+    assert _status(tm, copy) == "ok"
+
+
+async def test_manager_volatile_drop_column_without_force(
+    mod_auto_backend, new_component_env, new_clusters_env, tmp_path
+):
+    """易失组件删属性不算有损：`hetu upgrade` 迁移完紧接着就 flush_volatile，数据本来就要
+    清掉。不带 force 也要迁移成功，不然改一个易失核心组件（Connection 之类）就逼所有部署
+    带 --drop-data 升级"""
+    from hetu.data import (
+        BaseComponent,
+        ComponentDefines,
+        define_component,
+        property_field,
+    )
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    app_file = str(tmp_path / "app.py")
+    backend = mod_auto_backend()
+
+    def define(with_v: bool):
+        ComponentDefines().clear_()
+        SystemClusters()._clear()
+        if with_v:
+
+            @define_component(namespace="pytest", force=True, volatile=True)
+            class MgrVolatile(BaseComponent):
+                owner: np.int64 = property_field(0, unique=True)
+                v: np.int32 = property_field(7, index=True)
+
+        else:
+
+            @define_component(namespace="pytest", force=True, volatile=True)
+            class MgrVolatile(BaseComponent):
+                owner: np.int64 = property_field(0, unique=True)
+
+        @define_system(namespace="pytest", components=(MgrVolatile,))
+        async def mgr_use_volatile(ctx):
+            pass
+
+        SystemClusters().build_clusters("pytest")
+        tm = ComponentTableManager("pytest", "mgr_volatile", {"default": backend})
+        return MgrVolatile, tm
+
+    comp, tm = define(with_v=True)
+    assert tm.create_or_migrate_all(app_file) is True
+    await _insert_owner(tm, comp, 1)
+
+    # 删掉带索引的 v：不带 force 也迁移成功，表按新定义重建、照常读写
+    comp, tm = define(with_v=False)
+    assert _status(tm, comp) == "schema_mismatch"
+    assert tm.create_or_migrate_all(app_file) is True
+    assert _status(tm, comp) == "ok"
+    await _insert_owner(tm, comp, 2)
+    await backend.wait_for_synced()
+    row = await _get_owner(tm, comp, 2)
+    assert row is not None and "v" not in row.dtype.names
+
+
+# ---------------------------------------------------------------------------
+# 重建索引：`hetu upgrade` 默认每次都按行数据重建持久组件的索引，修掉索引残留
+# ---------------------------------------------------------------------------
+
+
+async def _insert_items(backend, comp, *fields):
+    """插入 Item 行，fields 每项是 (owner, time, name)，返回插入的行"""
+    rows = []
+    async with backend.session("pytest", 1) as session:
+        for owner, time_, name in fields:
+            row = comp.new_row()
+            row.owner, row.time, row.name = owner, time_, name
+            await session.using(comp).insert(row)
+            rows.append(row)
+    await backend.wait_for_synced()
+    return rows
+
+
+async def test_rebuild_index_removes_orphans(item_ref, mod_auto_backend):
+    """重建按行数据来：索引里残留的、行已经不存在的项被清掉；表里一行都不剩时也要清"""
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    x, y = await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
+
+    maint.delete_row(item_ref, int(x.id))  # 只删行 key，owner 索引里留下 x
+    maint.rebuild_index(item_ref)
+    members = raw_index_members(backend, item_ref, "owner")
+    assert [m.rsplit(b"\x00", 1)[-1] for m in members] == [str(y.id).encode()]
+
+    maint.delete_row(item_ref, int(y.id))  # 表空了，索引里只剩残留
+    maint.rebuild_index(item_ref)
+    assert raw_index_members(backend, item_ref, "owner") == []
+
+
+async def test_rebuild_index_failure_keeps_old_index(item_ref, mod_auto_backend):
+    """重建中途失败（这里是行数据违反 unique）：旧索引原样保留，不能留下空的或半截的
+    索引——每次 hetu upgrade 都重建，失败后照样得能起服"""
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    _a, b = await _insert_items(backend, item_ref.comp_cls, (1, 1, "a"), (1, 2, "b"))
+    raw_hset(backend, item_ref, int(b.id), name="a")
+
+    before = raw_index_members(backend, item_ref, "name")
+    with pytest.raises(RuntimeError, match="unique"):
+        maint.rebuild_index(item_ref)
+    assert raw_index_members(backend, item_ref, "name") == before
+
+
+async def test_rebuild_index_without_snowflake(item_ref, mod_auto_backend, monkeypatch):
+    """hetu upgrade 进程不初始化 SnowflakeID（它不占 worker 租约）：重建索引不能发号，
+    有行的表照样重建，建出来的与 commit 写的逐字节一致"""
+    backend = mod_auto_backend()
+    maint = backend.get_table_maintenance()
+    await _insert_items(backend, item_ref.comp_cls, (6, 1, "x"), (7, 2, "y"))
+    names = list(item_ref.comp_cls.indexes_)
+    before = [raw_index_members(backend, item_ref, name) for name in names]
+    assert all(before)
+
+    monkeypatch.setattr(SnowflakeID(), "worker_id", -1)  # 模拟 upgrade 进程里未初始化
+    maint.rebuild_index(item_ref)
+    assert [raw_index_members(backend, item_ref, name) for name in names] == before
+
+
+async def test_manager_rebuild_index_all(
+    mod_auto_backend, new_component_env, new_clusters_env, monkeypatch
+):
+    """`hetu upgrade` 默认重建所有持久组件的索引，索引残留因此清掉；易失组件随后会被清空，
+    不用重建"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.data.backend.base import TableMaintenance
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+
+    @define_component(namespace="pytest", force=True)
+    class MgrKeep(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_component(namespace="pytest", force=True, volatile=True)
+    class MgrTemp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_system(namespace="pytest", components=(MgrKeep, MgrTemp))
+    async def mgr_use_keep_temp(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tm = ComponentTableManager("pytest", "mgr_rebuild", {"default": backend})
+    assert tm.check_and_create_new_tables() is True
+    await _insert_owner(tm, MgrKeep, 1)
+    await backend.wait_for_synced()
+    keep = tm.get_table(MgrKeep)
+    row = await _get_owner(tm, MgrKeep, 1)
+    keep.backend.get_table_maintenance().delete_row(keep, int(row.id))  # 索引残留
+    await backend.wait_for_synced()
+
+    rebuilt = []
+    real_rebuild = TableMaintenance.rebuild_index
+
+    def spy(self, table_ref):
+        rebuilt.append(table_ref.comp_name)
+        return real_rebuild(self, table_ref)
+
+    monkeypatch.setattr(TableMaintenance, "rebuild_index", spy)
+    tm.rebuild_index_all()
+    assert "MgrKeep" in rebuilt and "MgrTemp" not in rebuilt
+    await backend.wait_for_synced()
+
+    # 残留清掉了：读空后插入同值能提交（残留还在时每次都抛 InconsistentRangeRead）
+    async with keep.session() as session:
+        repo = session.using(MgrKeep)
+        assert await repo.get(owner=1) is None
+        new_row = MgrKeep.new_row()
+        new_row.owner = 1
+        await repo.insert(new_row)
+
+
+def test_upgrade_rebuilds_index_by_default(monkeypatch):
+    """hetu upgrade 默认重建索引，--no-rebuild-index 关掉"""
+    from hetu.cli import CommandIndex
+    from hetu.cli.migrate import MigrateCommand
+
+    passed = []
+
+    def fake_run(cls, config, yes, drop_data, rebuild_index=True):
+        passed.append(rebuild_index)
+
+    monkeypatch.setattr(MigrateCommand, "run", classmethod(fake_run))
+    index = CommandIndex()
+    index.register()
+    base = ["upgrade", "--app-file", "app.py", "--namespace", "ns", "--instance", "s1"]
+    MigrateCommand.execute(index.parser.parse_args(base))
+    MigrateCommand.execute(index.parser.parse_args([*base, "--no-rebuild-index"]))
+    assert passed == [True, False]
+
+
+@use_redis_family_backend_only
+async def test_live_worker_ids_sees_unexpired_leases(mod_auto_backend):
+    """upgrade 靠 worker 租约判断服务器还在不在跑：没过期的租约都算"""
+    from hetu.data.backend.worker_keeper import live_worker_ids
+
+    backend = mod_auto_backend()
+    io = backend.master.io
+    key = "snowflake:worker:1023"  # 最后一个 id，别的测试起的服务一般占不到
+    io.delete(key)
+    assert 1023 not in live_worker_ids(backend)
+    io.set(key, "pytest-node", ex=60)
+    try:
+        assert 1023 in live_worker_ids(backend)
+    finally:
+        io.delete(key)
+
+
+def _exited_process() -> subprocess.Popen:
+    """起一个进程并等它退出。Windows 上调用方握着返回的 Popen（也就握着进程句柄）期间，
+    这个 pid 不会被别的进程复用"""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc
+
+
+@use_redis_family_backend_only
+async def test_live_worker_ids_skips_exited_local_workers(mod_auto_backend):
+    """Windows 上 sanic 停 worker 是硬杀（Ctrl+C、DEBUG 自动重载都是 TerminateProcess），
+    租约来不及释放。本机上进程已经退出了的租约不算"服务器在跑"，不然 upgrade 得干等它过期。
+
+    只在 Windows 上这么认：别的平台上同一个机器码下可能是另一个 PID 空间（容器用 host
+    网络），本地查不到 pid 不代表进程不在，照旧算在跑。本机活着的、别的机器的、值不是
+    `机器码:pid` 的租约，哪个平台都算在跑"""
+    from hetu.common.helper import get_machine_id
+    from hetu.data.backend.worker_keeper import live_worker_ids
+
+    backend = mod_auto_backend()
+    io = backend.master.io
+    exited = _exited_process()
+    leases = {
+        1019: f"{get_machine_id()}:{exited.pid}",
+        1020: f"{get_machine_id()}:{os.getpid()}",
+        1021: f"other-machine:{exited.pid}",
+        1022: "pytest-node",
+    }
+    try:
+        for worker_id, owner in leases.items():
+            io.set(f"snowflake:worker:{worker_id}", owner, ex=60)
+        live = set(live_worker_ids(backend)) & set(leases)
+        assert live == ({1020, 1021, 1022} if sys.platform == "win32" else set(leases))
+        # 只是不算，不删：key 照旧等 TTL 过期
+        assert io.exists("snowflake:worker:1019")
+    finally:
+        for worker_id in leases:
+            io.delete(f"snowflake:worker:{worker_id}")
+
+
+def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):
+    """还有服务器持有 worker 租约时 upgrade 以退出码 1 退出：迁移、清空易失表、重建索引
+    在服务器运行时执行都会写坏数据。在加载 app 之前就退出，什么都没动"""
+    from hetu.cli.migrate import MigrateCommand
+    from hetu.data.backend import worker_keeper
+
+    monkeypatch.setattr(worker_keeper, "live_worker_ids", lambda backend: [3])
+    db = (tmp_path / "db.sqlite3").as_posix()
+    config = {
+        "APP_FILE": str(tmp_path / "no_such_app.py"),
+        "NAMESPACE": "ns",
+        "INSTANCES": ["s1"],
+        "BACKENDS": {"SQLite": {"type": "sqlite", "master": f"sqlite:///{db}"}},
+    }
+    with pytest.raises(SystemExit) as exc_info:
+        MigrateCommand.run(config, True, False)
+    assert exc_info.value.code == 1
+    assert "3" in capsys.readouterr().out

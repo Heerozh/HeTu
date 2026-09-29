@@ -14,13 +14,15 @@
 - 不能（正确性依赖最新值）就把它加进 ALLOWED 并写清理由，让下一个人能复核。
 """
 
+import importlib.util
 import re
 from pathlib import Path
 
 HETU_ROOT = Path(__file__).resolve().parent.parent / "hetu"
+AUDIT_PLUGIN = Path(__file__).resolve().parent.parent / "tools" / "master_read_audit.py"
 
 # 读方法（写方法不在本约束内：写本来就只能去 master）
-READ_METHODS = ("get", "get_many", "range")
+READ_METHODS = ("get", "get_many", "get_many_array_", "range", "range_read_")
 # `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……
 PATTERN = re.compile(
     r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*\(",
@@ -70,3 +72,49 @@ def test_allowlist_has_no_stale_entries():
     live = {(rel, meth) for rel, meth, _, _ in _hits()}
     stale = sorted(set(ALLOWED) - live)
     assert not stale, f"ALLOWED 里这些条目对应的代码已经没了，请删除：{stale}"
+
+
+def test_audit_plugin_wraps_every_backend_read_method(monkeypatch):
+    """
+    摸底用的 tools/master_read_audit 要包住每个具体后端真正执行的读方法。读方法定义在中间
+    基类（RedisModelClient）或具体后端上，只包 BackendClient 的直接子类会漏掉它们，审计就
+    永远报 0 次 master 读
+    """
+    from hetu.data.backend import Backend
+    from hetu.data.backend.base import BackendClient
+    from hetu.data.backend.redis import RedisBackendClient
+    from hetu.data.backend.sqlite import SQLiteBackendClient
+
+    spec = importlib.util.spec_from_file_location("master_read_audit", AUDIT_PLUGIN)
+    assert spec and spec.loader
+    audit = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(audit)
+
+    # pytest_configure 会改全局的类：先记下原样（包括类上本来没有的），用例结束时还原
+    monkeypatch.setattr(
+        Backend, "master_or_servant", vars(Backend)["master_or_servant"]
+    )
+    tree, pending = [], [BackendClient]
+    while pending:
+        cls = pending.pop()
+        tree.append(cls)
+        pending.extend(cls.__subclasses__())
+    saved = [
+        (cls, name, vars(cls).get(name)) for cls in tree for name in audit.READ_METHODS
+    ]
+
+    try:
+        audit.pytest_configure(None)
+        missed = [
+            f"{cls.__name__}.{name}"
+            for cls in (RedisBackendClient, SQLiteBackendClient)
+            for name in audit.READ_METHODS
+            if not getattr(getattr(cls, name), "_audited", False)
+        ]
+    finally:
+        for cls, name, orig in saved:
+            if orig is not None:
+                setattr(cls, name, orig)
+            elif name in vars(cls):
+                delattr(cls, name)
+    assert not missed, f"这些读方法没被审计包住：{missed}"

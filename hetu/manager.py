@@ -8,7 +8,8 @@ Component Table管理类，通过System定义的Component来管理他们所属�
 """
 
 import logging
-from typing import TYPE_CHECKING, ItemsView
+from collections.abc import ItemsView
+from typing import TYPE_CHECKING
 
 from .data.backend import RaceCondition, Table
 from .i18n import _
@@ -64,7 +65,7 @@ class ComponentTableManager:
         创建或安全的迁移所有表，如果schema有无法安全迁移的变更，则返回False。
         此时要么写迁移脚本，要么用cli强制迁移。
         """
-        for _key, tbl in self._tables.items():
+        for tbl in self._tables.values():
             maint = tbl.backend.get_table_maintenance()
             tbl_status, old_meta = maint.check_table(tbl)
             if tbl_status == "not_exists":
@@ -89,9 +90,9 @@ class ComponentTableManager:
         返回true表示所有表的状态正常，false表示有表需要迁移。
         """
         ret = True
-        for _key, tbl in self._tables.items():
+        for tbl in self._tables.values():
             maint = tbl.backend.get_table_maintenance()
-            tbl_status, old_meta = maint.check_table(tbl)
+            tbl_status, _old_meta = maint.check_table(tbl)
             match tbl_status:
                 case "not_exists":
                     try:
@@ -120,6 +121,16 @@ class ComponentTableManager:
             if comp.volatile_:
                 maint = tbl.backend.get_table_maintenance()
                 maint.flush(tbl)
+
+    def rebuild_index_all(self):
+        """
+        按行数据重建所有持久组件的索引，修掉索引残留；易失组件会被清空，不用重建。
+        扫描行与覆盖索引之间的写入会丢，必须停服执行，由 `hetu upgrade` 调用。
+        """
+        for comp, tbl in self._tables.items():
+            if not comp.volatile_:
+                maint = tbl.backend.get_table_maintenance()
+                maint.rebuild_index(tbl)
 
     def _flush_all(self, force=False):
         """测试用，清空所有数据"""

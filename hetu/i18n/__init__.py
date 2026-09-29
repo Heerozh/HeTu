@@ -24,7 +24,7 @@ def get_system_language() -> str:
     try:
         env_default = Locale.default()
         if env_default:
-            print(f"Use language defined by ENV (LANG, LC_*): {str(env_default)}")
+            print(f"Use language defined by ENV (LANG, LC_*): {env_default!s}")
             return str(env_default)
     except TypeError:
         pass
@@ -40,7 +40,7 @@ def get_system_language() -> str:
         posix = locale.getlocale()[0]
 
     if posix:
-        print(f"Use system language: {str(posix)}")
+        print(f"Use system language: {posix!s}")
         return posix
 
     print("Use fallback language: en")

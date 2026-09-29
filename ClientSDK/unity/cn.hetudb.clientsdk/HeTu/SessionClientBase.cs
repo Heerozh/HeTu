@@ -36,6 +36,22 @@ namespace HeTu
     }
 
     /// <summary>
+    ///     被顶号：同一账号在别处登录，服务端断开了本连接（close 码
+    ///     <see cref="HeTuCloseCode.Kicked" />）。会话不会自动重连——重连会重新登录，把对方
+    ///     顶掉——而是直接进入 <see cref="HeTuSessionState.Faulted" /> 终态；应用在
+    ///     Faulted 事件或 Connect 的 await 里收到它时，提示玩家"账号已在别处登录"。
+    ///     Kicked: the account logged in elsewhere. The session does not reconnect (that
+    ///     would kick the other side) and enters Faulted; tell the player.
+    /// </summary>
+    public sealed class HeTuKickedException : Exception
+    {
+        public HeTuKickedException() :
+            base("Kicked by server: this account has logged in elsewhere.")
+        {
+        }
+    }
+
+    /// <summary>
     ///     内部信号：一次 watch 派发被底层取消（连接在飞行中断开，或派发那一刻
     ///     物理层已不可用）。不会外泄给调用方，只用来把"取消"和"失败"区分开。
     /// </summary>
@@ -52,7 +68,9 @@ namespace HeTu
     internal interface IHeTuSessionTransport : IDisposable
     {
         event Action Connected;
-        event Action<string> Closed;
+
+        // (close 码, 原因)，close 码见 HeTuCloseCode
+        event Action<int, string> Closed;
 
         bool IsConnected { get; }
 
@@ -637,13 +655,15 @@ namespace HeTu
             return Future.Completed;
         }
 
-        private void OnTransportClosed(string reason)
+        private void OnTransportClosed(int code, string reason)
         {
             if (_closed) return;
 
             _transportClosedItself = true;
-            var fault = new InvalidOperationException(
-                $"Connection closed: {reason ?? "(unknown)"}");
+            Exception fault = code == HeTuCloseCode.Kicked
+                ? new HeTuKickedException()
+                : new InvalidOperationException(
+                    $"Connection closed: {reason ?? "(unknown)"}");
 
             // 链在飞：把当前 step 失败掉，由 .Catch(HandleSessionFailure) 统一处理。
             if (_activeStepPromise != null && _activeStepPromise.TryFail(fault))
@@ -743,6 +763,13 @@ namespace HeTu
             MarkConnectionLost(closeTransport);
             SafeInvokeUserCallback(Faulted, fault);
             if (_closed) return;
+            // 被顶号：账号在别处登录了。重连会重跑 bootstrap（登录）把对方顶掉，两边互踢，
+            // 所以不重连，直接进 Faulted 终态，由应用提示玩家。
+            if (fault is HeTuKickedException)
+            {
+                EnterFaulted(fault);
+                return;
+            }
             // 首次 Ready 前的失败 = 凭据/配置/URL 错，重同样一份没意义。
             if (!_hasBeenReady)
             {

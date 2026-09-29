@@ -47,6 +47,21 @@ namespace HeTu.Client.Tests
                 catch (WebSocketException) { }
                 catch (OperationCanceledException) { }
             });
+            // 模拟 HeTu 服务端顶号：连上就发 close 4001 "kicked"
+            _app.Map("/kick", async (HttpContext ctx) =>
+            {
+                if (!ctx.WebSockets.IsWebSocketRequest) { ctx.Response.StatusCode = 400; return; }
+                using var ws = await ctx.WebSockets.AcceptWebSocketAsync();
+                try
+                {
+                    await ws.CloseOutputAsync((WebSocketCloseStatus)4001, "kicked",
+                        CancellationToken.None);
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await ws.ReceiveAsync(new byte[16], cts.Token);
+                }
+                catch (WebSocketException) { }
+                catch (OperationCanceledException) { }
+            });
             await _app.StartAsync();
             // 读取 OS 实际分配的绑定地址（含真实端口）
             var addr = _app.Urls.First();                    // "http://127.0.0.1:<port>"
@@ -65,7 +80,7 @@ namespace HeTu.Client.Tests
             var closed = new TaskCompletionSource<string>();
             t.OnOpen += () => opened.TrySetResult();
             t.OnMessage += b => echoed.TrySetResult(b);
-            t.OnClose += r => closed.TrySetResult(r);
+            t.OnClose += (_, r) => closed.TrySetResult(r);
 
             t.Connect(_wsUrl);
             Assert.That(await Task.WhenAny(opened.Task, Task.Delay(5000)) == opened.Task, Is.True, "应触发 OnOpen");
@@ -78,6 +93,20 @@ namespace HeTu.Client.Tests
             t.Close();
             await Task.WhenAny(closed.Task, Task.Delay(5000));
             Assert.That(closed.Task.IsCompleted, Is.True, "Close 后应触发 OnClose");
+        }
+
+        // 服务端带码关闭（被顶号 4001 "kicked"）：码和原因都要透给上层，原来一律报 null（正常关闭）
+        [Test]
+        public async Task ServerCloseWithCode_ReportsCodeAndReason()
+        {
+            using var t = new WebSocketTransport();
+            var closed = new TaskCompletionSource<(int Code, string Reason)>();
+            t.OnClose += (code, reason) => closed.TrySetResult((code, reason));
+
+            t.Connect(_wsUrl.Replace("/ws", "/kick"));
+            Assert.That(await Task.WhenAny(closed.Task, Task.Delay(5000)) == closed.Task, Is.True,
+                "服务端关闭后应触发 OnClose");
+            Assert.That(closed.Task.Result, Is.EqualTo((HeTuCloseCode.Kicked, "kicked")));
         }
 
         [Test]

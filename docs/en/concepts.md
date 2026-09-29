@@ -18,7 +18,8 @@ not the data-mapper sense the term has acquired in some web frameworks.
 entity. **`Components`** are typed tables (one per logical kind of data).
 **`Systems`** are async functions that operate on those tables inside a
 transaction. There is no inheritance, no per-row methods, and no central
-"world" object. State lives in Redis (or SQL); systems are stateless.
+"world" object. State lives in Redis (or SQLite in development); systems are
+stateless.
 
 ## Components
 
@@ -39,10 +40,11 @@ A few invariants that surprise new users:
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
-- **SQL backends cannot store a uint64 above `2**63 - 1`.** On the SQL
-  backends (SQLite / PostgreSQL / MariaDB) unsigned integers live in BIGINT
-  columns: committing a larger value is rejected with a `ValueError`, and range
-  bounds beyond it are clamped. The Redis backend has no such limit.
+- **SQLite is for development only.** The SQLite backend emulates Redis's
+  behavior on a local database file (index ordering, commit checks and
+  subscription notifications all match Redis), so there is nothing to install
+  and it is easy to debug, but it is not built for performance; use Redis in
+  production.
 - **One index type, two flavors.** Indexes are always sorted sets supporting
   `range()` queries and subscriptions. `unique=True` is the same sorted index
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.
@@ -154,7 +156,9 @@ helper that takes `ctx` and call it directly.
 
 HeTu uses optimistic concurrency. Every Session keeps an `IdentityMap` of the
 rows it read or wrote. On commit, the engine checks each row's version against
-Redis. If anything changed underneath, the commit aborts with `RaceCondition`
+Redis, as well as every range the Session read with `range` (a row added into
+such a range counts as a change). If anything changed underneath, the commit
+aborts with `RaceCondition`
 and the engine **automatically re-runs the `System` from the top**, up to
 `retry=` times (default 9999).
 
@@ -216,6 +220,18 @@ strong consistency (spending currency, granting rewards, validation) inside a
 `System` — write transactions are guarded by optimistic locking — rather than
 relying on the subscription data a client holds.
 
+**Identical queries are shared within a worker.** Subscriptions that are not
+filtered by row-level security — components with `EVERYBODY` or `USER`
+permission, or a caller that is an admin — are shared per query inside a worker:
+connections that subscribe to the same query join one subscription, the server
+reads and compares each change once, and a connection that subscribes later gets
+the current result without touching the database. Public queries such as a
+server-wide chat (thousands of players watching "the latest N messages"),
+announcements or leaderboards therefore cost the same reads no matter how many
+players watch them; what remains per connection is encoding and sending the
+push. Subscriptions on `OWNER` / `RLS` components are filtered per connection
+and are not shared, so their cost grows with the number of players.
+
 What wakes a `range` up depends on the shape of the query. A **point query**
 (`high` omitted, or `low == high` — `owner=me`, `zone=z`) on an index declared
 with `point_sub=True` listens to the channel of that one index value and is only
@@ -223,7 +239,8 @@ notified when a row enters or leaves that value (insert, delete, or a row's
 field changing to/from it). An **interval query**, and a point query on an index
 without `point_sub`, listens to the whole index and is woken by any change to
 any value of that index, re-running its comparison on the server (the server
-logs a warning once when a point query lands here). So for hot indexes such as
+logs a warning once when a point query lands here; `id` cannot declare
+`point_sub`, so watch a single row by id with `select`). So for hot indexes such as
 "every player watches their own inventory", declare `point_sub=True` and write
 a point query — other players picking up items will not touch you:
 
@@ -249,6 +266,12 @@ different route: on commit, the engine publishes one extra table-level
 notification per modified table carrying the list of changed `row_id`s, and a
 table subscription listens to that single channel — it counts as one
 subscription regardless of how many rows the table has.
+
+Public (not RLS-filtered) `select` and `range` subscriptions are shared within
+a worker, so those per-row channels are subscribed once per worker, not once
+per connection; for a public table of a few hundred rows, a `range` over the
+whole table is usually enough. Table subscriptions are mainly for larger
+tables, and for RLS-filtered tables where every connection sees its own slice.
 
 That notification costs a Redis PUBLISH (replicated to every replica) on every
 commit, so it is only sent for components declared with `table_sub=True`;
@@ -276,23 +299,32 @@ row that gains it is pushed as added.
 
 ## Permissions
 
-Every `Component` and every `System` carries a `permission=` level. The four
-useful levels:
+Every `Component` and every `System` carries a `permission=` level; `OWNER` and
+`RLS` are for `Components` only:
 
 | Level       | Meaning                                                                                                                                                                                                 |
 |-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public.                                                                                               |
 | `USER`      | Connection must have called `elevate(ctx, user_id)` first (by server). Standard "logged in" gate.                                                                                                       |
-| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages.                                                                                      |
+| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller` on subscriptions. Use for personal inventory, private messages.                                                                     |
 | `RLS`       | Raw RLS filter. Declare `rls_compare=(operator, component_field, context_field)` on the `Component` to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
-| `ADMIN`     | Server-internal calls only; not exposed over the RPC wire.                                                                                                                                              |
+| `ADMIN`     | Only admin connections (`ctx.group` starting with `"admin"`) may call the `System` or subscribe to the `Component`. For a server-internal `System`, use `permission=None`.                              |
 
-OWNER and RLS are enforced inside `SessionRepository`, not just at the call
-boundary. A `System` with `permission=USER` that reads an `permission=OWNER` `Component`
-still only sees rows the caller owns — there is no way to "leak" through a more
-privileged caller. That is: A `System`'s permissions merely determine who is authorized
-to invoke that `System`; when reading data, access is still determined by the permission
-definitions of the `Components`.
+`OWNER` and `RLS` only take effect on subscriptions (`select` / `range` / table
+subscriptions): the server checks every row against the caller (admin
+connections are not filtered) and never pushes rows the caller may not see.
+Reads and writes through `ctx.repo` inside a `System` are **not** checked
+against row-level permissions — a `System` with `permission=USER` can read and
+modify anyone's rows of a `permission=OWNER` `Component`, and whatever it
+returns through `ResponseToClient` is not filtered either. A `System`'s
+permission only decides who may call it. This is by design: trades, guild
+settlements and the like have to read and write other players' rows.
+
+So before a `System` returns data to the client, or modifies someone else's rows
+based on arguments from the client, it has to check that the caller is allowed
+to. For example, a `System` that fetches a channel's message history should
+first confirm that `ctx.caller` is a member of that channel, then read and
+return the messages.
 
 ## Transactions
 

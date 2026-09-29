@@ -23,10 +23,10 @@ define_component(
     backend: str = 'default',
     rls_compare: tuple[str, str, str] | None = None,
     table_sub: bool = False,
-) -> Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
+) -> collections.abc.Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:406`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L406)</small>
+<small>Source: [`hetu/data/component.py:413`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L413)</small>
 
 
 
@@ -131,7 +131,7 @@ define_endpoint(
 )
 ```
 
-<small>Source: [`hetu/endpoint/definer.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L92)</small>
+<small>Source: [`hetu/endpoint/definer.py:93`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/definer.py#L93)</small>
 
 
 
@@ -434,7 +434,7 @@ property_field(
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:54`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L54)</small>
+<small>Source: [`hetu/data/component.py:60`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L60)</small>
 
 
 
@@ -508,7 +508,9 @@ range-subscription behavior (woken by any write to the index) with a warning.
 `property_field(...)` 只负责声明字段元数据，真正的合法性校验会在
 `@define_component` 执行时完成，包括：
 
-- 字段名是否合法；
+- 字段名是否合法：不能是 Python / C# 关键字，也不能和 numpy 行数据
+  （`np.record` / `np.recarray`）的属性同名，如 `size`、`item`、`shape`，
+  否则 `row.size` 读到的是 numpy 的属性而不是字段值；
 - `default` 与 `dtype` 是否兼容；
 - `dtype` 是否可用于 NumPy structured array；
 - `unique/index/point_sub` 组合是否合法。
