@@ -2757,6 +2757,10 @@ class SubscriptionBroker:
         self._outbox.pop(sub_id, None)
         self._borrowed.discard(sub_id)
         await self._hub.detach(self, sub)
+        if not self._outbox:
+            # 待发区空了，连接不再算卡着：卡着时本连接别的订阅攒下的通知要重读，同取走待发区。
+            # 否则只有取走待发区才重读，而待发区已经空了，攒着的变动一直推不出去
+            self._hub.resume_(self)
 
     def deliver_(
         self,
