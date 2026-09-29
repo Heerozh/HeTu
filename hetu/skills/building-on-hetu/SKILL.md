@@ -91,10 +91,12 @@ working examples — read them first.
   only *after* commit (or after `await ctx.session_commit()`).
 - **Endpoint** — a raw RPC with **no** transaction. Use only for non-DB work, or
   to call several Systems that each commit independently (`ctx.systems.call(...)`).
-- **Permissions** — enforced at the Component level too: a `USER` System reading
-  an `OWNER` Component still sees only the caller's rows. `RLS` needs
-  `rls_compare=` on the Component. `elevate(ctx, user_id)` is how a login System
-  authenticates a connection.
+- **Permissions** — a System's `permission=` only gates who may call it.
+  `OWNER` / `RLS` (Component-only; `RLS` needs `rls_compare=`) filter rows on
+  **subscriptions** only: inside a System, `ctx.repo` reads and writes any row
+  and `ResponseToClient` data is not filtered, so check the caller yourself
+  (e.g. channel membership before returning chat history).
+  `elevate(ctx, user_id)` is how a login System authenticates a connection.
 - **Subscriptions** — clients `select` one row (by unique key) or `range` over an
   indexed column; the server pushes deltas via Redis pub/sub, permission-filtered.
   No polling.

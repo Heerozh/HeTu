@@ -299,23 +299,32 @@ row that gains it is pushed as added.
 
 ## Permissions
 
-Every `Component` and every `System` carries a `permission=` level. The four
-useful levels:
+Every `Component` and every `System` carries a `permission=` level; `OWNER` and
+`RLS` are for `Components` only:
 
 | Level       | Meaning                                                                                                                                                                                                 |
 |-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `EVERYBODY` | Any websocket connection, including pre-`elevate`. Useful for chat history, lobby lists, anything public.                                                                                               |
 | `USER`      | Connection must have called `elevate(ctx, user_id)` first (by server). Standard "logged in" gate.                                                                                                       |
-| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller`. Use for personal inventory, private messages.                                                                                      |
+| `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller` on subscriptions. Use for personal inventory, private messages.                                                                     |
 | `RLS`       | Raw RLS filter. Declare `rls_compare=(operator, component_field, context_field)` on the `Component` to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
-| `ADMIN`     | Server-internal calls only; not exposed over the RPC wire.                                                                                                                                              |
+| `ADMIN`     | Only admin connections (`ctx.group` starting with `"admin"`) may call the `System` or subscribe to the `Component`. For a server-internal `System`, use `permission=None`.                              |
 
-OWNER and RLS are enforced inside `SessionRepository`, not just at the call
-boundary. A `System` with `permission=USER` that reads an `permission=OWNER` `Component`
-still only sees rows the caller owns — there is no way to "leak" through a more
-privileged caller. That is: A `System`'s permissions merely determine who is authorized
-to invoke that `System`; when reading data, access is still determined by the permission
-definitions of the `Components`.
+`OWNER` and `RLS` only take effect on subscriptions (`select` / `range` / table
+subscriptions): the server checks every row against the caller (admin
+connections are not filtered) and never pushes rows the caller may not see.
+Reads and writes through `ctx.repo` inside a `System` are **not** checked
+against row-level permissions — a `System` with `permission=USER` can read and
+modify anyone's rows of a `permission=OWNER` `Component`, and whatever it
+returns through `ResponseToClient` is not filtered either. A `System`'s
+permission only decides who may call it. This is by design: trades, guild
+settlements and the like have to read and write other players' rows.
+
+So before a `System` returns data to the client, or modifies someone else's rows
+based on arguments from the client, it has to check that the caller is allowed
+to. For example, a `System` that fetches a channel's message history should
+first confirm that `ctx.caller` is a member of that channel, then read and
+return the messages.
 
 ## Transactions
 
