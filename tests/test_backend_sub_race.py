@@ -1583,6 +1583,74 @@ async def test_rejoin_within_tick_gets_what_changes_after_it():
     assert got_b == {"S": {1: None}}
 
 
+# ============ 后半段认的是那一次登记：退订后重订同一查询会重新加入同一个订阅对象 ============
+
+
+async def test_stale_second_half_leaves_rejoined_registration_alone():
+    """
+    A 加入初始化中的共享订阅 S（B 撑着它），后半段在等。A 退订（它的后半段回 None）又立刻重订，
+    重新加入 S，旧的后半段这时才跑：它不能把重订的登记当成自己的撤掉。以前按订阅对象认，
+    _subs["S"] 又是 S，旧的后半段拿着 None 就把新登记退订了
+    """
+    hub, (a, b), _mq, node = make_brokers(2)
+    s = SlowInitSub({"X"})
+    _, tb = share_sub(b, "S", lambda: s)
+    joined, stale = share_sub(a, "S", lambda: SlowInitSub({"X"}))
+    assert joined is s
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    await a.unsubscribe("S")  # B 还订着，不退频道，也不让出事件循环
+    _, again = share_sub(a, "S", lambda: SlowInitSub({"X"}))
+    async with asyncio.timeout(1):
+        assert await stale is None
+    assert a._subs.get("S") is s, "旧的后半段撤掉了重订的登记"
+    s.release.set()
+    async with asyncio.timeout(1):
+        assert await again == [{"id": 1}]
+        assert await tb == [{"id": 1}]
+    assert set(s.members) == {a, b}
+    await close_hub(hub, node)
+
+
+async def test_stale_second_half_with_rows_is_not_counted_twice():
+    """
+    A 的后半段已经拿到初始化结果、还没跑，A 退订又重订、重新加入 S：旧的后半段回 None，不再按
+    这次订阅计频道数（以前两个后半段各加一次，退订只减一次，告警用的频道数越积越多）
+    """
+    hub, (a, b), _mq, node = make_brokers(2)
+    s = SlowInitSub({"X"})
+    _, tb = share_sub(b, "S", lambda: s)
+    _, stale = share_sub(a, "S", lambda: SlowInitSub({"X"}))
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    s.release.set()
+    await asyncio.sleep(0)  # 初始化完成、结果交给了 A 的 future；A 的后半段还没跑
+    assert s.ready and not stale.done()
+    await a.unsubscribe("S")
+    _, again = share_sub(a, "S", lambda: SlowInitSub({"X"}))
+    async with asyncio.timeout(1):
+        assert await stale is None
+        assert await again == [{"id": 1}]
+        assert await tb == [{"id": 1}]
+    assert a._channel_count == 1
+    await unsubscribe_and_ack(a, node, "S")
+    assert a._channel_count == 0
+    await close_hub(hub, node)
+
+
+async def test_waiting_after_hub_close_does_not_hang():
+    """hub 关闭之后再等一个订阅的初始化结果（重复订阅的后半段这时才开始跑）：抛 ConnectionError，
+    不能一直挂着（close 已经把当时等着的都交代了，之后来的没人管）"""
+    hub, (a,), _mq, node = make_brokers(1)
+    s = SlowInitSub({"X"})
+    first = open_sub(a, "S", s)
+    await finish(asyncio.create_task(s.reading.wait()), node)
+    await close_hub(hub, node)
+    with pytest.raises(ConnectionError):
+        await first
+    with pytest.raises(ConnectionError):
+        async with asyncio.timeout(1):
+            await hub.wait_(s, a)
+
+
 # ============ 合批窗口：通知接连不断时 tick 不能一条一个 ============
 
 

@@ -847,3 +847,67 @@ async def test_shared_init_failure_fails_every_waiter(
     assert not hub._shared and not hub._channel_subs
     for broker in brokers:
         await broker.close()
+
+
+class _LaggingServant:
+    """落后的副本：行还没复制过来（get 读回 None），其余照原来的副本"""
+
+    def __init__(self, real):
+        self._real = real
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    async def get(self, *args, **kwargs):
+        return None
+
+
+async def test_private_duplicate_waits_for_the_first_init(
+    hub: SubscriptionHub, filled_rls_ref, user_id11_ctx
+):
+    """
+    RLS 私有订阅的重复订阅，在第一次订阅还没初始化完时就到了（客户端一帧里 WatchRow 两次）：要等
+    第一次的结果。第一次读到落后的副本、行不存在，订阅不成立、撤掉，重复订阅也回 None。以前重复
+    订阅不等，换个副本读到了行，回复带着 sub_id，服务端却什么也没登记，客户端再也收不到这行的推送
+    """
+    backend = hub._backend
+    real = backend.servant
+    row = (
+        await real.range(
+            filled_rls_ref, "owner", 10, limit=1, row_format=RowFormat.TYPED_DICT
+        )
+    )[0]
+    broker = SubscriptionBroker(backend, hub=hub)
+    with patch.object(backend, "_servants", [_LaggingServant(real)]):
+        first = await broker.begin_subscribe_get(
+            filled_rls_ref, user_id11_ctx, "id", row["id"]
+        )
+    dup = await broker.begin_subscribe_get(
+        filled_rls_ref, user_id11_ctx, "id", row["id"]
+    )
+    async with asyncio.timeout(5):
+        assert await asyncio.gather(first, dup) == [(None, None), (None, None)]
+    assert broker.count() == (0, 0, 0) and not broker._subs
+    await broker.close()
+
+
+async def test_duplicate_started_after_subscription_closed_does_not_hang(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    重复订阅的后半段在已有订阅关闭之后才开始跑（初始化还没完成，客户端就 unsub 了）：回 None，不能
+    一直等下去（初始化已经取消，没人会再交代它）
+    """
+    broker = SubscriptionBroker(hub._backend, hub=hub)
+    first = await broker.begin_subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    dup = await broker.begin_subscribe_range(
+        filled_item_ref, admin_ctx, "owner", 10, limit=30
+    )
+    (sub_id,) = broker._subs
+    await broker.unsubscribe(sub_id)
+    async with asyncio.timeout(5):
+        assert await first == (None, [])
+        assert await dup == (None, [])
+    await broker.close()
