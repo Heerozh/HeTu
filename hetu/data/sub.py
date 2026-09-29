@@ -848,6 +848,8 @@ class SubscriptionHub:
         已就绪的当场拿快照：之后暂存的更新都会交给它，快照已含之前的（设计稿 2026-09-29 §3.2）。
         tick 中途加入、这个 tick 已给订阅暂存了更新的，记下已暂存的：交付时只给它之后变了的
         """
+        if self._autostart:
+            self._start()  # 处理循环意外结束过的话重新拉起：热门查询都是加入，不能只靠新建
         sub.members[broker] = sub_id
         tick = self._staging
         if tick is not None and (staged := tick.staged.get(sub)):
@@ -1092,33 +1094,61 @@ class SubscriptionHub:
 
     async def _init(self, sub: BaseSubscription) -> None:
         """
-        初始化一个订阅（hub 的后台任务，见 `open_`）。出错（副本挂了、Redis 抖动）时换一个随机
-        副本，按 1、2、4… 个 interval 退避重试，共 INIT_RETRIES 次，还不行才让等着的成员失败
-        （设计稿 2026-09-29 §3.4）：一次抖动不至于让一批连接一起断开重连，Redis 长时间不可用时
-        回复也不会一直不来（排在它后面的回复都在等它）。成员撤空时本任务被取消
+        初始化一个订阅（hub 的后台任务，见 `open_`），出错时有限重试（`_initialize`）。成员撤空时
+        本任务被取消。
+        不论怎么结束，等着的成员都要有交代：不然它们一直等（服务器里发送循环卡在占位上，之后的回复、
+        推送全堵住），同一查询之后的订阅者也都加入这个死订阅
         """
         ContextFilter.set_log_context(_HUB_LOG_CONTEXT)
+        try:
+            rows = await self._initialize(sub)
+        except Exception as e:  # noqa: BLE001 重试用尽，交给等着的成员
+            sub.init_task = None
+            self._fail_init(sub, e)
+            return
+        except BaseException:
+            # 本任务被取消：成员撤空（_release）、hub 关闭（close）时已经交代过。别的（事件循环关闭时
+            # 的取消、KeyboardInterrupt 等）也不能让等着的成员一直等
+            sub.init_task = None
+            if not (sub.closed or self._closed):
+                interrupted = ConnectionError(_("订阅的初始化被中断"))
+                self._fail_init(sub, interrupted, log=False)
+            raise
+        sub.init_task = None
+        self._ready(sub, rows)
+
+    async def _initialize(self, sub: BaseSubscription) -> list[dict[str, Any]] | None:
+        """
+        带重试的 `sub.initialize_`：出错（副本挂了、Redis 抖动）时换一个随机副本，按 1、2、4… 个
+        interval 退避重试，共 INIT_RETRIES 次，还不行抛出最后那次的错误（设计稿 2026-09-29 §3.4）：
+        一次抖动不至于让一批连接一起断开重连，Redis 长时间不可用时回复也不会一直不来（排在它后面的
+        回复都在等它）。后端调用里漏出来的 CancelledError（本任务并没有被取消）也当作出错
+        """
+        task = asyncio.current_task()
         attempt = 0
         while True:
             try:
-                rows = await sub.initialize_(self)
-                break
-            except Exception as e:  # noqa: BLE001 换副本重试，用尽了交给等着的成员
-                if attempt >= self.INIT_RETRIES:
-                    sub.init_task = None
-                    self._fail_init(sub, e)
-                    return
-                self._log_error(
-                    _("初始化订阅 {sub_id} 出错，换副本稍后重试"),
-                    e,
-                    requeued=False,
-                    sub_id=next(iter(sub.members.values()), None),
+                return await sub.initialize_(self)
+            except asyncio.CancelledError as e:
+                if task is None or task.cancelling():
+                    raise  # 本任务被取消
+                err: Exception = RuntimeError(
+                    _("后端调用意外抛出 CancelledError（订阅的初始化并没有被取消）")
                 )
-                sub.use_servant_(self._backend.servant)
-                await asyncio.sleep(self.interval * 2**attempt)
-                attempt += 1
-        sub.init_task = None
-        self._ready(sub, rows)
+                err.__cause__ = e
+            except Exception as e:  # noqa: BLE001 换副本重试，用尽了抛给 _init
+                err = e
+            if attempt >= self.INIT_RETRIES:
+                raise err
+            self._log_error(
+                _("初始化订阅 {sub_id} 出错，换副本稍后重试"),
+                err,
+                requeued=False,
+                sub_id=next(iter(sub.members.values()), None),
+            )
+            sub.use_servant_(self._backend.servant)
+            await asyncio.sleep(self.interval * 2**attempt)
+            attempt += 1
 
     def _ready(self, sub: BaseSubscription, rows: list[dict[str, Any]] | None) -> None:
         """
@@ -1143,15 +1173,21 @@ class SubscriptionHub:
                 if not waiter.done():
                     waiter.set_result(rows)
 
-    def _fail_init(self, sub: BaseSubscription, exc: Exception) -> None:
-        """初始化重试用尽：订阅不生效、撤掉共享登记，等着的成员都拿到这个异常，由它们各自退订"""
-        self._log_error(
-            _("初始化订阅 {sub_id} 出错，重试 {retries} 次仍失败"),
-            exc,
-            requeued=False,
-            sub_id=next(iter(sub.members.values()), None),
-            retries=self.INIT_RETRIES,
-        )
+    def _fail_init(
+        self, sub: BaseSubscription, exc: Exception, log: bool = True
+    ) -> None:
+        """
+        初始化失败（重试用尽，log 为真时记日志；或被中断）：订阅不生效、撤掉共享登记，等着的成员都
+        拿到这个异常，由它们各自退订
+        """
+        if log:
+            self._log_error(
+                _("初始化订阅 {sub_id} 出错，重试 {retries} 次仍失败"),
+                exc,
+                requeued=False,
+                sub_id=next(iter(sub.members.values()), None),
+                retries=self.INIT_RETRIES,
+            )
         sub.active = False
         self._unshare(sub)
         waiters, sub.waiters = sub.waiters, {}
