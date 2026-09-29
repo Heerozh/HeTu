@@ -11,7 +11,12 @@ sub_budget.py 的端到端版本：起一个真实的 hetu 服务器（1 个 wor
     cd benchmark
     uv run python sub_budget_ws.py --conns 80 --zones 8 --limit 50 --writes 300 --duration 15
 
-Redis 连接数：每个 worker 只有 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数无关。
+    # Linux 混合架构：服务器绑 P 核，客户端 / 写进程绑别的核
+    uv run python sub_budget_ws.py --conns 1000 --zones 100 --server-cpus 0 \\
+        --client-cpus 4,5,6,7,8,9,10,11 --writer-cpus 12,13,14,15
+
+Redis 连接数：每个 worker 每个副本 1 条 pubsub 连接 + 有界读池（BACKENDS.max_connections），与 ws 连接数
+无关。服务器的 CPU 是 CPU 时间；笔记本 P 核频率随负载变，跨负载比较时以 sub_scenarios_ws.py 的周期数为准。
 """
 
 import argparse
@@ -46,7 +51,10 @@ def client_proc(
     stop: Any,
     window: Any,
     result_q: Any,
+    cpus: list[int],
+    idx: int,
 ) -> None:
+    base.pin(cpus, idx)
     asyncio.run(_client_main(url, zones, limit, ready, stop, window, result_q))
 
 
@@ -201,7 +209,14 @@ def main() -> None:
     ap.add_argument("--client-procs", type=int, default=4)
     ap.add_argument("--duration", type=float, default=15)
     ap.add_argument("--tag", default="")
+    ap.add_argument(
+        "--server-cpus", default="", help="服务器绑这些核（taskset -c 的写法）"
+    )
+    ap.add_argument("--client-cpus", default="", help="客户端进程绑这些核（逗号分隔）")
+    ap.add_argument("--writer-cpus", default="", help="写进程绑这些核（逗号分隔）")
     args = ap.parse_args()
+    args.client_cpus = [int(x) for x in args.client_cpus.split(",") if x]
+    args.writer_cpus = [int(x) for x in args.writer_cpus.split(",") if x]
 
     workdir = tempfile.mkdtemp(prefix="hetu_sub_budget_ws_")
     ids = asyncio.run(base.prepare_data(args))
@@ -211,8 +226,9 @@ def main() -> None:
     cfg = write_config(args, workdir)
     env = dict(os.environ, PYTHONUTF8="1")
     server_log = open(os.path.join(workdir, "server.log"), "w", encoding="utf-8")  # noqa: SIM115 进程结束后再关
+    taskset = ["taskset", "-c", args.server_cpus] if args.server_cpus else []
     server = subprocess.Popen(
-        [sys.executable, "-m", "hetu", "start", "--config", cfg],
+        [*taskset, sys.executable, "-m", "hetu", "start", "--config", cfg],
         cwd=workdir,
         env=env,
         stdout=server_log,
@@ -237,7 +253,17 @@ def main() -> None:
                 continue
             p = mp.Process(
                 target=client_proc,
-                args=(url, zs, args.limit, ready, stop, window, result_q),
+                args=(
+                    url,
+                    zs,
+                    args.limit,
+                    ready,
+                    stop,
+                    window,
+                    result_q,
+                    args.client_cpus,
+                    i,
+                ),
             )
             p.start()
             cprocs.append(p)
@@ -258,7 +284,7 @@ def main() -> None:
         if args.writes > 0:
             for w in range(args.writers):
                 p = mp.Process(
-                    target=base.writer_proc,
+                    target=base.writer_proc_pinned,
                     args=(
                         args.master,
                         args.replica,
@@ -269,6 +295,9 @@ def main() -> None:
                         raced,
                         wstop,
                         args.writer_coroutines,
+                        1,
+                        0.0,
+                        args.writer_cpus,
                     ),
                 )
                 p.start()

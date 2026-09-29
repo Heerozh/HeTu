@@ -6,16 +6,19 @@
 - 行分成 Z 个 zone，每个 zone 恰好 S 行（R = Z*S），每个连接 subscribe_range 自己 zone 的
   全部 S 行（AOI 模型：同屏玩家互相可见）。C 个连接均摊到 Z 个 zone，所以一次写入会扇出到
   K = C/Z 个连接（fan-out）。
-- 每个连接 = 一个 SubscriptionBroker = 一条独立 Redis pubsub 连接 + puller/consumer 协程，
-  与 hetu/server/websocket.py 一致，只是不经过 WebSocket/pipeline（那段用 sub_budget_ws.py
-  测）。连接可以分到 --procs 个进程里（每个进程一个事件循环 ≈ 一个 hetu worker）。
+- 每个连接 = 一个 SubscriptionBroker（连接的门面）。订阅在进程内的 worker 级订阅器
+  （SubscriptionHub）里处理；Actor 是 EVERYBODY 组件，同一个 zone 的 K 个连接共享一个订阅：
+  每条通知每个进程只读、比对一次，再交给 K 个成员。每个进程每个副本一条 pubsub 连接。
+- 消费同服务端的发送循环（hetu/server/websocket.py）：hub 交来更新时叫醒，直接取走门面的
+  待发区，只是不经过 WebSocket/pipeline（那段用 sub_budget_ws.py 测）。连接可以分到 --procs
+  个进程里（每个进程一个事件循环 ≈ 一个 hetu worker）。
 - 写入由独立进程完成（走 Session.commit 同款 Lua 提交路径），所以订阅进程的 CPU 统计里只有
   订阅侧成本。行里带 ts 字段（写入时间戳），交付时用来算写→交付延迟。
 - --move-ratio 让一部分写入改 zone（AOI 跨区），触发索引订阅的 ZRANGE 对比 + 行频道增删。
 
 输出
 ----
-- 静态成本：每个 (频道, 订阅者) 对在 Redis 侧 / Python 侧占多少内存
+- 静态成本：每个进程订阅的频道（按进程去重）在 Redis 侧占多少内存、每个连接在 Python 侧占多少
 - 动态成本：每交付一次更新（一行变更推给一个连接）的 Python CPU µs、Redis 副本 CPU µs、
   Redis 命令数；每收到一条 pubsub 通知（被合批掉的也算）的 Python CPU µs
 - 交付率（交付/应交付），写→交付延迟 p50/p90/p99，积压（最老未处理通知的年龄），事件循环卡顿
@@ -26,6 +29,8 @@
     uv run python sub_budget.py --conns 200 --zones 20 --limit 50 --writes 300 --duration 15
     uv run python sub_budget.py --conns 800 --zones 80 --limit 50 --procs 4 --writes 1500
     uv run python sub_budget.py --conns 1000 --zones 100 --limit 50 --writes 0 --duration 3  # 只测静态
+    # Linux 混合架构：订阅进程绑 P 核，写进程绑别的核
+    uv run python sub_budget.py --conns 200 --zones 20 --sub-cpus 0 --writer-cpus 12,13,14,15
 
 会 FLUSHALL 指定的 Redis，请用专用实例（默认 127.0.0.1:23400 主 / 23401 副本）。
 """
@@ -201,6 +206,13 @@ def writer_proc(
     )
 
 
+def writer_proc_pinned(*args) -> None:
+    """writer_proc，先按最后一个参数（核列表）按种子轮着绑核"""
+    *rest, cpus = args
+    pin(cpus, rest[4])
+    writer_proc(*rest)
+
+
 async def _writer_main(
     master,
     replica,
@@ -244,7 +256,7 @@ async def _writer_main(
             except RaceCondition:
                 local_raced += 1
             now = time.perf_counter()
-            if now - last_flush > 0.5:
+            if now - last_flush > 0.1:  # 窗口结束时读计数：刷得勤，少算的写入少
                 with written.get_lock():
                     written.value += local_written
                 with raced.get_lock():
@@ -304,7 +316,14 @@ class Stats:
         self.backlog_age.clear()
 
 
+def pin(cpus: list[int], idx: int) -> None:
+    """第 idx 个进程绑 cpus 里的一个核（轮着分）；没给就不绑"""
+    if cpus and hasattr(os, "sched_setaffinity"):
+        os.sched_setaffinity(0, {cpus[idx % len(cpus)]})
+
+
 def subscriber_proc(args, proc_idx: int, zones: list[int], ready, go, stop, result_q):
+    pin(args.sub_cpus, proc_idx)
     asyncio.run(_subscriber_main(args, proc_idx, zones, ready, go, stop, result_q))
 
 
@@ -350,17 +369,36 @@ async def _subscriber_main(args, proc_idx, zones, ready, go, stop, result_q):
 
     hub._pubsub.on_message = counting_on_message
 
+    def count(updates: dict) -> None:
+        now = time.time()
+        for rows in updates.values():
+            for row in rows.values():
+                if row is None:
+                    stats.deleted += 1
+                else:
+                    stats.delivered += 1
+                    stats.add_latency(now - float(row["ts"]))
+
     async def consumer(broker: SubscriptionBroker):
+        # 同服务端的发送循环：hub 交来更新时叫醒，直接取走待发区（空闲等着时不算推送卡住）。
+        # 旧代码没有这组接口，退回每连接一个协程等 get_updates
+        if not hasattr(broker, "take_updates_"):
+            while running:
+                count(await broker.get_updates())
+            return
+        wake = asyncio.Event()
+        broker.bind_sender_(wake.set)
         while running:
-            updates = await broker.get_updates()
-            now = time.time()
-            for rows in updates.values():
-                for row in rows.values():
-                    if row is None:
-                        stats.deleted += 1
-                    else:
-                        stats.delivered += 1
-                        stats.add_latency(now - float(row["ts"]))
+            updates = broker.take_updates_()
+            if updates:
+                count(updates)
+                continue
+            wake.clear()
+            broker.idle_(True)
+            try:
+                await wake.wait()
+            finally:
+                broker.idle_(False)
 
     async def sampler():
         # 事件循环卡顿 + 积压年龄，每 100ms 采一次
@@ -470,7 +508,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             raise TimeoutError("subscriber procs not ready")
     time.sleep(1.0)
     rep1 = redis_snapshot(args.replica)
-    channel_pairs = conns * (limit + 1)  # 每连接: S 个行频道 + 1 个索引频道
+    # 同一 zone 的连接在一个进程里共享一个订阅：每个进程订阅的频道 = 本进程的 zone 数 ×（S 个行
+    # 频道 + 1 个索引值频道），Redis 侧按 (频道, 进程的 pubsub 连接) 记
+    shared_subs = sum(len(set(all_zones[i::procs])) for i in range(procs))
+    channel_pairs = shared_subs * (limit + 1)
 
     # 2. 起写进程
     written = mp.Value("q", 0)
@@ -481,7 +522,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         per_proc_rate = args.writes / args.writers if args.writes > 0 else 0
         for w in range(args.writers):
             p = mp.Process(
-                target=writer_proc,
+                target=writer_proc_pinned,
                 args=(
                     args.master,
                     args.replica,
@@ -494,6 +535,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                     args.writer_coroutines,
                     zones,
                     args.move_ratio,
+                    args.writer_cpus,
                 ),
             )
             p.start()
@@ -565,10 +607,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         "subscribe_ms_per_conn": round(
             sum(r["subscribe_s"] for r in results) / conns * 1000, 1
         ),
-        "redis_bytes_per_chan_sub": round((rep1["mem"] - rep0["mem"]) / channel_pairs),
-        "py_bytes_per_chan_sub": round(
-            sum(r["tm_bytes"] for r in results) / channel_pairs
-        ),
+        "shared_subs": shared_subs,
+        "redis_bytes_per_channel": round((rep1["mem"] - rep0["mem"]) / channel_pairs),
+        "py_bytes_per_conn": round(sum(r["tm_bytes"] for r in results) / conns),
         "rss_bytes_per_conn": round(sum(r["rss_bytes"] for r in results) / conns),
         "redis_pubsub_channels": int(rep1["pubsub_channels"]),
         "redis_clients": int(rep1["clients"]),
@@ -636,12 +677,18 @@ def main() -> None:
     ap.add_argument("--writers", type=int, default=2, help="写进程数")
     ap.add_argument("--writer-coroutines", type=int, default=8, help="每写进程协程数")
     ap.add_argument("--duration", type=float, default=15, help="计时窗口秒数")
+    ap.add_argument(
+        "--sub-cpus", default="", help="订阅进程绑这些核（逗号分隔，轮着分）"
+    )
+    ap.add_argument("--writer-cpus", default="", help="写进程绑这些核")
     ap.add_argument("--csv", default="", help="追加结果到此 CSV")
     ap.add_argument("--tag", default="", help="写进 CSV 的备注")
     ap.add_argument(
         "--profile", action="store_true", help="0 号订阅进程跑 cProfile 并打印"
     )
     args = ap.parse_args()
+    args.sub_cpus = [int(x) for x in args.sub_cpus.split(",") if x]
+    args.writer_cpus = [int(x) for x in args.writer_cpus.split(",") if x]
 
     res = run(args)
     res["tag"] = args.tag
