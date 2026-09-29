@@ -2379,8 +2379,9 @@ class SubscriptionBroker:
             return self._settled(None, [])
 
         servant = self._backend.servant
-        # 查询参数（索引存在、边界合法）当场校验、不合法当场抛出，不等到后台读的时候
-        servant.check_range_(table_ref, index_name, left, right, desc)
+        # 查询参数（limit 是整数、索引存在、边界合法）当场校验、不合法当场抛出，不等到后台读的时候
+        # （后台读出错会换副本重试）
+        servant.check_range_(table_ref, index_name, left, right, limit, desc)
 
         sub_id = self.make_query_id_(table_ref, index_name, left, right, limit, desc)
         if (existing := self._subs.get(sub_id)) is not None:
@@ -2604,7 +2605,9 @@ class SubscriptionBroker:
                 table_ref, servant, ctx, table_channel, self._max_table_rows
             )
 
-        key = self._share_key(table_ref, ctx, ("table",))
+        # 行数上限也是查询的一部分：订阅按建它的连接的上限读初始行、做 RESYNC（服务器里各连接的上限
+        # 都是 MAX_TABLE_SUBSCRIPTION_ROWS，照样共享）
+        key = self._share_key(table_ref, ctx, ("table", self._max_table_rows))
         return self._finish_table(table_ref, ctx, self._subscribe(sub_id, key, make))
 
     async def _finish_table(
