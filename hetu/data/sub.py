@@ -1882,11 +1882,13 @@ class SubscriptionBroker:
     """
     Component的数据订阅和查询接口，每个连接一个。订阅本身在本 worker 共享的 `SubscriptionHub`
     里处理，本对象是连接的门面：权限检查、sub_id、同连接的重复订阅与订阅数，以及待发区——hub 在
-    tick 末尾把本连接的更新交到这里，`get_updates` 取走。
+    tick 末尾把本连接的更新交到这里，服务端的发送循环直接取走（`bind_sender_` / `take_updates_`），
+    别的用法（测试等）用 `get_updates` 等着取。
 
     The per-connection facade of component subscriptions. The subscriptions themselves are
     processed by the worker-wide `SubscriptionHub`; this object handles permissions, sub
-    ids, per-connection duplicates and quotas, and the outbox that `get_updates` drains.
+    ids, per-connection duplicates and quotas, and the outbox. The server's send loop drains
+    the outbox directly (`bind_sender_` / `take_updates_`); other callers use `get_updates`.
 
     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况，客户端会在 1~2 个
     `1/UPDATE_FREQUENCY`（默认 100~200ms）内收到最新数据；Redis 压力过大（副本复制延迟
@@ -1940,8 +1942,11 @@ class SubscriptionBroker:
         # 待发区里与同一订阅的别的成员共用的那几份（hub 交来的原样，只读）：再合并时先拷一份
         self._borrowed: set[str] = set()
         self._arrived = asyncio.Event()
-        # 正在 get_updates 里等 hub 交来更新（推送没卡住）
+        # 取待发区的一方（服务端发送循环，或 get_updates）正空闲等着：推送没卡住
         self._waiting = False
+        # 服务端发送循环的叫醒函数（bind_sender_）：它空闲等着时交来更新就叫一次，醒来前不重复叫
+        self._wake: Callable[[], None] | None = None
+        self._wake_pending = False
         # 服务端内部关注（watch_channel）用的 MQClient，第一次用时才建
         self._watch_mq: MQClient | None = None
         # MAX_SUBSCRIBED 告警用：各订阅登记时的频道数
@@ -2788,14 +2793,47 @@ class SubscriptionBroker:
         else:
             pending.update(updates)
         self._arrived.set()
+        if self._waiting and self._wake is not None and not self._wake_pending:
+            self._wake_pending = True
+            self._wake()
+
+    def bind_sender_(self, wake: Callable[[], None]) -> None:
+        """
+        服务端的发送循环直接取待发区（`take_updates_`），不另开协程等 `get_updates`：它空闲等着
+        （`idle_`）时 hub 交来更新，调 wake 叫醒它一次（在 hub 的处理循环里同步调用，不能阻塞）。
+        同一个门面只用一种取法
+        """
+        self._wake = wake
+
+    def idle_(self, idle: bool) -> None:
+        """
+        发送循环进入 / 离开空闲等待（等 push_queue、等订阅回复的占位）。空闲期间交来、还没取走的
+        更新不算推送卡住，hub 照常读、合并进待发区；醒来时清掉叫醒标记，下次空闲还能再叫
+        """
+        self._waiting = idle
+        if not idle:
+            self._wake_pending = False
+
+    def take_updates_(self) -> dict[str, dict[int, Any]]:
+        """
+        不等待地取走待发区（空就返回空 dict），格式同 `get_updates`。取走之后推送卡着时攒下的
+        通知要重读
+        """
+        if not self._outbox:
+            return {}
+        updates, self._outbox = self._outbox, {}
+        self._borrowed.clear()
+        # 推送卡着时 hub 攒下没读的通知，现在重读
+        self._hub.resume_(self)
+        return updates
 
     def _has_updates(self) -> bool:
         return bool(self._outbox)
 
     def stalled_(self) -> bool:
         """
-        推送卡住了：待发区里还有上次交来的没取走，也没在 get_updates 里等着取（推送阻塞在
-        push_queue 上，客户端网络拥塞）。hub 据此先不为本连接读库，等它取走待发区再重读
+        推送卡住了：待发区里还有上次交来的没取走，而取的一方不在空闲等着（服务端发送循环卡在
+        ws.send 上，客户端网络拥塞）。hub 据此先不为本连接读库，等它取走待发区再重读
         """
         return bool(self._outbox) and not self._waiting
 
@@ -2845,8 +2883,4 @@ class SubscriptionBroker:
                     self._waiting = False
             elif not await hub.step_(deadline, self._has_updates):
                 return {}
-        updates, self._outbox = self._outbox, {}
-        self._borrowed.clear()
-        # 推送卡着时 hub 攒下没读的通知，现在重读
-        hub.resume_(self)
-        return updates
+        return self.take_updates_()

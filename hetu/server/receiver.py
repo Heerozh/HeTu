@@ -347,38 +347,3 @@ async def client_handler(
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:
                 pass  # 队列满时外层自然会被 Sanic 的连接关闭取消掉
-
-
-async def subscription_handler(
-    ws: Websocket, broker: SubscriptionBroker, push_queue: asyncio.Queue
-):
-    """订阅消息获取循环，是一个asyncio的task，由loop.call_soon方法添加到worker主协程的执行队列"""
-    last_updates = {}
-    try:
-        while True:
-            last_updates = await broker.get_updates()
-            for sub_id, data in last_updates.items():
-                reply = ["updt", sub_id, data]
-                await push_queue.put(reply)
-    except asyncio.CancelledError:
-        # print('subscription_handler normal canceled')
-        pass
-    except RedisConnectionError as e:
-        logger.error(
-            _(
-                "❌ [📡WSSubscription] Redis ConnectionError，断开连接: {err}"
-                "上次接受了：{count}条消息。"
-            ).format(err=f"{type(e).__name__}:{e}", count=len(last_updates))
-        )
-        return ws.fail_connection()
-    except BaseException as e:
-        logger.exception(
-            _(
-                "❌ [📡WSSubscription] 数据库获取订阅消息时异常，"
-                "上条消息：{updates}，异常：{err}"
-            ).format(updates=last_updates, err=f"{type(e).__name__}:{e}")
-        )
-        return ws.fail_connection()
-    finally:
-        # print('subscription_handler closed')
-        pass
