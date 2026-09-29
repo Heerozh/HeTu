@@ -335,7 +335,7 @@ zone 的连接共享一个订阅）：
   - 编码约 20%；
   - ws 发送约 20%；
   - 交付之后到发送循环的两次任务交接（Event 唤醒 `get_updates`、`subscription_handler` 经 push_queue 交给
-    发送循环）约 40%；
+    发送循环）约 40%，已去掉（`2026-09-29-push-path-and-gc-design.md` §2）；
   - hub 的 tick 约 9%。
 
 **背包**（OWNER，按连接私有，走不到共享）：每次操作多 2~3% 周期。
