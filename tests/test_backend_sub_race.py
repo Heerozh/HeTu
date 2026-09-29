@@ -1921,3 +1921,34 @@ async def test_busy_sender_with_outbox_is_stalled_and_draining_rereads():
     await wait_until(lambda: a._outbox)  # 攒着的重读了
     assert a.take_updates_() == {"S": {1: {"v": 2}}}
     await close_hub(hub, node)
+
+
+async def test_failing_wake_does_not_break_delivery_to_other_connections():
+    """
+    发送循环的叫醒函数是在 hub 的交付循环里同步调用的：它抛异常不能打断 hub 给别的连接交付（不兜的话这个
+    tick 排在后面的连接都拿不到更新，订阅的指纹却已推进，这次推送就丢了）；这次没叫醒，下次交来时还要再叫
+    （不兜的话叫醒标记一直留着，这段空闲里再也叫不醒）
+    """
+    hub, (a, b), mq, node = make_brokers(2, autostart=True)
+    s = await shared_by(node, a, b, sub=FakeSub({"C"}))  # 交付时先轮到 a
+    calls: list[int] = []
+
+    def broken_wake() -> None:
+        calls.append(1)
+        raise RuntimeError("sender gone")
+
+    a.bind_sender_(broken_wake)
+    a.idle_(True)
+    s.updates = {1: {"id": 1, "v": 1}}
+    mq.push_pulled_("C", None)
+    assert await b.get_updates(timeout=TICK) == {"S": {1: {"id": 1, "v": 1}}}, (
+        "a 的叫醒出错，排在后面的 b 没拿到更新"
+    )
+    assert calls == [1]
+    assert a._outbox == {"S": {1: {"id": 1, "v": 1}}}
+
+    s.updates = {1: {"id": 1, "v": 2}}
+    mq.push_pulled_("C", None)
+    await wait_until(lambda: a._outbox.get("S") == {1: {"id": 1, "v": 2}})
+    assert calls == [1, 1], "叫醒失败后一直不再叫"
+    await close_hub(hub, node)
