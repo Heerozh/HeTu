@@ -951,6 +951,51 @@ async def test_shared_init_failure_fails_every_waiter(
         await broker.close()
 
 
+@pytest.mark.parametrize("limit", ["abc", None, 1.5, True])
+async def test_malformed_range_limit_fails_in_first_half(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx, limit
+):
+    """
+    range 的 limit 不是整数（客户端乱传）：前半段当场报错（服务器里断开连接），不登记、不读库。以前
+    前半段不校验 limit，登记后在后台读 4 次（初始读 + 重试 3 次，约 0.7 秒）才失败，还记着"换副本
+    重试"的错误日志，这期间这个连接后面的回复都在等它
+    """
+    backend = hub._backend
+    broker = SubscriptionBroker(backend, hub=hub)
+    with ExitStack() as stack:
+        reads = _read_counter(stack, backend)
+        with pytest.raises((TypeError, ValueError)):
+            await broker.begin_subscribe_range(
+                filled_item_ref, admin_ctx, "owner", 10, None, limit
+            )
+        assert reads()["range"] == 0
+    assert broker.count() == (0, 0, 0) and not broker._subs
+    await broker.close()
+
+
+async def test_table_subscriptions_with_different_caps_are_not_shared(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    整表订阅的行数上限（max_table_rows）也是查询的一部分：共享的整表订阅按建它的连接的上限读初始行、
+    做 RESYNC。以前小上限的连接先建、大上限的在初始化期间加入，两个都回 None（表超过了小上限），
+    大上限的本该拿到全表；之后 RESYNC 也只读到小上限那么多行
+    """
+    backend = hub._backend
+    small = SubscriptionBroker(backend, hub=hub, max_table_rows=10)
+    big = SubscriptionBroker(backend, hub=hub, max_table_rows=100_000)
+    finishes = [
+        await small.begin_subscribe_table(filled_item_ref, admin_ctx),
+        await big.begin_subscribe_table(filled_item_ref, admin_ctx),
+    ]
+    async with asyncio.timeout(5):
+        (small_id, small_rows), (big_id, big_rows) = await asyncio.gather(*finishes)
+    assert small_id is None and small_rows == []
+    assert big_id and len(big_rows) == 25
+    await small.close()
+    await big.close()
+
+
 class _LaggingServant:
     """落后的副本：行还没复制过来（get 读回 None），其余照原来的副本"""
 
