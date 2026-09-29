@@ -80,6 +80,11 @@ public class NetBootstrap : MonoBehaviour
   `--authkey` 运行，请使用此方法。
 - **每个 `Connect()` 对应一个 `Close()`。** `Close()` 会取消正在进行的 `CallSystem` /
   `Get` / `Range` 调用并销毁套接字 — 在 `OnDestroy` 中调用它，这样退出播放模式时不会泄漏工作任务。
+- **被顶号（账号在别处登录）。** 同一账号在另一条连接登录时，服务器会先发 WebSocket close 码
+  `4001`（`HeTuCloseCode.Kicked`）、原因 `"kicked"`，再断开本连接。在 `OnClosed` 里判断
+  `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked`，提示玩家"账号已在别处登录"，
+  并且不要自动重连 — 重连会重新登录，把对方顶掉。`HeTuSessionClient` 遇到它会直接进入 `Faulted`
+  终态（异常为 `HeTuKickedException`），不会重连。
 
 ## 调用 `Systems`
 

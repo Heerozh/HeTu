@@ -413,7 +413,7 @@ namespace Tests.HeTu
             public bool IsConnected { get; private set; }
 
             public event Action Connected;
-            public event Action<string> Closed;
+            public event Action<int, string> Closed;
 
             public void Connect()
             {
@@ -481,10 +481,10 @@ namespace Tests.HeTu
                 Connected?.Invoke();
             }
 
-            public void RaiseClosed(string reason)
+            public void RaiseClosed(string reason, int code = HeTuCloseCode.Abnormal)
             {
                 IsConnected = false;
-                Closed?.Invoke(reason);
+                Closed?.Invoke(code, reason);
             }
 
             // 底层 socket 静默死亡:连接没了但 Closed 没送达(关 Domain Reload 停
@@ -546,7 +546,8 @@ namespace Tests.HeTu
             public void ForceConnected() => State = ConnectionState.Connected;
 
             protected override void ConnectCore(string url, Action onConnected,
-                Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
+                Action<byte[]> onMessage, Action<int, string> onClose,
+                Action<string> onError)
             {
             }
 

@@ -13,12 +13,12 @@ namespace HeTu
 
         // ---- 传输接缝：事件统一转投到泵线程 ----
         protected override void ConnectCore(string url, Action onConnected,
-            Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
+            Action<byte[]> onMessage, Action<int, string> onClose, Action<string> onError)
         {
             _socket = new WebSocketTransport();
             _socket.OnOpen += () => _pump.Post(onConnected);
             _socket.OnMessage += data => _pump.Post(() => onMessage(data));
-            _socket.OnClose += reason => _pump.Post(() => onClose(reason));
+            _socket.OnClose += (code, reason) => _pump.Post(() => onClose(code, reason));
             _socket.OnError += msg => _pump.Post(() => onError(msg));
             _socket.Connect(url);
         }

@@ -1260,6 +1260,84 @@ namespace Tests.HeTu
                 "maxReconnectAttempts=0 时不应进入 Faulted 终态");
         }
 
+        // 被顶号（服务端 close 4001）= 账号在别处登录了。重连会重跑 bootstrap（登录）把对方
+        // 顶掉，两边互踢 → 不重连，直接进 Faulted 终态，异常是 HeTuKickedException，应用据此提示。
+        [Test]
+        public void Kicked_EntersFaultedWithoutReconnect()
+        {
+            var ts = new[] { new FakeTransport("c1"), new FakeTransport("never-used") };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0); // 不限次重连也不重连
+
+            var faults = new List<Exception>();
+            session.Faulted += faults.Add;
+
+            session.Start();
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("kicked", HeTuCloseCode.Kicked);
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.AreEqual(0, scheduler.PendingCount, "被顶号后不应安排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount, "被顶号后不应建新连接");
+            Assert.AreEqual(1, faults.Count);
+            Assert.IsInstanceOf<HeTuKickedException>(faults[0]);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+            Assert.IsTrue(f.IsFailed);
+            Assert.IsInstanceOf<HeTuKickedException>(f.Exception);
+            Assert.Throws<ObjectDisposedException>(() =>
+                session.CallSystem("noop", Array.Empty<object>(), _ => { }, _ => { }));
+        }
+
+        // 重连后的 bootstrap（登录）还没跑完就被顶号：同样不再重连
+        [Test]
+        public void Kicked_DuringReconnectBootstrap_EntersFaulted()
+        {
+            var ts = new[]
+            {
+                new FakeTransport("c1"),
+                new FakeTransport("c2"),
+                new FakeTransport("never-used")
+            };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var bootstrapCount = 0;
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: _ =>
+                {
+                    bootstrapCount++;
+                    // 首次登录立即完成；重连后的那次挂着，等被顶号打断
+                    return bootstrapCount == 1 ? Future.Completed : new Promise().Future;
+                },
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            Exception lastFault = null;
+            session.Faulted += ex => lastFault = ex;
+
+            session.Start();
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("network lost");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Bootstrapping, session.State);
+
+            ts[1].RaiseClosed("kicked", HeTuCloseCode.Kicked);
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.IsInstanceOf<HeTuKickedException>(lastFault);
+            Assert.AreEqual(0, scheduler.PendingCount);
+            Assert.AreEqual(0, ts[2].ConnectCount);
+        }
+
         // 重连阶段 bootstrap（登录）主动抛异常 = 票据/凭据被永久拒绝（如 STALE_TICKET）,
         // 重跑同样的 bootstrap 不会有不同结果 → 直接进 Faulted 终态,不浪费重试次数。
         [Test]
@@ -1764,7 +1842,7 @@ namespace Tests.HeTu
             }
 
             public event Action Connected;
-            public event Action<string> Closed;
+            public event Action<int, string> Closed;
 
             public void Connect()
             {
@@ -1780,10 +1858,10 @@ namespace Tests.HeTu
                 Connected?.Invoke();
             }
 
-            public void RaiseClosed(string reason)
+            public void RaiseClosed(string reason, int code = HeTuCloseCode.Abnormal)
             {
                 IsConnected = false;
-                Closed?.Invoke(reason);
+                Closed?.Invoke(code, reason);
             }
 
             // 模拟 socket 静默死亡：底层连接没了,但 Closed 事件没送达(典型如
@@ -1988,7 +2066,8 @@ namespace Tests.HeTu
             public void ForceConnected() => State = ConnectionState.Connected;
 
             protected override void ConnectCore(string url, Action onConnected,
-                Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
+                Action<byte[]> onMessage, Action<int, string> onClose,
+                Action<string> onError)
             {
             }
 

@@ -75,7 +75,8 @@ namespace HeTu
 
         // 实际Websocket连接方法
         protected override void ConnectCore(string url, Action onConnected,
-            Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
+            Action<byte[]> onMessage, Action<int, string> onClose,
+            Action<string> onError)
         {
             // 每条连接捕获自己的 socket 做"代次"标记:UnityWebSocket 事件非线程、隔帧
             // 才在主线程派发,Close 后立刻 Connect 时旧 socket 迟到的 OnClose/OnMessage
@@ -93,28 +94,10 @@ namespace HeTu
             socket.OnClose += (_, e) =>
             {
                 if (socket != _socket) return;
-                switch (e.StatusCode)
-                {
-                    case CloseStatusCode.Normal:
-                        onClose(null);
-                        break;
-                    case CloseStatusCode.Unknown:
-                    case CloseStatusCode.Away:
-                    case CloseStatusCode.ProtocolError:
-                    case CloseStatusCode.UnsupportedData:
-                    case CloseStatusCode.Undefined:
-                    case CloseStatusCode.NoStatus:
-                    case CloseStatusCode.Abnormal:
-                    case CloseStatusCode.InvalidData:
-                    case CloseStatusCode.PolicyViolation:
-                    case CloseStatusCode.TooBig:
-                    case CloseStatusCode.MandatoryExtension:
-                    case CloseStatusCode.ServerError:
-                    case CloseStatusCode.TlsHandshakeFailure:
-                    default:
-                        onClose(e.Reason);
-                        break;
-                }
+                // 正常关闭原因给 null；其余（含服务端自定义的 4xxx，如被顶号 4001）给原因。
+                // 用 e.Code 而非 e.StatusCode：后者把枚举外的码（4xxx）都折成 Unknown
+                onClose(e.Code,
+                    e.StatusCode == CloseStatusCode.Normal ? null : e.Reason);
             };
             socket.OnError += (_, e) =>
             {

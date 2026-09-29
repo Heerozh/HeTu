@@ -170,7 +170,8 @@ namespace Tests.HeTu
                 Subscriptions.Add(subId, subscription);
 
             protected override void ConnectCore(string url, Action onConnected,
-                Action<byte[]> onMessage, Action<string> onClose, Action<string> onError)
+                Action<byte[]> onMessage, Action<int, string> onClose,
+                Action<string> onError)
             {
             }
 

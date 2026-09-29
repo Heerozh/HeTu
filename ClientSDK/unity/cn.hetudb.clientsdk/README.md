@@ -96,12 +96,18 @@ Unity 6000+ 的 `Awaitable` 或 Unity 2022.3 的 `UniTask`，因此在 WebGL 上
 携带本次失败的异常；是否终态请读 `State`——首次 Ready 之前任何失败都进 `Faulted` 状态，
 post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的过渡通知。
 
+被顶号（账号在别处登录，服务端 close 码 `4001`）时不重连，直接进 `Faulted`，异常为
+`HeTuKickedException`——重连会重跑登录把对方顶掉、两边互踢。在 `Faulted` 事件里判断它，
+提示玩家"账号已在别处登录"。
+
 ### 连接
 
 - `Connect(url)`：建立单条物理连接并等待握手完成。
 - `Close()`：主动断开并取消所有挂起请求。
 - `OnConnected`：握手完成后触发。
 - `OnClosed`：连接断开时触发，参数为空表示正常断开。
+- `LastCloseCode`：最近一次断开的 close 码，`OnClosed` 里可读；等于 `HeTuCloseCode.Kicked`
+  （4001）表示被顶号（账号在别处登录），请提示玩家且不要自动重连。
 
 ### RPC
 

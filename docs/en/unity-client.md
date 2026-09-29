@@ -95,6 +95,12 @@ Key points the source enforces but isn't always obvious from a snippet:
   versions of the SDK had `Connect` block until close; if you're upgrading,
   replace the `while (true) { await Connect... }` reconnect loop with
   `HeTuSessionClient` below.)
+- **Kicked (logged in elsewhere).** When the same account logs in on another
+  connection, the server closes this one with WebSocket close code `4001`
+  (`HeTuCloseCode.Kicked`) and reason `"kicked"`. Inside `OnClosed`, check
+  `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked` to tell the
+  player "logged in elsewhere" — and don't reconnect automatically, or you'll
+  log in again and kick the other device right back.
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`
@@ -441,13 +447,20 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — either an initial-connect failure (always terminal), or post-Ready `maxReconnectAttempts` reached. `Faulted` event carries the last `Exception`. |
+| `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, or kicked (`HeTuKickedException`, never retried). `Faulted` event carries the last `Exception`. |
 
 The `Faulted` **event** is broader than the `Faulted` **state**: it fires
 once per failed attempt — pre-Ready failures fire it once then go terminal;
 post-Ready transient drops fire it on every retry. Check `session.State`
 from inside the handler to tell terminal from transient (post-Ready retry
 keeps state in `Reconnecting`).
+
+Being kicked is the exception to retrying: when the account logs in
+elsewhere, the server closes the connection with close code `4001`, and the
+session goes straight to `Faulted` with a `HeTuKickedException` instead of
+reconnecting — a reconnect would re-run your login `bootstrap` and kick the
+other device, and the two would keep kicking each other. Check for it in the
+`Faulted` handler (or around `await Connect`) to show "logged in elsewhere".
 
 ### `CallSystem` semantics
 
