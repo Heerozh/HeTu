@@ -1947,6 +1947,8 @@ class SubscriptionBroker:
         # 服务端发送循环的叫醒函数（bind_sender_）：它空闲等着时交来更新就叫一次，醒来前不重复叫
         self._wake: Callable[[], None] | None = None
         self._wake_pending = False
+        # 叫醒函数出过错（只记一次日志）
+        self._wake_failed = False
         # 服务端内部关注（watch_channel）用的 MQClient，第一次用时才建
         self._watch_mq: MQClient | None = None
         # MAX_SUBSCRIBED 告警用：各订阅登记时的频道数
@@ -2795,7 +2797,20 @@ class SubscriptionBroker:
         self._arrived.set()
         if self._waiting and self._wake is not None and not self._wake_pending:
             self._wake_pending = True
-            self._wake()
+            try:
+                self._wake()
+            except Exception:
+                # 不能打断 hub 给别的连接交付：这是在 hub 的交付循环里，抛出去的话本 tick 排在后面的
+                # 连接都拿不到更新（订阅的指纹已推进，推送就丢了）。这次算没叫醒，下次交来时再叫
+                self._wake_pending = False
+                if not self._wake_failed:
+                    self._wake_failed = True
+                    logger.exception(
+                        _(
+                            "❌ [📡Subscription] 叫醒发送循环出错，本连接的推送要等下次交来"
+                            "更新或有回复要发时才发出"
+                        )
+                    )
 
     def bind_sender_(self, wake: Callable[[], None]) -> None:
         """
