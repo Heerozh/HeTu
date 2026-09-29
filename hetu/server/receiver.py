@@ -66,6 +66,9 @@ async def rpc(
         replay.info(f"[EndpointResult][{data[1]}]({ok}, {res!s})")
 
     if not ok:
+        if executor.kicked:
+            # 被顶号不是请求出错，debug 模式也断开：client_handler 带 close 码关连接
+            return False
         # 执行失败/非法调用。debug 模式下发独立的 err 帧（区别于成功的 rsp 信封），
         # 把失败原因回传客户端 SDK，便于开发期定位且不污染 ToDict 等反序列化；连接保持。
         # release 模式下直接关闭连接，不向客户端泄露任何原因。
@@ -282,6 +285,11 @@ async def client_handler(
                 case "rpc":  # rpc endpoint_name args ...
                     # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接
                     if not await rpc(last_data, executor, push_queue, debug):
+                        if executor.kicked:
+                            exit_reason = _("连接已被顶号")
+                            return ws.fail_connection(
+                                connection.CLOSE_KICKED, connection.CLOSE_KICKED_REASON
+                            )
                         exit_reason = _("rpc 调用失败")
                         return ws.fail_connection()
                 case "sub":  # sub component_name get/range args ...

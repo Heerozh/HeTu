@@ -32,6 +32,11 @@ ENDPOINT_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 # 占位符，实际由Config里修改。通知模式下"是否被顶号"检查的兜底重查间隔（秒），0 = 每次调用都查
 CONNECTION_ALIVE_RECHECK_INTERVAL = 0
 
+# 被顶号时服务器先发这个 WebSocket close 码和原因再断开（4000-4999 是留给应用自定义的段）。
+# 客户端据此提示"账号已在别处登录"，也别自动重连：重连会重新登录，把对方顶掉
+CLOSE_KICKED = 4001
+CLOSE_KICKED_REASON = "kicked"
+
 
 @define_component(namespace="core", volatile=True, permission=Permission.ADMIN)
 class Connection(BaseComponent):
@@ -100,7 +105,8 @@ async def elevate(ctx: Context, user_id: int, kick_logged_in=True):
     如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]。
 
     kick_logged_in:
-        如果user_id已在其他连接登录，则标记该连接断开并返回True，该连接将在客户端调用任意Endpoint时被关闭。
+        如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
+        断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
 
     Notes
     -----

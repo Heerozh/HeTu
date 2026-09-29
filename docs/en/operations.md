@@ -104,7 +104,10 @@ population while staying consistent.
   `owner == this user` index-value channel, so when it gets kicked the server
   closes it proactively and the RPC path no longer reads the row on every
   call; if a notification is lost, `CONNECTION_ALIVE_RECHECK_INTERVAL`
-  (default 5 s) re-checks as a fallback.
+  (default 5 s) re-checks as a fallback. Before disconnecting, the server
+  sends a WebSocket close frame with code `4001` and reason `kicked`, so the
+  client can tell the user "logged in elsewhere" — and should not reconnect
+  automatically (reconnecting logs in again and kicks the other side).
 - `servants` is optional. Leaving it empty puts you in single-master mode —
   fine for small games.
 - Set Redis `client-output-buffer-limit` on the servants conservatively;

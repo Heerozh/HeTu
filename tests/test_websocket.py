@@ -291,7 +291,9 @@ def test_websocket_kick_connect(test_server):
 
 
 def test_websocket_kick_without_rpc_after_login(test_server):
-    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开"""
+    """登录后一次 RPC 都不再调（只挂着订阅）的连接被顶号，也要靠通知主动断开；断开前先发带原因的
+    close（4001 kicked），客户端据此提示"账号在别处登录" """
+    result = {}
 
     async def kick_routine(connect):
         client1 = await connect()
@@ -303,9 +305,10 @@ def test_websocket_kick_without_rpc_after_login(test_server):
         await client2.recv()
 
         # client1 没有任何后续调用，只能靠 owner 索引值频道的通知把它断开
-        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)):
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)) as exc_info:
             async with asyncio.timeout(3):
                 await client1.recv()
+        result["close"] = exc_info.value.rcvd
         await client2.send(["rpc", "add_rls_comp_value", 2])
         await client2.recv()
 
@@ -315,6 +318,57 @@ def test_websocket_kick_without_rpc_after_login(test_server):
     assert response.client_sent[-1] == ["rpc", "add_rls_comp_value", 2], (
         "最后一行没执行到"
     )
+    close = result["close"]
+    assert close is not None and (close.code, close.reason) == (4001, "kicked"), close
+
+
+def test_websocket_kick_found_on_rpc_sends_close_code(monkeypatch, test_server):
+    """通知没把被顶号的连接断开（通知丢了）时，它下次 RPC 核查到被顶号，也一样先发带原因的 close"""
+    from hetu.endpoint.connection import ConnectionAliveChecker
+
+    async def never_kicked(self, ctx):
+        return False
+
+    # 通知触发的主动核查永远查不到顶号，只剩 RPC 路径
+    monkeypatch.setattr(ConnectionAliveChecker, "kicked", never_kicked)
+    result = {}
+
+    async def kick_routine(connect):
+        client1 = await connect()
+        await client1.send(["rpc", "login", 1])
+        await client1.recv()
+
+        client2 = await connect()
+        await client2.send(["rpc", "login", 1])
+        await client2.recv()
+
+        # 登录后的首个调用必核一次（ConnectionAliveChecker._dirty 初值），不依赖通知的时机
+        await client1.send(["rpc", "add_rls_comp_value", 1])
+        with pytest.raises((ConnectionClosedError, ConnectionClosedOK)) as exc_info:
+            async with asyncio.timeout(3):
+                await client1.recv()
+        result["close"] = exc_info.value.rcvd
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=kick_routine)
+    close = result["close"]
+    assert close is not None and (close.code, close.reason) == (4001, "kicked"), close
+
+
+async def test_rpc_kicked_disconnects_even_in_debug():
+    """被顶号不是请求出错：debug 模式也不发 err 帧留着连接，交给 client_handler 带 close 码断开"""
+    from hetu.server.receiver import rpc
+
+    class KickedExecutor:
+        kicked = True
+
+        async def execute(self, endpoint, *args):
+            return False, None
+
+    push_queue: asyncio.Queue = asyncio.Queue()
+    assert not await rpc(
+        ["rpc", "login", 1], cast(Any, KickedExecutor()), push_queue, 1
+    )
+    assert push_queue.empty()
 
 
 @pytest.mark.timeout(60)

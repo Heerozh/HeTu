@@ -195,7 +195,7 @@ ResponseToClient(message: list | dict)
 elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 ```
 
-<small>Source: [`hetu/endpoint/connection.py:97`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L97)</small>
+<small>Source: [`hetu/endpoint/connection.py:102`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L102)</small>
 
 
 
@@ -203,7 +203,8 @@ elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 如果成功，则ctx.caller会被设置为user_id，同时事务结束，之后将无法调用ctx[Components]。
 
 kick_logged_in:
-    如果user_id已在其他连接登录，则标记该连接断开并返回True，该连接将在客户端调用任意Endpoint时被关闭。
+    如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
+    断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
 
 
 

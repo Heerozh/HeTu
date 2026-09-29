@@ -31,11 +31,15 @@ async def test_connect_kick(mod_test_app, tbl_mgr, new_ctx):
     await executor1_replaced.execute("login", 1)
 
     # 测试运行第一个连接的system，然后看是否失败
+    assert not executor1.kicked
     ok, _ = await executor1.execute("test_rls_comp_value", 101)
     assert not ok
+    # 失败原因是被顶号：websocket 层据此带 close 码断开
+    assert executor1.kicked
     # 这个的值应该是之前executor1的
     ok, _ = await executor1_replaced.execute("test_rls_comp_value", 101)
     assert ok
+    assert not executor1_replaced.kicked
 
     # 结束连接
     await executor1.terminate()

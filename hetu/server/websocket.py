@@ -191,7 +191,10 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                         ).format(ctx=context)
                         replay.info(close_msg)
                         logger.info(close_msg)
-                        ws.fail_connection()
+                        # 先发带原因的 close 再断开，客户端据此提示"账号已在别处登录"
+                        ws.fail_connection(
+                            connection.CLOSE_KICKED, connection.CLOSE_KICKED_REASON
+                        )
                 except Exception as e:  # noqa: BLE001 读库失败不致命：兜底间隔和下次调用还会再查
                     logger.warning(
                         _("⚠️ [📡WSConnect] 顶号核查读库失败：{err}").format(
