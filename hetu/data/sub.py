@@ -709,8 +709,8 @@ class SubscriptionHub:
     """
     worker 级订阅器：每个 worker（进程）的每个 backend 一个，worker 内所有连接的订阅都在这里处理。
     持有唯一的 MQClient（本地队列：合批、尾随重读，见 `MQClient`）和一个处理循环：弹出一批通知 →
-    按表批量预读行 → 各订阅 `get_updated`（订阅之间并发）→ 记账 → 按成员暂存更新；tick 末尾统一
-    订阅 / 退订频道，再把更新交给各连接的门面（`SubscriptionBroker`）。
+    按表批量预读行 → 各订阅 `get_updated`（订阅之间并发）→ 记账 → 按订阅暂存更新；tick 末尾统一
+    订阅 / 退订频道，再把各订阅的更新交给它这时的成员（各连接的门面 `SubscriptionBroker`）。
 
     一个 worker 一个队列、一条时间线，尾随重读与补读的保证与每连接一个队列时相同。订阅层的补读
     定向到单个订阅（`reread_for`），不按频道重跑 worker 里所有订阅。通知接连不断时相邻 tick 之间
