@@ -566,6 +566,129 @@ async def test_deferred_table_reply_cancelled_before_it_runs_still_rolls_back():
     assert not [w for w in caught if "never awaited" in str(w.message)]
 
 
+# ==== sub_call：回复的占位、订阅数上限（设计稿 2026-09-29 §3.3） ====
+
+
+class _GatedBroker:
+    """
+    sub_call 用的门面替身：前半段登记、计入订阅数；第 i 次订阅的后半段等 gates[i] 放行后回
+    (results[i], [])，results[i] 为 None 的订阅不成立、撤掉登记（同 SubscriptionBroker）
+    """
+
+    def __init__(self, results: list[str | None]):
+        self.results = results
+        self.gates = [asyncio.Event() for _ in results]
+        self.begun = 0
+        self.registered = 0
+
+    async def begin_subscribe_range(self, table, ctx, *args):
+        i = self.begun
+        self.begun += 1
+        self.registered += 1
+
+        async def finish() -> tuple[str | None, list]:
+            await self.gates[i].wait()
+            if self.results[i] is None:
+                self.registered -= 1
+            return self.results[i], []
+
+        return finish()
+
+    def count(self) -> tuple[int, int, int]:
+        return 0, self.registered, 0
+
+
+def _sub_executor(max_index_sub: int):
+    from types import SimpleNamespace
+
+    ctx = SimpleNamespace(
+        max_row_sub=100, max_index_sub=max_index_sub, max_table_sub=100
+    )
+    return SimpleNamespace(
+        context=ctx, tbl_mgr=SimpleNamespace(get_table=lambda name: object())
+    )
+
+
+RANGE_SUB = ["sub", "Comp", "range", "owner", 1]
+
+
+async def test_sub_reply_slot_is_taken_before_registering():
+    """
+    push_queue 满着（客户端网络拥塞）时，订阅先在队列里占到回复的位再登记：一登记，推送协程就可能
+    给这个 sub_id 放推送，排到回复前面的话 SDK 当作不认识的订阅丢掉（以前先登记后放占位）
+    """
+    from hetu.server.receiver import sub_call
+
+    broker = _GatedBroker(["S"])
+    broker.gates[0].set()
+    push_queue: asyncio.Queue = asyncio.Queue(1)
+    push_queue.put_nowait(["updt", "X", {}])
+    executor = _sub_executor(max_index_sub=5)
+    call = asyncio.create_task(
+        sub_call(RANGE_SUB, executor, broker, push_queue, set())  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(0.01)
+    assert broker.begun == 0, "队列满着就先登记了，推送可能排到回复前面"
+    push_queue.get_nowait()
+    async with asyncio.timeout(1):
+        assert await call is True
+        assert await push_queue.get_nowait() == ["sub", "S", []]
+
+
+async def test_sub_limit_waits_for_in_flight_subscriptions():
+    """
+    订阅数上限按成立的订阅算（dev 逐条处理，不成立的不计入）。前半段就登记、计入的订阅里可能有随后
+    不成立的（force=False 的空结果、不存在的行）：到了上限先等在途的都有结果再判，不能算上它们就
+    断开连接。都成立的照样超限
+    """
+    from hetu.server.receiver import sub_call
+
+    executor = _sub_executor(max_index_sub=1)
+    for results, expected in (([None, "S2"], True), (["S1", "S2"], False)):
+        broker = _GatedBroker(results)
+        push_queue: asyncio.Queue = asyncio.Queue()
+        deferred: set[asyncio.Task] = set()
+        assert await sub_call(RANGE_SUB, executor, broker, push_queue, deferred)  # type: ignore[arg-type]
+        second = asyncio.create_task(
+            sub_call(RANGE_SUB, executor, broker, push_queue, deferred)  # type: ignore[arg-type]
+        )
+        await asyncio.sleep(0.01)
+        assert not second.done(), "到了上限，没等在途的订阅有结果就判了"
+        for gate in broker.gates:
+            gate.set()
+        async with asyncio.timeout(1):
+            assert await second is expected
+
+
+async def test_failed_sub_replies_are_all_retrieved():
+    """
+    同一连接的几个订阅同时失败（副本挂了、重试用尽）：发送循环只等到第一个占位就断开，别的占位的
+    异常也要标成取过了，不然每个都在 gc 时报一条 "Future exception was never retrieved"（绕过限流）
+    """
+    from hetu.server.receiver import defer_sub_reply_
+
+    loop = asyncio.get_running_loop()
+    caught: list[dict] = []
+    old_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: caught.append(context))
+    try:
+
+        async def finish() -> tuple[str | None, list]:
+            raise ConnectionError("replica down")
+
+        deferred: set[asyncio.Task] = set()
+        replies = [defer_sub_reply_(finish(), deferred) for _ in range(3)]
+        await asyncio.gather(*list(deferred), return_exceptions=True)
+        assert all(reply.done() for reply in replies)
+        await asyncio.sleep(0)  # 任务的完成回调把它们从 deferred 里撤掉
+        assert not deferred
+        del replies
+        gc.collect()
+    finally:
+        loop.set_exception_handler(old_handler)
+    assert not [c for c in caught if "never retrieved" in c.get("message", "")]
+
+
 @pytest.mark.timeout(30)
 def test_websocket_table_subscribe_does_not_block_following_messages(
     monkeypatch, test_server
