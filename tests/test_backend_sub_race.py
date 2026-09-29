@@ -1501,6 +1501,35 @@ async def test_any_member_draining_rereads_parked_notifications():
     await close_hub(hub, node)
 
 
+async def test_draining_rereads_only_its_own_parked_subscriptions():
+    """
+    攒着的通知按成员连接索引：连接取走待发区时只重读它在的、攒着通知的订阅（不扫它的全部订阅），
+    别的连接的照旧攒着；成员退订时撤掉它的索引，不留引用
+    """
+    hub, (a, b), mq, node = make_brokers(2, autostart=True)
+    s1, s2 = FakeSub({"C1"}), FakeSub({"C2"})
+    await register(a, node, "S1", s1)
+    await register(b, node, "S2", s2)
+    s1.updates = {1: {"v": 1}}
+    s2.updates = {2: {"v": 1}}
+    mq.push_pulled_("C1", None)
+    mq.push_pulled_("C2", None)
+    await wait_until(lambda: a._outbox and b._outbox)  # 都交到了，都卡着
+    s1.updates = {1: {"v": 2}}
+    s2.updates = {2: {"v": 2}}
+    mq.push_pulled_("C1", None)
+    mq.push_pulled_("C2", None)
+    await wait_until(lambda: s1 in hub._parked and s2 in hub._parked)
+    assert hub._parked_by == {a: {s1}, b: {s2}}
+
+    assert await a.get_updates(timeout=TICK) == {"S1": {1: {"v": 1}}}
+    assert await a.get_updates(timeout=TICK) == {"S1": {1: {"v": 2}}}
+    assert s2 in hub._parked and hub._parked_by == {b: {s2}}
+    await unsubscribe_and_ack(b, node, "S2")
+    assert not hub._parked and not hub._parked_by
+    await close_hub(hub, node)
+
+
 class ScriptedSub(FakeSub):
     """按频道返回预设的更新（script）；gates 里的频道卡在各自的闸门上，进入时置 reached[频道]"""
 

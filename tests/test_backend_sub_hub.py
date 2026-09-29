@@ -642,6 +642,43 @@ async def test_late_joiner_gets_what_members_hold_without_reading(
     await b.close()
 
 
+async def test_snapshot_order_follows_index_changes(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """
+    后加入者的回复按最近一次 ZRANGE 的顺序排，排好的列表缓存到快照下次变动（后加入者共用）：索引
+    字段变了、行在结果里挪了位置，之后加入的连接拿到新顺序
+    """
+    backend = hub._backend
+    comp = filled_item_ref.comp_cls
+    a, b, c = (SubscriptionBroker(backend, hub=hub) for _ in range(3))
+    query = ("time", 100, 200, 30)
+    sub_id, rows = await a.subscribe_range(filled_item_ref, admin_ctx, *query)
+    assert sub_id and len(rows) == 25
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    assert await b.subscribe_range(filled_item_ref, admin_ctx, *query) == (
+        sub_id,
+        rows,
+    )
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        first = await repo.get(time=110)
+        assert first
+        first.time = 150
+        await repo.update(first)
+    moved = int(first.id)
+    sub = cast(IndexSubscription, a._subs[sub_id])
+    await wait_until(lambda: sub.order[-1] == moved, timeout=3)
+    sub_c, rows_c = await c.subscribe_range(filled_item_ref, admin_ctx, *query)
+    order = await backend.servant.range(
+        filled_item_ref, *query, row_format=RowFormat.ID_LIST
+    )
+    assert sub_c == sub_id and [row["id"] for row in rows_c] == order
+    assert rows_c[-1]["time"] == 150
+    for broker in (a, b, c):
+        await broker.close()
+
+
 async def test_joiners_during_init_share_one_read(
     hub: SubscriptionHub, filled_item_ref, admin_ctx
 ):

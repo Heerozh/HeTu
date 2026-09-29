@@ -124,6 +124,8 @@ class BaseSubscription:
     # 随暂存的更新改（见 SubscriptionHub._stage）；后加入的成员拿它做回复。私有订阅为 None。
     # 行对象与推送共用，之后都不再改
     snapshot: dict[int, dict[str, Any]] | None = None
+    # 按回复顺序排好的快照（snapshot_rows_ 的缓存），快照或顺序变了就清掉（hub 与比对逻辑各管各的）
+    snapshot_list: list[dict[str, Any]] | None = None
     # 有成员在等重读判定频道（SubscriptionHub.recheck_）时：序号大于它的 tick 里重读到才算数
     recheck_after: int = 0
 
@@ -138,9 +140,21 @@ class BaseSubscription:
         return None
 
     def snapshot_rows_(self) -> list[dict[str, Any]]:
-        """快照里的行，按回复的顺序排好（后加入的成员的回复）"""
-        assert self.snapshot is not None, "私有订阅没有快照"
-        return list(self.snapshot.values())
+        """
+        快照里的行，按回复的顺序排好（后加入的成员的回复）。排好的列表缓存到快照下次变动，后加入的
+        成员共用这一份（只读）：整表订阅的快照可能有十万行，每个后加入者重排一遍太贵
+        """
+        rows = self.snapshot_list
+        if rows is None:
+            assert self.snapshot is not None, "私有订阅没有快照"
+            rows = self.snapshot_list = self.order_snapshot_(self.snapshot)
+        return rows
+
+    def order_snapshot_(
+        self, snapshot: dict[int, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        """快照按回复的顺序排成列表"""
+        return list(snapshot.values())
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
         """
@@ -313,9 +327,9 @@ class IndexSubscription(BaseSubscription):
     def recheck_channel_(self) -> str | None:
         return self.index_channel
 
-    def snapshot_rows_(self) -> list[dict[str, Any]]:
-        snapshot = self.snapshot
-        assert snapshot is not None, "私有订阅没有快照"
+    def order_snapshot_(
+        self, snapshot: dict[int, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         return [snapshot[row_id] for row_id in self.order if row_id in snapshot]
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
@@ -429,6 +443,7 @@ class IndexSubscription(BaseSubscription):
                 rtn[row_id] = visible
         self.last_range_result = row_ids
         self.order = [row_id for row_id in order if row_id in row_ids]
+        self.snapshot_list = None  # 顺序可能变了（只改了索引字段的行，快照内容还没变）
         self.row_subs.update(new_subs)
         new_chans.update(new_subs)
         for row_id in deletes:
@@ -481,9 +496,9 @@ class TableSubscription(BaseSubscription):
     def use_servant_(self, servant: BackendClient) -> None:
         self.servant = servant
 
-    def snapshot_rows_(self) -> list[dict[str, Any]]:
-        snapshot = self.snapshot
-        assert snapshot is not None, "私有订阅没有快照"
+    def order_snapshot_(
+        self, snapshot: dict[int, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
         return [snapshot[row_id] for row_id in sorted(snapshot)]  # 同全量读，按 id 升序
 
     async def initialize_(self, hub: SubscriptionHub) -> list[dict[str, Any]] | None:
@@ -761,6 +776,9 @@ class SubscriptionHub:
         # 成员的推送全都卡住的订阅先攒着不读的通知：订阅 → {频道: payload}；有成员取走待发区、
         # 或有新成员加入时重读（见 _collect、resume_、join_）
         self._parked: dict[BaseSubscription, dict[str, set[str] | None]] = {}
+        # 同上，按成员连接索引：连接 → 它在的、攒着通知的订阅。连接取走待发区时只看自己的这几个
+        # （resume_），不用扫它的全部订阅（一个连接可能订着上千个）
+        self._parked_by: dict[SubscriptionBroker, set[BaseSubscription]] = {}
         # 后台任务（频道的订阅、退订、补订）：不随调用方取消，close 时统一取消
         self._tasks: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
@@ -832,7 +850,7 @@ class SubscriptionHub:
         sub.token = next(self._tokens)
         sub.active = sub.ready = sub.closed = False
         sub.share_key = key
-        sub.snapshot = None
+        sub.snapshot = sub.snapshot_list = None
         self._by_token[sub.token] = sub
         if key is not None:
             self._shared[key] = sub
@@ -969,7 +987,9 @@ class SubscriptionHub:
         gone: list[str] = []
         for sub in subs:
             sub.members.pop(broker, None)
-            # 还在等初始化结果的：不用等了，它的后半段回 None
+            if sub in self._parked:
+                self._unindex_parked(broker, sub)
+            # 还在等初始化结果（或重读判定频道）的：不用等了，它的后半段回 None
             for waiter in sub.waiters.pop(broker, ()):
                 if not waiter.done():
                     waiter.set_result(None)
@@ -1168,6 +1188,7 @@ class SubscriptionHub:
             sub.active = sub.ready = True
             if sub.share_key is not None:
                 sub.snapshot = {int(row["id"]): row for row in rows}
+                sub.snapshot_list = None
         for futures in waiters.values():
             for waiter in futures:
                 if not waiter.done():
@@ -1432,7 +1453,11 @@ class SubscriptionHub:
         self, sub: BaseSubscription, channel: str, payload: set[str] | None
     ) -> None:
         """成员全都卡着的订阅这个频道先不读，攒着，有成员取走待发区（resume_）或有新成员加入时重读"""
-        items = self._parked.setdefault(sub, {})
+        items = self._parked.get(sub)
+        if items is None:
+            items = self._parked[sub] = {}
+            for broker in sub.members:
+                self._parked_by.setdefault(broker, set()).add(sub)
         if payload is None:
             items.setdefault(channel, None)
         elif (known := items.get(channel)) is None:
@@ -1443,17 +1468,29 @@ class SubscriptionHub:
     def _unpark(self, sub: BaseSubscription) -> None:
         """sub 攒着的通知全部定向重读：interval 后照常读、推最新的"""
         items = self._parked.pop(sub, None)
-        if not items or sub.closed or not sub.active:
+        if items is None:
+            return
+        for broker in sub.members:
+            self._unindex_parked(broker, sub)
+        if sub.closed or not sub.active:
             return
         for channel, payload in items.items():
             self.reread_for(sub, channel, payload=payload)
 
+    def _unindex_parked(
+        self, broker: SubscriptionBroker, sub: BaseSubscription
+    ) -> None:
+        parked = self._parked_by.get(broker)
+        if parked is not None:
+            parked.discard(sub)
+            if not parked:
+                del self._parked_by[broker]
+
     def resume_(self, broker: SubscriptionBroker) -> None:
         """门面取走了待发区：它所在的订阅攒下的通知都重读（它没卡着了，订阅不再"全都卡着"）"""
-        if not self._parked:
-            return
-        for sub in broker.subscriptions_():
-            if sub in self._parked:
+        parked = self._parked_by.pop(broker, None)
+        if parked:
+            for sub in parked:
                 self._unpark(sub)
 
     def _repair(
@@ -1689,6 +1726,7 @@ class SubscriptionHub:
                     snapshot.pop(row_id, None)
                 else:
                     snapshot[row_id] = row
+            sub.snapshot_list = None
         staged = tick.staged.get(sub)
         if staged is None:
             tick.staged[sub] = dict(updates)
@@ -1819,6 +1857,7 @@ class SubscriptionHub:
         self._effective.clear()
         self._inflight.clear()
         self._parked.clear()
+        self._parked_by.clear()
         for kind in self._errors.values():
             if kind.timer is not None:
                 kind.timer.cancel()
@@ -2054,10 +2093,6 @@ class SubscriptionBroker:
     def _current(self, sub_id: str, reg: object) -> bool:
         """sub_id 还是 reg 那次登记：期间没被退订（退订后又重订的也不算）"""
         return self._regs.get(sub_id) is reg
-
-    def subscriptions_(self) -> Iterable[BaseSubscription]:
-        """本连接的订阅对象（hub 的背压恢复用）"""
-        return self._subs.values()
 
     async def _finish(self, p: _Pending) -> list[dict[str, Any]] | None:
         """
