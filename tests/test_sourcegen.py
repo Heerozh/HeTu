@@ -47,6 +47,19 @@ public class TestComponent : IBaseComponent
     assert code == expect
 
 
+def test_component_csharp_gen_skips_hidden():
+    """hidden 字段不发给客户端，生成的客户端类里也没有"""
+
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class HiddenGen(BaseComponent):
+        level: np.int32 = property_field(0)
+        secret: np.int64 = property_field(0, hidden=True)
+
+    code = "\n".join(generate_component(HiddenGen))
+    assert '[Key("level")] public int Level;' in code
+    assert "secret" not in code.lower()
+
+
 def test_generate_all_components_latest_template(tmp_path, monkeypatch):
     @define_component(namespace="HeTu", volatile=True, force=True)
     class TestA(BaseComponent):

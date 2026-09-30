@@ -81,7 +81,8 @@ class ZstdLayer(MessageProcessLayer, alias="zstd"):
                     codes = rng.integers(0x20, 0x7F, size=length)
                     default_row[name] = "".join(map(chr, codes))
             row_dict = _comp.struct_to_dict(default_row)
-            del row_dict["_version"]  # 删除版本字段
+            for name in _comp.hidden_fields_:
+                del row_dict[name]  # 同订阅推送，删除版本字段与 hidden 字段
 
             # 对订阅id随机填充，这是为了只保留key特征。我们这里放弃值重复特征。
             ref = TableReference(_comp, "", 0)
