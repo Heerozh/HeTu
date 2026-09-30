@@ -816,9 +816,21 @@ class RedisModelClient(BackendClient):
                 _del_key(key)
             # 变动的 row_id 只有表频道要用：没声明 table_sub 的组件（绝大多数）不收集
             if comp_cls.table_sub_:
+                updated_ids = [row["id"] for row in old_rows]
+                if len(comp_cls.hidden_fields_) > 1:
+                    # 只改了 hidden 字段的行客户端看不出变化，不叫醒整表订阅（new_row 只含改了
+                    # 的字段）。RLS 判定用的字段例外：改了它行会对订阅者变得可见 / 不可见
+                    quiet = set(comp_cls.hidden_fields_)
+                    if comp_cls.rls_compare_:
+                        quiet.discard(comp_cls.rls_compare_[1])
+                    updated_ids = [
+                        old_row["id"]
+                        for old_row, new_row in zip(old_rows, new_rows)
+                        if not new_row.keys() <= quiet
+                    ]
                 touched_ids = [
                     *(row["id"] for row in inserts),
-                    *(row["id"] for row in old_rows),
+                    *updated_ids,
                     *(str(row["id"]) for row in deletes),
                 ]
                 if touched_ids:

@@ -91,8 +91,9 @@ def row_fingerprint_(row: Mapping[str, Any] | None) -> int | None:
     """
     行内容的指纹（行不存在为 None），用来判断重读回来的是不是客户端已经持有的那份数据：
     补读、尾随重读大多读回一样的内容，一样就不再推。
-    不能只比 _version：同 id 删除后重插时版本从 1 重来，而刚插入没改过的行都是 1。
-    原始行含 _version，字段顺序由 dtype 固定。组件不允许子数组字段（define_component 拒绝
+    按推给客户端的行算（已去掉 _version 与 hidden 字段）：只改了 hidden 字段的写入客户端看不出
+    变化，不推。不能只比 _version：同 id 删除后重插时版本从 1 重来，而刚插入没改过的行都是 1。
+    字段顺序由 dtype 固定。组件不允许子数组字段（define_component 拒绝
     void dtype），行里都是 Python 标量 / str / bytes，repr 是精确的（float 的 repr 能原样
     转回；hash(tuple(values)) 反而分不清 0.0 与 -0.0）。实测每行 1µs 以内，比转 dict 还便宜。
     """
@@ -224,7 +225,7 @@ class RowSubscription(BaseSubscription):
         visible = self.decode_row_(row)
         if visible is None:
             return None  # 行不存在，或 caller 对该行无权限
-        self.pushed = row_fingerprint_(row)
+        self.pushed = row_fingerprint_(visible)
         # 订阅生效前已在别的节点上应用、这次读到的副本却还没应用的写入不会再有通知，初始化期间
         # 弹出的通知也被跳过了（订阅还没生效）：生效后隔一个 interval 补读一次（读回一样就不推）
         hub.reread_for(self, self.channel)
@@ -246,14 +247,19 @@ class RowSubscription(BaseSubscription):
         cache[channel] = row
 
     def decode_row_(self, row: dict[str, Any] | None) -> dict[str, Any] | None:
-        """按本订阅的RLS判定行是否可见：可见返回去掉_version的拷贝，不可见/不存在返回None"""
+        """
+        按本订阅的RLS判定行是否可见：可见返回去掉 _version 与 hidden 字段的拷贝，不可见/不存在
+        返回None
+        """
         if row is None:
             return None
+        comp_cls = self.table_ref.comp_cls
         ctx = self.rls_ctx
-        if ctx is not None and not ctx.rls_check(self.table_ref.comp_cls, row):
+        if ctx is not None and not ctx.rls_check(comp_cls, row):
             return None
         row = dict(row)  # 缓存里的原始行可能被别的订阅共用，不能就地改
-        row.pop("_version", None)
+        for name in comp_cls.hidden_fields_:
+            del row[name]
         return row
 
     async def read_(self, channel: str) -> dict[str, Any] | None:
@@ -281,7 +287,7 @@ class RowSubscription(BaseSubscription):
         visible = self.decode_row_(row)
         # 不可见的行客户端没有，和行不存在一样记 None：它在不可见期间怎么变都不推，
         # 推 None 等于把不可见行的 id 告诉了客户端
-        fingerprint = None if visible is None else row_fingerprint_(row)
+        fingerprint = None if visible is None else row_fingerprint_(visible)
         if fingerprint == self.pushed:
             return set(), set(), {}
         self.pushed = fingerprint
@@ -343,6 +349,7 @@ class IndexSubscription(BaseSubscription):
             ),
         )
         comp_cls = ref.comp_cls
+        hidden = comp_cls.hidden_fields_
         ctx = self.rls_ctx
         row_subs: dict[str, RowSubscription] = {}
         visible: list[dict[str, Any]] = []
@@ -350,13 +357,14 @@ class IndexSubscription(BaseSubscription):
             # 不可见（RLS）的行先不订：生效后的补读重跑范围比对时会把它们订上（只订不推）
             if ctx is not None and not ctx.rls_check(comp_cls, row):
                 continue
+            for name in hidden:
+                del row[name]
             row_id = int(row["id"])
             channel = servant.row_channel(ref, row_id)
             # 客户端拿到的是这些初始行：记下内容指纹，之后重读回来一样就不再推
             row_subs[channel] = RowSubscription(
                 ref, servant, ctx, channel, row_id, row_fingerprint_(row)
             )
-            del row["_version"]
             visible.append(row)
         self.row_subs = row_subs
         self.last_range_result = {row_sub.row_id for row_sub in row_subs.values()}
@@ -437,7 +445,7 @@ class IndexSubscription(BaseSubscription):
             row_sub = RowSubscription(ref, servant, self.rls_ctx, new_chan_name, row_id)
             # 不可见（RLS）的行也要订阅，等它变得可见时才能通知；但现在不推给客户端
             visible = row_sub.decode_row_(row)
-            row_sub.pushed = None if visible is None else row_fingerprint_(row)
+            row_sub.pushed = None if visible is None else row_fingerprint_(visible)
             new_subs[new_chan_name] = row_sub
             if visible is not None:
                 rtn[row_id] = visible
@@ -522,18 +530,20 @@ class TableSubscription(BaseSubscription):
         ctx = self.rls_ctx
         if ctx is not None:
             rows = [row for row in rows if ctx.rls_check(ref.comp_cls, row)]
+        hidden = ref.comp_cls.hidden_fields_
+        for row in rows:
+            for name in hidden:
+                del row[name]
         # 初始化期间攒下的通知定向重新入队重读；初始读已经包含的（读回一样）不再推
         if pending := self.finish_init_(rows):
             hub.reread_for(self, self.table_channel, payload=pending)
-        for row in rows:
-            del row["_version"]
         return rows
 
     def finish_init_(self, rows: list[dict[str, Any]]) -> set[str]:
         """
-        初始全量读完成（rows 为客户端将拿到的行，含 _version）：记下客户端持有的行，退出
-        初始化。返回初始化期间攒下的 row_id，调用方要把它们重新入队重读；初始读已经包含的
-        读回一样，不会再推
+        初始全量读完成（rows 为客户端将拿到的行，已去掉 _version 与 hidden 字段）：记下
+        客户端持有的行，退出初始化。返回初始化期间攒下的 row_id，调用方要把它们重新入队重读；
+        初始读已经包含的读回一样，不会再推
         """
         assert self.pending is not None, "重复完成初始化"
         pending, self.pending = self.pending, None
@@ -572,6 +582,7 @@ class TableSubscription(BaseSubscription):
             await self.servant.get_many(self.table_ref, ids, RowFormat.TYPED_DICT),
         )
         comp_cls = self.table_ref.comp_cls
+        hidden = comp_cls.hidden_fields_
         ctx = self.rls_ctx
         known = self.known_ids
         last_read = self.last_read
@@ -581,10 +592,11 @@ class TableSubscription(BaseSubscription):
         rtn: dict[int, dict[str, Any] | None] = {}
         for row_id, row in zip(ids, rows):
             if row is not None and (ctx is None or ctx.rls_check(comp_cls, row)):
+                for name in hidden:
+                    del row[name]
                 fingerprint = read_now[row_id] = row_fingerprint_(row)
                 if row_id in known and last_read.get(row_id) == fingerprint:
                     continue  # 上一批刚推过一模一样的（尾随重读）
-                del row["_version"]
                 rtn[row_id] = row
             elif row_id in known:
                 # 被删除，或失去RLS权限：客户端持有该行，需要通知删除
@@ -607,6 +619,7 @@ class TableSubscription(BaseSubscription):
             self.servant, self.table_ref, self.max_rows
         )
         comp_cls = self.table_ref.comp_cls
+        hidden = comp_cls.hidden_fields_
         ctx = self.rls_ctx
         known = self.known_ids
         rtn: dict[int, dict[str, Any] | None] = {}
@@ -616,7 +629,8 @@ class TableSubscription(BaseSubscription):
             row_id = int(row["id"])
             seen.add(row_id)
             if ctx is None or ctx.rls_check(comp_cls, row):
-                del row["_version"]
+                for name in hidden:
+                    del row[name]
                 rtn[row_id] = row
             elif row_id in known:
                 rtn[row_id] = None
@@ -2037,6 +2051,27 @@ class SubscriptionBroker:
         """判断是否对行有权限，首先你要调用_has_table_permission判断是否有表权限"""
         return ctx.rls_check(table_ref.comp_cls, row)
 
+    @classmethod
+    def _hidden_query(
+        cls, table_ref: TableReference, ctx: Context, index_name: Any
+    ) -> bool:
+        """
+        按 hidden 字段查询：拒绝并警告。不推它的值，查询条件照样能试探出来，比如
+        `range(Player, "role", "werewolf")` 返回的就是所有狼人
+        """
+        # index_name 是客户端传来的，不一定可哈希，用元组的 in
+        if index_name not in table_ref.comp_cls.hidden_fields_:
+            return False
+        logger.warning(
+            _(
+                "⚠️ [📡Subscription] {comp_name}.{index_name} 是 hidden 属性，不允许按它"
+                "订阅，检查是否非法调用，caller：{caller}"
+            ).format(
+                comp_name=table_ref.comp_name, index_name=index_name, caller=ctx.caller
+            )
+        )
+        return True
+
     @staticmethod
     def _share_key(
         table_ref: TableReference, ctx: Context, query: tuple
@@ -2187,6 +2222,8 @@ class SubscriptionBroker:
         # 首先caller要对整个表有权限
         if not self._has_table_permission(table_ref, ctx):
             return self._settled(None, None)
+        if self._hidden_query(table_ref, ctx, index_name):
+            return self._settled(None, None)
 
         servant = self._backend.servant
 
@@ -2319,7 +2356,8 @@ class SubscriptionBroker:
             # unsub，旧订阅得跟着撤掉，不然它和它的频道会挂到连接结束
             await self.unsubscribe(sub_id)
             return None, None
-        del row["_version"]  # 内部版本号不推给客户端
+        for name in table_ref.comp_cls.hidden_fields_:
+            del row[name]  # 内部版本号、hidden 字段不推给客户端
         return sub_id, row
 
     async def subscribe_range(
@@ -2418,6 +2456,8 @@ class SubscriptionBroker:
                     "检查是否非法调用，caller：{caller}"
                 ).format(comp_name=table_ref.comp_name, caller=ctx.caller)
             )
+            return self._settled(None, [])
+        if self._hidden_query(table_ref, ctx, index_name):
             return self._settled(None, [])
 
         servant = self._backend.servant
@@ -2544,13 +2584,16 @@ class SubscriptionBroker:
         )
         if not self._current(sub_id, reg):
             return None, []  # 读的这段时间里被退订了
-        for row in rows:
-            del row["_version"]
         # 如果是rls权限，需要对每行数据进行权限判断
         if table_ref.comp_cls.is_rls():
             rows = [
                 row for row in rows if self._has_row_permission(table_ref, ctx, row)
             ]
+        # 判完 RLS 再去掉：判定用的字段可能是 hidden 的
+        hidden = table_ref.comp_cls.hidden_fields_
+        for row in rows:
+            for name in hidden:
+                del row[name]
         if not force and len(rows) == 0:
             return None, rows
         return sub_id, rows
@@ -2731,8 +2774,10 @@ class SubscriptionBroker:
             # 订阅数
             await self.unsubscribe(sub_id)
             return None, []
+        hidden = table_ref.comp_cls.hidden_fields_
         for row in rows:
-            del row["_version"]
+            for name in hidden:
+                del row[name]
         return sub_id, rows
 
     async def _read_whole_table(

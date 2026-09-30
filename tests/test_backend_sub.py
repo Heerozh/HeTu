@@ -2694,3 +2694,139 @@ async def test_table_error_midway_keeps_state_for_retry(
     with patch.object(ctx_cls, "rls_check", flaky):
         await updates_until(broker, synced, timeout=5)
     assert raised
+
+
+# ============================ hidden 字段 ============================
+
+# 客户端看得到的字段；Agent 其余的 owner、role、secret（和 _version）都不推
+AGENT_SHOWN = {"id", "level", "hp"}
+
+
+@pytest.fixture
+async def agent_ref(new_component_env, mod_auto_backend):
+    """
+    带 hidden 字段的组件：RLS 判定用的 owner、带索引的 role、secret 都对客户端隐藏。建表并写
+    4 行：level 1~3 的 owner=10，level 4 的 owner=11
+    """
+    import numpy as np
+
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+    from hetu.data.backend import Table
+
+    @define_component(namespace="pytest", permission=Permission.OWNER, table_sub=True)
+    class Agent(BaseComponent):
+        owner: np.int64 = property_field(0, index=True, hidden=True)
+        level: np.int32 = property_field(0, index=True)
+        hp: np.int32 = property_field(100)
+        role: str = property_field("", dtype="U8", index=True, hidden=True)
+        secret: np.int64 = property_field(0, hidden=True)
+
+    backend: Backend = mod_auto_backend()
+    ref = create_ref(Agent, backend)
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(Agent)
+        for level, owner in ((1, 10), (2, 10), (3, 10), (4, 11)):
+            row = Agent.new_row()
+            row.owner, row.level, row.role, row.secret = owner, level, "wolf", 42
+            await repo.insert(row)
+    await backend.wait_for_synced()
+    return Table(Agent, ref.instance_name, ref.cluster_id, backend)
+
+
+async def modify_agent(backend: Backend, agent_ref, level: int, **fields) -> None:
+    """改 level 这一行的字段"""
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(agent_ref.comp_cls)
+        row = await repo.get(level=level)
+        assert row
+        for key, value in fields.items():
+            setattr(row, key, value)
+        await repo.update(row)
+    await backend.wait_for_synced()
+
+
+@both_hub_modes
+async def test_hidden_fields_not_pushed(
+    broker: SubscriptionBroker, agent_ref, admin_ctx
+):
+    """行、范围、整表订阅推给客户端的行都不带 hidden 字段（管理员也一样），更新也不带；
+    只改了 hidden 字段的写入客户端看不出变化，三种订阅都不推"""
+    backend = broker._backend
+    get_id, row = await broker.subscribe_get(agent_ref, admin_ctx, "level", 1)
+    range_id, rows = await broker.subscribe_range(
+        agent_ref, admin_ctx, "level", 1, 4, limit=10
+    )
+    table_id, table_rows = await broker.subscribe_table(agent_ref, admin_ctx)
+    assert get_id and range_id and table_id and row
+    assert len(rows) == 4 and len(table_rows) == 4
+    for shown in (row, *rows, *table_rows):
+        assert set(shown) == AGENT_SHOWN
+    row_id = row["id"]
+
+    await modify_agent(backend, agent_ref, 1, hp=50, secret=7)
+    expect = {"id": row_id, "level": 1, "hp": 50}
+
+    def pushed(merged):
+        for sub_id in (get_id, range_id, table_id):
+            assert merged[sub_id][row_id] == expect
+
+    await updates_until(broker, pushed)
+
+    # 整表订阅只和上一批读过的比（level 1 刚推过），level 2 靠 commit 不发表频道才不推
+    await modify_agent(backend, agent_ref, 1, secret=8, role="seer")
+    await modify_agent(backend, agent_ref, 2, secret=9)
+    assert await broker.get_updates(timeout=1) == {}
+
+
+async def test_hidden_rls_field(broker: SubscriptionBroker, agent_ref, user_id10_ctx):
+    """RLS 判定用的 owner 是 hidden 的：照样按它过滤、不推给客户端。重复订阅（私有订阅重读
+    一遍）也是先判 RLS 再去掉 hidden 字段。只改它也会让行不可见，三种订阅都推 None"""
+    backend = broker._backend
+    get_id, row = await broker.subscribe_get(agent_ref, user_id10_ctx, "level", 1)
+    range_id, rows = await broker.subscribe_range(
+        agent_ref, user_id10_ctx, "level", 1, 4, limit=10
+    )
+    table_id, table_rows = await broker.subscribe_table(agent_ref, user_id10_ctx)
+    assert get_id and range_id and table_id and row
+    assert sorted(r["level"] for r in rows) == [1, 2, 3]
+    assert sorted(r["level"] for r in table_rows) == [1, 2, 3]
+
+    assert await broker.subscribe_get(agent_ref, user_id10_ctx, "id", row["id"]) == (
+        get_id,
+        row,
+    )
+    sub_again, rows_again = await broker.subscribe_range(
+        agent_ref, user_id10_ctx, "level", 1, 4, limit=10
+    )
+    assert sub_again == range_id
+    assert sorted(r["level"] for r in rows_again) == [1, 2, 3]
+    sub_again, table_again = await broker.subscribe_table(agent_ref, user_id10_ctx)
+    assert sub_again == table_id and len(table_again) == 3
+    for shown in (row, *rows, *table_rows, *rows_again, *table_again):
+        assert set(shown) == AGENT_SHOWN
+
+    row_id = row["id"]
+    await modify_agent(backend, agent_ref, 1, owner=11)
+
+    def gone(merged):
+        for sub_id in (get_id, range_id, table_id):
+            assert merged[sub_id][row_id] is None
+
+    await updates_until(broker, gone)
+
+
+async def test_hidden_index_query_rejected(
+    broker: SubscriptionBroker, agent_ref, admin_ctx, caplog
+):
+    """不能按 hidden 字段订阅（管理员也不行）：不推它的值，查询条件照样能试探出来"""
+    assert await broker.subscribe_get(agent_ref, admin_ctx, "role", "wolf") == (
+        None,
+        None,
+    )
+    assert await broker.subscribe_range(agent_ref, admin_ctx, "role", "wolf") == (
+        None,
+        [],
+    )
+    assert broker.count() == (0, 0, 0)
+    assert not broker._hub.mq.subscribed_channels
+    assert "Agent.role" in caplog.text and "hidden" in caplog.text
