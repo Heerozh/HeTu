@@ -205,6 +205,8 @@ elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 kick_logged_in:
     如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
     断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
+    被顶掉的连接的 `on_disconnect` 以匿名身份（`ctx.caller == 0`）运行，不会动已在新连接
+    上的这个用户。
 
 
 
