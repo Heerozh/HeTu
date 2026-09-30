@@ -222,6 +222,17 @@ class PlayerName(hetu.BaseComponent):
 
 所以 `系统` 在把数据返回给客户端、或按客户端传来的参数改动别人的行之前，要自己校验调用者有没有这个权限。比如拉取频道历史消息的 `系统`，要先确认 `ctx.caller` 是该频道的成员，再读取消息返回。
 
+要对客户端藏起某一列（服务端内部状态、隐藏身份这类），在该字段上声明 `hidden=True`：
+
+```python
+@hetu.define_component(namespace="Game", permission=hetu.Permission.EVERYBODY)
+class Player(hetu.BaseComponent):
+    name: str = hetu.property_field("", dtype="U32")
+    role: str = hetu.property_field("", dtype="U16", index=True, hidden=True)
+```
+
+订阅（`select` / `range` / 整表订阅）推给客户端的行都不带 `hidden` 的列，管理员连接也一样；只改了 `hidden` 列的写入客户端看不出变化，不推送。客户端也不能按 `hidden` 的列订阅：就算不推它的值，按 `role` 等于 `"werewolf"` 做 `range` 这样的查询条件本身就能把它试探出来，所以它也不能声明 `point_sub`。和行级权限一样，`hidden` 只管订阅：`系统` 里照常读写，`ResponseToClient` 返回的数据不过滤；`hetu build` 生成的客户端类不含这一列。改动 `hidden` 和改权限一样要跑 `hetu upgrade`（只更新 schema 版本，不搬数据）。
+
 ## 事务
 
 每次 `系统` 调用都会打开一个 `会话`。一个会话持有一个 `IdentityMap`（接触到的行集），通过每个 `组件` 的 `SessionRepository` 路由读写，并在最后原子性地提交所有写入。如果两个会话在某一行上冲突，则第二个提交的会话会引发 `RaceCondition`，引擎会重试。

@@ -22,7 +22,7 @@ Everything an app touches is exported at the top level:
 | Symbol                                                                               | Role                                                     |
 |--------------------------------------------------------------------------------------|----------------------------------------------------------|
 | `@define_component(namespace=, permission=, backend=, volatile=)`                    | Declare a typed table                                    |
-| `property_field(default, dtype=, index=, unique=)`                                   | Declare a column                                         |
+| `property_field(default, dtype=, index=, unique=, hidden=)`                          | Declare a column                                         |
 | `BaseComponent`                                                                      | Base class for a component; `.new_row()`, `.new_rows(n)` |
 | `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC                              |
 | `@define_endpoint(namespace=, permission=)`                                          | Declare a raw (non-transactional) RPC                    |
@@ -97,6 +97,10 @@ working examples — read them first.
   and `ResponseToClient` data is not filtered, so check the caller yourself
   (e.g. channel membership before returning chat history).
   `elevate(ctx, user_id)` is how a login System authenticates a connection.
+- **Hidden columns** — `property_field(..., hidden=True)` keeps a column out of
+  every subscription push (admins included; writes touching only hidden columns
+  push nothing), and clients may not subscribe by it. Systems still read/write
+  it, and `ResponseToClient` data is not filtered.
 - **Subscriptions** — clients `select` one row (by unique key) or `range` over an
   indexed column; the server pushes deltas via Redis pub/sub, permission-filtered.
   No polling.
