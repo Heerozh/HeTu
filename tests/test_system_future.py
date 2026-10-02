@@ -937,3 +937,115 @@ async def test_future_call_task_cleans_expired_call_locks(
         return await _lock_uuids(lock_tbl) == ["fresh"]
 
     assert await _run_future_task_until(tbl_mgr, expired_gone, timeout=4)
+
+
+async def test_clean_expired_call_locks_in_batches(monkeypatch, test_app, tbl_mgr):
+    """过期的锁多于一批时连续分批清完"""
+    from hetu.system import lock
+    from hetu.system.lock import SystemLock
+
+    monkeypatch.setattr(lock, "CLEAN_BATCH", 2)
+    lock_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "add_rls_comp_value"))
+    for i in range(9):
+        await _add_call_lock(lock_tbl, f"old{i}", 3600)
+    await _add_call_lock(lock_tbl, "fresh", 0)
+    await lock_tbl.backend.wait_for_synced()
+
+    assert await lock.clean_expired_call_locks(tbl_mgr, 60) == 9
+    assert await _lock_uuids(lock_tbl) == ["fresh"]
+
+
+async def test_clean_expired_call_locks_yields_on_race(test_app, tbl_mgr):
+    """清锁撞竞态（别的 worker 也在清这张表）：让给别人清，不抛异常"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system.lock import SystemLock, clean_expired_call_locks
+
+    lock_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "add_rls_comp_value"))
+    await _add_call_lock(lock_tbl, "old", 3600)
+    await lock_tbl.backend.wait_for_synced()
+
+    async def race(_idmap):
+        raise RaceCondition("RACE: 别的 worker 也在清")
+
+    with patch.object(lock_tbl.backend.master, "commit", new=race):
+        assert await clean_expired_call_locks(tbl_mgr, 60) == 0
+    assert await _lock_uuids(lock_tbl) == ["old"]
+
+
+@pytest.mark.timeout(30)
+async def test_future_call_task_startup_sweeps_week_old_locks(
+    monkeypatch, test_app, tbl_mgr
+):
+    """worker 启动时兜底清一次 7 天前的 call lock（定期清理不碰的 on_start 锁靠它清）"""
+    from hetu.system import future
+    from hetu.system.lock import SystemLock
+
+    monkeypatch.setattr(future, "CALL_LOCK_CLEAN_INTERVAL", 3600)  # 只看启动时那次
+    lock_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "add_rls_comp_value"))
+    await _add_call_lock(lock_tbl, "week-old", 8 * 24 * 3600)
+    await _add_call_lock(lock_tbl, "fresh", 3600)
+
+    async def swept():
+        return await _lock_uuids(lock_tbl) == ["fresh"]
+
+    assert await _run_future_task_until(tbl_mgr, swept, timeout=4)
+
+
+async def test_run_due_calls_drain_limit_per_table(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """一张表一轮最多连续执行 DRAIN_PER_TABLE 条就去看别的表，剩下的下一轮接着执行"""
+    from hetu.system import future
+
+    monkeypatch.setattr(future, "DRAIN_PER_TABLE", 2)
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    callers = _task_callers(tbl_mgr)
+    await _insert_due_calls(fc_tbl, new_ctx(), 3)
+
+    assert await future.run_due_calls([fc_tbl], callers) == 0
+    assert await _counter_value(tbl_mgr, test_app) == 102
+    await fc_tbl.backend.wait_for_synced()
+    assert await future.run_due_calls([fc_tbl], callers) == 0
+    assert await _counter_value(tbl_mgr, test_app) == 103
+
+
+async def test_run_due_calls_retries_soon_when_due_call_taken(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """看到有到期的却一条没取到（被别的 worker 抢先、副本还没同步）：隔
+    CONTENDED_RETRY_DELAY 秒就再扫，不睡满 1 秒"""
+    from hetu.system import future
+
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+
+    async def taken_by_others(_tbl):
+        return None
+
+    monkeypatch.setattr(future, "pop_upcoming_call", taken_by_others)
+    frozen = time.time()
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    delay = await future.run_due_calls([fc_tbl], _task_callers(tbl_mgr))
+    assert delay == pytest.approx(future.CONTENDED_RETRY_DELAY)
+
+
+async def test_pop_upcoming_call_error_before_row_read(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """读行时就出错（如后端断线）：原样抛出；还没读到是哪条，不挂调用信息"""
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+
+    def broken_get(*_args, **_kwargs):
+        raise ConnectionError("读行时后端断线")
+
+    backend = fc_tbl.backend
+    for client in (backend.master, backend.servant):
+        monkeypatch.setattr(type(client), "get", broken_get)
+    with pytest.raises(ConnectionError) as exc_info:
+        await pop_upcoming_call(fc_tbl)
+    assert not getattr(exc_info.value, "__notes__", None)

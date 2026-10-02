@@ -329,6 +329,9 @@ def test_sortable_bytes_round_trip():
             value = dtype.type(v)
             got = from_sortable_bytes(dtype, to_sortable_bytes(value))
             assert type(got) is dtype.type and got == value, (dtype, v, got)
+    # 复数等不能当索引的类型
+    with pytest.raises(AssertionError):
+        from_sortable_bytes(np.dtype(np.complex128), b"\x00" * 16)
 
 
 async def test_range_index_reads_values_without_rows(
