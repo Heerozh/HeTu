@@ -529,14 +529,11 @@ async def test_exec_future_call_system_error_keeps_call(
 async def test_pop_upcoming_call_error_names_the_call(
     monkeypatch, test_app, tbl_mgr, executor
 ):
-    """取出事务失败（如一直竞态、重试耗尽）时，异常要带上正在取出的是哪条调用：
-    call 出了 pop_upcoming_call 就没了，任务循环的错误日志只剩一句重试耗尽"""
+    """取出事务失败（竞态以外的错误，如后端断线）时，异常要带上正在取出的是哪条调用：
+    call 出了 pop_upcoming_call 就没了，任务循环的错误日志里看不出是哪条"""
     import traceback
-    from types import SimpleNamespace
     from unittest.mock import patch
 
-    from hetu.data.backend import session as session_mod
-    from hetu.data.backend.base import RaceCondition
     from hetu.system.future import FutureCalls, _build_future_row, pop_upcoming_call
 
     await executor.execute("login", 1020)
@@ -546,24 +543,95 @@ async def test_pop_upcoming_call_error_names_the_call(
     )
     await _insert_future_row(fc_tbl, row)
 
-    async def always_race(_idmap):
-        raise RaceCondition("RACE: 每次都被别的 worker 抢先")
+    async def broken_commit(_idmap):
+        raise ConnectionError("提交时后端断线")
 
-    async def no_backoff(_delay):
-        pass
-
-    monkeypatch.setattr(session_mod, "asyncio", SimpleNamespace(sleep=no_backoff))
     last_time = time.time() + 2
     monkeypatch.setattr(time, "time", lambda: last_time)
     with (
-        patch.object(fc_tbl.backend.master, "commit", new=always_race),
-        pytest.raises(RuntimeError) as exc_info,
+        patch.object(fc_tbl.backend.master, "commit", new=broken_commit),
+        pytest.raises(ConnectionError) as exc_info,
     ):
         await pop_upcoming_call(fc_tbl)
     # 任务循环用 logger.exception 记日志，打出来的就是这段 traceback
     logged = "".join(traceback.format_exception(exc_info.value))
     assert "add_rls_comp_value(4,)" in logged
     assert str(row.id) in logged
+
+
+@pytest.mark.timeout(20)
+async def test_pop_upcoming_call_gives_up_on_race_without_error(
+    test_app, tbl_mgr, new_ctx
+):
+    """取出时一直撞竞态（每次都被别的 worker 抢先）：放弃、返回 None，下一轮再取。多 worker 抢
+    同一批到期调用时这是常态，不该变成任务循环里的一条错误日志外加 1 秒退避，也不该做
+    0.1~1.6 秒的指数退避"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+
+    async def always_race(_idmap):
+        raise RaceCondition("RACE: 每次都被别的 worker 抢先")
+
+    started = time.monotonic()
+    with patch.object(fc_tbl.backend.master, "commit", new=always_race):
+        assert await pop_upcoming_call(fc_tbl) is None
+    assert time.monotonic() - started < 0.5
+
+
+async def test_pop_upcoming_call_skips_call_taken_by_other_worker(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """读到索引之后、读行之前，这条已被别的 worker 取走（scheduled 已顺延、版本 +1）：读回的行
+    已不到期，不能再取走它。提交时的版本校验拦不住（读回的就是新版本），只能核对读回的
+    scheduled；否则两个 worker 都拿到这一条，各执行一遍"""
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    (taken,) = await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    state = _take_after_index_read(monkeypatch, fc_tbl, int(taken.id))
+
+    assert await pop_upcoming_call(fc_tbl) is None
+    assert state["taken"]
+    # 还是别人的租约，没被改写
+    row = await _get_future_row(fc_tbl, taken.id)
+    assert row is not None and row.scheduled > time.time() + 500
+
+
+async def test_exec_future_call_retries_delete_on_race(test_app, tbl_mgr, new_ctx):
+    """执行成功后删行撞竞态（读到滞后副本上的旧版本，或这条刚被超时重投改了版本）：要重试删掉，
+    不能把 RaceCondition 抛给任务循环（那会记一条错误、退避 1 秒，还跳过后面的收尾）"""
+    from unittest.mock import patch
+
+    from hetu.data.backend.base import RaceCondition
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    (row,) = await _insert_due_calls(fc_tbl, new_ctx(), 1, value=4)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call is not None and call.id == row.id
+
+    master = fc_tbl.backend.master
+    orig_commit = master.commit
+    raced = []
+
+    async def race_once_on_delete(idmap):
+        ref = idmap.first_reference()
+        if not raced and ref is not None and ref.comp_cls is fc_tbl.comp_cls:
+            raced.append(ref)
+            raise RaceCondition("RACE: Version mismatch（模拟读到滞后副本）")
+        return await orig_commit(idmap)
+
+    caller = _task_callers(tbl_mgr)["server1"]
+    with patch.object(master, "commit", new=race_once_on_delete):
+        assert await exec_future_call(call, caller, fc_tbl)
+    assert raced
+    assert await _get_future_row(fc_tbl, row.id) is None
+    assert await _counter_value(tbl_mgr, test_app) == 104
 
 
 def test_key_to_id_properties():
