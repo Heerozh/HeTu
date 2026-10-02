@@ -192,7 +192,15 @@ def test_new_file_initialized_by_another_process_while_checking(tmp_path, monkey
     """
     path = str(tmp_path / "new.db")
     real_connect = sqlite3.connect
-    other = threading.Thread(target=lambda: open_store(path, 5000).close())
+    other_errors: list[Exception] = []
+
+    def open_other():
+        try:
+            open_store(path, 5000).close()
+        except Exception as exc:  # noqa: BLE001 线程里的异常 pytest 只报警告，带回主线程判
+            other_errors.append(exc)
+
+    other = threading.Thread(target=open_other)
     wrapped: list[bool] = []
 
     class RacingConn:
@@ -227,9 +235,48 @@ def test_new_file_initialized_by_another_process_while_checking(tmp_path, monkey
     finally:
         if other.ident is not None:  # 起过才 join
             other.join()
+    assert other_errors == []  # 两个都要打开成功
     conn = real_connect(path)
     try:
         assert conn.execute("PRAGMA application_id").fetchone()[0] == APPLICATION_ID
+    finally:
+        conn.close()
+
+
+def test_switching_to_wal_waits_for_write_lock(tmp_path):
+    """
+    库还是回滚日志模式时，切 WAL 要拿着读锁再升写锁，被别的连接的写锁挡住时 SQLite 不调
+    busy handler、直接报 database is locked。几个 worker 同时打开新库、一起切 WAL 时就会这样：
+    开库要按 busy_timeout 等对方放锁，不能直接失败
+    """
+    path = tmp_path / "hetu.db"
+    _make_db(
+        path,
+        f"PRAGMA application_id={APPLICATION_ID}",
+        f"PRAGMA user_version={FORMAT_VERSION}",
+    )
+    holding = threading.Event()
+
+    def hold_write_lock():
+        conn = sqlite3.connect(path, isolation_level=None)  # 连接只能在打开它的线程里用
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            holding.set()
+            time.sleep(0.3)
+            conn.execute("ROLLBACK")
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=hold_write_lock)
+    thread.start()
+    try:
+        assert holding.wait(3)
+        open_store(str(path), 5000).close()
+    finally:
+        thread.join()
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         conn.close()
 
