@@ -356,7 +356,11 @@ What each field is for:
   administrator (skipping RLS row filters and allowing
   `Permission.ADMIN`-gated calls). Setting `ctx.group = "admin"` from a
   trusted login `System` is how you grant admin in HeTu — there is no
-  separate token-based admin endpoint.
+  separate token-based admin endpoint. A value starting with `"gm"` marks
+  a GM: once logged in, it may call `Permission.GM`-gated
+  `Systems`/`Endpoints`, and otherwise reads data like an ordinary player
+  (RLS still filters its subscriptions, no `ADMIN` `Components`). Set
+  `ctx.group = "gm"` in the login `System` after `elevate`.
 - **`ctx.client_limits` / `ctx.server_limits`** — list of `[max_count,
   window_seconds]` pairs. The engine tears the connection down once any
   pair is exceeded. `elevate()` automatically multiplies these limits by
