@@ -302,3 +302,87 @@ def test_normalize_int_bounds():
     assert norm(0, True, 2**64, True, np.dtype(np.int64)) == (0, 2**63 - 1)
     with pytest.raises(ValueError):
         norm(float("nan"), True, 1, True)
+
+
+def test_sortable_bytes_round_trip():
+    """from_sortable_bytes 是 to_sortable_bytes 的逆：索引 member 里就能解出原值，不用再读行"""
+    import numpy as np
+
+    from hetu.data.backend.base import from_sortable_bytes, to_sortable_bytes
+
+    inf = float("inf")
+    cases = {
+        np.int8: [-128, -1, 0, 1, 127],
+        np.int16: [-32768, 0, 32767],
+        np.int32: [-(2**31), -7, 0, 2**31 - 1],
+        np.int64: [-(2**63), -1, 0, 1, 2**63 - 1],
+        np.uint32: [0, 5, 2**32 - 1],
+        np.uint64: [0, 2**64 - 1],
+        np.float32: [-inf, -1.5, 0.0, 0.1, inf],
+        np.float64: [-inf, -1e300, -1.5, 0.0, 1759400000.123, inf],
+        "U8": ["", "abc", "a\x00b", "中文"],
+        "S8": [b"", b"a\x00b", b"\xff\x01"],
+    }
+    for typ, values in cases.items():
+        dtype = np.dtype(typ)
+        for v in values:
+            value = dtype.type(v)
+            got = from_sortable_bytes(dtype, to_sortable_bytes(value))
+            assert type(got) is dtype.type and got == value, (dtype, v, got)
+
+
+async def test_range_index_reads_values_without_rows(
+    nums, mod_auto_backend, monkeypatch
+):
+    """range_index_ 只读索引：按索引顺序返回 (值, 行 id)，值从 member 里解出、与存的一致，
+    不去读行"""
+    backend: Backend = mod_auto_backend()
+    ref, tags = nums
+    by_tag = {tag: row_id for row_id, tag in tags.items()}
+
+    def no_row_reads(*_args, **_kwargs):
+        raise AssertionError("range_index_ 不该读行")
+
+    for client in (backend.master, backend.servant):
+        monkeypatch.setattr(type(client), "hgetall_many_", no_row_reads)
+
+    for col, field in enumerate(("i8", "i16", "u32", "i64")):
+        got = await backend.servant.range_index_(
+            ref, field, -(2**63), 2**63 - 1, limit=-1
+        )
+        expected = sorted((NUM_ROWS[tag][col], by_tag[tag]) for tag in NUM_ROWS)
+        assert [(int(value), row_id) for value, row_id in got] == expected, field
+
+    # limit / desc 与 range 一致
+    got = await backend.servant.range_index_(
+        ref, "i64", -(2**63), 2**63 - 1, limit=2, desc=True
+    )
+    assert [row_id for _value, row_id in got] == [by_tag["A"], by_tag["B"]]
+    assert await backend.servant.range_index_(ref, "i64", 2, 3, limit=-1) == []
+
+
+async def test_range_index_float_and_str(item_ref, mod_auto_backend):
+    """浮点、字符串索引同样从 member 解值"""
+    import numpy as np
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    rows = [
+        _item(comp, time=1, name="b", model=-1.5),
+        _item(comp, time=2, name="a", model=0.1),
+        _item(comp, time=3, name="中", model=3.25),
+    ]
+    await _insert_rows(backend, comp, *rows)
+    ids = [int(row.id) for row in rows]
+
+    got = await backend.servant.range_index_(item_ref, "model", -10, 10, limit=-1)
+    assert [(float(value), row_id) for value, row_id in got] == [
+        (-1.5, ids[0]),
+        (float(np.float32(0.1)), ids[1]),
+        (3.25, ids[2]),
+    ]
+    got = await backend.servant.range_index_(item_ref, "name", "a", "b", limit=-1)
+    assert [(str(value), row_id) for value, row_id in got] == [
+        ("a", ids[1]),
+        ("b", ids[0]),
+    ]

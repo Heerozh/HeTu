@@ -37,75 +37,208 @@ async def test_future_call_create(test_app, tbl_mgr, executor: EndpointExecutor)
         assert rows[0].owner == 1020
 
 
-class _SleepSpy:
-    """替身 asyncio 模块：记下 sleep 请求的时长，其余属性照旧转给 asyncio"""
+def _task_app(tbl_mgr):
+    """future_call_task 只用到 app.ctx.table_managers 与 app.config["NAMESPACE"]"""
+    from types import SimpleNamespace
 
-    def __init__(self):
-        self.delays = []
-
-    def __getattr__(self, name):
-        return getattr(asyncio, name)
-
-    async def sleep(self, delay, result=None):
-        self.delays.append(delay)
-        return await asyncio.sleep(delay, result)
+    return SimpleNamespace(
+        ctx=SimpleNamespace(table_managers={"server1": tbl_mgr}),
+        config={"NAMESPACE": "pytest"},
+    )
 
 
-async def test_sleep_for_upcoming(
-    monkeypatch, test_app, tbl_mgr, executor: EndpointExecutor
-):
-    """测试sleep_for_upcoming的等待逻辑是否正确"""
-    time_time = time.time
+def _task_callers(tbl_mgr):
+    """同 future_call_task 里的执行器：内部服务身份（caller=0）"""
+    from hetu.system import SystemContext
+    from hetu.system.caller import SystemCaller
 
-    # 创建一个未来调用
+    context = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="localhost",
+        group="guest",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    return {"server1": SystemCaller("pytest", tbl_mgr, context)}
+
+
+async def _counter_value(tbl_mgr, test_app) -> int:
+    """future_call_task 以 caller=0 执行 add_rls_comp_value：累加在 owner=0 那行（默认 100）"""
+    tbl = tbl_mgr.get_table(test_app.RLSComp)
+    async with tbl.session() as session:
+        row = await session.using(test_app.RLSComp).get(owner=0)
+    return 100 if row is None else int(row.value)
+
+
+async def _insert_due_calls(fc_tbl, ctx, n, *, value=1, timeout=10, ago=5.0):
+    """插入 n 条已到期的 add_rls_comp_value(value) 调用（按插入顺序依次到期），等副本同步"""
+    from hetu.system.future import _build_future_row
+
+    now = time.time()
+    rows = []
+    async with fc_tbl.session() as session:
+        repo = session.using(fc_tbl.comp_cls)
+        for i in range(n):
+            row = _build_future_row(
+                ctx,
+                now - ago + i * 0.001,
+                "add_rls_comp_value",
+                (value,),
+                timeout=timeout,
+            )
+            await repo.insert(row)
+            rows.append(row)
+    await fc_tbl.backend.wait_for_synced()
+    return rows
+
+
+async def _run_future_task_until(tbl_mgr, done, timeout: float) -> bool:
+    """跑 future_call_task，直到 done() 为真或超时；返回 done() 的最终结果"""
+    import contextlib
+
     from hetu.system import future
+
+    task = asyncio.create_task(future.future_call_task(_task_app(tbl_mgr)))
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if await done():
+                return True
+            await asyncio.sleep(0.05)
+        return await done()
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+def _take_after_index_read(monkeypatch, fc_tbl, victim_id, lease=600.0):
+    """
+    模拟另一个 worker 抢先取走 victim：本进程第一次读到 fc_tbl 的 scheduled 索引（ZRANGE）
+    之后、读行之前，把 victim 取走（scheduled 顺延 lease 秒、版本 +1），并等副本同步完。
+    索引和行是两次往返，这正是中间被别人取走的时机。
+    """
+    backend = fc_tbl.backend
+    client_cls = type(backend.master)
+    orig = client_cls.zrange_bylex_
+    idx_key = client_cls.index_key(fc_tbl, "scheduled")
+    state = {"taken": False}
+
+    async def zrange_then_take(self, key, *args, **kwargs):
+        members = await orig(self, key, *args, **kwargs)
+        if key == idx_key and not state["taken"]:
+            state["taken"] = True
+            async with fc_tbl.session() as session:
+                repo = session.using(fc_tbl.comp_cls)
+                row = await repo.get(id=victim_id)
+                assert row is not None
+                row.scheduled = time.time() + lease
+                row.last_run = time.time()
+                await repo.update(row)
+            await backend.wait_for_synced()
+        return members
+
+    monkeypatch.setattr(client_cls, "zrange_bylex_", zrange_then_take)
+    return state
+
+
+async def test_next_due_reads_scheduled_from_index(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """next_due 返回 horizon 之前最早一条的 scheduled，只读索引（值从 member 解出），不读行：
+    读行是第二次往返，中间那行可能已被别的 worker 取走、scheduled 改到 timeout 之后"""
+    from hetu.system.future import FutureCalls, next_due
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    assert await next_due(fc_tbl, time.time() + 1) is None
+
+    (row,) = await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    scheduled = float(row.scheduled)
+
+    def no_row_reads(*_args, **_kwargs):
+        raise AssertionError("next_due 不该读行")
+
+    backend = fc_tbl.backend
+    for client in (backend.master, backend.servant):
+        monkeypatch.setattr(type(client), "hgetall_many_", no_row_reads)
+        monkeypatch.setattr(type(client), "get", no_row_reads)
+    assert await next_due(fc_tbl, time.time() + 1) == scheduled
+    assert await next_due(fc_tbl, scheduled - 1) is None
+
+
+async def test_run_due_calls_wake_time(test_app, tbl_mgr, new_ctx):
+    """一轮扫描：执行所有表里到期的调用；返回距下次该扫的秒数——处理过调用就马上再扫（0），
+    没有到期的就睡到最早那条，最多 1 秒"""
+    from hetu.system.future import FutureCalls, _build_future_row, run_due_calls
+
+    tables = [
+        tbl_mgr.get_table(FutureCalls),
+        tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1")),
+    ]
+    callers = _task_callers(tbl_mgr)
+
+    delay = await run_due_calls(tables, callers)
+    assert 0.9 <= delay <= 1.0
+
+    await _insert_due_calls(tables[1], new_ctx(), 2)
+    assert await run_due_calls(tables, callers) == 0
+    assert await _counter_value(tbl_mgr, test_app) == 102
+
+    async with tables[0].session() as session:
+        row = _build_future_row(
+            new_ctx(), time.time() + 0.5, "add_rls_comp_value", (1,), timeout=10
+        )
+        await session.using(tables[0].comp_cls).insert(row)
+    await tables[0].backend.wait_for_synced()
+    delay = await run_due_calls(tables, callers)
+    assert 0.3 < delay <= 0.5
+
+
+@pytest.mark.timeout(30)
+async def test_future_call_task_drains_due_calls_across_tables(
+    test_app, tbl_mgr, new_ctx
+):
+    """有多张 FutureCalls 表（主表 + 副本）时，某张表积压的到期调用要连续执行完，不能每处理
+    一条就随机换一张表、碰上空表再睡 1 秒（K 张表时吞吐只有 worker 数 / (K-1) 条每秒）"""
     from hetu.system.future import FutureCalls
 
-    # 断言请求的睡眠时长，而不是量墙钟：墙钟里还含一次后端查询，CI 负载高时
-    # 光查询就能超过 0.1 秒
-    spy = _SleepSpy()
-    monkeypatch.setattr(future, "asyncio", spy)
+    assert (
+        tbl_mgr.get_table(FutureCalls) is not None
+    )  # 主表恒在：global 的 System 引用它
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    n = 20
+    await _insert_due_calls(fc_tbl, new_ctx(), n)
 
-    await executor.execute("login", 1020)
+    async def all_done():
+        return await _counter_value(tbl_mgr, test_app) >= 100 + n
 
-    FutureCallsTableCopy1 = FutureCalls.duplicate("pytest", "copy1")
-    fc_tbl = tbl_mgr.get_table(FutureCallsTableCopy1)
+    assert await _run_future_task_until(tbl_mgr, all_done, timeout=4)
+    assert await _counter_value(tbl_mgr, test_app) == 100 + n
 
-    ok, uuid = await executor.execute("add_rls_comp_value_future", 4, False)
 
-    # 获取任务到期时间
-    async with fc_tbl.session() as session:
-        repo = session.using(FutureCallsTableCopy1)
-        expire_time = time_time() + 1.1
-        rows = await repo.range("scheduled", 0, expire_time, limit=1)
-        expire_time = rows[0].scheduled
+@pytest.mark.timeout(30)
+async def test_future_call_task_not_stalled_by_call_taken_between_reads(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """最早到期的调用在"读索引"和"读行"之间被别的 worker 取走（scheduled 已顺延 timeout）：
+    不能按读到的新 scheduled 去睡（会睡 timeout 秒，长周期的 recurring 甚至一小时），
+    后面到期的调用要照常执行"""
+    from hetu.system.future import FutureCalls
 
-    # 测试sleep_for_upcoming(等待下一个到期任务)是否正常
-    from hetu.system.future import sleep_for_upcoming
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    taken, _other = await _insert_due_calls(fc_tbl, new_ctx(), 2)
+    state = _take_after_index_read(monkeypatch, fc_tbl, int(taken.id))
 
-    start = time_time()
-    have_task = await sleep_for_upcoming(fc_tbl)
-    # 睡到了任务到期时间，且没多睡
-    assert time_time() > expire_time
-    assert spy.delays[-1] <= expire_time - start
-    assert have_task
+    async def other_done():
+        return await _counter_value(tbl_mgr, test_app) >= 101
 
-    # 已到期，再调用不应再睡
-    have_task = await sleep_for_upcoming(fc_tbl)
-    assert spy.delays[-1] <= 0
-    assert have_task
-
-    # 删除未来任务
-    from hetu.system.future import pop_upcoming_call
-
-    call = await pop_upcoming_call(fc_tbl)
-    assert call
-    assert call.id == uuid
-
-    # 再次调用sleep应该返回无任务False，并睡1秒
-    have_task = await sleep_for_upcoming(fc_tbl)
-    assert spy.delays[-1] == 1
-    assert not have_task
+    assert await _run_future_task_until(tbl_mgr, other_done, timeout=4)
+    assert state["taken"]
+    # 被取走的那条归别人执行，本 worker 只执行了另一条
+    assert await _counter_value(tbl_mgr, test_app) == 101
 
 
 async def test_pop_upcoming_call(
@@ -580,23 +713,18 @@ async def test_future_call_task_backs_off_on_persistent_error(
     """后端已关闭（或任何持续报错）时，future_call_task 不能空转刷屏：
     出错后要退避再重试（否则同步抛出的异常让循环永不挂起，事件循环被饿死，
     Sanic 关服时连 CancelledError 都送不进去）。"""
-    import asyncio
-    from types import SimpleNamespace
-
+    from hetu.data.backend import Backend
     from hetu.system import future
 
     calls = {"n": 0}
 
-    async def broken_sleep_for_upcoming(_tbl):
+    def broken_servant(_self):
+        # 主循环每轮先去 servant 上看有没有到期的：后端关了，这里同步抛出
         calls["n"] += 1
         raise ConnectionError("连接已关闭，已调用过close")
 
-    monkeypatch.setattr(future, "sleep_for_upcoming", broken_sleep_for_upcoming)
-    app = SimpleNamespace(
-        ctx=SimpleNamespace(table_managers={"server1": tbl_mgr}),
-        config={"NAMESPACE": "pytest"},
-    )
-    task = asyncio.create_task(future.future_call_task(app))
+    monkeypatch.setattr(Backend, "servant", property(broken_servant))
+    task = asyncio.create_task(future.future_call_task(_task_app(tbl_mgr)))
     await asyncio.sleep(2.5)  # 若循环不让出，这一句永远回不来（timeout 兜底）
     assert calls["n"] <= 4, calls  # 退避 1 s：2.5 s 内最多两三次
     task.cancel()
