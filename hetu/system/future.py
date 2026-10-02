@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from ..data import BaseComponent, Permission, define_component, property_field
+from ..data.backend import RaceCondition, RowFormat
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from ..i18n import _
 from .caller import SystemCaller
@@ -335,48 +336,67 @@ async def next_due(tbl: Table, horizon: float) -> float | None:
     return float(upcoming[0][0]) if upcoming else None
 
 
-async def pop_upcoming_call(tbl: Table):
-    """取出并修改到期任务"""
-    call = None
-    try:
-        async for attempt in tbl.session().retry(5):
-            async with attempt as session:
-                repo = session.using(tbl.comp_cls)
-                # 取出最早到期的任务。不做区间校验：取哪一条不依赖区间里没有别的行，并发取同一条
-                # 由它的版本校验管；否则不断有新的到期任务插进来时会反复判竞态
-                now = time.time()
-                calls = await repo.range(
-                    scheduled=(0, now + 0.1), limit=1, phantom_check=False
-                )
-                # 检查可能被其他worker消费了
-                if calls.size == 0:
-                    return None
-                call = calls[0]
-                # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+# 出队时从最早到期的这么多条里随机挑一条：多个 worker 同时出队时不全挤在最早那一条上撞车
+POP_CANDIDATES = 8
+# 出队撞竞态（被别的 worker 抢先）最多换几次；都没抢到就放弃，下一轮再取
+POP_ATTEMPTS = 5
+# 撞竞态后换一条之前随机等这么久以内，错开同时撞车的 worker
+POP_RACE_JITTER = 0.005
+
+
+async def pop_upcoming_call(tbl: Table) -> np.record | None:
+    """
+    取出一条到期的调用：scheduled 顺延 timeout 秒作为租约（到时还没执行完、没删掉就会重投），
+    timeout 为 0 的直接删。没有到期的、或到期的都被别的 worker 抢走了，返回 None。
+    """
+    comp_cls = tbl.comp_cls
+    for _attempt in range(POP_ATTEMPTS):
+        now = time.time()
+        # 候选只读索引拿 id，不进事务：区间里不断有新的到期调用插进来，读进事务会反复判竞态
+        candidates = await tbl.backend.master_or_servant.range(
+            tbl, "scheduled", 0, now + 0.1, POP_CANDIDATES, False, RowFormat.ID_LIST
+        )
+        if not candidates:
+            return None
+        call = None
+        try:
+            async with tbl.session() as session:
+                repo = session.using(comp_cls)
+                call = await repo.get(id=random.choice(candidates))
+                # 读索引和读行是两次往返，中间这条可能已被别的 worker 取走（scheduled 已顺延）
+                # 或执行完删掉了。读回的行必须仍然到期：提交时的版本校验只保证读回之后没人再改
+                # 它，拦不住读回之前就被取走的，那样两个 worker 会各执行一遍
+                if call is None or call.scheduled > now + 0.1:
+                    continue
                 if call.timeout == 0:
                     repo.delete(call.id)
                 else:
                     call.scheduled = now + call.timeout
                     call.last_run = now
                     await repo.update(call)
-    except Exception as e:
-        # call 出了本函数就没了，挂到异常上，任务循环记的 traceback 末尾才有是哪条调用。
-        # scheduled/last_run 已被上面就地改成要写入的值，不打
-        if call is not None:
-            e.add_note(
-                _(
-                    "[⚙️Future] 正在取出的调用：{system}{args}，id={id}，"
-                    "recurring={recurring}，timeout={timeout}"
-                ).format(
-                    system=call.system,
-                    args=call.args,
-                    id=call.id,
-                    recurring=call.recurring,
-                    timeout=call.timeout,
+        except RaceCondition:
+            # 提交前被别的 worker 抢先取走了：换一条，不用指数退避
+            await asyncio.sleep(random.random() * POP_RACE_JITTER)
+            continue
+        except Exception as e:
+            # call 出了本函数就没了，挂到异常上，任务循环记的 traceback 末尾才有是哪条调用。
+            # scheduled/last_run 已被上面就地改成要写入的值，不打
+            if call is not None:
+                e.add_note(
+                    _(
+                        "[⚙️Future] 正在取出的调用：{system}{args}，id={id}，"
+                        "recurring={recurring}，timeout={timeout}"
+                    ).format(
+                        system=call.system,
+                        args=call.args,
+                        id=call.id,
+                        recurring=call.recurring,
+                        timeout=call.timeout,
+                    )
                 )
-            )
-        raise
-    return call
+            raise
+        return call
+    return None
 
 
 async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
@@ -413,11 +433,13 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
         replay.info(f"[SystemResult][{call.system}]({ok}, {res!s})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
-        async with tbl.session() as session:
-            repo = session.using(tbl.comp_cls)
-            get_4_del = await repo.get(id=call.id)
-            if get_4_del:
-                repo.delete(get_4_del.id)
+        # 读到滞后副本上的旧版本、或这条刚被超时重投改了版本，会撞竞态：重试，别让它变成任务
+        # 循环里的一条错误（还会跳过下面的收尾）
+        async for attempt in tbl.session().retry(3):
+            async with attempt as session:
+                repo = session.using(tbl.comp_cls)
+                if get_4_del := await repo.get(id=call.id):
+                    repo.delete(get_4_del.id)
         # 再删除call_lock uuid数据，只有ok的执行才有call lock
         await caller.remove_call_lock(call.system, str(call.id))
     return True
