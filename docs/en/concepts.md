@@ -300,7 +300,7 @@ row that gains it is pushed as added.
 ## Permissions
 
 Every `Component` and every `System` carries a `permission=` level; `OWNER` and
-`RLS` are for `Components` only:
+`RLS` are for `Components` only, `GM` is for `Systems` only:
 
 | Level       | Meaning                                                                                                                                                                                                 |
 |-------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -308,6 +308,7 @@ Every `Component` and every `System` carries a `permission=` level; `OWNER` and
 | `USER`      | Connection must have called `elevate(ctx, user_id)` first (by server). Standard "logged in" gate.                                                                                                       |
 | `OWNER`     | Same as USER plus an automatic row filter `row.owner == ctx.caller` on subscriptions. Use for personal inventory, private messages.                                                                     |
 | `RLS`       | Raw RLS filter. Declare `rls_compare=(operator, component_field, context_field)` on the `Component` to use a non-`owner` filter (for example, "rows whose `guild_id` matches the caller's `guild_id`"). |
+| `GM`        | `Systems` only: logged-in connections whose `ctx.group` starts with `"gm"` (and admins) may call it. GMs read data like players (RLS applies, `ADMIN` `Components` are off-limits).                     |
 | `ADMIN`     | Only admin connections (`ctx.group` starting with `"admin"`) may call the `System` or subscribe to the `Component`. For a server-internal `System`, use `permission=None`.                              |
 
 `OWNER` and `RLS` only take effect on subscriptions (`select` / `range` / table

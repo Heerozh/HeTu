@@ -38,7 +38,7 @@ class Context:
     """调用方的IP地址。"""
 
     group: str
-    """所属组名，目前只用于判断是否admin。"""
+    """所属组名，用于判断是否admin（`is_admin()`）、GM（`is_gm()`）。"""
 
     user_data: dict[str, Any]
     """当前连接的用户数据，可自由设置，在所有System间共享。"""
@@ -74,7 +74,20 @@ class Context:
         return f"[{self.connection_id}|{self.address}|{self.caller}]"
 
     def is_admin(self):
+        """
+        是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
+        可订阅 ADMIN 组件，订阅时不受 RLS 限制。
+        Whether this is an admin connection (group starts with "admin").
+        """
         return self.group.startswith("admin")
+
+    def is_gm(self):
+        """
+        是否 GM 连接（group 以 "gm" 开头）：登录后可调用 `Permission.GM` 的 System/Endpoint，
+        读数据和普通玩家一样。
+        Whether this is a GM connection (group starts with "gm").
+        """
+        return self.group.startswith("gm")
 
     def configure(
         self, client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0

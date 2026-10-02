@@ -49,7 +49,7 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 - **`address`** (str) — 调用方的IP地址。
 
-- **`group`** (str) — 所属组名，目前只用于判断是否admin。
+- **`group`** (str) — 所属组名，用于判断是否admin（`is_admin()`）、GM（`is_gm()`）。
 
 - **`user_data`** (dict[str, Any]) — 当前连接的用户数据，可自由设置，在所有System间共享。
 
@@ -82,13 +82,55 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 ### Methods
 
+#### `is_admin`
+
+```python
+is_admin()
+```
+
+<small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
+
+是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
+可订阅 ADMIN 组件，订阅时不受 RLS 限制。
+Whether this is an admin connection (group starts with "admin").
+
+
+
+
+
+
+
+
+
+
+#### `is_gm`
+
+```python
+is_gm()
+```
+
+<small>Source: [`hetu/endpoint/context.py:84`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L84)</small>
+
+是否 GM 连接（group 以 "gm" 开头）：登录后可调用 `Permission.GM` 的 System/Endpoint，
+读数据和普通玩家一样。
+Whether this is a GM connection (group starts with "gm").
+
+
+
+
+
+
+
+
+
+
 #### `configure`
 
 ```python
 configure(client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:79`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L79)</small>
+<small>Source: [`hetu/endpoint/context.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L92)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -138,7 +180,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:119`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L119)</small>
+<small>Source: [`hetu/endpoint/context.py:132`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L132)</small>
 
 检查当前用户对某个component的权限
 

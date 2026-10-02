@@ -59,6 +59,23 @@ def test_rls_check_struct_uses_configured_field(new_component_env):
     assert ctx.rls_check(FriendRLS, {"friend": 99, "owner": 11}) is False
 
 
+def test_rls_check_gm_like_player(new_component_env):
+    """GM 读数据和普通玩家一样受 RLS 限制，只有 admin 跳过"""
+
+    @define_component(namespace="pytest", permission=Permission.OWNER)
+    class OwnedItem(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True)
+
+    gm = _make_ctx(caller=11, group="gm")
+    assert gm.is_gm() and not gm.is_admin()
+    assert gm.rls_check(OwnedItem, {"owner": 11}) is True
+    assert gm.rls_check(OwnedItem, {"owner": 99}) is False
+
+    admin = _make_ctx(caller=11, group="admin")
+    assert not admin.is_gm()
+    assert admin.rls_check(OwnedItem, {"owner": 99}) is True
+
+
 def test_rls_check_string_ctx_attr_no_crash(new_component_env):
     """发现8回归：ctx_attr 指向字符串型 Context 属性时 rls_check 不应崩溃。
     旧代码 np.isnan(b) 对字符串会抛 TypeError。"""

@@ -397,3 +397,15 @@ def test_hidden_point_sub_conflict(new_component_env):
         @define_component(namespace="pytest", force=True)
         class BadComp(BaseComponent):
             owner: np.int64 = property_field(0, point_sub=True, hidden=True)
+
+
+def test_gm_permission_rejected(new_component_env):
+    """GM 只是 System/Endpoint 的调用权限，组件不能用：放过的话订阅判表权限时会当成"已登录
+    就能读"。用 ValueError 而不是断言，-O 下也拦得住"""
+    from hetu.common import Permission
+
+    with pytest.raises(ValueError, match="GM"):
+
+        @define_component(namespace="pytest", force=True, permission=Permission.GM)
+        class GMComp(BaseComponent):
+            owner: np.int64 = property_field(0)
