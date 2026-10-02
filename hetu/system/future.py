@@ -16,8 +16,6 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import RowFormat
-
 from ..data import BaseComponent, Permission, define_component, property_field
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from ..i18n import _
@@ -315,21 +313,26 @@ async def cancel_future_call(ctx: SystemContext, key: str) -> bool:
     return True
 
 
-async def sleep_for_upcoming(tbl: Table):
-    """等待下一个即将到期的任务，返回是否有任务"""
-    # query limit=1 获得即将到期任务(1秒内）
-    calls = await tbl.servant_range(
-        "scheduled", left=0, right=time.time() + 1, limit=1, row_format=RowFormat.RAW
-    )
-    # 如果无任务，则sleep并continue
-    if not calls:
-        await asyncio.sleep(1)
-        return False
+# 没有到期调用时最多睡多久：新建的调用最迟这么久后被发现
+MAX_IDLE_SLEEP = 1.0
+# 每张表一轮最多连续取出执行这么多条就去看下一张表，免得一张表的积压饿死别的表
+DRAIN_PER_TABLE = 64
+# 看到有到期的却一条没取到（被别的 worker 抢先、副本还没同步）时，隔这么久再扫，免得空转
+CONTENDED_RETRY_DELAY = 0.05
 
-    # sleep将到期时间
-    seconds_left = float(calls[0]["scheduled"]) - time.time()
-    await asyncio.sleep(seconds_left)
-    return True
+
+async def next_due(tbl: Table, horizon: float) -> float | None:
+    """
+    horizon 之前最早到期的一条调用的 scheduled，没有返回 None。
+
+    只读 servant 上的 scheduled 索引（索引 member 里就编着值），不读行：先读索引再读行是两次
+    往返，中间这条可能已被别的 worker 取走、scheduled 改到了 timeout 之后，按读到的值去睡就会
+    睡过头（timeout 长的 recurring 调用能睡一小时）。
+    """
+    upcoming = await tbl.backend.servant.range_index_(
+        tbl, "scheduled", 0, horizon, limit=1
+    )
+    return float(upcoming[0][0]) if upcoming else None
 
 
 async def pop_upcoming_call(tbl: Table):
@@ -420,6 +423,37 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     return True
 
 
+async def run_due_calls(tables: list[Table], callers: dict[str, SystemCaller]) -> float:
+    """
+    扫一遍所有未来调用表，取出并执行已到期的调用，返回距下次该扫的秒数：执行过调用就是 0（马上
+    再扫，可能还有），否则睡到最早的下一条，最多 MAX_IDLE_SLEEP 秒。
+
+    到期的表连续取出执行，不能每处理一条就换表、碰上空表就睡：表一多（主表 + 各个副本），吞吐
+    就塌成 worker 数 / (表数-1) 条每秒。表按随机顺序扫，各 worker 不总从同一张表开始抢。
+    """
+    executed = 0
+    wake = time.time() + MAX_IDLE_SLEEP
+    for tbl in random.sample(tables, len(tables)):
+        now = time.time()
+        due = await next_due(tbl, now + MAX_IDLE_SLEEP)
+        if due is None:
+            continue
+        if due > now:
+            wake = min(wake, due)
+            continue
+        popped = 0
+        for _i in range(DRAIN_PER_TABLE):
+            if not (call := await pop_upcoming_call(tbl)):
+                break
+            popped += 1
+            await exec_future_call(call, callers[tbl.instance_name], tbl)
+        if not popped:
+            # 看到到期的却一条没取到：被别的 worker 抢先了，或副本上的索引还没跟上
+            wake = min(wake, time.time() + CONTENDED_RETRY_DELAY)
+        executed += popped
+    return 0.0 if executed else max(0.0, wake - time.time())
+
+
 async def future_call_task(app):
     """
     未来调用的后台task，每个Worker启动时会开一个，执行到期的未来调用。
@@ -470,23 +504,13 @@ async def future_call_task(app):
         ]
 
     # 不能通过SubscriptionBroker订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，
-    # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式
-    # 如果有很多个instance，可能worker个task来不及处理这么多future表?
-    # 应该不会，如果堆积，sleep_for_upcoming并不会sleep，会循环到处理完的
+    # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式：
+    # 每轮扫完所有表，执行到期的；全都没到期才睡，睡到最早的下一条（最多 1 秒）
     while True:
-        # 随机选一个未来调用组件
-        tbl = random.choice(future_call_tables)
         try:
-            # 等待0-1秒直到下一个即将到期的任务，如果没有任务则重新循环
-            if not await sleep_for_upcoming(tbl):
-                continue
-
-            # 取出并修改到期任务的事务, 此时如果服务器关闭，事务还未执行到提交，任何数据不会丢失
-            if not (call := await pop_upcoming_call(tbl)):
-                continue
-
-            # 执行任务, 此时call已被取出，如果服务器关闭/数据库断线，timeout=0的任务会丢失
-            await exec_future_call(call, callers[tbl.instance_name], tbl)
+            # 取出调用的事务提交前服务器关闭，任何数据不会丢失；取出后执行前关闭，
+            # timeout=0 的调用会丢失，其余的 timeout 后重投
+            await asyncio.sleep(await run_due_calls(future_call_tables, callers))
         except asyncio.CancelledError:
             break
         except Exception as e:

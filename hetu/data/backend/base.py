@@ -170,6 +170,33 @@ def to_sortable_bytes(value: np.generic) -> bytes:
     assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
 
 
+def from_sortable_bytes(dtype: np.dtype, sortable: bytes) -> np.generic:
+    """
+    `to_sortable_bytes` 的逆：索引 member 的值段还原成 dtype 的值。只读索引就能拿到值，不用再
+    读行（见 `BackendClient.range_index_`）。
+    """
+    if np.issubdtype(dtype, np.signedinteger):
+        (data,) = struct.unpack(">Q", sortable)
+        return dtype.type(data - (1 << 63))
+    elif np.issubdtype(dtype, np.unsignedinteger):
+        (data,) = struct.unpack(">Q", sortable)
+        return dtype.type(data)
+    elif np.issubdtype(dtype, np.floating):
+        (u64,) = struct.unpack(">Q", sortable)
+        # 编码时正数置了符号位、负数整体取反，这里反过来
+        if u64 & (1 << 63):
+            u64 &= ~(1 << 63)
+        else:
+            u64 = ~u64 & 0xFFFFFFFFFFFFFFFF
+        (double,) = struct.unpack(">d", struct.pack(">Q", u64))
+        return dtype.type(double)
+    elif np.issubdtype(dtype, np.str_):
+        return dtype.type(sortable.replace(b"\x00\xff", b"\x00").decode("utf-8"))
+    elif np.issubdtype(dtype, np.bytes_):
+        return dtype.type(sortable.replace(b"\x00\xff", b"\x00"))
+    assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+
+
 def sortable_token(sortable: bytes) -> str:
     """
     索引值的 sortable bytes → 频道名里的 token。≤32 字节直接 hex（数值都是 8 字节，16 位 hex
@@ -658,6 +685,24 @@ class BackendClient:
             raise TypeError(
                 _("range 的 limit 必须是整数，收到：{limit}").format(limit=repr(limit))
             )
+
+    async def range_index_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
+        limit: int = 10,
+        desc: bool = False,
+    ) -> list[tuple[Any, int]]:
+        """
+        内部方法：只读索引，返回区间内前 `limit` 个 `(索引值, 行 id)`，区间、limit、desc 的规则同
+        `range`。不读行，一次往返；索引值按组件 dtype 还原（numpy 标量）。
+
+        只要索引上的值、不要整行时用它，比如未来调用的调度只想知道最早一条什么时候到期：先读索引
+        再读行是两次往返，中间那行可能已被改走，读到的行值就不是这次区间里的值了。
+        """
+        raise NotImplementedError
 
     async def range_read_(
         self,

@@ -22,7 +22,14 @@ HETU_ROOT = Path(__file__).resolve().parent.parent / "hetu"
 AUDIT_PLUGIN = Path(__file__).resolve().parent.parent / "tools" / "master_read_audit.py"
 
 # 读方法（写方法不在本约束内：写本来就只能去 master）
-READ_METHODS = ("get", "get_many", "get_many_array_", "range", "range_read_")
+READ_METHODS = (
+    "get",
+    "get_many",
+    "get_many_array_",
+    "range",
+    "range_read_",
+    "range_index_",
+)
 # `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……
 PATTERN = re.compile(
     r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*\(",

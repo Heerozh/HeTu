@@ -169,7 +169,7 @@ async def test_next_due_reads_scheduled_from_index(
     assert await next_due(fc_tbl, scheduled - 1) is None
 
 
-async def test_run_due_calls_wake_time(test_app, tbl_mgr, new_ctx):
+async def test_run_due_calls_wake_time(monkeypatch, test_app, tbl_mgr, new_ctx):
     """一轮扫描：执行所有表里到期的调用；返回距下次该扫的秒数——处理过调用就马上再扫（0），
     没有到期的就睡到最早那条，最多 1 秒"""
     from hetu.system.future import FutureCalls, _build_future_row, run_due_calls
@@ -187,14 +187,16 @@ async def test_run_due_calls_wake_time(test_app, tbl_mgr, new_ctx):
     assert await run_due_calls(tables, callers) == 0
     assert await _counter_value(tbl_mgr, test_app) == 102
 
+    # 等副本同步可能要 1 秒左右（副本约每秒回报一次复制进度），用冻结的时钟判定睡多久
+    frozen = time.time() + 100
     async with tables[0].session() as session:
         row = _build_future_row(
-            new_ctx(), time.time() + 0.5, "add_rls_comp_value", (1,), timeout=10
+            new_ctx(), frozen + 0.5, "add_rls_comp_value", (1,), timeout=10
         )
         await session.using(tables[0].comp_cls).insert(row)
     await tables[0].backend.wait_for_synced()
-    delay = await run_due_calls(tables, callers)
-    assert 0.3 < delay <= 0.5
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    assert await run_due_calls(tables, callers) == pytest.approx(0.5)
 
 
 @pytest.mark.timeout(30)
