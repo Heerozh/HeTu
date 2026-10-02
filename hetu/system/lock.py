@@ -30,8 +30,9 @@ replay = logging.getLogger("HeTu.replay")
 CALL_LOCK_RETENTION: float = 30 * 60
 # worker 启动时兜底清理的保留期：on_start 的锁不参与定期清理，只在这里清
 STARTUP_LOCK_RETENTION = datetime.timedelta(days=7).total_seconds()
-# 清理时一个事务最多删这么多行
-CLEAN_BATCH = 1000
+# 清理时一个事务最多删这么多行。提交的 Lua 执行期间 master 不处理别的命令：每行约 4µs，
+# 1000 行一次要占 4ms，200 行不到 1ms，总开销一样
+CLEAN_BATCH = 200
 
 
 @define_component(namespace="HeTu", volatile=True, permission=Permission.ADMIN)
