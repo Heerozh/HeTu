@@ -666,7 +666,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:464`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L464)</small>
+<small>Source: [`hetu/data/backend/base.py:491`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L491)</small>
 
 从数据库直接获取单行数据。
 
@@ -711,7 +711,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:584`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L584)</small>
+<small>Source: [`hetu/data/backend/base.py:611`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L611)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -773,7 +773,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:694`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L694)</small>
+<small>Source: [`hetu/data/backend/base.py:739`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L739)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
@@ -882,7 +882,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:289`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L289)</small>
+<small>Source: [`hetu/system/future.py:300`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L300)</small>
 
 
 
@@ -932,7 +932,7 @@ create_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:147`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L147)</small>
+<small>Source: [`hetu/system/future.py:156`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L156)</small>
 
 
 
@@ -963,6 +963,8 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 如果前一次已经成功执行，call_lock会触发，跳过执行。
 * 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
 * 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+* 注意：非 recurring 时不能超过 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）
+  的一半，否则抛 ValueError：重投时锁必须还在，才能认出已经执行过
 
 - **`recurring`** (Any) — 设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
 
@@ -1023,7 +1025,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:217`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L217)</small>
+<small>Source: [`hetu/system/future.py:228`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L228)</small>
 
 
 
