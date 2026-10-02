@@ -417,7 +417,7 @@ def test_resolve_ack_threshold_follows_startup_timeout():
 
 
 def test_on_start_rejects_client_permission(new_component_env, new_clusters_env):
-    """on_start System 不能用客户端可调用权限（USER/EVERYBODY），防止种子逻辑被外部触发。"""
+    """on_start System 不能用客户端可调用权限（USER/EVERYBODY/GM），防止种子逻辑被外部触发。"""
     import pytest
 
     from hetu.data import Permission
@@ -447,6 +447,17 @@ def test_on_start_rejects_client_permission(new_component_env, new_clusters_env)
             permission=Permission.EVERYBODY,
         )
         async def seed_everybody(ctx):
+            pass
+
+    with pytest.raises(AssertionError, match="on_start"):
+
+        @define_system(
+            namespace="pytest",
+            components=(SeedComp,),
+            on_start=True,
+            permission=Permission.GM,
+        )
+        async def seed_gm(ctx):
             pass
 
 

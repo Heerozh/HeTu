@@ -2304,12 +2304,12 @@ async def admin_only_ref(new_component_env, mod_auto_backend):
 async def test_admin_component_rejects_non_admin(
     broker: SubscriptionBroker, admin_only_ref, admin_ctx, user_id10_ctx
 ):
-    """ADMIN 权限的组件：非管理员（已登录的也不行）的行、范围、整表订阅都拒绝，不读库、
+    """ADMIN 权限的组件：非管理员（已登录的、GM 也不行）的行、范围、整表订阅都拒绝，不读库、
     不占频道和计数；管理员照常订阅"""
     servant = broker._backend.servant
     row_id = int((await servant.range(admin_only_ref, "key", 1, limit=1))[0].id)
 
-    for ctx in (user_id10_ctx, make_ctx()):
+    for ctx in (user_id10_ctx, make_ctx(), make_ctx(caller=10, group="gm")):
         assert await broker.subscribe_get(admin_only_ref, ctx, "key", 1) == (None, None)
         assert await broker.subscribe_get(admin_only_ref, ctx, "id", row_id) == (
             None,

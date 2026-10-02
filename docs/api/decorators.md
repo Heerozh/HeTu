@@ -51,6 +51,7 @@ define_component(
 - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
          此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
 - rls: 行级权限，需要配合`rls_compare`参数使用，定义具体的行级权限逻辑
+- gm: **不可用** GM只用于System/Endpoint的调用权限，GM读数据和普通玩家一样
 
 - **`rls_compare`** (Any) — 当permission设置为RLS(行级权限)时，定义行级安全的比较函数和属性名。
 
@@ -154,6 +155,7 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 - everybody: 任何客户端连接都可以调用执行。（不安全）
 - user: 只有已登录客户端连接可以调用
 - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
+- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员客户端连接可以调用
 - admin: 只有管理员权限客户端连接可以调用
 - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 
@@ -295,6 +297,7 @@ define_system(
 - everybody: 任何客户端连接都可以调用执行。（不安全）
 - user: 只有已登录客户端连接可以调用
 - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
+- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员客户端连接可以调用
 - admin: 只有管理员权限客户端连接可以调用
 - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 

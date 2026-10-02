@@ -490,6 +490,7 @@ def define_component(
         - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
                  此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
         - rls: 行级权限，需要配合`rls_compare`参数使用，定义具体的行级权限逻辑
+        - gm: **不可用** GM只用于System/Endpoint的调用权限，GM读数据和普通玩家一样
 
     rls_compare: tuple[str, str, str] | None
         当permission设置为RLS(行级权限)时，定义行级安全的比较函数和属性名。
@@ -709,6 +710,16 @@ def define_component(
         assert issubclass(cls, BaseComponent), _(
             "{cls_name}必须继承于BaseComponent"
         ).format(cls_name=cls.__name__)
+
+        # GM 只是调用权限，没有读取规则：放过的话，订阅判表权限时会落到"已登录就能读"。
+        # 用 raise 而不是断言，-O 下也要拦住
+        if permission == Permission.GM:
+            raise ValueError(
+                _(
+                    "{cls_name}权限定义出错，Component不能用GM权限："
+                    "GM只用于System/Endpoint的调用权限"
+                ).format(cls_name=cls.__name__)
+            )
 
         # 检查RLS权限各种定义符合要求
         _rls_define_check(cls.__name__, properties)

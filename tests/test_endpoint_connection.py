@@ -479,6 +479,38 @@ async def test_endpoint_admin_permission(mod_test_app, tbl_mgr, new_ctx, caplog)
     )
 
 
+async def test_endpoint_gm_permission(mod_test_app, tbl_mgr, new_ctx, caplog):
+    """GM 端点放行已登录的 gm 组（含 gm_xxx 子组）和 admin 组；没登录的 gm 组、普通玩家都被
+    网关拒绝。GM 不是 admin，调不了 ADMIN 端点"""
+    from hetu.common import Permission
+    from hetu.endpoint.definer import EndpointDefines
+
+    async def ep_gm_only(ctx):
+        pass
+
+    async def ep_admin_only(ctx):
+        pass
+
+    EndpointDefines().add("pytest", ep_gm_only, True, Permission.GM)
+    EndpointDefines().add("pytest", ep_admin_only, True, Permission.ADMIN)
+
+    def check(endpoint, caller=0, group=""):
+        ctx = new_ctx()
+        ctx.caller = caller
+        ctx.group = group
+        return EndpointExecutor("pytest", tbl_mgr, ctx).execute_check(endpoint, ())
+
+    assert check("ep_gm_only", group="gm") is None
+    assert "ep_gm_only无调用权限" in caplog.text
+    assert check("ep_gm_only", caller=10) is None
+
+    assert check("ep_gm_only", caller=10, group="gm") is not None
+    assert check("ep_gm_only", caller=10, group="gm_cs") is not None
+    assert check("ep_gm_only", group="admin") is not None
+
+    assert check("ep_admin_only", caller=10, group="gm") is None
+
+
 # ============ 服务端发送限流（SERVER_SEND_LIMITS，防订阅攻击） ============
 
 
