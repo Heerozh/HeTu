@@ -99,6 +99,9 @@ working examples — read them first.
   `elevate(ctx, user_id)` is how a login System authenticates a connection.
   `GM` (System/Endpoint-only) lets logged-in connections whose `ctx.group`
   starts with `"gm"` (and admins) call it; GMs otherwise read data like players.
+  `ADMIN` is root-level for back-office tools only: never put a game-client
+  connection (GM accounts included) in the `admin` group; in-game management
+  always uses `GM`.
 - **Hidden columns** — `property_field(..., hidden=True)` keeps a column out of
   every subscription push (admins included; writes touching only hidden columns
   push nothing), and clients may not subscribe by it. Systems still read/write

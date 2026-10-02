@@ -14,7 +14,7 @@ next: operations
 - **[`call_lock`](#call_lock与幂等system执行)** —— 使 `System` 在重试时具备幂等性。
 - **[生命周期钩子](#the-on_disconnect-hook)** —— `on_disconnect` 在套接字关闭时运行。
 - **[原始 `Endpoints`](#原始endpoints多system或非数据库rpc)** —— 无事务的 RPC 处理器，用于非数据库工作或独立调用多个 `System`。
-- **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 提升管理员权限，以及速率限制覆盖。
+- **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 授予管理员 / GM 权限，以及速率限制覆盖。
 - **[提前 `session_commit` / `session_discard`](#提前-session_commit--session_discard)** —— 在 `System` 主体返回之前提交（或放弃）事务。
 - **[查不到就插入](#查不到就插入两种写法)** —— `range` 的区间校验（防幻读），以及热路径上更省的 unique 锚定 + `upsert` 写法。
 - **[用于范围查询的 NumPy 模式](#用于范围查询的-numpy-模式)** —— 广播、布尔掩码、聚合，以及将两个查询在内存中合并而非循环。
@@ -226,7 +226,7 @@ async def my_system(ctx: hetu.SystemContext, ...):
 每个字段的用途：
 
 - **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）。
-- **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。以 `"gm"` 开头的值视为 GM：已登录的 GM 连接能调用 `Permission.GM` 门控的 `System`/`Endpoint`，除此之外和普通玩家一样（订阅照样按 RLS 过滤，订不了 `ADMIN` `组件`）。GM 账号在登录 `System` 里 `elevate` 之后设 `ctx.group = "gm"`。
+- **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。admin 是 root 级权限，只给后台管理工具的连接，不要给游戏客户端的连接（GM 账号也不行），游戏里的管理权限一律用 GM。以 `"gm"` 开头的值视为 GM：已登录的 GM 连接能调用 `Permission.GM` 门控的 `System`/`Endpoint`，除此之外和普通玩家一样（订阅照样按 RLS 过滤，订不了 `ADMIN` `组件`）。GM 账号在登录 `System` 里 `elevate` 之后设 `ctx.group = "gm"`。
 - **`ctx.client_limits` / `ctx.server_limits`** —— `[max_count, window_seconds]` 对的列表。一旦超出任何一对，引擎就会断开连接。`elevate()` 会自动将这些限制乘以 10 倍，因此登录后的用户获得匿名连接所没有的余量。如果需要为机器人账户等自定义预算，可以在自己的逻辑中覆盖每个连接的设置。
 - **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** —— 活动 `Get`、`Range` 和 `Table`（整表）订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。整表订阅的单表行数上限是全局配置 `MAX_TABLE_SUBSCRIPTION_ROWS`，不在 `ctx` 上。
 - **`ctx.race_count`** —— 当前事务的重试次数。用于退避非幂等副作用：`if ctx.race_count == 0: send_email(...)` 仅在第一次尝试时发送电子邮件。

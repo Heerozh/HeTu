@@ -76,8 +76,10 @@ class Context:
     def is_admin(self):
         """
         是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
-        可订阅 ADMIN 组件，订阅时不受 RLS 限制。
-        Whether this is an admin connection (group starts with "admin").
+        可订阅 ADMIN 组件，订阅时不受 RLS 限制。这是后台管理工具用的 root 级权限，不要给游戏
+        客户端的连接，游戏里的管理权限用 GM（`is_gm()`）。
+        Whether this is an admin connection (group starts with "admin"): root-level, for
+        back-office tools only, never for game-client connections (those use GM).
         """
         return self.group.startswith("admin")
 

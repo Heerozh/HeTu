@@ -25,7 +25,7 @@ once a project leaves the prototype stage:
   RPC handlers without a transaction, for non-database work or to call
   multiple `Systems` independently.
 - **[Per-connection state](#per-connection-state-user_data-group-and-limits)** —
-  `ctx.user_data`, admin elevation via `ctx.group`, and rate-limit
+  `ctx.user_data`, admin / GM groups via `ctx.group`, and rate-limit
   overrides.
 - **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)
   ** —
@@ -356,8 +356,10 @@ What each field is for:
   administrator (skipping RLS row filters and allowing
   `Permission.ADMIN`-gated calls). Setting `ctx.group = "admin"` from a
   trusted login `System` is how you grant admin in HeTu — there is no
-  separate token-based admin endpoint. A value starting with `"gm"` marks
-  a GM: once logged in, it may call `Permission.GM`-gated
+  separate token-based admin endpoint. Admin is root-level and meant for
+  back-office tools only: never give it to a game-client connection (GM
+  accounts included); in-game management always uses GM. A value starting
+  with `"gm"` marks a GM: once logged in, it may call `Permission.GM`-gated
   `Systems`/`Endpoints`, and otherwise reads data like an ordinary player
   (RLS still filters its subscriptions, no `ADMIN` `Components`). Set
   `ctx.group = "gm"` in the login `System` after `elevate`.

@@ -242,7 +242,10 @@ Permission(*values)
 Call permission for Systems/Endpoints only: logged-in connections whose group starts
 with "gm", or admin connections. GMs read data like ordinary players.
 
-- **`ADMIN`** (Any) — 仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。
+- **`ADMIN`** (Any) — 仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。admin 是后台管理工具用的 root 级
+权限，不要给游戏客户端的连接（GM 账号也不行），游戏里的管理功能用 `GM`。
+Admin connections only. Admin is root-level and meant for back-office tools: never
+give it to game-client connections (GMs included); in-game management uses `GM`.
 
 
 

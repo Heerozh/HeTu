@@ -397,8 +397,8 @@ def define_system(
         - everybody: 任何客户端连接都可以调用执行。（不安全）
         - user: 只有已登录客户端连接可以调用
         - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
-        - gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员客户端连接可以调用
-        - admin: 只有管理员权限客户端连接可以调用
+        - gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员连接可以调用
+        - admin: 只有管理员连接可以调用。admin是后台管理工具用的root级权限，游戏客户端的管理功能请用gm
         - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
     retry: int
         如果System遇到事务冲突，会重复执行直到成功。设为0关闭

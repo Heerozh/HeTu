@@ -311,6 +311,14 @@ Every `Component` and every `System` carries a `permission=` level; `OWNER` and
 | `GM`        | `Systems` only: logged-in connections whose `ctx.group` starts with `"gm"` (and admins) may call it. GMs read data like players (RLS applies, `ADMIN` `Components` are off-limits).                     |
 | `ADMIN`     | Only admin connections (`ctx.group` starting with `"admin"`) may call the `System` or subscribe to the `Component`. For a server-internal `System`, use `permission=None`.                              |
 
+`ADMIN` is a root-level permission for back-office tools (ops dashboards,
+data-repair scripts and the like): its subscriptions skip RLS, and it can
+subscribe to engine-internal tables such as `Connection` as well as anything the
+app marks `ADMIN`. Never put a game-client connection in the admin group, not
+even a GM's: if such an account leaks, it can see every player's data and call
+every `ADMIN` `System`. In-game management (GM commands, customer-service tools
+and so on) always uses `GM`.
+
 `OWNER` and `RLS` only take effect on subscriptions (`select` / `range` / table
 subscriptions): the server checks every row against the caller (admin
 connections are not filtered) and never pushes rows the caller may not see.

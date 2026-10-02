@@ -91,8 +91,10 @@ is_admin()
 <small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
 
 是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
-可订阅 ADMIN 组件，订阅时不受 RLS 限制。
-Whether this is an admin connection (group starts with "admin").
+可订阅 ADMIN 组件，订阅时不受 RLS 限制。这是后台管理工具用的 root 级权限，不要给游戏
+客户端的连接，游戏里的管理权限用 GM（`is_gm()`）。
+Whether this is an admin connection (group starts with "admin"): root-level, for
+back-office tools only, never for game-client connections (those use GM).
 
 
 
@@ -109,7 +111,7 @@ Whether this is an admin connection (group starts with "admin").
 is_gm()
 ```
 
-<small>Source: [`hetu/endpoint/context.py:84`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L84)</small>
+<small>Source: [`hetu/endpoint/context.py:86`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L86)</small>
 
 是否 GM 连接（group 以 "gm" 开头）：登录后可调用 `Permission.GM` 的 System/Endpoint，
 读数据和普通玩家一样。
@@ -130,7 +132,7 @@ Whether this is a GM connection (group starts with "gm").
 configure(client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:92`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L92)</small>
+<small>Source: [`hetu/endpoint/context.py:94`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L94)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -180,7 +182,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:132`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L132)</small>
+<small>Source: [`hetu/endpoint/context.py:134`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L134)</small>
 
 检查当前用户对某个component的权限
 

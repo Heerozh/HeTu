@@ -47,7 +47,7 @@ define_component(
 
 - everybody: 任何客户端连接都可以读，适合读一些服务器状态类的数据，如在线人数
 - user: 只有已登录的客户端都连接可以读
-- admin: 只有管理员权限客户端连接可以读
+- admin: 只有管理员连接可以读。admin是后台管理工具用的root级权限，不要给游戏客户端的连接
 - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
          此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
 - rls: 行级权限，需要配合`rls_compare`参数使用，定义具体的行级权限逻辑
@@ -155,8 +155,8 @@ System在定义时，如果设置了permission，则会自动生成对应的Endp
 - everybody: 任何客户端连接都可以调用执行。（不安全）
 - user: 只有已登录客户端连接可以调用
 - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
-- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员客户端连接可以调用
-- admin: 只有管理员权限客户端连接可以调用
+- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员连接可以调用
+- admin: 只有管理员连接可以调用。admin是后台管理工具用的root级权限，游戏客户端的管理功能请用gm
 - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 
 
@@ -297,8 +297,8 @@ define_system(
 - everybody: 任何客户端连接都可以调用执行。（不安全）
 - user: 只有已登录客户端连接可以调用
 - owner: **不可用** OWNER权限这里不可使用，需要自行做安全检查
-- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员客户端连接可以调用
-- admin: 只有管理员权限客户端连接可以调用
+- gm: 只有已登录的GM（`ctx.is_gm()`，group以"gm"开头）或管理员连接可以调用
+- admin: 只有管理员连接可以调用。admin是后台管理工具用的root级权限，游戏客户端的管理功能请用gm
 - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 
 - **`retry`** (Any) — 如果System遇到事务冲突，会重复执行直到成功。设为0关闭

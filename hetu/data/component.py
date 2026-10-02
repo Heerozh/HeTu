@@ -486,7 +486,7 @@ def define_component(
 
         - everybody: 任何客户端连接都可以读，适合读一些服务器状态类的数据，如在线人数
         - user: 只有已登录的客户端都连接可以读
-        - admin: 只有管理员权限客户端连接可以读
+        - admin: 只有管理员连接可以读。admin是后台管理工具用的root级权限，不要给游戏客户端的连接
         - owner: 只能读取到owner属性值==登录的用户id（`ctx.caller`）的行，未登录的客户端无法读取。
                  此权限等同rls权限，且`rls_compare=('eq', 'owner', 'caller')`
         - rls: 行级权限，需要配合`rls_compare`参数使用，定义具体的行级权限逻辑
