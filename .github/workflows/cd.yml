@@ -97,7 +97,9 @@ jobs:
       - name: Build and push Docker images
         uses: docker/build-push-action@v6
         with:
-          push: true
+          # 等价 push: true。oci-artifact=false：attestation 用旧版 manifest 格式，
+          # 新版 BuildKit 默认的 OCI artifact 格式（config 为 oci.empty）会被 ACR 拒收
+          outputs: type=registry,oci-artifact=false
           platforms: linux/amd64,linux/arm64
           tags: |
             heerozh/hetu:${{ steps.ver.outputs.norm }}
@@ -242,7 +244,8 @@ jobs:
         if: steps.check.outputs.should_build == 'true'
         uses: docker/build-push-action@v6
         with:
-          push: true
+          # 同 tag 发布：oci-artifact=false 让 ACR 能收 attestation
+          outputs: type=registry,oci-artifact=false
           platforms: linux/amd64,linux/arm64
           tags: |
             heerozh/hetu:latest-nightly

@@ -354,3 +354,58 @@ def test_load_json_without_notify_keys(new_component_env):
     assert loaded.table_sub_ is False
     assert loaded.point_subs_ == frozenset()
     assert "owner" in loaded.indexes_
+
+
+def test_hidden_define(new_component_env):
+    """hidden 写进 schema（load_json、duplicate 还原）；不发给客户端的字段 = _version + hidden"""
+    import json
+
+    @define_component(namespace="pytest", force=True)
+    class HiddenComp(BaseComponent):
+        secret: np.int64 = property_field(0, hidden=True)
+        role: str = property_field("", dtype="U8", index=True, hidden=True)
+        level: np.int32 = property_field(0)
+
+    assert HiddenComp.hidden_fields_ == ("_version", "role", "secret")
+    props = json.loads(HiddenComp.json_)["properties"]
+    assert props["secret"]["hidden"] is True and props["role"]["hidden"] is True
+    assert "role" in HiddenComp.indexes_
+
+    loaded = BaseComponent.load_json(HiddenComp.json_)
+    assert loaded.hidden_fields_ == ("_version", "role", "secret")
+    copy = HiddenComp.duplicate("pytest", "copy")
+    assert copy.hidden_fields_ == ("_version", "role", "secret")
+
+
+def test_no_hidden_keeps_schema(new_component_env):
+    """没用 hidden 的组件 schema 里没有这个键：升级 HeTu 后 schema 版本不变，不用迁移"""
+    import json
+
+    @define_component(namespace="pytest", force=True)
+    class PlainComp(BaseComponent):
+        level: np.int32 = property_field(0)
+
+    assert PlainComp.hidden_fields_ == ("_version",)
+    for prop in json.loads(PlainComp.json_)["properties"].values():
+        assert "hidden" not in prop
+
+
+def test_hidden_point_sub_conflict(new_component_env):
+    """客户端不能按 hidden 字段订阅，声明 point_sub 没有意义，定义时报错"""
+    with pytest.raises(ValueError, match="hidden"):
+
+        @define_component(namespace="pytest", force=True)
+        class BadComp(BaseComponent):
+            owner: np.int64 = property_field(0, point_sub=True, hidden=True)
+
+
+def test_gm_permission_rejected(new_component_env):
+    """GM 只是 System/Endpoint 的调用权限，组件不能用：放过的话订阅判表权限时会当成"已登录
+    就能读"。用 ValueError 而不是断言，-O 下也拦得住"""
+    from hetu.common import Permission
+
+    with pytest.raises(ValueError, match="GM"):
+
+        @define_component(namespace="pytest", force=True, permission=Permission.GM)
+        class GMComp(BaseComponent):
+            owner: np.int64 = property_field(0)

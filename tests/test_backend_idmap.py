@@ -559,3 +559,161 @@ def test_delete_reinserted_db_row_still_deletes_it(mod_item_model):
     inserts, _, deletes = idmap.get_dirty_rows()[ref]
     assert inserts == []
     assert {(d["id"], d["name"]) for d in deletes} == {("9", "db")}
+
+
+# ---- 一个事务里很多行：每行的开销不能随事务里已有的行数增长 ----
+
+
+def _cost_growth(costs: list[float], k: int) -> float:
+    """最后 k 次与最前 k 次操作耗时的中位数之比；每次操作的开销与已有行数无关时约为 1"""
+    import statistics
+
+    return statistics.median(costs[-k:]) / statistics.median(costs[:k])
+
+
+def _def_big_row():
+    """一行很大的组件：同 FutureCalls 的 args（<U1024，numpy 里一行 4 KB 多）"""
+    from hetu.data import define_component, property_field
+
+    @define_component(namespace="pytest", force=True)
+    class BigRow(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        blob: str = property_field("", dtype="<U1024")
+
+    return BigRow
+
+
+def test_insert_cost_flat_in_big_transaction(mod_item_model):
+    """
+    一个事务里逐行 insert 很多行，每行的开销不能随已插入的行数增长。原来每次 insert 都把本事务
+    缓存的行扫一遍（unique 检查的 filter 逐行判是否删除、np.append 复制整个缓存），n 行是平方
+    级：3000 行要好几秒，这段是同步计算，worker 的事件循环一直卡着
+    """
+    import asyncio
+    import gc
+    import time
+    from types import SimpleNamespace
+
+    from hetu.data.backend.session import Session
+
+    Item = mod_item_model
+    rows = []
+    for i in range(2000):
+        row = Item.new_row()
+        row.time, row.name = i, f"n{i}"  # 两个 unique 列各不相同
+        rows.append(row)
+
+    async def insert_all() -> list[float]:
+        # insert 不读写数据库，Session 不需要真的后端
+        session = Session(SimpleNamespace(master=None), "TestServer", 1)  # type: ignore
+        await session.__aenter__()
+        repo = session.using(Item)
+        costs = []
+        for row in rows:
+            started = time.perf_counter()
+            await repo.insert(row)
+            costs.append(time.perf_counter() - started)
+        return costs
+
+    # 本模块的夹具是模块级的同步用例环境，用 async 用例会让 pytest-asyncio 重建夹具
+    gc.disable()
+    try:
+        costs = asyncio.run(insert_all())
+    finally:
+        gc.enable()
+    assert _cost_growth(costs, 200) < 3
+
+
+def test_add_clean_cost_flat_with_big_rows(mod_item_model):
+    """
+    逐行读进缓存（get 没命中缓存、读到库里已有的行）很多行时，每行的开销不能随缓存行数增长。
+    原来每读一行都 np.isin 判重、np.append 复制整个缓存，行大时（如 FutureCalls）是平方级
+    """
+    import gc
+    import time
+
+    BigRow = _def_big_row()
+    ref = TableReference(BigRow, "TestServer", 1)
+    idmap = IdentityMap()
+    rows = []
+    for i in range(2000):
+        row = BigRow.new_row()
+        row.owner, row.blob = i, "x" * 40
+        row._version = 1
+        rows.append(row)
+
+    costs = []
+    gc.disable()
+    try:
+        for row in rows:
+            started = time.perf_counter()
+            idmap.add_clean(ref, row)
+            costs.append(time.perf_counter() - started)
+    finally:
+        gc.enable()
+    assert _cost_growth(costs, 200) < 3
+
+
+def test_cache_consistent_across_growth_and_compaction(mod_item_model):
+    """
+    缓存行数跨过多次扩容、中间删掉库里的行（标 DELETE）和本事务 insert 的行（从缓存里拿掉）
+    之后接着读、接着 insert：get / filter / 脏行都要对得上
+    """
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    idmap = IdentityMap()
+
+    def item(row_id, owner, version=1):
+        row = Item.new_row(id_=row_id)
+        row.owner, row.time, row.name = owner, row_id, f"r{row_id}"
+        row._version = version
+        return row
+
+    # 先整批读进 5 行，再逐行读 45 行（库里的行，_version=1）
+    batch = np.rec.array(np.stack([item(i, i % 3) for i in range(1, 6)]))
+    idmap.add_clean(ref, batch)
+    for i in range(6, 51):
+        idmap.add_clean(ref, item(i, i % 3))
+    # 再 insert 50 行（_version=0）
+    for i in range(51, 101):
+        idmap.add_insert(ref, item(i, i % 3, version=0))
+
+    # 改几行、删几行：删库里的行（标 DELETE）、删本事务 insert 的行（从缓存拿掉）
+    for i in (2, 30, 60):
+        row, _ = idmap.get(ref, i)
+        assert row is not None
+        row.qty = 77
+        idmap.update(ref, row)
+    for i in (3, 31, 61, 99):
+        idmap.mark_deleted(ref, i)
+    # 拿掉行之后接着读、接着 insert，再跨一次扩容
+    for i in range(101, 131):
+        idmap.add_clean(ref, item(i, i % 3))
+    for i in range(131, 161):
+        idmap.add_insert(ref, item(i, i % 3, version=0))
+
+    live = set(range(1, 161)) - {3, 31, 61, 99}
+    for i in range(1, 161):
+        row, state = idmap.get(ref, i)
+        if i in (61, 99):  # 本事务 insert 又删掉的：当它没插过
+            assert row is None and state is None
+            continue
+        assert row is not None and int(row.id) == i
+        assert int(row.qty) == (77 if i in (2, 30, 60) else 1)
+    assert idmap.get(ref, 3)[1] == RowState.DELETE
+    assert idmap.get(ref, 31)[1] == RowState.DELETE
+
+    for owner in range(3):
+        got = sorted(int(i) for i in idmap.filter(ref, owner=owner).id)
+        assert got == sorted(i for i in live if i % 3 == owner), owner
+    # 删掉的库里的行不算
+    assert len(idmap.filter(ref, name="r3")) == 0
+    assert len(idmap.filter(ref, name="r31")) == 0
+
+    inserts, (old_rows, new_rows), deletes = idmap.get_dirty_rows()[ref]
+    assert sorted(int(r["id"]) for r in inserts) == sorted(
+        [*(i for i in range(51, 101) if i not in (61, 99)), *range(131, 161)]
+    )
+    assert sorted(int(r["id"]) for r in old_rows) == [2, 30]
+    assert all(r == {"qty": "77"} for r in new_rows)
+    assert {int(r["id"]) for r in deletes} == {3, 31}

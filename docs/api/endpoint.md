@@ -49,7 +49,7 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 - **`address`** (str) — 调用方的IP地址。
 
-- **`group`** (str) — 所属组名，目前只用于判断是否admin。
+- **`group`** (str) — 所属组名，用于判断是否admin（`is_admin()`）、GM（`is_gm()`）。
 
 - **`user_data`** (dict[str, Any]) — 当前连接的用户数据，可自由设置，在所有System间共享。
 
@@ -82,13 +82,57 @@ Endpoint调用时的上下文，由engine创建并作为 `ctx` 参数传入Endpo
 
 ### Methods
 
+#### `is_admin`
+
+```python
+is_admin()
+```
+
+<small>Source: [`hetu/endpoint/context.py:76`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L76)</small>
+
+是否管理员连接（group 以 "admin" 开头）：可调用 ADMIN、GM 权限的 System/Endpoint，
+可订阅 ADMIN 组件，订阅时不受 RLS 限制。这是后台管理工具用的 root 级权限，不要给游戏
+客户端的连接，游戏里的管理权限用 GM（`is_gm()`）。
+Whether this is an admin connection (group starts with "admin"): root-level, for
+back-office tools only, never for game-client connections (those use GM).
+
+
+
+
+
+
+
+
+
+
+#### `is_gm`
+
+```python
+is_gm()
+```
+
+<small>Source: [`hetu/endpoint/context.py:86`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L86)</small>
+
+是否 GM 连接（group 以 "gm" 开头）：登录后可调用 `Permission.GM` 的 System/Endpoint，
+读数据和普通玩家一样。
+Whether this is a GM connection (group starts with "gm").
+
+
+
+
+
+
+
+
+
+
 #### `configure`
 
 ```python
 configure(client_limits, server_limits, max_row_sub, max_index_sub, max_table_sub=0)
 ```
 
-<small>Source: [`hetu/endpoint/context.py:79`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L79)</small>
+<small>Source: [`hetu/endpoint/context.py:94`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L94)</small>
 
 配置当前连接的限流与订阅配额。
 
@@ -138,7 +182,7 @@ rls_check(
 ) -> bool
 ```
 
-<small>Source: [`hetu/endpoint/context.py:119`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L119)</small>
+<small>Source: [`hetu/endpoint/context.py:134`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/context.py#L134)</small>
 
 检查当前用户对某个component的权限
 
@@ -205,6 +249,8 @@ elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 kick_logged_in:
     如果user_id已在其他连接登录，则标记该连接断开并返回True。服务器随后主动断开该连接，
     断开前先发 WebSocket close 码 `CLOSE_KICKED` (4001)、原因 "kicked"，客户端可据此提示。
+    被顶掉的连接的 `on_disconnect` 以匿名身份（`ctx.caller == 0`）运行，不会动已在新连接
+    上的这个用户。
 
 
 

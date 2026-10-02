@@ -47,7 +47,7 @@ SessionRepository(session: Session, comp_cls: type[BaseComponent]) -> None
 remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:65`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L65)</small>
+<small>Source: [`hetu/data/backend/repo.py:68`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L68)</small>
 
 内部方法，在远程数据库中检查Unique索引冲突。
 
@@ -66,7 +66,7 @@ remote_has_unique_conflicts_(row: numpy.record, fields: set) -> str | None
 is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:105`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L105)</small>
+<small>Source: [`hetu/data/backend/repo.py:108`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L108)</small>
 
 检查一行数据的Unique索引在本地和远程数据库中是否有冲突。
 
@@ -108,7 +108,7 @@ is_unique_conflicts(row: numpy.record, insert=False) -> tuple[str | None, bool]
 get_by_id(row_id: numpy.int64 | int) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:166`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L166)</small>
+<small>Source: [`hetu/data/backend/repo.py:169`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L169)</small>
 
 从数据库获取单行数据，并放入`Session`缓存。
 本指令如果命中缓存，不会去数据库查询。
@@ -132,7 +132,7 @@ get(
 ) -> numpy.record | None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:187`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L187)</small>
+<small>Source: [`hetu/data/backend/repo.py:190`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L190)</small>
 
 从数据库获取单行数据，并放入Session缓存。
 推荐通过"id"主键查询，这样无须查询索引，如果缓存命中，不会去数据库查询；否则会执行1-2次查询。
@@ -190,7 +190,7 @@ range(
 ) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:289`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L289)</small>
+<small>Source: [`hetu/data/backend/repo.py:292`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L292)</small>
 
 从数据库查询索引，返回区间内数据，限制 `limit` 条。
 本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
@@ -263,7 +263,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:475`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L475)</small>
+<small>Source: [`hetu/data/backend/repo.py:478`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L478)</small>
 
 向Session中添加一行待插入数据。
 
@@ -295,7 +295,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:526`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L526)</small>
+<small>Source: [`hetu/data/backend/repo.py:529`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L529)</small>
 
 向Session中添加一行待更新数据。
 
@@ -324,7 +324,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:562`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L562)</small>
+<small>Source: [`hetu/data/backend/repo.py:565`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L565)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -359,7 +359,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:591`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L591)</small>
+<small>Source: [`hetu/data/backend/repo.py:594`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L594)</small>
 
 向Session中添加一行待删除数据。
 
@@ -666,7 +666,7 @@ servant_get(
 ) -> numpy.record | dict[str, Any] | None
 ```
 
-<small>Source: [`hetu/data/backend/base.py:464`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L464)</small>
+<small>Source: [`hetu/data/backend/base.py:491`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L491)</small>
 
 从数据库直接获取单行数据。
 
@@ -711,7 +711,7 @@ servant_range(
 )
 ```
 
-<small>Source: [`hetu/data/backend/base.py:584`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L584)</small>
+<small>Source: [`hetu/data/backend/base.py:611`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L611)</small>
 
 从数据库直接查询索引 `index_name`，返回在 [`left`, `right`] 闭区间内数据。
 如果 `right` 为 `None`，则查询等于 `left` 的数据，限制 `limit` 条。
@@ -773,7 +773,7 @@ servant_range(
 direct_set(id_: int, **kwargs: str) -> bool
 ```
 
-<small>Source: [`hetu/data/backend/base.py:694`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L694)</small>
+<small>Source: [`hetu/data/backend/base.py:739`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/base.py#L739)</small>
 
 UNSAFE! 只用于易失数据! 不会做类型检查!
 
@@ -882,7 +882,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:289`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L289)</small>
+<small>Source: [`hetu/system/future.py:300`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L300)</small>
 
 
 
@@ -932,7 +932,7 @@ create_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:147`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L147)</small>
+<small>Source: [`hetu/system/future.py:156`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L156)</small>
 
 
 
@@ -963,6 +963,8 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 如果前一次已经成功执行，call_lock会触发，跳过执行。
 * 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
 * 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+* 注意：非 recurring 时不能超过 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）
+  的一半，否则抛 ValueError：重投时锁必须还在，才能认出已经执行过
 
 - **`recurring`** (Any) — 设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
 
@@ -1023,7 +1025,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:217`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L217)</small>
+<small>Source: [`hetu/system/future.py:228`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L228)</small>
 
 
 

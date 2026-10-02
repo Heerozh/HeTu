@@ -28,6 +28,7 @@ from .base import (
     UniqueViolation,
     detach_rows_,
     exact_number_,
+    from_sortable_bytes,
     inverted_bounds_error_,
     normalize_int_bounds_,
     peel_bound_,
@@ -572,6 +573,28 @@ class RedisModelClient(BackendClient):
         ]
 
     @override
+    async def range_index_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
+        limit: int = 10,
+        desc: bool = False,
+    ) -> list[tuple[Any, int]]:
+        """见基类"""
+        members, _b_left, _b_right = await self._zrange_members(
+            table_ref, index_name, left, right, limit, desc
+        )
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        result = []
+        for member in members:
+            # member 是 value\x00id，row_id 不含 0x00，最后一个 0x00 就是终止符
+            value, _sep, row_id = member.rpartition(b"\x00")
+            result.append((from_sortable_bytes(dtype, value), int(row_id)))
+        return result
+
+    @override
     async def range_read_(
         self,
         table_ref: TableReference,
@@ -816,9 +839,21 @@ class RedisModelClient(BackendClient):
                 _del_key(key)
             # 变动的 row_id 只有表频道要用：没声明 table_sub 的组件（绝大多数）不收集
             if comp_cls.table_sub_:
+                updated_ids = [row["id"] for row in old_rows]
+                if len(comp_cls.hidden_fields_) > 1:
+                    # 只改了 hidden 字段的行客户端看不出变化，不叫醒整表订阅（new_row 只含改了
+                    # 的字段）。RLS 判定用的字段例外：改了它行会对订阅者变得可见 / 不可见
+                    quiet = set(comp_cls.hidden_fields_)
+                    if comp_cls.rls_compare_:
+                        quiet.discard(comp_cls.rls_compare_[1])
+                    updated_ids = [
+                        old_row["id"]
+                        for old_row, new_row in zip(old_rows, new_rows)
+                        if not new_row.keys() <= quiet
+                    ]
                 touched_ids = [
                     *(row["id"] for row in inserts),
-                    *(row["id"] for row in old_rows),
+                    *updated_ids,
                     *(str(row["id"]) for row in deletes),
                 ]
                 if touched_ids:

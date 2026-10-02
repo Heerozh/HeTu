@@ -57,7 +57,10 @@ class ZlibLayer(MessageProcessLayer, alias="zlib"):
         for comp in SystemClusters().get_components():
             if comp.permission_ == Permission.ADMIN:
                 continue
-            keys.update(comp.dtype_map_.keys())
+            # 字典随握手发给客户端：不发给客户端的字段名（_version、hidden）不放进去
+            keys.update(
+                name for name in comp.dtype_map_ if name not in comp.hidden_fields_
+            )
             keys.add(comp.name_)
 
         if not keys:

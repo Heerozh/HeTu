@@ -56,6 +56,9 @@ class SessionRepository:
         idmap = self._session.idmap
         ref = self.ref
         for unique_index in fields:
+            if unique_index == "id":
+                # 主键不用查：调用方已用 _get_changed_fields 确认缓存里没有这个 id 的有效行
+                continue
             value = row[unique_index]
             rows = idmap.filter(ref, **{unique_index: value})
             if len(rows) > 0:

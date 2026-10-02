@@ -22,12 +22,12 @@ Everything an app touches is exported at the top level:
 | Symbol                                                                               | Role                                                     |
 |--------------------------------------------------------------------------------------|----------------------------------------------------------|
 | `@define_component(namespace=, permission=, backend=, volatile=)`                    | Declare a typed table                                    |
-| `property_field(default, dtype=, index=, unique=)`                                   | Declare a column                                         |
+| `property_field(default, dtype=, index=, unique=, hidden=)`                          | Declare a column                                         |
 | `BaseComponent`                                                                      | Base class for a component; `.new_row()`, `.new_rows(n)` |
 | `@define_system(namespace=, components=, permission=, depends=, retry=, call_lock=)` | Declare a transactional RPC                              |
 | `@define_endpoint(namespace=, permission=)`                                          | Declare a raw (non-transactional) RPC                    |
 | `SystemContext` / `EndpointContext`                                                  | The `ctx` passed into your function                      |
-| `Permission`                                                                         | `EVERYBODY` / `USER` / `OWNER` / `RLS` / `ADMIN`         |
+| `Permission`                                                                         | `EVERYBODY` / `USER` / `OWNER` / `RLS` / `GM` / `ADMIN`  |
 | `elevate(ctx, user_id, ...)`                                                         | Promote a connection to authenticated                    |
 | `ResponseToClient(data)`                                                             | Wrap a return value to send back to the client           |
 
@@ -97,6 +97,15 @@ working examples — read them first.
   and `ResponseToClient` data is not filtered, so check the caller yourself
   (e.g. channel membership before returning chat history).
   `elevate(ctx, user_id)` is how a login System authenticates a connection.
+  `GM` (System/Endpoint-only) lets logged-in connections whose `ctx.group`
+  starts with `"gm"` (and admins) call it; GMs otherwise read data like players.
+  `ADMIN` is root-level for back-office tools only: never put a game-client
+  connection (GM accounts included) in the `admin` group; in-game management
+  always uses `GM`.
+- **Hidden columns** — `property_field(..., hidden=True)` keeps a column out of
+  every subscription push (admins included; writes touching only hidden columns
+  push nothing), and clients may not subscribe by it. Systems still read/write
+  it, and `ResponseToClient` data is not filtered.
 - **Subscriptions** — clients `select` one row (by unique key) or `range` over an
   indexed column; the server pushes deltas via Redis pub/sub, permission-filtered.
   No polling.

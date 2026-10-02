@@ -128,9 +128,11 @@ def _schema_diff(
     """比对本地组件类与服务器 meta 的定义，返回 ``(必须一致的差异, 只告警的差异)``。
 
     比数据布局：``namespace`` 和 ``properties`` 的列名 / dtype / unique /
-    index；以及通知声明 ``table_sub`` / 各列 ``point_sub``——headless 写入走同一条
-    commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新。``default`` 差异只告警；
-    ``permission / rls_compare / volatile / readonly / backend`` 与 headless 无关，忽略。
+    index；以及通知声明 ``table_sub`` / 各列 ``point_sub`` / ``hidden``——headless 写入走
+    同一条 commit，声明对不上就少发（或多发）通知，服务器上的订阅会漏更新（整表订阅组件的
+    commit 不为只改了 hidden 列的行发表频道，RLS 判定用的列除外，所以这时 ``rls_compare``
+    也要一致）。``default`` 差异只告警；``permission / volatile / readonly / backend`` 与
+    headless 无关，忽略。
     差异行方向为 ``服务器 -> 本地``。
     """
     local_d = json.loads(local.json_)
@@ -155,7 +157,7 @@ def _schema_diff(
         if col not in local_p:
             errors.append(f"- col {col} ({remote_p[col]['dtype']})")
             continue
-        for key in ("dtype", "unique", "index", "point_sub"):
+        for key in ("dtype", "unique", "index", "point_sub", "hidden"):
             local_v = local_p[col].get(key, False)
             remote_v = remote_p[col].get(key, False)
             if local_v != remote_v:
@@ -165,6 +167,10 @@ def _schema_diff(
                 f"~ col {col}.default: {remote_p[col]['default']!r} -> "
                 f"{local_p[col]['default']!r}"
             )
+    hidden = any(p.get("hidden") for p in (*local_p.values(), *remote_p.values()))
+    local_rls, remote_rls = local_d["rls_compare"], remote_d["rls_compare"]
+    if (local_ts or remote_ts) and hidden and local_rls != remote_rls:
+        errors.append(f"rls_compare: {remote_rls} -> {local_rls}")
     return errors, warns
 
 

@@ -25,7 +25,7 @@ once a project leaves the prototype stage:
   RPC handlers without a transaction, for non-database work or to call
   multiple `Systems` independently.
 - **[Per-connection state](#per-connection-state-user_data-group-and-limits)** —
-  `ctx.user_data`, admin elevation via `ctx.group`, and rate-limit
+  `ctx.user_data`, admin / GM groups via `ctx.group`, and rate-limit
   overrides.
 - **[Early `session_commit` / `session_discard`](#early-session_commit--session_discard)
   ** —
@@ -151,6 +151,11 @@ Things to know about the API:
   retry-after window. If the call doesn't commit within `timeout`, the
   scheduler runs it again. `timeout=0` means "fire-and-forget" — no
   retries, and you accept that a process crash mid-call drops the task.
+  For one-shot (non-`recurring`) calls, `timeout` must not exceed half the
+  call-lock retention (config `CALL_LOCK_RETENTION`, default 30 minutes),
+  otherwise `create_future_call` raises `ValueError`: when the call is
+  re-run after `timeout`, its lock must still be there to tell that it
+  already ran.
 - **`recurring=True`** turns the entry into a periodic job. Each run
   reschedules itself `timeout` seconds later. Requires `timeout > 0`.
 - **The target `System` must declare `call_lock=True`** when `timeout>0` and
@@ -158,8 +163,11 @@ Things to know about the API:
   deduplicate retries; without `call_lock`, the engine refuses to register
   the future call.
 - **Trigger granularity is ~1 second.** Each `worker` runs a
-  `future_call_task` background coroutine that polls every second; don't
-  use this for sub-second precision.
+  `future_call_task` background coroutine. Each pass scans every future-call
+  table (the main one and every copy) and runs the due calls; when nothing
+  is due it sleeps until the earliest next call, at most 1 second, so a new
+  call is picked up within about a second. Don't use this for sub-second
+  precision.
 - **The execution `ctx` has no user identity.** The scheduler runs as
   internal traffic — `ctx.caller` is `0`, `ctx.address` is `localhost`. If
   the work needs a user id, pass it explicitly in `args`.
@@ -243,9 +251,15 @@ Mechanics:
   same transaction. If the transaction aborts (`RaceCondition`), the lock
   row aborts with it — retries are still allowed, but only until one
   succeeds.
-- Lock rows live on `SystemLock` indefinitely; on worker startup the
-  engine sweeps rows older than 7 days. If you want to free a slot
-  earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
+- Lock rows are kept for `CALL_LOCK_RETENTION` seconds (config, default
+  30 minutes) and then swept by every worker periodically, so **uuid
+  deduplication only holds within the retention window**. If you need a
+  longer window (for example payment callbacks that may be resent hours
+  later), record the processed order ids in your own data. Locks of
+  `on_start` `System`s are exempt (they back "run once per boot") and are
+  only swept on worker startup once older than 7 days. If you want to free
+  a slot earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
+  `SystemLock` is volatile: `hetu upgrade` clears it.
 
 `uuid=` is a keyword-only argument on `ctx.systems.call(...)` and on
 parent-`Systems`' `ctx.depend[...](...)`-style invocations.
@@ -278,6 +292,16 @@ Notes:
   close.
 - **`ctx.caller`** is the user id if the connection was elevated, or `0`
   if it disconnected before login. Guard accordingly.
+- **A kicked connection runs the hook with `ctx.caller == 0`.** When the
+  same account logs in on another connection
+  (`elevate(..., kick_logged_in=True)`), the old connection is closed and
+  its `on_disconnect` runs as an anonymous connection: the account now
+  lives on the new connection, whose login logic may already have run
+  (e.g. marked the user online), so the old connection must not mark it
+  offline. In the rare case where the old connection drops on its own at
+  the same moment the account logs in elsewhere, its hook may still run as
+  the user; if that matters, store `ctx.connection_id` on the user row at
+  login and only change the row in the hook when it still matches.
 - The hook runs in a normal transaction, so failures retry on
   `RaceCondition`. Do not block on external services here — the
   connection is already gone.
@@ -346,7 +370,13 @@ What each field is for:
   administrator (skipping RLS row filters and allowing
   `Permission.ADMIN`-gated calls). Setting `ctx.group = "admin"` from a
   trusted login `System` is how you grant admin in HeTu — there is no
-  separate token-based admin endpoint.
+  separate token-based admin endpoint. Admin is root-level and meant for
+  back-office tools only: never give it to a game-client connection (GM
+  accounts included); in-game management always uses GM. A value starting
+  with `"gm"` marks a GM: once logged in, it may call `Permission.GM`-gated
+  `Systems`/`Endpoints`, and otherwise reads data like an ordinary player
+  (RLS still filters its subscriptions, no `ADMIN` `Components`). Set
+  `ctx.group = "gm"` in the login `System` after `elevate`.
 - **`ctx.client_limits` / `ctx.server_limits`** — list of `[max_count,
   window_seconds]` pairs. The engine tears the connection down once any
   pair is exceeded. `elevate()` automatically multiplies these limits by

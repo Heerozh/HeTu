@@ -466,6 +466,14 @@ async def _cleanup_connection(
         # 断线System不走Endpoint，要自己打时间戳，否则是上一次rpc的时间（可能很久以前）
         context.timestamp = time.time()
         try:
+            # 被顶号的连接已经不代表这个用户：账号在新连接上，新连接的登录逻辑可能已经跑过
+            # （比如把用户标成在线），再以用户身份跑断线 System 会把它覆盖掉。改以匿名身份跑，
+            # 和库里一致（顶号时本行 owner 已被改成 0）。顶号通知可能丢了、还在路上，这里从
+            # master 再核一次：刚被顶号时副本可能还是旧的。
+            # 核查和断线 System 不在一个事务里（Connection 在自己的簇），核查之后、断线 System
+            # 提交之前才被顶号的，仍会以用户身份跑
+            if context.caller and await endpoint_executor.alive_checker.kicked(context):
+                context.caller = 0
             await system_caller.call(DISCONNECT_SYSTEM)
         except BaseException as e:
             err_msg = _(

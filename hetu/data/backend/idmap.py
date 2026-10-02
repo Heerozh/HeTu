@@ -90,8 +90,12 @@ class IdentityMap:
 
     def __init__(self) -> None:
         # 每个Component类型对应一个缓存
-        # {TableReference: np.recarray} - 存储行数据
+        # {TableReference: np.recarray} - 存储行数据，是 _row_buf 前 n 行的视图
         self._row_cache: dict[TableReference, np.recarray] = {}
+        # 行缓存的底层缓冲，容量不够时按倍数扩容：逐行追加均摊 O(1)，不用每行复制整个缓存
+        self._row_buf: dict[TableReference, np.recarray] = {}
+        # 状态为 DELETE 的行 id，filter 用它一次性排除已删除的行
+        self._deleted: dict[TableReference, set[int]] = {}
 
         # 储存查询到的行数据初始值，用于对比变更
         self._row_clean: dict[TableReference, dict[int, np.record]] = {}
@@ -157,10 +161,28 @@ class IdentityMap:
             cache = first_rows.copy().reshape(-1).view(np.recarray)
         clean_cache: dict[int, np.record] = {}
         states: dict[int, RowState] = {}
-        self._row_cache[table_ref] = cache
+        self._row_buf[table_ref] = self._row_cache[table_ref] = cache
         self._row_clean[table_ref] = clean_cache
         self._row_states[table_ref] = states
         return cache, clean_cache, states
+
+    def _append_rows(
+        self, table_ref: TableReference, rows: np.record | np.recarray
+    ) -> None:
+        """
+        把一行或一批行追加到缓存末尾。缓冲容量不够时按倍数扩容，均摊每行 O(1)：原来每行
+        np.append 复制整个缓存，事务里行一多就是平方级（行大时尤其明显）。
+        """
+        cache = self._row_cache[table_ref]
+        buf = self._row_buf[table_ref]
+        size = len(cache)
+        end = size + (1 if rows.ndim == 0 else len(rows))
+        if end > len(buf):
+            grown = np.empty(max(end, 2 * len(buf), 16), dtype=buf.dtype)
+            grown[:size] = cache
+            buf = self._row_buf[table_ref] = grown.view(np.recarray)
+        buf[size:end] = rows
+        self._row_cache[table_ref] = cast(np.recarray, buf[:end])
 
     def add_clean(
         self, table_ref: TableReference, row_s: np.record | np.recarray
@@ -185,19 +207,15 @@ class IdentityMap:
             _, clean_cache, states = self._new_cache(table_ref, row_s)
         else:
             # 初始化该component的缓存
-            cache, clean_cache, states = self._cache(table_ref)
+            _, clean_cache, states = self._cache(table_ref)
 
-            # 查找是否已存在该ID的行
-            if len(cache) > 0:
-                existing_idx = np.isin(cache["id"], row_s["id"])
-                if np.any(existing_idx):
-                    raise ValueError(
-                        f"Row with id {cache['id'][existing_idx]} "
-                        "already exists in cache"
-                    )
+            # 查找是否已存在该ID的行：缓存里的行都有状态，查状态字典，不扫缓存
+            ids = [row_s["id"]] if single else row_s["id"]
+            if existing := [row_id for row_id in ids if row_id in states]:
+                raise ValueError(f"Row with id {existing} already exists in cache")
 
             # 添加新行
-            self._row_cache[table_ref] = np.rec.array(np.append(cache, row_s))
+            self._append_rows(table_ref, row_s)
 
         # 标记为CLEAN
         if single:
@@ -262,15 +280,14 @@ class IdentityMap:
 
         assert row["_version"] == 0, f"不得修改_version字段，{row['_version']}"
 
-        # 初始化缓存
-
         # 添加到缓存
-        cache, _, states = self._cache(table_ref)
-        # todo np.append可能有性能问题，等py3.15的旁路trace工具再sampling一下优化看看
-        self._row_cache[table_ref] = np.rec.array(np.append(cache, row))
+        _, _, states = self._cache(table_ref)
+        self._append_rows(table_ref, row)
 
-        # 标记为INSERT
+        # 标记为INSERT（删掉的行同 id 再插回来，就不再算已删除）
         states[row["id"]] = RowState.INSERT
+        if deleted := self._deleted.get(table_ref):
+            deleted.discard(row["id"])
 
     def update(self, table_ref: TableReference, row: np.record) -> None:
         """
@@ -331,12 +348,15 @@ class IdentityMap:
         # 库里的行去删，版本校验必然失败，每次重试都一样。按有没有数据库态判断、不按 INSERT
         # 状态：删掉库里的行再用同一个 id insert，状态也是 INSERT，忘掉就把那行的删除也丢了
         if row_id not in clean_cache:
-            self._row_cache[table_ref] = cast(np.recarray, cache[~found])
+            # 拿掉之后的行另存一份，作为新的缓冲（下次追加时再扩容）
+            remaining = cast(np.recarray, cache[~found])
+            self._row_buf[table_ref] = self._row_cache[table_ref] = remaining
             del states[row_id]
             return
 
         # 标记为DELETE
         states[row_id] = RowState.DELETE
+        self._deleted.setdefault(table_ref, set()).add(row_id)
 
     def is_deleted(self, table_ref: TableReference, row_id: int) -> bool:
         """
@@ -668,17 +688,15 @@ class IdentityMap:
             return np.rec.array(np.empty(0, dtype=table_ref.comp_cls.dtypes))
 
         cache = self._row_cache[table_ref]
-        states = self._row_states[table_ref]
 
         # 构建过滤掩码
         mask = np.ones(len(cache), dtype=bool)
         for index_name, value in kwargs.items():
             mask &= cache[index_name] == value
 
-        # 排除已删除的行
-        for i in range(len(cache)):
-            row_id = int(cache[i]["id"])
-            if states.get(row_id) == RowState.DELETE:
-                mask[i] = False
+        # 排除已删除的行。一次向量化判断：逐行判断是 Python 循环，insert 的 unique 检查每次
+        # 都要调本方法，事务里行一多就成了平方级
+        if deleted := self._deleted.get(table_ref):
+            mask &= ~np.isin(cache["id"], list(deleted))
 
         return cast(np.recarray, cache[mask])

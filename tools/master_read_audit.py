@@ -30,7 +30,14 @@ import os
 import random
 import traceback
 
-READ_METHODS = ("get", "get_many", "get_many_array_", "range", "range_read_")
+READ_METHODS = (
+    "get",
+    "get_many",
+    "get_many_array_",
+    "range",
+    "range_read_",
+    "range_index_",
+)
 COUNTS: collections.Counter = collections.Counter()
 # 正在一个被记过的读方法里：里面再调的读方法不重复记
 _INSIDE_READ = contextvars.ContextVar("inside_read", default=False)

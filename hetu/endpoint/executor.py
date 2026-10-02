@@ -96,6 +96,16 @@ class EndpointExecutor:
                     replay.info(err_msg)
                     logger.warning(err_msg)
                     return None
+            case Permission.GM:
+                # GM 是已登录的玩家账号（group 以 "gm" 开头）；admin 也放行
+                if not (context.is_admin() or (context.caller and context.is_gm())):
+                    err_msg = _(
+                        "⚠️ [📞Endpoint] [非法操作] {context} | "
+                        "{endpoint}无调用权限，检查是否非法调用：{args}"
+                    ).format(context=context, endpoint=endpoint, args=args)
+                    replay.info(err_msg)
+                    logger.warning(err_msg)
+                    return None
             case Permission.ADMIN:
                 if not context.is_admin():
                     err_msg = _(

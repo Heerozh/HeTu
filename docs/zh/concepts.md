@@ -208,7 +208,7 @@ class PlayerName(hetu.BaseComponent):
 
 ## 权限
 
-每个 `组件` 和每个 `系统` 都带有一个 `permission=` 级别，其中 `OWNER` / `RLS` 只能用于 `组件`：
+每个 `组件` 和每个 `系统` 都带有一个 `permission=` 级别，其中 `OWNER` / `RLS` 只能用于 `组件`，`GM` 只能用于 `系统`：
 
 | 级别        | 含义                                                                                                                                                                                                   |
 |-------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -216,11 +216,25 @@ class PlayerName(hetu.BaseComponent):
 | `USER`      | 连接必须先调用 `elevate(ctx, user_id)`（由服务器调用）。标准的“已登录”门槛。                                                                                                                             |
 | `OWNER`     | 与 `USER` 相同，外加订阅时的自动行过滤 `row.owner == ctx.caller`。用于个人库存、私信等。                                                                                                                |
 | `RLS`       | 原始 RLS 过滤。在 `组件` 上声明 `rls_compare=(operator, component_field, context_field)` 以使用非 `owner` 过滤器（例如，“其 `guild_id` 与调用者的 `guild_id` 匹配的行”）。                          |
+| `GM`        | 只能用于 `系统`：已登录且 `ctx.group` 以 `"gm"` 开头的连接（以及管理员连接）能调用。GM 读数据和普通玩家一样：订阅照样按 RLS 过滤，也订不了 `ADMIN` `组件`。                                             |
 | `ADMIN`     | 只有管理员连接（`ctx.group` 以 `"admin"` 开头）能调用该 `系统`、订阅该 `组件`。只供服务器内部调用的 `系统` 请用 `permission=None`。                                                                     |
+
+`ADMIN` 是给后台管理工具（运维面板、数据修复脚本这类）用的 root 级权限：订阅不受 RLS 限制，能订到 `Connection` 这类引擎内部表和应用标成 `ADMIN` 的敏感数据。不要把 admin 组给游戏客户端的连接，GM 账号也不行：这样的账号一旦泄露，就能看到所有玩家的数据、调用所有 `ADMIN` 的 `系统`。游戏里的管理功能（GM 指令、客服工具等）一律用 `GM`。
 
 `OWNER` 和 `RLS` 只在订阅（`select` / `range` / 整表订阅）时生效：服务端逐行按调用者判断（管理员连接不过滤），看不到的行不推给客户端。`系统` 里通过 `ctx.repo` 的读写**不做**行级权限检查——一个 `permission=USER` 的 `系统` 能读到、也能改动 `OWNER` `组件` 里任何人的行，它通过 `ResponseToClient` 返回给客户端的数据也不会被过滤。`系统` 的权限只决定谁能调用它。这是有意为之：交易、公会结算这类逻辑本来就要读写别人的行。
 
 所以 `系统` 在把数据返回给客户端、或按客户端传来的参数改动别人的行之前，要自己校验调用者有没有这个权限。比如拉取频道历史消息的 `系统`，要先确认 `ctx.caller` 是该频道的成员，再读取消息返回。
+
+要对客户端藏起某一列（服务端内部状态、隐藏身份这类），在该字段上声明 `hidden=True`：
+
+```python
+@hetu.define_component(namespace="Game", permission=hetu.Permission.EVERYBODY)
+class Player(hetu.BaseComponent):
+    name: str = hetu.property_field("", dtype="U32")
+    role: str = hetu.property_field("", dtype="U16", index=True, hidden=True)
+```
+
+订阅（`select` / `range` / 整表订阅）推给客户端的行都不带 `hidden` 的列，管理员连接也一样；只改了 `hidden` 列的写入客户端看不出变化，不推送。客户端也不能按 `hidden` 的列订阅：就算不推它的值，按 `role` 等于 `"werewolf"` 做 `range` 这样的查询条件本身就能把它试探出来，所以它也不能声明 `point_sub`。和行级权限一样，`hidden` 只管订阅：`系统` 里照常读写，`ResponseToClient` 返回的数据不过滤；`hetu build` 生成的客户端类不含这一列。改动 `hidden` 和改权限一样要跑 `hetu upgrade`（只更新 schema 版本，不搬数据）。
 
 ## 事务
 

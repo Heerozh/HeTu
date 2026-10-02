@@ -29,5 +29,19 @@ class Permission(IntEnum):
     RLS = 4
     """Component自定义行级读取权限；具体比较逻辑由 `rls_compare` 参数定义。"""
 
+    GM = 500
+    """
+    只用于 System/Endpoint 的调用权限：已登录且 `ctx.is_gm()`（group 以 "gm" 开头）的连接，
+    或管理员连接可以调用。GM 读数据和普通玩家一样，受 Component 权限与 RLS 限制；Component
+    不能用此权限。
+    Call permission for Systems/Endpoints only: logged-in connections whose group starts
+    with "gm", or admin connections. GMs read data like ordinary players.
+    """
+
     ADMIN = 999
-    """仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。"""
+    """
+    仅管理员连接允许访问；要求 `ctx.is_admin()` 返回True。admin 是后台管理工具用的 root 级
+    权限，不要给游戏客户端的连接（GM 账号也不行），游戏里的管理功能用 `GM`。
+    Admin connections only. Admin is root-level and meant for back-office tools: never
+    give it to game-client connections (GMs included); in-game management uses `GM`.
+    """

@@ -166,6 +166,33 @@ def test_zlib_encode_decode_roundtrip(base_pipeline, mod_item_model):
     assert 0.5 > zlib_layer.encode_ratio > 0.1
 
 
+def test_dicts_skip_hidden_fields(new_clusters_env):
+    """压缩字典随握手发给客户端：_version 与 hidden 字段的名字不放进去，zstd 样本里也不带"""
+
+    @define_component(namespace="pytest", force=True)
+    class HiddenDict(BaseComponent):
+        shown_value: int = property_field(0)
+        secret_value: int = property_field(0, hidden=True)
+
+    @define_system(namespace="pytest", components=(HiddenDict,), force=True)
+    async def use_hidden(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+
+    words = pipeline.ZlibLayer(level=6).dict_message.decode("utf-8").split("\n")
+    assert "shown_value" in words
+    assert "secret_value" not in words and "_version" not in words
+
+    pipe = pipeline.MessagePipeline()
+    pipe.add_layer(pipeline.JSONBinaryLayer())
+    zstd_layer = pipeline.ZstdLayer(level=3)
+    pipe.add_layer(zstd_layer)
+    rows = [msgspec.msgpack.decode(s)[2] for s in zstd_layer.initial_samples()]
+    assert any("shown_value" in row for row in rows)
+    assert not any("secret_value" in row or "_version" in row for row in rows)
+
+
 def test_zlib_dict_negotiation(base_pipeline):
     """客户端进程没注册组件时字典和服务端不同，必须采纳握手时下发的服务端字典。"""
     server_layer = pipeline.ZlibLayer(level=6)

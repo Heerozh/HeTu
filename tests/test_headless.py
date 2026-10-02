@@ -158,6 +158,28 @@ async def test_schema_guard_notify_declarations(mod_test_app, mod_auto_backend):
         assert needle in str(ei.value), (needle, str(ei.value))
 
 
+def test_schema_diff_hidden(mod_test_app):
+    """hidden 与服务器不一致也必须报：整表订阅组件的 commit 不为只改了 hidden 列的行发表频道。
+    RLS 判定用的列例外，所以有 hidden 列的整表订阅组件 rls_compare 也要一致，其余情况不管"""
+    Sim = mod_test_app.HeadlessSim
+    errors, _ = headless._schema_diff(
+        _variant(Sim, properties={"epoch": {"hidden": True}}), Sim.json_
+    )
+    assert errors == ["~ col epoch.hidden: False -> True"]
+
+    rls = ["eq", "system_id", "caller"]
+    remote = _variant(Sim, table_sub=True, properties={"epoch": {"hidden": True}})
+    local = _variant(
+        Sim, table_sub=True, properties={"epoch": {"hidden": True}}, rls_compare=rls
+    )
+    errors, _ = headless._schema_diff(local, remote.json_)
+    assert errors == [f"rls_compare: None -> {rls}"]
+
+    remote = _variant(Sim, table_sub=True)
+    local = _variant(Sim, table_sub=True, rls_compare=rls)
+    assert headless._schema_diff(local, remote.json_) == ([], [])
+
+
 # ---------------------------------------------------------------- 读
 
 

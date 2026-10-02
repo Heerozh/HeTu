@@ -58,7 +58,8 @@ def generate_component(component_cls: type[BaseComponent]):
         f'    [Key("{name}")] public {dtype_to_csharp(prop.dtype)} '
         f"{to_csharp_property_name(name)};"
         for name, prop in component_cls.properties_
-        if name not in {"id", "_version"}
+        # id 在下面单独声明；_version 与 hidden 字段不发给客户端
+        if name != "id" and name not in component_cls.hidden_fields_
     ]
 
     lines = [

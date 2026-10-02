@@ -14,7 +14,7 @@ next: operations
 - **[`call_lock`](#call_lock与幂等system执行)** —— 使 `System` 在重试时具备幂等性。
 - **[生命周期钩子](#the-on_disconnect-hook)** —— `on_disconnect` 在套接字关闭时运行。
 - **[原始 `Endpoints`](#原始endpoints多system或非数据库rpc)** —— 无事务的 RPC 处理器，用于非数据库工作或独立调用多个 `System`。
-- **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 提升管理员权限，以及速率限制覆盖。
+- **[每连接状态](#每连接状态user_data-group-和-limits)** —— `ctx.user_data`、通过 `ctx.group` 授予管理员 / GM 权限，以及速率限制覆盖。
 - **[提前 `session_commit` / `session_discard`](#提前-session_commit--session_discard)** —— 在 `System` 主体返回之前提交（或放弃）事务。
 - **[查不到就插入](#查不到就插入两种写法)** —— `range` 的区间校验（防幻读），以及热路径上更省的 unique 锚定 + `upsert` 写法。
 - **[用于范围查询的 NumPy 模式](#用于范围查询的-numpy-模式)** —— 广播、布尔掩码、聚合，以及将两个查询在内存中合并而非循环。
@@ -97,10 +97,10 @@ async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
 
 - **`at`** 为正数时是 POSIX 时间戳；**负数或零**表示“从现在起多少秒”。`at=-10` 表示十秒后运行。
 - **`*args`** 必须可被 `repr()` 序列化，并且 `eval()` 后能恢复为等同的值——调度器将参数存储为字符串。坚持使用基本类型（`int`、`float`、`str`、`bool`、简单元组）。总长度必须 ≤ 1024 字符。
-- **`timeout`（秒，默认 60，非零时最小 5）** 是重试时间窗口。如果调用在 `timeout` 内未提交，调度器会再次运行它。`timeout=0` 表示“发射后不管”——不重试，你需要接受进程在调用中途崩溃会丢失任务。
+- **`timeout`（秒，默认 60，非零时最小 5）** 是重试时间窗口。如果调用在 `timeout` 内未提交，调度器会再次运行它。`timeout=0` 表示“发射后不管”——不重试，你需要接受进程在调用中途崩溃会丢失任务。一次性调用（非 `recurring`）的 `timeout` 不能超过 call lock 保留期（配置 `CALL_LOCK_RETENTION`，默认 30 分钟）的一半，否则 `create_future_call` 抛 `ValueError`：重投时锁必须还在，才能认出已经执行过。
 - **`recurring=True`** 将条目变为周期性作业。每次运行会在 `timeout` 秒后重新调度自身。要求 `timeout > 0`。
 - **目标 `System` 必须声明 `call_lock=True`**——当 `timeout>0` 且不是 `recurring` 时。调度器使用调用的行 ID 作为 UUID 来去重重试；没有 `call_lock`，引擎会拒绝注册未来调用。
-- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程，每秒轮询一次；不要将其用于亚秒级精度。
+- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。
 - **执行 `ctx` 没有用户身份。** 调度器作为内部流量运行——`ctx.caller` 是 `0`，`ctx.address` 是 `localhost`。如果工作需要用户 ID，请在 `args` 中显式传递。
 - **权限警告。** 如果目标 `System` 的 `permission=USER`（或任何非 `ADMIN`/`None` 的值），`create_future_call` 会发出警告，因为同一个 `System` 现在也可能由客户端直接调用。最佳实践是未来调用目标使用 `permission=None`。
 
@@ -156,7 +156,7 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 - 启用 `call_lock=True` 会自动向 `System` 的集群附加一个重复的 `SystemLock` `Component`（使用与 `System` 副本相同的后缀技巧——每个上锁的 `System` 对应一个锁表）。
 - 调用时，引擎会读取给定 `uuid` 的 `SystemLock`。如果存在行，则跳过 `System` 主体并返回 `None`。
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
-- 锁行在 `SystemLock` 上无限期存在；在工作器启动时，引擎会清除超过 7 天的行。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。
+- 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
 `uuid=` 是 `ctx.systems.call(...)` 以及父 `Systems` 的 `ctx.depend[...](...)` 风格调用上的关键字参数。
 
@@ -182,6 +182,7 @@ async def on_disconnect(ctx: hetu.SystemContext):
 
 - **`permission=None`** 以保证安全。任何其他值也会生成一个同名的客户端可调用 `Endpoint`，恶意客户端可以随意触发你的“断开连接”行为。引擎本身在套接字关闭调用此钩子时会忽略权限。
 - **`ctx.caller`** 是用户 ID（如果连接已提升）或 `0`（如果它在登录前已断开连接）。请相应地进行防护。
+- **被顶号的连接以 `ctx.caller == 0` 运行钩子。** 同一账号在别的连接登录（`elevate(..., kick_logged_in=True)`）时，旧连接会被断开，它的 `on_disconnect` 按匿名连接运行：账号已经在新连接上，新连接的登录逻辑可能已经跑过（比如把用户标成在线），旧连接不能再把它标成离线。极少数情况下，旧连接恰好在账号于别处登录的同一时刻自己断开，它的钩子仍可能以用户身份运行；如果这对你很重要，就在登录时把 `ctx.connection_id` 记进用户行，钩子里比对一致后再改。
 - 钩子在正常事务中运行，因此失败会在 `RaceCondition` 时重试。不要在此处阻塞外部服务——连接已经不存在了。
 - 触发 `on_disconnect` 是尽力而为的：如果工作器进程被杀死（`SIGKILL`、机器断电），钩子会被跳过。对于保证清理，请将此钩子与周期性 Future Call 配对，以回收过期的 `last_active` 连接。
 
@@ -225,7 +226,7 @@ async def my_system(ctx: hetu.SystemContext, ...):
 每个字段的用途：
 
 - **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）。
-- **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。
+- **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。admin 是 root 级权限，只给后台管理工具的连接，不要给游戏客户端的连接（GM 账号也不行），游戏里的管理权限一律用 GM。以 `"gm"` 开头的值视为 GM：已登录的 GM 连接能调用 `Permission.GM` 门控的 `System`/`Endpoint`，除此之外和普通玩家一样（订阅照样按 RLS 过滤，订不了 `ADMIN` `组件`）。GM 账号在登录 `System` 里 `elevate` 之后设 `ctx.group = "gm"`。
 - **`ctx.client_limits` / `ctx.server_limits`** —— `[max_count, window_seconds]` 对的列表。一旦超出任何一对，引擎就会断开连接。`elevate()` 会自动将这些限制乘以 10 倍，因此登录后的用户获得匿名连接所没有的余量。如果需要为机器人账户等自定义预算，可以在自己的逻辑中覆盖每个连接的设置。
 - **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** —— 活动 `Get`、`Range` 和 `Table`（整表）订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。整表订阅的单表行数上限是全局配置 `MAX_TABLE_SUBSCRIPTION_ROWS`，不在 `ctx` 上。
 - **`ctx.race_count`** —— 当前事务的重试次数。用于退避非幂等副作用：`if ctx.race_count == 0: send_email(...)` 仅在第一次尝试时发送电子邮件。

@@ -22,7 +22,14 @@ HETU_ROOT = Path(__file__).resolve().parent.parent / "hetu"
 AUDIT_PLUGIN = Path(__file__).resolve().parent.parent / "tools" / "master_read_audit.py"
 
 # 读方法（写方法不在本约束内：写本来就只能去 master）
-READ_METHODS = ("get", "get_many", "get_many_array_", "range", "range_read_")
+READ_METHODS = (
+    "get",
+    "get_many",
+    "get_many_array_",
+    "range",
+    "range_read_",
+    "range_index_",
+)
 # `xxx.master.get(`、`self._master.range(`、`backend.master.get_many(`……
 PATTERN = re.compile(
     r"(?:\.|\b)_?master\s*\.\s*(" + "|".join(READ_METHODS) + r")\s*\(",
@@ -37,7 +44,10 @@ ALLOWED: dict[tuple[str, str], str] = {
     (
         "endpoint/connection.py",
         "get",
-    ): "kicked()：顶号核查不能用滞后数据，只在收到顶号通知时才读；RPC 热路径用的是 servant_get",
+    ): (
+        "kicked()：顶号核查不能用滞后数据，只在收到顶号通知时、已登录连接拆连接时（决定断线 "
+        "System 以谁的身份跑）才读；RPC 热路径用的是 servant_get"
+    ),
 }
 
 
