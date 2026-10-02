@@ -803,3 +803,137 @@ async def test_future_call_task_backs_off_on_persistent_error(
     except asyncio.CancelledError:
         pass
     assert task.done()
+
+
+async def _lock_uuids(lock_tbl) -> list[str]:
+    """这张 call lock 表里所有锁的 uuid（先等副本同步）"""
+    await lock_tbl.backend.wait_for_synced()
+    async with lock_tbl.session() as session:
+        rows = await session.using(lock_tbl.comp_cls).range(
+            called=(0, time.time() + 3600), limit=-1
+        )
+    return sorted(str(uuid) for uuid in rows.uuid)
+
+
+async def _add_call_lock(lock_tbl, uuid: str, age: float) -> None:
+    """直接插一行 call lock，called 为 age 秒前"""
+    comp = lock_tbl.comp_cls
+    async with lock_tbl.session() as session:
+        row = comp.new_row()
+        row.uuid, row.called = uuid, time.time() - age
+        row.name = comp.name_.partition(":")[2]  # 副本后缀就是 System 名
+        await session.using(comp).insert(row)
+
+
+async def test_exec_future_call_keeps_call_lock(test_app, tbl_mgr, new_ctx):
+    """执行成功后不立即删 call lock，留到保留期后由定期清理删：同一条调用还有别的执行在路上时
+    （超时重投、卡住的 worker），它查锁才看得到已经执行过"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+    from hetu.system.lock import SystemLock
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call is not None
+    assert await exec_future_call(call, _task_callers(tbl_mgr)["server1"], fc_tbl)
+
+    lock_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "add_rls_comp_value"))
+    assert await _lock_uuids(lock_tbl) == [str(call.id)]
+
+
+async def test_exec_future_call_twice_runs_system_once(test_app, tbl_mgr, new_ctx):
+    """同一条调用执行了两次（第一份执行完以后，超时重投或卡住的另一份才去查锁）：目标 System
+    只能生效一次。原来执行完立即删锁，后到的那份查不到锁就会再执行一遍"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1, value=4)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call is not None
+    caller = _task_callers(tbl_mgr)["server1"]
+    assert await exec_future_call(call, caller, fc_tbl)
+    await fc_tbl.backend.wait_for_synced()
+    assert await exec_future_call(call, caller, fc_tbl)
+    assert await _counter_value(tbl_mgr, test_app) == 104
+
+
+async def test_clean_expired_call_locks_retention_and_on_start(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """清锁只清 called 早于保留期的；定期清理跳过 on_start 的锁表（"每次开服只跑一次"靠它，
+    worker 在保留期之后崩溃重启也不能再跑一遍），启动时的兜底清理（7 天）照旧清它"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, define_system
+    from hetu.system.lock import SystemLock, clean_expired_call_locks
+
+    @define_component(namespace="pytest", force=True)
+    class LockedComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+
+    @define_system(namespace="pytest", components=(LockedComp,), call_lock=True)
+    async def locked_sys(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(LockedComp,), on_start=True)
+    async def boot_sys(ctx):
+        pass
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    retention = 600.0
+    locked_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "locked_sys"))
+    boot_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "boot_sys"))
+    await _add_call_lock(locked_tbl, "old", retention * 2)
+    await _add_call_lock(locked_tbl, "fresh", retention / 2)
+    await _add_call_lock(boot_tbl, "boot-old", retention * 2)
+    await backend.wait_for_synced()
+
+    assert await clean_expired_call_locks(tbl_mgr, retention, skip_on_start=True) == 1
+    assert await _lock_uuids(locked_tbl) == ["fresh"]
+    assert await _lock_uuids(boot_tbl) == ["boot-old"]
+
+    assert await clean_expired_call_locks(tbl_mgr, retention) == 1
+    assert await _lock_uuids(boot_tbl) == []
+
+
+async def test_build_future_row_timeout_within_lock_retention(
+    monkeypatch, test_app, new_ctx
+):
+    """一次性调用（非 recurring、timeout 非 0）的 timeout 不能超过 call lock 保留期的一半：执行
+    成功后 worker 没来得及删行就挂了，这条会在 timeout 后重投，那时锁必须还在"""
+    from hetu.system import lock
+    from hetu.system.future import _build_future_row
+
+    monkeypatch.setattr(lock, "CALL_LOCK_RETENTION", 100, raising=False)
+    ctx = new_ctx()
+    with pytest.raises(ValueError, match="CALL_LOCK_RETENTION"):
+        _build_future_row(ctx, -1, "add_rls_comp_value", (1,), timeout=51)
+    _build_future_row(ctx, -1, "add_rls_comp_value", (1,), timeout=50)
+    # recurring 与 timeout=0 的调用不加锁，不受限
+    _build_future_row(ctx, -1, "add_rls_comp_value", (1,), timeout=3600, recurring=True)
+    _build_future_row(ctx, -1, "add_rls_comp_value", (1,), timeout=0)
+
+
+@pytest.mark.timeout(30)
+async def test_future_call_task_cleans_expired_call_locks(
+    monkeypatch, test_app, tbl_mgr
+):
+    """call lock 保留 CALL_LOCK_RETENTION 秒，由 future_call_task 定期清理（原来只在 worker
+    启动时清 7 天前的）"""
+    from hetu.system import future, lock
+    from hetu.system.lock import SystemLock
+
+    monkeypatch.setattr(lock, "CALL_LOCK_RETENTION", 5, raising=False)
+    monkeypatch.setattr(future, "CALL_LOCK_CLEAN_INTERVAL", 0.2, raising=False)
+    lock_tbl = tbl_mgr.get_table(SystemLock.duplicate("pytest", "add_rls_comp_value"))
+    await _add_call_lock(lock_tbl, "expired", 60)
+    await _add_call_lock(lock_tbl, "fresh", 0)
+
+    async def expired_gone():
+        return await _lock_uuids(lock_tbl) == ["fresh"]
+
+    assert await _run_future_task_until(tbl_mgr, expired_gone, timeout=4)
