@@ -28,6 +28,7 @@ from .base import (
     UniqueViolation,
     detach_rows_,
     exact_number_,
+    from_sortable_bytes,
     inverted_bounds_error_,
     normalize_int_bounds_,
     peel_bound_,
@@ -570,6 +571,28 @@ class RedisModelClient(BackendClient):
             cast(dict[str, Any], self.row_decode_(comp_cls, row, row_format))
             for row in raw_rows
         ]
+
+    @override
+    async def range_index_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None = None,
+        limit: int = 10,
+        desc: bool = False,
+    ) -> list[tuple[Any, int]]:
+        """见基类"""
+        members, _b_left, _b_right = await self._zrange_members(
+            table_ref, index_name, left, right, limit, desc
+        )
+        dtype = table_ref.comp_cls.dtype_map_[index_name]
+        result = []
+        for member in members:
+            # member 是 value\x00id，row_id 不含 0x00，最后一个 0x00 就是终止符
+            value, _sep, row_id = member.rpartition(b"\x00")
+            result.append((from_sortable_bytes(dtype, value), int(row_id)))
+        return result
 
     @override
     async def range_read_(

@@ -16,11 +16,11 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from hetu.data.backend import RowFormat
-
 from ..data import BaseComponent, Permission, define_component, property_field
+from ..data.backend import RaceCondition, RowFormat
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from ..i18n import _
+from . import lock
 from .caller import SystemCaller
 from .context import SystemContext
 from .definer import SystemClusters, define_system
@@ -97,6 +97,15 @@ def _build_future_row(
     assert revert == args, _("args通过eval还原丢失了信息")
 
     assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
+    # 一次性调用靠 call lock 去重：执行成功后 worker 没来得及删行就挂了，这条会在 timeout 后
+    # 重投，那时锁必须还在。锁保留 CALL_LOCK_RETENTION 秒，留一倍余量
+    if not recurring and timeout > lock.CALL_LOCK_RETENTION / 2:
+        raise ValueError(
+            _(
+                "一次性未来调用的 timeout（{timeout} 秒）不能超过 call lock 保留期 "
+                "CALL_LOCK_RETENTION（{retention} 秒）的一半：超时重投时锁必须还在"
+            ).format(timeout=timeout, retention=lock.CALL_LOCK_RETENTION)
+        )
 
     # 读取保存的system define，检查是否开了call lock
     sys = SYSTEM_CLUSTERS.get_system(system)
@@ -186,6 +195,8 @@ async def create_future_call(
         如果前一次已经成功执行，call_lock会触发，跳过执行。
         * 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
         * 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+        * 注意：非 recurring 时不能超过 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）
+          的一半，否则抛 ValueError：重投时锁必须还在，才能认出已经执行过
     recurring: bool
         设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
 
@@ -315,65 +326,91 @@ async def cancel_future_call(ctx: SystemContext, key: str) -> bool:
     return True
 
 
-async def sleep_for_upcoming(tbl: Table):
-    """等待下一个即将到期的任务，返回是否有任务"""
-    # query limit=1 获得即将到期任务(1秒内）
-    calls = await tbl.servant_range(
-        "scheduled", left=0, right=time.time() + 1, limit=1, row_format=RowFormat.RAW
+# 没有到期调用时最多睡多久：新建的调用最迟这么久后被发现
+MAX_IDLE_SLEEP = 1.0
+# 每张表一轮最多连续取出执行这么多条就去看下一张表，免得一张表的积压饿死别的表
+DRAIN_PER_TABLE = 64
+# 看到有到期的却一条没取到（被别的 worker 抢先、副本还没同步）时，隔这么久再扫，免得空转
+CONTENDED_RETRY_DELAY = 0.05
+# 每隔多久清一次过期的 call lock（保留期见 lock.CALL_LOCK_RETENTION）
+CALL_LOCK_CLEAN_INTERVAL = 60.0
+
+
+async def next_due(tbl: Table, horizon: float) -> float | None:
+    """
+    horizon 之前最早到期的一条调用的 scheduled，没有返回 None。
+
+    只读 servant 上的 scheduled 索引（索引 member 里就编着值），不读行：先读索引再读行是两次
+    往返，中间这条可能已被别的 worker 取走、scheduled 改到了 timeout 之后，按读到的值去睡就会
+    睡过头（timeout 长的 recurring 调用能睡一小时）。
+    """
+    upcoming = await tbl.backend.servant.range_index_(
+        tbl, "scheduled", 0, horizon, limit=1
     )
-    # 如果无任务，则sleep并continue
-    if not calls:
-        await asyncio.sleep(1)
-        return False
-
-    # sleep将到期时间
-    seconds_left = float(calls[0]["scheduled"]) - time.time()
-    await asyncio.sleep(seconds_left)
-    return True
+    return float(upcoming[0][0]) if upcoming else None
 
 
-async def pop_upcoming_call(tbl: Table):
-    """取出并修改到期任务"""
-    call = None
-    try:
-        async for attempt in tbl.session().retry(5):
-            async with attempt as session:
-                repo = session.using(tbl.comp_cls)
-                # 取出最早到期的任务。不做区间校验：取哪一条不依赖区间里没有别的行，并发取同一条
-                # 由它的版本校验管；否则不断有新的到期任务插进来时会反复判竞态
-                now = time.time()
-                calls = await repo.range(
-                    scheduled=(0, now + 0.1), limit=1, phantom_check=False
-                )
-                # 检查可能被其他worker消费了
-                if calls.size == 0:
-                    return None
-                call = calls[0]
-                # update到期的任务scheduled属性+timeout时间，如果为0则删除任务
+# 出队时从最早到期的这么多条里随机挑一条：多个 worker 同时出队时不全挤在最早那一条上撞车
+POP_CANDIDATES = 8
+# 出队撞竞态（被别的 worker 抢先）最多换几次；都没抢到就放弃，下一轮再取
+POP_ATTEMPTS = 5
+# 撞竞态后换一条之前随机等这么久以内，错开同时撞车的 worker
+POP_RACE_JITTER = 0.005
+
+
+async def pop_upcoming_call(tbl: Table) -> np.record | None:
+    """
+    取出一条到期的调用：scheduled 顺延 timeout 秒作为租约（到时还没执行完、没删掉就会重投），
+    timeout 为 0 的直接删。没有到期的、或到期的都被别的 worker 抢走了，返回 None。
+    """
+    comp_cls = tbl.comp_cls
+    for _attempt in range(POP_ATTEMPTS):
+        now = time.time()
+        # 候选只读索引拿 id，不进事务：区间里不断有新的到期调用插进来，读进事务会反复判竞态
+        candidates = await tbl.backend.master_or_servant.range(
+            tbl, "scheduled", 0, now + 0.1, POP_CANDIDATES, False, RowFormat.ID_LIST
+        )
+        if not candidates:
+            return None
+        call = None
+        try:
+            async with tbl.session() as session:
+                repo = session.using(comp_cls)
+                call = await repo.get(id=random.choice(candidates))
+                # 读索引和读行是两次往返，中间这条可能已被别的 worker 取走（scheduled 已顺延）
+                # 或执行完删掉了。读回的行必须仍然到期：提交时的版本校验只保证读回之后没人再改
+                # 它，拦不住读回之前就被取走的，那样两个 worker 会各执行一遍
+                if call is None or call.scheduled > now + 0.1:
+                    continue
                 if call.timeout == 0:
                     repo.delete(call.id)
                 else:
                     call.scheduled = now + call.timeout
                     call.last_run = now
                     await repo.update(call)
-    except Exception as e:
-        # call 出了本函数就没了，挂到异常上，任务循环记的 traceback 末尾才有是哪条调用。
-        # scheduled/last_run 已被上面就地改成要写入的值，不打
-        if call is not None:
-            e.add_note(
-                _(
-                    "[⚙️Future] 正在取出的调用：{system}{args}，id={id}，"
-                    "recurring={recurring}，timeout={timeout}"
-                ).format(
-                    system=call.system,
-                    args=call.args,
-                    id=call.id,
-                    recurring=call.recurring,
-                    timeout=call.timeout,
+        except RaceCondition:
+            # 提交前被别的 worker 抢先取走了：换一条，不用指数退避
+            await asyncio.sleep(random.random() * POP_RACE_JITTER)
+            continue
+        except Exception as e:
+            # call 出了本函数就没了，挂到异常上，任务循环记的 traceback 末尾才有是哪条调用。
+            # scheduled/last_run 已被上面就地改成要写入的值，不打
+            if call is not None:
+                e.add_note(
+                    _(
+                        "[⚙️Future] 正在取出的调用：{system}{args}，id={id}，"
+                        "recurring={recurring}，timeout={timeout}"
+                    ).format(
+                        system=call.system,
+                        args=call.args,
+                        id=call.id,
+                        recurring=call.recurring,
+                        timeout=call.timeout,
+                    )
                 )
-            )
-        raise
-    return call
+            raise
+        return call
+    return None
 
 
 async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
@@ -410,14 +447,47 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
         replay.info(f"[SystemResult][{call.system}]({ok}, {res!s})")
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
-        async with tbl.session() as session:
-            repo = session.using(tbl.comp_cls)
-            get_4_del = await repo.get(id=call.id)
-            if get_4_del:
-                repo.delete(get_4_del.id)
-        # 再删除call_lock uuid数据，只有ok的执行才有call lock
-        await caller.remove_call_lock(call.system, str(call.id))
+        # 读到滞后副本上的旧版本、或这条刚被超时重投改了版本，会撞竞态：重试，别让它变成任务
+        # 循环里的一条错误
+        async for attempt in tbl.session().retry(3):
+            async with attempt as session:
+                repo = session.using(tbl.comp_cls)
+                if get_4_del := await repo.get(id=call.id):
+                    repo.delete(get_4_del.id)
+        # call lock 不在这里删：同一条调用可能还有别的执行在路上（超时重投、卡住的 worker），
+        # 它们查锁才知道已经执行过。锁留到保留期后由 future_call_task 定期清理
     return True
+
+
+async def run_due_calls(tables: list[Table], callers: dict[str, SystemCaller]) -> float:
+    """
+    扫一遍所有未来调用表，取出并执行已到期的调用，返回距下次该扫的秒数：执行过调用就是 0（马上
+    再扫，可能还有），否则睡到最早的下一条，最多 MAX_IDLE_SLEEP 秒。
+
+    到期的表连续取出执行，不能每处理一条就换表、碰上空表就睡：表一多（主表 + 各个副本），吞吐
+    就塌成 worker 数 / (表数-1) 条每秒。表按随机顺序扫，各 worker 不总从同一张表开始抢。
+    """
+    executed = 0
+    wake = time.time() + MAX_IDLE_SLEEP
+    for tbl in random.sample(tables, len(tables)):
+        now = time.time()
+        due = await next_due(tbl, now + MAX_IDLE_SLEEP)
+        if due is None:
+            continue
+        if due > now:
+            wake = min(wake, due)
+            continue
+        popped = 0
+        for _i in range(DRAIN_PER_TABLE):
+            if not (call := await pop_upcoming_call(tbl)):
+                break
+            popped += 1
+            await exec_future_call(call, callers[tbl.instance_name], tbl)
+        if not popped:
+            # 看到到期的却一条没取到：被别的 worker 抢先了，或副本上的索引还没跟上
+            wake = min(wake, time.time() + CONTENDED_RETRY_DELAY)
+        executed += popped
+    return 0.0 if executed else max(0.0, wake - time.time())
 
 
 async def future_call_task(app):
@@ -431,9 +501,14 @@ async def future_call_task(app):
         _("🔗 [⚙️Future] 新Task：{task_name}").format(task_name=current_task.get_name())
     )
 
-    # 启动时清空超过7天的call_lock的已执行uuid数据
+    # 启动时兜底清一次超过7天的call lock：on_start 的锁不参与下面的定期清理，只在这里清
     for tbl_mgr in app.ctx.table_managers.values():
-        await clean_expired_call_locks(tbl_mgr)
+        if deleted := await clean_expired_call_locks(tbl_mgr):
+            logger.info(
+                _("🔗 [⚙️Future] 释放了 {deleted} 条过期的 call lock").format(
+                    deleted=deleted
+                )
+            )
 
     # 随机sleep一段时间，错开各worker的执行时间
     await asyncio.sleep(random.random())
@@ -469,24 +544,23 @@ async def future_call_task(app):
             if tbl_mgr.get_table(comp) is not None
         ]
 
+    # 定期清理过期的 call lock，各 worker 错开时间
+    next_clean = time.monotonic() + random.uniform(0, CALL_LOCK_CLEAN_INTERVAL)
+
     # 不能通过SubscriptionBroker订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，
-    # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式
-    # 如果有很多个instance，可能worker个task来不及处理这么多future表?
-    # 应该不会，如果堆积，sleep_for_upcoming并不会sleep，会循环到处理完的
+    # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式：
+    # 每轮扫完所有表，执行到期的；全都没到期才睡，睡到最早的下一条（最多 1 秒）
     while True:
-        # 随机选一个未来调用组件
-        tbl = random.choice(future_call_tables)
         try:
-            # 等待0-1秒直到下一个即将到期的任务，如果没有任务则重新循环
-            if not await sleep_for_upcoming(tbl):
-                continue
-
-            # 取出并修改到期任务的事务, 此时如果服务器关闭，事务还未执行到提交，任何数据不会丢失
-            if not (call := await pop_upcoming_call(tbl)):
-                continue
-
-            # 执行任务, 此时call已被取出，如果服务器关闭/数据库断线，timeout=0的任务会丢失
-            await exec_future_call(call, callers[tbl.instance_name], tbl)
+            # 取出调用的事务提交前服务器关闭，任何数据不会丢失；取出后执行前关闭，
+            # timeout=0 的调用会丢失，其余的 timeout 后重投
+            if time.monotonic() >= next_clean:
+                next_clean = time.monotonic() + CALL_LOCK_CLEAN_INTERVAL
+                for tbl_mgr in app.ctx.table_managers.values():
+                    await clean_expired_call_locks(
+                        tbl_mgr, lock.CALL_LOCK_RETENTION, skip_on_start=True
+                    )
+            await asyncio.sleep(await run_due_calls(future_call_tables, callers))
         except asyncio.CancelledError:
             break
         except Exception as e:
