@@ -97,10 +97,10 @@ async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
 
 - **`at`** 为正数时是 POSIX 时间戳；**负数或零**表示“从现在起多少秒”。`at=-10` 表示十秒后运行。
 - **`*args`** 必须可被 `repr()` 序列化，并且 `eval()` 后能恢复为等同的值——调度器将参数存储为字符串。坚持使用基本类型（`int`、`float`、`str`、`bool`、简单元组）。总长度必须 ≤ 1024 字符。
-- **`timeout`（秒，默认 60，非零时最小 5）** 是重试时间窗口。如果调用在 `timeout` 内未提交，调度器会再次运行它。`timeout=0` 表示“发射后不管”——不重试，你需要接受进程在调用中途崩溃会丢失任务。
+- **`timeout`（秒，默认 60，非零时最小 5）** 是重试时间窗口。如果调用在 `timeout` 内未提交，调度器会再次运行它。`timeout=0` 表示“发射后不管”——不重试，你需要接受进程在调用中途崩溃会丢失任务。一次性调用（非 `recurring`）的 `timeout` 不能超过 call lock 保留期（配置 `CALL_LOCK_RETENTION`，默认 30 分钟）的一半，否则 `create_future_call` 抛 `ValueError`：重投时锁必须还在，才能认出已经执行过。
 - **`recurring=True`** 将条目变为周期性作业。每次运行会在 `timeout` 秒后重新调度自身。要求 `timeout > 0`。
 - **目标 `System` 必须声明 `call_lock=True`**——当 `timeout>0` 且不是 `recurring` 时。调度器使用调用的行 ID 作为 UUID 来去重重试；没有 `call_lock`，引擎会拒绝注册未来调用。
-- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程，每秒轮询一次；不要将其用于亚秒级精度。
+- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。
 - **执行 `ctx` 没有用户身份。** 调度器作为内部流量运行——`ctx.caller` 是 `0`，`ctx.address` 是 `localhost`。如果工作需要用户 ID，请在 `args` 中显式传递。
 - **权限警告。** 如果目标 `System` 的 `permission=USER`（或任何非 `ADMIN`/`None` 的值），`create_future_call` 会发出警告，因为同一个 `System` 现在也可能由客户端直接调用。最佳实践是未来调用目标使用 `permission=None`。
 
@@ -156,7 +156,7 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 - 启用 `call_lock=True` 会自动向 `System` 的集群附加一个重复的 `SystemLock` `Component`（使用与 `System` 副本相同的后缀技巧——每个上锁的 `System` 对应一个锁表）。
 - 调用时，引擎会读取给定 `uuid` 的 `SystemLock`。如果存在行，则跳过 `System` 主体并返回 `None`。
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
-- 锁行在 `SystemLock` 上无限期存在；在工作器启动时，引擎会清除超过 7 天的行。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。
+- 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
 `uuid=` 是 `ctx.systems.call(...)` 以及父 `Systems` 的 `ctx.depend[...](...)` 风格调用上的关键字参数。
 

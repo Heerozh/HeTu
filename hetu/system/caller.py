@@ -214,7 +214,9 @@ class SystemCaller:
             如果提供了uuid，系统会在调用前检查该uuid是否已经执行过，
             使用本功能也需要System定义时`call_lock`设为`True`。
 
-            主要用于未来调用的幂等性，或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+            主要用于未来调用的幂等性，或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况。
+            去重只在 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）内有效，过期的
+            锁由 future_call_task 定期清理。
 
         Returns
         -------
@@ -234,8 +236,8 @@ class SystemCaller:
 
     async def remove_call_lock(self, system: str, uuid: str):
         """
-        删除call lock。此方法开发者无需调用，由系统内部管理。
-        call lock本身是易失表，可以通过维护工具定期清理数据，并不需要特地remove。
+        删除call lock，让同一 uuid 能再执行一次。一般不用调用：锁保留 CALL_LOCK_RETENTION 秒后
+        由 future_call_task 定期清理。
         """
         sys = SYSTEM_CLUSTERS.get_system(system)
         assert sys

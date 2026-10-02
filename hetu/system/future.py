@@ -20,6 +20,7 @@ from ..data import BaseComponent, Permission, define_component, property_field
 from ..data.backend import RaceCondition, RowFormat
 from ..endpoint.definer import ENDPOINT_NAME_MAX_LEN
 from ..i18n import _
+from . import lock
 from .caller import SystemCaller
 from .context import SystemContext
 from .definer import SystemClusters, define_system
@@ -96,6 +97,15 @@ def _build_future_row(
     assert revert == args, _("args通过eval还原丢失了信息")
 
     assert not recurring or timeout != 0, _("recurring=True时timeout不能为0")
+    # 一次性调用靠 call lock 去重：执行成功后 worker 没来得及删行就挂了，这条会在 timeout 后
+    # 重投，那时锁必须还在。锁保留 CALL_LOCK_RETENTION 秒，留一倍余量
+    if not recurring and timeout > lock.CALL_LOCK_RETENTION / 2:
+        raise ValueError(
+            _(
+                "一次性未来调用的 timeout（{timeout} 秒）不能超过 call lock 保留期 "
+                "CALL_LOCK_RETENTION（{retention} 秒）的一半：超时重投时锁必须还在"
+            ).format(timeout=timeout, retention=lock.CALL_LOCK_RETENTION)
+        )
 
     # 读取保存的system define，检查是否开了call lock
     sys = SYSTEM_CLUSTERS.get_system(system)
@@ -185,6 +195,8 @@ async def create_future_call(
         如果前一次已经成功执行，call_lock会触发，跳过执行。
         * 注意：抛弃的只有事务(所有ctx.repo[components]的操作)，修改全局变量、写入文件等操作是永久的
         * 注意：`ctx.race_count`只是事务冲突的计数，timeout引起的再次触发会从0重新计数
+        * 注意：非 recurring 时不能超过 call lock 保留期（配置 CALL_LOCK_RETENTION，默认 30 分钟）
+          的一半，否则抛 ValueError：重投时锁必须还在，才能认出已经执行过
     recurring: bool
         设置后，将永不删除此未来调用，每次执行后按timeout时间再次执行。
 
@@ -320,6 +332,8 @@ MAX_IDLE_SLEEP = 1.0
 DRAIN_PER_TABLE = 64
 # 看到有到期的却一条没取到（被别的 worker 抢先、副本还没同步）时，隔这么久再扫，免得空转
 CONTENDED_RETRY_DELAY = 0.05
+# 每隔多久清一次过期的 call lock（保留期见 lock.CALL_LOCK_RETENTION）
+CALL_LOCK_CLEAN_INTERVAL = 60.0
 
 
 async def next_due(tbl: Table, horizon: float) -> float | None:
@@ -434,14 +448,14 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     # 执行成功后，删除未来调用。如果代码错误/数据库错误，会下次重试
     if ok and req_call_lock:
         # 读到滞后副本上的旧版本、或这条刚被超时重投改了版本，会撞竞态：重试，别让它变成任务
-        # 循环里的一条错误（还会跳过下面的收尾）
+        # 循环里的一条错误
         async for attempt in tbl.session().retry(3):
             async with attempt as session:
                 repo = session.using(tbl.comp_cls)
                 if get_4_del := await repo.get(id=call.id):
                     repo.delete(get_4_del.id)
-        # 再删除call_lock uuid数据，只有ok的执行才有call lock
-        await caller.remove_call_lock(call.system, str(call.id))
+        # call lock 不在这里删：同一条调用可能还有别的执行在路上（超时重投、卡住的 worker），
+        # 它们查锁才知道已经执行过。锁留到保留期后由 future_call_task 定期清理
     return True
 
 
@@ -487,9 +501,14 @@ async def future_call_task(app):
         _("🔗 [⚙️Future] 新Task：{task_name}").format(task_name=current_task.get_name())
     )
 
-    # 启动时清空超过7天的call_lock的已执行uuid数据
+    # 启动时兜底清一次超过7天的call lock：on_start 的锁不参与下面的定期清理，只在这里清
     for tbl_mgr in app.ctx.table_managers.values():
-        await clean_expired_call_locks(tbl_mgr)
+        if deleted := await clean_expired_call_locks(tbl_mgr):
+            logger.info(
+                _("🔗 [⚙️Future] 释放了 {deleted} 条过期的 call lock").format(
+                    deleted=deleted
+                )
+            )
 
     # 随机sleep一段时间，错开各worker的执行时间
     await asyncio.sleep(random.random())
@@ -525,6 +544,9 @@ async def future_call_task(app):
             if tbl_mgr.get_table(comp) is not None
         ]
 
+    # 定期清理过期的 call lock，各 worker 错开时间
+    next_clean = time.monotonic() + random.uniform(0, CALL_LOCK_CLEAN_INTERVAL)
+
     # 不能通过SubscriptionBroker订阅组件获取调用的更新，因为订阅消息不保证可靠会丢失，
     # 导致部分任务可能卡很久不执行，所以这里使用最基础的，每一段时间循环的方式：
     # 每轮扫完所有表，执行到期的；全都没到期才睡，睡到最早的下一条（最多 1 秒）
@@ -532,6 +554,12 @@ async def future_call_task(app):
         try:
             # 取出调用的事务提交前服务器关闭，任何数据不会丢失；取出后执行前关闭，
             # timeout=0 的调用会丢失，其余的 timeout 后重投
+            if time.monotonic() >= next_clean:
+                next_clean = time.monotonic() + CALL_LOCK_CLEAN_INTERVAL
+                for tbl_mgr in app.ctx.table_managers.values():
+                    await clean_expired_call_locks(
+                        tbl_mgr, lock.CALL_LOCK_RETENTION, skip_on_start=True
+                    )
             await asyncio.sleep(await run_due_calls(future_call_tables, callers))
         except asyncio.CancelledError:
             break

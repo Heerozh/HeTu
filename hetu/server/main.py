@@ -30,6 +30,7 @@ from ..i18n import _
 from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
+from ..system import lock as system_lock
 from ..system.future import future_call_task
 from . import pipeline
 from .watchdog import hang_watchdog_task
@@ -384,6 +385,9 @@ def worker_main(app_name, config) -> Sanic:
     )
     connection.CONNECTION_ALIVE_RECHECK_INTERVAL = config.get(
         "CONNECTION_ALIVE_RECHECK_INTERVAL", 5
+    )
+    system_lock.CALL_LOCK_RETENTION = config.get(
+        "CALL_LOCK_RETENTION", system_lock.CALL_LOCK_RETENTION
     )
 
     # 加载web服务器
