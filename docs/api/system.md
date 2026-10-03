@@ -269,7 +269,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:658`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L658)</small>
+<small>Source: [`hetu/data/backend/repo.py:655`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L655)</small>
 
 向Session中添加一行待插入数据。
 
@@ -301,7 +301,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:709`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L709)</small>
+<small>Source: [`hetu/data/backend/repo.py:706`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L706)</small>
 
 向Session中添加一行待更新数据。
 
@@ -330,7 +330,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:745`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L745)</small>
+<small>Source: [`hetu/data/backend/repo.py:742`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L742)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -365,7 +365,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:774`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L774)</small>
+<small>Source: [`hetu/data/backend/repo.py:771`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L771)</small>
 
 向Session中添加一行待删除数据。
 
