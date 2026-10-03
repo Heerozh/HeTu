@@ -34,6 +34,7 @@ from .base import (
     peel_bound_,
     sortable_token,
     to_sortable_bytes,
+    to_sortable_bytes_list,
 )
 from .idmap import RangeObservation
 
@@ -351,13 +352,17 @@ class RedisModelClient(BackendClient):
         row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
         # 观察区间给 ZLEXCOUNT 用，要按 min, max 排；desc 时 b_left 是上界
         lo, hi = (b_right, b_left) if desc else (b_left, b_right)
+        # 两端都是 "[" 开头的闭区间，去掉 "[" 就是 member（排序键）的闭区间
+        query = (lo[1:], hi[1:])
         if 0 < limit == len(members):
             # 截断读只看到了前 limit 行，观察区间收到最后一个返回的 member 为止
             if desc:
                 lo = b"[" + members[-1]
             else:
                 hi = b"[" + members[-1]
-        return row_ids, RangeObservation(index_name, row_ids, (lo, hi), members)
+        return row_ids, RangeObservation(
+            index_name, row_ids, (lo, hi), members, query=query
+        )
 
     # ============ 读：两个后端共用，I/O 由子类的两个原语完成 ============
 
@@ -612,6 +617,38 @@ class RedisModelClient(BackendClient):
             index_name, members, b_left, b_right, limit, desc
         )
 
+    @override
+    def index_sort_keys_(
+        self, table_ref: TableReference, index_name: str, rows: np.ndarray
+    ) -> list[bytes]:
+        """见基类。排序键就是索引 member：值的编码 + 0x00 + 十进制 id，与 commit 写索引时一致"""
+        values = to_sortable_bytes_list(rows[index_name])
+        return [
+            value + b"\x00" + b"%d" % row_id
+            for value, row_id in zip(values, rows["id"].tolist())
+        ]
+
+    @override
+    def shrink_observation_(
+        self, obs: RangeObservation, last_key: bytes, desc: bool
+    ) -> None:
+        """见基类。观察区间是 ZLEXCOUNT 的两端，截断的一端（升序是上界、降序是下界）收到 last_key"""
+        lo, hi = obs.bounds
+        end = b"[" + last_key
+        members = obs.members or []
+        if desc:
+            if end <= lo:
+                return
+            obs.bounds = (end, hi)
+            keep = sum(1 for member in members if member >= last_key)
+        else:
+            if end >= hi:
+                return
+            obs.bounds = (lo, end)
+            keep = sum(1 for member in members if member <= last_key)
+        del obs.ids[keep:]
+        del members[keep:]
+
     # ============ 提交 ============
 
     def _range_checks(self, idmap: IdentityMap) -> list[list[str | bytes | int]]:
@@ -623,15 +660,22 @@ class RedisModelClient(BackendClient):
         不是原子的、还可能打到不同节点，中间有行被改走又有行插进来时行数可能不变，所以
         这里先在 worker 上核对，对不上直接判竞态，不去 master。本事务新 insert 的行不核对，
         主键冲突交给 NX 判定（否则盲插已存在的 id 会从 UniqueViolation 变成无限重试）。
-        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）。
+        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）；
+        同一查询读了几次的，被另一条包含的也不发（见 _drop_covered）。
         """
         if located := idmap.inconsistent_range():
             raise InconsistentRangeRead(*located)
         for ref, observations in idmap.range_observations().items():
             comp_cls = ref.comp_cls
+            # 同一个 member 在几次读里都读到时只核对一次（比如"取一行、删一行"的循环，每次
+            # 读都带着之前删掉的整段前缀）
+            checked: set[tuple[str, bytes]] = set()
             for obs in observations:
                 dtype = comp_cls.dtype_map_[obs.index_name]
                 for row_id, member in zip(obs.ids, obs.members or ()):
+                    if (obs.index_name, member) in checked:
+                        continue
+                    checked.add((obs.index_name, member))
                     row = idmap.db_row(ref, row_id)
                     if row is None:
                         continue
@@ -642,7 +686,7 @@ class RedisModelClient(BackendClient):
                         )
         checks: list[list[str | bytes | int]] = []
         for ref, observations in idmap.range_observations_to_check().items():
-            for obs in observations:
+            for obs in self._drop_covered(observations):
                 lo, hi = obs.bounds
                 checks.append(
                     [
@@ -655,6 +699,47 @@ class RedisModelClient(BackendClient):
                     ]
                 )
         return checks
+
+    @staticmethod
+    def _covers(outer: RangeObservation, inner: RangeObservation) -> bool:
+        """
+        outer 的区间包含 inner 的，且 outer 在 inner 区间里读到的 member 就是 inner 读到的：
+        outer 的 CNT 加上读到的行的 VER 保证 outer 区间里还是那些行，inner 区间也就没变
+        """
+        (outer_lo, outer_hi), (inner_lo, inner_hi) = outer.bounds, inner.bounds
+        if not (outer_lo <= inner_lo and inner_hi <= outer_hi):
+            return False
+        # 两端都是 "[" 开头的闭区间
+        lo, hi = inner_lo[1:], inner_hi[1:]
+        inside = {member for member in outer.members or () if lo <= member <= hi}
+        return inside == set(inner.members or ())
+
+    @classmethod
+    def _drop_covered(
+        cls, observations: list[RangeObservation]
+    ) -> list[RangeObservation]:
+        """
+        同一查询读了几次（比如本事务写入前后各读一次，截断读收到的位置不同）：被另一条包含的
+        观察不用单独发 CNT。只在同一索引、同一查询的观察之间比，几次读之间库里的行变了的
+        （有并发写入）对不上，都留着。
+        """
+        if len(observations) < 2:
+            return observations
+        groups: dict[tuple, list[RangeObservation]] = {}
+        for obs in observations:
+            groups.setdefault((obs.index_name, obs.query), []).append(obs)
+        if len(groups) == len(observations):
+            return observations
+        kept_all: list[RangeObservation] = []
+        for group in groups.values():
+            kept: list[RangeObservation] = []
+            for obs in group:
+                if any(cls._covers(other, obs) for other in kept):
+                    continue
+                kept = [other for other in kept if not cls._covers(obs, other)]
+                kept.append(obs)
+            kept_all.extend(kept)
+        return kept_all
 
     def build_commit_payload_(self, idmap: IdentityMap) -> tuple[list[str], list]:
         """
@@ -741,7 +826,7 @@ class RedisModelClient(BackendClient):
             """添加del的push命令"""
             pushes.append(["DEL", _key])
 
-        dirties = idmap.get_dirty_rows()
+        dirties, read_versions = idmap.get_commit_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
 
@@ -860,9 +945,9 @@ class RedisModelClient(BackendClient):
                     ids_msg: bytes = msg_packer.pack(touched_ids)  # type: ignore
                     table_pubs.append([self.table_channel(ref), ids_msg])
 
-        # 对纯读行加版本检查，防止事务依赖的陈旧读：
+        # 对纯读行（含改了又改回原值的行）加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
-        for ref, row_versions in idmap.get_clean_rows().items():
+        for ref, row_versions in read_versions.items():
             clean_id_prefix = self.cluster_prefix(ref) + ":id:"
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)

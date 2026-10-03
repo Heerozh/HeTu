@@ -135,7 +135,10 @@ What this buys you, and what it costs:
 
 - **One Session, one commit.** The child `System` reads/writes through the
   same `ctx.repo[...]`, so either everything commits or `RaceCondition`
-  retries the whole call from the parent's top.
+  retries the whole call from the parent's top. Reads in the transaction
+  (`get`, `range`) see the rows it has already written but not yet committed,
+  so if both parent and child grant an item "only when none is found", the
+  call still grants just one.
 - **Components inherit.** The parent transparently gains access to the
   child's declared Components — you don't need to repeat them in the
   parent's `components=`.
