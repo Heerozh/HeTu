@@ -746,23 +746,8 @@ class BackendClient:
         内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
         同时返回这次读取的观察。之后 `commit` 据此校验同样的查询是否仍返回这些行（防幻读，
         见 `SessionRepository.range`）。`limit` 不能为 0。
-        观察里的 `members` 是读到的各行的排序键（见 `index_sort_keys_`）。
-        """
-        raise NotImplementedError
-
-    def index_key_bounds_(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None,
-    ) -> tuple[bytes, bytes] | None:
-        """
-        内部方法：`range(index_name, left, right)` 匹配的排序键区间 `(lo, hi)`，两端都含，按字节序
-        比较；区间里没有值时返回 None。参数不合法时与 `range` 报同样的错。不访问数据库。
-
-        排序键见 `index_sort_keys_`。事务里的 range 用这两个方法把本事务的改动按数据库的
-        规则合并进结果（见 `SessionRepository.range`）。
+        观察里的 `members` 是读到的各行的排序键，`query` 是这次查询匹配的排序键闭区间（见
+        `index_sort_keys_`）。
         """
         raise NotImplementedError
 
@@ -771,7 +756,8 @@ class BackendClient:
     ) -> list[bytes]:
         """
         内部方法：`rows` 这些行在 `index_name` 索引上的排序键。range 按排序键的字节序返回行
-        （desc 时倒序），与 `range_read_` 观察里的 `members` 是同一套键。
+        （desc 时倒序），与 `range_read_` 观察里的 `members` / `query` 是同一套键。事务里的
+        range 用它把本事务的改动按数据库的规则合并进结果（见 `SessionRepository.range`）。
         """
         raise NotImplementedError
 

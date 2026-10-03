@@ -6,6 +6,7 @@
 """
 
 import logging
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, cast
@@ -50,8 +51,9 @@ class RangeObservation:
     # 只保护返回的行、不校验区间（get 命中：约定是"返回一行匹配的"，那一行由 VER 管）。
     # 读取一致性照样核对
     rows_only: bool = False
-    # 这次读的查询（后端规范化后的区间两端，按扫描顺序）。截断读的 bounds 会收窄，它不变：
-    # 同一查询读了几次，后端按它归组，判断哪条观察已经被另一条包含
+    # 这次查询匹配的排序键闭区间 (lo, hi)，两端都含、按字节序比较，区间为空时 lo > hi
+    # （排序键见 BackendClient.index_sort_keys_）。截断读的 bounds 会收窄，它不变：事务里
+    # 的 range 按它挑出落在区间里的本事务的行；同一查询读了几次，后端按它归组去重
     query: tuple = ()
 
 
@@ -62,6 +64,17 @@ def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | 
     for name in bytes_fields:
         ret[name] = bytes(row[name])
     return ret
+
+
+def _id_positions(ids: np.ndarray, wanted: Collection[int]) -> list[int] | np.ndarray:
+    """
+    ids 里属于 wanted 的位置，用来从缓存里挑行。缓存不大时在 Python 里扫一遍最快（几十行
+    约 1µs）；np.isin 的固定开销约 8µs，缓存大了才划算
+    """
+    if len(ids) > 128:
+        return np.isin(ids, list(wanted))
+    wanted_set = wanted if isinstance(wanted, set) else set(wanted)
+    return [i for i, row_id in enumerate(ids.tolist()) if row_id in wanted_set]
 
 
 def changed_fields(new: np.record, old: np.record) -> list[str]:
@@ -519,6 +532,51 @@ class IdentityMap:
         """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
         return len(self._row_cache.get(table_ref, ())) > 0
 
+    def lookup(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray | None, dict[int, int], list[int]]:
+        """
+        一批 id 查缓存，返回 (rows, index_of, miss_ids)：rows 是缓存里有的行（拷贝，没有时为
+        None），index_of 是 {id: 在 rows 里的下标}，miss_ids 是缓存里没有的 id（保持原顺序）。
+        已删除的行两边都不在。比逐个 get 省：有没有看状态字典，缓存里的行一次取出。
+        """
+        states = self._row_states.get(table_ref)
+        if not states:
+            return None, {}, list(row_ids)
+        hit_ids: list[int] = []
+        miss_ids: list[int] = []
+        for row_id in row_ids:
+            state = states.get(row_id)
+            if state is None:
+                miss_ids.append(row_id)
+            elif state != RowState.DELETE:
+                hit_ids.append(row_id)
+        if not hit_ids:
+            return None, {}, miss_ids
+        cache = self._row_cache[table_ref]
+        rows = cast(np.recarray, cache[_id_positions(cache["id"], hit_ids)])
+        index_of = {row_id: i for i, row_id in enumerate(rows["id"].tolist())}
+        return rows, index_of, miss_ids
+
+    def match(
+        self, table_ref: TableReference, index_name: str, value: object
+    ) -> np.recarray | None:
+        """
+        缓存里 `index_name == value` 的行（排除已删除的，拷贝），没有时返回 None。同 `filter`
+        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。
+        """
+        cache = self._row_cache.get(table_ref)
+        if cache is None or len(cache) == 0:
+            return None
+        mask = cache[index_name] == value
+        if not mask.any():
+            return None
+        if deleted := self._deleted.get(table_ref):
+            mask &= ~np.isin(cache["id"], list(deleted))
+            if not mask.any():
+                return None
+        return cast(np.recarray, cache[mask])
+
     def has_writes(self, table_ref: TableReference) -> bool:
         """这张表在本事务里有没有 insert / update / delete 过的行"""
         return bool(self._written.get(table_ref) or self._deleted.get(table_ref))
@@ -542,19 +600,23 @@ class IdentityMap:
         if not written:
             return None, gone
         cache = self._row_cache[table_ref]
-        rows = cast(np.recarray, cache[np.isin(cache["id"], list(written))])
+        rows = cast(np.recarray, cache[_id_positions(cache["id"], written)])
         clean_rows = self._row_clean[table_ref]
         values = rows[index_name]
-        keep = np.ones(len(rows), dtype=bool)
+        unchanged: list[int] = []
         for i, row_id in enumerate(rows["id"].tolist()):
             clean = clean_rows.get(row_id)
             if clean is not None and clean[index_name] == values[i]:
-                keep[i] = False
+                unchanged.append(i)
             else:
                 gone.add(row_id)
-        if not keep.any():
-            return None, gone
-        return cast(np.recarray, rows[keep]), gone
+        if unchanged:
+            if len(unchanged) == len(rows):
+                return None, gone
+            keep = np.ones(len(rows), dtype=bool)
+            keep[unchanged] = False
+            rows = cast(np.recarray, rows[keep])
+        return rows, gone
 
     def moved_away(self, table_ref: TableReference, index_name: str) -> set[int]:
         """

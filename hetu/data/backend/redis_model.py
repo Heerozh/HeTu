@@ -352,7 +352,8 @@ class RedisModelClient(BackendClient):
         row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
         # 观察区间给 ZLEXCOUNT 用，要按 min, max 排；desc 时 b_left 是上界
         lo, hi = (b_right, b_left) if desc else (b_left, b_right)
-        query = (b_left, b_right)
+        # 两端都是 "[" 开头的闭区间，去掉 "[" 就是 member（排序键）的闭区间
+        query = (lo[1:], hi[1:])
         if 0 < limit == len(members):
             # 截断读只看到了前 limit 行，观察区间收到最后一个返回的 member 为止
             if desc:
@@ -615,23 +616,6 @@ class RedisModelClient(BackendClient):
         return self.range_observation_(
             index_name, members, b_left, b_right, limit, desc
         )
-
-    @override
-    def index_key_bounds_(
-        self,
-        table_ref: TableReference,
-        index_name: str,
-        left: int | float | str | bytes | bool,
-        right: int | float | str | bytes | bool | None,
-    ) -> tuple[bytes, bytes] | None:
-        """见基类。排序键就是索引 member"""
-        _idx_key, b_left, b_right, empty = self.zrange_args_(
-            table_ref, index_name, left, right, False
-        )
-        if empty:
-            return None
-        # ZRANGE BYLEX 的两端都是 "[" 开头的闭区间，去掉 "[" 就是 member 的闭区间
-        return b_left[1:], b_right[1:]
 
     @override
     def index_sort_keys_(

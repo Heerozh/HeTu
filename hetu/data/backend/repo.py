@@ -395,21 +395,30 @@ class SessionRepository:
                 )
             )
 
-        left = _to_py(_left)
-        right = None if _right is None else _to_py(_right)
-
         idmap = self._session.idmap
-        if limit != 0 and index_name in comp_cls.uniques_:
-            hit = self._unique_point_hit(index_name, left, right, limit, desc)
-            if hit is not None:
-                return hit
-        if limit != 0 and idmap.has_writes(self.ref):
-            # 这张表在本事务里有写入，要把改动合并进结果
-            return await self._range_merged(
-                index_name, left, right, limit, desc, phantom_check
-            )
+        if limit != 0:
+            if index_name in comp_cls.uniques_ and idmap.has_rows(self.ref):
+                hit = self._unique_point_hit(
+                    index_name,
+                    _to_py(_left),
+                    None if _right is None else _to_py(_right),
+                    limit,
+                    desc,
+                )
+                if hit is not None:
+                    return hit
+            if idmap.has_writes(self.ref):
+                # 这张表在本事务里有写入，要把改动合并进结果
+                return await self._range_merged(
+                    index_name,
+                    _to_py(_left),
+                    None if _right is None else _to_py(_right),
+                    limit,
+                    desc,
+                    phantom_check,
+                )
         rows, obs = await self._range_rows(
-            index_name, left, right, limit, desc, phantom_check
+            index_name, _left, _right, limit, desc, phantom_check
         )
         if obs is not None:
             idmap.add_range_observation(self.ref, obs)
@@ -429,15 +438,12 @@ class SessionRepository:
         提交时这一行由 VER / unique 检查保证仍是这个值上唯一的一行，不用登记区间观察。
         """
         ref = self.ref
-        idmap = self._session.idmap
-        if not idmap.has_rows(ref):
-            return None
         dtype = ref.comp_cls.dtype_map_[index_name]
         point = BackendClient.point_query_value_(dtype, left, right)
         if point is None:
             return None
-        hit = idmap.filter(ref, **{index_name: point})
-        if len(hit) == 0:
+        hit = self._session.idmap.match(ref, index_name, point)
+        if hit is None:
             return None
         # 参数错误（比如字符串列拿数字查）照样报，和去数据库时一样
         self._session.master_or_servant.check_range_(
@@ -474,33 +480,11 @@ class SessionRepository:
         client = self._session.master_or_servant
 
         rows, gone = idmap.local_changes(ref, index_name)
-        # (排序键, 行 id, 本事务的行)，库里的行第三项为 None，取回来再填
-        local: list[tuple[bytes, int, np.record | None]] = []
         read_limit = limit
-        if (
-            bounds := client.index_key_bounds_(ref, index_name, left, right)
-        ) is not None:
-            lo, hi = bounds
-            if rows is not None:
-                keys = client.index_sort_keys_(ref, index_name, rows)
-                local = [
-                    (key, row_id, row)
-                    for key, row_id, row in zip(keys, rows["id"].tolist(), rows)
-                    if lo <= key <= hi
-                ]
-            if limit > 0 and gone:
-                # 本事务拿掉的行在数据库索引里还占着原来的位置：截断读落在区间里的有几行，
-                # 就要多读几行，剩下的才够 limit 行
-                clean = [
-                    row
-                    for row_id in gone
-                    if (row := idmap.db_row(ref, row_id)) is not None
-                ]
-                if clean:
-                    clean_rows = np.array(clean, dtype=comp_cls.dtypes)
-                    keys = client.index_sort_keys_(ref, index_name, clean_rows)
-                    read_limit += sum(lo <= key <= hi for key in keys)
-
+        if limit > 0:
+            # 本事务删掉、改走的行在数据库索引里还占着原来的位置，有几行就多读几行，剩下的
+            # 才够 limit 行。多读的只是索引，取行只取看到的
+            read_limit += sum(idmap.db_row(ref, row_id) is not None for row_id in gone)
         row_ids, obs = await client.range_read_(
             ref, index_name, left, right, read_limit, desc
         )
@@ -511,59 +495,78 @@ class SessionRepository:
         if not row_ids and point is not None and index_name in comp_cls.uniques_:
             idmap.mark_absent(ref, index_name, point)
 
-        merged: list[tuple[bytes, int, np.record | None]] = [
-            (key, row_id, None)
+        # (排序键, 行 id, 在 rows 里的下标)，库里的行下标为 -1
+        merged = [
+            (key, row_id, -1)
             for key, row_id in zip(obs.members or (), row_ids)
             if row_id not in gone
         ]
-        if local:
-            merged.extend(local)
-            merged.sort(key=itemgetter(0), reverse=desc)
+        if rows is not None:
+            lo, hi = obs.query
+            keys = client.index_sort_keys_(ref, index_name, rows)
+            local = [
+                (key, row_id, i)
+                for i, (key, row_id) in enumerate(zip(keys, rows["id"].tolist()))
+                if lo <= key <= hi
+            ]
+            if local:
+                merged.extend(local)
+                merged.sort(key=itemgetter(0), reverse=desc)
         if 0 < limit <= len(merged):
             del merged[limit:]
             # 截断读只观察到看到的最后一行为止，同库里直接读到 limit 行
             client.shrink_observation_(obs, merged[-1][0], desc)
 
-        found, missing = await self._fetch_rows(
-            client, [row_id for _key, row_id, row in merged if row is None]
+        # 只取看到的库里的行：缓存里有的直接用，没有的一次批量读回
+        cached, index_of, miss_ids = idmap.lookup(
+            ref, [row_id for _key, row_id, i in merged if i < 0]
         )
+        fetched: np.recarray | None = None
+        missing: list[int] = []
+        if miss_ids:
+            fetched, missing = await client.get_many_array_(ref, miss_ids)
+            if len(fetched) == 1:
+                # 点查通常只取一行：单行缓存路径比按批加入快
+                idmap.add_clean(ref, fetched[0])
+            elif len(fetched) > 1:
+                idmap.add_clean(ref, fetched)
         obs.point = point
         obs.missing = missing
         if phantom_check:
             idmap.add_range_observation(ref, obs)
-        result = [
-            found.get(row_id) if row is None else row for _k, row_id, row in merged
-        ]
-        return np.array(
-            [row for row in result if row is not None], dtype=comp_cls.dtypes
-        ).view(np.recarray)
 
-    async def _fetch_rows(
-        self, client: BackendClient, row_ids: list[int]
-    ) -> tuple[dict[int, np.record], list[int]]:
-        """
-        按 id 取行（同 _range_rows 的后半段）：命中缓存的直接用，未命中的一次批量读回、放入
-        缓存。返回 {id: 行}，以及读不到的 id（读索引之后被删的）。
-        """
-        idmap = self._session.idmap
-        found: dict[int, np.record] = {}
-        miss_ids: list[int] = []
-        for row_id in row_ids:
-            row, row_stat = idmap.get(self.ref, row_id)
-            if row_stat is None:
-                miss_ids.append(row_id)
-            elif row is not None and row_stat != RowState.DELETE:
-                found[row_id] = row
-        missing: list[int] = []
-        if miss_ids:
-            fetched, missing = await client.get_many_array_(self.ref, miss_ids)
-            if len(fetched) == 1:
-                # 点查通常只取一行：单行缓存路径比按批加入快
-                idmap.add_clean(self.ref, fetched[0])
-            elif len(fetched) > 1:
-                idmap.add_clean(self.ref, fetched)
-            found.update(zip(fetched["id"].tolist(), fetched))
-        return found, missing
+        # 按合并后的顺序整批填进结果：读回的、缓存里的、本事务的行各一次
+        fetched_pos: list[int] = []
+        cached_pos: list[int] = []
+        cached_idx: list[int] = []
+        local_pos: list[int] = []
+        local_idx: list[int] = []
+        gone_while_reading = set(missing)
+        keep = [True] * len(merged)
+        for pos, (_key, row_id, i) in enumerate(merged):
+            if i >= 0:
+                local_pos.append(pos)
+                local_idx.append(i)
+            elif (j := index_of.get(row_id)) is not None:
+                cached_pos.append(pos)
+                cached_idx.append(j)
+            elif row_id in gone_while_reading:
+                keep[pos] = False
+            else:
+                fetched_pos.append(pos)
+        if fetched is not None and len(fetched_pos) == len(merged):
+            # 全是一次读回的库里的行：读回的这批就是结果（同 _range_rows）
+            return fetched
+        result = np.empty(len(merged), dtype=comp_cls.dtypes)
+        if fetched_pos:
+            result[fetched_pos] = fetched
+        if cached is not None and cached_pos:
+            result[cached_pos] = cached[cached_idx]
+        if rows is not None and local_pos:
+            result[local_pos] = rows[local_idx]
+        if missing:
+            result = result[keep]
+        return result.view(np.recarray)
 
     async def _range_rows(
         self,
