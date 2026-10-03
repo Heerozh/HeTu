@@ -352,13 +352,16 @@ class RedisModelClient(BackendClient):
         row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
         # 观察区间给 ZLEXCOUNT 用，要按 min, max 排；desc 时 b_left 是上界
         lo, hi = (b_right, b_left) if desc else (b_left, b_right)
+        query = (b_left, b_right)
         if 0 < limit == len(members):
             # 截断读只看到了前 limit 行，观察区间收到最后一个返回的 member 为止
             if desc:
                 lo = b"[" + members[-1]
             else:
                 hi = b"[" + members[-1]
-        return row_ids, RangeObservation(index_name, row_ids, (lo, hi), members)
+        return row_ids, RangeObservation(
+            index_name, row_ids, (lo, hi), members, query=query
+        )
 
     # ============ 读：两个后端共用，I/O 由子类的两个原语完成 ============
 
@@ -673,7 +676,8 @@ class RedisModelClient(BackendClient):
         不是原子的、还可能打到不同节点，中间有行被改走又有行插进来时行数可能不变，所以
         这里先在 worker 上核对，对不上直接判竞态，不去 master。本事务新 insert 的行不核对，
         主键冲突交给 NX 判定（否则盲插已存在的 id 会从 UniqueViolation 变成无限重试）。
-        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）。
+        unique 列点查已由 VER / UNIQ 保证不变的，不发 CNT（见 range_observations_to_check）；
+        同一查询读了几次的，被另一条包含的也不发（见 _drop_covered）。
         """
         if located := idmap.inconsistent_range():
             raise InconsistentRangeRead(*located)
@@ -692,7 +696,7 @@ class RedisModelClient(BackendClient):
                         )
         checks: list[list[str | bytes | int]] = []
         for ref, observations in idmap.range_observations_to_check().items():
-            for obs in observations:
+            for obs in self._drop_covered(observations):
                 lo, hi = obs.bounds
                 checks.append(
                     [
@@ -705,6 +709,47 @@ class RedisModelClient(BackendClient):
                     ]
                 )
         return checks
+
+    @staticmethod
+    def _covers(outer: RangeObservation, inner: RangeObservation) -> bool:
+        """
+        outer 的区间包含 inner 的，且 outer 在 inner 区间里读到的 member 就是 inner 读到的：
+        outer 的 CNT 加上读到的行的 VER 保证 outer 区间里还是那些行，inner 区间也就没变
+        """
+        (outer_lo, outer_hi), (inner_lo, inner_hi) = outer.bounds, inner.bounds
+        if not (outer_lo <= inner_lo and inner_hi <= outer_hi):
+            return False
+        # 两端都是 "[" 开头的闭区间
+        lo, hi = inner_lo[1:], inner_hi[1:]
+        inside = {member for member in outer.members or () if lo <= member <= hi}
+        return inside == set(inner.members or ())
+
+    @classmethod
+    def _drop_covered(
+        cls, observations: list[RangeObservation]
+    ) -> list[RangeObservation]:
+        """
+        同一查询读了几次（比如本事务写入前后各读一次，截断读收到的位置不同）：被另一条包含的
+        观察不用单独发 CNT。只在同一索引、同一查询的观察之间比，几次读之间库里的行变了的
+        （有并发写入）对不上，都留着。
+        """
+        if len(observations) < 2:
+            return observations
+        groups: dict[tuple, list[RangeObservation]] = {}
+        for obs in observations:
+            groups.setdefault((obs.index_name, obs.query), []).append(obs)
+        if len(groups) == len(observations):
+            return observations
+        kept_all: list[RangeObservation] = []
+        for group in groups.values():
+            kept: list[RangeObservation] = []
+            for obs in group:
+                if any(cls._covers(other, obs) for other in kept):
+                    continue
+                kept = [other for other in kept if not cls._covers(obs, other)]
+                kept.append(obs)
+            kept_all.extend(kept)
+        return kept_all
 
     def build_commit_payload_(self, idmap: IdentityMap) -> tuple[list[str], list]:
         """

@@ -50,6 +50,9 @@ class RangeObservation:
     # 只保护返回的行、不校验区间（get 命中：约定是"返回一行匹配的"，那一行由 VER 管）。
     # 读取一致性照样核对
     rows_only: bool = False
+    # 这次读的查询（后端规范化后的区间两端，按扫描顺序）。截断读的 bounds 会收窄，它不变：
+    # 同一查询读了几次，后端按它归组，判断哪条观察已经被另一条包含
+    query: tuple = ()
 
 
 def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | bytes]:
