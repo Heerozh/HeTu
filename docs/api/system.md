@@ -205,7 +205,7 @@ range(
 [`RaceCondition`](exceptions.md#racecondition)，`System` 会自动重试。所以"range 查不到就 insert、查到就 update"
 的写法是安全的。
 
-截断读（数据库返回了 `limit` 行）也防幻读，和语法一致，只保护看到的前 `limit` 行：
+截断读（返回了 `limit` 行）也防幻读，和语法一致，只保护看到的前 `limit` 行：
 区间外的行本来就没读到，它们的增减不算冲突。**用 range 判断"有没有"时必须读全**
 （`limit=-1`），否则没读到的行会被当成不存在。
 
