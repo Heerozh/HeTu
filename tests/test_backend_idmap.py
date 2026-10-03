@@ -535,7 +535,9 @@ def test_delete_inserted_row_leaves_nothing_to_commit(mod_item_model):
     idmap.mark_deleted(ref, 8)
 
     assert not idmap.is_dirty
-    assert not idmap.has_writes(ref)
+    # range 合并本事务的改动时也当它没插过
+    local = idmap.local_index(ref, "name")
+    assert local is not None and not local.placed and not local.moved
     assert idmap.get_dirty_rows()[ref] == ([], ([], []), [])
     assert len(idmap.filter(ref, name="a")) == 0
 

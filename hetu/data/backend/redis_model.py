@@ -369,9 +369,7 @@ class RedisModelClient(BackendClient):
                 lo = b"[" + members[-1]
             else:
                 hi = b"[" + members[-1]
-        return row_ids, RangeObservation(
-            index_name, row_ids, (lo, hi), members, query=query
-        )
+        return row_ids, RangeObservation(index_name, row_ids, (lo, hi), members, query)
 
     # ============ 读：两个后端共用，I/O 由子类的两个原语完成 ============
 
@@ -638,13 +636,27 @@ class RedisModelClient(BackendClient):
         ]
 
     @override
+    def index_query_keys_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+    ) -> tuple[bytes, bytes]:
+        """见基类。ZRANGE 的两端都是 "[" 开头的闭区间，去掉 "[" 就是排序键的闭区间"""
+        lo, hi = self.range_normalize_(
+            table_ref.comp_cls.dtype_map_[index_name], left, right, False
+        )
+        return lo[1:], hi[1:]
+
+    @override
     def shrink_observation_(
         self, obs: RangeObservation, last_key: bytes, desc: bool
     ) -> None:
         """见基类。观察区间是 ZLEXCOUNT 的两端，截断的一端（升序是上界、降序是下界）收到 last_key"""
         lo, hi = obs.bounds
         end = b"[" + last_key
-        members = obs.members or []
+        members = obs.members
         if desc:
             if end <= lo:
                 return
@@ -681,7 +693,7 @@ class RedisModelClient(BackendClient):
             checked: set[tuple[str, bytes]] = set()
             for obs in observations:
                 dtype = comp_cls.dtype_map_[obs.index_name]
-                for row_id, member in zip(obs.ids, obs.members or ()):
+                for row_id, member in zip(obs.ids, obs.members):
                     if (obs.index_name, member) in checked:
                         continue
                     checked.add((obs.index_name, member))
@@ -720,8 +732,8 @@ class RedisModelClient(BackendClient):
             return False
         # 两端都是 "[" 开头的闭区间
         lo, hi = inner_lo[1:], inner_hi[1:]
-        inside = {member for member in outer.members or () if lo <= member <= hi}
-        return inside == set(inner.members or ())
+        inside = {member for member in outer.members if lo <= member <= hi}
+        return inside == set(inner.members)
 
     @classmethod
     def _drop_covered(

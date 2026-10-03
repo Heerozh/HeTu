@@ -769,6 +769,20 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def index_query_keys_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+    ) -> tuple[bytes, bytes]:
+        """
+        内部方法：一次 range 查询匹配的排序键闭区间 (lo, hi)，同 `range_read_` 观察里的
+        `query`，不访问数据库；区间为空时 lo > hi。事务里的 range 在读之前用它数本事务删改的
+        行有几行原值在区间里（数据库会读到它们，要多读这么多行）
+        """
+        raise NotImplementedError
+
     def shrink_observation_(
         self, obs: RangeObservation, last_key: bytes, desc: bool
     ) -> None:

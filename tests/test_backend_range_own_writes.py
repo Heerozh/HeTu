@@ -621,7 +621,8 @@ async def test_range_merged_phantom_check_off_skips_range_check(
 
 async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_backend):
     """本事务删掉、改走的行，只有原值落在查询区间里的才在数据库结果里占位置。删改的行多了，
-    多读也只多读这几行，不按整张表删改了多少行去读"""
+    多读也只多读这几行，不按整张表删改了多少行去读（删改的行少时全算上，见
+    repo._COUNT_ALL_MOVED_UPTO）"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()

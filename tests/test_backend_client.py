@@ -498,7 +498,9 @@ async def test_range_observations_to_check(mod_item_model):
     idmap = IdentityMap()
 
     def observe(index_name: str, point, ids=()):
-        obs = RangeObservation(index_name, list(ids), (index_name, point), [], point)
+        obs = RangeObservation(
+            index_name, list(ids), (index_name, point), [], (b"", b""), point
+        )
         idmap.add_range_observation(item_ref, obs)
         return obs
 
@@ -538,7 +540,9 @@ async def test_range_observations_to_check(mod_item_model):
     nonunique = observe("owner", None, [int(hit.id)])
     ranged = observe("time", None)
     # get 命中：只保护返回的那一行，不校验区间
-    got = RangeObservation("owner", [int(hit.id)], ("got",), [], 7, rows_only=True)
+    got = RangeObservation(
+        "owner", [int(hit.id)], ("got",), [], (b"", b""), 7, rows_only=True
+    )
     idmap.add_range_observation(item_ref, got)
 
     # 完全相同的观察去重

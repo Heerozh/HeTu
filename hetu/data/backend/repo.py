@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+from functools import partial
 from operator import itemgetter
 from typing import TYPE_CHECKING, cast
 
@@ -12,7 +13,7 @@ import numpy as np
 
 from ...i18n import _
 from .base import BackendClient, RowFormat, UniqueViolation
-from .idmap import RangeObservation, RowState, changed_fields
+from .idmap import LocalIndex, RangeObservation, RowState, changed_fields
 from .table import TableReference
 
 if TYPE_CHECKING:
@@ -37,6 +38,10 @@ Int64 = np.int64 | int
 PyScalar = int | float | str | bytes | bool
 # 数据库能收的最大 limit（int64）
 _MAX_LIMIT = (1 << 63) - 1
+# 事务里的 range 要为本事务删掉、改走的库里行多读索引：不超过这么多行时全算上，不细算哪些原值
+# 在查询区间里。细算要先规范化查询区间（worker 上约 3µs），多读十几个索引项在 master 上约
+# 0.6µs；行多了才值得细算，免得删了几千行之后每次 range 都在 master 上多读几千项
+_COUNT_ALL_MOVED_UPTO = 16
 
 
 def _to_py(value: IndexScalar) -> PyScalar:
@@ -273,25 +278,19 @@ class SessionRepository:
             if is_unique and idmap.observed_absent(self.ref, index_name, value):
                 return None
 
-            # cache未命中，去数据库查询。本事务删掉的、改走了这个索引值的行，提交前还在数据库
-            # 索引的原值上，会占掉读到的名额：多读这么多行，剩下的里面才一定有真匹配的（如果
-            # 有）；读空时也就读全了这个值，校验的是整个值上没有别的行
-            moved = idmap.moved_away(self.ref, index_name)
-            rows, obs = await self._range_rows(
-                index_name, query_value, None, 1 + len(moved), False, True
+            # cache未命中，去数据库查询。本事务删掉的、改走了这个值的行由 _range_read 拿掉（多读
+            # 几行补上），读空时也就读全了这个值，校验的是整个值上没有别的行
+            rows, obs = await self._range_read(
+                index_name, _to_py(query_value), None, 1, False, own_rows=False
             )
-            if moved:
-                # 删掉的 _range_rows 已经排除了，改走的也去掉：它们已经不匹配这个值了
-                rows = rows[~np.isin(rows.id, list(moved))]
-            if obs is not None:
-                # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值
-                # 新行排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
-                obs.rows_only = rows.shape[0] > 0
-                idmap.add_range_observation(self.ref, obs)
+            # 命中：get 的约定是"返回一行匹配的"，只保护这一行（VER），不校验有没有同值新行
+            # 排到它前面，省一次区间校验；读空：要校验这个值上仍然没有行
+            obs.rows_only = rows.shape[0] > 0
+            idmap.add_range_observation(self.ref, obs)
             if rows.shape[0] > 0:
                 return rows[0]
             # 等值查询unique列读空：登记negative observation，供commit判定竞态。数据库读空时
-            # _range_rows 已登记过；读到的都是本事务改走了的行时要在这里登记
+            # _range_read 已登记过；读到的都是本事务改走了的行时要在这里登记
             if is_unique:
                 idmap.mark_absent(self.ref, index_name, value)
             return None
@@ -413,32 +412,20 @@ class SessionRepository:
             )
         limit = int(limit)
 
+        left, right = _to_py(_left), None if _right is None else _to_py(_right)
+        if limit == 0:
+            # 一行都不要，不用去数据库；参数照样校验
+            self._session.master_or_servant.check_range_(
+                self.ref, index_name, left, right, limit, desc
+            )
+            return np.rec.array(np.empty(0, dtype=comp_cls.dtypes))
         idmap = self._session.idmap
-        if limit != 0:
-            if index_name in comp_cls.uniques_ and idmap.has_rows(self.ref):
-                hit = self._unique_point_hit(
-                    index_name,
-                    _to_py(_left),
-                    None if _right is None else _to_py(_right),
-                    limit,
-                    desc,
-                )
-                if hit is not None:
-                    return hit
-            if idmap.has_writes(self.ref):
-                # 这张表在本事务里有写入，要把改动合并进结果
-                return await self._range_merged(
-                    index_name,
-                    _to_py(_left),
-                    None if _right is None else _to_py(_right),
-                    limit,
-                    desc,
-                    phantom_check,
-                )
-        rows, obs = await self._range_rows(
-            index_name, _left, _right, limit, desc, phantom_check
-        )
-        if obs is not None:
+        if index_name in comp_cls.uniques_ and idmap.has_rows(self.ref):
+            hit = self._unique_point_hit(index_name, left, right, limit, desc)
+            if hit is not None:
+                return hit
+        rows, obs = await self._range_read(index_name, left, right, limit, desc)
+        if phantom_check:
             idmap.add_range_observation(self.ref, obs)
         return rows
 
@@ -479,155 +466,51 @@ class SessionRepository:
             hit = cast(np.recarray, hit[:limit])
         return hit
 
-    async def _range_merged(
+    async def _range_read(
         self,
         index_name: str,
         left: PyScalar,
         right: PyScalar | None,
         limit: int,
         desc: bool,
-        phantom_check: bool,
-    ) -> np.recarray:
+        own_rows: bool = True,
+    ) -> tuple[np.recarray, RangeObservation]:
         """
-        这张表在本事务里有写入时的 range：数据库读到的行按本事务的改动修正——拿掉删掉的、
-        改走了的行，放进 insert 的、改进区间的行（按当前值）——再按索引顺序合并，截到 limit。
-        合并用后端的排序键（见 `BackendClient.index_sort_keys_`），区间匹配和顺序与数据库
-        完全一致。
+        range、get 读数据库的主体：读索引，按本事务的改动修正，截到 limit，取行、放入缓存，返回
+        结果和这次读取的观察。观察由调用方登记：range 按 phantom_check 登记，get 命中时改成只
+        保护返回的行。
 
-        先只读索引、合并出要返回哪些行，再只取其中库里的行：被本事务的行挤出 limit 的库里
-        行不取，观察也收到看到的最后一行为止，别的事务改它们不算冲突。
-        区间校验照旧只针对数据库里的行：提交时它们没变，加上本事务自己的改动，读到的结果就
-        还成立。
+        本事务写过这张表时，数据库读到的行按本事务的改动修正——拿掉删掉的、改走了的行，放进
+        insert 的、改进区间的行（按当前值）——再按索引顺序合并。合并用后端的排序键（见
+        `BackendClient.index_sort_keys_`），区间匹配和顺序与数据库完全一致。先只读索引、合并出
+        要返回哪些行，再只取其中库里的行：被本事务的行挤出 limit 的库里行不取，观察也收到看到的
+        最后一行为止，别的事务改它们不算冲突。区间校验只针对数据库里的行：提交时它们没变，加上
+        本事务自己的改动，读到的结果就还成立。
+
+        own_rows=False 时不放进本事务的行：get 先在缓存里找过，找不到才来，本事务的行不会匹配。
+
+        取行和查索引用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对会把这种
+        滞后误判成竞态。
         """
         ref = self.ref
         comp_cls = ref.comp_cls
         idmap = self._session.idmap
         client = self._session.master_or_servant
 
-        rows, gone = idmap.local_changes(ref, index_name)
+        local = idmap.local_index(ref, index_name)
+        if local is not None and not (local.placed or local.moved):
+            local = None  # 写过这张表，但没碰这个索引
         read_limit = limit
-        if limit > 0:
-            # 本事务删掉、改走的行在数据库索引里还占着原来的位置，有几行就多读几行，剩下的
-            # 才够 limit 行。多读的只是索引，取行只取看到的
-            read_limit += sum(idmap.db_row(ref, row_id) is not None for row_id in gone)
+        if local is not None and limit > 0 and local.moved:
+            # 本事务删掉、改走的行在数据库索引里还占着原来的位置，在区间里的有几行就多读几行，
+            # 剩下的才够 limit 行。多读的只是索引，取行只取看到的
+            read_limit += self._moved_in_range(local, index_name, left, right)
             if read_limit > _MAX_LIMIT:
                 # limit 用很大的数表示不限（如 sys.maxsize），加上多读的就超出数据库能收的范围
                 read_limit = -1
         row_ids, obs = await client.range_read_(
             ref, index_name, left, right, read_limit, desc
         )
-        point = BackendClient.point_query_value_(
-            comp_cls.dtype_map_[index_name], left, right
-        )
-        # unique 列读空登记 negative observation，同 _range_rows
-        if not row_ids and point is not None and index_name in comp_cls.uniques_:
-            idmap.mark_absent(ref, index_name, point)
-
-        # (排序键, 行 id, 在 rows 里的下标)，库里的行下标为 -1
-        merged = [
-            (key, row_id, -1)
-            for key, row_id in zip(obs.members or (), row_ids)
-            if row_id not in gone
-        ]
-        if rows is not None:
-            lo, hi = obs.query
-            keys = client.index_sort_keys_(ref, index_name, rows)
-            local = [
-                (key, row_id, i)
-                for i, (key, row_id) in enumerate(zip(keys, rows["id"].tolist()))
-                if lo <= key <= hi
-            ]
-            if local:
-                merged.extend(local)
-                merged.sort(key=itemgetter(0), reverse=desc)
-        if 0 < limit <= len(merged):
-            del merged[limit:]
-            # 截断读只观察到看到的最后一行为止，同库里直接读到 limit 行
-            client.shrink_observation_(obs, merged[-1][0], desc)
-
-        # 只取看到的库里的行：缓存里有的直接用，没有的一次批量读回
-        cached, index_of, miss_ids = idmap.lookup(
-            ref, [row_id for _key, row_id, i in merged if i < 0]
-        )
-        fetched: np.recarray | None = None
-        missing: list[int] = []
-        if miss_ids:
-            fetched, missing = await client.get_many_array_(ref, miss_ids)
-            if len(fetched) == 1:
-                # 点查通常只取一行：单行缓存路径比按批加入快
-                idmap.add_clean(ref, fetched[0])
-            elif len(fetched) > 1:
-                idmap.add_clean(ref, fetched)
-        obs.point = point
-        obs.missing = missing
-        if phantom_check:
-            idmap.add_range_observation(ref, obs)
-
-        # 按合并后的顺序整批填进结果：读回的、缓存里的、本事务的行各一次
-        fetched_pos: list[int] = []
-        cached_pos: list[int] = []
-        cached_idx: list[int] = []
-        local_pos: list[int] = []
-        local_idx: list[int] = []
-        gone_while_reading = set(missing)
-        keep = [True] * len(merged)
-        for pos, (_key, row_id, i) in enumerate(merged):
-            if i >= 0:
-                local_pos.append(pos)
-                local_idx.append(i)
-            elif (j := index_of.get(row_id)) is not None:
-                cached_pos.append(pos)
-                cached_idx.append(j)
-            elif row_id in gone_while_reading:
-                keep[pos] = False
-            else:
-                fetched_pos.append(pos)
-        if fetched is not None and len(fetched_pos) == len(merged):
-            # 全是一次读回的库里的行：读回的这批就是结果（同 _range_rows）
-            return fetched
-        result = np.empty(len(merged), dtype=comp_cls.dtypes)
-        if fetched_pos:
-            result[fetched_pos] = fetched
-        if cached is not None and cached_pos:
-            result[cached_pos] = cached[cached_idx]
-        if rows is not None and local_pos:
-            result[local_pos] = rows[local_idx]
-        if missing:
-            result = result[keep]
-        return result.view(np.recarray)
-
-    async def _range_rows(
-        self,
-        index_name: str,
-        left: IndexScalar,
-        right: IndexScalar | None,
-        limit: int,
-        desc: bool,
-        phantom_check: bool,
-    ) -> tuple[np.recarray, RangeObservation | None]:
-        """
-        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（不校验区间时为
-        None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
-        """
-        comp_cls = self.ref.comp_cls
-        if isinstance(left, np.generic):
-            left = left.item()
-        if isinstance(right, np.generic):
-            right = right.item()
-
-        # 先查询 id 列表；要校验区间的，顺便拿回这次读取的观察，commit 时由后端校验
-        client = self._session.master_or_servant
-        obs: RangeObservation | None = None
-        if phantom_check and limit != 0:
-            row_ids, obs = await client.range_read_(
-                self.ref, index_name, left, right, limit, desc
-            )
-        else:
-            row_ids = await client.range(
-                self.ref, index_name, left, right, limit, desc, RowFormat.ID_LIST
-            )
-
-        idmap = self._session.idmap
         # 等值点查的值（判定规则同订阅侧 point_query_value_），不是点查为 None
         point = BackendClient.point_query_value_(
             comp_cls.dtype_map_[index_name], left, right
@@ -636,52 +519,85 @@ class SessionRepository:
         # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间里的值数不过来，由提交时
         # 的区间校验管。
         if not row_ids and point is not None and index_name in comp_cls.uniques_:
-            idmap.mark_absent(self.ref, index_name, point)
+            idmap.mark_absent(ref, index_name, point)
 
-        # 再按 id 取行：命中 Session 缓存的直接用（含本事务的修改，已删除的排除），
-        # 未命中的 id 一次批量读回、解码成一个数组放入缓存（N 行 1 次往返，而非逐行 get）。
-        # 取行和查 id 用同一个节点：各自随机选的话，节点间的复制进度不同，读取一致性核对
-        # 会把这种滞后误判成竞态
-        rows: list[np.record | None] = []
-        miss_slots: list[int] = []
-        miss_ids: list[int] = []
-        for _id in row_ids:
-            row, row_stat = idmap.get(self.ref, _id)
-            if row_stat is None:
-                miss_slots.append(len(rows))
-                miss_ids.append(_id)
-                rows.append(None)  # 占位，保持索引顺序
-            elif row_stat != RowState.DELETE:
-                rows.append(row)
+        ids = row_ids
+        if local is not None:
+            # (排序键, 行 id)：数据库读到的行拿掉本事务删掉、改走的，放进区间里本事务的行
+            merged = [
+                (key, row_id)
+                for key, row_id in zip(obs.members, row_ids)
+                if not local.gone(row_id)
+            ]
+            if own_rows and local.placed:
+                sort_keys = partial(client.index_sort_keys_, ref, index_name)
+                if placed := local.placed_between(*obs.query, sort_keys):
+                    merged.extend(placed)
+                    merged.sort(key=itemgetter(0), reverse=desc)
+            if 0 < limit <= len(merged):
+                del merged[limit:]
+                # 截断读只观察到看到的最后一行为止，同库里直接读到 limit 行
+                client.shrink_observation_(obs, merged[-1][0], desc)
+            ids = [row_id for _key, row_id in merged]
+
+        # 取行：缓存里有的（含本事务的行）直接用，没有的一次批量读回、放入缓存
+        cached, index_of, miss_ids = idmap.lookup(ref, ids)
         fetched: np.recarray | None = None
         missing: list[int] = []
         if miss_ids:
-            # 读不到的行是 ZRANGE 与读行之间刚被删除的，跳过（区间观察里记下，见下）
-            fetched, missing = await client.get_many_array_(self.ref, miss_ids)
+            # 读不到的行是读索引与取行之间刚被删除的，跳过（记进观察，commit 直接判竞态）
+            fetched, missing = await client.get_many_array_(ref, miss_ids)
             if len(fetched) == 1:
                 # 点查通常只取一行：单行缓存路径比按批加入快
-                idmap.add_clean(self.ref, fetched[0])
+                idmap.add_clean(ref, fetched[0])
             elif len(fetched) > 1:
-                idmap.add_clean(self.ref, fetched)
-
-        if obs is not None:
-            # 取行时有行已被删，读到的就不是任何一刻的区间，commit 会直接判竞态
-            obs.point = point
-            obs.missing = missing
-
-        if fetched is not None and len(miss_ids) == len(rows):
-            # 没有命中缓存的行：读回的这批就是结果。缓存存的是拷贝，返回值与缓存互不影响
+                idmap.add_clean(ref, fetched)
+        obs.point = point
+        obs.missing = missing
+        if fetched is not None and len(miss_ids) == len(ids):
+            # 全是读回的行：读回的这批就是结果。缓存存的是拷贝，返回值与缓存互不影响
             return fetched, obs
-        if fetched is not None:
-            # 有命中缓存的行：读回的行按索引顺序填回占位
-            gone = set(missing)
-            records = iter(fetched)
-            for slot, _id in zip(miss_slots, miss_ids):
-                if _id not in gone:
-                    rows[slot] = next(records)
-        # 拼成一个数组返回（拷贝，与缓存互不影响）
-        result = [r for r in rows if r is not None]
-        return np.array(result, dtype=comp_cls.dtypes).view(np.recarray), obs
+
+        # 按顺序整批填进结果：缓存里的、读回的各一次。两边都不在的跳过：读索引之后被删了
+        # （读回时已读不到，或者同一事务的别的协程删了它）
+        fetched_ids = set(miss_ids).difference(missing)
+        cached_pos: list[int] = []
+        cached_idx: list[int] = []
+        fetched_pos: list[int] = []
+        size = 0
+        for row_id in ids:
+            if (i := index_of.get(row_id)) is not None:
+                cached_pos.append(size)
+                cached_idx.append(i)
+            elif row_id in fetched_ids:
+                fetched_pos.append(size)
+            else:
+                continue
+            size += 1
+        result = np.empty(size, dtype=comp_cls.dtypes)
+        if cached is not None and cached_pos:
+            result[cached_pos] = cached[cached_idx]
+        if fetched is not None and fetched_pos:
+            result[fetched_pos] = fetched
+        return result.view(np.recarray), obs
+
+    def _moved_in_range(
+        self,
+        local: LocalIndex,
+        index_name: str,
+        left: PyScalar,
+        right: PyScalar | None,
+    ) -> int:
+        """
+        本事务删掉、改走的库里行里，原值落在这次查询区间里的有几行（数据库会读到它们）。行不多
+        时全算上、不细算（见 `_COUNT_ALL_MOVED_UPTO`）
+        """
+        if len(local.moved) <= _COUNT_ALL_MOVED_UPTO:
+            return len(local.moved)
+        client = self._session.master_or_servant
+        lo, hi = client.index_query_keys_(self.ref, index_name, left, right)
+        sort_keys = partial(client.index_sort_keys_, self.ref, index_name)
+        return local.moved_between(lo, hi, sort_keys)
 
     async def insert(self, row: np.record) -> None:
         """
