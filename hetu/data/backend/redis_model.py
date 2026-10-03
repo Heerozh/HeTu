@@ -641,6 +641,27 @@ class RedisModelClient(BackendClient):
             for value, row_id in zip(values, rows["id"].tolist())
         ]
 
+    @override
+    def shrink_observation_(
+        self, obs: RangeObservation, last_key: bytes, desc: bool
+    ) -> None:
+        """见基类。观察区间是 ZLEXCOUNT 的两端，截断的一端（升序是上界、降序是下界）收到 last_key"""
+        lo, hi = obs.bounds
+        end = b"[" + last_key
+        members = obs.members or []
+        if desc:
+            if end <= lo:
+                return
+            obs.bounds = (end, hi)
+            keep = sum(1 for member in members if member >= last_key)
+        else:
+            if end >= hi:
+                return
+            obs.bounds = (lo, end)
+            keep = sum(1 for member in members if member <= last_key)
+        del obs.ids[keep:]
+        del members[keep:]
+
     # ============ 提交 ============
 
     def _range_checks(self, idmap: IdentityMap) -> list[list[str | bytes | int]]:

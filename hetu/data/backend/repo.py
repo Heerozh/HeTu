@@ -463,6 +463,8 @@ class SessionRepository:
         合并用后端的排序键（见 `BackendClient.index_sort_keys_`），区间匹配和顺序与数据库
         完全一致。
 
+        先只读索引、合并出要返回哪些行，再只取其中库里的行：被本事务的行挤出 limit 的库里
+        行不取，观察也收到看到的最后一行为止，别的事务改它们不算冲突。
         区间校验照旧只针对数据库里的行：提交时它们没变，加上本事务自己的改动，读到的结果就
         还成立。
         """
@@ -472,7 +474,8 @@ class SessionRepository:
         client = self._session.master_or_servant
 
         rows, gone = idmap.local_changes(ref, index_name)
-        local: list[tuple[bytes, np.record]] = []
+        # (排序键, 行 id, 本事务的行)，库里的行第三项为 None，取回来再填
+        local: list[tuple[bytes, int, np.record | None]] = []
         read_limit = limit
         if (
             bounds := client.index_key_bounds_(ref, index_name, left, right)
@@ -480,7 +483,11 @@ class SessionRepository:
             lo, hi = bounds
             if rows is not None:
                 keys = client.index_sort_keys_(ref, index_name, rows)
-                local = [(key, row) for key, row in zip(keys, rows) if lo <= key <= hi]
+                local = [
+                    (key, row_id, row)
+                    for key, row_id, row in zip(keys, rows["id"].tolist(), rows)
+                    if lo <= key <= hi
+                ]
             if limit > 0 and gone:
                 # 本事务拿掉的行在数据库索引里还占着原来的位置：截断读落在区间里的有几行，
                 # 就要多读几行，剩下的才够 limit 行
@@ -494,28 +501,69 @@ class SessionRepository:
                     keys = client.index_sort_keys_(ref, index_name, clean_rows)
                     read_limit += sum(lo <= key <= hi for key in keys)
 
-        db_rows, obs = await self._range_rows(
-            index_name, left, right, read_limit, desc, True, client
+        row_ids, obs = await client.range_read_(
+            ref, index_name, left, right, read_limit, desc
         )
-        assert obs is not None  # limit 不为 0 时一定有观察
-        if phantom_check:
-            idmap.add_range_observation(ref, obs)
-        if not local and not gone:
-            # 改动的只有别的列：数据库读到的就是结果，行已经是缓存里的当前值
-            return db_rows
-        key_of = dict(zip(obs.ids, obs.members or ()))
-        merged = [
-            (key_of[row_id], row)
-            for row_id, row in zip(db_rows["id"].tolist(), db_rows)
+        point = BackendClient.point_query_value_(
+            comp_cls.dtype_map_[index_name], left, right
+        )
+        # unique 列读空登记 negative observation，同 _range_rows
+        if not row_ids and point is not None and index_name in comp_cls.uniques_:
+            idmap.mark_absent(ref, index_name, point)
+
+        merged: list[tuple[bytes, int, np.record | None]] = [
+            (key, row_id, None)
+            for key, row_id in zip(obs.members or (), row_ids)
             if row_id not in gone
         ]
         if local:
             merged.extend(local)
             merged.sort(key=itemgetter(0), reverse=desc)
-        if 0 < limit < len(merged):
+        if 0 < limit <= len(merged):
             del merged[limit:]
-        result = [row for _key, row in merged]
-        return np.array(result, dtype=comp_cls.dtypes).view(np.recarray)
+            # 截断读只观察到看到的最后一行为止，同库里直接读到 limit 行
+            client.shrink_observation_(obs, merged[-1][0], desc)
+
+        found, missing = await self._fetch_rows(
+            client, [row_id for _key, row_id, row in merged if row is None]
+        )
+        obs.point = point
+        obs.missing = missing
+        if phantom_check:
+            idmap.add_range_observation(ref, obs)
+        result = [
+            found.get(row_id) if row is None else row for _k, row_id, row in merged
+        ]
+        return np.array(
+            [row for row in result if row is not None], dtype=comp_cls.dtypes
+        ).view(np.recarray)
+
+    async def _fetch_rows(
+        self, client: BackendClient, row_ids: list[int]
+    ) -> tuple[dict[int, np.record], list[int]]:
+        """
+        按 id 取行（同 _range_rows 的后半段）：命中缓存的直接用，未命中的一次批量读回、放入
+        缓存。返回 {id: 行}，以及读不到的 id（读索引之后被删的）。
+        """
+        idmap = self._session.idmap
+        found: dict[int, np.record] = {}
+        miss_ids: list[int] = []
+        for row_id in row_ids:
+            row, row_stat = idmap.get(self.ref, row_id)
+            if row_stat is None:
+                miss_ids.append(row_id)
+            elif row is not None and row_stat != RowState.DELETE:
+                found[row_id] = row
+        missing: list[int] = []
+        if miss_ids:
+            fetched, missing = await client.get_many_array_(self.ref, miss_ids)
+            if len(fetched) == 1:
+                # 点查通常只取一行：单行缓存路径比按批加入快
+                idmap.add_clean(self.ref, fetched[0])
+            elif len(fetched) > 1:
+                idmap.add_clean(self.ref, fetched)
+            found.update(zip(fetched["id"].tolist(), fetched))
+        return found, missing
 
     async def _range_rows(
         self,

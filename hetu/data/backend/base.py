@@ -775,6 +775,16 @@ class BackendClient:
         """
         raise NotImplementedError
 
+    def shrink_observation_(
+        self, obs: RangeObservation, last_key: bytes, desc: bool
+    ) -> None:
+        """
+        内部方法：把 `range_read_` 得到的观察收到排序键 `last_key` 为止（含），只留之前读到的
+        行；`last_key` 不在观察范围内时不动。事务里的 range 合并了本事务的行再截断时用：看到
+        的最后一行之后的库里行没取，提交时不用校验。`desc` 与读取时相同。
+        """
+        raise NotImplementedError
+
     async def commit(self, idmap: IdentityMap) -> None:
         """
         使用事务，向数据库提交IdentityMap中的所有数据修改
