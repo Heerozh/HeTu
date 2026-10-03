@@ -667,9 +667,15 @@ class RedisModelClient(BackendClient):
             raise InconsistentRangeRead(*located)
         for ref, observations in idmap.range_observations().items():
             comp_cls = ref.comp_cls
+            # 同一个 member 在几次读里都读到时只核对一次（比如"取一行、删一行"的循环，每次
+            # 读都带着之前删掉的整段前缀）
+            checked: set[tuple[str, bytes]] = set()
             for obs in observations:
                 dtype = comp_cls.dtype_map_[obs.index_name]
                 for row_id, member in zip(obs.ids, obs.members or ()):
+                    if (obs.index_name, member) in checked:
+                        continue
+                    checked.add((obs.index_name, member))
                     row = idmap.db_row(ref, row_id)
                     if row is None:
                         continue
