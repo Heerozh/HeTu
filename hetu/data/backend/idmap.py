@@ -96,6 +96,9 @@ class IdentityMap:
         self._row_buf: dict[TableReference, np.recarray] = {}
         # 状态为 DELETE 的行 id，filter 用它一次性排除已删除的行
         self._deleted: dict[TableReference, set[int]] = {}
+        # 状态为 INSERT / UPDATE 的行 id。range 据此（加上 _deleted）判断这张表在本事务里
+        # 有没有写入，有才需要把本事务的改动合并进结果
+        self._written: dict[TableReference, set[int]] = {}
 
         # 储存查询到的行数据初始值，用于对比变更
         self._row_clean: dict[TableReference, dict[int, np.record]] = {}
@@ -286,6 +289,7 @@ class IdentityMap:
 
         # 标记为INSERT（删掉的行同 id 再插回来，就不再算已删除）
         states[row["id"]] = RowState.INSERT
+        self._written.setdefault(table_ref, set()).add(int(row["id"]))
         if deleted := self._deleted.get(table_ref):
             deleted.discard(row["id"])
 
@@ -328,6 +332,7 @@ class IdentityMap:
         # 如果是新插入的行，保持INSERT状态；否则标记为UPDATE
         if states.get(row_id) != RowState.INSERT:
             states[row_id] = RowState.UPDATE
+        self._written.setdefault(table_ref, set()).add(int(row_id))
 
     def mark_deleted(self, table_ref: TableReference, row_id: int) -> None:
         """
@@ -343,6 +348,10 @@ class IdentityMap:
         found = cache["id"] == row_id
         if not found.any():
             raise ValueError(f"Row with id {row_id} not found in cache")
+
+        written = self._written.get(table_ref)
+        if written:
+            written.discard(int(row_id))
 
         # 数据库里没有的行（本事务 insert 的）提交时不用管，直接忘掉；标成 DELETE 会被当成
         # 库里的行去删，版本校验必然失败，每次重试都一样。按有没有数据库态判断、不按 INSERT
@@ -502,6 +511,43 @@ class IdentityMap:
         本事务新 insert 的行、或不在缓存里的行返回 None。
         """
         return self._row_clean.get(table_ref, {}).get(row_id)
+
+    def has_writes(self, table_ref: TableReference) -> bool:
+        """这张表在本事务里有没有 insert / update / delete 过的行"""
+        return bool(self._written.get(table_ref) or self._deleted.get(table_ref))
+
+    def local_changes(
+        self, table_ref: TableReference, index_name: str
+    ) -> tuple[np.recarray | None, set[int]]:
+        """
+        range 合并本事务改动用，返回 (rows, gone)：
+
+        - rows：要按当前值放进结果的行，即本事务 insert 的行、update 改了 `index_name` 列的
+          行（拷贝），没有时为 None；
+        - gone：数据库结果里要拿掉的 id，即 rows 里的行（库里还在原值上，或者库里根本没有），
+          加上本事务删掉的行。
+
+        update 了但没改这一列的行两边都不在：它在数据库结果里的位置不变，取行时拿到的就是
+        缓存里的当前值。
+        """
+        gone = {int(row_id) for row_id in self._deleted.get(table_ref, ())}
+        written = self._written.get(table_ref)
+        if not written:
+            return None, gone
+        cache = self._row_cache[table_ref]
+        rows = cast(np.recarray, cache[np.isin(cache["id"], list(written))])
+        clean_rows = self._row_clean[table_ref]
+        values = rows[index_name]
+        keep = np.ones(len(rows), dtype=bool)
+        for i, row_id in enumerate(rows["id"].tolist()):
+            clean = clean_rows.get(row_id)
+            if clean is not None and clean[index_name] == values[i]:
+                keep[i] = False
+            else:
+                gone.add(row_id)
+        if not keep.any():
+            return None, gone
+        return cast(np.recarray, rows[keep]), gone
 
     def moved_away(self, table_ref: TableReference, index_name: str) -> set[int]:
         """

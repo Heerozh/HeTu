@@ -34,6 +34,7 @@ from .base import (
     peel_bound_,
     sortable_token,
     to_sortable_bytes,
+    to_sortable_bytes_list,
 )
 from .idmap import RangeObservation
 
@@ -611,6 +612,34 @@ class RedisModelClient(BackendClient):
         return self.range_observation_(
             index_name, members, b_left, b_right, limit, desc
         )
+
+    @override
+    def index_key_bounds_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+    ) -> tuple[bytes, bytes] | None:
+        """见基类。排序键就是索引 member"""
+        _idx_key, b_left, b_right, empty = self.zrange_args_(
+            table_ref, index_name, left, right, False
+        )
+        if empty:
+            return None
+        # ZRANGE BYLEX 的两端都是 "[" 开头的闭区间，去掉 "[" 就是 member 的闭区间
+        return b_left[1:], b_right[1:]
+
+    @override
+    def index_sort_keys_(
+        self, table_ref: TableReference, index_name: str, rows: np.ndarray
+    ) -> list[bytes]:
+        """见基类。排序键就是索引 member：值的编码 + 0x00 + 十进制 id，与 commit 写索引时一致"""
+        values = to_sortable_bytes_list(rows[index_name])
+        return [
+            value + b"\x00" + b"%d" % row_id
+            for value, row_id in zip(values, rows["id"].tolist())
+        ]
 
     # ============ 提交 ============
 

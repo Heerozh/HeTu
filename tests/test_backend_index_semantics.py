@@ -334,6 +334,36 @@ def test_sortable_bytes_round_trip():
         from_sortable_bytes(np.dtype(np.complex128), b"\x00" * 16)
 
 
+def test_sortable_bytes_list_matches_one_by_one():
+    """to_sortable_bytes_list 是批量版：每个值的编码与逐个 to_sortable_bytes 相同（事务里的
+    range 用它给本事务的行算排序键，和数据库索引的 member 对不上就会排错、漏行）"""
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    inf, nan = float("inf"), float("nan")
+    cases = {
+        np.int8: [-128, -1, 0, 1, 127],
+        np.int16: [-32768, 0, 32767],
+        np.int32: [-(2**31), -7, 0, 2**31 - 1],
+        np.int64: [-(2**63), -1, 0, 1, 2**63 - 1],
+        np.uint8: [0, 255],
+        np.uint32: [0, 5, 2**32 - 1],
+        np.uint64: [0, 2**63, 2**64 - 1],
+        np.float32: [-inf, -1.5, -0.0, 0.0, 0.1, inf, nan, -nan],
+        np.float64: [-inf, -1e300, -1.5, -0.0, 0.0, 1759400000.123, inf, nan, -nan],
+        "U8": ["", "abc", "a\x00b", "中文", "abcdefgh"],
+        "S8": [b"", b"a\x00b", b"\xff\x01", b"abcdefgh"],
+    }
+    for typ, values in cases.items():
+        array = np.array(values, dtype=typ)
+        expect = [to_sortable_bytes(value) for value in array]
+        assert to_sortable_bytes_list(array) == expect, typ
+    assert to_sortable_bytes_list(np.array([], dtype=np.int64)) == []
+    with pytest.raises(AssertionError):
+        to_sortable_bytes_list(np.array([1j]))
+
+
 async def test_range_index_reads_values_without_rows(
     nums, mod_auto_backend, monkeypatch
 ):

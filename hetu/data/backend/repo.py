@@ -5,6 +5,7 @@
 @email: heeroz@gmail.com
 """
 
+from operator import itemgetter
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -303,10 +304,9 @@ class SessionRepository:
         从数据库查询索引，返回区间内数据，限制 `limit` 条。
         本指令会去数据库执行 1～2 次往返：先查索引拿 id 列表，缓存未命中的行再一次批量读回。
 
-        与 `get` 不同，本方法的区间匹配只读取**已提交**的数据，不会读取当前事务中未提交
-        的修改：当前事务内新 `insert` 的行、或索引字段被改动的行，不会反映在返回结果里
-        （但已 `delete` 的行仍会被正确排除，不过仍占limit名额）。如需读取事务内新插入的行，
-        请改用 `get`。
+        结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
+        会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
+        结果里，也不占 `limit` 名额。
 
         读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
         区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -387,12 +387,91 @@ class SessionRepository:
                 )
             )
 
+        idmap = self._session.idmap
+        if limit != 0 and idmap.has_writes(self.ref):
+            # 这张表在本事务里有写入，要把改动合并进结果
+            return await self._range_merged(
+                index_name, _left, _right, limit, desc, phantom_check
+            )
         rows, obs = await self._range_rows(
             index_name, _left, _right, limit, desc, phantom_check
         )
         if obs is not None:
-            self._session.idmap.add_range_observation(self.ref, obs)
+            idmap.add_range_observation(self.ref, obs)
         return rows
+
+    async def _range_merged(
+        self,
+        index_name: str,
+        left: IndexScalar,
+        right: IndexScalar | None,
+        limit: int,
+        desc: bool,
+        phantom_check: bool,
+    ) -> np.recarray:
+        """
+        这张表在本事务里有写入时的 range：数据库读到的行按本事务的改动修正——拿掉删掉的、
+        改走了的行，放进 insert 的、改进区间的行（按当前值）——再按索引顺序合并，截到 limit。
+        合并用后端的排序键（见 `BackendClient.index_sort_keys_`），区间匹配和顺序与数据库
+        完全一致。
+
+        区间校验照旧只针对数据库里的行：提交时它们没变，加上本事务自己的改动，读到的结果就
+        还成立。
+        """
+        ref = self.ref
+        comp_cls = ref.comp_cls
+        idmap = self._session.idmap
+        client = self._session.master_or_servant
+        if isinstance(left, np.generic):
+            left = left.item()
+        if isinstance(right, np.generic):
+            right = right.item()
+
+        rows, gone = idmap.local_changes(ref, index_name)
+        local: list[tuple[bytes, np.record]] = []
+        read_limit = limit
+        if (
+            bounds := client.index_key_bounds_(ref, index_name, left, right)
+        ) is not None:
+            lo, hi = bounds
+            if rows is not None:
+                keys = client.index_sort_keys_(ref, index_name, rows)
+                local = [(key, row) for key, row in zip(keys, rows) if lo <= key <= hi]
+            if limit > 0 and gone:
+                # 本事务拿掉的行在数据库索引里还占着原来的位置：截断读落在区间里的有几行，
+                # 就要多读几行，剩下的才够 limit 行
+                clean = [
+                    row
+                    for row_id in gone
+                    if (row := idmap.db_row(ref, row_id)) is not None
+                ]
+                if clean:
+                    clean_rows = np.array(clean, dtype=comp_cls.dtypes)
+                    keys = client.index_sort_keys_(ref, index_name, clean_rows)
+                    read_limit += sum(lo <= key <= hi for key in keys)
+
+        db_rows, obs = await self._range_rows(
+            index_name, left, right, read_limit, desc, True, client
+        )
+        assert obs is not None  # limit 不为 0 时一定有观察
+        if phantom_check:
+            idmap.add_range_observation(ref, obs)
+        if not local and not gone:
+            # 改动的只有别的列：数据库读到的就是结果，行已经是缓存里的当前值
+            return db_rows
+        key_of = dict(zip(obs.ids, obs.members or ()))
+        merged = [
+            (key_of[row_id], row)
+            for row_id, row in zip(db_rows["id"].tolist(), db_rows)
+            if row_id not in gone
+        ]
+        if local:
+            merged.extend(local)
+            merged.sort(key=itemgetter(0), reverse=desc)
+        if 0 < limit < len(merged):
+            del merged[limit:]
+        result = [row for _key, row in merged]
+        return np.array(result, dtype=comp_cls.dtypes).view(np.recarray)
 
     async def _range_rows(
         self,
@@ -401,11 +480,13 @@ class SessionRepository:
         right: IndexScalar | None,
         limit: int,
         desc: bool,
-        phantom_check: bool,
+        observe: bool,
+        client: BackendClient | None = None,
     ) -> tuple[np.recarray, RangeObservation | None]:
         """
-        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（不校验区间时为
-        None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
+        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（`observe` 为 False 时
+        为 None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
+        `client` 不给时随机选一个节点。
         """
         comp_cls = self.ref.comp_cls
         if isinstance(left, np.generic):
@@ -414,9 +495,10 @@ class SessionRepository:
             right = right.item()
 
         # 先查询 id 列表；要校验区间的，顺便拿回这次读取的观察，commit 时由后端校验
-        client = self._session.master_or_servant
+        if client is None:
+            client = self._session.master_or_servant
         obs: RangeObservation | None = None
-        if phantom_check and limit != 0:
+        if observe and limit != 0:
             row_ids, obs = await client.range_read_(
                 self.ref, index_name, left, right, limit, desc
             )
