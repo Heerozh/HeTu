@@ -648,6 +648,26 @@ def test_key_to_id_properties():
     assert -(2**63) <= a <= -1  # int64 负数范围内
 
 
+def test_call_lock_uuid_tells_keyed_calls_apart():
+    """一次性未来调用的 call lock uuid：雪花 id 不会复用，就是 id；按 key 的调用（负 id）同一个
+    key 先后 ensure 的两条 id 相同，靠建行时间区分。最长也放得进 SystemLock.uuid"""
+    from hetu.system.future import FutureCalls, _call_lock_uuid
+    from hetu.system.lock import SystemLock
+
+    row = FutureCalls.new_row()
+    row.created = 1759400000.123
+    assert _call_lock_uuid(row) == str(row.id)
+
+    keyed = FutureCalls.new_row(id_=-(2**63))  # 最长的负 id
+    keyed.created = 1759400000.123
+    first = _call_lock_uuid(keyed)
+    keyed.created += 0.002
+    assert _call_lock_uuid(keyed) != first
+    keyed.created = 16_000_000_000.0  # 2477 年
+    width = SystemLock.dtype_map_["uuid"].itemsize // np.dtype("<U1").itemsize
+    assert len(_call_lock_uuid(keyed)) <= width
+
+
 async def test_ensure_future_call_idempotent(test_app, tbl_mgr, executor):
     """同 key 多次 ensure 只产生一条 FutureCalls 行，且返回同一确定性 id；不覆盖已有参数"""
     from hetu.system.future import FutureCalls, _key_to_id
@@ -804,11 +824,6 @@ async def test_exec_future_call_keeps_reensured_call(
     assert kept is not None and "9" in kept.args
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="call lock 的 uuid 就是行 id：按 key 的一次性调用执行过以后，锁的保留期内同一个 "
-    "key 再 ensure 的新调用会被当成已经执行过，不执行就删掉",
-)
 async def test_reensured_one_shot_call_runs_again(
     monkeypatch, test_app, tbl_mgr, executor
 ):
