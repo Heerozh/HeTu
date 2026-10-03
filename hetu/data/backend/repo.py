@@ -633,8 +633,8 @@ class SessionRepository:
             comp_cls.dtype_map_[index_name], left, right
         )
         # unique 列读空时与 get 一样登记 negative observation，让"先 range 确认不存在再写"
-        # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间无穷且本就不保证事务内
-        # 可见性。
+        # 的写法撞车时判竞态而非 UniqueViolation。区间查询不登记：区间里的值数不过来，由提交时
+        # 的区间校验管。
         if not row_ids and point is not None and index_name in comp_cls.uniques_:
             idmap.mark_absent(self.ref, index_name, point)
 
