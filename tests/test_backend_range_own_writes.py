@@ -583,6 +583,44 @@ async def test_range_limit_checked_the_same_on_every_path(
         session.discard()
 
 
+async def test_range_limit_zero_skips_db(item_ref, mod_auto_backend):
+    """limit=0 一行都不要：不去数据库、不登记观察，直接返回空；参数照样校验"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2))
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with patch.object(master, "range_read_", wraps=master.range_read_) as m_read:
+            rows = await repo.range(time=(0, 10), limit=0)
+        assert len(rows) == 0 and m_read.call_count == 0
+        assert not session.idmap.range_observations()
+        with pytest.raises(ValueError, match="str"):
+            await repo.range(name=(1, 1), limit=0)
+        session.discard()
+
+
+async def test_get_value_not_a_point(item_ref, mod_auto_backend):
+    """get 的值换算不成这一列上的一个点（整数列给小数、超出类型范围）：照旧按原值查，查不到
+    返回 None，不报错"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(_timed(comp, 3)[0])
+        assert await repo.get(time=1.5) is None
+        assert await repo.get(time=2**70) is None
+        got = await repo.get(time=3.0)  # 整数值的小数照样是点
+        assert got is not None and got.time == 3
+        session.discard()
+
+
 async def test_range_huge_limit_after_own_delete(item_ref, mod_auto_backend):
     """limit 用很大的数表示不限（如 sys.maxsize）：本事务删过行、要多读几行时也不溢出"""
     import sys
