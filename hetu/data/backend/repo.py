@@ -33,6 +33,13 @@ IndexScalar = (
     | bool
 )
 Int64 = np.int64 | int
+# 后端区间参数收的 python 原生值
+PyScalar = int | float | str | bytes | bool
+
+
+def _to_py(value: IndexScalar) -> PyScalar:
+    """np 标量转成 python 原生值"""
+    return value.item() if isinstance(value, np.generic) else value
 
 
 class SessionRepository:
@@ -306,7 +313,8 @@ class SessionRepository:
 
         结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
         会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
-        结果里，也不占 `limit` 名额。
+        结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）时本事务里已经
+        有这个值的行（insert 的、改成这个值的、读过的），直接返回、不去数据库。
 
         读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
         区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -387,24 +395,64 @@ class SessionRepository:
                 )
             )
 
+        left = _to_py(_left)
+        right = None if _right is None else _to_py(_right)
+
         idmap = self._session.idmap
+        if limit != 0 and index_name in comp_cls.uniques_:
+            hit = self._unique_point_hit(index_name, left, right, limit, desc)
+            if hit is not None:
+                return hit
         if limit != 0 and idmap.has_writes(self.ref):
             # 这张表在本事务里有写入，要把改动合并进结果
             return await self._range_merged(
-                index_name, _left, _right, limit, desc, phantom_check
+                index_name, left, right, limit, desc, phantom_check
             )
         rows, obs = await self._range_rows(
-            index_name, _left, _right, limit, desc, phantom_check
+            index_name, left, right, limit, desc, phantom_check
         )
         if obs is not None:
             idmap.add_range_observation(self.ref, obs)
         return rows
 
+    def _unique_point_hit(
+        self,
+        index_name: str,
+        left: PyScalar,
+        right: PyScalar | None,
+        limit: int,
+        desc: bool,
+    ) -> np.recarray | None:
+        """
+        unique 列点查：本事务缓存里已经有这个值的行（insert 的、update 改成这个值的、读过的）
+        就是结果，直接返回，不去数据库（同 get）；没有时返回 None。
+        提交时这一行由 VER / unique 检查保证仍是这个值上唯一的一行，不用登记区间观察。
+        """
+        ref = self.ref
+        idmap = self._session.idmap
+        if not idmap.has_rows(ref):
+            return None
+        dtype = ref.comp_cls.dtype_map_[index_name]
+        point = BackendClient.point_query_value_(dtype, left, right)
+        if point is None:
+            return None
+        hit = idmap.filter(ref, **{index_name: point})
+        if len(hit) == 0:
+            return None
+        # 参数错误（比如字符串列拿数字查）照样报，和去数据库时一样
+        self._session.master_or_servant.check_range_(
+            ref, index_name, left, right, limit, desc
+        )
+        if 0 < limit < len(hit):
+            # 缓存里有两行是这个值，只会是先后读进来、中间被别的事务改过，提交时 VER 会判竞态
+            hit = cast(np.recarray, hit[:limit])
+        return hit
+
     async def _range_merged(
         self,
         index_name: str,
-        left: IndexScalar,
-        right: IndexScalar | None,
+        left: PyScalar,
+        right: PyScalar | None,
         limit: int,
         desc: bool,
         phantom_check: bool,
@@ -422,10 +470,6 @@ class SessionRepository:
         comp_cls = ref.comp_cls
         idmap = self._session.idmap
         client = self._session.master_or_servant
-        if isinstance(left, np.generic):
-            left = left.item()
-        if isinstance(right, np.generic):
-            right = right.item()
 
         rows, gone = idmap.local_changes(ref, index_name)
         local: list[tuple[bytes, np.record]] = []

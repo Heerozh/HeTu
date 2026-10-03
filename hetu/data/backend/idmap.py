@@ -512,6 +512,10 @@ class IdentityMap:
         """
         return self._row_clean.get(table_ref, {}).get(row_id)
 
+    def has_rows(self, table_ref: TableReference) -> bool:
+        """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
+        return len(self._row_cache.get(table_ref, ())) > 0
+
     def has_writes(self, table_ref: TableReference) -> bool:
         """这张表在本事务里有没有 insert / update / delete 过的行"""
         return bool(self._written.get(table_ref) or self._deleted.get(table_ref))
