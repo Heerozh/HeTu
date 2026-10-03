@@ -776,6 +776,60 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     assert ok
 
 
+async def test_exec_future_call_keeps_reensured_call(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """按 key 的一次性调用取出之后、执行完之前，这个 key 被 cancel 又重新 ensure（同一个 id 的
+    新调用）：执行完收尾时只删自己取出的那一条，不能把新建的那条删掉"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    ok, fid = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+    assert ok
+
+    last_time = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == fid
+
+    # 执行期间这个 key 被重配：cancel 掉旧的，ensure 一条新的
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "once")
+    assert ok and deleted is True
+    ok, again = await executor.execute("ensure_rls_comp_value_future", "once", 9, False)
+    assert ok and again == fid
+
+    assert await exec_future_call(call, executor.context.systems, fc_tbl)
+    kept = await _get_future_row(fc_tbl, fid)
+    assert kept is not None and "9" in kept.args
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="call lock 的 uuid 就是行 id：按 key 的一次性调用执行过以后，锁的保留期内同一个 "
+    "key 再 ensure 的新调用会被当成已经执行过，不执行就删掉",
+)
+async def test_reensured_one_shot_call_runs_again(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """按 key 的一次性调用执行完以后，同一个 key 再 ensure 一条：新的这条也要执行"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    start = time.time()
+    for round_, expect in ((1, 104), (2, 108)):
+        ok, _ = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+        assert ok
+        now = start + 2 * round_
+        monkeypatch.setattr(time, "time", lambda now=now: now)
+        call = await pop_upcoming_call(fc_tbl)
+        assert call is not None
+        assert await exec_future_call(call, executor.context.systems, fc_tbl)
+        ok, _ = await executor.execute("test_rls_comp_value", expect)
+        assert ok, round_
+
+
 @pytest.mark.timeout(20)
 async def test_future_call_task_backs_off_on_persistent_error(
     test_app, tbl_mgr, monkeypatch
