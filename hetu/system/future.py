@@ -61,6 +61,24 @@ def _key_to_id(key: str) -> int:
     return -(h >> 1) - 1  # -> [-(2**63), -1]：恒负、非 0、落在 int64 范围内
 
 
+def _call_lock_uuid(call: np.record) -> str:
+    """一次性未来调用执行时的 call lock uuid（防超时重投时重复执行）。
+
+    雪花 id 不会复用，就是 id。按 key 的调用（负 id）同一个 key cancel 后再 ensure 是同一个 id，
+    再加上建行时间（毫秒，十六进制）区分是哪一条：只用 id 的话，锁的保留期内新的这条会被当成
+    已经执行过，不执行就删掉。最长 20 + 1 + 11 = 32 个字符，正好放进 SystemLock.uuid（<U32），
+    够用到 2527 年。
+
+    Call-lock uuid of a one-shot future call. Snowflake ids are never reused, so it is
+    just the id; keyed calls (negative ids) reuse the id after cancel + ensure, so the
+    creation time (ms, hex) is appended to tell the two apart.
+    """
+    row_id = int(call.id)
+    if row_id > 0:
+        return str(row_id)
+    return f"{row_id}~{int(call.created * 1000):x}"
+
+
 def _build_future_row(
     ctx: SystemContext,
     at: float,
@@ -243,13 +261,16 @@ async def ensure_future_call(
 
     幂等通过 key 的确定性 id 复用 FutureCalls 主键唯一性实现：已存在则直接返回（不写入，
     事务空提交），并发同 key 的多余插入会撞主键引发事务竞态并自动重试，最终只保留一条。
+    一次性调用（recurring=False）执行完就删掉，之后再 ensure 同一个 key 会新建一条，到点照样
+    执行。
 
     * 同create_future_call，目标system必须开启call_lock。
 
     Idempotently ensure a single future call exists, keyed by ``key``; if it already
     exists, keep it as-is (params are NOT updated) and return its id. Useful for seeding
     a server-wide recurring background task from an on_start system without piling up
-    duplicates across restarts.
+    duplicates across restarts. A one-shot call is deleted once it has run; ensuring the
+    same key again afterwards creates a new call that runs again when due.
 
     Parameters
     ----------
@@ -433,7 +454,7 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
     caller.context.timestamp = time.time()
     try:
         if req_call_lock:
-            res = await caller.call_(sys, *args, uuid=str(call.id))
+            res = await caller.call_(sys, *args, uuid=_call_lock_uuid(call))
         else:
             res = await caller.call_(sys, *args)
         ok = True
@@ -452,8 +473,12 @@ async def exec_future_call(call: np.record, caller: SystemCaller, tbl: Table):
         async for attempt in tbl.session().retry(3):
             async with attempt as session:
                 repo = session.using(tbl.comp_cls)
-                if get_4_del := await repo.get(id=call.id):
-                    repo.delete(get_4_del.id)
+                # 只删自己取出的那一条：按 key 的调用（ensure_future_call）id 由 key 推导，执行
+                # 期间这个 key 被 cancel 又重新 ensure 的话，表里同 id 的已是新建的另一条，
+                # 建行时间（created，取出时不改）不同
+                current = await repo.get(id=call.id)
+                if current is not None and current.created == call.created:
+                    repo.delete(current.id)
         # call lock 不在这里删：同一条调用可能还有别的执行在路上（超时重投、卡住的 worker），
         # 它们查锁才知道已经执行过。锁留到保留期后由 future_call_task 定期清理
     return True

@@ -583,6 +583,44 @@ async def test_range_limit_checked_the_same_on_every_path(
         session.discard()
 
 
+async def test_range_limit_zero_skips_db(item_ref, mod_auto_backend):
+    """limit=0 一行都不要：不去数据库、不登记观察，直接返回空；参数照样校验"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2))
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with patch.object(master, "range_read_", wraps=master.range_read_) as m_read:
+            rows = await repo.range(time=(0, 10), limit=0)
+        assert len(rows) == 0 and m_read.call_count == 0
+        assert not session.idmap.range_observations()
+        with pytest.raises(ValueError, match="str"):
+            await repo.range(name=(1, 1), limit=0)
+        session.discard()
+
+
+async def test_get_value_not_a_point(item_ref, mod_auto_backend):
+    """get 的值换算不成这一列上的一个点（整数列给小数、超出类型范围）：照旧按原值查，查不到
+    返回 None，不报错"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(_timed(comp, 3)[0])
+        assert await repo.get(time=1.5) is None
+        assert await repo.get(time=2**70) is None
+        got = await repo.get(time=3.0)  # 整数值的小数照样是点
+        assert got is not None and got.time == 3
+        session.discard()
+
+
 async def test_range_huge_limit_after_own_delete(item_ref, mod_auto_backend):
     """limit 用很大的数表示不限（如 sys.maxsize）：本事务删过行、要多读几行时也不溢出"""
     import sys
@@ -619,14 +657,10 @@ async def test_range_merged_phantom_check_off_skips_range_check(
     assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="多读按整张表删改的库里行数算。细算哪些原值在区间里要逐行取快照字段（每行约 "
-    "0.7µs，比 master 上多读一个索引项贵约 20 倍），得等按索引增量维护删改行的排序键后再做",
-)
 async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_backend):
     """本事务删掉、改走的行，只有原值落在查询区间里的才在数据库结果里占位置。删改的行多了，
-    多读也只多读这几行，不按整张表删改了多少行去读"""
+    多读也只多读这几行，不按整张表删改了多少行去读（删改的行少时全算上，见
+    repo._COUNT_ALL_MOVED_UPTO）"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()
@@ -657,4 +691,64 @@ async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_b
             assert list(rows.time) == [3]
         # 1 行 + owner=1 上删掉、改走的 2 行；owner=2 上删掉的 20 行不在区间里
         assert [call.args[4] for call in m_read.call_args_list] == [3, 3]
+        session.discard()
+
+
+async def test_range_keys_each_own_row_once(item_ref, mod_auto_backend):
+    """事务里反复 range、写入：本事务的每一行在每个索引上只算一次排序键，不随 range 的次数
+    重算（"查不到就插"的循环原来是平方级）；只改了别的列的行不用算"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1000, 1001))
+    master = backend.master
+    keyed: list[int] = []
+    sort_keys = master.index_sort_keys_
+
+    def counting(ref, index_name, rows):
+        keyed.append(len(rows))
+        return sort_keys(ref, index_name, rows)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        with patch.object(master, "index_sort_keys_", new=counting):
+            for row in await repo.range(time=(1000, 1001), limit=-1):
+                row.qty = 5  # 不是索引列
+                await repo.update(row)
+            for t in range(50):
+                assert len(await repo.range(owner=(9, 9), limit=-1)) == t
+                await repo.insert(_item(comp, owner=9, time=t, name=f"g{t}"))
+            assert len(await repo.range(owner=(9, 9), limit=-1)) == 50
+        # 插入的 50 行各算一次
+        assert sum(keyed) == 50
+        session.discard()
+
+
+async def test_range_row_deleted_by_concurrent_coroutine(item_ref, mod_auto_backend):
+    """同一个 Session 上另一个协程在 range 读数据库期间删了一行：结果里没有这行，其余的行
+    各在各的位置上（不把别的行错位填进去）"""
+    import asyncio
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    y = _item(comp, owner=1, time=1, name="y")
+    x = _item(comp, owner=1, time=2, name="x")
+    z = _item(comp, owner=1, time=3, name="z")
+    await _insert_rows(backend, comp, y, x, z)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        assert await repo.get(id=int(x.id)) is not None
+        assert await repo.get(id=int(z.id)) is not None
+        await repo.insert(_item(comp, owner=2, time=4, name="other"))
+
+        async def deleter():
+            await asyncio.sleep(0)
+            repo.delete(int(x.id))
+
+        rows, _ = await asyncio.gather(repo.range(owner=(1, 1), limit=-1), deleter())
+        assert sorted(rows.name) == ["y", "z"]
         session.discard()

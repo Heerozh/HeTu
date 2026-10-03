@@ -2,6 +2,7 @@ import asyncio
 from unittest.mock import patch
 
 import pytest
+from fixtures.backends import raw_hset
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend, RaceCondition, UniqueViolation
@@ -188,6 +189,71 @@ async def test_stale_read_after_reverted_update_race(item_ref, mod_auto_backend)
             await repo1.update(b)
     assert (await _read_master(backend, comp, "RevertA")).qty == 100
     assert (await _read_master(backend, comp, "RevertB")).qty == 1
+
+
+async def test_reinserted_same_id_is_race(item_ref, mod_auto_backend):
+    """
+    同一个 id 删掉又插回来（显式 id、upsert(id=)、按 key 的未来调用都会这样）：读到旧行的事务
+    提交时要判竞态，不能因为新行的版本号碰巧和旧行一样就放过（ABA）
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(comp)
+        for name, time in (("AbaA", 210), ("AbaB", 211)):
+            row = comp.new_row()
+            row.name, row.time = name, time
+            await item_repo.insert(row)
+
+    await backend.wait_for_synced()
+    a_id = int((await _read_master(backend, comp, "AbaA")).id)
+
+    with pytest.raises(RaceCondition, match="Version"):
+        async with backend.session("pytest", 1) as s1:
+            repo1 = s1.using(comp)
+            a = await repo1.get(id=a_id)
+            assert a is not None
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                assert await repo2.get(id=a_id) is not None
+                repo2.delete(a_id)
+            async with backend.session("pytest", 1) as s3:
+                again = comp.new_row(id_=a_id)
+                again.name, again.time, again.qty = "AbaA", 212, 99
+                await s3.using(comp).insert(again)
+            b = await repo1.get(name="AbaB")
+            assert b is not None
+            b.qty = int(a.qty) + 1
+            await repo1.update(b)
+    assert (await _read_master(backend, comp, "AbaB")).qty == 1
+
+
+async def test_version_wraps_at_int32_max(item_ref, mod_auto_backend):
+    """_version 是 int32：一行累计改到上限后回绕，照样能读、能改。不回绕的话写进去的
+    2147483648 下次读这一行解码就溢出，这行从此读不出来"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    row = comp.new_row()
+    row.name, row.time = "Wrap", 220
+    async with backend.session("pytest", 1) as session:
+        await session.using(comp).insert(row)
+    top = 2**31 - 1
+    raw_hset(backend, item_ref, int(row.id), _version=str(top))
+
+    for qty in (7, 8):
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            got = await repo.get(id=int(row.id))
+            assert got is not None
+            got.qty = qty
+            await repo.update(got)
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        got = await session.using(comp).get(id=int(row.id))
+        assert got is not None and got.qty == 8
+        assert 0 < got._version < top
 
 
 async def test_unique_commit_race(item_ref, mod_auto_backend):

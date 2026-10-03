@@ -266,11 +266,14 @@ async def test_explicit_ids_only(hl, mod_test_app, monkeypatch):
 
     async with hl.session(Sim) as s, s[Sim].upsert(id=-2002) as r:
         r.system_id, r.epoch = 77, 1
-    # 重发同一批：命中 → 走 update，字段没变连写都不写
+    [first] = await hl.backend.master.get_many(hl.table(Sim), [-2002])
+    assert first is not None
+    # 重发同一批：命中 → 走 update，字段没变连写都不写（版本号不变）
     async with hl.session(Sim) as s, s[Sim].upsert(id=-2002) as r:
         r.system_id, r.epoch = 77, 1
     got = await hl.backend.master.get_many(hl.table(Sim), [-2002])
-    assert got[0] is not None and int(got[0].epoch) == 1 and int(got[0]._version) == 1
+    assert got[0] is not None and int(got[0].epoch) == 1
+    assert int(got[0]._version) == int(first._version)
     assert sf.worker_id == -1
 
 

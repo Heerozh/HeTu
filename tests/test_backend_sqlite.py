@@ -17,7 +17,7 @@ from fixtures.testdata import create_ref, def_item, def_rls_test
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import Backend
 from hetu.data.backend.base import MQClient
-from hetu.data.backend.redis_model import msg_packer
+from hetu.data.backend.redis_model import FIRST_VERSION_SPAN, msg_packer
 from hetu.data.backend.sqlite import SQLiteBackendClient
 from hetu.data.backend.sqlite.commit import run_commit
 from hetu.data.backend.sqlite.mq import (
@@ -308,7 +308,9 @@ async def test_rows_are_readable(tmp_path, new_component_env):
     assert names[:2] == ["_hetu_key", "id"] and names[-1] == "_version"
     assert set(names[1:]) == set(comp.dtype_map_)
     assert values["name"] == "河图"
-    assert (values["owner"], values["model"], values["_version"]) == ("7", "0.5", "1")
+    assert (values["owner"], values["model"]) == ("7", "0.5")
+    # 新插入的行版本号随机起步（见 FIRST_VERSION_SPAN）
+    assert 1 <= int(values["_version"]) <= FIRST_VERSION_SPAN
 
 
 async def test_bytes_field_roundtrip(tmp_path, new_component_env):
