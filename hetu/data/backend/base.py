@@ -147,7 +147,11 @@ def to_sortable_bytes(value: np.generic) -> bytes:
         return struct.pack(">Q", value)
     elif np.issubdtype(dtype, np.floating):
         double = value.item()
-        packed = struct.pack(">d", value)
+        if math.isnan(double):
+            # NaN 不论符号位一律按正 NaN 编码：commit 写索引前把值转成文本再解析，符号位丢了，
+            # 事务里给本事务的行算的排序键要和写进去的一致
+            double = math.nan
+        packed = struct.pack(">d", double)
         [u64] = struct.unpack(">Q", packed)
         # IEEE 754 浮点数排序调整
         if double >= 0:
@@ -183,6 +187,10 @@ def to_sortable_bytes_list(values: np.ndarray) -> list[bytes]:
         keys = values.astype(np.uint64)
     elif np.issubdtype(dtype, np.floating):
         doubles = values.astype(np.float64)
+        nan = np.isnan(doubles)
+        if nan.any():
+            # 同 to_sortable_bytes：NaN 一律按正 NaN 编码
+            doubles = np.where(nan, np.nan, doubles)
         bits = doubles.view(np.uint64)
         # 同 to_sortable_bytes：>= 0（含 -0.0）置符号位，负数和 NaN 整体取反
         keys = np.where(doubles >= 0, bits | np.uint64(1 << 63), ~bits)
