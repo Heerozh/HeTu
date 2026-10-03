@@ -341,3 +341,58 @@ async def test_range_truncated_reread_after_phantom_is_race(item_ref, mod_auto_b
                 await s2.using(comp).insert(_timed(comp, 15)[0])
             assert list((await repo.range(time=(0, 100), limit=2)).time) == [10, 15]
             await repo.insert(_timed(comp, 500)[0])
+
+
+async def test_range_merged_row_deleted_while_reading(item_ref, mod_auto_backend):
+    """有本事务写入时照样核对读取一致性：读索引之后、取行之前被删的行不在结果里，写事务
+    提交时判竞态（同没有写入时的 range）"""
+    from unittest.mock import patch
+
+    from hetu.data.backend import InconsistentRangeRead
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=6, time=1, name="a")
+    b = _item(comp, owner=6, time=2, name="b")
+    await _insert_rows(backend, comp, a, b)
+    master = backend.master
+    orig_fetch = master.get_many_array_
+    fired = False
+
+    async def get_many_array_(*args, **kwargs):
+        nonlocal fired
+        if not fired:
+            fired = True
+            async with backend.session("pytest", 1) as intruder:
+                intruder.only_master = True
+                repo2 = intruder.using(comp)
+                assert await repo2.get(id=int(b.id)) is not None
+                repo2.delete(int(b.id))
+        return await orig_fetch(*args, **kwargs)
+
+    with pytest.raises(InconsistentRangeRead):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            await repo.insert(_item(comp, owner=6, time=3, name="mine"))
+            with patch.object(master, "get_many_array_", new=get_many_array_):
+                rows = await repo.range(owner=(6, 6), limit=-1)
+            assert sorted(rows.name) == ["a", "mine"]
+
+
+async def test_range_merged_unique_point_read_empty_is_race(item_ref, mod_auto_backend):
+    """有本事务写入时，unique 列点查读空照样登记"观察到不存在"：并发插入同值后本事务再插，
+    判竞态（重试），不是确定性的 UniqueViolation。关掉区间校验，单看这条规则"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            await repo.insert(_item(comp, time=1, name="other"))
+            rows = await repo.range(name=("v", "v"), limit=1, phantom_check=False)
+            assert len(rows) == 0
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, time=2, name="v"))
+            await repo.insert(_item(comp, time=3, name="v"))
