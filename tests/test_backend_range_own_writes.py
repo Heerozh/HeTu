@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from hetu.common.snowflake_id import SnowflakeID
-from hetu.data.backend import Backend
+from hetu.data.backend import Backend, RaceCondition
 
 SnowflakeID().init(1, 0)
 
@@ -230,3 +230,50 @@ async def test_range_unique_point_hits_local_without_db_read(
             assert m_read.call_count == 0 and m_range.call_count == 0
         # 改走了的旧值本地没有：去数据库读到的那行已经不是这个值了
         assert len(await repo.range(name=("t2", "t2"))) == 0
+
+
+@pytest.mark.parametrize("desc", [False, True])
+@pytest.mark.parametrize("where", ["outside", "inside"])
+async def test_range_truncated_with_own_rows_observes_visible_only(
+    item_ref, mod_auto_backend, desc, where
+):
+    """合并了本事务的行再截断：只取、只观察到看到的最后一行为止。库里排在后面、没看到的行
+    不取也不校验——并发插在看到的末尾之外、改了没看到的行都不算冲突；插进看到的范围里照样
+    判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    a = _item(comp, owner=1, time=1, name="a")
+    b = _item(comp, owner=2, time=2, name="b")
+    c = _item(comp, owner=3, time=3, name="c")
+    await _insert_rows(backend, comp, a, b, c)
+    # 升序看到 x(0)、a、b，没看到 c；降序看到 x(4)、c、b，没看到 a
+    unseen = a if desc else c
+    if where == "outside":
+        # 和 b 同值、排在 b 外侧（升序 id 更大，降序 id 更小；a、b、c 的雪花号连号，
+        # 减 1 会撞上 a）
+        intruder = _item(
+            comp, owner=2, time=9, name="i", id_=int(b.id) - 1000 if desc else None
+        )
+    else:
+        intruder = _item(comp, owner=3 if desc else 1, time=9, name="i")
+
+    async def read_then_commit():
+        async with backend.session("pytest", 1) as s1:
+            repo = s1.using(comp)
+            await repo.insert(_item(comp, owner=4 if desc else 0, time=10, name="x"))
+            rows = await repo.range(owner=(0, 10), limit=3, desc=desc)
+            assert list(rows.name) == (["x", "c", "b"] if desc else ["x", "a", "b"])
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                await repo2.insert(intruder)
+                if where == "outside":
+                    row = await repo2.get(id=int(unseen.id))
+                    assert row is not None
+                    row.level = 9
+                    await repo2.update(row)
+
+    if where == "outside":
+        await read_then_commit()
+    else:
+        with pytest.raises(RaceCondition, match="Range"):
+            await read_then_commit()
