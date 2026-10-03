@@ -589,7 +589,9 @@ async def test_cache_hit_row_is_a_copy(
             r.qty = 3
 
     final = await backend.master.get(item_ref, rid)
-    assert final is not None and final.qty == 3 and final._version == 2
+    # 这个事务只提交了一次更新（插入时的版本号随机起步）
+    assert final is not None and final.qty == 3
+    assert final._version == first._version + 1
 
 
 async def test_range_batches_row_reads(filled_item_ref, mod_auto_backend):

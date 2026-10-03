@@ -12,6 +12,7 @@ SQLite 用 sqlite3 与它的 Python 版（`sqlite/commit.py`）。
 """
 
 import itertools
+import random
 from collections.abc import Awaitable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any, Literal, Never, cast, overload, override
 
@@ -44,6 +45,14 @@ if TYPE_CHECKING:
     from .table import TableReference
 
 msg_packer = msgpack.Packer(use_bin_type=False)
+
+# 行的 _version 是 int32：改到上限后回绕到 1。版本校验只比相等，回绕不影响；改成 int64 的话
+# 每张表的结构都变了，所有表都得迁移
+MAX_VERSION = 2**31 - 1
+# 新插入的行版本号从 [1, 2^24] 里随机取，不从 1 开始：同一个 id 删掉又插回来时（显式 id、
+# upsert(id=)、按 key 的未来调用），读到旧行的事务提交时 VER 才不会把新行当成旧行（ABA）。
+# 范围不取大，给 int32 留足改动次数的余量
+FIRST_VERSION_SPAN = 1 << 24
 
 
 class RedisModelClient(BackendClient):
@@ -788,8 +797,10 @@ class RedisModelClient(BackendClient):
 
         def _hset_key(_key, _old_version, _update: dict[str, str | bytes]):
             """添加hset的push命令"""
-            # 版本+1
+            # 版本+1，到上限回绕（见 MAX_VERSION）
             _ver = int(_old_version) + 1
+            if _ver > MAX_VERSION:
+                _ver = 1
             _update.pop("_version", None)  # 无视用户传入的_version字段
             # 组合hset, 别忘记写_version
             _kvs = itertools.chain.from_iterable(_update.items())
@@ -884,7 +895,8 @@ class RedisModelClient(BackendClient):
                     row_id,
                     "insert",
                 )
-                _hset_key(key, 0, insert)
+                # 版本号随机起步（见 FIRST_VERSION_SPAN）
+                _hset_key(key, random.randrange(FIRST_VERSION_SPAN), insert)
                 _exc_index(
                     indexes, point_subs, dtype_map, idx_prefix, insert, insert, True
                 )
