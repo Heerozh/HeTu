@@ -52,7 +52,8 @@ async def remove_item_order(ctx, order_id):
 - `Order` `Component` 会被复制到名为 `Order:ItemOrder` 的兄弟表中。它拥有相同的模式、索引和权限——它是一个真实的、独立的物理表。
 - 也会注册一份 `remove` `System` 主体的副本，并绑定到新表。`ctx.depend["remove:ItemOrder"]` 调用的是*那个*副本。
 - 集群计算针对副本进行：`:ItemOrder` 集群与原始 `Order` 集群没有重叠，因此它们永远不会共享一个分片，也永远不会互相读写。
-- 所有继承仍然有效。如果 `remove` 本身也依赖其他 `System`，则整个依赖图都会在相同后缀下被复制。
+- 所有继承仍然有效。如果 `remove` 本身也依赖其他 `System`，则整个依赖图都会在相同后缀下被复制。依赖图里自己写了后缀的依赖（如 `depends=("audit:Log",)`），以及 `components=` 里显式 `duplicate` 出来的副本，保留它们自己的后缀。
+- 同一个 `System` 不能在依赖图里以不同后缀（或有、无后缀）各出现一次，比如同时依赖 `remove` 和 `remove:ItemOrder`：`ctx.repo[Order]` 只能对应一张表，启动时会报错。
 
 当一个 `Component` 成为瓶颈（比如 `FutureCalls` 队列或全局 `Inventory`），并且你希望某些调用方在单独的物理副本上操作时，就可以使用此功能。**不要**将其用作通用的“命名空间”机制：每个副本都是一个真实的表，需要存储和隔离，而你可能实际上希望它们协同工作。
 
@@ -154,11 +155,12 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 机制：
 
 - 启用 `call_lock=True` 会自动向 `System` 的集群附加一个重复的 `SystemLock` `Component`（使用与 `System` 副本相同的后缀技巧——每个上锁的 `System` 对应一个锁表）。
+- 锁表不随 `depends=` 继承：父 `System` 通过 `ctx.depend[...]` 调用上锁的 `System` 时，不读写它的锁表。只有用 `uuid=` 直接调用的那个 `System` 会用自己的锁表去重，所以要 uuid 去重（包括作为未来调用目标）的 `System` 必须自己声明 `call_lock=True`。
 - 调用时，引擎会读取给定 `uuid` 的 `SystemLock`。如果存在行，则跳过 `System` 主体并返回 `None`。
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
 - 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
-`uuid=` 是 `ctx.systems.call(...)` 以及父 `Systems` 的 `ctx.depend[...](...)` 风格调用上的关键字参数。
+`uuid=` 是 `ctx.systems.call(...)` 的关键字参数。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
 
 ## `on_disconnect` 钩子
 

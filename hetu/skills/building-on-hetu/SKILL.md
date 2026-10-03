@@ -81,7 +81,8 @@ working examples — read them first.
   `ctx.depend["remove:ItemOrder"]`): the engine duplicates the Component into a
   **separate physical sibling table** (`Order:ItemOrder`, same schema / index /
   permission) and registers a copy of the System bound to it, in its own isolated
-  cluster — not generic namespacing, each copy is a real table. Resolve a copy at
+  cluster — not generic namespacing, each copy is a real table. The System's own
+  `depends=` graph is copied under the same tag too. Resolve a copy at
   load time with `Component.duplicate(namespace, tag)`, enumerate with
   `get_duplicates()`. Built-in `create_future_call:scheduler` is the canonical
   example. (→ `advanced.md`)

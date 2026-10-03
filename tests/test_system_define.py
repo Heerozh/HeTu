@@ -5,10 +5,16 @@
 #  @email: heeroz@gmail.com
 #  """
 
+import numpy as np
 import pytest
 
+from hetu.common.snowflake_id import SnowflakeID
 from hetu.data import BaseComponent, Permission, define_component, property_field
 from hetu.system import SystemClusters, SystemContext, define_system
+from hetu.system.lock import SystemLock
+
+# 运行期 System 创建新行需要 SnowflakeID（生产中由 start_backends 初始化）
+SnowflakeID().init(1, 0)
 
 
 @pytest.fixture
@@ -288,3 +294,205 @@ def test_system_copy(test_component):
 
     # 检测cluster不相关
     assert system1_def.cluster_id != system_copy1_def.cluster_id
+
+
+def test_system_copy_nested(test_component):
+    # 副本依赖的整张依赖图都换成同后缀的副本：被依赖System自己的depends也要复制，
+    # 否则嵌套的那层仍读写主表，副本的簇也会被并回主簇
+    comp1, comp2, comp3 = test_component[:3]
+
+    @define_system(namespace="pytest", components=(comp1,))
+    async def leaf(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(comp2,), depends=("leaf",))
+    async def mid(ctx):
+        pass
+
+    @define_system(namespace="pytest", depends=("mid:copy",))
+    async def top(ctx):
+        pass
+
+    # 嵌套的那层和外层引用同一个Component：主表和副本都在的话，ctx.repo[comp3]只剩一张
+    @define_system(namespace="pytest", components=(comp3,))
+    async def inner(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(comp3,), depends=("inner",))
+    async def outer(ctx):
+        pass
+
+    @define_system(namespace="pytest", depends=("outer:copy",))
+    async def top2(ctx):
+        pass
+
+    clusters = SystemClusters()
+    clusters.build_clusters("pytest")
+
+    mid_def = clusters.get_system("mid", namespace="pytest")
+    top_def = clusters.get_system("top", namespace="pytest")
+    top2_def = clusters.get_system("top2", namespace="pytest")
+    assert mid_def and top_def and top2_def
+    assert mid_def.full_components == {comp1, comp2}
+    assert top_def.full_components == {
+        comp1.duplicate("pytest", "copy"),
+        comp2.duplicate("pytest", "copy"),
+    }
+    assert top_def.cluster_id != mid_def.cluster_id
+    assert top2_def.full_components == {comp3.duplicate("pytest", "copy")}
+
+
+def test_system_copy_nested_keeps_own_suffix(test_component):
+    # 依赖图里自己写了后缀的依赖保留自己的后缀，它下面的依赖跟着用这个后缀；
+    # components里显式duplicate的副本也保留自己的后缀
+    comp1, comp2, comp3 = test_component[:3]
+    fixed = comp2.duplicate("pytest", "fixed")
+
+    @define_system(namespace="pytest", components=(comp1,))
+    async def base(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(fixed,), depends=("base",))
+    async def leaf(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(comp3,), depends=("leaf:y",))
+    async def mid(ctx):
+        pass
+
+    @define_system(namespace="pytest", depends=("mid:copy",))
+    async def top(ctx):
+        pass
+
+    clusters = SystemClusters()
+    clusters.build_clusters("pytest")
+
+    mid_def = clusters.get_system("mid", namespace="pytest")
+    top_def = clusters.get_system("top", namespace="pytest")
+    assert mid_def and top_def
+    assert mid_def.full_components == {comp3, fixed, comp1.duplicate("pytest", "y")}
+    assert top_def.full_components == {
+        comp3.duplicate("pytest", "copy"),
+        fixed,
+        comp1.duplicate("pytest", "y"),
+    }
+
+
+def test_system_copy_conflict(test_component):
+    # 同一个System在依赖图里以不同后缀（或有、无后缀）出现，ctx.repo里同一个Component
+    # 要对应两张表，启动时就报错
+    comp1, comp2 = test_component[:2]
+
+    @define_system(namespace="pytest", components=(comp1,))
+    async def leaf(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(comp2,), depends=("leaf",))
+    async def mid(ctx):
+        pass
+
+    @define_system(namespace="pytest", depends=("leaf", "mid:copy"))
+    async def top(ctx):
+        pass
+
+    with pytest.raises(AssertionError, match=r"top.*EComp1:copy"):
+        SystemClusters().build_clusters("pytest")
+
+
+def test_depends_skip_call_lock_table(test_component):
+    # 被依赖System的call lock锁表不继承：uuid去重只用被直接调用的System自己的锁表。
+    # 继承进来会和自己的锁表在ctx.repo里撞SystemLock这个键，谁覆盖谁看集合遍历顺序
+    comp1, comp2 = test_component[:2]
+
+    @define_system(namespace="pytest", components=(comp1,), call_lock=True)
+    async def settle(ctx):
+        pass
+
+    @define_system(
+        namespace="pytest", components=(comp2,), depends=("settle",), on_start=True
+    )
+    async def boot(ctx):
+        pass
+
+    @define_system(namespace="pytest", components=(comp2,), depends=("settle",))
+    async def plain(ctx):
+        pass
+
+    @define_system(namespace="pytest", depends=("settle:copy",))
+    async def copied(ctx):
+        pass
+
+    clusters = SystemClusters()
+    clusters.build_clusters("pytest")
+
+    def lock_tables(sys_name):
+        sys_def = clusters.get_system(sys_name, namespace="pytest")
+        assert sys_def
+        return {
+            comp.name_
+            for comp in sys_def.full_components
+            if comp.name_.startswith(SystemLock.name_)
+        }
+
+    assert lock_tables("settle") == {"SystemLock:settle"}
+    assert lock_tables("boot") == {"SystemLock:boot"}
+    assert lock_tables("plain") == set()
+    assert lock_tables("copied") == set()
+
+
+async def test_system_copy_nested_runtime(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    # 运行时：经mid:copy调到的leaf读写Leaf:copy，主表不动；
+    # 没开call_lock的System也不能再借依赖的锁做uuid去重
+    from hetu.manager import ComponentTableManager
+    from hetu.system.caller import SystemCaller
+
+    @define_component(namespace="pytest", force=True)
+    class Leaf(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        n: np.int32 = property_field(0)
+
+    @define_system(namespace="pytest", components=(Leaf,), call_lock=True)
+    async def leaf(ctx, owner):
+        async with ctx.repo[Leaf].upsert(owner=owner) as row:
+            row.n += 1
+
+    @define_system(namespace="pytest", depends=("leaf",))
+    async def mid(ctx, owner):
+        await ctx.depend["leaf"](ctx, owner)
+
+    @define_system(namespace="pytest", depends=("mid:copy",))
+    async def top(ctx, owner):
+        await ctx.depend["mid:copy"](ctx, owner)
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+
+    ctx = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    ctx.systems = SystemCaller("pytest", tbl_mgr, ctx)
+    await ctx.systems.call("top", 1)
+    with pytest.raises(ValueError, match="call_lock"):
+        await ctx.systems.call("mid", 2, uuid="borrowed")
+
+    await backend.wait_for_synced()
+    leaf_copy = Leaf.duplicate("pytest", "copy")
+    copy_tbl = tbl_mgr.get_table(leaf_copy)
+    main_tbl = tbl_mgr.get_table(Leaf)
+    assert copy_tbl and main_tbl
+    async with copy_tbl.session() as session:
+        row = await session.using(leaf_copy).get(owner=1)
+        assert row is not None and row.n == 1
+    async with main_tbl.session() as session:
+        assert await session.using(Leaf).get(owner=1) is None

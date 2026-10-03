@@ -269,7 +269,7 @@ define_system(
 )
 ```
 
-<small>Source: [`hetu/system/definer.py:341`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L341)</small>
+<small>Source: [`hetu/system/definer.py:363`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L363)</small>
 
 
 
@@ -314,6 +314,9 @@ define_system(
 
 客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
 或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+
+调用锁不随`depends`继承：通过`depends`调用本System只是同一个事务里的普通函数调用，
+不做uuid去重。要用uuid去重（包括作为未来调用目标）的System必须自己开启此项。
 
 - **`on_start`** (Any) — 标记此System为"启动钩子"：每次hetu start启动、开始收连接前，引擎会对每个instance
 执行一次。
