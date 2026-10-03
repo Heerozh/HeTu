@@ -250,15 +250,25 @@ class SessionRepository:
         idmap = self._session.idmap
         # 如果不是主键，直接用range方法
         if index_name != "id":
-            # 去cache查询（含本事务新 insert 的行，所以要先于 negative cache）
-            rows = idmap.filter(self.ref, **{index_name: query_value})
-            if len(rows) > 0:
+            # 去cache查询（含本事务新 insert 的行，所以要先于 negative cache）。查询值先按列
+            # 类型换算（同 range 的点查）：数值列拿 "10" 查和拿 10 查一样，缓存里的行、
+            # negative cache 都按换算后的值比
+            point = BackendClient.point_query_value_(
+                comp_cls.dtype_map_[index_name], query_value, None
+            )
+            if point is None:
+                value = query_value
+                rows = idmap.filter(self.ref, **{index_name: query_value})
+            else:
+                value = point
+                rows = idmap.match(self.ref, index_name, point)
+            if rows is not None and len(rows) > 0:
                 return rows[0]
 
             # negative cache：本事务已观察过该值不存在，事务内可重复读，不再打远程
             # （upsert 内部会再 get 一次锚定值，SystemLock 等流程因此省一次往返）
             is_unique = index_name in comp_cls.uniques_
-            if is_unique and idmap.observed_absent(self.ref, index_name, query_value):
+            if is_unique and idmap.observed_absent(self.ref, index_name, value):
                 return None
 
             # cache未命中，去数据库查询。本事务删掉的、改走了这个索引值的行，提交前还在数据库
@@ -278,10 +288,10 @@ class SessionRepository:
                 idmap.add_range_observation(self.ref, obs)
             if rows.shape[0] > 0:
                 return rows[0]
-            # 等值查询unique列读空：登记negative observation，供commit判定竞态。
-            # （区间range查询不登记negative observation，区间无穷且本就不保证事务内可见性。）
+            # 等值查询unique列读空：登记negative observation，供commit判定竞态。数据库读空时
+            # _range_rows 已登记过；读到的都是本事务改走了的行时要在这里登记
             if is_unique:
-                idmap.mark_absent(self.ref, index_name, query_value)
+                idmap.mark_absent(self.ref, index_name, value)
             return None
         else:
             row_id = int(query_value)
