@@ -277,3 +277,67 @@ async def test_range_truncated_with_own_rows_observes_visible_only(
     else:
         with pytest.raises(RaceCondition, match="Range"):
             await read_then_commit()
+
+
+def _spy_cnt_checks(backend: Backend):
+    """包住 master.commit_script_，记下每次提交里的 CNT 检查（区间校验）"""
+    from unittest.mock import patch
+
+    import msgpack
+
+    master = backend.master
+    captured: list[list] = []
+    orig_commit_script = master.commit_script_
+
+    async def spy(keys, args):
+        checks = msgpack.unpackb(args[0], raw=True)[0]
+        captured.append([chk for chk in checks if chk[0] == b"CNT"])
+        return await orig_commit_script(keys, args)
+
+    return captured, patch.object(master, "commit_script_", new=spy)
+
+
+@pytest.mark.parametrize("write", ["insert", "delete"])
+async def test_range_reread_after_own_write_sends_one_check(
+    item_ref, mod_auto_backend, write
+):
+    """同一区间在本事务写入前后各截断读一次：两次观察到的库里的行一致（一个包含另一个），
+    提交时只发一条区间校验，同一批行不多占一次 master 调用"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 10, 20, 30, 40, 50))
+    captured, spy = _spy_cnt_checks(backend)
+
+    with spy:
+        async with backend.session("pytest", 1) as session:
+            session.only_master = True
+            repo = session.using(comp)
+            rows = await repo.range(time=(0, 100), limit=3)
+            assert list(rows.time) == [10, 20, 30]
+            if write == "insert":
+                await repo.insert(_timed(comp, 15)[0])
+                expect, count = [10, 15, 20], 3  # 第二次只看到 20，被第一次的观察包含
+            else:
+                repo.delete(int(rows[0].id))
+                expect, count = [20, 30, 40], 4  # 第二次多读到 40，包含第一次的观察
+            rows = await repo.range(time=(0, 100), limit=3)
+            assert list(rows.time) == expect
+    [checks] = captured
+    assert [chk[4] for chk in checks] == [count]
+
+
+async def test_range_truncated_reread_after_phantom_is_race(item_ref, mod_auto_backend):
+    """同一区间截断读两次、中间被并发插入：两次读到的库里的行对不上，两条校验都要留，判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 10, 20, 30))
+
+    with pytest.raises(RaceCondition, match="Range"):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            assert list((await repo.range(time=(0, 100), limit=2)).time) == [10, 20]
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_timed(comp, 15)[0])
+            assert list((await repo.range(time=(0, 100), limit=2)).time) == [10, 15]
+            await repo.insert(_timed(comp, 500)[0])
