@@ -695,28 +695,16 @@ class IdentityMap:
 
     def get_clean_rows(self) -> dict[TableReference, dict[int, str]]:
         """
-        返回当前仍处于CLEAN状态的行（被读取但未被修改/删除/重新插入），
-        以及它们读取时的 `_version`。提交时用于对纯读行做严格的乐观锁检查，
-        避免事务依赖的陈旧读（stale read）。
+        返回本事务读过、提交时不写的行，以及它们读取时的 `_version`：仍处于CLEAN状态的行
+        （被读取但未被修改/删除/重新插入），加上 update 过但改回了原值的行（提交时不发更新，
+        见 `get_dirty_rows`）。提交时用于对这些行做严格的乐观锁检查，避免事务依赖的陈旧读
+        （stale read）。
 
         Returns
         -------
         {TableReference: {row_id: _version_str}}
         """
-        ret: dict[TableReference, dict[int, str]] = {}
-        for table_ref, states in self._row_states.items():
-            clean_cache = self._row_clean.get(table_ref, {})
-            row_versions: dict[int, str] = {}
-            for row_id, state in states.items():
-                if state != RowState.CLEAN:
-                    continue
-                clean_row = clean_cache.get(row_id)
-                if clean_row is None:
-                    continue
-                row_versions[row_id] = str(clean_row["_version"])
-            if row_versions:
-                ret[table_ref] = row_versions
-        return ret
+        return self.get_commit_rows()[1]
 
     def get_dirty_rows(
         self,
@@ -740,26 +728,48 @@ class IdentityMap:
         updates: ([old_row_dict, ], [changed_fields_dict, ]}  # changed_fields_dict只包含变更的字段
         deletes: [old_row_dict, ]
         """
-        ret = {}
+        return self.get_commit_rows()[0]
+
+    def get_commit_rows(
+        self,
+    ) -> tuple[
+        dict[
+            TableReference,
+            tuple[
+                list[dict[str, str | bytes]],
+                tuple[list[dict[str, str | bytes]], list[dict[str, str | bytes]]],
+                list[dict[str, str | bytes]],
+            ],
+        ],
+        dict[TableReference, dict[int, str]],
+    ]:
+        """
+        提交用：返回 (`get_dirty_rows()`, `get_clean_rows()`)。一行改回了原值没有，要逐字段
+        比过才知道，扫脏行时顺便登记它的版本，不用为此再比一遍
+        """
+        dirties = {}
+        read_versions: dict[TableReference, dict[int, str]] = {}
 
         for table_ref, states in self._row_states.items():
             # 初始化各状态列表
             inserts, updates, deletes = [], ([], []), []
+            versions: dict[int, str] = {}
 
             cache = self._row_cache[table_ref]
             bytes_fields = table_ref.comp_cls.bytes_fields_
 
             clean_cache = self._row_clean[table_ref]
             old_rows, new_rows = updates
+            dirty_ids: list[int] = []
+            for row_id, state in states.items():
+                if state != RowState.CLEAN:
+                    dirty_ids.append(row_id)
+                elif (clean_row := clean_cache.get(row_id)) is not None:
+                    versions[row_id] = str(clean_row["_version"])
             # 单行事务直接按已有状态分派，避免 np.isin 掩码和 recarray 副本。
             # 多行仍先用 NumPy 筛掉 CLEAN 行，避免大范围读取、少量写入时逐行
             # 创建 record；INSERT/UPDATE/DELETE 共用一次筛选。
             if len(cache) > 1:
-                dirty_ids = [
-                    row_id
-                    for row_id, state in states.items()
-                    if state != RowState.CLEAN
-                ]
                 dirty_rows = cache[np.isin(cache["id"], dirty_ids)] if dirty_ids else ()
             else:
                 dirty_rows = cache
@@ -770,7 +780,7 @@ class IdentityMap:
                     inserts.append(_row_to_db(row, bytes_fields))
                 elif state == RowState.UPDATE:
                     old = clean_cache[row_id]
-                    # 只写有变化的字段；改回原值的行没有变化，不发空更新
+                    # 只写有变化的字段
                     if fields := changed_fields(row, old):
                         new_fields: dict[str, str | bytes] = {
                             field: bytes(row[field])
@@ -780,13 +790,19 @@ class IdentityMap:
                         }
                         old_rows.append(_row_to_db(old, bytes_fields))
                         new_rows.append(new_fields)
+                    else:
+                        # 改回了原值：不发空更新，但和只读的行一样校验版本。本事务用的是
+                        # 读到的值，别人在这期间改了它就是陈旧读
+                        versions[int(row_id)] = str(old["_version"])
                 elif state == RowState.DELETE:
                     # 按数据库里的原值删：Redis 据此清索引，改过的索引列要清的是原值
                     deletes.append(_row_to_db(clean_cache[row_id], bytes_fields))
 
-            ret[table_ref] = (inserts, updates, deletes)
+            dirties[table_ref] = (inserts, updates, deletes)
+            if versions:
+                read_versions[table_ref] = versions
 
-        return ret
+        return dirties, read_versions
 
     def filter(self, table_ref: TableReference, **kwargs) -> np.recarray:
         """

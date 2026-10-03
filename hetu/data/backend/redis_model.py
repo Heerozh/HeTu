@@ -820,7 +820,7 @@ class RedisModelClient(BackendClient):
             """添加del的push命令"""
             pushes.append(["DEL", _key])
 
-        dirties = idmap.get_dirty_rows()
+        dirties, read_versions = idmap.get_commit_rows()
         if not dirties:
             raise ValueError(_("没有脏数据需要提交"))
 
@@ -939,9 +939,9 @@ class RedisModelClient(BackendClient):
                     ids_msg: bytes = msg_packer.pack(touched_ids)  # type: ignore
                     table_pubs.append([self.table_channel(ref), ids_msg])
 
-        # 对纯读行加版本检查，防止事务依赖的陈旧读：
+        # 对纯读行（含改了又改回原值的行）加版本检查，防止事务依赖的陈旧读：
         # 事务读到的某行，在提交前若被其他事务修改，本事务应失败重试。
-        for ref, row_versions in idmap.get_clean_rows().items():
+        for ref, row_versions in read_versions.items():
             clean_id_prefix = self.cluster_prefix(ref) + ":id:"
             for row_id, old_version in row_versions.items():
                 _version_must_match(clean_id_prefix + str(row_id), old_version)
