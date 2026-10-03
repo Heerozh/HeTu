@@ -149,6 +149,47 @@ async def test_stale_read_race(item_ref, mod_auto_backend):
     assert (await _read_master(backend, comp, "TargetB")).qty == 0
 
 
+async def test_stale_read_after_reverted_update_race(item_ref, mod_auto_backend):
+    """
+    读到的行改了又改回原值：提交时不发更新，但和只读的行一样要校验版本。别的事务在这期间
+    改了它，本事务基于旧值做的决定照样判竞态（同 test_stale_read_race）
+    """
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        item_repo = session.using(comp)
+        for name, time in (("RevertA", 200), ("RevertB", 201)):
+            row = comp.new_row()
+            row.name, row.time, row.qty = name, time, 1
+            await item_repo.insert(row)
+
+    await backend.wait_for_synced()
+
+    with pytest.raises(RaceCondition, match="Version"):
+        async with backend.session("pytest", 1) as s1:
+            repo1 = s1.using(comp)
+            a = await repo1.get(name="RevertA")
+            assert a is not None
+            stale_qty = int(a.qty)
+            a.qty = 50
+            await repo1.update(a)
+            a.qty = stale_qty
+            await repo1.update(a)  # 改回原值
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                a2 = await repo2.get(name="RevertA")
+                assert a2 is not None
+                a2.qty = a2.qty + 99  # type: ignore
+                await repo2.update(a2)
+            b = await repo1.get(name="RevertB")
+            assert b is not None
+            b.qty = stale_qty + 1  # type: ignore
+            await repo1.update(b)
+    assert (await _read_master(backend, comp, "RevertA")).qty == 100
+    assert (await _read_master(backend, comp, "RevertB")).qty == 1
+
+
 async def test_unique_commit_race(item_ref, mod_auto_backend):
     """
     提交时的 unique 冲突判定：盲写（本事务未曾 get 观察其不存在）撞上并发已提交的同值

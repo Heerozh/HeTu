@@ -190,11 +190,13 @@ async def test_range_own_inserts_ordered_like_db(item_ref, mod_auto_backend, des
     assert seen == committed
 
 
-async def test_range_unique_point_hits_local_without_db_read(
+async def test_range_unique_point_hits_db_row_without_db_read(
     item_ref, mod_auto_backend
 ):
-    """unique 列点查：本事务缓存里已经有这个值的行（insert 的、update 改成这个值的、读过的），
-    直接返回、不去数据库（同 get）；参数照样校验"""
+    """unique 列点查：本事务从库里读过、这一列没改过的行就是结果，直接返回、不去数据库
+    （同 get），提交时它的版本校验加 unique 保证这个值上仍只有它。本事务写成这个值的行
+    （insert 的、改成这个值的）提交前可能又离开这个值，库里也可能本来就有同值的行，照样去
+    数据库读。参数照样校验"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()
@@ -210,26 +212,113 @@ async def test_range_unique_point_hits_local_without_db_read(
         assert moved is not None
         moved.name = "moved"
         await repo.update(moved)
-        assert await repo.get(name="t3") is not None
+        touched = await repo.get(name="t3")
+        assert touched is not None
+        touched.level = 9  # 改的是别的列
+        await repo.update(touched)
         await repo.insert(_item(comp, time=11, name="11"))
 
         with (
             patch.object(master, "range_read_", wraps=master.range_read_) as m_read,
             patch.object(master, "range", wraps=master.range) as m_range,
         ):
-            for name, time in (("t4", 4), ("moved", 2), ("t3", 3)):
-                assert list((await repo.range(name=(name, name))).time) == [time]
-                rows = await repo.range("name", name, desc=True, phantom_check=False)
-                assert list(rows.time) == [time]
+            assert list((await repo.range(name=("t3", "t3"))).time) == [3]
+            rows = await repo.range("name", "t3", desc=True, phantom_check=False)
+            assert list(rows.time) == [3]
             assert list((await repo.range(time=(3, 3))).name) == ["t3"]
             moved_id = int(moved.id)
             assert list((await repo.range(id=(moved_id, moved_id))).name) == ["moved"]
-            # 字符串列拿数字查照样报错，不因为本地有 name="11" 的行就放过
-            with pytest.raises(ValueError, match="str"):
-                await repo.range(name=(11, 11))
             assert m_read.call_count == 0 and m_range.call_count == 0
+            # 本事务写成这个值的行：去数据库读，合并进结果
+            for name, time in (("t4", 4), ("moved", 2)):
+                assert list((await repo.range(name=(name, name))).time) == [time]
+            assert m_read.call_count == 2
+        # 字符串列拿数字查照样报错，不因为本地有 name="11" 的行就放过
+        with pytest.raises(ValueError, match="str"):
+            await repo.range(name=(11, 11))
         # 改走了的旧值本地没有：去数据库读到的那行已经不是这个值了
         assert len(await repo.range(name=("t2", "t2"))) == 0
+
+
+@pytest.mark.parametrize("leave", ["delete", "move"])
+async def test_range_unique_point_own_row_left_value_is_race(
+    item_ref, mod_auto_backend, leave
+):
+    """unique 列点查读到本事务写成这个值的行（insert 的、改成这个值的），之后它又离开了这个值
+    （删掉、改走）：提交时这个值上没有本事务的行兜着了，这期间别的事务插进来的同值行要判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, time=1, name="w"))
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            if leave == "delete":
+                mine = _item(comp, time=2, name="x")
+                await repo.insert(mine)
+            else:
+                mine = await repo.get(name="w")
+                assert mine is not None
+                mine.name = "x"
+                await repo.update(mine)
+            assert list((await repo.range(name=("x", "x"))).id) == [mine.id]
+            async with backend.session("pytest", 1) as s2:
+                await s2.using(comp).insert(_item(comp, time=3, name="x"))
+            if leave == "delete":
+                repo.delete(int(mine.id))
+            else:
+                mine.name = "z"
+                await repo.update(mine)
+            await repo.insert(_item(comp, time=4, name="other"))
+
+
+async def test_range_unique_point_blind_insert_sees_db_row(item_ref, mod_auto_backend):
+    """本事务盲插了库里已有的 unique 值：点查连库里那行一起返回，不能只看本地的行（提交时会撞
+    unique，但事务里的逻辑在那之前看到的应该是真实情况）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    existing = _item(comp, time=1, name="x")
+    await _insert_rows(backend, comp, existing)
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        mine = _item(comp, time=2, name="x")
+        await repo.insert(mine)
+        rows = await repo.range(name=("x", "x"))
+        assert sorted(rows.id) == sorted([existing.id, mine.id])
+        session.discard()
+
+
+async def test_range_unique_point_reverted_row_is_race(item_ref, mod_auto_backend):
+    """unique 列点查直接返回读过的行，靠的是这一行提交时校验版本：改了又改回原值的行也要
+    校验，它被别的事务改走、同值又插进新行时判竞态"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    r = _item(comp, time=1, name="a")
+    await _insert_rows(backend, comp, r)
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            row = await repo.get(id=int(r.id))
+            assert row is not None
+            row.level = 5
+            await repo.update(row)
+            row.level = 1
+            await repo.update(row)  # 改回原值
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                renamed = await repo2.get(id=int(r.id))
+                assert renamed is not None
+                renamed.name = "z"
+                await repo2.update(renamed)
+            async with backend.session("pytest", 1) as s3:
+                await s3.using(comp).insert(_item(comp, time=3, name="a"))
+            assert list((await repo.range(name=("a", "a"))).id) == [r.id]
+            await repo.insert(_item(comp, time=4, name="u"))
 
 
 @pytest.mark.parametrize("desc", [False, True])
@@ -396,3 +485,169 @@ async def test_range_merged_unique_point_read_empty_is_race(item_ref, mod_auto_b
             async with backend.session("pytest", 1) as s2:
                 await s2.using(comp).insert(_item(comp, time=2, name="v"))
             await repo.insert(_item(comp, time=3, name="v"))
+
+
+async def test_range_covered_reread_with_reverted_row_is_race(
+    item_ref, mod_auto_backend
+):
+    """同一区间截断读、全读各一次，后一次的观察包含前一次：前一次的区间校验能省，前提是后一次
+    读到的行提交时都校验版本。改了又改回原值的行也要校验，否则它被并发改动、挪出前一次的
+    区间就没人发现"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    r = _item(comp, time=10, name="r")
+    await _insert_rows(backend, comp, r, _item(comp, time=50, name="s"))
+
+    with pytest.raises(RaceCondition):
+        async with backend.session("pytest", 1) as s1:
+            s1.only_master = True
+            repo = s1.using(comp)
+            assert list((await repo.range(time=(0, 100), limit=1)).name) == ["r"]
+            rows = await repo.range(time=(0, 100), limit=-1)
+            assert list(rows.name) == ["r", "s"]
+            row = rows[0]
+            row.level = 5
+            await repo.update(row)
+            row.level = 1
+            await repo.update(row)  # 改回原值
+            await repo.insert(_item(comp, time=500, name="x"))
+            async with backend.session("pytest", 1) as s2:
+                repo2 = s2.using(comp)
+                moved = await repo2.get(id=int(r.id))
+                assert moved is not None
+                moved.time = 60  # r 不再是区间里的第一行
+                await repo2.update(moved)
+
+
+async def test_range_own_nan_ordered_like_committed(item_ref, mod_auto_backend):
+    """浮点索引上本事务写入的 NaN：不论符号位，排序键都和提交后数据库里的一致（提交时 NaN
+    一律存成正的），事务里看到的结果和提交后读到的一样"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, _item(comp, time=1, name="a", model=1.0))
+    negative_nan = np.copysign(np.float32(np.nan), np.float32(-1))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        await repo.insert(_item(comp, time=2, name="n", model=negative_nan))
+        whole = list((await repo.range(model=(-np.inf, np.inf), limit=-1)).name)
+        unit = list((await repo.range(model=(0, 1), limit=-1)).name)
+    assert len(whole) == 2
+    assert whole == list(
+        (await _master_range(backend, comp, model=(-np.inf, np.inf))).name
+    )
+    assert unit == list((await _master_range(backend, comp, model=(0, 1))).name)
+
+
+async def test_get_string_value_sees_own_insert(item_ref, mod_auto_backend):
+    """数值索引拿字符串值查（如 "10"）：get 和 range 一样按列类型换算后匹配，都看得到本事务
+    insert 的行（"get 为空就发一件"调两次只发一件）"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        mine = _item(comp, time=10, name="ten", owner=3)
+        await repo.insert(mine)
+        for field, value in (("time", "10"), ("owner", "3")):
+            got = await repo.get(**{field: value})
+            assert got is not None and got.id == mine.id, field
+            rows = await repo.range(**{field: (value, value)})
+            assert list(rows.id) == [mine.id], field
+        session.discard()
+
+
+@pytest.mark.parametrize("path", ["db", "merged", "cached_point"])
+async def test_range_limit_checked_the_same_on_every_path(
+    item_ref, mod_auto_backend, path
+):
+    """limit 的校验不随走哪条路变：numpy 整数照常用，小数、bool 一律报 TypeError"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2))
+
+    # 区间查询走数据库（本事务有写入时是合并路径），unique 点查命中读过的行时不去数据库
+    query = {"time": (0, 10)}
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        if path == "merged":
+            await repo.insert(_timed(comp, 3)[0])
+        elif path == "cached_point":
+            assert await repo.get(name="t1") is not None
+            query = {"name": ("t1", "t1")}
+        for bad in (1.0, True):
+            with pytest.raises(TypeError, match="limit"):
+                await repo.range(limit=bad, **query)  # type: ignore
+        rows = await repo.range(limit=np.int64(1), **query)  # type: ignore
+        assert list(rows.time) == [1]
+        session.discard()
+
+
+async def test_range_huge_limit_after_own_delete(item_ref, mod_auto_backend):
+    """limit 用很大的数表示不限（如 sys.maxsize）：本事务删过行、要多读几行时也不溢出"""
+    import sys
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2, 3))
+
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        rows = await repo.range(time=(0, 10), limit=sys.maxsize)
+        assert list(rows.time) == [1, 2, 3]
+        repo.delete(int(rows[0].id))
+        rows = await repo.range(time=(0, 10), limit=sys.maxsize)
+        assert list(rows.time) == [2, 3]
+        session.discard()
+
+
+async def test_range_merged_phantom_check_off_skips_range_check(
+    item_ref, mod_auto_backend
+):
+    """有本事务写入时 phantom_check=False 同样不校验区间：区间里并发插进来的行不算冲突"""
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+
+    async with backend.session("pytest", 1) as s1:
+        s1.only_master = True
+        repo = s1.using(comp)
+        await repo.insert(_item(comp, time=1, name="mine"))
+        rows = await repo.range(owner=(7, 7), limit=-1, phantom_check=False)
+        assert len(rows) == 0
+        async with backend.session("pytest", 1) as s2:
+            await s2.using(comp).insert(_item(comp, owner=7, time=2, name="other"))
+    assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
+
+
+async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_backend):
+    """本事务删掉、改走的行，只有原值落在查询区间里的才在数据库结果里占位置，多读也只多读
+    这几行，不按整张表删改了多少行去读"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    owners = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}  # time -> owner
+    await _insert_rows(
+        backend,
+        comp,
+        *(_item(comp, owner=o, time=t, name=f"n{t}") for t, o in owners.items()),
+    )
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        for row in await repo.range(owner=(2, 2), limit=-1):
+            repo.delete(int(row.id))
+        moved = await repo.get(time=2)
+        assert moved is not None
+        moved.owner = 9  # 原值在 owner=1 上
+        await repo.update(moved)
+        with patch.object(master, "range_read_", wraps=master.range_read_) as m_read:
+            rows = await repo.range(owner=(1, 1), limit=1)
+            assert list(rows.time) == [1]
+            rows = await repo.range(owner=(1, 1), limit=1, desc=True)
+            assert list(rows.time) == [1]
+        # 1 行 + owner=1 上改走的那 1 行；owner=2 上删掉的 3 行不在区间里
+        assert [call.args[4] for call in m_read.call_args_list] == [2, 2]
+        session.discard()

@@ -372,7 +372,7 @@ def test_get_absent_unique_fields(mod_item_model):
 
 
 def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
-    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新。"""
+    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新，但和只读的行一样要校验版本"""
     ref = TableReference(mod_item_model, "TestServer", 1)
     idmap = IdentityMap()
     rows = mod_item_model.new_rows(5)
@@ -397,7 +397,7 @@ def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
     assert old_rows[0]["qty"] == "1"
     assert new_rows == [{"qty": "9"}]
     assert [r["id"] for r in deletes] == ["13"]
-    assert set(idmap.get_clean_rows()[ref]) == {11}
+    assert set(idmap.get_clean_rows()[ref]) == {11, 14}
 
 
 def test_dirty_rows_skip_read_only_tables(mod_item_model):
@@ -426,13 +426,13 @@ def test_dirty_rows_skip_read_only_tables(mod_item_model):
 
 def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
     """没动过的 NaN 不算变更：改回原值不发更新，改别的字段时只写那个字段；
-    0.0 改成 -0.0 仍和按值比较一样算没变"""
+    0.0 改成 -0.0 仍和按值比较一样算没变。不发更新的行提交时照样校验版本"""
     Item = mod_item_model
     ref = TableReference(Item, "TestServer", 1)
     idmap = IdentityMap()
-    rows = Item.new_rows(3)
-    rows.id = [1, 2, 3]
-    rows.model = [np.nan, np.nan, 0.0]
+    rows = Item.new_rows(4)
+    rows.id = [1, 2, 3, 4]
+    rows.model = [np.nan, np.nan, 0.0, 0.0]
     idmap.add_clean(ref, rows)
 
     reverted = rows[0].copy()
@@ -447,10 +447,14 @@ def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
     signed_zero.model = -0.0
     signed_zero.level = 3
     idmap.update(ref, signed_zero)
+    only_signed_zero = rows[3].copy()
+    only_signed_zero.model = -0.0
+    idmap.update(ref, only_signed_zero)
 
     _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
     assert [r["id"] for r in old_rows] == ["2", "3"]
     assert new_rows == [{"qty": "7"}, {"level": "3"}]
+    assert set(idmap.get_clean_rows()[ref]) == {1, 4}
 
 
 @pytest.mark.parametrize("preload", [False, True])
@@ -531,6 +535,7 @@ def test_delete_inserted_row_leaves_nothing_to_commit(mod_item_model):
     idmap.mark_deleted(ref, 8)
 
     assert not idmap.is_dirty
+    assert not idmap.has_writes(ref)
     assert idmap.get_dirty_rows()[ref] == ([], ([], []), [])
     assert len(idmap.filter(ref, name="a")) == 0
 

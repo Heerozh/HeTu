@@ -364,6 +364,25 @@ def test_sortable_bytes_list_matches_one_by_one():
         to_sortable_bytes_list(np.array([1j]))
 
 
+def test_sortable_bytes_nan_sign_ignored():
+    """NaN 不论符号位编码都一样：提交时值先转成文本再解析，写进索引的一律是正 NaN。事务里给
+    本事务的行算排序键也得这样，否则同一行在事务里、提交后排的位置不同"""
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    for typ in (np.float32, np.float64):
+        dtype = np.dtype(typ)
+        positive = dtype.type(np.nan)
+        negative = np.copysign(positive, dtype.type(-1))
+        assert np.signbit(negative)
+        committed = to_sortable_bytes(dtype.type(str(negative)))  # commit 写索引的算法
+        assert to_sortable_bytes(negative) == committed
+        assert to_sortable_bytes(positive) == committed
+        array = np.array([negative, positive], dtype=dtype)
+        assert to_sortable_bytes_list(array) == [committed, committed]
+
+
 async def test_range_index_reads_values_without_rows(
     nums, mod_auto_backend, monkeypatch
 ):
