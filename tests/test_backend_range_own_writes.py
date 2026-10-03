@@ -550,9 +550,9 @@ async def test_get_string_value_sees_own_insert(item_ref, mod_auto_backend):
         mine = _item(comp, time=10, name="ten", owner=3)
         await repo.insert(mine)
         for field, value in (("time", "10"), ("owner", "3")):
-            got = await repo.get(**{field: value})
+            got = await repo.get(field, value)
             assert got is not None and got.id == mine.id, field
-            rows = await repo.range(**{field: (value, value)})
+            rows = await repo.range(field, value, value)
             assert list(rows.id) == [mine.id], field
         session.discard()
 
