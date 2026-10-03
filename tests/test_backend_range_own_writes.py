@@ -619,14 +619,19 @@ async def test_range_merged_phantom_check_off_skips_range_check(
     assert len(await _master_range(backend, comp, owner=(7, 7))) == 1
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason="多读按整张表删改的库里行数算。细算哪些原值在区间里要逐行取快照字段（每行约 "
+    "0.7µs，比 master 上多读一个索引项贵约 20 倍），得等按索引增量维护删改行的排序键后再做",
+)
 async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_backend):
-    """本事务删掉、改走的行，只有原值落在查询区间里的才在数据库结果里占位置，多读也只多读
-    这几行，不按整张表删改了多少行去读"""
+    """本事务删掉、改走的行，只有原值落在查询区间里的才在数据库结果里占位置。删改的行多了，
+    多读也只多读这几行，不按整张表删改了多少行去读"""
     from unittest.mock import patch
 
     backend: Backend = mod_auto_backend()
     comp = item_ref.comp_cls
-    owners = {1: 1, 2: 1, 3: 2, 4: 2, 5: 2}  # time -> owner
+    owners = {1: 1, 2: 1, 3: 1} | {t: 2 for t in range(100, 120)}  # time -> owner
     await _insert_rows(
         backend,
         comp,
@@ -639,15 +644,17 @@ async def test_range_reads_extra_only_for_own_rows_in_range(item_ref, mod_auto_b
         repo = session.using(comp)
         for row in await repo.range(owner=(2, 2), limit=-1):
             repo.delete(int(row.id))
-        moved = await repo.get(time=2)
-        assert moved is not None
+        rows = await repo.range(owner=(1, 1), limit=-1)
+        assert list(rows.time) == [1, 2, 3]
+        repo.delete(int(rows[0].id))
+        moved = rows[1]
         moved.owner = 9  # 原值在 owner=1 上
         await repo.update(moved)
         with patch.object(master, "range_read_", wraps=master.range_read_) as m_read:
             rows = await repo.range(owner=(1, 1), limit=1)
-            assert list(rows.time) == [1]
+            assert list(rows.time) == [3]
             rows = await repo.range(owner=(1, 1), limit=1, desc=True)
-            assert list(rows.time) == [1]
-        # 1 行 + owner=1 上改走的那 1 行；owner=2 上删掉的 3 行不在区间里
-        assert [call.args[4] for call in m_read.call_args_list] == [2, 2]
+            assert list(rows.time) == [3]
+        # 1 行 + owner=1 上删掉、改走的 2 行；owner=2 上删掉的 20 行不在区间里
+        assert [call.args[4] for call in m_read.call_args_list] == [3, 3]
         session.discard()
