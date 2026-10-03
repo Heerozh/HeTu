@@ -188,3 +188,45 @@ async def test_range_own_inserts_ordered_like_db(item_ref, mod_auto_backend, des
     committed = list((await _master_range(backend, comp, owner=(5, 5), desc=desc)).id)
     assert len(seen) == 5
     assert seen == committed
+
+
+async def test_range_unique_point_hits_local_without_db_read(
+    item_ref, mod_auto_backend
+):
+    """unique 列点查：本事务缓存里已经有这个值的行（insert 的、update 改成这个值的、读过的），
+    直接返回、不去数据库（同 get）；参数照样校验"""
+    from unittest.mock import patch
+
+    backend: Backend = mod_auto_backend()
+    comp = item_ref.comp_cls
+    await _insert_rows(backend, comp, *_timed(comp, 1, 2, 3))
+    master = backend.master
+
+    async with backend.session("pytest", 1) as session:
+        session.only_master = True
+        repo = session.using(comp)
+        await repo.insert(_timed(comp, 4)[0])
+        moved = await repo.get(name="t2")
+        assert moved is not None
+        moved.name = "moved"
+        await repo.update(moved)
+        assert await repo.get(name="t3") is not None
+        await repo.insert(_item(comp, time=11, name="11"))
+
+        with (
+            patch.object(master, "range_read_", wraps=master.range_read_) as m_read,
+            patch.object(master, "range", wraps=master.range) as m_range,
+        ):
+            for name, time in (("t4", 4), ("moved", 2), ("t3", 3)):
+                assert list((await repo.range(name=(name, name))).time) == [time]
+                rows = await repo.range("name", name, desc=True, phantom_check=False)
+                assert list(rows.time) == [time]
+            assert list((await repo.range(time=(3, 3))).name) == ["t3"]
+            moved_id = int(moved.id)
+            assert list((await repo.range(id=(moved_id, moved_id))).name) == ["moved"]
+            # 字符串列拿数字查照样报错，不因为本地有 name="11" 的行就放过
+            with pytest.raises(ValueError, match="str"):
+                await repo.range(name=(11, 11))
+            assert m_read.call_count == 0 and m_range.call_count == 0
+        # 改走了的旧值本地没有：去数据库读到的那行已经不是这个值了
+        assert len(await repo.range(name=("t2", "t2"))) == 0
