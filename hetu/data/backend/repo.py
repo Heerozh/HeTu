@@ -572,13 +572,11 @@ class SessionRepository:
         right: IndexScalar | None,
         limit: int,
         desc: bool,
-        observe: bool,
-        client: BackendClient | None = None,
+        phantom_check: bool,
     ) -> tuple[np.recarray, RangeObservation | None]:
         """
-        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（`observe` 为 False 时
-        为 None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
-        `client` 不给时随机选一个节点。
+        range 的主体：查索引、取行、放入缓存，返回行和这次读取的观察（不校验区间时为
+        None）。观察由调用方登记：range 原样登记，get 命中时改成只保护返回的行。
         """
         comp_cls = self.ref.comp_cls
         if isinstance(left, np.generic):
@@ -587,10 +585,9 @@ class SessionRepository:
             right = right.item()
 
         # 先查询 id 列表；要校验区间的，顺便拿回这次读取的观察，commit 时由后端校验
-        if client is None:
-            client = self._session.master_or_servant
+        client = self._session.master_or_servant
         obs: RangeObservation | None = None
-        if observe and limit != 0:
+        if phantom_check and limit != 0:
             row_ids, obs = await client.range_read_(
                 self.ref, index_name, left, right, limit, desc
             )
