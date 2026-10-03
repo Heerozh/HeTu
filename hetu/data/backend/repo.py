@@ -313,8 +313,8 @@ class SessionRepository:
 
         结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
         会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
-        结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）时本事务里已经
-        有这个值的行（insert 的、改成这个值的、读过的），直接返回、不去数据库。
+        结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）命中本事务从库里
+        读过、这一列没改过的行时，直接返回、不去数据库。
 
         读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
         区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -433,18 +433,25 @@ class SessionRepository:
         desc: bool,
     ) -> np.recarray | None:
         """
-        unique 列点查：本事务缓存里已经有这个值的行（insert 的、update 改成这个值的、读过的）
-        就是结果，直接返回，不去数据库（同 get）；没有时返回 None。
-        提交时这一行由 VER / unique 检查保证仍是这个值上唯一的一行，不用登记区间观察。
+        unique 列点查：本事务从库里读过、这一列没改过的行就是结果，直接返回，不去数据库
+        （同 get）；没有时返回 None。提交时这一行的 VER 加 unique 检查保证它仍是这个值上唯一
+        的一行，不用登记区间观察。
+        本事务写成这个值的行（insert 的、update 改成这个值的）不算：提交前它可能又离开这个值，
+        库里也可能本来就有同值的行，要去数据库读。
         """
         ref = self.ref
         dtype = ref.comp_cls.dtype_map_[index_name]
         point = BackendClient.point_query_value_(dtype, left, right)
         if point is None:
             return None
-        hit = self._session.idmap.match(ref, index_name, point)
+        idmap = self._session.idmap
+        hit = idmap.match(ref, index_name, point)
         if hit is None:
             return None
+        for row_id in hit["id"].tolist():
+            db_row = idmap.db_row(ref, row_id)
+            if db_row is None or db_row[index_name] != point:
+                return None
         # 参数错误（比如字符串列拿数字查）照样报，和去数据库时一样
         self._session.master_or_servant.check_range_(
             ref, index_name, left, right, limit, desc
