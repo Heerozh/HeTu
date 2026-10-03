@@ -493,7 +493,7 @@ get_components(namespace: str | None = None) -> dict[type[BaseComponent], int]
 build_endpoints()
 ```
 
-<small>Source: [`hetu/system/definer.py:279`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L279)</small>
+<small>Source: [`hetu/system/definer.py:301`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L301)</small>
 
 把System定义复制到EndpointDefines中，作为Endpoint使用
 

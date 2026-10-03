@@ -176,7 +176,9 @@ class SystemClusters(metaclass=Singleton):
                         return True
             return False
 
-        def inherit_components(namespace_, depends, req: set, inh: set):
+        def inherit_components(namespace_, depends, req: set, inh: set, suffix=""):
+            # suffix 是上层副本依赖传下来的后缀：依赖自己写了后缀的用自己的，没写的沿用
+            # 上层的，这样副本依赖的整张依赖图都换成同后缀的副本
             for dep_sys in depends:
                 base_name, sys_suffix = (
                     dep_sys.split(":") if ":" in dep_sys else (dep_sys, "")
@@ -188,18 +190,19 @@ class SystemClusters(metaclass=Singleton):
                         ).format(sys_name=sys_name, base_name=base_name)
                     )
                 base_def = self._system_map[namespace_][base_name]
-                if sys_suffix:
-                    # 复制Component
-                    req.update(
-                        [
-                            _comp.duplicate(namespace_, sys_suffix)
-                            for _comp in base_def.components
-                        ]
-                    )
-                else:
-                    req.update(base_def.components)
+                sys_suffix = sys_suffix or suffix
+                for _comp in base_def.components:
+                    # 被依赖System的call lock锁表不继承：uuid去重只用被直接调用的System
+                    # 自己的锁表，作为依赖执行时不读写它；继承进来还会和自己的锁表在
+                    # ctx.repo里撞SystemLock这个键
+                    if _comp.master_ is SystemLock:
+                        continue
+                    # components里显式duplicate的副本保留自己的后缀
+                    if sys_suffix and _comp.master_ is None:
+                        _comp = _comp.duplicate(namespace_, sys_suffix)
+                    req.add(_comp)
                 inh.update(base_def.depends)
-                inherit_components(namespace_, base_def.depends, req, inh)
+                inherit_components(namespace_, base_def.depends, req, inh, sys_suffix)
 
         for namespace in self._system_map:
             # 把global的System迁移到当前namespace
@@ -228,6 +231,25 @@ class SystemClusters(metaclass=Singleton):
                             "System {sys_name} 引用的Component必须都是同一种backend，"
                             "现在有：{refs}"
                         ).format(sys_name=sys_name, refs=refs)
+                    )
+                # ctx.repo按主Component取表（见SystemCaller.call_），同一个Component的
+                # 两张表（主表和副本，或两个副本）同时出现时，ctx.repo里只会剩下一张
+                tables_by_master: dict[type[BaseComponent], list[str]] = {}
+                for comp in sys_def.full_components:
+                    master = comp.master_ or comp
+                    tables_by_master.setdefault(master, []).append(comp.name_)
+                conflicts = [
+                    sorted(names)
+                    for names in tables_by_master.values()
+                    if len(names) > 1
+                ]
+                if conflicts:
+                    raise AssertionError(
+                        _(
+                            "System {sys_name} 引用了同一个Component的多张表：{tables}，"
+                            "ctx.repo里只能对应其中一张。一般是依赖图里同一个System以"
+                            "不同的副本后缀（或有、无后缀）各被引用了一次"
+                        ).format(sys_name=sys_name, tables=conflicts)
                     )
                 # 添加到clusters
                 clusters.append(
@@ -414,6 +436,9 @@ def define_system(
 
         客户端直接调用的System不需要此功能，主要用于未来调用的幂等性，
         或者你需要嵌套执行System，保证其中一个只执行一次等特殊情况，
+
+        调用锁不随`depends`继承：通过`depends`调用本System只是同一个事务里的普通函数调用，
+        不做uuid去重。要用uuid去重（包括作为未来调用目标）的System必须自己开启此项。
     on_start: bool
         标记此System为"启动钩子"：每次hetu start启动、开始收连接前，引擎会对每个instance
         执行一次。
@@ -484,10 +509,14 @@ def define_system(
     >>>
     >>> @hetu.define_system(namespace="example", depends=('remove:ItemOrder', ))
     ... async def remove_item_order(ctx: hetu.SystemContext, order_id, stock_id):
-    ...     return await ctx.depend['remove:ItemOrder'](order_id)
+    ...     return await ctx.depend['remove:ItemOrder'](ctx, order_id)
 
     `depends=('remove:ItemOrder', )`等同创建一个新的`remove` System，但是使用
     `components=(Order.duplicate(namespace, suffix='ItemOrder'), )` 参数。
+    `remove`自己的`depends`也一并换成同后缀的副本，即整张依赖图都复制；依赖图里自己写了
+    后缀的依赖，以及`components`里显式`duplicate`的副本，保留自己的后缀。
+    同一个System不能在依赖图里以不同后缀（或有、无后缀）各出现一次，比如同时依赖`remove`
+    和`remove:ItemOrder`：`ctx.repo[Order]`只能对应一张表，启动时会报错。
 
     正常调用`remove`(不使用System副本)的话，数据是操作名为 `Order` 的表。
     在这个例子中，`remove_item_order` 调用的 `remove` 函数会操作名为

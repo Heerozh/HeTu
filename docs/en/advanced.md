@@ -88,7 +88,14 @@ What that one suffix actually does:
   has no overlap with the original `Order` cluster, so they never share a
   shard and never read/write across each other.
 - All inheritance still works. If `remove` itself depended on other
-  `Systems`, the whole graph is duplicated under the same suffix.
+  `Systems`, the whole graph is duplicated under the same suffix. A
+  dependency in that graph that names its own suffix (say
+  `depends=("audit:Log",)`), and a duplicate listed explicitly in
+  `components=`, keep their own suffix.
+- The same `System` can't appear in one dependency graph under two
+  different suffixes (or both with and without one) — say, depending on
+  both `remove` and `remove:ItemOrder`. `ctx.repo[Order]` can only point at
+  one table, so startup fails with an error.
 
 Use this when one `Component` sits at a bottleneck — say, a `FutureCalls`
 queue or a global `Inventory` — and you want some callers to operate on a
@@ -245,6 +252,12 @@ Mechanics:
 - Enabling `call_lock=True` automatically attaches a duplicate
   `SystemLock` `Component` to the `System`'s cluster (using the same suffix
   trick as `System` copies — one lock table per locked `System`).
+- The lock table isn't inherited through `depends=`: when a parent
+  `System` calls a locked `System` via `ctx.depend[...]`, it neither reads
+  nor writes that lock table. Only the `System` you call directly with
+  `uuid=` deduplicates, against its own lock table — so a `System` that
+  needs `uuid=` deduplication (including a future-call target) must
+  declare `call_lock=True` itself.
 - On call, the engine reads `SystemLock` for the given `uuid`. If a row
   exists, the `System`'s body is skipped and `None` is returned.
 - On commit, the engine writes the `uuid` row alongside your data, in the
@@ -261,8 +274,9 @@ Mechanics:
   a slot earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
   `SystemLock` is volatile: `hetu upgrade` clears it.
 
-`uuid=` is a keyword-only argument on `ctx.systems.call(...)` and on
-parent-`Systems`' `ctx.depend[...](...)`-style invocations.
+`uuid=` is a keyword-only argument on `ctx.systems.call(...)`.
+`ctx.depend[...](...)` is a plain function call inside the same
+transaction: it takes no `uuid=` and does no deduplication.
 
 ## The `on_disconnect` hook
 
