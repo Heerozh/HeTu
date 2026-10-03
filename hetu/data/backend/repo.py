@@ -35,6 +35,8 @@ IndexScalar = (
 Int64 = np.int64 | int
 # 后端区间参数收的 python 原生值
 PyScalar = int | float | str | bytes | bool
+# 数据库能收的最大 limit（int64）
+_MAX_LIMIT = (1 << 63) - 1
 
 
 def _to_py(value: IndexScalar) -> PyScalar:
@@ -404,6 +406,12 @@ class SessionRepository:
                     comp_name=comp_cls.name_, index_name=index_name
                 )
             )
+        # limit 先校验、换成 int，不然走哪条路（数据库、合并、点查命中）报的错不一样
+        if type(limit) is bool or not isinstance(limit, (int, np.integer)):
+            raise TypeError(
+                _("range 的 limit 必须是整数，收到：{limit}").format(limit=repr(limit))
+            )
+        limit = int(limit)
 
         idmap = self._session.idmap
         if limit != 0:
@@ -502,6 +510,9 @@ class SessionRepository:
             # 本事务删掉、改走的行在数据库索引里还占着原来的位置，有几行就多读几行，剩下的
             # 才够 limit 行。多读的只是索引，取行只取看到的
             read_limit += sum(idmap.db_row(ref, row_id) is not None for row_id in gone)
+            if read_limit > _MAX_LIMIT:
+                # limit 用很大的数表示不限（如 sys.maxsize），加上多读的就超出数据库能收的范围
+                read_limit = -1
         row_ids, obs = await client.range_read_(
             ref, index_name, left, right, read_limit, desc
         )
