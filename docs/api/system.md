@@ -222,6 +222,12 @@ range(
 默认闭区间，如果要自定义区间，请转换为字符串并开头指定 `(` 或 `[`。
 区间里没有值（比如两端都是开区间、值又相同）时返回空；下界大于上界报
 `ValueError`。
+不限下界或上界时传 `-inf` / `inf`（`float("inf")` 或 `np.inf`），比如
+`level=(10, np.inf)` 是 10 级及以上；读全表用 `id=(-np.inf, np.inf)` 并设
+`limit=-1`。只有数值字段能这么写，字符串字段的边界只能是 str / bytes。
+整数字段超出类型范围的边界（含 ±inf）钳到类型的极值：int8 字段上
+`(0, 1000)` 就是 `(0, 127)`，不会溢出或报错；小数边界向区间内取整，
+`(0.5, 10)` 就是 `(1, 10)`。
 * 如果要查询的字段和参数冲突，请使用辅助参数方式。
 
 - **`limit`** (Any) — 限制返回的行数，越少越快。负数表示不限制行数。
@@ -263,7 +269,7 @@ range(
 insert(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:478`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L478)</small>
+<small>Source: [`hetu/data/backend/repo.py:484`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L484)</small>
 
 向Session中添加一行待插入数据。
 
@@ -295,7 +301,7 @@ insert(row: numpy.record) -> None
 update(row: numpy.record) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:529`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L529)</small>
+<small>Source: [`hetu/data/backend/repo.py:535`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L535)</small>
 
 向Session中添加一行待更新数据。
 
@@ -324,7 +330,7 @@ upsert(
 ) -> hetu.data.backend.repo.UpsertContext
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:565`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L565)</small>
+<small>Source: [`hetu/data/backend/repo.py:571`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L571)</small>
 
 使用async with语法，根据Unique索引，查询并返回一行数据，如果不存在则返回新行数据。
 在退出上下文时，自动插入新行，或是更新已有行。
@@ -359,7 +365,7 @@ upsert(
 delete(row_id: int) -> None
 ```
 
-<small>Source: [`hetu/data/backend/repo.py:594`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L594)</small>
+<small>Source: [`hetu/data/backend/repo.py:600`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/backend/repo.py#L600)</small>
 
 向Session中添加一行待删除数据。
 
