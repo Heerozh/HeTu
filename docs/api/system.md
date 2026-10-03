@@ -888,7 +888,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:300`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L300)</small>
+<small>Source: [`hetu/system/future.py:321`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L321)</small>
 
 
 
@@ -938,7 +938,7 @@ create_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:156`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L156)</small>
+<small>Source: [`hetu/system/future.py:174`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L174)</small>
 
 
 
@@ -1031,7 +1031,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:228`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L228)</small>
+<small>Source: [`hetu/system/future.py:246`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L246)</small>
 
 
 
@@ -1043,13 +1043,16 @@ ensure_future_call(
 
 幂等通过 key 的确定性 id 复用 FutureCalls 主键唯一性实现：已存在则直接返回（不写入，
 事务空提交），并发同 key 的多余插入会撞主键引发事务竞态并自动重试，最终只保留一条。
+一次性调用（recurring=False）执行完就删掉，之后再 ensure 同一个 key 会新建一条，到点照样
+执行。
 
 * 同create_future_call，目标system必须开启call_lock。
 
 Idempotently ensure a single future call exists, keyed by ``key``; if it already
 exists, keep it as-is (params are NOT updated) and return its id. Useful for seeding
 a server-wide recurring background task from an on_start system without piling up
-duplicates across restarts.
+duplicates across restarts. A one-shot call is deleted once it has run; ensuring the
+same key again afterwards creates a new call that runs again when due.
 
 
 ### Parameters

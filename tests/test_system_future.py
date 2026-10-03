@@ -781,7 +781,7 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     call = await pop_upcoming_call(fc_tbl)
     assert call and call.id == fid  # 负数 id 正常 pop
 
-    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=str(负数 id)
+    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=负数 id + 建行时间（见 _call_lock_uuid）
     # 注：测试复用已 login 的 executor（caller=1020）；生产中 future_call_task 的 caller 恒为 0
     ok = await exec_future_call(call, executor.context.systems, fc_tbl)
     assert ok
