@@ -1,0 +1,9 @@
+# editorconfig.org
+root = true
+
+# 与 .gitattributes 一致：新建 / 保存的文件一律 LF（Windows 批处理例外）
+[*]
+end_of_line = lf
+
+[*.{bat,cmd}]
+end_of_line = crlf

@@ -1,3 +1,8 @@
+# 工作区统一 LF，不随本机 core.autocrlf 转换（只有 Windows 批处理保留 CRLF）
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # Github语言统计忽略特定目录
 ClientSDK/unity/cn.hetudb.clientsdk/UnityWebSocket/** linguist-vendored
 
