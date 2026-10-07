@@ -147,6 +147,31 @@ def test_generate_all_components_skips_write_when_unchanged(
     assert output.stat().st_mtime_ns == mtime_before  # 未重写
 
 
+def test_generate_all_components_writes_lf(tmp_path, monkeypatch, capsys):
+    # 任何平台都写 LF；已有的 CRLF 旧文件要被重写，不能当成无变化跳过。
+    @define_component(namespace="HeTu", volatile=True, force=True)
+    class Lfy(BaseComponent):
+        value: np.int64 = property_field(0)
+
+    monkeypatch.setattr(
+        SystemClusters(),
+        "get_clusters",
+        lambda _namespace: [SimpleNamespace(components=[Lfy])],
+    )
+
+    output = tmp_path / "Components.cs"
+    generate_all_components("demo_ns", str(output))
+    raw = output.read_bytes()
+    assert b"\n" in raw and b"\r" not in raw
+
+    output.write_bytes(raw.replace(b"\n", b"\r\n"))
+    capsys.readouterr()
+    generate_all_components("demo_ns", str(output))
+
+    assert "跳过写入" not in capsys.readouterr().out
+    assert output.read_bytes() == raw
+
+
 def test_generate_all_components_dedup_duplicates(tmp_path, monkeypatch):
     # 副本(duplicate)的 name_ 带冒号(如 ChatMessage:Universe)，是非法 C# 类名。
     # 生成时应统一映射到 master 去重，只输出一个干净的 master 类。
