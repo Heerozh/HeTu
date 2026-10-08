@@ -1,7 +1,7 @@
 # 命令行调试入口（`hetu call` / `get` / `range` / `shell`）— 设计稿
 
 - 日期：2026-10-08
-- 状态：设计稿，待评审（§10 的待确认项按本稿默认值落地）
+- 状态：已评审，实现中（分支 `feat/cli-debug`）；§10 的决定已确认
 - 影响范围：新增 `hetu/local.py`（进程内应用运行时，CLI 与 `Sandbox` 共用）、
   `hetu/data/backend/snowflake_lease.py`（发号租约，服务器与 CLI 共用）、四个 CLI 子命令
   （`hetu/cli/call.py`、`data.py`、`shell.py`、`console.py`）；核心层小改（`Session` 提交观察
@@ -125,7 +125,8 @@ v1 不做：调用纯 `@define_endpoint`（依赖连接的端点，见 §8）、
 - **D5** 表结构用 `check_table` 按需校验（只查本次碰到的表）；`hetu get/range` 走 headless
   按组件名读，不 import app，默认读 servant。
 - **D6** stdout 只有一行 JSON；日志和 `print` 全进 stderr；强制 UTF-8。
-- **D7** 写保护：`--dry-run`，加配置项 `CLI_ALLOW_WRITE`（默认仅当全部后端是 SQLite 时为 true）。
+- **D7** 写保护：`--dry-run`，加配置项 `CLI_ALLOW_WRITE`（默认 true，可在部署配置里关掉）；配置
+  `DEBUG` 关闭时真写入会给出警告。
 - **D8** 审计写独立的 JSONL 文件，挂在提交观察钩子上，不用 replay 日志。
 - **D9** 配置定位：`--config` > 命令行参数模式 > `$HETU_CONFIG` > `./config.yml`；SQLite
   相对路径改为按配置目录解析（服务器一起改）；CLI 不新建库文件。
@@ -426,10 +427,12 @@ System 返回后，若它 `create_task` 出去的任务还没结束：取消它�
 | `dry_run` | `--dry-run`                                | 记录写集，不提交，session 按已提交清理                      |
 | `forbid`  | `CLI_ALLOW_WRITE` 为 false 且没有 `--dry-run` | 有脏行就抛 `CliWriteForbidden`，不碰后端                  |
 
-- `CLI_ALLOW_WRITE`：新配置项。默认值：配置里全部后端都是 SQLite 时为 true，否则为 false——
-  生产配置要显式写 `CLI_ALLOW_WRITE: true` 才允许 CLI 真写。开关在部署配置里，命令行只能通过
-  `--dry-run` 让它更安全，不能放开。命令行参数模式没有配置文件，按同样的默认值处理：`--db`
-  是 Redis 时只能 dry-run，要真写请用配置文件。
+- `CLI_ALLOW_WRITE`：新配置项，默认 true。要禁止 CLI 写某个库，就在那份部署配置里写
+  `CLI_ALLOW_WRITE: false`。开关在部署配置里，命令行只能通过 `--dry-run` 让它更安全，不能放开。
+  命令行参数模式没有配置文件，按默认值 true 处理。
+- 配置的 `DEBUG` 关闭（或参数模式下没有 `DEBUG`）时，每次命令第一次真提交后，输出的 `warnings`
+  和 stderr 各加一条："DEBUG 关闭的配置（按生产库对待）上 CLI 刚刚真写入了数据；要禁止，在配置
+  里设 CLI_ALLOW_WRITE: false"。只读调用、dry-run 不警告。
 - `forbid`：`CliWriteForbidden` 不是 `RaceCondition`，System 不重试，直接失败，退出码 3，提示
   "加 --dry-run，或在配置里设 CLI_ALLOW_WRITE: true"。只读的 System 照常可用。注意 `--uuid`
   本身会写调用锁行，所以 forbid 下带 `--uuid` 的调用一定失败。
@@ -771,7 +774,7 @@ SQLite 部分不需要 Docker；Redis 部分用现有 fixture（`mod_auto_backen
   System 里都会 `print` 的 app 文件）：
   8. `hetu call` 端到端：stdout 恰好一行合法 JSON；退出码 0 / 1 / 2 / 3 分别对应成功、System
      抛异常、USER 不给 `--as`、缺表；`result` / `client` / `wire_error`（System 返回含
-     `np.int64` 的 `ResponseToClient`）；`retries`；超时。
+     `np.int64` 的 `ResponseToClient`）；`retries`；超时；`DEBUG` 关闭时真写入有警告、只读调用没有。
   9. 用 `PYTHONIOENCODING=gbk` 模拟 Windows 管道：输出仍是合法的 UTF-8 JSON，没有
      `UnicodeEncodeError`。
   10. 两个 `hetu call` 进程并发向同一个 SQLite 库插行：都成功、id 不重复；两个 worker id 在
@@ -827,7 +830,6 @@ v1 不做：
 - `hetu set` / `insert` 之类的写子命令（用 shell）。
 - shell 内热重载代码。
 - 为 JS 消费者把大整数输出成字符串的选项。
-- 自动识别"开发用 Redis"来放开 `CLI_ALLOW_WRITE`。
 
 ## 9. 主要改动文件清单
 
@@ -855,10 +857,10 @@ v1 不做：
 
 ## 10. 待确认的新决定
 
-评审时请确认以下几处本稿新引入的选择：
+评审结论：除第 1 项按评审意见修改外，其余按本稿默认值落地。
 
-1. `CLI_ALLOW_WRITE` 默认值：仅当全部后端是 SQLite 时为 true，生产要显式开（§2.10）。另一个选择
-   是默认处处为 true，只建议生产配置关掉。
+1. ~~`CLI_ALLOW_WRITE` 仅当全部后端是 SQLite 时默认 true~~ → 已定：默认 true，`DEBUG` 关闭时
+   真写入给出警告（§2.10）。
 2. 服务器的 SQLite 相对路径语义改为相对配置目录，旧文件存在时打 warning（§2.2）。另一个选择是
    保持相对当前目录，CLI 只做"文件不存在就报错并给出绝对路径"。
 3. `Sandbox` 的 group 默认值由 `""` 改为 `"guest"`（§3.2）。
