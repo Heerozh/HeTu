@@ -64,6 +64,8 @@ __all__ = [
     "IdentityRequired",
     "LocalApp",
     "TableNotReady",
+    "build_app_registry",
+    "check_backend_files",
     "load_app_module",
     "open_local_app",
     "resolve_identity",
@@ -478,13 +480,39 @@ class LocalApp:
         await self.aclose()
 
 
-def _sqlite_path(db_cfg: dict) -> str | None:
+def sqlite_db_path(db_cfg: dict) -> str | None:
     """SQLite 后端配置的库文件路径；不是 SQLite 返回 None"""
     if str(db_cfg.get("type", "")).lower() != "sqlite":
         return None
     from .data.backend.sqlite.client import SQLiteBackendClient
 
     return SQLiteBackendClient.parse_dsn(db_cfg["master"])
+
+
+def check_backend_files(config: dict) -> None:
+    """SQLite 库文件必须已经存在（服务器开过服）：不新建，不存在抛 `BackendNotReady`"""
+    for db_cfg in config["BACKENDS"].values():
+        path = sqlite_db_path(db_cfg)
+        if path is not None and not os.path.exists(path):
+            raise BackendNotReady(
+                _(
+                    "库文件不存在：{path}（服务器还没在这个库上启动过，或配置路径不对）"
+                ).format(path=os.path.abspath(path))
+            )
+
+
+def build_app_registry(config: dict) -> None:
+    """加载 APP_FILE 并建簇（进程内只建一次，已建过就只切换主 namespace），不连数据库。
+
+    WorkerLease 已随本模块 import 注册：服务器进程也注册了它，两边算出的簇编号才一致。
+    """
+    namespace = config["NAMESPACE"]
+    clusters = SystemClusters()
+    if clusters.get_clusters(namespace) is None:
+        load_app_module(config["APP_FILE"])
+        clusters.build_clusters(namespace)
+    elif clusters.main_namespace != namespace:
+        clusters.switch_main(namespace)
 
 
 async def open_local_app(
@@ -526,24 +554,11 @@ async def open_local_app(
             )
         )
 
-    # 1. 加载 app、建簇（进程内只建一次）。WorkerLease 已随本模块 import 注册：服务器进程
-    #    也注册了它，两边算出的簇编号才一致
-    clusters = SystemClusters()
-    if clusters.get_clusters(namespace) is None:
-        load_app_module(config["APP_FILE"])
-        clusters.build_clusters(namespace)
-    elif clusters.main_namespace != namespace:
-        clusters.switch_main(namespace)
+    # 1. 加载 app、建簇（进程内只建一次）
+    build_app_registry(config)
 
     # 2. 后端，第一个为 default（同 start_backends）。不新建 SQLite 库文件
-    for db_cfg in config["BACKENDS"].values():
-        path = _sqlite_path(db_cfg)
-        if path is not None and not os.path.exists(path):
-            raise BackendNotReady(
-                _(
-                    "库文件不存在：{path}（服务器还没在这个库上启动过，或配置路径不对）"
-                ).format(path=os.path.abspath(path))
-            )
+    check_backend_files(config)
     backends: dict[str, Backend] = {}
     try:
         for name, db_cfg in config["BACKENDS"].items():
@@ -578,7 +593,10 @@ async def open_local_app(
                 create_worker_keeper(lease_tbl.backend, os.getpid(), tool=True),
                 lease_tbl,
             )
-            await lease.__aenter__()
+            try:
+                await lease.__aenter__()
+            except KeyError as e:  # 所有 worker id 都被占了
+                raise BackendNotReady(str(e)) from e
             app.lease = lease
         return app
     except BaseException:

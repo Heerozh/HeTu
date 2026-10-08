@@ -9,8 +9,11 @@ import argparse
 
 from ..i18n import _
 from .build import BuildCommand
+from .call import CallCommand
+from .data import GetCommand, RangeCommand
 from .init import InitCommand
 from .migrate import MigrateCommand
+from .shell import ShellCommand
 from .start import StartCommand
 
 # 把所有命令加入list
@@ -19,6 +22,10 @@ COMMANDS = [
     MigrateCommand,
     BuildCommand,
     InitCommand,
+    CallCommand,
+    GetCommand,
+    RangeCommand,
+    ShellCommand,
 ]
 
 

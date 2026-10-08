@@ -684,7 +684,7 @@ async def test_redis_tool_keeper(mod_auto_backend):
 async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     """SQLite 上的工具进程在预留段 [1000, 1023] 里用 KV 租约互斥，语义同 Redis"""
     monkeypatch.chdir(tmp_path)
-    from hetu.common.snowflake_id import TOOL_WORKER_ID_FLOOR
+    from hetu.common.snowflake_id import TOOL_WORKER_ID_FLOOR, WorkerKeeper
     from hetu.data.backend.sqlite.store import SQLiteStore
     from hetu.data.backend.worker_keeper import (
         SQLiteToolWorkerKeeper,
@@ -697,10 +697,11 @@ async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
     master = backend.master
     first = create_worker_keeper(backend, 900, tool=True)
     assert isinstance(first, SQLiteToolWorkerKeeper)
-    keepers = [first]
+    keepers: list[WorkerKeeper] = [first]
     try:
         assert await first.get_worker_id() == 1023
         second = create_worker_keeper(backend, 901, tool=True)
+        assert isinstance(second, SQLiteToolWorkerKeeper)
         keepers.append(second)
         assert await second.get_worker_id() == 1022
         assert first.lease_deadline is not None

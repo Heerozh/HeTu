@@ -102,6 +102,11 @@ class SystemClusters(metaclass=Singleton):
         else:
             return self._main_system_map.get(system_name, None)
 
+    def systems_of(self, namespace: str | None = None) -> dict[str, SystemDefine]:
+        """某个 namespace（默认主 namespace）的全部 System 定义，含迁入的 global System 与
+        core pin 占位 System（名字形如 ``__core_pin_system_*``）。返回副本。"""
+        return dict(self._system_map.get(namespace or self._main_namespace, {}))
+
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
         return {
             name: self.get_system(cluster.namespace, name) for name in cluster.systems
