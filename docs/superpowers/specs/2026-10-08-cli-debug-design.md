@@ -1,7 +1,7 @@
 # 命令行调试入口（`hetu call` / `get` / `range` / `shell`）— 设计稿
 
 - 日期：2026-10-08
-- 状态：已评审，实现中（分支 `feat/cli-debug`）；§10 的决定已确认
+- 状态：已实现（分支 `feat/cli-debug`）；§10 的决定已确认，与本稿的出入见 §11
 - 影响范围：新增 `hetu/local.py`（进程内应用运行时，CLI 与 `Sandbox` 共用）、
   `hetu/data/backend/snowflake_lease.py`（发号租约，服务器与 CLI 共用）、四个 CLI 子命令
   （`hetu/cli/call.py`、`data.py`、`shell.py`、`console.py`）；核心层小改（`Session` 提交观察
@@ -389,6 +389,7 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 ```
 
 失败时也带 `writes`：嵌套的 `ctx.systems.call` 各自独立提交，外层失败前可能已经写进去一部分。
+`traceback` 只在退出码 1（代码或调用失败）时给出；用法错误、环境未就绪只给消息。
 
 `to_jsonable` 规则：带字段名的 `np.record` / `np.void` → dict；结构化 ndarray / recarray →
 dict 列表；其他 ndarray → list；`np.generic` → `.item()`；NaN / ±inf → `"NaN"` /
@@ -873,3 +874,17 @@ v1 不做：
 9. 名字：`LocalApp` / `hetu/local.py`（原稿暂名 AppClient，容易和 `HeadlessClient`、游戏客户端
    混淆）。
 10. 配置定位顺序，含 `start` / `upgrade` 也回落到 `$HETU_CONFIG` 和 `./config.yml`（§2.2）。
+
+## 11. 实现记录（与本稿的出入）
+
+- 租约常量（`WORKER_ID_EXPIRE_SEC` / `FENCE_MARGIN_SEC` / `WORKER_ID_KEY`）与新增的
+  `TOOL_NODE_PREFIX` / `TOOL_WORKER_ID_FLOOR` 放在 `hetu/common/snowflake_id.py`（与 `WorkerKeeper`
+  基类同处，Redis 与 SQLite 的 keeper 都不必互相 import）；Windows 上"本机已退出进程"的判定挪到
+  `hetu/common/helper.py` 的 `lease_owner_exited`，Redis 模块里的 `_owner_exited` 保留为它的别名。
+- `UsageError` 定义在 `hetu/cli/base.py`（`pick_instance` 也要用），`console.py` 再导入。
+- 新增 `SystemClusters.systems_of(namespace)`（只读副本），供 `hetu call --list` 用，不碰私有表。
+- `hetu.local` 另外公开 `build_app_registry`（`--list` 只建簇不连库）与 `check_backend_files`。
+- 写集里超过 20 行时的计数键是 `insert_omitted` / `update_omitted` / `delete_omitted`。
+- `hetu.i18n` 导入时打的"Use language ..."提示改写 stderr：它在 `import hetu` 时就打印，写 stdout
+  会破坏"stdout 恰好一行 JSON"。
+- `traceback` 只在退出码 1 时输出（§2.9 已同步）。

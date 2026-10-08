@@ -210,7 +210,7 @@ Open a transaction over the given (same-cluster) components.
 check_schema() -> None
 ```
 
-<small>Source: [`hetu/headless.py:371`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L371)</small>
+<small>Source: [`hetu/headless.py:376`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L376)</small>
 
 重读所有已认表的 meta，簇或数据布局变了就抛异常（[`TableNotFound`](headless.md#tablenotfound) /
 [`ClusterChanged`](headless.md#clusterchanged) / [`SchemaMismatch`](headless.md#schemamismatch)），不自动刷新——由调用方重新 [`connect`](headless.md#connect) 或退出。
@@ -233,7 +233,7 @@ Re-read table metas; raise if the cluster id or layout changed on the server.
 close() -> None
 ```
 
-<small>Source: [`hetu/headless.py:389`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L389)</small>
+<small>Source: [`hetu/headless.py:394`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L394)</small>
 
 关闭连接（仅当 backend 由本 client 创建时才关它）/ Close owned backend.
 
@@ -408,7 +408,7 @@ connect(
 ) -> hetu.headless.HeadlessClient
 ```
 
-<small>Source: [`hetu/headless.py:401`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L401)</small>
+<small>Source: [`hetu/headless.py:406`](https://github.com/Heerozh/HeTu/blob/main/hetu/headless.py#L406)</small>
 
 
 

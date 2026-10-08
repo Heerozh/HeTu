@@ -528,6 +528,8 @@ async def open_local_app(
     **不建表、不迁移**：每张表第一次用到时核对表结构与簇，不一致抛 `TableNotReady`。
     不新建 SQLite 库文件（不存在抛 `BackendNotReady`）。
 
+    Open an in-process app from a config dict. Never creates or migrates tables.
+
     Parameters
     ----------
     config: dict
@@ -541,8 +543,6 @@ async def open_local_app(
         起续约 / 预留水位两个后台任务；`aclose()` 时写精确水位并释放。
     address: str
         作为 `ctx.address`。
-
-    Open an in-process app from a config dict. Never creates or migrates tables.
     """
     namespace = config["NAMESPACE"]
     instances: list[str] = list(config["INSTANCES"])

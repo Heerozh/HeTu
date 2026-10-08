@@ -257,7 +257,16 @@ Downgrading is currently not supported, may adding this feature in the future.
 ## The `hetu` CLI
 
 The `hetu` command (run by `uv run hetu`) is your operations
-entry point. The three subcommands:
+entry point: `start`, `upgrade` (migrations), `build` (client codegen), plus
+`call` / `get` / `range` / `shell` for debugging (see
+[Debugging from the command line](#debugging-from-the-command-line)).
+
+Subcommands that need a config look for it in this order: `--config` > CLI-flag
+mode (any of `--app-file` / `--namespace` / `--db` given) > the `HETU_CONFIG`
+environment variable > `config.yml` in the current directory. The official
+Docker image sets `HETU_CONFIG=/app/config.yml`. Relative paths for `APP_FILE`
+and SQLite database files (`sqlite:///./hetu.db`) resolve against **the config
+file's directory**, wherever you run the command from.
 
 ### `hetu start`
 
@@ -346,9 +355,10 @@ indexes all corrupt data while servers are running. If a server crashed, wait
 for its lease to expire (at most 60 seconds) and try again. On Windows there is
 no need to wait for servers on the same machine that have already exited:
 Sanic stops Windows workers with a hard kill, so they never get to release
-their leases, and such leases are not counted. The SQLite backend has no
-leases, so the check can't see its servers; make sure they are stopped
-yourself.
+their leases, and such leases are not counted. Servers on the SQLite backend
+have no leases, so the check can't see them; make sure they are stopped
+yourself. `hetu call` / `hetu shell` hold leases too (on Redis and SQLite), so
+`upgrade` also refuses while they run and lists them separately.
 
 ### `hetu build`
 
@@ -367,6 +377,84 @@ hetu build --app-file=./app.py --namespace=my_game \
 
 This keeps client and server schemas in lockstep without hand-written
 boilerplate.
+
+## Debugging from the command line
+
+`hetu call` / `get` / `range` / `shell` **connect to the configured backend
+from the current process** to call Systems as admin or as a given player and to
+read component rows. They don't go through the server and don't need one
+running (they work on a SQLite dev database too). Writes go through the same
+commit path as Systems, so online clients get their subscription pushes as
+usual. Whoever can run them already holds the database address and
+credentials, so the server gains no new network entry point.
+
+```bash
+hetu call --list                          # every System: params, permission, components, first doc line
+hetu get --list                           # components, fields, indexes
+hetu call add_gold 1001 500               # ADMIN System, runs as admin by default
+hetu call --as 1001 buy_item 3 2          # USER Systems need a player id
+hetu call --as 1001 --group gm gm_kick 2002
+hetu call send_mail --args-file args.json # args from a JSON-array file (- for stdin)
+hetu call add_gold 1001 500 --dry-run     # run it but don't commit; shows what it would write
+hetu get Player owner=1001                # one row by id or an indexed field
+hetu range Item owner 1001 --limit 50     # omit the right bound for an exact match; ( / [ prefix = open / closed
+hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player', owner=1001))"
+```
+
+- **Output**: `call` / `get` / `range` / `--list` print exactly one JSON line
+  on stdout; logs and `print`s from your app go to stderr. `call` reports the
+  System's raw return value `result`, what the client would actually receive
+  as `client` (or `wire_error` when it can't be serialized), the race-retry
+  count, the call's write set `writes`, and `target` (config file, instance,
+  backend addresses with passwords masked). Failures carry `error_type` and
+  `error`, plus the full `traceback` when your code raised.
+- **Exit codes**: 0 success; 1 code or call failure (the System raised, timed
+  out); 2 usage error (arguments, identity, unknown name); 3 environment not
+  ready (no config, missing database file or table, schema differs from the
+  code, write protection).
+- **Identity**: without `--as` / `--group` it follows the System's permission:
+  ADMIN, GM and internal Systems (`permission=None`) run as admin, EVERYBODY as
+  guest, and **USER requires `--as`** (production USER endpoints never admit
+  logged-out connections, and running as player 0 would create owner=0 rows).
+  With `--as` the group defaults to guest. There is no connection:
+  `ctx.connection_id` is 0 and `ctx.request` is None, so Systems that call
+  `elevate` fail; pass login-time `ctx.user_data` with `--user-data`.
+- **Arguments**: each one is parsed as JSON, falling back to a plain string;
+  parameters annotated `str` are never parsed. Something that looks like JSON
+  but doesn't parse is an error (PowerShell often eats the quotes); use
+  `--args-file` or stdin then. Put non-numeric arguments starting with `-`
+  after `--`.
+- **Reads**: `get` / `range` don't load your app; the schema comes from the
+  table meta in the database, so they work even when the app code is broken.
+  They read a replica by default; use `--master` right after a write. `range`
+  returns at most 10 rows by default and `truncated` says whether there were
+  more.
+- **Schema**: `call` / `shell` never create or migrate tables. A table that is
+  missing, or whose schema / cluster differs from your local code, is an
+  error: start the server once (it creates new tables) or run `hetu upgrade`.
+- **`hetu shell`** preloads `call_system` / `get` / `must_get` / `insert` /
+  `upsert` (the same API as the test `Sandbox`), plus `app.range` and `show()`
+  (prints as JSON, numpy rows with field names), with top-level await. Code
+  comes from `-c`, a script file or stdin; with none of them you get an
+  interactive prompt. Restart the shell after changing code.
+
+**It runs your local code**: `hetu call` re-imports your local app every time,
+which says nothing about what the server has loaded — a single-worker server
+doesn't auto-reload, so restart it before testing the client path. In
+production run it inside the deployed container (`docker exec <container> hetu
+call ...`) rather than writing to the production database from a dev checkout:
+the schema check can't catch logic differences. Also: background tasks a
+System starts with `create_task` are cancelled when the command exits,
+initialization hooked up in `on_server_setup` doesn't run, and FutureCalls
+created from the CLI are executed by the running servers.
+
+**Write protection and audit**: set `CLI_ALLOW_WRITE` (default true) to false
+and the CLI can only read or `--dry-run`; real writes fail with exit code 3.
+On a config with `DEBUG` off, real writes produce a warning. Every `call` and
+`shell` run is appended to `CLI_AUDIT_LOG` (default
+`logs/hetu_cli_audit.jsonl` next to the config): who, on which host, the
+command and arguments, which rows each commit changed, and the outcome. The
+audit stays on the machine that ran the CLI; the server keeps no trace.
 
 ## Configuration file
 

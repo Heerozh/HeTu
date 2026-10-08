@@ -68,6 +68,11 @@ TOPIC_META: dict[str, tuple[str, str, int]] = {
         "无服务器进程的表直读写客户端：可信内部进程不经 Sanic / System 直接读写组件表。",
         70,
     ),
+    "local": (
+        "Local",
+        "进程内应用运行时：直连后端跑 System、读写组件表，hetu call / shell 与 Sandbox 共用。",
+        80,
+    ),
 }
 
 

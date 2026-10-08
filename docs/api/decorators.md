@@ -269,7 +269,7 @@ define_system(
 )
 ```
 
-<small>Source: [`hetu/system/definer.py:363`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L363)</small>
+<small>Source: [`hetu/system/definer.py:368`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L368)</small>
 
 
 

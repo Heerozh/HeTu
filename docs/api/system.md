@@ -447,13 +447,33 @@ namespace 隔离共存，无需清表重建（清表重建对多模块包不可�
 
 
 
+#### `systems_of`
+
+```python
+systems_of(namespace: str | None = None) -> dict[str, hetu.system.definer.SystemDefine]
+```
+
+<small>Source: [`hetu/system/definer.py:105`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L105)</small>
+
+某个 namespace（默认主 namespace）的全部 System 定义，含迁入的 global System 与
+core pin 占位 System（名字形如 ``__core_pin_system_*``）。返回副本。
+
+
+
+
+
+
+
+
+
+
 #### `get_startup_systems`
 
 ```python
 get_startup_systems(namespace: str | None = None) -> list[str]
 ```
 
-<small>Source: [`hetu/system/definer.py:110`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L110)</small>
+<small>Source: [`hetu/system/definer.py:115`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L115)</small>
 
 返回所有标记了 on_start=True 的 System 名字（按定义顺序）。
 
@@ -474,7 +494,7 @@ Return names of all systems marked with ``on_start=True`` (in definition order).
 get_components(namespace: str | None = None) -> dict[type[BaseComponent], int]
 ```
 
-<small>Source: [`hetu/system/definer.py:123`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L123)</small>
+<small>Source: [`hetu/system/definer.py:128`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L128)</small>
 
 返回所有被System引用过的Component及其所属簇id
 
@@ -493,7 +513,7 @@ get_components(namespace: str | None = None) -> dict[type[BaseComponent], int]
 build_endpoints()
 ```
 
-<small>Source: [`hetu/system/definer.py:301`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L301)</small>
+<small>Source: [`hetu/system/definer.py:306`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/definer.py#L306)</small>
 
 把System定义复制到EndpointDefines中，作为Endpoint使用
 

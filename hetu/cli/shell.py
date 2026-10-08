@@ -219,6 +219,14 @@ async def _shell_main(args: argparse.Namespace, out: TextIO) -> None:
     target = describe_target(config, config_file, instance)
 
     source, filename = read_source(args)
+    if source is not None and not source.strip():
+        print(
+            _(
+                "没有要执行的代码：用 -c CODE、脚本文件，或从 stdin 传入；"
+                "在终端里直接运行 hetu shell 进交互模式"
+            ),
+            file=sys.stderr,
+        )
 
     mode = write_mode_for(config, args.dry_run)
     audit = AuditLog.from_config(
