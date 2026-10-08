@@ -5,7 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-import importlib.util
 import logging
 import sys
 
@@ -118,14 +117,10 @@ class MigrateCommand(CommandInterface):
             sys.exit(1)
 
         # 加载玩家的app文件
-        spec = importlib.util.spec_from_file_location("HeTuApp", config["APP_FILE"])
-        assert spec and spec.loader, _("无法加载app文件 {app_file}").format(
-            app_file=config["APP_FILE"]
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["HeTuApp"] = module
-        spec.loader.exec_module(module)
+        from hetu.local import load_app_module
         from hetu.system import SystemClusters
+
+        load_app_module(config["APP_FILE"])
 
         SystemClusters().build_clusters(config["NAMESPACE"])
 

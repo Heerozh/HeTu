@@ -7,10 +7,8 @@ Worker进程入口文件
 """
 
 import asyncio
-import importlib.util
 import logging
 import os
-import sys
 
 from sanic import Sanic
 from sanic.worker.manager import WorkerManager
@@ -22,6 +20,7 @@ from ..data.backend.snowflake_lease import SnowflakeLease
 from ..data.backend.worker_keeper import WorkerLease, create_worker_keeper
 from ..endpoint import connection
 from ..i18n import _
+from ..local import load_app_module
 from ..manager import ComponentTableManager
 from ..safelogging.default import DEFAULT_LOGGING_CONFIG
 from ..system import SystemClusters
@@ -269,11 +268,7 @@ def worker_main(app_name, config) -> Sanic:
     # 加载玩家的app文件
     if (app_file := config.get("APP_FILE", None)) is not None:
         try:
-            spec = importlib.util.spec_from_file_location("HeTuApp", app_file)
-            assert spec and spec.loader
-            module = importlib.util.module_from_spec(spec)
-            sys.modules["HeTuApp"] = module
-            spec.loader.exec_module(module)
+            load_app_module(app_file)
         except Exception as e:
             print(
                 _(

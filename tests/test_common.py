@@ -676,7 +676,9 @@ async def test_redis_tool_keeper(mod_auto_backend):
         await tool.keep_alive()
     await tool.release_worker_id()
     assert await aio.get("snowflake:worker:1023") == b"thief:1"
-    await aio.delete(*await aio.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES))
+    await aio.delete(
+        *await aio.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    )
 
 
 async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
