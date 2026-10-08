@@ -102,3 +102,36 @@ def windows_pid_exited(pid: int) -> bool:
         return False
     finally:
         _winapi.CloseHandle(handle)
+
+
+def lease_owner_exited(owner: bytes | str) -> bool:
+    """
+    worker id 租约的主人（node_id，即 `机器码:pid`，工具进程再带 `cli:` 前缀）是本机上已经
+    退出的进程。只在 Windows 上这么认。
+
+    为什么要认：Windows 上 sanic 停 worker 是 TerminateProcess 硬杀——Ctrl+C 走
+    `WorkerProcess.terminate()` 的 `os.kill(pid, SIGINT)`，DEBUG 自动重载走
+    `multiprocessing.Process.terminate()`，从外面 `taskkill /F` 也一样——关服钩子里的
+    release_worker_id 没机会跑。这些租约照算的话，upgrade 就得干等它们过期。
+
+    为什么只在 Windows：判断的前提是"机器码相同就是同一个 PID 空间，本地查得到那个 pid"。
+    容器里机器码是 hostname（识别不出容器时是 MAC），host 网络或写死 hostname 时多个容器
+    共用一个机器码、PID 空间却各自独立，本地查不到 pid 不代表进程不在，会把活着的服务器当成
+    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 sanic
+    用信号优雅停 worker，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
+
+    只认不删：key 照旧等 TTL 过期，开服分配有的是空位。按值删会撞上"pid 被回收、新 worker
+    接手同一把 key"的竞态，删掉的就成了活租约。
+    """
+    if sys.platform != "win32":
+        return False
+    if isinstance(owner, bytes):
+        owner = owner.decode("ascii", errors="replace")
+    from .snowflake_id import TOOL_NODE_PREFIX
+
+    machine_id, _, pid = owner.removeprefix(TOOL_NODE_PREFIX).rpartition(":")
+    return (
+        machine_id == get_machine_id()
+        and pid.isdecimal()
+        and windows_pid_exited(int(pid))
+    )

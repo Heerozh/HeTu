@@ -6,8 +6,9 @@
 """
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, cast
 
 from ...i18n import _
@@ -19,6 +20,24 @@ if TYPE_CHECKING:
     from hetu.data.component import BaseComponent
 
     from . import Backend, BackendClient
+
+
+type CommitFn = Callable[[IdentityMap], Awaitable[None]]
+type CommitObserver = Callable[[Session, CommitFn], Awaitable[None]]
+
+commit_observer: ContextVar[CommitObserver | None] = ContextVar(
+    "hetu_commit_observer", default=None
+)
+"""
+提交观察钩子：设置后，本上下文里每次有脏数据的 `Session.commit()` 都改为调用
+``observer(session, commit_fn)``，由它决定是否 ``await commit_fn(session.idmap)`` 真正提交
+（dry-run 不调）、是否抛异常拒绝（写保护），并可读 ``session.idmap.get_dirty_rows()`` 记账。
+只有 `hetu call` / `hetu shell` 在执行用户代码期间设置它；服务器从不设置，每次提交只多一次
+``ContextVar.get()``。用 ContextVar 是为了只管到设置它的任务及其子任务：事先建好的后台任务
+（如雪花号租约的续约、水位循环）复制的上下文里没有它。
+
+Commit hook used by the CLI (dry-run / write protection / write-set capture / audit).
+"""
 
 
 class Session(AbstractAsyncContextManager):
@@ -104,7 +123,11 @@ class Session(AbstractAsyncContextManager):
         """
         # 如果数据库不具备写入通知功能，要在此手动往MQ推送数据变动消息。
         if self._idmap.is_dirty:
-            await self._master.commit(self._idmap)
+            observer = commit_observer.get()
+            if observer is None:
+                await self._master.commit(self._idmap)
+            else:
+                await observer(self, self._master.commit)
         self.clean()
 
     def discard(self) -> None:

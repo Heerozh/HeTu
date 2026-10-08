@@ -361,8 +361,13 @@ class HeadlessClient:
                     "跨簇请拆成两个事务）：{detail}"
                 ).format(detail=detail)
             )
+        # 用表自己的 backend：同簇的组件必然在同一后端（build_clusters 保证），headless 只有
+        # 一个后端时与 self.backend 是同一个；hetu.local 的多后端配置需要它
         session = HeadlessSession(
-            self.backend, self.instance, cluster_ids.pop(), [t.comp_cls for t in tables]
+            tables[0].backend,
+            self.instance,
+            cluster_ids.pop(),
+            [t.comp_cls for t in tables],
         )
         session.only_master = only_master
         session.explicit_ids_only = self.explicit_ids_only
