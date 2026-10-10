@@ -407,7 +407,9 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
   as `client` (or `wire_error` when it can't be serialized), the race-retry
   count, the call's write set `writes`, and `target` (config file, instance,
   backend addresses with passwords masked). Failures carry `error_type` and
-  `error`, plus the full `traceback` when your code raised.
+  `error`, plus the full `traceback` when your code raised. A commit that was
+  interrupted mid-flight (a timeout, say) shows `committed: "unknown"` in
+  `writes`: it may have taken effect, so check the data before re-running.
 - **Exit codes**: 0 success; 1 code or call failure (the System raised, timed
   out); 2 usage error (arguments, identity, unknown name); 3 environment not
   ready (no config, missing database file or table, schema differs from the
@@ -453,7 +455,8 @@ and the CLI can only read or `--dry-run`; real writes fail with exit code 3.
 On a config with `DEBUG` off, real writes produce a warning. Every `call` and
 `shell` run is appended to `CLI_AUDIT_LOG` (default
 `logs/hetu_cli_audit.jsonl` next to the config): who, on which host, the
-command and arguments, which rows each commit changed, and the outcome. The
+command and arguments (database passwords masked), which rows each commit
+changed, and the outcome. The
 audit stays on the machine that ran the CLI; the server keeps no trace.
 
 ## Configuration file

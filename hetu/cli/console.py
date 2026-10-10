@@ -301,10 +301,21 @@ def describe_target(
 # ============ 审计 ============
 
 
+def mask_argv(argv: list[str]) -> list[str]:
+    """审计里记的命令行：数据库地址（``--db URL`` / ``--db=URL``）打码口令，每项最多 1 KB"""
+    out = []
+    for arg in argv:
+        head, sep, value = arg.partition("=") if arg.startswith("--") else ("", "", arg)
+        if "://" in value:
+            value = mask_url(value)
+        out.append(clip(head + sep + value, MAX_AUDIT_ARGS))
+    return out
+
+
 class AuditLog:
     """
-    CLI 审计：只追加的 JSONL，每行一次 ``os.write``（O_APPEND），不轮转。记录 start（命令、
-    参数、身份、写模式）、每次真实提交的写集摘要（commit）、end（结果）。不用 replay 日志：
+    CLI 审计：只追加的 JSONL，每行一次 ``os.write``（O_APPEND），不轮转。记录 start（命令行、
+    参数、身份、写模式）、每次真实提交的写集 id（commit）、end（结果）。不用 replay 日志：
     它默认关闭、要套用配置的 LOGGING（console handler 写 stdout），且文件 handler 不是进程安全的。
     """
 
@@ -316,7 +327,6 @@ class AuditLog:
             "host": socket.gethostname(),
             "pid": os.getpid(),
             "cwd": os.getcwd(),
-            "argv": sys.argv,
             **base,
         }
 
@@ -350,9 +360,9 @@ class AuditLog:
             os.close(fd)
 
     def start(self, **fields: Any) -> None:
-        """start 记录写不进去就中止命令（AuditUnavailable）"""
+        """start 记录（带打码后的命令行）写不进去就中止命令（AuditUnavailable）"""
         try:
-            self.write("start", **fields)
+            self.write("start", argv=mask_argv(sys.argv), **fields)
         except OSError as e:
             raise AuditUnavailable(
                 _(
@@ -417,10 +427,11 @@ def _clipped(items: list) -> tuple[list, int]:
     return items[:MAX_WRITE_ROWS], max(0, len(items) - MAX_WRITE_ROWS)
 
 
-def summarize_writes(session: Session, committed: bool) -> dict | None:
-    """一次提交的写集（每张表按 insert / update / delete 分组），没有实际改动返回 None"""
+def summarize_writes(session: Session, dirty: dict, committed: bool) -> dict | None:
+    """一次提交的写集（每张表按 insert / update / delete 分组，每种最多列 MAX_WRITE_ROWS 行），
+    没有实际改动返回 None。dirty 是 ``session.idmap.get_dirty_rows()``"""
     tables: dict[str, dict] = {}
-    for ref, (inserts, (olds, news), deletes) in session.idmap.get_dirty_rows().items():
+    for ref, (inserts, (olds, news), deletes) in dirty.items():
         if not (inserts or news or deletes):
             continue
         comp_cls = ref.comp_cls
@@ -463,15 +474,18 @@ def summarize_writes(session: Session, committed: bool) -> dict | None:
     }
 
 
-def _ids_by_op(entry: dict) -> dict:
-    """审计里只记各表按操作分组的 id"""
+def _ids_by_op(dirty: dict) -> dict:
+    """审计里只记各表按操作分组的 id，全部记（写集摘要每种操作只列 MAX_WRITE_ROWS 行）"""
     out: dict[str, dict[str, list]] = {}
-    for comp_name, ops in entry["tables"].items():
-        out[comp_name] = {
-            op: [r["id"] for r in ops[op]]
-            for op in ("insert", "update", "delete")
-            if op in ops
+    for ref, (inserts, (olds, news), deletes) in dirty.items():
+        comp_cls = ref.comp_cls
+        ops = {
+            op: [_decode_field(comp_cls, "id", r["id"]) for r in rows]
+            for op, rows in (("insert", inserts), ("update", olds), ("delete", deletes))
+            if rows and (op != "update" or news)
         }
+        if ops:
+            out[comp_cls.name_] = ops
     return out
 
 
@@ -497,24 +511,29 @@ class WriteRecorder:
         self._production_warned = False
 
     async def __call__(self, session: Session, commit_fn: CommitFn) -> None:
-        entry = summarize_writes(session, committed=self.mode == "commit")
+        from ..data.backend.base import RaceCondition, UniqueViolation
+
+        dirty = session.idmap.get_dirty_rows()
+        entry = summarize_writes(session, dirty, committed=self.mode == "commit")
         if self.mode == "forbid" and entry is not None:
             raise CliWriteForbidden()
         if self.mode == "dry_run":
             if entry is not None:
                 self.writes.append(entry)
             return
-        await commit_fn(session.idmap)
         if entry is None:
+            await commit_fn(session.idmap)
             return
-        self.writes.append(entry)
-        if self.audit is not None:
-            self.audit.write_quietly(
-                "commit",
-                cluster=entry["cluster"],
-                instance=entry["instance"],
-                tables=_ids_by_op(entry),
-            )
+        try:
+            await commit_fn(session.idmap)
+        except RaceCondition, UniqueViolation:
+            raise  # 后端拒绝了这次提交，什么都没写（RaceCondition 时事务会重试）
+        except BaseException:
+            # 提交途中被取消（--timeout、租约丢失）或连接出错：可能已经生效，照样记下来
+            entry["committed"] = "unknown"
+            self._record(entry, dirty)
+            raise
+        self._record(entry, dirty)
         if self.production and not self._production_warned:
             self._production_warned = True
             msg = _(
@@ -523,6 +542,17 @@ class WriteRecorder:
             )
             self.warnings.append(msg)
             logger.warning("⚠️ " + msg)
+
+    def _record(self, entry: dict, dirty: dict) -> None:
+        self.writes.append(entry)
+        if self.audit is not None:
+            self.audit.write_quietly(
+                "commit",
+                cluster=entry["cluster"],
+                instance=entry["instance"],
+                committed=entry["committed"],
+                tables=_ids_by_op(dirty),
+            )
 
     @contextmanager
     def active(self) -> Iterator[None]:

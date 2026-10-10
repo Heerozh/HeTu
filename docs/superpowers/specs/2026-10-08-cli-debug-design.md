@@ -458,6 +458,9 @@ finally 还能读写数据库。收尾出错（释放租约、关连接失败）
   值按组件 dtype 还原成 JSON 类型（`get_dirty_rows()` 给的是提交用的字符串：布尔按
   `"True" / "False"` 还原，bytes 列按 `to_jsonable` 规则）；每张表每种操作最多列 20 行，多的给
   `"omitted": N`。所有更新都改回了原值的提交（脏行列表全空）不列出。
+- `committed`：真提交为 `true`，dry-run 为 `false`；提交途中被取消（`--timeout`、租约丢失）或
+  连接出错时为 `"unknown"`——可能已经生效，要直接查数据。后端拒绝的提交（`RaceCondition` /
+  `UniqueViolation`，什么都没写）不列出。
 - 机制见 §3.7。
 
 ### 2.11 审计
@@ -466,10 +469,12 @@ finally 还能读写数据库。收尾出错（释放租约、关连接失败）
   模式下相对当前目录），设为 `""` 关闭。只追加的 JSONL，每行用 `O_APPEND` 打开后一次
   `os.write`；不轮转（需要时用外部 logrotate 的 copytruncate）。
 - 记录三种事件，公共字段：`ts`（带时区的 ISO 时间）、`run`（uuid4）、`user`
-  （`getpass.getuser()`）、`host`、`pid`、`cwd`、`argv`、`config`、`namespace`、`instance`、
+  （`getpass.getuser()`）、`host`、`pid`、`cwd`、`config`、`namespace`、`instance`、
   `worker_id`：
-  - `start`：命令、System 名、参数（repr，最多 1 KB）、身份、写模式；shell 记执行的代码；
-  - `commit`：每次真实提交的 instance、cluster、各表按操作分组的 id；
+  - `start`：命令行 `argv`（数据库地址打码口令，每项最多 1 KB）、命令、System 名、参数（repr，
+    最多 1 KB）、身份、写模式；shell 记执行的代码。`argv` 只记在这一条，不在每条记录里重复；
+  - `commit`：每次提交的 instance、cluster、`committed`（同 `writes`，含 `"unknown"`）、各表按
+    操作分组的**全部** id（`writes` 每种操作只列 20 行，审计不截断）；
   - `end`：`ok`、`error_type`、`elapsed_ms`。
 - 只有可能写入的 `call` 和 `shell` 记审计；`get` / `range` / `--list` 只读，不记。
 - 挂在提交观察钩子上，所以 shell 里直接 `client.session` 的写入、嵌套调用的写入都有记录。

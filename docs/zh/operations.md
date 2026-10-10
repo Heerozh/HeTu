@@ -283,7 +283,8 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
 - **输出**：`call` / `get` / `range` / `--list` 的 stdout 恰好一行 JSON，日志和 app 里的 `print` 都在
   stderr。`call` 给出 System 的原始返回值 `result`、客户端实际会收到的 `client`（序列化不了时给
   `wire_error`）、竞态重试次数、这次调用的写集 `writes`、`target`（配置文件、实例、口令打码后的后端
-  地址）。失败时给 `error_type`、`error`，代码出错时还有完整 `traceback`。
+  地址）。失败时给 `error_type`、`error`，代码出错时还有完整 `traceback`。提交途中被打断（超时等）的
+  那次在 `writes` 里 `committed` 为 `"unknown"`：可能已经生效，重跑前先查数据。
 - **退出码**：0 成功；1 代码或调用失败（System 抛异常、超时）；2 用法错误（参数、身份、名字不存在）；
   3 环境未就绪（找不到配置、库文件或表不存在、表结构与代码不一致、写保护拒绝）。
 - **身份**：没给 `--as` / `--group` 时按 System 的权限推断：ADMIN、GM 与内部 System（`permission=None`）
@@ -309,8 +310,8 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
 
 **写保护与审计**：配置项 `CLI_ALLOW_WRITE`（默认 true）设为 false 后，CLI 只能读或 `--dry-run`，真写入会
 报错（退出码 3）；`DEBUG` 关闭的配置上真写入会给出警告。`call` 与 `shell` 的每次运行都追加记录到
-`CLI_AUDIT_LOG`（默认配置目录下的 `logs/hetu_cli_audit.jsonl`）：谁、在哪台机器、什么命令和参数、每次提交
-改了哪些行、结果。审计写在运行 CLI 的机器上，服务器那边没有痕迹。
+`CLI_AUDIT_LOG`（默认配置目录下的 `logs/hetu_cli_audit.jsonl`）：谁、在哪台机器、什么命令和参数（数据库
+口令打码）、每次提交改了哪些行、结果。审计写在运行 CLI 的机器上，服务器那边没有痕迹。
 
 ## 配置文件
 

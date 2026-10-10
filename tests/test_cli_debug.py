@@ -3,6 +3,7 @@ hetu call / get / range / shell 的端到端测试：子进程里跑真实命令
 （表由 hetu upgrade 建好，和部署时一样）。外加纯函数的进程内单测。
 """
 
+import asyncio
 import json
 import os
 import subprocess
@@ -417,22 +418,38 @@ def test_audit_log(project):
     audit = project / "logs" / "hetu_cli_audit.jsonl"
     before = audit.read_text(encoding="utf-8").count("\n") if audit.exists() else 0
     run_json("call", "add_gold", "4001", "1", cwd=project)
-    run_hetu("shell", "-c", "await insert('Wallet', owner=4002)", cwd=project)
+    # 一次提交插 25 行：写集摘要只列 20 行，审计要记全部 id
+    source = textwrap.dedent(
+        """
+        Wallet = client.table('Wallet').comp_cls
+        async with client.session(Wallet) as s:
+            for i in range(25):
+                row = Wallet.new_row()
+                row.owner = 4100 + i
+                await s[Wallet].insert(row)
+        """
+    )
+    code, _out, err = run_hetu("shell", "-c", source, cwd=project)
+    assert code == 0, err
     records = [
         json.loads(line)
         for line in audit.read_text(encoding="utf-8").splitlines()[before:]
     ]
-    events = [(r["event"], r["argv"][1]) for r in records]
-    assert events == [
-        ("start", "call"),
-        ("commit", "call"),
-        ("end", "call"),
-        ("start", "shell"),
-        ("commit", "shell"),
-        ("end", "shell"),
+    assert [r["event"] for r in records] == [
+        "start",
+        "commit",
+        "end",
+        "start",
+        "commit",
+        "end",
     ]
+    # 命令行只记在 start 里
+    assert records[0]["argv"][1:3] == ["call", "add_gold"]
+    assert records[3]["argv"][1] == "shell"
+    assert all("argv" not in r for r in records if r["event"] != "start")
     assert records[0]["system"] == "add_gold" and records[2]["ok"] is True
-    assert "Wallet" in records[4]["tables"] and records[4]["worker_id"] >= 1000
+    assert records[4]["worker_id"] >= 1000 and records[4]["committed"] is True
+    assert len(records[4]["tables"]["Wallet"]["insert"]) == 25
 
 
 def test_concurrent_cli_processes_get_distinct_worker_ids(project):
@@ -549,6 +566,75 @@ def test_to_jsonable_and_mask():
     ]
     assert mask_url("redis://:secret@10.0.0.5:6379/0") == "redis://:***@10.0.0.5:6379/0"
     assert mask_url("redis://127.0.0.1:6379/0") == "redis://127.0.0.1:6379/0"
+
+
+def test_mask_argv():
+    from hetu.cli.console import MAX_AUDIT_ARGS, mask_argv
+
+    argv = [
+        "hetu",
+        "call",
+        "--db",
+        "redis://:S3cret@10.0.0.5:6379/0",
+        "--db=redis://u:S3cret@h:1/0",
+        "x" * 5000,
+    ]
+    masked = mask_argv(argv)
+    assert "S3cret" not in json.dumps(masked)
+    assert masked[3] == "redis://:***@10.0.0.5:6379/0"
+    assert masked[4] == "--db=redis://u:***@h:1/0"
+    assert len(masked[5]) == MAX_AUDIT_ARGS + 1
+
+
+async def test_write_recorder_records_full_ids_and_unknown_commits(tmp_path):
+    """审计记全部 id（写集摘要只列 20 行）；后端拒绝的提交不记；提交途中被取消记成 unknown"""
+    from types import SimpleNamespace
+
+    import numpy as np
+
+    from hetu.cli.console import AuditLog, WriteRecorder
+    from hetu.data.backend.base import RaceCondition
+
+    comp = SimpleNamespace(name_="Wallet", dtype_map_={"id": np.dtype("<i8")})
+    rows = [{"id": str(i), "owner": str(i)} for i in range(25)]
+    ref = type("Ref", (), {"comp_cls": comp})()  # 要能当 dict 的键
+    dirty = {ref: (rows, ([], []), [])}
+    session = SimpleNamespace(
+        idmap=SimpleNamespace(get_dirty_rows=lambda: dirty),
+        instance_name="s1",
+        cluster_id=1,
+    )
+    audit = AuditLog(str(tmp_path / "audit.jsonl"), {})
+    recorder = WriteRecorder("commit", audit=audit)
+
+    async def ok(_idmap):
+        pass
+
+    await recorder(session, ok)
+    (entry,) = recorder.writes
+    assert len(entry["tables"]["Wallet"]["insert"]) == 20
+    assert entry["tables"]["Wallet"]["insert_omitted"] == 5
+
+    async def race(_idmap):
+        raise RaceCondition("RACE")
+
+    with pytest.raises(RaceCondition):
+        await recorder(session, race)
+    assert len(recorder.writes) == 1  # 被拒绝的提交什么都没写，不记
+
+    async def cancelled(_idmap):
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await recorder(session, cancelled)
+    assert recorder.writes[1]["committed"] == "unknown"
+
+    records = [
+        json.loads(x)
+        for x in (tmp_path / "audit.jsonl").read_text("utf-8").splitlines()
+    ]
+    assert [r["committed"] for r in records] == [True, "unknown"]
+    assert records[0]["tables"]["Wallet"]["insert"] == list(range(25))
 
 
 def test_resolve_sqlite_url(tmp_path):

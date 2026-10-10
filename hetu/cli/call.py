@@ -291,7 +291,8 @@ async def run_system(
             raise CallTimeout(
                 _(
                     "System {name} 超过 {timeout} 秒没结束，已中止。若超时发生在提交途中，"
-                    "提交可能已经生效：请看输出的 writes、审计日志或直接查数据"
+                    "提交可能已经生效：writes 里 committed 为 unknown 的那次，"
+                    "请直接查数据确认"
                 ).format(name=name, timeout=timeout)
             ) from e
         finally:
