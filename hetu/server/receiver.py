@@ -7,7 +7,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -56,8 +56,9 @@ async def rpc(
     executor: EndpointExecutor,
     push_queue: asyncio.Queue,
     debug: int = 0,
+    on_rsp: Callable[[], None] | None = None,
 ):
-    """处理Client SDK调用Endpoint的命令"""
+    """处理Client SDK调用Endpoint的命令。on_rsp 在 rsp 入队之后调用（rej / err / 断开时不调）"""
     # print(executor.context, 'rpc', data)
     check_length("rpc", data, 2, 100)
     ok, res = await executor.execute(data[1], *data[2:])
@@ -81,12 +82,46 @@ async def rpc(
     if isinstance(res, RejectResponse):
         # 软拒绝：发 rej 帧，连接保持
         await push_queue.put(["rej", data[1], res.code])
-    elif isinstance(res, ResponseToClient):
+        return True
+    if isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
     else:
         # 无视返回值，直接返回ok，如果不返回，Request无法对应
         await push_queue.put(["rsp", "ok"])
+    if on_rsp is not None:
+        on_rsp()
     return True
+
+
+# rpcs 的 sync_id 上限：SDK 按连接递增生成，int32 足够，各语言的 SDK 都能原样表示
+SYNC_ID_MAX = 2**31 - 1
+
+
+async def rpcs(
+    data: list,
+    executor: EndpointExecutor,
+    broker: SubscriptionBroker,
+    push_queue: asyncio.Queue,
+    debug: int = 0,
+):
+    """
+    处理 Client SDK 等推送的调用 ``["rpcs", sync_id, endpoint, *args]``：同 rpc 执行、照常回复；回了 rsp
+    就在本 worker 的订阅器里起栅栏，这次调用引起的推送发出之后再给客户端发 ``["sync", sync_id]``
+    （设计稿 docs/superpowers/specs/2026-10-10-rpcs-sync-design.md）。sync_id 不合法时抛 ValueError，
+    同别的格式错误一样断开连接
+    """
+    check_length("rpcs", data, 3, 101)
+    sync_id = data[1]
+    # bool 是 int 的子类，不能算
+    if type(sync_id) is not int or not 0 <= sync_id <= SYNC_ID_MAX:
+        raise ValueError(f"Invalid rpcs sync_id: {sync_id!r}")
+    return await rpc(
+        [data[0], *data[2:]],
+        executor,
+        push_queue,
+        debug,
+        on_rsp=lambda: broker.sync_(sync_id),
+    )
 
 
 def defer_sub_reply_(
@@ -282,9 +317,15 @@ async def client_handler(
                 return ws.fail_connection()
             # 执行消息
             match last_data[0]:
-                case "rpc":  # rpc endpoint_name args ...
-                    # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接
-                    if not await rpc(last_data, executor, push_queue, debug):
+                # rpc endpoint_name args ... / rpcs sync_id endpoint_name args ...
+                case "rpc" | "rpcs":
+                    # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接；rpcs 回了 rsp
+                    # 之后起栅栏，推送发出之后再发 sync
+                    if last_data[0] == "rpc":
+                        ok = await rpc(last_data, executor, push_queue, debug)
+                    else:
+                        ok = await rpcs(last_data, executor, broker, push_queue, debug)
+                    if not ok:
                         if executor.kicked:
                             exit_reason = _("连接已被顶号")
                             return ws.fail_connection(
