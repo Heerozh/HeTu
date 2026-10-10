@@ -349,6 +349,7 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
   表达式时，对它的值调用 `show()`。抛异常 → traceback 写 stderr，退出码按 §2.9 的映射。
 - 交互：REPL 跑在单独线程，事件循环留在主线程（参照 CPython `asyncio/__main__.py`），空闲时
   租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。
+- 代码留下的后台任务在关闭后端之前取消（与 §2.9 的 System 后台任务同一套收尾）。
 - `show(x)`：把 `to_jsonable(x)`（§2.9）按缩进 2、`ensure_ascii=False` 打到 stdout。
 - 进程内不会重新加载代码（`build_clusters` 每进程只能调一次），改了代码请重开 shell。
 - `--dry-run` 和写保护对整个会话生效，包括用户代码里直接 `client.session` 的写入。审计记录
@@ -415,8 +416,10 @@ tuple / set / frozenset → list；dict 的非 str 键转 str；其他对象 →
 审计或数据）。默认 `retry=9999`、每次最多 sleep 0.2 秒（`system/caller.py:165`），没有超时可能
 空转很久，而 agent 的工具超时一到会直接杀进程，最后那行 JSON 就出不来了。
 
-System 返回后，若它 `create_task` 出去的任务还没结束：取消它们，并加一条 warning："System
-留下 N 个后台任务，CLI 退出时已取消（在服务器里它们会继续跑）"。
+System 返回后（失败、超时也一样），若它 `create_task` 出去的任务还没结束：取消并等它们结束
+（最多 5 秒），并加一条 warning："System 留下 N 个后台任务，CLI 退出时已取消（在服务器里它们会
+继续跑）"。收尾顺序：取消后台任务 → 写精确水位、释放租约 → 关闭后端 → 写审计 end，后台任务的
+finally 还能读写数据库。收尾出错（释放租约、关连接失败）只告警，不把已经完成的调用报成失败。
 
 ### 2.10 写保护、dry-run 与写集
 

@@ -35,12 +35,15 @@ from .base import (
 )
 from .console import (
     AuditLog,
-    LeaseLost,
     WriteRecorder,
+    cancel_new_tasks,
+    close_app_quietly,
     code_for_audit,
     describe_target,
     exit_code_for,
     is_production,
+    lease_guard,
+    logger,
     setup_process,
     to_jsonable,
     write_mode_for,
@@ -257,37 +260,30 @@ async def _shell_main(args: argparse.Namespace, out: TextIO) -> None:
         app = await open_local_app(config, instance=instance, address="cli")
         if audit is not None and app.lease is not None:
             audit.base["worker_id"] = app.lease.worker_id
-        lost: list[bool] = []
-        task = asyncio.current_task()
-        if app.lease is not None and task is not None:
-
-            def on_lost() -> None:
-                lost.append(True)
-                task.cancel()
-
-            app.lease.on_lost = on_lost
         ns = build_namespace(app, out)
-        try:
-            with recorder.active():
+        before = asyncio.all_tasks()
+        with lease_guard(app), recorder.active():
+            try:
                 if source is None:
                     await interact(ns, ns["show"])
                 else:
                     await run_source(source, filename, ns, ns["show"])
-        except asyncio.CancelledError:
-            if not lost:
-                raise
-            if task is not None:
-                task.uncancel()
-            raise LeaseLost(
-                _("Worker ID 租约丢失（本进程卡住太久被别人接手），已中止")
-            ) from None
+            finally:
+                # 代码留下的后台任务赶在关闭后端之前取消：它们的 finally 可能还要读写数据库
+                leftover = await cancel_new_tasks(before)
+                if leftover:
+                    logger.warning(
+                        _("⚠️ shell 退出时取消了 {n} 个还在跑的后台任务").format(
+                            n=leftover
+                        )
+                    )
         ok = True
     except BaseException as e:
         error_type = type(e).__name__
         raise
     finally:
         if app is not None:
-            await app.aclose()
+            await close_app_quietly(app)
         if audit is not None:
             audit.write_quietly(
                 "end",

@@ -31,12 +31,14 @@ from .console import (
     MAX_AUDIT_ARGS,
     AuditLog,
     CallTimeout,
-    LeaseLost,
     WriteRecorder,
+    cancel_new_tasks,
     client_payload_of,
     clip,
+    close_app_quietly,
     describe_target,
     is_production,
+    lease_guard,
     run_json_command,
     to_jsonable,
     write_mode_for,
@@ -262,20 +264,6 @@ async def _list_main(args: argparse.Namespace, report: dict) -> dict:
 # ============ 调用 ============
 
 
-def _guard_lease(app: LocalApp) -> list[bool]:
-    """租约丢失时取消当前任务；返回的列表非空表示是因为租约丢失被取消的"""
-    lost: list[bool] = []
-    task = asyncio.current_task()
-    if app.lease is not None and task is not None:
-
-        def on_lost() -> None:
-            lost.append(True)
-            task.cancel()
-
-        app.lease.on_lost = on_lost
-    return lost
-
-
 async def run_system(
     app: LocalApp,
     recorder: WriteRecorder,
@@ -289,15 +277,16 @@ async def run_system(
     timeout: float,
     warnings: list[str],
 ) -> dict:
-    """在提交观察钩子下跑一个 System，返回输出字段"""
-    lost = _guard_lease(app)
+    """在提交观察钩子下跑一个 System，返回输出字段。System 留下的后台任务在返回（或失败）
+    前取消，赶在关闭后端之前"""
     ctx = app.new_context(caller, group, user_data)
     before = asyncio.all_tasks()
     started = time.perf_counter()
-    with recorder.active():
+    with lease_guard(app), recorder.active():
         try:
             async with asyncio.timeout(timeout if timeout > 0 else None):
                 rtn = await ctx.systems.call(name, *call_args, uuid=uuid)
+            elapsed_ms = (time.perf_counter() - started) * 1000
         except TimeoutError as e:
             raise CallTimeout(
                 _(
@@ -305,30 +294,15 @@ async def run_system(
                     "提交可能已经生效：请看输出的 writes、审计日志或直接查数据"
                 ).format(name=name, timeout=timeout)
             ) from e
-        except asyncio.CancelledError:
-            if not lost:
-                raise
-            current = asyncio.current_task()
-            if current is not None:
-                current.uncancel()
-            raise LeaseLost(
-                _("Worker ID 租约丢失（本进程卡住太久被别人接手），命令已中止")
-            ) from None
-    elapsed_ms = (time.perf_counter() - started) * 1000
-
-    current = asyncio.current_task()
-    pending = [
-        t for t in asyncio.all_tasks() - before if not t.done() and t is not current
-    ]
-    if pending:
-        for task in pending:
-            task.cancel()
-        await asyncio.gather(*pending, return_exceptions=True)
-        warnings.append(
-            _(
-                "System 留下 {n} 个后台任务，CLI 退出时已取消（在服务器里它们会继续跑）"
-            ).format(n=len(pending))
-        )
+        finally:
+            leftover = await cancel_new_tasks(before)
+            if leftover:
+                warnings.append(
+                    _(
+                        "System 留下 {n} 个后台任务，CLI 退出时已取消"
+                        "（在服务器里它们会继续跑）"
+                    ).format(n=leftover)
+                )
     client, wire_error = client_payload_of(rtn, app.to_client_payload)
     return {
         "result": to_jsonable(rtn),
@@ -435,7 +409,7 @@ async def _call_main(args: argparse.Namespace, report: dict) -> dict:
         raise
     finally:
         if app is not None:
-            await app.aclose()
+            await close_app_quietly(app, warnings)
         if audit is not None:
             audit.write_quietly(
                 "end",

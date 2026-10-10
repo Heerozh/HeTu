@@ -38,6 +38,7 @@ from .base import UsageError
 
 if TYPE_CHECKING:
     from ..data.backend.session import CommitFn, Session
+    from ..local import LocalApp
 
 logger = logging.getLogger("HeTu.root")
 
@@ -551,3 +552,85 @@ def is_production(config: dict) -> bool:
     if isinstance(debug, str):
         return debug.strip().lower() in ("", "0", "false", "no", "off")
     return not debug
+
+
+# ============ 执行用户工作与收尾 ============
+
+# 收尾时等被取消的后台任务结束的最长秒数（吞掉取消、不肯退出的任务不能卡住命令）
+TASK_CLEANUP_TIMEOUT = 5.0
+
+
+@contextmanager
+def lease_guard(app: LocalApp) -> Iterator[None]:
+    """
+    执行用户工作期间：租约丢失（本进程卡住太久、worker id 被别人接手）就取消当前任务，
+    并把那次取消转成 `LeaseLost`。其他来源的取消（Ctrl+C 等）原样传出。
+    """
+    task = asyncio.current_task()
+    lease = app.lease
+    if lease is None or task is None:
+        yield
+        return
+    lost = False
+
+    def on_lost() -> None:
+        nonlocal lost
+        lost = True
+        task.cancel()
+
+    lease.on_lost = on_lost
+    try:
+        yield
+    except asyncio.CancelledError:
+        if not lost:
+            raise
+        task.uncancel()
+        raise LeaseLost(
+            _("Worker ID 租约丢失（本进程卡住太久被别人接手），命令已中止")
+        ) from None
+    finally:
+        lease.on_lost = None
+
+
+async def cancel_new_tasks(before: set[asyncio.Task]) -> int:
+    """
+    取消并等待 ``before`` 之后新建、还没结束的任务（System 或 shell 代码留下的后台任务），
+    返回个数。要在 `LocalApp.aclose` 之前调用：它们的 finally 可能还要读写数据库、发号。
+    """
+    current = asyncio.current_task()
+    pending = [
+        t for t in asyncio.all_tasks() - before if not t.done() and t is not current
+    ]
+    if not pending:
+        return 0
+    for task in pending:
+        task.cancel()
+    done, still = await asyncio.wait(pending, timeout=TASK_CLEANUP_TIMEOUT)
+    for task in done:
+        if not task.cancelled() and (exc := task.exception()) is not None:
+            logger.warning(
+                _("⚠️ 后台任务 {task} 退出时出错：{err}").format(
+                    task=task.get_name(), err=f"{type(exc).__name__}: {exc}"
+                )
+            )
+    if still:
+        logger.warning(
+            _("⚠️ {n} 个后台任务 {timeout} 秒内没有响应取消，不再等待").format(
+                n=len(still), timeout=TASK_CLEANUP_TIMEOUT
+            )
+        )
+    return len(pending)
+
+
+async def close_app_quietly(app: LocalApp, warnings: list[str] | None = None) -> None:
+    """命令收尾关闭 app（写水位、释放租约、关连接）。出错只告警：用户工作已经做完（提交已经
+    发生），不能因为收尾失败报成失败，也不能盖掉命令本身的异常"""
+    try:
+        await app.aclose()
+    except Exception as e:  # noqa: BLE001
+        msg = _("收尾释放租约 / 关闭连接时出错（不影响已经完成的操作）：{err}").format(
+            err=f"{type(e).__name__}: {e}"
+        )
+        logger.warning("⚠️ " + msg)
+        if warnings is not None:
+            warnings.append(msg)

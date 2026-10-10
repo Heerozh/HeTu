@@ -13,6 +13,8 @@ from pathlib import Path
 import pytest
 
 APP = '''
+import asyncio
+
 import numpy as np
 import hetu
 
@@ -51,6 +53,21 @@ async def peek(ctx: hetu.SystemContext, uid):
 @hetu.define_system(namespace="clidemo", components=(Wallet,), permission=hetu.Permission.EVERYBODY)
 async def boom(ctx: hetu.SystemContext):
     raise RuntimeError("boom 💥")
+
+
+@hetu.define_system(namespace="clidemo", components=(Wallet,), depends=("add_gold",), permission=hetu.Permission.ADMIN)
+async def spawn_and_fail(ctx: hetu.SystemContext, uid: int):
+    """留下一个后台任务再失败：它被取消时的收尾还要写库"""
+
+    async def background():
+        try:
+            await asyncio.sleep(100)
+        finally:
+            await ctx.systems.call("add_gold", uid, 1)
+
+    asyncio.get_running_loop().create_task(background())
+    await asyncio.sleep(0)
+    raise RuntimeError("after spawn")
 
 
 @hetu.define_endpoint(namespace="clidemo", permission=hetu.Permission.EVERYBODY)
@@ -200,6 +217,15 @@ def test_call_args(project, tmp_path):
         stdin="﻿[1004, 7]".encode(),
     )
     assert code == 0 and out["result"] == 7
+
+
+def test_call_cleans_up_background_tasks_before_closing(project):
+    """System 留下的后台任务在关闭后端之前取消（失败路径也是）：它的 finally 还能写库"""
+    code, out = run_json("call", "spawn_and_fail", "6101", cwd=project)
+    assert code == 1 and out["error"] == "after spawn"
+    assert any("1 个后台任务" in w for w in out["warnings"])
+    code, out = run_json("get", "Wallet", "owner=6101", cwd=project)
+    assert code == 0 and out["row"]["gold"] == 1
 
 
 def test_write_protection(tmp_path):
@@ -364,6 +390,27 @@ def test_shell(project):
     assert code == 0, err
     code, out = run_json("get", "Wallet", "owner=3002", cwd=project)
     assert out["row"] is None
+
+
+def test_shell_cleans_up_background_tasks_before_closing(project):
+    """shell 代码留下的后台任务在关闭后端之前取消：它的 finally 还能写库"""
+    source = textwrap.dedent(
+        """
+        async def background():
+            try:
+                await asyncio.sleep(100)
+            finally:
+                await insert('Wallet', owner=3101)
+
+        task = asyncio.create_task(background())
+        await asyncio.sleep(0)
+        """
+    )
+    code, out, err = run_hetu("shell", "-c", source, cwd=project)
+    assert code == 0, err
+    assert "1 个还在跑的后台任务" in err
+    code, out = run_json("get", "Wallet", "owner=3101", cwd=project)
+    assert out["row"] is not None
 
 
 def test_audit_log(project):
