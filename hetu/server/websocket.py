@@ -337,7 +337,8 @@ async def send_loop(
     先插一轮推送。在等占位的期间不插：那个占位是哪个订阅的还不知道。
     等推送的调用（rpcs）的 ["sync", id] 随推送一起取、排在推送后面发（门面的 take_synced_，设计稿
     2026-10-10-rpcs-sync §4.5），先后规则与推送相同。
-    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
+    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真（sync 帧
+    不记，见下）。
     返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
     """
     loop = asyncio.get_running_loop()
@@ -366,10 +367,10 @@ async def send_loop(
                     await ws.send(pack(["updt", sub_id, data]))
                     if flooded():
                         return
+                # sync 不计入发送频率上限：它和客户端的 rpcs 请求一一对应，客户端那一侧已经限过频。
+                # 计入的话一次 rpcs 要发 rsp + sync 两帧，按默认配置（两边上限相同）服务端先超限
                 for sync_id in synced:
                     await ws.send(pack(["sync", sync_id]))
-                    if flooded():
-                        return
                 continue
         if push_queue.empty():
             # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里

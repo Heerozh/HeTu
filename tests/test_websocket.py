@@ -1096,7 +1096,13 @@ class _FakeOutbox:
         pass
 
 
-async def _run_send_loop(ws: _FakeSendWs, outbox: _FakeOutbox, queue, until) -> None:
+async def _run_send_loop(
+    ws: _FakeSendWs,
+    outbox: _FakeOutbox,
+    queue,
+    until,
+    flooded: Callable[[], bool] = lambda: False,
+) -> None:
     """跑 send_loop 直到 until(发出的帧) 为真（最多 2 秒），之后停掉它"""
     from hetu.server.websocket import send_loop
 
@@ -1106,7 +1112,7 @@ async def _run_send_loop(ws: _FakeSendWs, outbox: _FakeOutbox, queue, until) -> 
             cast(Any, outbox),
             queue,
             pack=lambda reply: reply,
-            flooded=lambda: False,
+            flooded=flooded,
         )
     )
     try:
@@ -1233,6 +1239,33 @@ async def test_send_loop_never_sends_sync_ahead_of_a_queued_sub_reply():
         lambda frames: ["sync", 7] in frames,
     )
     assert [f[0] for f in ws.frames] == ["rsp"] * 10 + ["sub", "updt", "sync"]
+
+
+async def test_send_loop_sync_frames_do_not_count_toward_send_limit():
+    """
+    sync 帧不计入服务端发送频率上限：它和客户端的 rpcs 请求一一对应，客户端那一侧已经限过频。计入的话
+    一次 rpcs 要发 rsp + sync 两帧，按默认配置（服务端与客户端的上限相同）客户端没超限、服务端先超了
+    """
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    queue.put_nowait(["rsp", "ok"])
+    counted: list[int] = []
+
+    def flooded() -> bool:
+        counted.append(1)
+        return False
+
+    ws = _FakeSendWs()
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"S": {1: {"v": 1}}}, synced=[7, 8]),
+        queue,
+        lambda frames: ["sync", 8] in frames,
+        flooded=flooded,
+    )
+    assert [f[0] for f in ws.frames] == ["rsp", "updt", "sync", "sync"]
+    assert len(counted) == 2, "只有 rsp 和 updt 计入发送次数"
 
 
 async def test_send_loop_sync_held_behind_replies_goes_out_with_pushes():
