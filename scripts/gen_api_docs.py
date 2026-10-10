@@ -760,16 +760,18 @@ def main() -> None:
     link_map = _build_symbol_link_map(symbols)
     grouped = group_by_topic(symbols)
 
+    # 固定 LF：Windows 上 write_text 默认会把 \n 转成 \r\n
     (DOCS_API_DIR / "_index.md").write_text(
-        render_index_page(grouped), encoding="utf-8"
+        render_index_page(grouped), encoding="utf-8", newline="\n"
     )
     for topic, group_symbols in grouped.items():
         (DOCS_API_DIR / f"{topic}.md").write_text(
             render_topic_page(topic, group_symbols, symbol_index, link_map),
             encoding="utf-8",
+            newline="\n",
         )
     (DOCS_API_DIR / "_coverage.md").write_text(
-        render_coverage_page(symbols), encoding="utf-8"
+        render_coverage_page(symbols), encoding="utf-8", newline="\n"
     )
 
     print(f"Wrote {len(grouped) + 2} files to {DOCS_API_DIR}")
