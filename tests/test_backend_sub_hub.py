@@ -5,6 +5,7 @@ docs/superpowers/specs/2026-09-28-worker-subscriptions-design.md）。连真实�
 """
 
 import asyncio
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import ExitStack
 from contextvars import ContextVar
@@ -1095,3 +1096,243 @@ async def test_duplicate_started_after_subscription_closed_does_not_hang(
         assert await first == (None, [])
         assert await dup == (None, [])
     await broker.close()
+
+
+# ==== 栅栏（等推送的 RPC，设计稿 docs/superpowers/specs/2026-10-10-rpcs-sync-design.md）====
+
+
+def test_fence_delay_covers_notify_path():
+    """栅栏入队前的余量要盖住"commit 返回 → 通知进本地队列"：SQLite 每 interval/2 轮询一次通知表"""
+    from hetu.data.backend.sqlite.mq import SQLiteMQClient
+
+    assert MQClient.FENCE_DELAY == 0.02
+    assert SQLiteMQClient.FENCE_DELAY > 0.5 * INTERVAL
+
+
+async def _subscribed_row(
+    hub: SubscriptionHub, ref, ctx
+) -> tuple[SubscriptionBroker, str, str]:
+    """新门面订 time=110 那行，返回 (门面, sub_id, 行频道)"""
+    broker = SubscriptionBroker(hub._backend, hub=hub)
+    sub_id, _ = await broker.subscribe_get(ref, ctx, "time", 110)
+    assert sub_id
+    channel = cast(RowSubscription, broker._subs[sub_id]).channel
+    return broker, sub_id, channel
+
+
+class _ListHandler(logging.Handler):
+    """直接挂在 HeTu.root 上收日志：起服类测试会把它的 propagate 关掉，caplog 收不到"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+async def test_fence_fires_after_earlier_notifications_are_delivered(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """栅栏触发时，它入队之前已进队列的通知都已处理完、推送已交到待发区"""
+    broker, sub_id, channel = await _subscribed_row(hub, filled_item_ref, admin_ctx)
+    await asyncio.sleep(INTERVAL * 3)  # 订阅生效后的补读先消化掉
+    assert not broker.has_updates_()
+    row_id = await _set_qty(hub._backend, filled_item_ref, 777)
+    # 这次写入的通知进了 hub 的队列之后再放栅栏：栅栏只管它之前到达的
+    await wait_until(lambda: channel in hub.mq.pulled_set)
+    seen: list[dict] = []
+
+    def on_fire() -> None:
+        seen.append({sid: dict(rows) for sid, rows in broker._outbox.items()})
+
+    hub.fence_(on_fire)
+    await wait_until(lambda: seen, timeout=3)
+    assert seen[0][sub_id][row_id]["qty"] == 777
+    await broker.close()
+
+
+async def test_fence_alone_fires_after_delay_and_one_interval(hub: SubscriptionHub):
+    """只有栅栏：隔 FENCE_DELAY 入队、满一个 interval 弹出之后才触发，不会更早"""
+    loop = asyncio.get_running_loop()
+    fired_at: list[float] = []
+    start = loop.time()
+    hub.fence_(lambda: fired_at.append(loop.time()))
+    await wait_until(lambda: fired_at, timeout=3)
+    elapsed = fired_at[0] - start
+    expected = hub.mq.FENCE_DELAY + INTERVAL
+    # 定时器可能按时钟精度早到一点
+    assert expected - 0.02 <= elapsed < expected + 1
+
+
+async def test_fence_does_not_wait_for_later_notifications(
+    hub: SubscriptionHub, filled_item_ref, admin_ctx
+):
+    """栅栏只管它入队之前到达的通知：之后才到的，可以在它触发之后才处理"""
+    broker, sub_id, _channel = await _subscribed_row(hub, filled_item_ref, admin_ctx)
+    await asyncio.sleep(INTERVAL * 3)
+    seen: list[dict] = []
+    with patch.object(hub.mq, "FENCE_DELAY", 0):
+        hub.fence_(lambda: seen.append(dict(broker._outbox)))
+    await wait_until(lambda: hub.mq.pulled_deque)  # 栅栏键入队了
+    await asyncio.sleep(INTERVAL / 2)
+    row_id = await _set_qty(hub._backend, filled_item_ref, 888)
+    await wait_until(lambda: seen, timeout=3)
+    assert sub_id not in seen[0]
+    updates = await settled_updates(broker, timeout=3)
+    assert updates[sub_id][row_id]["qty"] == 888
+    await broker.close()
+
+
+async def test_fence_key_mixed_with_notifications_and_directed_rereads(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """栅栏键和真实通知、定向补读同一批弹出：各自照常处理，栅栏在本批交付之后触发"""
+    hub = SubscriptionHub(mod_auto_backend("main"), autostart=False)
+    broker, sub_id, channel = await _subscribed_row(hub, filled_item_ref, admin_ctx)
+    row_id = await _set_qty(hub._backend, filled_item_ref, 555)
+    await wait_until(lambda: channel in hub.mq.pulled_set)
+    hub.reread_for(broker._subs[sub_id], channel)
+    queued = len(hub.mq.pulled_deque)
+    seen: list[dict] = []
+    with patch.object(hub.mq, "FENCE_DELAY", 0):
+        hub.fence_(lambda: seen.append(dict(broker._outbox)))
+    await wait_until(lambda: len(hub.mq.pulled_deque) == queued + 1)
+    await asyncio.sleep(INTERVAL * 1.5)  # 都满期：下面一次弹出同一批
+    loop = asyncio.get_running_loop()
+    assert await hub.step_(loop.time() + 3, lambda: False)
+    assert seen and seen[0][sub_id][row_id]["qty"] == 555
+    await broker.close()
+    await hub.close()
+
+
+async def test_fence_fires_when_the_tick_fails(
+    mod_auto_backend, filled_item_ref, admin_ctx
+):
+    """栅栏和别的通知同一批弹出、这个 tick 处理出错（bug）：栅栏照常触发"""
+    hub = SubscriptionHub(mod_auto_backend("main"), autostart=False)
+    broker, _sub_id, channel = await _subscribed_row(hub, filled_item_ref, admin_ctx)
+    await _set_qty(hub._backend, filled_item_ref, 999)
+    await wait_until(lambda: channel in hub.mq.pulled_set)
+    queued = len(hub.mq.pulled_deque)
+    fired: list[int] = []
+    with patch.object(hub.mq, "FENCE_DELAY", 0):
+        hub.fence_(lambda: fired.append(1))
+    await wait_until(lambda: len(hub.mq.pulled_deque) == queued + 1)
+    await asyncio.sleep(INTERVAL * 1.5)
+    loop = asyncio.get_running_loop()
+    with (
+        patch.object(hub, "_prefetch_rows", side_effect=RuntimeError("boom")),
+        pytest.raises(RuntimeError, match="boom"),
+    ):
+        await hub.step_(loop.time() + 3, lambda: False)
+    assert fired == [1]
+    await broker.close()
+    await hub.close()
+
+
+async def test_fence_callback_error_does_not_break_others(hub: SubscriptionHub):
+    """一个栅栏的回调抛异常：记日志，同批别的栅栏、之后的 tick 照常"""
+    handler = _ListHandler()
+    logging.getLogger("HeTu.root").addHandler(handler)
+    try:
+
+        def broken() -> None:
+            raise RuntimeError("fence callback boom")
+
+        fired: list[int] = []
+        hub.fence_(broken)
+        hub.fence_(lambda: fired.append(1))
+        await wait_until(lambda: fired, timeout=3)
+        hub.fence_(lambda: fired.append(2))
+        await wait_until(lambda: len(fired) == 2, timeout=3)
+    finally:
+        logging.getLogger("HeTu.root").removeHandler(handler)
+    assert any(
+        r.exc_info and "fence callback boom" in str(r.exc_info[1])
+        for r in handler.records
+    )
+
+
+async def test_fence_fires_on_hub_close(mod_auto_backend):
+    """hub 关闭时还没触发的栅栏都触发：等着 sync 的连接不会一直等"""
+    hub = SubscriptionHub(mod_auto_backend("main"))
+    fired: list[int] = []
+    hub.fence_(lambda: fired.append(1))
+    await hub.close()
+    await asyncio.sleep(0)
+    assert fired == [1]
+    # 关闭之后再放的栅栏也会触发（不会一直不来）
+    hub.fence_(lambda: fired.append(2))
+    await wait_until(lambda: len(fired) == 2, timeout=1)
+
+
+async def test_fence_safety_timer(hub: SubscriptionHub):
+    """栅栏键迟迟没被处理（这里让它 60 秒后才入队）：保险定时器到时照样触发，且只触发一次"""
+    fired: list[int] = []
+    with (
+        patch.object(hub.mq, "FENCE_DELAY", 60),
+        patch.object(hub, "FENCE_TIMEOUT_INTERVALS", 2),
+    ):
+        hub.fence_(lambda: fired.append(1))
+    await wait_until(lambda: fired, timeout=1)
+    await asyncio.sleep(INTERVAL * 3)
+    assert fired == [1]
+
+
+async def test_fence_restarts_a_stopped_loop(hub: SubscriptionHub):
+    """处理循环停了（被取消）：fence_ 把它重新拉起，不靠保险定时器"""
+    task = hub._task
+    assert task is not None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+    fired: list[int] = []
+    hub.fence_(lambda: fired.append(1))
+    # 保险定时器要 2 秒，1 秒内触发说明是处理循环弹出了栅栏键
+    await wait_until(lambda: fired, timeout=1)
+
+
+async def test_broker_sync_hands_ids_to_sender(hub: SubscriptionHub):
+    """sync_：栅栏触发时 sync_id 交给发送循环（叫醒它），不算订阅推送"""
+    broker = SubscriptionBroker(hub._backend, hub=hub)
+    woke: list[int] = []
+    broker.bind_sender_(lambda: woke.append(1))
+    broker.idle_(True)
+    broker.sync_(7)
+    broker.sync_(8)
+    await wait_until(broker.has_synced_, timeout=3)
+    got: list[int] = []
+    await wait_until(
+        lambda: got.extend(broker.take_synced_()) or len(got) == 2, timeout=3
+    )
+    assert got == [7, 8]
+    assert woke
+    assert not broker.has_updates_()
+    assert not broker.has_synced_()
+    await broker.close()
+
+
+@pytest.mark.timeout(20)
+async def test_broker_sync_does_not_spin_get_updates(mod_auto_backend):
+    """
+    手动模式：get_updates 驱动的 tick 里栅栏触发了，但 sync 不是订阅推送：get_updates 到时返回空。
+    has_updates_ 算上 sync 的话，step_ 每次都当场返回，get_updates 不让出事件循环地空转
+    """
+    hub = SubscriptionHub(mod_auto_backend("main"), autostart=False)
+    broker = SubscriptionBroker(hub._backend, hub=hub)
+    broker.sync_(1)
+    assert await broker.get_updates(timeout=hub.mq.FENCE_DELAY + INTERVAL * 3) == {}
+    assert broker.take_synced_() == [1]
+    await broker.close()
+    await hub.close()
+
+
+async def test_broker_sync_after_close_is_dropped(hub: SubscriptionHub):
+    """连接关了：在途的栅栏触发时不再记 sync_id，关闭之后再 sync_ 直接忽略"""
+    broker = SubscriptionBroker(hub._backend, hub=hub)
+    broker.sync_(1)
+    await broker.close()
+    broker.sync_(2)
+    await asyncio.sleep(hub.mq.FENCE_DELAY + INTERVAL * 2)
+    assert not broker.has_synced_()
+    assert broker.take_synced_() == []

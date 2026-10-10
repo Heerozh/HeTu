@@ -5,6 +5,7 @@ import itertools
 import logging
 import os
 import warnings
+from collections.abc import Iterable
 from typing import Any, Callable, cast
 
 import pytest
@@ -256,6 +257,65 @@ def test_websocket_call_system(test_server):
     }
 
 
+@pytest.mark.timeout(20)
+def test_websocket_rpcs_sync_arrives_after_push(test_server):
+    """rpcs：rsp 照常先到；这次调用引起的订阅推送都到了之后，才来 ["sync", id]"""
+    owner = 9101
+    frames: list = []
+    before: dict = {}
+    sub_ids: list = []
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "login", owner])
+        await client.recv()
+        await client.send(["sub", "RLSComp", "range", "owner", owner, owner])
+        _, sub_id, rows = await client.recv()
+        assert sub_id
+        sub_ids.append(sub_id)
+        before.update({row["owner"]: row["value"] for row in rows or []})
+        await client.send(["rpcs", 7, "add_rls_comp_value", 1])
+        async with asyncio.timeout(5):
+            while not frames or frames[-1] != ["sync", 7]:
+                frames.append(await client.recv())
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert frames[0] == ["rsp", "ok"]
+    assert frames[-1] == ["sync", 7]
+    expected = before.get(owner, 100) + 1
+    pushed = [
+        row["value"]
+        for frame in frames[1:-1]
+        if frame[0] == "updt" and frame[1] == sub_ids[0]
+        for row in frame[2].values()
+        if row
+    ]
+    assert expected in pushed, f"sync 之前没收到这次写入的推送：{frames}"
+
+
+@pytest.mark.timeout(20)
+def test_websocket_rpcs_without_push_still_syncs(test_server):
+    """rpcs 调用没改到本连接订阅的数据：没有推送，sync 照样在约一个 interval 之后到"""
+    from hetu.data.backend import MQClient
+
+    frames: list = []
+    elapsed: list[float] = []
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpcs", 3, "echo_response", ["hi"]])
+        loop = asyncio.get_running_loop()
+        start = loop.time()
+        async with asyncio.timeout(5):
+            frames.append(await client.recv())
+            frames.append(await client.recv())
+        elapsed.append(loop.time() - start)
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    assert frames == [["rsp", ["hi"]], ["sync", 3]]
+    assert elapsed[0] >= 1 / MQClient.UPDATE_FREQUENCY - 0.03
+
+
 def test_websocket_kick_connect(test_server):
     # 测试踢掉别人的连接
     async def kick_routine(connect):
@@ -369,6 +429,147 @@ async def test_rpc_kicked_disconnects_even_in_debug():
         ["rpc", "login", 1], cast(Any, KickedExecutor()), push_queue, 1
     )
     assert push_queue.empty()
+
+
+# ==== rpcs：等推送的调用（设计稿 docs/superpowers/specs/2026-10-10-rpcs-sync-design.md）====
+
+
+class _RpcExecutor:
+    """rpc() / rpcs() 用的执行器替身：返回给定的结果，记下调用"""
+
+    def __init__(self, result: tuple, kicked: bool = False):
+        self.result = result
+        self.kicked = kicked
+        self.calls: list = []
+
+    async def execute(self, endpoint, *args):
+        self.calls.append((endpoint, args))
+        return self.result
+
+
+class _SyncBroker:
+    """rpcs() 用的门面替身：记下 sync_ 的 id，以及那时 push_queue 里已排着几条回复"""
+
+    def __init__(self, queue: asyncio.Queue):
+        self.queue = queue
+        self.synced: list[tuple[int, int]] = []
+
+    def sync_(self, sync_id: int) -> None:
+        self.synced.append((sync_id, self.queue.qsize()))
+
+
+async def test_rpcs_syncs_after_the_rsp_is_queued():
+    """rpcs 照 rpc 执行、照常回 rsp；rsp 入队之后才起栅栏"""
+    from hetu.server.receiver import rpcs
+
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    executor = _RpcExecutor((True, None))
+    assert await rpcs(
+        ["rpcs", 7, "buy", 1, 2], cast(Any, executor), cast(Any, broker), queue
+    )
+    assert executor.calls == [("buy", (1, 2))]
+    assert queue.get_nowait() == ["rsp", "ok"]
+    assert broker.synced == [(7, 1)]
+
+
+async def test_rpcs_response_to_client_also_syncs():
+    from hetu.endpoint.response import ResponseToClient
+    from hetu.server.receiver import rpcs
+
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    executor = _RpcExecutor((True, ResponseToClient({"gold": 5})))
+    assert await rpcs(["rpcs", 3, "buy"], cast(Any, executor), cast(Any, broker), queue)
+    assert queue.get_nowait() == ["rsp", {"gold": 5}]
+    assert broker.synced == [(3, 1)]
+
+
+@pytest.mark.parametrize(
+    ("result", "debug", "keep", "frame"),
+    [
+        # 守卫软拒绝：没有提交，回 rej、连接保持
+        ((True, "reject"), 0, True, ["rej", "buy", "RATE_LIMITED"]),
+        # debug 模式执行失败：回 err、连接保持
+        ((False, "boom"), 1, True, ["err", "buy", "boom"]),
+        # release 模式执行失败：断开连接
+        ((False, None), 0, False, None),
+    ],
+)
+async def test_rpcs_no_sync_without_rsp(result, debug, keep, frame):
+    """只在回了 rsp 时才起栅栏：rej / err / 断开都不发 sync"""
+    from hetu.endpoint.response import RejectResponse
+    from hetu.server.receiver import rpcs
+
+    if result[1] == "reject":
+        result = (True, RejectResponse("RATE_LIMITED"))
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    ok = await rpcs(
+        ["rpcs", 5, "buy"],
+        cast(Any, _RpcExecutor(result)),
+        cast(Any, broker),
+        queue,
+        debug,
+    )
+    assert bool(ok) is keep
+    assert (queue.get_nowait() if frame else None) == frame
+    assert queue.empty()
+    assert broker.synced == []
+
+
+async def test_rpcs_kicked_disconnects_without_sync():
+    from hetu.server.receiver import rpcs
+
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    executor = _RpcExecutor((False, None), kicked=True)
+    assert not await rpcs(
+        ["rpcs", 5, "login", 1], cast(Any, executor), cast(Any, broker), queue, 1
+    )
+    assert queue.empty()
+    assert broker.synced == []
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        ["rpcs", 7],  # 缺 endpoint
+        ["rpcs", "7", "buy"],
+        ["rpcs", True, "buy"],
+        ["rpcs", 7.0, "buy"],
+        ["rpcs", -1, "buy"],
+        ["rpcs", 2**31, "buy"],
+        ["rpcs", None, "buy"],
+    ],
+)
+async def test_rpcs_rejects_bad_sync_id(data):
+    """sync_id 不是 0..2^31-1 的整数（bool 不算）、消息太短：同别的格式错误，抛错让连接断开"""
+    from hetu.server.receiver import rpcs
+
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    executor = _RpcExecutor((True, None))
+    with pytest.raises(ValueError, match="rpcs"):
+        await rpcs(data, cast(Any, executor), cast(Any, broker), queue)
+    assert executor.calls == []
+    assert queue.empty()
+    assert broker.synced == []
+
+
+async def test_rpcs_accepts_sync_id_bounds():
+    from hetu.server.receiver import rpcs
+
+    queue: asyncio.Queue = asyncio.Queue()
+    broker = _SyncBroker(queue)
+    for sync_id in (0, 2**31 - 1):
+        assert await rpcs(
+            ["rpcs", sync_id, "buy"],
+            cast(Any, _RpcExecutor((True, None))),
+            cast(Any, broker),
+            queue,
+        )
+    assert [sync_id for sync_id, _queued in broker.synced] == [0, 2**31 - 1]
 
 
 @pytest.mark.timeout(60)
@@ -871,10 +1072,11 @@ class _FakeSendWs:
 
 
 class _FakeOutbox:
-    """send_loop 用的门面替身：待发区就是个 dict"""
+    """send_loop 用的门面替身：待发区就是个 dict，旁边排着要发的 sync_id"""
 
-    def __init__(self, outbox: dict[str, dict]):
+    def __init__(self, outbox: dict[str, dict], synced: Iterable[int] = ()):
         self.outbox = dict(outbox)
+        self.synced = list(synced)
 
     def has_updates_(self) -> bool:
         return bool(self.outbox)
@@ -882,6 +1084,13 @@ class _FakeOutbox:
     def take_updates_(self) -> dict[str, dict]:
         updates, self.outbox = self.outbox, {}
         return updates
+
+    def has_synced_(self) -> bool:
+        return bool(self.synced)
+
+    def take_synced_(self) -> list[int]:
+        synced, self.synced = self.synced, []
+        return synced
 
     def idle_(self, idle: bool) -> None:
         pass
@@ -972,6 +1181,77 @@ async def test_send_loop_waits_for_the_sub_reply_it_is_holding():
         lambda frames: any(f[0] == "updt" for f in frames),
     )
     assert [f[0] for f in ws.frames] == ["sub", "updt"]
+
+
+async def test_send_loop_sends_sync_after_updates():
+    """等推送的调用的 sync 帧和推送同一次从待发区取：先发推送，再发 sync"""
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    ws = _FakeSendWs()
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"S": {1: {"v": 1}}}, synced=[7]),
+        queue,
+        lambda frames: ["sync", 7] in frames,
+    )
+    assert ws.frames == [["updt", "S", {1: {"v": 1}}], ["sync", 7]]
+
+
+async def test_send_loop_wakes_for_sync_alone():
+    """只有 sync、没有推送：门面叫醒空闲的发送循环后照样发出"""
+    from hetu.server.websocket import PUSH_UPDATES, PushQueue
+
+    queue = PushQueue(1024)
+    outbox = _FakeOutbox({})
+    ws = _FakeSendWs()
+
+    def fence_fired() -> None:
+        outbox.synced.append(9)
+        queue.put_nowait(PUSH_UPDATES)  # 门面交来 sync 时叫醒空闲的发送循环
+
+    asyncio.get_running_loop().call_later(0.05, fence_fired)
+    await _run_send_loop(ws, outbox, queue, lambda frames: ["sync", 9] in frames)
+    assert ws.frames == [["sync", 9]]
+
+
+async def test_send_loop_never_sends_sync_ahead_of_a_queued_sub_reply():
+    """sync 与推送同进同出：排着订阅回复的占位时，前面的回复发了再久也不先发 sync"""
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    for i in range(10):
+        queue.put_nowait(["rsp", i])  # 每帧 20ms，这些回复要发 200ms
+    placeholder = asyncio.get_running_loop().create_future()
+    placeholder.set_result(["sub", "X", []])
+    queue.put_nowait(placeholder)
+    ws = _FakeSendWs(delay=0.02)
+    await _run_send_loop(
+        ws,
+        _FakeOutbox({"X": {1: {"v": 1}}}, synced=[7]),
+        queue,
+        lambda frames: ["sync", 7] in frames,
+    )
+    assert [f[0] for f in ws.frames] == ["rsp"] * 10 + ["sub", "updt", "sync"]
+
+
+async def test_send_loop_sync_held_behind_replies_goes_out_with_pushes():
+    """客户端连着发 RPC 时，被回复压住的 sync 和推送一样，压住一阵就插一轮发出，不会等到队列空"""
+    from hetu.server.websocket import PushQueue
+
+    queue = PushQueue(1024)
+    calls = itertools.count(1)
+
+    def client_keeps_calling(frame) -> None:
+        if frame[0] == "rsp":
+            queue.put_nowait(["rsp", next(calls)])  # 回复一发出，客户端又发来一条 RPC
+
+    ws = _FakeSendWs(on_send=client_keeps_calling, delay=0.01)
+    queue.put_nowait(["rsp", 0])
+    await _run_send_loop(
+        ws, _FakeOutbox({}, synced=[7]), queue, lambda frames: ["sync", 7] in frames
+    )
+    assert ws.frames[0] == ["rsp", 0], "sync 一开始就抢到了排着的回复前面"
 
 
 @pytest.mark.timeout(30)
@@ -1319,6 +1599,14 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         "rpc_rejected": (
             lambda ws: ws.send(["rpc", "add_rls_comp_value", 1]),
             "rpc 调用失败",
+        ),
+        "rpcs_rejected": (
+            lambda ws: ws.send(["rpcs", 1, "add_rls_comp_value", 1]),
+            "rpc 调用失败",
+        ),
+        "rpcs_bad_sync_id": (
+            lambda ws: ws.send(["rpcs", "1", "login", 1]),
+            "Invalid rpcs sync_id",
         ),
     }
     closed = []
