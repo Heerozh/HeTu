@@ -280,6 +280,8 @@ def _common_read_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 class GetCommand(CommandInterface):
+    json_output = True
+
     @classmethod
     def name(cls):
         return "get"
@@ -318,6 +320,8 @@ class GetCommand(CommandInterface):
 
 
 class RangeCommand(CommandInterface):
+    json_output = True
+
     @classmethod
     def name(cls):
         return "range"

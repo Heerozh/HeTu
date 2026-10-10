@@ -427,6 +427,8 @@ async def _call_main(args: argparse.Namespace, report: dict) -> dict:
 
 
 class CallCommand(CommandInterface):
+    json_output = True
+
     @classmethod
     def name(cls):
         return "call"

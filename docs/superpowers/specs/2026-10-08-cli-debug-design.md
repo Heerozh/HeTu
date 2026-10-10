@@ -359,7 +359,8 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 ### 2.9 输出格式与退出码
 
 `call` / `get` / `range` / 两个 `--list` 的 stdout 恰好一行 JSON（UTF-8，
-`ensure_ascii=False`）。shell 不受此约束。
+`ensure_ascii=False`）。shell 不受此约束。命令行本身的用法错误（argparse 报的）也输出一行 JSON、
+退出码 2；`call` 的选项可以夹在参数中间（`call add_gold 1001 --dry-run 500`）。
 
 `hetu call` 成功：
 

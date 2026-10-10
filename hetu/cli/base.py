@@ -269,6 +269,9 @@ def add_config_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 class CommandInterface:
+    json_output = False
+    """stdout 只输出一行 JSON 的命令：命令行用法错误也要写成 JSON（见 CommandIndex）"""
+
     @classmethod
     def name(cls):
         raise NotImplementedError("Subclasses should implement this method.")

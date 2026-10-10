@@ -225,6 +225,20 @@ def test_call_args(project, tmp_path):
     assert code == 0 and out["result"] == 7
 
 
+def test_command_line_parsing(project):
+    # 选项夹在两个参数中间：后面的参数接回 ARG 末尾
+    code, out = run_json("call", "add_gold", "6001", "--dry-run", "5", cwd=project)
+    assert code == 0 and out["result"] == 5 and out["dry_run"] is True
+    # argparse 的用法错误也输出一行 JSON、退出码 2
+    code, out = run_json("call", "add_gold", "--timeout", "abc", cwd=project)
+    assert code == 2 and out["error_type"] == "UsageError"
+    assert "usage:" in out["error"]
+    code, out = run_json("range", "Wallet", cwd=project)
+    assert code == 2 and out["ok"] is False
+    code, out = run_json("get", "Wallet", "owner=1", "--nope", cwd=project)
+    assert code == 2 and "--nope" in out["error"]
+
+
 def test_call_cleans_up_background_tasks_before_closing(project):
     """System 留下的后台任务在关闭后端之前取消（失败路径也是）：它的 finally 还能写库"""
     code, out = run_json("call", "spawn_and_fail", "6101", cwd=project)
