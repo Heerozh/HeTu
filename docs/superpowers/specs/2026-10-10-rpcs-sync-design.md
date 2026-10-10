@@ -104,9 +104,10 @@ hub 的 MQ 队列按到达时刻排序（`_enqueue` 只往队尾追加，时刻�
 - `_tick(batch)`：先把栅栏键从这批里拣出来，剩下的照旧 `_collect` / `_repair`（`_collect` 把 `\0` 开头的键按
   定向补读解析，栅栏键不能进去）；在最外层的 `finally` 里、现有的 `_settle_channels` / `_deliver` 之后，逐个触发
   这批的栅栏。没有 work 提前 return、处理出错时也会走到。手动模式（`step_`）同样经过 `_tick`。
-- 保险定时器：每个栅栏另挂 `FENCE_TIMEOUT_INTERVALS`（默认 20，即 2 秒）个 interval 的定时器，到时还没触发就
-  直接触发。覆盖栅栏键被 `DROP_AFTER` 丢掉、处理循环因 bug 重启等情况，保证连接活着时 sync 一定会来，SDK 不用
-  自己计时。
+- 保险定时器：每个栅栏另挂一个定时器，栅栏键入队之后再过 `FENCE_TIMEOUT_INTERVALS`（默认 20，即 2 秒）个
+  interval 还没触发就直接触发。覆盖栅栏键被 `DROP_AFTER` 丢掉、处理循环因 bug 重启等情况，保证连接活着时 sync
+  一定会来，SDK 不用自己计时。从入队时算起（审查后改）：interval 很短时 20 个 interval 可能比 g 还短，从 `fence_`
+  调用时算的话栅栏键还没入队就先超时了。
 - `close()`：触发所有未触发的栅栏，取消它们的定时器。
 - 触发 = 取消两个定时器、从登记表移除、同步调用 callback。callback 不能 await；抛出的异常记日志后吞掉（同
   `deliver_` 叫醒发送循环出错的处理），不影响同批其他栅栏和后续 tick。
@@ -161,7 +162,9 @@ sync 帧不计入服务端发送频率上限（`flooded()`，审查后补）：�
   （§8.1）；留 20ms 应对负载尖峰。Linux 压测负载下 p99 仍在 1ms 以内，偶发的几十 ms 是事件循环卡住，栅栏的
   定时器同样被推迟，没有被超车（§8.2）。
 - SQLite（`SQLiteMQClient`）：通知表每 interval/2（50ms）轮询一次，Windows 上 asyncio 的睡眠还会多睡一个定时器
-  周期（约 15.6ms），实测 δ 最长约 63ms，取 `0.5 * interval + 0.03`（80ms）。只用于开发，延迟不敏感。
+  周期（约 15.6ms），实测 δ 最长约 63ms，取 `0.5 * interval + 0.03`（80ms）。只用于开发，延迟不敏感。建实例时
+  按当时的 `UPDATE_FREQUENCY` 算（审查后改，原来是 import 时算死的类属性）：以后它做成配置、调低时，轮询间隔
+  变长，余量跟着变长。
 
 g 越大越稳、完成越晚。以后可以做成配置项。
 

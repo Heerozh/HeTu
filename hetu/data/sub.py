@@ -1174,12 +1174,14 @@ class SubscriptionHub:
         if self._autostart:
             self._start()  # 处理循环意外结束过的话重新拉起，别只靠保险定时器
         fid = next(self._fence_ids)
+        delay = self._mq.FENCE_DELAY
+        # 保险超时从栅栏键入队时算起：interval 很短时 FENCE_TIMEOUT_INTERVALS 个 interval 可能比
+        # FENCE_DELAY 还短，从现在算的话栅栏键还没入队就先超时了
+        timeout = delay + self.FENCE_TIMEOUT_INTERVALS * self.interval
         self._fences[fid] = _Fence(
             callback,
-            loop.call_later(self._mq.FENCE_DELAY, self._enqueue_fence, fid),
-            loop.call_later(
-                self.FENCE_TIMEOUT_INTERVALS * self.interval, self._fire_fence, fid
-            ),
+            loop.call_later(delay, self._enqueue_fence, fid),
+            loop.call_later(timeout, self._fire_fence, fid),
         )
 
     def _enqueue_fence(self, fid: int) -> None:

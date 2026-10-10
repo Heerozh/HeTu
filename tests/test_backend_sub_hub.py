@@ -1102,14 +1102,8 @@ async def test_duplicate_started_after_subscription_closed_does_not_hang(
 
 
 def test_fence_delay_covers_notify_path():
-    """
-    栅栏入队前的余量要盖住"commit 返回 → 通知进本地队列"：SQLite 每 interval/2 轮询一次通知表，
-    Windows 上 asyncio 的睡眠会多睡一个定时器周期（约 1/64 秒），实测最长约 63ms
-    """
-    from hetu.data.backend.sqlite.mq import SQLiteMQClient
-
+    """栅栏入队前的余量要盖住"commit 返回 → 通知进本地队列"：Redis 平时约 1ms（SQLite 见下一条）"""
     assert MQClient.FENCE_DELAY == 0.02
-    assert SQLiteMQClient.FENCE_DELAY >= 0.5 * INTERVAL + 1 / 64 + 0.01
 
 
 async def _subscribed_row(
@@ -1271,16 +1265,49 @@ async def test_fence_fires_on_hub_close(mod_auto_backend):
 
 
 async def test_fence_safety_timer(hub: SubscriptionHub):
-    """栅栏键迟迟没被处理（这里让它 60 秒后才入队）：保险定时器到时照样触发，且只触发一次"""
+    """栅栏键丢了（这里让它不入队，同积压超过 DROP_AFTER 被丢掉）：保险定时器到时照样触发，且只触发一次"""
     fired: list[int] = []
     with (
-        patch.object(hub.mq, "FENCE_DELAY", 60),
+        patch.object(hub, "_enqueue_fence", lambda fid: None),
         patch.object(hub, "FENCE_TIMEOUT_INTERVALS", 2),
     ):
         hub.fence_(lambda: fired.append(1))
     await wait_until(lambda: fired, timeout=1)
     await asyncio.sleep(INTERVAL * 3)
     assert fired == [1]
+
+
+async def test_fence_safety_timer_counts_from_enqueue(hub: SubscriptionHub):
+    """
+    保险超时从栅栏键入队时算起：UPDATE_FREQUENCY 调得很高（interval 很短）时，20 个 interval 可能比
+    FENCE_DELAY 还短，从 fence_ 调用时算的话，栅栏键还没入队就先超时触发了
+    """
+    with patch.object(hub.mq, "UPDATE_FREQUENCY", 1000):
+        hub.fence_(lambda: None)
+        window = hub.FENCE_TIMEOUT_INTERVALS * hub.interval
+    (fence,) = hub._fences.values()
+    assert fence.expire.when() - fence.enqueue.when() >= window - 1e-6
+
+
+@pytest.mark.parametrize("frequency", [MQClient.UPDATE_FREQUENCY, 5])
+async def test_fence_delay_follows_update_frequency(mod_auto_backend, frequency):
+    """
+    SQLite 每 interval/2 轮询一次通知表，Windows 上 asyncio 的睡眠会多睡一个定时器周期（约 1/64 秒），
+    实测最长约 63ms：栅栏的余量要盖过一次轮询，并且跟着 UPDATE_FREQUENCY 走（建 MQClient 时按轮询间隔
+    算）。以后把它做成配置、调低的话轮询间隔变长，余量不跟着变长，sync 就总比推送先到
+    """
+    from hetu.data.backend.sqlite.mq import SQLiteMQClient
+
+    backend: Backend = mod_auto_backend("main")
+    with patch.object(MQClient, "UPDATE_FREQUENCY", frequency):
+        mq = backend.get_mq_client()
+        try:
+            if isinstance(mq, SQLiteMQClient):
+                assert mq.FENCE_DELAY >= 0.5 / frequency + 1 / 64 + 0.01
+            else:
+                assert mq.FENCE_DELAY == MQClient.FENCE_DELAY
+        finally:
+            await mq.close()
 
 
 async def test_fence_restarts_a_stopped_loop(hub: SubscriptionHub):

@@ -277,7 +277,11 @@ class SQLiteMQClient(HubMQClient):
     """
 
     LOG_TAG = "💾SQLite"
-    # 通知表每 interval/2 才轮询一次（SQLiteNotifyHub._run）：栅栏要等过一次轮询，刚提交的通知才在它
-    # 前面。Windows 上 asyncio 的睡眠会多睡一个定时器周期（约 15.6ms），实测"commit 返回 → 通知进
-    # 本地队列"最长约 63ms，再留 15ms 余量（设计稿 2026-10-10-rpcs-sync §8）
-    FENCE_DELAY = 0.5 / MQClient.UPDATE_FREQUENCY + 0.03
+
+    def __init__(self, hub: MQHub, *more_hubs: MQHub):
+        super().__init__(hub, *more_hubs)
+        # 通知表每 interval/2 才轮询一次（SQLiteNotifyHub._run）：栅栏要等过一次轮询，刚提交的通知才在
+        # 它前面。Windows 上 asyncio 的睡眠会多睡一个定时器周期（约 15.6ms），实测"commit 返回 → 通知
+        # 进本地队列"最长约 63ms，再留 15ms 余量（设计稿 2026-10-10-rpcs-sync §8）。建实例时按当时的
+        # UPDATE_FREQUENCY 算，轮询间隔跟着它变
+        self.FENCE_DELAY = 0.5 / self.UPDATE_FREQUENCY + 0.03
