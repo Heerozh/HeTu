@@ -321,6 +321,130 @@ namespace Tests.HeTu
             Assert.IsInstanceOf<CallOutcomeUnknownException>(failure);
         }
 
+        // 等推送的调用（rpcs）已收到回复、还在等推送时断线：提交确定发生了，按成功完成，不报结果
+        // 未知；而且在会话切到 Reconnecting 之后才回调，续体里接着发的调用排队等重连，不被当场回绝。
+        // 没收到回复的照旧报结果未知
+        [Test]
+        public void AnsweredPushCall_TransportClosed_CompletesAfterReconnecting()
+        {
+            var first = new FakeTransport("c1") { HoldCallsOpen = true };
+            var second = new FakeTransport("c2");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            var completed = 0;
+            var stateAtCompletion = HeTuSessionState.Stopped;
+            Exception failure = null;
+            Exception unansweredFailure = null;
+            Exception followUpFailure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.CallSystem("buy", new object[] { 1 }, response =>
+            {
+                completed++;
+                stateAtCompletion = session.State;
+                session.CallSystem("follow-up", Array.Empty<object>(), _ => { },
+                    ex => followUpFailure = ex);
+            }, ex => failure = ex, true);
+            session.CallSystem("sell", new object[] { 2 },
+                _ => Assert.Fail("call should not complete"),
+                ex => unansweredFailure = ex, true);
+
+            first.AnswerHeldPushCall("buy");
+            first.RaiseClosed("network lost");
+
+            Assert.AreEqual(1, completed);
+            Assert.IsNull(failure);
+            Assert.AreEqual(HeTuSessionState.Reconnecting, stateAtCompletion);
+            Assert.IsInstanceOf<CallOutcomeUnknownException>(unansweredFailure);
+            Assert.IsNull(followUpFailure, "续体里接着发的调用应排队等重连");
+
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            CollectionAssert.AreEqual(new[] { "follow-up" },
+                second.Calls.Select(call => call.SystemName));
+            Assert.AreEqual(1, completed);
+        }
+
+        [Test]
+        public void AnsweredPushCall_RequestTimeout_CompletesInsteadOfUnknown()
+        {
+            var first = new FakeTransport("c1") { HoldCallsOpen = true };
+            var second = new FakeTransport("c2");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler,
+                requestTimeout: TimeSpan.FromSeconds(30));
+            var stateAtCompletion = HeTuSessionState.Stopped;
+            Exception failure = null;
+
+            session.Start();
+            first.RaiseConnected();
+            session.CallSystem("buy", new object[] { 1 },
+                _ => stateAtCompletion = session.State, ex => failure = ex, true);
+            first.AnswerHeldPushCall("buy");
+
+            scheduler.RunNext(); // 请求超时定时器
+
+            Assert.IsNull(failure);
+            Assert.AreEqual(HeTuSessionState.Reconnecting, stateAtCompletion);
+        }
+
+        [Test]
+        public void AnsweredPushCall_SessionClose_CompletesAfterStopped()
+        {
+            var transport = new FakeTransport("c1") { HoldCallsOpen = true };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+            var stateAtCompletion = HeTuSessionState.Ready;
+            Exception failure = null;
+            Exception unansweredFailure = null;
+
+            session.Start();
+            transport.RaiseConnected();
+            session.CallSystem("buy", new object[] { 1 },
+                _ => stateAtCompletion = session.State, ex => failure = ex, true);
+            session.CallSystem("sell", new object[] { 2 },
+                _ => Assert.Fail("call should not complete"),
+                ex => unansweredFailure = ex, true);
+            transport.AnswerHeldPushCall("buy");
+
+            session.Close();
+
+            Assert.IsNull(failure);
+            Assert.AreEqual(HeTuSessionState.Stopped, stateAtCompletion);
+            Assert.IsInstanceOf<OperationCanceledException>(unansweredFailure);
+        }
+
+        [Test]
+        public void AnsweredPushCall_Kicked_CompletesAfterFaulted()
+        {
+            var transport = new FakeTransport("c1") { HoldCallsOpen = true };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+            var stateAtCompletion = HeTuSessionState.Ready;
+            Exception failure = null;
+
+            session.Start();
+            transport.RaiseConnected();
+            session.CallSystem("buy", new object[] { 1 },
+                _ => stateAtCompletion = session.State, ex => failure = ex, true);
+            transport.AnswerHeldPushCall("buy");
+
+            transport.RaiseClosed("kicked", HeTuCloseCode.Kicked);
+
+            Assert.IsNull(failure);
+            Assert.AreEqual(HeTuSessionState.Faulted, stateAtCompletion);
+        }
+
         [Test]
         public void WatchDispatchCanceledWhileReady_ReconnectsInsteadOfStrandingWatch()
         {
@@ -1860,6 +1984,13 @@ namespace Tests.HeTu
             public int HeldWatchCount => _heldWatches.Count;
             private readonly List<Action<bool>> _heldWatches = new();
 
+            // 等推送的调用收到 rsp 时的通知（onAnswered），按系统名；测试用 AnswerHeldPushCall 触发
+            private readonly Dictionary<string, Action<JsonObject>> _answerers = new();
+
+            // 模拟服务端已回 rsp、sync 还没到（调用仍挂着）
+            public void AnswerHeldPushCall(string systemName) =>
+                _answerers[systemName](null);
+
             public void ReleaseHeldWatches(bool canceled)
             {
                 var snapshot = _heldWatches.ToArray();
@@ -1898,9 +2029,12 @@ namespace Tests.HeTu
 
             public void CallSystem(string systemName, object[] args,
                 Action<JsonObject, CallOutcome, string> onResponse,
-                bool awaitPush = false)
+                bool awaitPush = false,
+                Action<JsonObject> onAnswered = null)
             {
                 Calls.Add(new CallRecord(systemName, args, awaitPush));
+                if (onAnswered != null)
+                    _answerers[systemName] = onAnswered;
                 if (HoldCallsOpen)
                     return;
                 if (FailCallsWithReason != null)

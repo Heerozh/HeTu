@@ -536,8 +536,9 @@ namespace HeTu
 
         public void CallSystem(string systemName, object[] args,
             Action<JsonObject, CallOutcome, string> onResponse,
-            bool awaitPush = false) =>
-            _client.CallSystemSync(systemName, args, onResponse, awaitPush);
+            bool awaitPush = false,
+            Action<JsonObject> onAnswered = null) =>
+            _client.CallSystemSync(systemName, args, onResponse, awaitPush, onAnswered);
 
         public void WatchRow<T>(
             string index,

@@ -113,6 +113,9 @@ namespace HeTu
             // 如果场景没挂WebsocketManager，会导致close不掉socket的task
             // 这是正常的，如果运行test套件，确保不在editor mode里，而是在player mode里运行
             _socket = null;
+            // 已收到回复、还在等推送的调用按成功完成：要在下面取消等待者之前，否则先被判成取消。
+            // 与被取消的调用的续体在同一个位置运行（断线时在 OnClosed 里，排在用户的处理之后）
+            FinishPushCallsOnClose();
             _connectionCancelSource?.Cancel();
             _connectionCancelSource?.Dispose();
             _connectionCancelSource = null;

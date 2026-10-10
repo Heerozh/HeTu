@@ -314,13 +314,15 @@ namespace HeTu
         {
             State = ConnectionState.Disconnected;
             LastCloseCode = code;
-            FinishPushCallsOnClose();
             Subscriptions.Clean();
             if (code == HeTuCloseCode.Kicked)
                 Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
             else if (errMsg == null)
                 Logger.Instance.Info("连接断开，收到了服务器Close消息。");
             OnClosed?.Invoke(errMsg);
+            // 放在 OnClosed 之后：连接拆完了才跑用户代码（续体里接着 Connect / CallSystem 不会撞上
+            // 拆到一半的连接）
+            FinishPushCallsOnClose();
         }
 
         private void HandleError(string errMsg)
@@ -383,8 +385,13 @@ namespace HeTu
         ///     引起的订阅推送都已先到）才回调 Completed；rej / err 立即回调。断线时已收到 rsp 的按
         ///     成功回调（见 <see cref="FinishPushCallsOnClose" />）。
         /// </param>
+        /// <param name="onAnswered">
+        ///     等推送的调用收到 rsp、还在等 sync 时通知一次（参数为回复内容）。Session 层据此在断线时
+        ///     自己把这个调用当成功，不靠本类断线收尾的先后。
+        /// </param>
         internal protected void CallSystemSync(string systemName, object[] args,
-            Action<JsonObject, CallOutcome, string> onResponse, bool awaitPush = false)
+            Action<JsonObject, CallOutcome, string> onResponse, bool awaitPush = false,
+            Action<JsonObject> onAnswered = null)
         {
             if (!EnsureConnected("CallSystem"))
             {
@@ -454,6 +461,7 @@ namespace HeTu
                     // 等推送的调用：rsp 到了先存着，等 sync（发送拥塞时 sync 也可能先到）
                     pushCall.Response = responsePayload;
                     pushCall.RspArrived = true;
+                    onAnswered?.Invoke((JsonObject)responsePayload);
                     if (pushCall.Synced)
                         CompletePushCall(pushCall);
                     return;
@@ -524,9 +532,10 @@ namespace HeTu
         }
 
         /// <summary>
-        ///     连接断开、主动关闭、重连前、释放时调用：已收到 rsp 的等推送调用按成功完成——提交确定
-        ///     发生了，重连后订阅会恢复。必须排在 OnClosed、取消等待者之前：Session 层在 OnClosed 里
-        ///     把还在途的调用判成结果未知。没收到 rsp 的留给回复队列照旧取消。
+        ///     连接断开（OnClosed 之后）、主动关闭、重连前、释放时调用：已收到 rsp 的等推送调用按
+        ///     成功完成——提交确定发生了，重连后订阅会恢复。没收到 rsp 的留给回复队列照旧取消。
+        ///     子类有自己的取消（如 Unity 的 HeTuClient 按连接取消等待者）时，要在取消之前调用它，
+        ///     否则这些调用会先被判成取消。Session 层不靠这里：它按 onAnswered 自己处理。
         /// </summary>
         protected void FinishPushCallsOnClose()
         {

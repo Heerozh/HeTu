@@ -181,10 +181,19 @@ g 越大越稳、完成越晚。以后可以做成配置项。
   - `rsp` → 存下 payload，sync 已到就完成。
 - `OnReceived` 加 `case MessageSync`：id 按整数解析（MessagePack 可能解成 byte / int / long）。找到 pending 就打上
   标记，`rsp` 已存则用它完成（`Completed`）；找不到（已因 rej / err 结束，或重连前的旧 id）就忽略。
-- 断线（`HandleClosed`）、主动 `Close()`、`Dispose()`、重连前的清理（`ConnectSync`）：在触发 `OnClosed`、取消等待者
-  之前，先把已收到 `rsp` 的 pending 按成功完成——提交确定发生了，重连后订阅会恢复；没收到 `rsp` 的照旧由回复
-  队列取消（Session 层照旧报 `CallOutcomeUnknownException`）。然后清空 `_pendingPushCalls`、`_syncSeq` 归零。必须排在
-  `OnClosed` 之前：Session 的 transport 在 `OnClosed` 里把在途调用判成结果未知。
+- 断线、主动 `Close()`、`Dispose()`、重连前的清理（`ConnectSync`）时，把已收到 `rsp` 的 pending 按成功完成——提交
+  确定发生了，重连后订阅会恢复；没收到 `rsp` 的照旧由回复队列取消（`FinishPushCallsOnClose`）。重连前清空
+  `_pendingPushCalls`、`_syncSeq` 归零。时机（审查后改）：
+  - 断线（`HandleClosed`）放在 `OnClosed` 之后：连接拆完了才跑用户代码。原来放在 `OnClosed` 之前，续体是同步跑的
+    （Unity 的 Awaitable / UniTask），这时连接拆到一半，续体里接着 `CallSystem` 会被当场回绝，`Connect` 出来的新
+    连接会被随后的拆除关掉。
+  - Unity 的 `HeTuClient` 断线时在 `CloseCore` 里、按连接取消等待者之前完成，否则先被取消。这和被取消的调用的
+    续体在同一个位置运行（`OnClosed` 里它自己的处理；它每次 `Connect` 都重新挂到最后），不比原来更早。
+- Session 层不靠基类的先后：`CallSystemSync` 另带一个内部回调 `onAnswered`，等推送的调用收到 `rsp`、还在等 sync
+  时通知一次，`PendingCall` 记下"已收到回复"。断线（transport 自己断开、请求超时、派发被当场回绝）、进 Faulted、
+  会话 `Close()` 时，这些调用按成功完成，其余在途调用照旧报结果未知 / 取消；成功回调放在会话切到 Reconnecting /
+  Faulted / Stopped 之后，续体里接着发的调用排队等重连，不被当场回绝。原来靠基类赶在 `OnClosed` 之前完成，但会话
+  自己发起的几条路径（超时等）是先判在途调用结果未知、再关 transport，成功回调到了也被丢掉（审查第 2 条）。
 - 不需要计时器：连接活着时服务端保证会发 sync（§4.2 的保险定时器）。
 
 公开 API：
@@ -192,7 +201,7 @@ g 越大越稳、完成越晚。以后可以做成配置项。
 - `HeTuClient.CallSystemAwaitPush(string systemName, params object[] args)`（Awaitable / UniTask）。不能给
   `CallSystem(string, params object[])` 加 bool 参数：`CallSystem("x", true)` 会被绑到新重载上。
 - `HeTuSessionClient.CallSystemAwaitPush(...)`：`PendingCall` 带上标记，`IHeTuSessionTransport.CallSystem` 加
-  `awaitPush` 参数。在途语义不变：发出后断线、没收到 `rsp` 的报结果未知。
+  `awaitPush`、`onAnswered` 参数。在途语义不变：发出后断线、没收到 `rsp` 的报结果未知。
 - `HeadlessHeTuClient.CallSystemAwaitPush(...)`（Task）。
 - `SystemLocalCallbacks` 照旧在发出时执行；Inspector 记一条 callsystem，调用完成时结束。
 
@@ -329,7 +338,9 @@ SDK（`ClientSDK/csharp/HeTu.Client.Tests`，Unity `Tests/Editor` 镜像；仿 `
 - `rej` / `err` → 立即结束，之后来的 `sync` 被忽略；
 - 断线时已收到 `rsp` → 成功；没收到 → 取消；
 - 不认识的 sync id 忽略；
-- Session 层（`SessionClientBaseTest` 的 FakeTransport）：`CallSystemAwaitPush` 的排队、派发、断线后的结果未知语义。
+- Session 层（`SessionClientBaseTest` 的 FakeTransport）：`CallSystemAwaitPush` 的排队、派发、断线后的结果未知语义；
+  已收到回复的调用在 transport 断开、请求超时、会话 `Close`、被顶号进 Faulted 时按成功完成，回调时会话已切到
+  Reconnecting / Stopped / Faulted，续体里接着发的调用排队等重连（审查后补）。
 
 ## 10. 备选方案与否决理由
 

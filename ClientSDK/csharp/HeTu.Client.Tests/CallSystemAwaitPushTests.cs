@@ -116,10 +116,11 @@ namespace HeTu.Client.Tests
         }
 
         [Test]
-        public void AwaitPush_ClosedAfterRsp_CompletesBeforeOnClosed()
+        public void AwaitPush_ClosedAfterRsp_CompletesAfterOnClosed()
         {
-            // 提交确定发生了：断线时已收到 rsp 的按成功完成，而且要在 OnClosed 之前——Session 层
-            // 在 OnClosed 里把还在途的调用判成结果未知
+            // 提交确定发生了：断线时已收到 rsp 的按成功完成。放在 OnClosed 之后，连接拆完了才跑
+            // 用户代码（续体里接着 Connect / CallSystem 不会撞上拆到一半的连接）；Session 层自己按
+            // onAnswered 处理，不靠这里的先后
             var client = PushTestClient.Connected();
             var outcomes = new List<CallOutcome>();
             client.Call("buy", Array.Empty<object>(), (_, oc, _) => outcomes.Add(oc), true);
@@ -129,8 +130,26 @@ namespace HeTu.Client.Tests
 
             client.RaiseClosed(HeTuCloseCode.Abnormal, "network lost");
 
+            Assert.That(seenInOnClosed, Is.EqualTo(0));
             Assert.That(outcomes, Is.EqualTo(new[] { CallOutcome.Completed }));
-            Assert.That(seenInOnClosed, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void AwaitPush_ReportsAnsweredWhenRspArrives()
+        {
+            // rsp 到了、sync 还没到时通知一次（Session 层据此在断线时把它当成功）；rej / err、
+            // 普通调用都不通知
+            var client = PushTestClient.Connected();
+            var answered = new List<string>();
+            client.Call("buy", Array.Empty<object>(), Ignore, true, _ => answered.Add("buy"));
+            client.Call("sell", Array.Empty<object>(), Ignore, true, _ => answered.Add("sell"));
+            client.Call("move", Array.Empty<object>(), Ignore, false, _ => answered.Add("move"));
+
+            client.Receive(new object[] { "rsp", "ok" });
+            Assert.That(answered, Is.EqualTo(new[] { "buy" }));
+            client.Receive(new object[] { "rej", "sell", "RATE_LIMITED" });
+            client.Receive(new object[] { "rsp", "ok" });
+            Assert.That(answered, Is.EqualTo(new[] { "buy" }));
         }
 
         [Test]
@@ -210,8 +229,8 @@ namespace HeTu.Client.Tests
 
             public void Call(string systemName, object[] args,
                 Action<JsonObject, CallOutcome, string> onResponse,
-                bool awaitPush = false) =>
-                CallSystemSync(systemName, args, onResponse, awaitPush);
+                bool awaitPush = false, Action<JsonObject> onAnswered = null) =>
+                CallSystemSync(systemName, args, onResponse, awaitPush, onAnswered);
 
             public void Receive(object[] frame) => OnReceived(Pipeline.Encode(frame, out _));
 

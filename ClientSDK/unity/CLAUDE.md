@@ -47,7 +47,7 @@ SetupPipeline([JsonbLayer, ZlibLayer, CryptoLayer])
 
 If you change pipeline behavior **the server's matching layer in `hetu/server/pipeline/` must change in the same commit** — they handshake byte-for-byte.
 
-Replies to `rpc` / `sub` carry no request id: `ResponseManager` matches them FIFO. The one exception is `CallSystemAwaitPush`: it sends `["rpcs", sync_id, system, ...]`, gets its `rsp` FIFO as usual, and completes only when the out-of-order `["sync", sync_id]` frame arrives (the server sends it after the subscription pushes the call caused). `HeTuClientBase` keeps the pending map; on disconnect / `Close` / reconnect / `Dispose`, calls that already got their `rsp` complete successfully before `OnClosed` fires. Keep in lock-step with `rpcs` in `hetu/server/receiver.py`.
+Replies to `rpc` / `sub` carry no request id: `ResponseManager` matches them FIFO. The one exception is `CallSystemAwaitPush`: it sends `["rpcs", sync_id, system, ...]`, gets its `rsp` FIFO as usual, and completes only when the out-of-order `["sync", sync_id]` frame arrives (the server sends it after the subscription pushes the call caused). `HeTuClientBase` keeps the pending map; on disconnect (after `OnClosed`; Unity's `HeTuClient` does it in `CloseCore` before cancelling its waiters) / `Close` / reconnect / `Dispose`, calls that already got their `rsp` complete successfully. `HeTuSessionClientBase` does not rely on that timing: an internal `onAnswered` callback marks the `PendingCall` when its `rsp` arrives, and connection loss / Faulted / `Close` complete those calls successfully after the session state has changed (so continuations queue for the reconnect). Keep in lock-step with `rpcs` in `hetu/server/receiver.py`.
 
 ### Subscriptions
 

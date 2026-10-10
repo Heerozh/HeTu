@@ -445,7 +445,8 @@ namespace Tests.HeTu
 
             public void CallSystem(string systemName, object[] args,
                 Action<JsonObject, CallOutcome, string> onResponse,
-                bool awaitPush = false)
+                bool awaitPush = false,
+                Action<JsonObject> onAnswered = null)
             {
                 Calls.Add(new CallRecord(systemName, args, awaitPush));
                 onResponse(null, CallOutcome.Completed, null);

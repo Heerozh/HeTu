@@ -77,12 +77,14 @@ namespace HeTu
         void Connect();
         void Close();
 
-        // awaitPush：等推送的调用（rpcs），见 HeTuClientBase.CallSystemSync
+        // awaitPush：等推送的调用（rpcs）；onAnswered：它收到 rsp、还在等 sync 时通知一次。
+        // 见 HeTuClientBase.CallSystemSync
         void CallSystem(
             string systemName,
             object[] args,
             Action<JsonObject, CallOutcome, string> onResponse,
-            bool awaitPush = false);
+            bool awaitPush = false,
+            Action<JsonObject> onAnswered = null);
 
         void WatchRow<T>(
             string index,
@@ -225,9 +227,17 @@ namespace HeTu
                 SafeInvokeUserCallback(
                     _pendingCalls.Dequeue().OnFailed, canceled);
 
+            // 已收到回复、还在等推送的调用在进 Stopped 之后按成功完成（同 MarkConnectionLost）
+            var answered = new List<PendingCall>();
             foreach (var pending in _inFlightCalls.ToArray())
             {
                 pending.DisarmTimeout();
+                if (pending.Answered)
+                {
+                    answered.Add(pending);
+                    continue;
+                }
+
                 SafeInvokeUserCallback(pending.OnFailed, canceled);
             }
 
@@ -246,6 +256,7 @@ namespace HeTu
             _subscriptions.Clear();
             CleanupTransport(closeTransport: true);
             SetState(HeTuSessionState.Stopped);
+            CompleteAnswered(answered);
         }
 
         public void Dispose() => Close();
@@ -734,7 +745,8 @@ namespace HeTu
                             break;
                     }
                 },
-                pending.AwaitPush);
+                pending.AwaitPush,
+                pending.AwaitPush ? pending.MarkAnswered : null);
         }
 
         private void DispatchPendingWatches()
@@ -765,41 +777,56 @@ namespace HeTu
             _activeStepPromise = null;
             var closeTransport = !_transportClosedItself;
             _transportClosedItself = false;
-            MarkConnectionLost(closeTransport);
-            SafeInvokeUserCallback(Faulted, fault);
-            if (_closed) return;
-            // 被顶号：账号在别处登录了。重连会重跑 bootstrap（登录）把对方顶掉，两边互踢，
-            // 所以不重连，直接进 Faulted 终态，由应用提示玩家。
-            if (fault is HeTuKickedException)
+            var answered = MarkConnectionLost(closeTransport);
+            try
             {
-                EnterFaulted(fault);
-                return;
+                SafeInvokeUserCallback(Faulted, fault);
+                if (_closed) return;
+                // 被顶号：账号在别处登录了。重连会重跑 bootstrap（登录）把对方顶掉，两边互踢，
+                // 所以不重连，直接进 Faulted 终态，由应用提示玩家。
+                if (fault is HeTuKickedException)
+                {
+                    EnterFaulted(fault);
+                    return;
+                }
+                // 首次 Ready 前的失败 = 凭据/配置/URL 错，重同样一份没意义。
+                if (!_hasBeenReady)
+                {
+                    EnterFaulted(fault);
+                    return;
+                }
+                // Ready 之后:bootstrap 阶段由应用层主动抛出(socket 仍存活,
+                // closeTransport==true)的非取消异常 = 票据/登录被永久拒绝(如 STALE_TICKET),
+                // 重连重跑同样的 bootstrap 只会得到同样结果 → 直接进 Faulted 终态,不浪费
+                // maxReconnectAttempts 次无谓重试。真正的连接掉线(含 bootstrap 期间掉线,
+                // 经 OnTransportClosed 置 _transportClosedItself=true)仍按退避重连;
+                // OperationCanceledException(取消,如退出/切场景)不当作永久拒绝。
+                if (State == HeTuSessionState.Bootstrapping
+                    && closeTransport
+                    && fault is not OperationCanceledException)
+                {
+                    EnterFaulted(fault);
+                    return;
+                }
+                if (ExhaustedRetries())
+                {
+                    EnterFaulted(fault);
+                    return;
+                }
+                ScheduleReconnect();
             }
-            // 首次 Ready 前的失败 = 凭据/配置/URL 错，重同样一份没意义。
-            if (!_hasBeenReady)
+            finally
             {
-                EnterFaulted(fault);
-                return;
+                // 已收到回复、还在等推送的调用按成功完成。放在会话切到 Reconnecting / Faulted
+                // 之后：续体里接着发的调用排队等重连，而不是被拆到一半的连接当场回绝
+                CompleteAnswered(answered);
             }
-            // Ready 之后:bootstrap 阶段由应用层主动抛出(socket 仍存活,
-            // closeTransport==true)的非取消异常 = 票据/登录被永久拒绝(如 STALE_TICKET),
-            // 重连重跑同样的 bootstrap 只会得到同样结果 → 直接进 Faulted 终态,不浪费
-            // maxReconnectAttempts 次无谓重试。真正的连接掉线(含 bootstrap 期间掉线,
-            // 经 OnTransportClosed 置 _transportClosedItself=true)仍按退避重连;
-            // OperationCanceledException(取消,如退出/切场景)不当作永久拒绝。
-            if (State == HeTuSessionState.Bootstrapping
-                && closeTransport
-                && fault is not OperationCanceledException)
-            {
-                EnterFaulted(fault);
-                return;
-            }
-            if (ExhaustedRetries())
-            {
-                EnterFaulted(fault);
-                return;
-            }
-            ScheduleReconnect();
+        }
+
+        private void CompleteAnswered(List<PendingCall> answered)
+        {
+            foreach (var pending in answered)
+                SafeInvokeUserCallback(pending.OnCompleted, pending.AnsweredResponse);
         }
 
         // 物理层与会话状态失配：会话自认为 Ready，但底层要么当场回绝了派发
@@ -855,9 +882,17 @@ namespace HeTu
             while (_pendingCalls.Count > 0)
                 SafeInvokeUserCallback(_pendingCalls.Dequeue().OnFailed, fault);
 
+            // 已收到回复、还在等推送的调用在进 Faulted 之后按成功完成（同 MarkConnectionLost）
+            var answered = new List<PendingCall>();
             foreach (var pending in _inFlightCalls.ToArray())
             {
                 pending.DisarmTimeout();
+                if (pending.Answered)
+                {
+                    answered.Add(pending);
+                    continue;
+                }
+
                 SafeInvokeUserCallback<Exception>(
                     pending.OnFailed,
                     new CallOutcomeUnknownException(pending.SystemName));
@@ -878,19 +913,28 @@ namespace HeTu
 
             CleanupTransport(closeTransport: true);
             SetState(HeTuSessionState.Faulted);
+            CompleteAnswered(answered);
         }
 
-        private void MarkConnectionLost(bool closeTransport)
+        // 在途调用报结果未知；已收到回复、还在等推送的不报，交回调用方在会话状态切换之后按成功完成
+        private List<PendingCall> MarkConnectionLost(bool closeTransport)
         {
             // 关掉 transport 会让底层 ResponseQueue.CancelAll 把在飞的 watch 冲成
             // canceled、绕回 OnWatchDispatchCanceled，而此刻 State 还停在 Ready
             // （SetState(Reconnecting) 在后面才发生），得挡住它再递归进一次失败处理。
             _handlingConnectionLoss = true;
+            var answered = new List<PendingCall>();
             try
             {
                 foreach (var pending in _inFlightCalls.ToArray())
                 {
                     pending.DisarmTimeout();
+                    if (pending.Answered)
+                    {
+                        answered.Add(pending);
+                        continue;
+                    }
+
                     SafeInvokeUserCallback<Exception>(
                         pending.OnFailed,
                         new CallOutcomeUnknownException(pending.SystemName));
@@ -910,6 +954,8 @@ namespace HeTu
             {
                 _handlingConnectionLoss = false;
             }
+
+            return answered;
         }
 
         private void ScheduleReconnect()
@@ -1101,6 +1147,16 @@ namespace HeTu
 
             // 等推送的调用（rpcs）
             public bool AwaitPush { get; }
+
+            // 等推送的调用已收到 rsp（还在等 sync）：断线、关闭时按成功完成，提交确定发生了
+            public bool Answered { get; private set; }
+            public JsonObject AnsweredResponse { get; private set; }
+
+            public void MarkAnswered(JsonObject response)
+            {
+                Answered = true;
+                AnsweredResponse = response;
+            }
 
             // 同 PendingWatch：请求级超时定时器，结算时必须 Disarm。
             private IDisposable _timeout;
