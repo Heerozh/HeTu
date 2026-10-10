@@ -345,6 +345,28 @@ def test_get_and_range_without_app(project, tmp_path):
     )
     assert out["truncated"] is False and out["read_from"] == "master"
 
+    # 数值列的 ( / [ 前缀：开 / 闭区间
+    for master in ((), ("--master",)):
+        code, out = run_json(
+            "range", "Wallet", "owner", "(2001", "2003", *master, cwd=broken
+        )
+        assert code == 0, out
+        assert [r["owner"] for r in out["rows"]] == [2002, 2003]
+
+
+def test_get_by_id_point(project):
+    """按 id 的点查：整数才直接取行，小数不能被截成整数去取别的行"""
+    code, out, err = run_hetu(
+        "shell", "-c", "await insert('Wallet', id=7, owner=7007)", cwd=project
+    )
+    assert code == 0, err
+    for query in ("id=7", "id=[7"):
+        code, out = run_json("get", "Wallet", query, cwd=project)
+        assert code == 0 and out["row"]["owner"] == 7007, out
+    for query in ("id=7.5", "id=(7", "id=inf"):
+        code, out = run_json("get", "Wallet", query, cwd=project)
+        assert code == 0 and out["row"] is None, (query, out)
+
 
 def test_lists(project):
     code, out = run_json("call", "--list", cwd=project)
@@ -555,8 +577,20 @@ def test_convert_value():
     assert convert_value(np.dtype("?"), "false", point=True) is False
     assert convert_value(np.dtype("<U8"), "[GM]x", point=True) == "[[GM]x"
     assert convert_value(np.dtype("<U8"), "(a", point=False) == "(a"
+    # bytes 列同样按字面值点查
+    assert convert_value(np.dtype("S8"), "[ab", point=True) == b"[[ab"
+    assert convert_value(np.dtype("S8"), "(ab", point=False) == b"(ab"
+    # 数值列的区间前缀：校验后原样交给后端；大整数不经过浮点
+    assert convert_value(np.dtype("<i8"), "(1000", point=False) == "(1000"
+    assert convert_value(np.dtype("<f8"), "[1.5", point=False) == "[1.5"
+    assert convert_value(np.dtype("<f8"), "2", point=False) == 2.0
+    assert convert_value(np.dtype("<u8"), "18446744073709551615", point=True) == (
+        18446744073709551615
+    )
     with pytest.raises(UsageError):
         convert_value(np.dtype("?"), "maybe", point=True)
+    with pytest.raises(UsageError):
+        convert_value(np.dtype("<i8"), "(abc", point=False)
 
 
 def test_to_jsonable_and_mask():

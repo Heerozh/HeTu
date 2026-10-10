@@ -37,20 +37,22 @@ if TYPE_CHECKING:
 
 def convert_value(dtype: np.dtype, raw: str, *, point: bool) -> Any:
     """
-    命令行给的值按列 dtype 转换。整数列接受 "1001"，也接受 inf / -inf（区间边界）；布尔列只认
-    true/false/1/0。字符串列：point（get 的点查）时以 [ 或 ( 开头的值前面补一个 [，按字面值
-    查——这两个前缀在 range 里表示闭 / 开区间（见 base.peel_bound_）。
+    命令行给的值按列 dtype 转换。数值列接受 "1001"，也接受 inf / -inf（区间边界），以及表示
+    闭 / 开区间的 [ / ( 前缀——带前缀的校验过是个数后原样交给后端（见 base.peel_bound_）。
+    布尔列只认 true/false/1/0。字符串（含 bytes）列：point（get 的点查）时以 [ 或 ( 开头的值
+    前面补一个 [，按字面值查。
     """
+    from ..data.backend.base import exact_number_
+
     kind = dtype.kind
     try:
         match kind:
-            case "i" | "u":
-                try:
-                    return int(raw)
-                except ValueError:
-                    return float(raw)
-            case "f":
-                return float(raw)
+            case "i" | "u" | "f":
+                prefixed = raw[:1] in ("[", "(")
+                number = exact_number_(raw[1:] if prefixed else raw)
+                if kind == "f":
+                    number = float(number)
+                return raw if prefixed else number
             case "b":
                 lowered = raw.strip().lower()
                 if lowered in ("true", "1"):
@@ -58,15 +60,13 @@ def convert_value(dtype: np.dtype, raw: str, *, point: bool) -> Any:
                 if lowered in ("false", "0"):
                     return False
                 raise ValueError(raw)
-            case "S":
-                return raw.encode("utf-8")
-    except ValueError as e:
+    except (ValueError, OverflowError) as e:
         raise UsageError(
             _("值 {raw} 不能转换成列类型 {dtype}").format(raw=raw, dtype=dtype)
         ) from e
     if point and raw[:1] in ("[", "("):
-        return "[" + raw
-    return raw
+        raw = "[" + raw
+    return raw.encode("utf-8") if kind == "S" else raw
 
 
 def queryable_fields(comp_cls: type[BaseComponent]) -> list[str]:
@@ -137,7 +137,7 @@ async def _read(
     desc: bool,
 ) -> list[dict]:
     """读行：默认 servant（非事务），master 时在只读 master 的事务里读"""
-    from ..data.backend.base import RowFormat
+    from ..data.backend.base import BackendClient, RowFormat
     from ..headless import HeadlessClient
 
     if master:
@@ -147,9 +147,14 @@ async def _read(
                 index, left, right, limit=limit, desc=desc
             )
         return to_jsonable(rows)
-    if index == "id" and right == left:
-        row = await table.servant_get(int(left), RowFormat.STRUCT)
-        return [] if row is None else [to_jsonable(row)]
+    if index == "id":
+        # 按 id 的点查直接取行。小数、越界、开区间不是点（区间里没有这个 id），走区间查询
+        point = BackendClient.point_query_value_(
+            table.comp_cls.dtype_map_["id"], left, right
+        )
+        if point is not None:
+            row = await table.servant_get(int(point), RowFormat.STRUCT)
+            return [] if row is None else [to_jsonable(row)]
     rows = await table.servant_range(index, left, right, limit, desc, RowFormat.STRUCT)
     return to_jsonable(rows)
 
