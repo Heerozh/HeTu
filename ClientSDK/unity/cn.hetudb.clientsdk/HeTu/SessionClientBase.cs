@@ -77,10 +77,12 @@ namespace HeTu
         void Connect();
         void Close();
 
+        // awaitPush：等推送的调用（rpcs），见 HeTuClientBase.CallSystemSync
         void CallSystem(
             string systemName,
             object[] args,
-            Action<JsonObject, CallOutcome, string> onResponse);
+            Action<JsonObject, CallOutcome, string> onResponse,
+            bool awaitPush = false);
 
         void WatchRow<T>(
             string index,
@@ -349,10 +351,12 @@ namespace HeTu
             string systemName,
             object[] args,
             Action<JsonObject> onCompleted,
-            Action<Exception> onFailed)
+            Action<Exception> onFailed,
+            bool awaitPush = false)
         {
             ThrowIfClosed();
-            var pending = new PendingCall(systemName, args, onCompleted, onFailed);
+            var pending = new PendingCall(systemName, args, onCompleted, onFailed,
+                awaitPush);
             if (State == HeTuSessionState.Ready && _transport != null)
             {
                 DispatchCall(pending);
@@ -729,7 +733,8 @@ namespace HeTu
                             pending.OnCompleted(response);
                             break;
                     }
-                });
+                },
+                pending.AwaitPush);
         }
 
         private void DispatchPendingWatches()
@@ -1079,18 +1084,23 @@ namespace HeTu
                 string systemName,
                 object[] args,
                 Action<JsonObject> onCompleted,
-                Action<Exception> onFailed)
+                Action<Exception> onFailed,
+                bool awaitPush)
             {
                 SystemName = systemName;
                 Args = args;
                 OnCompleted = onCompleted;
                 OnFailed = onFailed;
+                AwaitPush = awaitPush;
             }
 
             public string SystemName { get; }
             public object[] Args { get; }
             public Action<JsonObject> OnCompleted { get; }
             public Action<Exception> OnFailed { get; }
+
+            // 等推送的调用（rpcs）
+            public bool AwaitPush { get; }
 
             // 同 PendingWatch：请求级超时定时器，结算时必须 Disarm。
             private IDisposable _timeout;

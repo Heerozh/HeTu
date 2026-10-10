@@ -121,6 +121,7 @@ namespace HeTu
     public abstract class HeTuClientBase : IDisposable
     {
         internal const string CommandRpc = "rpc";
+        internal const string CommandRpcSync = "rpcs";
         internal const string CommandSub = "sub";
         internal const string CommandUnsub = "unsub";
         internal const string QueryGet = "get";
@@ -131,6 +132,7 @@ namespace HeTu
         internal const string MessageSubed = "sub";
         internal const string MessageReject = "rej";
         internal const string MessageError = "err";
+        internal const string MessageSync = "sync";
         internal const string IndexId = "id";
         protected readonly InspectorTraceCollector InspectorCollector = new();
 
@@ -139,6 +141,12 @@ namespace HeTu
 
         protected readonly SubscriptionManager Subscriptions = new();
         protected ConnectionState State = ConnectionState.Disconnected;
+
+        // 等推送的调用（rpcs）：sync_id → 还没完成的调用。sync 帧不占回复顺序，按 id 认
+        private readonly Dictionary<int, PendingPushCall> _pendingPushCalls = new();
+
+        // 本连接上一个 rpcs 的 sync_id：按连接递增，重连归零（服务端只收 0..int.MaxValue）
+        private int _syncSeq;
 
         /// <summary>
         ///     System 调用的本地回调表。也就是System对应的客户端逻辑。
@@ -171,6 +179,7 @@ namespace HeTu
 
         public virtual void Dispose()
         {
+            FinishPushCallsOnClose();
             Pipeline.Dispose();
             GC.SuppressFinalize(this);
         }
@@ -258,7 +267,10 @@ namespace HeTu
             // 前置清理
             Logger.Instance.Info($"正在连接到：{url}...");
             Subscriptions.Clean();
+            FinishPushCallsOnClose();
             ResponseQueue.CancelAll("重新连接");
+            _pendingPushCalls.Clear();
+            _syncSeq = 0;
             LastCloseCode = 0;
 
             // 初始化WebSocket以及事件
@@ -302,6 +314,7 @@ namespace HeTu
         {
             State = ConnectionState.Disconnected;
             LastCloseCode = code;
+            FinishPushCallsOnClose();
             Subscriptions.Clean();
             if (code == HeTuCloseCode.Kicked)
                 Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
@@ -329,6 +342,7 @@ namespace HeTu
         public virtual void Close()
         {
             Logger.Instance.Info("主动调用了Close");
+            FinishPushCallsOnClose();
             ResponseQueue.CancelAll("主动调用了Close");
             Subscriptions.Clean();
             CloseCore();
@@ -364,8 +378,13 @@ namespace HeTu
         /// <param name="systemName">系统名。</param>
         /// <param name="args">参数列表。</param>
         /// <param name="onResponse">响应回调，第二参数为调用结果，第三参数为拒绝码。</param>
+        /// <param name="awaitPush">
+        ///     为 true 时发等推送的调用（rpcs）：回了 rsp 之后还要等服务端的 ["sync", id]（这次调用
+        ///     引起的订阅推送都已先到）才回调 Completed；rej / err 立即回调。断线时已收到 rsp 的按
+        ///     成功回调（见 <see cref="FinishPushCallsOnClose" />）。
+        /// </param>
         internal protected void CallSystemSync(string systemName, object[] args,
-            Action<JsonObject, CallOutcome, string> onResponse)
+            Action<JsonObject, CallOutcome, string> onResponse, bool awaitPush = false)
         {
             if (!EnsureConnected("CallSystem"))
             {
@@ -373,13 +392,30 @@ namespace HeTu
                 return;
             }
 
-            var payload = new object[] { CommandRpc, systemName }.Concat(args).ToArray();
+            PendingPushCall pushCall = null;
+            object[] payload;
+            if (awaitPush)
+            {
+                _syncSeq = _syncSeq == int.MaxValue ? 1 : _syncSeq + 1;
+                pushCall = new PendingPushCall(_syncSeq, onResponse);
+                _pendingPushCalls[pushCall.SyncId] = pushCall;
+                payload = new object[] { CommandRpcSync, pushCall.SyncId, systemName }
+                    .Concat(args).ToArray();
+            }
+            else
+            {
+                payload = new object[] { CommandRpc, systemName }.Concat(args).ToArray();
+            }
+
             var traceId = InspectorCollector.InterceptRequest("callsystem", systemName,
                 payload);
+            if (pushCall != null)
+                pushCall.TraceId = traceId;
             SendRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
+                    ForgetPushCall(pushCall);
                     InspectorCollector.CompleteRequest(traceId, "canceled");
                     onResponse(null, CallOutcome.Canceled, null);
                     return;
@@ -389,6 +425,7 @@ namespace HeTu
                 if (response != null && response.Length > 0 &&
                     response[0] as string == MessageReject)
                 {
+                    ForgetPushCall(pushCall);
                     var code = response.Length > 2 ? response[2] as string : "REJECTED";
                     InspectorCollector.CompleteRequest(traceId, "rejected", code);
                     OnCallRejected?.Invoke(systemName, code);
@@ -402,6 +439,7 @@ namespace HeTu
                 if (response != null && response.Length > 0 &&
                     response[0] as string == MessageError)
                 {
+                    ForgetPushCall(pushCall);
                     var reason = response.Length > 2 ? response[2] as string : null;
                     InspectorCollector.CompleteRequest(traceId, "failed", reason);
                     onResponse(null, CallOutcome.Failed, reason);
@@ -411,12 +449,92 @@ namespace HeTu
                 var responsePayload = response != null && response.Length > 1
                     ? response[1]
                     : null;
+                if (pushCall != null)
+                {
+                    // 等推送的调用：rsp 到了先存着，等 sync（发送拥塞时 sync 也可能先到）
+                    pushCall.Response = responsePayload;
+                    pushCall.RspArrived = true;
+                    if (pushCall.Synced)
+                        CompletePushCall(pushCall);
+                    return;
+                }
+
                 InspectorCollector.CompleteRequest(traceId, "completed",
                     responsePayload);
                 onResponse((JsonObject)responsePayload, CallOutcome.Completed, null);
             }, traceId);
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
+        }
+
+        // ["sync", sync_id]：等推送的调用引起的订阅推送都已先到。不占回复顺序，按 id 认；认不出的
+        // （已因 rej / err 结束，或断线前的旧 id）忽略
+        private void HandleSync(object[] message)
+        {
+            if (message.Length < 2 || !TryGetSyncId(message[1], out var syncId) ||
+                !_pendingPushCalls.TryGetValue(syncId, out var call))
+                return;
+            call.Synced = true;
+            if (call.RspArrived)
+                CompletePushCall(call);
+        }
+
+        // MessagePack 按数值大小解成不同的整数类型
+        private static bool TryGetSyncId(object value, out int syncId)
+        {
+            long id;
+            switch (value)
+            {
+                case long l: id = l; break;
+                case int i: id = i; break;
+                case uint ui: id = ui; break;
+                case short s: id = s; break;
+                case ushort us: id = us; break;
+                case byte b: id = b; break;
+                case sbyte sb: id = sb; break;
+                case ulong ul when ul <= int.MaxValue: id = (long)ul; break;
+                default:
+                    syncId = 0;
+                    return false;
+            }
+
+            if (id < 0 || id > int.MaxValue)
+            {
+                syncId = 0;
+                return false;
+            }
+
+            syncId = (int)id;
+            return true;
+        }
+
+        private void CompletePushCall(PendingPushCall call)
+        {
+            ForgetPushCall(call);
+            InspectorCollector.CompleteRequest(call.TraceId, "completed", call.Response);
+            call.OnResponse((JsonObject)call.Response, CallOutcome.Completed, null);
+        }
+
+        private void ForgetPushCall(PendingPushCall call)
+        {
+            if (call != null &&
+                _pendingPushCalls.TryGetValue(call.SyncId, out var registered) &&
+                registered == call)
+                _pendingPushCalls.Remove(call.SyncId);
+        }
+
+        /// <summary>
+        ///     连接断开、主动关闭、重连前、释放时调用：已收到 rsp 的等推送调用按成功完成——提交确定
+        ///     发生了，重连后订阅会恢复。必须排在 OnClosed、取消等待者之前：Session 层在 OnClosed 里
+        ///     把还在途的调用判成结果未知。没收到 rsp 的留给回复队列照旧取消。
+        /// </summary>
+        protected void FinishPushCallsOnClose()
+        {
+            if (_pendingPushCalls.Count == 0)
+                return;
+            var answered = _pendingPushCalls.Values.Where(c => c.RspArrived).ToArray();
+            foreach (var call in answered)
+                CompletePushCall(call);
         }
 
         internal static string MakeSubId(string table, string index, object left,
@@ -869,7 +987,33 @@ namespace HeTu
                         decodeMetrics.TransportSizeBytes);
                     subscribed.UpdateRows(rows);
                     break;
+                case MessageSync:
+                    // 等推送的调用引起的推送都已先到（按 id 认，不占回复顺序）
+                    HandleSync(structuredMsg);
+                    break;
             }
+        }
+
+        // 一次还没完成的等推送调用（rpcs）
+        private sealed class PendingPushCall
+        {
+            public PendingPushCall(int syncId,
+                Action<JsonObject, CallOutcome, string> onResponse)
+            {
+                SyncId = syncId;
+                OnResponse = onResponse;
+            }
+
+            public int SyncId { get; }
+            public Action<JsonObject, CallOutcome, string> OnResponse { get; }
+            public string TraceId { get; set; }
+
+            // 按顺序的回复（rsp）已到：payload 先存着，等 sync
+            public bool RspArrived { get; set; }
+            public object Response { get; set; }
+
+            // ["sync", id] 已到
+            public bool Synced { get; set; }
         }
     }
 }

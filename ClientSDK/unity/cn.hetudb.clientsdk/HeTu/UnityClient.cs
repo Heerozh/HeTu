@@ -199,11 +199,38 @@ namespace HeTu
         ///     注册客户端对应逻辑，每次CallSystem调用时也都会先执行这些回调，这样一些本地逻辑可以放在客户端回调里。
         /// </summary>
 #if UNITY_6000_0_OR_NEWER
-        public async Awaitable<JsonObject> CallSystem(string systemName,
+        public Awaitable<JsonObject> CallSystem(string systemName,
             params object[] args)
 #else
-        public async UniTask<JsonObject> CallSystem(string systemName,
+        public UniTask<JsonObject> CallSystem(string systemName,
             params object[] args)
+#endif
+            => CallSystemCore(systemName, args, false);
+
+        /// <summary>
+        ///     等推送的System调用：同 <see cref="CallSystem" />，但要等这次调用引起的订阅推送都到了
+        ///     才返回，返回时 WatchRow / WatchRange 拿到的订阅对象已是新值，适合"按钮置灰、请求完成
+        ///     后按订阅数据恢复按钮"。比 CallSystem 约多等一个推送间隔（~100ms），高频调用（如移动）
+        ///     请用 CallSystem。服务端负载过高时推送仍可能晚到，同订阅本身尽力而为的最终一致。
+        ///     Like CallSystem, but returns only after the subscription updates caused by
+        ///     this call have arrived, so watched rows are already up to date. About one
+        ///     push interval (~100 ms) slower; use CallSystem for high-frequency calls.
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+        public Awaitable<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#else
+        public UniTask<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#endif
+            => CallSystemCore(systemName, args, true);
+
+#if UNITY_6000_0_OR_NEWER
+        private async Awaitable<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
+#else
+        private async UniTask<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
 #endif
         {
             if (_connectionCancelSource == null)
@@ -234,7 +261,7 @@ namespace HeTu
                         tcs.TrySetResult(response);
                         break;
                 }
-            });
+            }, awaitPush);
 
             using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(
                 _connectionCancelSource.Token,

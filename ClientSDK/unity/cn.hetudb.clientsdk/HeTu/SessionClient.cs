@@ -243,13 +243,40 @@ namespace HeTu
         public UniTask<JsonObject> CallSystem(string systemName,
             params object[] args)
 #endif
+            => CallSystemCore(systemName, args, false);
+
+        /// <summary>
+        ///     等推送的System调用（见 <c>HeTuClient.CallSystemAwaitPush</c>）：要等这次调用引起的
+        ///     订阅推送都到了才返回，返回时订阅对象已是新值，适合"按钮置灰、请求完成后按订阅数据
+        ///     恢复按钮"。比 <see cref="CallSystem" /> 约多等一个推送间隔（~100ms）。已收到服务端
+        ///     回应、还在等推送时断线，按成功返回（提交确定发生了，重连后订阅会恢复）。
+        ///     Like CallSystem, but returns only after the subscription updates caused by
+        ///     this call have arrived. About one push interval (~100 ms) slower.
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+        public Awaitable<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#else
+        public UniTask<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#endif
+            => CallSystemCore(systemName, args, true);
+
+#if UNITY_6000_0_OR_NEWER
+        private Awaitable<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
+#else
+        private UniTask<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
+#endif
         {
             var tcs = NewCompletionSource<JsonObject>();
             _core.CallSystem(
                 systemName,
                 args,
                 response => tcs.TrySetResult(response),
-                ex => tcs.TrySetException(ex));
+                ex => tcs.TrySetException(ex),
+                awaitPush);
             return AwaitFrom(tcs);
         }
 
@@ -508,8 +535,9 @@ namespace HeTu
         public void Close() => _client.Close();
 
         public void CallSystem(string systemName, object[] args,
-            Action<JsonObject, CallOutcome, string> onResponse) =>
-            _client.CallSystemSync(systemName, args, onResponse);
+            Action<JsonObject, CallOutcome, string> onResponse,
+            bool awaitPush = false) =>
+            _client.CallSystemSync(systemName, args, onResponse, awaitPush);
 
         public void WatchRow<T>(
             string index,
