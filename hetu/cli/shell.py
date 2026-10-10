@@ -17,6 +17,7 @@ import concurrent.futures
 import contextvars
 import inspect
 import json
+import os
 import sys
 import threading
 import time
@@ -71,12 +72,17 @@ def _no_call(*_args: Any, **_kwargs: Any) -> NoReturn:
     )
 
 
-def build_namespace(app: LocalApp, out: TextIO) -> dict[str, Any]:
-    """shell 预置的名字。range 不预置成裸名字（会遮住内置的 range），用 app.range"""
+def build_namespace(
+    app: LocalApp, out: TextIO, file: str | None = None
+) -> dict[str, Any]:
+    """shell 预置的名字。range 不预置成裸名字（会遮住内置的 range），用 app.range。
+
+    ``__name__`` 是 "__main__"（跑脚本文件时还有 ``__file__``）：常见的
+    ``if __name__ == "__main__":`` 写法照常执行，不会静默什么都不做"""
     import hetu
 
-    return {
-        "__name__": "__hetu_shell__",
+    ns: dict[str, Any] = {
+        "__name__": "__main__",
         "__builtins__": __builtins__,
         "app": app,
         "client": app.client,
@@ -91,6 +97,9 @@ def build_namespace(app: LocalApp, out: TextIO) -> dict[str, Any]:
         "hetu": hetu,
         "asyncio": asyncio,
     }
+    if file is not None:
+        ns["__file__"] = os.path.abspath(file)
+    return ns
 
 
 async def run_source(source: str, filename: str, ns: dict, show) -> None:
@@ -260,7 +269,7 @@ async def _shell_main(args: argparse.Namespace, out: TextIO) -> None:
         app = await open_local_app(config, instance=instance, address="cli")
         if audit is not None and app.lease is not None:
             audit.base["worker_id"] = app.lease.worker_id
-        ns = build_namespace(app, out)
+        ns = build_namespace(app, out, None if filename.startswith("<") else filename)
         before = asyncio.all_tasks()
         with lease_guard(app), recorder.active():
             try:

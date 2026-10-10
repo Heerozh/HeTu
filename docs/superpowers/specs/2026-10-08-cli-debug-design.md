@@ -347,6 +347,8 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 - 代码来源：`-c CODE`、`FILE`、`-`（stdin）；都没给时，stdin 是终端就进交互模式，否则读 stdin。
 - 非交互：整段源码用 `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` 编译，在事件循环里执行；最后一条语句是
   表达式时，对它的值调用 `show()`。抛异常 → traceback 写 stderr，退出码按 §2.9 的映射。
+  `__name__` 为 `"__main__"`，跑脚本文件时有 `__file__`：`if __name__ == "__main__":` 里的主逻辑
+  照常执行，不会静默什么都不做。
 - 交互：REPL 跑在单独线程，事件循环留在主线程（参照 CPython `asyncio/__main__.py`），空闲时
   租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。
 - 代码留下的后台任务在关闭后端之前取消（与 §2.9 的 System 后台任务同一套收尾）。

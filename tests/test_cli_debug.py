@@ -440,6 +440,18 @@ def test_shell(project):
     assert out["row"] is None
 
 
+def test_shell_script_runs_as_main(project, tmp_path):
+    """脚本文件按 __main__ 执行、有 __file__：if __name__ == "__main__" 里的主逻辑照常跑"""
+    script = tmp_path / "job.py"
+    script.write_text(
+        'if __name__ == "__main__":\n    show(__file__.endswith("job.py"))\n',
+        encoding="utf-8",
+    )
+    code, out, err = run_hetu("shell", str(script), cwd=project)
+    assert code == 0, err
+    assert out.strip().endswith("true")
+
+
 def test_shell_cleans_up_background_tasks_before_closing(project):
     """shell 代码留下的后台任务在关闭后端之前取消：它的 finally 还能写库"""
     source = textwrap.dedent(
