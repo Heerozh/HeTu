@@ -36,7 +36,7 @@ class SnowflakeLease:
        围栏）→ 先预留一段水位再发号；
     2. 运行期：`renew_forever` 每 5 秒续约，`reserve_forever` 每 TIMESTAMP_SAVE_INTERVAL
        秒预留水位。两个循环刻意分开，见 `SnowflakeTimestampKeeper` 的文档；
-    3. `release`：先写精确水位（之后不再发号），再释放 worker id。
+    3. `release`：先写精确水位（之后不再发号；租约已丢就不写），再释放 worker id。
 
     只租 id、不接水位的进程正常退出并释放租约后，下一个拿到同一 id 的进程读到的是旧水位，
     会落在它用过的毫秒上；跨机器还有时钟差。所以水位这一步不能省。
@@ -61,6 +61,8 @@ class SnowflakeLease:
         self._tasks: list[asyncio.Task] = []
         self.on_lost: Callable[[], None] | None = None
         """工具进程用：``async with`` 起的续约循环发现租约丢失时调用"""
+        self.lost = False
+        """续约时发现租约已不属于本进程（之后 `release` 不再写水位）"""
 
     async def acquire(self, *, wait: bool) -> int:
         """
@@ -121,6 +123,7 @@ class SnowflakeLease:
                 )
                 continue
             except SystemExit:
+                self.lost = True
                 on_lost()
                 break
             except asyncio.CancelledError:
@@ -158,10 +161,11 @@ class SnowflakeLease:
                 )
 
     async def release(self) -> None:
-        """写精确水位，再释放 worker id。调用方保证之后不再发号。"""
+        """写精确水位，再释放 worker id。调用方保证之后不再发号。两步都失败只告警。"""
         # 精确水位：不会再发号了，最后用到的时间戳就是真实上界。下次拿到这个 id 的进程从这里
-        # 接着发，不用背周期写入预留的那一段。失败不能挡住退出流程，下次就按最近一次的预留值
-        if self.ts_keeper is not None:
+        # 接着发，不用背周期写入预留的那一段。失败不能挡住退出流程，下次就按最近一次的预留值。
+        # 租约已经丢了就不写：接手的进程可能已经预留了更高的水位，无条件写会把它写低
+        if self.ts_keeper is not None and not self.lost:
             try:
                 await self.ts_keeper.save(SnowflakeID().last_timestamp)
             except Exception as e:  # noqa: BLE001
@@ -170,7 +174,15 @@ class SnowflakeLease:
                         err=f"{type(e).__name__}:{e}"
                     )
                 )
-        await self.keeper.release_worker_id()
+        # 释放失败不影响已经完成的工作：租约最多 WORKER_ID_EXPIRE_SEC 秒后自己过期
+        try:
+            await self.keeper.release_worker_id()
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                _("[❄️ID] 释放 Worker ID 失败，等它自己过期: {err}").format(
+                    err=f"{type(e).__name__}:{e}"
+                )
+            )
 
     def _lost(self) -> None:
         if self.on_lost is not None:

@@ -804,3 +804,22 @@ async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path
         keeper = lease.keeper
         await keeper.release_worker_id()  # 模拟租约过期后被别人拿走：自己那把没了
         await asyncio.wait_for(lost.wait(), 5)
+        # 接手的进程预留了更高的水位
+        high = generator.last_timestamp + 60_000
+        await table.direct_set(lease.worker_id, last_timestamp=str(high))
+    # 丢了租约，退出时不写精确水位：不能把接手者的水位写低
+    assert lease.lost
+    row = await backend.master.get(table, lease.worker_id, row_format=RowFormat.RAW)
+    assert row is not None and int(row["last_timestamp"]) == high
+
+    # 释放 worker id 失败（连接抖动等）只告警，不让收尾抛异常：租约会自己过期
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
+    async with lease:
+        keeper = lease.keeper
+        real_release = keeper.release_worker_id
+
+        async def broken_release():
+            raise ConnectionError("blip")
+
+        monkeypatch.setattr(keeper, "release_worker_id", broken_release)
+    await real_release()
