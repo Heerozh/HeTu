@@ -104,14 +104,18 @@ class MigrateCommand(CommandInterface):
 
         # 有服务器在跑时不能升级：迁移、清空易失表、重建索引在线执行都会写坏数据。
         # 靠 worker 租约判断，SQLite 后端没有租约，看不出来
+        from ..common.snowflake_id import TOOL_NODE_PREFIX, WORKER_ID_EXPIRE_SEC
         from ..data.backend import worker_keeper
 
         live: set[int] = set()
+        tools: set[int] = set()
         for backend in set(backends.values()):
-            live.update(worker_keeper.live_worker_ids(backend))
+            leases = worker_keeper.live_worker_leases(backend)
+            live.update(leases)
+            tools.update(
+                i for i, owner in leases.items() if owner.startswith(TOOL_NODE_PREFIX)
+            )
         if live:
-            from ..common.snowflake_id import TOOL_NODE_PREFIX, WORKER_ID_EXPIRE_SEC
-
             print(
                 _(
                     "❌ 检测到还有服务器在运行（持有 Worker ID 租约：{ids}），请先停服再升级："
@@ -119,17 +123,6 @@ class MigrateCommand(CommandInterface):
                     "退出的，等租约过期（最多 {ttl} 秒）后再试。"
                 ).format(ids=sorted(live), ttl=WORKER_ID_EXPIRE_SEC)
             )
-            tools: list[int] = []
-            for backend in set(backends.values()):
-                try:
-                    leases = worker_keeper.live_worker_leases(backend)
-                except Exception:  # noqa: BLE001, S112 只是为了把提示说细，读不到就算了
-                    continue
-                tools += [
-                    i
-                    for i, owner in leases.items()
-                    if owner.startswith(TOOL_NODE_PREFIX)
-                ]
             if tools:
                 print(
                     _(
