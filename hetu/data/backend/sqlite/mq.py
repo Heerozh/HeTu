@@ -277,3 +277,5 @@ class SQLiteMQClient(HubMQClient):
     """
 
     LOG_TAG = "💾SQLite"
+    # 通知表每 interval/2 才轮询一次（SQLiteNotifyHub._run）：栅栏要等过一次轮询，刚提交的通知才在它前面
+    FENCE_DELAY = 0.5 / MQClient.UPDATE_FREQUENCY + 0.01

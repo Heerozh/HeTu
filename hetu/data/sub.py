@@ -655,6 +655,8 @@ class TableSubscription(BaseSubscription):
 
 # 定向补读在 MQ 队列里的键："\0{token}\0{频道}"。真实频道名不会以 NUL 开头（设计稿 §4.4）
 _TARGETED = "\0"
+# 栅栏在 MQ 队列里的键："\0\0{fid}"。定向补读的 token 至少一位数字，撞不上（设计稿 2026-10-10 §4.2）
+_FENCE = "\0\0"
 # 一个 tick 里连续处理这么多个订阅就让出一次事件循环，别长时间饿死接收 / 发送协程
 _YIELD_EVERY = 256
 # 错误日志的限流间隔（秒）：Redis 挂着时每个 tick 都会出错、都会重试，别刷屏
@@ -719,6 +721,24 @@ class _Subscribing:
         self.done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
 
+class _Fence:
+    """一个还没触发的栅栏（见 SubscriptionHub.fence_）"""
+
+    __slots__ = ("callback", "enqueue", "expire")
+
+    def __init__(
+        self,
+        callback: Callable[[], None],
+        enqueue: asyncio.TimerHandle,
+        expire: asyncio.TimerHandle,
+    ) -> None:
+        self.callback = callback
+        # 到时（FENCE_DELAY）把栅栏键放进 MQ 队列
+        self.enqueue = enqueue
+        # 保险定时器：到时还没触发就直接触发
+        self.expire = expire
+
+
 class SubscriptionHub:
     """
     worker 级订阅器：每个 worker（进程）的每个 backend 一个，worker 内所有连接的订阅都在这里处理。
@@ -759,6 +779,9 @@ class SubscriptionHub:
     # 订阅初始化（SUBSCRIBE、读初始行）出错时重试几次，间隔按 1、2、4… 个 interval 退避、每次换一个
     # 副本；默认 3 次共约 0.7 秒，还不行才让等着的连接失败（断开）
     INIT_RETRIES: int = 3
+    # 栅栏的保险超时（interval 数）：栅栏键丢了（积压超过 DROP_AFTER 被丢）、处理循环卡住时，到时直接
+    # 触发，保证连接活着时等推送的调用一定等得到 sync（设计稿 2026-10-10 §4.2）
+    FENCE_TIMEOUT_INTERVALS: float = 20
 
     def __init__(self, backend: Backend, autostart: bool = True):
         """
@@ -804,6 +827,9 @@ class SubscriptionHub:
         self._step_lock = asyncio.Lock()
         # 错误日志按类别限流：(说明模板, 异常类型) → 状态，见 _log_error
         self._errors: dict[tuple[str, type[BaseException]], _ErrorKind] = {}
+        # 还没触发的栅栏：fid → 回调与定时器（见 fence_）
+        self._fences: dict[int, _Fence] = {}
+        self._fence_ids = itertools.count(1)
         self._closed = False
         if autostart:
             self._start()
@@ -1124,6 +1150,59 @@ class SubscriptionHub:
         prefix = f"{_TARGETED}{sub.token}{_TARGETED}"
         self._mq.request_reread(*[prefix + ch for ch in channels], payload=payload)
 
+    # === === === 栅栏 === === ===
+
+    def fence_(self, callback: Callable[[], None]) -> None:
+        """
+        通用栅栏：隔 `FENCE_DELAY`（按后端，见 `MQClient`）往本 hub 的 MQ 队列放一个栅栏键，弹出它的
+        那个 tick 交付之后同步调用 callback。队列按到达时刻排序、满一个 interval 才弹出，所以 callback
+        被调时，栅栏入队之前本 worker 收到的通知都已处理完、推送都已交到各成员的待发区；之后才到的
+        不等。等推送的调用（rpcs）回了 rsp 之后用它，让 sync 排在这次调用引起的推送后面（设计稿
+        docs/superpowers/specs/2026-10-10-rpcs-sync-design.md）。
+        栅栏键丢了、处理循环卡住时，保险定时器（FENCE_TIMEOUT_INTERVALS）到时直接调；hub 关闭时也调，
+        关闭之后再放的在下一轮事件循环调。callback 必须非阻塞，抛出的异常只记日志。
+
+        Generic fence: ``callback`` runs right after the tick that pops the fence key has
+        delivered its updates. The key is queued ``FENCE_DELAY`` seconds later into the
+        same time-ordered MQ queue, so every notification this worker received before
+        then has been processed and handed to the members' outboxes when it runs.
+        """
+        loop = asyncio.get_running_loop()
+        if self._closed:
+            loop.call_soon(self._call_fence, callback)
+            return
+        if self._autostart:
+            self._start()  # 处理循环意外结束过的话重新拉起，别只靠保险定时器
+        fid = next(self._fence_ids)
+        self._fences[fid] = _Fence(
+            callback,
+            loop.call_later(self._mq.FENCE_DELAY, self._enqueue_fence, fid),
+            loop.call_later(
+                self.FENCE_TIMEOUT_INTERVALS * self.interval, self._fire_fence, fid
+            ),
+        )
+
+    def _enqueue_fence(self, fid: int) -> None:
+        if fid in self._fences:
+            self._mq.request_reread(f"{_FENCE}{fid}")
+
+    def _fire_fence(self, fid: int) -> None:
+        """触发栅栏：撤掉它的定时器、调回调。已触发过的（保险定时器先到）什么也不做"""
+        fence = self._fences.pop(fid, None)
+        if fence is None:
+            return
+        fence.enqueue.cancel()
+        fence.expire.cancel()
+        self._call_fence(fence.callback)
+
+    @staticmethod
+    def _call_fence(callback: Callable[[], None]) -> None:
+        # 在 tick 的收尾里调：回调出错不能打断同批别的栅栏，也不能让 tick 抛出去
+        try:
+            callback()
+        except Exception:
+            logger.exception(_("❌ [📡Subscription] 栅栏回调出错"))
+
     # === === === 初始化 === === ===
 
     async def _init(self, sub: BaseSubscription) -> None:
@@ -1387,37 +1466,45 @@ class SubscriptionHub:
             self._step_lock.release()
 
     async def _tick(self, batch: Mapping[str, set[str] | None]) -> None:
-        """处理一批弹出的通知（设计稿 §4.3）"""
-        work = self._repair(self._collect(batch))
-        if not work:
-            return
-        self._ticks += 1
-        # 在本 tick 的任何读之前记下
-        tick = self._staging = _Tick(self._ticks, self._effective_seq)
+        """
+        处理一批弹出的通知（设计稿 §4.3）。这批里的栅栏最后触发：本批交付之后，没有 work、中途出错也
+        一样（设计稿 2026-10-10 §4.2）
+        """
+        fences: list[int] = []
         try:
-            # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
-            RowSubscription.reset_cache_()
-            await self._prefetch_rows(work)
-            await self._process_all(work, tick)
-        finally:
+            work = self._repair(self._collect(batch, fences))
+            if not work:
+                return
+            self._ticks += 1
+            # 在本 tick 的任何读之前记下
+            tick = self._staging = _Tick(self._ticks, self._effective_seq)
             try:
-                if not self._closed:
-                    # 中途出错也要把已记账的频道订上 / 退掉：新行的频道不订上就永远收不到通知，
-                    # 放掉的一直订着
-                    await self._settle_channels(tick)
+                # 本 tick 要读的行先按表批量读取，填进 RowSubscription 的缓存
+                RowSubscription.reset_cache_()
+                await self._prefetch_rows(work)
+                await self._process_all(work, tick)
             finally:
-                # 放在最后：推给客户端的新行一般在其行频道订阅生效之后（SUBSCRIBE 最多等
-                # SUBSCRIBE_WAIT_INTERVALS），get_updates 拿到的也总是完整的 tick。中途出错也把
-                # 已算好的交出去
-                self._staging = None
-                self._deliver(tick)
+                try:
+                    if not self._closed:
+                        # 中途出错也要把已记账的频道订上 / 退掉：新行的频道不订上就永远收不到
+                        # 通知，放掉的一直订着
+                        await self._settle_channels(tick)
+                finally:
+                    # 放在最后：推给客户端的新行一般在其行频道订阅生效之后（SUBSCRIBE 最多等
+                    # SUBSCRIBE_WAIT_INTERVALS），get_updates 拿到的也总是完整的 tick。中途出错
+                    # 也把已算好的交出去
+                    self._staging = None
+                    self._deliver(tick)
+        finally:
+            for fid in fences:
+                self._fire_fence(fid)
 
     def _collect(
-        self, batch: Mapping[str, set[str] | None]
+        self, batch: Mapping[str, set[str] | None], fences: list[int]
     ) -> dict[BaseSubscription, list[tuple[str, set[str] | None]]]:
         """
         按订阅分组：真实频道交给订了它的所有已生效订阅；定向补读只交给它指定的订阅（还订着那个
-        频道的话）。每个订阅内保持弹出顺序。
+        频道的话）。每个订阅内保持弹出顺序。栅栏键不分给任何订阅，fid 记进 fences。
         成员的推送全都卡着的订阅先不读（`_park`）：恢复按拉取驱动的背压，同 dev 不调 get_updates
         就不读
         """
@@ -1426,6 +1513,9 @@ class SubscriptionHub:
         work: dict[BaseSubscription, list[tuple[str, set[str] | None]]] = {}
         for key, payload in batch.items():
             if key.startswith(_TARGETED):
+                if key.startswith(_FENCE):
+                    fences.append(int(key[len(_FENCE) :]))
+                    continue
                 token, channel = key[1:].split(_TARGETED, 1)
                 sub = self._by_token.get(int(token))
                 if (
@@ -1865,6 +1955,12 @@ class SubscriptionHub:
                     if not waiter.done():
                         waiter.set_exception(closed)
                         waiter.exception()
+        # 还没触发的栅栏都触发：等着 sync 的连接不能一直等
+        fences, self._fences = self._fences, {}
+        for fence in fences.values():
+            fence.enqueue.cancel()
+            fence.expire.cancel()
+            self._call_fence(fence.callback)
         self._channel_subs.clear()
         self._by_token.clear()
         self._shared.clear()

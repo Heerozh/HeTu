@@ -1212,7 +1212,7 @@ async def test_fence_fires_when_the_tick_fails(
     """栅栏和别的通知同一批弹出、这个 tick 处理出错（bug）：栅栏照常触发"""
     hub = SubscriptionHub(mod_auto_backend("main"), autostart=False)
     broker, _sub_id, channel = await _subscribed_row(hub, filled_item_ref, admin_ctx)
-    await _set_qty(hub._backend, filled_item_ref, 999)
+    await _set_qty(hub._backend, filled_item_ref, 444)
     await wait_until(lambda: channel in hub.mq.pulled_set)
     queued = len(hub.mq.pulled_deque)
     fired: list[int] = []

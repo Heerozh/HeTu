@@ -1246,6 +1246,10 @@ class MQClient:
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
     # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
     DROP_AFTER = 120
+    # 栅栏（SubscriptionHub.fence_）隔多少秒才入队：给"commit 返回 → 它的通知进本 worker 的本地
+    # 队列"留的余量，之后才到的通知栅栏不等。Redis 副本应用 + 经 pubsub 推到 worker 平时约 1ms
+    # （设计稿 2026-10-10-rpcs-sync §4.6）
+    FENCE_DELAY: float = 0.02
     # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
     RESYNC = "*"
     # 日志里的后端标签，后端实现覆盖
