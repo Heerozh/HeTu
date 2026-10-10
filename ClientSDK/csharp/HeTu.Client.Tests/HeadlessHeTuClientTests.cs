@@ -56,5 +56,15 @@ namespace HeTu.Client.Tests
             using var c = new HeadlessHeTuClient();
             Assert.DoesNotThrow(() => c.Close());
         }
+
+        // 等推送的调用同 CallSystem 走泵线程：未连接时以取消结束，不会一直挂着。
+        [Test]
+        public void CallSystemAwaitPush_WhenNotConnected_IsCanceled()
+        {
+            using var c = new HeadlessHeTuClient();
+            var call = c.CallSystemAwaitPush("buy", 1);
+            Assert.That(async () => await call.WaitAsync(TimeSpan.FromSeconds(2)),
+                Throws.InstanceOf<OperationCanceledException>());
+        }
     }
 }

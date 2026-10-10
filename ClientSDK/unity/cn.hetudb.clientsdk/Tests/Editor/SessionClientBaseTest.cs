@@ -109,6 +109,33 @@ namespace Tests.HeTu
             Assert.IsNull(response);
         }
 
+        // 等推送的调用（rpcs）：排队等 Ready 的、Ready 后直接派发的，都把标记交给 transport
+        [Test]
+        public void AwaitPushCall_IsForwardedToTransport()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                scheduler);
+            var completed = new List<string>();
+
+            session.Start();
+            session.CallSystem("buy", new object[] { 1 }, _ => completed.Add("buy"),
+                _ => Assert.Fail("call should not fail"), true);
+            transport.RaiseConnected();
+            session.CallSystem("move", new object[] { 2 }, _ => completed.Add("move"),
+                _ => Assert.Fail("call should not fail"));
+            session.CallSystem("sell", new object[] { 3 }, _ => completed.Add("sell"),
+                _ => Assert.Fail("call should not fail"), true);
+
+            Assert.AreEqual(3, transport.Calls.Count);
+            Assert.IsTrue(transport.Calls[0].AwaitPush);
+            Assert.IsFalse(transport.Calls[1].AwaitPush);
+            Assert.IsTrue(transport.Calls[2].AwaitPush);
+            Assert.That(completed, Is.EqualTo(new[] { "buy", "move", "sell" }));
+        }
+
         [Test]
         public void SentCallThenDisconnect_FailsAsUnknownOutcome_WithoutRetry()
         {
@@ -1870,9 +1897,10 @@ namespace Tests.HeTu
             public void SimulateSilentDrop() => IsConnected = false;
 
             public void CallSystem(string systemName, object[] args,
-                Action<JsonObject, CallOutcome, string> onResponse)
+                Action<JsonObject, CallOutcome, string> onResponse,
+                bool awaitPush = false)
             {
-                Calls.Add(new CallRecord(systemName, args));
+                Calls.Add(new CallRecord(systemName, args, awaitPush));
                 if (HoldCallsOpen)
                     return;
                 if (FailCallsWithReason != null)
@@ -2005,14 +2033,16 @@ namespace Tests.HeTu
 
             public readonly struct CallRecord
             {
-                public CallRecord(string systemName, object[] args)
+                public CallRecord(string systemName, object[] args, bool awaitPush)
                 {
                     SystemName = systemName;
                     Args = args;
+                    AwaitPush = awaitPush;
                 }
 
                 public string SystemName { get; }
                 public object[] Args { get; }
+                public bool AwaitPush { get; }
             }
         }
 
