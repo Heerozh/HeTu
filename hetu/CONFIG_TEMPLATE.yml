@@ -22,6 +22,13 @@ INSTANCES:
 # 开启服务器的debug模式，打印debug消息。可设置为false/true/2。
 # 如果设置为2，则开启深度debug模式，框架和协程都将在Debug模式下，性能只有10%
 DEBUG: false
+
+# 命令行调试（hetu call / hetu shell）是否允许真写入这个库。设为 false 后只能读或 --dry-run，
+# 真写入会报错。DEBUG 关闭时（按生产库对待）CLI 每次真写入都会给出警告。
+CLI_ALLOW_WRITE: true
+# hetu call / hetu shell 的审计日志（JSONL，只追加不轮转）：谁、在哪台机器、什么命令、每次提交
+# 改了哪些行。相对路径按本配置文件所在目录解析；设为 "" 关闭。
+CLI_AUDIT_LOG: logs/hetu_cli_audit.jsonl
 # 开启web控制后台，GET /获得信息 POST /reload重载代码 POST /shutdown关闭服务器
 #INSPECTOR: true
 #INSPECTOR_PORT: 6457
@@ -144,7 +151,7 @@ BACKENDS:
     #        但广泛兼容Forks: Valkey(推荐>=9.2有通知快速路径), Tair等；支持redis代理层。
     #        代理层多数不支持RESP3协议，启动时会报 ResponseError: unknown command，
     #        此时在url后追加 ?protocol=2 降级。河图没有用到RESP3独有特性。
-    # SQLite url格式：sqlite:///./data/hetu.sqlite3
+    # SQLite url格式：sqlite:///./data/hetu.sqlite3（相对路径按本配置文件所在目录解析）
     #        仅限开发环境：在本地库文件上模拟 Redis 的行为，免装服务、方便调试，不考虑性能；
     #        servants 留空。
     master: redis://127.0.0.1:6379/0  # 密码等可用 ${REDIS_PASSWORD} 等环境变量注入

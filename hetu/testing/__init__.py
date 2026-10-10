@@ -15,12 +15,8 @@ unit-test their own `@define_system` / `@define_endpoint` logic.
 """
 
 import importlib
-import time
 import warnings
-from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, Any, Literal, Self
-
-import msgspec
+from typing import Any, Literal
 
 from ..common.snowflake_id import SnowflakeID
 from ..data.backend import Backend
@@ -29,17 +25,10 @@ from ..endpoint.connection import elevate
 from ..endpoint.definer import EndpointDefines
 from ..endpoint.executor import EndpointExecutor
 from ..endpoint.response import RejectResponse, ResponseToClient
-from ..headless import HeadlessClient
+from ..local import LocalApp
 from ..manager import ComponentTableManager
 from ..system import SystemClusters, SystemContext
 from ..system.caller import SystemCaller
-
-if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
-    import numpy as np
-
-    from ..data.backend import Table
 
 __all__ = ["CallRejected", "ConnectionClosed", "Sandbox", "sandbox_fixture"]
 
@@ -71,7 +60,7 @@ class ConnectionClosed(Exception):
     """
 
 
-class Sandbox:
+class Sandbox(LocalApp):
     """进程内 HeTu 应用沙盒（SQLite 临时文件），用于单测 System / Endpoint。
 
     用法 / Usage::
@@ -103,6 +92,10 @@ class Sandbox:
     `sb.client.session(A, B)` / `sb.client.table(A)`。Sandbox 与 headless 的区别只在
     它自己建簇、建表、初始化雪花 id、并能跑 System。
 
+    Sandbox 是 `hetu.local.LocalApp` 的子类：`call_system` / `get` / `must_get` / `range` /
+    `insert` / `upsert` 与 `hetu shell` 里同名函数是同一套实现，只多了临时库、建表、`call`
+    和 `flush`，身份默认值更宽松（没给 caller 就是 0、group 为 "guest"）。
+
     注意 / Notes
     -----
     - 注册表为全局单例；多 app/namespace 共享测试进程时（如 uv workspace 全仓
@@ -114,12 +107,8 @@ class Sandbox:
       `@rate_limit` 的跨调用计数请走集成测试（与不测 slowapi 同理，限流本身是 HeTu 的事）。
     """
 
-    namespace: str
-    instance_name: str
     backend: Backend
-    tbl_mgr: ComponentTableManager
-    client: HeadlessClient
-    """表直读写客户端：`get`/`range`/`insert`/`upsert` 都经它；多表事务用 `client.session`"""
+    """本沙盒的 SQLite 后端（即 `backends["default"]`）"""
 
     def __init__(
         self,
@@ -130,22 +119,23 @@ class Sandbox:
     ) -> None:
         """一般不直接调用，请用 `Sandbox.create(...)`。直接构造用于已自备 backend/tbl_mgr
         的高级场景。"""
-        self.namespace = namespace
-        self.instance_name = instance_name
-        self.backend = backend
-        self.tbl_mgr = tbl_mgr
-        # Sandbox = headless client + 簇 + 建表 + SystemCaller：数据读写全部复用 headless，
-        # 只是 Sandbox 已初始化雪花 id，允许 insert/upsert 自动发号（explicit_ids_only=False）
-        self.client = HeadlessClient(
-            backend,
+        # 表是自己刚建的，不用再核对表结构；数据读写全部复用 LocalApp（headless client）
+        super().__init__(
+            namespace,
             instance_name,
-            [tbl for _comp, tbl in tbl_mgr.items()],
-            explicit_ids_only=False,
+            {"default": backend},
+            tbl_mgr,
+            verify_tables=False,
+            address="sandbox",
         )
-        # 与 server pipeline 同款 msgpack codec（见 hetu/server/pipeline/jsonb.py），
-        # 用于 call/call_system 模拟真实 wire 序列化往返（见 _wire_roundtrip）。
-        self._msg_encoder = msgspec.msgpack.Encoder()
-        self._msg_decoder = msgspec.msgpack.Decoder()
+        self.backend = backend
+
+    def resolve_identity(
+        self, system: str, caller: int | None, group: str | None
+    ) -> tuple[int, str]:
+        """单测用宽松默认：没给 caller 就是 0、没给 group 就是 "guest"（同线上的普通连接），
+        不按 permission 推断，不要求 USER System 必须给 caller。"""
+        return (0 if caller is None else caller), ("guest" if group is None else group)
 
     @classmethod
     async def create(
@@ -270,208 +260,12 @@ class Sandbox:
         message = res.message if isinstance(res, ResponseToClient) else "ok"
         return self._wire_roundtrip(message)
 
-    async def call_system(
-        self,
-        system: str,
-        *args: Any,
-        caller: int = 0,
-        uuid: str = "",
-        user_data: dict | None = None,
-        raw: bool = False,
-    ) -> Any:
-        """绕过 Endpoint 层、以 `caller` 身份直接跑一个 System，默认返回 client SDK 实际
-        收到的 payload。要测权限/guard/登录等 Endpoint 行为请改用 `call`。
-
-        默认（`raw=False`）按 server `receiver.rpc()` 的 framing 处理 System 返回值，
-        并过一遍与生产同款的 msgpack 序列化往返（见 `_to_client_payload`），以暴露在
-        真实 wire 上才会出现的问题：
-
-        - System 返回 `ResponseToClient(msg)` → 返回 msgpack 往返后的 `msg`；
-          不可序列化的 payload（如 numpy 标量、自定义对象）会在此抛 `TypeError`，
-          `tuple`/`set` 会如实变成 `list`，与 client 实际收到的一致。
-        - System 返回 `None` 或任意普通值 → 返回字符串 `"ok"`（普通返回值在 wire 上
-          被无视，仅用于 System 间嵌套调用）。
-        - System 返回 `RejectResponse` → 原样返回该对象（边角情况；软拒绝由 Endpoint
-          guard 产生，Sandbox 不模拟 Endpoint 层）。
-
-        `raw=True` 时跳过上述处理，原样返回 System 的返回值（等价 `ctx.systems.call`
-        的嵌套调用语义，便于断言 System 内部计算/返回值，不做序列化校验）。
-
-        内部会开事务、自动在 `RaceCondition` 时重试。
-
-        Run a System as `caller`; by default returns what the client SDK actually
-        receives (after `receiver.rpc()` framing + the production msgpack round-trip),
-        so unit tests catch wire-only failures. Pass `raw=True` to get the System's
-        untouched return value instead.
-
-        user_data: 传入则作为 `ctx.user_data`（同一 dict 对调用方可见，便于断言
-        System 对其的写入）；不传则用空 dict。
-        """
-        ctx = SystemContext(
-            caller=caller,
-            connection_id=0,
-            address="sandbox",
-            group="",
-            user_data=user_data if user_data is not None else {},
-            # 绕过了Endpoint层，所以这里代替它打上请求时间戳，与生产的ctx.timestamp一致
-            timestamp=time.time(),
-            request=None,  # type: ignore[arg-type]
-            systems=None,  # type: ignore[arg-type]
-        )
-        ctx.systems = SystemCaller(self.namespace, self.tbl_mgr, ctx)
-        rtn = await ctx.systems.call(system, *args, uuid=uuid)
-        if raw:
-            return rtn
-        return self._to_client_payload(rtn)
-
-    def _wire_roundtrip(self, message: Any) -> Any:
-        """把一条 message 按 server `receiver.rpc()` 的 ``["rsp", message]`` framing 过一遍
-        与生产同款的 msgpack codec（见 `hetu/server/pipeline/jsonb.py`），返回 client SDK
-        实际收到的裸 message。
-
-        不可序列化的 payload（如 numpy 标量、自定义对象）会在此抛 `TypeError`（与生产
-        wire 一致），`tuple`/`set` 会如实变成 `list`。`call` 与 `call_system` 共用此往返。
-        """
-        decoded = self._msg_decoder.decode(self._msg_encoder.encode(["rsp", message]))
-        return decoded[1]
-
-    def _to_client_payload(self, rtn: Any) -> Any:
-        """把 System 返回值按 server `receiver.rpc()` 的 framing + 真实 msgpack 往返，
-        返回 client SDK 实际收到的 payload。
-
-        序列化采用与 `hetu/server/pipeline/jsonb.py` 同款的 `msgspec.msgpack`，因此
-        不可序列化的 payload 会在此抛 `TypeError`（与生产 wire 一致）。
-        """
-        if isinstance(rtn, RejectResponse):
-            # 软拒绝在 wire 上是 ["rej", name, code]，由 Endpoint guard 产生；call_system
-            # 不模拟 Endpoint 层，原样返回该对象（code/reason 是字符串，无序列化问题）。
-            return rtn
-        # framing 与 receiver.rpc() 对齐：ResponseToClient → message，其余（含 None /
-        # 普通返回值）→ "ok"。
-        message = rtn.message if isinstance(rtn, ResponseToClient) else "ok"
-        return self._wire_roundtrip(message)
-
-    def _resolve_table(self, comp: Any) -> Table:
-        """把 Component 类或名字字符串解析为本沙盒的 `Table`。"""
-        try:
-            return self.client.table(comp)
-        except KeyError as e:
-            raise ValueError(
-                f"找不到 Component：{comp!r}（是否在 components 中引用过？）"
-            ) from e
-
-    async def get(self, comp: Any, **query: Any) -> np.record | None:
-        """按 unique/index 字段读一行；无则返回 None（语义同 `repo.get`）。
-
-        `comp` 可传 Component 类或其名字字符串；`query` 只允许一个带索引的字段，
-        如 `get("Player", owner=1234)`。已知行必然存在（如 setup 之后）时，改用
-        `must_get` 可免去 `is None` 判空、直接访问字段。
-        """
-        table = self._resolve_table(comp)
-        async with self.client.session(table.comp_cls) as session:
-            return await session[table.comp_cls].get(**query)
-
-    async def must_get(self, comp: Any, **query: Any) -> np.record:
-        """同 `get`，但断言该行存在：命中返回该行，未命中抛 `LookupError`。
-
-        用于测试中 setup 后「保证存在」的读取，省去 `assert ... is not None` 样板；
-        返回类型为非 Optional 的 `numpy.record`，可直接访问字段（`row.value` 等）。
-        """
-        row = await self.get(comp, **query)
-        if row is None:
-            raise LookupError(f"{comp} 中不存在匹配 {query} 的行")
-        return row
-
-    async def range(
-        self,
-        comp: Any,
-        index_name: str | None = None,
-        _left: Any = None,
-        _right: Any = None,
-        limit: int = 10,
-        desc: bool = False,
-        **kwargs: Any,
-    ) -> np.recarray:
-        """按索引区间读多行，便于断言列表场景。默认闭区间 `[left, right]`。
-
-        签名与 `repo.range` 对齐，两种形态都支持：位置参数
-        `range(comp, "value", 1.0, 2.0)`，或 kwarg 区间 `range(comp, value=(1.0, 2.0))`。
-        `comp` 可传 Component 类或其名字字符串；索引字段必须带 index/unique。
-        `limit` 默认 10（与 `repo.range` 一致，注意超出会静默截断），负数表示不限制；
-        `desc=True` 降序。返回 `numpy.recarray`（c-struct array），无数据时为空数组。
-        """
-        table = self._resolve_table(comp)
-        async with self.client.session(table.comp_cls) as session:
-            return await session[table.comp_cls].range(
-                index_name, _left, _right, limit=limit, desc=desc, **kwargs
-            )
-
-    async def insert(self, comp: Any, **fields: Any) -> int:
-        """插入一行并返回其 `id`，省去手写 `new_row()` + `repo.insert(row)` 的样板。
-
-        只需给关心的字段，其余字段保留组件默认值。传 `id=` 可指定主键，否则自动生成
-        雪花 id（返回值即该 id）。`_version` 由引擎管理，不能设置。
-
-        用法 / Usage::
-
-            rid = await sb.insert(PlayerInfo, owner=1001, name="Alice")
-            await sb.insert(PlayerInfo, owner=1002, id=12345)  # 指定 id
-
-        `comp` 可传 Component 类或其名字字符串；重复 unique 会抛 `UniqueViolation`。
-        直接落库（绕过 System / 不做权限检查），便于测试喂初始行。
-        """
-        table = self._resolve_table(comp)
-        comp_cls = table.comp_cls
-        valid = set(comp_cls.prop_idx_map_)  # 全部字段名（含 id/_version）
-        row = comp_cls.new_row(id_=fields.pop("id", None))
-        for name, value in fields.items():
-            if name not in valid:
-                raise ValueError(f"{comp_cls.name_} 组件没有叫 {name} 的字段")
-            if name == "_version":
-                raise ValueError("_version 由引擎管理，insert 时不能设置")
-            row[name] = value
-        async with self.client.session(comp_cls) as session:
-            await session[comp_cls].insert(row)
-        return int(row.id)
-
-    @asynccontextmanager
-    async def upsert(self, comp: Any, **anchor: Any) -> AsyncIterator[np.record]:
-        """以 `async with` 语法 upsert 一行，镜像 `repo.upsert`：按 unique 字段锚定
-        查询，块内修改字段，退出块时自动 update/insert 并 commit。
-
-        用法 / Usage::
-
-            async with sb.upsert(RLSComp, owner=1001) as row:
-                row.value = 50
-            # 退出：owner=1001 存在则更新其 value，否则插入新行（owner=1001），并 commit
-
-        `anchor` 只能给一个 **unique** 字段（如 `owner=...`/`id=...`），等同
-        `repo.upsert(**anchor)` 的锚定语义。`comp` 可传 Component 类或其名字字符串。
-        直接落库（绕过 System / 不做权限检查），便于测试喂初始行。
-        """
-        comp_cls = self._resolve_table(comp).comp_cls
-        async with (
-            self.client.session(comp_cls) as session,
-            session[comp_cls].upsert(**anchor) as row,
-        ):
-            yield row
-
     async def flush(self) -> None:
         """清空本沙盒所有组件表的数据（测试间复用同一 backend 时用）。"""
         # force flush 是本助手的预期操作，抑制引擎"强制删除"的劝阻性警告
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.tbl_mgr._flush_all(force=True)
-
-    async def aclose(self) -> None:
-        """关闭 backend 连接。"""
-        await self.client.close()
-
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *exc: object) -> None:
-        await self.aclose()
 
 
 def sandbox_fixture(

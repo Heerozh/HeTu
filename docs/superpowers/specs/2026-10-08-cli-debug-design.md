@@ -1,7 +1,7 @@
 # 命令行调试入口（`hetu call` / `get` / `range` / `shell`）— 设计稿
 
 - 日期：2026-10-08
-- 状态：设计稿，待评审（§10 的待确认项按本稿默认值落地）
+- 状态：已实现（分支 `feat/cli-debug`）；§10 的决定已确认，与本稿的出入见 §11
 - 影响范围：新增 `hetu/local.py`（进程内应用运行时，CLI 与 `Sandbox` 共用）、
   `hetu/data/backend/snowflake_lease.py`（发号租约，服务器与 CLI 共用）、四个 CLI 子命令
   （`hetu/cli/call.py`、`data.py`、`shell.py`、`console.py`）；核心层小改（`Session` 提交观察
@@ -125,7 +125,8 @@ v1 不做：调用纯 `@define_endpoint`（依赖连接的端点，见 §8）、
 - **D5** 表结构用 `check_table` 按需校验（只查本次碰到的表）；`hetu get/range` 走 headless
   按组件名读，不 import app，默认读 servant。
 - **D6** stdout 只有一行 JSON；日志和 `print` 全进 stderr；强制 UTF-8。
-- **D7** 写保护：`--dry-run`，加配置项 `CLI_ALLOW_WRITE`（默认仅当全部后端是 SQLite 时为 true）。
+- **D7** 写保护：`--dry-run`，加配置项 `CLI_ALLOW_WRITE`（默认 true，可在部署配置里关掉）；配置
+  `DEBUG` 关闭时真写入会给出警告。
 - **D8** 审计写独立的 JSONL 文件，挂在提交观察钩子上，不用 replay 日志。
 - **D9** 配置定位：`--config` > 命令行参数模式 > `$HETU_CONFIG` > `./config.yml`；SQLite
   相对路径改为按配置目录解析（服务器一起改）；CLI 不新建库文件。
@@ -346,8 +347,13 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 - 代码来源：`-c CODE`、`FILE`、`-`（stdin）；都没给时，stdin 是终端就进交互模式，否则读 stdin。
 - 非交互：整段源码用 `ast.PyCF_ALLOW_TOP_LEVEL_AWAIT` 编译，在事件循环里执行；最后一条语句是
   表达式时，对它的值调用 `show()`。抛异常 → traceback 写 stderr，退出码按 §2.9 的映射。
+  `__name__` 为 `"__main__"`，跑脚本文件时有 `__file__`：`if __name__ == "__main__":` 里的主逻辑
+  照常执行，不会静默什么都不做。
 - 交互：REPL 跑在单独线程，事件循环留在主线程（参照 CPython `asyncio/__main__.py`），空闲时
-  租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。
+  租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。Ctrl+C 只取消正在跑的
+  那条语句（同 `python -m asyncio`），空闲时不退出；不接管的话 `asyncio.run` 的 SIGINT 处理会
+  取消整个 shell。Ctrl+D 退出。
+- 代码留下的后台任务在关闭后端之前取消（与 §2.9 的 System 后台任务同一套收尾）。
 - `show(x)`：把 `to_jsonable(x)`（§2.9）按缩进 2、`ensure_ascii=False` 打到 stdout。
 - 进程内不会重新加载代码（`build_clusters` 每进程只能调一次），改了代码请重开 shell。
 - `--dry-run` 和写保护对整个会话生效，包括用户代码里直接 `client.session` 的写入。审计记录
@@ -357,7 +363,8 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 ### 2.9 输出格式与退出码
 
 `call` / `get` / `range` / 两个 `--list` 的 stdout 恰好一行 JSON（UTF-8，
-`ensure_ascii=False`）。shell 不受此约束。
+`ensure_ascii=False`）。shell 不受此约束。命令行本身的用法错误（argparse 报的）也输出一行 JSON、
+退出码 2；`call` 的选项可以夹在参数中间（`call add_gold 1001 --dry-run 500`）。
 
 `hetu call` 成功：
 
@@ -388,6 +395,7 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
 ```
 
 失败时也带 `writes`：嵌套的 `ctx.systems.call` 各自独立提交，外层失败前可能已经写进去一部分。
+`traceback` 只在退出码 1（代码或调用失败）时给出；用法错误、环境未就绪只给消息。
 
 `to_jsonable` 规则：带字段名的 `np.record` / `np.void` → dict；结构化 ndarray / recarray →
 dict 列表；其他 ndarray → list；`np.generic` → `.item()`；NaN / ±inf → `"NaN"` /
@@ -413,8 +421,10 @@ tuple / set / frozenset → list；dict 的非 str 键转 str；其他对象 →
 审计或数据）。默认 `retry=9999`、每次最多 sleep 0.2 秒（`system/caller.py:165`），没有超时可能
 空转很久，而 agent 的工具超时一到会直接杀进程，最后那行 JSON 就出不来了。
 
-System 返回后，若它 `create_task` 出去的任务还没结束：取消它们，并加一条 warning："System
-留下 N 个后台任务，CLI 退出时已取消（在服务器里它们会继续跑）"。
+System 返回后（失败、超时也一样），若它 `create_task` 出去的任务还没结束：取消并等它们结束
+（最多 5 秒），并加一条 warning："System 留下 N 个后台任务，CLI 退出时已取消（在服务器里它们会
+继续跑）"。收尾顺序：取消后台任务 → 写精确水位、释放租约 → 关闭后端 → 写审计 end，后台任务的
+finally 还能读写数据库。收尾出错（释放租约、关连接失败）只告警，不把已经完成的调用报成失败。
 
 ### 2.10 写保护、dry-run 与写集
 
@@ -426,10 +436,12 @@ System 返回后，若它 `create_task` 出去的任务还没结束：取消它�
 | `dry_run` | `--dry-run`                                | 记录写集，不提交，session 按已提交清理                      |
 | `forbid`  | `CLI_ALLOW_WRITE` 为 false 且没有 `--dry-run` | 有脏行就抛 `CliWriteForbidden`，不碰后端                  |
 
-- `CLI_ALLOW_WRITE`：新配置项。默认值：配置里全部后端都是 SQLite 时为 true，否则为 false——
-  生产配置要显式写 `CLI_ALLOW_WRITE: true` 才允许 CLI 真写。开关在部署配置里，命令行只能通过
-  `--dry-run` 让它更安全，不能放开。命令行参数模式没有配置文件，按同样的默认值处理：`--db`
-  是 Redis 时只能 dry-run，要真写请用配置文件。
+- `CLI_ALLOW_WRITE`：新配置项，默认 true。要禁止 CLI 写某个库，就在那份部署配置里写
+  `CLI_ALLOW_WRITE: false`。开关在部署配置里，命令行只能通过 `--dry-run` 让它更安全，不能放开。
+  命令行参数模式没有配置文件，按默认值 true 处理。
+- 配置的 `DEBUG` 关闭（或参数模式下没有 `DEBUG`）时，每次命令第一次真提交后，输出的 `warnings`
+  和 stderr 各加一条："DEBUG 关闭的配置（按生产库对待）上 CLI 刚刚真写入了数据；要禁止，在配置
+  里设 CLI_ALLOW_WRITE: false"。只读调用、dry-run 不警告。
 - `forbid`：`CliWriteForbidden` 不是 `RaceCondition`，System 不重试，直接失败，退出码 3，提示
   "加 --dry-run，或在配置里设 CLI_ALLOW_WRITE: true"。只读的 System 照常可用。注意 `--uuid`
   本身会写调用锁行，所以 forbid 下带 `--uuid` 的调用一定失败。
@@ -451,6 +463,9 @@ System 返回后，若它 `create_task` 出去的任务还没结束：取消它�
   值按组件 dtype 还原成 JSON 类型（`get_dirty_rows()` 给的是提交用的字符串：布尔按
   `"True" / "False"` 还原，bytes 列按 `to_jsonable` 规则）；每张表每种操作最多列 20 行，多的给
   `"omitted": N`。所有更新都改回了原值的提交（脏行列表全空）不列出。
+- `committed`：真提交为 `true`，dry-run 为 `false`；提交途中被取消（`--timeout`、租约丢失）或
+  连接出错时为 `"unknown"`——可能已经生效，要直接查数据。后端拒绝的提交（`RaceCondition` /
+  `UniqueViolation`，什么都没写）不列出。
 - 机制见 §3.7。
 
 ### 2.11 审计
@@ -459,10 +474,12 @@ System 返回后，若它 `create_task` 出去的任务还没结束：取消它�
   模式下相对当前目录），设为 `""` 关闭。只追加的 JSONL，每行用 `O_APPEND` 打开后一次
   `os.write`；不轮转（需要时用外部 logrotate 的 copytruncate）。
 - 记录三种事件，公共字段：`ts`（带时区的 ISO 时间）、`run`（uuid4）、`user`
-  （`getpass.getuser()`）、`host`、`pid`、`cwd`、`argv`、`config`、`namespace`、`instance`、
+  （`getpass.getuser()`）、`host`、`pid`、`cwd`、`config`、`namespace`、`instance`、
   `worker_id`：
-  - `start`：命令、System 名、参数（repr，最多 1 KB）、身份、写模式；shell 记执行的代码；
-  - `commit`：每次真实提交的 instance、cluster、各表按操作分组的 id；
+  - `start`：命令行 `argv`（数据库地址打码口令，每项最多 1 KB）、命令、System 名、参数（repr，
+    最多 1 KB）、身份、写模式；shell 记执行的代码。`argv` 只记在这一条，不在每条记录里重复；
+  - `commit`：每次提交的 instance、cluster、`committed`（同 `writes`，含 `"unknown"`）、各表按
+    操作分组的**全部** id（`writes` 每种操作只列 20 行，审计不截断）；
   - `end`：`ok`、`error_type`、`elapsed_ms`。
 - 只有可能写入的 `call` 和 `shell` 记审计；`get` / `range` / `--list` 只读，不记。
 - 挂在提交观察钩子上，所以 shell 里直接 `client.session` 的写入、嵌套调用的写入都有记录。
@@ -771,7 +788,7 @@ SQLite 部分不需要 Docker；Redis 部分用现有 fixture（`mod_auto_backen
   System 里都会 `print` 的 app 文件）：
   8. `hetu call` 端到端：stdout 恰好一行合法 JSON；退出码 0 / 1 / 2 / 3 分别对应成功、System
      抛异常、USER 不给 `--as`、缺表；`result` / `client` / `wire_error`（System 返回含
-     `np.int64` 的 `ResponseToClient`）；`retries`；超时。
+     `np.int64` 的 `ResponseToClient`）；`retries`；超时；`DEBUG` 关闭时真写入有警告、只读调用没有。
   9. 用 `PYTHONIOENCODING=gbk` 模拟 Windows 管道：输出仍是合法的 UTF-8 JSON，没有
      `UnicodeEncodeError`。
   10. 两个 `hetu call` 进程并发向同一个 SQLite 库插行：都成功、id 不重复；两个 worker id 在
@@ -827,7 +844,6 @@ v1 不做：
 - `hetu set` / `insert` 之类的写子命令（用 shell）。
 - shell 内热重载代码。
 - 为 JS 消费者把大整数输出成字符串的选项。
-- 自动识别"开发用 Redis"来放开 `CLI_ALLOW_WRITE`。
 
 ## 9. 主要改动文件清单
 
@@ -855,10 +871,10 @@ v1 不做：
 
 ## 10. 待确认的新决定
 
-评审时请确认以下几处本稿新引入的选择：
+评审结论：除第 1 项按评审意见修改外，其余按本稿默认值落地。
 
-1. `CLI_ALLOW_WRITE` 默认值：仅当全部后端是 SQLite 时为 true，生产要显式开（§2.10）。另一个选择
-   是默认处处为 true，只建议生产配置关掉。
+1. ~~`CLI_ALLOW_WRITE` 仅当全部后端是 SQLite 时默认 true~~ → 已定：默认 true，`DEBUG` 关闭时
+   真写入给出警告（§2.10）。
 2. 服务器的 SQLite 相对路径语义改为相对配置目录，旧文件存在时打 warning（§2.2）。另一个选择是
    保持相对当前目录，CLI 只做"文件不存在就报错并给出绝对路径"。
 3. `Sandbox` 的 group 默认值由 `""` 改为 `"guest"`（§3.2）。
@@ -871,3 +887,17 @@ v1 不做：
 9. 名字：`LocalApp` / `hetu/local.py`（原稿暂名 AppClient，容易和 `HeadlessClient`、游戏客户端
    混淆）。
 10. 配置定位顺序，含 `start` / `upgrade` 也回落到 `$HETU_CONFIG` 和 `./config.yml`（§2.2）。
+
+## 11. 实现记录（与本稿的出入）
+
+- 租约常量（`WORKER_ID_EXPIRE_SEC` / `FENCE_MARGIN_SEC` / `WORKER_ID_KEY`）与新增的
+  `TOOL_NODE_PREFIX` / `TOOL_WORKER_ID_FLOOR` 放在 `hetu/common/snowflake_id.py`（与 `WorkerKeeper`
+  基类同处，Redis 与 SQLite 的 keeper 都不必互相 import）；Windows 上"本机已退出进程"的判定挪到
+  `hetu/common/helper.py` 的 `lease_owner_exited`，Redis 模块里的 `_owner_exited` 保留为它的别名。
+- `UsageError` 定义在 `hetu/cli/base.py`（`pick_instance` 也要用），`console.py` 再导入。
+- 新增 `SystemClusters.systems_of(namespace)`（只读副本），供 `hetu call --list` 用，不碰私有表。
+- `hetu.local` 另外公开 `build_app_registry`（`--list` 只建簇不连库）与 `check_backend_files`。
+- 写集里超过 20 行时的计数键是 `insert_omitted` / `update_omitted` / `delete_omitted`。
+- `hetu.i18n` 导入时打的"Use language ..."提示改写 stderr：它在 `import hetu` 时就打印，写 stdout
+  会破坏"stdout 恰好一行 JSON"。
+- `traceback` 只在退出码 1 时输出（§2.9 已同步）。

@@ -29,6 +29,10 @@ def func_alias(ctx):
     pass
 
 
+# core pin 占位 System 的名字前缀（见 SystemClusters.build_clusters），列出 System 时要排除
+CORE_PIN_PREFIX = "__core_pin_system_"
+
+
 @dataclass
 class SystemDefine(EndpointDefine):
     components: set[type[BaseComponent]]  # 引用的Components
@@ -102,6 +106,11 @@ class SystemClusters(metaclass=Singleton):
         else:
             return self._main_system_map.get(system_name, None)
 
+    def systems_of(self, namespace: str | None = None) -> dict[str, SystemDefine]:
+        """某个 namespace（默认主 namespace）的全部 System 定义，含迁入的 global System 与
+        core pin 占位 System（名字形如 ``__core_pin_system_*``）。返回副本。"""
+        return dict(self._system_map.get(namespace or self._main_namespace, {}))
+
     def get_systems(self, cluster: Cluster) -> dict[str, SystemDefine]:
         return {
             name: self.get_system(cluster.namespace, name) for name in cluster.systems
@@ -149,7 +158,7 @@ class SystemClusters(metaclass=Singleton):
 
         core_comps = ComponentDefines().get_all("core")
         for comp in core_comps:
-            func_alias.__name__ = f"__core_pin_system_{comp.__name__}__"
+            func_alias.__name__ = f"{CORE_PIN_PREFIX}{comp.__name__}__"
             SystemClusters().add(
                 "global",
                 func=func_alias,

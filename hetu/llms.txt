@@ -52,6 +52,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 - [Endpoint](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/endpoint.md): `EndpointContext` / `ResponseToClient` / `elevate`
 - [Exceptions](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/exceptions.md): `RaceCondition` / `UniqueViolation`
 - [Headless](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/headless.md): `hetu.headless.connect` / `HeadlessClient` —— 非服务器进程（可信内部进程）不经 Sanic / System 直接读写组件表，写入走与 System 相同的提交路径
+- [Local](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/api/local.md): `hetu.local.open_local_app` / `LocalApp` —— 进程内直连后端跑 System、读写组件表，`hetu call` / `hetu shell` 与测试用 `Sandbox` 共用同一套 API
 
 ## For LLM-assisted Development
 

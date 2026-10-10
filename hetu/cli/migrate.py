@@ -5,20 +5,23 @@
 @email: heeroz@gmail.com
 """
 
-import importlib.util
 import logging
 import sys
 
-import yaml
-
-from hetu.cli.base import CommandInterface, resolve_app_file
-from hetu.common import yamlloader
+from hetu.cli.base import (
+    CommandInterface,
+    ConfigError,
+    config_from_flags,
+    locate_config_file,
+    read_config_file,
+)
 from hetu.i18n import _
 
 logger = logging.getLogger("HeTu.root")
-logger.setLevel(logging.DEBUG)
-assert logging.lastResort
-logging.lastResort.setLevel(logging.DEBUG)
+
+# 命令行参数模式下的默认值。参数本身默认为 None，才能判断是否显式给出（见 flag_mode_requested）
+DEFAULT_APP_FILE = "app.py"
+DEFAULT_DB = "redis://127.0.0.1:6379/0"
 
 
 class MigrateCommand(CommandInterface):
@@ -38,14 +41,12 @@ class MigrateCommand(CommandInterface):
         parser_migrate.add_argument(
             "--db",
             metavar="redis://127.0.0.1:6379/0",
-            help=_("后端数据库地址"),
-            default="redis://127.0.0.1:6379/0",
+            help=_("后端数据库地址，默认 redis://127.0.0.1:6379/0"),
         )
         parser_migrate.add_argument(
             "--app-file",
-            help=_("河图app的py文件"),
+            help=_("河图app的py文件，默认 app.py"),
             metavar=".app.py",
-            default="app.py",
         )
         parser_migrate.add_argument(
             "--namespace",
@@ -58,7 +59,10 @@ class MigrateCommand(CommandInterface):
 
         parser_migrate.add_argument(
             "--config",
-            help=_("通过yml配置文件读取后端数据库地址"),
+            help=_(
+                "通过yml配置文件读取后端数据库地址。不给且没用命令行参数时，依次找环境变量"
+                " HETU_CONFIG、当前目录的 config.yml"
+            ),
             metavar="config.yml",
         )
         parser_migrate.add_argument(
@@ -100,14 +104,18 @@ class MigrateCommand(CommandInterface):
 
         # 有服务器在跑时不能升级：迁移、清空易失表、重建索引在线执行都会写坏数据。
         # 靠 worker 租约判断，SQLite 后端没有租约，看不出来
+        from ..common.snowflake_id import TOOL_NODE_PREFIX, WORKER_ID_EXPIRE_SEC
         from ..data.backend import worker_keeper
 
         live: set[int] = set()
+        tools: set[int] = set()
         for backend in set(backends.values()):
-            live.update(worker_keeper.live_worker_ids(backend))
+            leases = worker_keeper.live_worker_leases(backend)
+            live.update(leases)
+            tools.update(
+                i for i, owner in leases.items() if owner.startswith(TOOL_NODE_PREFIX)
+            )
         if live:
-            from ..data.backend.redis.worker_keeper import WORKER_ID_EXPIRE_SEC
-
             print(
                 _(
                     "❌ 检测到还有服务器在运行（持有 Worker ID 租约：{ids}），请先停服再升级："
@@ -115,17 +123,20 @@ class MigrateCommand(CommandInterface):
                     "退出的，等租约过期（最多 {ttl} 秒）后再试。"
                 ).format(ids=sorted(live), ttl=WORKER_ID_EXPIRE_SEC)
             )
+            if tools:
+                print(
+                    _(
+                        "   其中 {ids} 是 hetu call / shell 进程，等它们结束即可"
+                        "（异常退出的最多 {ttl} 秒过期）。"
+                    ).format(ids=sorted(tools), ttl=WORKER_ID_EXPIRE_SEC)
+                )
             sys.exit(1)
 
         # 加载玩家的app文件
-        spec = importlib.util.spec_from_file_location("HeTuApp", config["APP_FILE"])
-        assert spec and spec.loader, _("无法加载app文件 {app_file}").format(
-            app_file=config["APP_FILE"]
-        )
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["HeTuApp"] = module
-        spec.loader.exec_module(module)
+        from hetu.local import load_app_module
         from hetu.system import SystemClusters
+
+        load_app_module(config["APP_FILE"])
 
         SystemClusters().build_clusters(config["NAMESPACE"])
 
@@ -200,27 +211,24 @@ class MigrateCommand(CommandInterface):
 
     @classmethod
     def execute(cls, args):
-        if args.config:
-            config_file = args.config
-            with open(config_file, "r", encoding="utf-8") as f:
-                config_dict = yaml.load(f, yamlloader.Loader)
-            config = config_dict
-            # APP_FILE 相对路径按配置文件所在目录解析，而非进程 CWD
-            if config.get("APP_FILE"):
-                config["APP_FILE"] = resolve_app_file(config["APP_FILE"], config_file)
-        else:
-            config = {
-                "APP_FILE": args.app_file,
-                "NAMESPACE": args.namespace,
-                "INSTANCES": [args.instance],
-                "BACKENDS": {
-                    "Redis": {
-                        "type": "Redis",
-                        "master": args.db,
-                    }
-                },
-            }
-            assert args.namespace, _("namespace参数不能为空，建议用--config参数")
-            assert args.instance, _("instance参数不能为空，建议用--config参数")
-            assert args.app_file, _("app_file参数不能为空，建议用--config参数")
+        # 迁移的每一步都要打出来：只在执行 upgrade 时打开 DEBUG（以前写在模块顶层，
+        # import hetu.cli 就会改掉所有 hetu 命令的全局日志设置）
+        logger.setLevel(logging.DEBUG)
+        assert logging.lastResort
+        logging.lastResort.setLevel(logging.DEBUG)
+
+        try:
+            if config_file := locate_config_file(args):
+                config = read_config_file(config_file)
+            else:
+                config = config_from_flags(
+                    args,
+                    need_app=True,
+                    need_db=True,
+                    default_app_file=DEFAULT_APP_FILE,
+                    default_db=DEFAULT_DB,
+                )
+        except ConfigError as e:
+            print(e)
+            sys.exit(2)
         return cls.run(config, args.y, args.drop_data, not args.no_rebuild_index)

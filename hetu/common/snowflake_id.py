@@ -36,6 +36,20 @@ SEQUENCE_MASK = -1 ^ (-1 << SEQUENCE_BITS)
 
 TIME_ROLLBACK_TOLERANCE_MS = 10_000  # 允许的时间回拨容忍度，单位毫秒
 
+# ==== worker id 租约（Redis 与 SQLite 的 keeper 共用，与后端无关）====
+# 回收worker id的时间，超时则认为宕机
+WORKER_ID_EXPIRE_SEC = 60
+# 租约 key 的前缀，完整 key 是 f"{WORKER_ID_KEY}:{worker_id}"
+WORKER_ID_KEY = "snowflake:worker"
+# 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
+# 数据库时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
+FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
+# hetu call / shell 这类工具进程持有的租约，node_id 带这个前缀，hetu upgrade 据此认出来
+TOOL_NODE_PREFIX = "cli:"
+# SQLite 后端给工具进程预留的 worker id 段 [TOOL_WORKER_ID_FLOOR, MAX_WORKER_ID]：SQLite 上的
+# 服务器 worker 用本机进程序号（从 0 往上、不做协调），工具进程只在这一段里互斥地租
+TOOL_WORKER_ID_FLOOR = 1000
+
 
 class WorkerLeaseExpired(Exception):
     """Worker ID 租约已超出安全期，继续发号可能产生重复雪花ID，因此拒绝发号。

@@ -134,7 +134,9 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
 | `hetu/data/sub.py`       | `SubscriptionHub`（worker 级）, `SubscriptionBroker`（每连接）, 三种 Subscription      |
 | `hetu/server/`           | Sanic workers、WebSocket handler、message pipeline                                      |
 | `hetu/manager.py`        | `ComponentTableManager` —— 将 Components 映射到 backend Tables                          |
-| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK） |
+| `hetu/cli/`              | CLI commands：`start`（启动服务）、`upgrade`（schema 迁移）、`build`（生成 client SDK）；调试用 `call` / `get` / `range` / `shell` |
+| `hetu/local.py`          | `LocalApp` / `open_local_app` —— 进程内直连后端跑 System、读写组件表（`hetu call` / `shell` 与 `Sandbox` 共用） |
+| `hetu/data/backend/snowflake_lease.py` | `SnowflakeLease` —— 雪花号租约生命周期（worker id + 时间戳水位 + 续约），服务器与 CLI 共用 |
 | `hetu/sourcegen/`        | Client SDK code generation（C#）；由 `hetu build` 调用                                  |
 | `hetu/safelogging/`      | 进程安全的日志 queue/listener；通过 YAML 配置见 hetu/CONFIG_TEMPLATE.yml                |
 | `hetu/i18n/`             | gettext 风格的翻译，所有用户可见字符串都包在 `_("...")` 中                              |

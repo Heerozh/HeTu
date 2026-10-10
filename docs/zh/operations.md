@@ -169,7 +169,13 @@ Nginx 也能工作，但其配置语法对于 HeTu 所鼓励的动态增删模�
 
 ## `hetu` CLI
 
-`hetu` 命令（通过 `uv run hetu` 运行）是您的运维入口点。三个子命令：
+`hetu` 命令（通过 `uv run hetu` 运行）是您的运维入口点：`start`（启动）、`upgrade`（迁移）、`build`
+（生成客户端代码），以及调试用的 `call` / `get` / `range` / `shell`（见 [命令行调试](#命令行调试)）。
+
+需要配置的子命令按这个顺序找配置：`--config` > 命令行参数模式（给了 `--app-file` / `--namespace` /
+`--db` 之一）> 环境变量 `HETU_CONFIG` > 当前目录的 `config.yml`。官方 Docker 镜像设了
+`HETU_CONFIG=/app/config.yml`。配置里 `APP_FILE` 与 SQLite 库文件（`sqlite:///./hetu.db`）的相对路径都按
+**配置文件所在目录**解析，与在哪个目录运行无关。
 
 ### `hetu start`
 
@@ -239,7 +245,8 @@ hetu upgrade --app-file=./app.py --namespace=my_game --instance=server1 \
 `upgrade` 开始前会检查有没有服务器还在运行（Redis 后端看 worker 租约），有就直接退出（退出码 1），什么都
 不动：迁移、清空易失表、重建索引在服务器运行时执行都会写坏数据。服务器是异常退出的，等租约过期（最多 60
 秒）后再试。Windows 上本机已经退出的服务器不用等：Sanic 在 Windows 上停 worker 是硬杀，租约来不及释放，
-所以这种租约不算。SQLite 后端没有租约、检查不出来，请自己确认已经停服。
+所以这种租约不算。SQLite 后端的服务器没有租约、检查不出来，请自己确认已经停服。`hetu call` / `hetu shell`
+也持有租约（Redis 与 SQLite 都是），它们在跑时 `upgrade` 同样拒绝执行，提示里会单独列出。
 
 ### `hetu build`
 
@@ -253,6 +260,59 @@ hetu build --app-file=./app.py --namespace=my_game \
 `--namespace` 和 `--output` 是必需的；`--app-file` 默认为 `/app/app.py`。
 
 这样可以保持客户端和服务器端 schema 同步，而无需手写样板代码。
+
+## 命令行调试
+
+`hetu call` / `get` / `range` / `shell` 在**本进程里直连配置好的后端**，以 admin 或指定玩家身份调用
+System、查看组件数据，不经过服务器、不需要开服（SQLite 开发库也能用）。写入走与 System 相同的提交路径，
+在线客户端照常收到订阅推送。能跑它们的人手里本来就有数据库地址和口令，所以不给服务器加任何新的网络入口。
+
+```bash
+hetu call --list                          # 全部 System：参数、权限、引用的组件、文档第一行
+hetu get --list                           # 组件、字段、索引
+hetu call add_gold 1001 500               # ADMIN 级 System，默认以 admin 身份
+hetu call --as 1001 buy_item 3 2          # USER 级 System 必须给玩家 id
+hetu call --as 1001 --group gm gm_kick 2002
+hetu call send_mail --args-file args.json # 参数从 JSON 数组文件读（- 为 stdin）
+hetu call add_gold 1001 500 --dry-run     # 执行但不提交，看它会写什么
+hetu get Player owner=1001                # 按 id 或带索引的字段读一行
+hetu range Item owner 1001 --limit 50     # 省略右界即精确匹配；( / [ 前缀表示开 / 闭区间
+hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player', owner=1001))"
+```
+
+- **输出**：`call` / `get` / `range` / `--list` 的 stdout 恰好一行 JSON，日志和 app 里的 `print` 都在
+  stderr。`call` 给出 System 的原始返回值 `result`、客户端实际会收到的 `client`（序列化不了时给
+  `wire_error`）、竞态重试次数、这次调用的写集 `writes`、`target`（配置文件、实例、口令打码后的后端
+  地址）。失败时给 `error_type`、`error`，代码出错时还有完整 `traceback`。提交途中被打断（超时等）的
+  那次在 `writes` 里 `committed` 为 `"unknown"`：可能已经生效，重跑前先查数据。
+- **退出码**：0 成功；1 代码或调用失败（System 抛异常、超时）；2 用法错误（参数、身份、名字不存在）；
+  3 环境未就绪（找不到配置、库文件或表不存在、表结构与代码不一致、写保护拒绝）。
+- **身份**：没给 `--as` / `--group` 时按 System 的权限推断：ADMIN、GM 与内部 System（`permission=None`）
+  用 admin，EVERYBODY 用 guest，**USER 必须 `--as`**（线上 USER 端点不放行未登录连接，用 0 号身份跑会在库里
+  建出 owner=0 的行）。给了 `--as` 时 group 默认 guest。没有连接：`ctx.connection_id` 为 0、`ctx.request`
+  为 None，调 `elevate` 的 System 会失败；登录时写进 `ctx.user_data` 的数据用 `--user-data` 手动给。
+- **参数**：每个参数先按 JSON 解析，解析不了当字符串；形参注解为 `str` 的不解析。看起来像 JSON 却解析失败
+  的直接报错（PowerShell 常把引号吃掉），这时改用 `--args-file` 或 stdin。以 `-` 开头的非数字参数放在
+  `--` 后面。
+- **读**：`get` / `range` 不加载 app，schema 取自库里的表 meta，app 代码改坏了也能看数据；默认读副本，
+  刚写完马上读用 `--master`。`range` 默认最多 10 行，输出 `truncated` 表示是否还有更多。
+- **表结构**：`call` / `shell` 不建表、不迁移；用到的表在库里不存在、或与本地代码的结构 / 簇不一致时直接
+  报错，先启动一次服务器（建新表）或 `hetu upgrade`。
+- **`hetu shell`**：预置与测试用 `Sandbox` 同名的 `call_system` / `get` / `must_get` / `insert` /
+  `upsert`，以及 `app.range` 与 `show()`（按 JSON 打印，numpy 行带字段名），支持顶层 await。代码来自
+  `-c`、脚本文件或 stdin；都没给时进交互模式。脚本按 `__main__` 执行（有 `__file__`）；交互模式下
+  Ctrl+C 只中断正在跑的语句，Ctrl+D 退出。改了代码要重开 shell。
+
+**跑的是本地代码**：`hetu call` 每次都重新 import 本地的 app，不代表服务器已经加载了同样的代码——
+单 worker 的服务器不会自动重载，验证客户端那条路径要重启服务器。生产上请在部署好的容器里跑
+（`docker exec <容器> hetu call ...`），别从开发机的代码直接写生产库：表结构校验拦不住逻辑上的差异。
+另外：System 里 `create_task` 出去的后台任务在命令退出时会被取消；`on_server_setup` 里挂的初始化不会执行；
+经 CLI 创建的 FutureCall 由在跑的服务器执行。
+
+**写保护与审计**：配置项 `CLI_ALLOW_WRITE`（默认 true）设为 false 后，CLI 只能读或 `--dry-run`，真写入会
+报错（退出码 3）；`DEBUG` 关闭的配置上真写入会给出警告。`call` 与 `shell` 的每次运行都追加记录到
+`CLI_AUDIT_LOG`（默认配置目录下的 `logs/hetu_cli_audit.jsonl`）：谁、在哪台机器、什么命令和参数（数据库
+口令打码）、每次提交改了哪些行、结果。审计写在运行 CLI 的机器上，服务器那边没有痕迹。
 
 ## 配置文件
 

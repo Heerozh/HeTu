@@ -712,6 +712,17 @@ class SQLiteStore:
             return None
         return bytes(row[0])
 
+    def kv_expire_if(self, key: str, value: bytes, ttl: float) -> bool:
+        """值还是 value（且没过期）才把过期时间刷成 ttl 秒后，返回刷没刷（租约续期用的 CAS）"""
+        with self.write_txn():
+            if self.kv_get(key) != value:
+                return False
+            self.conn.execute(
+                f"UPDATE {quote(KV_TABLE)} SET expire_at = ? WHERE key = ?",
+                (time.time() + ttl, key),
+            )
+            return True
+
     def kv_delete_if(self, key: str, value: bytes) -> bool:
         """值还是 value（且没过期）才删，返回删没删（同 redis-py Lock 的释放）"""
         with self.write_txn():

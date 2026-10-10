@@ -343,6 +343,29 @@ async def test_check_schema(mod_test_app, mod_auto_backend):
     await client.close()
 
 
+async def test_check_schema_reads_each_tables_backend(
+    mod_test_app, mod_tbl_mgr, mod_auto_backend, tmp_path
+):
+    """hetu.local 的多后端配置里表不都在 client.backend 上：要去表自己的后端读 meta"""
+    from hetu.data.backend import Backend
+
+    Cfg = mod_test_app.PublicConfig
+    real = await headless.HeadlessClient.from_backend(
+        mod_auto_backend(), "server1", [Cfg]
+    )
+    other = Backend(
+        {"type": "sqlite", "master": "sqlite:///" + (tmp_path / "other.db").as_posix()}
+    )
+    try:
+        client = headless.HeadlessClient(
+            other, "server1", [real.table(Cfg)], owns_backend=False
+        )
+        await client.check_schema()
+    finally:
+        await other.close()
+        await real.close()
+
+
 # ---------------------------------------------------------------- 轮询读（验收 8）
 
 

@@ -28,6 +28,38 @@ logger = logging.getLogger("HeTu.root")
 replay = logging.getLogger("HeTu.replay")
 
 
+# 端点能用的权限级别；OWNER / RLS 只用于 Component
+ENDPOINT_PERMISSIONS = (
+    Permission.EVERYBODY,
+    Permission.USER,
+    Permission.GM,
+    Permission.ADMIN,
+)
+
+
+def permission_allows(permission: Permission | None, caller: int, group: str) -> bool:
+    """
+    生产端点放不放行这个身份调用（`EndpointExecutor.execute_check` 的权限判定）。默认拒绝：
+    OWNER / RLS / 未知级别，以及 None（没有端点的内部 System）一律 False。
+    `hetu call` 用它判断显式给的身份在线上能不能出现。
+
+    Whether a production endpoint with ``permission`` admits caller/group. Fails closed.
+    """
+    is_admin = group.startswith("admin")
+    match permission:
+        case Permission.EVERYBODY:
+            return True  # 公开接口，任何连接都可调用
+        case Permission.USER:
+            return bool(caller)
+        case Permission.GM:
+            # GM 是已登录的玩家账号（group 以 "gm" 开头）；admin 也放行
+            return is_admin or (bool(caller) and group.startswith("gm"))
+        case Permission.ADMIN:
+            return is_admin
+        case _:
+            return False
+
+
 class EndpointExecutor:
     """
     每个连接一个EndpointExecutor实例。
@@ -84,46 +116,21 @@ class EndpointExecutor:
 
         # 检查权限是否符合。默认拒绝：只有显式放行的权限级别才允许，未处理的级别
         # (OWNER/RLS/未知) 一律失败关闭——即使 -O 去掉了 define_endpoint 定义期的断言。
-        match ep.permission:
-            case Permission.EVERYBODY:
-                pass  # 公开接口，任何连接都可调用
-            case Permission.USER:
-                if not context.caller:
-                    err_msg = _(
-                        "⚠️ [📞Endpoint] [非法操作] {context} | "
-                        "{endpoint}无调用权限，检查是否非法调用：{args}"
-                    ).format(context=context, endpoint=endpoint, args=args)
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
-            case Permission.GM:
-                # GM 是已登录的玩家账号（group 以 "gm" 开头）；admin 也放行
-                if not (context.is_admin() or (context.caller and context.is_gm())):
-                    err_msg = _(
-                        "⚠️ [📞Endpoint] [非法操作] {context} | "
-                        "{endpoint}无调用权限，检查是否非法调用：{args}"
-                    ).format(context=context, endpoint=endpoint, args=args)
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
-            case Permission.ADMIN:
-                if not context.is_admin():
-                    err_msg = _(
-                        "⚠️ [📞Endpoint] [非法操作] {context} | "
-                        "{endpoint}无调用权限，检查是否非法调用：{args}"
-                    ).format(context=context, endpoint=endpoint, args=args)
-                    replay.info(err_msg)
-                    logger.warning(err_msg)
-                    return None
-            case _:
+        if not permission_allows(ep.permission, context.caller, context.group):
+            if ep.permission in ENDPOINT_PERMISSIONS:
+                err_msg = _(
+                    "⚠️ [📞Endpoint] [非法操作] {context} | "
+                    "{endpoint}无调用权限，检查是否非法调用：{args}"
+                ).format(context=context, endpoint=endpoint, args=args)
+            else:
                 # OWNER/RLS 或未知权限级别：失败关闭，拒绝调用
                 err_msg = _(
                     "⚠️ [📞Endpoint] [非法操作] {context} | "
                     "{endpoint}权限级别不支持，拒绝调用：{permission}"
                 ).format(context=context, endpoint=endpoint, permission=ep.permission)
-                replay.info(err_msg)
-                logger.warning(err_msg)
-                return None
+            replay.info(err_msg)
+            logger.warning(err_msg)
+            return None
 
         # 检测args数量是否对得上
         if not (ep.arg_count - ep.defaults_count - 1 <= len(args) <= ep.arg_count - 1):

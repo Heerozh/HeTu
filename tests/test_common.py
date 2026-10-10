@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import subprocess
@@ -634,3 +635,191 @@ def test_windows_pid_exited():
     assert windows_pid_exited(proc.pid)
 
     assert windows_pid_exited(0xFFFFFFFC)  # Windows 的 pid 到不了这么大，查无此进程
+
+
+@use_redis_family_backend_only
+async def test_redis_tool_keeper(mod_auto_backend):
+    """hetu call / shell 的 tool 模式：不做复用扫描、从上往下 SET NX、node_id 带 cli: 前缀。
+
+    复用扫描用的 GETEX 会把所有现存租约（包括已死 worker 的）TTL 刷回满值，工具进程调用得
+    勤，死租约就永不过期，hetu upgrade 会一直以为有服务器在跑
+    """
+    from hetu.data.backend.redis.worker_keeper import (
+        RedisWorkerKeeper,
+        live_worker_leases,
+    )
+
+    backend = mod_auto_backend()
+    aio = backend.master.aio
+    keys = await aio.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    if keys:
+        await aio.delete(*keys)
+
+    # 一个已死 worker 留下的租约，还剩 30 秒
+    await aio.set("snowflake:worker:5", "dead-machine:1", ex=30)
+
+    # 用真实 pid：Windows 上 live_worker_leases 会滤掉本机已经退出（不存在）的 pid
+    tool = RedisWorkerKeeper(os.getpid(), aio, tool=True)
+    assert tool.node_id.startswith("cli:")
+    assert await tool.get_worker_id() == 1023
+    assert await RedisWorkerKeeper(os.getpid(), aio, tool=True).get_worker_id() == 1022
+    # 没有碰别人的租约
+    assert await aio.ttl("snowflake:worker:5") <= 30
+    assert tool.lease_deadline is not None
+
+    owners = live_worker_leases(backend.master.io)
+    assert owners[1023] == tool.node_id and owners[5] == "dead-machine:1"
+
+    # 续约、被抢后发现、释放只删自己的，与服务器模式相同
+    await tool.keep_alive()
+    await aio.set("snowflake:worker:1023", "thief:1", ex=60)
+    with pytest.raises(SystemExit):
+        await tool.keep_alive()
+    await tool.release_worker_id()
+    assert await aio.get("snowflake:worker:1023") == b"thief:1"
+    await aio.delete(
+        *await aio.keys("snowflake:*", target_nodes=RedisCluster.PRIMARIES)
+    )
+
+
+async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
+    """SQLite 上的工具进程在预留段 [1000, 1023] 里用 KV 租约互斥，语义同 Redis"""
+    monkeypatch.chdir(tmp_path)
+    from hetu.common.snowflake_id import TOOL_WORKER_ID_FLOOR, WorkerKeeper
+    from hetu.data.backend.sqlite.store import SQLiteStore
+    from hetu.data.backend.worker_keeper import (
+        SQLiteToolWorkerKeeper,
+        create_worker_keeper,
+        live_worker_ids,
+        live_worker_leases,
+    )
+
+    backend = mod_sqlite_backend()
+    master = backend.master
+    # 用真实 pid：Windows 上 live_worker_leases 会滤掉本机已经退出（不存在）的 pid。
+    # tool 模式按 SET NX 往下分配，同 pid 的两个 keeper 照样拿到不同的 id
+    first = create_worker_keeper(backend, os.getpid(), tool=True)
+    assert isinstance(first, SQLiteToolWorkerKeeper)
+    keepers: list[WorkerKeeper] = [first]
+    try:
+        assert await first.get_worker_id() == 1023
+        second = create_worker_keeper(backend, os.getpid(), tool=True)
+        assert isinstance(second, SQLiteToolWorkerKeeper)
+        keepers.append(second)
+        assert await second.get_worker_id() == 1022
+        assert first.lease_deadline is not None
+
+        leases = live_worker_leases(backend)
+        assert leases[1023] == first.node_id and leases[1022] == second.node_id
+        assert first.node_id.startswith("cli:")
+        assert {1022, 1023} <= set(live_worker_ids(backend))
+
+        # 续约推进围栏；被抢后续约抛 SystemExit，释放不删别人的
+        deadline = first.lease_deadline
+        await first.keep_alive()
+        assert first.lease_deadline >= deadline
+        key = "snowflake:worker:1023"
+        master.run_sync_(SQLiteStore.kv_delete_if, key, first.node_id.encode())
+        assert master.run_sync_(SQLiteStore.kv_set_nx, key, b"thief", 60)
+        with pytest.raises(SystemExit):
+            await first.keep_alive()
+        await first.release_worker_id()
+        assert master.run_sync_(SQLiteStore.kv_get, key) == b"thief"
+        master.run_sync_(SQLiteStore.kv_delete_if, key, b"thief")
+
+        # 预留段占满就报错，不会越界去撞服务器 worker 的序号（second 还占着 1022）
+        for pid in range(1000, 1000 + 1024 - TOOL_WORKER_ID_FLOOR - 1):
+            keeper = create_worker_keeper(backend, pid, tool=True)
+            keepers.append(keeper)
+            await keeper.get_worker_id()
+        with pytest.raises(KeyError):
+            await create_worker_keeper(backend, 5000, tool=True).get_worker_id()
+    finally:
+        for keeper in keepers:
+            await keeper.release_worker_id()
+    assert live_worker_leases(backend) == {}
+
+
+def test_sqlite_kv_expire_if(tmp_path):
+    """kv_expire_if：值相符且未过期才续期（租约续期用的 CAS）"""
+    from hetu.data.backend.sqlite.store import SQLiteStore
+
+    store = SQLiteStore(str(tmp_path / "kv.sqlite3"))
+    try:
+        assert not store.kv_expire_if("k", b"me", 60)  # 不存在
+        assert store.kv_set_nx("k", b"me", 0.05)
+        assert not store.kv_expire_if("k", b"other", 60)  # 不是自己的
+        assert store.kv_expire_if("k", b"me", 60)
+        time.sleep(0.1)
+        assert store.kv_get("k") == b"me"  # 已续到 60 秒后，没过期
+        assert store.kv_set_nx("k2", b"me", 0.01)
+        time.sleep(0.05)
+        assert not store.kv_expire_if("k2", b"me", 60)  # 已过期就不能续
+    finally:
+        store.close()
+
+
+async def test_fixed_worker_keeper_leaves_tool_range(monkeypatch):
+    """SQLite 服务器 worker 的序号不能进工具进程的预留段"""
+    from hetu.data.backend.worker_keeper import FixedWorkerKeeper
+
+    monkeypatch.setenv("SANIC_WORKER_IDENTIFIER", "Srv 1000")
+    with pytest.raises(KeyError):
+        await FixedWorkerKeeper().get_worker_id()
+
+
+async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path):
+    """SnowflakeLease：拿 id → 接水位 → 发号 → 退出时写精确水位、释放租约；丢租约时回调"""
+    monkeypatch.chdir(tmp_path)
+    from hetu.common.snowflake_id import SnowflakeID
+    from hetu.data.backend import snowflake_lease
+    from hetu.data.backend.base import RowFormat
+    from hetu.data.backend.snowflake_lease import SnowflakeLease
+    from hetu.data.backend.worker_keeper import create_worker_keeper, live_worker_ids
+
+    backend = mod_auto_backend()
+    table = _make_lease_table(backend)
+    generator = SnowflakeID()
+
+    pid = os.getpid()  # 真实 pid，理由同 test_sqlite_tool_keeper
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
+    async with lease:
+        worker_id = lease.worker_id
+        assert worker_id >= 1000 and generator.worker_id == worker_id
+        assert worker_id in live_worker_ids(backend)
+        new_id = generator.next_id()
+        assert (new_id >> 12) & 1023 == worker_id
+        last = generator.last_timestamp
+    # 精确水位不低于最后发出的 id 的时间戳；租约已释放
+    row = await backend.master.get(table, worker_id, row_format=RowFormat.RAW)
+    assert row is not None and int(row["last_timestamp"]) >= last
+    assert worker_id not in live_worker_ids(backend)
+
+    # 续约发现租约被抢走 → on_lost
+    monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
+    lost = asyncio.Event()
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
+    lease.on_lost = lost.set
+    async with lease:
+        keeper = lease.keeper
+        await keeper.release_worker_id()  # 模拟租约过期后被别人拿走：自己那把没了
+        await asyncio.wait_for(lost.wait(), 5)
+        # 接手的进程预留了更高的水位
+        high = generator.last_timestamp + 60_000
+        await table.direct_set(lease.worker_id, last_timestamp=str(high))
+    # 丢了租约，退出时不写精确水位：不能把接手者的水位写低
+    assert lease.lost
+    row = await backend.master.get(table, lease.worker_id, row_format=RowFormat.RAW)
+    assert row is not None and int(row["last_timestamp"]) == high
+
+    # 释放 worker id 失败（连接抖动等）只告警，不让收尾抛异常：租约会自己过期
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
+    async with lease:
+        keeper = lease.keeper
+        real_release = keeper.release_worker_id
+
+        async def broken_release():
+            raise ConnectionError("blip")
+
+        monkeypatch.setattr(keeper, "release_worker_id", broken_release)
+    await real_release()

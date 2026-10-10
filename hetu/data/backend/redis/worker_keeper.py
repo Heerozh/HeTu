@@ -1,12 +1,19 @@
 import logging
-import sys
 from time import monotonic
 from typing import TYPE_CHECKING, final, override
 
 import redis.asyncio
 
-from ....common.helper import get_machine_id, windows_pid_exited
-from ....common.snowflake_id import MAX_WORKER_ID, WorkerKeeper
+from ....common.helper import get_machine_id
+from ....common.helper import lease_owner_exited as _owner_exited
+from ....common.snowflake_id import (
+    FENCE_MARGIN_SEC,
+    MAX_WORKER_ID,
+    TOOL_NODE_PREFIX,
+    WORKER_ID_EXPIRE_SEC,
+    WORKER_ID_KEY,
+    WorkerKeeper,
+)
 from ....i18n import _
 
 if TYPE_CHECKING:
@@ -14,13 +21,15 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("HeTu.root")
 
-# 回收worker id的时间，超时则认为宕机
-WORKER_ID_EXPIRE_SEC = 60
-# 租约 key 的前缀，完整 key 是 f"{WORKER_ID_KEY}:{worker_id}"
-WORKER_ID_KEY = "snowflake:worker"
-# 发号围栏的安全余量（秒）。我们在 TTL 到期前这么多秒就停止发号，用来覆盖本机单调时钟与
-# Redis 时钟之间的漂移、以及续约请求的网络耗时。取 TTL 的 1/4。
-FENCE_MARGIN_SEC = WORKER_ID_EXPIRE_SEC / 4
+__all__ = [
+    "FENCE_MARGIN_SEC",
+    "LUA_RELEASE_IF_MINE",
+    "WORKER_ID_EXPIRE_SEC",
+    "WORKER_ID_KEY",
+    "RedisWorkerKeeper",
+    "live_worker_ids",
+    "live_worker_leases",
+]
 
 
 # 释放租约的 compare-and-delete：只删自己的那把。Redis 没有单条命令能做"值相符才删"
@@ -34,51 +43,29 @@ return 0
 """
 
 
-def live_worker_ids(io: redis.Redis | redis.RedisCluster) -> list[int]:
+def live_worker_leases(io: redis.Redis | redis.RedisCluster) -> dict[int, str]:
     """
-    还持有租约的 worker id：服务器在跑，或者异常退出后租约还没过期（最多
-    WORKER_ID_EXPIRE_SEC 秒）。一次 pipeline 查完所有 id，cluster 下按 slot 分发。
+    还持有租约的 worker id → 持有者（node_id）：服务器在跑、hetu call / shell 在跑（持有者带
+    `cli:` 前缀），或者异常退出后租约还没过期（最多 WORKER_ID_EXPIRE_SEC 秒）。一次 pipeline
+    查完所有 id，cluster 下按 slot 分发。
 
-    例外：Windows 上本机已经退出的进程留下的租约不算，见 `_owner_exited`。
+    例外：Windows 上本机已经退出的进程留下的租约不算，见 `hetu.common.helper.lease_owner_exited`。
     """
     pipe = io.pipeline()
     for worker_id in range(MAX_WORKER_ID + 1):
         pipe.get(f"{WORKER_ID_KEY}:{worker_id}")
-    return [
-        worker_id
+    return {
+        worker_id: owner.decode("utf-8", "replace")
+        if isinstance(owner, bytes)
+        else str(owner)
         for worker_id, owner in enumerate(pipe.execute())
         if owner is not None and not _owner_exited(owner)
-    ]
+    }
 
 
-def _owner_exited(owner: bytes | str) -> bool:
-    """
-    租约的主人（node_id，即 `机器码:pid`）是本机上已经退出的进程。只在 Windows 上这么认。
-
-    为什么要认：Windows 上 sanic 停 worker 是 TerminateProcess 硬杀——Ctrl+C 走
-    `WorkerProcess.terminate()` 的 `os.kill(pid, SIGINT)`，DEBUG 自动重载走
-    `multiprocessing.Process.terminate()`，从外面 `taskkill /F` 也一样——关服钩子里的
-    release_worker_id 没机会跑。这些租约照算的话，upgrade 就得干等它们过期。
-
-    为什么只在 Windows：判断的前提是"机器码相同就是同一个 PID 空间，本地查得到那个 pid"。
-    容器里机器码是 hostname（识别不出容器时是 MAC），host 网络或写死 hostname 时多个容器
-    共用一个机器码、PID 空间却各自独立，本地查不到 pid 不代表进程不在，会把活着的服务器当成
-    已退出、放 upgrade 在它运行时执行。Windows 只用于开发，没有这个问题；Linux 上 sanic
-    用信号优雅停 worker，租约会正常释放，只有 kill -9 / OOM 才留下，交给 TTL。
-
-    只认不删：key 照旧等 TTL 过期，开服分配有的是空位。按值删会撞上"pid 被回收、新 worker
-    经 `_getex_if_mine` 接手同一把 key"的竞态，删掉的就成了活租约。
-    """
-    if sys.platform != "win32":
-        return False
-    if isinstance(owner, bytes):
-        owner = owner.decode("ascii", errors="replace")
-    machine_id, _, pid = owner.rpartition(":")
-    return (
-        machine_id == get_machine_id()
-        and pid.isdecimal()
-        and windows_pid_exited(int(pid))
-    )
+def live_worker_ids(io: redis.Redis | redis.RedisCluster) -> list[int]:
+    """还持有租约的 worker id，见 `live_worker_leases`"""
+    return list(live_worker_leases(io))
 
 
 @final
@@ -126,18 +113,26 @@ class RedisWorkerKeeper(WorkerKeeper):
         self,
         pid: int,
         aio: redis.asyncio.Redis | redis.asyncio.RedisCluster,
+        *,
+        tool: bool = False,
     ):
         """
         初始化 RedisWorkerKeeper。
+
+        tool: 工具进程模式（hetu call / shell）。node_id 带 `cli:` 前缀；分配时**不做**复用
+        扫描、从 MAX_WORKER_ID 往下 SET NX，见 `get_worker_id`。续约、释放、围栏不变。
         """
         super().__init__()
         self.aio = aio
         self.worker_id_key = WORKER_ID_KEY
         self.worker_id = -1
+        self.tool = tool
         # 机器码+pid组成的node_id。
         # 如果pid为固定值，则可以保证60秒内获取到的worker_id尽可能不变
         # 比如固定每个容器只启动一个worker，则pid是固定的1
         self.node_id = f"{get_machine_id()}:{pid}"
+        if tool:
+            self.node_id = TOOL_NODE_PREFIX + self.node_id
 
     def _key(self, worker_id: int) -> str:
         return f"{self.worker_id_key}:{worker_id}"
@@ -159,11 +154,46 @@ class RedisWorkerKeeper(WorkerKeeper):
         self.lease_deadline = started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
         return True
 
+    async def _get_tool_worker_id(self) -> int:
+        """
+        工具进程分配：从 MAX_WORKER_ID 往下 SET NX，常见情况下一次就拿到。
+
+        不做服务器那样的复用扫描：工具进程每次都是新 pid，扫描必然 1024 次全落空；而且扫描
+        用的 GETEX 会把**所有**现存租约（包括已死 worker 的）TTL 刷回满值，工具进程调用得
+        勤，死租约就永不过期，hetu upgrade 会一直以为有服务器在跑。从上往下分配让工具进程
+        远离服务器从 0 往上占用的 id。
+        """
+        if self.worker_id >= 0 and await self._getex_if_mine(self.worker_id):
+            return self.worker_id
+        for worker_id in range(MAX_WORKER_ID, -1, -1):
+            started_at = monotonic()
+            result = await self.aio.set(
+                self._key(worker_id), self.node_id, nx=True, ex=WORKER_ID_EXPIRE_SEC
+            )
+            if result:
+                self.lease_deadline = (
+                    started_at + WORKER_ID_EXPIRE_SEC - FENCE_MARGIN_SEC
+                )
+                logger.info(
+                    _(
+                        "[❄️ID] 成功获取 Worker ID: {worker_id}, 进程码: {node_id}"
+                    ).format(worker_id=worker_id, node_id=self.node_id)
+                )
+                self.worker_id = worker_id
+                return worker_id
+        raise KeyError(
+            _(
+                "无法获取可用的 Worker ID，所有 ID 均被占用。如果有宕机，请等待ID过期重试"
+            )
+        )
+
     @override
     async def get_worker_id(self) -> int:
         """
         从Redis中获取一个可用的 Worker ID。
         """
+        if self.tool:
+            return await self._get_tool_worker_id()
         # 查找之前是否已经分配过自己的worker id
         for worker_id in range(MAX_WORKER_ID + 1):
             # node_id相同说明是容器重启，直接复用。GETEX一条命令原子完成"读值+续期"，

@@ -22,6 +22,11 @@ EXTRAS: dict[str, str] = {
     "hetu.headless.TableNotFound": "headless",
     "hetu.headless.SchemaMismatch": "headless",
     "hetu.headless.ClusterChanged": "headless",
+    "hetu.local.open_local_app": "local",
+    "hetu.local.LocalApp": "local",
+    "hetu.local.TableNotReady": "local",
+    "hetu.local.IdentityRequired": "local",
+    "hetu.local.BackendNotReady": "local",
 }
 
 # Topic mapping for items already in hetu.__all__. If a name from __all__ is

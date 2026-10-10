@@ -361,8 +361,13 @@ class HeadlessClient:
                     "跨簇请拆成两个事务）：{detail}"
                 ).format(detail=detail)
             )
+        # 用表自己的 backend：同簇的组件必然在同一后端（build_clusters 保证），headless 只有
+        # 一个后端时与 self.backend 是同一个；hetu.local 的多后端配置需要它
         session = HeadlessSession(
-            self.backend, self.instance, cluster_ids.pop(), [t.comp_cls for t in tables]
+            tables[0].backend,
+            self.instance,
+            cluster_ids.pop(),
+            [t.comp_cls for t in tables],
         )
         session.only_master = only_master
         session.explicit_ids_only = self.explicit_ids_only
@@ -375,9 +380,9 @@ class HeadlessClient:
 
         Re-read table metas; raise if the cluster id or layout changed on the server.
         """
-        maint = self.backend.get_table_maintenance()
         for name, tbl in self._tables.items():
-            meta = maint.read_meta(self.instance, name)
+            # 用表自己的 backend（同 session()）：hetu.local 的多后端配置里表不都在 self.backend
+            meta = tbl.backend.get_table_maintenance().read_meta(self.instance, name)
             if meta is None:
                 raise TableNotFound(self.instance, name)
             if meta.cluster_id != tbl.cluster_id:
