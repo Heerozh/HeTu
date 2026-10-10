@@ -390,3 +390,26 @@ SDK（`ClientSDK/csharp/HeTu.Client.Tests`，Unity `Tests/Editor` 镜像；仿 `
    一节）、SDK 的 `README.md` 与 `ClientSDK/unity/CLAUDE.md`（协议说明）、`hetu/skills/hetu-csharp-client/SKILL.md`、
    `hetu/llms.txt` 的 SDK 摘要、`AGENTS.md`（receiver 路由的命令）。
 8. §8 实测，按结果调整 g。
+
+## 14. 审查（PR #185，2026-10-11）
+
+xhigh 审查 10 条，修了 8 条（第 6 条只修了保险超时与 SQLite 余量两处），各自带用例：
+
+| 条目 | 问题 | 处理 | 提交 |
+|---|---|---|---|
+| 1 | sync 帧计入服务端发送频率上限，一次 `rpcs` 发两帧，按默认配置服务端先超限 | sync 不计入（§4.5） | `b0d6638c` |
+| 6 | 保险超时从 `fence_` 调用时算，interval 很短时早于栅栏入队；SQLite 的 g 是 import 时算死的 | 保险超时从入队算起；SQLite 建实例时算（§4.2、§4.6） | `5527d233` |
+| 2 | 会话自己发起的断线路径先判在途调用结果未知，已收到回复的成功回调被丢掉 | 会话层按 `onAnswered` 自己处理，状态切换之后再回调（§5） | `8bb0f769` |
+| 3 | 断线收尾在 `OnClosed` 之前同步跑用户续体，撞上拆到一半的连接 | 挪到 `OnClosed` 之后；Unity 客户端在 `CloseCore` 取消等待者之前（§5） | `8bb0f769` |
+| 4 | 重入收尾时同一调用完成两次 | 先撤登记、撤成了才回调（§5） | `e2666bb6` |
+| 5 | 编码失败后登记残留；headless 下 Task 永远不完成 | 发出去了才登记；headless 把异常交给 Task（§5） | `e2666bb6` |
+| 8 | sync id 的 8 路整数类型 switch 是死代码 | 直接 `is long` | `72b9a270` |
+| 10 | 测试文件 6 行超过 90 列 | 折行 | `72b9a270` |
+
+不修：
+
+- 第 7 条（效率：只有栅栏的一批也跑一个空 tick 并多等约 5ms，每个 `rpcs` 两个定时器）：§8.2 实测每次调用多约
+  24µs（+7%），一半在 hub。把同一时间窗口里的栅栏合并能省掉大部分定时器，但要改栅栏的登记结构；按钮类调用的
+  频率下无感。空 tick 后多等的约 5ms 只推迟下一批，不耗 CPU。
+- 第 9 条（receiver 里 `case "rpc" | "rpcs"` 进去又按名字分）：合并是为了共用后面的失败处理（被顶号带 close 码
+  断开、release 模式断开），拆开要么重复要么另抽函数，收益不大。
