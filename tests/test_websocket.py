@@ -316,6 +316,60 @@ def test_websocket_rpcs_without_push_still_syncs(test_server):
     assert elapsed[0] >= 1 / MQClient.UPDATE_FREQUENCY - 0.03
 
 
+@pytest.mark.timeout(20)
+def test_websocket_rpcs_sync_after_rows_enter_and_leave_range(test_server):
+    """
+    rpcs：行进入 / 离开范围订阅的推送也在 sync 之前到。这条路径与行内容更新不同：靠索引频道的通知
+    重跑 range、批量读新行，tick 末尾订上新行的行频道之后才交付
+    """
+    owner = 9102
+    lo, hi = 9100.0, 9200.0
+    calls: list[list] = []
+    sub_ids: list = []
+
+    async def call_awaiting_push(client, sync_id, value):
+        await client.send(["rpcs", sync_id, "client_index_upsert_test", owner, value])
+        frames: list = []
+        async with asyncio.timeout(5):
+            while not frames or frames[-1] != ["sync", sync_id]:
+                frames.append(await client.recv())
+        calls.append(frames)
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "login", owner])
+        await client.recv()
+        # 这行先放在范围外
+        await client.send(["rpc", "client_index_upsert_test", owner, 0.0])
+        await client.recv()
+        await client.send(["sub", "IndexComp1", "range", "value", lo, hi])
+        _, sub_id, rows = await client.recv()
+        assert sub_id
+        assert all(row["owner"] != owner for row in rows or [])
+        sub_ids.append(sub_id)
+        await call_awaiting_push(client, 1, 9150.0)  # 进入
+        await call_awaiting_push(client, 2, 0.0)  # 离开
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+
+    def pushed(frames: list) -> dict:
+        assert frames[0] == ["rsp", "ok"]
+        rows: dict = {}
+        for frame in frames[1:-1]:
+            if frame[0] == "updt" and frame[1] == sub_ids[0]:
+                rows.update(frame[2])
+        return rows
+
+    entered = pushed(calls[0])
+    row_ids = [rid for rid, row in entered.items() if row and row["owner"] == owner]
+    assert row_ids, f"sync 之前没收到进入范围的行：{calls[0]}"
+    assert entered[row_ids[0]]["value"] == 9150.0
+    left = pushed(calls[1])
+    assert row_ids[0] in left and left[row_ids[0]] is None, (
+        f"sync 之前没收到离开范围的行：{calls[1]}"
+    )
+
+
 def test_websocket_kick_connect(test_server):
     # 测试踢掉别人的连接
     async def kick_routine(connect):
