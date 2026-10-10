@@ -33,7 +33,7 @@ row-level security. Authoritative source: https://github.com/Heerozh/HeTu
 
 ## Client SDK
 
-- [Unity Client SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/unity-client.md): UPM 安装（`cn.hetudb.clientsdk`）、`HeTuClient.Instance`、`CallSystem` RPC、`Get` / `Range` 订阅、两种数据更新模式（事件回调与 R3 Reactive）、生命周期绑定、WebGL 支持
+- [Unity Client SDK](https://raw.githubusercontent.com/Heerozh/HeTu/main/docs/en/unity-client.md): UPM 安装（`cn.hetudb.clientsdk`）、`HeTuClient.Instance`、`CallSystem` RPC（`CallSystemAwaitPush` 等调用引起的订阅推送到了才返回）、`Get` / `Range` 订阅、两种数据更新模式（事件回调与 R3 Reactive）、生命周期绑定、WebGL 支持
 
 ## Advanced
 

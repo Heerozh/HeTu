@@ -129,6 +129,31 @@ Debug.Log(resp.To<string>());
 Use `.Forget()` (or `_ = CallSystem(...)`) for fast input streams like per-
 frame movement; `await` for actions whose result you actually need.
 
+**Calls that wait for their pushes.** `CallSystem`'s reply is sent as soon as
+the server commits, while the subscription updates caused by that write arrive
+about one batching interval (100 ms by default) later. If you refresh the UI
+from subscription data right after the call returns — say, re-enabling a
+button based on how much gold is left — you read the old values. Use
+`CallSystemAwaitPush` there: it returns only after the pushes caused by the
+call have arrived, so the objects from `WatchRow` / `WatchRange` are already
+up to date.
+
+```csharp
+buyButton.interactable = false;
+await HeTuClient.Instance.CallSystemAwaitPush("buy", itemId);
+// the gold subscription already reflects the purchase here
+buyButton.interactable = gold.Data.value >= price;
+```
+
+`CallSystemAwaitPush` takes about one batching interval longer than
+`CallSystem` and doesn't hold up other calls or pushes on the same connection;
+keep high-frequency calls such as movement on `CallSystem`. Like subscriptions
+themselves it is best-effort: when the server is overloaded, a push can still
+arrive after it returns. `HeTuSessionClient` and the headless
+`HeadlessHeTuClient` have the same method; if the connection drops after the
+server's reply arrived but before the pushes did, it returns successfully (the
+commit definitely happened, and subscriptions are restored on reconnect).
+
 **Local pre-callbacks.** You can register a client-side hook that runs every
 time you call a `System` with that name — useful for client-side prediction:
 

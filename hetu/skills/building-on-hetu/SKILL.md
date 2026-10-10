@@ -230,7 +230,8 @@ one cluster; tables no System references go in `namespace="core"`. Call
 `hetu build` generates typed C# component classes from your definitions. The
 client uses `HeTuClient.Instance` (one raw socket) or, preferred,
 `HeTuSessionClient.Instance` (auto-reconnect + subscription replay):
-`CallSystem(name, args...)`, `WatchRow<T>(index, value)`,
+`CallSystem(name, args...)` (or `CallSystemAwaitPush`, which returns only after
+the subscription pushes the call caused have arrived), `WatchRow<T>(index, value)`,
 `WatchRange<T>(index, lo, hi, limit)`. Subscriptions hold a server resource and
 **must be disposed** (`sub.AddTo(gameObject)`). See `unity-client.md`.
 `ADMIN`-permission Components are **skipped** by codegen (no C# class emitted) —

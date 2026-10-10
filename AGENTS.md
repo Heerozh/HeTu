@@ -106,7 +106,10 @@ Client (Unity/JS/C#) ──WebSocket──► Sanic Worker ──► EndpointExe
   ComponentTableManagers、SystemClusters。
 - `websocket.py`：WebSocket handler —— 为每个连接创建 `EndpointExecutor`、
   `SystemCaller`、`SubscriptionBroker`。
-- `receiver.py`：message dispatcher —— 路由 `rpc`、`sub`、`unsub`、`sel` 命令。
+- `receiver.py`：message dispatcher —— 路由 `rpc`、`rpcs`、`sub`、`unsub`、`sel` 命令。
+  `rpcs` 是等推送的调用：照常回 rsp，再在 `SubscriptionHub` 里起栅栏（`fence_`），这次调用
+  引起的推送发出之后发 `["sync", id]`（设计见
+  `docs/superpowers/specs/2026-10-10-rpcs-sync-design.md`）。
 - `pipeline/`：分层 message processing（jsonb serialization、zlib/brotli/zstd
   compression、ChaCha20 encryption）。各层通过带 `alias` 的
   `__init_subclass__` 自动注册。

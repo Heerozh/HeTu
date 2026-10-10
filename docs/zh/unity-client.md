@@ -102,6 +102,23 @@ Debug.Log(resp.To<string>());
 对于快速的输入流（如每帧移动），使用 `.Forget()`（或 `_ = CallSystem(...)`）；对于需要结果的
 action，使用 `await`。
 
+**等推送的调用。** `CallSystem` 的回复在服务端提交后立即发出，而这次写入引起的订阅推送要再晚约一个
+合批间隔（默认 100ms）才到。所以调用一返回就按订阅数据刷新界面（比如恢复按钮：钱还够不够、库存还剩
+几个），读到的还是旧值。这种场景改用 `CallSystemAwaitPush`：它等这次调用引起的推送都到了才返回，
+返回时 `WatchRow` / `WatchRange` 拿到的订阅对象已经是新值。
+
+```csharp
+buyButton.interactable = false;
+await HeTuClient.Instance.CallSystemAwaitPush("buy", itemId);
+// 这里 gold 订阅已经是购买之后的数据
+buyButton.interactable = gold.Data.value >= price;
+```
+
+`CallSystemAwaitPush` 比 `CallSystem` 约多等一个合批间隔，期间不耽误同一连接上别的调用和推送；移动这类
+高频调用仍用 `CallSystem`。它和订阅本身一样是尽力而为：服务端负载过高时，推送仍可能晚于它返回。
+`HeTuSessionClient` 和 headless 的 `HeadlessHeTuClient` 也有同名方法；已经收到服务端回复、还在等推送时
+断线的，按成功返回（提交确定已经发生，重连后订阅会恢复）。
+
 **本地预回调。** 你可以注册一个客户端钩子，每次调用指定名称的 `System` 时都会运行 —
 适用于客户端预测：
 
