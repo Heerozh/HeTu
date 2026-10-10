@@ -177,6 +177,9 @@ def to_jsonable(obj: Any) -> Any:
     if isinstance(obj, np.void) and obj.dtype.names:
         return {name: to_jsonable(obj[name]) for name in obj.dtype.names}
     if isinstance(obj, np.ndarray):
+        # 零维数组没法迭代，取出那个标量（结构化的是带字段名的 np.void）
+        if obj.ndim == 0:
+            return to_jsonable(obj[()])
         if obj.dtype.names:
             return [to_jsonable(row) for row in obj]
         return [to_jsonable(x) for x in obj.tolist()]

@@ -71,6 +71,11 @@ async def spawn_and_fail(ctx: hetu.SystemContext, uid: int):
     raise RuntimeError("after spawn")
 
 
+@hetu.define_system(namespace="clidemo", components=(Wallet,), permission=hetu.Permission.EVERYBODY)
+async def zero_dim(ctx: hetu.SystemContext):
+    return np.array(42)
+
+
 @hetu.define_endpoint(namespace="clidemo", permission=hetu.Permission.EVERYBODY)
 async def raw_endpoint(ctx, x):
     """纯 Endpoint"""
@@ -227,6 +232,12 @@ def test_call_cleans_up_background_tasks_before_closing(project):
     assert any("1 个后台任务" in w for w in out["warnings"])
     code, out = run_json("get", "Wallet", "owner=6101", cwd=project)
     assert code == 0 and out["row"]["gold"] == 1
+
+
+def test_call_zero_dim_result(project):
+    code, out = run_json("call", "zero_dim", cwd=project)
+    assert code == 0, out
+    assert out["result"] == 42
 
 
 def test_write_protection(tmp_path):
@@ -564,6 +575,9 @@ def test_to_jsonable_and_mask():
         [1, 2],
         {"__bytes__": "/w=="},
     ]
+    # 零维数组（结构化的保留字段名）
+    assert to_jsonable(np.array(42)) == 42
+    assert to_jsonable(np.zeros((), dtype=[("a", "<i4")])) == {"a": 0}
     assert mask_url("redis://:secret@10.0.0.5:6379/0") == "redis://:***@10.0.0.5:6379/0"
     assert mask_url("redis://127.0.0.1:6379/0") == "redis://127.0.0.1:6379/0"
 
