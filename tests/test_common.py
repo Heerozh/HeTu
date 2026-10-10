@@ -658,10 +658,11 @@ async def test_redis_tool_keeper(mod_auto_backend):
     # 一个已死 worker 留下的租约，还剩 30 秒
     await aio.set("snowflake:worker:5", "dead-machine:1", ex=30)
 
-    tool = RedisWorkerKeeper(900, aio, tool=True)
+    # 用真实 pid：Windows 上 live_worker_leases 会滤掉本机已经退出（不存在）的 pid
+    tool = RedisWorkerKeeper(os.getpid(), aio, tool=True)
     assert tool.node_id.startswith("cli:")
     assert await tool.get_worker_id() == 1023
-    assert await RedisWorkerKeeper(901, aio, tool=True).get_worker_id() == 1022
+    assert await RedisWorkerKeeper(os.getpid(), aio, tool=True).get_worker_id() == 1022
     # 没有碰别人的租约
     assert await aio.ttl("snowflake:worker:5") <= 30
     assert tool.lease_deadline is not None
@@ -695,12 +696,14 @@ async def test_sqlite_tool_keeper(mod_sqlite_backend, monkeypatch, tmp_path):
 
     backend = mod_sqlite_backend()
     master = backend.master
-    first = create_worker_keeper(backend, 900, tool=True)
+    # 用真实 pid：Windows 上 live_worker_leases 会滤掉本机已经退出（不存在）的 pid。
+    # tool 模式按 SET NX 往下分配，同 pid 的两个 keeper 照样拿到不同的 id
+    first = create_worker_keeper(backend, os.getpid(), tool=True)
     assert isinstance(first, SQLiteToolWorkerKeeper)
     keepers: list[WorkerKeeper] = [first]
     try:
         assert await first.get_worker_id() == 1023
-        second = create_worker_keeper(backend, 901, tool=True)
+        second = create_worker_keeper(backend, os.getpid(), tool=True)
         assert isinstance(second, SQLiteToolWorkerKeeper)
         keepers.append(second)
         assert await second.get_worker_id() == 1022
@@ -778,7 +781,8 @@ async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path
     table = _make_lease_table(backend)
     generator = SnowflakeID()
 
-    lease = SnowflakeLease(create_worker_keeper(backend, 902, tool=True), table)
+    pid = os.getpid()  # 真实 pid，理由同 test_sqlite_tool_keeper
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
     async with lease:
         worker_id = lease.worker_id
         assert worker_id >= 1000 and generator.worker_id == worker_id
@@ -794,7 +798,7 @@ async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path
     # 续约发现租约被抢走 → on_lost
     monkeypatch.setattr(snowflake_lease, "RENEW_INTERVAL", 0.05)
     lost = asyncio.Event()
-    lease = SnowflakeLease(create_worker_keeper(backend, 903, tool=True), table)
+    lease = SnowflakeLease(create_worker_keeper(backend, pid, tool=True), table)
     lease.on_lost = lost.set
     async with lease:
         keeper = lease.keeper
