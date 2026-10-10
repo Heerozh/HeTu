@@ -473,6 +473,38 @@ def test_shell_cleans_up_background_tasks_before_closing(project):
     assert out["row"] is not None
 
 
+async def test_shell_ctrl_c_interrupts_statement_only(monkeypatch):
+    """交互模式的 Ctrl+C 只取消正在跑的那条语句（同 python -m asyncio），空闲时也不退出 shell"""
+    import time
+
+    from hetu.cli import shell
+
+    later = "asyncio.get_running_loop().call_later"
+    lines = [
+        (0, "import signal"),
+        # 语句运行中：0.2 秒后在主线程上收到 SIGINT
+        (0, f"{later}(0.2, signal.raise_signal, 2); await asyncio.sleep(30)"),
+        (0, "after_busy = 1"),
+        (0, f"_ = {later}(0.1, signal.raise_signal, 2)"),
+        (0.5, "after_idle = 1"),  # 停在提示符时收到 SIGINT（2 即 SIGINT）
+    ]
+
+    def fake_input(_self, _prompt=""):
+        if not lines:
+            raise EOFError
+        delay, line = lines.pop(0)
+        time.sleep(delay)
+        return line
+
+    monkeypatch.setattr(shell._AsyncConsole, "raw_input", fake_input)
+    monkeypatch.setattr(sys, "displayhook", sys.displayhook)
+    ns = {"__name__": "__main__", "__builtins__": __builtins__, "asyncio": asyncio}
+    started = time.monotonic()
+    await asyncio.wait_for(shell.interact(ns, print), 10)
+    assert ns["after_busy"] == 1 and ns["after_idle"] == 1
+    assert time.monotonic() - started < 10
+
+
 def test_audit_log(project):
     audit = project / "logs" / "hetu_cli_audit.jsonl"
     before = audit.read_text(encoding="utf-8").count("\n") if audit.exists() else 0

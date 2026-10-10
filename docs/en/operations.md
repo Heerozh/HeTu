@@ -438,8 +438,9 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
   `upsert` (the same API as the test `Sandbox`), plus `app.range` and `show()`
   (prints as JSON, numpy rows with field names), with top-level await. Code
   comes from `-c`, a script file or stdin; with none of them you get an
-  interactive prompt. Scripts run as `__main__` (with `__file__` set).
-  Restart the shell after changing code.
+  interactive prompt. Scripts run as `__main__` (with `__file__` set); at the
+  interactive prompt Ctrl+C interrupts only the running statement and Ctrl+D
+  exits. Restart the shell after changing code.
 
 **It runs your local code**: `hetu call` re-imports your local app every time,
 which says nothing about what the server has loaded — a single-worker server

@@ -350,7 +350,9 @@ namespace 的 core 组件）。`get` 只接受 `id` 或带索引的字段，没�
   `__name__` 为 `"__main__"`，跑脚本文件时有 `__file__`：`if __name__ == "__main__":` 里的主逻辑
   照常执行，不会静默什么都不做。
 - 交互：REPL 跑在单独线程，事件循环留在主线程（参照 CPython `asyncio/__main__.py`），空闲时
-  租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。
+  租约循环照常运行；displayhook 对 `np.record` / `recarray` 调用 `show()`。Ctrl+C 只取消正在跑的
+  那条语句（同 `python -m asyncio`），空闲时不退出；不接管的话 `asyncio.run` 的 SIGINT 处理会
+  取消整个 shell。Ctrl+D 退出。
 - 代码留下的后台任务在关闭后端之前取消（与 §2.9 的 System 后台任务同一套收尾）。
 - `show(x)`：把 `to_jsonable(x)`（§2.9）按缩进 2、`ensure_ascii=False` 打到 stdout。
 - 进程内不会重新加载代码（`build_clusters` 每进程只能调一次），改了代码请重开 shell。

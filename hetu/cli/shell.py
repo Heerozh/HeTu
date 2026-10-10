@@ -18,6 +18,7 @@ import contextvars
 import inspect
 import json
 import os
+import signal
 import sys
 import threading
 import time
@@ -136,6 +137,8 @@ class _AsyncConsole(code.InteractiveConsole):
         self.compile.compiler.flags |= ast.PyCF_ALLOW_TOP_LEVEL_AWAIT
         self.loop = loop
         self.context = context
+        self.running: asyncio.Task | None = None
+        """正在事件循环上跑的那条语句（Ctrl+C 取消它）"""
 
     def runcode(self, code: types.CodeType) -> None:
         future: concurrent.futures.Future = concurrent.futures.Future()
@@ -152,8 +155,10 @@ class _AsyncConsole(code.InteractiveConsole):
                 return
             # 在设置了提交观察钩子的上下文里跑，dry-run / 写保护 / 审计对交互代码同样生效
             task = self.loop.create_task(coro, context=self.context)
+            self.running = task
 
             def done(t: asyncio.Task) -> None:
+                self.running = None
                 if t.cancelled():
                     future.cancel()
                 elif (exc := t.exception()) is not None:
@@ -166,10 +171,34 @@ class _AsyncConsole(code.InteractiveConsole):
         self.loop.call_soon_threadsafe(callback, context=self.context)
         try:
             future.result()
+        except concurrent.futures.CancelledError:
+            self.write("KeyboardInterrupt\n")  # Ctrl+C 取消了这条语句
         except SystemExit:
             raise
         except BaseException:  # noqa: BLE001
             self.showtraceback()
+
+    def interrupt(self) -> None:
+        """Ctrl+C（在主线程的信号处理里调用）：有语句在跑就取消它，同 python -m asyncio"""
+        task = self.running
+        if task is not None and not task.done():
+            task.cancel()
+            self.loop.call_soon_threadsafe(lambda: None)  # 叫醒事件循环
+        else:
+            # REPL 线程卡在 input() 里，打断不了；提示一下怎么退出
+            self.write("\n" + _("KeyboardInterrupt（Ctrl+D 退出 shell）") + "\n")
+
+
+def _install_sigint(console: _AsyncConsole):
+    """交互期间接管 Ctrl+C，返回还原函数。不接管的话，asyncio.run 的处理会取消整个 shell"""
+    if threading.current_thread() is not threading.main_thread():
+        return lambda: None
+
+    def handler(_signum: int, _frame: Any) -> None:
+        console.interrupt()
+
+    previous = signal.signal(signal.SIGINT, handler)
+    return lambda: signal.signal(signal.SIGINT, previous)
 
 
 def _displayhook(show):
@@ -207,8 +236,12 @@ async def interact(ns: dict, show) -> None:
         finally:
             loop.call_soon_threadsafe(lambda: done.done() or done.set_result(None))
 
-    threading.Thread(target=repl, name="hetu-shell-repl", daemon=True).start()
-    await done
+    restore = _install_sigint(console)
+    try:
+        threading.Thread(target=repl, name="hetu-shell-repl", daemon=True).start()
+        await done
+    finally:
+        restore()
 
 
 def read_source(args: argparse.Namespace) -> tuple[str | None, str]:

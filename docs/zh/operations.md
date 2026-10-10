@@ -300,7 +300,8 @@ hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player'
   报错，先启动一次服务器（建新表）或 `hetu upgrade`。
 - **`hetu shell`**：预置与测试用 `Sandbox` 同名的 `call_system` / `get` / `must_get` / `insert` /
   `upsert`，以及 `app.range` 与 `show()`（按 JSON 打印，numpy 行带字段名），支持顶层 await。代码来自
-  `-c`、脚本文件或 stdin；都没给时进交互模式。脚本按 `__main__` 执行（有 `__file__`）。改了代码要重开 shell。
+  `-c`、脚本文件或 stdin；都没给时进交互模式。脚本按 `__main__` 执行（有 `__file__`）；交互模式下
+  Ctrl+C 只中断正在跑的语句，Ctrl+D 退出。改了代码要重开 shell。
 
 **跑的是本地代码**：`hetu call` 每次都重新 import 本地的 app，不代表服务器已经加载了同样的代码——
 单 worker 的服务器不会自动重载，验证客户端那条路径要重启服务器。生产上请在部署好的容器里跑
