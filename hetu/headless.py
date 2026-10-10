@@ -380,9 +380,9 @@ class HeadlessClient:
 
         Re-read table metas; raise if the cluster id or layout changed on the server.
         """
-        maint = self.backend.get_table_maintenance()
         for name, tbl in self._tables.items():
-            meta = maint.read_meta(self.instance, name)
+            # 用表自己的 backend（同 session()）：hetu.local 的多后端配置里表不都在 self.backend
+            meta = tbl.backend.get_table_maintenance().read_meta(self.instance, name)
             if meta is None:
                 raise TableNotFound(self.instance, name)
             if meta.cluster_id != tbl.cluster_id:
