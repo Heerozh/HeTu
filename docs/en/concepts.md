@@ -223,6 +223,16 @@ strong consistency (spending currency, granting rewards, validation) inside a
 `System` — write transactions are guarded by optimistic locking — rather than
 relying on the subscription data a client holds.
 
+**If you need subscription data right after a call, wait for its pushes.** A
+`System` call's reply goes out right after the commit, about one batching
+interval ahead of the pushes it causes. When the client sends `rpcs`
+(`CallSystemAwaitPush` in the SDK), the server replies as usual and drops a
+fence into the worker's subscription engine; once every change notification
+received before the fence has been processed and pushed, it sends a
+`["sync", id]` frame, and the SDK completes the call only then. No master
+reads and no extra replica reads; the cost is that the call completes about one
+batching interval later.
+
 **Identical queries are shared within a worker.** Subscriptions that are not
 filtered by row-level security — components with `EVERYBODY` or `USER`
 permission, or a caller that is an admin — are shared per query inside a worker:

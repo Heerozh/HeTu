@@ -335,7 +335,10 @@ async def send_loop(
     回复优先，但推送不能一直等队列空：客户端连着发 RPC、链路又慢时队列可能一直不空。推送被排着的回复
     压住超过 PUSH_MAX_HOLD 秒，而队列里一个订阅回复的占位都没有（登记过的订阅的回复都已发出）时，
     先插一轮推送。在等占位的期间不插：那个占位是哪个订阅的还不知道。
-    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
+    等推送的调用（rpcs）的 ["sync", id] 随推送一起取、排在推送后面发（门面的 take_synced_，设计稿
+    2026-10-10-rpcs-sync §4.5），先后规则与推送相同。
+    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真（sync 帧
+    不记，见下）。
     返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
     """
     loop = asyncio.get_running_loop()
@@ -344,7 +347,7 @@ async def send_loop(
     while True:
         drain = push_queue.empty()
         if not drain:
-            if not broker.has_updates_():
+            if not (broker.has_updates_() or broker.has_synced_()):
                 held_since = None
             elif held_since is None:
                 held_since = loop.time()
@@ -355,12 +358,19 @@ async def send_loop(
                 drain = True
         if drain:
             held_since = None
+            # 同一个同步段里先取待发区、再取 sync：栅栏在它那个 tick 交付之后才触发，应排在 sync 前面的
+            # 推送要么已经发出，要么就在这次取走的待发区里
             updates = broker.take_updates_()
-            if updates:
+            synced = broker.take_synced_()
+            if updates or synced:
                 for sub_id, data in updates.items():
                     await ws.send(pack(["updt", sub_id, data]))
                     if flooded():
                         return
+                # sync 不计入发送频率上限：它和客户端的 rpcs 请求一一对应，客户端那一侧已经限过频。
+                # 计入的话一次 rpcs 要发 rsp + sync 两帧，按默认配置（两边上限相同）服务端先超限
+                for sync_id in synced:
+                    await ws.send(pack(["sync", sync_id]))
                 continue
         if push_queue.empty():
             # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里

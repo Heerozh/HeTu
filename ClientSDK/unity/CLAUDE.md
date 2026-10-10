@@ -41,11 +41,13 @@ Outbound and inbound messages flow through a configurable `MessagePipeline` of `
 SetupPipeline([JsonbLayer, ZlibLayer, CryptoLayer])
 ```
 
-- **`JsonbLayer`** — MessagePack serialization. Decode is lazy for payload data: complex bodies stay as `JsonObject` (a raw byte-slice wrapper) until the caller asks for `To<T>()`/`ToList<T>()`/`ToDict<TKey,TValue>()`. Only the standard envelopes `rsp`/`sub`/`updt` are parsed eagerly.
+- **`JsonbLayer`** — MessagePack serialization. Decode is lazy for payload data: complex bodies stay as `JsonObject` (a raw byte-slice wrapper) until the caller asks for `To<T>()`/`ToList<T>()`/`ToDict<TKey,TValue>()`. Only the standard envelopes `rsp`/`sub`/`updt`/`rej`/`err`/`sync` are parsed eagerly.
 - **`ZlibLayer`** — stream zlib via `Unity.SharpZipLib`, with an optional preset dictionary negotiated during handshake.
 - **`CryptoLayer`** — X25519 ECDH key agreement + ChaCha20-Poly1305 (BouncyCastle). Optional `SetAuthKey(...)` toggles a signed-hello variant (magic bytes `H2A1`).
 
 If you change pipeline behavior **the server's matching layer in `hetu/server/pipeline/` must change in the same commit** — they handshake byte-for-byte.
+
+Replies to `rpc` / `sub` carry no request id: `ResponseManager` matches them FIFO. The one exception is `CallSystemAwaitPush`: it sends `["rpcs", sync_id, system, ...]`, gets its `rsp` FIFO as usual, and completes only when the out-of-order `["sync", sync_id]` frame arrives (the server sends it after the subscription pushes the call caused). `HeTuClientBase` keeps the pending map; on disconnect (after `OnClosed`; Unity's `HeTuClient` does it in `CloseCore` before cancelling its waiters) / `Close` / reconnect / `Dispose`, calls that already got their `rsp` complete successfully. `HeTuSessionClientBase` does not rely on that timing: an internal `onAnswered` callback marks the `PendingCall` when its `rsp` arrives, and connection loss / Faulted / `Close` complete those calls successfully after the session state has changed (so continuations queue for the reconnect). Keep in lock-step with `rpcs` in `hetu/server/receiver.py`.
 
 ### Subscriptions
 

@@ -17,6 +17,13 @@
 - RPC 往返探针（一个不订阅的连接每 PROBE_MS 发一次 ping）：订阅负载下事件循环的响应；
 步末停写，等 worker 闲下来（积压消化完），核对一致性：每个客户端手里的行 == master 上的行。
 
+等推送的调用（--rpcs-rate，设计稿 docs/superpowers/specs/2026-10-10-rpcs-sync-design.md §8.2）：前
+--rpcs-conns 个连接在压测负载之上按总速率调 rpcs_write（一次只有一个在途），改自己一件物品（kind = -nonce）；
+chat 场景再发一条聊天，这些连接另订自己的物品。客户端记回复、这次调用的推送（item 是物品行，chat 是聊天行）、
+sync 各自到达的时刻：sync 先于推送的比例、sync 比推送晚多少、完成延迟。--rpcs-cmd rpc 发普通 rpc 作对照
+（量栅栏的额外开销）。worker 里另记 δ（commit 返回 → 物品行的通知进 hub 的 MQ 队列）、栅栏键实际入队的时刻
+（fencestats）。这些调用的推送不计入场景本身的交付统计。
+
 对比两份代码：--server-pythonpath 指向另一份代码的 worktree（如 dev），只有服务器跑它，客户端 / 写进程
 两边一样。
 
@@ -42,6 +49,8 @@ app 里已对 worker 调了 prctl(PR_SET_PTRACER_ANY)；py-spy 在 Python 3.14 �
         --tag branch --out /tmp/sub_scenarios.jsonl
     uv run python benchmark/sub_scenarios_ws.py --scenario chat --rates 0.5,1,2,5 \\
         --server-pythonpath ../hetu-dev --tag dev --out /tmp/sub_scenarios.jsonl
+    uv run python benchmark/sub_scenarios_ws.py --scenario item --rates 2000 \\
+        --rpcs-rate 200 --rpcs-conns 100 --tag rpcs --out /tmp/sub_scenarios.jsonl
     uv run python benchmark/sub_scenarios_ws.py --show /tmp/sub_scenarios.jsonl
 
 会 FLUSHALL --master 指定的 Redis，请用专用实例。
@@ -95,6 +104,14 @@ SHOW_KEYS = {
         "fanout_done_p99_ms,rpc_rtt_p99_ms,rpc_rtt_max_ms,worker_rss_mb,cons_bad_conns"
     ),
 }
+# 带 --rpcs-rate 的结果另打印这些列
+RPCS_SHOW_KEYS = (
+    "tag,scenario,target_rate,rc_cmd,rc_rate,rc_ok,worker_gcycles_u_ps,rc_rsp_p50_ms,"
+    "rc_push_p50_ms,rc_push_p99_ms,rc_done_p50_ms,rc_done_p99_ms,rc_sync_minus_push_p1_ms,"
+    "rc_sync_minus_push_p50_ms,rc_sync_before_push,rc_push_missing,"
+    "rc_push_missing_gone,fs_delta_p50_ms,"
+    "fs_delta_p99_ms,fs_delta_max_ms,fs_g_p99_ms,fs_miss,fs_lost"
+)
 
 
 def setup_registry() -> None:
@@ -183,6 +200,15 @@ async def prepare_data(args) -> dict[int, list[int]]:
 
         await asyncio.gather(*(seed(u) for u in range(1, args.conns + 1)))
     else:
+        # 等推送的调用改的是自己的物品，chat 场景也给每个调用的连接灌一件
+        if args.rpcs_rate > 0:
+            item_tbl = tables.get_table(app.Item)
+            assert item_tbl
+            for uid in range(1, args.rpcs_conns + 1):
+                async with item_tbl.session() as s:
+                    row = app.Item.new_row()
+                    row.owner = uid
+                    await s.using(app.Item).insert(row)
         table = tables.get_table(app.ChatMessage)
         assert table
         for i in range(args.limit + 64):
@@ -294,6 +320,10 @@ async def _writer_main(args, widx, rate, items, stop, out_q):
 
     op = item_op if args.scenario == "item" else chat_op
 
+    async def idle() -> None:
+        while not stop.is_set():
+            await asyncio.sleep(0.2)
+
     async def one(co: int) -> None:
         rng = random.Random(widx * 1000 + co)
         interval = 1 / per_co
@@ -307,7 +337,10 @@ async def _writer_main(args, widx, rate, items, stop, out_q):
             next_t += interval
             await op(rng)
 
-    await asyncio.gather(*(one(c) for c in range(coroutines)))
+    if rate > 0:
+        await asyncio.gather(*(one(c) for c in range(coroutines)))
+    else:  # 只量等推送的调用：不写
+        await idle()
     await backend.close()
     out_q.put((widx, ops, raced, {u: items[u] for u in users}))
 
@@ -354,6 +387,122 @@ async def ws_connect(url: str):
     return ws, pipe, ctx
 
 
+class Caller:
+    """
+    一条连接上的等推送调用（--rpcs-rate）：按速率调 rpcs_write，一次只有一个在途（UI 等它完成才恢复按钮），
+    记下回复、这次调用的推送、sync 各自到达的时刻（离发出的秒数）。推送按 nonce 认：item 是物品行的
+    kind == -nonce，chat 是聊天行的 name == "r{uid}:{nonce}"
+    """
+
+    def __init__(self, args, uid: int, active: asyncio.Event):
+        self.uid = uid
+        self.cmd = args.rpcs_cmd
+        self.chat = args.scenario == "chat"
+        self.interval = args.rpcs_conns / args.rpcs_rate
+        self.active = active
+        self.items: set[int] = set()  # 自己的物品（item 场景就是订阅状态本身）
+        self.nonce = 0
+        self.inflight: dict[str, Any] | None = None
+        self.done: asyncio.Future | None = None
+        # nonce -> 记录，等这次调用的推送；10 秒没来就不等了
+        self.pending: dict[int, dict[str, Any]] = {}
+        self.records: list[dict[str, Any]] = []
+
+    async def run(self, ws, pipe, ctx) -> None:
+        rng = random.Random(self.uid)
+        loop = asyncio.get_running_loop()
+        next_t = 0.0
+        while True:
+            if not self.active.is_set():
+                await self.active.wait()
+                next_t = time.perf_counter() + rng.random() * self.interval
+            delay = next_t - time.perf_counter()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            elif delay < -1.0:
+                next_t = time.perf_counter()  # 追不上就放弃追赶
+            next_t += self.interval
+            if not self.active.is_set() or not self.items:
+                continue
+            rid = rng.choice(tuple(self.items))
+            self.nonce += 1
+            n = self.nonce
+            rec: dict[str, Any] = {
+                "n": n,
+                "rid": rid,
+                "gone": False,  # 推送到之前这件物品被写进程删了（推送里只有删除）
+                "t": time.time(),
+                "p0": time.perf_counter(),
+                "ok": None,
+                "rsp": None,
+                "push": None,
+                "sync": None,
+                "timeout": False,
+            }
+            self.pending[n] = rec
+            self.inflight = rec
+            self.done = done = loop.create_future()
+            if self.cmd == "rpcs":
+                req = ["rpcs", n, "rpcs_write", n, rid, self.chat]
+            else:
+                req = ["rpc", "rpcs_write", n, rid, self.chat]
+            await ws.send(pipe.encode(ctx, req))
+            try:
+                await asyncio.wait_for(done, 10)
+            except TimeoutError:
+                rec["timeout"] = True
+            self.records.append(rec)
+            cutoff = time.perf_counter() - 10
+            for k in [k for k, r in self.pending.items() if r["p0"] < cutoff]:
+                del self.pending[k]
+
+    def _finish(self) -> None:
+        self.inflight = None
+        if self.done is not None and not self.done.done():
+            self.done.set_result(None)
+
+    def on_reply(self, msg: list, now: float) -> None:
+        """rsp / rej / err / sync"""
+        rec = self.inflight
+        if rec is None:
+            return
+        kind = msg[0]
+        if kind == "rsp":
+            rec["rsp"] = now - rec["p0"]
+            rec["ok"] = isinstance(msg[1], dict) and bool(msg[1].get("ok"))
+            if self.cmd == "rpc" or rec["sync"] is not None:
+                self._finish()
+        elif kind in ("rej", "err"):
+            rec["rsp"] = now - rec["p0"]
+            rec["ok"] = False
+            self._finish()
+        elif kind == "sync" and msg[1] == rec["n"]:
+            rec["sync"] = now - rec["p0"]
+            if rec["rsp"] is not None:
+                self._finish()
+
+    def on_push(self, n: int, now: float) -> None:
+        rec = self.pending.pop(n, None)
+        if rec is not None and rec["push"] is None:
+            rec["push"] = now - rec["p0"]
+
+    def on_gone(self, rid: int) -> None:
+        """物品被删了：还在等它的推送的调用不会再等到"""
+        for rec in self.pending.values():
+            if rec["rid"] == rid and rec["push"] is None:
+                rec["gone"] = True
+
+    def take(self, w0: float, w1: float) -> list[tuple]:
+        """窗口内发出的调用：(ok, 回复, 推送, sync, 超时, 物品被删)，秒，没到的是 None"""
+        out = [
+            (r["ok"], r["rsp"], r["push"], r["sync"], r["timeout"], r["gone"])
+            for r in self.records
+            if w0 <= r["t"] < w1
+        ]
+        self.records.clear()
+        return out
+
+
 def client_proc(args, cidx: int, uids: list[int], url: str, ready, ctrl):
     pin([args.client_cpus[cidx % len(args.client_cpus)]])
     asyncio.run(_client_main(args, uids, url, ready, ctrl))
@@ -383,8 +532,13 @@ async def _client_main(args, uids, url, ready, ctrl):
     sem = asyncio.Semaphore(args.connect_concurrency)
     errors: list[str] = []
     chat = args.scenario == "chat"
+    calls_on = asyncio.Event()  # 等推送的调用：主进程在每步的写入期间打开
+    callers: list[Caller] = []
+    caller_tasks: list[asyncio.Task] = []
 
     async def one(uid: int) -> None:
+        caller = None
+        item_sub = None
         async with sem:
             ws, pipe, ctx = await ws_connect(url)
             await ws.send(pipe.encode(ctx, ["rpc", "login", uid]))
@@ -398,22 +552,62 @@ async def _client_main(args, uids, url, ready, ctrl):
             msg = pipe.decode(ctx, _bytes(await ws.recv()))
             assert isinstance(msg, list) and msg[0] == "sub", msg[:2]
             state = states[uid] = {int(r["id"]) for r in msg[2]}
+            if args.rpcs_rate > 0 and uid <= args.rpcs_conns:
+                caller = Caller(args, uid, calls_on)
+                if chat:  # chat 场景另订自己的物品，调用改的是它
+                    req = ["sub", "Item", "range", "owner", uid, None, 10, False, True]
+                    await ws.send(pipe.encode(ctx, req))
+                    msg = pipe.decode(ctx, _bytes(await ws.recv()))
+                    assert isinstance(msg, list) and msg[0] == "sub", msg[:2]
+                    item_sub = msg[1]
+                    caller.items = {int(r["id"]) for r in msg[2]}
+                else:
+                    caller.items = state
+                callers.append(caller)
+                caller_tasks.append(asyncio.create_task(caller.run(ws, pipe, ctx)))
             with ready.get_lock():
                 ready.value += 1
+        mine = f"r{uid}:"
         try:
             async for raw in ws:
                 msg = pipe.decode(ctx, _bytes(raw))
-                if not isinstance(msg, list) or msg[0] != "updt":
+                if not isinstance(msg, list):
+                    continue
+                if msg[0] != "updt":
+                    if caller is not None:
+                        caller.on_reply(msg, time.perf_counter())
                     continue
                 now = time.time()
+                now_pc = time.perf_counter()
                 stats["frames"] += 1
+                if item_sub is not None and msg[1] == item_sub:
+                    assert caller is not None
+                    for key, row in msg[2].items():
+                        if row is None:
+                            caller.items.discard(int(key))
+                        else:
+                            caller.items.add(int(key))
+                    continue
                 for key, row in msg[2].items():
                     rid = int(key)
                     if row is None:
                         state.discard(rid)
+                        if caller is not None and not chat:
+                            caller.on_gone(rid)
                         if not chat and now >= window[0]:
                             stats["del_recv"][rid] = now
                         stats["dels"] += 1
+                        continue
+                    # 等推送的调用写的行：不计入场景的交付统计
+                    if chat and row.get("kind") == "rpcs":
+                        state.add(rid)
+                        if caller is not None and row["name"].startswith(mine):
+                            caller.on_push(int(row["name"][len(mine) :]), now_pc)
+                        continue
+                    if not chat and int(row["kind"]) < 0:
+                        state.add(rid)
+                        if caller is not None:
+                            caller.on_push(-int(row["kind"]), now_pc)
                         continue
                     ts = float(row["ts"])
                     in_window = window[0] <= ts < window[1]
@@ -445,21 +639,30 @@ async def _client_main(args, uids, url, ready, ctrl):
         if cmd[0] == "window":
             window[0], window[1] = cmd[1], cmd[2]
             reset()
+            for c in callers:
+                c.records.clear()
+            ctrl.send("ok")
+        elif cmd[0] == "calls":
+            if cmd[1]:
+                calls_on.set()
+            else:
+                calls_on.clear()
             ctrl.send("ok")
         elif cmd[0] == "report":
             s = dict(stats)
             s["lat"] = stats["lat"].samples
             s["errors"] = list(errors)
             s["alive"] = sum(not t.done() for t in tasks)
+            s["rpcs"] = [r for c in callers for r in c.take(window[0], window[1])]
             ctrl.send(s)
             reset()
             window[0] = window[1] = float("inf")
         elif cmd[0] == "state":
             ctrl.send({u: set(st) for u, st in states.items()})
         elif cmd[0] == "stop":
-            for t in tasks:
+            for t in (*caller_tasks, *tasks):
                 t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*caller_tasks, *tasks, return_exceptions=True)
             ctrl.send("bye")
             return
 
@@ -871,11 +1074,17 @@ class Harness:
     def run_step(self, step: int, rate: float) -> dict[str, Any]:
         args = self.args
         stop, out_q, wprocs = self.start_writers(rate)
+        rpcs_on = args.rpcs_rate > 0
+        if rpcs_on:
+            for _p, conn in self.clients:
+                assert call(conn, "calls", True) == "ok"
         time.sleep(args.warmup)
         w0 = time.time()
         w1 = w0 + args.duration
         for _p, conn in self.clients:
             assert call(conn, "window", w0, w1) == "ok"
+        if rpcs_on:
+            call(self.probe_conn, "rpc", ["fencestats", True])
         gc_a = call(self.probe_conn, "rpc", ["gcstats"])
         tk_a = call(self.probe_conn, "rpc", ["tickstats"])
         cpu_a = proc_cpu(self.workers)
@@ -909,9 +1118,13 @@ class Harness:
         cpu = proc_cpu(self.workers) - cpu_a
         gc_b = call(self.probe_conn, "rpc", ["gcstats"])
         tk_b = call(self.probe_conn, "rpc", ["tickstats"])
+        fs = call(self.probe_conn, "rpc", ["fencestats", True]) if rpcs_on else None
         rep_b, mas_b = redis_snap(args.replicas), redis_snap([args.master])
         rss = sum(p.memory_info().rss for p in self.workers)
         stop.set()
+        if rpcs_on:
+            for _p, conn in self.clients:
+                assert call(conn, "calls", False) == "ok"
         counts = perf.result()
         ops: list[tuple[str, int, float]] = []
         raced = 0
@@ -985,6 +1198,9 @@ class Harness:
             res.update(item_metrics(args, win_ops, creps, lat, cpu, counts))
         else:
             res.update(chat_metrics(args, win_ops, creps, lat, cpu, counts))
+        if rpcs_on:
+            recs = [r for c in creps for r in c["rpcs"]]
+            res.update(rpcs_metrics(args, recs, fs))
         if spy is not None and os.path.exists(spy_out):
             res["pyspy"] = spy_out
             with open(spy_out + ".summary.json", "w", encoding="utf-8") as f:
@@ -1088,6 +1304,77 @@ def chat_metrics(args, win_ops, creps, lat, cpu, counts) -> dict[str, Any]:
     }
 
 
+def rpcs_metrics(args, recs: list, fs: dict | None) -> dict[str, Any]:
+    """等推送的调用：客户端 (ok, 回复, 推送, sync, 超时) 的统计，加上 worker 里的栅栏时序（fs_*）"""
+
+    def ms(vals: list[float], p: float) -> float:
+        return round(pct(vals, p) * 1000, 1)
+
+    ok = [r for r in recs if r[0]]
+    rsp = [r[1] for r in recs if r[1] is not None]
+    push = [r[2] for r in ok if r[2] is not None]
+    res: dict[str, Any] = {
+        "rc_cmd": args.rpcs_cmd,
+        "rc_conns": args.rpcs_conns,
+        "rc_target": args.rpcs_rate,
+        "rc_calls": len(recs),
+        "rc_rate": round(len(recs) / args.duration, 1),
+        "rc_ok": len(ok),
+        "rc_timeouts": sum(bool(r[4]) for r in recs),
+        "rc_rsp_p50_ms": ms(rsp, 0.5),
+        "rc_rsp_p99_ms": ms(rsp, 0.99),
+        "rc_push_p50_ms": ms(push, 0.5),
+        "rc_push_p99_ms": ms(push, 0.99),
+        "rc_push_missing": sum(r[2] is None for r in ok),
+        # 其中物品在推送之前被写进程删了：推送里只有删除，等不到这次的值
+        "rc_push_missing_gone": sum(r[2] is None and r[5] for r in ok),
+    }
+    if args.rpcs_cmd == "rpcs":
+        done = [r[3] for r in recs if r[3] is not None]
+        both = [r for r in ok if r[2] is not None and r[3] is not None]
+        diff = [r[3] - r[2] for r in both]
+        res.update(
+            rc_done_p50_ms=ms(done, 0.5),
+            rc_done_p99_ms=ms(done, 0.99),
+            rc_done_max_ms=round(max(done, default=float("nan")) * 1000, 1),
+            # sync 比这次调用的推送晚多少（负 = sync 先到）
+            rc_sync_minus_push_min_ms=round(min(diff, default=float("nan")) * 1000, 1),
+            rc_sync_minus_push_p1_ms=ms(diff, 0.01),
+            rc_sync_minus_push_p50_ms=ms(diff, 0.5),
+            rc_sync_minus_push_p99_ms=ms(diff, 0.99),
+            # 不算物品被删的（没有这次调用的推送可等）
+            rc_sync_before_push=sum(
+                r[3] is not None and not r[5] and (r[2] is None or r[2] > r[3])
+                for r in ok
+            ),
+            rc_sync_before_rsp=sum(
+                r[1] is not None and r[3] is not None and r[3] < r[1] for r in recs
+            ),
+        )
+    else:
+        done = rsp
+        gap = [r[2] - r[1] for r in ok if r[1] is not None and r[2] is not None]
+        res.update(
+            rc_done_p50_ms=ms(done, 0.5),
+            rc_done_p99_ms=ms(done, 0.99),
+            rc_done_max_ms=round(max(done, default=float("nan")) * 1000, 1),
+            # 今天的情形：回复比推送早多少
+            rc_push_minus_rsp_p50_ms=ms(gap, 0.5),
+            rc_push_minus_rsp_p99_ms=ms(gap, 0.99),
+            rc_rsp_before_push=sum(
+                r[1] is not None and not r[5] and (r[2] is None or r[2] > r[1])
+                for r in ok
+            ),
+        )
+    if fs:
+        res.update(fs_n=fs["n"], fs_miss=fs["miss"], fs_merged=fs["merged"])
+        res["fs_lost"] = fs["lost"]
+        for name, key in (("delta", "delta_ms"), ("g", "g_ms"), ("late", "late_ms")):
+            for q, v in fs[key].items():
+                res[f"fs_{name}_{q}_ms"] = v
+    return res
+
+
 def show(path: str, keys: str) -> None:
     """按场景打印结果文件里的主要列"""
     with open(path, encoding="utf-8") as f:
@@ -1100,6 +1387,15 @@ def show(path: str, keys: str) -> None:
         table = [[str(r.get(c, "")) for c in cols] for r in picked]
         widths = [max(len(c), *(len(t[i]) for t in table)) for i, c in enumerate(cols)]
         print(f"== {scenario}")
+        print("  ".join(c.ljust(w) for c, w in zip(cols, widths, strict=True)))
+        for t in table:
+            print("  ".join(v.ljust(w) for v, w in zip(t, widths, strict=True)))
+    picked = [r for r in rows if "rc_calls" in r]
+    if picked and not keys:
+        cols = RPCS_SHOW_KEYS.split(",")
+        table = [[str(r.get(c, "")) for c in cols] for r in picked]
+        widths = [max(len(c), *(len(t[i]) for t in table)) for i, c in enumerate(cols)]
+        print("== rpcs")
         print("  ".join(c.ljust(w) for c, w in zip(cols, widths, strict=True)))
         for t in table:
             print("  ".join(v.ljust(w) for v, w in zip(t, widths, strict=True)))
@@ -1143,6 +1439,21 @@ def parse_args() -> argparse.Namespace:
     ap.add_argument("--client-procs", type=int, default=8)
     ap.add_argument("--connect-concurrency", type=int, default=8, help="每个客户端进程")
     ap.add_argument("--probe-ms", type=float, default=20)
+    ap.add_argument(
+        "--rpcs-rate",
+        type=float,
+        default=0,
+        help="等推送的调用（rpcs_write）的总速率（次/秒），0 不调",
+    )
+    ap.add_argument(
+        "--rpcs-conns", type=int, default=100, help="前这么多个连接发等推送的调用"
+    )
+    ap.add_argument(
+        "--rpcs-cmd",
+        choices=("rpcs", "rpc"),
+        default="rpcs",
+        help="rpc：同样的调用发普通 rpc，作对照（不等推送，量栅栏的额外开销）",
+    )
     ap.add_argument("--server-cpus", default="0")
     ap.add_argument("--client-cpus", default="4,5,6,7,8,9,10,11")
     ap.add_argument("--writer-cpus", default="12,13,14,15")

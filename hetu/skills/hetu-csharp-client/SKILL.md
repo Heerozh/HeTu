@@ -138,6 +138,7 @@ hp.AddTo(gameObject);
 | `.Connect(url, authKey, bootstrap, …, maxReconnectAttempts, connectTimeout)` | start session; awaits to `Ready` |
 | `.StateChanged` / `.State` | session-state events (reconnect UI) · `HeTuSessionState` |
 | `.CallSystem(name, args…)` → `JsonObject` | RPC a System/Endpoint |
+| `.CallSystemAwaitPush(name, args…)` → `JsonObject` | same, but returns after the subscription pushes the call caused have arrived (read watched rows right after, e.g. re-enable a button); ~100 ms slower |
 | `.WatchRow<T>(index, value)` → `RowSubscription<T>` | one row; `.Subject`, `.Data` |
 | `.WatchRange<T>(index, left, right, limit, force:)` → `IndexSubscription<T>` | a set; `.Rows`, `.ObserveAdd/Remove/Row` |
 | `.Close()` | end session (call before re-`Connect`) |

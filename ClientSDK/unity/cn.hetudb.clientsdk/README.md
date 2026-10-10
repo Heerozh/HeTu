@@ -114,6 +114,11 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 - `CallSystem(systemName, params object[] args)`
     - 发送系统调用。
     - 可通过 `SystemLocalCallbacks[systemName]` 注册本地前置逻辑。
+- `CallSystemAwaitPush(systemName, params object[] args)`
+    - 同 `CallSystem`，但要等这次调用引起的订阅推送都到了才返回，返回时订阅对象已是新值；约多等
+      一个推送间隔（~100ms）。适合"按钮置灰、请求完成后按订阅数据恢复"，高频调用（如移动）用
+      `CallSystem`。
+    - 已收到服务端回复、还在等推送时断线，按成功返回。
 
 ### 数据订阅
 

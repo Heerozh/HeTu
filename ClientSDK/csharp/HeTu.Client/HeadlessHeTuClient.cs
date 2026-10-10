@@ -42,7 +42,9 @@ namespace HeTu
             _socket?.Dispose();
             _socket = null;
             State = ConnectionState.Disconnected;
-            // 取消仍在等待的响应回调，避免 await 中的 CallSystem/WatchXxx 永久挂起（泵已停，无竞态）。
+            // 已收到 rsp、还在等 sync 的等推送调用按成功完成（提交确定发生了），再取消其余仍在等待的
+            // 响应回调，避免 await 中的 CallSystem/WatchXxx 永久挂起（泵已停，无竞态）。
+            FinishPushCallsOnClose();
             ResponseQueue.CancelAll("disposed");
             // 最后释放 Pipeline。
             base.Dispose();
@@ -88,29 +90,52 @@ namespace HeTu
             return tcs.Task;
         }
 
-        public Task<JsonObject> CallSystem(string systemName, params object[] args)
+        public Task<JsonObject> CallSystem(string systemName, params object[] args) =>
+            CallSystemCore(systemName, args, false);
+
+        /// <summary>
+        ///     等推送的调用：同 <see cref="CallSystem" />，但要等这次调用引起的订阅推送都到了才完成，
+        ///     完成时订阅对象已是新值（服务端 rsp 之后的 ["sync", id]）。延迟约多一个推送间隔（~100ms）。
+        ///     Like CallSystem, but completes only after the subscription updates caused by this
+        ///     call have been received.
+        /// </summary>
+        public Task<JsonObject> CallSystemAwaitPush(string systemName, params object[] args) =>
+            CallSystemCore(systemName, args, true);
+
+        private Task<JsonObject> CallSystemCore(string systemName, object[] args, bool awaitPush)
         {
             var tcs = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pump.Post(() => CallSystemSync(systemName, args, (resp, outcome, code) =>
+            _pump.Post(() =>
             {
-                switch (outcome)
+                try
                 {
-                    case CallOutcome.Canceled:
-                        tcs.TrySetCanceled();
-                        break;
-                    case CallOutcome.Rejected:
-                        tcs.TrySetException(
-                            new HeTuCallRejectedException(systemName, code));
-                        break;
-                    case CallOutcome.Failed:
-                        tcs.TrySetException(
-                            new HeTuCallFailedException(systemName, code));
-                        break;
-                    default:
-                        tcs.TrySetResult(resp);
-                        break;
+                    CallSystemSync(systemName, args, (resp, outcome, code) =>
+                    {
+                        switch (outcome)
+                        {
+                            case CallOutcome.Canceled:
+                                tcs.TrySetCanceled();
+                                break;
+                            case CallOutcome.Rejected:
+                                tcs.TrySetException(
+                                    new HeTuCallRejectedException(systemName, code));
+                                break;
+                            case CallOutcome.Failed:
+                                tcs.TrySetException(
+                                    new HeTuCallFailedException(systemName, code));
+                                break;
+                            default:
+                                tcs.TrySetResult(resp);
+                                break;
+                        }
+                    }, awaitPush);
                 }
-            }));
+                catch (Exception ex)
+                {
+                    // 参数没法序列化等：发送前就抛出，交给 Task，别让它一直挂着（泵只会记日志）
+                    tcs.TrySetException(ex);
+                }
+            });
             return tcs.Task;
         }
 
