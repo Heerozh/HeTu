@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using HeTu;
 using MessagePack;
 using NUnit.Framework;
@@ -133,6 +135,45 @@ namespace HeTu.Client.Tests
             Assert.That(seenInOnClosed, Is.EqualTo(0));
             Assert.That(outcomes, Is.EqualTo(new[] { CallOutcome.Completed }));
         }
+
+        [Test]
+        public void AwaitPush_ReentrantCloseInCompletion_CompletesEachOnce()
+        {
+            // 断线收尾逐个完成已收到回复的调用，第一个的续体里又 Close()（重入收尾）：
+            // 第二个只能完成一次
+            var client = PushTestClient.Connected();
+            var done = new List<string>();
+            client.Call("buy", Array.Empty<object>(), (_, _, _) =>
+            {
+                done.Add("buy");
+                client.Close();
+            }, true);
+            client.Call("sell", Array.Empty<object>(), (_, _, _) => done.Add("sell"), true);
+            client.Receive(new object[] { "rsp", "ok" });
+            client.Receive(new object[] { "rsp", "ok" });
+
+            client.RaiseClosed(HeTuCloseCode.Abnormal, "network lost");
+
+            Assert.That(done, Is.EqualTo(new[] { "buy", "sell" }));
+        }
+
+        [Test]
+        public void AwaitPush_EncodeFailure_LeavesNothingPending()
+        {
+            // 参数没法序列化时发送前就抛出：不能留下永远不会完成的登记
+            var client = PushTestClient.Connected();
+            Action unserializable = () => { };
+
+            Assert.That(
+                () => client.Call("buy", new object[] { unserializable }, Ignore, true),
+                Throws.Exception);
+            Assert.That(PendingPushCallCount(client), Is.Zero);
+        }
+
+        private static int PendingPushCallCount(HeTuClientBase client) =>
+            ((ICollection)typeof(HeTuClientBase)
+                .GetField("_pendingPushCalls", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(client)!).Count;
 
         [Test]
         public void AwaitPush_ReportsAnsweredWhenRspArrives()

@@ -405,7 +405,6 @@ namespace HeTu
             {
                 _syncSeq = _syncSeq == int.MaxValue ? 1 : _syncSeq + 1;
                 pushCall = new PendingPushCall(_syncSeq, onResponse);
-                _pendingPushCalls[pushCall.SyncId] = pushCall;
                 payload = new object[] { CommandRpcSync, pushCall.SyncId, systemName }
                     .Concat(args).ToArray();
             }
@@ -471,6 +470,10 @@ namespace HeTu
                     responsePayload);
                 onResponse((JsonObject)responsePayload, CallOutcome.Completed, null);
             }, traceId);
+            // 发出去了才登记：参数没法序列化时 SendRequest 在编码时就抛出，不能留下永远不会完成的
+            // 登记（回复与 sync 都要等之后处理收到的消息，晚于这里）
+            if (pushCall != null)
+                _pendingPushCalls[pushCall.SyncId] = pushCall;
             SystemLocalCallbacks.TryGetValue(systemName, out var callbacks);
             callbacks?.Invoke(args);
         }
@@ -518,17 +521,22 @@ namespace HeTu
 
         private void CompletePushCall(PendingPushCall call)
         {
-            ForgetPushCall(call);
+            // 已经完成过的不再回调：断线收尾逐个完成时，前一个的续体里又 Close()（重入收尾）
+            if (!ForgetPushCall(call))
+                return;
             InspectorCollector.CompleteRequest(call.TraceId, "completed", call.Response);
             call.OnResponse((JsonObject)call.Response, CallOutcome.Completed, null);
         }
 
-        private void ForgetPushCall(PendingPushCall call)
+        // 撤掉登记，返回它这时还登记着没有
+        private bool ForgetPushCall(PendingPushCall call)
         {
-            if (call != null &&
-                _pendingPushCalls.TryGetValue(call.SyncId, out var registered) &&
-                registered == call)
-                _pendingPushCalls.Remove(call.SyncId);
+            if (call == null ||
+                !_pendingPushCalls.TryGetValue(call.SyncId, out var registered) ||
+                registered != call)
+                return false;
+            _pendingPushCalls.Remove(call.SyncId);
+            return true;
         }
 
         /// <summary>

@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
@@ -55,6 +56,28 @@ namespace HeTu.Client.Tests
         {
             using var c = new HeadlessHeTuClient();
             Assert.DoesNotThrow(() => c.Close());
+        }
+
+        // 参数没法序列化：编码在泵线程上抛出，Task 要以这个异常结束，不能一直挂着（泵只记日志）。
+        [Test]
+        public void CallSystem_EncodeFailure_FaultsTask()
+        {
+            using var c = new HeadlessHeTuClient();
+            typeof(HeTuClientBase)
+                .GetField("State", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .SetValue(c, ConnectionState.Connected);
+            Action unserializable = () => { };
+
+            foreach (var call in new[]
+                     {
+                         c.CallSystem("buy", unserializable),
+                         c.CallSystemAwaitPush("buy", unserializable)
+                     })
+            {
+                Assert.That(async () => await call.WaitAsync(TimeSpan.FromSeconds(2)),
+                    Throws.Exception.Not.InstanceOf<TimeoutException>()
+                        .And.Not.InstanceOf<OperationCanceledException>());
+            }
         }
 
         // 等推送的调用同 CallSystem 走泵线程：未连接时以取消结束，不会一直挂着。

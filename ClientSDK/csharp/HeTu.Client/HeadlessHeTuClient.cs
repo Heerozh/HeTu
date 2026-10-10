@@ -105,26 +105,37 @@ namespace HeTu
         private Task<JsonObject> CallSystemCore(string systemName, object[] args, bool awaitPush)
         {
             var tcs = new TaskCompletionSource<JsonObject>(TaskCreationOptions.RunContinuationsAsynchronously);
-            _pump.Post(() => CallSystemSync(systemName, args, (resp, outcome, code) =>
+            _pump.Post(() =>
             {
-                switch (outcome)
+                try
                 {
-                    case CallOutcome.Canceled:
-                        tcs.TrySetCanceled();
-                        break;
-                    case CallOutcome.Rejected:
-                        tcs.TrySetException(
-                            new HeTuCallRejectedException(systemName, code));
-                        break;
-                    case CallOutcome.Failed:
-                        tcs.TrySetException(
-                            new HeTuCallFailedException(systemName, code));
-                        break;
-                    default:
-                        tcs.TrySetResult(resp);
-                        break;
+                    CallSystemSync(systemName, args, (resp, outcome, code) =>
+                    {
+                        switch (outcome)
+                        {
+                            case CallOutcome.Canceled:
+                                tcs.TrySetCanceled();
+                                break;
+                            case CallOutcome.Rejected:
+                                tcs.TrySetException(
+                                    new HeTuCallRejectedException(systemName, code));
+                                break;
+                            case CallOutcome.Failed:
+                                tcs.TrySetException(
+                                    new HeTuCallFailedException(systemName, code));
+                                break;
+                            default:
+                                tcs.TrySetResult(resp);
+                                break;
+                        }
+                    }, awaitPush);
                 }
-            }, awaitPush));
+                catch (Exception ex)
+                {
+                    // 参数没法序列化等：发送前就抛出，交给 Task，别让它一直挂着（泵只会记日志）
+                    tcs.TrySetException(ex);
+                }
+            });
             return tcs.Task;
         }
 
