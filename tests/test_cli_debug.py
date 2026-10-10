@@ -555,19 +555,21 @@ def test_concurrent_cli_processes_get_distinct_worker_ids(project):
             "-c",
             textwrap.dedent(
                 """
+                import sys
                 from hetu.common.snowflake_id import SnowflakeID
                 print("WID", SnowflakeID().worker_id, flush=True)
-                await asyncio.sleep(8)
+                await asyncio.to_thread(sys.stdin.readline)  # 等测试关掉 stdin
                 """
             ),
         ],
         cwd=project,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         env=full_env,
     )
     try:
-        assert holder.stdout is not None
+        assert holder.stdin is not None and holder.stdout is not None
         # shell 的 stdout 归用户代码：app 自己 import 时的 print 也在里面
         line = ""
         while not line.startswith("WID"):
@@ -579,9 +581,12 @@ def test_concurrent_cli_processes_get_distinct_worker_ids(project):
         new_id = out["writes"][0]["tables"]["Wallet"]["insert"][0]["id"]
         assert (new_id >> 12) & 1023 != holder_id
         assert (new_id >> 12) & 1023 >= 1000
+        holder.stdin.close()  # 放持有者正常退出、释放租约
+        assert holder.wait(timeout=60) == 0
     finally:
-        holder.kill()
-        holder.wait()
+        if holder.poll() is None:
+            holder.kill()
+            holder.wait()
 
 
 def test_cli_commands_do_not_load_sanic(project):
