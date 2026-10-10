@@ -62,7 +62,8 @@ namespace Tests.HeTu
             // 发送拥塞时服务端的推送（连同 sync）可能插到排着的回复前面
             var client = PushTestClient.Connected();
             var outcomes = new List<CallOutcome>();
-            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc), true);
+            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc),
+                true);
 
             client.Receive(new object[] { "sync", 1 });
             Assert.IsEmpty(outcomes);
@@ -77,7 +78,8 @@ namespace Tests.HeTu
             // rpcs 等 sync 的期间，排在它后面的普通调用照常按回复顺序完成
             var client = PushTestClient.Connected();
             var order = new List<string>();
-            client.Call("buy", Array.Empty<object>(), (_, _2, _3) => order.Add("buy"), true);
+            client.Call("buy", Array.Empty<object>(), (_, _2, _3) => order.Add("buy"),
+                true);
             client.Call("move", Array.Empty<object>(), (_, _2, _3) => order.Add("move"));
 
             client.Receive(new object[] { "rsp", "ok" });
@@ -113,7 +115,8 @@ namespace Tests.HeTu
         {
             var client = PushTestClient.Connected();
             var outcomes = new List<CallOutcome>();
-            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc), true);
+            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc),
+                true);
 
             client.Receive(new object[] { "err", "buy", "RuntimeError: boom" });
             Assert.That(outcomes, Is.EqualTo(new[] { CallOutcome.Failed }));
@@ -214,7 +217,8 @@ namespace Tests.HeTu
         {
             var client = PushTestClient.Connected();
             var outcomes = new List<CallOutcome>();
-            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc), true);
+            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc),
+                true);
 
             client.RaiseClosed(HeTuCloseCode.Abnormal, "network lost");
             Assert.IsEmpty(outcomes, "没收到 rsp 不能当成功");
@@ -228,7 +232,8 @@ namespace Tests.HeTu
         {
             var client = PushTestClient.Connected();
             var outcomes = new List<CallOutcome>();
-            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc), true);
+            client.Call("buy", Array.Empty<object>(), (_, oc, _3) => outcomes.Add(oc),
+                true);
             client.Receive(new object[] { "rsp", "ok" });
 
             client.Close();
@@ -291,7 +296,8 @@ namespace Tests.HeTu
                 bool awaitPush = false, Action<JsonObject> onAnswered = null) =>
                 CallSystemSync(systemName, args, onResponse, awaitPush, onAnswered);
 
-            public void Receive(object[] frame) => OnReceived(Pipeline.Encode(frame, out _));
+            public void Receive(object[] frame) =>
+                OnReceived(Pipeline.Encode(frame, out _));
 
             protected override void ConnectCore(string url, Action onConnected,
                 Action<byte[]> onMessage, Action<int, string> onClose,

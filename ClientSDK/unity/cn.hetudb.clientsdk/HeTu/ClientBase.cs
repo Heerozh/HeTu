@@ -482,41 +482,14 @@ namespace HeTu
         // （已因 rej / err 结束，或断线前的旧 id）忽略
         private void HandleSync(object[] message)
         {
-            if (message.Length < 2 || !TryGetSyncId(message[1], out var syncId) ||
-                !_pendingPushCalls.TryGetValue(syncId, out var call))
+            // JsonbLayer 按标准消息解出来的 sync_id 是 long
+            if (message.Length < 2 || message[1] is not long syncId ||
+                syncId < 0 || syncId > int.MaxValue ||
+                !_pendingPushCalls.TryGetValue((int)syncId, out var call))
                 return;
             call.Synced = true;
             if (call.RspArrived)
                 CompletePushCall(call);
-        }
-
-        // MessagePack 按数值大小解成不同的整数类型
-        private static bool TryGetSyncId(object value, out int syncId)
-        {
-            long id;
-            switch (value)
-            {
-                case long l: id = l; break;
-                case int i: id = i; break;
-                case uint ui: id = ui; break;
-                case short s: id = s; break;
-                case ushort us: id = us; break;
-                case byte b: id = b; break;
-                case sbyte sb: id = sb; break;
-                case ulong ul when ul <= int.MaxValue: id = (long)ul; break;
-                default:
-                    syncId = 0;
-                    return false;
-            }
-
-            if (id < 0 || id > int.MaxValue)
-            {
-                syncId = 0;
-                return false;
-            }
-
-            syncId = (int)id;
-            return true;
         }
 
         private void CompletePushCall(PendingPushCall call)

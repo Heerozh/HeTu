@@ -179,7 +179,7 @@ g 越大越稳、完成越晚。以后可以做成配置项。
   - 取消 → 撤掉 pending，`Canceled`；
   - `rej` / `err` → 撤掉，立即 `Rejected` / `Failed`；
   - `rsp` → 存下 payload，sync 已到就完成。
-- `OnReceived` 加 `case MessageSync`：id 按整数解析（MessagePack 可能解成 byte / int / long）。找到 pending 就打上
+- `OnReceived` 加 `case MessageSync`：id 是 `JsonbLayer` 标准解码给的 long。找到 pending 就打上
   标记，`rsp` 已存则用它完成（`Completed`）；找不到（已因 rej / err 结束，或重连前的旧 id）就忽略。
 - 断线、主动 `Close()`、`Dispose()`、重连前的清理（`ConnectSync`）时，把已收到 `rsp` 的 pending 按成功完成——提交
   确定发生了，重连后订阅会恢复；没收到 `rsp` 的照旧由回复队列取消（`FinishPushCallsOnClose`）。重连前清空
