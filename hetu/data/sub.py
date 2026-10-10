@@ -2051,6 +2051,8 @@ class SubscriptionBroker:
         self._outbox: dict[str, dict[int, dict[str, Any] | None]] = {}
         # 待发区里与同一订阅的别的成员共用的那几份（hub 交来的原样，只读）：再合并时先拷一份
         self._borrowed: set[str] = set()
+        # 等推送的调用（rpcs）的栅栏已触发、还没发出的 sync_id（见 sync_），发送循环随推送一起取走
+        self._synced: list[int] = []
         self._arrived = asyncio.Event()
         # 取待发区的一方（服务端发送循环，或 get_updates）正空闲等着：推送没卡住
         self._waiting = False
@@ -2077,6 +2079,7 @@ class SubscriptionBroker:
         self._channel_count = 0
         self._outbox.clear()
         self._borrowed.clear()
+        self._synced.clear()
         # 两个退订并发，只等一个往返。内部关注的先撤：MQClient.close 在第一次 await 之前就同步
         # 清掉回调，等订阅退订回来的期间顶号检测不会再触发（它会去 master 核一次，白读）
         detach = asyncio.ensure_future(self._detach_all(subs)) if subs else None
@@ -2936,13 +2939,18 @@ class SubscriptionBroker:
         else:
             pending.update(updates)
         self._arrived.set()
+        self._wake_sender()
+
+    def _wake_sender(self) -> None:
+        """服务端发送循环空闲等着时叫醒它一次（bind_sender_），醒来前不重复叫"""
         if self._waiting and self._wake is not None and not self._wake_pending:
             self._wake_pending = True
             try:
                 self._wake()
             except Exception:
-                # 不能打断 hub 给别的连接交付：这是在 hub 的交付循环里，抛出去的话本 tick 排在后面的
-                # 连接都拿不到更新（订阅的指纹已推进，推送就丢了）。这次算没叫醒，下次交来时再叫
+                # 不能打断 hub 给别的连接交付：这是在 hub 的交付循环（或栅栏回调）里，抛出去的话本
+                # tick 排在后面的连接都拿不到更新（订阅的指纹已推进，推送就丢了）。这次算没叫醒，下次
+                # 交来时再叫
                 self._wake_pending = False
                 if not self._wake_failed:
                     self._wake_failed = True
@@ -2984,7 +2992,10 @@ class SubscriptionBroker:
         return updates
 
     def has_updates_(self) -> bool:
-        """待发区里有没有还没取走的更新"""
+        """
+        待发区里有没有还没取走的更新。不算 sync（`has_synced_`）：get_updates 在手动模式下拿它当
+        "已就绪"交给 step_，算上的话只有 sync 时 get_updates 会不让出事件循环地空转
+        """
         return bool(self._outbox)
 
     def stalled_(self) -> bool:
@@ -2993,6 +3004,41 @@ class SubscriptionBroker:
         ws.send 上，客户端网络拥塞）。hub 据此先不为本连接读库，等它取走待发区再重读
         """
         return bool(self._outbox) and not self._waiting
+
+    def sync_(self, sync_id: int) -> None:
+        """
+        本连接一次等推送的调用（rpcs）回了 rsp：在 hub 里起一个栅栏（`SubscriptionHub.fence_`），它
+        触发时把 sync_id 交给发送循环，排在那之前交来的推送后面发出 ``["sync", sync_id]``（设计稿
+        docs/superpowers/specs/2026-10-10-rpcs-sync-design.md §4.3）。连接已关闭就忽略。
+
+        An awaited-push call (``rpcs``) got its ``rsp``: fence the hub, then hand
+        ``sync_id`` to the send loop after the updates delivered before the fence.
+        """
+        if self._closed:
+            return
+        self._hub.fence_(lambda: self._fenced(sync_id))
+
+    def _fenced(self, sync_id: int) -> None:
+        """sync_ 的栅栏触发了（在 hub 的 tick 收尾里同步调用，不能阻塞）"""
+        if self._closed:
+            return
+        self._synced.append(sync_id)
+        self._wake_sender()
+
+    def has_synced_(self) -> bool:
+        """有没有栅栏已触发、还没发出的 sync_id"""
+        return bool(self._synced)
+
+    def take_synced_(self) -> list[int]:
+        """
+        不等待地取走栅栏已触发的 sync_id（按触发顺序）。发送循环在同一个同步段里先取待发区、再取
+        它，先发推送再发 sync：栅栏在它那个 tick 交付之后才触发，应排在 sync 前面的推送要么已经
+        发出，要么就在这一次取走的待发区里
+        """
+        if not self._synced:
+            return []
+        synced, self._synced = self._synced, []
+        return synced
 
     async def get_updates(self, timeout=None) -> dict[str, dict[int, Any]]:
         """
