@@ -48,8 +48,6 @@ if TYPE_CHECKING:
     from ..local import LocalApp
     from ..system.definer import SystemDefine
 
-CORE_PIN_PREFIX = "__core_pin_system_"
-
 
 # ============ 参数 ============
 
@@ -152,6 +150,7 @@ def reads_ctx_caller(func: Callable) -> bool:
 
 def find_system(name: str) -> SystemDefine:
     from ..system import SystemClusters
+    from ..system.definer import CORE_PIN_PREFIX
 
     clusters = SystemClusters()
     sys_def = clusters.get_system(name)
@@ -204,6 +203,7 @@ def permission_name(permission: Any) -> str | None:
 def list_systems_and_endpoints(namespace: str) -> dict:
     from ..endpoint.definer import EndpointDefines
     from ..system import SystemClusters
+    from ..system.definer import CORE_PIN_PREFIX
     from ..system.lock import SystemLock
 
     systems = []

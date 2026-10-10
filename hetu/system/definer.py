@@ -29,6 +29,10 @@ def func_alias(ctx):
     pass
 
 
+# core pin 占位 System 的名字前缀（见 SystemClusters.build_clusters），列出 System 时要排除
+CORE_PIN_PREFIX = "__core_pin_system_"
+
+
 @dataclass
 class SystemDefine(EndpointDefine):
     components: set[type[BaseComponent]]  # 引用的Components
@@ -154,7 +158,7 @@ class SystemClusters(metaclass=Singleton):
 
         core_comps = ComponentDefines().get_all("core")
         for comp in core_comps:
-            func_alias.__name__ = f"__core_pin_system_{comp.__name__}__"
+            func_alias.__name__ = f"{CORE_PIN_PREFIX}{comp.__name__}__"
             SystemClusters().add(
                 "global",
                 func=func_alias,
