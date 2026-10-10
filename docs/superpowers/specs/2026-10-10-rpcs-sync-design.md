@@ -1,7 +1,7 @@
 # 等推送的 RPC（`rpcs` + 通用栅栏）— 设计稿
 
 - 日期：2026-10-10
-- 状态：已审，实施中（§11、§12 是已定事项）
+- 状态：已实施（§11、§12 是已定事项；Linux 负载下的实测待补，§8.2）
 - 分支：`feat/rpcs-sync`（基于 dev `41186147`）
 - 影响范围：`hetu/server/receiver.py`（新命令 `rpcs`）、`hetu/data/sub.py`（hub 的通用栅栏、门面的 sync 帧）、
   `hetu/server/websocket.py`（发送循环发 sync 帧）、`hetu/data/backend/base.py` 与 `hetu/data/backend/sqlite/mq.py`
@@ -153,10 +153,10 @@ hub 的 MQ 队列按到达时刻排序（`_enqueue` 只往队尾追加，时刻�
 
 `MQClient.FENCE_DELAY`（秒）：给"commit 返回 → 通知进本 worker 的队列"（δ）留的余量，按后端覆盖。
 
-- Redis（基类默认）：0.02。δ = 副本应用 + 副本经 pubsub 推到 worker + 读协程调度，平时约 1ms；留 20ms 应对负载
-  尖峰。§8 实测 δ 的分布后再定。
-- SQLite（`SQLiteMQClient`）：通知表每 interval/2（50ms）轮询一次，取 `0.5 * interval + 0.01`（60ms）。只用于
-  开发，延迟不敏感。
+- Redis（基类默认）：0.02。δ = 副本应用 + 副本经 pubsub 推到 worker + 读协程调度，空闲实测 p99 约 0.2ms
+  （§8.1）；留 20ms 应对负载尖峰，负载下的分布待测（§8.2）。
+- SQLite（`SQLiteMQClient`）：通知表每 interval/2（50ms）轮询一次，Windows 上 asyncio 的睡眠还会多睡一个定时器
+  周期（约 15.6ms），实测 δ 最长约 63ms，取 `0.5 * interval + 0.03`（80ms）。只用于开发，延迟不敏感。
 
 g 越大越稳、完成越晚。以后可以做成配置项。
 
@@ -167,7 +167,7 @@ g 越大越稳、完成越晚。以后可以做成配置项。
 - 常量 `CommandRpcSync = "rpcs"`、`MessageSync = "sync"`。`JsonbLayer` 的标准解码加 `sync` 分支（`[cmd, 整数]`），
   不走异常回退。
 - `CallSystemSync(systemName, args, onResponse, awaitPush = false)`（内部）：`awaitPush` 时取 `++_syncSeq` 作 id，
-  发 `["rpcs", id, systemName, *args]`，登记 `_pendingSyncs[id]`；FIFO 回调照旧登记。按顺序的回复到达时：
+  发 `["rpcs", id, systemName, *args]`，登记 `_pendingPushCalls[id]`；FIFO 回调照旧登记。按顺序的回复到达时：
   - 取消 → 撤掉 pending，`Canceled`；
   - `rej` / `err` → 撤掉，立即 `Rejected` / `Failed`；
   - `rsp` → 存下 payload，sync 已到就完成。
@@ -175,7 +175,7 @@ g 越大越稳、完成越晚。以后可以做成配置项。
   标记，`rsp` 已存则用它完成（`Completed`）；找不到（已因 rej / err 结束，或重连前的旧 id）就忽略。
 - 断线（`HandleClosed`）、主动 `Close()`、`Dispose()`、重连前的清理（`ConnectSync`）：在触发 `OnClosed`、取消等待者
   之前，先把已收到 `rsp` 的 pending 按成功完成——提交确定发生了，重连后订阅会恢复；没收到 `rsp` 的照旧由回复
-  队列取消（Session 层照旧报 `CallOutcomeUnknownException`）。然后清空 `_pendingSyncs`、`_syncSeq` 归零。必须排在
+  队列取消（Session 层照旧报 `CallOutcomeUnknownException`）。然后清空 `_pendingPushCalls`、`_syncSeq` 归零。必须排在
   `OnClosed` 之前：Session 的 transport 在 `OnClosed` 里把在途调用判成结果未知。
 - 不需要计时器：连接活着时服务端保证会发 sync（§4.2 的保险定时器）。
 
@@ -219,12 +219,31 @@ g 越大越稳、完成越晚。以后可以做成配置项。
   约一个 RTT 到达。
 - 不阻塞同一连接的其他回复和推送。
 
-## 8. 实测（实现后补）
+## 8. 实测
 
-用 `benchmark/sub_scenarios_ws.py`（加 `rpcs` 模式）在 Redis 主 + 副本（Docker / Linux）上测：
+### 8.1 Windows 本机、空闲（2026-10-10）
 
-- δ 的分布：`rpc()` 返回到该写入的通知进 hub 队列的间隔，空闲与聊天 / 背包压测负载下各一组，据此定 g。
-- `rpcs` 完成时刻与推送到达时刻的差（p50 / p99），以及 sync 先于推送的比例（应为 0，负载高时统计）。
+Docker 起的 Redis 主 + 1 副本，以及 SQLite。hub 订一行，每次改这行之后记"commit 返回 → 这行的通知进 hub 队列"
+的间隔 δ（临时用例，没提交），各 300 次：
+
+| 后端 | min | p50 | p90 | p99 | max |
+|---|---|---|---|---|---|
+| Redis 主从 | -0.06ms | 0.06ms | 0.08ms | 0.20ms | 0.31ms |
+| SQLite | 13.7ms | 14.8ms | 15.9ms | 62.1ms | 62.8ms |
+
+负值是 pubsub 消息比 commit 的回复先被事件循环处理。SQLite 的长尾来自 50ms 的轮询睡眠在 Windows 上多睡一个
+定时器周期：原定的 60ms 余量不够，改为 80ms。
+
+按 `rpcs` 的时序（写完立刻放栅栏）各跑 300 次，看栅栏触发时这次写入的推送是否已在待发区：Redis（g = 20ms）
+漏 0/300；SQLite 在 g = 60ms 与 80ms 下都漏 0/300（60ms 时没漏，是因为栅栏自己的定时器在 Windows 上也晚到，
+不能指望）。
+
+### 8.2 待测（Linux）
+
+用 `benchmark/sub_scenarios_ws.py`（加 `rpcs` 模式）在 Redis 主 + 副本上测：
+
+- 聊天 / 背包压测负载下 δ 的分布，据此复核 Redis 的 20ms；
+- `rpcs` 完成时刻与推送到达时刻的差（p50 / p99），以及 sync 先于推送的比例；
 - 每秒大量 `rpcs` 时 hub 的额外开销（预期可忽略）。
 
 ## 9. 测试计划（先写 red）
@@ -282,7 +301,8 @@ SDK（`ClientSDK/csharp/HeTu.Client.Tests`，Unity `Tests/Editor` 镜像；仿 `
 
 ## 12. 原待定项（2026-10-10，用户：按本稿的推荐）
 
-1. g：Redis 20ms、SQLite 60ms，先用类常量，不做配置项；SQLite 不改成"栅栏入队前先 poll 一次通知表"。
+1. g：Redis 20ms、SQLite 60ms（实测后改为 80ms，§8.1），先用类常量，不做配置项；SQLite 不改成"栅栏入队前先
+   poll 一次通知表"。
 2. 保险超时：20 个 interval（2 秒）。
 3. `sync_id` 的范围 0..2^31-1，帧名 `sync`。
 4. SDK 公开 API 叫 `CallSystemAwaitPush`。

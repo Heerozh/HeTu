@@ -1102,11 +1102,14 @@ async def test_duplicate_started_after_subscription_closed_does_not_hang(
 
 
 def test_fence_delay_covers_notify_path():
-    """栅栏入队前的余量要盖住"commit 返回 → 通知进本地队列"：SQLite 每 interval/2 轮询一次通知表"""
+    """
+    栅栏入队前的余量要盖住"commit 返回 → 通知进本地队列"：SQLite 每 interval/2 轮询一次通知表，
+    Windows 上 asyncio 的睡眠会多睡一个定时器周期（约 1/64 秒），实测最长约 63ms
+    """
     from hetu.data.backend.sqlite.mq import SQLiteMQClient
 
     assert MQClient.FENCE_DELAY == 0.02
-    assert SQLiteMQClient.FENCE_DELAY > 0.5 * INTERVAL
+    assert SQLiteMQClient.FENCE_DELAY >= 0.5 * INTERVAL + 1 / 64 + 0.01
 
 
 async def _subscribed_row(
