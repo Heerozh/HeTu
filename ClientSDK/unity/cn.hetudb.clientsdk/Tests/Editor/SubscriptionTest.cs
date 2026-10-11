@@ -204,6 +204,28 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void IndexSubscription_PerRowSubjects_CreatedOnlyWhenObserved()
+        {
+            // 大表 × 多个句柄时不能每行每句柄都预建 subject：只给 ObserveRow 过的行建
+            var client = new StubClient();
+            var rows = new List<TestRow>();
+            for (long id = 1; id <= 100; id++)
+                rows.Add(new TestRow { ID = id, Value = (int)id });
+            var sub = new IndexSubscription<TestRow>("sub-1", "Test", rows, client);
+            sub.Update(101, new TestRow { ID = 101, Value = 101 });
+            Assert.AreEqual(0, GetReplaceSubjectCount(sub));
+
+            var values = new List<int>();
+            sub.ObserveRow(5).Subscribe(row => values.Add(row.Value));
+            sub.Update(5, new TestRow { ID = 5, Value = 50 });
+
+            Assert.AreEqual(1, GetReplaceSubjectCount(sub));
+            CollectionAssert.AreEqual(new[] { 50 }, values);
+            Assert.Throws<KeyNotFoundException>(() => sub.ObserveRow(999),
+                "不在范围里的行照旧抛 KeyNotFound");
+        }
+
+        [Test]
         public void IndexSubscription_OnDelete_CanStillObserveRow()
         {
             // OnDelete 触发时这行还在：回调里 ObserveRow 能拿到它的流，随后流会完成
@@ -311,6 +333,14 @@ namespace Tests.HeTu
             var dict = field!.GetValue(sub);
             var indexer = dict!.GetType().GetProperty("Item");
             return indexer!.GetValue(dict, new object[] { rowId })!;
+        }
+
+        private static int GetReplaceSubjectCount(IndexSubscription<TestRow> sub)
+        {
+            var field = typeof(IndexSubscription<TestRow>).GetField(
+                "_replaceSubjects",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            return ((ICollection)field!.GetValue(sub)!).Count;
         }
 
         private static bool IsSubjectDisposed(object subject) =>
