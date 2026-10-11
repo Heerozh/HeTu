@@ -660,8 +660,10 @@ namespace HeTu
                 {
                     var subID = (string)response[1];
                     // 如果查询到值；依然是重复订阅时沿用已有的核心
-                    if (subID != null &&
-                        !TryGetExistingCore<ManagedRowCore<T>, T>(subID, out rowCore))
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             !TryGetExistingCore<ManagedRowCore<T>, T>(subID, out rowCore))
                     {
                         var data = ((JsonObject)response[2]).To<T>();
                         if (reusable == null)
@@ -786,8 +788,11 @@ namespace HeTu
                 {
                     var subID = (string)response[1];
                     // 如果查询到值；依然是重复订阅时沿用已有的核心
-                    if (subID != null &&
-                        !TryGetExistingCore<ManagedIndexCore<T>, T>(subID, out idxCore))
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             !TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out idxCore))
                     {
                         var rawRows = (JsonObject)response[2];
                         var rows = rawRows.ToList<T>();
@@ -906,8 +911,11 @@ namespace HeTu
                 {
                     var subID = (string)response[1];
                     // 无权限或行数超限时服务端返回null；依然是重复订阅时沿用已有的核心
-                    if (subID != null &&
-                        !TryGetExistingCore<ManagedIndexCore<T>, T>(subID, out tblCore))
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             !TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out tblCore))
                     {
                         var rawRows = (JsonObject)response[2];
                         var rows = rawRows.ToList<T>();
@@ -961,6 +969,19 @@ namespace HeTu
         {
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
+            UnsubscribeRemote(subID, from);
+        }
+
+        // 恢复的 sub 在途时，核心的最后一个句柄已 Dispose（当时 stale，没发 unsub）：回复不登记、
+        // 不算恢复成功；这次恢复让服务端又订上了，表里没有别的核心持有这个 sub_id 就退掉
+        private void DropClosedRestore(string subID)
+        {
+            if (!Subscriptions.Contains(subID))
+                UnsubscribeRemote(subID, "Dispose");
+        }
+
+        private void UnsubscribeRemote(string subID, string from)
+        {
             if (State != ConnectionState.Connected)
                 return;
             if (_inFlightSubs > 0)
