@@ -635,9 +635,9 @@ namespace HeTu
             {
                 var predictID = MakeSubId(componentName, IndexId, value, null, 1, false);
                 if (TryGetExistingCore<ManagedRowCore<T>, T>(predictID,
-                        out var existingCore))
+                        out var existingCore) && existingCore != reusable)
                 {
-                    onResponse(existingCore, false, null);
+                    onResponse(TakeOver(reusable, existingCore), false, null);
                     return;
                 }
             }
@@ -663,7 +663,10 @@ namespace HeTu
                     if (subID != null && reusable is { IsClosed: true })
                         DropClosedRestore(subID);
                     else if (subID != null &&
-                             !TryGetExistingCore<ManagedRowCore<T>, T>(subID, out rowCore))
+                             TryGetExistingCore<ManagedRowCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        rowCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
                         var data = ((JsonObject)response[2]).To<T>();
                         if (reusable == null)
@@ -760,9 +763,9 @@ namespace HeTu
             var predictID = MakeSubId(
                 componentName, index, left, right, limit, desc);
             if (TryGetExistingCore<ManagedIndexCore<T>, T>(predictID,
-                    out var existingCore))
+                    out var existingCore) && existingCore != reusable)
             {
-                onResponse(existingCore, false, null);
+                onResponse(TakeOver(reusable, existingCore), false, null);
                 return;
             }
 
@@ -791,8 +794,10 @@ namespace HeTu
                     if (subID != null && reusable is { IsClosed: true })
                         DropClosedRestore(subID);
                     else if (subID != null &&
-                             !TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
-                                 out idxCore))
+                             TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        idxCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
                         var rawRows = (JsonObject)response[2];
                         var rows = rawRows.ToList<T>();
@@ -887,9 +892,9 @@ namespace HeTu
             // 先要组合sub_id看看是否已订阅过
             var predictID = MakeTableSubId(componentName);
             if (TryGetExistingCore<ManagedIndexCore<T>, T>(predictID,
-                    out var existingCore))
+                    out var existingCore) && existingCore != reusable)
             {
-                onResponse(existingCore, false, null);
+                onResponse(TakeOver(reusable, existingCore), false, null);
                 return;
             }
 
@@ -914,8 +919,10 @@ namespace HeTu
                     if (subID != null && reusable is { IsClosed: true })
                         DropClosedRestore(subID);
                     else if (subID != null &&
-                             !TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
-                                 out tblCore))
+                             TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        tblCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
                         var rawRows = (JsonObject)response[2];
                         var rows = rawRows.ToList<T>();
@@ -970,6 +977,38 @@ namespace HeTu
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
             UnsubscribeRemote(subID, from);
+        }
+
+        // 会话恢复（reusable）撞上表里同 sub_id 的另一个核心 existing（重连后、恢复前有人用
+        // 裸 HeTuClient 订了同一订阅）：两者对应服务端同一个订阅。用 existing 的数据重绑
+        // reusable（它的句柄收到差异和 OnResynced），并入 existing 的句柄（看到的数据不变），
+        // 登记 reusable 取代它，会话的核心实例不变。不是恢复时照常沿用已有的核心
+        private ManagedRowCore<T> TakeOver<T>(ManagedRowCore<T> reusable,
+            ManagedRowCore<T> existing)
+            where T : IBaseComponent
+        {
+            if (reusable == null)
+                return existing;
+            if (reusable.IsClosed)
+                return null;
+            reusable.Rebind(existing.SubId, existing.Data, this);
+            reusable.AbsorbHandlesFrom(existing);
+            Subscriptions.Add(existing.SubId, reusable);
+            return reusable;
+        }
+
+        private ManagedIndexCore<T> TakeOver<T>(ManagedIndexCore<T> reusable,
+            ManagedIndexCore<T> existing)
+            where T : IBaseComponent
+        {
+            if (reusable == null)
+                return existing;
+            if (reusable.IsClosed)
+                return null;
+            reusable.Rebind(existing.SubId, existing.Rows.Values.ToList(), this);
+            reusable.AbsorbHandlesFrom(existing);
+            Subscriptions.Add(existing.SubId, reusable);
+            return reusable;
         }
 
         // 恢复的 sub 在途时，核心的最后一个句柄已 Dispose（当时 stale，没发 unsub）：回复不登记、

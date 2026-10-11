@@ -90,8 +90,8 @@ namespace HeTu
             CreationTrace = creationTrace;
         }
 
-        // 同一订阅的所有句柄共用的那一份
-        internal ManagedSubscriptionCore Core { get; }
+        // 同一订阅的所有句柄共用的那一份（恢复时可能被并到另一个核心上，见 Rebase）
+        internal ManagedSubscriptionCore Core { get; private set; }
 
         internal StackTrace CreationTrace { get; }
 
@@ -148,6 +148,9 @@ namespace HeTu
         /// <param name="data">更新数据。</param>
         public abstract void UpdateRows(JsonObject data);
 
+        // 改挂到另一个同类型、同数据的核心上（ManagedSubscriptionCore.AbsorbHandlesFrom）
+        internal virtual void Rebase(ManagedSubscriptionCore core) => Core = core;
+
         ~BaseSubscription() =>
             Logger.Instance.Error(
                 "检测到资源泄漏！订阅被 GC 回收但未调用 .Dispose() 方法！订阅ID：" + SubId +
@@ -160,8 +163,8 @@ namespace HeTu
     /// <typeparam name="T">组件类型。</typeparam>
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
-        private readonly ManagedRowCore<T> _core;
         private readonly Subject<T> _subject;
+        private ManagedRowCore<T> _core;
 
         public RowSubscription(string subscriptID, string componentName, T row,
             HeTuClientBase client, StackTrace creationTrace = null) :
@@ -250,6 +253,12 @@ namespace HeTu
         internal void PushToSubject(T row) => _subject.OnNext(row);
 
         internal void RaiseResynced() => OnResynced?.Invoke();
+
+        internal override void Rebase(ManagedSubscriptionCore core)
+        {
+            base.Rebase(core);
+            _core = (ManagedRowCore<T>)core;
+        }
     }
 
     /// <summary>
@@ -259,9 +268,9 @@ namespace HeTu
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _addSubject;
-        private readonly ManagedIndexCore<T> _core;
         private readonly Subject<long> _removeSubject;
         private readonly Dictionary<long, Subject<T>> _replaceSubjects;
+        private ManagedIndexCore<T> _core;
 
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
             HeTuClientBase client, StackTrace creationTrace = null) :
@@ -446,6 +455,12 @@ namespace HeTu
         internal void PushRemove(long rowID) => _removeSubject.OnNext(rowID);
 
         internal void RaiseResynced() => OnResynced?.Invoke();
+
+        internal override void Rebase(ManagedSubscriptionCore core)
+        {
+            base.Rebase(core);
+            _core = (ManagedIndexCore<T>)core;
+        }
     }
 
     /// <summary>
@@ -490,6 +505,21 @@ namespace HeTu
         internal abstract BaseSubscription NewHandle(StackTrace creationTrace);
 
         internal void Attach(BaseSubscription handle) => _handles.Add(handle);
+
+        // 恢复时发现同 sub_id 已登记了别的核心 other：两份对应服务端同一个订阅。调用方先用
+        // other 的数据重绑本核心，再把 other 的句柄并过来（它们看到的数据不变，不发事件）；
+        // other 就此作废，不发 unsub（服务端订阅归本核心了）
+        internal void AbsorbHandlesFrom(ManagedSubscriptionCore other)
+        {
+            foreach (var handle in other._handles)
+            {
+                handle.Rebase(this);
+                _handles.Add(handle);
+            }
+
+            other._handles.Clear();
+            other.IsClosed = true;
+        }
 
         internal void Release(BaseSubscription handle)
         {
