@@ -101,8 +101,9 @@ namespace HeTu
         public string SubId => Core.SubId;
 
         /// <summary>
-        ///     当前对象是否已脱离活跃连接，等待 Session 重连恢复。Dispose 后恒为 false，
-        ///     生命周期判断请用 IsDisposed。
+        ///     当前对象是否已脱离活跃连接，等待 Session 重连恢复。Dispose 后恒为 false。
+        ///     Whether the subscription is detached from a live connection and waiting
+        ///     for the session to restore it. Always false after Dispose.
         /// </summary>
         public bool IsStale => !IsDisposed && Core.IsStale;
 
@@ -110,7 +111,12 @@ namespace HeTu
 
         /// <summary>
         ///     释放本句柄。Dispose应该明确调用。同一订阅的其他句柄不受影响；最后一个句柄
-        ///     Dispose 时才销毁远端订阅对象。
+        ///     Dispose 时才销毁远端订阅对象。漏了 Dispose 的句柄会让服务端订阅一直留到断线
+        ///     （同一订阅的其他句柄都释放了也一样），泄漏日志要等断线后它被回收时才会出现。
+        ///     Releases this handle; other handles of the same subscription are not
+        ///     affected, and the server subscription is dropped with the last one. A
+        ///     handle that is never disposed keeps the server subscription alive until the
+        ///     connection closes; the leak is only logged once it is collected after that.
         /// </summary>
         public void Dispose()
         {
@@ -191,6 +197,7 @@ namespace HeTu
 
         /// <summary>
         ///     最近一次收到的行 ID（删除后保留删除前的值）。
+        ///     ID of the last row received (kept after the row is deleted).
         /// </summary>
         public long LastRowID => _core.LastRowID;
 
@@ -415,7 +422,10 @@ namespace HeTu
         public Observable<long> ObserveRemove() => _removeSubject;
 
         /// <summary>
-        ///     监听指定行的数据更新流。
+        ///     监听指定行的数据更新流。该行必须在当前范围里（见 <see cref="Rows" />），
+        ///     否则抛 <see cref="KeyNotFoundException" />。
+        ///     Observes updates of a row currently in <see cref="Rows" />; throws
+        ///     <see cref="KeyNotFoundException" /> otherwise.
         /// </summary>
         /// <param name="rowID">目标行 ID。</param>
         /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>

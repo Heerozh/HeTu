@@ -378,6 +378,18 @@ objects for the same query share one server subscription and the same data
 others — the SDK tells the server "stop pushing me changes for this query"
 only when the last one is disposed.
 
+Two caveats:
+
+- A subscription that is never disposed keeps the server subscription alive
+  until the connection closes, even if every other subscription of the same
+  query has been disposed. The SDK's leak log only shows up once it is
+  collected after the disconnect, so don't rely on it to catch leaks early.
+- The unsubscribe can go out a bit later: while subscribe requests are still
+  awaiting replies, the SDK waits for them before unsubscribing, so a request
+  that lands on the same subscription isn't dropped with it. With a constant
+  stream of subscribe requests (e.g. paging quickly), old subscriptions stay
+  until the requests pause.
+
 ## Logical session: `HeTuSessionClient`
 
 A bare `HeTuClient` is one physical WebSocket — if it drops, your data goes
