@@ -940,6 +940,9 @@ namespace HeTu
         // 时按键直接查不到，要靠这张表查重
         private readonly Dictionary<string, string> _aliases = new();
 
+        // 反查：服务端 sub_id → 指向它的客户端键（通常就一个），退订时一起删
+        private readonly Dictionary<string, List<string>> _aliasKeys = new();
+
         /// <summary>
         ///     清空缓存。
         /// </summary>
@@ -947,6 +950,7 @@ namespace HeTu
         {
             _subscriptions.Clear();
             _aliases.Clear();
+            _aliasKeys.Clear();
         }
 
         // 按 sub_id 查，查不到再按客户端的查询键查（见 AddAlias）
@@ -958,16 +962,37 @@ namespace HeTu
                 return false;
             if (_subscriptions.TryGetValue(canonical, out subscription))
                 return true;
-            // 服务端的 sub_id 已不在表里（退订了），这个键作废
-            _aliases.Remove(subID);
+            // 兜底：服务端的 sub_id 已不在表里，这个键作废（正常路径上 Remove 时已一起删了）
+            RemoveAlias(subID, canonical);
             return false;
         }
 
         // 记下客户端的查询键对应服务端回的 sub_id；两者一样时不用记
         internal void AddAlias(string key, string subID)
         {
-            if (key != subID)
-                _aliases[key] = subID;
+            if (key == subID)
+                return;
+            if (_aliases.TryGetValue(key, out var old))
+            {
+                if (old == subID)
+                    return;
+                RemoveAlias(key, old);
+            }
+
+            _aliases[key] = subID;
+            if (!_aliasKeys.TryGetValue(subID, out var keys))
+                _aliasKeys[subID] = keys = new List<string>(1);
+            keys.Add(key);
+        }
+
+        private void RemoveAlias(string key, string subID)
+        {
+            _aliases.Remove(key);
+            if (!_aliasKeys.TryGetValue(subID, out var keys))
+                return;
+            keys.Remove(key);
+            if (keys.Count == 0)
+                _aliasKeys.Remove(subID);
         }
 
         internal void Add(string subID, ManagedSubscriptionCore subscription) =>
@@ -977,7 +1002,15 @@ namespace HeTu
         ///     移除订阅引用。
         /// </summary>
         /// <param name="subID">订阅 ID。</param>
-        public void Remove(string subID) => _subscriptions.Remove(subID);
+        public void Remove(string subID)
+        {
+            _subscriptions.Remove(subID);
+            // 指向它的客户端键一起删，不然按带小数的边界不停换范围订阅时会一直累积到断线
+            if (!_aliasKeys.Remove(subID, out var keys))
+                return;
+            foreach (var key in keys)
+                _aliases.Remove(key);
+        }
 
         /// <summary>
         ///     判断是否包含指定订阅。
