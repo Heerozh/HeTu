@@ -566,7 +566,7 @@ namespace HeTu
             // 已退订的核心不能再发句柄（正常路径上退订时已从表里移除，这里兜底）
             if (existing.IsClosed)
             {
-                Subscriptions.Remove(subId);
+                Subscriptions.Remove(existing.SubId);
                 return false;
             }
 
@@ -820,6 +820,10 @@ namespace HeTu
                             index, left, right, limit, desc, force);
                         Subscriptions.Add(subID, idxCore);
                     }
+
+                    // 客户端拼的 predictID 可能和服务端的 sub_id 格式不同，记下来供下次查重
+                    if (idxCore != null)
+                        Subscriptions.AddAlias(predictID, subID);
                 }
                 catch (Exception ex)
                 {

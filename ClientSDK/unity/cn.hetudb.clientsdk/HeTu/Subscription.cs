@@ -935,13 +935,40 @@ namespace HeTu
         private readonly Dictionary<string, ManagedSubscriptionCore> _subscriptions =
             new();
 
+        // 客户端自己拼的查询键 → 服务端回的 sub_id。WatchRange 的边界按 C# 格式拼，服务端按
+        // Python 格式拼（double 1.0 是 "1" 对 "1.0"，某些区域设置下小数点还会变逗号），对不上
+        // 时按键直接查不到，要靠这张表查重
+        private readonly Dictionary<string, string> _aliases = new();
+
         /// <summary>
         ///     清空缓存。
         /// </summary>
-        public void Clean() => _subscriptions.Clear();
+        public void Clean()
+        {
+            _subscriptions.Clear();
+            _aliases.Clear();
+        }
 
-        internal bool TryGet(string subID, out ManagedSubscriptionCore subscription) =>
-            _subscriptions.TryGetValue(subID, out subscription);
+        // 按 sub_id 查，查不到再按客户端的查询键查（见 AddAlias）
+        internal bool TryGet(string subID, out ManagedSubscriptionCore subscription)
+        {
+            if (_subscriptions.TryGetValue(subID, out subscription))
+                return true;
+            if (!_aliases.TryGetValue(subID, out var canonical))
+                return false;
+            if (_subscriptions.TryGetValue(canonical, out subscription))
+                return true;
+            // 服务端的 sub_id 已不在表里（退订了），这个键作废
+            _aliases.Remove(subID);
+            return false;
+        }
+
+        // 记下客户端的查询键对应服务端回的 sub_id；两者一样时不用记
+        internal void AddAlias(string key, string subID)
+        {
+            if (key != subID)
+                _aliases[key] = subID;
+        }
 
         internal void Add(string subID, ManagedSubscriptionCore subscription) =>
             _subscriptions[subID] = subscription;
