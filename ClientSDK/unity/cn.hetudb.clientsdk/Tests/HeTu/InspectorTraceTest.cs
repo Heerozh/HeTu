@@ -108,8 +108,8 @@ namespace Tests.HeTu
             client.ConfigureInspector(true);
             client.AddInspectorDispatcher(dispatcher);
             client.ForceConnected();
-            using var subscription = new TestSubscription(subId, "HP", client,
-                new StackTrace(true));
+            using var subscription = new RowSubscription<DictComponent>(subId, "HP",
+                new DictComponent { ["id"] = 1L }, client, new StackTrace(true));
             client.RegisterSubscription(subId, subscription);
 
             client.Unsubscribe(subId, "test");
@@ -130,15 +130,18 @@ namespace Tests.HeTu
             client.ConfigureInspector(true);
             client.AddInspectorDispatcher(dispatcher);
             client.ForceConnected();
-            using var subscription = new TestSubscription(subId, "HP", client,
-                new StackTrace(true));
+            using var subscription = new RowSubscription<DictComponent>(subId, "HP",
+                new DictComponent { ["id"] = 1L }, client, new StackTrace(true));
             client.RegisterSubscription(subId, subscription);
 
             var packet = MessagePackSerializer.Serialize(new object[]
             {
                 HeTuClientBase.MessageUpdate,
                 subId,
-                new Dictionary<long, object> { [1L] = new Dictionary<string, object>() }
+                new Dictionary<long, object>
+                {
+                    [1L] = new Dictionary<string, object> { ["id"] = 1L }
+                }
             });
 
             client.Receive(packet);
@@ -167,7 +170,7 @@ namespace Tests.HeTu
             public void Receive(byte[] buffer) => OnReceived(buffer);
 
             public void RegisterSubscription(string subId, BaseSubscription subscription) =>
-                Subscriptions.Add(subId, subscription);
+                Subscriptions.Add(subId, subscription.Core);
 
             protected override void ConnectCore(string url, Action onConnected,
                 Action<byte[]> onMessage, Action<int, string> onClose,
@@ -180,19 +183,6 @@ namespace Tests.HeTu
             }
 
             protected override void SendCore(byte[] data)
-            {
-            }
-        }
-
-        private sealed class TestSubscription : BaseSubscription
-        {
-            public TestSubscription(string subscriptID, string componentName,
-                HeTuClientBase client, StackTrace creationTrace) :
-                base(subscriptID, componentName, client, creationTrace)
-            {
-            }
-
-            public override void UpdateRows(JsonObject data)
             {
             }
         }

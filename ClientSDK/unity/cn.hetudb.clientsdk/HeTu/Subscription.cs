@@ -50,7 +50,12 @@ namespace HeTu
     }
 
     /// <summary>
-    ///     订阅基类，封装反订阅与资源释放逻辑。
+    ///     订阅句柄基类，封装反订阅与资源释放逻辑。
+    ///     每次 Watch 都拿到一个自己的句柄；同一个订阅（同一行、同一范围）的所有句柄共用一份
+    ///     服务端订阅和数据，各自 Dispose 只退掉自己，最后一个句柄 Dispose 时才去服务器反订阅。
+    ///     Every Watch call returns its own handle. Handles of the same subscription
+    ///     share one server subscription and its data; disposing a handle only releases
+    ///     that handle, and the server subscription is dropped with the last one.
     /// </summary>
     /// <remarks>
     ///     订阅推送是尽力而为的最终一致：正常负载下约 99% 的情况能收到最新数据（通常在
@@ -72,38 +77,40 @@ namespace HeTu
         /// </summary>
         public readonly string ComponentName;
 
-        private HeTuClientBase _parentClient;
-
         /// <summary>
         ///     该订阅关联的 R3 资源袋。
         /// </summary>
         public DisposableBag DisposeBag;
 
-        protected BaseSubscription(string subscriptID, string componentName,
-            HeTuClientBase client, StackTrace creationTrace = null)
+        private protected BaseSubscription(ManagedSubscriptionCore core,
+            StackTrace creationTrace)
         {
-            SubId = subscriptID;
-            ComponentName = componentName;
-            _parentClient = client;
+            Core = core;
+            ComponentName = core.ComponentName;
             CreationTrace = creationTrace;
         }
+
+        // 同一订阅的所有句柄共用的那一份
+        internal ManagedSubscriptionCore Core { get; }
 
         internal StackTrace CreationTrace { get; }
 
         /// <summary>
         ///     服务器侧 canonical 订阅 ID。
         /// </summary>
-        public string SubId { get; }
+        public string SubId => Core.SubId;
 
         /// <summary>
-        ///     当前对象是否已脱离活跃连接，等待 Session 重连恢复。
+        ///     当前对象是否已脱离活跃连接，等待 Session 重连恢复。Dispose 后恒为 false，
+        ///     生命周期判断请用 IsDisposed。
         /// </summary>
-        public bool IsStale { get; private set; }
+        public bool IsStale => !IsDisposed && Core.IsStale;
 
         internal bool IsDisposed { get; private set; }
 
         /// <summary>
-        ///     销毁远端订阅对象。Dispose应该明确调用。
+        ///     释放本句柄。Dispose应该明确调用。同一订阅的其他句柄不受影响；最后一个句柄
+        ///     Dispose 时才销毁远端订阅对象。
         /// </summary>
         public virtual void Dispose()
         {
@@ -111,21 +118,13 @@ namespace HeTu
                 return;
 
             IsDisposed = true;
-            // Stale 表示底层连接已经断了（Session 在 MarkConnectionLost 里挨个
-            // Suspend），此时再向 _parentClient 发 unsub 没意义：底层
-            // HeTuClient 通常已经 Subscriptions.Clean()，能早返；即使顺序变了
-            // 守住这里也不会戳到死 socket。
-            if (!IsStale)
-                _parentClient?.Unsubscribe(SubId, "Dispose");
-            // 复位 IsStale：Dispose 后对象不再属于"等重连"状态，外部只看
-            // IsStale 不应被误导。生命周期判断请用 IsDisposed。
-            IsStale = false;
             DisposeBag.Dispose();
+            Core.Release(this);
             Disposed?.Invoke(this);
             GC.SuppressFinalize(this);
         }
 
-        void IRestorableSubscription.Suspend() => Suspend();
+        void IRestorableSubscription.Suspend() => Core.Suspend();
 
         void IRestorableSubscription.Restore(
             IHeTuSessionTransport transport,
@@ -148,21 +147,10 @@ namespace HeTu
 #endif
 
         /// <summary>
-        ///     应用服务器推送的行更新。
+        ///     应用服务器推送的行更新（同一订阅的所有句柄都会收到）。
         /// </summary>
         /// <param name="data">更新数据。</param>
         public abstract void UpdateRows(JsonObject data);
-
-        internal void RebindRemote(string subscriptID, HeTuClientBase client)
-        {
-            if (SubId != subscriptID)
-                throw new Exception("错误，Rebind的subscriptID不应该有变化，" +
-                                    $"旧的：{SubId}, 新的：{subscriptID}");
-            _parentClient = client;
-            IsStale = false;
-        }
-
-        internal void Suspend() => IsStale = true;
 
         internal virtual void Restore(
             IHeTuSessionTransport transport,
@@ -178,35 +166,44 @@ namespace HeTu
     }
 
     /// <summary>
-    ///     单行订阅对象（Get 结果）。
+    ///     单行订阅句柄（Get 结果）。
     /// </summary>
     /// <typeparam name="T">组件类型。</typeparam>
     public class RowSubscription<T> : BaseSubscription where T : IBaseComponent
     {
+        private readonly ManagedRowCore<T> _core;
         private readonly Subject<T> _subject;
-
-        public long LastRowID;
 
         public RowSubscription(string subscriptID, string componentName, T row,
             HeTuClientBase client, StackTrace creationTrace = null) :
-            base(subscriptID, componentName, client, creationTrace)
+            this(new ManagedRowCore<T>(subscriptID, componentName, row, client,
+                creationTrace), creationTrace)
         {
-            Data = row;
-            BoundRowID = row.ID;
-            LastRowID = row.ID;
+        }
+
+        internal RowSubscription(ManagedRowCore<T> core, StackTrace creationTrace) :
+            base(core, creationTrace)
+        {
+            _core = core;
             _subject = new Subject<T>();
             DisposeBag.Add(_subject);
+            core.Attach(this);
         }
+
+        /// <summary>
+        ///     最近一次收到的行 ID（删除后保留删除前的值）。
+        /// </summary>
+        public long LastRowID => _core.LastRowID;
 
         /// <summary>
         ///     当前缓存的行数据。
         /// </summary>
-        public T Data { get; private set; }
+        public T Data => _core.Data;
 
         /// <summary>
         ///     该订阅最终绑定的行 ID。WatchRow 解析成功后，重连恢复按此 ID 进行。
         /// </summary>
-        public long BoundRowID { get; private set; }
+        public long BoundRowID => _core.BoundRowID;
 
         /// <summary>
         ///     获得 RowSubscription 的 Subject 响应式热源，自动处理 OnUpdate 和 OnDelete 事件。
@@ -243,58 +240,27 @@ namespace HeTu
         public event Action OnResynced;
 
         /// <summary>
-        ///     更新当前行数据并触发相关事件。
+        ///     更新当前行数据并触发相关事件（同一订阅的所有句柄都会收到）。
         /// </summary>
         /// <param name="data">新数据；为 <see langword="null" /> 表示删除。</param>
-        public void Update(T data)
-        {
-            // 防御 Restore 异步回调晚于 Dispose 到达："僵尸"更新会戳到已 Dispose
-            // 的 _subject，R3 直接抛 ObjectDisposedException。
-            if (IsDisposed) return;
-            if (data is null)
-            {
-                OnDelete?.Invoke(this);
-                Data = default;
-                // 不应该_subject.OnCompleted，如果订阅的查询条件不是RowId，那么数据可能会重新出现
-                // 如果是订阅RowId，那么数据不会重新出现，所以可以OnCompleted
-                // 但为了统一，我们始终不调用OnCompleted
-            }
-            else
-            {
-                Data = data;
-                LastRowID = data.ID;
-                OnUpdate?.Invoke(this);
-            }
+        public void Update(T data) => _core.Update(data);
 
-            _subject.OnNext(Data);
-        }
-
-        public override void UpdateRows(JsonObject data)
-        {
-            var rows = data.ToDict<long, T>();
-            foreach (var (_, rowData) in rows)
-            {
-                Update(rowData);
-            }
-        }
+        public override void UpdateRows(JsonObject data) => _core.UpdateRows(data);
 
         internal void Rebind(
             string subscriptID,
             T row,
-            HeTuClientBase client)
-        {
-            // 已 Dispose 直接返回：避免 RebindRemote 把对象表面上"激活"
-            //（IsStale = false, _parentClient = 新 client），以及避免后续 Update
-            //  戳到已被 DisposeBag 销毁的 _subject。
-            if (IsDisposed) return;
-            RebindRemote(subscriptID, client);
-            BoundRowID = row.ID;
-            // 重连后 always-fire：T 通常是用户类没实现 Equals，引用比较恒不等；
-            // 与其要求实现 Equals 或按字节比较，不如统一回放给响应式链路，
-            // 保证断线期间的变化不会漏给 Subject/OnUpdate 订阅方。
-            Update(row);
-            OnResynced?.Invoke();
-        }
+            HeTuClientBase client) =>
+            _core.Rebind(subscriptID, row, client);
+
+        // 以下由 ManagedRowCore 对每个还活着的句柄调用
+        internal void RaiseUpdate() => OnUpdate?.Invoke(this);
+
+        internal void RaiseDelete() => OnDelete?.Invoke(this);
+
+        internal void PushToSubject(T row) => _subject.OnNext(row);
+
+        internal void RaiseResynced() => OnResynced?.Invoke();
 
         internal override void Restore(
             IHeTuSessionTransport transport,
@@ -333,20 +299,27 @@ namespace HeTu
     }
 
     /// <summary>
-    ///     范围订阅对象（Range 结果）。
+    ///     范围订阅句柄（Range 结果）。
     /// </summary>
     /// <typeparam name="T">组件类型。</typeparam>
     public class IndexSubscription<T> : BaseSubscription where T : IBaseComponent
     {
         private readonly Subject<T> _addSubject;
+        private readonly ManagedIndexCore<T> _core;
         private readonly Subject<long> _removeSubject;
         private readonly Dictionary<long, Subject<T>> _replaceSubjects;
 
         public IndexSubscription(string subscriptID, string componentName, List<T> rows,
             HeTuClientBase client, StackTrace creationTrace = null) :
-            base(subscriptID, componentName, client, creationTrace)
+            this(new ManagedIndexCore<T>(subscriptID, componentName, rows, client,
+                creationTrace), creationTrace)
         {
-            Rows = rows.ToDictionary(row => row.ID);
+        }
+
+        internal IndexSubscription(ManagedIndexCore<T> core, StackTrace creationTrace) :
+            base(core, creationTrace)
+        {
+            _core = core;
             _addSubject = new Subject<T>();
             _removeSubject = new Subject<long>();
             _replaceSubjects = new Dictionary<long, Subject<T>>();
@@ -355,26 +328,20 @@ namespace HeTu
             // per-row subject 不进 DisposeBag——R3 的 DisposableBag 只能追加，
             // 删行的 churn 会让 bag 单调增长。改成跟着 _replaceSubjects 字典走，
             // 删除时显式 Dispose，整体 Dispose 在 override 里兜底。
-            foreach (var (id, _) in Rows)
+            foreach (var id in core.Rows.Keys)
                 _replaceSubjects[id] = new Subject<T>();
+            core.Attach(this);
         }
 
         /// <summary>
-        ///     当前订阅范围内的行集合（key 为行 ID）。
+        ///     当前订阅范围内的行集合（key 为行 ID）。同一订阅的所有句柄共用这一份。
         /// </summary>
-        public Dictionary<long, T> Rows { get; }
-
-        internal string RestoreIndex { get; private set; }
-        internal object RestoreLeft { get; private set; }
-        internal object RestoreRight { get; private set; }
-        internal int RestoreLimit { get; private set; }
-        internal bool RestoreDesc { get; private set; }
-        internal bool RestoreForce { get; private set; } = true;
+        public Dictionary<long, T> Rows => _core.Rows;
 
         /// <summary>
         ///     为 true 表示这是 WatchTable 建立的整表订阅，断线重连时重发 table 而非 range。
         /// </summary>
-        internal bool RestoreAsTable { get; private set; }
+        internal bool RestoreAsTable => _core.RestoreAsTable;
 
         public override void Dispose()
         {
@@ -406,54 +373,13 @@ namespace HeTu
         public event Action OnResynced;
 
         /// <summary>
-        ///     对指定行应用新增/更新/删除变更。
+        ///     对指定行应用新增/更新/删除变更（同一订阅的所有句柄都会收到）。
         /// </summary>
         /// <param name="rowID">目标行 ID。</param>
         /// <param name="data">新数据；为 <see langword="null" /> 表示删除。</param>
-        public void Update(long rowID, T data)
-        {
-            // 防御 Restore 异步回调晚于 Dispose 到达：_replaceSubjects 已被
-            // override Dispose 清空，再戳进来会 KeyNotFoundException。
-            if (IsDisposed) return;
-            var exist = Rows.ContainsKey(rowID);
-            var delete = data is null;
+        public void Update(long rowID, T data) => _core.Update(rowID, data);
 
-            if (delete)
-            {
-                if (!exist) return;
-                OnDelete?.Invoke(this, rowID);
-                var subject = _replaceSubjects[rowID];
-                subject.OnCompleted();
-                subject.Dispose();
-                Rows.Remove(rowID);
-                _replaceSubjects.Remove(rowID);
-                _removeSubject.OnNext(rowID);
-            }
-            else
-            {
-                Rows[rowID] = data;
-                if (exist)
-                {
-                    OnUpdate?.Invoke(this, rowID);
-                    _replaceSubjects[rowID].OnNext(data);
-                }
-                else
-                {
-                    OnInsert?.Invoke(this, rowID);
-                    _replaceSubjects[rowID] = new Subject<T>();
-                    _addSubject.OnNext(data);
-                }
-            }
-        }
-
-        public override void UpdateRows(JsonObject data)
-        {
-            var rows = data.ToDict<long, T>();
-            foreach (var (rowID, rowData) in rows)
-            {
-                Update(rowID, rowData);
-            }
-        }
+        public override void UpdateRows(JsonObject data) => _core.UpdateRows(data);
 
         /// <summary>
         ///     获得范围订阅的新增热源，初始行也会先依次发出。
@@ -464,12 +390,12 @@ namespace HeTu
         ///     var uiItems = new Dictionary<long, GameObject>();
         ///     IndexSubscription<HP> indexSub = client.WatchRange<HP>(...);
         ///     indexSub.AddTo(gameObject);
-        /// 
+        ///
         ///     // 创建新UI对象
         ///     Action<long> createUI = rowID => {
         ///         var go = new GameObject($"ID: {rowID}");
         ///         uiItems[rowID] = go;
-        /// 
+        ///
         ///         var hpText = go.AddComponent<TMP_Text>();
         ///         // bind 更新
         ///         indexSub.ObserveRow(rowID)
@@ -481,12 +407,12 @@ namespace HeTu
         ///             // 注意，规范上来说，AddTo应该能加就加，不管别人是否会处理，重复添加一般
         ///             // 无副作用。但这里不是，这里是ObserveAdd事件，导致Bag会持续增长，内存溢出。
         ///     };
-        /// 
+        ///
         ///     // 统一处理新增（包含初始行）
         ///     indexSub.ObserveAdd()
         ///         .Subscribe(added => { createUI(added.ID); })
         ///         .AddTo(ref indexSub.DisposeBag);
-        /// 
+        ///
         ///     // 统一处理删除
         ///     indexSub.ObserveRemove()
         ///         .Subscribe(removedID => {
@@ -519,34 +445,53 @@ namespace HeTu
             object right,
             int limit,
             bool desc,
-            bool force)
-        {
-            RestoreIndex = index;
-            RestoreLeft = left;
-            RestoreRight = right;
-            RestoreLimit = limit;
-            RestoreDesc = desc;
-            RestoreForce = force;
-            RestoreAsTable = false;
-        }
+            bool force) =>
+            _core.ConfigureRestoreQuery(index, left, right, limit, desc, force);
 
-        internal void ConfigureRestoreTable()
-        {
-            RestoreAsTable = true;
-        }
+        internal void ConfigureRestoreTable() => _core.ConfigureRestoreTable();
 
         internal void Rebind(
             string subscriptID,
             List<T> rows,
-            HeTuClientBase client)
+            HeTuClientBase client) =>
+            _core.Rebind(subscriptID, rows, client);
+
+        // 以下由 ManagedIndexCore 对每个还活着的句柄调用
+        internal void RaiseInsert(long rowID, T data)
         {
-            // 同 RowSubscription.Rebind：Dispose 后任何延迟到达的 Restore 回调
-            // 都 noop，避免对象被"复活"或戳到已清空的 _replaceSubjects。
-            if (IsDisposed) return;
-            RebindRemote(subscriptID, client);
-            ReplaceSnapshot(rows);
-            OnResynced?.Invoke();
+            // 先建好这行的 subject，OnInsert 里就能 ObserveRow
+            if (_replaceSubjects.Remove(rowID, out var stale))
+                stale.Dispose();
+            _replaceSubjects[rowID] = new Subject<T>();
+            OnInsert?.Invoke(this, rowID);
+            _addSubject.OnNext(data);
         }
+
+        internal void RaiseUpdate(long rowID, T data)
+        {
+            OnUpdate?.Invoke(this, rowID);
+            if (_replaceSubjects.TryGetValue(rowID, out var subject))
+                subject.OnNext(data);
+        }
+
+        // 删除分两步：这一步行还在 Rows 里；之后核心删掉行，再 PushRemove
+        internal void RaiseDelete(long rowID)
+        {
+            _replaceSubjects.Remove(rowID, out var subject);
+            try
+            {
+                OnDelete?.Invoke(this, rowID);
+            }
+            finally
+            {
+                subject?.OnCompleted();
+                subject?.Dispose();
+            }
+        }
+
+        internal void PushRemove(long rowID) => _removeSubject.OnNext(rowID);
+
+        internal void RaiseResynced() => OnResynced?.Invoke();
 
         internal override void Restore(
             IHeTuSessionTransport transport,
@@ -570,7 +515,7 @@ namespace HeTu
                 onCompleted(subscription != null);
             }
 
-            if (RestoreAsTable)
+            if (_core.RestoreAsTable)
             {
                 // 整表订阅：重发 table，而不是 range
                 transport.WatchTable(OnRestored, ComponentName, this);
@@ -578,23 +523,296 @@ namespace HeTu
             }
 
             transport.WatchRange(
-                RestoreIndex,
-                RestoreLeft,
-                RestoreRight,
-                RestoreLimit,
+                _core.RestoreIndex,
+                _core.RestoreLeft,
+                _core.RestoreRight,
+                _core.RestoreLimit,
                 OnRestored,
-                RestoreDesc,
-                RestoreForce,
+                _core.RestoreDesc,
+                _core.RestoreForce,
                 ComponentName,
                 this);
+        }
+    }
+
+    /// <summary>
+    ///     同一个订阅（sub_id）的所有句柄共用的那一份：服务端订阅、数据、断线恢复状态。
+    ///     每次 Watch 从这里发一个句柄（<see cref="BaseSubscription" />），句柄 Dispose 时
+    ///     交回来；最后一个句柄交回时才去服务器反订阅。服务端对同一连接的重复订阅回同一个
+    ///     sub_id、不计数，一条 unsub 就删，所以计数只能在客户端做。
+    /// </summary>
+    internal abstract class ManagedSubscriptionCore
+    {
+        private readonly List<BaseSubscription> _handles = new();
+        private HeTuClientBase _parentClient;
+
+        protected ManagedSubscriptionCore(string subscriptID, string componentName,
+            HeTuClientBase client, StackTrace creationTrace)
+        {
+            SubId = subscriptID;
+            ComponentName = componentName;
+            _parentClient = client;
+            CreationTrace = creationTrace;
+        }
+
+        public string SubId { get; }
+        public string ComponentName { get; }
+
+        // 第一次订阅时的调用栈，Inspector 用它标注推送
+        public StackTrace CreationTrace { get; }
+
+        public bool IsStale { get; private set; }
+
+        // 远端订阅已退（最后一个句柄已 Dispose，或会话关闭）
+        public bool IsClosed { get; private set; }
+
+        public int HandleCount => _handles.Count;
+
+        public abstract void UpdateRows(JsonObject data);
+
+        // 发一个新句柄（类型由具体核心决定）
+        internal abstract BaseSubscription NewHandle(StackTrace creationTrace);
+
+        internal void Attach(BaseSubscription handle) => _handles.Add(handle);
+
+        internal void Release(BaseSubscription handle)
+        {
+            if (!_handles.Remove(handle) || _handles.Count > 0)
+                return;
+            Close();
+        }
+
+        // 退掉远端订阅并 Dispose 所有句柄。最后一个句柄交回时调用；会话关闭时也直接调。
+        internal void Close()
+        {
+            if (IsClosed)
+                return;
+
+            IsClosed = true;
+            // Stale 表示底层连接已经断了（Session 在 MarkConnectionLost 里挨个
+            // Suspend），此时再向 _parentClient 发 unsub 没意义：底层
+            // HeTuClient 通常已经 Subscriptions.Clean()，能早返；即使顺序变了
+            // 守住这里也不会戳到死 socket。
+            if (!IsStale)
+                _parentClient?.Unsubscribe(SubId, "Dispose");
+            IsStale = false;
+            foreach (var handle in _handles.ToArray())
+                handle.Dispose();
+            _handles.Clear();
+        }
+
+        internal void Suspend() => IsStale = true;
+
+        protected void RebindRemote(string subscriptID, HeTuClientBase client)
+        {
+            if (SubId != subscriptID)
+                throw new Exception("错误，Rebind的subscriptID不应该有变化，" +
+                                    $"旧的：{SubId}, 新的：{subscriptID}");
+            _parentClient = client;
+            IsStale = false;
+        }
+
+        // 对每个还活着的句柄通知一次。某个句柄的用户回调抛异常只记日志，不能挡住
+        // 别的句柄（它们可能属于完全无关的界面）。
+        protected void ForEachHandle<THandle>(Action<THandle> notify)
+            where THandle : BaseSubscription
+        {
+            foreach (var handle in _handles.ToArray())
+            {
+                if (handle.IsDisposed)
+                    continue;
+                try
+                {
+                    notify((THandle)handle);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Instance.Error($"订阅 {SubId} 的回调抛出异常：{ex}");
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    ///     单行订阅的共享核心，句柄是 <see cref="RowSubscription{T}" />。
+    /// </summary>
+    internal sealed class ManagedRowCore<T> : ManagedSubscriptionCore
+        where T : IBaseComponent
+    {
+        public ManagedRowCore(string subscriptID, string componentName, T row,
+            HeTuClientBase client, StackTrace creationTrace) :
+            base(subscriptID, componentName, client, creationTrace)
+        {
+            Data = row;
+            BoundRowID = row.ID;
+            LastRowID = row.ID;
+        }
+
+        public T Data { get; private set; }
+        public long BoundRowID { get; private set; }
+        public long LastRowID { get; private set; }
+
+        public RowSubscription<T> CreateHandle(StackTrace creationTrace) =>
+            new(this, creationTrace);
+
+        internal override BaseSubscription NewHandle(StackTrace creationTrace) =>
+            CreateHandle(creationTrace);
+
+        public void Update(T data)
+        {
+            // 防御 Restore 异步回调晚于 Dispose 到达："僵尸"更新会戳到已 Dispose
+            // 的 subject，R3 直接抛 ObjectDisposedException。
+            if (IsClosed) return;
+            if (data is null)
+            {
+                // OnDelete 里还能读到删除前的 Data
+                ForEachHandle<RowSubscription<T>>(h => h.RaiseDelete());
+                Data = default;
+                // 不应该_subject.OnCompleted，如果订阅的查询条件不是RowId，那么数据可能会重新出现
+                // 如果是订阅RowId，那么数据不会重新出现，所以可以OnCompleted
+                // 但为了统一，我们始终不调用OnCompleted
+            }
+            else
+            {
+                Data = data;
+                LastRowID = data.ID;
+                ForEachHandle<RowSubscription<T>>(h => h.RaiseUpdate());
+            }
+
+            var current = Data;
+            ForEachHandle<RowSubscription<T>>(h => h.PushToSubject(current));
+        }
+
+        public override void UpdateRows(JsonObject data)
+        {
+            var rows = data.ToDict<long, T>();
+            foreach (var (_, rowData) in rows)
+            {
+                Update(rowData);
+            }
+        }
+
+        public void Rebind(
+            string subscriptID,
+            T row,
+            HeTuClientBase client)
+        {
+            // 已关闭直接返回：避免 RebindRemote 把对象表面上"激活"
+            //（IsStale = false, _parentClient = 新 client），以及避免后续 Update
+            //  戳到已被 DisposeBag 销毁的 subject。
+            if (IsClosed) return;
+            RebindRemote(subscriptID, client);
+            BoundRowID = row.ID;
+            // 重连后 always-fire：T 通常是用户类没实现 Equals，引用比较恒不等；
+            // 与其要求实现 Equals 或按字节比较，不如统一回放给响应式链路，
+            // 保证断线期间的变化不会漏给 Subject/OnUpdate 订阅方。
+            Update(row);
+            ForEachHandle<RowSubscription<T>>(h => h.RaiseResynced());
+        }
+    }
+
+    /// <summary>
+    ///     范围 / 整表订阅的共享核心，句柄是 <see cref="IndexSubscription{T}" />。
+    /// </summary>
+    internal sealed class ManagedIndexCore<T> : ManagedSubscriptionCore
+        where T : IBaseComponent
+    {
+        public ManagedIndexCore(string subscriptID, string componentName, List<T> rows,
+            HeTuClientBase client, StackTrace creationTrace) :
+            base(subscriptID, componentName, client, creationTrace) =>
+            Rows = rows.ToDictionary(row => row.ID);
+
+        public Dictionary<long, T> Rows { get; }
+
+        internal string RestoreIndex { get; private set; }
+        internal object RestoreLeft { get; private set; }
+        internal object RestoreRight { get; private set; }
+        internal int RestoreLimit { get; private set; }
+        internal bool RestoreDesc { get; private set; }
+        internal bool RestoreForce { get; private set; } = true;
+
+        // 为 true 表示这是 WatchTable 建立的整表订阅，断线重连时重发 table 而非 range
+        internal bool RestoreAsTable { get; private set; }
+
+        public IndexSubscription<T> CreateHandle(StackTrace creationTrace) =>
+            new(this, creationTrace);
+
+        internal override BaseSubscription NewHandle(StackTrace creationTrace) =>
+            CreateHandle(creationTrace);
+
+        public void Update(long rowID, T data)
+        {
+            // 防御 Restore 异步回调晚于 Dispose 到达
+            if (IsClosed) return;
+            var exist = Rows.ContainsKey(rowID);
+
+            if (data is null)
+            {
+                if (!exist) return;
+                ForEachHandle<IndexSubscription<T>>(h => h.RaiseDelete(rowID));
+                Rows.Remove(rowID);
+                ForEachHandle<IndexSubscription<T>>(h => h.PushRemove(rowID));
+            }
+            else
+            {
+                Rows[rowID] = data;
+                if (exist)
+                    ForEachHandle<IndexSubscription<T>>(h => h.RaiseUpdate(rowID, data));
+                else
+                    ForEachHandle<IndexSubscription<T>>(h => h.RaiseInsert(rowID, data));
+            }
+        }
+
+        public override void UpdateRows(JsonObject data)
+        {
+            var rows = data.ToDict<long, T>();
+            foreach (var (rowID, rowData) in rows)
+            {
+                Update(rowID, rowData);
+            }
+        }
+
+        internal void ConfigureRestoreQuery(
+            string index,
+            object left,
+            object right,
+            int limit,
+            bool desc,
+            bool force)
+        {
+            RestoreIndex = index;
+            RestoreLeft = left;
+            RestoreRight = right;
+            RestoreLimit = limit;
+            RestoreDesc = desc;
+            RestoreForce = force;
+            RestoreAsTable = false;
+        }
+
+        internal void ConfigureRestoreTable()
+        {
+            RestoreAsTable = true;
+        }
+
+        public void Rebind(
+            string subscriptID,
+            List<T> rows,
+            HeTuClientBase client)
+        {
+            // 同 ManagedRowCore.Rebind：关闭后任何延迟到达的 Restore 回调
+            // 都 noop，避免对象被"复活"或戳到已清空的 per-row subject。
+            if (IsClosed) return;
+            RebindRemote(subscriptID, client);
+            ReplaceSnapshot(rows);
+            ForEachHandle<IndexSubscription<T>>(h => h.RaiseResynced());
         }
 
         private void ReplaceSnapshot(List<T> rows)
         {
             // 把 diff 全部交给 Update：删除、新增、变更都走同一条事件路径，
-            // 重连后 R3 链路（_addSubject/_removeSubject/_replaceSubjects 以及
+            // 重连后 R3 链路（ObserveAdd/ObserveRemove/ObserveRow 以及
             // OnInsert/OnDelete/OnUpdate）就能像断线期间一直在线那样收到完整变更。
-            // 已存在的行其 _replaceSubjects 条目会被 Update 复用，订阅方不会断流。
+            // 已存在的行其 per-row subject 会被复用，订阅方不会断流。
             var nextRows = rows.ToDictionary(row => row.ID);
 
             foreach (var rowId in Rows.Keys.ToArray())
@@ -609,32 +827,22 @@ namespace HeTu
     }
 
     /// <summary>
-    ///     订阅对象强引用管理器。
+    ///     订阅强引用管理器（按 sub_id 管理共享核心）。
     /// </summary>
     public class SubscriptionManager
     {
-        private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
+        private readonly Dictionary<string, ManagedSubscriptionCore> _subscriptions =
+            new();
 
         /// <summary>
         ///     清空缓存。
         /// </summary>
         public void Clean() => _subscriptions.Clear();
 
-        /// <summary>
-        ///     按订阅 ID 获取订阅对象。
-        /// </summary>
-        /// <param name="subID">订阅 ID。</param>
-        /// <param name="subscription">输出订阅对象。</param>
-        /// <returns>是否获取成功。</returns>
-        public bool TryGet(string subID, out BaseSubscription subscription) =>
+        internal bool TryGet(string subID, out ManagedSubscriptionCore subscription) =>
             _subscriptions.TryGetValue(subID, out subscription);
 
-        /// <summary>
-        ///     添加或覆盖订阅引用。
-        /// </summary>
-        /// <param name="subID">订阅 ID。</param>
-        /// <param name="subscription">订阅对象。</param>
-        public void Add(string subID, BaseSubscription subscription) =>
+        internal void Add(string subID, ManagedSubscriptionCore subscription) =>
             _subscriptions[subID] = subscription;
 
         /// <summary>
