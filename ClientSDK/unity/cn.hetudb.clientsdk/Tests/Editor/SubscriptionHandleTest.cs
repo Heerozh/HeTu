@@ -265,6 +265,59 @@ namespace Tests.HeTu
             Assert.AreEqual(2, client.CountSent("unsub"), "抛异常也要退订");
         }
 
+        [Test]
+        public void RowRestore_LastHandleDisposedInFlight_DropsAndUnsubscribes()
+        {
+            // 会话恢复的 sub 在途时最后一个句柄 Dispose：核心还 stale，当时不发 unsub。
+            // 回复到了不能把已关闭的核心登记回表、报恢复成功，服务端因这次恢复又订上了，要退掉
+            var client = HandleTestClient.Connected();
+            var core = new ManagedRowCore<DictComponent>(RowSubId, "Item",
+                Dict(Row(7, 10)), client, null);
+            var handle = core.CreateHandle(null);
+            core.Suspend();
+            ManagedRowCore<DictComponent> restored = null;
+            var answered = false;
+            client.WatchRowCoreSync<DictComponent>("id", 7L, (c, _, _) =>
+            {
+                restored = c;
+                answered = true;
+            }, "Item", core, null);
+
+            handle.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            client.Receive(new object[] { "sub", RowSubId, Row(7, 10) });
+
+            Assert.IsTrue(answered);
+            Assert.IsNull(restored, "已关闭的核心不算恢复成功");
+            Assert.AreEqual(1, client.CountSent("unsub"));
+            client.WatchRow(Row(7, 11));
+            Assert.AreEqual(2, client.CountSent("sub"), "表里不能留已关闭的核心");
+        }
+
+        [Test]
+        public void RangeRestore_LastHandleDisposedInFlight_DropsAndUnsubscribes()
+        {
+            var client = HandleTestClient.Connected();
+            var core = new ManagedIndexCore<DictComponent>(RangeSubId, "Item",
+                new List<DictComponent> { Dict(Row(7, 10)) }, client, null);
+            var handle = core.CreateHandle(null);
+            core.Suspend();
+            ManagedIndexCore<DictComponent> restored = null;
+            var answered = false;
+            client.WatchRangeCoreSync<DictComponent>("owner", 1L, 1L, 10, (c, _, _) =>
+            {
+                restored = c;
+                answered = true;
+            }, false, true, "Item", core, null);
+
+            handle.Dispose();
+            client.Receive(new object[] { "sub", RangeSubId, new[] { Row(7, 10) } });
+
+            Assert.IsTrue(answered);
+            Assert.IsNull(restored);
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
         // 以下是"有 sub 在途时退订"的竞态：服务端对同一连接的重复订阅回同一个 sub_id、不计数，
         // 在途的 sub 若落到要退的订阅上，先发出的 unsub 会把它一起退掉（服务端先处理完 sub 时
         // 客户端拿到一个服务端已没有的订阅；先处理 unsub 时回 null）。unsub 要等在途的 sub 回完。
@@ -396,6 +449,14 @@ namespace Tests.HeTu
             new() { ["id"] = id, ["value"] = value };
 
         private static int Value(DictComponent row) => Convert.ToInt32(row["value"]);
+
+        private static DictComponent Dict(Dictionary<string, object> row)
+        {
+            var dict = new DictComponent();
+            foreach (var (key, value) in row)
+                dict[key] = value;
+            return dict;
+        }
 
         private static object[] Update(string subId, long rowId,
             Dictionary<string, object> row) =>
