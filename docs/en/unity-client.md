@@ -367,9 +367,16 @@ sub.AddTo(ref _bag);
 try { /* use sub */ } finally { sub.Dispose(); }
 ```
 
-`Dispose()` does two things: tells the server "stop pushing me changes for
-this query" and tears down all R3 streams chained off the subscription.
-After dispose, the `Subject` / `ObserveRow` streams will not emit further.
+`Dispose()` releases the subscription you hold: it tears down all R3
+streams chained off it, and after dispose its `Subject` / `ObserveRow`
+streams and events stop firing.
+
+The same row / range can be watched from several places: every `WatchRow` /
+`WatchRange` / `WatchTable` call returns **its own** subscription object;
+objects for the same query share one server subscription and the same data
+(`Data` / `Rows`). Dispose each on its own lifecycle without affecting the
+others — the SDK tells the server "stop pushing me changes for this query"
+only when the last one is disposed.
 
 ## Logical session: `HeTuSessionClient`
 
@@ -523,8 +530,10 @@ extra hooks the session populates:
   clean diff — not just a "everything reloaded" signal. Use it to clear
   any "stale" indicators in your UI.
 - **De-duplication** — calling `WatchRow` / `WatchRange` twice with the
-  same arguments hands you the **same** subscription object back; the
-  remote unsubscribe only happens when *every* handle is disposed.
+  same arguments sends one server subscription but hands each caller
+  **its own** subscription object; the remote unsubscribe only happens
+  when *every* one is disposed, and a reconnect restores the query once
+  for all of them.
 
 `RowSubscription`'s restore target is the **bound row's `ID`**, not the
 original index/value: if your call was `session.WatchRow<Player>("owner",

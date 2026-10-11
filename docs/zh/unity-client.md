@@ -309,8 +309,12 @@ sub.AddTo(ref _bag);
 try { /* 使用 sub */ } finally { sub.Dispose(); }
 ```
 
-`Dispose()` 做两件事：告诉服务器“停止为此查询推送变更”，并销毁从该订阅派生的所有 R3 流。释放后，
-`Subject` / `ObserveRow` 流将不再发出数据。
+`Dispose()` 释放的是你手里这一个订阅：销毁从它派生的所有 R3 流，释放后它的 `Subject` /
+`ObserveRow` 流不再发出数据、事件也不再触发。
+
+同一行 / 同一范围可以在多处订阅：每次 `WatchRow` / `WatchRange` / `WatchTable` 都返回一个**自己的**
+订阅对象，它们共用一个服务端订阅和同一份数据（`Data` / `Rows`）。各处按自己的生命周期 `Dispose`
+即可，互不影响；最后一个 `Dispose` 时，SDK 才告诉服务器“停止为此查询推送变更”。
 
 ## Unity 版本说明
 

@@ -60,7 +60,8 @@ public class NetBootstrap : MonoBehaviour
     - 管理持续存在的逻辑会话，而不是只管理一条当前 WebSocket。
     - 断线后会重新建立连接、先执行 `bootstrap`，再恢复仍然存活的订阅。
     - `WatchRow` / `WatchRange` 返回的就是普通 `RowSubscription` /
-      `IndexSubscription`；同一 canonical `sub_id` 会复用同一个订阅对象。
+      `IndexSubscription` 句柄；同一 canonical `sub_id` 的多次订阅共用一个服务端订阅，
+      但每次调用拿到自己的句柄，各自 `Dispose` 互不影响，最后一个 `Dispose` 才退订。
     - 未发送的 `CallSystem` 会等待 session ready 后再发；已经发出但未收到响应就断线的调用会抛出
       `CallOutcomeUnknownException`，不会自动重试副作用请求。
 
