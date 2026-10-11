@@ -355,8 +355,8 @@ namespace Tests.HeTu
             // 裸客户端的订阅先发、恢复后发，裸的回复先到登记了核心，恢复的回复到达时撞上它
             var client = HandleTestClient.Connected();
             IndexSubscription<DictComponent> raw = null;
-            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10, (s, _, _) => raw = s,
-                componentName: "Item");
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10,
+                (s, _, _) => raw = s, componentName: "Item");
             var core = new ManagedIndexCore<DictComponent>(RangeSubId, "Item",
                 new List<DictComponent> { Dict(Row(7, 10)) }, client, null);
             core.ConfigureRestoreQuery("owner", 1L, 1L, 10, false, true);

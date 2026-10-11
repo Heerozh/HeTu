@@ -497,7 +497,9 @@ namespace HeTu
     /// </summary>
     internal abstract class ManagedSubscriptionCore : IRestorableSubscription
     {
-        private readonly List<BaseSubscription> _handles = new();
+        // 写时复制：增删句柄时换新数组（少见），推送分发时直接遍历当时的数组（热路径不分配，
+        // 回调里增删句柄也不影响这次遍历）
+        private BaseSubscription[] _handles = Array.Empty<BaseSubscription>();
         private HeTuClientBase _parentClient;
 
         protected ManagedSubscriptionCore(string subscriptID, string componentName,
@@ -520,7 +522,7 @@ namespace HeTu
         // 远端订阅已退（最后一个句柄已 Dispose，或会话关闭）
         public bool IsClosed { get; private set; }
 
-        public int HandleCount => _handles.Count;
+        public int HandleCount => _handles.Length;
 
         // 远端订阅已退（Close 末尾触发），Session 据此注销
         internal event Action<ManagedSubscriptionCore> Closed;
@@ -530,7 +532,13 @@ namespace HeTu
         // 发一个新句柄（类型由具体核心决定）
         internal abstract BaseSubscription NewHandle(StackTrace creationTrace);
 
-        internal void Attach(BaseSubscription handle) => _handles.Add(handle);
+        internal void Attach(BaseSubscription handle)
+        {
+            var handles = new BaseSubscription[_handles.Length + 1];
+            _handles.CopyTo(handles, 0);
+            handles[^1] = handle;
+            _handles = handles;
+        }
 
         internal void RunOnClientThread(Action action)
         {
@@ -545,21 +553,28 @@ namespace HeTu
         // other 就此作废，不发 unsub（服务端订阅归本核心了）
         internal void AbsorbHandlesFrom(ManagedSubscriptionCore other)
         {
-            foreach (var handle in other._handles)
-            {
+            var moved = other._handles;
+            foreach (var handle in moved)
                 handle.Rebase(this);
-                _handles.Add(handle);
-            }
-
-            other._handles.Clear();
+            var handles = new BaseSubscription[_handles.Length + moved.Length];
+            _handles.CopyTo(handles, 0);
+            moved.CopyTo(handles, _handles.Length);
+            _handles = handles;
+            other._handles = Array.Empty<BaseSubscription>();
             other.IsClosed = true;
         }
 
         internal void Release(BaseSubscription handle)
         {
-            if (!_handles.Remove(handle) || _handles.Count > 0)
+            var index = Array.IndexOf(_handles, handle);
+            if (index < 0)
                 return;
-            Close();
+            var handles = new BaseSubscription[_handles.Length - 1];
+            Array.Copy(_handles, 0, handles, 0, index);
+            Array.Copy(_handles, index + 1, handles, index, handles.Length - index);
+            _handles = handles;
+            if (handles.Length == 0)
+                Close();
         }
 
         // 退掉远端订阅并 Dispose 所有句柄。最后一个句柄交回时调用；会话关闭时也直接调。
@@ -576,9 +591,10 @@ namespace HeTu
             if (!IsStale)
                 _parentClient?.Unsubscribe(this);
             IsStale = false;
-            foreach (var handle in _handles.ToArray())
+            // 每个句柄 Dispose 时 Release 会换新数组，这里遍历的是旧的
+            foreach (var handle in _handles)
                 handle.Dispose();
-            _handles.Clear();
+            _handles = Array.Empty<BaseSubscription>();
             Closed?.Invoke(this);
         }
 
@@ -600,17 +616,19 @@ namespace HeTu
         }
 
         // 对每个还活着的句柄通知一次。某个句柄的用户回调抛异常只记日志，不能挡住
-        // 别的句柄（它们可能属于完全无关的界面）。
-        protected void ForEachHandle<THandle>(Action<THandle> notify)
+        // 别的句柄（它们可能属于完全无关的界面）。notify 用不捕获变量的 static lambda、
+        // 参数经 arg 传入，热路径上不分配。
+        protected void ForEachHandle<THandle, TArg>(Action<THandle, TArg> notify,
+            TArg arg)
             where THandle : BaseSubscription
         {
-            foreach (var handle in _handles.ToArray())
+            foreach (var handle in _handles)
             {
                 if (handle.IsDisposed)
                     continue;
                 try
                 {
-                    notify((THandle)handle);
+                    notify((THandle)handle, arg);
                 }
                 catch (Exception ex)
                 {
@@ -618,6 +636,10 @@ namespace HeTu
                 }
             }
         }
+
+        protected void ForEachHandle<THandle>(Action<THandle> notify)
+            where THandle : BaseSubscription =>
+            ForEachHandle<THandle, Action<THandle>>(static (h, n) => n(h), notify);
     }
 
     /// <summary>
@@ -653,7 +675,7 @@ namespace HeTu
             if (data is null)
             {
                 // OnDelete 里还能读到删除前的 Data
-                ForEachHandle<RowSubscription<T>>(h => h.RaiseDelete());
+                ForEachHandle<RowSubscription<T>>(static h => h.RaiseDelete());
                 Data = default;
                 // 不应该_subject.OnCompleted，如果订阅的查询条件不是RowId，那么数据可能会重新出现
                 // 如果是订阅RowId，那么数据不会重新出现，所以可以OnCompleted
@@ -663,11 +685,11 @@ namespace HeTu
             {
                 Data = data;
                 LastRowID = data.ID;
-                ForEachHandle<RowSubscription<T>>(h => h.RaiseUpdate());
+                ForEachHandle<RowSubscription<T>>(static h => h.RaiseUpdate());
             }
 
-            var current = Data;
-            ForEachHandle<RowSubscription<T>>(h => h.PushToSubject(current));
+            ForEachHandle<RowSubscription<T>, T>(static (h, row) => h.PushToSubject(row),
+                Data);
         }
 
         public override void UpdateRows(JsonObject data)
@@ -694,7 +716,7 @@ namespace HeTu
             // 与其要求实现 Equals 或按字节比较，不如统一回放给响应式链路，
             // 保证断线期间的变化不会漏给 Subject/OnUpdate 订阅方。
             Update(row);
-            ForEachHandle<RowSubscription<T>>(h => h.RaiseResynced());
+            ForEachHandle<RowSubscription<T>>(static h => h.RaiseResynced());
         }
 
         public override void Restore(
@@ -771,17 +793,23 @@ namespace HeTu
             if (data is null)
             {
                 if (!exist) return;
-                ForEachHandle<IndexSubscription<T>>(h => h.RaiseDelete(rowID));
+                ForEachHandle<IndexSubscription<T>, long>(
+                    static (h, id) => h.RaiseDelete(id), rowID);
                 Rows.Remove(rowID);
-                ForEachHandle<IndexSubscription<T>>(h => h.PushRemove(rowID));
+                ForEachHandle<IndexSubscription<T>, long>(
+                    static (h, id) => h.PushRemove(id), rowID);
             }
             else
             {
                 Rows[rowID] = data;
                 if (exist)
-                    ForEachHandle<IndexSubscription<T>>(h => h.RaiseUpdate(rowID, data));
+                    ForEachHandle<IndexSubscription<T>, (long, T)>(
+                        static (h, change) => h.RaiseUpdate(change.Item1, change.Item2),
+                        (rowID, data));
                 else
-                    ForEachHandle<IndexSubscription<T>>(h => h.RaiseInsert(rowID, data));
+                    ForEachHandle<IndexSubscription<T>, (long, T)>(
+                        static (h, change) => h.RaiseInsert(change.Item1, change.Item2),
+                        (rowID, data));
             }
         }
 
@@ -826,7 +854,7 @@ namespace HeTu
             if (IsClosed) return;
             RebindRemote(subscriptID, client);
             ReplaceSnapshot(rows);
-            ForEachHandle<IndexSubscription<T>>(h => h.RaiseResynced());
+            ForEachHandle<IndexSubscription<T>>(static h => h.RaiseResynced());
         }
 
         public override void Restore(
