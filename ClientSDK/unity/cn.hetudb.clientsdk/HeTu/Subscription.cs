@@ -112,13 +112,20 @@ namespace HeTu
         ///     释放本句柄。Dispose应该明确调用。同一订阅的其他句柄不受影响；最后一个句柄
         ///     Dispose 时才销毁远端订阅对象。
         /// </summary>
-        public virtual void Dispose()
+        public void Dispose()
+        {
+            GC.SuppressFinalize(this);
+            // 在客户端的协议线程上释放（Unity 就地；Headless 投到泵线程）：共享核心、订阅表、
+            // 挂起的 unsub 都只在那条线程上动
+            Core.RunOnClientThread(DisposeOnClientThread);
+        }
+
+        private protected virtual void DisposeOnClientThread()
         {
             if (IsDisposed)
                 return;
 
             IsDisposed = true;
-            GC.SuppressFinalize(this);
             try
             {
                 // 会同步跑用户挂进来的 disposable 和 R3 链的 OnCompleted，可能抛异常
@@ -305,11 +312,16 @@ namespace HeTu
         /// </summary>
         internal bool RestoreAsTable => _core.RestoreAsTable;
 
-        public override void Dispose()
+        private protected override void DisposeOnClientThread()
         {
             if (IsDisposed) return;
-            var subjects = _replaceSubjects.Values.ToArray();
-            _replaceSubjects.Clear();
+            Subject<T>[] subjects;
+            lock (_replaceSubjects)
+            {
+                subjects = _replaceSubjects.Values.ToArray();
+                _replaceSubjects.Clear();
+            }
+
             try
             {
                 // per-row subject 的 Dispose 会跑用户 R3 链的 OnCompleted，可能抛异常
@@ -318,7 +330,7 @@ namespace HeTu
             }
             finally
             {
-                base.Dispose();
+                base.DisposeOnClientThread();
             }
         }
 
@@ -409,16 +421,20 @@ namespace HeTu
         /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>
         public Observable<T> ObserveRow(long rowID)
         {
-            if (_replaceSubjects.TryGetValue(rowID, out var subject))
+            // 可能在用户线程上调用（Headless），而推送在泵线程上增删同一张表
+            lock (_replaceSubjects)
+            {
+                if (_replaceSubjects.TryGetValue(rowID, out var subject))
+                    return subject;
+                if (IsDisposed)
+                    throw new ObjectDisposedException(GetType().Name);
+                if (!Rows.ContainsKey(rowID))
+                    throw new KeyNotFoundException(
+                        $"Row {rowID} is not in subscription {SubId}.");
+                subject = new Subject<T>();
+                _replaceSubjects[rowID] = subject;
                 return subject;
-            if (IsDisposed)
-                throw new ObjectDisposedException(GetType().Name);
-            if (!Rows.ContainsKey(rowID))
-                throw new KeyNotFoundException(
-                    $"Row {rowID} is not in subscription {SubId}.");
-            subject = new Subject<T>();
-            _replaceSubjects[rowID] = subject;
-            return subject;
+            }
         }
 
         internal void Rebind(
@@ -438,8 +454,10 @@ namespace HeTu
         internal void RaiseUpdate(long rowID, T data)
         {
             OnUpdate?.Invoke(this, rowID);
-            if (_replaceSubjects.TryGetValue(rowID, out var subject))
-                subject.OnNext(data);
+            Subject<T> subject;
+            lock (_replaceSubjects)
+                _replaceSubjects.TryGetValue(rowID, out subject);
+            subject?.OnNext(data);
         }
 
         // 删除分两步：这一步行还在 Rows 里；之后核心删掉行，再 PushRemove。
@@ -452,11 +470,11 @@ namespace HeTu
             }
             finally
             {
-                if (_replaceSubjects.Remove(rowID, out var subject))
-                {
-                    subject.OnCompleted();
-                    subject.Dispose();
-                }
+                Subject<T> subject;
+                lock (_replaceSubjects)
+                    _replaceSubjects.Remove(rowID, out subject);
+                subject?.OnCompleted();
+                subject?.Dispose();
             }
         }
 
@@ -513,6 +531,14 @@ namespace HeTu
         internal abstract BaseSubscription NewHandle(StackTrace creationTrace);
 
         internal void Attach(BaseSubscription handle) => _handles.Add(handle);
+
+        internal void RunOnClientThread(Action action)
+        {
+            if (_parentClient != null)
+                _parentClient.RunSerialized(action);
+            else
+                action();
+        }
 
         // 恢复时发现同 sub_id 已登记了别的核心 other：两份对应服务端同一个订阅。调用方先用
         // other 的数据重绑本核心，再把 other 的句柄并过来（它们看到的数据不变，不发事件）；

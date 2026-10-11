@@ -17,6 +17,9 @@ namespace HeTu
             _thread.Start();
         }
 
+        /// <summary>当前线程是否就是泵线程。</summary>
+        public bool IsPumpThread => Thread.CurrentThread == _thread;
+
         public void Post(Action action)
         {
             if (action == null || _q.IsAddingCompleted) return;

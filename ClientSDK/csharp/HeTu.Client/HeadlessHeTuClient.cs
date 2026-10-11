@@ -25,6 +25,15 @@ namespace HeTu
 
         protected override void SendCore(byte[] data) => _socket?.Send(data);
 
+        // 订阅句柄的 Dispose 等从调用方线程进来的动作：在泵线程上就地执行，否则投到泵线程
+        internal override void RunSerialized(Action action)
+        {
+            if (_pump.IsPumpThread)
+                action();
+            else
+                _pump.Post(action);
+        }
+
         protected override void CloseCore()
         {
             _socket?.Close();

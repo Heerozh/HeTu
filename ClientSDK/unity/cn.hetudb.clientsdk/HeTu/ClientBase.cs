@@ -242,6 +242,10 @@ namespace HeTu
         // 实际往ws发送数据的方法
         protected abstract void SendCore(byte[] data);
 
+        // 在本客户端的协议线程上执行 action：订阅表、共享核心、挂起的 unsub 等只能在那条线程上
+        // 动。默认就地执行（Unity 只在主线程上用）；Headless 投到泵线程。
+        internal virtual void RunSerialized(Action action) => action();
+
         /// <summary>
         ///     配置消息处理管道。要和你的河图服务器中的配置一致
         /// </summary>
