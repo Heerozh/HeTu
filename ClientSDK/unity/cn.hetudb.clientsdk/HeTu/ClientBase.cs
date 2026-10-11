@@ -954,6 +954,16 @@ namespace HeTu
             Logger.Instance.Info($"因BaseSubscription {from}，已取消订阅 {subID}");
         }
 
+        // 核心的最后一个句柄 Dispose 时调用：只退登记着的这个核心。旧连接留下的核心晚些
+        // 才 Dispose 时，表里同 sub_id 的可能已是重连后新订的，不能把它退掉。
+        internal void Unsubscribe(ManagedSubscriptionCore core)
+        {
+            if (!Subscriptions.TryGet(core.SubId, out var registered) ||
+                registered != core)
+                return;
+            Unsubscribe(core.SubId, "Dispose");
+        }
+
         protected virtual void OnReceived(byte[] buffer)
         {
             // 解码消息

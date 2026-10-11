@@ -492,7 +492,7 @@ namespace HeTu
             // HeTuClient 通常已经 Subscriptions.Clean()，能早返；即使顺序变了
             // 守住这里也不会戳到死 socket。
             if (!IsStale)
-                _parentClient?.Unsubscribe(SubId, "Dispose");
+                _parentClient?.Unsubscribe(this);
             IsStale = false;
             foreach (var handle in _handles.ToArray())
                 handle.Dispose();
