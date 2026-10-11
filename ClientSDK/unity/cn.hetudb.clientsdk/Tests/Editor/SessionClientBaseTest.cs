@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Reflection;
 using HeTu;
@@ -1174,9 +1175,9 @@ namespace Tests.HeTu
             // 用户回调不能被二次触发。
             Assert.IsNull(received,
                 "Close 后晚到的成功响应不应再回调用户");
-            // 新生成的 subscription 必须 Dispose，否则就是孤儿（服务器仍在推送）。
+            // 新生成的订阅（没人持有）必须关掉，否则就是孤儿（服务器仍在推送）。
             Assert.NotNull(transport.LastIssuedSubscription);
-            Assert.IsTrue(transport.LastIssuedSubscription.IsDisposed,
+            Assert.IsTrue(transport.LastIssuedSubscription.IsClosed,
                 "Close 后晚到的 subscription 必须 Dispose，不能留在 session 里");
         }
 
@@ -2176,7 +2177,7 @@ namespace Tests.HeTu
                 bool Desc, bool Force), List<TestComponent>> RangeResults { get; } = new();
             public List<string> WatchedTables { get; } = new();
             public Dictionary<string, List<TestComponent>> TableResults { get; } = new();
-            public BaseSubscription LastIssuedSubscription { get; private set; }
+            public ManagedSubscriptionCore LastIssuedSubscription { get; private set; }
             public int HeldWatchCount => _heldWatches.Count;
             private readonly List<Action<bool>> _heldWatches = new();
 
@@ -2241,9 +2242,10 @@ namespace Tests.HeTu
 
             public void WatchRow<T>(
                 string index, object value,
-                Action<RowSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedRowCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                RowSubscription<T> reusable = null)
+                ManagedRowCore<T> reusable = null,
+                StackTrace creationTrace = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-row");
@@ -2272,7 +2274,7 @@ namespace Tests.HeTu
                     var row = (T)(IBaseComponent)result;
                     var subId = HeTuClientBase.MakeSubId(
                         compName, "id", row.ID, null, 1, false);
-                    RowSubscription<T> resolved;
+                    ManagedRowCore<T> resolved;
                     if (reusable != null)
                     {
                         reusable.Rebind(subId, row, _remoteClient);
@@ -2280,8 +2282,8 @@ namespace Tests.HeTu
                     }
                     else
                     {
-                        resolved = new RowSubscription<T>(
-                            subId, compName, row, _remoteClient);
+                        resolved = new ManagedRowCore<T>(
+                            subId, compName, row, _remoteClient, creationTrace);
                     }
 
                     LastIssuedSubscription = resolved;
@@ -2299,9 +2301,10 @@ namespace Tests.HeTu
 
             public void WatchRange<T>(
                 string index, object left, object right, int limit,
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 bool desc = false, bool force = true, string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                StackTrace creationTrace = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-range");
@@ -2323,17 +2326,18 @@ namespace Tests.HeTu
                     return;
                 }
 
-                var subscription = new IndexSubscription<T>(
-                    subId, componentName, rows, _remoteClient);
+                var subscription = new ManagedIndexCore<T>(
+                    subId, componentName, rows, _remoteClient, creationTrace);
                 subscription.ConfigureRestoreQuery(index, left, right, limit, desc,
                     force);
                 onResponse(subscription, false, null);
             }
 
             public void WatchTable<T>(
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                StackTrace creationTrace = null)
                 where T : IBaseComponent
             {
                 Operations.Add("watch-table");
@@ -2353,8 +2357,8 @@ namespace Tests.HeTu
                     return;
                 }
 
-                var subscription = new IndexSubscription<T>(
-                    subId, componentName, rows, _remoteClient);
+                var subscription = new ManagedIndexCore<T>(
+                    subId, componentName, rows, _remoteClient, creationTrace);
                 subscription.ConfigureRestoreTable();
                 onResponse(subscription, false, null);
             }

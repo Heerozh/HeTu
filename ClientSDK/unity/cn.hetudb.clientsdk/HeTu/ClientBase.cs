@@ -590,29 +590,15 @@ namespace HeTu
         public void WatchRowSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
-            string componentName = null,
-            RowSubscription<T> reusable = null)
+            string componentName = null)
             where T : IBaseComponent
         {
+            // 每个调用方发一个自己的句柄，同一订阅的句柄共用一个核心
             var creationTrace = CaptureCreationTrace();
             WatchRowCoreSync<T>(index, value,
                 (core, canceled, ex) =>
-                    onResponse(HandleFor(core, reusable, creationTrace), canceled, ex),
-                componentName, (ManagedRowCore<T>)reusable?.Core, creationTrace);
-        }
-
-        // 每个调用方发一个自己的句柄；会话恢复（reusable）时沿用原句柄
-        private static TSubscription HandleFor<TSubscription>(
-            ManagedSubscriptionCore core, TSubscription reusable,
-            StackTrace creationTrace)
-            where TSubscription : BaseSubscription
-        {
-            if (core == null)
-                return null;
-            if (reusable != null && reusable.Core == core)
-                return reusable;
-            // ReSharper disable once NotDisposedResource
-            return (TSubscription)core.NewHandle(creationTrace);
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                componentName, null, creationTrace);
         }
 
         // 核心级的 WatchRow：已订阅过就回已有的核心，否则发 sub、建核心并登记。回调拿到的
@@ -728,16 +714,14 @@ namespace HeTu
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
-            string componentName = null,
-            IndexSubscription<T> reusable = null)
+            string componentName = null)
             where T : IBaseComponent
         {
             var creationTrace = CaptureCreationTrace();
             WatchRangeCoreSync<T>(index, left, right, limit,
                 (core, canceled, ex) =>
-                    onResponse(HandleFor(core, reusable, creationTrace), canceled, ex),
-                desc, force, componentName, (ManagedIndexCore<T>)reusable?.Core,
-                creationTrace);
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                desc, force, componentName, null, creationTrace);
         }
 
         // 核心级的 WatchRange，见 WatchRowCoreSync
@@ -857,15 +841,14 @@ namespace HeTu
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
         public void WatchTableSync<T>(
             Action<IndexSubscription<T>, bool, Exception> onResponse,
-            string componentName = null,
-            IndexSubscription<T> reusable = null)
+            string componentName = null)
             where T : IBaseComponent
         {
             var creationTrace = CaptureCreationTrace();
             WatchTableCoreSync<T>(
                 (core, canceled, ex) =>
-                    onResponse(HandleFor(core, reusable, creationTrace), canceled, ex),
-                componentName, (ManagedIndexCore<T>)reusable?.Core, creationTrace);
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                componentName, null, creationTrace);
         }
 
         // 核心级的 WatchTable，见 WatchRowCoreSync

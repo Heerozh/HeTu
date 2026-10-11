@@ -454,9 +454,10 @@ namespace Tests.HeTu
 
             public void WatchRow<T>(
                 string index, object value,
-                Action<RowSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedRowCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                RowSubscription<T> reusable = null)
+                ManagedRowCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent
             {
                 componentName ??= typeof(T).Name;
@@ -471,27 +472,30 @@ namespace Tests.HeTu
                 }
 
                 onResponse(
-                    new RowSubscription<T>(
+                    new ManagedRowCore<T>(
                         subId,
                         componentName,
                         row,
-                        _remoteClient),
+                        _remoteClient,
+                        creationTrace),
                     false,
                     null);
             }
 
             public void WatchRange<T>(
                 string index, object left, object right, int limit,
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 bool desc = false, bool force = true, string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 
             public void WatchTable<T>(
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 

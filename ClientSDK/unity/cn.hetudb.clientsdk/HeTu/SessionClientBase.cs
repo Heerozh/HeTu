@@ -6,6 +6,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 
 namespace HeTu
@@ -86,12 +87,15 @@ namespace HeTu
             bool awaitPush = false,
             Action<JsonObject> onAnswered = null);
 
+        // 订阅按共享核心收发（见 HeTuClientBase.WatchRowCoreSync）：回调拿到的核心可能已有
+        // 别的句柄，句柄由会话发给各调用方。reusable：重连恢复时把回复绑回原核心。
         void WatchRow<T>(
             string index,
             object value,
-            Action<RowSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            RowSubscription<T> reusable = null)
+            ManagedRowCore<T> reusable = null,
+            StackTrace creationTrace = null)
             where T : IBaseComponent;
 
         void WatchRange<T>(
@@ -99,17 +103,19 @@ namespace HeTu
             object left,
             object right,
             int limit,
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             bool desc = false,
             bool force = true,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            StackTrace creationTrace = null)
             where T : IBaseComponent;
 
         void WatchTable<T>(
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            StackTrace creationTrace = null)
             where T : IBaseComponent;
     }
 
@@ -137,7 +143,9 @@ namespace HeTu
         private readonly int _maxReconnectAttempts;
         private readonly TimeSpan _requestTimeout;
         private readonly IHeTuSessionScheduler _scheduler;
-        private readonly Dictionary<string, BaseSubscription> _subscriptions = new();
+        // sub_id → 共享核心。同一订阅的多个调用方各拿一个句柄，核心只有一份、只恢复一次
+        private readonly Dictionary<string, ManagedSubscriptionCore> _subscriptions =
+            new();
         private readonly Func<IHeTuSessionTransport> _transportFactory;
 
         private Promise _activeStepPromise;
@@ -251,7 +259,7 @@ namespace HeTu
             }
 
             foreach (var subscription in _subscriptions.Values.ToArray())
-                SafeInvokeUserCallback(subscription.Dispose);
+                SafeInvokeUserCallback(subscription.Close);
 
             _subscriptions.Clear();
             CleanupTransport(closeTransport: true);
@@ -387,15 +395,16 @@ namespace HeTu
         {
             ThrowIfClosed();
             componentName ??= typeof(T).Name;
+            var creationTrace = HeTuClientBase.CaptureCreationTrace();
             var knownSubId = index == HeTuClientBase.IndexId
                 ? HeTuClientBase.MakeSubId(
                     componentName, HeTuClientBase.IndexId, value, null, 1, false)
                 : null;
 
             if (knownSubId != null &&
-                TryGetSubscription<RowSubscription<T>>(knownSubId, out var existing))
+                TryGetSubscription<ManagedRowCore<T>>(knownSubId, out var existing))
             {
-                onCompleted(existing);
+                onCompleted(existing.CreateHandle(creationTrace));
                 return;
             }
 
@@ -404,7 +413,7 @@ namespace HeTu
             {
                 if (pending is PendingWatch<RowSubscription<T>> typed)
                 {
-                    typed.AddWaiter(onCompleted, onFailed);
+                    typed.AddWaiter(onCompleted, onFailed, creationTrace);
                     return;
                 }
 
@@ -418,7 +427,7 @@ namespace HeTu
                 (tx, promise) => tx.WatchRow<T>(
                     index,
                     value,
-                    (sub, canceled, ex) =>
+                    (core, canceled, ex) =>
                     {
                         if (canceled)
                         {
@@ -427,11 +436,13 @@ namespace HeTu
                         }
 
                         if (ex != null) promise.TryFail(ex);
-                        else promise.TryComplete(sub);
+                        else promise.TryComplete(core);
                     },
-                    componentName),
+                    componentName,
+                    creationTrace: creationTrace),
                 onCompleted,
-                onFailed);
+                onFailed,
+                creationTrace);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -450,12 +461,13 @@ namespace HeTu
         {
             ThrowIfClosed();
             componentName ??= typeof(T).Name;
+            var creationTrace = HeTuClientBase.CaptureCreationTrace();
             var subId = HeTuClientBase.MakeSubId(
                 componentName, index, left, right, limit, desc);
 
-            if (TryGetSubscription<IndexSubscription<T>>(subId, out var existing))
+            if (TryGetSubscription<ManagedIndexCore<T>>(subId, out var existing))
             {
-                onCompleted(existing);
+                onCompleted(existing.CreateHandle(creationTrace));
                 return;
             }
 
@@ -463,7 +475,7 @@ namespace HeTu
             {
                 if (pending is PendingWatch<IndexSubscription<T>> typed)
                 {
-                    typed.AddWaiter(onCompleted, onFailed);
+                    typed.AddWaiter(onCompleted, onFailed, creationTrace);
                     return;
                 }
 
@@ -479,7 +491,7 @@ namespace HeTu
                     left,
                     right,
                     limit,
-                    (sub, canceled, ex) =>
+                    (core, canceled, ex) =>
                     {
                         if (canceled)
                         {
@@ -488,13 +500,15 @@ namespace HeTu
                         }
 
                         if (ex != null) promise.TryFail(ex);
-                        else promise.TryComplete(sub);
+                        else promise.TryComplete(core);
                     },
                     desc,
                     force,
-                    componentName),
+                    componentName,
+                    creationTrace: creationTrace),
                 onCompleted,
-                onFailed);
+                onFailed,
+                creationTrace);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -511,11 +525,12 @@ namespace HeTu
         {
             ThrowIfClosed();
             componentName ??= typeof(T).Name;
+            var creationTrace = HeTuClientBase.CaptureCreationTrace();
             var subId = HeTuClientBase.MakeTableSubId(componentName);
 
-            if (TryGetSubscription<IndexSubscription<T>>(subId, out var existing))
+            if (TryGetSubscription<ManagedIndexCore<T>>(subId, out var existing))
             {
-                onCompleted(existing);
+                onCompleted(existing.CreateHandle(creationTrace));
                 return;
             }
 
@@ -523,7 +538,7 @@ namespace HeTu
             {
                 if (pending is PendingWatch<IndexSubscription<T>> typed)
                 {
-                    typed.AddWaiter(onCompleted, onFailed);
+                    typed.AddWaiter(onCompleted, onFailed, creationTrace);
                     return;
                 }
 
@@ -535,7 +550,7 @@ namespace HeTu
                 subId,
                 typeof(T),
                 (tx, promise) => tx.WatchTable<T>(
-                    (sub, canceled, ex) =>
+                    (core, canceled, ex) =>
                     {
                         if (canceled)
                         {
@@ -544,11 +559,13 @@ namespace HeTu
                         }
 
                         if (ex != null) promise.TryFail(ex);
-                        else promise.TryComplete(sub);
+                        else promise.TryComplete(core);
                     },
-                    componentName),
+                    componentName,
+                    creationTrace: creationTrace),
                 onCompleted,
-                onFailed);
+                onFailed,
+                creationTrace);
             AddPendingWatch(watch);
             DispatchPendingIfReady(watch);
         }
@@ -642,10 +659,10 @@ namespace HeTu
             return p.Future;
         }
 
-        private Future RestoreOne(BaseSubscription subscription)
+        private Future RestoreOne(ManagedSubscriptionCore subscription)
         {
             if (_closed) return Future.Completed;
-            if (subscription.IsDisposed) return Future.Completed;
+            if (subscription.IsClosed) return Future.Completed;
 
             var p = new Promise();
             ((IRestorableSubscription)subscription).Restore(
@@ -908,7 +925,7 @@ namespace HeTu
             }
 
             foreach (var subscription in _subscriptions.Values.ToArray())
-                SafeInvokeUserCallback(subscription.Dispose);
+                SafeInvokeUserCallback(subscription.Close);
             _subscriptions.Clear();
 
             CleanupTransport(closeTransport: true);
@@ -990,16 +1007,16 @@ namespace HeTu
             _transport = null;
         }
 
-        private bool TryGetSubscription<TSubscription>(
+        private bool TryGetSubscription<TCore>(
             string subId,
-            out TSubscription subscription)
-            where TSubscription : BaseSubscription
+            out TCore subscription)
+            where TCore : ManagedSubscriptionCore
         {
             subscription = null;
             if (!_subscriptions.TryGetValue(subId, out var existing))
                 return false;
 
-            if (existing is not TSubscription typed)
+            if (existing is not TCore typed)
                 throw new InvalidCastException(
                     $"Subscription '{subId}' already exists with type {existing.GetType()}.");
 
@@ -1007,30 +1024,33 @@ namespace HeTu
             return true;
         }
 
-        private TSubscription RegisterSubscription<TSubscription>(
-            TSubscription subscription)
-            where TSubscription : BaseSubscription
+        private ManagedSubscriptionCore RegisterSubscription(
+            ManagedSubscriptionCore subscription)
         {
             if (_subscriptions.TryGetValue(subscription.SubId, out var existing))
             {
-                if (existing is not TSubscription typed)
+                if (existing.GetType() != subscription.GetType())
                     throw new InvalidCastException(
                         $"Subscription '{subscription.SubId}' already exists with type {existing.GetType()}.");
-                return typed;
+                return existing;
             }
 
             _subscriptions.Add(subscription.SubId, subscription);
-            subscription.Disposed += HandleSubscriptionDisposed;
+            subscription.Closed += HandleSubscriptionClosed;
             return subscription;
         }
 
-        private void UnregisterSubscription(BaseSubscription subscription)
+        private void UnregisterSubscription(ManagedSubscriptionCore subscription)
         {
-            _subscriptions.Remove(subscription.SubId);
-            subscription.Disposed -= HandleSubscriptionDisposed;
+            subscription.Closed -= HandleSubscriptionClosed;
+            // 只删自己：同 sub_id 之后可能已登记了别的核心
+            if (_subscriptions.TryGetValue(subscription.SubId, out var registered) &&
+                registered == subscription)
+                _subscriptions.Remove(subscription.SubId);
         }
 
-        private void HandleSubscriptionDisposed(BaseSubscription subscription) =>
+        // 最后一个句柄 Dispose（或核心被关）后不再恢复
+        private void HandleSubscriptionClosed(ManagedSubscriptionCore subscription) =>
             UnregisterSubscription(subscription);
 
         private void AddPendingWatch(PendingWatch watch)
@@ -1047,18 +1067,17 @@ namespace HeTu
                 _pendingWatchesByKey.Remove(watch.Key);
         }
 
-        private void CompletePending<TSubscription>(
+        private void CompletePending(
             PendingWatch watch,
-            TSubscription subscription)
-            where TSubscription : BaseSubscription
+            ManagedSubscriptionCore subscription)
         {
             RemovePendingWatch(watch);
-            // Close 后晚到的成功响应：session 已不再管理订阅，必须把这条 subscription
-            // 立即 Dispose，否则它会被 RegisterSubscription 写回已清空的 _subscriptions
-            // 成为孤儿（服务器还会持续推送）。
+            // Close 后晚到的成功响应：session 已不再管理订阅，没人持有的核心必须立即
+            // 关掉，否则它会成为孤儿（服务器还会持续推送）。已有别的句柄的不动。
             if (_closed)
             {
-                subscription?.Dispose();
+                if (subscription is { HandleCount: 0 })
+                    subscription.Close();
                 return;
             }
             if (subscription == null)
@@ -1198,7 +1217,7 @@ namespace HeTu
                 HeTuSessionClientBase owner,
                 IHeTuSessionTransport transport);
 
-            public abstract void Complete(BaseSubscription subscription);
+            public abstract void Complete(ManagedSubscriptionCore subscription);
             public abstract void Fail(Exception exception);
 
             public void MarkRetryable()
@@ -1210,29 +1229,34 @@ namespace HeTu
 
         // Row/Range 唯一的差异是 transport.WatchRow vs transport.WatchRange 这一次
         // 调用。把它折成一个 dispatch lambda 注入进来，剩下的"deduplication / 在飞
-        // 标志 / waiter 列表 / 完成时通知所有 waiter"逻辑就完全共用。
+        // 标志 / waiter 列表 / 完成时给每个 waiter 发自己的句柄"逻辑就完全共用。
         private sealed class PendingWatch<TSub> : PendingWatch
             where TSub : BaseSubscription
         {
-            private readonly Action<IHeTuSessionTransport, Promise<TSub>> _dispatch;
+            private readonly Action<IHeTuSessionTransport,
+                Promise<ManagedSubscriptionCore>> _dispatch;
+
             private readonly List<Waiter> _waiters = new();
 
             public PendingWatch(
                 string key,
                 Type dataType,
-                Action<IHeTuSessionTransport, Promise<TSub>> dispatch,
+                Action<IHeTuSessionTransport, Promise<ManagedSubscriptionCore>> dispatch,
                 Action<TSub> firstOnCompleted,
-                Action<Exception> firstOnFailed) :
+                Action<Exception> firstOnFailed,
+                StackTrace firstCreationTrace) :
                 base(key, dataType)
             {
                 _dispatch = dispatch;
-                _waiters.Add(new Waiter(firstOnCompleted, firstOnFailed));
+                _waiters.Add(new Waiter(firstOnCompleted, firstOnFailed,
+                    firstCreationTrace));
             }
 
             public void AddWaiter(
                 Action<TSub> onCompleted,
-                Action<Exception> onFailed) =>
-                _waiters.Add(new Waiter(onCompleted, onFailed));
+                Action<Exception> onFailed,
+                StackTrace creationTrace) =>
+                _waiters.Add(new Waiter(onCompleted, onFailed, creationTrace));
 
             public override void Dispatch(
                 HeTuSessionClientBase owner,
@@ -1241,14 +1265,14 @@ namespace HeTu
                 IsInFlight = true;
                 ArmTimeout(owner.ScheduleRequestTimeout(
                     "watch " + (Key ?? DataType.Name)));
-                var p = new Promise<TSub>();
+                var p = new Promise<ManagedSubscriptionCore>();
                 _dispatch(transport, p);
                 p.Future
-                    .Then(sub =>
+                    .Then(core =>
                     {
                         IsInFlight = false;
                         DisarmTimeout();
-                        owner.CompletePending(this, sub);
+                        owner.CompletePending(this, core);
                     })
                     .Catch(ex =>
                     {
@@ -1273,13 +1297,17 @@ namespace HeTu
                     });
             }
 
-            public override void Complete(BaseSubscription subscription)
+            public override void Complete(ManagedSubscriptionCore subscription)
             {
-                var typed = subscription as TSub;
                 var snapshot = _waiters.ToArray();
                 _waiters.Clear();
-                foreach (var waiter in snapshot)
-                    SafeInvokeUserCallback(waiter.OnCompleted, typed);
+                // 先把句柄全发好再回调：前一个 waiter 在回调里就 Dispose 时，核心不能因为
+                // 句柄数暂时归零而退订
+                var handles = snapshot
+                    .Select(w => (TSub)subscription?.NewHandle(w.CreationTrace))
+                    .ToArray();
+                for (var i = 0; i < snapshot.Length; i++)
+                    SafeInvokeUserCallback(snapshot[i].OnCompleted, handles[i]);
             }
 
             public override void Fail(Exception exception)
@@ -1292,14 +1320,17 @@ namespace HeTu
 
             private readonly struct Waiter
             {
-                public Waiter(Action<TSub> onCompleted, Action<Exception> onFailed)
+                public Waiter(Action<TSub> onCompleted, Action<Exception> onFailed,
+                    StackTrace creationTrace)
                 {
                     OnCompleted = onCompleted;
                     OnFailed = onFailed;
+                    CreationTrace = creationTrace;
                 }
 
                 public Action<TSub> OnCompleted { get; }
                 public Action<Exception> OnFailed { get; }
+                public StackTrace CreationTrace { get; }
             }
         }
     }

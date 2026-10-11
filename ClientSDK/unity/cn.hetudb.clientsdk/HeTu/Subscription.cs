@@ -70,7 +70,7 @@ namespace HeTu
     ///     granting rewards, validation) to a server System.
     /// </remarks>
     [MustDisposeResource]
-    public abstract class BaseSubscription : IDisposable, IRestorableSubscription
+    public abstract class BaseSubscription : IDisposable
     {
         /// <summary>
         ///     对应的组件名。
@@ -120,19 +120,8 @@ namespace HeTu
             IsDisposed = true;
             DisposeBag.Dispose();
             Core.Release(this);
-            Disposed?.Invoke(this);
             GC.SuppressFinalize(this);
         }
-
-        void IRestorableSubscription.Suspend() => Core.Suspend();
-
-        void IRestorableSubscription.Restore(
-            IHeTuSessionTransport transport,
-            Action<bool> onCompleted,
-            Action<Exception> onFailed) =>
-            Restore(transport, onCompleted, onFailed);
-
-        internal event Action<BaseSubscription> Disposed;
 
 #if R3_UNITY_INSTALLED
         /// <summary>
@@ -151,13 +140,6 @@ namespace HeTu
         /// </summary>
         /// <param name="data">更新数据。</param>
         public abstract void UpdateRows(JsonObject data);
-
-        internal virtual void Restore(
-            IHeTuSessionTransport transport,
-            Action<bool> onCompleted,
-            Action<Exception> onFailed) =>
-            onFailed(new NotSupportedException(
-                $"Subscription type '{GetType()}' cannot be restored by a session."));
 
         ~BaseSubscription() =>
             Logger.Instance.Error(
@@ -261,41 +243,6 @@ namespace HeTu
         internal void PushToSubject(T row) => _subject.OnNext(row);
 
         internal void RaiseResynced() => OnResynced?.Invoke();
-
-        internal override void Restore(
-            IHeTuSessionTransport transport,
-            Action<bool> onCompleted,
-            Action<Exception> onFailed) =>
-            transport.WatchRow(
-                HeTuClientBase.IndexId,
-                BoundRowID,
-                (subscription, canceled, exception) =>
-                {
-                    // canceled 代表底层 ResponseQueue.CancelAll 把这条迟到的回调冲掉了，
-                    // 一般发生在新一轮 Connect 的 ConnectSync 内部。Session 已通过
-                    // transport.Closed 事件知道断线并自行调度了重连，再走 onFailed 会
-                    // 反过来触发 HandleRecoverableFailure → MarkConnectionLost，把刚
-                    // 建出来的新 transport 当场 Dispose 形成死循环。直接吞掉。
-                    if (canceled)
-                        return;
-
-                    if (exception != null)
-                    {
-                        onFailed(exception);
-                        return;
-                    }
-
-                    if (subscription == null)
-                    {
-                        Update(default);
-                        onCompleted(false);
-                        return;
-                    }
-
-                    onCompleted(true);
-                },
-                ComponentName,
-                this);
     }
 
     /// <summary>
@@ -439,17 +386,6 @@ namespace HeTu
         /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>
         public Observable<T> ObserveRow(long rowID) => _replaceSubjects[rowID];
 
-        internal void ConfigureRestoreQuery(
-            string index,
-            object left,
-            object right,
-            int limit,
-            bool desc,
-            bool force) =>
-            _core.ConfigureRestoreQuery(index, left, right, limit, desc, force);
-
-        internal void ConfigureRestoreTable() => _core.ConfigureRestoreTable();
-
         internal void Rebind(
             string subscriptID,
             List<T> rows,
@@ -492,47 +428,6 @@ namespace HeTu
         internal void PushRemove(long rowID) => _removeSubject.OnNext(rowID);
 
         internal void RaiseResynced() => OnResynced?.Invoke();
-
-        internal override void Restore(
-            IHeTuSessionTransport transport,
-            Action<bool> onCompleted,
-            Action<Exception> onFailed)
-        {
-            void OnRestored(IndexSubscription<T> subscription, bool canceled,
-                Exception exception)
-            {
-                // 同 RowSubscription.Restore：迟到的 cancel 不能再调 onFailed，
-                // 否则会级联到 HandleRecoverableFailure 把新 transport 又 Dispose。
-                if (canceled)
-                    return;
-
-                if (exception != null)
-                {
-                    onFailed(exception);
-                    return;
-                }
-
-                onCompleted(subscription != null);
-            }
-
-            if (_core.RestoreAsTable)
-            {
-                // 整表订阅：重发 table，而不是 range
-                transport.WatchTable(OnRestored, ComponentName, this);
-                return;
-            }
-
-            transport.WatchRange(
-                _core.RestoreIndex,
-                _core.RestoreLeft,
-                _core.RestoreRight,
-                _core.RestoreLimit,
-                OnRestored,
-                _core.RestoreDesc,
-                _core.RestoreForce,
-                ComponentName,
-                this);
-        }
     }
 
     /// <summary>
@@ -541,7 +436,7 @@ namespace HeTu
     ///     交回来；最后一个句柄交回时才去服务器反订阅。服务端对同一连接的重复订阅回同一个
     ///     sub_id、不计数，一条 unsub 就删，所以计数只能在客户端做。
     /// </summary>
-    internal abstract class ManagedSubscriptionCore
+    internal abstract class ManagedSubscriptionCore : IRestorableSubscription
     {
         private readonly List<BaseSubscription> _handles = new();
         private HeTuClientBase _parentClient;
@@ -567,6 +462,9 @@ namespace HeTu
         public bool IsClosed { get; private set; }
 
         public int HandleCount => _handles.Count;
+
+        // 远端订阅已退（Close 末尾触发），Session 据此注销
+        internal event Action<ManagedSubscriptionCore> Closed;
 
         public abstract void UpdateRows(JsonObject data);
 
@@ -599,9 +497,16 @@ namespace HeTu
             foreach (var handle in _handles.ToArray())
                 handle.Dispose();
             _handles.Clear();
+            Closed?.Invoke(this);
         }
 
-        internal void Suspend() => IsStale = true;
+        public void Suspend() => IsStale = true;
+
+        // 会话重连后按原来的订阅意图重新订阅，回复绑回本核心（句柄不变）
+        public abstract void Restore(
+            IHeTuSessionTransport transport,
+            Action<bool> onCompleted,
+            Action<Exception> onFailed);
 
         protected void RebindRemote(string subscriptID, HeTuClientBase client)
         {
@@ -709,6 +614,41 @@ namespace HeTu
             Update(row);
             ForEachHandle<RowSubscription<T>>(h => h.RaiseResynced());
         }
+
+        public override void Restore(
+            IHeTuSessionTransport transport,
+            Action<bool> onCompleted,
+            Action<Exception> onFailed) =>
+            transport.WatchRow(
+                HeTuClientBase.IndexId,
+                BoundRowID,
+                (core, canceled, exception) =>
+                {
+                    // canceled 代表底层 ResponseQueue.CancelAll 把这条迟到的回调冲掉了，
+                    // 一般发生在新一轮 Connect 的 ConnectSync 内部。Session 已通过
+                    // transport.Closed 事件知道断线并自行调度了重连，再走 onFailed 会
+                    // 反过来触发 HandleRecoverableFailure → MarkConnectionLost，把刚
+                    // 建出来的新 transport 当场 Dispose 形成死循环。直接吞掉。
+                    if (canceled)
+                        return;
+
+                    if (exception != null)
+                    {
+                        onFailed(exception);
+                        return;
+                    }
+
+                    if (core == null)
+                    {
+                        Update(default);
+                        onCompleted(false);
+                        return;
+                    }
+
+                    onCompleted(true);
+                },
+                ComponentName,
+                this);
     }
 
     /// <summary>
@@ -805,6 +745,47 @@ namespace HeTu
             RebindRemote(subscriptID, client);
             ReplaceSnapshot(rows);
             ForEachHandle<IndexSubscription<T>>(h => h.RaiseResynced());
+        }
+
+        public override void Restore(
+            IHeTuSessionTransport transport,
+            Action<bool> onCompleted,
+            Action<Exception> onFailed)
+        {
+            void OnRestored(ManagedIndexCore<T> core, bool canceled,
+                Exception exception)
+            {
+                // 同 ManagedRowCore.Restore：迟到的 cancel 不能再调 onFailed，
+                // 否则会级联到 HandleRecoverableFailure 把新 transport 又 Dispose。
+                if (canceled)
+                    return;
+
+                if (exception != null)
+                {
+                    onFailed(exception);
+                    return;
+                }
+
+                onCompleted(core != null);
+            }
+
+            if (RestoreAsTable)
+            {
+                // 整表订阅：重发 table，而不是 range
+                transport.WatchTable<T>(OnRestored, ComponentName, this);
+                return;
+            }
+
+            transport.WatchRange<T>(
+                RestoreIndex,
+                RestoreLeft,
+                RestoreRight,
+                RestoreLimit,
+                OnRestored,
+                RestoreDesc,
+                RestoreForce,
+                ComponentName,
+                this);
         }
 
         private void ReplaceSnapshot(List<T> rows)
