@@ -219,6 +219,35 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void WatchRange_ServerSubIdFormattedDifferently_SecondWatchNotSent()
+        {
+            // 服务端按 Python 的格式拼 sub_id（1.0 → "1.0"），客户端拼出来是 "1"，按字符串查重
+            // 永远查不到。要按客户端自己的键记住服务端回的 sub_id，第二次订阅当场拿句柄、不再发
+            const string serverSubId = "Item.value[1.0:2.5:1][:10]";
+            var client = HandleTestClient.Connected();
+            IndexSubscription<DictComponent> a = null, b = null;
+            client.WatchRangeSync<DictComponent>("value", 1.0, 2.5, 10,
+                (s, _, _) => a = s, componentName: "Item");
+            client.Receive(new object[] { "sub", serverSubId, new[] { Row(7, 10) } });
+
+            client.WatchRangeSync<DictComponent>("value", 1.0, 2.5, 10,
+                (s, _, _) => b = s, componentName: "Item");
+
+            Assert.NotNull(b, "已订阅过，应当场拿到句柄");
+            Assert.AreNotSame(a, b);
+            Assert.AreEqual(1, client.CountSent("sub"));
+            Assert.AreEqual(serverSubId, b.SubId);
+            a.Dispose();
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+
+            // 都退了：再订要重新发
+            client.WatchRangeSync<DictComponent>("value", 1.0, 2.5, 10, (_, _, _) => { },
+                componentName: "Item");
+            Assert.AreEqual(2, client.CountSent("sub"));
+        }
+
+        [Test]
         public void WatchTable_DisposeOneHandle_OtherKeepsUpdating()
         {
             var client = HandleTestClient.Connected();
