@@ -349,6 +349,22 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void PendingUnsub_ReplyLandsThenDisposedInCallback_SendsOnce()
+        {
+            // 在途回复落到挂起的订阅上，回调里马上 Dispose：当场发出的 unsub 和挂着的那条
+            // 只能发一条
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            client.WatchRowSync<DictComponent>("owner", 1L, (s, _, _) => s.Dispose(),
+                "Item");
+            a.Dispose();
+
+            client.Receive(new object[] { "sub", RowSubId, Row(7, 10) });
+
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
         public void PendingUnsub_DroppedWhenConnectionCloses()
         {
             var client = HandleTestClient.Connected();
