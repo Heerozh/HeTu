@@ -75,11 +75,46 @@ Code that depends on R3 must be wrapped in `#if R3_UNITY_INSTALLED` (e.g. `BaseS
 
 ## Common commands
 
-This package has no shell-driven build/test loop — everything runs inside the Unity Editor:
+Tests run in three places: the Unity Editor, a throwaway .NET test project (EditMode tests, no Unity needed), and the headless client's test project. Server-backed tests need the test server below.
 
-- **Open the test project**: open a Unity project (Unity 2022.3 or Unity 6000+) that has `cn.hetudb.clientsdk` added via UPM, then `Window > General > Test Runner`.
+- **Open the test project**: open a Unity project (Unity 2022.3 or Unity 6000+) that has `cn.hetudb.clientsdk` added via UPM, then `Window > General > Test Runner`. If the Unity MCP is connected to such a project, `run_tests` with `assembly_names` (`HeTu.ClientSDK.EditorTests` for EditMode, `河图ClientSDK单元测试` for PlayMode) does the same.
 - **EditMode tests** (`Tests/Editor/`): run inside the Editor with no server. `ConnectionSemanticsTest.cs` exercises `HeTuClientBase` via an in-file `TestClient` subclass; `SessionClientBaseTest.cs` exercises `HeTuSessionClientBase` via `FakeTransport` + `FakeScheduler`; `SubscriptionTest.cs` exercises subscription rebinding via a `StubClient`; `SubscriptionHandleTest.cs` exercises shared cores / per-caller handles end to end through `HeTuClientBase` frames. Prefer adding new tests here whenever the behavior doesn't actually need a WebSocket.
-- **PlayMode tests** (`Tests/HeTu/`): only `HeTuClientTest.cs` requires the HeTu server's pytest harness running at `ws://127.0.0.1:2466/hetu/pytest` (start it via `tests/app.py` in the server repo). `SessionClientFacadeTest.cs` uses fakes; `InspectorTraceTest.cs` is pure unit tests — both run without a server. Per the file comment in `HeTuClient.cs` (`CloseCore`), server-backed PlayMode tests **must be run in Player mode, not Editor mode** — otherwise the socket close path doesn't run a Unity main loop and tasks hang.
+- **EditMode tests without Unity**: `Tests/Editor/*.cs` and `Tests/HeTu/InspectorTraceTest.cs` are plain C# + NUnit 3, so a throwaway test project outside the repo runs them against the same shared sources (`ClientSDK/csharp/HeTu.Client/HeTu.Client.csproj` links every `HeTu/*.cs` except `UnityClient.cs` / `SessionClient.cs`). `AssemblyName` must be `HeTu.Client.Tests` (the `InternalsVisibleTo` of `HeTu.Client`), and NUnit must stay on 3.x (NUnit 4 dropped `Assert.AreEqual` and friends):
+
+  ```xml
+  <Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+      <TargetFramework>net8.0</TargetFramework>
+      <RollForward>Major</RollForward>
+      <AssemblyName>HeTu.Client.Tests</AssemblyName>
+      <LangVersion>latest</LangVersion>
+      <Nullable>disable</Nullable>
+      <ImplicitUsings>disable</ImplicitUsings>
+    </PropertyGroup>
+    <ItemGroup>
+      <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+      <PackageReference Include="NUnit" Version="3.14.0" />
+      <PackageReference Include="NUnit3TestAdapter" Version="4.6.0" />
+    </ItemGroup>
+    <ItemGroup>
+      <ProjectReference Include="<repo>/ClientSDK/csharp/HeTu.Client/HeTu.Client.csproj" />
+      <Compile Include="<repo>/ClientSDK/unity/cn.hetudb.clientsdk/Tests/Editor/*.cs" />
+      <Compile Include="<repo>/ClientSDK/unity/cn.hetudb.clientsdk/Tests/HeTu/InspectorTraceTest.cs" />
+    </ItemGroup>
+  </Project>
+  ```
+
+  Then `dotnet test` in that directory. `UnityClient.cs`, `SessionClient.cs` and the rest of `Tests/HeTu/` only compile inside Unity, so changes touching them still need a Unity compile.
+- **Headless client tests**: `dotnet test ClientSDK/csharp/HeTu.Client.Tests` (NUnit 4). The `[Explicit]` integration tests (`*Integration*`) are skipped unless `HETU_URL` is set.
+- **Test server** (for server-backed PlayMode tests and the headless integration tests): from the server repo root, with the SQLite dev backend (no Docker):
+
+  ```
+  PYTHONUTF8=1 uv run hetu start --app-file=tests/app.py --namespace=pytest --instance=pytest --port=2466 --authkey=pytest --workers=1 --db=sqlite:///<fresh dir>/playmode.db
+  ```
+
+  Use a fresh DB file per run: `HeTuClientTest.TestRowSubscribe` expects no `RLSComp` row for owner 123 yet. `--workers=1` keeps two connections on one worker, so the shared-subscription integration cases really have two members. Stop the server when done.
+- **PlayMode tests** (`Tests/HeTu/`): `HeTuClientTest.cs` and `ReconnectRaceTest.cs` connect to the test server at `ws://127.0.0.1:2466/hetu/pytest` (authkey `pytest`); `SessionClientFacadeTest.cs` uses fakes; `InspectorTraceTest.cs` is pure unit tests. Run them from the Test Runner's **PlayMode** tab — entering Play mode in the Editor is enough, a standalone player is not needed. They must not run as EditMode tests: without the Unity main loop UnityWebSocket's close task never runs and tasks hang (see `HeTuClient.CloseCore`). Make sure no open scene has unsaved changes first, or the runner stops on a save prompt.
+- **Headless integration tests** against the same server: `HETU_URL=ws://127.0.0.1:2466/hetu/pytest HETU_AUTHKEY=pytest dotnet test ClientSDK/csharp/HeTu.Client.Tests --filter FullyQualifiedName~Integration`.
 - **Run a single test**: in Test Runner, right-click the test name → "Run Selected". The `[Order(N)]` attribute on `TestRowSubscribe`/`TestSystemCall` in `HeTuClientTest.cs` matters — `TestRowSubscribe` must run before any successful `login` call (see `// 必须未调用过login测试才会通过` comment).
 - **Manual end-to-end**: see the snippet in `cn.hetudb.clientsdk/README.md`.
 
