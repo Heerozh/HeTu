@@ -118,9 +118,16 @@ namespace HeTu
                 return;
 
             IsDisposed = true;
-            DisposeBag.Dispose();
-            Core.Release(this);
             GC.SuppressFinalize(this);
+            try
+            {
+                // 会同步跑用户挂进来的 disposable 和 R3 链的 OnCompleted，可能抛异常
+                DisposeBag.Dispose();
+            }
+            finally
+            {
+                Core.Release(this);
+            }
         }
 
 #if R3_UNITY_INSTALLED
@@ -293,10 +300,18 @@ namespace HeTu
         public override void Dispose()
         {
             if (IsDisposed) return;
-            foreach (var subject in _replaceSubjects.Values)
-                subject.Dispose();
+            var subjects = _replaceSubjects.Values.ToArray();
             _replaceSubjects.Clear();
-            base.Dispose();
+            try
+            {
+                // per-row subject 的 Dispose 会跑用户 R3 链的 OnCompleted，可能抛异常
+                foreach (var subject in subjects)
+                    subject.Dispose();
+            }
+            finally
+            {
+                base.Dispose();
+            }
         }
 
         /// <summary>
