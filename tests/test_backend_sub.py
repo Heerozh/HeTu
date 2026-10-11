@@ -1,8 +1,8 @@
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
-from typing import AsyncGenerator, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -464,14 +464,10 @@ async def test_subscribe_get_rls(
     broker: SubscriptionBroker, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
-    sub_id, row = await broker.subscribe_get(
-        filled_item_ref, user_id10_ctx, "time", 110
-    )
+    sub_id, _ = await broker.subscribe_get(filled_item_ref, user_id10_ctx, "time", 110)
     assert sub_id is not None
 
-    sub_id, row = await broker.subscribe_get(
-        filled_item_ref, user_id11_ctx, "time", 110
-    )
+    sub_id, _ = await broker.subscribe_get(filled_item_ref, user_id11_ctx, "time", 110)
     assert sub_id is None
 
 
@@ -530,7 +526,7 @@ async def test_query_subscribe_rls_lost(
 ):
     backend = broker._backend
 
-    sub_id, rows = await broker.subscribe_range(
+    sub_id, _ = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
@@ -575,7 +571,7 @@ async def test_query_subscribe_rls_gain(
         row.owner = 11
         await repo.update(row)
 
-    sub_id, rows = await broker.subscribe_range(
+    sub_id, _ = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
