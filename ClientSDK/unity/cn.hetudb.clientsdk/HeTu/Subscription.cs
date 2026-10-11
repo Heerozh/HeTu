@@ -410,18 +410,21 @@ namespace HeTu
                 subject.OnNext(data);
         }
 
-        // 删除分两步：这一步行还在 Rows 里；之后核心删掉行，再 PushRemove
+        // 删除分两步：这一步行还在 Rows 里；之后核心删掉行，再 PushRemove。
+        // OnDelete 里还能 ObserveRow 这一行，之后它的流才完成
         internal void RaiseDelete(long rowID)
         {
-            _replaceSubjects.Remove(rowID, out var subject);
             try
             {
                 OnDelete?.Invoke(this, rowID);
             }
             finally
             {
-                subject?.OnCompleted();
-                subject?.Dispose();
+                if (_replaceSubjects.Remove(rowID, out var subject))
+                {
+                    subject.OnCompleted();
+                    subject.Dispose();
+                }
             }
         }
 
