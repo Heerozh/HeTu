@@ -1,0 +1,309 @@
+using System;
+using System.Collections.Generic;
+using HeTu;
+using NUnit.Framework;
+using R3;
+
+namespace Tests.HeTu
+{
+    // 同一个订阅（sub_id）被订阅多次：每次 Watch 拿到自己的句柄，共用一个远端订阅；
+    // 各自 Dispose 只退掉自己，最后一个句柄 Dispose 才发 unsub。
+    [TestFixture]
+    public class SubscriptionHandleTest
+    {
+        private const string RowSubId = "Item.id[7:None:1][:1]";
+        private const string RangeSubId = "Item.owner[1:1:1][:10]";
+        private const string TableSubId = "Item.table";
+
+        [SetUp]
+        public void SilenceLogger() =>
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+
+        [Test]
+        public void WatchRow_SameRowTwice_EachCallerGetsOwnHandle()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var b = client.WatchRow(Row(7, 10));
+
+            Assert.NotNull(a);
+            Assert.NotNull(b);
+            Assert.AreNotSame(a, b, "每个调用方应拿到自己的句柄");
+            Assert.AreEqual(1, client.CountSent("sub"), "第二次订阅不该再发 sub");
+            Assert.AreEqual(10, Value(b.Data));
+            Assert.AreEqual(RowSubId, b.SubId);
+        }
+
+        [Test]
+        public void WatchRow_DisposeOneHandle_OtherKeepsUpdating()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var b = client.WatchRow(Row(7, 10));
+
+            var aUpdates = new List<int>();
+            a.OnUpdate += s => aUpdates.Add(Value(s.Data));
+            var bUpdates = new List<int>();
+            b.OnUpdate += s => bUpdates.Add(Value(s.Data));
+            var bSubject = new List<int>();
+            b.Subject.Subscribe(row => bSubject.Add(Value(row)));
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"), "还有句柄在用，不能退订");
+
+            client.Receive(Update(RowSubId, 7, Row(7, 20)));
+
+            CollectionAssert.IsEmpty(aUpdates, "已 Dispose 的句柄不再收事件");
+            CollectionAssert.AreEqual(new[] { 20 }, bUpdates);
+            CollectionAssert.AreEqual(new[] { 10, 20 }, bSubject);
+            Assert.AreEqual(20, Value(b.Data));
+        }
+
+        [Test]
+        public void WatchRow_DisposeLastHandle_SendsSingleUnsub()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var b = client.WatchRow(Row(7, 10));
+
+            a.Dispose();
+            a.Dispose(); // 重复 Dispose 只算一次
+            Assert.AreEqual(0, client.CountSent("unsub"));
+
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+            Assert.That(client.Sent[^1], Is.EqualTo(new object[] { "unsub", RowSubId }));
+
+            // 都退了：再订阅要重新发 sub
+            client.WatchRow(Row(7, 10));
+            Assert.AreEqual(2, client.CountSent("sub"));
+        }
+
+        [Test]
+        public void WatchRow_DisposedHandle_CompletesOnlyItsOwnSubject()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var b = client.WatchRow(Row(7, 10));
+
+            var aCompleted = false;
+            a.Subject.Subscribe(_ => { }, _ => aCompleted = true);
+            var bCompleted = false;
+            b.Subject.Subscribe(_ => { }, _ => bCompleted = true);
+
+            a.Dispose();
+
+            Assert.IsTrue(aCompleted);
+            Assert.IsFalse(bCompleted);
+        }
+
+        [Test]
+        public void WatchRow_ByOtherIndex_ResolvingToWatchedRow_GetsOwnHandle()
+        {
+            // 非 id 索引事先算不出 sub_id，照常发 sub；服务端对已订阅的行回同一个 sub_id
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+
+            RowSubscription<DictComponent> b = null;
+            client.WatchRowSync<DictComponent>("owner", 1L, (s, _, _) => b = s, "Item");
+            client.Receive(new object[] { "sub", RowSubId, Row(7, 10) });
+
+            Assert.NotNull(b);
+            Assert.AreNotSame(a, b);
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            client.Receive(Update(RowSubId, 7, Row(7, 30)));
+            Assert.AreEqual(30, Value(b.Data));
+        }
+
+        [Test]
+        public void WatchRow_HandlerThrows_OtherHandleStillNotified()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var b = client.WatchRow(Row(7, 10));
+
+            a.OnUpdate += _ => throw new InvalidOperationException("boom");
+            var bUpdates = 0;
+            b.OnUpdate += _ => bUpdates++;
+
+            client.Receive(Update(RowSubId, 7, Row(7, 20)));
+
+            Assert.AreEqual(1, bUpdates, "一个调用方的回调抛异常不能挡住别的调用方");
+        }
+
+        [Test]
+        public void WatchRange_DisposeOneHandle_OtherKeepsReceivingRowChanges()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRange(Row(7, 10));
+            var b = client.WatchRange(Row(7, 10));
+            Assert.AreNotSame(a, b);
+
+            var rowValues = new List<int>();
+            b.ObserveRow(7).Subscribe(row => rowValues.Add(Value(row)));
+            var inserts = new List<long>();
+            b.OnInsert += (_, id) => inserts.Add(id);
+            var removed = new List<long>();
+            b.ObserveRemove().Subscribe(id => removed.Add(id));
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+
+            client.Receive(Update(RangeSubId, 7, Row(7, 11)));
+            client.Receive(Update(RangeSubId, 8, Row(8, 1)));
+            client.Receive(Update(RangeSubId, 7, null));
+
+            CollectionAssert.AreEqual(new[] { 11 }, rowValues);
+            CollectionAssert.AreEqual(new long[] { 8 }, inserts);
+            CollectionAssert.AreEqual(new long[] { 7 }, removed);
+            CollectionAssert.AreEquivalent(new long[] { 8 }, b.Rows.Keys);
+
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void WatchRange_LaterHandle_SeesCurrentRowsAndCanObserveThem()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRange(Row(7, 10));
+            client.Receive(Update(RangeSubId, 8, Row(8, 1)));
+
+            var b = client.WatchRange(Row(7, 10));
+            Assert.AreNotSame(a, b);
+            var added = new List<long>();
+            b.ObserveAdd().Subscribe(row => added.Add(row.ID));
+            var row8 = new List<int>();
+            b.ObserveRow(8).Subscribe(row => row8.Add(Value(row)));
+
+            client.Receive(Update(RangeSubId, 8, Row(8, 2)));
+
+            CollectionAssert.AreEquivalent(new long[] { 7, 8 }, added);
+            CollectionAssert.AreEqual(new[] { 2 }, row8);
+            Assert.AreEqual(2, a.Rows.Count);
+        }
+
+        [Test]
+        public void WatchRange_TwoInFlight_ShareOneRemote()
+        {
+            // 两次订阅都在回复前发出：服务端对重复订阅回同一个 sub_id、不计数，
+            // 所以客户端最后只能发一次 unsub
+            var client = HandleTestClient.Connected();
+            IndexSubscription<DictComponent> a = null, b = null;
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10,
+                (s, _, _) => a = s, componentName: "Item");
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10,
+                (s, _, _) => b = s, componentName: "Item");
+            Assert.AreEqual(2, client.CountSent("sub"));
+            client.Receive(new object[] { "sub", RangeSubId, new[] { Row(7, 10) } });
+            client.Receive(new object[] { "sub", RangeSubId, new[] { Row(7, 10) } });
+            Assert.NotNull(a);
+            Assert.NotNull(b);
+            Assert.AreNotSame(a, b);
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void WatchTable_DisposeOneHandle_OtherKeepsUpdating()
+        {
+            var client = HandleTestClient.Connected();
+            IndexSubscription<DictComponent> a = null, b = null;
+            client.WatchTableSync<DictComponent>((s, _, _) => a = s, "Item");
+            client.Receive(new object[] { "sub", TableSubId, new[] { Row(7, 10) } });
+            client.WatchTableSync<DictComponent>((s, _, _) => b = s, "Item");
+            Assert.AreNotSame(a, b);
+
+            var updates = new List<long>();
+            b.OnUpdate += (_, id) => updates.Add(id);
+            a.Dispose();
+            client.Receive(Update(TableSubId, 7, Row(7, 11)));
+
+            CollectionAssert.AreEqual(new long[] { 7 }, updates);
+            Assert.AreEqual(0, client.CountSent("unsub"));
+        }
+
+        private static Dictionary<string, object> Row(long id, int value) =>
+            new() { ["id"] = id, ["value"] = value };
+
+        private static int Value(DictComponent row) => Convert.ToInt32(row["value"]);
+
+        private static object[] Update(string subId, long rowId,
+            Dictionary<string, object> row) =>
+            new object[]
+            {
+                "updt", subId, new Dictionary<long, object> { [rowId] = row }
+            };
+
+        private sealed class HandleTestClient : HeTuClientBase
+        {
+            private HandleTestClient() =>
+                SetupPipeline(new List<MessageProcessLayer> { new JsonbLayer() });
+
+            public List<object[]> Sent { get; } = new();
+
+            public static HandleTestClient Connected()
+            {
+                var client = new HandleTestClient();
+                client.ConnectSync("ws://test");
+                client.State = ConnectionState.Connected;
+                return client;
+            }
+
+            public int CountSent(string command) =>
+                Sent.FindAll(frame => (string)frame[0] == command).Count;
+
+            // 订阅 Item 的 id=7 行；已订阅过时同步回调，否则用 reply 当服务端回复
+            public RowSubscription<DictComponent> WatchRow(
+                Dictionary<string, object> reply)
+            {
+                RowSubscription<DictComponent> result = null;
+                var answered = false;
+                WatchRowSync<DictComponent>("id", 7L, (s, _, _) =>
+                {
+                    result = s;
+                    answered = true;
+                }, "Item");
+                if (!answered)
+                    Receive(new object[] { "sub", RowSubId, reply });
+                return result;
+            }
+
+            // 订阅 Item 的 owner=[1,1] 范围；已订阅过时同步回调，否则用 reply 当初始行
+            public IndexSubscription<DictComponent> WatchRange(
+                params Dictionary<string, object>[] reply)
+            {
+                IndexSubscription<DictComponent> result = null;
+                var answered = false;
+                WatchRangeSync<DictComponent>("owner", 1L, 1L, 10, (s, _, _) =>
+                {
+                    result = s;
+                    answered = true;
+                }, componentName: "Item");
+                if (!answered)
+                    Receive(new object[] { "sub", RangeSubId, reply });
+                return result;
+            }
+
+            public void Receive(object[] frame) =>
+                OnReceived(Pipeline.Encode(frame, out _));
+
+            protected override void ConnectCore(string url, Action onConnected,
+                Action<byte[]> onMessage, Action<int, string> onClose,
+                Action<string> onError)
+            {
+            }
+
+            protected override void CloseCore()
+            {
+            }
+
+            protected override void SendCore(byte[] data) =>
+                Sent.Add((object[])Pipeline.Decode(data));
+        }
+    }
+}
