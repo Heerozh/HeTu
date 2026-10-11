@@ -204,6 +204,23 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void IndexSubscription_OnDelete_CanStillObserveRow()
+        {
+            // OnDelete 触发时这行还在：回调里 ObserveRow 能拿到它的流，随后流会完成
+            var client = new StubClient();
+            var sub = new IndexSubscription<TestRow>("sub-1", "Test",
+                new List<TestRow> { new() { ID = 1, Value = 1 } },
+                client);
+            var completed = false;
+            sub.OnDelete += (s, id) =>
+                s.ObserveRow(id).Subscribe(_ => { }, _ => completed = true);
+
+            sub.Update(1, null);
+
+            Assert.IsTrue(completed);
+        }
+
+        [Test]
         public void IndexSubscription_Dispose_DisposesAllRemainingPerRowSubjects()
         {
             var client = new StubClient();
