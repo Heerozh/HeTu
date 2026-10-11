@@ -148,6 +148,13 @@ namespace HeTu
         // 本连接上一个 rpcs 的 sync_id：按连接递增，重连归零（服务端只收 0..int.MaxValue）
         private int _syncSeq;
 
+        // 已发出、还没收到回复的 sub 请求数。服务端对同一连接的重复订阅回同一个 sub_id、
+        // 不计数，一条 unsub 就删：在途的 sub 可能落到要退的订阅上（按非 id 索引的 WatchRow
+        // 事先算不出 sub_id），这时发出 unsub 会把它一起退掉。所以 unsub 只在没有 sub 在途时
+        // 才发，否则先挂在 _pendingUnsubs，等在途的 sub 都回复了再决定（FlushPendingUnsubs）。
+        private int _inFlightSubs;
+        private readonly List<(string SubId, string From)> _pendingUnsubs = new();
+
         /// <summary>
         ///     System 调用的本地回调表。也就是System对应的客户端逻辑。
         ///     Key 为系统名，Value 为调用时同步触发的回调。
@@ -267,8 +274,10 @@ namespace HeTu
             // 前置清理
             Logger.Instance.Info($"正在连接到：{url}...");
             Subscriptions.Clean();
+            _pendingUnsubs.Clear();
             FinishPushCallsOnClose();
             ResponseQueue.CancelAll("重新连接");
+            _inFlightSubs = 0;
             _pendingPushCalls.Clear();
             _syncSeq = 0;
             LastCloseCode = 0;
@@ -315,6 +324,7 @@ namespace HeTu
             State = ConnectionState.Disconnected;
             LastCloseCode = code;
             Subscriptions.Clean();
+            _pendingUnsubs.Clear();
             if (code == HeTuCloseCode.Kicked)
                 Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
             else if (errMsg == null)
@@ -345,7 +355,9 @@ namespace HeTu
         {
             Logger.Instance.Info("主动调用了Close");
             FinishPushCallsOnClose();
+            _pendingUnsubs.Clear();
             ResponseQueue.CancelAll("主动调用了Close");
+            _inFlightSubs = 0;
             Subscriptions.Clean();
             CloseCore();
         }
@@ -634,7 +646,7 @@ namespace HeTu
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -760,7 +772,7 @@ namespace HeTu
             };
             var traceId = InspectorCollector.InterceptRequest(QueryRange,
                 componentName, payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -880,7 +892,7 @@ namespace HeTu
             var payload = new object[] { CommandSub, componentName, QueryTable };
             var traceId = InspectorCollector.InterceptRequest(QueryTable,
                 componentName, payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -937,7 +949,11 @@ namespace HeTu
             WatchTableSync(onResponse, componentName);
 
         /// <summary>
-        ///     取消指定订阅。
+        ///     取消指定订阅。有订阅请求还没收到回复时，unsub 推迟到它们都回复之后再发；
+        ///     期间同一 sub_id 又被订上的话就不发了。
+        ///     If subscribe requests are still awaiting replies, the unsub is deferred
+        ///     until they are answered, and dropped if the same sub_id got subscribed
+        ///     again meanwhile.
         /// </summary>
         /// <param name="subID">订阅 ID。</param>
         /// <param name="from">取消来源说明（用于日志）。</param>
@@ -947,11 +963,63 @@ namespace HeTu
             Subscriptions.Remove(subID);
             if (State != ConnectionState.Connected)
                 return;
+            if (_inFlightSubs > 0)
+            {
+                // 有 sub 在途，它可能落到这个订阅上：等它回复后再决定发不发
+                if (!_pendingUnsubs.Exists(p => p.SubId == subID))
+                    _pendingUnsubs.Add((subID, from));
+                return;
+            }
+
+            SendUnsub(subID, from);
+        }
+
+        private void SendUnsub(string subID, string from)
+        {
             var payload = new object[] { CommandUnsub, subID };
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
             SendRequest(payload, null, traceId);
             Logger.Instance.Info($"因BaseSubscription {from}，已取消订阅 {subID}");
+        }
+
+        // 发 sub 请求：计入在途数；回复（或取消）处理完后看看挂着的 unsub 能不能发
+        private void SendSubRequest(object payload, ResponseManager.Callback callback,
+            string traceId)
+        {
+            SendRequest(payload, (response, cancel) =>
+            {
+                // 重连 / Close 时计数已归零，那之后才回调的不再减成负数
+                if (_inFlightSubs > 0)
+                    _inFlightSubs--;
+                try
+                {
+                    callback(response, cancel);
+                }
+                finally
+                {
+                    FlushPendingUnsubs();
+                }
+            }, traceId);
+            // 编码失败时 SendRequest 直接抛出、回调不会登记，所以发出去了才计数
+            _inFlightSubs++;
+        }
+
+        // 在途的 sub 都回复了：挂着的 unsub 里，sub_id 又被登记了的（在途的回复落到了它上面，
+        // 服务端那边还订着）丢掉，其余发出
+        private void FlushPendingUnsubs()
+        {
+            if (_inFlightSubs > 0 || _pendingUnsubs.Count == 0)
+                return;
+            var pending = _pendingUnsubs.ToArray();
+            _pendingUnsubs.Clear();
+            if (State != ConnectionState.Connected)
+                return;
+            foreach (var (subID, from) in pending)
+            {
+                if (!Subscriptions.Contains(subID))
+                    SendUnsub(subID, from);
+            }
         }
 
         // 核心的最后一个句柄 Dispose 时调用：只退登记着的这个核心。旧连接留下的核心晚些
