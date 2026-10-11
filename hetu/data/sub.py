@@ -2281,7 +2281,8 @@ class SubscriptionBroker:
         如果是重复订阅，会返回上一次订阅的sub_id，已有的订阅照旧。回复里的数据：在 worker
         内共享的订阅（组件不按 RLS 判定可见，或 caller 是 admin）是订阅已推给客户端的内容；
         按 RLS 私有的订阅是这次重新读的（可能落在滞后的副本上）。客户端应沿用已有的订阅
-        对象、不要拿它覆盖本地数据（官方 SDK 就是这样）。客户端应该写代码防止重复订阅。
+        对象、不要拿它覆盖本地数据（官方 SDK 就是这样）。按 id 重复订阅客户端应该自己拦住；
+        按非 id 索引订阅事先不知道会落到哪一行，落到已订阅的行是正常情况。
 
         推送是尽力而为的最终一致：约 99% 的情况收到最新数据，Redis 压力过大时可能残留旧数据
         直到该行下次变更（见类说明）。
@@ -2345,11 +2346,14 @@ class SubscriptionBroker:
 
         sub_id = self.make_query_id_(table_ref, "id", row_id, None, 1, False)
         if (existing := self._subs.get(sub_id)) is not None:
-            logger.warning(
-                _("⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码").format(
-                    sub_id=sub_id
+            # 按非 id 索引订阅时客户端事先不知道会落到哪一行，拦不住（SDK 允许多处订阅同一行），
+            # 不算客户端代码的问题；按 id 的重复订阅客户端拦得住，才警告
+            if index_name == "id":
+                logger.warning(
+                    _(
+                        "⚠️ [📡Subscription] {sub_id} 数据重复订阅，检查客户端代码"
+                    ).format(sub_id=sub_id)
                 )
-            )
             reg = self._regs[sub_id]
             if existing.share_key is not None:
                 return self._repeat_get(sub_id, existing, reg)
