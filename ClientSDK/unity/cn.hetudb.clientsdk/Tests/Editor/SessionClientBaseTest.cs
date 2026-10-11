@@ -940,6 +940,7 @@ namespace Tests.HeTu
                 sub => subscription = sub,
                 _ => Assert.Fail("watch should not fail"));
 
+            subscription.ObserveRow(2);
             var replaceSubjectsField = typeof(IndexSubscription<TestComponent>)
                 .GetField("_replaceSubjects",
                     BindingFlags.NonPublic | BindingFlags.Instance);

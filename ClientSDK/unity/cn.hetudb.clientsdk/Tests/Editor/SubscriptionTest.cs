@@ -194,6 +194,7 @@ namespace Tests.HeTu
                 new List<TestRow> { new() { ID = 1, Value = 1 } },
                 client);
 
+            sub.ObserveRow(1);
             var subjectForRow1 = GetReplaceSubject(sub, 1L);
 
             sub.Update(1, null);
@@ -254,6 +255,8 @@ namespace Tests.HeTu
                 },
                 client);
 
+            sub.ObserveRow(1);
+            sub.ObserveRow(2);
             var s1 = GetReplaceSubject(sub, 1L);
             var s2 = GetReplaceSubject(sub, 2L);
 

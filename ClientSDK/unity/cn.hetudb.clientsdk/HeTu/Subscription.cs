@@ -288,11 +288,10 @@ namespace HeTu
             _replaceSubjects = new Dictionary<long, Subject<T>>();
             DisposeBag.Add(_addSubject);
             DisposeBag.Add(_removeSubject);
-            // per-row subject 不进 DisposeBag——R3 的 DisposableBag 只能追加，
-            // 删行的 churn 会让 bag 单调增长。改成跟着 _replaceSubjects 字典走，
-            // 删除时显式 Dispose，整体 Dispose 在 override 里兜底。
-            foreach (var id in core.Rows.Keys)
-                _replaceSubjects[id] = new Subject<T>();
+            // per-row subject 第一次 ObserveRow 时才建（大表 × 多个句柄时不预建）。
+            // 不进 DisposeBag——R3 的 DisposableBag 只能追加，删行的 churn 会让 bag 单调
+            // 增长。改成跟着 _replaceSubjects 字典走，删除时显式 Dispose，整体 Dispose 在
+            // override 里兜底。
             core.Attach(this);
         }
 
@@ -408,7 +407,19 @@ namespace HeTu
         /// </summary>
         /// <param name="rowID">目标行 ID。</param>
         /// <returns>该行的更新流；删除时会完成（OnCompleted）。</returns>
-        public Observable<T> ObserveRow(long rowID) => _replaceSubjects[rowID];
+        public Observable<T> ObserveRow(long rowID)
+        {
+            if (_replaceSubjects.TryGetValue(rowID, out var subject))
+                return subject;
+            if (IsDisposed)
+                throw new ObjectDisposedException(GetType().Name);
+            if (!Rows.ContainsKey(rowID))
+                throw new KeyNotFoundException(
+                    $"Row {rowID} is not in subscription {SubId}.");
+            subject = new Subject<T>();
+            _replaceSubjects[rowID] = subject;
+            return subject;
+        }
 
         internal void Rebind(
             string subscriptID,
@@ -419,10 +430,7 @@ namespace HeTu
         // 以下由 ManagedIndexCore 对每个还活着的句柄调用
         internal void RaiseInsert(long rowID, T data)
         {
-            // 先建好这行的 subject，OnInsert 里就能 ObserveRow
-            if (_replaceSubjects.Remove(rowID, out var stale))
-                stale.Dispose();
-            _replaceSubjects[rowID] = new Subject<T>();
+            // 行已进了 Rows，OnInsert 里就能 ObserveRow（那时才建 subject）
             OnInsert?.Invoke(this, rowID);
             _addSubject.OnNext(data);
         }
