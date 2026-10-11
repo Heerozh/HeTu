@@ -205,6 +205,39 @@ namespace Tests.HeTu
         }
 
         [Test]
+        public void UpdateFanOut_DoesNotAllocate()
+        {
+            // 推送热路径：分发给各句柄时不能每次复制句柄表、建闭包
+            var client = new StubClient();
+            var rowSub = new RowSubscription<TestRow>("sub-1", "Test",
+                new TestRow { ID = 1, Value = 1 }, client);
+            var rowOther = ((ManagedRowCore<TestRow>)rowSub.Core).CreateHandle(null);
+            var idxSub = new IndexSubscription<TestRow>("sub-2", "Test",
+                new List<TestRow> { new() { ID = 1, Value = 1 } }, client);
+            var idxOther = ((ManagedIndexCore<TestRow>)idxSub.Core).CreateHandle(null);
+            var row = new TestRow { ID = 1, Value = 2 };
+            for (var i = 0; i < 100; i++)
+            {
+                rowSub.Update(row);
+                idxSub.Update(1, row);
+            }
+
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 1000; i++)
+            {
+                rowSub.Update(row);
+                idxSub.Update(1, row);
+            }
+
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.Less(allocated, 1000, $"2000 次更新分配了 {allocated} 字节");
+            rowOther.Dispose();
+            rowSub.Dispose();
+            idxOther.Dispose();
+            idxSub.Dispose();
+        }
+
+        [Test]
         public void IndexSubscription_PerRowSubjects_CreatedOnlyWhenObserved()
         {
             // 大表 × 多个句柄时不能每行每句柄都预建 subject：只给 ObserveRow 过的行建
