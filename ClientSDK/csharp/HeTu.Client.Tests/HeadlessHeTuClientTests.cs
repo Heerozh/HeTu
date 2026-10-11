@@ -1,5 +1,6 @@
 using System;
 using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
@@ -88,6 +89,35 @@ namespace HeTu.Client.Tests
             var call = c.CallSystemAwaitPush("buy", 1);
             Assert.That(async () => await call.WaitAsync(TimeSpan.FromSeconds(2)),
                 Throws.InstanceOf<OperationCanceledException>());
+        }
+
+        // 订阅句柄的 Dispose 常在调用方线程上调用（WatchXxx 的续体跑在线程池），但共享核心、
+        // 订阅表、挂起的 unsub 只能在泵线程上动：Dispose 要投到泵线程执行。
+        [Test]
+        public void SubscriptionDispose_FromCallerThread_RunsOnPump()
+        {
+            using var c = new HeadlessHeTuClient();
+            var sub = new RowSubscription<DictComponent>("Item.id[1:None:1][:1]", "Item",
+                new DictComponent { ["id"] = 1L }, c);
+            var probe = new ThreadProbe();
+            sub.DisposeBag.Add(probe);
+
+            sub.Dispose();
+
+            Assert.That(probe.Disposed.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            Assert.That(probe.ThreadName, Is.EqualTo("HeTuClientPump"));
+        }
+
+        private sealed class ThreadProbe : IDisposable
+        {
+            public readonly ManualResetEventSlim Disposed = new();
+            public string ThreadName;
+
+            public void Dispose()
+            {
+                ThreadName = Thread.CurrentThread.Name;
+                Disposed.Set();
+            }
         }
     }
 }
