@@ -227,6 +227,28 @@ namespace Tests.HeTu
             Assert.AreEqual(0, client.CountSent("unsub"));
         }
 
+        [Test]
+        public void HandleFromPreviousConnection_DisposeKeepsNewSubscription()
+        {
+            // 断线后不用会话、手动重连再订阅同一行：旧连接的句柄晚些 Dispose 时，
+            // 不能把新连接上同 sub_id 的订阅退掉
+            var client = HandleTestClient.Connected();
+            var old = client.WatchRow(Row(7, 10));
+            client.RaiseClosed();
+            client.Reconnect();
+            var fresh = client.WatchRow(Row(7, 11));
+            Assert.AreNotSame(old, fresh);
+
+            old.Dispose();
+
+            Assert.AreEqual(0, client.CountSent("unsub"), "旧句柄不该退掉新订阅");
+            client.Receive(Update(RowSubId, 7, Row(7, 12)));
+            Assert.AreEqual(12, Value(fresh.Data));
+
+            fresh.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
         private static Dictionary<string, object> Row(long id, int value) =>
             new() { ["id"] = id, ["value"] = value };
 
@@ -241,6 +263,8 @@ namespace Tests.HeTu
 
         private sealed class HandleTestClient : HeTuClientBase
         {
+            private Action<int, string> _onClose;
+
             private HandleTestClient() =>
                 SetupPipeline(new List<MessageProcessLayer> { new JsonbLayer() });
 
@@ -249,10 +273,18 @@ namespace Tests.HeTu
             public static HandleTestClient Connected()
             {
                 var client = new HandleTestClient();
-                client.ConnectSync("ws://test");
-                client.State = ConnectionState.Connected;
+                client.Reconnect();
                 return client;
             }
+
+            // 走一遍真实的连接入口（记下 onClose 好模拟断线），再当作已握手
+            public void Reconnect()
+            {
+                ConnectSync("ws://test");
+                State = ConnectionState.Connected;
+            }
+
+            public void RaiseClosed() => _onClose(HeTuCloseCode.Abnormal, "network lost");
 
             public int CountSent(string command) =>
                 Sent.FindAll(frame => (string)frame[0] == command).Count;
@@ -294,9 +326,8 @@ namespace Tests.HeTu
 
             protected override void ConnectCore(string url, Action onConnected,
                 Action<byte[]> onMessage, Action<int, string> onClose,
-                Action<string> onError)
-            {
-            }
+                Action<string> onError) =>
+                _onClose = onClose;
 
             protected override void CloseCore()
             {
