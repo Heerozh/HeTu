@@ -1,5 +1,7 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
+using System.Reflection;
 using HeTu;
 using NUnit.Framework;
 using R3;
@@ -245,6 +247,28 @@ namespace Tests.HeTu
             client.WatchRangeSync<DictComponent>("value", 1.0, 2.5, 10, (_, _, _) => { },
                 componentName: "Item");
             Assert.AreEqual(2, client.CountSent("sub"));
+        }
+
+        [Test]
+        public void WatchRange_UnsubscribeDropsKeyMapping()
+        {
+            // 退订时"客户端键 → 服务端 sub_id"的条目要一起删：按带小数的边界不停换范围订阅时，
+            // 不能一直累积到断线
+            var client = HandleTestClient.Connected();
+            for (var i = 0; i < 3; i++)
+            {
+                IndexSubscription<DictComponent> sub = null;
+                client.WatchRangeSync<DictComponent>("value", i + 0.5, i + 1.0, 10,
+                    (s, _, _) => sub = s, componentName: "Item");
+                client.Receive(new object[]
+                {
+                    "sub", $"Item.value[{i}.5:{i + 1}.0:1][:10]", new[] { Row(7, 10) }
+                });
+                sub.Dispose();
+            }
+
+            Assert.AreEqual(3, client.CountSent("unsub"));
+            Assert.AreEqual(0, client.KeyMappingCount);
         }
 
         [Test]
@@ -602,6 +626,17 @@ namespace Tests.HeTu
 
             public void Call(string systemName) =>
                 CallSystemSync(systemName, Array.Empty<object>(), (_, _, _) => { });
+
+            // SubscriptionManager 里"客户端键 → 服务端 sub_id"表的条目数
+            public int KeyMappingCount
+            {
+                get
+                {
+                    var aliases = typeof(SubscriptionManager).GetField("_aliases",
+                        BindingFlags.NonPublic | BindingFlags.Instance);
+                    return ((ICollection)aliases!.GetValue(Subscriptions)!).Count;
+                }
+            }
 
             public int CountSent(string command) =>
                 Sent.FindAll(frame => (string)frame[0] == command).Count;
