@@ -249,6 +249,117 @@ namespace Tests.HeTu
             Assert.AreEqual(1, client.CountSent("unsub"));
         }
 
+        // 以下是"有 sub 在途时退订"的竞态：服务端对同一连接的重复订阅回同一个 sub_id、不计数，
+        // 在途的 sub 若落到要退的订阅上，先发出的 unsub 会把它一起退掉（服务端先处理完 sub 时
+        // 客户端拿到一个服务端已没有的订阅；先处理 unsub 时回 null）。unsub 要等在途的 sub 回完。
+
+        [Test]
+        public void UnsubWhileSubInFlight_ReplyLandsOnSameSubscription_KeepsIt()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            RowSubscription<DictComponent> b = null;
+            client.WatchRowSync<DictComponent>("owner", 1L, (s, _, _) => b = s, "Item");
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"), "有 sub 在途时 unsub 先不发");
+
+            client.Receive(new object[] { "sub", RowSubId, Row(7, 10) });
+            Assert.NotNull(b);
+            Assert.AreEqual(0, client.CountSent("unsub"), "在途回复落到了这个订阅上，不能退");
+            client.Receive(Update(RowSubId, 7, Row(7, 30)));
+            Assert.AreEqual(30, Value(b.Data));
+
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void UnsubWhileSubInFlight_ReplyLandsElsewhere_SendsUnsubAfterReply()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            RowSubscription<DictComponent> b = null;
+            client.WatchRowSync<DictComponent>("owner", 2L, (s, _, _) => b = s, "Item");
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+
+            client.Receive(new object[] { "sub", "Item.id[8:None:1][:1]", Row(8, 1) });
+            Assert.NotNull(b);
+            Assert.AreEqual(1, client.CountSent("unsub"));
+            Assert.That(client.Sent[^1], Is.EqualTo(new object[] { "unsub", RowSubId }));
+        }
+
+        [Test]
+        public void UnsubWhileSubInFlight_NullReply_SendsUnsubAfterReply()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            var answered = false;
+            client.WatchRowSync<DictComponent>("owner", 3L, (_, _, _) => answered = true,
+                "Item");
+
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+
+            client.Receive(new object[] { "sub", null, null });
+            Assert.IsTrue(answered);
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void TwoRangesInFlight_FirstDisposedOnArrival_SecondStillSubscribed()
+        {
+            var client = HandleTestClient.Connected();
+            IndexSubscription<DictComponent> a = null, b = null;
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10,
+                (s, _, _) => a = s, componentName: "Item");
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10,
+                (s, _, _) => b = s, componentName: "Item");
+
+            client.Receive(new object[] { "sub", RangeSubId, new[] { Row(7, 10) } });
+            a.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"), "第二个订阅还在途");
+
+            client.Receive(new object[] { "sub", RangeSubId, new[] { Row(7, 10) } });
+            Assert.NotNull(b);
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            client.Receive(Update(RangeSubId, 7, Row(7, 11)));
+            Assert.AreEqual(11, Value(b.Rows[7]));
+
+            b.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void PendingUnsub_DroppedWhenConnectionCloses()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            client.WatchRowSync<DictComponent>("owner", 1L, (_, _, _) => { }, "Item");
+            a.Dispose();
+
+            client.RaiseClosed();
+            client.Reconnect();
+            // 新连接上再订、回复：旧连接挂着的 unsub 不能补发
+            client.WatchRange(Row(7, 10));
+
+            Assert.AreEqual(0, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void CallInFlight_DoesNotDelayUnsub()
+        {
+            var client = HandleTestClient.Connected();
+            var a = client.WatchRow(Row(7, 10));
+            client.Call("move");
+
+            a.Dispose();
+
+            Assert.AreEqual(1, client.CountSent("unsub"), "只有在途的 sub 才推迟 unsub");
+        }
+
         private static Dictionary<string, object> Row(long id, int value) =>
             new() { ["id"] = id, ["value"] = value };
 
@@ -285,6 +396,9 @@ namespace Tests.HeTu
             }
 
             public void RaiseClosed() => _onClose(HeTuCloseCode.Abnormal, "network lost");
+
+            public void Call(string systemName) =>
+                CallSystemSync(systemName, Array.Empty<object>(), (_, _, _) => { });
 
             public int CountSent(string command) =>
                 Sent.FindAll(frame => (string)frame[0] == command).Count;
