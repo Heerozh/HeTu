@@ -976,6 +976,8 @@ namespace HeTu
 
         private void SendUnsub(string subID, string from)
         {
+            // 同一 sub_id 若还挂着一条（在途回复落到它上面后又被当场退订），这条发了它就不用再发
+            _pendingUnsubs.RemoveAll(p => p.SubId == subID);
             var payload = new object[] { CommandUnsub, subID };
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
