@@ -218,7 +218,7 @@ namespace Tests.HeTu
         }
 
         [Test]
-        public void WatchRow_WithSameSubId_ReturnsSameSubscription()
+        public void WatchRow_WithSameSubId_ReturnsOwnHandleSharingOneWatch()
         {
             var transport = new FakeTransport("c1");
             transport.RowResults[("id", 7L)] =
@@ -242,12 +242,208 @@ namespace Tests.HeTu
 
             Assert.NotNull(first);
             Assert.NotNull(second);
-            Assert.AreSame(first, second);
+            Assert.AreNotSame(first, second);
             Assert.AreEqual(10, first.Data.Value);
             Assert.AreEqual(10, second.Data.Value);
             CollectionAssert.AreEqual(
                 new[] { ("id", (object)7L) },
                 transport.WatchedRows);
+        }
+
+        [Test]
+        public void WatchRow_PendingDuplicate_EachWaiterGetsOwnHandle()
+        {
+            var transport = new FakeTransport("c1") { HoldWatchCallbacks = true };
+            transport.RowResults[("id", 7L)] =
+                new TestComponent { ID = 7, Value = 10 };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                new FakeScheduler());
+            session.Start();
+            transport.RaiseConnected();
+
+            RowSubscription<TestComponent> first = null;
+            RowSubscription<TestComponent> second = null;
+            session.WatchRow<TestComponent>("id", 7L, null,
+                sub => first = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRow<TestComponent>("id", 7L, null,
+                sub => second = sub,
+                _ => Assert.Fail("watch should not fail"));
+            Assert.AreEqual(1, transport.HeldWatchCount, "在飞的同一订阅只派发一次");
+            transport.ReleaseHeldWatches(false);
+
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.AreNotSame(first, second);
+            first.Dispose();
+            Assert.IsFalse(second.IsDisposed, "一个等待方 Dispose 不能退掉另一个");
+        }
+
+        [Test]
+        public void WatchRow_DisposeOneHandle_OtherStillRestoredAfterReconnect()
+        {
+            var first = new FakeTransport("c1");
+            first.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 20 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            RowSubscription<TestComponent> a = null;
+            RowSubscription<TestComponent> b = null;
+            session.WatchRow<TestComponent>("id", 7L, null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRow<TestComponent>("id", 7L, null, sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+            var bResynced = 0;
+            b.OnResynced += () => bResynced++;
+
+            a.Dispose();
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            Assert.IsFalse(b.IsDisposed);
+            Assert.IsFalse(b.IsStale);
+            Assert.AreEqual(20, b.Data.Value);
+            Assert.AreEqual(1, bResynced);
+            CollectionAssert.AreEqual(
+                new[] { ("id", (object)7L) },
+                second.WatchedRows);
+        }
+
+        [Test]
+        public void WatchRow_DisposeOneHandleWhileDisconnected_OtherStillRestored()
+        {
+            var first = new FakeTransport("c1");
+            first.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 20 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            RowSubscription<TestComponent> a = null;
+            RowSubscription<TestComponent> b = null;
+            session.WatchRow<TestComponent>("id", 7L, null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRow<TestComponent>("id", 7L, null, sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            first.RaiseClosed("network lost");
+            a.Dispose();
+            Assert.IsTrue(b.IsStale, "另一个句柄仍在等重连");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.IsFalse(b.IsDisposed);
+            Assert.IsFalse(b.IsStale);
+            Assert.AreEqual(20, b.Data.Value);
+            Assert.AreEqual(1, second.WatchedRows.Count);
+        }
+
+        [Test]
+        public void WatchRow_DisposeEveryHandle_NotRestoredAfterReconnect()
+        {
+            var first = new FakeTransport("c1");
+            first.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var second = new FakeTransport("c2");
+            second.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 20 };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            RowSubscription<TestComponent> a = null;
+            RowSubscription<TestComponent> b = null;
+            session.WatchRow<TestComponent>("id", 7L, null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRow<TestComponent>("id", 7L, null, sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            a.Dispose();
+            b.Dispose();
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.AreEqual(0, second.WatchedRows.Count);
+        }
+
+        [Test]
+        public void WatchRange_DisposeOneHandle_OtherStillRestoredAfterReconnect()
+        {
+            var key = ("value", (object)0, (object)10, 10, false, true);
+            var first = new FakeTransport("c1");
+            first.RangeResults[key] = new List<TestComponent>
+            {
+                new() { ID = 2, Value = 2 }
+            };
+            var second = new FakeTransport("c2");
+            second.RangeResults[key] = new List<TestComponent>
+            {
+                new() { ID = 2, Value = 20 }
+            };
+            var scheduler = new FakeScheduler();
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { first, second }),
+                scheduler);
+            session.Start();
+            first.RaiseConnected();
+
+            IndexSubscription<TestComponent> a = null;
+            IndexSubscription<TestComponent> b = null;
+            session.WatchRange<TestComponent>("value", 0, 10, 10, null,
+                sub => a = sub, _ => Assert.Fail("watch should not fail"));
+            session.WatchRange<TestComponent>("value", 0, 10, 10, null,
+                sub => b = sub, _ => Assert.Fail("watch should not fail"));
+            var bUpdates = new List<long>();
+            b.OnUpdate += (_, id) => bUpdates.Add(id);
+
+            a.Dispose();
+            first.RaiseClosed("network lost");
+            scheduler.RunNext();
+            second.RaiseConnected();
+
+            Assert.IsFalse(b.IsDisposed);
+            Assert.AreEqual(20, b.Rows[2].Value);
+            CollectionAssert.AreEqual(new long[] { 2 }, bUpdates);
+            Assert.AreEqual(1, second.WatchedRanges.Count);
+        }
+
+        [Test]
+        public void Close_DisposesEveryHandle()
+        {
+            var transport = new FakeTransport("c1");
+            transport.RowResults[("id", 7L)] = new TestComponent { ID = 7, Value = 10 };
+            var session = CreateSession(
+                new Queue<FakeTransport>(new[] { transport }),
+                new FakeScheduler());
+            session.Start();
+            transport.RaiseConnected();
+
+            RowSubscription<TestComponent> a = null;
+            RowSubscription<TestComponent> b = null;
+            session.WatchRow<TestComponent>("id", 7L, null, sub => a = sub,
+                _ => Assert.Fail("watch should not fail"));
+            session.WatchRow<TestComponent>("id", 7L, null, sub => b = sub,
+                _ => Assert.Fail("watch should not fail"));
+
+            session.Close();
+
+            Assert.IsTrue(a.IsDisposed);
+            Assert.IsTrue(b.IsDisposed);
         }
 
         [Test]
@@ -487,7 +683,7 @@ namespace Tests.HeTu
         }
 
         [Test]
-        public void WatchRange_WithSameSubId_ReturnsSameSubscription()
+        public void WatchRange_WithSameSubId_ReturnsOwnHandleSharingOneWatch()
         {
             var transport = new FakeTransport("c1");
             transport.RangeResults[("value", 0, 10, 10, false, true)] =
@@ -516,7 +712,7 @@ namespace Tests.HeTu
 
             Assert.NotNull(first);
             Assert.NotNull(second);
-            Assert.AreSame(first, second);
+            Assert.AreNotSame(first, second);
             Assert.AreEqual(1, first.Rows.Count);
             Assert.AreEqual(1, transport.WatchedRanges.Count);
         }
@@ -689,7 +885,7 @@ namespace Tests.HeTu
         }
 
         [Test]
-        public void WatchTable_WithSameComponent_ReturnsSameSubscription()
+        public void WatchTable_WithSameComponent_ReturnsOwnHandleSharingOneWatch()
         {
             var first = new FakeTransport("c1");
             first.TableResults["TestComponent"] = new List<TestComponent>
@@ -710,7 +906,7 @@ namespace Tests.HeTu
                 _ => Assert.Fail("watch should not fail"));
 
             Assert.IsNotNull(a);
-            Assert.AreSame(a, b);
+            Assert.AreNotSame(a, b);
             Assert.AreEqual(1, first.WatchedTables.Count);
         }
 
