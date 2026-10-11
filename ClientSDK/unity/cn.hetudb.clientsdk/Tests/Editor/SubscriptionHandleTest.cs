@@ -249,6 +249,22 @@ namespace Tests.HeTu
             Assert.AreEqual(1, client.CountSent("unsub"));
         }
 
+        [Test]
+        public void Dispose_UserDisposableThrows_StillReleasesHandle()
+        {
+            // DisposeBag 里用户挂的东西 Dispose 时抛异常，句柄也要交回，不然订阅永远退不掉
+            var client = HandleTestClient.Connected();
+            var row = client.WatchRow(Row(7, 10));
+            row.DisposeBag.Add(new ThrowingDisposable());
+            var range = client.WatchRange(Row(7, 10));
+            range.DisposeBag.Add(new ThrowingDisposable());
+
+            Assert.Throws<InvalidOperationException>(row.Dispose);
+            Assert.Throws<InvalidOperationException>(range.Dispose);
+
+            Assert.AreEqual(2, client.CountSent("unsub"), "抛异常也要退订");
+        }
+
         // 以下是"有 sub 在途时退订"的竞态：服务端对同一连接的重复订阅回同一个 sub_id、不计数，
         // 在途的 sub 若落到要退的订阅上，先发出的 unsub 会把它一起退掉（服务端先处理完 sub 时
         // 客户端拿到一个服务端已没有的订阅；先处理 unsub 时回 null）。unsub 要等在途的 sub 回完。
@@ -371,6 +387,11 @@ namespace Tests.HeTu
             {
                 "updt", subId, new Dictionary<long, object> { [rowId] = row }
             };
+
+        private sealed class ThrowingDisposable : IDisposable
+        {
+            public void Dispose() => throw new InvalidOperationException("boom");
+        }
 
         private sealed class HandleTestClient : HeTuClientBase
         {
