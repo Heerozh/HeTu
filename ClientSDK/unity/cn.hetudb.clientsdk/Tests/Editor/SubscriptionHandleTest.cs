@@ -318,6 +318,72 @@ namespace Tests.HeTu
             Assert.AreEqual(1, client.CountSent("unsub"));
         }
 
+        [Test]
+        public void RowRestore_SameSubIdAlreadyWatchedByRawClient_HandlesKeepUpdating()
+        {
+            // 重连后、会话恢复前，有人用裸客户端订了同一行：表里已有一个核心。会话的核心不能
+            // 就此停在 stale，两边的句柄都要继续收推送，全部释放后才退订
+            var client = HandleTestClient.Connected();
+            var raw = client.WatchRow(Row(7, 20));
+            var core = new ManagedRowCore<DictComponent>(RowSubId, "Item",
+                Dict(Row(7, 10)), client, null);
+            var sess = core.CreateHandle(null);
+            core.Suspend();
+            var resynced = 0;
+            sess.OnResynced += () => resynced++;
+            ManagedRowCore<DictComponent> restored = null;
+
+            client.WatchRowCoreSync<DictComponent>("id", 7L, (c, _, _) => restored = c,
+                "Item", core, null);
+
+            Assert.AreSame(core, restored, "会话的核心恢复后仍是同一个");
+            Assert.IsFalse(sess.IsStale);
+            Assert.AreEqual(20, Value(sess.Data));
+            Assert.AreEqual(1, resynced);
+            client.Receive(Update(RowSubId, 7, Row(7, 30)));
+            Assert.AreEqual(30, Value(sess.Data));
+            Assert.AreEqual(30, Value(raw.Data));
+            sess.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            raw.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
+        [Test]
+        public void RangeRestore_ReplyFindsCoreFromEarlierRawWatch_HandlesKeepUpdating()
+        {
+            // 裸客户端的订阅先发、恢复后发，裸的回复先到登记了核心，恢复的回复到达时撞上它
+            var client = HandleTestClient.Connected();
+            IndexSubscription<DictComponent> raw = null;
+            client.WatchRangeSync<DictComponent>("owner", 1L, 1L, 10, (s, _, _) => raw = s,
+                componentName: "Item");
+            var core = new ManagedIndexCore<DictComponent>(RangeSubId, "Item",
+                new List<DictComponent> { Dict(Row(7, 10)) }, client, null);
+            core.ConfigureRestoreQuery("owner", 1L, 1L, 10, false, true);
+            var sess = core.CreateHandle(null);
+            core.Suspend();
+            ManagedIndexCore<DictComponent> restored = null;
+            client.WatchRangeCoreSync<DictComponent>("owner", 1L, 1L, 10,
+                (c, _, _) => restored = c, false, true, "Item", core, null);
+
+            var rows = new[] { Row(7, 20), Row(8, 1) };
+            client.Receive(new object[] { "sub", RangeSubId, rows });
+            var rawRow8 = new List<int>();
+            raw.ObserveRow(8).Subscribe(r => rawRow8.Add(Value(r)));
+            client.Receive(new object[] { "sub", RangeSubId, rows });
+
+            Assert.AreSame(core, restored);
+            Assert.IsFalse(sess.IsStale);
+            Assert.AreEqual(20, Value(sess.Rows[7]));
+            client.Receive(Update(RangeSubId, 8, Row(8, 2)));
+            Assert.AreEqual(2, Value(sess.Rows[8]));
+            CollectionAssert.AreEqual(new[] { 2 }, rawRow8, "裸句柄已有的行流不能断");
+            sess.Dispose();
+            Assert.AreEqual(0, client.CountSent("unsub"));
+            raw.Dispose();
+            Assert.AreEqual(1, client.CountSent("unsub"));
+        }
+
         // 以下是"有 sub 在途时退订"的竞态：服务端对同一连接的重复订阅回同一个 sub_id、不计数，
         // 在途的 sub 若落到要退的订阅上，先发出的 unsub 会把它一起退掉（服务端先处理完 sub 时
         // 客户端拿到一个服务端已没有的订阅；先处理 unsub 时回 null）。unsub 要等在途的 sub 回完。
