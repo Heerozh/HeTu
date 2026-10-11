@@ -182,6 +182,34 @@ async def test_subscribe_get_by_id(
     assert "_version" not in row
 
 
+async def test_subscribe_get_repeat_by_other_index_no_warning(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
+):
+    """
+    按非 id 索引订阅落到已订阅的行：客户端事先不知道会落到哪一行，拦不住（SDK 允许多处订阅同一
+    行，各拿各的句柄），不算客户端代码的问题，不打警告。按 id 重复订阅客户端拦得住，照旧警告
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_id, row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        sub_id2, row2 = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        assert sub_id and row
+        assert sub_id2 == sub_id and row2
+        assert not [r for r in caplog.records if sub_id in r.getMessage()]
+
+        sub_id3, _ = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row["id"]
+        )
+    assert sub_id3 == sub_id
+    warns = [r for r in caplog.records if sub_id in r.getMessage()]
+    assert len(warns) == 1, [r.getMessage() for r in warns]
+
+
 async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     """测试range订阅的返回值，和订阅管理器的私有值是否正常"""
     sub_id, rows = await broker.subscribe_range(
