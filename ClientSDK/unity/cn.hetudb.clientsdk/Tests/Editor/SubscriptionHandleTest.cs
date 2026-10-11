@@ -19,6 +19,16 @@ namespace Tests.HeTu
         public void SilenceLogger() =>
             Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
 
+        // 测试里没 Dispose 的订阅在这里就回收：终结器的泄漏日志落在本测试里（先静默 logger），
+        // 不会在之后别的测试（如 LoggerTest 接住日志断言时）冒出来
+        [TearDown]
+        public void CollectUndisposedSubscriptions()
+        {
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
         [Test]
         public void WatchRow_SameRowTwice_EachCallerGetsOwnHandle()
         {
