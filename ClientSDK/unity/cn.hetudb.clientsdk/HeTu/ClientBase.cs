@@ -148,6 +148,13 @@ namespace HeTu
         // 本连接上一个 rpcs 的 sync_id：按连接递增，重连归零（服务端只收 0..int.MaxValue）
         private int _syncSeq;
 
+        // 已发出、还没收到回复的 sub 请求数。服务端对同一连接的重复订阅回同一个 sub_id、
+        // 不计数，一条 unsub 就删：在途的 sub 可能落到要退的订阅上（按非 id 索引的 WatchRow
+        // 事先算不出 sub_id），这时发出 unsub 会把它一起退掉。所以 unsub 只在没有 sub 在途时
+        // 才发，否则先挂在 _pendingUnsubs，等在途的 sub 都回复了再决定（FlushPendingUnsubs）。
+        private int _inFlightSubs;
+        private readonly List<(string SubId, string From)> _pendingUnsubs = new();
+
         /// <summary>
         ///     System 调用的本地回调表。也就是System对应的客户端逻辑。
         ///     Key 为系统名，Value 为调用时同步触发的回调。
@@ -235,6 +242,10 @@ namespace HeTu
         // 实际往ws发送数据的方法
         protected abstract void SendCore(byte[] data);
 
+        // 在本客户端的协议线程上执行 action：订阅表、共享核心、挂起的 unsub 等只能在那条线程上
+        // 动。默认就地执行（Unity 只在主线程上用）；Headless 投到泵线程。
+        internal virtual void RunSerialized(Action action) => action();
+
         /// <summary>
         ///     配置消息处理管道。要和你的河图服务器中的配置一致
         /// </summary>
@@ -267,8 +278,10 @@ namespace HeTu
             // 前置清理
             Logger.Instance.Info($"正在连接到：{url}...");
             Subscriptions.Clean();
+            _pendingUnsubs.Clear();
             FinishPushCallsOnClose();
             ResponseQueue.CancelAll("重新连接");
+            _inFlightSubs = 0;
             _pendingPushCalls.Clear();
             _syncSeq = 0;
             LastCloseCode = 0;
@@ -315,6 +328,7 @@ namespace HeTu
             State = ConnectionState.Disconnected;
             LastCloseCode = code;
             Subscriptions.Clean();
+            _pendingUnsubs.Clear();
             if (code == HeTuCloseCode.Kicked)
                 Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
             else if (errMsg == null)
@@ -345,7 +359,9 @@ namespace HeTu
         {
             Logger.Instance.Info("主动调用了Close");
             FinishPushCallsOnClose();
+            _pendingUnsubs.Clear();
             ResponseQueue.CancelAll("主动调用了Close");
+            _inFlightSubs = 0;
             Subscriptions.Clean();
             CloseCore();
         }
@@ -539,33 +555,28 @@ namespace HeTu
             Type expectedComponentType) =>
             $"[HeTuClient] 已订阅该数据，但之前订阅使用的是{actualType}类型，你不能再用{expectedComponentType}类型订阅了";
 
-        private static TSubscription CastSubscriptionOrThrow<TSubscription, TComponent>(
-            BaseSubscription subscribed)
-            where TSubscription : BaseSubscription
+        private bool TryGetExistingCore<TCore, TComponent>(string subId,
+            out TCore core)
+            where TCore : ManagedSubscriptionCore
             where TComponent : IBaseComponent
         {
-            if (subscribed is TSubscription casted)
-                return casted;
-
-            throw new InvalidCastException(
-                BuildSubscriptionTypeMismatchMessage(subscribed.GetType(),
-                    typeof(TComponent)));
-        }
-
-        private bool TryGetExistingSubscription<TSubscription, TComponent>(string subId,
-            out TSubscription subscription)
-            where TSubscription : BaseSubscription
-            where TComponent : IBaseComponent
-        {
-            subscription = null;
+            core = null;
             if (!Subscriptions.TryGet(subId, out var existing))
                 return false;
+            // 已退订的核心不能再发句柄（正常路径上退订时已从表里移除，这里兜底）
+            if (existing.IsClosed)
+            {
+                Subscriptions.Remove(existing.SubId);
+                return false;
+            }
 
-            subscription = CastSubscriptionOrThrow<TSubscription, TComponent>(existing);
+            core = existing as TCore ?? throw new InvalidCastException(
+                BuildSubscriptionTypeMismatchMessage(existing.GetType(),
+                    typeof(TComponent)));
             return true;
         }
 
-        private static StackTrace CaptureCreationTrace()
+        internal static StackTrace CaptureCreationTrace()
         {
 #if DEBUG
             return new StackTrace(1, true);
@@ -595,8 +606,25 @@ namespace HeTu
         public void WatchRowSync<T>(
             string index, object value,
             Action<RowSubscription<T>, bool, Exception> onResponse,
-            string componentName = null,
-            RowSubscription<T> reusable = null)
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            // 每个调用方发一个自己的句柄，同一订阅的句柄共用一个核心
+            var creationTrace = CaptureCreationTrace();
+            WatchRowCoreSync<T>(index, value,
+                (core, canceled, ex) =>
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                componentName, null, creationTrace);
+        }
+
+        // 核心级的 WatchRow：已订阅过就回已有的核心，否则发 sub、建核心并登记。回调拿到的
+        // 核心可能还没有句柄，由调用方发句柄。reusable：会话恢复时把回复绑回原来的核心。
+        internal void WatchRowCoreSync<T>(
+            string index, object value,
+            Action<ManagedRowCore<T>, bool, Exception> onResponse,
+            string componentName,
+            ManagedRowCore<T> reusable,
+            StackTrace creationTrace)
             where T : IBaseComponent
         {
             if (!EnsureConnected("WatchRowSync"))
@@ -610,21 +638,19 @@ namespace HeTu
             if (index == IndexId)
             {
                 var predictID = MakeSubId(componentName, IndexId, value, null, 1, false);
-                if (TryGetExistingSubscription<RowSubscription<T>, T>(predictID,
-                        out var existingRowSubscription))
+                if (TryGetExistingCore<ManagedRowCore<T>, T>(predictID,
+                        out var existingCore) && existingCore != reusable)
                 {
-                    onResponse(existingRowSubscription, false, null);
+                    onResponse(TakeOver(reusable, existingCore), false, null);
                     return;
                 }
             }
-
-            var creationTrace = CaptureCreationTrace();
 
             // 向服务器订阅
             var payload = new[] { CommandSub, componentName, QueryGet, index, value };
             var traceId = InspectorCollector.InterceptRequest(QueryGet, componentName,
                 payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -633,36 +659,32 @@ namespace HeTu
                     return;
                 }
 
-                RowSubscription<T> rowSubscription = null;
+                ManagedRowCore<T> rowCore = null;
                 try
                 {
                     var subID = (string)response[1];
-                    // 如果查询到值
-                    if (subID != null)
+                    // 如果查询到值；依然是重复订阅时沿用已有的核心
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             TryGetExistingCore<ManagedRowCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        rowCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
-                        // 如果依然是重复订阅，直接返回副本
-                        if (TryGetExistingSubscription<RowSubscription<T>, T>(subID,
-                                out var existingSubscription))
+                        var data = ((JsonObject)response[2]).To<T>();
+                        if (reusable == null)
                         {
-                            rowSubscription = existingSubscription;
+                            rowCore = new ManagedRowCore<T>(
+                                subID, componentName, data, this, creationTrace);
                         }
                         else
                         {
-                            var data = ((JsonObject)response[2]).To<T>();
-                            // ReSharper disable once NotDisposedResource
-                            if (reusable == null)
-                            {
-                                rowSubscription = new RowSubscription<T>(
-                                    subID, componentName, data, this, creationTrace);
-                            }
-                            else
-                            {
-                                reusable.Rebind(subID, data, this);
-                                rowSubscription = reusable;
-                            }
-
-                            Subscriptions.Add(subID, rowSubscription);
+                            reusable.Rebind(subID, data, this);
+                            rowCore = reusable;
                         }
+
+                        Subscriptions.Add(subID, rowCore);
                     }
                 }
                 catch (Exception ex)
@@ -675,7 +697,7 @@ namespace HeTu
                 var responsePayload = response.Length > 2 ? response[2] : null;
                 InspectorCollector.CompleteRequest(traceId, "completed",
                     responsePayload);
-                onResponse(rowSubscription, false, null);
+                onResponse(rowCore, false, null);
             }, traceId);
         }
 
@@ -713,8 +735,24 @@ namespace HeTu
             string index, object left, object right, int limit,
             Action<IndexSubscription<T>, bool, Exception> onResponse,
             bool desc = false, bool force = true,
-            string componentName = null,
-            IndexSubscription<T> reusable = null)
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            var creationTrace = CaptureCreationTrace();
+            WatchRangeCoreSync<T>(index, left, right, limit,
+                (core, canceled, ex) =>
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                desc, force, componentName, null, creationTrace);
+        }
+
+        // 核心级的 WatchRange，见 WatchRowCoreSync
+        internal void WatchRangeCoreSync<T>(
+            string index, object left, object right, int limit,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
+            bool desc, bool force,
+            string componentName,
+            ManagedIndexCore<T> reusable,
+            StackTrace creationTrace)
             where T : IBaseComponent
         {
             if (!EnsureConnected("WatchRangeSync"))
@@ -728,14 +766,12 @@ namespace HeTu
             // 先要组合sub_id看看是否已订阅过
             var predictID = MakeSubId(
                 componentName, index, left, right, limit, desc);
-            if (TryGetExistingSubscription<IndexSubscription<T>, T>(predictID,
-                    out var existingIndexSubscription))
+            if (TryGetExistingCore<ManagedIndexCore<T>, T>(predictID,
+                    out var existingCore) && existingCore != reusable)
             {
-                onResponse(existingIndexSubscription, false, null);
+                onResponse(TakeOver(reusable, existingCore), false, null);
                 return;
             }
-
-            var creationTrace = CaptureCreationTrace();
 
             // 发送订阅请求
             var payload = new[]
@@ -745,7 +781,7 @@ namespace HeTu
             };
             var traceId = InspectorCollector.InterceptRequest(QueryRange,
                 componentName, payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -754,40 +790,40 @@ namespace HeTu
                     return;
                 }
 
-                IndexSubscription<T> idxSubscription = null;
+                ManagedIndexCore<T> idxCore = null;
                 try
                 {
                     var subID = (string)response[1];
-                    // 如果查询到值
-                    if (subID != null)
+                    // 如果查询到值；依然是重复订阅时沿用已有的核心
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        idxCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
-                        // 如果依然是重复订阅，直接返回副本
-                        if (TryGetExistingSubscription<IndexSubscription<T>, T>(subID,
-                                out var existingSubscription))
+                        var rawRows = (JsonObject)response[2];
+                        var rows = rawRows.ToList<T>();
+                        if (reusable == null)
                         {
-                            idxSubscription = existingSubscription;
+                            idxCore = new ManagedIndexCore<T>(
+                                subID, componentName, rows, this, creationTrace);
                         }
                         else
                         {
-                            var rawRows = (JsonObject)response[2];
-                            var rows = rawRows.ToList<T>();
-                            // ReSharper disable once NotDisposedResource
-                            if (reusable == null)
-                            {
-                                idxSubscription = new IndexSubscription<T>(
-                                    subID, componentName, rows, this, creationTrace);
-                            }
-                            else
-                            {
-                                reusable.Rebind(subID, rows, this);
-                                idxSubscription = reusable;
-                            }
-
-                            idxSubscription.ConfigureRestoreQuery(
-                                index, left, right, limit, desc, force);
-                            Subscriptions.Add(subID, idxSubscription);
+                            reusable.Rebind(subID, rows, this);
+                            idxCore = reusable;
                         }
+
+                        idxCore.ConfigureRestoreQuery(
+                            index, left, right, limit, desc, force);
+                        Subscriptions.Add(subID, idxCore);
                     }
+
+                    // 客户端拼的 predictID 可能和服务端的 sub_id 格式不同，记下来供下次查重
+                    if (idxCore != null)
+                        Subscriptions.AddAlias(predictID, subID);
                 }
                 catch (Exception ex)
                 {
@@ -799,7 +835,7 @@ namespace HeTu
                 var responsePayload = response.Length > 2 ? response[2] : null;
                 InspectorCollector.CompleteRequest(traceId, "completed",
                     responsePayload);
-                onResponse(idxSubscription, false, null);
+                onResponse(idxCore, false, null);
             }, traceId);
         }
 
@@ -835,8 +871,22 @@ namespace HeTu
         /// <param name="componentName">组件名；为空时取 <typeparamref name="T" /> 类型名。</param>
         public void WatchTableSync<T>(
             Action<IndexSubscription<T>, bool, Exception> onResponse,
-            string componentName = null,
-            IndexSubscription<T> reusable = null)
+            string componentName = null)
+            where T : IBaseComponent
+        {
+            var creationTrace = CaptureCreationTrace();
+            WatchTableCoreSync<T>(
+                (core, canceled, ex) =>
+                    onResponse(core?.CreateHandle(creationTrace), canceled, ex),
+                componentName, null, creationTrace);
+        }
+
+        // 核心级的 WatchTable，见 WatchRowCoreSync
+        internal void WatchTableCoreSync<T>(
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
+            string componentName,
+            ManagedIndexCore<T> reusable,
+            StackTrace creationTrace)
             where T : IBaseComponent
         {
             if (!EnsureConnected("WatchTableSync"))
@@ -849,20 +899,18 @@ namespace HeTu
 
             // 先要组合sub_id看看是否已订阅过
             var predictID = MakeTableSubId(componentName);
-            if (TryGetExistingSubscription<IndexSubscription<T>, T>(predictID,
-                    out var existingTableSubscription))
+            if (TryGetExistingCore<ManagedIndexCore<T>, T>(predictID,
+                    out var existingCore) && existingCore != reusable)
             {
-                onResponse(existingTableSubscription, false, null);
+                onResponse(TakeOver(reusable, existingCore), false, null);
                 return;
             }
-
-            var creationTrace = CaptureCreationTrace();
 
             // 发送订阅请求
             var payload = new object[] { CommandSub, componentName, QueryTable };
             var traceId = InspectorCollector.InterceptRequest(QueryTable,
                 componentName, payload);
-            SendRequest(payload, (response, cancel) =>
+            SendSubRequest(payload, (response, cancel) =>
             {
                 if (cancel)
                 {
@@ -871,38 +919,34 @@ namespace HeTu
                     return;
                 }
 
-                IndexSubscription<T> tblSubscription = null;
+                ManagedIndexCore<T> tblCore = null;
                 try
                 {
                     var subID = (string)response[1];
-                    // 无权限或行数超限时服务端返回null
-                    if (subID != null)
+                    // 无权限或行数超限时服务端返回null；依然是重复订阅时沿用已有的核心
+                    if (subID != null && reusable is { IsClosed: true })
+                        DropClosedRestore(subID);
+                    else if (subID != null &&
+                             TryGetExistingCore<ManagedIndexCore<T>, T>(subID,
+                                 out var existingCore) && existingCore != reusable)
+                        tblCore = TakeOver(reusable, existingCore);
+                    else if (subID != null)
                     {
-                        // 如果依然是重复订阅，直接返回副本
-                        if (TryGetExistingSubscription<IndexSubscription<T>, T>(subID,
-                                out var existingSubscription))
+                        var rawRows = (JsonObject)response[2];
+                        var rows = rawRows.ToList<T>();
+                        if (reusable == null)
                         {
-                            tblSubscription = existingSubscription;
+                            tblCore = new ManagedIndexCore<T>(
+                                subID, componentName, rows, this, creationTrace);
                         }
                         else
                         {
-                            var rawRows = (JsonObject)response[2];
-                            var rows = rawRows.ToList<T>();
-                            // ReSharper disable once NotDisposedResource
-                            if (reusable == null)
-                            {
-                                tblSubscription = new IndexSubscription<T>(
-                                    subID, componentName, rows, this, creationTrace);
-                            }
-                            else
-                            {
-                                reusable.Rebind(subID, rows, this);
-                                tblSubscription = reusable;
-                            }
-
-                            tblSubscription.ConfigureRestoreTable();
-                            Subscriptions.Add(subID, tblSubscription);
+                            reusable.Rebind(subID, rows, this);
+                            tblCore = reusable;
                         }
+
+                        tblCore.ConfigureRestoreTable();
+                        Subscriptions.Add(subID, tblCore);
                     }
                 }
                 catch (Exception ex)
@@ -915,7 +959,7 @@ namespace HeTu
                 var responsePayload = response.Length > 2 ? response[2] : null;
                 InspectorCollector.CompleteRequest(traceId, "completed",
                     responsePayload);
-                onResponse(tblSubscription, false, null);
+                onResponse(tblCore, false, null);
             }, traceId);
         }
 
@@ -928,7 +972,11 @@ namespace HeTu
             WatchTableSync(onResponse, componentName);
 
         /// <summary>
-        ///     取消指定订阅。
+        ///     取消指定订阅。有订阅请求还没收到回复时，unsub 推迟到它们都回复之后再发；
+        ///     期间同一 sub_id 又被订上的话就不发了。
+        ///     If subscribe requests are still awaiting replies, the unsub is deferred
+        ///     until they are answered, and dropped if the same sub_id got subscribed
+        ///     again meanwhile.
         /// </summary>
         /// <param name="subID">订阅 ID。</param>
         /// <param name="from">取消来源说明（用于日志）。</param>
@@ -936,13 +984,122 @@ namespace HeTu
         {
             if (!Subscriptions.Contains(subID)) return;
             Subscriptions.Remove(subID);
+            UnsubscribeRemote(subID, from);
+        }
+
+        // 会话恢复（reusable）撞上表里同 sub_id 的另一个核心 existing（重连后、恢复前有人用
+        // 裸 HeTuClient 订了同一订阅）：两者对应服务端同一个订阅。用 existing 的数据重绑
+        // reusable（它的句柄收到差异和 OnResynced），并入 existing 的句柄（看到的数据不变），
+        // 登记 reusable 取代它，会话的核心实例不变。不是恢复时照常沿用已有的核心
+        private ManagedRowCore<T> TakeOver<T>(ManagedRowCore<T> reusable,
+            ManagedRowCore<T> existing)
+            where T : IBaseComponent
+        {
+            if (reusable == null)
+                return existing;
+            if (reusable.IsClosed)
+                return null;
+            reusable.Rebind(existing.SubId, existing.Data, this);
+            reusable.AbsorbHandlesFrom(existing);
+            Subscriptions.Add(existing.SubId, reusable);
+            return reusable;
+        }
+
+        private ManagedIndexCore<T> TakeOver<T>(ManagedIndexCore<T> reusable,
+            ManagedIndexCore<T> existing)
+            where T : IBaseComponent
+        {
+            if (reusable == null)
+                return existing;
+            if (reusable.IsClosed)
+                return null;
+            reusable.Rebind(existing.SubId, existing.Rows.Values.ToList(), this);
+            reusable.AbsorbHandlesFrom(existing);
+            Subscriptions.Add(existing.SubId, reusable);
+            return reusable;
+        }
+
+        // 恢复的 sub 在途时，核心的最后一个句柄已 Dispose（当时 stale，没发 unsub）：回复不登记、
+        // 不算恢复成功；这次恢复让服务端又订上了，表里没有别的核心持有这个 sub_id 就退掉
+        private void DropClosedRestore(string subID)
+        {
+            if (!Subscriptions.Contains(subID))
+                UnsubscribeRemote(subID, "Dispose");
+        }
+
+        private void UnsubscribeRemote(string subID, string from)
+        {
             if (State != ConnectionState.Connected)
                 return;
+            if (_inFlightSubs > 0)
+            {
+                // 有 sub 在途，它可能落到这个订阅上：等它回复后再决定发不发
+                if (!_pendingUnsubs.Exists(p => p.SubId == subID))
+                    _pendingUnsubs.Add((subID, from));
+                return;
+            }
+
+            SendUnsub(subID, from);
+        }
+
+        private void SendUnsub(string subID, string from)
+        {
+            // 同一 sub_id 若还挂着一条（在途回复落到它上面后又被当场退订），这条发了它就不用再发
+            _pendingUnsubs.RemoveAll(p => p.SubId == subID);
             var payload = new object[] { CommandUnsub, subID };
             var traceId = InspectorCollector.InterceptRequest(CommandUnsub, subID,
                 payload, InspectorTraceCompletionMode.AfterSend);
             SendRequest(payload, null, traceId);
             Logger.Instance.Info($"因BaseSubscription {from}，已取消订阅 {subID}");
+        }
+
+        // 发 sub 请求：计入在途数；回复（或取消）处理完后看看挂着的 unsub 能不能发
+        private void SendSubRequest(object payload, ResponseManager.Callback callback,
+            string traceId)
+        {
+            SendRequest(payload, (response, cancel) =>
+            {
+                // 重连 / Close 时计数已归零，那之后才回调的不再减成负数
+                if (_inFlightSubs > 0)
+                    _inFlightSubs--;
+                try
+                {
+                    callback(response, cancel);
+                }
+                finally
+                {
+                    FlushPendingUnsubs();
+                }
+            }, traceId);
+            // 编码失败时 SendRequest 直接抛出、回调不会登记，所以发出去了才计数
+            _inFlightSubs++;
+        }
+
+        // 在途的 sub 都回复了：挂着的 unsub 里，sub_id 又被登记了的（在途的回复落到了它上面，
+        // 服务端那边还订着）丢掉，其余发出
+        private void FlushPendingUnsubs()
+        {
+            if (_inFlightSubs > 0 || _pendingUnsubs.Count == 0)
+                return;
+            var pending = _pendingUnsubs.ToArray();
+            _pendingUnsubs.Clear();
+            if (State != ConnectionState.Connected)
+                return;
+            foreach (var (subID, from) in pending)
+            {
+                if (!Subscriptions.Contains(subID))
+                    SendUnsub(subID, from);
+            }
+        }
+
+        // 核心的最后一个句柄 Dispose 时调用：只退登记着的这个核心。旧连接留下的核心晚些
+        // 才 Dispose 时，表里同 sub_id 的可能已是重连后新订的，不能把它退掉。
+        internal void Unsubscribe(ManagedSubscriptionCore core)
+        {
+            if (!Subscriptions.TryGet(core.SubId, out var registered) ||
+                registered != core)
+                return;
+            Unsubscribe(core.SubId, "Dispose");
         }
 
         protected virtual void OnReceived(byte[] buffer)

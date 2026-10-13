@@ -11,6 +11,16 @@ namespace Tests.HeTu
     [TestFixture]
     public sealed class SubscriptionTest
     {
+        // 测试里没 Dispose 的订阅在这里就回收：终结器的泄漏日志落在本测试里（先静默 logger），
+        // 不会在之后别的测试（如 LoggerTest 接住日志断言时）冒出来
+        [TearDown]
+        public void CollectUndisposedSubscriptions()
+        {
+            Logger.Instance.SetLogger(_ => { }, _ => { }, _ => { });
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+        }
+
         [Test]
         public void RowSubscription_Rebind_FiresOnUpdateWithNewData()
         {
@@ -194,6 +204,7 @@ namespace Tests.HeTu
                 new List<TestRow> { new() { ID = 1, Value = 1 } },
                 client);
 
+            sub.ObserveRow(1);
             var subjectForRow1 = GetReplaceSubject(sub, 1L);
 
             sub.Update(1, null);
@@ -201,6 +212,78 @@ namespace Tests.HeTu
             Assert.IsTrue(IsSubjectDisposed(subjectForRow1),
                 "Per-row Subject should be fully disposed (not just " +
                 "completed) when its row is deleted");
+        }
+
+        [Test]
+        public void UpdateFanOut_DoesNotAllocate()
+        {
+            // 推送热路径：分发给各句柄时不能每次复制句柄表、建闭包
+            var client = new StubClient();
+            var rowSub = new RowSubscription<TestRow>("sub-1", "Test",
+                new TestRow { ID = 1, Value = 1 }, client);
+            var rowOther = ((ManagedRowCore<TestRow>)rowSub.Core).CreateHandle(null);
+            var idxSub = new IndexSubscription<TestRow>("sub-2", "Test",
+                new List<TestRow> { new() { ID = 1, Value = 1 } }, client);
+            var idxOther = ((ManagedIndexCore<TestRow>)idxSub.Core).CreateHandle(null);
+            var row = new TestRow { ID = 1, Value = 2 };
+            for (var i = 0; i < 100; i++)
+            {
+                rowSub.Update(row);
+                idxSub.Update(1, row);
+            }
+
+            var before = GC.GetAllocatedBytesForCurrentThread();
+            for (var i = 0; i < 1000; i++)
+            {
+                rowSub.Update(row);
+                idxSub.Update(1, row);
+            }
+
+            var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.Less(allocated, 1000, $"2000 次更新分配了 {allocated} 字节");
+            rowOther.Dispose();
+            rowSub.Dispose();
+            idxOther.Dispose();
+            idxSub.Dispose();
+        }
+
+        [Test]
+        public void IndexSubscription_PerRowSubjects_CreatedOnlyWhenObserved()
+        {
+            // 大表 × 多个句柄时不能每行每句柄都预建 subject：只给 ObserveRow 过的行建
+            var client = new StubClient();
+            var rows = new List<TestRow>();
+            for (long id = 1; id <= 100; id++)
+                rows.Add(new TestRow { ID = id, Value = (int)id });
+            var sub = new IndexSubscription<TestRow>("sub-1", "Test", rows, client);
+            sub.Update(101, new TestRow { ID = 101, Value = 101 });
+            Assert.AreEqual(0, GetReplaceSubjectCount(sub));
+
+            var values = new List<int>();
+            sub.ObserveRow(5).Subscribe(row => values.Add(row.Value));
+            sub.Update(5, new TestRow { ID = 5, Value = 50 });
+
+            Assert.AreEqual(1, GetReplaceSubjectCount(sub));
+            CollectionAssert.AreEqual(new[] { 50 }, values);
+            Assert.Throws<KeyNotFoundException>(() => sub.ObserveRow(999),
+                "不在范围里的行照旧抛 KeyNotFound");
+        }
+
+        [Test]
+        public void IndexSubscription_OnDelete_CanStillObserveRow()
+        {
+            // OnDelete 触发时这行还在：回调里 ObserveRow 能拿到它的流，随后流会完成
+            var client = new StubClient();
+            var sub = new IndexSubscription<TestRow>("sub-1", "Test",
+                new List<TestRow> { new() { ID = 1, Value = 1 } },
+                client);
+            var completed = false;
+            sub.OnDelete += (s, id) =>
+                s.ObserveRow(id).Subscribe(_ => { }, _ => completed = true);
+
+            sub.Update(1, null);
+
+            Assert.IsTrue(completed);
         }
 
         [Test]
@@ -215,6 +298,8 @@ namespace Tests.HeTu
                 },
                 client);
 
+            sub.ObserveRow(1);
+            sub.ObserveRow(2);
             var s1 = GetReplaceSubject(sub, 1L);
             var s2 = GetReplaceSubject(sub, 2L);
 
@@ -294,6 +379,14 @@ namespace Tests.HeTu
             var dict = field!.GetValue(sub);
             var indexer = dict!.GetType().GetProperty("Item");
             return indexer!.GetValue(dict, new object[] { rowId })!;
+        }
+
+        private static int GetReplaceSubjectCount(IndexSubscription<TestRow> sub)
+        {
+            var field = typeof(IndexSubscription<TestRow>).GetField(
+                "_replaceSubjects",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            return ((ICollection)field!.GetValue(sub)!).Count;
         }
 
         private static bool IsSubjectDisposed(object subject) =>

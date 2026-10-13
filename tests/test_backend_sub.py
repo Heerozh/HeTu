@@ -1,8 +1,8 @@
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 from contextvars import ContextVar
-from typing import AsyncGenerator, cast
+from typing import cast
 from unittest.mock import patch
 
 import pytest
@@ -180,6 +180,34 @@ async def test_subscribe_get_by_id(
     assert sub_id and row
     assert row["id"] == row_id and row["time"] == 110
     assert "_version" not in row
+
+
+async def test_subscribe_get_repeat_by_other_index_no_warning(
+    broker: SubscriptionBroker, filled_item_ref, admin_ctx, caplog
+):
+    """
+    按非 id 索引订阅落到已订阅的行：客户端事先不知道会落到哪一行，拦不住（SDK 允许多处订阅同一
+    行，各拿各的句柄），不算客户端代码的问题，不打警告。按 id 重复订阅客户端拦得住，照旧警告
+    """
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="HeTu.root"):
+        sub_id, row = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        sub_id2, row2 = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "name", "Itm10"
+        )
+        assert sub_id and row
+        assert sub_id2 == sub_id and row2
+        assert not [r for r in caplog.records if sub_id in r.getMessage()]
+
+        sub_id3, _ = await broker.subscribe_get(
+            filled_item_ref, admin_ctx, "id", row["id"]
+        )
+    assert sub_id3 == sub_id
+    warns = [r for r in caplog.records if sub_id in r.getMessage()]
+    assert len(warns) == 1, [r.getMessage() for r in warns]
 
 
 async def test_subscribe_range(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
@@ -436,14 +464,10 @@ async def test_subscribe_get_rls(
     broker: SubscriptionBroker, filled_item_ref, user_id10_ctx, user_id11_ctx
 ):
     # 测试owner不符不给订阅
-    sub_id, row = await broker.subscribe_get(
-        filled_item_ref, user_id10_ctx, "time", 110
-    )
+    sub_id, _ = await broker.subscribe_get(filled_item_ref, user_id10_ctx, "time", 110)
     assert sub_id is not None
 
-    sub_id, row = await broker.subscribe_get(
-        filled_item_ref, user_id11_ctx, "time", 110
-    )
+    sub_id, _ = await broker.subscribe_get(filled_item_ref, user_id11_ctx, "time", 110)
     assert sub_id is None
 
 
@@ -502,7 +526,7 @@ async def test_query_subscribe_rls_lost(
 ):
     backend = broker._backend
 
-    sub_id, rows = await broker.subscribe_range(
+    sub_id, _ = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id
@@ -547,7 +571,7 @@ async def test_query_subscribe_rls_gain(
         row.owner = 11
         await repo.update(row)
 
-    sub_id, rows = await broker.subscribe_range(
+    sub_id, _ = await broker.subscribe_range(
         filled_item_ref, user_id10_ctx, "owner", 1, right=20, limit=55
     )
     assert sub_id

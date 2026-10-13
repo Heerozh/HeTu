@@ -543,32 +543,37 @@ namespace HeTu
         public void WatchRow<T>(
             string index,
             object value,
-            Action<RowSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            RowSubscription<T> reusable = null)
+            ManagedRowCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchRowSync(index, value, onResponse, componentName, reusable);
+            _client.WatchRowCoreSync(index, value, onResponse, componentName, reusable,
+                creationTrace);
 
         public void WatchRange<T>(
             string index,
             object left,
             object right,
             int limit,
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             bool desc = false,
             bool force = true,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchRangeSync(index, left, right, limit, onResponse,
-                desc, force, componentName, reusable);
+            _client.WatchRangeCoreSync(index, left, right, limit, onResponse,
+                desc, force, componentName, reusable, creationTrace);
 
         public void WatchTable<T>(
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchTableSync(onResponse, componentName, reusable);
+            _client.WatchTableCoreSync(onResponse, componentName, reusable,
+                creationTrace);
 
         public void Dispose()
         {
