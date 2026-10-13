@@ -602,6 +602,25 @@ async def test_pop_upcoming_call_skips_call_taken_by_other_worker(
     assert row is not None and row.scheduled > time.time() + 500
 
 
+async def test_pop_upcoming_call_skips_reread_row_not_yet_due(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """读索引时到期，读回的行却还差几十毫秒才到期（这期间按 key 的调用被 cancel 又 ensure 成
+    稍后执行）：不能取出，未来调用不能早于计划时间执行"""
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    (call,) = await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    frozen = time.time()
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    state = _take_after_index_read(monkeypatch, fc_tbl, int(call.id), lease=0.05)
+
+    assert await pop_upcoming_call(fc_tbl) is None
+    assert state["taken"]
+    row = await _get_future_row(fc_tbl, call.id)
+    assert row is not None and row.scheduled == frozen + 0.05
+
+
 async def test_exec_future_call_retries_delete_on_race(test_app, tbl_mgr, new_ctx):
     """执行成功后删行撞竞态（读到滞后副本上的旧版本，或这条刚被超时重投改了版本）：要重试删掉，
     不能把 RaceCondition 抛给任务循环（那会记一条错误、退避 1 秒，还跳过后面的收尾）"""
@@ -1098,6 +1117,30 @@ async def test_run_due_calls_retries_soon_when_due_call_taken(
     monkeypatch.setattr(time, "time", lambda: frozen)
     delay = await future.run_due_calls([fc_tbl], _task_callers(tbl_mgr))
     assert delay == pytest.approx(future.CONTENDED_RETRY_DELAY)
+
+
+async def test_run_due_calls_leaves_calls_not_yet_due(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """到期的调用叫醒 worker 时，同表里还差几十毫秒才到期的调用不能一起取出执行：目标 System
+    自己校验到点没有（如读条结束）的话，会当成没到点跳过，一次性调用执行完就删了，再没人收尾"""
+    from hetu.system import future
+
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    async with fc_tbl.session() as session:
+        soon = future._build_future_row(
+            new_ctx(), time.time() + 0.05, "add_rls_comp_value", (1,), timeout=10
+        )
+        await session.using(fc_tbl.comp_cls).insert(soon)
+    await fc_tbl.backend.wait_for_synced()
+
+    frozen = float(soon.scheduled) - 0.05
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    assert await future.run_due_calls([fc_tbl], _task_callers(tbl_mgr)) == 0
+    assert await _counter_value(tbl_mgr, test_app) == 101
+    row = await _get_future_row(fc_tbl, soon.id)
+    assert row is not None and row.scheduled == soon.scheduled and row.last_run == 0
 
 
 async def test_pop_upcoming_call_error_before_row_read(
