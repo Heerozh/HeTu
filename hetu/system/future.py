@@ -189,7 +189,9 @@ async def create_future_call(
     Notes
     -----
     * System执行时的Context是内部服务，而不是用户连接，无法获取用户ID，要自己作为参数传入
-    * 触发精度<=1秒，由每个Worker每秒运行一次循环检查并触发
+    * 不会早于at执行（按执行它的Worker的时钟），System里读到的ctx.timestamp>=at。各Worker
+      睡到最早一条到期才醒，到点即触发；新建的调用最迟约1秒后被发现，at离创建不到1秒的可能
+      晚触发最多约1秒
 
     Parameters
     ----------
@@ -387,9 +389,11 @@ async def pop_upcoming_call(tbl: Table) -> np.record | None:
     comp_cls = tbl.comp_cls
     for _attempt in range(POP_ATTEMPTS):
         now = time.time()
-        # 候选只读索引拿 id，不进事务：区间里不断有新的到期调用插进来，读进事务会反复判竞态
+        # 候选只读索引拿 id，不进事务：区间里不断有新的到期调用插进来，读进事务会反复判竞态。
+        # 只取已到期的，不往后多看：别的调用到期叫醒时会把还没到点的一起提前执行，目标 System
+        # 自己校验到点没有的话（如读条结束）会当成没到点跳过，一次性调用执行完就删，再没人收尾
         candidates = await tbl.backend.master_or_servant.range(
-            tbl, "scheduled", 0, now + 0.1, POP_CANDIDATES, False, RowFormat.ID_LIST
+            tbl, "scheduled", 0, now, POP_CANDIDATES, False, RowFormat.ID_LIST
         )
         if not candidates:
             return None
@@ -401,7 +405,7 @@ async def pop_upcoming_call(tbl: Table) -> np.record | None:
                 # 读索引和读行是两次往返，中间这条可能已被别的 worker 取走（scheduled 已顺延）
                 # 或执行完删掉了。读回的行必须仍然到期：提交时的版本校验只保证读回之后没人再改
                 # 它，拦不住读回之前就被取走的，那样两个 worker 会各执行一遍
-                if call is None or call.scheduled > now + 0.1:
+                if call is None or call.scheduled > now:
                     continue
                 if call.timeout == 0:
                     repo.delete(call.id)

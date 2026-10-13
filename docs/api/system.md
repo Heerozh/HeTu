@@ -908,7 +908,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:321`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L321)</small>
+<small>Source: [`hetu/system/future.py:323`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L323)</small>
 
 
 
@@ -1030,7 +1030,9 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 
 ### Notes
 * System执行时的Context是内部服务，而不是用户连接，无法获取用户ID，要自己作为参数传入
-* 触发精度<=1秒，由每个Worker每秒运行一次循环检查并触发
+* 不会早于at执行（按执行它的Worker的时钟），System里读到的ctx.timestamp>=at。各Worker
+  睡到最早一条到期才醒，到点即触发；新建的调用最迟约1秒后被发现，at离创建不到1秒的可能
+  晚触发最多约1秒
 
 
 
@@ -1051,7 +1053,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:246`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L246)</small>
+<small>Source: [`hetu/system/future.py:248`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L248)</small>
 
 
 
