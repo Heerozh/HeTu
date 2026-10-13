@@ -174,7 +174,9 @@ Things to know about the API:
   table (the main one and every copy) and runs the due calls; when nothing
   is due it sleeps until the earliest next call, at most 1 second, so a new
   call is picked up within about a second. Don't use this for sub-second
-  precision.
+  precision. A call may run late but never before `at`: the `ctx.timestamp`
+  the target `System` sees is never less than `at`, so checking "is it time
+  yet" inside it (e.g. a cast finishing) is safe.
 - **The execution `ctx` has no user identity.** The scheduler runs as
   internal traffic — `ctx.caller` is `0`, `ctx.address` is `localhost`. If
   the work needs a user id, pass it explicitly in `args`.
