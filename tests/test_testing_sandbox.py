@@ -262,6 +262,30 @@ async def test_sandbox_call_denied_raises_connection_closed(tmp_path):
             await sb.call("add_rls_comp_value", 9)  # 无 caller → 匿名，USER 不放行
 
 
+async def test_sandbox_call_as_group(tmp_path):
+    # call(group=...) 模拟 GM / admin 连接：连接组按给的值走权限检查，endpoint 里的 ctx 也看得到；
+    # 不给 group 是普通连接，GM 端点不放行
+    from hetu.common import Permission
+    from hetu.endpoint.definer import EndpointDefines
+
+    async def ep_gm_only(ctx):
+        return hetu.ResponseToClient({"gm": ctx.is_gm(), "group": ctx.group})
+
+    db = tmp_path / "t.sqlite3"
+    async with await Sandbox.create("pytest", app, db_path=str(db)) as sb:
+        EndpointDefines().add("pytest", ep_gm_only, True, Permission.GM)
+        with pytest.raises(ConnectionClosed):
+            await sb.call("ep_gm_only", caller=1234)
+        assert await sb.call("ep_gm_only", caller=1234, group="gm") == {
+            "gm": True,
+            "group": "gm",
+        }
+        # GM 要已登录；admin 不用
+        with pytest.raises(ConnectionClosed):
+            await sb.call("ep_gm_only", group="gm")
+        assert (await sb.call("ep_gm_only", group="admin"))["group"] == "admin"
+
+
 async def test_sandbox_call_unknown_endpoint_raises_connection_closed(tmp_path):
     # permission=None 的 System（on_disconnect）不会生成 endpoint → 走 call 时 endpoint
     # 不存在 → 同样判非法、关连接。这与权限不符是 execute_check 里的不同分支。
