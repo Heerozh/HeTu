@@ -1697,6 +1697,83 @@ namespace Tests.HeTu
             Assert.AreEqual(0, ts[2].ConnectCount);
         }
 
+        // 请求被拒（服务端 close 4002）= 客户端越界，比如客户端比服务器新、调了服务器上还没有的
+        // System。重连后再调一样会被断开，周期性掉线 → 不重连，直接进 Faulted 终态。
+        // 4000-4999 段都是河图的终态码，以后新增的（这里用 4099 代表）老 SDK 也不重连。
+        [TestCase(HeTuCloseCode.Rejected)]
+        [TestCase(4099)]
+        public void TerminalCloseCode_EntersFaultedWithoutReconnect(int code)
+        {
+            var ts = new[] { new FakeTransport("c1"), new FakeTransport("never-used") };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0); // 不限次重连也不重连
+
+            var faults = new List<Exception>();
+            session.Faulted += faults.Add;
+
+            session.Start();
+            ts[0].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+            ts[0].RaiseClosed("rejected", code);
+
+            Assert.AreEqual(HeTuSessionState.Faulted, session.State);
+            Assert.AreEqual(0, scheduler.PendingCount, "终态 close 码不应安排重连");
+            Assert.AreEqual(0, ts[1].ConnectCount, "终态 close 码不应建新连接");
+            Assert.AreEqual(1, faults.Count);
+            var rejected = faults[0] as HeTuConnectionRejectedException;
+            Assert.IsNotNull(rejected, $"异常类型不对：{faults[0]}");
+            Assert.AreEqual(code, rejected.Code);
+            Assert.AreEqual("rejected", rejected.Reason);
+
+            var f = session.WaitForReady(TimeSpan.FromSeconds(5));
+            Assert.IsTrue(f.IsFailed);
+            Assert.AreSame(faults[0], f.Exception);
+        }
+
+        // 服务端内部出错（close 1011，如后端连不上）不是客户端的错，照常退避重连
+        [Test]
+        public void InternalErrorCloseCode_Reconnects()
+        {
+            var ts = new[] { new FakeTransport("c1"), new FakeTransport("c2") };
+            var q = new Queue<FakeTransport>(ts);
+            var scheduler = new FakeScheduler();
+            var session = new HeTuSessionClientBase(
+                () => q.Dequeue(),
+                scheduler,
+                bootstrap: null,
+                reconnectDelay: TimeSpan.FromSeconds(1),
+                maxReconnectAttempts: 0);
+
+            session.Start();
+            ts[0].RaiseConnected();
+            ts[0].RaiseClosed("internal error", HeTuCloseCode.InternalError);
+
+            Assert.AreNotEqual(HeTuSessionState.Faulted, session.State);
+            Assert.AreEqual(1, scheduler.PendingCount, "服务端出错应安排重连");
+            scheduler.RunNext();
+            ts[1].RaiseConnected();
+            Assert.AreEqual(HeTuSessionState.Ready, session.State);
+        }
+
+        [TestCase(HeTuCloseCode.Normal, false)]
+        [TestCase(HeTuCloseCode.Abnormal, false)]
+        [TestCase(HeTuCloseCode.InternalError, false)]
+        [TestCase(3999, false)]
+        [TestCase(HeTuCloseCode.Kicked, true)]
+        [TestCase(HeTuCloseCode.Rejected, true)]
+        [TestCase(4999, true)]
+        [TestCase(5000, false)]
+        public void CloseCode_IsTerminal(int code, bool terminal)
+        {
+            Assert.AreEqual(terminal, HeTuCloseCode.IsTerminal(code));
+        }
+
         // 重连阶段 bootstrap（登录）主动抛异常 = 票据/凭据被永久拒绝（如 STALE_TICKET）,
         // 重跑同样的 bootstrap 不会有不同结果 → 直接进 Faulted 终态,不浪费重试次数。
         [Test]
