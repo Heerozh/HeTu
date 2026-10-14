@@ -214,6 +214,7 @@ class Sandbox(LocalApp):
         endpoint: str,
         *args: Any,
         caller: int = 0,
+        group: str = "",
         user_data: dict | None = None,
     ) -> Any:
         """像客户端那样经 Endpoint 正常路径调用，返回 client SDK 实际收到的 payload。
@@ -223,7 +224,13 @@ class Sandbox(LocalApp):
         `@define_endpoint`（`call_system` 调不到），也可调用 System 自动生成的 endpoint。
 
         `caller` 非 0 时，会先建连接并 `elevate(caller)` 模拟已登录，再执行（等价"已登录
-        客户端调用"）；`caller=0` 为匿名连接。每次调用都是独立的新连接，调用结束即断开。
+        客户端调用"）；`caller=0` 为匿名连接。`group` 是连接组（`ctx.group`），默认空 =
+        普通连接；给 `"gm"` 模拟 GM 连接、`"admin"` 模拟管理员连接，权限检查与 endpoint
+        内的 `ctx.is_gm()` / `ctx.is_admin()` 都按它判断。每次调用都是独立的新连接，调用
+        结束即断开。
+
+        Call like a client through the full Endpoint path. ``group`` sets the connection
+        group (``"gm"`` / ``"admin"`` to simulate GM / admin connections).
         """
         # 与生产 server 一致：统一用 SystemContext（is-a Context），这样 EndpointExecutor
         # 与 SystemCaller 都能收，且 endpoint 内 ctx.systems.call 需要的 repo/depend 字段齐备。
@@ -231,7 +238,7 @@ class Sandbox(LocalApp):
             caller=0,
             connection_id=0,
             address="sandbox",
-            group="",
+            group=group,
             user_data=user_data if user_data is not None else {},
             timestamp=0,
             request=None,  # type: ignore[arg-type]

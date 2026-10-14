@@ -136,12 +136,13 @@ async def test_rename(sandbox):
 
 Two ways to invoke your code:
 
-- **`call(name, *args, caller=0, user_data=None)`** — the **client path**. Runs the full
-  Endpoint pipeline: connection → permission/arg checks → guards → your
+- **`call(name, *args, caller=0, group="", user_data=None)`** — the **client path**. Runs
+  the full Endpoint pipeline: connection → permission/arg checks → guards → your
   `@define_endpoint`
   (or a System's auto-generated endpoint). `caller != 0` first `elevate`s a fresh
-  connection (simulates a logged-in client). Returns what the client SDK actually
-  receives
+  connection (simulates a logged-in client); `group="gm"` / `"admin"` simulates a GM /
+  admin connection (`ctx.group`, checked by `Permission.GM` / `ADMIN`). Returns what
+  the client SDK actually receives
   (msgpack round-tripped). A guard soft-reject raises **`CallRejected`** (assert
   `.code`); an illegal call (bad permission/args, unknown endpoint, or the endpoint
   raised) raises **`ConnectionClosed`**. Each call is a fresh connection (no cross-call
