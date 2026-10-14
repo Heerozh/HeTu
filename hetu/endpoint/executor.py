@@ -205,8 +205,9 @@ class EndpointExecutor:
     ) -> tuple[bool, ResponseToClient | RejectResponse | str | None]:
         """
         调用Endpoint，返回True表示调用成功，
-        返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接；
-        失败时第二个返回值可能是异常原因字符串（仅server debug模式下回传客户端）。
+        返回False表示内部失败或非法调用，此时需要立即调用terminate断开连接：
+        执行抛异常时第二个返回值是异常原因字符串（仅server debug模式下回传客户端），
+        没通过调用检查（非法调用、被顶号）时是None。服务器据此选断开用的close码。
         """
         # 检查call参数和call权限
         ep = self.execute_check(endpoint, args)

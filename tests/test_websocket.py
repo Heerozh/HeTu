@@ -17,6 +17,7 @@ from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK
 import hetu
 from hetu import webext
 from hetu.data import sub as sub_module
+from hetu.endpoint import connection
 from hetu.endpoint.definer import EndpointDefines
 from hetu.safelogging.default import DEFAULT_LOGGING_CONFIG
 from hetu.server import pipeline, worker_main
@@ -479,9 +480,8 @@ async def test_rpc_kicked_disconnects_even_in_debug():
             return False, None
 
     push_queue: asyncio.Queue = asyncio.Queue()
-    assert not await rpc(
-        ["rpc", "login", 1], cast(Any, KickedExecutor()), push_queue, 1
-    )
+    code = await rpc(["rpc", "login", 1], cast(Any, KickedExecutor()), push_queue, 1)
+    assert code == connection.CLOSE_KICKED
     assert push_queue.empty()
 
 
@@ -519,9 +519,10 @@ async def test_rpcs_syncs_after_the_rsp_is_queued():
     queue: asyncio.Queue = asyncio.Queue()
     broker = _SyncBroker(queue)
     executor = _RpcExecutor((True, None))
-    assert await rpcs(
+    code = await rpcs(
         ["rpcs", 7, "buy", 1, 2], cast(Any, executor), cast(Any, broker), queue
     )
+    assert code is None
     assert executor.calls == [("buy", (1, 2))]
     assert queue.get_nowait() == ["rsp", "ok"]
     assert broker.synced == [(7, 1)]
@@ -534,23 +535,26 @@ async def test_rpcs_response_to_client_also_syncs():
     queue: asyncio.Queue = asyncio.Queue()
     broker = _SyncBroker(queue)
     executor = _RpcExecutor((True, ResponseToClient({"gold": 5})))
-    assert await rpcs(["rpcs", 3, "buy"], cast(Any, executor), cast(Any, broker), queue)
+    code = await rpcs(["rpcs", 3, "buy"], cast(Any, executor), cast(Any, broker), queue)
+    assert code is None
     assert queue.get_nowait() == ["rsp", {"gold": 5}]
     assert broker.synced == [(3, 1)]
 
 
 @pytest.mark.parametrize(
-    ("result", "debug", "keep", "frame"),
+    ("result", "debug", "close_code", "frame"),
     [
         # 守卫软拒绝：没有提交，回 rej、连接保持
-        ((True, "reject"), 0, True, ["rej", "buy", "RATE_LIMITED"]),
+        ((True, "reject"), 0, None, ["rej", "buy", "RATE_LIMITED"]),
         # debug 模式执行失败：回 err、连接保持
-        ((False, "boom"), 1, True, ["err", "buy", "boom"]),
-        # release 模式执行失败：断开连接
-        ((False, None), 0, False, None),
+        ((False, "boom"), 1, None, ["err", "buy", "boom"]),
+        # release 模式非法调用：断开连接
+        ((False, None), 0, connection.CLOSE_REJECTED, None),
+        # release 模式执行抛异常：断开连接
+        ((False, "boom"), 0, connection.CLOSE_INTERNAL_ERROR, None),
     ],
 )
-async def test_rpcs_no_sync_without_rsp(result, debug, keep, frame):
+async def test_rpcs_no_sync_without_rsp(result, debug, close_code, frame):
     """只在回了 rsp 时才起栅栏：rej / err / 断开都不发 sync"""
     from hetu.endpoint.response import RejectResponse
     from hetu.server.receiver import rpcs
@@ -566,7 +570,7 @@ async def test_rpcs_no_sync_without_rsp(result, debug, keep, frame):
         queue,
         debug,
     )
-    assert bool(ok) is keep
+    assert ok == close_code
     assert (queue.get_nowait() if frame else None) == frame
     assert queue.empty()
     assert broker.synced == []
@@ -578,9 +582,10 @@ async def test_rpcs_kicked_disconnects_without_sync():
     queue: asyncio.Queue = asyncio.Queue()
     broker = _SyncBroker(queue)
     executor = _RpcExecutor((False, None), kicked=True)
-    assert not await rpcs(
+    code = await rpcs(
         ["rpcs", 5, "login", 1], cast(Any, executor), cast(Any, broker), queue, 1
     )
+    assert code == connection.CLOSE_KICKED
     assert queue.empty()
     assert broker.synced == []
 
@@ -617,12 +622,13 @@ async def test_rpcs_accepts_sync_id_bounds():
     queue: asyncio.Queue = asyncio.Queue()
     broker = _SyncBroker(queue)
     for sync_id in (0, 2**31 - 1):
-        assert await rpcs(
+        code = await rpcs(
             ["rpcs", sync_id, "buy"],
             cast(Any, _RpcExecutor((True, None))),
             cast(Any, broker),
             queue,
         )
+        assert code is None
     assert [sync_id for sync_id, _queued in broker.synced] == [0, 2**31 - 1]
 
 
@@ -803,14 +809,20 @@ def test_call_flooding_lv1_flooding(test_server):
     # 因为同时启动2个websocket会报
     # sanic.exceptions.ServerError: Sanic server could not start: [Errno 98] Address already in use.
     # 所以分2个测试，或者可以尝试启动时用随机的port
+    close = None
+
     async def flooding_routine(connect):
+        nonlocal close
         client1 = await connect()
-        with pytest.raises(ConnectionClosedError):
+        with pytest.raises(ConnectionClosedError) as exc_info:
             for i in range(101):
                 await client1.send(["rpc", "login", 1])
                 await client1.recv()
+        close = exc_info.value.rcvd
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=flooding_routine)
+    # 超出接收频率上限算客户端越界：带 4002 断开，客户端别重连
+    assert close is not None and close.code == connection.CLOSE_REJECTED, close
 
 
 def test_call_flooding_lv2_normal(test_server):
@@ -1121,7 +1133,7 @@ class _FakeSendWs:
             self.on_send(frame)
         await asyncio.sleep(self.delay)
 
-    def fail_connection(self) -> None:
+    def fail_connection(self, code: int = 1006, reason: str = "") -> None:
         pass
 
 
@@ -1660,6 +1672,29 @@ def test_websocket_invalid_sub_length_disconnects(test_server):
 
 
 @pytest.mark.timeout(20)
+def test_websocket_system_crash_closes_with_internal_error(test_server):
+    """release 模式 System 执行抛异常：算服务端出错，带 1011 断开（客户端可以重连），不回原因"""
+    result = {}
+
+    async def routine(connect):
+        client = await connect()
+        await client.send(["rpc", "login", 1])
+        await client.recv()
+        await client.send(["rpc", "crashing_system"])
+        with pytest.raises(ConnectionClosedError) as exc_info:
+            await client.recv()
+        result["close"] = exc_info.value.rcvd
+
+    test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
+    close = result["close"]
+    assert close is not None, "没收到 close 帧"
+    assert (close.code, close.reason) == (
+        connection.CLOSE_INTERNAL_ERROR,
+        "internal error",
+    )
+
+
+@pytest.mark.timeout(20)
 def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
     """各种非法消息（release 模式）：发的那条连接被断开并记下原因，别的连接照常可用"""
     caplog.set_level(logging.INFO, logger="HeTu.root")
@@ -1668,11 +1703,16 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         # 绕过客户端 pipeline，直接发原始帧
         await type(ws).send(ws, data)
 
-    # 用例名 → (发送动作, 服务端记录的断开原因)
+    # 用例名 → (发送动作, 服务端记录的断开原因)。都是客户端越界，一律带 4002 "rejected" 断开
     cases = {
         "empty_frame": (lambda ws: send_raw(ws, b""), "收到空帧"),
         "text_frame": (lambda ws: send_raw(ws, "hello"), "收到非二进制帧：str"),
+        "undecodable": (
+            lambda ws: send_raw(ws, b"not a hetu message"),
+            "Invalid message encoding",
+        ),
         "not_list": (lambda ws: ws.send({"rpc": "login"}), "Invalid message format"),
+        "empty_list": (lambda ws: ws.send([]), "Invalid message format"),
         "unknown_msg_type": (lambda ws: ws.send(["bogus"]), "未知消息类型：bogus"),
         "unknown_component": (
             lambda ws: ws.send(["sub", "NoSuchComp", "table"]),
@@ -1681,6 +1721,11 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         "unknown_sub_op": (
             lambda ws: ws.send(["sub", "PublicNames", "bogus"]),
             "未知订阅操作：bogus",
+        ),
+        # 客户端比服务器新，调了服务器还没有的 System
+        "rpc_unknown_endpoint": (
+            lambda ws: ws.send(["rpc", "no_such_system"]),
+            "rpc 调用失败",
         ),
         # 未登录调 USER 权限的 System：执行失败，release 模式直接断开、不回原因
         "rpc_rejected": (
@@ -1697,6 +1742,7 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         ),
     }
     closed = []
+    close_frames = {}
     healthy_ok = False
 
     async def routine(connect):
@@ -1704,10 +1750,12 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
         healthy = await connect()
         for name, (send_bad, _reason) in cases.items():
             client = await connect()
-            with pytest.raises(ConnectionClosedError):
+            with pytest.raises(ConnectionClosedError) as exc_info:
                 await send_bad(client)
                 await client.recv()
             closed.append(name)
+            rcvd = exc_info.value.rcvd
+            close_frames[name] = None if rcvd is None else (rcvd.code, rcvd.reason)
         # 别的连接不受影响
         await healthy.send(["rpc", "login", 1])
         await healthy.recv()
@@ -1715,6 +1763,9 @@ def test_websocket_bad_message_closes_only_that_connection(test_server, caplog):
 
     test_server.test_client.websocket("/hetu/pytest_1", mimic=routine)
     assert closed == list(cases), "有非法消息没让连接断开"
+    assert close_frames == dict.fromkeys(
+        cases, (connection.CLOSE_REJECTED, "rejected")
+    ), close_frames
     assert healthy_ok, "正常连接被连累了"
     close_logs = [
         r.getMessage() for r in caplog.records if "接收协程结束" in r.getMessage()
