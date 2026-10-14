@@ -70,7 +70,9 @@ namespace HeTu
         ///     放弃。配合 <see cref="StateChanged" /> 绑 UI 时：
         ///     <c>Faulted &amp;&amp; !HasBeenReady</c> → "连不上服务器"，
         ///     <c>Faulted &amp;&amp; HasBeenReady</c> → "已掉线且无法恢复"。
-        ///     被顶号也会直接进 Faulted（不重连），见 <see cref="HeTuKickedException" />。
+        ///     被顶号、请求被拒（4000-4999 段的终态 close 码）也会直接进 Faulted（不重连），见
+        ///     <see cref="HeTuKickedException" />、
+        ///     <see cref="HeTuConnectionRejectedException" />。
         /// </summary>
         public bool HasBeenReady => _core?.HasBeenReady ?? false;
 
@@ -85,9 +87,13 @@ namespace HeTu
         ///     都会进来，携带本次失败的异常。是否已经是终态请同时观察
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Faulted" />。
         ///     异常是 <see cref="HeTuKickedException" /> 时表示被顶号（账号在别处登录）：会话
-        ///     不会重连、直接进 Faulted，请提示玩家。
+        ///     不会重连、直接进 Faulted，请提示玩家。异常是
+        ///     <see cref="HeTuConnectionRejectedException" /> 时表示请求被服务器拒绝（客户端越界，
+        ///     常见于客户端比服务器新）：同样不重连、直接进 Faulted。
         ///     A <see cref="HeTuKickedException" /> means the account logged in
-        ///     elsewhere; the session enters Faulted without reconnecting.
+        ///     elsewhere; a <see cref="HeTuConnectionRejectedException" /> means the
+        ///     server rejected the client (e.g. a client newer than the server). Either
+        ///     way the session enters Faulted without reconnecting.
         /// </summary>
         public event Action<Exception> Faulted;
 

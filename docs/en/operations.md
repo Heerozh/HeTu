@@ -108,6 +108,13 @@ population while staying consistent.
   sends a WebSocket close frame with code `4001` and reason `kicked`, so the
   client can tell the user "logged in elsewhere" — and should not reconnect
   automatically (reconnecting logs in again and kicks the other side).
+- Every server-initiated disconnect carries a close code, and clients decide
+  whether to reconnect from it: `4002 rejected` means the client broke the
+  rules (illegal call, malformed message, send-rate limit — typically a
+  client newer than the server), `1011 internal error` means a server-side
+  error (backend unreachable, a System raised). Everything in 4000-4999 is
+  terminal and the SDK does not reconnect; 1011 and network loss (1006, no
+  close frame) reconnect with backoff. The details are only in the server log.
 - `servants` is optional. Leaving it empty puts you in single-master mode —
   fine for small games.
 - Set Redis `client-output-buffer-limit` on the servants conservatively;

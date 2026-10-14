@@ -92,6 +92,34 @@ namespace HeTu
         ///     side.
         /// </summary>
         public const int Kicked = 4001;
+
+        /// <summary>
+        ///     请求被拒：客户端越界（调了服务器上不存在的 System、无权限、参数数量不对、报文非法、
+        ///     超出收发频率上限等），常见于客户端比服务器新。重连后再发同样的请求只会再被断开，
+        ///     所以不要自动重连。服务器不回具体原因，看服务器日志。与服务端 <c>CLOSE_REJECTED</c> 一致。
+        ///     Rejected: the client broke the protocol (unknown System, no permission,
+        ///     malformed message, rate limit...), e.g. a client newer than the server.
+        ///     Do not reconnect automatically: the same request would be rejected again.
+        ///     See the server log for the reason.
+        /// </summary>
+        public const int Rejected = 4002;
+
+        /// <summary>
+        ///     服务端内部出错（后端连不上、System 执行抛异常等），可以退避重连。
+        ///     Server internal error (backend unreachable, System raised...);
+        ///     reconnecting with backoff is fine.
+        /// </summary>
+        public const int InternalError = 1011;
+
+        /// <summary>
+        ///     是不是终态的 close 码：4000-4999 段都由河图定义为终态（如 <see cref="Kicked" />、
+        ///     <see cref="Rejected" />），不应自动重连；其余（断网的 <see cref="Abnormal" />、
+        ///     <see cref="InternalError" /> 等）可以重连。以后新增的终态码也在这一段，老版本 SDK
+        ///     同样不会重连。
+        ///     Whether the close code is terminal: HeTu defines every code in 4000-4999
+        ///     as terminal (no automatic reconnect); other codes may be retried.
+        /// </summary>
+        public static bool IsTerminal(int code) => code >= 4000 && code <= 4999;
     }
 
     /// <summary>
@@ -331,6 +359,10 @@ namespace HeTu
             _pendingUnsubs.Clear();
             if (code == HeTuCloseCode.Kicked)
                 Logger.Instance.Info("连接断开：账号已在别处登录（被顶号）。");
+            else if (code == HeTuCloseCode.Rejected)
+                Logger.Instance.Error(
+                    "连接断开：请求被服务器拒绝（调了服务器上不存在的 System、无权限、报文非法或超出" +
+                    "频率上限，常见于客户端比服务器新），原因见服务器日志。");
             else if (errMsg == null)
                 Logger.Instance.Info("连接断开，收到了服务器Close消息。");
             OnClosed?.Invoke(errMsg);

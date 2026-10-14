@@ -22,7 +22,7 @@ from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import PUSH_CLOSE, client_handler
+from .receiver import PUSH_CLOSE, client_handler, close_connection
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -75,12 +75,17 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     handshake_msg = await ws.recv(timeout=10)
     if not isinstance(handshake_msg, (bytes, bytearray)):
         logger.info("New Connect Error: Invalid handshake message type")
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
-    handshake_msg = msg_pipe.decode(None, handshake_msg)
+    try:
+        handshake_msg = msg_pipe.decode(None, handshake_msg)
+    except Exception as e:  # noqa: BLE001 握手包来自客户端，解不开都算格式错
+        logger.info(f"New Connect Error: undecodable handshake message: {e}")
+        close_connection(ws, connection.CLOSE_REJECTED)
+        return
     if not isinstance(handshake_msg, list):
         logger.info("New Connect Error: Invalid handshake message format")
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 进行握手处理，获得连接上下文
@@ -89,7 +94,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             "New Connect Error: client pipeline layers count "
             "does not match server pipeline"
         )
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 在客户端握手后，才返回实例是否存在的错误，防止暴露实例信息给扫描器
@@ -100,7 +105,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 instance=instance
             )
         )
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
     tbl_mgr = request.app.ctx.table_managers[instance]
 
@@ -113,7 +118,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         try:
             await ws.send(msg_pipe.encode(None, []))
         finally:
-            ws.fail_connection()
+            close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 初始化Context，一个连接一个Context
@@ -192,9 +197,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                         replay.info(close_msg)
                         logger.info(close_msg)
                         # 先发带原因的 close 再断开，客户端据此提示"账号已在别处登录"
-                        ws.fail_connection(
-                            connection.CLOSE_KICKED, connection.CLOSE_KICKED_REASON
-                        )
+                        close_connection(ws, connection.CLOSE_KICKED)
                 except Exception as e:  # noqa: BLE001 读库失败不致命：兜底间隔和下次调用还会再查
                     logger.warning(
                         _("⚠️ [📡WSConnect] 顶号核查读库失败：{err}").format(
@@ -256,7 +259,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         replay.info(err_msg)
         logger.exception(err_msg)
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_INTERNAL_ERROR)
     else:
         assert broker is not None
 
@@ -270,7 +273,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             """记一次发送，到了发送上限就断开"""
             flood_checker.sent()
             if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):
-                ws.fail_connection()
+                close_connection(ws, connection.CLOSE_REJECTED)
                 return True
             return False
 
@@ -399,7 +402,7 @@ async def send_loop(
                 )
                 replay.info(err_msg)
                 logger.exception(err_msg)
-                ws.fail_connection()
+                close_connection(ws, connection.CLOSE_INTERNAL_ERROR)
                 return
             finally:
                 broker.idle_(False)

@@ -53,6 +53,36 @@ namespace HeTu
     }
 
     /// <summary>
+    ///     连接被服务器以终态 close 码断开（4000-4999 段，被顶号除外，见
+    ///     <see cref="HeTuCloseCode.IsTerminal" />）。目前是
+    ///     <see cref="HeTuCloseCode.Rejected" />：
+    ///     客户端越界（调了服务器上不存在的 System、无权限、报文非法、超出频率上限等），常见于
+    ///     客户端比服务器新。重连后再发同样的请求只会再被断开，所以会话不会自动重连，直接进入
+    ///     <see cref="HeTuSessionState.Faulted" /> 终态；应用可提示玩家"版本不匹配，请更新"。
+    ///     服务器不回具体原因，看服务器日志。
+    ///     The server closed the connection with a terminal close code (4000-4999,
+    ///     other than kicked), currently <see cref="HeTuCloseCode.Rejected" />: the
+    ///     client broke the protocol, e.g. called a System the server does not have
+    ///     yet. The session does not reconnect and enters Faulted.
+    /// </summary>
+    public sealed class HeTuConnectionRejectedException : Exception
+    {
+        public HeTuConnectionRejectedException(int code, string reason) :
+            base($"Connection rejected by server (close code {code}: {reason ?? ""}). " +
+                 "See the server log for the reason.")
+        {
+            Code = code;
+            Reason = reason;
+        }
+
+        /// <summary>服务器发的 close 码。The close code sent by the server.</summary>
+        public int Code { get; }
+
+        /// <summary>服务器发的 close 原因（固定短语，不含细节）。The close reason.</summary>
+        public string Reason { get; }
+    }
+
+    /// <summary>
     ///     内部信号：一次 watch 派发被底层取消（连接在飞行中断开，或派发那一刻
     ///     物理层已不可用）。不会外泄给调用方，只用来把"取消"和"失败"区分开。
     /// </summary>
@@ -692,9 +722,13 @@ namespace HeTu
             if (_closed) return;
 
             _transportClosedItself = true;
-            Exception fault = code == HeTuCloseCode.Kicked
-                ? new HeTuKickedException()
-                : new InvalidOperationException(
+            Exception fault;
+            if (code == HeTuCloseCode.Kicked)
+                fault = new HeTuKickedException();
+            else if (HeTuCloseCode.IsTerminal(code))
+                fault = new HeTuConnectionRejectedException(code, reason);
+            else
+                fault = new InvalidOperationException(
                     $"Connection closed: {reason ?? "(unknown)"}");
 
             // 链在飞：把当前 step 失败掉，由 .Catch(HandleSessionFailure) 统一处理。
@@ -800,8 +834,9 @@ namespace HeTu
                 SafeInvokeUserCallback(Faulted, fault);
                 if (_closed) return;
                 // 被顶号：账号在别处登录了。重连会重跑 bootstrap（登录）把对方顶掉，两边互踢，
-                // 所以不重连，直接进 Faulted 终态，由应用提示玩家。
-                if (fault is HeTuKickedException)
+                // 所以不重连，直接进 Faulted 终态，由应用提示玩家。请求被拒（客户端越界，比如调了
+                // 服务器上还没有的 System）同理：重连后再调一样被断开，周期性掉线
+                if (fault is HeTuKickedException or HeTuConnectionRejectedException)
                 {
                     EnterFaulted(fault);
                     return;

@@ -32,10 +32,25 @@ ENDPOINT_CALL_IDLE_TIMEOUT = 0  # 占位符，实际由Config里修改
 # 占位符，实际由Config里修改。通知模式下"是否被顶号"检查的兜底重查间隔（秒），0 = 每次调用都查
 CONNECTION_ALIVE_RECHECK_INTERVAL = 0
 
-# 被顶号时服务器先发这个 WebSocket close 码和原因再断开（4000-4999 是留给应用自定义的段）。
-# 客户端据此提示"账号已在别处登录"，也别自动重连：重连会重新登录，把对方顶掉
+# 服务器断开连接时发的 WebSocket close 码。4000-4999 是留给应用自定义的段，河图约定这一段都是
+# 终态：客户端别自动重连。其余的码（1006 没收到 close 帧的断网、1011 服务端内部出错）可以重连。
+# 原因只给每个码固定的那句，不向客户端泄露细节，细节在服务端日志里
+
+# 被顶号。客户端据此提示"账号已在别处登录"，也别自动重连：重连会重新登录，把对方顶掉
 CLOSE_KICKED = 4001
 CLOSE_KICKED_REASON = "kicked"
+# 客户端越界：非法调用（不存在的 Endpoint、无权限、参数数量不对）、报文格式错、订阅非法、超出收发
+# 频率上限。重连后再发同样的请求只会再被断开，所以别重连（客户端比服务器新、调了服务器还没有的
+# 接口，也落在这里）
+CLOSE_REJECTED = 4002
+# 服务端内部出错：后端连不上、Endpoint 执行抛异常等。客户端可以退避重连
+CLOSE_INTERNAL_ERROR = 1011
+
+CLOSE_REASONS = {
+    CLOSE_KICKED: CLOSE_KICKED_REASON,
+    CLOSE_REJECTED: "rejected",
+    CLOSE_INTERNAL_ERROR: "internal error",
+}
 
 
 @define_component(namespace="core", volatile=True, permission=Permission.ADMIN)

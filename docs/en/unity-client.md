@@ -101,6 +101,19 @@ Key points the source enforces but isn't always obvious from a snippet:
   `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked` to tell the
   player "logged in elsewhere" — and don't reconnect automatically, or you'll
   log in again and kick the other device right back.
+- **Rejected.** In release mode, when the client breaks the rules (calls a
+  System the server doesn't have, lacks permission, passes the wrong number
+  of arguments, sends a malformed message, exceeds the send-rate limit), the
+  server closes the connection with close code `4002`
+  (`HeTuCloseCode.Rejected`) and reason `"rejected"`, without the details
+  (see the server log). The usual cause is a client newer than the server.
+  Don't reconnect automatically either — the same call would get you
+  disconnected again, over and over. Every code in 4000-4999 is terminal like
+  this (`HeTuCloseCode.IsTerminal(code)`); `HeTuSessionClient` goes straight
+  to `Faulted` on all of them (with a `HeTuConnectionRejectedException`, whose
+  `Code` is the close code, for anything other than kicked). A server-side
+  error (backend unreachable, a System raised) closes with `1011`
+  (`HeTuCloseCode.InternalError`), which is fine to reconnect after.
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`
@@ -491,7 +504,7 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, or kicked (`HeTuKickedException`, never retried). `Faulted` event carries the last `Exception`. |
+| `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, kicked (`HeTuKickedException`, never retried), or another terminal close code such as rejected (`HeTuConnectionRejectedException`, never retried). `Faulted` event carries the last `Exception`. |
 
 The `Faulted` **event** is broader than the `Faulted` **state**: it fires
 once per failed attempt — pre-Ready failures fire it once then go terminal;
@@ -505,6 +518,10 @@ session goes straight to `Faulted` with a `HeTuKickedException` instead of
 reconnecting — a reconnect would re-run your login `bootstrap` and kick the
 other device, and the two would keep kicking each other. Check for it in the
 `Faulted` handler (or around `await Connect`) to show "logged in elsewhere".
+Any other terminal close code (4000-4999, e.g. `4002` rejected) likewise goes
+straight to `Faulted`, with a `HeTuConnectionRejectedException`: retrying the
+same request would only be rejected again. Show something like "version
+mismatch, please update".
 
 ### `CallSystem` semantics
 

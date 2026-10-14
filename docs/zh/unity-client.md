@@ -85,6 +85,13 @@ public class NetBootstrap : MonoBehaviour
   `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked`，提示玩家"账号已在别处登录"，
   并且不要自动重连 — 重连会重新登录，把对方顶掉。`HeTuSessionClient` 遇到它会直接进入 `Faulted`
   终态（异常为 `HeTuKickedException`），不会重连。
+- **请求被拒。** release 模式下客户端越界（调了服务器上不存在的 System、无权限、参数数量不对、
+  报文非法、超出收发频率上限）时，服务器发 close 码 `4002`（`HeTuCloseCode.Rejected`）、原因
+  `"rejected"` 再断开，不回具体原因（看服务器日志）。最常见的是客户端比服务器新。同样不要自动
+  重连 — 重连后再调一样会被断开，变成周期性掉线。4000-4999 段都是这类终态码
+  （`HeTuCloseCode.IsTerminal(code)`），`HeTuSessionClient` 遇到都直接进入 `Faulted`（被顶号之外的
+  异常为 `HeTuConnectionRejectedException`，`Code` 是 close 码）。服务端内部出错（后端连不上、
+  System 抛异常）发 `1011`（`HeTuCloseCode.InternalError`），可以重连。
 
 ## 调用 `Systems`
 
