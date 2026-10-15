@@ -65,9 +65,10 @@ STARTUP_TIMEOUT: 60
 # 注意：Windows 上此项强制开启（配0或不配都按10秒算，只能调大调小、关不掉），因为 Sanic 在
 # Windows 多worker下有 accept 死锁——它把 Linux 的共享监听socket模型直接套用到 Windows，
 # 而 Windows 共享 socket 上的操作协调由涉及的进程自己负责，抢输的 worker 会真堵死在
-# accept() 里，整个事件循环停摆且一个字的日志都没有。此项修复不易，因为是模式错误。
-# 看门狗在那里既是唯一的诊断手段，也会自动自愈（往自己的监听端口发若干次一次性连接把它
-# 喂醒）。生产环境请跑在 Linux 上，那里不存在此问题。
+# accept() 里，整个事件循环停摆且一个字的日志都没有。现在 HeTu 在 Windows 上把 accept
+# 挪到了专用线程里（hetu/server/threaded_accept.py），事件循环不会再被它堵住；看门狗
+# 保留为兜底，补丁没装上时仍会自动自愈（往自己的监听端口发若干次一次性连接把它喂醒）。
+# 生产环境请跑在 Linux 上，那里不存在此问题。
 HANG_WATCHDOG_TIMEOUT: 0
 
 

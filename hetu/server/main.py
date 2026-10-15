@@ -27,6 +27,7 @@ from ..system import SystemClusters
 from ..system import lock as system_lock
 from ..system.future import future_call_task
 from . import pipeline
+from .threaded_accept import IS_WINDOWS, threaded_accept_listener
 from .watchdog import hang_watchdog_task
 from .web import HETU_BLUEPRINT, web_root
 from .websocket import wait_connections_closed  # 导入即注册 ws 路由
@@ -331,6 +332,10 @@ def worker_main(app_name, config) -> Sanic:
     # 服务器work进程setup/teardown回调
     app.before_server_start(worker_start)
     app.after_server_stop(worker_close)
+    # Windows 多 worker 共享监听socket，accept 会把事件循环堵死，改到专用线程里接，
+    # 见 threaded_accept.py
+    if IS_WINDOWS:
+        app.before_server_start(threaded_accept_listener)
 
     # 启动未来调用worker
     app.add_task(future_call_task(app))

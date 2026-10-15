@@ -237,6 +237,11 @@ class LoopWatchdog:
         等于废掉。Windows 又没有 SO_REUSEPORT，没法一个 worker 一个监听 socket。所以没有便宜
         的正确解，只能在这兜底：生产环境请跑 Linux。
 
+        ## 后来的根治
+
+        threaded_accept.py 把 accept 挪到专用线程里做，事件循环线程不再调 accept()，也就
+        不会卡在这里。这段自愈只在补丁没装上（事件循环不是 selector 的）时才会用到。
+
         Heal the Windows-only shared-listening-socket accept() deadlock by feeding the
         blocked accept() throwaway local connections until the event loop escapes asyncio's
         `for _ in range(backlog + 1)` accept loop.
