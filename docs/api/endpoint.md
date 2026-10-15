@@ -239,7 +239,7 @@ ResponseToClient(message: list | dict)
 elevate(ctx: hetu.endpoint.context.Context, user_id: int, kick_logged_in=True)
 ```
 
-<small>Source: [`hetu/endpoint/connection.py:102`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L102)</small>
+<small>Source: [`hetu/endpoint/connection.py:117`](https://github.com/Heerozh/HeTu/blob/main/hetu/endpoint/connection.py#L117)</small>
 
 
 
