@@ -28,7 +28,6 @@ from ..system import lock as system_lock
 from ..system.future import future_call_task
 from . import pipeline
 from .threaded_accept import IS_WINDOWS, threaded_accept_listener
-from .watchdog import hang_watchdog_task
 from .web import HETU_BLUEPRINT, web_root
 from .websocket import wait_connections_closed  # 导入即注册 ws 路由
 
@@ -339,8 +338,6 @@ def worker_main(app_name, config) -> Sanic:
 
     # 启动未来调用worker
     app.add_task(future_call_task(app))
-    # 启动事件循环卡死检测，卡住时自动dump线程/协程栈到logs/hang_<pid>.log
-    app.add_task(hang_watchdog_task(app))
     # 启动WorkerKeeper续约任务，保证自己的Worker ID不被回收
     app.add_task(worker_keeper_renewal(app))
     # 启动雪花ID时间戳高水位记录，和上面的续约刻意分开，见函数文档

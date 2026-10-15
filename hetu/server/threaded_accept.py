@@ -9,10 +9,26 @@
 
 Sanic 在 Windows 多 worker 时把同一个监听 socket 复制进每个 worker（socket.share /
 fromshare），各 worker 用 selector 事件循环 select() + accept()。Windows 共享 socket 上的
-操作协调由涉及的进程自己负责，抢输的 worker 会真的堵死在 accept() 系统调用里：卡死现场
-Python 层 gettimeout() 是 0.0，内核层却是阻塞模式（看门狗自愈要连喂 backlog 次才能把
-asyncio 的 `for _ in range(backlog + 1)` 循环喂出来，说明每次 accept 都在阻塞）。
-accept 跑在事件循环线程上，于是整个 worker 停摆。详见 watchdog.LoopWatchdog。
+操作协调由涉及的进程自己负责（MSDN 对 WSADuplicateSocket 的说明），抢输的 worker 会真的
+堵死在 accept() 系统调用里：卡死现场 Python 层 gettimeout() 是 0.0，内核层却是阻塞模式
+（往监听端口连喂 backlog 次才能把 asyncio 的 `for _ in range(backlog + 1)` 循环喂出来，
+说明每次 accept 都在阻塞）。accept 跑在事件循环线程上，于是整个 worker 停摆——心跳、
+WorkerKeeper 续约、FutureCalls、该 worker 上所有已建立的连接全部冻结，直到下一个连接恰好
+被它抢到才解开。症状极具迷惑性：该 worker 只是"不再打日志了"，进程还活着，其他 worker
+一切正常。
+
+排查时已经排除的原因（别再走一遍）：
+
+* Python 层 socket 不是阻塞模式：create_server 确实调了 setblocking(False)，卡死现场
+  gettimeout() 仍是 0.0
+* socket.fromshare() 把共享 socket 重置回阻塞：实测无影响，FIONBIO 在 Windows 上是每描述符的
+* 主进程 spawn 新 worker 时 multiprocessing 的 sock.dup() → settimeout(None) 污染了别的
+  描述符：实测不影响
+* 客户端在 accept 前 RST：8 线程 × 150 次风暴不触发
+
+为什么不干脆换成 IOCP(Proactor)：Proactor 用 AcceptEx 重叠 I/O，根本没有阻塞 accept，
+Sanic 也跑得起来，但实测 200 个并发连接会全部落到同一个 worker，多进程等于废掉。Windows
+又没有 SO_REUSEPORT，没法一个 worker 一个监听 socket。
 
 ## 修法
 
@@ -223,11 +239,11 @@ async def threaded_accept_listener(_app):
     """Sanic before_server_start 监听器：给本 worker 的事件循环装 accept 线程补丁。
 
     worker_main 只在 Windows 上注册它。装不上（事件循环不是 selector 的）就保持原样，
-    Windows 上仍有看门狗兜底自愈。
+    只打一条警告。
 
     Sanic before_server_start listener that installs the threaded accept patch on this
-    worker's event loop (registered on Windows only). Falls back to the watchdog's
-    auto-heal if the loop is not a selector loop.
+    worker's event loop (registered on Windows only). Leaves the loop untouched and
+    logs a warning if it is not a selector loop.
     """
     loop = asyncio.get_running_loop()
     if install_threaded_accept(loop):
@@ -238,6 +254,6 @@ async def threaded_accept_listener(_app):
         logger.warning(
             _(
                 "⚠️ 事件循环 {loop} 不是 selector 事件循环，没装上 accept 线程补丁，"
-                "Windows 多 worker 的 accept 死锁只能靠看门狗自愈"
+                "Windows 多 worker 下如遇 worker 卡住不响应，请改用 WORKER_NUM: 1"
             ).format(loop=type(loop).__name__)
         )
