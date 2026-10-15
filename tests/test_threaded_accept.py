@@ -1,21 +1,21 @@
 """accept 线程补丁的测试（根治 Windows 多 worker 的 accept 死锁，见 threaded_accept.py）
 
 Windows 卡死现场：监听 socket 在 Python 层 gettimeout() 是 0.0，内核层却是阻塞模式。
-Linux 上用 os.set_blocking 只改内核层的 O_NONBLOCK 就能造出同一个现场，所以这里在任何
-平台上都能验证"accept 堵住时事件循环还转不转"。
+只改内核层就能造出同一个现场（Linux 用 os.set_blocking，Windows 用 ioctlsocket），
+所以这里在任何平台上都能验证"accept 堵住时事件循环还转不转"。
 """
 
 import asyncio
+import ctypes
 import inspect
 import os
 import socket
+import sys
 import threading
 import time
 from asyncio import selector_events
 from types import SimpleNamespace
 from typing import Any
-
-import pytest
 
 from hetu.server.threaded_accept import (
     install_threaded_accept,
@@ -23,6 +23,26 @@ from hetu.server.threaded_accept import (
 )
 
 BACKLOG = 1
+FIONBIO = 0x8004667E
+
+
+def _set_os_blocking(sock: socket.socket):
+    """只把内核层改成阻塞，Python 层的 timeout 不动"""
+    if sys.platform == "win32":
+        # os.set_blocking 在 Windows 上不认 socket 句柄
+        ws2_32 = ctypes.WinDLL("ws2_32")
+        ws2_32.ioctlsocket.argtypes = [
+            ctypes.c_size_t,
+            ctypes.c_long,
+            ctypes.POINTER(ctypes.c_ulong),
+        ]
+        nonblocking = ctypes.c_ulong(0)
+        ret = ws2_32.ioctlsocket(
+            sock.fileno(), ctypes.c_long(FIONBIO).value, ctypes.byref(nonblocking)
+        )
+        assert ret == 0, f"ioctlsocket 失败：{ws2_32.WSAGetLastError()}"
+    else:
+        os.set_blocking(sock.fileno(), True)
 
 
 class _Proto(asyncio.Protocol):
@@ -58,7 +78,7 @@ def _run_server(loop, state, ready, patched, os_blocking):
         )
         if os_blocking:
             # 只改内核层，Python 层仍是 0.0——和 Windows 卡死现场一致
-            os.set_blocking(sock.fileno(), True)
+            _set_os_blocking(sock)
             assert sock.gettimeout() == 0.0
         state["port"] = sock.getsockname()[1]
         state["server"] = server
@@ -146,10 +166,8 @@ def test_threaded_accept_keeps_loop_alive_on_blocking_listen_socket():
 async def test_threaded_accept_serves_and_stops():
     """正常（非阻塞）模式下：连接走原版 _accept_connection2 建 transport，
     peername、Server 的连接计数都和原版一致；Server.close() 后 accept 线程退出"""
-    loop = asyncio.get_running_loop()
-    if not isinstance(loop, selector_events.BaseSelectorEventLoop):
-        pytest.skip("需要 selector 事件循环")
-    # 测试用的 loop 是 module 级共享的，补丁装在一个新 loop 上更干净，所以另起线程跑
+    # 测试用的 loop 是 module 级共享的（Windows 上还是 Proactor），补丁装在一个新的
+    # selector loop 上更干净，所以另起线程跑
     result = await asyncio.to_thread(_serve_echo_in_new_loop)
     assert result["echo"] == [b"hello-0", b"hello-1", b"hello-2"]
     assert all(p is not None and p[0] == "127.0.0.1" for p in result["peernames"])
