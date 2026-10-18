@@ -149,3 +149,21 @@ def test_rls_check_missing_ctx_attr_is_invisible(new_component_env):
     MaskRLS = define("and_")
     assert _make_ctx(user_data={"team_mask": 0b0110}).rls_check(MaskRLS, row) is True
     assert _make_ctx(user_data={"team_mask": 0b1000}).rls_check(MaskRLS, row) is False
+
+
+def test_rls_check_unsupported_operator_is_invisible(new_component_env):
+    """ctx 那边的值类型不支持该运算（and_ 碰上字符串、浮点）：按不可见处理，不抛"""
+
+    @define_component(
+        namespace="pytest",
+        permission=Permission.RLS,
+        rls_compare=("and_", "mask", "team_mask"),
+    )
+    class MaskRLS(BaseComponent):
+        owner: np.int64 = property_field(0, unique=False, index=True)
+        mask: np.int64 = property_field(0, unique=False, index=False)
+
+    row = {"mask": 0b0100, "owner": 11}
+    for value in ("6", 6.0):
+        ctx = _make_ctx(user_data={"team_mask": value})
+        assert ctx.rls_check(MaskRLS, row) is False, value

@@ -162,9 +162,9 @@ class Context:
                 if type(row) is dict
                 else getattr(row, comp_attr, np.nan)
             )
+            return bool(rls_func(a, b))
         except TypeError, ValueError:
             # 行里的值转不成 ctx 那边的类型（比如某个 System 把 user_data 里比较用的值置成了
-            # None）：按不可见处理。判定出错不能当作有权限；抛出的话订阅这一批整个失败，每次
-            # 重试都一样
+            # None），或这个类型不支持该运算（比如 and_ 碰上字符串）：按不可见处理。判定出错
+            # 不能当作有权限；抛出的话订阅这一批整个失败，每次重试都一样
             return False
-        return bool(rls_func(a, b))
