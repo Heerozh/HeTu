@@ -113,6 +113,7 @@ class SnowflakeLease:
         while True:
             await asyncio.sleep(RENEW_INTERVAL)
             # sanic bug: 它windows下共享sock句柄方法不对，其他worker的task会被暂停，导致续约失败
+            # （已由 server/threaded_accept.py 根治，accept 不再跑在事件循环线程上）
             try:
                 await self.keeper.keep_alive()
             except RedisConnectionError as e:
