@@ -105,12 +105,13 @@ class SystemCaller:
         assert first_table, f"TYPING不该走到: System {sys_name} 没有引用任何Component"
         session = first_table.session()
 
-        # 设置context.repo
+        # 准备context.repo，每次重试开头重新挂上
+        repos = {}
         for comp in sys.full_components:
             repo = session.using(comp)
             master = comp.master_ or comp
-            context.repo[master] = repo
-        if uuid and SystemLock not in context.repo:
+            repos[master] = repo
+        if uuid and SystemLock not in repos:
             raise ValueError(
                 _(
                     "调用System {sys_name} 时使用了uuid防重复功能，但该System没有定call_lock=True"
@@ -130,8 +131,10 @@ class SystemCaller:
         stuck_count = 0
         # 调用系统
         while context.race_count < sys.max_retry:
-            # 开始新的事务，并attach components
+            # 开始新的事务，并attach components。上一次System里调过
+            # ctx.session_commit()/session_discard()的话context.repo已被清空，要重新挂上
             await session.__aenter__()
+            context.repo = dict(repos)
 
             # 执行system和事务
             try:
