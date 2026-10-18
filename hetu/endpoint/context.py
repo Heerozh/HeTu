@@ -149,7 +149,11 @@ class Context:
         # 避免对字符串/None 值调用 np.isnan 抛 TypeError。
         b = getattr(self, ctx_attr, _UNSET)
         if b is _UNSET:
-            b = self.user_data.get(ctx_attr, np.nan)
+            b = self.user_data.get(ctx_attr, _UNSET)
+        if b is _UNSET:
+            # 两处都没有（比如登录 System 还没把它写进 user_data）：按不可见处理。不能拿 nan
+            # 去比，ne 对 nan 恒为真会放行所有行，and_ 等位运算碰上 float 直接抛 TypeError
+            return False
         # struct 行也要按配置的 comp_attr 取值（与 dict 分支一致），不能写死 "owner"，
         # 否则字段名非 owner 的自定义 RLS 会拿错列判断权限。
         try:

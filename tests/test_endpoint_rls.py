@@ -119,3 +119,33 @@ def test_rls_check_unconvertible_value_is_invisible(new_component_env):
     assert (
         _make_ctx(user_data={"guild": 7}).rls_check(GuildRLS, {"guild": "abc"}) is False
     )
+
+
+def test_rls_check_missing_ctx_attr_is_invisible(new_component_env):
+    """
+    ctx_attr 在 Context 和 user_data 里都找不到（比如登录 System 还没写进 user_data）：按不可见
+    处理。以前拿 nan 去比，ne 对 nan 恒为真会放行所有行；and_ 碰上 float 抛 TypeError
+    """
+
+    def define(op):
+        @define_component(
+            namespace="pytest",
+            permission=Permission.RLS,
+            rls_compare=(op, "mask", "team_mask"),
+            force=True,
+        )
+        class MaskRLS(BaseComponent):
+            owner: np.int64 = property_field(0, unique=False, index=True)
+            mask: np.int64 = property_field(0, unique=False, index=False)
+
+        return MaskRLS
+
+    ctx = _make_ctx(caller=11)
+    row = {"mask": 0b0100, "owner": 11}
+    for op in ("eq", "ne", "lt", "and_"):
+        assert ctx.rls_check(define(op), row) is False, op
+
+    # 写进 user_data 后照常判定
+    MaskRLS = define("and_")
+    assert _make_ctx(user_data={"team_mask": 0b0110}).rls_check(MaskRLS, row) is True
+    assert _make_ctx(user_data={"team_mask": 0b1000}).rls_check(MaskRLS, row) is False

@@ -380,7 +380,8 @@ What each field is for:
   Use it to cache a user's primary `OnlineUser` row, current zone, etc.
   *Not* persisted; gone when the socket closes. It is also the default
   source for `rls_compare`'s third tuple element when the named
-  attribute isn't found on `ctx` itself.
+  attribute isn't found on `ctx` itself; if it's found in neither, no
+  row of that component is visible to the connection.
 - **`ctx.group: str`** — the connection's group label. The default is
   `"guest"`; the engine treats any value starting with `"admin"` as an
   administrator (skipping RLS row filters and allowing
