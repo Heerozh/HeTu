@@ -7,7 +7,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Awaitable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -51,13 +51,22 @@ def check_length(name, data: list, left, right):
         )
 
 
+def close_connection(ws: Websocket, code: int) -> None:
+    """按 close 码断开连接，原因只给该码固定的那句。已经在关了就什么也不做"""
+    ws.fail_connection(code, connection.CLOSE_REASONS[code])
+
+
 async def rpc(
     data: list,
     executor: EndpointExecutor,
     push_queue: asyncio.Queue,
     debug: int = 0,
-):
-    """处理Client SDK调用Endpoint的命令"""
+    on_rsp: Callable[[], None] | None = None,
+) -> int | None:
+    """
+    处理Client SDK调用Endpoint的命令。返回 None 表示连接保持，要断开时返回 close 码（见
+    `connection.CLOSE_REASONS`）。on_rsp 在 rsp 入队之后调用（rej / err / 断开时不调）
+    """
     # print(executor.context, 'rpc', data)
     check_length("rpc", data, 2, 100)
     ok, res = await executor.execute(data[1], *data[2:])
@@ -67,26 +76,64 @@ async def rpc(
 
     if not ok:
         if executor.kicked:
-            # 被顶号不是请求出错，debug 模式也断开：client_handler 带 close 码关连接
-            return False
+            # 被顶号不是请求出错，debug 模式也断开
+            return connection.CLOSE_KICKED
         # 执行失败/非法调用。debug 模式下发独立的 err 帧（区别于成功的 rsp 信封），
         # 把失败原因回传客户端 SDK，便于开发期定位且不污染 ToDict 等反序列化；连接保持。
         # release 模式下直接关闭连接，不向客户端泄露任何原因。
         if debug:
             reason = res if isinstance(res, str) else "server rejected the request."
             await push_queue.put(["err", data[1], reason])
-            return True
-        return False
+            return None
+        # 只用 close 码区分：执行抛异常时 res 是原因字符串，算服务端出错（客户端可以重连）；
+        # 没通过调用检查时 res 是 None，是非法调用（客户端别重连）
+        if isinstance(res, str):
+            return connection.CLOSE_INTERNAL_ERROR
+        return connection.CLOSE_REJECTED
 
     if isinstance(res, RejectResponse):
         # 软拒绝：发 rej 帧，连接保持
         await push_queue.put(["rej", data[1], res.code])
-    elif isinstance(res, ResponseToClient):
+        return None
+    if isinstance(res, ResponseToClient):
         await push_queue.put(["rsp", res.message])
     else:
         # 无视返回值，直接返回ok，如果不返回，Request无法对应
         await push_queue.put(["rsp", "ok"])
-    return True
+    if on_rsp is not None:
+        on_rsp()
+    return None
+
+
+# rpcs 的 sync_id 上限：SDK 按连接递增生成，int32 足够，各语言的 SDK 都能原样表示
+SYNC_ID_MAX = 2**31 - 1
+
+
+async def rpcs(
+    data: list,
+    executor: EndpointExecutor,
+    broker: SubscriptionBroker,
+    push_queue: asyncio.Queue,
+    debug: int = 0,
+) -> int | None:
+    """
+    处理 Client SDK 等推送的调用 ``["rpcs", sync_id, endpoint, *args]``：同 rpc 执行、照常回复；回了 rsp
+    就在本 worker 的订阅器里起栅栏，这次调用引起的推送发出之后再给客户端发 ``["sync", sync_id]``
+    （设计稿 docs/superpowers/specs/2026-10-10-rpcs-sync-design.md）。sync_id 不合法时抛 ValueError，
+    同别的格式错误一样断开连接
+    """
+    check_length("rpcs", data, 3, 101)
+    sync_id = data[1]
+    # bool 是 int 的子类，不能算
+    if type(sync_id) is not int or not 0 <= sync_id <= SYNC_ID_MAX:
+        raise ValueError(f"Invalid rpcs sync_id: {sync_id!r}")
+    return await rpc(
+        [data[0], *data[2:]],
+        executor,
+        push_queue,
+        debug,
+        on_rsp=lambda: broker.sync_(sync_id),
+    )
 
 
 def defer_sub_reply_(
@@ -254,21 +301,29 @@ async def client_handler(
     deferred: set[asyncio.Task] = set()
     # receive_messages 不会自己结束：对端关闭时 recv_streaming 一直挂着，等连接断开后由
     # websocket_connection 的清理取消本协程，走下面静默的 CancelledError 出口。
-    # 其余出口都在各自分支里写明原因，这里只是兜底
+    # 其余出口都在各自分支里写明原因和 close 码（客户端按码决定重不重连），这里只是兜底
     exit_reason = _("接收循环意外结束")
+    close_code = connection.CLOSE_INTERNAL_ERROR
     try:
         async for message in receive_messages(ws):
             if not message:
                 exit_reason = _("收到空帧")
+                close_code = connection.CLOSE_REJECTED
                 break
             if type(message) is not bytes:
                 exit_reason = _("收到非二进制帧：{kind}").format(
                     kind=type(message).__name__
                 )
+                close_code = connection.CLOSE_REJECTED
                 break  # if not byte frame, close connection
             # 转换消息到array
-            last_data = pipe.decode(pipe_ctx, message)
-            if type(last_data) is not list:
+            try:
+                last_data = pipe.decode(pipe_ctx, message)
+            except Exception as e:  # 报文来自客户端，解不开都算格式错
+                raise ValueError(
+                    f"Invalid message encoding: {type(e).__name__}:{e}"
+                ) from e
+            if type(last_data) is not list or not last_data:
                 raise ValueError("Invalid message format")
             # 如果关闭了replay，为了速度，不执行下面的字符串序列化
             if replay.isEnabledFor(logging.DEBUG):
@@ -279,19 +334,28 @@ async def client_handler(
                 ctx, "Coroutines(Websocket.client_handler)"
             ):
                 exit_reason = _("超出接收频率上限")
-                return ws.fail_connection()
+                close_code = connection.CLOSE_REJECTED
+                return
             # 执行消息
             match last_data[0]:
-                case "rpc":  # rpc endpoint_name args ...
-                    # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接
-                    if not await rpc(last_data, executor, push_queue, debug):
-                        if executor.kicked:
-                            exit_reason = _("连接已被顶号")
-                            return ws.fail_connection(
-                                connection.CLOSE_KICKED, connection.CLOSE_KICKED_REASON
-                            )
-                        exit_reason = _("rpc 调用失败")
-                        return ws.fail_connection()
+                # rpc endpoint_name args ... / rpcs sync_id endpoint_name args ...
+                case "rpc" | "rpcs":
+                    # rpc() 内部按 debug 决定失败时发 err 帧（保持连接）还是关连接；rpcs 回了 rsp
+                    # 之后起栅栏，推送发出之后再发 sync
+                    if last_data[0] == "rpc":
+                        code = await rpc(last_data, executor, push_queue, debug)
+                    else:
+                        code = await rpcs(
+                            last_data, executor, broker, push_queue, debug
+                        )
+                    if code is not None:
+                        close_code = code
+                        exit_reason = (
+                            _("连接已被顶号")
+                            if code == connection.CLOSE_KICKED
+                            else _("rpc 调用失败")
+                        )
+                        return
                 case "sub":  # sub component_name get/range args ...
                     sub_ok = await sub_call(
                         last_data, executor, broker, push_queue, deferred
@@ -301,7 +365,8 @@ async def client_handler(
                             await push_queue.put(BAD_SUBS)
                         else:
                             exit_reason = _("订阅请求非法")
-                            return ws.fail_connection()
+                            close_code = connection.CLOSE_REJECTED
+                            return
                 case "unsub":  # unsub sub_id
                     check_length("unsub", last_data, 2, 2)
                     await broker.unsubscribe(last_data[1])
@@ -326,7 +391,15 @@ async def client_handler(
         )
         replay.info(err_msg)
         logger.error(err_msg)
-        return ws.fail_connection()
+    except ValueError as e:
+        # 报文格式错（解不开、长度不对、未知消息类型等）：客户端越界，不是服务端出错
+        exit_reason = f"{type(e).__name__}:{e}"
+        close_code = connection.CLOSE_REJECTED
+        err_msg = _("⚠️ [📡WSReceiver] [非法操作] 封包：{data}，异常：{err}").format(
+            data=last_data, err=f"{type(e).__name__}:{e}"
+        )
+        replay.info(err_msg)
+        logger.warning(err_msg)
     except (SanicException, BaseException) as e:
         exit_reason = f"{type(e).__name__}:{e}"
         err_msg = _("❌ [📡WSReceiver] 执行异常，封包：{data}，异常：{err}").format(
@@ -334,7 +407,6 @@ async def client_handler(
         )
         replay.info(err_msg)
         logger.exception(err_msg)
-        return ws.fail_connection()
     finally:
         # 还在后台等的订阅后半段跟着连接取消（订阅回滚，占位的回复随之作废）
         for task in list(deferred):
@@ -350,7 +422,7 @@ async def client_handler(
             )
             replay.info(close_msg)
             logger.info(close_msg)
-            ws.fail_connection()
+            close_connection(ws, close_code)
             try:
                 push_queue.put_nowait(PUSH_CLOSE)
             except asyncio.QueueFull:

@@ -372,7 +372,7 @@ def test_get_absent_unique_fields(mod_item_model):
 
 
 def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
-    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新。"""
+    """混合状态只输出实际写入，改回原值的 UPDATE 不生成空更新，但和只读的行一样要校验版本"""
     ref = TableReference(mod_item_model, "TestServer", 1)
     idmap = IdentityMap()
     rows = mod_item_model.new_rows(5)
@@ -397,7 +397,7 @@ def test_dirty_rows_mixed_states_and_reverted_update(mod_item_model):
     assert old_rows[0]["qty"] == "1"
     assert new_rows == [{"qty": "9"}]
     assert [r["id"] for r in deletes] == ["13"]
-    assert set(idmap.get_clean_rows()[ref]) == {11}
+    assert set(idmap.get_clean_rows()[ref]) == {11, 14}
 
 
 def test_dirty_rows_skip_read_only_tables(mod_item_model):
@@ -426,13 +426,13 @@ def test_dirty_rows_skip_read_only_tables(mod_item_model):
 
 def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
     """没动过的 NaN 不算变更：改回原值不发更新，改别的字段时只写那个字段；
-    0.0 改成 -0.0 仍和按值比较一样算没变"""
+    0.0 改成 -0.0 仍和按值比较一样算没变。不发更新的行提交时照样校验版本"""
     Item = mod_item_model
     ref = TableReference(Item, "TestServer", 1)
     idmap = IdentityMap()
-    rows = Item.new_rows(3)
-    rows.id = [1, 2, 3]
-    rows.model = [np.nan, np.nan, 0.0]
+    rows = Item.new_rows(4)
+    rows.id = [1, 2, 3, 4]
+    rows.model = [np.nan, np.nan, 0.0, 0.0]
     idmap.add_clean(ref, rows)
 
     reverted = rows[0].copy()
@@ -447,10 +447,14 @@ def test_dirty_rows_unchanged_nan_is_not_a_change(mod_item_model):
     signed_zero.model = -0.0
     signed_zero.level = 3
     idmap.update(ref, signed_zero)
+    only_signed_zero = rows[3].copy()
+    only_signed_zero.model = -0.0
+    idmap.update(ref, only_signed_zero)
 
     _, (old_rows, new_rows), _ = idmap.get_dirty_rows()[ref]
     assert [r["id"] for r in old_rows] == ["2", "3"]
     assert new_rows == [{"qty": "7"}, {"level": "3"}]
+    assert set(idmap.get_clean_rows()[ref]) == {1, 4}
 
 
 @pytest.mark.parametrize("preload", [False, True])
@@ -531,6 +535,9 @@ def test_delete_inserted_row_leaves_nothing_to_commit(mod_item_model):
     idmap.mark_deleted(ref, 8)
 
     assert not idmap.is_dirty
+    # range 合并本事务的改动时也当它没插过
+    local = idmap.local_index(ref, "name")
+    assert local is not None and not local.placed and not local.moved
     assert idmap.get_dirty_rows()[ref] == ([], ([], []), [])
     assert len(idmap.filter(ref, name="a")) == 0
 
@@ -559,6 +566,88 @@ def test_delete_reinserted_db_row_still_deletes_it(mod_item_model):
     inserts, _, deletes = idmap.get_dirty_rows()[ref]
     assert inserts == []
     assert {(d["id"], d["name"]) for d in deletes} == {("9", "db")}
+
+
+@pytest.mark.parametrize("seed", range(20))
+def test_local_index_matches_recomputed(mod_item_model, seed):
+    """
+    本事务在索引上的改动（LocalIndex）是增量维护的：随机 insert、改索引列、改别的列、删，隔几步
+    同步一次，每次的结果都和从头重算的一样——哪些行按当前值放进结果、哪些行库里还在原值上，以及
+    它们的排序键。同一行改了又改、删掉的行多了，排好序的两份键列表要跟着增删
+    """
+    import random
+
+    Item = mod_item_model
+    ref = TableReference(Item, "TestServer", 1)
+    rng = random.Random(seed)
+    idmap = IdentityMap()
+    rows = Item.new_rows(200)
+    rows.id = np.arange(1, 201)
+    rows.owner = rng.choices(range(8), k=200)
+    idmap.add_clean(ref, rows)
+    # 独立的模型：库里的原值、本事务眼里的当前值、删掉的库里行
+    db = {int(row.id): int(row.owner) for row in rows}
+    current = dict(db)
+    deleted: set[int] = set()
+
+    def key(owner: int, row_id: int) -> bytes:
+        return b"%03d\x00%d" % (owner, row_id)
+
+    def sort_keys(arr: np.ndarray) -> list[bytes]:
+        return [key(int(v), int(i)) for v, i in zip(arr["owner"], arr["id"])]
+
+    def check() -> None:
+        local = idmap.local_index(ref, "owner")
+        assert local is not None
+        lo, hi = key(3, 0), key(5, 0) + b"\xff"
+        placed = {
+            row_id: key(owner, row_id)
+            for row_id, owner in current.items()
+            if db.get(row_id) != owner
+        }
+        moved = {row_id: key(db[row_id], row_id) for row_id in deleted} | {
+            row_id: key(db[row_id], row_id)
+            for row_id, owner in current.items()
+            if row_id in db and db[row_id] != owner
+        }
+        in_range = sorted((k, row_id) for row_id, k in placed.items() if lo <= k <= hi)
+        assert local.placed_between(lo, hi, sort_keys) == in_range
+        assert local.moved_between(lo, hi, sort_keys) == sum(
+            lo <= k <= hi for k in moved.values()
+        )
+        assert local.placed == placed and local.moved == moved
+        assert local.placed_keys == sorted((k, row_id) for row_id, k in placed.items())
+        assert local.moved_keys == sorted(moved.values())
+
+    for _step in range(300):
+        op = rng.random()
+        if op < 0.3:
+            row = Item.new_row()
+            row.owner = rng.randrange(8)
+            idmap.add_insert(ref, row)
+            current[int(row.id)] = int(row.owner)
+        elif op < 0.8 and current:
+            row_id = rng.choice(sorted(current))
+            row, _ = idmap.get(ref, row_id)
+            assert row is not None
+            if rng.random() < 0.6:
+                row.owner = rng.randrange(8)
+                current[row_id] = int(row.owner)
+            else:
+                row.qty = rng.randrange(100)  # 不是索引列
+            idmap.update(ref, row)
+        elif current:
+            row_id = rng.choice(sorted(current))
+            idmap.mark_deleted(ref, row_id)
+            del current[row_id]
+            if row_id in db:
+                deleted.add(row_id)
+        sync = rng.random()
+        if sync < 0.2:
+            check()
+        elif sync < 0.4:
+            idmap.local_index(ref, "owner")  # 只同步、不算排序键（get 就是这样用的）
+    check()
 
 
 # ---- 一个事务里很多行：每行的开销不能随事务里已有的行数增长 ----

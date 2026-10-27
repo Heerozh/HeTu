@@ -19,12 +19,18 @@ I18N_DOMAIN: str = os.environ.get("DEFAULT_DOMAIN", "messages")
 
 
 def get_system_language() -> str:
-    """Return the system UI language as a short code (e.g. 'en', 'zh')."""
+    """Return the system UI language as a short code (e.g. 'en', 'zh').
+
+    选中的语言打到 stderr：stdout 留给命令的输出（hetu call 等只输出一行 JSON）。
+    """
     # 优先从环境变量获取
     try:
         env_default = Locale.default()
         if env_default:
-            print(f"Use language defined by ENV (LANG, LC_*): {env_default!s}")
+            print(
+                f"Use language defined by ENV (LANG, LC_*): {env_default!s}",
+                file=sys.stderr,
+            )
             return str(env_default)
     except TypeError:
         pass
@@ -40,10 +46,10 @@ def get_system_language() -> str:
         posix = locale.getlocale()[0]
 
     if posix:
-        print(f"Use system language: {posix!s}")
+        print(f"Use system language: {posix!s}", file=sys.stderr)
         return posix
 
-    print("Use fallback language: en")
+    print("Use fallback language: en", file=sys.stderr)
     return "en"
 
 

@@ -20,9 +20,13 @@ WORKDIR /
 # 切换用户
 USER hetu
 
+# 配置文件：hetu start / upgrade / call / get / range / shell 没给 --config 时都用它，
+# 所以 docker exec <容器> hetu call ... 开箱即用
+ENV HETU_CONFIG=/app/config.yml
+
 # 入口
 EXPOSE 2466/tcp
 
 ENTRYPOINT ["python", "-m", "hetu"]
 #ENTRYPOINT ["python", "-O", "-m", "hetu"]  项目成熟后再开-O
-CMD ["start", "--config /app/config.yml"]
+CMD ["start"]

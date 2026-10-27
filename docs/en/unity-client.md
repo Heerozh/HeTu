@@ -101,6 +101,19 @@ Key points the source enforces but isn't always obvious from a snippet:
   `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked` to tell the
   player "logged in elsewhere" — and don't reconnect automatically, or you'll
   log in again and kick the other device right back.
+- **Rejected.** In release mode, when the client breaks the rules (calls a
+  System the server doesn't have, lacks permission, passes the wrong number
+  of arguments, sends a malformed message, exceeds the send-rate limit), the
+  server closes the connection with close code `4002`
+  (`HeTuCloseCode.Rejected`) and reason `"rejected"`, without the details
+  (see the server log). The usual cause is a client newer than the server.
+  Don't reconnect automatically either — the same call would get you
+  disconnected again, over and over. Every code in 4000-4999 is terminal like
+  this (`HeTuCloseCode.IsTerminal(code)`); `HeTuSessionClient` goes straight
+  to `Faulted` on all of them (with a `HeTuConnectionRejectedException`, whose
+  `Code` is the close code, for anything other than kicked). A server-side
+  error (backend unreachable, a System raised) closes with `1011`
+  (`HeTuCloseCode.InternalError`), which is fine to reconnect after.
 - **`Connect(url, authKey)`** is the same call but signs the handshake with
   a pre-shared key; use this if your server runs with `--authkey`.
 - **One `Close()` per `Connect()`.** `Close()` cancels in-flight `CallSystem`
@@ -128,6 +141,31 @@ Debug.Log(resp.To<string>());
 
 Use `.Forget()` (or `_ = CallSystem(...)`) for fast input streams like per-
 frame movement; `await` for actions whose result you actually need.
+
+**Calls that wait for their pushes.** `CallSystem`'s reply is sent as soon as
+the server commits, while the subscription updates caused by that write arrive
+about one batching interval (100 ms by default) later. If you refresh the UI
+from subscription data right after the call returns — say, re-enabling a
+button based on how much gold is left — you read the old values. Use
+`CallSystemAwaitPush` there: it returns only after the pushes caused by the
+call have arrived, so the objects from `WatchRow` / `WatchRange` are already
+up to date.
+
+```csharp
+buyButton.interactable = false;
+await HeTuClient.Instance.CallSystemAwaitPush("buy", itemId);
+// the gold subscription already reflects the purchase here
+buyButton.interactable = gold.Data.value >= price;
+```
+
+`CallSystemAwaitPush` takes about one batching interval longer than
+`CallSystem` and doesn't hold up other calls or pushes on the same connection;
+keep high-frequency calls such as movement on `CallSystem`. Like subscriptions
+themselves it is best-effort: when the server is overloaded, a push can still
+arrive after it returns. `HeTuSessionClient` and the headless
+`HeadlessHeTuClient` have the same method; if the connection drops after the
+server's reply arrived but before the pushes did, it returns successfully (the
+commit definitely happened, and subscriptions are restored on reconnect).
 
 **Local pre-callbacks.** You can register a client-side hook that runs every
 time you call a `System` with that name — useful for client-side prediction:
@@ -342,9 +380,28 @@ sub.AddTo(ref _bag);
 try { /* use sub */ } finally { sub.Dispose(); }
 ```
 
-`Dispose()` does two things: tells the server "stop pushing me changes for
-this query" and tears down all R3 streams chained off the subscription.
-After dispose, the `Subject` / `ObserveRow` streams will not emit further.
+`Dispose()` releases the subscription you hold: it tears down all R3
+streams chained off it, and after dispose its `Subject` / `ObserveRow`
+streams and events stop firing.
+
+The same row / range can be watched from several places: every `WatchRow` /
+`WatchRange` / `WatchTable` call returns **its own** subscription object;
+objects for the same query share one server subscription and the same data
+(`Data` / `Rows`). Dispose each on its own lifecycle without affecting the
+others — the SDK tells the server "stop pushing me changes for this query"
+only when the last one is disposed.
+
+Two caveats:
+
+- A subscription that is never disposed keeps the server subscription alive
+  until the connection closes, even if every other subscription of the same
+  query has been disposed. The SDK's leak log only shows up once it is
+  collected after the disconnect, so don't rely on it to catch leaks early.
+- The unsubscribe can go out a bit later: while subscribe requests are still
+  awaiting replies, the SDK waits for them before unsubscribing, so a request
+  that lands on the same subscription isn't dropped with it. With a constant
+  stream of subscribe requests (e.g. paging quickly), old subscriptions stay
+  until the requests pause.
 
 ## Logical session: `HeTuSessionClient`
 
@@ -447,7 +504,7 @@ transition:
 | `RestoringSubscriptions` | Bootstrap done; re-issuing each live `WatchRow` / `WatchRange`.                                    |
 | `Ready`                  | Queued calls have been flushed; the `Ready` event fires. Steady state.                             |
 | `Reconnecting`           | Transient drop; waiting `reconnectDelay`, then back to `Connecting`.                               |
-| `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, or kicked (`HeTuKickedException`, never retried). `Faulted` event carries the last `Exception`. |
+| `Faulted`                | Terminal — either an initial-connect failure (always terminal), post-Ready `maxReconnectAttempts` reached, kicked (`HeTuKickedException`, never retried), or another terminal close code such as rejected (`HeTuConnectionRejectedException`, never retried). `Faulted` event carries the last `Exception`. |
 
 The `Faulted` **event** is broader than the `Faulted` **state**: it fires
 once per failed attempt — pre-Ready failures fire it once then go terminal;
@@ -461,6 +518,10 @@ session goes straight to `Faulted` with a `HeTuKickedException` instead of
 reconnecting — a reconnect would re-run your login `bootstrap` and kick the
 other device, and the two would keep kicking each other. Check for it in the
 `Faulted` handler (or around `await Connect`) to show "logged in elsewhere".
+Any other terminal close code (4000-4999, e.g. `4002` rejected) likewise goes
+straight to `Faulted`, with a `HeTuConnectionRejectedException`: retrying the
+same request would only be rejected again. Show something like "version
+mismatch, please update".
 
 ### `CallSystem` semantics
 
@@ -498,8 +559,10 @@ extra hooks the session populates:
   clean diff — not just a "everything reloaded" signal. Use it to clear
   any "stale" indicators in your UI.
 - **De-duplication** — calling `WatchRow` / `WatchRange` twice with the
-  same arguments hands you the **same** subscription object back; the
-  remote unsubscribe only happens when *every* handle is disposed.
+  same arguments sends one server subscription but hands each caller
+  **its own** subscription object; the remote unsubscribe only happens
+  when *every* one is disposed, and a reconnect restores the query once
+  for all of them.
 
 `RowSubscription`'s restore target is the **bound row's `ID`**, not the
 original index/value: if your call was `session.WatchRow<Player>("owner",

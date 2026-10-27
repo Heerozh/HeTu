@@ -96,7 +96,10 @@ class Backend:
             await servant.close()
 
     def post_configure(
-        self, components: Iterable[type[BaseComponent]] | None = None
+        self,
+        components: Iterable[type[BaseComponent]] | None = None,
+        *,
+        servants: bool = True,
     ) -> None:
         """
         对数据库做的配置工作放在这，可以做些减少运维压力的工作，或是需要项目加载完成后才能做的初始化工作。
@@ -105,9 +108,13 @@ class Backend:
         components: 要做 schema 检查的组件列表。None（服务器默认）表示取
         `SystemClusters` 里所有被 System 引用的组件；不跑 System 的进程（headless
         client、Sandbox、测试）显式传入自己关心的组件即可，无需构建簇。
+        servants: 是否也配置 servant 一侧（Redis 为订阅打开 keyspace 通知，逐节点
+        CONFIG GET / SET）。不订阅任何东西的进程（hetu call / shell）传 False。
         """
         components = list(components) if components is not None else None
         self._master.post_configure(components)
+        if not servants:
+            return
         for servant in self._servants:
             servant.post_configure(components)
 

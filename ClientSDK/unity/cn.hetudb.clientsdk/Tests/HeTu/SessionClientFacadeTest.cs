@@ -83,6 +83,28 @@ namespace Tests.HeTu
         }
 
         [UnityTest]
+        public IEnumerator CallSystemAwaitPush_ForwardsAwaitPushToTransport() =>
+            RunTask(CallSystemAwaitPush_ForwardsAwaitPushToTransportAsync());
+
+        private async Task CallSystemAwaitPush_ForwardsAwaitPushToTransportAsync()
+        {
+            var transport = new FakeTransport("c1");
+            var scheduler = new FakeScheduler();
+            using var session = CreateSession(transport, scheduler);
+
+            var connectTask = ToTask(session.Connect());
+            transport.RaiseConnected();
+            await connectTask;
+
+            await ToTask(session.CallSystemAwaitPush("buy", 1));
+            await ToTask(session.CallSystem("move", 2));
+
+            CollectionAssert.AreEqual(
+                new[] { true, false },
+                transport.Calls.Select(call => call.AwaitPush));
+        }
+
+        [UnityTest]
         public IEnumerator WatchRow_CompletesFromCoreCallback() =>
             RunTask(WatchRow_CompletesFromCoreCallbackAsync());
 
@@ -422,17 +444,20 @@ namespace Tests.HeTu
             public void Close() => IsConnected = false;
 
             public void CallSystem(string systemName, object[] args,
-                Action<JsonObject, CallOutcome, string> onResponse)
+                Action<JsonObject, CallOutcome, string> onResponse,
+                bool awaitPush = false,
+                Action<JsonObject> onAnswered = null)
             {
-                Calls.Add(new CallRecord(systemName, args));
+                Calls.Add(new CallRecord(systemName, args, awaitPush));
                 onResponse(null, CallOutcome.Completed, null);
             }
 
             public void WatchRow<T>(
                 string index, object value,
-                Action<RowSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedRowCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                RowSubscription<T> reusable = null)
+                ManagedRowCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent
             {
                 componentName ??= typeof(T).Name;
@@ -447,27 +472,30 @@ namespace Tests.HeTu
                 }
 
                 onResponse(
-                    new RowSubscription<T>(
+                    new ManagedRowCore<T>(
                         subId,
                         componentName,
                         row,
-                        _remoteClient),
+                        _remoteClient,
+                        creationTrace),
                     false,
                     null);
             }
 
             public void WatchRange<T>(
                 string index, object left, object right, int limit,
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 bool desc = false, bool force = true, string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 
             public void WatchTable<T>(
-                Action<IndexSubscription<T>, bool, Exception> onResponse,
+                Action<ManagedIndexCore<T>, bool, Exception> onResponse,
                 string componentName = null,
-                IndexSubscription<T> reusable = null)
+                ManagedIndexCore<T> reusable = null,
+                System.Diagnostics.StackTrace creationTrace = null)
                 where T : IBaseComponent =>
                 throw new NotSupportedException();
 
@@ -493,14 +521,16 @@ namespace Tests.HeTu
 
             public readonly struct CallRecord
             {
-                public CallRecord(string systemName, object[] args)
+                public CallRecord(string systemName, object[] args, bool awaitPush)
                 {
                     SystemName = systemName;
                     Args = args;
+                    AwaitPush = awaitPush;
                 }
 
                 public string SystemName { get; }
                 public object[] Args { get; }
+                public bool AwaitPush { get; }
             }
         }
 

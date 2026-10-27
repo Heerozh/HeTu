@@ -112,8 +112,12 @@ def generate_all_components(namespace: str, output: str):
 
     content = "\n".join(lines)
     # 内容不变时跳过写入，避免触发客户端（如 Unity）无谓的重编译。
+    # 固定写 LF；读时 newline="" 不转换换行，旧的 CRLF 文件不会被误判为无变化。
     out_path = Path(output)
-    if out_path.exists() and out_path.read_text(encoding="utf-8") == content:
+    if (
+        out_path.exists()
+        and out_path.read_text(encoding="utf-8", newline="") == content
+    ):
         print(f"↩️  内容无变化，跳过写入 {output}")
         return
-    out_path.write_text(content, encoding="utf-8")
+    out_path.write_text(content, encoding="utf-8", newline="\n")

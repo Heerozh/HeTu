@@ -81,7 +81,8 @@ working examples — read them first.
   `ctx.depend["remove:ItemOrder"]`): the engine duplicates the Component into a
   **separate physical sibling table** (`Order:ItemOrder`, same schema / index /
   permission) and registers a copy of the System bound to it, in its own isolated
-  cluster — not generic namespacing, each copy is a real table. Resolve a copy at
+  cluster — not generic namespacing, each copy is a real table. The System's own
+  `depends=` graph is copied under the same tag too. Resolve a copy at
   load time with `Component.duplicate(namespace, tag)`, enumerate with
   `get_duplicates()`. Built-in `create_future_call:scheduler` is the canonical
   example. (→ `advanced.md`)
@@ -135,12 +136,13 @@ async def test_rename(sandbox):
 
 Two ways to invoke your code:
 
-- **`call(name, *args, caller=0, user_data=None)`** — the **client path**. Runs the full
-  Endpoint pipeline: connection → permission/arg checks → guards → your
+- **`call(name, *args, caller=0, group="", user_data=None)`** — the **client path**. Runs
+  the full Endpoint pipeline: connection → permission/arg checks → guards → your
   `@define_endpoint`
   (or a System's auto-generated endpoint). `caller != 0` first `elevate`s a fresh
-  connection (simulates a logged-in client). Returns what the client SDK actually
-  receives
+  connection (simulates a logged-in client); `group="gm"` / `"admin"` simulates a GM /
+  admin connection (`ctx.group`, checked by `Permission.GM` / `ADMIN`). Returns what
+  the client SDK actually receives
   (msgpack round-tripped). A guard soft-reject raises **`CallRejected`** (assert
   `.code`); an illegal call (bad permission/args, unknown endpoint, or the endpoint
   raised) raises **`ConnectionClosed`**. Each call is a fresh connection (no cross-call
@@ -157,6 +159,42 @@ Two ways to invoke your code:
   directly (no RLS filtering); **`insert`/`upsert`** seed rows; **`flush()`** wipes all
   tables between tests.
 - One app/namespace per process; a `call_system` target must reference ≥1 Component.
+
+## Debugging a running game (`hetu call` / `get` / `range` / `shell`)
+
+These run **in your process against the configured backend** (no server needed;
+works on the SQLite dev DB). Writes use the same commit path as Systems, so online
+clients get pushes. Config: `--config`, else `$HETU_CONFIG`, else `./config.yml`.
+(→ `docs/en/operations.md` "Debugging from the command line", `local.py`, `cli/`)
+
+```bash
+hetu call --list                     # Systems: params, permission, components, doc line
+hetu get --list                      # components, fields, which are indexed
+hetu call add_gold 1001 500          # ADMIN/GM/internal Systems run as admin by default
+hetu call --as 1001 buy_item 3 2     # USER Systems REQUIRE --as <uid> (exit 2 otherwise)
+hetu call add_gold 1001 500 --dry-run          # run, don't commit; see `writes`
+hetu call send_mail --args-file args.json      # args as a JSON array (- = stdin)
+hetu get Player owner=1001           # one row by id / indexed field (no app import)
+hetu range Item owner 1001 --limit 50 --master # read master right after a write
+hetu shell -c "await call_system('add_gold', 1001, 5); show(await get('Player', owner=1001))"
+```
+
+- stdout is **one JSON line**: `ok`, `result` (raw return), `client` (what the SDK
+  would get; `wire_error` if it can't be serialized — e.g. a raw `np.int64`),
+  `retries`, `writes` (rows each commit inserted/updated/deleted), `warnings`,
+  `target`; on failure `error_type`, `error`, `traceback`. Exit codes: 0 ok, 1 your
+  code raised / timed out, 2 usage (args, identity, unknown name), 3 environment
+  (no config/table, schema differs from code, writes forbidden).
+- Args are JSON-parsed, falling back to strings (`str`-annotated params stay strings);
+  JSON-looking args that fail to parse are rejected — use `--args-file` on
+  PowerShell. Put args starting with `-` after `--`.
+- It runs **your local code**: passing here does not mean the server reloaded it.
+  No connection: `ctx.request` is None, `elevate` fails; give login-time
+  `ctx.user_data` with `--user-data`. `hetu shell` exposes the same API as
+  `Sandbox` (`call_system`, `get`, `must_get`, `insert`, `upsert`, plus `app.range`
+  and `show()`); `call` is reserved for the future Endpoint path.
+- Never creates or migrates tables. `CLI_ALLOW_WRITE: false` in a config limits the
+  CLI to reads and `--dry-run`; every call/shell run is audited to `CLI_AUDIT_LOG`.
 
 ## Non-server processes (`hetu.headless`)
 
@@ -193,7 +231,8 @@ one cluster; tables no System references go in `namespace="core"`. Call
 `hetu build` generates typed C# component classes from your definitions. The
 client uses `HeTuClient.Instance` (one raw socket) or, preferred,
 `HeTuSessionClient.Instance` (auto-reconnect + subscription replay):
-`CallSystem(name, args...)`, `WatchRow<T>(index, value)`,
+`CallSystem(name, args...)` (or `CallSystemAwaitPush`, which returns only after
+the subscription pushes the call caused have arrived), `WatchRow<T>(index, value)`,
 `WatchRange<T>(index, lo, hi, limit)`. Subscriptions hold a server resource and
 **must be disposed** (`sub.AddTo(gameObject)`). See `unity-client.md`.
 `ADMIN`-permission Components are **skipped** by codegen (no C# class emitted) —
@@ -204,7 +243,8 @@ via the `DictComponent` overload and casting yourself; no generated type require
 
 `hetu init` (scaffold) · `hetu start --config=config.yml` (run) · `hetu upgrade`
 (migrate schema — run before deploying any Component change) · `hetu build`
-(regenerate the client SDK after any Component change).
+(regenerate the client SDK after any Component change) · `hetu call` / `get` /
+`range` / `shell` (debug: call Systems, read rows — see above).
 
 ## Where to read more
 
@@ -218,8 +258,9 @@ via the `DictComponent` overload and casting yourself; no generated type require
   then read: `data/component.py` (components & fields), `system/definer.py`
   (Systems & clusters), `system/context.py` (`ctx` + repo), `endpoint/`
   (Endpoints, `elevate`), `data/backend/` (`SessionRepository` CRUD),
-  `testing/__init__.py` (`Sandbox` unit-test helper), `headless.py` (table client
-  for non-server processes), `CONFIG_TEMPLATE.yml` (every config key).
+  `testing/__init__.py` (`Sandbox` unit-test helper), `local.py` (`LocalApp`, the
+  in-process runtime behind `hetu call` / `shell` and `Sandbox`), `headless.py`
+  (table client for non-server processes), `CONFIG_TEMPLATE.yml` (every config key).
 - **Advanced** (`advanced.md`): scheduled `FutureCalls`, `call_lock` idempotency,
   the `on_disconnect` hook, per-connection limits, NumPy patterns over `range()`
   results, custom pipeline layers.

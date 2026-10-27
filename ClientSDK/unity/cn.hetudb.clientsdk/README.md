@@ -60,7 +60,8 @@ public class NetBootstrap : MonoBehaviour
     - 管理持续存在的逻辑会话，而不是只管理一条当前 WebSocket。
     - 断线后会重新建立连接、先执行 `bootstrap`，再恢复仍然存活的订阅。
     - `WatchRow` / `WatchRange` 返回的就是普通 `RowSubscription` /
-      `IndexSubscription`；同一 canonical `sub_id` 会复用同一个订阅对象。
+      `IndexSubscription` 句柄；同一 canonical `sub_id` 的多次订阅共用一个服务端订阅，
+      但每次调用拿到自己的句柄，各自 `Dispose` 互不影响，最后一个 `Dispose` 才退订。
     - 未发送的 `CallSystem` 会等待 session ready 后再发；已经发出但未收到响应就断线的调用会抛出
       `CallOutcomeUnknownException`，不会自动重试副作用请求。
 
@@ -100,6 +101,10 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 `HeTuKickedException`——重连会重跑登录把对方顶掉、两边互踢。在 `Faulted` 事件里判断它，
 提示玩家"账号已在别处登录"。
 
+请求被拒（客户端越界，比如调了服务器上还没有的 System，服务端 close 码 `4002`）等其它
+4000-4999 段的终态码同样不重连，直接进 `Faulted`，异常为 `HeTuConnectionRejectedException`
+（`Code` 是 close 码）——重连后再调一样会被断开。可提示玩家"版本不匹配，请更新"，原因看服务器日志。
+
 ### 连接
 
 - `Connect(url)`：建立单条物理连接并等待握手完成。
@@ -107,13 +112,21 @@ post-Ready 重试用尽也是 `Faulted`，其它情况只是 Reconnecting 中的
 - `OnConnected`：握手完成后触发。
 - `OnClosed`：连接断开时触发，参数为空表示正常断开。
 - `LastCloseCode`：最近一次断开的 close 码，`OnClosed` 里可读；等于 `HeTuCloseCode.Kicked`
-  （4001）表示被顶号（账号在别处登录），请提示玩家且不要自动重连。
+  （4001）表示被顶号（账号在别处登录），请提示玩家且不要自动重连；等于 `HeTuCloseCode.Rejected`
+  （4002）表示请求被拒（客户端越界，常见于客户端比服务器新）。`HeTuCloseCode.IsTerminal(code)`
+  为真（4000-4999 段）时都不要自动重连；`HeTuCloseCode.InternalError`（1011，服务端出错）和
+  `Abnormal`（1006，断网）可以重连。
 
 ### RPC
 
 - `CallSystem(systemName, params object[] args)`
     - 发送系统调用。
     - 可通过 `SystemLocalCallbacks[systemName]` 注册本地前置逻辑。
+- `CallSystemAwaitPush(systemName, params object[] args)`
+    - 同 `CallSystem`，但要等这次调用引起的订阅推送都到了才返回，返回时订阅对象已是新值；约多等
+      一个推送间隔（~100ms）。适合"按钮置灰、请求完成后按订阅数据恢复"，高频调用（如移动）用
+      `CallSystem`。
+    - 已收到服务端回复、还在等推送时断线，按成功返回。
 
 ### 数据订阅
 

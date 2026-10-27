@@ -602,6 +602,25 @@ async def test_pop_upcoming_call_skips_call_taken_by_other_worker(
     assert row is not None and row.scheduled > time.time() + 500
 
 
+async def test_pop_upcoming_call_skips_reread_row_not_yet_due(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """读索引时到期，读回的行却还差几十毫秒才到期（这期间按 key 的调用被 cancel 又 ensure 成
+    稍后执行）：不能取出，未来调用不能早于计划时间执行"""
+    from hetu.system.future import FutureCalls, pop_upcoming_call
+
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    (call,) = await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    frozen = time.time()
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    state = _take_after_index_read(monkeypatch, fc_tbl, int(call.id), lease=0.05)
+
+    assert await pop_upcoming_call(fc_tbl) is None
+    assert state["taken"]
+    row = await _get_future_row(fc_tbl, call.id)
+    assert row is not None and row.scheduled == frozen + 0.05
+
+
 async def test_exec_future_call_retries_delete_on_race(test_app, tbl_mgr, new_ctx):
     """执行成功后删行撞竞态（读到滞后副本上的旧版本，或这条刚被超时重投改了版本）：要重试删掉，
     不能把 RaceCondition 抛给任务循环（那会记一条错误、退避 1 秒，还跳过后面的收尾）"""
@@ -646,6 +665,26 @@ def test_key_to_id_properties():
     assert a != 0
     assert c < 0 and a != c  # 不同 key 不同 id
     assert -(2**63) <= a <= -1  # int64 负数范围内
+
+
+def test_call_lock_uuid_tells_keyed_calls_apart():
+    """一次性未来调用的 call lock uuid：雪花 id 不会复用，就是 id；按 key 的调用（负 id）同一个
+    key 先后 ensure 的两条 id 相同，靠建行时间区分。最长也放得进 SystemLock.uuid"""
+    from hetu.system.future import FutureCalls, _call_lock_uuid
+    from hetu.system.lock import SystemLock
+
+    row = FutureCalls.new_row()
+    row.created = 1759400000.123
+    assert _call_lock_uuid(row) == str(row.id)
+
+    keyed = FutureCalls.new_row(id_=-(2**63))  # 最长的负 id
+    keyed.created = 1759400000.123
+    first = _call_lock_uuid(keyed)
+    keyed.created += 0.002
+    assert _call_lock_uuid(keyed) != first
+    keyed.created = 16_000_000_000.0  # 2477 年
+    width = SystemLock.dtype_map_["uuid"].itemsize // np.dtype("<U1").itemsize
+    assert len(_call_lock_uuid(keyed)) <= width
 
 
 async def test_ensure_future_call_idempotent(test_app, tbl_mgr, executor):
@@ -761,7 +800,7 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     call = await pop_upcoming_call(fc_tbl)
     assert call and call.id == fid  # 负数 id 正常 pop
 
-    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=str(负数 id)
+    # 执行：一次性 + timeout!=0 → 走 call_lock，uuid=负数 id + 建行时间（见 _call_lock_uuid）
     # 注：测试复用已 login 的 executor（caller=1020）；生产中 future_call_task 的 caller 恒为 0
     ok = await exec_future_call(call, executor.context.systems, fc_tbl)
     assert ok
@@ -774,6 +813,55 @@ async def test_ensure_one_shot_executes(monkeypatch, test_app, tbl_mgr, executor
     # 目标 System 真的执行了：RLSComp.value = 100 + 4
     ok, _ = await executor.execute("test_rls_comp_value", 104)
     assert ok
+
+
+async def test_exec_future_call_keeps_reensured_call(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """按 key 的一次性调用取出之后、执行完之前，这个 key 被 cancel 又重新 ensure（同一个 id 的
+    新调用）：执行完收尾时只删自己取出的那一条，不能把新建的那条删掉"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    ok, fid = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+    assert ok
+
+    last_time = time.time() + 1
+    monkeypatch.setattr(time, "time", lambda: last_time)
+    call = await pop_upcoming_call(fc_tbl)
+    assert call and call.id == fid
+
+    # 执行期间这个 key 被重配：cancel 掉旧的，ensure 一条新的
+    ok, deleted = await executor.execute("cancel_rls_comp_value_future", "once")
+    assert ok and deleted is True
+    ok, again = await executor.execute("ensure_rls_comp_value_future", "once", 9, False)
+    assert ok and again == fid
+
+    assert await exec_future_call(call, executor.context.systems, fc_tbl)
+    kept = await _get_future_row(fc_tbl, fid)
+    assert kept is not None and "9" in kept.args
+
+
+async def test_reensured_one_shot_call_runs_again(
+    monkeypatch, test_app, tbl_mgr, executor
+):
+    """按 key 的一次性调用执行完以后，同一个 key 再 ensure 一条：新的这条也要执行"""
+    from hetu.system.future import FutureCalls, exec_future_call, pop_upcoming_call
+
+    await executor.execute("login", 1020)
+    fc_tbl = tbl_mgr.get_table(FutureCalls.duplicate("pytest", "copy1"))
+    start = time.time()
+    for round_, expect in ((1, 104), (2, 108)):
+        ok, _ = await executor.execute("ensure_rls_comp_value_future", "once", 4, False)
+        assert ok
+        now = start + 2 * round_
+        monkeypatch.setattr(time, "time", lambda now=now: now)
+        call = await pop_upcoming_call(fc_tbl)
+        assert call is not None
+        assert await exec_future_call(call, executor.context.systems, fc_tbl)
+        ok, _ = await executor.execute("test_rls_comp_value", expect)
+        assert ok, round_
 
 
 @pytest.mark.timeout(20)
@@ -1029,6 +1117,30 @@ async def test_run_due_calls_retries_soon_when_due_call_taken(
     monkeypatch.setattr(time, "time", lambda: frozen)
     delay = await future.run_due_calls([fc_tbl], _task_callers(tbl_mgr))
     assert delay == pytest.approx(future.CONTENDED_RETRY_DELAY)
+
+
+async def test_run_due_calls_leaves_calls_not_yet_due(
+    monkeypatch, test_app, tbl_mgr, new_ctx
+):
+    """到期的调用叫醒 worker 时，同表里还差几十毫秒才到期的调用不能一起取出执行：目标 System
+    自己校验到点没有（如读条结束）的话，会当成没到点跳过，一次性调用执行完就删了，再没人收尾"""
+    from hetu.system import future
+
+    fc_tbl = tbl_mgr.get_table(future.FutureCalls.duplicate("pytest", "copy1"))
+    await _insert_due_calls(fc_tbl, new_ctx(), 1)
+    async with fc_tbl.session() as session:
+        soon = future._build_future_row(
+            new_ctx(), time.time() + 0.05, "add_rls_comp_value", (1,), timeout=10
+        )
+        await session.using(fc_tbl.comp_cls).insert(soon)
+    await fc_tbl.backend.wait_for_synced()
+
+    frozen = float(soon.scheduled) - 0.05
+    monkeypatch.setattr(time, "time", lambda: frozen)
+    assert await future.run_due_calls([fc_tbl], _task_callers(tbl_mgr)) == 0
+    assert await _counter_value(tbl_mgr, test_app) == 101
+    row = await _get_future_row(fc_tbl, soon.id)
+    assert row is not None and row.scheduled == soon.scheduled and row.last_run == 0
 
 
 async def test_pop_upcoming_call_error_before_row_read(

@@ -88,7 +88,14 @@ What that one suffix actually does:
   has no overlap with the original `Order` cluster, so they never share a
   shard and never read/write across each other.
 - All inheritance still works. If `remove` itself depended on other
-  `Systems`, the whole graph is duplicated under the same suffix.
+  `Systems`, the whole graph is duplicated under the same suffix. A
+  dependency in that graph that names its own suffix (say
+  `depends=("audit:Log",)`), and a duplicate listed explicitly in
+  `components=`, keep their own suffix.
+- The same `System` can't appear in one dependency graph under two
+  different suffixes (or both with and without one) — say, depending on
+  both `remove` and `remove:ItemOrder`. `ctx.repo[Order]` can only point at
+  one table, so startup fails with an error.
 
 Use this when one `Component` sits at a bottleneck — say, a `FutureCalls`
 queue or a global `Inventory` — and you want some callers to operate on a
@@ -167,7 +174,9 @@ Things to know about the API:
   table (the main one and every copy) and runs the due calls; when nothing
   is due it sleeps until the earliest next call, at most 1 second, so a new
   call is picked up within about a second. Don't use this for sub-second
-  precision.
+  precision. A call may run late but never before `at`: the `ctx.timestamp`
+  the target `System` sees is never less than `at`, so checking "is it time
+  yet" inside it (e.g. a cast finishing) is safe.
 - **The execution `ctx` has no user identity.** The scheduler runs as
   internal traffic — `ctx.caller` is `0`, `ctx.address` is `localhost`. If
   the work needs a user id, pass it explicitly in `args`.
@@ -245,6 +254,12 @@ Mechanics:
 - Enabling `call_lock=True` automatically attaches a duplicate
   `SystemLock` `Component` to the `System`'s cluster (using the same suffix
   trick as `System` copies — one lock table per locked `System`).
+- The lock table isn't inherited through `depends=`: when a parent
+  `System` calls a locked `System` via `ctx.depend[...]`, it neither reads
+  nor writes that lock table. Only the `System` you call directly with
+  `uuid=` deduplicates, against its own lock table — so a `System` that
+  needs `uuid=` deduplication (including a future-call target) must
+  declare `call_lock=True` itself.
 - On call, the engine reads `SystemLock` for the given `uuid`. If a row
   exists, the `System`'s body is skipped and `None` is returned.
 - On commit, the engine writes the `uuid` row alongside your data, in the
@@ -261,8 +276,9 @@ Mechanics:
   a slot earlier, use `SystemCaller.remove_call_lock(name, uuid)`.
   `SystemLock` is volatile: `hetu upgrade` clears it.
 
-`uuid=` is a keyword-only argument on `ctx.systems.call(...)` and on
-parent-`Systems`' `ctx.depend[...](...)`-style invocations.
+`uuid=` is a keyword-only argument on `ctx.systems.call(...)`.
+`ctx.depend[...](...)` is a plain function call inside the same
+transaction: it takes no `uuid=` and does no deduplication.
 
 ## The `on_disconnect` hook
 
@@ -364,7 +380,8 @@ What each field is for:
   Use it to cache a user's primary `OnlineUser` row, current zone, etc.
   *Not* persisted; gone when the socket closes. It is also the default
   source for `rls_compare`'s third tuple element when the named
-  attribute isn't found on `ctx` itself.
+  attribute isn't found on `ctx` itself; if it's found in neither, no
+  row of that component is visible to the connection.
 - **`ctx.group: str`** — the connection's group label. The default is
   `"guest"`; the engine treats any value starting with `"admin"` as an
   administrator (skipping RLS row filters and allowing
@@ -473,11 +490,12 @@ count as a conflict.
 
 Two things to watch:
 
-- **Read it all.** A truncated read (the database returned `limit` rows) only
+- **Read it all.** A truncated read (one that returned `limit` rows) only
   guards the first `limit` rows it saw; rows it didn't read are treated as
   missing. When checking whether something exists, use `limit=-1`. Rows this
-  transaction deleted are left out of the result but still take up `limit`
-  slots, so getting fewer than `limit` rows back doesn't mean you read it all.
+  transaction deleted or moved out are left out of the result and don't take
+  up `limit` slots, so getting fewer than `limit` rows back means you read it
+  all.
 - **Cost grows with the rows read.** Every row read gets a version check on
   the master, so a player with many items pays for the whole inventory on
   every item added.

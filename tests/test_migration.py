@@ -877,7 +877,11 @@ def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):
     from hetu.cli.migrate import MigrateCommand
     from hetu.data.backend import worker_keeper
 
-    monkeypatch.setattr(worker_keeper, "live_worker_ids", lambda backend: [3])
+    monkeypatch.setattr(
+        worker_keeper,
+        "live_worker_leases",
+        lambda backend: {3: "host:1", 1023: "cli:host:2"},
+    )
     db = (tmp_path / "db.sqlite3").as_posix()
     config = {
         "APP_FILE": str(tmp_path / "no_such_app.py"),
@@ -888,4 +892,6 @@ def test_upgrade_refuses_while_servers_running(monkeypatch, tmp_path, capsys):
     with pytest.raises(SystemExit) as exc_info:
         MigrateCommand.run(config, True, False)
     assert exc_info.value.code == 1
-    assert "3" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "[3, 1023]" in out  # 全部租约
+    assert "[1023]" in out  # 其中的 hetu call / shell 进程

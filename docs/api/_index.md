@@ -22,6 +22,7 @@ regeneration; update the docstring in the source file instead.
 | [Exceptions](exceptions.md) | RaceCondition, UniqueViolation |
 | [Migration](migration.md) | TableMaintenance |
 | [Headless](headless.md) | ClusterChanged, HeadlessClient, HeadlessError, HeadlessSession, SchemaMismatch, TableNotFound, connect |
+| [Local](local.md) | BackendNotReady, IdentityRequired, LocalApp, TableNotReady, open_local_app |
 
 
 See also: [Coverage report](_coverage.md) — APIs missing docstrings.

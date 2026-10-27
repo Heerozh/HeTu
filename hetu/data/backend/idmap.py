@@ -6,8 +6,11 @@
 """
 
 import logging
+from bisect import bisect_left, bisect_right, insort
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from enum import Enum
+from operator import itemgetter
 from typing import TYPE_CHECKING, cast
 
 import numpy as np
@@ -41,8 +44,13 @@ class RangeObservation:
     ids: list[int]
     # 后端相关的校验参数
     bounds: tuple
-    # ZRANGE 原样 member（Redis / SQLite 相同），commit 前核对读取一致性
-    members: list[bytes] | None = None
+    # 读到的各行的排序键（Redis / SQLite 就是 ZRANGE 原样的 member），与 ids 一一对应。
+    # 事务里的 range 按它合并本事务的行，commit 前按它核对读取一致性
+    members: list[bytes]
+    # 这次查询匹配的排序键闭区间 (lo, hi)，两端都含、按字节序比较，区间为空时 lo > hi
+    # （排序键见 BackendClient.index_sort_keys_）。截断读的 bounds 会收窄，它不变：事务里
+    # 的 range 按它挑出落在区间里的本事务的行；同一查询读了几次，后端按它归组去重
+    query: tuple[bytes, bytes]
     # 等值点查的值，否则 None
     point: object | None = None
     # 取行时已读不到（ZRANGE 与取行之间被删）的 id
@@ -52,6 +60,117 @@ class RangeObservation:
     rows_only: bool = False
 
 
+@dataclass(slots=True)
+class LocalIndex:
+    """
+    本事务在一个索引上的改动，事务里的 range、get 据此修正数据库读到的结果（见
+    `IdentityMap.local_index`）：
+
+    - placed：要按当前值放进结果的行，即本事务 insert 的行、update 改了这一列的行
+    - moved：数据库索引里还在原值上、本事务眼里已经不在那儿的库里行，即删掉的行、update 改了
+      这一列的行。数据库会读到它们，要多读这么多行，再从结果里拿掉
+
+    两边都是 {行 id: 排序键}（placed 是当前值的，moved 是原值的），排序键和数据库索引的 member
+    是同一套（见 `BackendClient.index_sort_keys_`），另按排序键排好一份列表，用来二分取区间。
+    排序键用到时才算、每行只算一次，没算的是 None：get 只要知道哪些行要拿掉、多读几行，
+    用不上排序键。
+    """
+
+    # 按行 id 从缓存里取当前行（结构化数组），给 placed 的行算排序键
+    current_rows: Callable[[Collection[int]], np.ndarray]
+    placed: dict[int, bytes | None] = field(default_factory=dict)
+    placed_keys: list[tuple[bytes, int]] = field(default_factory=list)
+    moved: dict[int, bytes | None] = field(default_factory=dict)
+    moved_keys: list[bytes] = field(default_factory=list)
+    # 还没算排序键的：placed 的行 id；moved 的 {行 id: 原值}
+    unkeyed_placed: set[int] = field(default_factory=set)
+    unkeyed_moved: dict[int, np.record] = field(default_factory=dict)
+    # 处理到了 IdentityMap 写入记录的哪个位置
+    synced: int = 0
+
+    def gone(self, row_id: int) -> bool:
+        """数据库读到的这一行要从结果里拿掉：删掉了、改走了，或者要按当前值另放"""
+        return row_id in self.placed or row_id in self.moved
+
+    def placed_between(
+        self, lo: bytes, hi: bytes, sort_keys: Callable[[np.ndarray], list[bytes]]
+    ) -> list[tuple[bytes, int]]:
+        """placed 里排序键落在 [lo, hi] 的 (排序键, 行 id)，按排序键升序"""
+        if self.unkeyed_placed:
+            rows = self.current_rows(self.unkeyed_placed)
+            entries = list(zip(sort_keys(rows), rows["id"].tolist()))
+            self.placed.update((row_id, key) for key, row_id in entries)
+            _add_sorted(self.placed_keys, entries)
+            self.unkeyed_placed.clear()
+        keys = self.placed_keys
+        start = bisect_left(keys, lo, key=itemgetter(0))
+        return keys[start : bisect_right(keys, hi, lo=start, key=itemgetter(0))]
+
+    def moved_between(
+        self, lo: bytes, hi: bytes, sort_keys: Callable[[np.ndarray], list[bytes]]
+    ) -> int:
+        """moved 里排序键落在 [lo, hi] 的有几行"""
+        if self.unkeyed_moved:
+            clean = list(self.unkeyed_moved.values())
+            rows = np.array(clean, dtype=clean[0].dtype)
+            keys = sort_keys(rows)
+            self.moved.update(zip(rows["id"].tolist(), keys))
+            _add_sorted(self.moved_keys, keys)
+            self.unkeyed_moved.clear()
+        keys = self.moved_keys
+        return max(0, bisect_right(keys, hi) - bisect_left(keys, lo))
+
+    def forget(self, row_ids: Collection[int]) -> None:
+        """把这些行从 placed、moved 里拿掉"""
+        placed: list[tuple[bytes, int]] = []
+        moved: list[bytes] = []
+        for row_id in row_ids:
+            if row_id in self.placed:
+                if (key := self.placed.pop(row_id)) is None:
+                    self.unkeyed_placed.discard(row_id)
+                else:
+                    placed.append((key, row_id))
+            if row_id in self.moved:
+                if (key := self.moved.pop(row_id)) is None:
+                    del self.unkeyed_moved[row_id]
+                else:
+                    moved.append(key)
+        if placed:
+            self.placed_keys = _remove_sorted(self.placed_keys, placed)
+        if moved:
+            self.moved_keys = _remove_sorted(self.moved_keys, moved)
+
+    def place(self, row_id: int) -> None:
+        """要按当前值放进结果的行"""
+        self.placed[row_id] = None
+        self.unkeyed_placed.add(row_id)
+
+    def move(self, row_id: int, clean: np.record) -> None:
+        """数据库里还在原值 clean 上的行"""
+        self.moved[row_id] = None
+        self.unkeyed_moved[row_id] = clean
+
+
+def _add_sorted(items: list, new: list) -> None:
+    """把 new 加进排好序的 items（原地）"""
+    if len(new) == 1:
+        insort(items, new[0])
+    else:
+        items.extend(new)
+        items.sort()
+
+
+def _remove_sorted(items: list, gone: list) -> list:
+    """从排好序的 items 里拿掉 gone（都在 items 里），返回拿掉后的列表。拿得少就逐个二分删，
+    拿得多就整个重建"""
+    if len(gone) * 8 < len(items):
+        for item in gone:
+            del items[bisect_left(items, item)]
+        return items
+    drop = set(gone)
+    return [item for item in items if item not in drop]
+
+
 def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | bytes]:
     """整行转成提交用的 {字段: 值}：一律 str()，bytes 字段原样保留字节"""
     assert row.dtype.names  # for type checker, could be removed by python -O
@@ -59,6 +178,17 @@ def _row_to_db(row: np.record, bytes_fields: frozenset[str]) -> dict[str, str | 
     for name in bytes_fields:
         ret[name] = bytes(row[name])
     return ret
+
+
+def _id_positions(ids: np.ndarray, wanted: Collection[int]) -> list[int] | np.ndarray:
+    """
+    ids 里属于 wanted 的位置，用来从缓存里挑行。缓存不大时在 Python 里扫一遍最快（几十行
+    约 1µs）；np.isin 的固定开销约 8µs，缓存大了才划算
+    """
+    if len(ids) > 128:
+        return np.isin(ids, list(wanted))
+    wanted_set = wanted if isinstance(wanted, set) else set(wanted)
+    return [i for i, row_id in enumerate(ids.tolist()) if row_id in wanted_set]
 
 
 def changed_fields(new: np.record, old: np.record) -> list[str]:
@@ -96,6 +226,11 @@ class IdentityMap:
         self._row_buf: dict[TableReference, np.recarray] = {}
         # 状态为 DELETE 的行 id，filter 用它一次性排除已删除的行
         self._deleted: dict[TableReference, set[int]] = {}
+        # 本事务每张表的写入记录：insert / update / delete 过的行 id，按写入顺序，同一行可能
+        # 出现多次。range 据此判断这张表有没有写过，并增量维护各索引上的改动（见 local_index）
+        self._writes: dict[TableReference, list[int]] = {}
+        # 本事务在各索引上的改动 {(表, 索引名): LocalIndex}，range 用到这个索引时才建、才更新
+        self._local_indexes: dict[tuple[TableReference, str], LocalIndex] = {}
 
         # 储存查询到的行数据初始值，用于对比变更
         self._row_clean: dict[TableReference, dict[int, np.record]] = {}
@@ -286,6 +421,7 @@ class IdentityMap:
 
         # 标记为INSERT（删掉的行同 id 再插回来，就不再算已删除）
         states[row["id"]] = RowState.INSERT
+        self._writes.setdefault(table_ref, []).append(int(row["id"]))
         if deleted := self._deleted.get(table_ref):
             deleted.discard(row["id"])
 
@@ -328,6 +464,7 @@ class IdentityMap:
         # 如果是新插入的行，保持INSERT状态；否则标记为UPDATE
         if states.get(row_id) != RowState.INSERT:
             states[row_id] = RowState.UPDATE
+        self._writes.setdefault(table_ref, []).append(int(row_id))
 
     def mark_deleted(self, table_ref: TableReference, row_id: int) -> None:
         """
@@ -343,6 +480,8 @@ class IdentityMap:
         found = cache["id"] == row_id
         if not found.any():
             raise ValueError(f"Row with id {row_id} not found in cache")
+
+        self._writes.setdefault(table_ref, []).append(int(row_id))
 
         # 数据库里没有的行（本事务 insert 的）提交时不用管，直接忘掉；标成 DELETE 会被当成
         # 库里的行去删，版本校验必然失败，每次重试都一样。按有没有数据库态判断、不按 INSERT
@@ -444,7 +583,7 @@ class IdentityMap:
             obs.index_name,
             obs.bounds,
             tuple(obs.ids),
-            tuple(obs.members or ()),
+            tuple(obs.members),
             tuple(obs.missing),
             obs.rows_only,
         )
@@ -503,32 +642,114 @@ class IdentityMap:
         """
         return self._row_clean.get(table_ref, {}).get(row_id)
 
-    def moved_away(self, table_ref: TableReference, index_name: str) -> set[int]:
+    def has_rows(self, table_ref: TableReference) -> bool:
+        """这张表在本事务的缓存里有没有行（读到的、写入的都算）"""
+        return len(self._row_cache.get(table_ref, ())) > 0
+
+    def lookup(
+        self, table_ref: TableReference, row_ids: list[int]
+    ) -> tuple[np.recarray | None, dict[int, int], list[int]]:
         """
-        本事务删掉的行、以及改了 `index_name` 列的行的 id。提交前数据库索引里它们还在原来
-        的值上，按这个索引查数据库会读到，但本事务眼里它们已经不在那个值上了。本事务新
-        insert 的行数据库里没有，不算。
+        一批 id 查缓存，返回 (rows, index_of, miss_ids)：rows 是缓存里有的行（拷贝，没有时为
+        None），index_of 是 {id: 在 rows 里的下标}，miss_ids 是缓存里没有的 id（保持原顺序）。
+        已删除的行两边都不在。比逐个 get 省：有没有看状态字典，缓存里的行一次取出。
         """
         states = self._row_states.get(table_ref)
         if not states:
-            return set()
+            return None, {}, list(row_ids)
+        hit_ids: list[int] = []
+        miss_ids: list[int] = []
+        for row_id in row_ids:
+            state = states.get(row_id)
+            if state is None:
+                miss_ids.append(row_id)
+            elif state != RowState.DELETE:
+                hit_ids.append(row_id)
+        if not hit_ids:
+            return None, {}, miss_ids
+        cache = self._row_cache[table_ref]
+        rows = cast(np.recarray, cache[_id_positions(cache["id"], hit_ids)])
+        index_of = {row_id: i for i, row_id in enumerate(rows["id"].tolist())}
+        return rows, index_of, miss_ids
+
+    def match(
+        self, table_ref: TableReference, index_name: str, value: object
+    ) -> np.recarray | None:
+        """
+        缓存里 `index_name == value` 的行（排除已删除的，拷贝），没有时返回 None。同 `filter`
+        的单条件版，没有匹配时不造空数组，没命中的常见情况更便宜。
+        """
+        cache = self._row_cache.get(table_ref)
+        if cache is None or len(cache) == 0:
+            return None
+        mask = cache[index_name] == value
+        if not mask.any():
+            return None
+        if deleted := self._deleted.get(table_ref):
+            mask &= ~np.isin(cache["id"], list(deleted))
+            if not mask.any():
+                return None
+        return cast(np.recarray, cache[mask])
+
+    def local_index(
+        self, table_ref: TableReference, index_name: str
+    ) -> LocalIndex | None:
+        """
+        本事务在 `index_name` 索引上的改动（见 LocalIndex），这张表本事务没写过时返回 None。
+        增量维护：只处理上次之后写过的行。
+        """
+        writes = self._writes.get(table_ref)
+        if not writes:
+            return None
+        local = self._local_indexes.get((table_ref, index_name))
+        if local is None:
+            local = LocalIndex(lambda row_ids: self._current_rows(table_ref, row_ids))
+            self._local_indexes[table_ref, index_name] = local
+        if local.synced < len(writes):
+            pending = set(writes[local.synced :])
+            local.synced = len(writes)
+            self._sync_local_index(table_ref, index_name, local, pending)
+        return local
+
+    def _current_rows(
+        self, table_ref: TableReference, row_ids: Collection[int]
+    ) -> np.ndarray:
+        """缓存里这些行的当前值（拷贝）。用不带字段属性的结构化数组，取列比 recarray 快"""
+        cache = self._row_cache[table_ref].view(np.ndarray)
+        return cache[_id_positions(cache["id"], row_ids)]
+
+    def _sync_local_index(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        local: LocalIndex,
+        row_ids: set[int],
+    ) -> None:
+        """按这些行现在的状态，重新放它们在 local 里的位置"""
+        if local.placed or local.moved:
+            local.forget(row_ids)
+        states = self._row_states[table_ref]
         clean_rows = self._row_clean[table_ref]
-        moved: set[int] = set()
         updated: list[int] = []
-        for row_id, state in states.items():
-            if row_id not in clean_rows:
-                continue
+        for row_id in row_ids:
+            state = states.get(row_id)
             if state == RowState.DELETE:
-                moved.add(int(row_id))
-            elif state == RowState.UPDATE:
-                updated.append(row_id)
+                local.move(row_id, clean_rows[row_id])
+            elif state == RowState.INSERT or state == RowState.UPDATE:
+                if row_id in clean_rows:
+                    updated.append(row_id)
+                else:
+                    local.place(row_id)  # 本事务 insert 的
+            # 没有状态的：本事务 insert 了又删掉，当它没插过
         if updated:
-            cache = self._row_cache[table_ref]
-            for row in cache[np.isin(cache["id"], updated)]:
-                row_id = int(row["id"])
-                if row[index_name] != clean_rows[row_id][index_name]:
-                    moved.add(row_id)
-        return moved
+            # 改了这一列的两边都放；没改的两边都不放：它在数据库结果里的位置不变，取行时
+            # 拿到的就是缓存里的当前值
+            rows = self._current_rows(table_ref, updated)
+            for row_id, value in zip(rows["id"].tolist(), rows[index_name]):
+                clean = clean_rows[row_id]
+                if clean[index_name] != value:
+                    local.place(row_id)
+                    local.move(row_id, clean)
 
     def _implied_by_unique(
         self,
@@ -580,28 +801,16 @@ class IdentityMap:
 
     def get_clean_rows(self) -> dict[TableReference, dict[int, str]]:
         """
-        返回当前仍处于CLEAN状态的行（被读取但未被修改/删除/重新插入），
-        以及它们读取时的 `_version`。提交时用于对纯读行做严格的乐观锁检查，
-        避免事务依赖的陈旧读（stale read）。
+        返回本事务读过、提交时不写的行，以及它们读取时的 `_version`：仍处于CLEAN状态的行
+        （被读取但未被修改/删除/重新插入），加上 update 过但改回了原值的行（提交时不发更新，
+        见 `get_dirty_rows`）。提交时用于对这些行做严格的乐观锁检查，避免事务依赖的陈旧读
+        （stale read）。
 
         Returns
         -------
         {TableReference: {row_id: _version_str}}
         """
-        ret: dict[TableReference, dict[int, str]] = {}
-        for table_ref, states in self._row_states.items():
-            clean_cache = self._row_clean.get(table_ref, {})
-            row_versions: dict[int, str] = {}
-            for row_id, state in states.items():
-                if state != RowState.CLEAN:
-                    continue
-                clean_row = clean_cache.get(row_id)
-                if clean_row is None:
-                    continue
-                row_versions[row_id] = str(clean_row["_version"])
-            if row_versions:
-                ret[table_ref] = row_versions
-        return ret
+        return self.get_commit_rows()[1]
 
     def get_dirty_rows(
         self,
@@ -625,26 +834,48 @@ class IdentityMap:
         updates: ([old_row_dict, ], [changed_fields_dict, ]}  # changed_fields_dict只包含变更的字段
         deletes: [old_row_dict, ]
         """
-        ret = {}
+        return self.get_commit_rows()[0]
+
+    def get_commit_rows(
+        self,
+    ) -> tuple[
+        dict[
+            TableReference,
+            tuple[
+                list[dict[str, str | bytes]],
+                tuple[list[dict[str, str | bytes]], list[dict[str, str | bytes]]],
+                list[dict[str, str | bytes]],
+            ],
+        ],
+        dict[TableReference, dict[int, str]],
+    ]:
+        """
+        提交用：返回 (`get_dirty_rows()`, `get_clean_rows()`)。一行改回了原值没有，要逐字段
+        比过才知道，扫脏行时顺便登记它的版本，不用为此再比一遍
+        """
+        dirties = {}
+        read_versions: dict[TableReference, dict[int, str]] = {}
 
         for table_ref, states in self._row_states.items():
             # 初始化各状态列表
             inserts, updates, deletes = [], ([], []), []
+            versions: dict[int, str] = {}
 
             cache = self._row_cache[table_ref]
             bytes_fields = table_ref.comp_cls.bytes_fields_
 
             clean_cache = self._row_clean[table_ref]
             old_rows, new_rows = updates
+            dirty_ids: list[int] = []
+            for row_id, state in states.items():
+                if state != RowState.CLEAN:
+                    dirty_ids.append(row_id)
+                elif (clean_row := clean_cache.get(row_id)) is not None:
+                    versions[row_id] = str(clean_row["_version"])
             # 单行事务直接按已有状态分派，避免 np.isin 掩码和 recarray 副本。
             # 多行仍先用 NumPy 筛掉 CLEAN 行，避免大范围读取、少量写入时逐行
             # 创建 record；INSERT/UPDATE/DELETE 共用一次筛选。
             if len(cache) > 1:
-                dirty_ids = [
-                    row_id
-                    for row_id, state in states.items()
-                    if state != RowState.CLEAN
-                ]
                 dirty_rows = cache[np.isin(cache["id"], dirty_ids)] if dirty_ids else ()
             else:
                 dirty_rows = cache
@@ -655,7 +886,7 @@ class IdentityMap:
                     inserts.append(_row_to_db(row, bytes_fields))
                 elif state == RowState.UPDATE:
                     old = clean_cache[row_id]
-                    # 只写有变化的字段；改回原值的行没有变化，不发空更新
+                    # 只写有变化的字段
                     if fields := changed_fields(row, old):
                         new_fields: dict[str, str | bytes] = {
                             field: bytes(row[field])
@@ -665,13 +896,19 @@ class IdentityMap:
                         }
                         old_rows.append(_row_to_db(old, bytes_fields))
                         new_rows.append(new_fields)
+                    else:
+                        # 改回了原值：不发空更新，但和只读的行一样校验版本。本事务用的是
+                        # 读到的值，别人在这期间改了它就是陈旧读
+                        versions[int(row_id)] = str(old["_version"])
                 elif state == RowState.DELETE:
                     # 按数据库里的原值删：Redis 据此清索引，改过的索引列要清的是原值
                     deletes.append(_row_to_db(clean_cache[row_id], bytes_fields))
 
-            ret[table_ref] = (inserts, updates, deletes)
+            dirties[table_ref] = (inserts, updates, deletes)
+            if versions:
+                read_versions[table_ref] = versions
 
-        return ret
+        return dirties, read_versions
 
     def filter(self, table_ref: TableReference, **kwargs) -> np.recarray:
         """

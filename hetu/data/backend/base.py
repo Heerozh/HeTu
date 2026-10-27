@@ -147,7 +147,11 @@ def to_sortable_bytes(value: np.generic) -> bytes:
         return struct.pack(">Q", value)
     elif np.issubdtype(dtype, np.floating):
         double = value.item()
-        packed = struct.pack(">d", value)
+        if math.isnan(double):
+            # NaN 不论符号位一律按正 NaN 编码：commit 写索引前把值转成文本再解析，符号位丢了，
+            # 事务里给本事务的行算的排序键要和写进去的一致
+            double = math.nan
+        packed = struct.pack(">d", double)
         [u64] = struct.unpack(">Q", packed)
         # IEEE 754 浮点数排序调整
         if double >= 0:
@@ -168,6 +172,39 @@ def to_sortable_bytes(value: np.generic) -> bytes:
     # elif np.issubdtype(dtype, np.bool_):
     #     return b"\x01" if value else b"\x00"
     assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+
+
+def to_sortable_bytes_list(values: np.ndarray) -> list[bytes]:
+    """
+    `to_sortable_bytes` 的批量版：把一列同 dtype 的值逐个编码，结果与逐个调用相同。数值列
+    向量化，字符串列逐个编码。
+    """
+    dtype = values.dtype
+    if np.issubdtype(dtype, np.signedinteger):
+        # 加 2^63 就是翻转 int64 的符号位
+        keys = values.astype(np.int64).view(np.uint64) ^ np.uint64(1 << 63)
+    elif np.issubdtype(dtype, np.unsignedinteger):
+        keys = values.astype(np.uint64)
+    elif np.issubdtype(dtype, np.floating):
+        doubles = values.astype(np.float64)
+        nan = np.isnan(doubles)
+        if nan.any():
+            # 同 to_sortable_bytes：NaN 一律按正 NaN 编码
+            doubles = np.where(nan, np.nan, doubles)
+        bits = doubles.view(np.uint64)
+        # 同 to_sortable_bytes：>= 0（含 -0.0）置符号位，负数和 NaN 整体取反
+        keys = np.where(doubles >= 0, bits | np.uint64(1 << 63), ~bits)
+    elif np.issubdtype(dtype, np.str_):
+        return [
+            value.encode("utf-8").replace(b"\x00", b"\x00\xff")
+            for value in values.tolist()
+        ]
+    elif np.issubdtype(dtype, np.bytes_):
+        return [value.replace(b"\x00", b"\x00\xff") for value in values.tolist()]
+    else:
+        assert False, _("不可排序的索引类型: {dtype}").format(dtype=dtype)
+    raw = keys.astype(">u8").tobytes()
+    return [raw[i : i + 8] for i in range(0, len(raw), 8)]
 
 
 def from_sortable_bytes(dtype: np.dtype, sortable: bytes) -> np.generic:
@@ -717,6 +754,42 @@ class BackendClient:
         内部方法，事务里的 range 读用：执行与 `range(..., RowFormat.ID_LIST)` 相同的查询，
         同时返回这次读取的观察。之后 `commit` 据此校验同样的查询是否仍返回这些行（防幻读，
         见 `SessionRepository.range`）。`limit` 不能为 0。
+        观察里的 `members` 是读到的各行的排序键，`query` 是这次查询匹配的排序键闭区间（见
+        `index_sort_keys_`）。
+        """
+        raise NotImplementedError
+
+    def index_sort_keys_(
+        self, table_ref: TableReference, index_name: str, rows: np.ndarray
+    ) -> list[bytes]:
+        """
+        内部方法：`rows` 这些行在 `index_name` 索引上的排序键。range 按排序键的字节序返回行
+        （desc 时倒序），与 `range_read_` 观察里的 `members` / `query` 是同一套键。事务里的
+        range 用它把本事务的改动按数据库的规则合并进结果（见 `SessionRepository.range`）。
+        """
+        raise NotImplementedError
+
+    def index_query_keys_(
+        self,
+        table_ref: TableReference,
+        index_name: str,
+        left: int | float | str | bytes | bool,
+        right: int | float | str | bytes | bool | None,
+    ) -> tuple[bytes, bytes]:
+        """
+        内部方法：一次 range 查询匹配的排序键闭区间 (lo, hi)，同 `range_read_` 观察里的
+        `query`，不访问数据库；区间为空时 lo > hi。事务里的 range 在读之前用它数本事务删改的
+        行有几行原值在区间里（数据库会读到它们，要多读这么多行）
+        """
+        raise NotImplementedError
+
+    def shrink_observation_(
+        self, obs: RangeObservation, last_key: bytes, desc: bool
+    ) -> None:
+        """
+        内部方法：把 `range_read_` 得到的观察收到排序键 `last_key` 为止（含），只留之前读到的
+        行；`last_key` 不在观察范围内时不动。事务里的 range 合并了本事务的行再截断时用：看到
+        的最后一行之后的库里行没取，提交时不用校验。`desc` 与读取时相同。
         """
         raise NotImplementedError
 
@@ -1173,6 +1246,10 @@ class MQClient:
     UPDATE_FREQUENCY = 10  # 控制客户端所有订阅的数据（如果有变动），每秒更新几次
     # 本地队列里超过这么多秒没被get_message取走的通知直接丢弃，防止堆积
     DROP_AFTER = 120
+    # 栅栏（SubscriptionHub.fence_）隔多少秒才入队：给"commit 返回 → 它的通知进本 worker 的本地
+    # 队列"留的余量，之后才到的通知栅栏不等。Redis 副本应用 + 经 pubsub 推到 worker 平时约 1ms
+    # （设计稿 2026-10-10-rpcs-sync §4.6）
+    FENCE_DELAY: float = 0.02
     # 表级频道 payload 里的特殊 row_id：这段时间的变更不可知（如 pubsub 断线重连），整表重同步
     RESYNC = "*"
     # 日志里的后端标签，后端实现覆盖

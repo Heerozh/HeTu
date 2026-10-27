@@ -72,6 +72,36 @@ async def login(ctx: hetu.EndpointContext, user_id):
     return hetu.ResponseToClient({"id": ctx.caller, "ok": ok})
 
 
+@hetu.define_system(
+    namespace=NAMESPACE,
+    components=(Item, ChatMessage),
+    permission=hetu.Permission.USER,
+)
+async def rpcs_write(ctx: hetu.SystemContext, nonce, item_id, chat):
+    """
+    等推送的调用压测（--rpcs-rate）：把自己的物品 item_id 的 kind 改成 -nonce（客户端按它认出这次调用的
+    推送）；chat 时再发一条聊天（kind="rpcs"、name="r{uid}:{nonce}"），客户端等的是聊天这行的推送。
+    物品被写进程删了就什么也不写，回 ok=False
+    """
+    repo = ctx.repo[Item]
+    row = await repo.get(id=int(item_id))
+    if row is None or int(row.owner) != ctx.caller:
+        return hetu.ResponseToClient({"ok": False})
+    row.kind = -int(nonce)
+    await repo.update(row)
+    if chat:
+        msg = ChatMessage.new_row()
+        msg.owner = ctx.caller
+        msg.name = f"r{ctx.caller}:{int(nonce)}"
+        msg.text = f"rpcs message number {int(nonce)} " * 3
+        msg.kind = "rpcs"
+        t = time.time()
+        msg.created_at_ms = int(t * 1000)
+        msg.ts = t
+        await ctx.repo[ChatMessage].insert(msg)
+    return hetu.ResponseToClient({"ok": True})
+
+
 @hetu.define_endpoint(namespace=NAMESPACE, permission=hetu.Permission.EVERYBODY)
 async def ping(ctx: hetu.EndpointContext):
     """RPC 往返探针：测订阅负载下事件循环的响应（不返回值，服务器回 ok）"""
@@ -178,3 +208,153 @@ async def prof(ctx: hetu.EndpointContext, action, path=""):
         # dump_stats 写文件，别卡事件循环
         await asyncio.to_thread(_PROF["p"].dump_stats, path)
         _PROF["p"] = None
+
+
+# ---------------------------------------------------------------------------
+# 诊断：等推送的调用（rpcs）的栅栏时序（设计稿 2026-10-10-rpcs-sync §8.2）。只看 rpcs_write：
+# - δ：commit 返回（rsp 入队、起栅栏那一刻）→ 这次改的物品行的通知进 hub 的 MQ 队列；
+# - g 实际：commit 返回 → 栅栏键真正入队（call_later 在负载下会晚到）；
+# - 漏：通知晚于栅栏键入队（排在栅栏后面，sync 会先于这次的推送）。
+# 通知比 commit 的回复先被事件循环处理时 δ 为负
+# ---------------------------------------------------------------------------
+
+
+class _FenceWatch:
+    __slots__ = ("arrive", "fenced", "key", "merged", "t0", "t_rsp")
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        self.t0 = time.monotonic()
+        self.t_rsp: float | None = None
+        self.arrive: float | None = None
+        self.fenced: float | None = None
+        self.merged = False
+
+
+# wait：物品 row_id（str）→ 还没凑齐三个时刻的；by_sync：(id(门面), sync_id) → 同一个，只在 rpcs 执行期间；
+# by_fid：栅栏 id → 同一个，到栅栏键入队为止；done：凑齐了的 (δ, g 实际, 漏, 合并进已排着的)
+_FS: dict = {"wait": {}, "by_sync": {}, "by_fid": {}, "done": [], "lost": 0}
+
+
+def _fence_watch_done(w: _FenceWatch) -> None:
+    if w.t_rsp is None or w.arrive is None or w.fenced is None:
+        return
+    if _FS["wait"].get(w.key) is w:
+        del _FS["wait"][w.key]
+    _FS["done"].append(
+        (w.arrive - w.t_rsp, w.fenced - w.t_rsp, w.arrive > w.fenced, w.merged)
+    )
+
+
+def _install_fence_probe() -> None:
+    import hetu.data.sub as sub_mod
+    from hetu.data.backend import base
+    from hetu.server import receiver
+
+    orig_rpcs = receiver.rpcs
+
+    async def rpcs(data, executor, broker, push_queue, debug=0):
+        # ["rpcs", sync_id, "rpcs_write", nonce, item_id, chat]
+        key = None
+        if len(data) >= 5 and data[2] == "rpcs_write":
+            w = _FenceWatch(str(int(data[4])))
+            _FS["wait"][w.key] = w
+            key = (id(broker), data[1])
+            _FS["by_sync"][key] = w
+        try:
+            return await orig_rpcs(data, executor, broker, push_queue, debug)
+        finally:
+            if key is not None:
+                _FS["by_sync"].pop(key, None)
+
+    # client_handler 按模块全局名调 rpcs，换掉模块属性就行
+    receiver.rpcs = rpcs
+
+    orig_sync = sub_mod.SubscriptionBroker.sync_
+
+    def sync_(self, sync_id):
+        w = _FS["by_sync"].get((id(self), sync_id))
+        if w is not None:
+            w.t_rsp = time.monotonic()
+        orig_sync(self, sync_id)
+        fences = self._hub._fences
+        if w is not None and fences:
+            _FS["by_fid"][next(reversed(fences))] = w
+
+    sub_mod.SubscriptionBroker.sync_ = sync_
+
+    orig_enqueue_fence = sub_mod.SubscriptionHub._enqueue_fence
+
+    def _enqueue_fence(self, fid):
+        w = _FS["by_fid"].pop(fid, None)
+        if w is not None:
+            w.fenced = time.monotonic()
+        orig_enqueue_fence(self, fid)
+        if w is not None:
+            _fence_watch_done(w)
+
+    sub_mod.SubscriptionHub._enqueue_fence = _enqueue_fence
+
+    orig_enqueue = base.MQClient._enqueue
+
+    def _enqueue(self, channel_name, payload_ids):
+        if _FS["wait"] and channel_name[:1] != "\0":
+            i = channel_name.rfind(":id:")
+            if i >= 0:
+                w = _FS["wait"].get(channel_name[i + 4 :])
+                if w is not None and w.arrive is None:
+                    w.arrive = time.monotonic()
+                    w.merged = channel_name in self.pulled_set
+                    _fence_watch_done(w)
+        return orig_enqueue(self, channel_name, payload_ids)
+
+    base.MQClient._enqueue = _enqueue
+
+
+# HETU_BENCH_NO_FENCE_PROBE=1 不装这些打点（量 rpcs 本身的开销时用，fencestats 全是 0）
+if not os.environ.get("HETU_BENCH_NO_FENCE_PROBE"):
+    _install_fence_probe()
+
+
+def _ms_pcts(vals: list[float]) -> dict:
+    if not vals:
+        return {}
+    s = sorted(vals)
+    n = len(s)
+
+    def p(q: float) -> float:
+        return round(s[min(n - 1, int(n * q))] * 1000, 3)
+
+    return {
+        "min": round(s[0] * 1000, 3),
+        "p50": p(0.5),
+        "p90": p(0.9),
+        "p99": p(0.99),
+        "p999": p(0.999),
+        "max": round(s[-1] * 1000, 3),
+    }
+
+
+@hetu.define_endpoint(namespace=NAMESPACE, permission=hetu.Permission.EVERYBODY)
+async def fencestats(ctx: hetu.EndpointContext, reset=False):
+    """rpcs_write 的栅栏时序汇总（毫秒），reset 时清零重新统计。5 秒还凑不齐的算丢（含物品已被删、没写）"""
+    now = time.monotonic()
+    for key, w in list(_FS["wait"].items()):
+        if now - w.t0 > 5:
+            del _FS["wait"][key]
+            _FS["lost"] += 1
+    done = _FS["done"]
+    res = {
+        "n": len(done),
+        "lost": _FS["lost"],
+        "miss": sum(d[2] for d in done),
+        "merged": sum(d[3] for d in done),
+        "delta_ms": _ms_pcts([d[0] for d in done]),
+        "g_ms": _ms_pcts([d[1] for d in done]),
+        # 通知晚于栅栏键的那几次，晚了多少
+        "late_ms": _ms_pcts([d[0] - d[1] for d in done if d[2]]),
+    }
+    if reset:
+        _FS["done"] = []
+        _FS["lost"] = 0
+    return hetu.ResponseToClient(res)

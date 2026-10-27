@@ -266,11 +266,14 @@ async def test_explicit_ids_only(hl, mod_test_app, monkeypatch):
 
     async with hl.session(Sim) as s, s[Sim].upsert(id=-2002) as r:
         r.system_id, r.epoch = 77, 1
-    # 重发同一批：命中 → 走 update，字段没变连写都不写
+    [first] = await hl.backend.master.get_many(hl.table(Sim), [-2002])
+    assert first is not None
+    # 重发同一批：命中 → 走 update，字段没变连写都不写（版本号不变）
     async with hl.session(Sim) as s, s[Sim].upsert(id=-2002) as r:
         r.system_id, r.epoch = 77, 1
     got = await hl.backend.master.get_many(hl.table(Sim), [-2002])
-    assert got[0] is not None and int(got[0].epoch) == 1 and int(got[0]._version) == 1
+    assert got[0] is not None and int(got[0].epoch) == 1
+    assert int(got[0]._version) == int(first._version)
     assert sf.worker_id == -1
 
 
@@ -338,6 +341,29 @@ async def test_check_schema(mod_test_app, mod_auto_backend):
         maint.do_create_table_(tbl)
     await client.check_schema()
     await client.close()
+
+
+async def test_check_schema_reads_each_tables_backend(
+    mod_test_app, mod_tbl_mgr, mod_auto_backend, tmp_path
+):
+    """hetu.local 的多后端配置里表不都在 client.backend 上：要去表自己的后端读 meta"""
+    from hetu.data.backend import Backend
+
+    Cfg = mod_test_app.PublicConfig
+    real = await headless.HeadlessClient.from_backend(
+        mod_auto_backend(), "server1", [Cfg]
+    )
+    other = Backend(
+        {"type": "sqlite", "master": "sqlite:///" + (tmp_path / "other.db").as_posix()}
+    )
+    try:
+        client = headless.HeadlessClient(
+            other, "server1", [real.table(Cfg)], owns_backend=False
+        )
+        await client.check_schema()
+    finally:
+        await other.close()
+        await real.close()
 
 
 # ---------------------------------------------------------------- 轮询读（验收 8）

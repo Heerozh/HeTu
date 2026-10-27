@@ -104,6 +104,14 @@
   背包的 GC 停顿与改法建议见设计稿 §4。
 - 所有窗口核对一致性都是 0 差异，消息全部送达，服务器日志 0 条错误。
 
+## 等推送的调用（rpcs，2026-10-10）
+
+`--rpcs-rate` / `--rpcs-conns` / `--rpcs-cmd`：在场景负载之上让一部分连接调 `rpcs_write`，量 sync 与推送的先后、
+δ（commit 返回 → 通知进 hub 队列）与栅栏的额外开销。结果与结论见
+`docs/superpowers/specs/2026-10-10-rpcs-sync-design.md` §8.2：背包 / 聊天共 19200 次调用 sync 先于推送 0 次，δ p99
+< 1ms，20ms 余量维持；每次调用比同样的 `rpc` 多约 24µs（+7%）。量开销时设 `HETU_BENCH_NO_FENCE_PROBE=1` 不装
+worker 里的打点。
+
 以下是第一步的结果。
 
 ## 背包：每人订 `Item.owner == 自己`

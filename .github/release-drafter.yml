@@ -8,6 +8,9 @@ categories:
     labels:
       - "feature"
       - "enhancement"
+  - title: "⚡ 性能优化"
+    labels:
+      - "performance"
   - title: "🐛 Bug Fixes"
     labels:
       - "fix"
@@ -38,6 +41,10 @@ autolabeler:
   - label: "enhancement"
     branch:
       - "/feature\/.+/"
+      - "/feat\/.+/"
+  - label: "performance"
+    branch:
+      - "/perf\/.+/"
 change-template: "- $TITLE @$AUTHOR (#$NUMBER)"
 change-title-escapes: "\\<*_&" # You can add # and @ to disable mentions, and add ` to disable code blocks.
 version-resolver:

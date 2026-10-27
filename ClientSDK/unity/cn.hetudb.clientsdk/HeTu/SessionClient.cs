@@ -70,7 +70,9 @@ namespace HeTu
         ///     放弃。配合 <see cref="StateChanged" /> 绑 UI 时：
         ///     <c>Faulted &amp;&amp; !HasBeenReady</c> → "连不上服务器"，
         ///     <c>Faulted &amp;&amp; HasBeenReady</c> → "已掉线且无法恢复"。
-        ///     被顶号也会直接进 Faulted（不重连），见 <see cref="HeTuKickedException" />。
+        ///     被顶号、请求被拒（4000-4999 段的终态 close 码）也会直接进 Faulted（不重连），见
+        ///     <see cref="HeTuKickedException" />、
+        ///     <see cref="HeTuConnectionRejectedException" />。
         /// </summary>
         public bool HasBeenReady => _core?.HasBeenReady ?? false;
 
@@ -85,9 +87,13 @@ namespace HeTu
         ///     都会进来，携带本次失败的异常。是否已经是终态请同时观察
         ///     <see cref="State" /> == <see cref="HeTuSessionState.Faulted" />。
         ///     异常是 <see cref="HeTuKickedException" /> 时表示被顶号（账号在别处登录）：会话
-        ///     不会重连、直接进 Faulted，请提示玩家。
+        ///     不会重连、直接进 Faulted，请提示玩家。异常是
+        ///     <see cref="HeTuConnectionRejectedException" /> 时表示请求被服务器拒绝（客户端越界，
+        ///     常见于客户端比服务器新）：同样不重连、直接进 Faulted。
         ///     A <see cref="HeTuKickedException" /> means the account logged in
-        ///     elsewhere; the session enters Faulted without reconnecting.
+        ///     elsewhere; a <see cref="HeTuConnectionRejectedException" /> means the
+        ///     server rejected the client (e.g. a client newer than the server). Either
+        ///     way the session enters Faulted without reconnecting.
         /// </summary>
         public event Action<Exception> Faulted;
 
@@ -243,13 +249,40 @@ namespace HeTu
         public UniTask<JsonObject> CallSystem(string systemName,
             params object[] args)
 #endif
+            => CallSystemCore(systemName, args, false);
+
+        /// <summary>
+        ///     等推送的System调用（见 <c>HeTuClient.CallSystemAwaitPush</c>）：要等这次调用引起的
+        ///     订阅推送都到了才返回，返回时订阅对象已是新值，适合"按钮置灰、请求完成后按订阅数据
+        ///     恢复按钮"。比 <see cref="CallSystem" /> 约多等一个推送间隔（~100ms）。已收到服务端
+        ///     回应、还在等推送时断线，按成功返回（提交确定发生了，重连后订阅会恢复）。
+        ///     Like CallSystem, but returns only after the subscription updates caused by
+        ///     this call have arrived. About one push interval (~100 ms) slower.
+        /// </summary>
+#if UNITY_6000_0_OR_NEWER
+        public Awaitable<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#else
+        public UniTask<JsonObject> CallSystemAwaitPush(string systemName,
+            params object[] args)
+#endif
+            => CallSystemCore(systemName, args, true);
+
+#if UNITY_6000_0_OR_NEWER
+        private Awaitable<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
+#else
+        private UniTask<JsonObject> CallSystemCore(string systemName,
+            object[] args, bool awaitPush)
+#endif
         {
             var tcs = NewCompletionSource<JsonObject>();
             _core.CallSystem(
                 systemName,
                 args,
                 response => tcs.TrySetResult(response),
-                ex => tcs.TrySetException(ex));
+                ex => tcs.TrySetException(ex),
+                awaitPush);
             return AwaitFrom(tcs);
         }
 
@@ -508,38 +541,45 @@ namespace HeTu
         public void Close() => _client.Close();
 
         public void CallSystem(string systemName, object[] args,
-            Action<JsonObject, CallOutcome, string> onResponse) =>
-            _client.CallSystemSync(systemName, args, onResponse);
+            Action<JsonObject, CallOutcome, string> onResponse,
+            bool awaitPush = false,
+            Action<JsonObject> onAnswered = null) =>
+            _client.CallSystemSync(systemName, args, onResponse, awaitPush, onAnswered);
 
         public void WatchRow<T>(
             string index,
             object value,
-            Action<RowSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedRowCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            RowSubscription<T> reusable = null)
+            ManagedRowCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchRowSync(index, value, onResponse, componentName, reusable);
+            _client.WatchRowCoreSync(index, value, onResponse, componentName, reusable,
+                creationTrace);
 
         public void WatchRange<T>(
             string index,
             object left,
             object right,
             int limit,
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             bool desc = false,
             bool force = true,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchRangeSync(index, left, right, limit, onResponse,
-                desc, force, componentName, reusable);
+            _client.WatchRangeCoreSync(index, left, right, limit, onResponse,
+                desc, force, componentName, reusable, creationTrace);
 
         public void WatchTable<T>(
-            Action<IndexSubscription<T>, bool, Exception> onResponse,
+            Action<ManagedIndexCore<T>, bool, Exception> onResponse,
             string componentName = null,
-            IndexSubscription<T> reusable = null)
+            ManagedIndexCore<T> reusable = null,
+            System.Diagnostics.StackTrace creationTrace = null)
             where T : IBaseComponent =>
-            _client.WatchTableSync(onResponse, componentName, reusable);
+            _client.WatchTableCoreSync(onResponse, componentName, reusable,
+                creationTrace);
 
         public void Dispose()
         {

@@ -1196,11 +1196,11 @@ async def test_loop_fallback_log_does_not_claim_requeue(caplog):
     real = hub._collect
     broken: list[None] = []
 
-    def collect_once_broken(batch):
+    def collect_once_broken(batch, fences):
         if not broken:
             broken.append(None)
             raise RuntimeError("bug in collect")
-        return real(batch)
+        return real(batch, fences)
 
     hub._collect = collect_once_broken  # type: ignore[method-assign]
     with caplog.at_level(logging.ERROR, logger="HeTu.root"):

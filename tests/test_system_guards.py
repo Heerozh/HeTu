@@ -260,18 +260,18 @@ async def test_rpc_emits_rej_frame(mod_test_app, executor):
 
     # 登录
     cont = await rpc(["rpc", "login", 7003], executor, push_queue)
-    assert cont is True
+    assert cont is None
     await push_queue.get()  # 丢弃 login 的 rsp
 
     # 第一次正常
     cont = await rpc(["rpc", "rate_limited_add", 5], executor, push_queue)
-    assert cont is True
+    assert cont is None
     first = await push_queue.get()
     assert first[0] == "rsp"
 
-    # 第二次被限流：发 rej 帧，且不关连接(cont=True)
+    # 第二次被限流：发 rej 帧，且不关连接(cont=None)
     cont = await rpc(["rpc", "rate_limited_add", 5], executor, push_queue)
-    assert cont is True
+    assert cont is None
     rej = await push_queue.get()
     assert rej == ["rej", "rate_limited_add", "RATE_LIMITED"]
 
@@ -284,13 +284,13 @@ async def test_rpc_emits_err_frame_in_debug(mod_test_app, executor):
     push_queue: asyncio.Queue = asyncio.Queue()
 
     cont = await rpc(["rpc", "login", 7005], executor, push_queue)
-    assert cont is True
+    assert cont is None
     await push_queue.get()  # 丢弃 login 的 rsp
 
-    # debug 模式：System 执行抛异常 → 发 err 帧（区别于 rsp/rej），且不关连接(cont=True)，
+    # debug 模式：System 执行抛异常 → 发 err 帧（区别于 rsp/rej），且不关连接(cont=None)，
     # reason 透传真实异常内容，方便开发期定位。
     cont = await rpc(["rpc", "crashing_system"], executor, push_queue, debug=1)
-    assert cont is True
+    assert cont is None
     err = await push_queue.get()
     assert err[0] == "err"
     assert err[1] == "crashing_system"
@@ -300,17 +300,24 @@ async def test_rpc_emits_err_frame_in_debug(mod_test_app, executor):
 async def test_rpc_failure_closes_connection_in_release(mod_test_app, executor):
     import asyncio
 
+    from hetu.endpoint import connection
     from hetu.server.receiver import rpc
 
     push_queue: asyncio.Queue = asyncio.Queue()
 
     cont = await rpc(["rpc", "login", 7006], executor, push_queue)
-    assert cont is True
+    assert cont is None
     await push_queue.get()  # 丢弃 login 的 rsp
 
-    # release 模式(debug=0)：执行失败 → 关连接(cont=False)，不向客户端发任何帧。
+    # release 模式(debug=0)：执行抛异常 → 关连接，不向客户端发任何帧，只用 close 码表明
+    # 是服务端出错（客户端可以重连）
     cont = await rpc(["rpc", "crashing_system"], executor, push_queue, debug=0)
-    assert cont is False
+    assert cont == connection.CLOSE_INTERNAL_ERROR
+    assert push_queue.empty()
+
+    # 非法调用（不存在的 Endpoint）→ 关连接，close 码表明客户端越界（客户端别重连）
+    cont = await rpc(["rpc", "no_such_system"], executor, push_queue, debug=0)
+    assert cont == connection.CLOSE_REJECTED
     assert push_queue.empty()
 
 

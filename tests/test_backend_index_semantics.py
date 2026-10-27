@@ -334,6 +334,55 @@ def test_sortable_bytes_round_trip():
         from_sortable_bytes(np.dtype(np.complex128), b"\x00" * 16)
 
 
+def test_sortable_bytes_list_matches_one_by_one():
+    """to_sortable_bytes_list 是批量版：每个值的编码与逐个 to_sortable_bytes 相同（事务里的
+    range 用它给本事务的行算排序键，和数据库索引的 member 对不上就会排错、漏行）"""
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    inf, nan = float("inf"), float("nan")
+    cases = {
+        np.int8: [-128, -1, 0, 1, 127],
+        np.int16: [-32768, 0, 32767],
+        np.int32: [-(2**31), -7, 0, 2**31 - 1],
+        np.int64: [-(2**63), -1, 0, 1, 2**63 - 1],
+        np.uint8: [0, 255],
+        np.uint32: [0, 5, 2**32 - 1],
+        np.uint64: [0, 2**63, 2**64 - 1],
+        np.float32: [-inf, -1.5, -0.0, 0.0, 0.1, inf, nan, -nan],
+        np.float64: [-inf, -1e300, -1.5, -0.0, 0.0, 1759400000.123, inf, nan, -nan],
+        "U8": ["", "abc", "a\x00b", "中文", "abcdefgh"],
+        "S8": [b"", b"a\x00b", b"\xff\x01", b"abcdefgh"],
+    }
+    for typ, values in cases.items():
+        array = np.array(values, dtype=typ)
+        expect = [to_sortable_bytes(value) for value in array]
+        assert to_sortable_bytes_list(array) == expect, typ
+    assert to_sortable_bytes_list(np.array([], dtype=np.int64)) == []
+    with pytest.raises(AssertionError):
+        to_sortable_bytes_list(np.array([1j]))
+
+
+def test_sortable_bytes_nan_sign_ignored():
+    """NaN 不论符号位编码都一样：提交时值先转成文本再解析，写进索引的一律是正 NaN。事务里给
+    本事务的行算排序键也得这样，否则同一行在事务里、提交后排的位置不同"""
+    import numpy as np
+
+    from hetu.data.backend.base import to_sortable_bytes, to_sortable_bytes_list
+
+    for typ in (np.float32, np.float64):
+        dtype = np.dtype(typ)
+        positive = dtype.type(np.nan)
+        negative = np.copysign(positive, dtype.type(-1))
+        assert np.signbit(negative)
+        committed = to_sortable_bytes(dtype.type(str(negative)))  # commit 写索引的算法
+        assert to_sortable_bytes(negative) == committed
+        assert to_sortable_bytes(positive) == committed
+        array = np.array([negative, positive], dtype=dtype)
+        assert to_sortable_bytes_list(array) == [committed, committed]
+
+
 async def test_range_index_reads_values_without_rows(
     nums, mod_auto_backend, monkeypatch
 ):

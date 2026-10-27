@@ -1,4 +1,6 @@
 using System;
+using System.Reflection;
+using System.Threading;
 using System.Threading.Tasks;
 using HeTu;
 using NUnit.Framework;
@@ -55,6 +57,67 @@ namespace HeTu.Client.Tests
         {
             using var c = new HeadlessHeTuClient();
             Assert.DoesNotThrow(() => c.Close());
+        }
+
+        // 参数没法序列化：编码在泵线程上抛出，Task 要以这个异常结束，不能一直挂着（泵只记日志）。
+        [Test]
+        public void CallSystem_EncodeFailure_FaultsTask()
+        {
+            using var c = new HeadlessHeTuClient();
+            typeof(HeTuClientBase)
+                .GetField("State", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .SetValue(c, ConnectionState.Connected);
+            Action unserializable = () => { };
+
+            foreach (var call in new[]
+                     {
+                         c.CallSystem("buy", unserializable),
+                         c.CallSystemAwaitPush("buy", unserializable)
+                     })
+            {
+                Assert.That(async () => await call.WaitAsync(TimeSpan.FromSeconds(2)),
+                    Throws.Exception.Not.InstanceOf<TimeoutException>()
+                        .And.Not.InstanceOf<OperationCanceledException>());
+            }
+        }
+
+        // 等推送的调用同 CallSystem 走泵线程：未连接时以取消结束，不会一直挂着。
+        [Test]
+        public void CallSystemAwaitPush_WhenNotConnected_IsCanceled()
+        {
+            using var c = new HeadlessHeTuClient();
+            var call = c.CallSystemAwaitPush("buy", 1);
+            Assert.That(async () => await call.WaitAsync(TimeSpan.FromSeconds(2)),
+                Throws.InstanceOf<OperationCanceledException>());
+        }
+
+        // 订阅句柄的 Dispose 常在调用方线程上调用（WatchXxx 的续体跑在线程池），但共享核心、
+        // 订阅表、挂起的 unsub 只能在泵线程上动：Dispose 要投到泵线程执行。
+        [Test]
+        public void SubscriptionDispose_FromCallerThread_RunsOnPump()
+        {
+            using var c = new HeadlessHeTuClient();
+            var sub = new RowSubscription<DictComponent>("Item.id[1:None:1][:1]", "Item",
+                new DictComponent { ["id"] = 1L }, c);
+            var probe = new ThreadProbe();
+            sub.DisposeBag.Add(probe);
+
+            sub.Dispose();
+
+            Assert.That(probe.Disposed.Wait(TimeSpan.FromSeconds(5)), Is.True);
+            Assert.That(probe.ThreadName, Is.EqualTo("HeTuClientPump"));
+        }
+
+        private sealed class ThreadProbe : IDisposable
+        {
+            public readonly ManualResetEventSlim Disposed = new();
+            public string ThreadName;
+
+            public void Dispose()
+            {
+                ThreadName = Thread.CurrentThread.Name;
+                Disposed.Set();
+            }
         }
     }
 }

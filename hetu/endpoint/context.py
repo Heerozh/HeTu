@@ -149,7 +149,11 @@ class Context:
         # 避免对字符串/None 值调用 np.isnan 抛 TypeError。
         b = getattr(self, ctx_attr, _UNSET)
         if b is _UNSET:
-            b = self.user_data.get(ctx_attr, np.nan)
+            b = self.user_data.get(ctx_attr, _UNSET)
+        if b is _UNSET:
+            # 两处都没有（比如登录 System 还没把它写进 user_data）：按不可见处理。不能拿 nan
+            # 去比，ne 对 nan 恒为真会放行所有行，and_ 等位运算碰上 float 直接抛 TypeError
+            return False
         # struct 行也要按配置的 comp_attr 取值（与 dict 分支一致），不能写死 "owner"，
         # 否则字段名非 owner 的自定义 RLS 会拿错列判断权限。
         try:
@@ -158,9 +162,9 @@ class Context:
                 if type(row) is dict
                 else getattr(row, comp_attr, np.nan)
             )
+            return bool(rls_func(a, b))
         except TypeError, ValueError:
             # 行里的值转不成 ctx 那边的类型（比如某个 System 把 user_data 里比较用的值置成了
-            # None）：按不可见处理。判定出错不能当作有权限；抛出的话订阅这一批整个失败，每次
-            # 重试都一样
+            # None），或这个类型不支持该运算（比如 and_ 碰上字符串）：按不可见处理。判定出错
+            # 不能当作有权限；抛出的话订阅这一批整个失败，每次重试都一样
             return False
-        return bool(rls_func(a, b))

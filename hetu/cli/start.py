@@ -12,20 +12,19 @@ import socket
 import sys
 import time
 from functools import partial
-from urllib.parse import urlparse
 
-import yaml
-from sanic import Sanic
-from sanic.config import Config
-from sanic.worker.loader import AppLoader
-
-from ..common import yamlloader
 from ..i18n import _
-from ..safelogging import handlers as log_handlers
-from ..server import StartupAborted, worker_main
-from ..server.pipeline import CryptoLayer
-from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
-from .base import CommandInterface, resolve_app_file
+from .base import (
+    CommandInterface,
+    ConfigError,
+    infer_backend_type_from_db_url,
+    locate_config_file,
+    read_config_file,
+)
+
+# 命令行参数模式下的默认值。参数本身默认为 None，才能判断是否显式给出（见 flag_mode_requested）
+DEFAULT_APP_FILE = "/app/app.py"
+DEFAULT_DB = "redis://127.0.0.1:6379/0"
 
 logger = logging.getLogger("HeTu.root")
 
@@ -38,30 +37,6 @@ FULL_COLOR_LOGO = """
 \033[38;2;25;170;255m  █        █   \033[0m █ █▄▄▄▄▄█ █
 \033[38;2;25;170;255m  █     ▀▀▄█   \033[0m █▀▀▀▀▀▀▀▀▀█
 """
-
-
-def infer_backend_type_from_db_url(db_url: str) -> str:
-    """根据db url推断后端类型。"""
-    scheme = urlparse(db_url).scheme.lower()
-    if scheme in {"redis", "rediss", "valkey", "valkeys"}:
-        return "redis"
-    if scheme == "sqlite":
-        return "sqlite"
-    if scheme in {"postgres", "postgresql", "mariadb", "mysql"}:
-        raise ValueError(
-            _(
-                "SQL 后端已移除，PostgreSQL / MariaDB 不再支持：'{scheme}'。"
-                "开发用 sqlite:///<库文件路径>，生产用 Redis"
-            ).format(scheme=scheme)
-        )
-    if scheme in {"file"}:
-        return "sharedmemory"
-    raise ValueError(
-        _(
-            "不支持的数据库URL scheme: '{scheme}'。"
-            "目前支持 redis/rediss/valkey/valkeys/sqlite"
-        ).format(scheme=scheme)
-    )
 
 
 def resolve_worker_num(worker_num: int) -> int:
@@ -100,9 +75,8 @@ class StartCommand(CommandInterface):
         cli_group = parser_start.add_argument_group(_("通过命令行启动参数"))
         cli_group.add_argument(
             "--app-file",
-            help=_("河图app的py文件"),
+            help=_("河图app的py文件，默认 /app/app.py"),
             metavar=".app.py",
-            default="/app/app.py",
         )
         cli_group.add_argument(
             "--namespace",
@@ -118,8 +92,7 @@ class StartCommand(CommandInterface):
         cli_group.add_argument(
             "--db",
             metavar="redis://127.0.0.1:6379/0",
-            help=_("后端数据库地址"),
-            default="redis://127.0.0.1:6379/0",
+            help=_("后端数据库地址，默认 redis://127.0.0.1:6379/0"),
         )
         cli_group.add_argument(
             "--workers",
@@ -158,25 +131,40 @@ class StartCommand(CommandInterface):
         cfg_group = parser_start.add_argument_group("或 通过配置文件启动参数")
         cfg_group.add_argument(
             "--config",
-            help=_("配置文件模板见CONFIG_TEMPLATE.yml"),
+            help=_(
+                "配置文件模板见CONFIG_TEMPLATE.yml。不给且没用命令行参数时，依次找环境变量"
+                " HETU_CONFIG、当前目录的 config.yml"
+            ),
             metavar="config.yml",
         )
 
     @classmethod
     def execute(cls, args):
+        from sanic import Sanic
+        from sanic.config import Config
+        from sanic.worker.loader import AppLoader
+
+        from ..safelogging import handlers as log_handlers
+        from ..server import StartupAborted, worker_main
+        from ..server.pipeline import CryptoLayer
+        from ..system.startup import ON_START_UUID_CONFIG_KEY, make_boot_uuid
+
         # 命令行转配置文件
-        if args.config:
+        config_file = locate_config_file(args)
+        if config_file:
             config = Config()
-            config_file = args.config
-            with open(config_file, "r", encoding="utf-8") as f:
-                config_dict = yaml.load(f, yamlloader.Loader)
-            # update_config只会读取大写的值到config变量
+            try:
+                config_dict = read_config_file(config_file)
+            except ConfigError as e:
+                print(e)
+                sys.exit(2)
+            # update_config只会读取大写的值到config变量；APP_FILE、SQLite 库文件的相对路径
+            # 已按配置文件所在目录解析，而非进程 CWD
             config.update_config(config_dict)
-            # APP_FILE 相对路径按配置文件所在目录解析，而非进程 CWD
-            if config.get("APP_FILE"):
-                config["APP_FILE"] = resolve_app_file(config["APP_FILE"], config_file)
             config_for_factory = config
         else:
+            args.app_file = args.app_file or DEFAULT_APP_FILE
+            args.db = args.db or DEFAULT_DB
             if not args.app_file or not args.namespace or not args.instance:
                 print(
                     _("--app_file是必须参数，或者用--config")

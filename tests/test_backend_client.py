@@ -16,7 +16,7 @@ from hetu.data.backend import Backend, RowFormat, Table, TableReference
 from hetu.data.backend.base import sortable_token, to_sortable_bytes
 from hetu.data.backend.idmap import IdentityMap
 from hetu.data.backend.redis import RedisBackendClient
-from hetu.data.backend.redis_model import RedisModelClient
+from hetu.data.backend.redis_model import FIRST_VERSION_SPAN, RedisModelClient
 
 SnowflakeID().init(1, 0)
 
@@ -58,11 +58,17 @@ async def test_redis_serialize_sortable():
     assert b1 > b2
 
 
-async def test_redis_commit_payload(mod_item_model, mod_rls_test_model):
+async def test_redis_commit_payload(mod_item_model, mod_rls_test_model, monkeypatch):
+    from types import SimpleNamespace
+
+    from hetu.data.backend import redis_model
+
     item_ref = TableReference(mod_item_model, "pytest", 1)
     rls_ref = TableReference(mod_rls_test_model, "pytest", 1)
     client = RedisBackendClient.__new__(RedisBackendClient)
     client.is_servant = False
+    # 新插入的行版本号随机起步（见 FIRST_VERSION_SPAN），这里固定成 1 好逐条比对
+    monkeypatch.setattr(redis_model, "random", SimpleNamespace(randrange=lambda _n: 0))
 
     # 建立测试数据
     idmap = IdentityMap()
@@ -492,7 +498,9 @@ async def test_range_observations_to_check(mod_item_model):
     idmap = IdentityMap()
 
     def observe(index_name: str, point, ids=()):
-        obs = RangeObservation(index_name, list(ids), (index_name, point), [], point)
+        obs = RangeObservation(
+            index_name, list(ids), (index_name, point), [], (b"", b""), point
+        )
         idmap.add_range_observation(item_ref, obs)
         return obs
 
@@ -532,7 +540,9 @@ async def test_range_observations_to_check(mod_item_model):
     nonunique = observe("owner", None, [int(hit.id)])
     ranged = observe("time", None)
     # get 命中：只保护返回的那一行，不校验区间
-    got = RangeObservation("owner", [int(hit.id)], ("got",), [], 7, rows_only=True)
+    got = RangeObservation(
+        "owner", [int(hit.id)], ("got",), [], (b"", b""), 7, rows_only=True
+    )
     idmap.add_range_observation(item_ref, got)
 
     # 完全相同的观察去重
@@ -754,14 +764,13 @@ async def test_insert(item_ref, rls_ref, mod_auto_backend):
     idmap.add_insert(rls_ref, row2)
     await client.commit(idmap)
 
-    # 测试insert的是否有效
-    row_get = await client.get(item_ref, row1.id)
-    row1._version += 1
-    assert row_get == row1
-
-    row_get = await client.get(rls_ref, row2.id)
-    row2._version += 1
-    assert row_get == row2
+    # 测试insert的是否有效。版本号随机起步（见 FIRST_VERSION_SPAN），其余字段原样
+    for ref, row in ((item_ref, row1), (rls_ref, row2)):
+        row_get = await client.get(ref, row.id)
+        assert row_get is not None
+        assert 1 <= row_get._version <= FIRST_VERSION_SPAN
+        row._version = row_get._version
+        assert row_get == row
 
 
 async def test_update_delete(item_ref, rls_ref, mod_auto_backend):

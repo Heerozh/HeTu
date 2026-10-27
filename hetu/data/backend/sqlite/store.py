@@ -150,7 +150,7 @@ class SQLiteStore:
             self.conn.execute(f"PRAGMA busy_timeout={int(busy_timeout_ms)}")
             # 先认库文件：不是 HeTu 的（旧后端的库、别的程序的库）就报错，一个字节都不改
             self._check_format()
-            mode = self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0]
+            mode = self._enable_wal(busy_timeout_ms)
             if str(mode).lower() != "wal":
                 logger.warning(
                     _(
@@ -239,6 +239,22 @@ class SQLiteStore:
             )
             self.conn.execute(f"PRAGMA application_id={APPLICATION_ID}")
             self.conn.execute(f"PRAGMA user_version={FORMAT_VERSION}")
+
+    def _enable_wal(self, busy_timeout_ms: int) -> str:
+        """
+        切到 WAL，返回切完的日志模式。从回滚日志切过去要拿着读锁再升写锁，被别的连接的写锁挡住时
+        SQLite 不调 busy handler、直接报 database is locked：几个进程同时打开新库、一起切的时候，
+        没抢到的那个就开库失败了。所以被挡就退开（语句失败时读锁已放掉）再试，总共等 busy_timeout
+        """
+        deadline = time.monotonic() + busy_timeout_ms / 1000
+        while True:
+            try:
+                return str(self.conn.execute("PRAGMA journal_mode=WAL").fetchone()[0])
+            except sqlite3.OperationalError as exc:
+                busy = exc.sqlite_errorcode & 0xFF == sqlite3.SQLITE_BUSY
+                if not busy or time.monotonic() >= deadline:
+                    raise
+            time.sleep(0.01)
 
     # ============ 事务 ============
 
@@ -695,6 +711,17 @@ class SQLiteStore:
         if row is None or (row[1] is not None and row[1] <= time.time()):
             return None
         return bytes(row[0])
+
+    def kv_expire_if(self, key: str, value: bytes, ttl: float) -> bool:
+        """值还是 value（且没过期）才把过期时间刷成 ttl 秒后，返回刷没刷（租约续期用的 CAS）"""
+        with self.write_txn():
+            if self.kv_get(key) != value:
+                return False
+            self.conn.execute(
+                f"UPDATE {quote(KV_TABLE)} SET expire_at = ? WHERE key = ?",
+                (time.time() + ttl, key),
+            )
+            return True
 
     def kv_delete_if(self, key: str, value: bytes) -> bool:
         """值还是 value（且没过期）才删，返回删没删（同 redis-py Lock 的释放）"""

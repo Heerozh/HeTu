@@ -52,7 +52,8 @@ async def remove_item_order(ctx, order_id):
 - `Order` `Component` 会被复制到名为 `Order:ItemOrder` 的兄弟表中。它拥有相同的模式、索引和权限——它是一个真实的、独立的物理表。
 - 也会注册一份 `remove` `System` 主体的副本，并绑定到新表。`ctx.depend["remove:ItemOrder"]` 调用的是*那个*副本。
 - 集群计算针对副本进行：`:ItemOrder` 集群与原始 `Order` 集群没有重叠，因此它们永远不会共享一个分片，也永远不会互相读写。
-- 所有继承仍然有效。如果 `remove` 本身也依赖其他 `System`，则整个依赖图都会在相同后缀下被复制。
+- 所有继承仍然有效。如果 `remove` 本身也依赖其他 `System`，则整个依赖图都会在相同后缀下被复制。依赖图里自己写了后缀的依赖（如 `depends=("audit:Log",)`），以及 `components=` 里显式 `duplicate` 出来的副本，保留它们自己的后缀。
+- 同一个 `System` 不能在依赖图里以不同后缀（或有、无后缀）各出现一次，比如同时依赖 `remove` 和 `remove:ItemOrder`：`ctx.repo[Order]` 只能对应一张表，启动时会报错。
 
 当一个 `Component` 成为瓶颈（比如 `FutureCalls` 队列或全局 `Inventory`），并且你希望某些调用方在单独的物理副本上操作时，就可以使用此功能。**不要**将其用作通用的“命名空间”机制：每个副本都是一个真实的表，需要存储和隔离，而你可能实际上希望它们协同工作。
 
@@ -100,7 +101,7 @@ async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
 - **`timeout`（秒，默认 60，非零时最小 5）** 是重试时间窗口。如果调用在 `timeout` 内未提交，调度器会再次运行它。`timeout=0` 表示“发射后不管”——不重试，你需要接受进程在调用中途崩溃会丢失任务。一次性调用（非 `recurring`）的 `timeout` 不能超过 call lock 保留期（配置 `CALL_LOCK_RETENTION`，默认 30 分钟）的一半，否则 `create_future_call` 抛 `ValueError`：重投时锁必须还在，才能认出已经执行过。
 - **`recurring=True`** 将条目变为周期性作业。每次运行会在 `timeout` 秒后重新调度自身。要求 `timeout > 0`。
 - **目标 `System` 必须声明 `call_lock=True`**——当 `timeout>0` 且不是 `recurring` 时。调度器使用调用的行 ID 作为 UUID 来去重重试；没有 `call_lock`，引擎会拒绝注册未来调用。
-- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。
+- **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。调用只会晚、不会早于 `at` 执行：目标 `System` 里读到的 `ctx.timestamp` 不小于 `at`，在里面校验“到点没有”（如读条结束）是安全的。
 - **执行 `ctx` 没有用户身份。** 调度器作为内部流量运行——`ctx.caller` 是 `0`，`ctx.address` 是 `localhost`。如果工作需要用户 ID，请在 `args` 中显式传递。
 - **权限警告。** 如果目标 `System` 的 `permission=USER`（或任何非 `ADMIN`/`None` 的值），`create_future_call` 会发出警告，因为同一个 `System` 现在也可能由客户端直接调用。最佳实践是未来调用目标使用 `permission=None`。
 
@@ -154,11 +155,12 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 机制：
 
 - 启用 `call_lock=True` 会自动向 `System` 的集群附加一个重复的 `SystemLock` `Component`（使用与 `System` 副本相同的后缀技巧——每个上锁的 `System` 对应一个锁表）。
+- 锁表不随 `depends=` 继承：父 `System` 通过 `ctx.depend[...]` 调用上锁的 `System` 时，不读写它的锁表。只有用 `uuid=` 直接调用的那个 `System` 会用自己的锁表去重，所以要 uuid 去重（包括作为未来调用目标）的 `System` 必须自己声明 `call_lock=True`。
 - 调用时，引擎会读取给定 `uuid` 的 `SystemLock`。如果存在行，则跳过 `System` 主体并返回 `None`。
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
 - 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
-`uuid=` 是 `ctx.systems.call(...)` 以及父 `Systems` 的 `ctx.depend[...](...)` 风格调用上的关键字参数。
+`uuid=` 是 `ctx.systems.call(...)` 的关键字参数。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
 
 ## `on_disconnect` 钩子
 
@@ -225,7 +227,7 @@ async def my_system(ctx: hetu.SystemContext, ...):
 
 每个字段的用途：
 
-- **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）。
+- **`ctx.user_data: dict[str, Any]`** —— 每个连接的任意状态。用于缓存用户的主要 `OnlineUser` 行、当前区域等。*不*持久化；套接字关闭时消失。它也是 `rls_compare` 第三个元组元素的默认来源（当 `ctx` 本身未找到命名属性时）；两处都找不到时，该组件的行对这个连接一律不可见。
 - **`ctx.group: str`** —— 连接的组标签。默认是 `"guest"`；引擎将以 `"admin"` 开头的任何值视为管理员（跳过 RLS 行过滤器，并允许 `Permission.ADMIN` 门控的调用）。从受信任的登录 `System` 设置 `ctx.group = "admin"` 是在 HeTu 中授予管理员权限的方式——没有单独基于令牌的管理员端点。admin 是 root 级权限，只给后台管理工具的连接，不要给游戏客户端的连接（GM 账号也不行），游戏里的管理权限一律用 GM。以 `"gm"` 开头的值视为 GM：已登录的 GM 连接能调用 `Permission.GM` 门控的 `System`/`Endpoint`，除此之外和普通玩家一样（订阅照样按 RLS 过滤，订不了 `ADMIN` `组件`）。GM 账号在登录 `System` 里 `elevate` 之后设 `ctx.group = "gm"`。
 - **`ctx.client_limits` / `ctx.server_limits`** —— `[max_count, window_seconds]` 对的列表。一旦超出任何一对，引擎就会断开连接。`elevate()` 会自动将这些限制乘以 10 倍，因此登录后的用户获得匿名连接所没有的余量。如果需要为机器人账户等自定义预算，可以在自己的逻辑中覆盖每个连接的设置。
 - **`ctx.max_row_sub` / `ctx.max_index_sub` / `ctx.max_table_sub`** —— 活动 `Get`、`Range` 和 `Table`（整表）订阅数量的上限。`elevate()` 会将其乘以 50 倍。根据需要收紧或放宽。整表订阅的单表行数上限是全局配置 `MAX_TABLE_SUBSCRIPTION_ROWS`，不在 `ctx` 上。
@@ -297,9 +299,9 @@ async def add_item(ctx: hetu.SystemContext, tpl: int, n: int):
 
 两个注意点：
 
-- **读全。** 截断读（数据库返回了 `limit` 行）只保护读到的前 `limit` 行，没读到的行会被当成不存在。
-  判断"有没有"时用 `limit=-1`。本事务删掉的行不在结果里、却占着 `limit` 的名额，返回行数小于 `limit`
-  不代表读全了。
+- **读全。** 截断读（返回了 `limit` 行）只保护看到的前 `limit` 行，没读到的行会被当成不存在。
+  判断"有没有"时用 `limit=-1`。本事务删掉、改走的行不在结果里，也不占 `limit` 的名额，返回行数小于
+  `limit` 就是读全了。
 - **成本随行数增长。** 读到的每一行都要在 master 上做一次版本校验，道具多的玩家每加一次道具，都要为
   整个背包付费。
 

@@ -22,7 +22,7 @@ from ..i18n import _
 from ..system.caller import SystemCaller
 from ..system.context import SystemContext
 from .pipeline import ServerMessagePipeline
-from .receiver import PUSH_CLOSE, client_handler
+from .receiver import PUSH_CLOSE, client_handler, close_connection
 from .web import HETU_BLUEPRINT
 
 logger = logging.getLogger("HeTu.root")
@@ -75,12 +75,17 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
     handshake_msg = await ws.recv(timeout=10)
     if not isinstance(handshake_msg, (bytes, bytearray)):
         logger.info("New Connect Error: Invalid handshake message type")
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
-    handshake_msg = msg_pipe.decode(None, handshake_msg)
+    try:
+        handshake_msg = msg_pipe.decode(None, handshake_msg)
+    except Exception as e:  # noqa: BLE001 握手包来自客户端，解不开都算格式错
+        logger.info(f"New Connect Error: undecodable handshake message: {e}")
+        close_connection(ws, connection.CLOSE_REJECTED)
+        return
     if not isinstance(handshake_msg, list):
         logger.info("New Connect Error: Invalid handshake message format")
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 进行握手处理，获得连接上下文
@@ -89,7 +94,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             "New Connect Error: client pipeline layers count "
             "does not match server pipeline"
         )
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 在客户端握手后，才返回实例是否存在的错误，防止暴露实例信息给扫描器
@@ -100,7 +105,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                 instance=instance
             )
         )
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_REJECTED)
         return
     tbl_mgr = request.app.ctx.table_managers[instance]
 
@@ -113,7 +118,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         try:
             await ws.send(msg_pipe.encode(None, []))
         finally:
-            ws.fail_connection()
+            close_connection(ws, connection.CLOSE_REJECTED)
         return
 
     # 初始化Context，一个连接一个Context
@@ -192,9 +197,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
                         replay.info(close_msg)
                         logger.info(close_msg)
                         # 先发带原因的 close 再断开，客户端据此提示"账号已在别处登录"
-                        ws.fail_connection(
-                            connection.CLOSE_KICKED, connection.CLOSE_KICKED_REASON
-                        )
+                        close_connection(ws, connection.CLOSE_KICKED)
                 except Exception as e:  # noqa: BLE001 读库失败不致命：兜底间隔和下次调用还会再查
                     logger.warning(
                         _("⚠️ [📡WSConnect] 顶号核查读库失败：{err}").format(
@@ -256,7 +259,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
         )
         replay.info(err_msg)
         logger.exception(err_msg)
-        ws.fail_connection()
+        close_connection(ws, connection.CLOSE_INTERNAL_ERROR)
     else:
         assert broker is not None
 
@@ -270,7 +273,7 @@ async def websocket_connection(request: Request, ws: Websocket, db_name: str) ->
             """记一次发送，到了发送上限就断开"""
             flood_checker.sent()
             if flood_checker.send_limit_reached(context, "Coroutines(Websocket.push)"):
-                ws.fail_connection()
+                close_connection(ws, connection.CLOSE_REJECTED)
                 return True
             return False
 
@@ -335,7 +338,10 @@ async def send_loop(
     回复优先，但推送不能一直等队列空：客户端连着发 RPC、链路又慢时队列可能一直不空。推送被排着的回复
     压住超过 PUSH_MAX_HOLD 秒，而队列里一个订阅回复的占位都没有（登记过的订阅的回复都已发出）时，
     先插一轮推送。在等占位的期间不插：那个占位是哪个订阅的还不知道。
-    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真。
+    等推送的调用（rpcs）的 ["sync", id] 随推送一起取、排在推送后面发（门面的 take_synced_，设计稿
+    2026-10-10-rpcs-sync §4.5），先后规则与推送相同。
+    pack 把一条回复 / 推送编成要发的帧；flooded 记一次发送，到了发送上限就断开连接、返回真（sync 帧
+    不记，见下）。
     返回时连接已在断开：收到 PUSH_CLOSE（接收协程已经拆了连接）、发送超限、订阅初始化失败
     """
     loop = asyncio.get_running_loop()
@@ -344,7 +350,7 @@ async def send_loop(
     while True:
         drain = push_queue.empty()
         if not drain:
-            if not broker.has_updates_():
+            if not (broker.has_updates_() or broker.has_synced_()):
                 held_since = None
             elif held_since is None:
                 held_since = loop.time()
@@ -355,12 +361,19 @@ async def send_loop(
                 drain = True
         if drain:
             held_since = None
+            # 同一个同步段里先取待发区、再取 sync：栅栏在它那个 tick 交付之后才触发，应排在 sync 前面的
+            # 推送要么已经发出，要么就在这次取走的待发区里
             updates = broker.take_updates_()
-            if updates:
+            synced = broker.take_synced_()
+            if updates or synced:
                 for sub_id, data in updates.items():
                     await ws.send(pack(["updt", sub_id, data]))
                     if flooded():
                         return
+                # sync 不计入发送频率上限：它和客户端的 rpcs 请求一一对应，客户端那一侧已经限过频。
+                # 计入的话一次 rpcs 要发 rsp + sync 两帧，按默认配置（两边上限相同）服务端先超限
+                for sync_id in synced:
+                    await ws.send(pack(["sync", sync_id]))
                 continue
         if push_queue.empty():
             # 空闲等着：这期间交来的推送不算卡住，hub 会塞 PUSH_UPDATES 叫醒这里
@@ -389,7 +402,7 @@ async def send_loop(
                 )
                 replay.info(err_msg)
                 logger.exception(err_msg)
-                ws.fail_connection()
+                close_connection(ws, connection.CLOSE_INTERNAL_ERROR)
                 return
             finally:
                 broker.idle_(False)

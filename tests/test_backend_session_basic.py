@@ -589,7 +589,9 @@ async def test_cache_hit_row_is_a_copy(
             r.qty = 3
 
     final = await backend.master.get(item_ref, rid)
-    assert final is not None and final.qty == 3 and final._version == 2
+    # 这个事务只提交了一次更新（插入时的版本号随机起步）
+    assert final is not None and final.qty == 3
+    assert final._version == first._version + 1
 
 
 async def test_range_batches_row_reads(filled_item_ref, mod_auto_backend):
@@ -1491,6 +1493,78 @@ async def test_system_session_discard(
     assert tbl is not None
     async with tbl.session() as session:
         assert await session.using(DiscardComp).get(owner=7) is None
+
+
+async def test_system_session_commit_race_retry(
+    mod_auto_backend, new_component_env, new_clusters_env
+):
+    """`ctx.session_commit()` 撞 RaceCondition 后整个 System 重跑：重跑时 `ctx.repo`
+    必须恢复完整（session_commit 清空的是上一次的），不能是空字典导致 KeyError"""
+    from hetu.data import BaseComponent, define_component, property_field
+    from hetu.manager import ComponentTableManager
+    from hetu.system import SystemClusters, SystemContext, define_system
+    from hetu.system.caller import SystemCaller
+
+    @define_component(namespace="pytest", force=True)
+    class EarlyCommitComp(BaseComponent):
+        owner: np.int64 = property_field(0, unique=True)
+        n: np.int32 = property_field(0)
+
+    repo_keys_per_attempt = []
+
+    @define_system(namespace="pytest", components=(EarlyCommitComp,))
+    async def bump_then_commit(ctx):
+        repo_keys_per_attempt.append(list(ctx.repo))
+        async with ctx.repo[EarlyCommitComp].upsert(owner=1) as row:
+            row.n += 1
+        if ctx.race_count == 0:
+            # 读完、提交前被别的事务改掉同一行，让这次 session_commit 撞冲突
+            assert tbl is not None
+            async with tbl.session() as other:
+                other.only_master = True
+                other_repo = other.using(EarlyCommitComp)
+                other_row = await other_repo.get(owner=1)
+                assert other_row is not None
+                other_row.n += 10
+                await other_repo.update(other_row)
+            await backend.wait_for_synced()
+        await ctx.session_commit()
+        return "done"
+
+    SystemClusters().build_clusters("pytest")
+    backend = mod_auto_backend()
+    tbl_mgr = ComponentTableManager("pytest", "server1", {"default": backend})
+    tbl_mgr._flush_all(force=True)
+    tbl = tbl_mgr.get_table(EarlyCommitComp)
+    assert tbl is not None
+    async with tbl.session() as session:
+        row = EarlyCommitComp.new_row()
+        row.owner = 1
+        await session.using(EarlyCommitComp).insert(row)
+    await backend.wait_for_synced()
+
+    ctx = SystemContext(
+        caller=0,
+        connection_id=0,
+        address="NotSet",
+        group="",
+        user_data={},
+        timestamp=0,
+        request=None,  # type: ignore
+        systems=None,  # type: ignore
+    )
+    ctx.systems = SystemCaller("pytest", tbl_mgr, ctx)
+    sys_def = SystemClusters().get_system("bump_then_commit", namespace="pytest")
+    assert sys_def is not None
+    assert await ctx.systems.call_(sys_def) == "done"
+    assert len(repo_keys_per_attempt) >= 2
+    assert all(keys == [EarlyCommitComp] for keys in repo_keys_per_attempt)
+
+    await backend.wait_for_synced()
+    async with tbl.session() as session:
+        row = await session.using(EarlyCommitComp).get(owner=1)
+        assert row is not None
+        assert row.n == 11
 
 
 @pytest.mark.parametrize("query", ["get", "range"])

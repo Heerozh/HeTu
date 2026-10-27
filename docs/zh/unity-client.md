@@ -85,6 +85,13 @@ public class NetBootstrap : MonoBehaviour
   `HeTuClient.Instance.LastCloseCode == HeTuCloseCode.Kicked`，提示玩家"账号已在别处登录"，
   并且不要自动重连 — 重连会重新登录，把对方顶掉。`HeTuSessionClient` 遇到它会直接进入 `Faulted`
   终态（异常为 `HeTuKickedException`），不会重连。
+- **请求被拒。** release 模式下客户端越界（调了服务器上不存在的 System、无权限、参数数量不对、
+  报文非法、超出收发频率上限）时，服务器发 close 码 `4002`（`HeTuCloseCode.Rejected`）、原因
+  `"rejected"` 再断开，不回具体原因（看服务器日志）。最常见的是客户端比服务器新。同样不要自动
+  重连 — 重连后再调一样会被断开，变成周期性掉线。4000-4999 段都是这类终态码
+  （`HeTuCloseCode.IsTerminal(code)`），`HeTuSessionClient` 遇到都直接进入 `Faulted`（被顶号之外的
+  异常为 `HeTuConnectionRejectedException`，`Code` 是 close 码）。服务端内部出错（后端连不上、
+  System 抛异常）发 `1011`（`HeTuCloseCode.InternalError`），可以重连。
 
 ## 调用 `Systems`
 
@@ -101,6 +108,23 @@ Debug.Log(resp.To<string>());
 
 对于快速的输入流（如每帧移动），使用 `.Forget()`（或 `_ = CallSystem(...)`）；对于需要结果的
 action，使用 `await`。
+
+**等推送的调用。** `CallSystem` 的回复在服务端提交后立即发出，而这次写入引起的订阅推送要再晚约一个
+合批间隔（默认 100ms）才到。所以调用一返回就按订阅数据刷新界面（比如恢复按钮：钱还够不够、库存还剩
+几个），读到的还是旧值。这种场景改用 `CallSystemAwaitPush`：它等这次调用引起的推送都到了才返回，
+返回时 `WatchRow` / `WatchRange` 拿到的订阅对象已经是新值。
+
+```csharp
+buyButton.interactable = false;
+await HeTuClient.Instance.CallSystemAwaitPush("buy", itemId);
+// 这里 gold 订阅已经是购买之后的数据
+buyButton.interactable = gold.Data.value >= price;
+```
+
+`CallSystemAwaitPush` 比 `CallSystem` 约多等一个合批间隔，期间不耽误同一连接上别的调用和推送；移动这类
+高频调用仍用 `CallSystem`。它和订阅本身一样是尽力而为：服务端负载过高时，推送仍可能晚于它返回。
+`HeTuSessionClient` 和 headless 的 `HeadlessHeTuClient` 也有同名方法；已经收到服务端回复、还在等推送时
+断线的，按成功返回（提交确定已经发生，重连后订阅会恢复）。
 
 **本地预回调。** 你可以注册一个客户端钩子，每次调用指定名称的 `System` 时都会运行 —
 适用于客户端预测：
@@ -292,8 +316,19 @@ sub.AddTo(ref _bag);
 try { /* 使用 sub */ } finally { sub.Dispose(); }
 ```
 
-`Dispose()` 做两件事：告诉服务器“停止为此查询推送变更”，并销毁从该订阅派生的所有 R3 流。释放后，
-`Subject` / `ObserveRow` 流将不再发出数据。
+`Dispose()` 释放的是你手里这一个订阅：销毁从它派生的所有 R3 流，释放后它的 `Subject` /
+`ObserveRow` 流不再发出数据、事件也不再触发。
+
+同一行 / 同一范围可以在多处订阅：每次 `WatchRow` / `WatchRange` / `WatchTable` 都返回一个**自己的**
+订阅对象，它们共用一个服务端订阅和同一份数据（`Data` / `Rows`）。各处按自己的生命周期 `Dispose`
+即可，互不影响；最后一个 `Dispose` 时，SDK 才告诉服务器“停止为此查询推送变更”。
+
+两点注意：
+
+- 漏了 `Dispose` 的订阅会让服务端订阅一直留到断线，即使同一查询的其他订阅都已释放。SDK 的泄漏
+  日志要等断线、这个订阅被回收时才会出现，别指望靠它及时发现泄漏。
+- 退订可能稍晚才发出：有订阅请求还在等回复时，SDK 会等它们回复后再退订，以免把刚好落到同一个
+  订阅上的请求一起退掉。持续不断地发订阅请求（比如快速翻页）时，旧订阅会一直留到请求停下来。
 
 ## Unity 版本说明
 

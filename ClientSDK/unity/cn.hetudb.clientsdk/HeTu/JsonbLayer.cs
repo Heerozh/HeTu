@@ -134,12 +134,13 @@ namespace HeTu
             if (count < 2) throw new Exception("数据包格式错误，长度不足2");
             // 2. 读取 Cmd (int)
             var cmd = reader.ReadString();
-            // 服务器标准消息：rsp / sub / updt / rej / err
+            // 服务器标准消息：rsp / sub / updt / rej / err / sync
             // ["rsp", json_data]
             // ["sub", sub_id, struct_data | list[struct_data]]
             // ["updt", sub_id, dict[id, struct_data]]
             // ["rej", system_name, code]    —— 业务软拒绝（如限流），连接保持
             // ["err", system_name, reason]  —— 服务端执行失败（仅 debug 模式回传原因）
+            // ["sync", sync_id]             —— 等推送的调用（rpcs）引起的推送都已发出
             switch (cmd)
             {
                 case HeTuClientBase.MessageResponse: // list[Any] | dict[Any, Any]
@@ -160,6 +161,11 @@ namespace HeTu
                         var sysName = reader.ReadString();
                         var detail = reader.ReadString();
                         return new object[] { cmd, sysName, detail };
+                    }
+                case HeTuClientBase.MessageSync: // ["sync", sync_id]
+                    {
+                        var syncId = reader.ReadInt64();
+                        return new object[] { cmd, syncId };
                     }
                 default:
                     throw new Exception($"未知的命令类型: {cmd}");

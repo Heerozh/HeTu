@@ -135,7 +135,10 @@ What this buys you, and what it costs:
 
 - **One Session, one commit.** The child `System` reads/writes through the
   same `ctx.repo[...]`, so either everything commits or `RaceCondition`
-  retries the whole call from the parent's top.
+  retries the whole call from the parent's top. Reads in the transaction
+  (`get`, `range`) see the rows it has already written but not yet committed,
+  so if both parent and child grant an item "only when none is found", the
+  call still grants just one.
 - **Components inherit.** The parent transparently gains access to the
   child's declared Components — you don't need to repeat them in the
   parent's `components=`.
@@ -219,6 +222,16 @@ that interval, what it reads is the latest value. Make decisions that need
 strong consistency (spending currency, granting rewards, validation) inside a
 `System` — write transactions are guarded by optimistic locking — rather than
 relying on the subscription data a client holds.
+
+**If you need subscription data right after a call, wait for its pushes.** A
+`System` call's reply goes out right after the commit, about one batching
+interval ahead of the pushes it causes. When the client sends `rpcs`
+(`CallSystemAwaitPush` in the SDK), the server replies as usual and drops a
+fence into the worker's subscription engine; once every change notification
+received before the fence has been processed and pushed, it sends a
+`["sync", id]` frame, and the SDK completes the call only then. No master
+reads and no extra replica reads; the cost is that the call completes about one
+batching interval later.
 
 **Identical queries are shared within a worker.** Subscriptions that are not
 filtered by row-level security — components with `EVERYBODY` or `USER`
