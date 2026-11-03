@@ -189,7 +189,10 @@ def test_call_errors(project, tmp_path):
     code, out = run_json("call", "add_gold", "1", "2", "3", cwd=project)
     assert code == 2
 
-    code, out = run_json("call", "peek", "1001", cwd=project)
+    # 自己备数据：xdist 下同文件的用例可能分到别的 worker，不能指望前面的用例写过
+    code, out = run_json("call", "add_gold", "1101", "500", cwd=project)
+    assert code == 0, out
+    code, out = run_json("call", "peek", "1101", cwd=project)
     assert code == 0
     assert out["client"] is None and "numpy.int64" in out["wire_error"]
     assert out["result"] == {"ResponseToClient": 500}
@@ -279,9 +282,12 @@ def test_config_discovery(project, tmp_path):
     # 子目录里没有 config.yml：找不到配置
     code, out = run_json("call", "--list", cwd=sub)
     assert code == 3 and out["error_type"] == "ConfigError"
+    # 自己备数据：xdist 下同文件的用例可能分到别的 worker，不能指望前面的用例写过
+    code, out = run_json("call", "add_gold", "1201", "500", cwd=project)
+    assert code == 0, out
     # HETU_CONFIG；SQLite 相对路径按配置目录解析，而不是当前目录
     code, out = run_json(
-        "get", "Wallet", "owner=1001", cwd=sub, env={"HETU_CONFIG": "../config.yml"}
+        "get", "Wallet", "owner=1201", cwd=sub, env={"HETU_CONFIG": "../config.yml"}
     )
     assert code == 0 and out["row"]["gold"] == 500
     assert not (sub / "game.db").exists()
@@ -289,7 +295,7 @@ def test_config_discovery(project, tmp_path):
     code, out = run_json(
         "get",
         "Wallet",
-        "owner=1001",
+        "owner=1201",
         "--config",
         str(project / "config.yml"),
         cwd=tmp_path,
