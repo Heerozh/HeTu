@@ -36,6 +36,20 @@ COMMANDS = [
 _NEGATIVE_NUMBER = re.compile(r"^-\d+$|^-\d*\.\d+$")
 
 
+def _force_utf8_stdio() -> None:
+    """
+    所有命令的 stdout / stderr 都强制 UTF-8：提示和日志里有 emoji 与中文，输出重定向到文件或
+    管道时 Windows 上默认是 GBK，打印 emoji 会抛 UnicodeEncodeError，命令半路崩掉。
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(encoding="utf-8", errors="backslashreplace")
+            except ValueError, OSError:
+                pass
+
+
 class _ArgumentError(Exception):
     def __init__(self, parser: argparse.ArgumentParser, message: str):
         super().__init__(message)
@@ -113,6 +127,7 @@ class CommandIndex:
         run_json_command(0, fail)
 
     def execute(self):
+        _force_utf8_stdio()
         args = self.parse()
 
         rtn = None

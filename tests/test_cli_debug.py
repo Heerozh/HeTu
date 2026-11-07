@@ -310,6 +310,17 @@ def test_encoding_on_gbk_pipe(project):
     assert code == 1 and out["error"] == "boom 💥"
 
 
+def test_upgrade_on_gbk_pipe(tmp_path):
+    """输出重定向时 Windows 上是 GBK 管道：hetu upgrade 的提示里有 emoji，不能打断迁移。
+    原来迁移完表结构就崩了，易失数据没清、索引没重建，后面的实例也没迁移"""
+    root = make_project(tmp_path / "proj")
+    code, out, err = run_hetu(
+        "upgrade", "-y", cwd=root, env={"PYTHONIOENCODING": "gbk"}
+    )
+    assert code in (0, None), out + err
+    assert "🎉" in out
+
+
 # ============ hetu get / range / --list ============
 
 

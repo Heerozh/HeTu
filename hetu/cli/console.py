@@ -88,19 +88,12 @@ def setup_process(verbosity: int, *, redirect_stdout: bool = True) -> TextIO:
     """
     设置进程环境，返回真正的 stdout（最后那行 JSON 写到这里）。
 
-    - stdout / stderr 强制 UTF-8：日志和报错里有 emoji 与中文，Windows 的 GBK 管道会让进程
-      在打印自己的错误时抛 UnicodeEncodeError；
     - redirect_stdout：之后的一切 print（app import、System 里的）都改写到 stderr；
     - 日志由这里配置，**不套用配置文件的 LOGGING**（其中 console handler 写 stdout）：
       HeTu 日志写 stderr，默认 WARNING，-v 为 INFO，-vv 为 DEBUG。
+
+    stdout / stderr 的 UTF-8 由 CLI 入口统一设置（`hetu.cli._force_utf8_stdio`）。
     """
-    for stream in (sys.stdout, sys.stderr):
-        reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is not None:
-            try:
-                reconfigure(encoding="utf-8", errors="backslashreplace")
-            except ValueError, OSError:
-                pass
     real_stdout = sys.stdout
     if redirect_stdout:
         sys.stdout = sys.stderr
