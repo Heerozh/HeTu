@@ -521,7 +521,6 @@ async def test_subscribe_get_rls_update(
 async def test_query_subscribe_rls_lost(
     broker: SubscriptionBroker,
     filled_item_ref,
-    mod_item_model,
     user_id10_ctx,
 ):
     backend = broker._backend
@@ -556,7 +555,6 @@ async def test_query_subscribe_rls_lost(
 async def test_query_subscribe_rls_gain(
     broker: SubscriptionBroker,
     filled_item_ref,
-    mod_item_model,
     user_id10_ctx,
 ):
     # query订阅的rls gain处理的原理是，每次index变化都检查所有未注册行的rls
@@ -596,7 +594,7 @@ async def test_query_subscribe_rls_gain(
     # 测试insert新数据能否得到通知
     async with backend.session("pytest", 1) as session:
         repo = session.using(filled_item_ref.comp_cls)
-        new = mod_item_model.new_row()
+        new = filled_item_ref.comp_cls.new_row()
         new.owner = 10
         new_row_id = new.id
         await repo.insert(new)
@@ -612,7 +610,6 @@ async def test_query_subscribe_rls_gain(
 async def test_query_subscribe_rls_lost_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
-    mod_rls_test_model,
     user_id11_ctx,
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
@@ -646,7 +643,6 @@ async def test_query_subscribe_rls_lost_without_index(
 async def test_query_subscribe_rls_gain_without_index(
     broker: SubscriptionBroker,
     filled_rls_ref,
-    mod_rls_test_model,
     user_id11_ctx,
 ):
     # filled_rls_ref的权限是要求ctx.caller == row.friend
@@ -699,9 +695,7 @@ async def test_query_subscribe_rls_gain_without_index(
 
 
 @pytest.mark.timeout(30)
-async def test_mq_backlog(
-    broker: SubscriptionBroker, filled_item_ref, mod_item_model, admin_ctx
-):
+async def test_mq_backlog(broker: SubscriptionBroker, filled_item_ref, admin_ctx):
     # 测试mq消息堆积的情况
     backend = broker._backend
     mq = broker._hub.mq
