@@ -177,6 +177,18 @@ Things to know about the API:
   precision. A call may run late but never before `at`: the `ctx.timestamp`
   the target `System` sees is never less than `at`, so checking "is it time
   yet" inside it (e.g. a cast finishing) is safe.
+- **A call that keeps colliding doesn't hold up the scheduler.** Each
+  `worker` runs future calls one at a time. When the target `System` hits
+  `RaceCondition`, it is retried in place for about 2 seconds; if it still
+  collides, the scheduler gives up on this round, moves on to the next call,
+  and logs a rate-limited warning with the conflict reason. The call is
+  re-run within about 5 seconds (or `timeout`, if shorter), so one-shot calls
+  are still guaranteed to succeed. A call that always collides never
+  succeeds: shrink what it reads and writes, e.g. pass `phantom_check=False`
+  to a `range` that doesn't depend on the interval. `timeout=0` calls have no
+  such limit because giving up would lose them: they retry up to the
+  `System`'s `retry=` limit, holding this `worker`'s loop while later calls
+  wait.
 - **The execution `ctx` has no user identity.** The scheduler runs as
   internal traffic — `ctx.caller` is `0`, `ctx.address` is `localhost`. If
   the work needs a user id, pass it explicitly in `args`.
