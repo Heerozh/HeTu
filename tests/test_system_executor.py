@@ -367,3 +367,33 @@ async def test_retry_counts_retries_after_first_run(
     with pytest.raises(RuntimeError):
         await caller.call("create_row")
     assert len(attempts) == max_retry + 1
+
+
+@pytest.mark.parametrize("backend_name", ["sqlite"], indirect=True)
+async def test_retry_budget(mod_test_app, tbl_mgr, new_ctx, monkeypatch):
+    """call_ 的 retry_budget：超过这么多秒后再撞竞态就放弃，抛 RetryBudgetExceeded，不再
+    重试到 max_retry。预算没用完时照常重试；max_retry 先到则还是普通的 RuntimeError"""
+    from hetu.data.backend import RaceCondition
+    from hetu.system import SystemClusters
+    from hetu.system.caller import RetryBudgetExceeded, SystemCaller
+
+    caller = SystemCaller("pytest", tbl_mgr, new_ctx())
+    system = SystemClusters().get_system("create_row")
+    assert system
+
+    attempts = _raced_system(monkeypatch, 3)
+    with pytest.raises(RetryBudgetExceeded) as exc_info:
+        await caller.call_(system, retry_budget=0)
+    assert len(attempts) == 1
+    assert exc_info.value.race_count == 1
+    assert isinstance(exc_info.value.__cause__, RaceCondition)
+
+    attempts = _raced_system(monkeypatch, 2)
+    assert await caller.call_(system, retry_budget=60) == "done"
+    assert len(attempts) == 3
+
+    attempts = _raced_system(monkeypatch, 3, max_retry=1)
+    with pytest.raises(RuntimeError) as exc_info:
+        await caller.call_(system, retry_budget=60)
+    assert len(attempts) == 2
+    assert not isinstance(exc_info.value, RetryBudgetExceeded)
