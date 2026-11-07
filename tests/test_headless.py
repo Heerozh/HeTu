@@ -3,6 +3,9 @@ hetu.headless：无服务器进程的表直读写客户端。
 
 服务器侧的表由 mod_test_app + mod_tbl_mgr 建好（含 meta / cluster_id），headless 只连
 同一个后端按 meta 认表；System 侧的写入经 mod_new_ctx 的 SystemCaller 完成。
+
+用到服务器表的用例都要在 mod_test_app 之后请求 mod_tbl_mgr，哪怕不用它的值：表是它建的，
+不能指望同文件前面的用例先跑过。单独跑、或 xdist 把用例分到别的 worker 时，表就不存在。
 """
 
 import asyncio
@@ -79,7 +82,9 @@ async def test_from_backend_matches_server_tables(hl, mod_test_app, mod_tbl_mgr)
         hl.table("PublicConfig")  # 没声明
 
 
-async def test_from_backend_rejects_bad_components(mod_test_app, mod_auto_backend):
+async def test_from_backend_rejects_bad_components(
+    mod_test_app, mod_tbl_mgr, mod_auto_backend
+):
     backend = mod_auto_backend()
     with pytest.raises(ValueError):
         await headless.HeadlessClient.from_backend(backend, "server1", [])
@@ -102,7 +107,7 @@ async def test_table_not_found_does_not_create(mod_auto_backend):
         )
 
 
-async def test_schema_guard(mod_test_app, mod_auto_backend, caplog):
+async def test_schema_guard(mod_test_app, mod_tbl_mgr, mod_auto_backend, caplog):
     """本地类与服务器 meta 的数据布局不一致 → SchemaMismatch 且信息含差异；
     权限类字段差异忽略，default 差异只告警。"""
     app = mod_test_app
@@ -144,7 +149,9 @@ async def test_schema_guard(mod_test_app, mod_auto_backend, caplog):
     assert any("epoch" in rec.getMessage() for rec in caplog.records)
 
 
-async def test_schema_guard_notify_declarations(mod_test_app, mod_auto_backend):
+async def test_schema_guard_notify_declarations(
+    mod_test_app, mod_tbl_mgr, mod_auto_backend
+):
     """table_sub / point_sub 与服务器不一致 → SchemaMismatch：headless 写入走同一条
     commit，声明少了就少发通知，服务器上的订阅会漏更新"""
     Sim = mod_test_app.HeadlessSim
@@ -313,7 +320,7 @@ async def test_race_with_system_and_retry(hl, mod_test_app, mod_new_ctx):
 # ---------------------------------------------------------------- check_schema
 
 
-async def test_check_schema(mod_test_app, mod_auto_backend):
+async def test_check_schema(mod_test_app, mod_tbl_mgr, mod_auto_backend):
     app = mod_test_app
     backend = mod_auto_backend()
     Cfg = app.PublicConfig  # 用其它 headless 测试不碰的表做破坏性检查
