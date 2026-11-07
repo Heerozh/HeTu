@@ -908,7 +908,7 @@ is_same_txn_group(other: hetu.data.backend.table.TableReference) -> bool
 cancel_future_call(ctx: hetu.system.context.SystemContext, key: str) -> bool
 ```
 
-<small>Source: [`hetu/system/future.py:323`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L323)</small>
+<small>Source: [`hetu/system/future.py:327`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L327)</small>
 
 
 
@@ -1033,6 +1033,10 @@ timeout不为0时，则保证目标System事务一定成功，且只执行一次
 * 不会早于at执行（按执行它的Worker的时钟），System里读到的ctx.timestamp>=at。各Worker
   睡到最早一条到期才醒，到点即触发；新建的调用最迟约1秒后被发现，at离创建不到1秒的可能
   晚触发最多约1秒
+* 各Worker逐条执行未来调用，事务持续冲突的调用不会一直占着：原地重试约2秒还冲突就放弃
+  这一轮，继续执行下一条，这条最迟约5秒后重投（timeout更短的按timeout）。一直冲突就一直
+  跑不成，要缩小System读写的范围。timeout=0的调用放弃就丢了，所以没有这个限制，会重试到
+  System的retry上限，这期间占着这个Worker的循环
 
 
 
@@ -1053,7 +1057,7 @@ ensure_future_call(
 )
 ```
 
-<small>Source: [`hetu/system/future.py:248`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L248)</small>
+<small>Source: [`hetu/system/future.py:252`](https://github.com/Heerozh/HeTu/blob/main/hetu/system/future.py#L252)</small>
 
 
 

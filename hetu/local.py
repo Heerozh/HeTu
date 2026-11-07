@@ -185,9 +185,15 @@ class _AppSystemCaller(SystemCaller):
         super().__init__(app.namespace, app.tbl_mgr, context)
         self._app = app
 
-    async def call_(self, sys: SystemDefine, *args, uuid: str = "") -> Any:
+    async def call_(
+        self,
+        sys: SystemDefine,
+        *args,
+        uuid: str = "",
+        retry_budget: float | None = None,
+    ) -> Any:
         self._app.verify_components(sys.full_components)
-        return await super().call_(sys, *args, uuid=uuid)
+        return await super().call_(sys, *args, uuid=uuid, retry_budget=retry_budget)
 
 
 class LocalApp:

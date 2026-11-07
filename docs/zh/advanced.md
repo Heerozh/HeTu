@@ -102,6 +102,7 @@ async def schedule_my_bonus(ctx: hetu.SystemContext, delay_seconds: float):
 - **`recurring=True`** 将条目变为周期性作业。每次运行会在 `timeout` 秒后重新调度自身。要求 `timeout > 0`。
 - **目标 `System` 必须声明 `call_lock=True`**——当 `timeout>0` 且不是 `recurring` 时。调度器使用调用的行 ID 作为 UUID 来去重重试；没有 `call_lock`，引擎会拒绝注册未来调用。
 - **触发粒度约为 1 秒。** 每个工作器运行一个 `future_call_task` 后台协程：每轮扫一遍所有未来调用表（主表和各个副本），执行已到期的，都没到期就睡到最早的下一条、最多 1 秒，所以新建的调用最迟约 1 秒后被发现；不要将其用于亚秒级精度。调用只会晚、不会早于 `at` 执行：目标 `System` 里读到的 `ctx.timestamp` 不小于 `at`，在里面校验“到点没有”（如读条结束）是安全的。
+- **事务持续冲突的调用不会占住调度。** 每个工作器逐条执行未来调用。目标 `System` 遇到 `RaceCondition` 时原地重试约 2 秒，还冲突就放弃这一轮、继续执行下一条，并打一条限频的警告说明冲突原因；这条最迟约 5 秒后重投（`timeout` 更短的按 `timeout`），所以一次性调用仍然保证成功。一直冲突的调用就一直跑不成，要缩小它读写的范围，比如不依赖区间的 `range` 传 `phantom_check=False`。`timeout=0` 的调用放弃就丢了，所以没有这个限制：它会重试到 `System` 的 `retry=` 上限，这期间占着这个工作器的循环，后面到期的调用都要等。
 - **执行 `ctx` 没有用户身份。** 调度器作为内部流量运行——`ctx.caller` 是 `0`，`ctx.address` 是 `localhost`。如果工作需要用户 ID，请在 `args` 中显式传递。
 - **权限警告。** 如果目标 `System` 的 `permission=USER`（或任何非 `ADMIN`/`None` 的值），`create_future_call` 会发出警告，因为同一个 `System` 现在也可能由客户端直接调用。最佳实践是未来调用目标使用 `permission=None`。
 

@@ -35,6 +35,23 @@ STUCK_INDEX_LOG_INTERVAL = 60.0
 _stuck_index_logged: dict[tuple[str, str, int], float] = {}
 
 
+class RetryBudgetExceeded(RuntimeError):
+    """
+    事务冲突重试超过了 `call_` 的 retry_budget，事务没有提交。
+    ``__cause__`` 是最后一次的 RaceCondition。
+    """
+
+    def __init__(self, sys_name: str, race_count: int, retry_budget: float):
+        super().__init__(
+            _(
+                "调用System失败, {sys_name}重试{race_count}次, 超过重试时间{retry_budget}秒"
+            ).format(
+                sys_name=sys_name, race_count=race_count, retry_budget=retry_budget
+            )
+        )
+        self.race_count = race_count
+
+
 def _log_stuck_index(sys_name: str, err: InconsistentRangeRead) -> None:
     """同一行连续多次对不上：索引里残留了和行数据不一致的项，告诉运维怎么修"""
     key = (err.comp_name, err.index_name, err.row_id)
@@ -82,11 +99,19 @@ class SystemCaller:
 
         return sys
 
-    async def call_(self, sys: SystemDefine, *args, uuid: str = "") -> Any:
+    async def call_(
+        self,
+        sys: SystemDefine,
+        *args,
+        uuid: str = "",
+        retry_budget: float | None = None,
+    ) -> Any:
         """
         实际调用逻辑，无任何检查
         调用成功返回System返回值
         事务冲突超出重试次数时Raise RuntimeError
+        给了retry_budget（秒）时，从开始调用算起超过这么久后再冲突，Raise RetryBudgetExceeded，
+        不等到重试次数用完。调用方不能一直等着重试时用，比如串行执行的未来调用循环
         """
         # 开始调用
         sys_name = sys.func.__name__
@@ -130,7 +155,7 @@ class SystemCaller:
         stuck_key: tuple[str, str, int] | None = None
         stuck_count = 0
         # 调用系统
-        while context.race_count < sys.max_retry:
+        while context.race_count <= sys.max_retry:
             # 开始新的事务，并attach components。上一次System里调过
             # ctx.session_commit()/session_discard()的话context.repo已被清空，要重新挂上
             await session.__aenter__()
@@ -182,6 +207,13 @@ class SystemCaller:
                         _log_stuck_index(sys_name, e)
                 else:
                     stuck_key, stuck_count = None, 0
+                if (
+                    retry_budget is not None
+                    and time.perf_counter() - start_time >= retry_budget
+                ):
+                    raise RetryBudgetExceeded(
+                        sys_name, context.race_count, retry_budget
+                    ) from e
                 await asyncio.sleep(delay)
                 continue
             except Exception:

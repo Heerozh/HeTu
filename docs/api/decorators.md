@@ -301,7 +301,8 @@ define_system(
 - admin: 只有管理员连接可以调用。admin是后台管理工具用的root级权限，游戏客户端的管理功能请用gm
 - rls: **不可用** RLS权限这里不可使用，需要自行做安全检查
 
-- **`retry`** (Any) — 如果System遇到事务冲突，会重复执行直到成功。设为0关闭
+- **`retry`** (Any) — 如果System遇到事务冲突，会重新执行直到成功，首次执行之外最多重试这么多次，超过后抛
+RuntimeError。设为0关闭重试：只执行一次，遇到冲突就失败
 
 - **`depends`** (Any) — 定义要事务依赖的其他System，调用时会在同一个事务会话中执行。
 可传入System函数本身，或字符串，如("system1", system2)。

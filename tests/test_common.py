@@ -823,3 +823,19 @@ async def test_snowflake_lease_lifecycle(mod_auto_backend, monkeypatch, tmp_path
 
         monkeypatch.setattr(keeper, "release_worker_id", broken_release)
     await real_release()
+
+
+def test_slow_log_table_shows_average_race_count():
+    """慢日志表格的"平均冲突次数"列是冲突次数的平均值，不是平均时间"""
+    from hetu.common.slowlog import SlowLog
+
+    slow_log = SlowLog()
+    slow_log.log(0.5, "sys_a", 3)
+    slow_log.log(0.5, "sys_a", 5)
+
+    row = next(line for line in str(slow_log).splitlines() if "sys_a" in line)
+    assert [cell.strip() for cell in row.strip("|").split("|")] == [
+        "sys_a",
+        "0.50",
+        "4.00",
+    ]
