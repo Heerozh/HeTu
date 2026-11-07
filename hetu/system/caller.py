@@ -130,7 +130,7 @@ class SystemCaller:
         stuck_key: tuple[str, str, int] | None = None
         stuck_count = 0
         # 调用系统
-        while context.race_count < sys.max_retry:
+        while context.race_count <= sys.max_retry:
             # 开始新的事务，并attach components。上一次System里调过
             # ctx.session_commit()/session_discard()的话context.repo已被清空，要重新挂上
             await session.__aenter__()
