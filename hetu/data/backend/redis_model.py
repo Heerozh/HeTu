@@ -989,7 +989,7 @@ class RedisModelClient(BackendClient):
         """
         把 IdentityMap 里的修改组装成提交脚本的输入：返回 (keys, payload)，payload 为
         `[checks, pushes, deleted, table_pubs, value_chans, seq_allocs]`（格式见
-        `redis/commit_v2.lua`）。
+        `redis/commit_v2.lua`），没有号要发时不带最后的 `seq_allocs`。
 
         提交序号列（commit_seq）的组件，insert 的 HSET 换成 HSETSEQ：号由提交脚本在检查都通过
         之后发（`seq_allocs` 是这次每个计数器要发几个），写进这一行、拼出这一行在这个索引上的
@@ -1315,20 +1315,19 @@ class RedisModelClient(BackendClient):
         checks = race_checks + range_checks + strict_checks
         # 添加一个带cluster id的key，指明lua脚本执行的集群
         keys = [self.row_key(first_ref, 1)]
-        return keys, [
-            checks,
-            pushes,
-            deleted,
-            table_pubs,
-            list(value_chans),
-            [[key, count] for key, count in seq_counts.items()],
-        ]
+        payload: list[Any] = [checks, pushes, deleted, table_pubs, list(value_chans)]
+        if seq_counts:
+            # 没有号要发时不带这一段：提交脚本读到 nil，就不建发号用的表、不进发号的循环
+            payload.append([[key, count] for key, count in seq_counts.items()])
+        return keys, payload
 
     @staticmethod
     def raise_for_commit_response_(resp: bytes) -> None:
         """
         提交脚本的返回串 → 异常：`RACE` 可重试，`UNIQUE` 是确定性冲突，`SEQ` 是提交序号列发号失败
-        （计数器到了上限，或者计数器 key 被写成了别的类型），一个号都没发、什么都没写，不重试
+        （发出的号会超出 [1, 2^53)：计数器到了上限，或者被手工改成了负数），一个号都没发、什么都
+        没写，不重试。计数器上的 Redis 命令出错（比如 key 被写成了别的类型）时，提交脚本把已经
+        加上去的计数器减回去，再原样返回 Redis 的错误，由 redis-py 抛出
         """
         text = resp.decode("utf-8")
         if text != "committed":

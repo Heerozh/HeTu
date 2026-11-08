@@ -18,6 +18,7 @@ from fixtures.backends import (
     raw_kv_keys,
     raw_kv_set,
     raw_seq_counter_key,
+    use_redis_family_backend_only,
 )
 from fixtures.testdata import create_ref
 
@@ -402,26 +403,56 @@ async def test_failed_commit_consumes_no_number(log_ref, mod_auto_backend):
 async def test_seq_allocation_all_or_nothing(log_ref, mod_auto_backend):
     """
     发号全成或全不发：同一次提交里后面的计数器出错（不是整数），前面已经加上去的减回去，行和
-    member 都没写；计数器到了 2^53 同样不发
+    member 都没写；发出的号会到 2^53、或者计数器被改成负数时同样不发
     """
     backend: Backend = mod_auto_backend()
     comp = log_ref.comp_cls
     await _insert(backend, comp, _log(comp, 7))
-    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=8), b"abc")
-    with pytest.raises(RuntimeError, match="SEQ") as excinfo:
-        await _insert(backend, comp, _log(comp, 7), _log(comp, 8))
-    assert "not an integer" in str(excinfo.value)
-    assert _counter(backend, log_ref, owner=7) == 1
-    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+    key8 = raw_seq_counter_key(backend, log_ref, owner=8)
 
-    raw_kv_set(
-        backend, raw_seq_counter_key(backend, log_ref, owner=8), b"%d" % (2**53 - 1)
-    )
-    with pytest.raises(RuntimeError, match="Counter overflow"):
+    async def attempt(match: str) -> None:
+        rows = _log(comp, 7), _log(comp, 8)
+        # Redis 原样抛 INCRBY 的错误（redis-py 的 ResponseError），SQLite 抛 RuntimeError
+        with pytest.raises(Exception, match=match):
+            await _insert(backend, comp, *rows)
+        async with backend.session("pytest", 1) as session:
+            for row in rows:
+                assert await session.using(comp).get(id=row.id) is None
+        assert _counter(backend, log_ref, owner=7) == 1
+        assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+
+    raw_kv_set(backend, key8, b"abc")
+    await attempt("not an integer")
+    raw_kv_set(backend, key8, b"%d" % (2**53 - 1))
+    await attempt("Counter out of range")
+    assert _counter(backend, log_ref, owner=8) == 2**53 - 1
+    raw_kv_set(backend, key8, b"-5")
+    await attempt("Counter out of range")
+    assert _counter(backend, log_ref, owner=8) == -5
+    assert await _seqs(backend, comp, owner=8) == []
+
+
+@pytest.mark.parametrize("raw", [b" 5", b"+5", b"05", b"1_0", b"-0", b"9" * 20])
+async def test_counter_parsed_like_redis(log_ref, mod_auto_backend, raw):
+    """计数器按 Redis INCRBY 的规则认整数：SQLite 也不放过 Python int() 认、Redis 不认的写法"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=7), raw)
+    with pytest.raises(Exception, match="not an integer"):
+        await _insert(backend, comp, _log(comp, 7))
+
+
+@use_redis_family_backend_only
+async def test_wrongtype_counter_keeps_redis_error(log_ref, mod_auto_backend):
+    """计数器 key 被写成了别的类型：减回前面的计数器，原样抛 Redis 的 WRONGTYPE"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    await _insert(backend, comp, _log(comp, 7))
+    master = backend.master
+    master.io.hset(raw_seq_counter_key(backend, log_ref, owner=8), "x", "1")  # type: ignore
+    with pytest.raises(Exception, match="WRONGTYPE"):
         await _insert(backend, comp, _log(comp, 7), _log(comp, 8))
     assert _counter(backend, log_ref, owner=7) == 1
-    assert _counter(backend, log_ref, owner=8) == 2**53 - 1
-    assert await _seqs(backend, comp, owner=8) == []
 
 
 @pytest.mark.parametrize(
@@ -479,7 +510,8 @@ async def test_payload_without_commit_seq_unchanged(
         await session.using(Plain).insert(Plain.new_row())
         _keys, payload = master.build_commit_payload_(session.idmap)
         session.discard()
-    assert payload[5] == []
+    # 没有号要发时不带第 6 段：提交脚本读到 nil，不建发号用的表
+    assert len(payload) == 5
     assert [cmd[0] for cmd in payload[1]] == ["HSET", "ZADD", "ZADD"]
 
 
@@ -897,15 +929,23 @@ async def test_enable_commit_seq_rejects_bad_numbers(
 
 
 async def test_rebuild_only_raises_counters(log_ref, mod_auto_backend):
-    """重建只把计数器往上调：比库里最大号大的不动，没有的补上"""
+    """
+    重建只把计数器往上调：比库里最大号大的不动，没有的补上。写坏了的（不是 INCRBY 认的整数，
+    比如 "0x10"、"5.5"）直接改写成最大号，两个后端规则相同
+    """
     backend: Backend = mod_auto_backend()
     comp = log_ref.comp_cls
     await _insert(backend, comp, _log(comp, 7), _log(comp, 7), _log(comp, 8))
+    await _insert(backend, comp, _log(comp, 9), _log(comp, 10))
     raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=7), b"100")
     raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=8), b"0")
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=9), b"0x10")
+    raw_kv_set(backend, raw_seq_counter_key(backend, log_ref, owner=10), b"5.5")
     backend.get_table_maintenance().do_rebuild_index_(log_ref)
     assert _counter(backend, log_ref, owner=7) == 100
     assert _counter(backend, log_ref, owner=8) == 1
+    assert _counter(backend, log_ref, owner=9) == 1
+    assert _counter(backend, log_ref, owner=10) == 1
 
 
 async def test_volatile_flush_restarts_numbering(new_component_env, mod_auto_backend):

@@ -404,10 +404,16 @@ end
 return #KEYS / 2
 """
 
-    # KEYS 是计数器，ARGV 是对应的最大号：只升不降，值不是整数的（被写坏了）直接改写
+    # KEYS 是计数器，ARGV 是对应的最大号：只升不降。被写坏了的（不是字符串、不是整数串）直接
+    # 改写：规则同 INCRBY 认的整数，和 SQLite 的 kv_get_int 一致，不用 tonumber（它还认
+    # "0x10"、"5.5"、"1e3"）
     _RAISE_COUNTERS_LUA = """
 for i = 1, #KEYS do
-    local current = tonumber(redis.call("GET", KEYS[i]))
+    local raw = redis.pcall("GET", KEYS[i])
+    local current = nil
+    if type(raw) == "string" and (raw == "0" or string.match(raw, "^%-?[1-9]%d*$")) then
+        current = tonumber(raw)
+    end
     if current == nil or current < tonumber(ARGV[i]) then
         redis.call("SET", KEYS[i], ARGV[i])
     end

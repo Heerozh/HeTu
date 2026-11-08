@@ -20,6 +20,7 @@ docs/superpowers/specs/2026-09-26-sqlite-backend-design.md §4.3）：
 """
 
 import logging
+import re
 import sqlite3
 import time
 from collections.abc import Iterable, Iterator, Sequence
@@ -49,6 +50,8 @@ ROW_KEY = "_hetu_key"
 KEYSPACE_PREFIX = "__keyspace@0__:"
 # 单条 IN 查询的参数上限
 IN_CHUNK = 500
+# Redis 认的整数串（string2ll）：可选负号加不以 0 开头的数字，或者就是 "0"
+_REDIS_INT = re.compile(rb"0|-?[1-9][0-9]*")
 
 
 def quote(name: str) -> str:
@@ -698,14 +701,18 @@ class SQLiteStore:
     # RedisModelClient.seq_counter_key_），值是十进制的字节串，同 Redis 的 INCRBY。
 
     def kv_get_int(self, key: str) -> int | None:
-        """计数器的值：key 不存在为 0；值不是整数返回 None（同 Redis INCRBY 的 not an integer）"""
+        """
+        计数器的值：key 不存在为 0；不是 Redis 认的整数返回 None（同 INCRBY 的 not an integer）。
+        规则同 Redis 的 string2ll：可选的负号加不以 0 开头的数字，或者就是 "0"，在 int64 范围里；
+        Python 的 int() 会放过 " 5"、"+5"、"05"、"1_0"，两个后端就对不上了
+        """
         raw = self.kv_get(key)
         if raw is None:
             return 0
-        try:
-            return int(raw)
-        except ValueError:
+        if not _REDIS_INT.fullmatch(raw):
             return None
+        value = int(raw)
+        return value if -(1 << 63) <= value < (1 << 63) else None
 
     def kv_set(self, key: str, value: bytes) -> None:
         """`SET key value`（不过期）。只能在写事务里调用"""

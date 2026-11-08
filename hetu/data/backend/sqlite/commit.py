@@ -10,8 +10,8 @@
 和 Redis 不同的一处：Phase 2 写到一半出错时，SQLite 的写事务整个回滚，Redis 会留下已经执行的
 写入（提交序号列在 Redis 上因此可能留下缺口，SQLite 不会）。
 
-**逐段对应 `commit_v2.lua`，改一边必须改另一边。** `tests/test_backend_client.py` 里的检查码用例
-两个后端共跑，守着两边一致。
+**逐段对应 `commit_v2.lua`，改一边必须改另一边。** `tests/test_backend_client.py` 里的检查码用例、
+`tests/test_commit_seq.py` 里的发号用例两个后端共跑，守着两边一致。
 
 通知按 Redis 产生通知的规则写进通知表（和数据同一个事务）：HSET 过的行、删掉的已有行发行频道
 （keyspace）；ZADD 真加进了、ZREM 真删掉了 member 的索引发整个索引的频道；表频道、值频道照 Lua 的
@@ -108,8 +108,11 @@ def _run_checks(
 def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
     """
     Phase 2 开头：提交序号列这次要发的号，返回 {seq_allocs 的下标（从 1 起）: 第一个号}。全成或
-    全不发，同 Lua 的减回：先读出各计数器、检查完，全部通过才写；有一个不是整数或到了上限，就返回
-    失败串，什么都不写
+    全不发，同 Lua 的减回：先读出各计数器、检查完，全部通过才写；有一个不是整数、加了会溢出
+    int64，或者发出的号不在 [1, 2^53) 里，就返回失败串，什么都不写。
+
+    不是整数、溢出 int64 时 Redis 是 INCRBY 报错，提交脚本原样返回它的错误（redis-py 抛
+    ResponseError）；这里返回同样内容的 SEQ 失败串（抛 RuntimeError），报错信息对得上
     """
     pending: list[tuple[str, int, int]] = []  # (计数器 key, 发完之后的值, 第一个号)
     for counter_key, count in seq_allocs:
@@ -117,8 +120,10 @@ def _alloc_seqs(store: SQLiteStore, seq_allocs: list) -> dict[int, int] | bytes:
         if current is None:
             return b"SEQ: ERR value is not an integer or out of range " + counter_key
         last = current + count
-        if last >= COMMIT_SEQ_LIMIT:
-            return b"SEQ: Counter overflow " + counter_key
+        if last >= 1 << 63:
+            return b"SEQ: ERR increment or decrement would overflow " + counter_key
+        if last >= COMMIT_SEQ_LIMIT or last < count:
+            return b"SEQ: Counter out of range " + counter_key
         pending.append((counter_key.decode(), last, current + 1))
     for key, last, _first in pending:
         store.kv_set(key, b"%d" % last)
