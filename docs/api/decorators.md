@@ -26,7 +26,7 @@ define_component(
 ) -> collections.abc.Callable[[type[hetu.data.component.BaseComponent]], type[hetu.data.component.BaseComponent]] | type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:447`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L447)</small>
+<small>Source: [`hetu/data/component.py:490`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L490)</small>
 
 
 
@@ -103,11 +103,12 @@ subscriptions on other components are rejected.
 
 
 ### Notes
-`property_field(default, unique, index, dtype, point_sub, hidden)` 是Component的属性定义，可定义默认值和数据类型。
+`property_field(default, unique, index, dtype, point_sub, hidden, groupby)` 是Component的属性定义，可定义默认值和数据类型。
     - `index` 表示此属性开启索引；
     - `unique` 表示属性值必须唯一，启动此项默认会同时打开index；
     - `point_sub` 表示此索引支持高效点订阅，启动此项默认会同时打开index；
-    - `hidden` 表示此属性对客户端隐藏：订阅推送不带它，客户端也不能按它查询。
+    - `hidden` 表示此属性对客户端隐藏：订阅推送不带它，客户端也不能按它查询；
+    - `groupby` 表示建复合索引：按分组列分组、组内按此属性排序，启动此项默认会同时打开index。
 
 .. warning:: ⚠️ 警告：索引会降低全表性能，请控制数量。其中unique索引降低的更多。
 
@@ -440,10 +441,11 @@ property_field(
     dtype: str | type = '',
     point_sub: bool = False,
     hidden: bool = False,
+    groupby: str | tuple[str, ...] | list[str] = (),
 ) -> Any
 ```
 
-<small>Source: [`hetu/data/component.py:63`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L63)</small>
+<small>Source: [`hetu/data/component.py:69`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L69)</small>
 
 
 
@@ -501,6 +503,20 @@ be combined with `point_sub`. Server-side code reads and writes it as usual;
 `hetu build` leave it out. Changing it requires `hetu upgrade`, like changing
 permissions (only the schema version is updated, no data is moved).
 
+- **`groupby`** (str | tuple[str, ...], default `()`) — 分组列，给了就建复合索引：按分组列分组、组内按本字段排序，例如
+`level = property_field(0, groupby="zone")` 是"每个 zone 里按 level 排序"。
+索引名仍是本字段名；查询时要同时给出全部分组列的值，比如
+`range(level=(10, 20), zone=3)`、`get(name="abc", zone=3)`。`unique=True` 表示组内
+唯一，不同组可以同值；`point_sub=True` 时按组发通知，按组订阅只被本组的写入叫醒
+（代价：本组里本字段每变一次 commit 都多发一条 PUBLISH）。分组列只能是整数、str、
+bytes 字段，可以修改，索引会跟着搬到新组。开启后强制启用 `index`。
+
+Group-by columns: builds a composite index, ordered by this field within each
+group. Queries must give every group-by column, e.g.
+`range(level=(10, 20), zone=3)`; `unique=True` means unique within a group;
+`point_sub=True` notifies per group. Group-by columns must be integer, str or
+bytes fields.
+
 
 
 
@@ -538,7 +554,7 @@ permissions (only the schema version is updated, no data is moved).
   否则 `row.size` 读到的是 numpy 的属性而不是字段值；
 - `default` 与 `dtype` 是否兼容；
 - `dtype` 是否可用于 NumPy structured array；
-- `unique/index/point_sub/hidden` 组合是否合法。
+- `unique/index/point_sub/hidden/groupby` 组合是否合法。
 
 
 

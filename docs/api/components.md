@@ -15,7 +15,7 @@ weight: 20
 BaseComponent()
 ```
 
-<small>Source: [`hetu/data/component.py:165`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L165)</small>
+<small>Source: [`hetu/data/component.py:188`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L188)</small>
 
 
 
@@ -45,7 +45,7 @@ BaseComponent()
 new_row(id_=None) -> numpy.record
 ```
 
-<small>Source: [`hetu/data/component.py:300`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L300)</small>
+<small>Source: [`hetu/data/component.py:343`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L343)</small>
 
 返回空数据行，id请设置为None，会自动生成规范雪花uuid，用于insert
 
@@ -64,7 +64,7 @@ new_row(id_=None) -> numpy.record
 new_rows(size) -> numpy.rec.recarray
 ```
 
-<small>Source: [`hetu/data/component.py:310`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L310)</small>
+<small>Source: [`hetu/data/component.py:353`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L353)</small>
 
 返回多行空数据行，用于批量insert
 
@@ -83,7 +83,7 @@ new_rows(size) -> numpy.rec.recarray
 str_max_len(prop_name: str) -> int
 ```
 
-<small>Source: [`hetu/data/component.py:320`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L320)</small>
+<small>Source: [`hetu/data/component.py:363`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L363)</small>
 
 返回字符串属性可存储的最大字符数（由该列 dtype 的列宽推导）。
 
@@ -106,7 +106,7 @@ str_max_len(prop_name: str) -> int
 dict_to_struct(data: dict) -> numpy.record
 ```
 
-<small>Source: [`hetu/data/component.py:338`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L338)</small>
+<small>Source: [`hetu/data/component.py:381`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L381)</small>
 
 从dict转换为c-struct like的类型，成为可直接传给数据库的行数据
 
@@ -125,7 +125,7 @@ dict_to_struct(data: dict) -> numpy.record
 struct_to_dict(data: numpy.record) -> dict[str, typing.Any]
 ```
 
-<small>Source: [`hetu/data/component.py:345`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L345)</small>
+<small>Source: [`hetu/data/component.py:388`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L388)</small>
 
 从c-struct like的行数据转换为typed dict
 
@@ -144,7 +144,7 @@ struct_to_dict(data: numpy.record) -> dict[str, typing.Any]
 duplicate(namespace: str, suffix: str) -> type[hetu.data.component.BaseComponent]
 ```
 
-<small>Source: [`hetu/data/component.py:351`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L351)</small>
+<small>Source: [`hetu/data/component.py:394`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L394)</small>
 
 复制一个新的副本组件。拥有相同的定义，但使用suffix结尾的新的名字。
 
@@ -168,7 +168,7 @@ duplicate(namespace: str, suffix: str) -> type[hetu.data.component.BaseComponent
 get_duplicates(namespace: str) -> dict[str, type[hetu.data.component.BaseComponent]]
 ```
 
-<small>Source: [`hetu/data/component.py:373`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L373)</small>
+<small>Source: [`hetu/data/component.py:416`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L416)</small>
 
 获取此Component在指定namespace下的所有副本实例
 
@@ -187,7 +187,7 @@ get_duplicates(namespace: str) -> dict[str, type[hetu.data.component.BaseCompone
 is_rls() -> bool
 ```
 
-<small>Source: [`hetu/data/component.py:378`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L378)</small>
+<small>Source: [`hetu/data/component.py:421`](https://github.com/Heerozh/HeTu/blob/main/hetu/data/component.py#L421)</small>
 
 判断此Component是否是RLS权限
 

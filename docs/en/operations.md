@@ -350,10 +350,23 @@ from the row data, which repairs leftover index entries — for example, a
 maintenance script deleted a row but not its index entry, the server log
 reports that the index and the row data don't match, and every `System` that
 reads that row keeps retrying. Run it with the servers **stopped** (writes
-between scanning the rows and replacing the index would be lost). Each index is
-built in full before it atomically replaces the old one, so a failed rebuild
-leaves the old index untouched. With a lot of data the rebuild is slow; pass
-`--no-rebuild-index` to skip it.
+between scanning the rows and replacing the index would be lost). All indexes
+are built and checked in full before they replace the old ones, so a failed
+rebuild leaves the old indexes untouched. With a lot of data the rebuild is
+slow; pass `--no-rebuild-index` to skip it. When you add or remove `groupby`
+(composite index), or change `unique` / `index`, the migration rebuilds that
+component's indexes even with `--no-rebuild-index`: the index definition
+changed, and the old index could not be queried.
+
+Turning an index that is in use into a composite index is a **breaking
+change**: every query without group values fails afterwards, older client SDKs
+subscribing to that index are disconnected by the server (4002, which the SDK
+treats as final and does not reconnect), and a new SDK sending group values to
+an older server is disconnected too. Prefer adding the composite index on a
+**new field**, switch the server code and the clients over, then drop the old
+index. Older HeTu versions cannot read the schema of a component that uses
+`groupby`, so do not run old and new versions against the same database while
+upgrading.
 
 Before doing anything, `upgrade` checks whether any server is still running
 (on Redis backends, from the worker leases) and exits with code 1 if so,
@@ -404,7 +417,9 @@ hetu call --as 1001 --group gm gm_kick 2002
 hetu call send_mail --args-file args.json # args from a JSON-array file (- for stdin)
 hetu call add_gold 1001 500 --dry-run     # run it but don't commit; shows what it would write
 hetu get Player owner=1001                # one row by id or an indexed field
+hetu get Item template=3 owner=1001       # composite index: the field plus every group-by column (--index picks one if several match)
 hetu range Item owner 1001 --limit 50     # omit the right bound for an exact match; ( / [ prefix = open / closed
+hetu range Rank level 10 20 --group zone=3  # composite index: one --group per group-by column, values taken literally
 hetu shell -c "await call_system('add_gold', 1001, 500); show(await get('Player', owner=1001))"
 ```
 
