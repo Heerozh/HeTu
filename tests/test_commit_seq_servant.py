@@ -4,6 +4,7 @@
 docs/superpowers/specs/2026-11-09-commit-seq-third-party-design.md。
 """
 
+import asyncio
 import pickle
 from typing import Any, cast
 
@@ -548,3 +549,192 @@ async def test_seq_read_pins_one_cluster_node(cmd: Table, monkeypatch):
     assert len(targets) == 4  # 一条 ZRANGE + 三条 HGETALL
     assert targets[0] is not None and all(node is targets[0] for node in targets)
     assert strategies == [LoadBalancingStrategy.RANDOM_REPLICA]
+
+
+# ============ 文档里库外消费方的写法（设计稿 §6） ============
+
+
+class Consumer:
+    """
+    设计稿 §6 的写法：每组的游标是（号、雪花 id），存在快照里；先读计数器，只读有新号的组；
+    按组捕获 CommitSeqDiverged，只停那一组
+    """
+
+    def __init__(self, tbl: Table, owners: list[int], snapshot=None):
+        self.tbl = tbl
+        self.owners = owners
+        self.cursors: dict[int, tuple[int, int | None]] = dict(snapshot or {})
+        self.stopped: dict[int, CommitSeqDiverged] = {}
+        self.handled: list[tuple[int, int, int]] = []  # (owner, 号, 行 id)
+
+    def snapshot(self) -> dict[int, tuple[int, int | None]]:
+        return dict(self.cursors)
+
+    def handled_seqs(self, owner: int) -> list[int]:
+        return [seq for o, seq, _id in self.handled if o == owner]
+
+    async def poll_all(self, limit: int = 1000) -> None:
+        groups = [{"owner": owner} for owner in self.owners]
+        heads = await self.tbl.servant_seq_head_many(groups)
+        for owner, head in zip(self.owners, heads, strict=True):
+            if owner in self.stopped:
+                continue
+            seq, row_id = self.cursors.get(owner, (0, None))
+            if head <= seq:
+                continue  # 没有新号；小于游标的报警计时这里不测
+            try:
+                rows, _blocked = await self.tbl.servant_seq_read(
+                    seq, limit, group={"owner": owner}, after_id=row_id
+                )
+            except CommitSeqDiverged as exc:
+                self.stopped[owner] = exc  # 只停这一组，别的组照常消费
+                continue
+            for row in rows:
+                self.handled.append((owner, int(row.seq), int(row.id)))
+            if len(rows):
+                self.cursors[owner] = (int(rows[-1].seq), int(rows[-1].id))
+
+
+async def trim(tbl: Table, persisted: dict[int, tuple[int, int | None]]) -> list[int]:
+    """
+    设计稿 §6 的裁剪方（这里每组只有一个消费方）：按已经落盘的游标，先核对游标那一号还是记下的
+    那一行，对得上才删号严格小于它的行，留下锚点行。返回核对没通过、没有删的组
+    """
+    refused = []
+    for owner, (seq, row_id) in persisted.items():
+        ids = await tbl.servant_range(
+            "seq",
+            seq,
+            seq,
+            limit=2,
+            row_format=RowFormat.ID_LIST,
+            group={"owner": owner},
+        )
+        if ids != [row_id]:
+            refused.append(owner)
+            continue
+        if seq <= 1:
+            continue
+        async with tbl.backend.session("pytest", 1) as session:
+            repo = session.using(tbl.comp_cls)
+            for row in await repo.range(seq=(1, seq - 1), owner=owner, limit=-1):
+                repo.delete(int(row.id))
+        await tbl.backend.wait_for_synced()
+    return refused
+
+
+async def test_recipe_with_concurrent_producers(cmd: Table):
+    """边写边读：同一组有两个并发写入方，消费方每组拿到的号从 1 开始连续、不重不漏"""
+    consumer = Consumer(cmd, [1, 2, 3])
+    producing = True
+
+    async def produce(owner: int, count: int):
+        for _ in range(count):
+            await insert(cmd, {"owner": owner})
+
+    async def consume():
+        while producing:
+            await consumer.poll_all(limit=4)
+            await asyncio.sleep(0)
+
+    reader = asyncio.create_task(consume())
+    await asyncio.gather(produce(1, 10), produce(1, 10), produce(2, 8), produce(3, 5))
+    producing = False
+    await reader
+    for _ in range(10):
+        await consumer.poll_all()
+    assert consumer.handled_seqs(1) == list(range(1, 21))
+    assert consumer.handled_seqs(2) == list(range(1, 9))
+    assert consumer.handled_seqs(3) == list(range(1, 6))
+    assert not consumer.stopped
+
+
+async def test_recipe_waits_for_lagging_fetch(cmd: Table, monkeypatch):
+    """取行落到落后的副本：消费方停在那一行前面，恢复之后接着读，不漏"""
+    ids = await insert(cmd, *[{"owner": 1}] * 4)
+    consumer = Consumer(cmd, [1])
+    tamper(monkeypatch, cmd, drop=[ids[2]])
+    await consumer.poll_all()
+    assert consumer.handled_seqs(1) == [1, 2]
+    monkeypatch.undo()
+    await consumer.poll_all()
+    assert consumer.handled_seqs(1) == [1, 2, 3, 4]
+
+
+async def test_recipe_trim_by_persisted_cursor_then_replay(cmd: Table):
+    """
+    裁剪按落盘的游标、只删严格小于它的行；消费方崩溃后从旧快照恢复，快照之后的命令都还在，
+    原样重放，锚点核对照常通过
+    """
+    await insert(cmd, *[{"owner": 1}] * 6)
+    consumer = Consumer(cmd, [1])
+    await consumer.poll_all(limit=3)  # 处理了 1..3
+    persisted = consumer.snapshot()  # 落盘：(3, id3)
+    await consumer.poll_all(limit=3)  # 内存里处理到 6，还没落盘
+    assert await trim(cmd, persisted) == []
+    rows, _ = await cmd.servant_seq_read(0, group={"owner": 1})
+    assert seqs(rows) == [3, 4, 5, 6]  # 只删了 1、2，锚点 3 还在
+    restored = Consumer(cmd, [1], snapshot=persisted)  # 崩溃，从快照恢复
+    await restored.poll_all()
+    assert restored.handled_seqs(1) == [4, 5, 6]
+
+
+async def test_recipe_trim_check_stops_after_rollback(cmd: Table):
+    """
+    审核实测的场景：数据回退之后，复用了号的新行都不大于旧的游标。裁剪前核对锚点，对不上就不删，
+    消费方随后发现号被复用了；不核对就删的话，这些没消费过的行会被静默裁掉
+    """
+    ids = await insert(cmd, *[{"owner": 1}] * 10)
+    consumer = Consumer(cmd, [1])
+    await consumer.poll_all()
+    persisted = consumer.snapshot()  # (10, id10)
+    await delete(cmd, *ids[7:])  # 回退：8..10 没了
+    raw_kv_set(cmd.backend, raw_seq_counter_key(cmd.backend, cmd, owner=1), b"7")
+    await insert(cmd, *[{"owner": 1}] * 5)  # 新行拿到 8..12
+    assert await trim(cmd, persisted) == [1]  # 10 号换了一行：不删
+    rows, _ = await cmd.servant_seq_read(0, 100, group={"owner": 1})
+    assert seqs(rows) == list(range(1, 13))
+    await consumer.poll_all()
+    assert consumer.stopped[1].reason == "reused"
+
+
+async def test_recipe_isolates_diverged_group(cmd: Table):
+    """一组的号被复用了：只停这一组，别的组照常消费"""
+    ids = await insert(cmd, *[{"owner": 1}] * 3)
+    await insert(cmd, *[{"owner": 2}] * 2)
+    consumer = Consumer(cmd, [1, 2])
+    await consumer.poll_all()
+    await delete(cmd, ids[2])  # owner 1 回退：3 号没了、计数器回到 2，之后又来了两行
+    raw_kv_set(cmd.backend, raw_seq_counter_key(cmd.backend, cmd, owner=1), b"2")
+    await insert(cmd, {"owner": 1}, {"owner": 1})
+    await insert(cmd, *[{"owner": 2}] * 2)
+    await consumer.poll_all()
+    assert consumer.stopped[1].reason == "reused"
+    assert consumer.handled_seqs(1) == [1, 2, 3]
+    assert consumer.handled_seqs(2) == [1, 2, 3, 4]
+
+
+# ============ headless ============
+
+
+@pytest.mark.parametrize("by_name", [False, True], ids=["by_class", "by_name"])
+async def test_headless_end_to_end(new_component_env, mod_auto_backend, by_name):
+    """headless 按组件类、按组件名（从 meta 生成的类）连接，`client.table()` 直接可用"""
+    from hetu import headless
+
+    backend = mod_auto_backend()
+    comp = def_cmd()
+    ids = await insert(make_table(backend, comp), *[{"owner": 7}] * 3)
+    target = comp.name_ if by_name else comp
+    client = await headless.HeadlessClient.from_backend(backend, "pytest", [target])
+    try:
+        tbl = client.table(target)
+        assert (tbl.comp_cls is comp) is not by_name
+        assert await tbl.servant_seq_head(group={"owner": 7}) == 3
+        assert await tbl.servant_seq_head_many([{"owner": 7}, {"owner": 8}]) == [3, 0]
+        rows, blocked = await tbl.servant_seq_read(
+            1, group={"owner": 7}, after_id=ids[0]
+        )
+        assert seqs(rows) == [2, 3] and blocked is None
+    finally:
+        await client.close()
