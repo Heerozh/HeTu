@@ -27,6 +27,15 @@ class Wallet(hetu.BaseComponent):
     owner: np.int64 = hetu.property_field(0, unique=True)
     name: str = hetu.property_field("", dtype="U16", index=True)
     gold: np.int64 = hetu.property_field(0)
+    guild: str = hetu.property_field("", dtype="U8")
+    # 复合索引：每个公会里按 rank 排序
+    rank: np.int32 = hetu.property_field(0, groupby="guild")
+
+
+@hetu.define_system(namespace="clidemo", components=(Wallet,), permission=hetu.Permission.USER)
+async def join_guild(ctx: hetu.SystemContext, guild: str, rank: int):
+    async with ctx.repo[Wallet].upsert(owner=ctx.caller) as row:
+        row.guild, row.rank = guild, rank
 
 
 @hetu.define_system(namespace="clidemo", components=(Wallet,), permission=hetu.Permission.ADMIN)
@@ -420,6 +429,79 @@ def test_lists(project):
     fields = {f["name"]: f for f in comps["Wallet"]["fields"]}
     assert fields["name"]["index"] is True and fields["gold"]["index"] is False
     assert "WorkerLease" in comps
+
+
+def test_get_and_range_composite_index(project):
+    """复合索引：get 给出本字段和全部分组列，range 用 --group 给分组值；漏给、多给都是用法错误"""
+    for uid, guild, rank in ((4301, "g1", 1), (4302, "g1", 2), (4303, "[g2", 1)):
+        code, out = run_json(
+            "call", "--as", str(uid), "join_guild", guild, str(rank), cwd=project
+        )
+        assert code == 0, out
+    code, out = run_json("get", "Wallet", "rank=2", "guild=g1", cwd=project)
+    assert code == 0 and out["row"]["owner"] == 4302
+    # 分组值按字面值：[ 开头不当成区间前缀
+    code, out = run_json("get", "Wallet", "rank=1", "guild=[g2", cwd=project)
+    assert code == 0 and out["row"]["owner"] == 4303
+    code, out = run_json(
+        "get", "Wallet", "--index", "rank", "rank=1", "guild=g1", cwd=project
+    )
+    assert code == 0 and out["row"]["owner"] == 4301
+    code, out = run_json("get", "Wallet", "rank=1", cwd=project)
+    assert code == 2 and "guild" in out["error"]
+    code, out = run_json("get", "Wallet", "rank=1", "gold=1", cwd=project)
+    assert code == 2 and "对不上" in out["error"]
+
+    for master in ((), ("--master",)):
+        code, out = run_json(
+            "range",
+            "Wallet",
+            "rank",
+            "0",
+            "10",
+            "--group",
+            "guild=g1",
+            "--fields",
+            "owner,rank",
+            *master,
+            cwd=project,
+        )
+        assert code == 0, out
+        assert out["rows"] == [
+            {"owner": 4301, "rank": 1},
+            {"owner": 4302, "rank": 2},
+        ]
+    code, out = run_json("range", "Wallet", "rank", "0", "10", cwd=project)
+    assert code == 2 and "guild" in out["error"]
+    code, out = run_json(
+        "range", "Wallet", "owner", "0", "10", "--group", "guild=g1", cwd=project
+    )
+    assert code == 2 and "不是复合索引" in out["error"]
+
+    code, out = run_json("get", "--list", cwd=project)
+    comps = {c["name"]: c for c in out["components"]}
+    fields = {f["name"]: f for f in comps["Wallet"]["fields"]}
+    assert fields["rank"]["groupby"] == ["guild"] and fields["rank"]["index"] is True
+    assert fields["owner"]["groupby"] == []
+
+
+def test_cli_group_value_conversion():
+    """分组值的转换：不处理 [ / ( 前缀，整数列要是整数"""
+    import numpy as np
+
+    from hetu.cli.base import UsageError
+    from hetu.cli.data import convert_group_value, parse_pairs
+
+    assert convert_group_value(np.dtype("<i4"), "3") == 3
+    assert convert_group_value(np.dtype("<U8"), "[g") == "[g"
+    assert convert_group_value(np.dtype("S8"), "(g") == b"(g"
+    with pytest.raises(UsageError):
+        convert_group_value(np.dtype("<i4"), "1.5")
+    assert parse_pairs(["a=1", "b==2"]) == {"a": "1", "b": "=2"}
+    with pytest.raises(UsageError):
+        parse_pairs(["a=1", "a=2"])
+    with pytest.raises(UsageError):
+        parse_pairs(["a"])
 
 
 # ============ hetu shell ============

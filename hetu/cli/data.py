@@ -69,8 +69,42 @@ def convert_value(dtype: np.dtype, raw: str, *, point: bool) -> Any:
     return raw.encode("utf-8") if kind == "S" else raw
 
 
+def convert_group_value(dtype: np.dtype, raw: str) -> Any:
+    """
+    复合索引的分组值按字面值转换：不处理 [ / ( 前缀（分组值是等值，没有开闭区间），整数列要是
+    整数。之后交给 resolve_group_ 按列类型校验
+    """
+    if dtype.kind in "iu":
+        try:
+            return int(raw)
+        except ValueError as e:
+            raise UsageError(
+                _("分组值 {raw} 不能转换成列类型 {dtype}").format(raw=raw, dtype=dtype)
+            ) from e
+    return raw.encode("utf-8") if dtype.kind == "S" else raw
+
+
+def parse_pairs(items: list[str]) -> dict[str, str]:
+    """命令行的 FIELD=VALUE 们 → {FIELD: VALUE}，同一个 FIELD 只能给一次"""
+    pairs: dict[str, str] = {}
+    for item in items:
+        if "=" not in item:
+            raise UsageError(_("查询要写成 FIELD=VALUE，如 owner=1001"))
+        field, raw = item.split("=", 1)
+        field = field.strip()
+        if field in pairs:
+            raise UsageError(_("{field} 给了不止一次").format(field=field))
+        pairs[field] = raw
+    return pairs
+
+
 def queryable_fields(comp_cls: type[BaseComponent]) -> list[str]:
-    return sorted(comp_cls.indexes_)
+    """可查的索引，复合索引带上分组列，如 level(zone)"""
+    groups = comp_cls.index_groups_
+    return sorted(
+        f"{name}({','.join(groups[name])})" if groups[name] else name
+        for name in comp_cls.indexes_
+    )
 
 
 def check_index(comp_cls: type[BaseComponent], field: str) -> None:
@@ -78,10 +112,77 @@ def check_index(comp_cls: type[BaseComponent], field: str) -> None:
         raise UsageError(
             _(
                 "组件 {comp} 的 {field} 不是 id 或带索引的字段，不能查；可查的有：{fields}"
+                "（括号里是复合索引的分组列，查询时要一并用 FIELD=VALUE 给出）"
             ).format(
                 comp=comp_cls.name_, field=field, fields=queryable_fields(comp_cls)
             )
         )
+
+
+def match_index(
+    comp_cls: type[BaseComponent], pairs: dict[str, str], explicit: str | None
+) -> str:
+    """
+    get 的 FIELD=VALUE 们对应哪个索引：--index 指定的，或者只给了一个字段，或者键集合正好是
+    某个复合索引的本字段加全部分组列
+    """
+    if explicit is not None:
+        if explicit not in pairs:
+            raise UsageError(
+                _("--index {index} 要同时用 {index}=VALUE 给出查询值").format(
+                    index=explicit
+                )
+            )
+        return explicit
+    if len(pairs) == 1:
+        return next(iter(pairs))
+    groups = comp_cls.index_groups_
+    keys = set(pairs)
+    matched = [
+        name for name in pairs if name in groups and keys == {name, *groups[name]}
+    ]
+    if len(matched) == 1:
+        return matched[0]
+    if not matched:
+        raise UsageError(
+            _(
+                "查询条件 {keys} 对不上组件 {comp} 的任何索引：要么只给一个带索引的字段，"
+                "要么正好给出复合索引的本字段和全部分组列；可查的有：{fields}"
+            ).format(
+                keys=sorted(keys),
+                comp=comp_cls.name_,
+                fields=queryable_fields(comp_cls),
+            )
+        )
+    raise UsageError(
+        _("查询条件 {keys} 同时匹配了 {matched} 几个索引，请用 --index 指定").format(
+            keys=sorted(keys), matched=matched
+        )
+    )
+
+
+def build_group(
+    comp_cls: type[BaseComponent], index: str, given: dict[str, str]
+) -> dict[str, Any] | None:
+    """index 的分组值：given 要正好是它的分组列（单列索引就是空），各值按字面值转换"""
+    groups = comp_cls.index_groups_[index]
+    if set(given) != set(groups):
+        if groups:
+            raise UsageError(
+                _(
+                    "{index} 是按 {columns} 分组的复合索引，要用 FIELD=VALUE 正好给出这些分组列，"
+                    "收到：{keys}"
+                ).format(index=index, columns=", ".join(groups), keys=sorted(given))
+            )
+        raise UsageError(
+            _("{index} 不是复合索引，多给了 {keys}").format(
+                index=index, keys=sorted(given)
+            )
+        )
+    dtype_map = comp_cls.dtype_map_
+    return {
+        col: convert_group_value(dtype_map[col], given[col]) for col in groups
+    } or None
 
 
 def project(rows: list[dict], fields: str | None) -> list[dict]:
@@ -135,8 +236,9 @@ async def _read(
     right: Any,
     limit: int,
     desc: bool,
+    group: dict[str, Any] | None = None,
 ) -> list[dict]:
-    """读行：默认 servant（非事务），master 时在只读 master 的事务里读"""
+    """读行：默认 servant（非事务），master 时在只读 master 的事务里读。group 是复合索引的分组值"""
     from ..data.backend.base import BackendClient, RowFormat
     from ..headless import HeadlessClient
 
@@ -144,7 +246,7 @@ async def _read(
         client = HeadlessClient(table.backend, table.instance_name, [table])
         async with client.session(table.comp_cls) as session:
             rows = await session[table.comp_cls].range(
-                index, left, right, limit=limit, desc=desc
+                index, left, right, limit=limit, desc=desc, _group=group
             )
         return to_jsonable(rows)
     if index == "id":
@@ -155,7 +257,9 @@ async def _read(
         if point is not None:
             row = await table.servant_get(int(point), RowFormat.STRUCT)
             return [] if row is None else [to_jsonable(row)]
-    rows = await table.servant_range(index, left, right, limit, desc, RowFormat.STRUCT)
+    rows = await table.servant_range(
+        index, left, right, limit, desc, RowFormat.STRUCT, group=group
+    )
     return to_jsonable(rows)
 
 
@@ -166,16 +270,19 @@ async def _get_main(args: argparse.Namespace, report: dict) -> dict:
     config, config_file = load_command_config(args, need_app=False, need_db=True)
     instance = pick_instance(config, args.instance)
     report["target"] = describe_target(config, config_file, instance)
-    if not args.query or "=" not in args.query:
+    if not args.query:
         raise UsageError(_("查询要写成 FIELD=VALUE，如 owner=1001"))
-    field, raw = args.query.split("=", 1)
-    field = field.strip()
+    pairs = parse_pairs(args.query)
     table, backends = await resolve_table(config, instance, args.component)
     try:
         comp_cls = table.comp_cls
+        field = match_index(comp_cls, pairs, args.index)
         check_index(comp_cls, field)
-        value = convert_value(comp_cls.dtype_map_[field], raw, point=True)
-        rows = await _read(table, args.master, field, value, value, 1, False)
+        group = build_group(
+            comp_cls, field, {k: v for k, v in pairs.items() if k != field}
+        )
+        value = convert_value(comp_cls.dtype_map_[field], pairs[field], point=True)
+        rows = await _read(table, args.master, field, value, value, 1, False, group)
     finally:
         await _close(backends)
     rows = project(rows, args.fields)
@@ -195,6 +302,7 @@ async def _range_main(args: argparse.Namespace, report: dict) -> dict:
     try:
         comp_cls = table.comp_cls
         check_index(comp_cls, args.index)
+        group = build_group(comp_cls, args.index, parse_pairs(args.group))
         dtype = comp_cls.dtype_map_[args.index]
         left = convert_value(dtype, args.left, point=False)
         right = (
@@ -205,7 +313,7 @@ async def _range_main(args: argparse.Namespace, report: dict) -> dict:
         # 多取一行，准确判断有没有被截断
         fetch = -1 if limit < 0 else limit + 1
         rows = await _read(
-            table, args.master, args.index, left, right, fetch, args.desc
+            table, args.master, args.index, left, right, fetch, args.desc, group
         )
     finally:
         await _close(backends)
@@ -236,6 +344,8 @@ def list_components(namespace: str) -> list[dict]:
                     "default": to_jsonable(prop.default),
                     "unique": bool(prop.unique),
                     "index": name in comp.indexes_,
+                    # 复合索引的分组列：查询时要一并给出
+                    "groupby": list(prop.groupby),
                     "hidden": bool(prop.hidden),
                 }
             )
@@ -301,8 +411,23 @@ class GetCommand(CommandInterface):
             action="store_true",
             help=_("列出组件、字段与索引（加载 app，不连数据库）"),
         )
+        parser.add_argument(
+            "--index",
+            help=_(
+                "FIELD=VALUE 同时匹配了几个复合索引时，指定按哪个索引查（其余 FIELD=VALUE "
+                "是它的分组值）"
+            ),
+        )
         parser.add_argument("component", nargs="?", metavar="COMPONENT")
-        parser.add_argument("query", nargs="?", metavar="FIELD=VALUE")
+        parser.add_argument(
+            "query",
+            nargs="*",
+            metavar="FIELD=VALUE",
+            help=_(
+                "一个带索引的字段，如 owner=1001；复合索引要同时给出全部分组列，"
+                "如 name=abc zone=3"
+            ),
+        )
 
     @classmethod
     def execute(cls, args):
@@ -343,6 +468,13 @@ class RangeCommand(CommandInterface):
             help=_("最多返回多少行，默认 10，-1 为不限"),
         )
         parser.add_argument("--desc", action="store_true", help=_("降序"))
+        parser.add_argument(
+            "--group",
+            action="append",
+            default=[],
+            metavar="FIELD=VALUE",
+            help=_("复合索引的分组值，每个分组列给一次，如 --group zone=3"),
+        )
         parser.add_argument("component", metavar="COMPONENT")
         parser.add_argument("index", metavar="INDEX")
         parser.add_argument("left", metavar="LEFT")
