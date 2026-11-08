@@ -163,9 +163,27 @@ async def test_nan_sign_update_no_self_collision(pair_ref, mod_auto_backend):
     comp = pair_ref.comp_cls
     (r_id,) = await _insert(backend, comp, (11, 11, np.nan))
     before = raw_index_members(backend, pair_ref, "f")
-    async with backend.session("pytest", 1) as session:
-        repo = session.using(comp)
-        mine = await repo.get(id=r_id)
-        mine.f = -np.nan
-        await repo.update(mine)
+    # 编码没变就不写索引、不查 unique：只有版本校验和改行。光看提交成功守不住这一点（就算发了
+    # UNIQ，查到的也是本次要 ZREM 的自己，会被豁免）
+    master = backend.master
+    original = master.build_commit_payload_
+    payloads: list[list] = []
+
+    def capture(idmap):
+        keys, payload = original(idmap)
+        payloads.append(payload)
+        return keys, payload
+
+    master.build_commit_payload_ = capture  # type: ignore
+    try:
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            mine = await repo.get(id=r_id)
+            mine.f = -np.nan
+            await repo.update(mine)
+    finally:
+        del master.build_commit_payload_
+    checks, pushes = payloads[-1][0], payloads[-1][1]
+    assert [check[0] for check in checks] == ["VER"]
+    assert [push[0] for push in pushes] == ["HSET"]
     assert raw_index_members(backend, pair_ref, "f") == before

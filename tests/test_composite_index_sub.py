@@ -272,6 +272,36 @@ async def test_group_subscription_rejects(broker, rank_ref, admin_ctx):
     assert broker._subs == {}
 
 
+async def test_group_subscription_owner_permission(
+    broker, new_component_env, mod_auto_backend, user_id10_ctx
+):
+    """OWNER 组件按组订阅：按连接各自过滤，只看得到自己的行；别人进组不推，自己的照推"""
+    from hetu.data import BaseComponent, Permission, define_component, property_field
+
+    @define_component(namespace="pytest", permission=Permission.OWNER, force=True)
+    class Bag(BaseComponent):
+        owner: np.int64 = property_field(0, index=True)
+        zone: np.int32 = property_field(0)
+        level: np.int32 = property_field(0, groupby="zone", point_sub=True)
+
+    backend = broker._backend
+    ref = create_ref(Bag, backend)
+    mine, _theirs = await _insert(
+        backend,
+        Bag,
+        {"owner": 10, "zone": 1, "level": 1},
+        {"owner": 11, "zone": 1, "level": 2},
+    )
+    sub_id, rows = await broker.subscribe_range(
+        ref, user_id10_ctx, "level", 0, 100, group={"zone": 1}
+    )
+    assert sub_id and [r["id"] for r in rows] == [mine]
+    await _insert(backend, Bag, {"owner": 11, "zone": 1, "level": 3})
+    assert await broker.get_updates(timeout=0.5) == {}
+    (new_id,) = await _insert(backend, Bag, {"owner": 10, "zone": 1, "level": 4})
+    await updates_until(broker, lambda u: u[sub_id][new_id]["level"] == 4)
+
+
 async def test_group_subscribe_get(broker, rank_ref, admin_ctx):
     """按复合索引订单行：在给定的组里找"""
     backend = broker._backend

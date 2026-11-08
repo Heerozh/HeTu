@@ -4,24 +4,35 @@
 设计稿见 docs/superpowers/specs/2026-11-08-composite-index-design.md。
 """
 
+import copy
 import itertools
 import json
 import random
+from contextlib import ExitStack
 
 import numpy as np
 import pytest
-from fixtures.backends import raw_hset, raw_index_members, use_redis_backend_only
+from fixtures.backends import (
+    raw_hset,
+    raw_index_members,
+    use_redis_backend_only,
+    use_redis_family_backend_only,
+)
+from fixtures.contexts import admin_ctx_
+from fixtures.read_counts import count_reads
 from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
 from hetu.data.backend import (
     Backend,
+    InconsistentRangeRead,
     RaceCondition,
     RowFormat,
     Table,
     TableReference,
     UniqueViolation,
 )
+from hetu.data.sub import SubscriptionBroker
 
 SnowflakeID().init(1, 0)
 
@@ -823,6 +834,8 @@ async def test_group_channel_and_commit(slot_ref, mod_auto_backend):
             ({"level": 2}, [chan1]),
             ({"zone": 2}, [chan2]),
             ({"qty": 3}, []),
+            # score 是没开 point_sub 的复合索引：改它不发
+            ({"score": 1.5}, []),
         ):
             async with backend.session("pytest", 1) as session:
                 repo = session.using(comp)
@@ -836,8 +849,88 @@ async def test_group_channel_and_commit(slot_ref, mod_auto_backend):
             await repo.get(id=row_id)
             repo.delete(row_id)
         assert captured[-1] == []
+        # 一个事务里同一组进了几行只发一条，不同组各一条
+        chan3 = master.index_group_channel(slot_ref, "level", {"zone": 3})
+        await _insert(
+            backend,
+            comp,
+            _slot(comp, zone=1, level=5),
+            _slot(comp, zone=3, level=6),
+            _slot(comp, zone=1, level=7),
+        )
+        assert captured[-1] == [chan1, chan3]
     finally:
         del master.build_commit_payload_
+
+
+async def test_range_read_inconsistent_group(slot_ref, mod_auto_backend):
+    """
+    读取时索引说行在 1 组、行数据却在 2 组（本字段没变）：只比本字段会放过，按整个值段核对才
+    发现得了（设计稿 §5.5）。读取期间行被挪走的情形，这里用只改行、不改索引来造
+    """
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _slot(comp, zone=1, level=10))
+    raw_hset(backend, slot_ref, row_id, zone="2")
+    await backend.wait_for_synced()
+    with pytest.raises(InconsistentRangeRead):
+        async with backend.session("pytest", 1) as session:
+            repo = session.using(comp)
+            rows = await repo.range(level=(0, 100), zone=1, limit=-1)
+            assert list(rows.id) == [row_id]
+            await repo.insert(_slot(comp, zone=5, level=1))  # 有写入才提交
+
+
+async def test_refill_group_after_moving_out(slot_ref, mod_auto_backend):
+    """把占着 (组, 值) 的行换到别的组，再在原组用这个值插一行：同一事务里能提交（§5.6）"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    (r_id,) = await _insert(backend, comp, _slot(comp, server="r", zone=1, name="x"))
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = await repo.get(id=r_id)
+        row.zone = 2
+        await repo.update(row)
+        await repo.insert(_slot(comp, server="r", zone=1, name="x"))
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        assert (await repo.get(name="x", server="r", zone=2)).id == r_id
+        assert (await repo.get(name="x", server="r", zone=1)).id != r_id
+
+
+@use_redis_family_backend_only
+async def test_composite_reads_never_touch_master(slot_ref, mod_backend_config):
+    """复合索引的事务读、按组订阅同样只走副本，master 一次不读（同 test_master_read_budget）"""
+    config = copy.deepcopy(mod_backend_config)
+    config["master_weight"] = 0
+    backend = Backend(config)
+    comp = slot_ref.comp_cls
+    backend.post_configure(components=[comp])
+    broker = SubscriptionBroker(backend)
+    try:
+        await _insert(
+            backend,
+            comp,
+            _slot(comp, owner=3, zone=1, level=5, slot=1, server="s", name="m1"),
+        )
+        with ExitStack() as stack:
+            counts = count_reads(stack, backend, include_range=True)
+            async with backend.session("pytest", 1) as session:
+                repo = session.using(comp)
+                assert len(await repo.range(level=(0, 10), zone=1)) == 1
+                assert await repo.get(slot=1, owner=3) is not None
+                assert await repo.get(name="m1", server="s", zone=1) is not None
+                assert await repo.get(name="m2", server="s", zone=1) is None
+            sub_id, rows = await broker.subscribe_range(
+                slot_ref, admin_ctx_(), "level", 0, 10, group={"zone": 1}
+            )
+            assert sub_id and len(rows) == 1
+            assert counts()["master"] == 0, counts()
+            assert counts()["servant"] > 0
+    finally:
+        await broker.close()
+        await backend.close()
 
 
 # ---------------------------------------------------------------- 维护
@@ -946,6 +1039,21 @@ async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
         assert len(await repo.range(time=(0, 1000), owner=11, limit=-1)) == 0
         with pytest.raises(ValueError, match="分组"):
             await repo.range(time=(0, 1000))
+
+    # 再去掉 groupby（换回原来的定义）：同样走 skip 路径，索引重建回单列格式
+    original = BaseComponent.load_json(filled_item_ref.comp_cls.json_)
+    old_table = Table(
+        original, filled_item_ref.instance_name, filled_item_ref.cluster_id, backend
+    )
+    status, old_meta = maint.check_table(old_table)
+    assert status == "schema_mismatch"
+    assert maint.migration_schema(tmp_path / "test.py", old_table, old_meta)
+    assert maint.check_table(old_table)[0] == "ok"
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(original)
+        assert (await repo.get(time=111)).name == "Itm11"
+        assert len(await repo.range(time=(0, 1000), limit=-1)) == 25
 
 
 def test_headless_schema_diff_groupby(new_component_env):
