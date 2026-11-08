@@ -213,10 +213,11 @@ async def sub_call(
     op = data[2]
     match op:
         case "get":
-            check_length("get", data, 5, 5)
+            # sub comp get index value [group]：group 是复合索引的分组值 {分组列: 值}
+            check_length("get", data, 5, 6)
         case "range":
-            # sub comp range index left [right limit desc force]
-            check_length("range", data, 5, 9)
+            # sub comp range index left [right limit desc force group]
+            check_length("range", data, 5, 10)
         case "table":  # sub component_name table
             check_length("table", data, 3, 3)
         case "logic_query":
