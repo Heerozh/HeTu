@@ -37,6 +37,15 @@ A few invariants that surprise new users:
 
 - **Strings are fixed-width.** `dtype="U256"` is a 256-character UTF-32 column;
   longer values are truncated. This is the cost of NumPy C-struct like storage.
+- **Bytes columns are fixed-width too, and drop trailing `\x00`.**
+  `dtype="S16"` is a 16-byte column: longer values are truncated as well, and
+  shorter ones are padded with `\x00`, so trailing `\x00` bytes are dropped as
+  padding (embedded ones are kept). `b"ab\x00"` reads back as `b"ab"` and is
+  the same value as `b"ab"` for queries and uniqueness. A trailing `"\x00"` in
+  a str column behaves the same way. Do not store binary data that may end in
+  `\x00` (little-endian packed integers, msgpack, hashes, UUID bytes) as is:
+  pad fixed-length values back with `.ljust(16, b"\x00")` after reading, store
+  variable-length ones as hex or base64, and keep numbers in integer columns.
 - **No nulls.** Every column has a default; you cannot tell whether a value
   was "set" or "still default". If you need optional data, split it into a
   separate Component and join via `owner`.
