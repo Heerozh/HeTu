@@ -113,6 +113,10 @@ class MigrationScript:
         # 读取table迁移脚本
         # 首先看old_meta里的版本号，然后搜索该版本号开头的文件
         old_version = old_meta.version
+        if old_version == REBUILD_PENDING_VERSION:
+            # 上次迁移搬完数据、重建失败（见 upgrade），之后又改了定义：数据已经是 meta 里那个定义的
+            # 形状，按它的版本号找脚本。哨兵是所有组件共用的，拿它找会捡到别的组件的脚本
+            old_version = schema_version_(old_meta.json)
         new_version = schema_version_(table_ref.comp_cls.json_)
         # 旧版 HeTu 生成的脚本按旧索引格式的版本号命名，升到当前定义的也算到头：索引格式的变化
         # 不用脚本处理，脚本迁移完会按当前格式重建索引、按当前格式写 meta

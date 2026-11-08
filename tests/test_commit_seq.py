@@ -978,6 +978,41 @@ async def test_dtype_migration_rebuild_failure_refuses_to_start(
     assert [int(r.seq) for r in await _read_all(backend, new_comp, 7)] == [1, 2, 3, 4]
 
 
+async def test_rebuild_pending_then_definition_changed(
+    new_component_env, mod_auto_backend, tmp_path
+):
+    """
+    卡在待重建之后又改了定义（这里干脆关掉 commit_seq）：迁移脚本按数据实际的版本号（meta 里那个
+    定义的）查找、命名，不拿哨兵版本号去找——哨兵是所有组件共用的，会捡到别的组件的脚本
+    """
+    from hetu.data.backend import Table
+    from hetu.data.backend.base import REBUILD_PENDING_VERSION, schema_version_
+
+    backend: Backend = mod_auto_backend()
+    create_ref(_ledger(commit_seq=False), backend)
+    await _fill_ledger(backend, _ledger(commit_seq=False), {7: [1, 2, 2]})
+    pending_comp, _table, migrate = _enable_commit_seq(backend, tmp_path, extra=True)
+    with pytest.raises(RuntimeError, match="组内重复的号"):
+        migrate()
+
+    give_up = _ledger(commit_seq=False, extra=True)
+    table = Table(give_up, "pytest", 1, backend)
+    maint = backend.get_table_maintenance()
+    status, meta = maint.check_table(table)
+    assert status == "schema_mismatch"
+    assert meta is not None and meta.version == REBUILD_PENDING_VERSION
+    assert maint.migration_schema(tmp_path / "app.py", table, meta)
+    assert maint.check_table(table)[0] == "ok"
+
+    scripts = [p.name for p in (tmp_path / "maint" / "migration").glob("*.py")]
+    assert not [name for name in scripts if REBUILD_PENDING_VERSION in name]
+    pending_version = schema_version_(pending_comp.json_)
+    assert [name for name in scripts if f"_v{pending_version}_to_v" in name]
+    rows = await _read_all(backend, give_up, 7)
+    assert sorted(int(r.seq) for r in rows) == [1, 2, 2]
+    assert {int(r.extra) for r in rows} == {7}
+
+
 async def test_change_groupby_recalibrates_new_counters(
     new_component_env, mod_auto_backend, tmp_path
 ):
