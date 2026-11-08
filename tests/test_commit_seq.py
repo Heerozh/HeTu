@@ -479,3 +479,149 @@ async def test_counter_keys_layout(new_component_env, mod_auto_backend):
     assert key == f"{master.cluster_prefix(ref)}:seq:seq:room,zone:{prefix.hex()}"
     assert raw_kv_keys(backend, master.cluster_prefix(ref) + ":seq:") == [key]
     assert _counter(backend, ref, room=room, zone=3) == 2
+
+
+# ---------------------------------------------------------------- 禁写与分组列锁定
+
+
+async def test_seq_column_not_writable(log_ref, mod_auto_backend):
+    """insert 时号必须是 0；update 不能改号；有号的行不能改分组列"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        with pytest.raises(ValueError, match="insert 时必须是 0"):
+            await repo.insert(_log(comp, 7, seq=5))
+        row = await repo.get(id=row_id)
+        row.seq = 9
+        with pytest.raises(ValueError, match="不能修改"):
+            await repo.update(row)
+        row = await repo.get(id=row_id)
+        row.owner = 8
+        with pytest.raises(ValueError, match="不能改分组列"):
+            await repo.update(row)
+        # 不碰号和分组列的修改照常
+        row = await repo.get(id=row_id)
+        row.kind = 3
+        await repo.update(row)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 3)]
+
+
+async def test_pending_and_unnumbered_rows_can_change_group(log_ref, mod_auto_backend):
+    """
+    本事务 insert、还没提交的行可以改分组列，号按最终的组发；库里号 ≤ 0（没有号的历史行）的行也
+    可以改分组列
+    """
+    from fixtures.backends import raw_hset
+
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        row = _log(comp, 7)
+        await repo.insert(row)
+        row.owner = 8
+        await repo.update(row)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == []
+    assert await _seqs(backend, comp, owner=8) == [(1, 0)]
+
+    # 造一行没有号的历史行（号是 0，索引按 0 建好）
+    (old_id,) = await _insert(backend, comp, _log(comp, 9))
+    raw_hset(backend, log_ref, old_id, seq="0")
+    backend.get_table_maintenance().do_rebuild_index_(log_ref)
+    await backend.wait_for_synced()
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        old = await repo.get(id=old_id)
+        old.owner = 10
+        await repo.update(old)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=9) == []
+    assert await _seqs(backend, comp, owner=10) == [(0, 0)]
+
+
+async def test_upsert_with_commit_seq(log_ref, mod_auto_backend):
+    """
+    用别的 unique 字段锚定：新建的行照常发号；命中已有行之后改分组列报错；在块里给号赋值，新建时
+    报错。不能以提交序号列为锚（不是 unique），-O 下也拦得住（用 raise 不用 assert）
+    """
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+
+    def upsert(session, uid: int):
+        return session.using(comp).upsert(uid=uid)
+
+    async with backend.session("pytest", 1) as session, upsert(session, 1001) as row:
+        row.owner, row.kind = 7, 1
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 1)]
+
+    with pytest.raises(ValueError, match="不能改分组列"):
+        async with (
+            backend.session("pytest", 1) as session,
+            upsert(session, 1001) as row,
+        ):
+            row.owner = 8
+    with pytest.raises(ValueError, match="insert 时必须是 0"):
+        async with (
+            backend.session("pytest", 1) as session,
+            upsert(session, 1002) as row,
+        ):
+            row.owner, row.seq = 7, 2
+    async with backend.session("pytest", 1) as session:
+        with pytest.raises(ValueError, match="不是unique索引"):
+            session.using(comp).upsert(seq=1)
+        with pytest.raises(ValueError, match="对不上任何索引"):
+            session.using(comp).upsert(seq=1, owner=7)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 1)]
+    assert _counter(backend, log_ref, owner=7) == 1
+
+
+async def test_payload_rejects_seq_update_bypassing_repo(log_ref, mod_auto_backend):
+    """绕过 repo 直接改缓存里的号：提交时 payload 兜底报错，什么都不写"""
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    (row_id,) = await _insert(backend, comp, _log(comp, 7))
+    with pytest.raises(ValueError, match="commit_seq 列"):
+        async with backend.session("pytest", 1) as session:
+            row = await session.using(comp).get(id=row_id)
+            row.seq = 5
+            session.idmap.update(log_ref, row)
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(1, 0)]
+
+
+# ---------------------------------------------------------------- 事务内
+
+
+async def test_pending_rows_not_on_seq_index(log_ref, mod_auto_backend):
+    """
+    本事务 insert 的行还没有号（是 0）：按提交序号列 range / get 查不到它们（(-inf, inf) 也查
+    不到），按 id、按别的索引能查到。开着 phantom_check 的 desc + limit 读不包含它，提交照样成功
+    """
+    backend: Backend = mod_auto_backend()
+    comp = log_ref.comp_cls
+    await _insert(backend, comp, _log(comp, 7, kind=1), _log(comp, 7, kind=2))
+    async with backend.session("pytest", 1) as session:
+        repo = session.using(comp)
+        new = _log(comp, 7, kind=3)
+        await repo.insert(new)
+        latest = await repo.range(seq=(-np.inf, np.inf), owner=7, limit=2, desc=True)
+        assert [int(seq) for seq in latest.seq] == [2, 1]
+        everything = await repo.range(seq=(-np.inf, np.inf), owner=7, limit=-1)
+        assert sorted(int(kind) for kind in everything.kind) == [1, 2]
+        assert await repo.get(seq=0, owner=7) is None
+        assert (await repo.get(id=new.id)).seq == 0
+        by_owner = await repo.range(owner=(7, 7), limit=-1)
+        assert sorted(int(kind) for kind in by_owner.kind) == [1, 2, 3]
+        # 删掉的库里行照常从结果里拿掉
+        first = await repo.get(seq=1, owner=7)
+        repo.delete(first.id)
+        rest = await repo.range(seq=(-np.inf, np.inf), owner=7, limit=-1)
+        assert [int(seq) for seq in rest.seq] == [2]
+    await backend.wait_for_synced()
+    assert await _seqs(backend, comp, owner=7) == [(2, 2), (3, 3)]

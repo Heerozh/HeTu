@@ -330,6 +330,8 @@ class SessionRepository:
         主键或 unique 列读空会登记"本事务观察到该值不存在"：同一事务内再次 `get` 同一值直接返回
         None（不再查询数据库），commit 时若该值已被并发写入则判为 `RaceCondition` 重试。
         结果按本事务眼里的数据：本事务新 insert 的行能查到，删掉的、已改走这个值的行不算匹配。
+        例外是提交序号列（`commit_seq`）：本事务 insert 的行还没有号（是 0），按这一列查不到它们，
+        按 id、按别的索引能查到。
 
         非 unique 列同样会在提交时校验：读空而提交前已有匹配的行（被并发插入，或读到了滞后的
         副本）判 `RaceCondition`，所以"get 为 None 就 insert"的写法是安全的；命中时只保证返回的
@@ -397,6 +399,18 @@ class SessionRepository:
             else:
                 value = point
                 rows = idmap.match(self.ref, index_name, point, group_values)
+            if (
+                rows is not None
+                and len(rows) > 0
+                and index_name == comp_cls.commit_seq_
+            ):
+                # 提交序号列：本事务 insert 的行还没有号（是 0），不在这个索引上（同 range）
+                rows = rows[
+                    [
+                        idmap.db_row(self.ref, row_id) is not None
+                        for row_id in rows["id"].tolist()
+                    ]
+                ]
             if rows is not None and len(rows) > 0:
                 return rows[0]
 
@@ -463,7 +477,8 @@ class SessionRepository:
         结果按本事务眼里的数据（同 `get`）：本事务 `insert` 的行、`update` 后落进区间的行
         会出现在结果里，和库里的行按索引顺序排在一起；`delete` 掉的、索引列改走了的行不在
         结果里，也不占 `limit` 名额。unique 列点查（如 `name=("x", "x")`）命中本事务从库里
-        读过、这一列没改过的行时，直接返回、不去数据库。
+        读过、这一列没改过的行时，直接返回、不去数据库。例外是提交序号列（`commit_seq`）的
+        索引：本事务 insert 的行还没有号（是 0），它的位置要到提交时才定，不在结果里。
 
         读到的区间会在提交时校验（防幻读）：若同样的查询届时会返回不同的行——别的事务往
         区间里插了一行、删改了返回的行，或者这次读到的是滞后的副本——提交时抛
@@ -810,12 +825,26 @@ class SessionRepository:
         本事务删掉的库里的行，不能再用同一个 id insert（`upsert` 锚定这个 id 新建也一样），
         抛 `ValueError`：要改这行请直接 `update`。
 
+        提交序号列（`commit_seq`）由提交脚本发号，insert 时它必须是 0，否则抛 `ValueError`。
+
         Parameters
         ----------
         row: np.record
             待插入的行数据，必须是 `c-struct` 格式。
         """
         assert row["_version"] == 0, "Insert row's _version must be 0."
+        seq_name = self.ref.comp_cls.commit_seq_
+        if seq_name is not None and row[seq_name] != 0:
+            raise ValueError(
+                _(
+                    "{comp_name}.{field} 是提交序号列（commit_seq），号由提交时发，insert 时"
+                    "必须是 0，收到：{value}"
+                ).format(
+                    comp_name=self.ref.comp_cls.name_,
+                    field=seq_name,
+                    value=row[seq_name],
+                )
+            )
         if self._session.explicit_ids_only and int(row["id"]) == 0:
             raise ValueError(
                 _(
@@ -856,6 +885,10 @@ class SessionRepository:
         只在本地 IdentityMap 检查 unique（同事务内重复 → 立即抛 `UniqueViolation`）；
         与数据库既有数据的冲突由 `commit()` 判定，规则同 `insert`。
 
+        提交序号列（`commit_seq`）不能改；库里已经有号的行也不能改它的分组列（搬到别的组会和那
+        一组的号重复），都抛 `ValueError`。本事务 insert、还没提交的行，以及库里号 ≤ 0（没有号的
+        历史行）可以改分组列。
+
         Parameters
         ----------
         row : np.record
@@ -874,6 +907,9 @@ class SessionRepository:
         if len(changed_fields) == 0:
             raise ValueError("No fields changed, cannot update.")
 
+        if (seq_name := self.ref.comp_cls.commit_seq_) is not None:
+            self._check_commit_seq_update(row, seq_name, changed_fields)
+
         # 本地（同事务）unique 检查，0 往返；与库中既有数据的冲突由 commit 判定
         if field := self._local_has_unique_conflicts(
             row, self._affected_uniques(changed_fields)
@@ -884,6 +920,40 @@ class SessionRepository:
             )
 
         self._session.idmap.update(self.ref, row)
+
+    def _check_commit_seq_update(
+        self, row: np.record, seq_name: str, changed_fields: set[str]
+    ) -> None:
+        """
+        update 时提交序号列的限制：号不能改；有号的行（库里的号 > 0）不能改分组列。分组列和库里
+        的值比（`db_row`），不和缓存比：本事务 insert 的行没有 db_row，号在提交时按最终的组发
+        """
+        comp_cls = self.ref.comp_cls
+        if seq_name in changed_fields:
+            raise ValueError(
+                _(
+                    "{comp_name}.{field} 是提交序号列（commit_seq），号由提交时发，不能修改"
+                ).format(comp_name=comp_cls.name_, field=seq_name)
+            )
+        groups = comp_cls.index_groups_[seq_name]
+        if not groups or changed_fields.isdisjoint(groups):
+            return
+        db_row = self._session.idmap.db_row(self.ref, int(row["id"]))
+        if db_row is None or db_row[seq_name] <= 0:
+            return
+        moved = [col for col in groups if row[col] != db_row[col]]
+        if moved:
+            raise ValueError(
+                _(
+                    "{comp_name}.{cols} 是提交序号列 {field} 的分组列，这一行已经有号"
+                    "（{seq}），不能改分组列：搬到别的组会和那一组的号重复"
+                ).format(
+                    comp_name=comp_cls.name_,
+                    cols=", ".join(moved),
+                    field=seq_name,
+                    seq=int(db_row[seq_name]),
+                )
+            )
 
     def upsert(self, **kwargs: IndexScalar) -> UpsertContext:
         """
@@ -909,11 +979,15 @@ class SessionRepository:
         """
         index_name, query_value, group = self._point_kwargs(kwargs, unique_only=True)
 
-        # 检查index_name存在且为unique索引
+        # 检查index_name存在且为unique索引。用 raise 不用 assert：-O 下 assert 会被去掉，非 unique
+        # 的锚（比如提交序号列）就会被放过去
         comp_cls = self.ref.comp_cls
-        assert index_name in comp_cls.uniques_, _(
-            "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
-        ).format(comp_name=comp_cls.name_, index_name=index_name)
+        if index_name not in comp_cls.uniques_:
+            raise ValueError(
+                _(
+                    "upsert只能用于unique索引，{comp_name}组件的{index_name}不是unique索引"
+                ).format(comp_name=comp_cls.name_, index_name=index_name)
+            )
         # 分组值当场校验（漏给、多给、值不合法都抛 ValueError），新行要写规范化后的值
         group_values = resolve_group_(comp_cls, index_name, group)
 
