@@ -66,8 +66,8 @@ def _call_lock_uuid(call: np.record) -> str:
 
     雪花 id 不会复用，就是 id。按 key 的调用（负 id）同一个 key cancel 后再 ensure 是同一个 id，
     再加上建行时间（毫秒，十六进制）区分是哪一条：只用 id 的话，锁的保留期内新的这条会被当成
-    已经执行过，不执行就删掉。最长 20 + 1 + 11 = 32 个字符，正好放进 SystemLock.uuid（<U32），
-    够用到 2527 年。
+    已经执行过，不执行就删掉。最长 20 + 1 + 11 = 32 个字符（毫秒数到 2527 年才进到 12 位十六
+    进制），放得进 SystemLock.uuid（<U64）。
 
     Call-lock uuid of a one-shot future call. Snowflake ids are never reused, so it is
     just the id; keyed calls (negative ids) reuse the id after cancel + ensure, so the

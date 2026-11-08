@@ -517,12 +517,13 @@ async def test_run_startup_systems_reruns_next_boot(
 
 
 def test_make_boot_uuid_unique_and_within_lock_width():
-    """make_boot_uuid 每次不同，且长度 <= 32（SystemLock.uuid 为 <U32）。"""
+    """make_boot_uuid 每次不同，且放得进 SystemLock.uuid。"""
+    from hetu.system.lock import SystemLock
     from hetu.system.startup import make_boot_uuid
 
     a, b = make_boot_uuid(), make_boot_uuid()
     assert a != b
-    assert 0 < len(a) <= 32
+    assert 0 < len(a) <= SystemLock.str_max_len("uuid")
 
 
 async def test_worker_start_dedups_with_shared_boot_uuid(
