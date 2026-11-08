@@ -161,7 +161,7 @@ await ctx.systems.call("settle", user_id, amount, uuid=order_id_str)
 - 提交时，引擎会在同一事务中将 `uuid` 行与你的数据一起写入。如果事务中止（`RaceCondition`），锁行也会随之中止——重试仍被允许，但仅限到成功一次为止。
 - 锁行保留 `CALL_LOCK_RETENTION` 秒（配置项，默认 30 分钟），之后由各工作器定期清理，**uuid 去重只在保留期内有效**：需要更长去重窗口的（比如支付回调可能隔几小时重发），请自己在业务数据里记下已处理的单号。`on_start` `System` 的锁不受此限（"每次开服只跑一次"靠它），只在工作器启动时清除超过 7 天的。如果你想更早释放槽位，请使用 `SystemCaller.remove_call_lock(name, uuid)`。`SystemLock` 是易失表，`hetu upgrade` 会清空它。
 
-`uuid=` 是 `ctx.systems.call(...)` 的关键字参数。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
+`uuid=` 是 `ctx.systems.call(...)` 的关键字参数，最长 64 个字符（`str(uuid.uuid4())` 是 36 个），超过会报 `ValueError`。`ctx.depend[...](...)` 只是在同一事务里调用函数，不接受 `uuid=`，也不做去重。
 
 ## `on_disconnect` 钩子
 

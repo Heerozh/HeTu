@@ -36,11 +36,18 @@ class ChatMessage(hetu.BaseComponent):
 A few invariants that surprise new users:
 
 - **Strings are fixed-width.** `dtype="U256"` is a 256-character UTF-32 column;
-  longer values are truncated. This is the cost of NumPy C-struct like storage.
+  longer values are silently truncated on assignment. This is the cost of
+  NumPy C-struct like storage. Query values are not truncated, so the original
+  value no longer finds the row (`get` returns None, `range` is empty), and
+  `upsert` raises `ValueError` when it would create a row whose anchor value
+  does not fit. Check the length of strings that come from clients (names,
+  order ids and the like) with `MyComp.str_max_len("name")` before storing or
+  querying them, and reject the ones that are too long.
 - **Bytes columns are fixed-width too, and drop trailing `\x00`.**
-  `dtype="S16"` is a 16-byte column: longer values are truncated as well, and
-  shorter ones are padded with `\x00`, so trailing `\x00` bytes are dropped as
-  padding (embedded ones are kept). `b"ab\x00"` reads back as `b"ab"` and is
+  `dtype="S16"` is a 16-byte column: longer values are truncated as well (UTF-8
+  text may be cut in the middle of a character and then fail to decode, so
+  keep text in str columns), and shorter ones are padded with `\x00`, so
+  trailing `\x00` bytes are dropped as padding (embedded ones are kept). `b"ab\x00"` reads back as `b"ab"` and is
   the same value as `b"ab"` for queries and uniqueness. A trailing `"\x00"` in
   a str column behaves the same way. Do not store binary data that may end in
   `\x00` (little-endian packed integers, msgpack, hashes, UUID bytes) as is:
