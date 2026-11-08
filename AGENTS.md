@@ -16,7 +16,7 @@ uv run pytest tests/test_backend_basic.py  # 运行单个测试文件
 uv run pytest tests/test_backend_basic.py::test_name  # 运行单个测试
 uv run pytest --cov-config=.coveragerc --cov=hetu tests/  # 覆盖率
 uv run pytest -n 8 tests/     # 多进程并行测试（pytest-xdist）
-uv run scripts/gen_api_docs.py # 改完代码同步文档，不然pr不通过
+uv run scripts/gen_api_docs.py # PR前同步文档，不然CI不通过
 ```
 
 需要 Python 3.14。测试依赖 Docker（用于启动 Redis/Valkey 容器；SQLite 后端无需 Docker）。
