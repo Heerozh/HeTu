@@ -5,7 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-import hashlib
 import logging
 import time
 import uuid
@@ -17,7 +16,13 @@ import numpy as np
 
 from ....i18n import _
 from ...component import BaseComponent
-from ..base import RowFormat, TableMaintenance
+from ..base import (
+    RowFormat,
+    TableMaintenance,
+    member_row_id_,
+    member_value_,
+    schema_version_,
+)
 from ..table import TableReference
 from .store import SQLiteStore
 
@@ -105,7 +110,7 @@ class SQLiteTableMaintenance(TableMaintenance):
         members = self._run(
             SQLiteStore.zrange_bylex, idx_key, b_left, b_right, False, 0, limit
         )
-        return [int(vk.rsplit(b"\x00", 1)[-1]) for vk in members]
+        return [member_row_id_(vk) for vk in members]
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -155,7 +160,7 @@ class SQLiteTableMaintenance(TableMaintenance):
             table_ref.instance_name,
             table_ref.comp_name,
             json_,
-            hashlib.md5(json_.encode("utf-8")).hexdigest(),
+            schema_version_(json_),
             table_ref.cluster_id,
         )
 
@@ -181,21 +186,26 @@ class SQLiteTableMaintenance(TableMaintenance):
 
     @override
     def do_rename_table_(self, from_: TableReference, to_: TableReference):
-        """重命名组件表：行表改名、索引 key 改前缀、meta 换成 to_ 的定义"""
+        """
+        重命名组件表：行表改名、索引 key 改前缀、meta 换成 to_ 的定义。版本号照搬（同 Redis 后端）：
+        改名不动数据，索引还是原来的格式
+        """
         from_table = self.client.cluster_prefix(from_)
         to_table = self.client.cluster_prefix(to_)
         from_meta = (from_.instance_name, from_.comp_name)
-        to_meta = self._meta_of(to_)
+        to_instance, to_comp, to_json, _version, to_cluster = self._meta_of(to_)
 
         def _rename(store: SQLiteStore) -> int:
             with store.write_txn():
+                old = store.meta_get(*from_meta)
+                assert old is not None
                 count = store.count_rows(from_table) + len(
                     store.zkeys_with_prefix(from_table + ":")
                 )
                 store.rename_row_table(from_table, to_table)
                 store.zrename_prefix(from_table + ":", to_table + ":")
                 store.meta_delete(*from_meta)
-                store.meta_set(*to_meta)
+                store.meta_set(to_instance, to_comp, to_json, old[1], to_cluster)
                 return count
 
         count = self._run(_rename)
@@ -282,11 +292,11 @@ class SQLiteTableMaintenance(TableMaintenance):
                         idx_name,
                         struct,
                         dict(zip(columns, cast(tuple[bytes, ...], raws))),
-                        str(row_id).encode(),
+                        row_id,
                     )
                     if is_unique:
                         # 按值段（复合索引带组前缀）查重，同组同值才算冲突
-                        value = member.rsplit(b"\x00", 1)[0]
+                        value = member_value_(member)
                         if value in seen:
                             raise RuntimeError(
                                 _(

@@ -5,7 +5,6 @@
 @email: heeroz@gmail.com
 """
 
-import hashlib
 import logging
 from collections.abc import Mapping
 from contextlib import AbstractContextManager
@@ -16,7 +15,13 @@ from redis.cluster import RedisCluster
 
 from ....common.helper import batched
 from ...component import BaseComponent
-from ..base import RowFormat, TableMaintenance
+from ..base import (
+    RowFormat,
+    TableMaintenance,
+    member_row_id_,
+    member_value_,
+    schema_version_,
+)
 from ..table import TableReference
 
 if TYPE_CHECKING:
@@ -76,9 +81,7 @@ class RedisTableMaintenance(TableMaintenance):
         row_ids = self.client.io.zrange(
             name=idx_key, **self.client.make_zrange_cmd_(b_left, b_right, False, limit)
         )
-        row_ids = cast(list[bytes], row_ids)
-        row_ids = [int(vk.rsplit(b"\x00", 1)[-1]) for vk in row_ids]
-        return row_ids
+        return [member_row_id_(vk) for vk in cast(list[bytes], row_ids)]
 
     @override
     def get_all_row_id(self, ref: TableReference) -> list[int]:
@@ -141,9 +144,7 @@ class RedisTableMaintenance(TableMaintenance):
         # 只需要写入meta，其他的_rebuild_index会创建
         meta = {
             "json": table_ref.comp_cls.json_,
-            "version": hashlib.md5(
-                table_ref.comp_cls.json_.encode("utf-8")
-            ).hexdigest(),
+            "version": schema_version_(table_ref.comp_cls.json_),
             "cluster_id": table_ref.cluster_id,
         }
         assert not self.client.io.exists(self.meta_key(table_ref))
@@ -177,13 +178,15 @@ class RedisTableMaintenance(TableMaintenance):
             io.restore(to_key, ttl, dump_data, replace=True)
             io.delete(from_key)  # cluster 不能跨节点rename，必须create+delete
 
-        # 更新meta，重命名会导致json/version变化的（除非只是cluster id变更）），所以都要写
+        # 更新meta：json 换成 to_ 的（改名到临时组件时组件名变了）。版本号照搬：改名不动数据，
+        # 索引还是原来的格式，按当前格式重算会把旧格式的表标成新的，迁移就不重建了
         from_meta_key = self.meta_key(from_)
         to_meta_key = self.meta_key(to_)
+        version = cast(bytes, io.hget(from_meta_key, "version"))
         io.delete(from_meta_key)
         meta = {
             "json": to_.comp_cls.json_,
-            "version": hashlib.md5(to_.comp_cls.json_.encode("utf-8")).hexdigest(),
+            "version": version,
             "cluster_id": to_.cluster_id,
         }
         self.client.io.hset(to_meta_key, mapping=meta)
@@ -198,7 +201,7 @@ class RedisTableMaintenance(TableMaintenance):
         json_ = table_ref.comp_cls.json_
         meta: dict[FieldT, EncodableT] = {
             "json": json_,
-            "version": hashlib.md5(json_.encode("utf-8")).hexdigest(),
+            "version": schema_version_(json_),
             "cluster_id": table_ref.cluster_id,
         }
         self.client.io.hset(self.meta_key(table_ref), mapping=meta)
@@ -314,7 +317,7 @@ class RedisTableMaintenance(TableMaintenance):
                     for key in chunk:
                         pipe.hmget(key, columns)
                     rows: list[list[bytes | None]] = pipe.execute()
-                    # 不管 unique 还是 index 都是 zset，member 是 value\x00row_id
+                    # 不管 unique 还是 index 都是 zset，member 是 值段\x00id 段
                     by_key: dict[str, dict[bytes, int]] = {}
                     for key, raws in zip(chunk, rows):
                         if any(raw is None for raw in raws):
@@ -329,11 +332,11 @@ class RedisTableMaintenance(TableMaintenance):
                             idx_name,
                             struct,
                             dict(zip(columns, cast(list[bytes], raws))),
-                            key.rsplit(":", 1)[-1].encode(),
+                            int(key.rsplit(":", 1)[-1]),
                         )
                         if is_unique:
                             # 按值段（复合索引带组前缀）查重，同组同值才算冲突
-                            value = member.rsplit(b"\x00", 1)[0]
+                            value = member_value_(member)
                             if value in seen:
                                 raise RuntimeError(
                                     f"组件{table_ref.comp_name}的unique索引`{idx_name}`"

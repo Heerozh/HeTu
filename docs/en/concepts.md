@@ -66,7 +66,10 @@ A few invariants that surprise new users:
   plus a uniqueness check at commit, and it implicitly turns on `index=True`.
   `point_sub=True` declares that the index supports efficient point
   subscriptions (see [Subscriptions](#subscriptions)); it also implies
-  `index=True`.
+  `index=True`. Rows sharing a value are ordered by `id` ascending; snowflake
+  ids grow with creation time (up to clock skew between servers), so
+  `range("owner", 5, desc=True, limit=N)` returns the N most recently inserted
+  rows for that value.
 - **Composite indexes: ordered within a group.** Add `groupby="zone"` to a
   field to get an index grouped by `zone` and ordered by that field within each
   group; the index keeps the field's name:

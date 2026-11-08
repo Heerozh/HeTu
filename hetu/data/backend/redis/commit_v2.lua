@@ -68,7 +68,8 @@ if checks then
             -- ZRANGE key [val\x00 [val\x00\xff BYLEX LIMIT 0 1
             local res = redis_call("ZRANGE", idx_key, start_val, end_val, "BYLEX", "LIMIT", 0, 1)
             if #res > 0 then
-                -- member 是 value\x00row_id，row_id 不含 0x00，故最后一个 0x00 即终止符
+                -- member 是 值段\x00id 段，id 段是定宽的 hex、不含 0x00，故最后一个 0x00 即终止符；
+                -- deleted 的键也是 id 段（见 redis_model.py 的 ROW_ID_TOKEN_LEN）
                 local row_id = string_match(res[1], ".*%z(.*)$")
                 -- 唯一索引指向的行在本次事务中被删除了，则不算冲突
                 if not deleted[row_id] then
