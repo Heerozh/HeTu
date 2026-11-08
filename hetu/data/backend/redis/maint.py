@@ -293,16 +293,18 @@ class RedisTableMaintenance(TableMaintenance):
                             value = member.rsplit(b"\x00", 1)[0]
                             if value in seen:
                                 raise RuntimeError(
-                                    f"组件{table_ref.comp_name}的unique索引`{idx_name}`在"
-                                    f"重建时发现违反unique约束，可能是迁移时缩短了值类型、新增"
-                                    f"了Unique标记、或去掉了groupby（组内唯一变成了全局唯一）"
-                                    f"导致。"
+                                    f"组件{table_ref.comp_name}的unique索引`{idx_name}`"
+                                    f"（列 {columns}）在重建时发现违反unique约束，可能是迁移时"
+                                    f"缩短了值类型、新增了Unique标记、或去掉了groupby（组内"
+                                    f"唯一变成了全局唯一）导致。"
                                 )
                             seen.add(value)
                         members[member] = 0
                     io.zadd(tmp_key, members)
         except BaseException:
-            io.delete(*tmp_keys)
+            # 第一个临时 key 都没登记上就出错时没东西可删：不带参数的 DEL 会再抛一个异常，盖住原来的
+            if tmp_keys:
+                io.delete(*tmp_keys)
             raise
         for idx_name, tmp_key in zip(comp_cls.indexes_, tmp_keys):
             io.rename(tmp_key, self.client.index_key(table_ref, idx_name))

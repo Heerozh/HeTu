@@ -285,12 +285,14 @@ class SQLiteTableMaintenance(TableMaintenance):
                         if value in seen:
                             raise RuntimeError(
                                 _(
-                                    "组件{comp_name}的unique索引`{idx_name}`在重建时"
-                                    "发现违反unique约束，可能是迁移时缩短了值类型、新增了"
-                                    "Unique标记、或去掉了groupby（组内唯一变成了全局唯一）"
-                                    "导致。"
+                                    "组件{comp_name}的unique索引`{idx_name}`（列 {columns}）"
+                                    "在重建时发现违反unique约束，可能是迁移时缩短了值类型、"
+                                    "新增了Unique标记、或去掉了groupby（组内唯一变成了全局"
+                                    "唯一）导致。"
                                 ).format(
-                                    comp_name=table_ref.comp_name, idx_name=idx_name
+                                    comp_name=table_ref.comp_name,
+                                    idx_name=idx_name,
+                                    columns=columns,
                                 )
                             )
                         seen.add(value)

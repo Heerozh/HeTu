@@ -10,7 +10,7 @@ import random
 
 import numpy as np
 import pytest
-from fixtures.backends import raw_hset, raw_index_members
+from fixtures.backends import raw_hset, raw_index_members, use_redis_backend_only
 from fixtures.testdata import create_ref
 
 from hetu.common.snowflake_id import SnowflakeID
@@ -867,10 +867,35 @@ async def test_rebuild_index_composite(slot_ref, mod_auto_backend):
     # level 改了值（重建的话 level 索引会变），slot 造出组内重复：重建失败，level 也不换
     raw_hset(backend, slot_ref, a_id, level="50")
     raw_hset(backend, slot_ref, b_id, slot="1")
-    with pytest.raises(RuntimeError, match="unique"):
+    with pytest.raises(RuntimeError, match="unique") as excinfo:
         maint.do_rebuild_index_(slot_ref)
+    assert "owner" in str(excinfo.value)  # 报错里给出 (分组列…, 本字段)
     for name in comp.indexes_:
         assert raw_index_members(backend, slot_ref, name) == before[name], name
+
+
+@use_redis_backend_only
+async def test_rebuild_index_error_before_first_tmp_key(
+    slot_ref, mod_auto_backend, monkeypatch
+):
+    """Redis 重建索引一开始就出错（还没登记任何临时 key）：抛出原来的异常，不被清理的 DEL 盖住"""
+    backend: Backend = mod_auto_backend()
+    comp = slot_ref.comp_cls
+    await _insert(backend, comp, _slot(comp, zone=1, level=1))
+    maint = backend.get_table_maintenance()
+    io = maint.client.io  # type: ignore[attr-defined]
+    original = io.delete
+    calls: list[tuple] = []
+
+    def flaky_delete(*keys):
+        calls.append(keys)
+        if len(calls) == 1:
+            raise ConnectionError("boom")
+        return original(*keys)
+
+    monkeypatch.setattr(io, "delete", flaky_delete)
+    with pytest.raises(ConnectionError, match="boom"):
+        maint.do_rebuild_index_(slot_ref)
 
 
 async def test_migration_adds_groupby_rebuilds_index(filled_item_ref, tmp_path):
